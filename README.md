@@ -13,10 +13,10 @@ Exports a CLI, programmatic API, and Vite plugin.
 ## Install
 
 ```
-npm install orez @rocicorp/zero
+npm install orez
 ```
 
-`@rocicorp/zero` is a peer dependency that provides the zero-cache binary. You can skip it if you only need PGlite + the proxy (`--skip-zero-cache`).
+`@rocicorp/zero` is included as a dependency and provides the zero-cache binary.
 
 ## CLI
 
