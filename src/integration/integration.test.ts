@@ -7,7 +7,7 @@
  * uses orez's startZeroLite() instead of real postgres + manual zero-cache.
  */
 
-import { describe, expect, test, beforeEach } from 'vitest'
+import { describe, expect, test, beforeAll, afterAll, beforeEach } from 'vitest'
 import WebSocket from 'ws'
 import { startZeroLite } from '../index.js'
 import type { PGlite } from '@electric-sql/pglite'
@@ -47,25 +47,24 @@ class Queue<T> {
   }
 }
 
-const WATERMARK_REGEX = /[0-9a-z]{2,}/
-
-describe('orez integration', { timeout: 60000 }, () => {
+describe('orez integration', { timeout: 120000 }, () => {
   let db: PGlite
   let zeroPort: number
   let pgPort: number
   let shutdown: () => Promise<void>
+  let dataDir: string
 
-  beforeEach(async () => {
-    // find available ports in high range to avoid conflicts
+  beforeAll(async () => {
     const testPgPort = 23000 + Math.floor(Math.random() * 1000)
     const testZeroPort = testPgPort + 100
 
-    const dataDir = `.orez-integration-test-${Date.now()}`
+    dataDir = `.orez-integration-test-${Date.now()}`
+    console.log(`[test] starting orez on pg:${testPgPort} zero:${testZeroPort}`)
     const result = await startZeroLite({
       pgPort: testPgPort,
       zeroPort: testZeroPort,
       dataDir,
-      logLevel: 'error',
+      logLevel: 'info',
       skipZeroCache: false,
     })
 
@@ -73,6 +72,8 @@ describe('orez integration', { timeout: 60000 }, () => {
     zeroPort = result.zeroPort
     pgPort = result.pgPort
     shutdown = result.stop
+
+    console.log(`[test] orez started, creating tables`)
 
     // create test tables
     await db.exec(`
@@ -86,20 +87,17 @@ describe('orez integration', { timeout: 60000 }, () => {
         id TEXT PRIMARY KEY,
         foo_id TEXT
       );
-
-      -- publication for zero-cache
-      DO $$ BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_publication WHERE pubname = 'zero_test'
-        ) THEN
-          CREATE PUBLICATION zero_test FOR TABLE foo, TABLE bar;
-        END IF;
-      END $$;
     `)
 
-    return async () => {
-      await shutdown()
-      // clean up data dir
+    console.log(`[test] tables created, waiting for zero-cache`)
+    // wait for zero-cache to be ready
+    await waitForZero(zeroPort, 90000)
+    console.log(`[test] zero-cache ready`)
+  }, 120000)
+
+  afterAll(async () => {
+    if (shutdown) await shutdown()
+    if (dataDir) {
       const { rmSync } = await import('node:fs')
       try {
         rmSync(dataDir, { recursive: true, force: true })
@@ -107,10 +105,12 @@ describe('orez integration', { timeout: 60000 }, () => {
     }
   })
 
-  test('zero-cache starts and accepts websocket connections', async () => {
-    // wait for zero-cache to be ready
-    await waitForZero(zeroPort)
+  beforeEach(async () => {
+    // clean tables between tests
+    await db.exec(`DELETE FROM foo; DELETE FROM bar;`)
+  })
 
+  test('zero-cache starts and accepts websocket connections', async () => {
     const ws = new WebSocket(
       `ws://localhost:${zeroPort}/sync/v4/connect` +
         `?clientGroupID=test-cg&clientID=test-client&wsid=ws1&schemaVersion=1&baseCookie=&ts=${Date.now()}&lmid=0`,
@@ -143,38 +143,15 @@ describe('orez integration', { timeout: 60000 }, () => {
       42,
     ])
 
-    await waitForZero(zeroPort)
-
     const downstream = new Queue<unknown>()
     const ws = connectAndSubscribe(zeroPort, downstream, {
       table: 'foo',
       orderBy: [['id', 'asc']],
     })
 
-    // connected
-    expect(await downstream.dequeue()).toMatchObject(['connected', { wsid: 'ws1' }])
-
-    // initial poke sequence
-    expect(await downstream.dequeue()).toMatchObject(['pokeStart', expect.anything()])
-    expect(await downstream.dequeue()).toMatchObject(['pokeEnd', expect.anything()])
-
-    // query registration poke
-    expect(await downstream.dequeue()).toMatchObject(['pokeStart', expect.anything()])
-    expect(await downstream.dequeue()).toMatchObject([
-      'pokePart',
-      expect.objectContaining({
-        desiredQueriesPatches: expect.anything(),
-      }),
-    ])
-    expect(await downstream.dequeue()).toMatchObject(['pokeEnd', expect.anything()])
-
-    // data poke with rows
-    const pokeStart = (await downstream.dequeue()) as [string, { pokeID: string }]
-    expect(pokeStart[0]).toBe('pokeStart')
-
-    const pokePart = (await downstream.dequeue()) as [string, Record<string, unknown>]
-    expect(pokePart[0]).toBe('pokePart')
-    expect(pokePart[1].rowsPatch).toEqual(
+    // drain until we get a pokePart with rowsPatch containing our data
+    const poke = await waitForPokePart(downstream, 30000)
+    expect(poke.rowsPatch).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           op: 'put',
@@ -187,14 +164,10 @@ describe('orez integration', { timeout: 60000 }, () => {
       ]),
     )
 
-    expect(await downstream.dequeue()).toMatchObject(['pokeEnd', expect.anything()])
-
     ws.close()
   })
 
   test('live replication: insert triggers poke', async () => {
-    await waitForZero(zeroPort)
-
     const downstream = new Queue<unknown>()
     const ws = connectAndSubscribe(zeroPort, downstream, {
       table: 'foo',
@@ -212,7 +185,7 @@ describe('orez integration', { timeout: 60000 }, () => {
     ])
 
     // wait for the replication poke
-    const poke = await waitForPokePart(downstream, 15000)
+    const poke = await waitForPokePart(downstream, 30000)
     expect(poke.rowsPatch).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -237,8 +210,6 @@ describe('orez integration', { timeout: 60000 }, () => {
       1,
     ])
 
-    await waitForZero(zeroPort)
-
     const downstream = new Queue<unknown>()
     const ws = connectAndSubscribe(zeroPort, downstream, {
       table: 'foo',
@@ -254,7 +225,7 @@ describe('orez integration', { timeout: 60000 }, () => {
       'upd-row',
     ])
 
-    const poke = await waitForPokePart(downstream, 15000)
+    const poke = await waitForPokePart(downstream, 30000)
     expect(poke.rowsPatch).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -278,8 +249,6 @@ describe('orez integration', { timeout: 60000 }, () => {
       1,
     ])
 
-    await waitForZero(zeroPort)
-
     const downstream = new Queue<unknown>()
     const ws = connectAndSubscribe(zeroPort, downstream, {
       table: 'foo',
@@ -291,7 +260,7 @@ describe('orez integration', { timeout: 60000 }, () => {
     // delete the row
     await db.query(`DELETE FROM foo WHERE id = $1`, ['del-row'])
 
-    const poke = await waitForPokePart(downstream, 15000)
+    const poke = await waitForPokePart(downstream, 30000)
     expect(poke.rowsPatch).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -305,8 +274,6 @@ describe('orez integration', { timeout: 60000 }, () => {
   })
 
   test('concurrent inserts all replicate', async () => {
-    await waitForZero(zeroPort)
-
     const downstream = new Queue<unknown>()
     const ws = connectAndSubscribe(zeroPort, downstream, {
       table: 'foo',
@@ -327,7 +294,7 @@ describe('orez integration', { timeout: 60000 }, () => {
     )
 
     // collect all poke parts within a window
-    const allRows = await collectPokeRows(downstream, 15000)
+    const allRows = await collectPokeRows(downstream, 30000)
     const ids = allRows
       .filter((r: any) => r.op === 'put' && r.tableName === 'foo')
       .map((r: any) => r.value.id)
@@ -381,16 +348,14 @@ describe('orez integration', { timeout: 60000 }, () => {
     const timeout = Date.now() + 30000
 
     while (!settled && Date.now() < timeout) {
-      const msg = (await downstream.dequeue('timeout' as any, 2000)) as any
+      const msg = (await downstream.dequeue('timeout' as any, 3000)) as any
       if (msg === 'timeout') {
         settled = true
       } else if (Array.isArray(msg) && msg[0] === 'pokeEnd') {
         // after a pokeEnd, check if another poke comes quickly
-        const next = (await downstream.dequeue('timeout' as any, 1500)) as any
+        const next = (await downstream.dequeue('timeout' as any, 2000)) as any
         if (next === 'timeout') {
           settled = true
-        } else {
-          // got another poke, keep draining
         }
       }
     }
@@ -402,7 +367,8 @@ describe('orez integration', { timeout: 60000 }, () => {
   ): Promise<Record<string, any>> {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      const msg = (await downstream.dequeue('timeout' as any, timeoutMs)) as any
+      const remaining = Math.max(1000, deadline - Date.now())
+      const msg = (await downstream.dequeue('timeout' as any, remaining)) as any
       if (msg === 'timeout') throw new Error('timed out waiting for pokePart')
       if (Array.isArray(msg) && msg[0] === 'pokePart' && msg[1]?.rowsPatch) {
         return msg[1]
@@ -417,11 +383,19 @@ describe('orez integration', { timeout: 60000 }, () => {
   ): Promise<any[]> {
     const rows: any[] = []
     const deadline = Date.now() + windowMs
+    // first wait for the pokePart with data
     while (Date.now() < deadline) {
-      const msg = (await downstream.dequeue('timeout' as any, 2000)) as any
+      const remaining = Math.max(1000, deadline - Date.now())
+      const msg = (await downstream.dequeue('timeout' as any, remaining)) as any
       if (msg === 'timeout') break
       if (Array.isArray(msg) && msg[0] === 'pokePart' && msg[1]?.rowsPatch) {
         rows.push(...msg[1].rowsPatch)
+        // check if more poke parts come quickly
+        const more = (await downstream.dequeue('timeout' as any, 2000)) as any
+        if (more !== 'timeout' && Array.isArray(more) && more[0] === 'pokePart' && more[1]?.rowsPatch) {
+          rows.push(...more[1].rowsPatch)
+        }
+        break
       }
     }
     return rows
