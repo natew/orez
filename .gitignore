@@ -1,6 +1,7 @@
 node_modules
 dist
 .zero-lite
+.zero-lite-test
 *.tgz
 .env
 .env.local

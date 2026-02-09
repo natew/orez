@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>zerolite demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+    h1 { margin-bottom: 16px; font-size: 24px; }
+    form { display: flex; gap: 8px; margin-bottom: 16px; }
+    input[type="text"] { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+    button { padding: 8px 12px; border: none; border-radius: 4px; cursor: pointer; background: #333; color: #fff; }
+    ul { list-style: none; }
+    li { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #eee; }
+    li span { flex: 1; }
+    .completed { text-decoration: line-through; color: #999; }
+    .delete-btn { background: transparent; color: #999; font-size: 16px; padding: 4px 8px; }
+    .delete-btn:hover { color: #e33; }
+    .count { font-size: 14px; color: #666; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <div data-testid="app-container">
+    <h1>zerolite demo</h1>
+    <form data-testid="todo-form">
+      <input type="text" data-testid="todo-input" placeholder="add a todo..." />
+      <button type="submit" data-testid="todo-add">add</button>
+    </form>
+    <ul data-testid="todo-list"></ul>
+    <div class="count" data-testid="todo-count">0</div>
+  </div>
+
+  <script>
+    const form = document.querySelector('[data-testid="todo-form"]')
+    const input = document.querySelector('[data-testid="todo-input"]')
+    const list = document.querySelector('[data-testid="todo-list"]')
+    const count = document.querySelector('[data-testid="todo-count"]')
+
+    async function loadTodos() {
+      const res = await fetch('/api/todos')
+      const todos = await res.json()
+      list.innerHTML = ''
+      todos.forEach(todo => {
+        const li = document.createElement('li')
+        li.setAttribute('data-testid', `todo-item-${todo.id}`)
+        li.innerHTML = `
+          <input type="checkbox" ${todo.completed ? 'checked' : ''} />
+          <span class="${todo.completed ? 'completed' : ''}">${escapeHtml(todo.text)}</span>
+          <button class="delete-btn" data-testid="todo-delete-${todo.id}">✕</button>
+        `
+        li.querySelector('input[type="checkbox"]').addEventListener('change', async (e) => {
+          await fetch(`/api/todos/${todo.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ completed: e.target.checked }),
+          })
+          loadTodos()
+        })
+        li.querySelector('.delete-btn').addEventListener('click', async () => {
+          await fetch(`/api/todos/${todo.id}`, { method: 'DELETE' })
+          loadTodos()
+        })
+        list.appendChild(li)
+      })
+      count.textContent = String(todos.length)
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div')
+      div.textContent = str
+      return div.innerHTML
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault()
+      const text = input.value.trim()
+      if (!text) return
+      await fetch('/api/todos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      })
+      input.value = ''
+      loadTodos()
+    })
+
+    loadTodos()
+  </script>
+</body>
+</html>

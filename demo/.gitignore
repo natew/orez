@@ -1,5 +1,3 @@
 node_modules
-.zero-lite
-dist
-.output
+.zero-lite-test
 test-results
