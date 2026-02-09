@@ -1,5 +1,5 @@
 {
-  "name": "zerolite",
+  "name": "zero-pglite",
   "version": "0.0.1",
   "description": "PGlite-powered zero-sync development backend. No Docker required.",
   "type": "module",
