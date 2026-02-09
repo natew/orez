@@ -19,6 +19,8 @@ import {
 } from 'node:http'
 import { join, dirname, extname } from 'node:path'
 
+import { log } from './log.js'
+
 export interface S3LocalConfig {
   port: number
   dataDir: string
@@ -155,7 +157,7 @@ export function startS3Local(config: S3LocalConfig): Promise<Server> {
 
   return new Promise((resolve, reject) => {
     server.listen(config.port, '127.0.0.1', () => {
-      console.info(`[orez/s3] listening on port ${config.port}`)
+      log.s3(`listening on port ${config.port}`)
       resolve(server)
     })
     server.on('error', reject)

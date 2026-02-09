@@ -12,6 +12,7 @@ import { createServer, type Server, type Socket } from 'node:net'
 
 import { fromNodeSocket } from 'pg-gateway/node'
 
+import { log } from './log.js'
 import { handleReplicationQuery, handleStartReplication } from './replication/handler.js'
 
 import type { ZeroLiteConfig } from './config.js'
@@ -292,8 +293,8 @@ export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<
             isReplicationConnection = true
           }
           dbName = params?.database || 'postgres'
-          console.info(
-            `[orez] new connection: db=${dbName} user=${params?.user} replication=${params?.replication || 'none'}`
+          log.proxy(
+            `connection: db=${dbName} user=${params?.user} replication=${params?.replication || 'none'}`
           )
           await db.waitReady
         },
@@ -309,7 +310,7 @@ export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<
               const query = new TextDecoder()
                 .decode(data.subarray(5, 1 + len - 1))
                 .replace(/\0$/, '')
-              console.info(`[orez] repl query: ${query.slice(0, 200)}`)
+              log.proxy(`repl query: ${query.slice(0, 200)}`)
             }
             return handleReplicationMessage(data, socket, db, connection)
           }
@@ -356,7 +357,7 @@ export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<
 
   return new Promise((resolve, reject) => {
     server.listen(config.pgPort, '127.0.0.1', () => {
-      console.info(`[orez] pg proxy listening on port ${config.pgPort}`)
+      log.proxy(`listening on port ${config.pgPort}`)
       resolve(server)
     })
     server.on('error', reject)
@@ -396,7 +397,7 @@ async function handleReplicationMessage(
     })
 
     handleStartReplication(query, writer, db).catch((err) => {
-      console.info(`[orez] replication stream ended: ${err}`)
+      log.proxy(`replication stream ended: ${err}`)
     })
     return undefined
   }

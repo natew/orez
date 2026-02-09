@@ -3,17 +3,19 @@ import { join, resolve } from 'node:path'
 
 import { PGlite } from '@electric-sql/pglite'
 
+import { log } from './log.js'
+
 import type { ZeroLiteConfig } from './config.js'
 
 export async function createPGliteInstance(config: ZeroLiteConfig): Promise<PGlite> {
   const dataPath = resolve(config.dataDir, 'pgdata')
   mkdirSync(dataPath, { recursive: true })
 
-  console.info(`[orez] creating pglite instance at ${dataPath}`)
+  log.pglite(`creating instance at ${dataPath}`)
   const db = new PGlite(dataPath)
 
   await db.waitReady
-  console.info('[orez] pglite ready')
+  log.pglite('ready')
 
   // create schemas for multi-db simulation
   await db.exec('CREATE SCHEMA IF NOT EXISTS zero_cvr')
@@ -36,7 +38,7 @@ export async function createPGliteInstance(config: ZeroLiteConfig): Promise<PGli
 export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   const migrationsDir = resolve(config.migrationsDir)
   if (!existsSync(migrationsDir)) {
-    console.info('[orez] no migrations directory found, skipping')
+    log.orez('no migrations directory found, skipping')
     return
   }
 
@@ -73,7 +75,7 @@ export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise
       continue
     }
 
-    console.info(`[orez] applying migration: ${name}`)
+    log.orez(`applying migration: ${name}`)
     const sql = readFileSync(join(migrationsDir, file), 'utf-8')
 
     // split by drizzle's statement-breakpoint marker
@@ -87,8 +89,8 @@ export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise
     }
 
     await db.query('INSERT INTO public.migrations (name) VALUES ($1)', [name])
-    console.info(`[orez] applied migration: ${name}`)
+    log.orez(`applied migration: ${name}`)
   }
 
-  console.info('[orez] migrations complete')
+  log.orez('migrations complete')
 }

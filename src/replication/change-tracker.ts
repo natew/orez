@@ -1,3 +1,5 @@
+import { log } from '../log.js'
+
 import type { PGlite } from '@electric-sql/pglite'
 
 export interface ChangeRecord {
@@ -90,7 +92,7 @@ async function installTriggersOnAllTables(db: PGlite): Promise<void> {
     count++
   }
 
-  console.info(`[orez] installed change tracking triggers on ${count} tables`)
+  log.pglite(`installed change tracking triggers on ${count} tables`)
 }
 
 export async function getChangesSince(

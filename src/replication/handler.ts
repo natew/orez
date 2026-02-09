@@ -6,7 +6,12 @@
  * it's talking to a real postgres with logical replication.
  */
 
-import { getChangesSince, getCurrentWatermark, type ChangeRecord } from './change-tracker.js'
+import { log } from '../log.js'
+import {
+  getChangesSince,
+  getCurrentWatermark,
+  type ChangeRecord,
+} from './change-tracker.js'
 import {
   encodeBegin,
   encodeCommit,
@@ -245,7 +250,7 @@ export async function handleStartReplication(
   writer: ReplicationWriter,
   db: PGlite
 ): Promise<void> {
-  console.info('[orez] replication: entering streaming mode')
+  log.proxy('replication: entering streaming mode')
 
   // send CopyBothResponse to enter streaming mode
   const copyBoth = new Uint8Array(1 + 4 + 1 + 2)
@@ -310,7 +315,7 @@ export async function handleStartReplication(
         await new Promise((resolve) => setTimeout(resolve, pollInterval))
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        console.info(`[orez] replication poll error: ${msg}`)
+        log.proxy(`replication poll error: ${msg}`)
         if (msg.includes('closed') || msg.includes('destroyed')) {
           running = false
           break
@@ -321,9 +326,9 @@ export async function handleStartReplication(
   }
 
   // start polling (runs until connection closes)
-  console.info('[orez] replication: starting poll loop')
+  log.proxy('replication: starting poll loop')
   await poll()
-  console.info('[orez] replication: poll loop exited')
+  log.proxy('replication: poll loop exited')
 }
 
 async function streamChanges(

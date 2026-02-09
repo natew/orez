@@ -1,6 +1,6 @@
 {
   "name": "orez",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "PGlite-powered zero-sync development backend. No Docker required.",
   "type": "module",
   "license": "MIT",
@@ -14,6 +14,10 @@
     "./s3": {
       "types": "./dist/s3-local.d.ts",
       "import": "./dist/s3-local.js"
+    },
+    "./vite": {
+      "types": "./dist/vite-plugin.d.ts",
+      "import": "./dist/vite-plugin.js"
     }
   },
   "bin": {
@@ -42,7 +46,13 @@
     "pg-gateway": "^0.3.0-beta.4"
   },
   "peerDependencies": {
-    "@rocicorp/zero": "*"
+    "@rocicorp/zero": "*",
+    "vite": ">=5"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
   },
 "devDependencies": {
     "oxlint": "latest",

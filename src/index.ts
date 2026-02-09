@@ -11,8 +11,10 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync, unlinkSync } from '
 import { resolve, join } from 'node:path'
 
 import { getConfig, getConnectionString } from './config.js'
+import { log } from './log.js'
 import { startPgProxy } from './pg-proxy.js'
 import { createPGliteInstance, runMigrations } from './pglite-manager.js'
+import { findPort } from './port.js'
 import { installChangeTracking } from './replication/change-tracker.js'
 
 import type { ZeroLiteConfig } from './config.js'
@@ -24,8 +26,20 @@ export { getConfig, getConnectionString } from './config.js'
 
 export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const config = getConfig(overrides)
-  console.info('[orez] starting...')
-  console.info(`[orez] data dir: ${resolve(config.dataDir)}`)
+
+  // find available ports
+  const pgPort = await findPort(config.pgPort)
+  const zeroPort = config.skipZeroCache
+    ? config.zeroPort
+    : await findPort(config.zeroPort)
+  if (pgPort !== config.pgPort) log.orez(`port ${config.pgPort} in use, using ${pgPort}`)
+  if (!config.skipZeroCache && zeroPort !== config.zeroPort)
+    log.orez(`port ${config.zeroPort} in use, using ${zeroPort}`)
+  config.pgPort = pgPort
+  config.zeroPort = zeroPort
+
+  log.orez('starting...')
+  log.orez(`data dir: ${resolve(config.dataDir)}`)
 
   mkdirSync(config.dataDir, { recursive: true })
 
@@ -36,7 +50,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   await runMigrations(db, config)
 
   // install change tracking
-  console.info('[orez] installing change tracking')
+  log.orez('installing change tracking')
   await installChangeTracking(db)
 
   // start tcp proxy
@@ -51,22 +65,22 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // start zero-cache
   let zeroCacheProcess: ChildProcess | null = null
   if (!config.skipZeroCache) {
-    console.info('[orez] starting zero-cache...')
+    log.orez('starting zero-cache...')
     zeroCacheProcess = await startZeroCache(config)
     await waitForZeroCache(config)
   } else {
-    console.info('[orez] skipping zero-cache (skipZeroCache=true)')
+    log.orez('skipping zero-cache (skipZeroCache=true)')
   }
 
   const stop = async () => {
-    console.info('[orez] shutting down...')
+    log.orez('shutting down...')
     if (zeroCacheProcess) {
       zeroCacheProcess.kill('SIGTERM')
     }
     pgServer.close()
     await db.close()
     cleanupEnvLocal()
-    console.info('[orez] stopped')
+    log.orez('stopped')
   }
 
   return { config, stop }
@@ -89,7 +103,7 @@ ZERO_CVR_DB="${cvrUrl}"
 ZERO_CHANGE_DB="${cdbUrl}"
 `
   writeFileSync(ENV_LOCAL_PATH, content)
-  console.info('[orez] wrote .env.local for dev server')
+  log.orez('wrote .env.local for dev server')
 }
 
 function cleanupEnvLocal(): void {
@@ -98,7 +112,7 @@ function cleanupEnvLocal(): void {
       const content = readFileSync(ENV_LOCAL_PATH, 'utf-8')
       if (content.startsWith(ENV_LOCAL_MARKER)) {
         unlinkSync(ENV_LOCAL_PATH)
-        console.info('[orez] cleaned up .env.local')
+        log.orez('cleaned up .env.local')
       }
     }
   } catch {
@@ -119,10 +133,10 @@ async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
     // table might not exist yet
   }
 
-  console.info('[orez] seeding demo data...')
+  log.orez('seeding demo data...')
   const seedFile = resolve(config.seedFile)
   if (!existsSync(seedFile)) {
-    console.info('[orez] no seed file found, skipping')
+    log.orez('no seed file found, skipping')
     return
   }
 
@@ -135,7 +149,7 @@ async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   for (const stmt of statements) {
     await db.exec(stmt)
   }
-  console.info('[orez] seeded demo data')
+  log.orez('seeded demo data')
 }
 
 async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
@@ -184,20 +198,20 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
   child.stdout?.on('data', (data: Buffer) => {
     const lines = data.toString().trim().split('\n')
     for (const line of lines) {
-      console.info(`[zero-cache] ${line}`)
+      log.zero(line)
     }
   })
 
   child.stderr?.on('data', (data: Buffer) => {
     const lines = data.toString().trim().split('\n')
     for (const line of lines) {
-      console.info(`[zero-cache] ${line}`)
+      log.zero(line)
     }
   })
 
   child.on('exit', (code) => {
     if (code !== 0 && code !== null) {
-      console.info(`[zero-cache] exited with code ${code}`)
+      log.zero(`exited with code ${code}`)
     }
   })
 
@@ -215,7 +229,7 @@ async function waitForZeroCache(
     try {
       const res = await fetch(url)
       if (res.ok) {
-        console.info('[orez] zero-cache is ready')
+        log.zero('ready')
         return
       }
     } catch {
@@ -224,5 +238,5 @@ async function waitForZeroCache(
     await new Promise((r) => setTimeout(r, 500))
   }
 
-  console.info('[orez] warning: zero-cache health check timed out, continuing anyway')
+  log.zero('health check timed out, continuing anyway')
 }
