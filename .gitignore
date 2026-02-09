@@ -8,3 +8,4 @@ dist
 .DS_Store
 .orez-integration*
 .env.*.local
+test-chat/
