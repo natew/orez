@@ -1,6 +1,6 @@
 {
   "name": "orez",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "PGlite-powered zero-sync development backend. No Docker required.",
   "type": "module",
   "license": "MIT",
@@ -44,12 +44,7 @@
   "peerDependencies": {
     "@rocicorp/zero": "*"
   },
-  "peerDependenciesMeta": {
-    "@rocicorp/zero": {
-      "optional": true
-    }
-  },
-  "devDependencies": {
+"devDependencies": {
     "oxlint": "latest",
     "oxfmt": "latest",
     "typescript": "^5.7.0",

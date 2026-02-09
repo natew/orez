@@ -12,9 +12,9 @@ import { createServer, type Server, type Socket } from 'node:net'
 
 import { fromNodeSocket } from 'pg-gateway/node'
 
-import { handleReplicationQuery, handleStartReplication } from './replication/handler'
+import { handleReplicationQuery, handleStartReplication } from './replication/handler.js'
 
-import type { ZeroLiteConfig } from './config'
+import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
 
 // database name -> search_path mapping

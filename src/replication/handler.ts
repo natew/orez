@@ -6,7 +6,7 @@
  * it's talking to a real postgres with logical replication.
  */
 
-import { getChangesSince, getCurrentWatermark, type ChangeRecord } from './change-tracker'
+import { getChangesSince, getCurrentWatermark, type ChangeRecord } from './change-tracker.js'
 import {
   encodeBegin,
   encodeCommit,
@@ -20,7 +20,7 @@ import {
   getTableOid,
   inferColumns,
   type ColumnInfo,
-} from './pgoutput-encoder'
+} from './pgoutput-encoder.js'
 
 import type { PGlite } from '@electric-sql/pglite'
 

@@ -10,17 +10,17 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 
-import { getConfig, getConnectionString } from './config'
-import { startPgProxy } from './pg-proxy'
-import { createPGliteInstance, runMigrations } from './pglite-manager'
-import { installChangeTracking } from './replication/change-tracker'
+import { getConfig, getConnectionString } from './config.js'
+import { startPgProxy } from './pg-proxy.js'
+import { createPGliteInstance, runMigrations } from './pglite-manager.js'
+import { installChangeTracking } from './replication/change-tracker.js'
 
-import type { ZeroLiteConfig } from './config'
+import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
 import type { Server } from 'node:net'
 
-export type { ZeroLiteConfig } from './config'
-export { getConfig, getConnectionString } from './config'
+export type { ZeroLiteConfig } from './config.js'
+export { getConfig, getConnectionString } from './config.js'
 
 export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const config = getConfig(overrides)

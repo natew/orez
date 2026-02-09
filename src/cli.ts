@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { defineCommand, runMain } from 'citty'
 
-import { startZeroLite } from './index'
-import { startS3Local } from './s3-local'
+import { startZeroLite } from './index.js'
+import { startS3Local } from './s3-local.js'
 
 const s3Command = defineCommand({
   meta: {

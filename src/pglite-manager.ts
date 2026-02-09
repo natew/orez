@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path'
 
 import { PGlite } from '@electric-sql/pglite'
 
-import type { ZeroLiteConfig } from './config'
+import type { ZeroLiteConfig } from './config.js'
 
 export async function createPGliteInstance(config: ZeroLiteConfig): Promise<PGlite> {
   const dataPath = resolve(config.dataDir, 'pgdata')
