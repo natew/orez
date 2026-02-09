@@ -1,6 +1,6 @@
 # orez
 
-[Zero](https://zero.rocicorp.dev) development backend powered by [PGlite](https://pglite.dev) and [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite). Bundles PostgreSQL and zero-cache into a single process with zero native dependencies — both Postgres and SQLite run as WASM, so `bunx orez` just works. No Docker, no Postgres install, no `node-gyp`, no platform-specific binaries.
+[Zero](https://zero.rocicorp.dev) development backend powered by [PGlite](https://pglite.dev) and [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite) (our WASM fork of SQLite's [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent)). Bundles PostgreSQL and zero-cache into a single process with zero native dependencies — both Postgres and SQLite run as WASM, so `bunx orez` just works. No Docker, no Postgres install, no `node-gyp`, no platform-specific binaries.
 
 ```
 bunx orez
@@ -101,7 +101,7 @@ The proxy also handles multi-database routing. zero-cache expects three separate
 
 The whole point of orez is that `bunx orez` works everywhere with no native compilation step. Postgres runs in-process as WASM via PGlite. But zero-cache also needs SQLite, and `@rocicorp/zero-sqlite3` ships as a compiled C addon — which means `node-gyp`, build tools, and platform-specific binaries.
 
-orez solves this by shipping [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite), a pure WASM build of SQLite compiled from the [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) with BEGIN CONCURRENT and WAL2 support. At startup, orez patches `@rocicorp/zero-sqlite3` to load bedrock-sqlite instead of native bindings. Both databases run as WASM — nothing to compile, nothing platform-specific. Just `bun install` and go.
+orez ships its own package, [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite) — SQLite's [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) recompiled to WASM with BEGIN CONCURRENT and WAL2 support. At startup, orez patches `@rocicorp/zero-sqlite3` to load bedrock-sqlite instead of the native C addon. Both databases run as WASM — nothing to compile, nothing platform-specific. Just `bun install` and go.
 
 ## Environment variables
 
