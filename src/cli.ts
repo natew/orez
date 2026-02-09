@@ -2,6 +2,41 @@
 import { defineCommand, runMain } from 'citty'
 
 import { startZeroLite } from './index'
+import { startS3Local } from './s3-local'
+
+const s3Command = defineCommand({
+  meta: {
+    name: 's3',
+    description: 'start a local s3-compatible server',
+  },
+  args: {
+    port: {
+      type: 'string',
+      description: 'port to listen on',
+      default: '9200',
+    },
+    'data-dir': {
+      type: 'string',
+      description: 'data directory for stored files',
+      default: '.orez',
+    },
+  },
+  async run({ args }) {
+    const server = await startS3Local({
+      port: Number(args.port),
+      dataDir: args['data-dir'],
+    })
+
+    process.on('SIGINT', () => {
+      server.close()
+      process.exit(0)
+    })
+    process.on('SIGTERM', () => {
+      server.close()
+      process.exit(0)
+    })
+  },
+})
 
 const main = defineCommand({
   meta: {
@@ -54,6 +89,9 @@ const main = defineCommand({
       description: 'run pglite + proxy only, skip zero-cache',
       default: false,
     },
+  },
+  subCommands: {
+    s3: s3Command,
   },
   async run({ args }) {
     const { config, stop } = await startZeroLite({

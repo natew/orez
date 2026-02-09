@@ -51,6 +51,37 @@ await stop()
 
 All options are optional and have sensible defaults. See `src/config.ts` for the full list.
 
+## CLI
+
+Run directly with npx/bunx:
+
+```
+npx orez
+```
+
+This starts PGlite, the TCP proxy, and zero-cache. Install `@rocicorp/zero` alongside orez to get the zero-cache binary (it's an optional peer dep, only needed if you're running zero-cache).
+
+Options:
+
+```
+--pg-port        postgresql proxy port (default: 6434)
+--zero-port      zero-cache port (default: 5849)
+--web-port       web server port for zero-cache mutate/query urls (default: 8081)
+--data-dir       data directory (default: .zero-lite)
+--migrations     migrations directory (default: src/database/migrations)
+--seed           seed file path
+--pg-user        postgresql user (default: user)
+--pg-password    postgresql password (default: password)
+--skip-zero-cache  run pglite + proxy only, skip zero-cache
+```
+
+S3 subcommand for a local S3-compatible server:
+
+```
+npx orez s3
+npx orez s3 --port 9200 --data-dir .orez
+```
+
 ## What gets faked
 
 The proxy intercepts several things to convince zero-cache it's talking to a real PostgreSQL server with logical replication enabled:
