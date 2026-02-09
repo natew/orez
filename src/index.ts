@@ -61,6 +61,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // write .env.local so `bun dev` connects to orez ports
   writeEnvLocal(config)
 
+  // clean up stale sqlite locks from previous runs
+  cleanupStaleLocks(config)
+
   // start zero-cache
   let zeroCacheProcess: ChildProcess | null = null
   if (!config.skipZeroCache) {
@@ -73,8 +76,21 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
   const stop = async () => {
     log.orez('shutting down...')
-    if (zeroCacheProcess) {
+    if (zeroCacheProcess && !zeroCacheProcess.killed) {
       zeroCacheProcess.kill('SIGTERM')
+      // wait up to 3s for graceful exit, then force kill
+      await new Promise<void>((r) => {
+        const timeout = setTimeout(() => {
+          if (zeroCacheProcess && !zeroCacheProcess.killed) {
+            zeroCacheProcess.kill('SIGKILL')
+          }
+          r()
+        }, 3000)
+        zeroCacheProcess!.on('exit', () => {
+          clearTimeout(timeout)
+          r()
+        })
+      })
     }
     pgServer.close()
     await db.close()
@@ -103,6 +119,21 @@ ZERO_CHANGE_DB="${cdbUrl}"
 `
   writeFileSync(ENV_LOCAL_PATH, content)
   log.orez('wrote .env.local for dev server')
+}
+
+function cleanupStaleLocks(config: ZeroLiteConfig): void {
+  const replicaPath = resolve(config.dataDir, 'zero-replica.db')
+  for (const suffix of ['-wal', '-shm', '-wal2']) {
+    const lockFile = replicaPath + suffix
+    try {
+      if (existsSync(lockFile)) {
+        unlinkSync(lockFile)
+        log.orez(`cleaned up stale ${suffix} lock`)
+      }
+    } catch {
+      // ignore
+    }
+  }
 }
 
 function cleanupEnvLocal(): void {
