@@ -1,6 +1,6 @@
 # orez
 
-[Zero](https://zero.rocicorp.dev) development backend powered by [PGlite](https://pglite.dev). Bundles PostgreSQL and zero-cache into a single process — no Docker, no Postgres install.
+[Zero](https://zero.rocicorp.dev) development backend powered by [PGlite](https://pglite.dev). Bundles PostgreSQL and zero-cache into a single process — no Docker, no Postgres install, no native compilation.
 
 ```
 npx orez
@@ -36,13 +36,15 @@ npx orez
 --log-level        error, warn, info, debug (default: info)
 --s3               also start a local s3-compatible server
 --s3-port          s3 server port (default: 9200)
+--bunny            also start a local bunny cdn storage-compatible server
+--bunny-port       bunny storage server port (default: 3533)
 ```
 
-S3 can also run standalone:
+Subcommands for standalone servers:
 
 ```
-npx orez s3
 npx orez s3 --port 9200 --data-dir .orez
+npx orez bunny --port 3533 --data-dir .orez
 ```
 
 ## Programmatic
@@ -78,12 +80,14 @@ export default {
       zeroPort: 5849,
       migrationsDir: 'src/database/migrations',
       s3: true,
+      bunny: true,
+      bunnyPort: 3533,
     }),
   ],
 }
 ```
 
-Starts orez when vite dev server starts, stops on close. Pass `s3: true` to also start a local s3 server.
+Starts orez when vite dev server starts, stops on close. Pass `s3: true` or `bunny: true` to also start local storage servers.
 
 ## How it works
 
@@ -96,6 +100,12 @@ orez starts three things in one process:
 The trick is in the TCP proxy. zero-cache needs logical replication to stay in sync with the upstream database. PGlite doesn't support logical replication natively, so orez fakes it. Every mutation is captured by triggers into a changes table, then encoded into the pgoutput binary protocol and streamed to zero-cache through the replication connection. zero-cache can't tell the difference.
 
 The proxy also handles multi-database routing. zero-cache expects three separate databases (upstream, CVR, change), but PGlite is a single database. orez maps database names to schemas, so `zero_cvr` becomes the `zero_cvr` schema and `zero_cdb` becomes `zero_cdb`.
+
+### WASM SQLite override
+
+zero-cache uses `@rocicorp/zero-sqlite3` which requires native SQLite bindings (compiled C addon). orez ships with [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite), a pure WASM build of SQLite compiled from the [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) with BEGIN CONCURRENT and WAL2 support.
+
+At startup, orez patches `@rocicorp/zero-sqlite3` to load bedrock-sqlite instead of native bindings. This means zero-cache runs entirely without native compilation — no `node-gyp`, no build tools, no platform-specific binaries. Just `npm install` and go.
 
 ## Environment variables
 
@@ -158,15 +168,35 @@ Or via CLI: `npx orez --s3` or standalone `npx orez s3`.
 
 Handles GET, PUT, DELETE, HEAD with CORS. Files stored on disk. No multipart, no ACLs, no versioning.
 
+## Extra: orez/bunny
+
+Local Bunny CDN storage-compatible server for dev. Drop-in replacement for Bunny's storage API.
+
+```typescript
+import { startBunnyLocal } from 'orez/bunny'
+
+const server = await startBunnyLocal({
+  port: 3533,
+  dataDir: '.orez',
+})
+```
+
+Or via CLI: `npx orez --bunny` or standalone `npx orez bunny`.
+
+Handles GET, PUT, DELETE, HEAD with CORS, plus directory listing. Files stored on disk.
+
 ## Tests
 
-82 tests across 6 test files covering the full stack from binary encoding to TCP-level integration:
+119 tests — 82 orez tests across 6 test files covering the full stack from binary encoding to TCP-level integration, plus 37 bedrock-sqlite tests covering the WASM SQLite engine:
 
 ```
-bun test
+bun test                                    # orez tests
+cd sqlite-wasm && npx vitest run            # bedrock-sqlite tests
 ```
 
-The test suite includes a zero-cache compatibility layer that decodes pgoutput messages into the same typed format that zero-cache's PgoutputParser produces, validating end-to-end compatibility.
+The orez test suite includes a zero-cache compatibility layer that decodes pgoutput messages into the same typed format that zero-cache's PgoutputParser produces, validating end-to-end compatibility.
+
+The bedrock-sqlite tests cover Database/Statement API, transactions, WAL/WAL2 modes, BEGIN CONCURRENT, FTS5, JSON functions, custom functions, aggregates, bigint handling, and file persistence.
 
 ## Limitations
 
@@ -181,19 +211,29 @@ This is a development tool. It is not suitable for production use.
 
 ```
 src/
-  index.ts              main entry, orchestrates startup
+  index.ts              main entry, orchestrates startup + sqlite wasm patching
   cli.ts                cli with citty
   config.ts             configuration with defaults
   log.ts                colored log prefixes
   port.ts               auto port finding
   pg-proxy.ts           tcp proxy with query rewriting
   pglite-manager.ts     pglite instance and migration runner
-  s3-local.ts           standalone local s3 server (orez/s3)
+  s3-local.ts           local s3-compatible server (orez/s3)
+  bunny-local.ts        local bunny cdn storage server (orez/bunny)
   vite-plugin.ts        vite dev server plugin (orez/vite)
   replication/
     handler.ts          replication protocol state machine
     pgoutput-encoder.ts binary pgoutput message encoder
     change-tracker.ts   trigger installation and change reader
+sqlite-wasm/
+  Makefile              emscripten build for bedrock-sqlite wasm binary
+  bedrock-sqlite.d.ts   typescript declarations
+  native/
+    api.js              better-sqlite3 compatible database/statement API
+    vfs.c               custom VFS with SHM support for WAL/WAL2
+    vfs.js              javascript VFS bridge
+  test/
+    database.test.ts    37 tests for the wasm sqlite engine
 ```
 
 ## License
