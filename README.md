@@ -1,12 +1,12 @@
 # orez
 
-[Zero](https://zero.rocicorp.dev) development backend powered by [PGlite](https://pglite.dev). Bundles PostgreSQL and zero-cache into a single process — no Docker, no Postgres install, no native compilation.
+[Zero](https://zero.rocicorp.dev) development backend powered by [PGlite](https://pglite.dev). Bundles PostgreSQL and zero-cache into a single process with zero native dependencies — both Postgres and SQLite run as WASM, so `bunx orez` just works. No Docker, no Postgres install, no `node-gyp`, no platform-specific binaries.
 
 ```
 bunx orez
 ```
 
-Starts PGlite, the TCP proxy, and zero-cache. Ports auto-increment if already in use.
+Starts PGlite (Postgres via WASM), the TCP proxy, and zero-cache (SQLite via WASM). Ports auto-increment if already in use.
 
 Exports a CLI, programmatic API, and Vite plugin.
 
@@ -96,11 +96,11 @@ The trick is in the TCP proxy. zero-cache needs logical replication to stay in s
 
 The proxy also handles multi-database routing. zero-cache expects three separate databases (upstream, CVR, change), but PGlite is a single database. orez maps database names to schemas, so `zero_cvr` becomes the `zero_cvr` schema and `zero_cdb` becomes `zero_cdb`.
 
-### WASM SQLite override
+### Zero native dependencies
 
-zero-cache uses `@rocicorp/zero-sqlite3` which requires native SQLite bindings (compiled C addon). orez ships with [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite), a pure WASM build of SQLite compiled from the [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) with BEGIN CONCURRENT and WAL2 support.
+The whole point of orez is that `bunx orez` works everywhere with no native compilation step. Postgres runs in-process as WASM via PGlite. But zero-cache also needs SQLite, and `@rocicorp/zero-sqlite3` ships as a compiled C addon — which means `node-gyp`, build tools, and platform-specific binaries.
 
-At startup, orez patches `@rocicorp/zero-sqlite3` to load bedrock-sqlite instead of native bindings. This means zero-cache runs entirely without native compilation — no `node-gyp`, no build tools, no platform-specific binaries. Just `bun install` and go.
+orez solves this by shipping [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite), a pure WASM build of SQLite compiled from the [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) with BEGIN CONCURRENT and WAL2 support. At startup, orez patches `@rocicorp/zero-sqlite3` to load bedrock-sqlite instead of native bindings. Both databases run as WASM — nothing to compile, nothing platform-specific. Just `bun install` and go.
 
 ## Environment variables
 
