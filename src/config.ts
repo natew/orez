@@ -11,8 +11,10 @@ export interface ZeroLiteConfig {
   migrationsDir: string
   seedFile: string
   skipZeroCache: boolean
+  disableWasmSqlite: boolean
   logLevel: LogLevel
   pgliteOptions: Partial<PGliteOptions>
+  onDbReady: string
 }
 
 export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConfig {
@@ -25,8 +27,10 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     migrationsDir: overrides.migrationsDir || '',
     seedFile: overrides.seedFile || 'src/database/seed.sql',
     skipZeroCache: overrides.skipZeroCache || false,
+    disableWasmSqlite: overrides.disableWasmSqlite || false,
     logLevel: overrides.logLevel || 'info',
     pgliteOptions: overrides.pgliteOptions || {},
+    onDbReady: overrides.onDbReady || '',
   }
 }
 

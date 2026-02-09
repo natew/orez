@@ -102,6 +102,16 @@ const main = defineCommand({
       description: 's3 server port',
       default: '9200',
     },
+    'disable-wasm-sqlite': {
+      type: 'boolean',
+      description: 'use native @rocicorp/zero-sqlite3 instead of wasm bedrock-sqlite',
+      default: false,
+    },
+    'on-db-ready': {
+      type: 'string',
+      description: 'command to run after db+proxy are ready, before zero-cache starts',
+      default: '',
+    },
     'on-healthy': {
       type: 'string',
       description: 'command to run once all services are healthy',
@@ -121,7 +131,9 @@ const main = defineCommand({
       pgUser: args['pg-user'],
       pgPassword: args['pg-password'],
       skipZeroCache: args['skip-zero-cache'],
+      disableWasmSqlite: args['disable-wasm-sqlite'],
       logLevel: args['log-level'] as 'error' | 'warn' | 'info' | 'debug',
+      onDbReady: args['on-db-ready'],
     })
 
     let s3Server: import('node:http').Server | null = null

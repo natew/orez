@@ -265,6 +265,10 @@ let currentSearchPath = 'public'
 
 export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<Server> {
   const server = createServer(async (socket: Socket) => {
+    // prevent idle timeouts from killing connections
+    socket.setKeepAlive(true, 30000)
+    socket.setTimeout(0)
+
     let dbName = 'postgres'
     let isReplicationConnection = false
 
@@ -293,7 +297,7 @@ export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<
             isReplicationConnection = true
           }
           dbName = params?.database || 'postgres'
-          log.proxy(
+          log.debug.proxy(
             `connection: db=${dbName} user=${params?.user} replication=${params?.replication || 'none'}`
           )
           await db.waitReady
@@ -310,7 +314,7 @@ export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<
               const query = new TextDecoder()
                 .decode(data.subarray(5, 1 + len - 1))
                 .replace(/\0$/, '')
-              log.proxy(`repl query: ${query.slice(0, 200)}`)
+              log.debug.proxy(`repl query: ${query.slice(0, 200)}`)
             }
             return handleReplicationMessage(data, socket, db, connection)
           }
@@ -357,7 +361,7 @@ export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<
 
   return new Promise((resolve, reject) => {
     server.listen(config.pgPort, '127.0.0.1', () => {
-      log.proxy(`listening on port ${config.pgPort}`)
+      log.debug.proxy(`listening on port ${config.pgPort}`)
       resolve(server)
     })
     server.on('error', reject)
@@ -397,7 +401,7 @@ async function handleReplicationMessage(
     })
 
     handleStartReplication(query, writer, db).catch((err) => {
-      log.proxy(`replication stream ended: ${err}`)
+      log.debug.proxy(`replication stream ended: ${err}`)
     })
     return undefined
   }

@@ -73,15 +73,53 @@ function quoteIdent(name: string): string {
 }
 
 async function installTriggersOnAllTables(db: PGlite): Promise<void> {
-  const tables = await db.query<{ tablename: string }>(
-    `SELECT tablename FROM pg_tables
-     WHERE schemaname = 'public'
-       AND tablename NOT IN ('migrations', '_zero_changes')
-       AND tablename NOT LIKE '_zero_%'`
-  )
+  // use the configured app publication to determine which tables to track.
+  // this avoids streaming changes for private tables (user, account, session, etc.)
+  // that zero-cache doesn't know about.
+  const pubName = process.env.ZERO_APP_PUBLICATIONS
+  let tables: { tablename: string }[]
+
+  if (pubName) {
+    const result = await db.query<{ tablename: string }>(
+      `SELECT tablename FROM pg_publication_tables
+       WHERE pubname = $1
+         AND schemaname = 'public'
+         AND tablename NOT LIKE '_zero_%'`,
+      [pubName]
+    )
+    tables = result.rows
+    log.debug.pglite(`using publication "${pubName}" (${tables.length} tables)`)
+    if (tables.length === 0) {
+      log.debug.pglite(`publication "${pubName}" has no tables yet (will be populated by migrations)`)
+    }
+
+    // drop stale triggers from tables NOT in the publication
+    // (these may exist from a prior install before the publication was created)
+    const publishedSet = new Set(tables.map((t) => t.tablename))
+    const allTriggered = await db.query<{ event_object_table: string }>(
+      `SELECT DISTINCT event_object_table FROM information_schema.triggers
+       WHERE trigger_name = '_zero_change_trigger'
+         AND event_object_schema = 'public'`
+    )
+    for (const { event_object_table } of allTriggered.rows) {
+      if (!publishedSet.has(event_object_table)) {
+        const quoted = quoteIdent(event_object_table)
+        await db.exec(`DROP TRIGGER IF EXISTS _zero_change_trigger ON public.${quoted}`)
+        log.debug.pglite(`removed stale trigger from non-published table: ${event_object_table}`)
+      }
+    }
+  } else {
+    const result = await db.query<{ tablename: string }>(
+      `SELECT tablename FROM pg_tables
+       WHERE schemaname = 'public'
+         AND tablename NOT IN ('migrations', '_zero_changes')
+         AND tablename NOT LIKE '_zero_%'`
+    )
+    tables = result.rows
+  }
 
   let count = 0
-  for (const { tablename } of tables.rows) {
+  for (const { tablename } of tables) {
     const quoted = quoteIdent(tablename)
     await db.exec(`
       DROP TRIGGER IF EXISTS _zero_change_trigger ON public.${quoted};
@@ -92,7 +130,7 @@ async function installTriggersOnAllTables(db: PGlite): Promise<void> {
     count++
   }
 
-  log.pglite(`installed change tracking triggers on ${count} tables`)
+  log.debug.pglite(`installed change tracking triggers on ${count} tables`)
 }
 
 export async function getChangesSince(

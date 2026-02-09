@@ -117,12 +117,30 @@ Module.onRuntimeInitialized = () => {
     return val
   }
 
+  // sqlite error code name lookup
+  const SQLITE_ERROR_NAMES = {
+    1: 'SQLITE_ERROR', 2: 'SQLITE_INTERNAL', 3: 'SQLITE_PERM',
+    4: 'SQLITE_ABORT', 5: 'SQLITE_BUSY', 6: 'SQLITE_LOCKED',
+    7: 'SQLITE_NOMEM', 8: 'SQLITE_READONLY', 9: 'SQLITE_INTERRUPT',
+    10: 'SQLITE_IOERR', 11: 'SQLITE_CORRUPT', 12: 'SQLITE_NOTFOUND',
+    13: 'SQLITE_FULL', 14: 'SQLITE_CANTOPEN', 15: 'SQLITE_PROTOCOL',
+    16: 'SQLITE_EMPTY', 17: 'SQLITE_SCHEMA', 18: 'SQLITE_TOOBIG',
+    19: 'SQLITE_CONSTRAINT', 20: 'SQLITE_MISMATCH', 21: 'SQLITE_MISUSE',
+    23: 'SQLITE_AUTH', 24: 'SQLITE_FORMAT', 25: 'SQLITE_RANGE',
+    26: 'SQLITE_NOTADB', 100: 'SQLITE_ROW', 101: 'SQLITE_DONE',
+  }
+
   // error class matching better-sqlite3
   class SqliteError extends Error {
     constructor(message, code) {
       super(message)
       this.name = 'SqliteError'
-      this.code = code || 'SQLITE_ERROR'
+      if (typeof code === 'number') {
+        // map numeric rc to string code, fall back to primary error code
+        this.code = SQLITE_ERROR_NAMES[code & 0xff] || SQLITE_ERROR_NAMES[code] || 'SQLITE_ERROR'
+      } else {
+        this.code = code || 'SQLITE_ERROR'
+      }
     }
   }
 
@@ -250,12 +268,19 @@ Module.onRuntimeInitialized = () => {
 
       this._open = true
       this._readonly = readonly
+      this._unsafe = false
       this._name = filename
       this._statements = new Set()
       this._functions = new Map()
 
       // set busy timeout to 5s by default
       this.exec('PRAGMA busy_timeout = 5000')
+    }
+
+    unsafeMode(enabled) {
+      if (enabled === undefined) enabled = true
+      this._unsafe = !!enabled
+      return this
     }
 
     get open() {
@@ -283,7 +308,9 @@ Module.onRuntimeInitialized = () => {
 
     exec(sql) {
       this._assertOpen()
-      // reset all active statements to prevent "SQL statements in progress" errors
+      // reset active statements to prevent "SQL statements in progress" errors
+      // native better-sqlite3 does this in C++; in wasm we do it unconditionally
+      // since zero-cache may not always enable unsafeMode before exec
       for (const stmt of this._statements) {
         if (!stmt._finalized) sqlite3.reset(stmt._ptr)
       }
@@ -291,7 +318,7 @@ Module.onRuntimeInitialized = () => {
       try {
         const rc = sqlite3.exec(this._ptr, tp, NULL, NULL, NULL)
         if (rc !== SQLITE_OK) {
-          throw new SqliteError(sqlite3.errmsg(this._ptr))
+          throw new SqliteError(sqlite3.errmsg(this._ptr), rc)
         }
       } finally {
         _free(tp)
@@ -523,7 +550,7 @@ Module.onRuntimeInitialized = () => {
 
     _handleError(rc) {
       if (rc !== SQLITE_OK) {
-        throw new SqliteError(sqlite3.errmsg(this._ptr))
+        throw new SqliteError(sqlite3.errmsg(this._ptr), rc)
       }
     }
   }
@@ -543,7 +570,7 @@ Module.onRuntimeInitialized = () => {
       try {
         const rc = sqlite3.prepare_v2(db._ptr, tp, -1, temp, NULL)
         if (rc !== SQLITE_OK) {
-          throw new SqliteError(sqlite3.errmsg(db._ptr))
+          throw new SqliteError(sqlite3.errmsg(db._ptr), rc)
         }
       } finally {
         _free(tp)
@@ -574,10 +601,15 @@ Module.onRuntimeInitialized = () => {
       this._reset()
       if (params) this._bind(params)
       this._step()
-      return {
+      const result = {
         changes: sqlite3.changes(this._db._ptr),
         lastInsertRowid: toNumberOrNot(sqlite3.last_insert_rowid(this._db._ptr)),
       }
+      // reset after step so SQLite doesn't consider this statement "in progress"
+      // native better-sqlite3 does this in C++; without it, COMMIT fails with
+      // "cannot commit transaction - SQL statements in progress"
+      sqlite3.reset(this._ptr)
+      return result
     }
 
     get(...args) {
@@ -585,8 +617,13 @@ Module.onRuntimeInitialized = () => {
       const params = resolveBindParams(args)
       this._reset()
       if (params) this._bind(params)
-      if (!this._step()) return undefined
-      return this._getRow()
+      if (!this._step()) {
+        sqlite3.reset(this._ptr)
+        return undefined
+      }
+      const row = this._getRow()
+      sqlite3.reset(this._ptr)
+      return row
     }
 
     all(...args) {
@@ -597,7 +634,15 @@ Module.onRuntimeInitialized = () => {
       const rows = []
       while (this._step()) {
         rows.push(this._getRow())
+        if (rows.length === 100000) {
+          console.warn(`[bedrock-sqlite] all() returned 100k rows, query: ${this._source.slice(0, 200)}`)
+        }
+        if (rows.length >= 10000000) {
+          sqlite3.reset(this._ptr)
+          throw new SqliteError(`all() exceeded 10M row safety limit, likely infinite loop. query: ${this._source.slice(0, 200)}`)
+        }
       }
+      sqlite3.reset(this._ptr)
       return rows
     }
 
@@ -647,6 +692,18 @@ Module.onRuntimeInitialized = () => {
       return cols
     }
 
+    // stub: zero-cache calls these for scan statistics
+    scanStatusV2() {
+      return []
+    }
+
+    scanStatusReset() {}
+
+    // stub: safe integers (not needed in wasm but api compat)
+    safeIntegers() {
+      return this
+    }
+
     bind(...args) {
       this._assertReady()
       const params = resolveBindParams(args)
@@ -665,7 +722,8 @@ Module.onRuntimeInitialized = () => {
       const rc = sqlite3.step(this._ptr)
       if (rc === SQLITE_ROW) return true
       if (rc === SQLITE_DONE) return false
-      throw new SqliteError(sqlite3.errmsg(this._db._ptr))
+      sqlite3.reset(this._ptr)
+      throw new SqliteError(sqlite3.errmsg(this._db._ptr), rc)
     }
 
     _getRow() {
@@ -710,7 +768,11 @@ Module.onRuntimeInitialized = () => {
         case SQLITE_BLOB: {
           const p = sqlite3.column_blob(this._ptr, i)
           if (p !== NULL) {
-            return Buffer.from(HEAPU8.slice(p, p + sqlite3.column_bytes(this._ptr, i)))
+            const nbytes = sqlite3.column_bytes(this._ptr, i)
+            if (nbytes > 104857600) {
+              throw new SqliteError(`blob column ${i} has unreasonable size: ${nbytes} bytes`)
+            }
+            return Buffer.from(HEAPU8.slice(p, p + nbytes))
           }
           return Buffer.alloc(0)
         }

@@ -250,7 +250,7 @@ export async function handleStartReplication(
   writer: ReplicationWriter,
   db: PGlite
 ): Promise<void> {
-  log.proxy('replication: entering streaming mode')
+  log.debug.proxy('replication: entering streaming mode')
 
   // send CopyBothResponse to enter streaming mode
   const copyBoth = new Uint8Array(1 + 4 + 1 + 2)
@@ -272,15 +272,27 @@ export async function handleStartReplication(
     $$ LANGUAGE plpgsql;
   `)
 
-  // install notify trigger on all tracked tables
-  const tables = await db.query<{ tablename: string }>(
-    `SELECT tablename FROM pg_tables
-     WHERE schemaname = 'public'
-       AND tablename NOT IN ('migrations', '_zero_changes')
-       AND tablename NOT LIKE '_zero_%'`
-  )
+  // install notify trigger on tracked tables (use configured publication if available)
+  const pubName = process.env.ZERO_APP_PUBLICATIONS
+  let tables: { tablename: string }[]
+  if (pubName) {
+    const result = await db.query<{ tablename: string }>(
+      `SELECT tablename FROM pg_publication_tables
+       WHERE pubname = $1 AND schemaname = 'public' AND tablename NOT LIKE '_zero_%'`,
+      [pubName]
+    )
+    tables = result.rows
+  } else {
+    const result = await db.query<{ tablename: string }>(
+      `SELECT tablename FROM pg_tables
+       WHERE schemaname = 'public'
+         AND tablename NOT IN ('migrations', '_zero_changes')
+         AND tablename NOT LIKE '_zero_%'`
+    )
+    tables = result.rows
+  }
 
-  for (const { tablename } of tables.rows) {
+  for (const { tablename } of tables) {
     const quoted = '"' + tablename.replace(/"/g, '""') + '"'
     await db.exec(`
       DROP TRIGGER IF EXISTS _zero_notify_trigger ON public.${quoted};
@@ -315,7 +327,7 @@ export async function handleStartReplication(
         await new Promise((resolve) => setTimeout(resolve, pollInterval))
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        log.proxy(`replication poll error: ${msg}`)
+        log.debug.proxy(`replication poll error: ${msg}`)
         if (msg.includes('closed') || msg.includes('destroyed')) {
           running = false
           break
@@ -325,10 +337,9 @@ export async function handleStartReplication(
     }
   }
 
-  // start polling (runs until connection closes)
-  log.proxy('replication: starting poll loop')
+  log.debug.proxy('replication: starting poll loop')
   await poll()
-  log.proxy('replication: poll loop exited')
+  log.debug.proxy('replication: poll loop exited')
 }
 
 async function streamChanges(

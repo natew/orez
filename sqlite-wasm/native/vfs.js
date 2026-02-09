@@ -4,6 +4,10 @@
 
 addToLibrary({
   $_shmRegistry: {},
+  // per-file lock tracking for multi-connection coordination.
+  // keys are file paths, values are { holders: Map<fi, level> }.
+  // sqlite lock levels: NONE=0, SHARED=1, RESERVED=2, PENDING=3, EXCLUSIVE=4
+  $_fileLocks: {},
   nodejsAccess: function (vfs, filePath, flags, outResult) {
     let aflags = fs.constants.F_OK
     if (flags == SQLITE_ACCESS_READWRITE) aflags = fs.constants.R_OK | fs.constants.W_OK
@@ -56,7 +60,7 @@ addToLibrary({
     const buf = HEAPU8.subarray(outBuffer, outBuffer + bytes)
     let bytesRead
     try {
-      bytesRead = fs.readSync(_fd(fi), buf, 0, bytes, offset)
+      bytesRead = fs.readSync(_fd(fi), buf, 0, bytes, _safeInt(offset))
     } catch {
       return SQLITE_IOERR_READ
     }
@@ -119,35 +123,65 @@ addToLibrary({
     }
     return SQLITE_OK
   },
+  nodejsLock__deps: ['$_fileLocks'],
   nodejsLock: function (fi, level) {
-    if (!_isLocked(fi)) {
-      try {
-        fs.mkdirSync(`${_path(fi)}.lock`)
-      } catch (err) {
-        return err.code == 'EEXIST' ? SQLITE_BUSY : SQLITE_IOERR_LOCK
+    var filePath = _path(fi)
+    if (!_fileLocks[filePath]) _fileLocks[filePath] = new Map()
+    var holders = _fileLocks[filePath]
+    var myLevel = holders.get(fi) || SQLITE_LOCK_NONE
+
+    // upgrading to RESERVED or higher: check for conflicts
+    if (level >= SQLITE_LOCK_RESERVED && myLevel < SQLITE_LOCK_RESERVED) {
+      for (var [other, otherLevel] of holders) {
+        if (other !== fi && otherLevel >= SQLITE_LOCK_RESERVED) {
+          return SQLITE_BUSY
+        }
       }
-      _setLocked(fi, true)
     }
+
+    // upgrading to EXCLUSIVE: check no other connection holds SHARED or above
+    if (level >= SQLITE_LOCK_EXCLUSIVE && myLevel < SQLITE_LOCK_EXCLUSIVE) {
+      for (var [other, otherLevel] of holders) {
+        if (other !== fi && otherLevel >= SQLITE_LOCK_SHARED) {
+          return SQLITE_BUSY
+        }
+      }
+    }
+
+    holders.set(fi, level)
+    if (level > SQLITE_LOCK_NONE) _setLocked(fi, true)
     return SQLITE_OK
   },
+  nodejsUnlock__deps: ['$_fileLocks'],
   nodejsUnlock: function (fi, level) {
-    if (level == SQLITE_LOCK_NONE && _isLocked(fi)) {
-      try {
-        fs.rmdirSync(`${_path(fi)}.lock`)
-      } catch (err) {
-        if (err.code != 'ENOENT') return SQLITE_IOERR_UNLOCK
+    var filePath = _path(fi)
+    var holders = _fileLocks[filePath]
+    if (holders) {
+      if (level == SQLITE_LOCK_NONE) {
+        holders.delete(fi)
+        _setLocked(fi, false)
+      } else {
+        holders.set(fi, level)
       }
-      _setLocked(fi, false)
+    } else {
+      if (level == SQLITE_LOCK_NONE) _setLocked(fi, false)
     }
     return SQLITE_OK
   },
+  nodejsCheckReservedLock__deps: ['$_fileLocks'],
   nodejsCheckReservedLock: function (fi, outResult) {
-    try {
-      fs.accessSync(`${_path(fi)}.lock`, fs.constants.F_OK)
-      setValue(outResult, 1, 'i32')
-    } catch {
-      setValue(outResult, 0, 'i32')
+    var filePath = _path(fi)
+    var holders = _fileLocks[filePath]
+    var reserved = 0
+    if (holders) {
+      for (var [other, otherLevel] of holders) {
+        if (other !== fi && otherLevel >= SQLITE_LOCK_RESERVED) {
+          reserved = 1
+          break
+        }
+      }
     }
+    setValue(outResult, reserved, 'i32')
     return SQLITE_OK
   },
   nodejs_max_path_length: function () {
@@ -190,6 +224,13 @@ addToLibrary({
       }
     }
     return SQLITE_OK
+  },
+  // real blocking sleep for busy_timeout support (C sleep/usleep are no-ops in WASM)
+  nodejsSleep: function (vfs, nMicro) {
+    var ms = Math.max(1, Math.floor(nMicro / 1000))
+    var sab = new SharedArrayBuffer(4)
+    Atomics.wait(new Int32Array(sab), 0, 0, ms)
+    return nMicro
   },
   nodejs_open: function (filePath, flags, mode) {
     let oflags = 0

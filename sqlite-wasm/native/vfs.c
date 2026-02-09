@@ -95,11 +95,8 @@ static void (*nodejsDlSym(sqlite3_vfs *pVfs, void *pH, const char *z))(void) {
 }
 static void nodejsDlClose(sqlite3_vfs *pVfs, void *pHandle) {}
 
-static int nodejsSleep(sqlite3_vfs *pVfs, int nMicro) {
-  if (nMicro >= 1000000) sleep(nMicro / 1000000);
-  if (nMicro % 1000000) usleep(nMicro % 1000000);
-  return nMicro;
-}
+// implemented in JS (vfs.js) via Atomics.wait for real blocking sleep
+extern int nodejsSleep(sqlite3_vfs *, int);
 
 static int nodejsCurrentTimeInt64(sqlite3_vfs *pVfs, sqlite3_int64 *piNow) {
   static const sqlite3_int64 unixEpoch = 24405875 * (sqlite3_int64)8640000;

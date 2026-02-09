@@ -1,6 +1,7 @@
+import type { LogLevel } from './config.js'
+
 const RESET = '\x1b[0m'
 const BOLD = '\x1b[1m'
-const DIM = '\x1b[2m'
 
 const COLORS = {
   cyan: '\x1b[36m',
@@ -10,14 +11,29 @@ const COLORS = {
   blue: '\x1b[34m',
 } as const
 
+const LEVEL_PRIORITY: Record<LogLevel, number> = {
+  error: 0,
+  warn: 1,
+  info: 2,
+  debug: 3,
+}
+
+let currentLevel: LogLevel = 'info'
+
+export function setLogLevel(level: LogLevel) {
+  currentLevel = level
+}
+
 function prefix(label: string, color: string): string {
   return `${BOLD}${color}[${label}]${RESET}`
 }
 
-function makeLogger(label: string, color: string) {
+function makeLogger(label: string, color: string, level: LogLevel = 'info') {
   const p = prefix(label, color)
   return (...args: unknown[]) => {
-    console.info(p, ...args)
+    if (LEVEL_PRIORITY[level] <= LEVEL_PRIORITY[currentLevel]) {
+      console.info(p, ...args)
+    }
   }
 }
 
@@ -27,4 +43,11 @@ export const log = {
   proxy: makeLogger('pg-proxy', COLORS.yellow),
   zero: makeLogger('zero-cache', COLORS.magenta),
   s3: makeLogger('orez/s3', COLORS.blue),
+  debug: {
+    orez: makeLogger('orez', COLORS.cyan, 'debug'),
+    pglite: makeLogger('pglite', COLORS.green, 'debug'),
+    proxy: makeLogger('pg-proxy', COLORS.yellow, 'debug'),
+    zero: makeLogger('zero-cache', COLORS.magenta, 'debug'),
+    s3: makeLogger('orez/s3', COLORS.blue, 'debug'),
+  },
 }

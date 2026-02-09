@@ -13,7 +13,7 @@ export async function createPGliteInstance(config: ZeroLiteConfig): Promise<PGli
   const dataPath = resolve(config.dataDir, 'pgdata')
   mkdirSync(dataPath, { recursive: true })
 
-  log.pglite(`creating instance at ${dataPath}`)
+  log.debug.pglite(`creating instance at ${dataPath}`)
   const {
     dataDir: _d,
     debug: _dbg,
@@ -28,13 +28,19 @@ export async function createPGliteInstance(config: ZeroLiteConfig): Promise<PGli
   })
 
   await db.waitReady
-  log.pglite('ready')
+  log.debug.pglite('ready')
+
+  // ensure plpgsql is available (needed by migrations and trigger functions)
+  await db.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
 
   // create schemas for multi-db simulation
   await db.exec('CREATE SCHEMA IF NOT EXISTS zero_cvr')
   await db.exec('CREATE SCHEMA IF NOT EXISTS zero_cdb')
 
-  // create publication for zero-cache
+  // create empty publication for zero-cache
+  // the app's migrations (via --on-db-ready) add specific tables to it,
+  // excluding private tables like user/session/account.
+  // DO NOT use FOR ALL TABLES - it auto-includes every future table.
   const pubName = process.env.ZERO_APP_PUBLICATIONS || 'zero_pub'
   const pubs = await db.query<{ count: string }>(
     `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
@@ -42,7 +48,7 @@ export async function createPGliteInstance(config: ZeroLiteConfig): Promise<PGli
   )
   if (Number(pubs.rows[0].count) === 0) {
     const quoted = '"' + pubName.replace(/"/g, '""') + '"'
-    await db.exec(`CREATE PUBLICATION ${quoted} FOR ALL TABLES`)
+    await db.exec(`CREATE PUBLICATION ${quoted}`)
   }
 
   return db
@@ -50,13 +56,13 @@ export async function createPGliteInstance(config: ZeroLiteConfig): Promise<PGli
 
 export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   if (!config.migrationsDir) {
-    log.orez('no migrations directory configured, skipping')
+    log.debug.orez('no migrations directory configured, skipping')
     return
   }
 
   const migrationsDir = resolve(config.migrationsDir)
   if (!existsSync(migrationsDir)) {
-    log.orez('no migrations directory found, skipping')
+    log.debug.orez('no migrations directory found, skipping')
     return
   }
 
@@ -93,7 +99,7 @@ export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise
       continue
     }
 
-    log.orez(`applying migration: ${name}`)
+    log.debug.orez(`applying migration: ${name}`)
     const sql = readFileSync(join(migrationsDir, file), 'utf-8')
 
     // split by drizzle's statement-breakpoint marker
@@ -107,8 +113,8 @@ export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise
     }
 
     await db.query('INSERT INTO public.migrations (name) VALUES ($1)', [name])
-    log.orez(`applied migration: ${name}`)
+    log.debug.orez(`applied migration: ${name}`)
   }
 
-  log.orez('migrations complete')
+  log.debug.orez('migrations complete')
 }

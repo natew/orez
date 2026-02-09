@@ -3,18 +3,27 @@
 'use strict'
 
 const mod = require('bedrock-sqlite')
-const Database = mod.Database
+const OrigDatabase = mod.Database
 const SqliteError = mod.SqliteError
 
-// patch Database.prototype with methods zero-cache uses but bedrock-sqlite doesn't have
-// set busy_timeout on every db open - wasm vfs can't share locks between processes,
-// so retrying on SQLITE_BUSY prevents "database is locked" errors
-Database.prototype.unsafeMode = function () {
+// wrap Database constructor to set pragmas immediately on every connection.
+// wasm vfs can't share SHM between processes, so WAL mode coordination breaks.
+// force DELETE journal mode and set busy_timeout before any queries run.
+function Database() {
+  const db = new OrigDatabase(...arguments)
   try {
-    this.pragma('busy_timeout = 5000')
-    this.pragma('journal_mode = wal')
-    this.pragma('synchronous = normal')
+    db.pragma('journal_mode = delete')
+    db.pragma('busy_timeout = 30000')
+    db.pragma('synchronous = normal')
   } catch {}
+  return db
+}
+Database.prototype = OrigDatabase.prototype
+Database.prototype.constructor = Database
+Object.keys(OrigDatabase).forEach(key => { Database[key] = OrigDatabase[key] })
+
+Database.prototype.unsafeMode = function () {
+  // pragmas already set in constructor, just return this
   return this
 }
 if (!Database.prototype.defaultSafeIntegers) {
@@ -41,6 +50,13 @@ const StmtProto = Object.getPrototypeOf(tmpStmt)
 if (!StmtProto.safeIntegers) {
   StmtProto.safeIntegers = function () {
     return this
+  }
+}
+if (!StmtProto.scanStatus) {
+  // returns undefined immediately to signal no scan stats available.
+  // zero-cache loops calling scanStatus(idx++) until it returns undefined.
+  StmtProto.scanStatus = function () {
+    return undefined
   }
 }
 if (!StmtProto.scanStatusV2) {
