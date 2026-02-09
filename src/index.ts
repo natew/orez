@@ -232,9 +232,7 @@ function patchSqliteForWasm(): void {
     // didn't produce lib/index.js, so fall back to manual lookup
     let libDir: string
     try {
-      const entry = import.meta
-        .resolve('@rocicorp/zero-sqlite3')
-        .replace('file://', '')
+      const entry = import.meta.resolve('@rocicorp/zero-sqlite3').replace('file://', '')
       libDir = resolve(entry, '..')
     } catch {
       // native build likely failed, find package via @rocicorp/zero

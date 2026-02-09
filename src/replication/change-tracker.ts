@@ -90,7 +90,9 @@ async function installTriggersOnAllTables(db: PGlite): Promise<void> {
     tables = result.rows
     log.debug.pglite(`using publication "${pubName}" (${tables.length} tables)`)
     if (tables.length === 0) {
-      log.debug.pglite(`publication "${pubName}" has no tables yet (will be populated by migrations)`)
+      log.debug.pglite(
+        `publication "${pubName}" has no tables yet (will be populated by migrations)`
+      )
     }
 
     // drop stale triggers from tables NOT in the publication
@@ -105,7 +107,9 @@ async function installTriggersOnAllTables(db: PGlite): Promise<void> {
       if (!publishedSet.has(event_object_table)) {
         const quoted = quoteIdent(event_object_table)
         await db.exec(`DROP TRIGGER IF EXISTS _zero_change_trigger ON public.${quoted}`)
-        log.debug.pglite(`removed stale trigger from non-published table: ${event_object_table}`)
+        log.debug.pglite(
+          `removed stale trigger from non-published table: ${event_object_table}`
+        )
       }
     }
   } else {

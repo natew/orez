@@ -16,11 +16,11 @@
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { describe, test, expect, beforeEach, afterEach } from 'vitest'
 
 // import bedrock-sqlite directly (our wasm build)
 // @ts-expect-error - CJS module
 import { Database } from 'bedrock-sqlite'
+import { describe, test, expect, beforeEach, afterEach } from 'vitest'
 
 // helper: temp db file
 function tmpDbPath(name: string): string {
@@ -242,10 +242,7 @@ describe('wasm-sqlite: BEGIN CONCURRENT', () => {
 
     // conn2's transaction starts here (deferred), sees conn1's commit
     conn2.prepare('INSERT INTO foo(id) VALUES(2)').run()
-    expect(conn2.prepare('SELECT * FROM foo').all()).toEqual([
-      { id: 1 },
-      { id: 2 },
-    ])
+    expect(conn2.prepare('SELECT * FROM foo').all()).toEqual([{ id: 1 }, { id: 2 }])
 
     conn2.prepare('ROLLBACK').run()
     conn1.close()
@@ -478,7 +475,9 @@ describe('wasm-sqlite: zero-cache replicator pattern', () => {
     db.pragma('journal_mode = WAL2')
     db.pragma('busy_timeout = 30000')
 
-    expect(db.prepare('SELECT count(*) as c FROM "_zero.changeLog"').get()).toEqual({ c: 0 })
+    expect(db.prepare('SELECT count(*) as c FROM "_zero.changeLog"').get()).toEqual({
+      c: 0,
+    })
     db.close()
   })
 
@@ -499,8 +498,18 @@ describe('wasm-sqlite: zero-cache replicator pattern', () => {
 
     // simulate processing a replication message batch
     runner.beginConcurrent()
-    runner.run('INSERT INTO issues(issueID, title, _0_version) VALUES(?, ?, ?)', 1, 'bug', '01')
-    runner.run('INSERT INTO issues(issueID, title, _0_version) VALUES(?, ?, ?)', 2, 'feat', '01')
+    runner.run(
+      'INSERT INTO issues(issueID, title, _0_version) VALUES(?, ?, ?)',
+      1,
+      'bug',
+      '01'
+    )
+    runner.run(
+      'INSERT INTO issues(issueID, title, _0_version) VALUES(?, ?, ?)',
+      2,
+      'feat',
+      '01'
+    )
     runner.commit()
 
     expect(runner.all('SELECT * FROM issues')).toEqual([

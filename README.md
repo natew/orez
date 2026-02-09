@@ -1,6 +1,6 @@
 # orez
 
-[Zero](https://zero.rocicorp.dev) development backend powered by [PGlite](https://pglite.dev) and [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite) (our WASM fork of SQLite's [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent)). Bundles PostgreSQL and zero-cache into a single process with zero native dependencies — both Postgres and SQLite run as WASM, so `bunx orez` just works. No Docker, no Postgres install, no `node-gyp`, no platform-specific binaries.
+[Zero](https://zero.rocicorp.dev) development backend powered by [PGlite](https://pglite.dev) and [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite) (our WASM fork of SQLite's [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent)). Bundles PostgreSQL and zero-cache into a single package with no native dependencies — both Postgres and SQLite run as WASM, so you can `bunx orez` and have a full backend up in seconds. No Docker, no Postgres install, no `node-gyp`, no platform-specific binaries.
 
 ```
 bunx orez
@@ -25,18 +25,20 @@ bunx orez
 ```
 
 ```
---pg-port=6434        postgresql proxy port
---zero-port=5849      zero-cache port
---data-dir=.orez      data directory
---migrations=DIR      migrations directory (skipped if not set)
---seed=FILE           seed file path
---pg-user=user        postgresql user
---pg-password=password postgresql password
---skip-zero-cache     run pglite + proxy only, skip zero-cache
---log-level=info      error, warn, info, debug
---s3                  also start a local s3-compatible server
---s3-port=9200        s3 server port
---on-healthy=CMD      command to run once all services are healthy
+--pg-port=6434            postgresql proxy port
+--zero-port=5849          zero-cache port
+--data-dir=.orez          data directory
+--migrations=DIR          migrations directory (skipped if not set)
+--seed=FILE               seed file path
+--pg-user=user            postgresql user
+--pg-password=password    postgresql password
+--skip-zero-cache         run pglite + proxy only, skip zero-cache
+--log-level=info          error, warn, info, debug
+--s3                      also start a local s3-compatible server
+--s3-port=9200            s3 server port
+--disable-wasm-sqlite     use native @rocicorp/zero-sqlite3 instead of wasm bedrock-sqlite
+--on-db-ready=CMD         command to run after db+proxy are ready, before zero-cache starts
+--on-healthy=CMD          command to run once all services are healthy
 ```
 
 Subcommands for standalone servers:
@@ -77,17 +79,16 @@ export default {
       pgPort: 6434,
       zeroPort: 5849,
       migrationsDir: 'src/database/migrations',
-      s3: true,
     }),
   ],
 }
 ```
 
-Starts orez when vite dev server starts, stops on close. Pass `s3: true` to also start a local storage server.
+Starts orez when vite dev server starts, stops on close.
 
 ## How it works
 
-orez starts three things in one process:
+orez starts three things:
 
 1. A PGlite instance (full PostgreSQL 16 running in-process via WASM)
 2. A TCP proxy that speaks the PostgreSQL wire protocol, including logical replication
@@ -129,7 +130,6 @@ Common vars you might want to set:
 ```bash
 ZERO_MUTATE_URL=http://localhost:3000/api/zero/push
 ZERO_QUERY_URL=http://localhost:3000/api/zero/pull
-ZERO_LOG_LEVEL=debug
 ```
 
 ## What gets faked

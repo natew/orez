@@ -20,7 +20,9 @@ function Database() {
 }
 Database.prototype = OrigDatabase.prototype
 Database.prototype.constructor = Database
-Object.keys(OrigDatabase).forEach(key => { Database[key] = OrigDatabase[key] })
+Object.keys(OrigDatabase).forEach((key) => {
+  Database[key] = OrigDatabase[key]
+})
 
 Database.prototype.unsafeMode = function () {
   // pragmas already set in constructor, just return this

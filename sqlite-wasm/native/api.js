@@ -119,15 +119,33 @@ Module.onRuntimeInitialized = () => {
 
   // sqlite error code name lookup
   const SQLITE_ERROR_NAMES = {
-    1: 'SQLITE_ERROR', 2: 'SQLITE_INTERNAL', 3: 'SQLITE_PERM',
-    4: 'SQLITE_ABORT', 5: 'SQLITE_BUSY', 6: 'SQLITE_LOCKED',
-    7: 'SQLITE_NOMEM', 8: 'SQLITE_READONLY', 9: 'SQLITE_INTERRUPT',
-    10: 'SQLITE_IOERR', 11: 'SQLITE_CORRUPT', 12: 'SQLITE_NOTFOUND',
-    13: 'SQLITE_FULL', 14: 'SQLITE_CANTOPEN', 15: 'SQLITE_PROTOCOL',
-    16: 'SQLITE_EMPTY', 17: 'SQLITE_SCHEMA', 18: 'SQLITE_TOOBIG',
-    19: 'SQLITE_CONSTRAINT', 20: 'SQLITE_MISMATCH', 21: 'SQLITE_MISUSE',
-    23: 'SQLITE_AUTH', 24: 'SQLITE_FORMAT', 25: 'SQLITE_RANGE',
-    26: 'SQLITE_NOTADB', 100: 'SQLITE_ROW', 101: 'SQLITE_DONE',
+    1: 'SQLITE_ERROR',
+    2: 'SQLITE_INTERNAL',
+    3: 'SQLITE_PERM',
+    4: 'SQLITE_ABORT',
+    5: 'SQLITE_BUSY',
+    6: 'SQLITE_LOCKED',
+    7: 'SQLITE_NOMEM',
+    8: 'SQLITE_READONLY',
+    9: 'SQLITE_INTERRUPT',
+    10: 'SQLITE_IOERR',
+    11: 'SQLITE_CORRUPT',
+    12: 'SQLITE_NOTFOUND',
+    13: 'SQLITE_FULL',
+    14: 'SQLITE_CANTOPEN',
+    15: 'SQLITE_PROTOCOL',
+    16: 'SQLITE_EMPTY',
+    17: 'SQLITE_SCHEMA',
+    18: 'SQLITE_TOOBIG',
+    19: 'SQLITE_CONSTRAINT',
+    20: 'SQLITE_MISMATCH',
+    21: 'SQLITE_MISUSE',
+    23: 'SQLITE_AUTH',
+    24: 'SQLITE_FORMAT',
+    25: 'SQLITE_RANGE',
+    26: 'SQLITE_NOTADB',
+    100: 'SQLITE_ROW',
+    101: 'SQLITE_DONE',
   }
 
   // error class matching better-sqlite3
@@ -137,7 +155,8 @@ Module.onRuntimeInitialized = () => {
       this.name = 'SqliteError'
       if (typeof code === 'number') {
         // map numeric rc to string code, fall back to primary error code
-        this.code = SQLITE_ERROR_NAMES[code & 0xff] || SQLITE_ERROR_NAMES[code] || 'SQLITE_ERROR'
+        this.code =
+          SQLITE_ERROR_NAMES[code & 0xff] || SQLITE_ERROR_NAMES[code] || 'SQLITE_ERROR'
       } else {
         this.code = code || 'SQLITE_ERROR'
       }
@@ -635,11 +654,15 @@ Module.onRuntimeInitialized = () => {
       while (this._step()) {
         rows.push(this._getRow())
         if (rows.length === 100000) {
-          console.warn(`[bedrock-sqlite] all() returned 100k rows, query: ${this._source.slice(0, 200)}`)
+          console.warn(
+            `[bedrock-sqlite] all() returned 100k rows, query: ${this._source.slice(0, 200)}`
+          )
         }
         if (rows.length >= 10000000) {
           sqlite3.reset(this._ptr)
-          throw new SqliteError(`all() exceeded 10M row safety limit, likely infinite loop. query: ${this._source.slice(0, 200)}`)
+          throw new SqliteError(
+            `all() exceeded 10M row safety limit, likely infinite loop. query: ${this._source.slice(0, 200)}`
+          )
         }
       }
       sqlite3.reset(this._ptr)
@@ -770,7 +793,9 @@ Module.onRuntimeInitialized = () => {
           if (p !== NULL) {
             const nbytes = sqlite3.column_bytes(this._ptr, i)
             if (nbytes > 104857600) {
-              throw new SqliteError(`blob column ${i} has unreasonable size: ${nbytes} bytes`)
+              throw new SqliteError(
+                `blob column ${i} has unreasonable size: ${nbytes} bytes`
+              )
             }
             return Buffer.from(HEAPU8.slice(p, p + nbytes))
           }
