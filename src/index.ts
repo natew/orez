@@ -152,24 +152,73 @@ async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
 }
 
 function patchSqliteForWasm(): void {
-  // replace @rocicorp/zero-sqlite3 with bedrock-sqlite (wasm) shim
-  // so zero-cache uses wasm instead of native bindings
+  // replace @rocicorp/zero-sqlite3 with bedrock-sqlite (wasm) so
+  // zero-cache uses wasm instead of native bindings
   try {
-    const sqlitePkg = import.meta.resolve('@rocicorp/zero-sqlite3').replace('file://', '')
-    const indexPath = resolve(sqlitePkg, '..', 'index.js')
+    const sqlitePkgEntry = import.meta
+      .resolve('@rocicorp/zero-sqlite3')
+      .replace('file://', '')
+    const libDir = resolve(sqlitePkgEntry, '..')
+    const indexPath = resolve(libDir, 'index.js')
     if (!existsSync(indexPath)) return
 
     const current = readFileSync(indexPath, 'utf-8')
     if (current.includes('bedrock-sqlite')) return // already patched
 
-    const shimPath = resolve(import.meta.dirname, 'sqlite-shim.cjs')
-    if (!existsSync(shimPath)) return
+    // resolve bedrock-sqlite's dist entry point
+    const bedrockEntry = import.meta.resolve('bedrock-sqlite').replace('file://', '')
+    if (!existsSync(bedrockEntry)) {
+      log.orez('bedrock-sqlite not found, skipping wasm patch')
+      return
+    }
 
-    const shim = `'use strict';\nmodule.exports = require('${shimPath}');\n`
+    // inline the full shim into index.js - no external file dependency
+    const shim = `'use strict';
+// patched by orez: bedrock-sqlite (wasm) replaces native bindings
+var mod = require('${bedrockEntry}');
+var Database = mod.Database;
+var SqliteError = mod.SqliteError;
+
+// patch methods zero-cache needs but bedrock-sqlite doesn't have
+if (!Database.prototype.unsafeMode) Database.prototype.unsafeMode = function() { return this; };
+if (!Database.prototype.defaultSafeIntegers) Database.prototype.defaultSafeIntegers = function() { return this; };
+if (!Database.prototype.serialize) Database.prototype.serialize = function() { throw new Error('not supported in wasm'); };
+if (!Database.prototype.backup) Database.prototype.backup = function() { throw new Error('not supported in wasm'); };
+
+// patch Statement prototype
+var tmpDb = new Database(':memory:');
+var tmpStmt = tmpDb.prepare('SELECT 1');
+var SP = Object.getPrototypeOf(tmpStmt);
+if (!SP.safeIntegers) SP.safeIntegers = function() { return this; };
+if (!SP.scanStatusV2) SP.scanStatusV2 = function() { return []; };
+if (!SP.scanStatusReset) SP.scanStatusReset = function() {};
+tmpDb.close();
+
+// scanstat constants
+Database.SQLITE_SCANSTAT_NLOOP = 0;
+Database.SQLITE_SCANSTAT_NVISIT = 1;
+Database.SQLITE_SCANSTAT_EST = 2;
+Database.SQLITE_SCANSTAT_NAME = 3;
+Database.SQLITE_SCANSTAT_EXPLAIN = 4;
+Database.SQLITE_SCANSTAT_SELECTID = 5;
+Database.SQLITE_SCANSTAT_PARENTID = 6;
+Database.SQLITE_SCANSTAT_NCYCLE = 7;
+Database.SQLITE_SCANSTAT_COMPLEX = 8;
+
+module.exports = Database;
+module.exports.SqliteError = SqliteError;
+`
     writeFileSync(indexPath, shim)
+
+    // also patch database.js since it has top-level native addon loading
+    const dbPath = resolve(libDir, 'database.js')
+    if (existsSync(dbPath)) {
+      writeFileSync(dbPath, `'use strict';\nmodule.exports = require('./index');\n`)
+    }
+
     log.orez('patched @rocicorp/zero-sqlite3 -> bedrock-sqlite (wasm)')
   } catch (e) {
-    log.orez(`sqlite wasm patch skipped: ${e}`)
+    log.orez(`sqlite wasm patch failed: ${e}`)
   }
 }
 
