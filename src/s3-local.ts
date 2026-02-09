@@ -17,7 +17,7 @@ import {
   unlinkSync,
   statSync,
 } from 'node:fs'
-import { join, dirname, extname } from 'node:path'
+import { join, dirname, extname, resolve } from 'node:path'
 
 import type { ZeroLiteConfig } from './config'
 
@@ -62,7 +62,13 @@ export function startS3Server(
         req.url || '/',
         `http://localhost:${config.s3Port}`
       )
-      const filePath = join(storageDir, url.pathname)
+      const filePath = resolve(join(storageDir, url.pathname))
+
+      if (!filePath.startsWith(resolve(storageDir))) {
+        res.writeHead(403, headers)
+        res.end()
+        return
+      }
 
       try {
         switch (req.method) {

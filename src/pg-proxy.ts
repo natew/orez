@@ -428,7 +428,7 @@ async function handleReplicationMessage(
 
   // check if this is a START_REPLICATION command
   if (upper.startsWith('START_REPLICATION')) {
-    const duplex = await connection.detach()
+    await connection.detach()
 
     const writer = {
       write(chunk: Uint8Array) {

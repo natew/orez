@@ -195,11 +195,12 @@ export async function handleReplicationQuery(query: string, db: PGlite): Promise
     const snapshotName = `00000003-00000001-1`
 
     // persist slot so pg_replication_slots queries find it
-    await db.exec(`
-      INSERT INTO public._zero_replication_slots (slot_name, restart_lsn, confirmed_flush_lsn)
-      VALUES ('${slotName}', '${lsn}', '${lsn}')
-      ON CONFLICT (slot_name) DO UPDATE SET restart_lsn = '${lsn}', confirmed_flush_lsn = '${lsn}'
-    `)
+    await db.query(
+      `INSERT INTO public._zero_replication_slots (slot_name, restart_lsn, confirmed_flush_lsn)
+       VALUES ($1, $2, $2)
+       ON CONFLICT (slot_name) DO UPDATE SET restart_lsn = $2, confirmed_flush_lsn = $2`,
+      [slotName, lsn]
+    )
 
     return buildSimpleResponse(
       ['slot_name', 'consistent_point', 'snapshot_name', 'output_plugin'],
@@ -211,7 +212,7 @@ export async function handleReplicationQuery(query: string, db: PGlite): Promise
     const match = trimmed.match(/DROP_REPLICATION_SLOT\s+"?(\w[^"\s]*)"?/i)
     const slotName = match?.[1]
     if (slotName) {
-      await db.exec(`DELETE FROM public._zero_replication_slots WHERE slot_name = '${slotName}'`)
+      await db.query(`DELETE FROM public._zero_replication_slots WHERE slot_name = $1`, [slotName])
     }
     return buildCommandComplete('DROP_REPLICATION_SLOT')
   }
@@ -269,10 +270,11 @@ export async function handleStartReplication(
   )
 
   for (const { tablename } of tables.rows) {
+    const quoted = '"' + tablename.replace(/"/g, '""') + '"'
     await db.exec(`
-      DROP TRIGGER IF EXISTS _zero_notify_trigger ON public."${tablename}";
+      DROP TRIGGER IF EXISTS _zero_notify_trigger ON public.${quoted};
       CREATE TRIGGER _zero_notify_trigger
-        AFTER INSERT OR UPDATE OR DELETE ON public."${tablename}"
+        AFTER INSERT OR UPDATE OR DELETE ON public.${quoted}
         FOR EACH STATEMENT EXECUTE FUNCTION public._zero_notify_change();
     `)
   }
@@ -346,17 +348,22 @@ async function streamChanges(
     }
 
     // send the change
-    let changeMsg: Uint8Array
+    let changeMsg: Uint8Array | null = null
     switch (change.op) {
       case 'INSERT':
-        changeMsg = encodeInsert(tableOid, change.row_data!, columns)
+        if (!change.row_data) continue
+        changeMsg = encodeInsert(tableOid, change.row_data, columns)
         break
       case 'UPDATE':
-        changeMsg = encodeUpdate(tableOid, change.row_data!, change.old_data, columns)
+        if (!change.row_data) continue
+        changeMsg = encodeUpdate(tableOid, change.row_data, change.old_data, columns)
         break
       case 'DELETE':
-        changeMsg = encodeDelete(tableOid, change.old_data!, columns)
+        if (!change.old_data) continue
+        changeMsg = encodeDelete(tableOid, change.old_data, columns)
         break
+      default:
+        continue
     }
 
     writer.write(wrapCopyData(wrapXLogData(lsn, lsn, ts, changeMsg)))
