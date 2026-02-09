@@ -42,10 +42,16 @@ const QUERY_REWRITES: Array<{ match: RegExp; replace: string }> = [
     match: /\bpg_replication_slots\b/g,
     replace: 'public._zero_replication_slots',
   },
+  // SET TRANSACTION queries: rewrite to SELECT 1 (PGlite doesn't support them,
+  // and no-op interception doesn't work for extended protocol Bind/Execute)
+  {
+    match: /^\s*SET\s+TRANSACTION\b.*$/gis,
+    replace: 'SELECT 1',
+  },
 ]
 
 // queries to intercept and return no-op success
-const NOOP_QUERY_PATTERNS = [/^\s*SET\s+TRANSACTION\s+SNAPSHOT\s+/i]
+const NOOP_QUERY_PATTERNS: RegExp[] = []
 
 /**
  * extract query text from a Parse message (0x50).
