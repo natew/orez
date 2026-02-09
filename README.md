@@ -27,7 +27,7 @@ bunx orez
 ```
 --pg-port          postgresql proxy port (default: 6434)
 --zero-port        zero-cache port (default: 5849)
---data-dir         data directory (default: .zero-lite)
+--data-dir         data directory (default: .orez)
 --migrations       migrations directory (skipped if not set)
 --seed             seed file path
 --pg-user          postgresql user (default: user)

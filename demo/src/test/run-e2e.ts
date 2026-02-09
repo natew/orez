@@ -9,7 +9,7 @@ const WEB_PORT = 3457
 async function main() {
   console.info('starting orez...')
   const lite = await startZeroLite({
-    dataDir: join(import.meta.dir, '../../../.zero-lite-test'),
+    dataDir: join(import.meta.dir, '../../../.orez-test'),
     pgPort: PG_PORT,
     zeroPort: 4850,
     migrationsDir: join(import.meta.dir, '../../src/database/migrations'),

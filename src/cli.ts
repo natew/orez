@@ -95,7 +95,7 @@ const main = defineCommand({
     'data-dir': {
       type: 'string',
       description: 'data directory',
-      default: '.zero-lite',
+      default: '.orez',
     },
     migrations: {
       type: 'string',

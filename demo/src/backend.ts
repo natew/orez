@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { startZeroLite } from '../../src/index'
 
 const lite = await startZeroLite({
-  dataDir: join(import.meta.dir, '../.zero-lite'),
+  dataDir: join(import.meta.dir, '../.orez'),
   pgPort: 6435,
   zeroPort: 4849,
   migrationsDir: join(import.meta.dir, 'database/migrations'),

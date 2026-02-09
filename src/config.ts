@@ -17,7 +17,7 @@ export interface ZeroLiteConfig {
 
 export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConfig {
   return {
-    dataDir: overrides.dataDir || '.zero-lite',
+    dataDir: overrides.dataDir || '.orez',
     pgPort: overrides.pgPort || 6434,
     zeroPort: overrides.zeroPort || 5849,
     pgUser: overrides.pgUser || 'user',
