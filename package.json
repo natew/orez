@@ -15,6 +15,10 @@
       "types": "./dist/s3-local.d.ts",
       "import": "./dist/s3-local.js"
     },
+    "./bunny": {
+      "types": "./dist/bunny-local.d.ts",
+      "import": "./dist/bunny-local.js"
+    },
     "./vite": {
       "types": "./dist/vite-plugin.d.ts",
       "import": "./dist/vite-plugin.js"
@@ -43,6 +47,7 @@
   "dependencies": {
     "@electric-sql/pglite": "^0.2.17",
     "@rocicorp/zero": ">=0.1.0",
+    "bedrock-sqlite": "0.0.1",
     "citty": "^0.2.0",
     "pg-gateway": "^0.3.0-beta.4"
   },

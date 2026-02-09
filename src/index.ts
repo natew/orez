@@ -7,8 +7,8 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, readFileSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
-import { resolve, join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 import { getConfig, getConnectionString } from './config.js'
 import { log } from './log.js'
@@ -19,10 +19,9 @@ import { installChangeTracking } from './replication/change-tracker.js'
 
 import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
-import type { Server } from 'node:net'
 
-export type { ZeroLiteConfig, LogLevel } from './config.js'
 export { getConfig, getConnectionString } from './config.js'
+export type { LogLevel, ZeroLiteConfig } from './config.js'
 
 export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const config = getConfig(overrides)
@@ -152,6 +151,28 @@ async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   log.orez('seeded demo data')
 }
 
+function patchSqliteForWasm(): void {
+  // replace @rocicorp/zero-sqlite3 with bedrock-sqlite (wasm) shim
+  // so zero-cache uses wasm instead of native bindings
+  try {
+    const sqlitePkg = import.meta.resolve('@rocicorp/zero-sqlite3').replace('file://', '')
+    const indexPath = resolve(sqlitePkg, '..', 'index.js')
+    if (!existsSync(indexPath)) return
+
+    const current = readFileSync(indexPath, 'utf-8')
+    if (current.includes('bedrock-sqlite')) return // already patched
+
+    const shimPath = resolve(import.meta.dirname, 'sqlite-shim.cjs')
+    if (!existsSync(shimPath)) return
+
+    const shim = `'use strict';\nmodule.exports = require('${shimPath}');\n`
+    writeFileSync(indexPath, shim)
+    log.orez('patched @rocicorp/zero-sqlite3 -> bedrock-sqlite (wasm)')
+  } catch (e) {
+    log.orez(`sqlite wasm patch skipped: ${e}`)
+  }
+}
+
 async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
   // resolve @rocicorp/zero entry, cli.js is right next to it
   let zeroCacheBin = ''
@@ -166,6 +187,9 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
   if (!zeroCacheBin) {
     throw new Error('zero-cache binary not found. install @rocicorp/zero')
   }
+
+  // patch sqlite to use wasm before spawning zero-cache
+  patchSqliteForWasm()
 
   const upstreamUrl = getConnectionString(config, 'postgres')
   const cvrUrl = getConnectionString(config, 'zero_cvr')

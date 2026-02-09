@@ -27,4 +27,5 @@ export const log = {
   proxy: makeLogger('pg-proxy', COLORS.yellow),
   zero: makeLogger('zero-cache', COLORS.magenta),
   s3: makeLogger('orez/s3', COLORS.blue),
+  bunny: makeLogger('orez/bunny', COLORS.cyan),
 }

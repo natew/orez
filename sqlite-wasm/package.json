@@ -1,0 +1,40 @@
+{
+  "name": "bedrock-sqlite",
+  "version": "0.0.1",
+  "description": "WASM build of SQLite (bedrock branch) with better-sqlite3 compatible API. Supports BEGIN CONCURRENT and WAL2.",
+  "license": "MIT",
+  "main": "dist/sqlite3.js",
+  "types": "bedrock-sqlite.d.ts",
+  "files": [
+    "dist/sqlite3.js",
+    "dist/sqlite3.wasm",
+    "dist/package.json",
+    "bedrock-sqlite.d.ts"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/natew/orez",
+    "directory": "sqlite-wasm"
+  },
+  "keywords": [
+    "sqlite",
+    "sqlite3",
+    "wasm",
+    "webassembly",
+    "better-sqlite3",
+    "database",
+    "wal2",
+    "begin-concurrent",
+    "bedrock"
+  ],
+  "scripts": {
+    "build:wasm": "docker run --rm -v $(pwd)/..:/workspace -w /workspace/sqlite-wasm -u $(id -u):$(id -g) emscripten/emsdk:5.0.0 make all",
+    "clean": "make clean",
+    "test": "vitest run",
+    "prepublishOnly": "test -f dist/sqlite3.wasm || (echo 'Run build:wasm first' && exit 1)"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0",
+    "typescript": "^5.7.0"
+  }
+}
