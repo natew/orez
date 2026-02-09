@@ -90,6 +90,16 @@ const main = defineCommand({
       description: 'log level: error, warn, info, debug',
       default: 'info',
     },
+    s3: {
+      type: 'boolean',
+      description: 'also start a local s3-compatible server',
+      default: false,
+    },
+    's3-port': {
+      type: 'string',
+      description: 's3 server port',
+      default: '9200',
+    },
   },
   subCommands: {
     s3: s3Command,
@@ -107,6 +117,14 @@ const main = defineCommand({
       logLevel: args['log-level'] as 'error' | 'warn' | 'info' | 'debug',
     })
 
+    let s3Server: import('node:http').Server | null = null
+    if (args.s3) {
+      s3Server = await startS3Local({
+        port: Number(args['s3-port']),
+        dataDir: args['data-dir'],
+      })
+    }
+
     log.orez('ready')
     log.orez(
       `pg: postgresql://${config.pgUser}:${config.pgPassword}@127.0.0.1:${config.pgPort}/postgres`
@@ -116,10 +134,12 @@ const main = defineCommand({
     }
 
     process.on('SIGINT', async () => {
+      s3Server?.close()
       await stop()
       process.exit(0)
     })
     process.on('SIGTERM', async () => {
+      s3Server?.close()
       await stop()
       process.exit(0)
     })

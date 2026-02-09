@@ -1,20 +1,14 @@
 # orez
 
-[Zero](https://zero.rocicorp.dev) development backend powered by [PGlite](https://pglite.dev). Bundles PostgreSQL and zero-cache into a single process with no system dependencies.
+[Zero](https://zero.rocicorp.dev) development backend powered by [PGlite](https://pglite.dev). Bundles PostgreSQL and zero-cache into a single process — no Docker, no Postgres install.
 
-`bun install && bun dev` — that's it.
+```
+npx orez
+```
 
-## How it works
+Starts PGlite, the TCP proxy, and zero-cache. Ports auto-increment if already in use.
 
-orez starts three things in one process:
-
-1. A PGlite instance (full PostgreSQL 16 running in-process via WASM)
-2. A TCP proxy that speaks the PostgreSQL wire protocol, including logical replication
-3. A zero-cache child process that connects to the proxy thinking it's a real Postgres server
-
-The trick is in the TCP proxy. zero-cache needs logical replication to stay in sync with the upstream database. PGlite doesn't support logical replication natively, so orez fakes it. Every mutation is captured by triggers into a changes table, then encoded into the pgoutput binary protocol and streamed to zero-cache through the replication connection. zero-cache can't tell the difference.
-
-The proxy also handles multi-database routing. zero-cache expects three separate databases (upstream, CVR, change), but PGlite is a single database. orez maps database names to schemas, so `zero_cvr` becomes the `zero_cvr` schema and `zero_cdb` becomes `zero_cdb`.
+Exports a CLI, programmatic API, and Vite plugin.
 
 ## Install
 
@@ -30,8 +24,6 @@ npm install orez @rocicorp/zero
 npx orez
 ```
 
-Starts PGlite, the TCP proxy, and zero-cache. Ports auto-increment if already in use.
-
 ```
 --pg-port          postgresql proxy port (default: 6434)
 --zero-port        zero-cache port (default: 5849)
@@ -42,9 +34,11 @@ Starts PGlite, the TCP proxy, and zero-cache. Ports auto-increment if already in
 --pg-password      postgresql password (default: password)
 --skip-zero-cache  run pglite + proxy only, skip zero-cache
 --log-level        error, warn, info, debug (default: info)
+--s3               also start a local s3-compatible server
+--s3-port          s3 server port (default: 9200)
 ```
 
-S3 subcommand:
+S3 can also run standalone:
 
 ```
 npx orez s3
@@ -83,12 +77,25 @@ export default {
       pgPort: 6434,
       zeroPort: 5849,
       migrationsDir: 'src/database/migrations',
+      s3: true,
     }),
   ],
 }
 ```
 
-Starts orez when vite dev server starts, stops on close.
+Starts orez when vite dev server starts, stops on close. Pass `s3: true` to also start a local s3 server.
+
+## How it works
+
+orez starts three things in one process:
+
+1. A PGlite instance (full PostgreSQL 16 running in-process via WASM)
+2. A TCP proxy that speaks the PostgreSQL wire protocol, including logical replication
+3. A zero-cache child process that connects to the proxy thinking it's a real Postgres server
+
+The trick is in the TCP proxy. zero-cache needs logical replication to stay in sync with the upstream database. PGlite doesn't support logical replication natively, so orez fakes it. Every mutation is captured by triggers into a changes table, then encoded into the pgoutput binary protocol and streamed to zero-cache through the replication connection. zero-cache can't tell the difference.
+
+The proxy also handles multi-database routing. zero-cache expects three separate databases (upstream, CVR, change), but PGlite is a single database. orez maps database names to schemas, so `zero_cvr` becomes the `zero_cvr` schema and `zero_cdb` becomes `zero_cdb`.
 
 ## Environment variables
 
@@ -96,16 +103,16 @@ Your entire environment is forwarded to the zero-cache child process. This means
 
 orez provides sensible defaults for a few variables:
 
-| Variable | Default | Overridable |
-|----------|---------|-------------|
-| `NODE_ENV` | `development` | yes |
-| `ZERO_LOG_LEVEL` | from `--log-level` | yes |
-| `ZERO_NUM_SYNC_WORKERS` | `1` | yes |
-| `ZERO_UPSTREAM_DB` | *(managed by orez)* | no |
-| `ZERO_CVR_DB` | *(managed by orez)* | no |
-| `ZERO_CHANGE_DB` | *(managed by orez)* | no |
-| `ZERO_REPLICA_FILE` | *(managed by orez)* | no |
-| `ZERO_PORT` | *(managed by orez)* | no |
+| Variable                | Default             | Overridable |
+| ----------------------- | ------------------- | ----------- |
+| `NODE_ENV`              | `development`       | yes         |
+| `ZERO_LOG_LEVEL`        | from `--log-level`  | yes         |
+| `ZERO_NUM_SYNC_WORKERS` | `1`                 | yes         |
+| `ZERO_UPSTREAM_DB`      | _(managed by orez)_ | no          |
+| `ZERO_CVR_DB`           | _(managed by orez)_ | no          |
+| `ZERO_CHANGE_DB`        | _(managed by orez)_ | no          |
+| `ZERO_REPLICA_FILE`     | _(managed by orez)_ | no          |
+| `ZERO_PORT`             | _(managed by orez)_ | no          |
 
 The `--log-level` flag controls both zero-cache (`ZERO_LOG_LEVEL`) and PGlite's debug output. Setting it to `debug` enables verbose logging from both.
 
@@ -133,6 +140,23 @@ The proxy intercepts several things to convince zero-cache it's talking to a rea
 - `READ ONLY` is stripped from transaction starts to avoid PGlite serialization issues
 
 The pgoutput encoder produces spec-compliant binary messages: Begin, Relation, Insert, Update, Delete, Commit, and Keepalive. All column values are encoded as text (typeOid 25), which zero-cache handles fine since it re-maps types downstream anyway.
+
+## Extra: orez/s3
+
+Local s3-compatible server for dev. Avoids needing Docker or MinIO.
+
+```typescript
+import { startS3Local } from 'orez/s3'
+
+const server = await startS3Local({
+  port: 9200,
+  dataDir: '.orez',
+})
+```
+
+Or via CLI: `npx orez --s3` or standalone `npx orez s3`.
+
+Handles GET, PUT, DELETE, HEAD with CORS. Files stored on disk. No multipart, no ACLs, no versioning.
 
 ## Tests
 
@@ -171,21 +195,6 @@ src/
     pgoutput-encoder.ts binary pgoutput message encoder
     change-tracker.ts   trigger installation and change reader
 ```
-
-## Extra: orez/s3
-
-The other annoying dep we found ourselves needing often was s3, so we're exporting `orez/s3`. Its likewise a tiny, dev-only helper for avoiding heavy docker deps like minio.
-
-```typescript
-import { startS3Local } from 'orez/s3'
-
-const server = await startS3Local({
-  port: 9200,
-  dataDir: '.orez',
-})
-```
-
-Handles GET, PUT, DELETE, HEAD with CORS. Files stored on disk. No multipart, no ACLs, no versioning.
 
 ## License
 
