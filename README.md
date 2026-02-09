@@ -3,7 +3,7 @@
 [Zero](https://zero.rocicorp.dev) development backend powered by [PGlite](https://pglite.dev). Bundles PostgreSQL and zero-cache into a single process — no Docker, no Postgres install, no native compilation.
 
 ```
-npx orez
+bunx orez
 ```
 
 Starts PGlite, the TCP proxy, and zero-cache. Ports auto-increment if already in use.
@@ -13,7 +13,7 @@ Exports a CLI, programmatic API, and Vite plugin.
 ## Install
 
 ```
-npm install orez
+bun install orez
 ```
 
 `@rocicorp/zero` is included as a dependency and provides the zero-cache binary.
@@ -21,14 +21,14 @@ npm install orez
 ## CLI
 
 ```
-npx orez
+bunx orez
 ```
 
 ```
 --pg-port          postgresql proxy port (default: 6434)
 --zero-port        zero-cache port (default: 5849)
 --data-dir         data directory (default: .zero-lite)
---migrations       migrations directory (default: src/database/migrations)
+--migrations       migrations directory (skipped if not set)
 --seed             seed file path
 --pg-user          postgresql user (default: user)
 --pg-password      postgresql password (default: password)
@@ -43,8 +43,8 @@ npx orez
 Subcommands for standalone servers:
 
 ```
-npx orez s3 --port 9200 --data-dir .orez
-npx orez bunny --port 3533 --data-dir .orez
+bunx orez s3 --port 9200 --data-dir .orez
+bunx orez bunny --port 3533 --data-dir .orez
 ```
 
 ## Programmatic
@@ -105,7 +105,7 @@ The proxy also handles multi-database routing. zero-cache expects three separate
 
 zero-cache uses `@rocicorp/zero-sqlite3` which requires native SQLite bindings (compiled C addon). orez ships with [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite), a pure WASM build of SQLite compiled from the [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) with BEGIN CONCURRENT and WAL2 support.
 
-At startup, orez patches `@rocicorp/zero-sqlite3` to load bedrock-sqlite instead of native bindings. This means zero-cache runs entirely without native compilation — no `node-gyp`, no build tools, no platform-specific binaries. Just `npm install` and go.
+At startup, orez patches `@rocicorp/zero-sqlite3` to load bedrock-sqlite instead of native bindings. This means zero-cache runs entirely without native compilation — no `node-gyp`, no build tools, no platform-specific binaries. Just `bun install` and go.
 
 ## Environment variables
 
@@ -164,7 +164,7 @@ const server = await startS3Local({
 })
 ```
 
-Or via CLI: `npx orez --s3` or standalone `npx orez s3`.
+Or via CLI: `bunx orez --s3` or standalone `bunx orez s3`.
 
 Handles GET, PUT, DELETE, HEAD with CORS. Files stored on disk. No multipart, no ACLs, no versioning.
 
@@ -181,7 +181,7 @@ const server = await startBunnyLocal({
 })
 ```
 
-Or via CLI: `npx orez --bunny` or standalone `npx orez bunny`.
+Or via CLI: `bunx orez --bunny` or standalone `bunx orez bunny`.
 
 Handles GET, PUT, DELETE, HEAD with CORS, plus directory listing. Files stored on disk.
 
@@ -191,7 +191,7 @@ Handles GET, PUT, DELETE, HEAD with CORS, plus directory listing. Files stored o
 
 ```
 bun test                                    # orez tests
-cd sqlite-wasm && npx vitest run            # bedrock-sqlite tests
+cd sqlite-wasm && bunx vitest run            # bedrock-sqlite tests
 ```
 
 The orez test suite includes a zero-cache compatibility layer that decodes pgoutput messages into the same typed format that zero-cache's PgoutputParser produces, validating end-to-end compatibility.
@@ -202,7 +202,7 @@ The bedrock-sqlite tests cover Database/Statement API, transactions, WAL/WAL2 mo
 
 This is a development tool. It is not suitable for production use.
 
-- PGlite runs single-threaded. All queries are serialized through a mutex. This is fine for development but would be a bottleneck under real load.
+- PGlite is single-connection. All queries are serialized through a mutex. Fine for development but would bottleneck under real load.
 - Column types are all encoded as text in the replication stream. Zero-cache handles this, but other pgoutput consumers might not.
 - Triggers add overhead to every write. Again, fine for development.
 - PGlite stores data on the local filesystem. No replication, no backups, no high availability.

@@ -71,7 +71,7 @@ run('bun run test')
 
 if (hasSqliteWasm) {
   console.info('\nchecking bedrock-sqlite...')
-  run('npx vitest run', { cwd: sqliteWasmDir })
+  run('bunx vitest run', { cwd: sqliteWasmDir })
 }
 
 // build orez
@@ -118,11 +118,11 @@ if (dryRun) {
 
 // publish
 console.info('\npublishing orez...')
-run('npm publish')
+run('bun publish')
 
 if (hasSqliteWasm) {
   console.info('\npublishing bedrock-sqlite...')
-  run('npm publish', { cwd: sqliteWasmDir })
+  run('bun publish', { cwd: sqliteWasmDir })
 }
 
 // git commit + tag + push

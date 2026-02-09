@@ -1,3 +1,5 @@
+import type { PGliteOptions } from '@electric-sql/pglite'
+
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
 
 export interface ZeroLiteConfig {
@@ -10,6 +12,7 @@ export interface ZeroLiteConfig {
   seedFile: string
   skipZeroCache: boolean
   logLevel: LogLevel
+  pgliteOptions: Partial<PGliteOptions>
 }
 
 export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConfig {
@@ -19,10 +22,11 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     zeroPort: overrides.zeroPort || 5849,
     pgUser: overrides.pgUser || 'user',
     pgPassword: overrides.pgPassword || 'password',
-    migrationsDir: overrides.migrationsDir || 'src/database/migrations',
+    migrationsDir: overrides.migrationsDir || '',
     seedFile: overrides.seedFile || 'src/database/seed.sql',
     skipZeroCache: overrides.skipZeroCache || false,
     logLevel: overrides.logLevel || 'info',
+    pgliteOptions: overrides.pgliteOptions || {},
   }
 }
 

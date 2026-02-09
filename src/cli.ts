@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process'
 import { defineCommand, runMain } from 'citty'
 
 import { startZeroLite } from './index.js'
@@ -98,7 +99,7 @@ const main = defineCommand({
     migrations: {
       type: 'string',
       description: 'migrations directory',
-      default: 'src/database/migrations',
+      default: '',
     },
     seed: {
       type: 'string',
@@ -145,6 +146,11 @@ const main = defineCommand({
       description: 'bunny storage server port',
       default: '3533',
     },
+    'on-healthy': {
+      type: 'string',
+      description: 'command to run once all services are healthy',
+      default: '',
+    },
   },
   subCommands: {
     s3: s3Command,
@@ -187,6 +193,24 @@ const main = defineCommand({
     )
     if (!config.skipZeroCache) {
       log.zero(`http://localhost:${config.zeroPort}`)
+    }
+
+    if (args['on-healthy']) {
+      log.orez(`running on-healthy: ${args['on-healthy']}`)
+      const child = spawn(args['on-healthy'], {
+        shell: true,
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          OREZ_PG_PORT: String(config.pgPort),
+          OREZ_ZERO_PORT: String(config.zeroPort),
+        },
+      })
+      child.on('exit', (code) => {
+        if (code !== 0 && code !== null) {
+          log.orez(`on-healthy command exited with code ${code}`)
+        }
+      })
     }
 
     process.on('SIGINT', async () => {
