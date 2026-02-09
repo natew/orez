@@ -1,6 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { PGlite } from '@electric-sql/pglite'
-import { installChangeTracking, getChangesSince, getCurrentWatermark } from './change-tracker'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+
+import {
+  installChangeTracking,
+  getChangesSince,
+  getCurrentWatermark,
+} from './change-tracker'
 
 describe('change-tracker', () => {
   let db: PGlite
@@ -145,7 +150,9 @@ describe('change-tracker', () => {
   })
 
   it('handles multi-row update', async () => {
-    await db.exec(`INSERT INTO public.items (name, value) VALUES ('a', 1), ('b', 2), ('c', 3)`)
+    await db.exec(
+      `INSERT INTO public.items (name, value) VALUES ('a', 1), ('b', 2), ('c', 3)`
+    )
     await db.exec(`UPDATE public.items SET value = value * 10`)
 
     const changes = await getChangesSince(db, 0)

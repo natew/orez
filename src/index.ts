@@ -6,25 +6,18 @@
  * `bun run` command.
  */
 
-import { resolve, join } from 'node:path'
-import {
-  existsSync,
-  readFileSync,
-  mkdirSync,
-  writeFileSync,
-  unlinkSync,
-} from 'node:fs'
 import { spawn, type ChildProcess } from 'node:child_process'
-
-import type { PGlite } from '@electric-sql/pglite'
-import type { Server } from 'node:net'
+import { existsSync, readFileSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
+import { resolve, join } from 'node:path'
 
 import { getConfig, getConnectionString } from './config'
-import { installChangeTracking } from './replication/change-tracker'
-import { createPGliteInstance, runMigrations } from './pglite-manager'
 import { startPgProxy } from './pg-proxy'
+import { createPGliteInstance, runMigrations } from './pglite-manager'
+import { installChangeTracking } from './replication/change-tracker'
 
 import type { ZeroLiteConfig } from './config'
+import type { PGlite } from '@electric-sql/pglite'
+import type { Server } from 'node:net'
 
 export type { ZeroLiteConfig } from './config'
 export { getConfig, getConnectionString } from './config'
@@ -113,10 +106,7 @@ function cleanupEnvLocal(): void {
   }
 }
 
-async function seedIfNeeded(
-  db: PGlite,
-  config: ZeroLiteConfig
-): Promise<void> {
+async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   // check if we already have data
   try {
     const result = await db.query<{ count: string }>(
@@ -148,15 +138,11 @@ async function seedIfNeeded(
   console.info('[orez] seeded demo data')
 }
 
-async function startZeroCache(
-  config: ZeroLiteConfig
-): Promise<ChildProcess> {
+async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
   // find zero-cache binary
   const zeroCachePaths = [
     resolve('node_modules/.bin/zero-cache'),
-    resolve(
-      'node_modules/@rocicorp/zero/out/zero-cache/src/bin/main.js'
-    ),
+    resolve('node_modules/@rocicorp/zero/out/zero-cache/src/bin/main.js'),
   ]
 
   let zeroCacheBin = ''
@@ -168,9 +154,7 @@ async function startZeroCache(
   }
 
   if (!zeroCacheBin) {
-    throw new Error(
-      'zero-cache binary not found. install @rocicorp/zero'
-    )
+    throw new Error('zero-cache binary not found. install @rocicorp/zero')
   }
 
   const upstreamUrl = getConnectionString(config, 'postgres')
@@ -240,7 +224,5 @@ async function waitForZeroCache(
     await new Promise((r) => setTimeout(r, 500))
   }
 
-  console.info(
-    '[orez] warning: zero-cache health check timed out, continuing anyway'
-  )
+  console.info('[orez] warning: zero-cache health check timed out, continuing anyway')
 }

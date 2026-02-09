@@ -4,7 +4,6 @@ Drop-in replacement for the Docker-based development backend that Rocicorp's Zer
 
 The goal is simple: `bun install && bun dev` with zero system dependencies.
 
-
 ## How it works
 
 orez starts three things in one process:
@@ -16,7 +15,6 @@ orez starts three things in one process:
 The trick is in the TCP proxy. zero-cache needs logical replication to stay in sync with the upstream database. PGlite doesn't support logical replication natively, so orez fakes it. Every mutation is captured by triggers into a changes table, then encoded into the pgoutput binary protocol and streamed to zero-cache through the replication connection. zero-cache can't tell the difference.
 
 The proxy also handles multi-database routing. zero-cache expects three separate databases (upstream, CVR, change), but PGlite is a single database. orez maps database names to schemas, so `zero_cvr` becomes the `zero_cvr` schema and `zero_cdb` becomes `zero_cdb`.
-
 
 ## Install
 
@@ -31,7 +29,6 @@ bun add orez
 ```
 
 You also need `@rocicorp/zero` installed in your project for the zero-cache binary.
-
 
 ## Usage
 
@@ -54,7 +51,6 @@ await stop()
 
 All options are optional and have sensible defaults. See `src/config.ts` for the full list.
 
-
 ## What gets faked
 
 The proxy intercepts several things to convince zero-cache it's talking to a real PostgreSQL server with logical replication enabled:
@@ -70,7 +66,6 @@ The proxy intercepts several things to convince zero-cache it's talking to a rea
 
 The pgoutput encoder produces spec-compliant binary messages: Begin, Relation, Insert, Update, Delete, Commit, and Keepalive. All column values are encoded as text (typeOid 25), which zero-cache handles fine since it re-maps types downstream anyway.
 
-
 ## Tests
 
 80 unit tests across 5 test files covering the full stack from binary encoding to TCP-level integration:
@@ -81,7 +76,6 @@ bun test
 
 The test suite includes a zero-cache compatibility layer that decodes pgoutput messages into the same typed format that zero-cache's PgoutputParser produces, validating end-to-end compatibility.
 
-
 ## Limitations
 
 This is a development tool. It is not suitable for production use.
@@ -90,7 +84,6 @@ This is a development tool. It is not suitable for production use.
 - Column types are all encoded as text in the replication stream. Zero-cache handles this, but other pgoutput consumers might not.
 - Triggers add overhead to every write. Again, fine for development.
 - PGlite stores data on the local filesystem. No replication, no backups, no high availability.
-
 
 ## Project structure
 
@@ -107,7 +100,6 @@ src/
     change-tracker.ts   trigger installation and change reader
 ```
 
-
 ## Extra
 
 The other annoying dep we found ourselves needing often was s3, so we're exporting `orez/s3`. Its likewise a tiny, dev-only helper for avoiding heavy docker deps like minio.
@@ -122,7 +114,6 @@ const server = await startS3Local({
 ```
 
 Handles GET, PUT, DELETE, HEAD with CORS. Files stored on disk. No multipart, no ACLs, no versioning.
-
 
 ## License
 

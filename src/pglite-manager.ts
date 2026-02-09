@@ -5,9 +5,7 @@ import { PGlite } from '@electric-sql/pglite'
 
 import type { ZeroLiteConfig } from './config'
 
-export async function createPGliteInstance(
-  config: ZeroLiteConfig
-): Promise<PGlite> {
+export async function createPGliteInstance(config: ZeroLiteConfig): Promise<PGlite> {
   const dataPath = resolve(config.dataDir, 'pgdata')
   mkdirSync(dataPath, { recursive: true })
 
@@ -22,8 +20,7 @@ export async function createPGliteInstance(
   await db.exec('CREATE SCHEMA IF NOT EXISTS zero_cdb')
 
   // create publication for zero-cache
-  const pubName =
-    process.env.ZERO_APP_PUBLICATIONS || 'zero_pub'
+  const pubName = process.env.ZERO_APP_PUBLICATIONS || 'zero_pub'
   const pubs = await db.query<{ count: string }>(
     `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
     [pubName]
@@ -36,10 +33,7 @@ export async function createPGliteInstance(
   return db
 }
 
-export async function runMigrations(
-  db: PGlite,
-  config: ZeroLiteConfig
-): Promise<void> {
+export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   const migrationsDir = resolve(config.migrationsDir)
   if (!existsSync(migrationsDir)) {
     console.info('[orez] no migrations directory found, skipping')
@@ -60,9 +54,7 @@ export async function runMigrations(
   let files: string[]
   if (existsSync(journalPath)) {
     const journal = JSON.parse(readFileSync(journalPath, 'utf-8'))
-    files = journal.entries.map(
-      (e: { tag: string }) => `${e.tag}.sql`
-    )
+    files = journal.entries.map((e: { tag: string }) => `${e.tag}.sql`)
   } else {
     files = readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.sql'))
@@ -94,10 +86,7 @@ export async function runMigrations(
       await db.exec(stmt)
     }
 
-    await db.query(
-      'INSERT INTO public.migrations (name) VALUES ($1)',
-      [name]
-    )
+    await db.query('INSERT INTO public.migrations (name) VALUES ($1)', [name])
     console.info(`[orez] applied migration: ${name}`)
   }
 

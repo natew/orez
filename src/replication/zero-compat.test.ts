@@ -10,13 +10,16 @@
  * uses proper type OIDs, but zero-cache handles re-mapping downstream.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createConnection, type Socket } from 'node:net'
+
 import { PGlite } from '@electric-sql/pglite'
-import type { Server, AddressInfo } from 'node:net'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+
+import { getConfig } from '../config'
 import { startPgProxy } from '../pg-proxy'
 import { installChangeTracking } from './change-tracker'
-import { getConfig } from '../config'
+
+import type { Server, AddressInfo } from 'node:net'
 
 // --- async queue (matches zero-cache's Queue pattern) ---
 
@@ -105,7 +108,14 @@ interface ZcKeepalive {
   tag: 'keepalive'
 }
 
-type ZcMessage = ZcBegin | ZcCommit | ZcRelation | ZcInsert | ZcUpdate | ZcDelete | ZcKeepalive
+type ZcMessage =
+  | ZcBegin
+  | ZcCommit
+  | ZcRelation
+  | ZcInsert
+  | ZcUpdate
+  | ZcDelete
+  | ZcKeepalive
 
 // --- pgoutput decoder (zero-cache compatible output) ---
 
@@ -183,7 +193,15 @@ class ZcDecoder {
       columns.push({ name: colName, flags, typeOid, typeMod })
     }
     const keyColumns = columns.filter((c) => c.flags & 1).map((c) => c.name)
-    const rel: ZcRelation = { tag: 'relation', relationOid: oid, schema, name, replicaIdentity, columns, keyColumns }
+    const rel: ZcRelation = {
+      tag: 'relation',
+      relationOid: oid,
+      schema,
+      name,
+      replicaIdentity,
+      columns,
+      keyColumns,
+    }
     this.relations.set(oid, rel)
     return rel
   }
@@ -278,7 +296,10 @@ function startup(params: Record<string, string>): Buffer {
   buf.writeInt32BE(8 + bodyLen, 0)
   buf.writeInt32BE(196608, 4)
   let pos = 8
-  for (const p of pairs) { p.copy(buf, pos); pos += p.length }
+  for (const p of pairs) {
+    p.copy(buf, pos)
+    pos += p.length
+  }
   return buf
 }
 
@@ -320,7 +341,9 @@ class ReplicationStream {
 
   constructor(private port: number) {}
 
-  get messages(): Queue<ZcMessage> { return this._msgs }
+  get messages(): Queue<ZcMessage> {
+    return this._msgs
+  }
 
   async connect(): Promise<void> {
     this.socket = createConnection({ port: this.port, host: '127.0.0.1' })
@@ -333,31 +356,43 @@ class ReplicationStream {
       this.drain()
     })
 
-    this.socket.write(startup({ user: 'user', database: 'postgres', replication: 'database' }))
+    this.socket.write(
+      startup({ user: 'user', database: 'postgres', replication: 'database' })
+    )
     const auth = await this.nextPg()
     if (auth.data.readInt32BE(5) === 3) {
       this.socket.write(password('password'))
       await this.nextPg()
     }
-    while ((await this.nextPg()).type !== 0x5a) { /* consume until ReadyForQuery */ }
+    while ((await this.nextPg()).type !== 0x5a) {
+      /* consume until ReadyForQuery */
+    }
   }
 
   async createSlot(name: string): Promise<void> {
-    this.socket.write(query(
-      `CREATE_REPLICATION_SLOT "${name}" TEMPORARY LOGICAL pgoutput NOEXPORT_SNAPSHOT`
-    ))
-    while ((await this.nextPg()).type !== 0x5a) { /* consume until ReadyForQuery */ }
+    this.socket.write(
+      query(
+        `CREATE_REPLICATION_SLOT "${name}" TEMPORARY LOGICAL pgoutput NOEXPORT_SNAPSHOT`
+      )
+    )
+    while ((await this.nextPg()).type !== 0x5a) {
+      /* consume until ReadyForQuery */
+    }
   }
 
   async startReplication(slot: string, pubs: string[]): Promise<void> {
     this.streaming = true
-    this.socket.write(query(
-      `START_REPLICATION SLOT "${slot}" LOGICAL 0/0 (proto_version '1', publication_names '${pubs.join(',')}')`
-    ))
+    this.socket.write(
+      query(
+        `START_REPLICATION SLOT "${slot}" LOGICAL 0/0 (proto_version '1', publication_names '${pubs.join(',')}')`
+      )
+    )
     await new Promise((r) => setTimeout(r, 150))
   }
 
-  close(): void { this.socket?.destroy() }
+  close(): void {
+    this.socket?.destroy()
+  }
 
   private drain() {
     while (true) {
@@ -387,7 +422,10 @@ class ReplicationStream {
         if (i >= 0) this.pgWaiters.splice(i, 1)
         reject(new Error('pg message timeout'))
       }, ms)
-      this.pgWaiters.push((msg) => { clearTimeout(t); resolve(msg) })
+      this.pgWaiters.push((msg) => {
+        clearTimeout(t)
+        resolve(msg)
+      })
     })
   }
 }
@@ -530,7 +568,9 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
 
   it('null values encoded correctly', async () => {
     const s = await stream()
-    await db.exec(`INSERT INTO public.foo (id, int_val, text_val) VALUES ('nul', NULL, NULL)`)
+    await db.exec(
+      `INSERT INTO public.foo (id, int_val, text_val) VALUES ('nul', NULL, NULL)`
+    )
 
     const q = s.messages
     let ins: ZcInsert | null = null
@@ -691,14 +731,20 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     let commit1: ZcCommit | null = null
     while (true) {
       const m = await nextData(q)
-      if (m.tag === 'commit') { commit1 = m as ZcCommit; break }
+      if (m.tag === 'commit') {
+        commit1 = m as ZcCommit
+        break
+      }
     }
 
     await db.exec(`INSERT INTO public.foo (id) VALUES ('lsn2')`)
     let commit2: ZcCommit | null = null
     while (true) {
       const m = await nextData(q)
-      if (m.tag === 'commit') { commit2 = m as ZcCommit; break }
+      if (m.tag === 'commit') {
+        commit2 = m as ZcCommit
+        break
+      }
     }
 
     function parseLsn(s: string): bigint {
@@ -743,7 +789,9 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     const s = await stream()
     const q = s.messages
 
-    await db.exec(`INSERT INTO public.foo (id, int_val) VALUES ('m1', 1), ('m2', 2), ('m3', 3)`)
+    await db.exec(
+      `INSERT INTO public.foo (id, int_val) VALUES ('m1', 1), ('m2', 2), ('m3', 3)`
+    )
 
     const inserts: ZcInsert[] = []
     const deadline = Date.now() + 5000
@@ -763,7 +811,9 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     const s = await stream()
     const q = s.messages
 
-    await db.exec(`INSERT INTO public.foo (id, int_val) VALUES ('u1', 1), ('u2', 2), ('u3', 3)`)
+    await db.exec(
+      `INSERT INTO public.foo (id, int_val) VALUES ('u1', 1), ('u2', 2), ('u3', 3)`
+    )
     // consume insert tx
     while ((await nextData(q)).tag !== 'commit') {}
 
@@ -789,12 +839,15 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
 
     const s = await stream()
     const q = s.messages
-    await db.exec(`INSERT INTO public.jtest (id, meta) VALUES ('j1', '{"foo":"bar","n":42}')`)
+    await db.exec(
+      `INSERT INTO public.jtest (id, meta) VALUES ('j1', '{"foo":"bar","n":42}')`
+    )
 
     let ins: ZcInsert | null = null
     while (!ins) {
       const m = await nextData(q)
-      if (m.tag === 'insert' && (m as ZcInsert).relation.name === 'jtest') ins = m as ZcInsert
+      if (m.tag === 'insert' && (m as ZcInsert).relation.name === 'jtest')
+        ins = m as ZcInsert
     }
 
     const meta = ins.new.meta!

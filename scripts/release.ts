@@ -25,7 +25,9 @@ function run(cmd: string, opts?: { silent?: boolean }) {
 }
 
 function runText(cmd: string): string {
-  return execSync(cmd, { cwd: resolve('.') }).toString().trim()
+  return execSync(cmd, { cwd: resolve('.') })
+    .toString()
+    .trim()
 }
 
 // read current version

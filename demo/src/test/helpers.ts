@@ -14,7 +14,9 @@ export async function addTodo(page: Page, text: string) {
   // wait for input to clear (confirms round-trip)
   await page.waitForFunction(
     () => {
-      const input = document.querySelector('[data-testid="todo-input"]') as HTMLInputElement
+      const input = document.querySelector(
+        '[data-testid="todo-input"]'
+      ) as HTMLInputElement
       return input?.value === ''
     },
     { timeout: 5_000 }

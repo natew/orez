@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+
 import { navigateTo, waitForApp } from './helpers'
 
 test.describe('connectivity', () => {

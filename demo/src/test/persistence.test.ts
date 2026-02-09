@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+
 import { navigateTo, waitForApp, addTodo, getTodoCount, clearTodos } from './helpers'
 
 const API = process.env.BASE_URL || 'http://localhost:3457'
@@ -28,7 +29,10 @@ test.describe('persistence', () => {
     await waitForApp(page)
     await addTodo(page, 'check persist')
 
-    const checkbox = page.locator('[data-testid^="todo-item-"]').first().locator('input[type="checkbox"]')
+    const checkbox = page
+      .locator('[data-testid^="todo-item-"]')
+      .first()
+      .locator('input[type="checkbox"]')
     await checkbox.click()
     await page.waitForTimeout(300)
     await expect(checkbox).toBeChecked()
@@ -36,7 +40,10 @@ test.describe('persistence', () => {
     await page.reload({ waitUntil: 'networkidle' })
     await waitForApp(page)
 
-    const checkboxAfter = page.locator('[data-testid^="todo-item-"]').first().locator('input[type="checkbox"]')
+    const checkboxAfter = page
+      .locator('[data-testid^="todo-item-"]')
+      .first()
+      .locator('input[type="checkbox"]')
     await expect(checkboxAfter).toBeChecked()
   })
 

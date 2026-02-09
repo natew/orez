@@ -1,6 +1,7 @@
-import { startZeroLite } from '../../../src/index'
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
+
+import { startZeroLite } from '../../../src/index'
 
 const PG_PORT = 6436
 const WEB_PORT = 3457
@@ -18,10 +19,14 @@ async function main() {
   })
 
   console.info('starting web server...')
-  const server = spawn('bun', ['run', '--hot', join(import.meta.dir, '../../src/server.ts')], {
-    env: { ...process.env, PORT: String(WEB_PORT), PG_PORT: String(PG_PORT) },
-    stdio: 'inherit',
-  })
+  const server = spawn(
+    'bun',
+    ['run', '--hot', join(import.meta.dir, '../../src/server.ts')],
+    {
+      env: { ...process.env, PORT: String(WEB_PORT), PG_PORT: String(PG_PORT) },
+      stdio: 'inherit',
+    }
+  )
 
   // wait for web server
   for (let i = 0; i < 30; i++) {

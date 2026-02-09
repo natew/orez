@@ -1,11 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { PGlite } from '@electric-sql/pglite'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+
+import { installChangeTracking } from './change-tracker'
 import {
   handleReplicationQuery,
   handleStartReplication,
   type ReplicationWriter,
 } from './handler'
-import { installChangeTracking } from './change-tracker'
 
 // parse wire protocol RowDescription+DataRow response into columns/values
 function parseResponse(buf: Uint8Array): { columns: string[]; values: string[] } | null {
@@ -78,7 +79,10 @@ describe('handleReplicationQuery', () => {
   })
 
   it('DROP_REPLICATION_SLOT removes slot', async () => {
-    await handleReplicationQuery('CREATE_REPLICATION_SLOT "drop_me" TEMPORARY LOGICAL pgoutput', db)
+    await handleReplicationQuery(
+      'CREATE_REPLICATION_SLOT "drop_me" TEMPORARY LOGICAL pgoutput',
+      db
+    )
     await handleReplicationQuery('DROP_REPLICATION_SLOT "drop_me"', db)
 
     const slots = await db.query<{ count: string }>(
@@ -176,9 +180,7 @@ describe('handleStartReplication', () => {
 
     await new Promise((r) => setTimeout(r, 700))
 
-    const keepalives = written.filter(
-      (msg) => msg[0] === 0x64 && msg[5] === 0x6b
-    )
+    const keepalives = written.filter((msg) => msg[0] === 0x64 && msg[5] === 0x6b)
     expect(keepalives.length).toBeGreaterThan(0)
   })
 

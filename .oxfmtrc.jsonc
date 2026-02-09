@@ -15,13 +15,20 @@
       ["external"],
       ["internal"],
       ["parent", "sibling", "index"],
-      ["builtin-type", "external-type", "internal-type", "parent-type", "sibling-type", "index-type"],
+      [
+        "builtin-type",
+        "external-type",
+        "internal-type",
+        "parent-type",
+        "sibling-type",
+        "index-type",
+      ],
       ["style"],
-      ["unknown"]
+      ["unknown"],
     ],
     "newlinesBetween": true,
     "order": "asc",
-    "ignoreCase": true
+    "ignoreCase": true,
   },
   "ignorePatterns": [
     "**/dist/**",
@@ -29,6 +36,6 @@
     "**/*.d.ts",
     "**/package.json",
     "**/tsconfig.json",
-    "**/*.lock"
-  ]
+    "**/*.lock",
+  ],
 }

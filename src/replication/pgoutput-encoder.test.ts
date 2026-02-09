@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+
 import {
   encodeBegin,
   encodeCommit,
@@ -226,7 +227,12 @@ describe('pgoutput-encoder', () => {
     ]
 
     it('includes old tuple when provided', () => {
-      const buf = encodeUpdate(16384, { id: '1', val: 'new' }, { id: '1', val: 'old' }, cols)
+      const buf = encodeUpdate(
+        16384,
+        { id: '1', val: 'new' },
+        { id: '1', val: 'old' },
+        cols
+      )
 
       expect(buf[0]).toBe(0x55) // 'U'
       expect(r32(buf, 1)).toBe(16384)
@@ -241,7 +247,12 @@ describe('pgoutput-encoder', () => {
     })
 
     it('old tuple precedes new tuple', () => {
-      const buf = encodeUpdate(16384, { id: '1', val: 'new' }, { id: '1', val: 'old' }, cols)
+      const buf = encodeUpdate(
+        16384,
+        { id: '1', val: 'new' },
+        { id: '1', val: 'old' },
+        cols
+      )
 
       // 'O' at offset 5, then old tuple, then 'N', then new tuple
       expect(buf[5]).toBe(0x4f)

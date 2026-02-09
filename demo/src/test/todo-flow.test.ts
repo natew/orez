@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+
 import { navigateTo, waitForApp, addTodo, getTodoCount, clearTodos } from './helpers'
 
 const API = process.env.BASE_URL || 'http://localhost:3457'
@@ -51,7 +52,10 @@ test.describe('todo flow', () => {
     await navigateTo(page, '/')
     await waitForApp(page)
     await addTodo(page, 'toggle twice')
-    const checkbox = page.locator('[data-testid^="todo-item-"]').first().locator('input[type="checkbox"]')
+    const checkbox = page
+      .locator('[data-testid^="todo-item-"]')
+      .first()
+      .locator('input[type="checkbox"]')
     await checkbox.click()
     await expect(checkbox).toBeChecked({ timeout: 3_000 })
     await checkbox.click()

@@ -65,7 +65,12 @@ export function encodeBegin(lsn: bigint, timestamp: bigint, xid: number): Uint8A
 }
 
 // encode a COMMIT message
-export function encodeCommit(flags: number, lsn: bigint, endLsn: bigint, timestamp: bigint): Uint8Array {
+export function encodeCommit(
+  flags: number,
+  lsn: bigint,
+  endLsn: bigint,
+  timestamp: bigint
+): Uint8Array {
   const buf = new Uint8Array(1 + 1 + 8 + 8 + 8)
   buf[0] = 0x43 // 'C'
   buf[1] = flags
@@ -95,7 +100,8 @@ export function encodeRelation(
     columnsSize += 1 + nb.length + 1 + 4 + 4 // flags + name + null + typeOid + typeMod
   }
 
-  const total = 1 + 4 + schemaBytes.length + 1 + nameBytes.length + 1 + 1 + 2 + columnsSize
+  const total =
+    1 + 4 + schemaBytes.length + 1 + nameBytes.length + 1 + 1 + 2 + columnsSize
   const buf = new Uint8Array(total)
   let pos = 0
 
@@ -126,7 +132,10 @@ export function encodeRelation(
   return buf
 }
 
-function encodeTupleData(row: Record<string, unknown>, columns: ColumnInfo[]): Uint8Array {
+function encodeTupleData(
+  row: Record<string, unknown>,
+  columns: ColumnInfo[]
+): Uint8Array {
   const parts: Uint8Array[] = []
   let totalSize = 2 // ncolumns (int16)
 
@@ -165,7 +174,11 @@ function encodeTupleData(row: Record<string, unknown>, columns: ColumnInfo[]): U
 }
 
 // encode an INSERT message
-export function encodeInsert(tableOid: number, row: Record<string, unknown>, columns: ColumnInfo[]): Uint8Array {
+export function encodeInsert(
+  tableOid: number,
+  row: Record<string, unknown>,
+  columns: ColumnInfo[]
+): Uint8Array {
   const tuple = encodeTupleData(row, columns)
   const buf = new Uint8Array(1 + 4 + 1 + tuple.length)
   buf[0] = 0x49 // 'I'
@@ -220,7 +233,12 @@ export function encodeDelete(
 }
 
 // wrap a pgoutput message in XLogData format
-export function wrapXLogData(walStart: bigint, walEnd: bigint, timestamp: bigint, data: Uint8Array): Uint8Array {
+export function wrapXLogData(
+  walStart: bigint,
+  walEnd: bigint,
+  timestamp: bigint,
+  data: Uint8Array
+): Uint8Array {
   const buf = new Uint8Array(1 + 8 + 8 + 8 + data.length)
   buf[0] = 0x77 // 'w' XLogData
   writeInt64(buf, 1, walStart)
@@ -240,7 +258,11 @@ export function wrapCopyData(data: Uint8Array): Uint8Array {
 }
 
 // encode a primary keepalive message
-export function encodeKeepalive(walEnd: bigint, timestamp: bigint, replyRequested: boolean): Uint8Array {
+export function encodeKeepalive(
+  walEnd: bigint,
+  timestamp: bigint,
+  replyRequested: boolean
+): Uint8Array {
   const inner = new Uint8Array(1 + 8 + 8 + 1)
   inner[0] = 0x6b // 'k' keepalive
   writeInt64(inner, 1, walEnd)

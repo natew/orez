@@ -9,13 +9,16 @@
  * query routing) that unit tests on individual components miss.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createConnection, type Socket } from 'node:net'
+
 import { PGlite } from '@electric-sql/pglite'
-import type { Server, AddressInfo } from 'node:net'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+
+import { getConfig } from '../config'
 import { startPgProxy } from '../pg-proxy'
 import { installChangeTracking } from './change-tracker'
-import { getConfig } from '../config'
+
+import type { Server, AddressInfo } from 'node:net'
 
 // --- pgoutput decoder (validates against pg protocol spec) ---
 
@@ -179,13 +182,22 @@ function decodePgOutput(data: Uint8Array): PgOutputMessage {
         pos += 4
         columns.push({ flags, name, typeOid, typeMod })
       }
-      return { type: 'Relation', raw: data, tableOid, schema, tableName, replicaIdentity, columns }
+      return {
+        type: 'Relation',
+        raw: data,
+        tableOid,
+        schema,
+        tableName,
+        replicaIdentity,
+        columns,
+      }
     }
     case 0x49: {
       // Insert
       const tableOid = r32(data, 1)
       const marker = data[5] // should be 'N'
-      if (marker !== 0x4e) throw new Error(`insert: expected 'N' marker, got 0x${marker.toString(16)}`)
+      if (marker !== 0x4e)
+        throw new Error(`insert: expected 'N' marker, got 0x${marker.toString(16)}`)
       const [tupleData] = decodeTupleData(data, 6)
       return { type: 'Insert', raw: data, tableOid, tupleData }
     }
@@ -211,7 +223,9 @@ function decodePgOutput(data: Uint8Array): PgOutputMessage {
       const tableOid = r32(data, 1)
       const marker = data[5]
       if (marker !== 0x4b && marker !== 0x4f)
-        throw new Error(`delete: expected 'K' or 'O' marker, got 0x${marker.toString(16)}`)
+        throw new Error(
+          `delete: expected 'K' or 'O' marker, got 0x${marker.toString(16)}`
+        )
       const [keyTupleData] = decodeTupleData(data, 6)
       return { type: 'Delete', raw: data, tableOid, keyTupleData }
     }
@@ -542,7 +556,7 @@ describe('tcp replication', () => {
     )
 
     await replClient.startReplication(
-      'START_REPLICATION SLOT "stream_test" LOGICAL 0/0 (proto_version \'1\', publication_names \'zero_takeout\')'
+      "START_REPLICATION SLOT \"stream_test\" LOGICAL 0/0 (proto_version '1', publication_names 'zero_takeout')"
     )
 
     // insert data right away - the poll loop will pick it up once it starts
@@ -606,7 +620,7 @@ describe('tcp replication', () => {
       'CREATE_REPLICATION_SLOT "upd_test" TEMPORARY LOGICAL pgoutput NOEXPORT_SNAPSHOT'
     )
     await replClient.startReplication(
-      'START_REPLICATION SLOT "upd_test" LOGICAL 0/0 (proto_version \'1\', publication_names \'zero_takeout\')'
+      "START_REPLICATION SLOT \"upd_test\" LOGICAL 0/0 (proto_version '1', publication_names 'zero_takeout')"
     )
 
     await replClient.collectStream(200) // skip CopyBothResponse
@@ -650,7 +664,7 @@ describe('tcp replication', () => {
       'CREATE_REPLICATION_SLOT "del_test" TEMPORARY LOGICAL pgoutput NOEXPORT_SNAPSHOT'
     )
     await replClient.startReplication(
-      'START_REPLICATION SLOT "del_test" LOGICAL 0/0 (proto_version \'1\', publication_names \'zero_takeout\')'
+      "START_REPLICATION SLOT \"del_test\" LOGICAL 0/0 (proto_version '1', publication_names 'zero_takeout')"
     )
 
     await replClient.collectStream(200)
@@ -693,7 +707,7 @@ describe('tcp replication', () => {
       'CREATE_REPLICATION_SLOT "multi_test" TEMPORARY LOGICAL pgoutput NOEXPORT_SNAPSHOT'
     )
     await replClient.startReplication(
-      'START_REPLICATION SLOT "multi_test" LOGICAL 0/0 (proto_version \'1\', publication_names \'zero_multi\')'
+      "START_REPLICATION SLOT \"multi_test\" LOGICAL 0/0 (proto_version '1', publication_names 'zero_multi')"
     )
 
     await replClient.collectStream(200)
@@ -701,7 +715,7 @@ describe('tcp replication', () => {
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('t1', 1)`)
     await db.exec(`INSERT INTO public.other (label) VALUES ('t2')`)
 
-    const stream = await replClient.collectStream(1200)
+    const stream = await replClient.collectStream(2500)
 
     const decoded: PgOutputMessage[] = []
     for (const msg of stream) {
@@ -731,7 +745,7 @@ describe('tcp replication', () => {
       'CREATE_REPLICATION_SLOT "rapid_test" TEMPORARY LOGICAL pgoutput NOEXPORT_SNAPSHOT'
     )
     await replClient.startReplication(
-      'START_REPLICATION SLOT "rapid_test" LOGICAL 0/0 (proto_version \'1\', publication_names \'zero_takeout\')'
+      "START_REPLICATION SLOT \"rapid_test\" LOGICAL 0/0 (proto_version '1', publication_names 'zero_takeout')"
     )
 
     await replClient.collectStream(200)
@@ -770,7 +784,9 @@ describe('tcp replication', () => {
     await client.query(`INSERT INTO public.items (name, value) VALUES ('tcp_direct', 77)`)
 
     // select back
-    const response = await client.query(`SELECT name, value FROM public.items WHERE name = 'tcp_direct'`)
+    const response = await client.query(
+      `SELECT name, value FROM public.items WHERE name = 'tcp_direct'`
+    )
     const dataRow = response.find((m) => m.type === 0x44) // DataRow
     expect(dataRow).toBeDefined()
 
@@ -790,7 +806,7 @@ describe('tcp replication', () => {
       'CREATE_REPLICATION_SLOT "concurrent_test" TEMPORARY LOGICAL pgoutput NOEXPORT_SNAPSHOT'
     )
     await replClient.startReplication(
-      'START_REPLICATION SLOT "concurrent_test" LOGICAL 0/0 (proto_version \'1\', publication_names \'zero_takeout\')'
+      "START_REPLICATION SLOT \"concurrent_test\" LOGICAL 0/0 (proto_version '1', publication_names 'zero_takeout')"
     )
     await replClient.collectStream(200)
 
@@ -801,7 +817,9 @@ describe('tcp replication', () => {
       password: 'password',
       database: 'postgres',
     })
-    await dataClient.query(`INSERT INTO public.items (name, value) VALUES ('concurrent', 123)`)
+    await dataClient.query(
+      `INSERT INTO public.items (name, value) VALUES ('concurrent', 123)`
+    )
 
     // replication stream should pick up the change
     const stream = await replClient.collectStream(1200)

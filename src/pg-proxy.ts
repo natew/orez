@@ -12,13 +12,10 @@ import { createServer, type Server, type Socket } from 'node:net'
 
 import { fromNodeSocket } from 'pg-gateway/node'
 
-import type { PGlite } from '@electric-sql/pglite'
+import { handleReplicationQuery, handleStartReplication } from './replication/handler'
 
 import type { ZeroLiteConfig } from './config'
-import {
-  handleReplicationQuery,
-  handleStartReplication,
-} from './replication/handler'
+import type { PGlite } from '@electric-sql/pglite'
 
 // database name -> search_path mapping
 const DB_SCHEMA_MAP: Record<string, string> = {
@@ -47,9 +44,7 @@ const QUERY_REWRITES: Array<{ match: RegExp; replace: string }> = [
 ]
 
 // queries to intercept and return no-op success
-const NOOP_QUERY_PATTERNS = [
-  /^\s*SET\s+TRANSACTION\s+SNAPSHOT\s+/i,
-]
+const NOOP_QUERY_PATTERNS = [/^\s*SET\s+TRANSACTION\s+SNAPSHOT\s+/i]
 
 /**
  * extract query text from a Parse message (0x50).
@@ -67,10 +62,7 @@ function extractParseQuery(data: Uint8Array): string | null {
 /**
  * rebuild a Parse message with a modified query string.
  */
-function rebuildParseMessage(
-  data: Uint8Array,
-  newQuery: string
-): Uint8Array {
+function rebuildParseMessage(data: Uint8Array, newQuery: string): Uint8Array {
   let offset = 5
   while (offset < data.length && data[offset] !== 0) offset++
   const nameEnd = offset + 1
@@ -84,8 +76,7 @@ function rebuildParseMessage(
   const encoder = new TextEncoder()
   const queryBytes = encoder.encode(newQuery)
 
-  const totalLen =
-    4 + nameBytes.length + queryBytes.length + 1 + suffix.length
+  const totalLen = 4 + nameBytes.length + queryBytes.length + 1 + suffix.length
   const result = new Uint8Array(1 + totalLen)
   const dv = new DataView(result.buffer)
   result[0] = 0x50
@@ -120,15 +111,9 @@ function interceptQuery(data: Uint8Array): Uint8Array {
   const msgType = data[0]
 
   if (msgType === 0x51) {
-    const view = new DataView(
-      data.buffer,
-      data.byteOffset,
-      data.byteLength
-    )
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
     const len = view.getInt32(1)
-    let query = new TextDecoder()
-      .decode(data.subarray(5, 1 + len - 1))
-      .replace(/\0$/, '')
+    let query = new TextDecoder().decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
 
     let modified = false
     for (const rw of QUERY_REWRITES) {
@@ -171,15 +156,9 @@ function interceptQuery(data: Uint8Array): Uint8Array {
 function isNoopQuery(data: Uint8Array): boolean {
   let query: string | null = null
   if (data[0] === 0x51) {
-    const view = new DataView(
-      data.buffer,
-      data.byteOffset,
-      data.byteLength
-    )
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
     const len = view.getInt32(1)
-    query = new TextDecoder()
-      .decode(data.subarray(5, 1 + len - 1))
-      .replace(/\0$/, '')
+    query = new TextDecoder().decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
   } else if (data[0] === 0x50) {
     query = extractParseQuery(data)
   }
@@ -230,10 +209,7 @@ function stripReadyForQuery(data: Uint8Array): Uint8Array {
   while (offset < data.length) {
     const msgType = data[offset]
     if (offset + 5 > data.length) break
-    const msgLen = new DataView(
-      data.buffer,
-      data.byteOffset + offset + 1
-    ).getInt32(0)
+    const msgLen = new DataView(data.buffer, data.byteOffset + offset + 1).getInt32(0)
     const totalLen = 1 + msgLen
 
     if (msgType !== 0x5a) {
@@ -286,10 +262,7 @@ const mutex = new Mutex()
 // module-level search_path tracking
 let currentSearchPath = 'public'
 
-export async function startPgProxy(
-  db: PGlite,
-  config: ZeroLiteConfig
-): Promise<Server> {
+export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<Server> {
   const server = createServer(async (socket: Socket) => {
     let dbName = 'postgres'
     let isReplicationConnection = false
@@ -307,8 +280,7 @@ export async function startPgProxy(
             clearTextPassword: string
           }) {
             return (
-              credentials.password ===
-                credentials.clearTextPassword &&
+              credentials.password === credentials.clearTextPassword &&
               credentials.username === config.pgUser
             )
           },
@@ -332,25 +304,14 @@ export async function startPgProxy(
           // handle replication connections
           if (isReplicationConnection) {
             if (data[0] === 0x51) {
-              const view = new DataView(
-                data.buffer,
-                data.byteOffset,
-                data.byteLength
-              )
+              const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
               const len = view.getInt32(1)
               const query = new TextDecoder()
                 .decode(data.subarray(5, 1 + len - 1))
                 .replace(/\0$/, '')
-              console.info(
-                `[orez] repl query: ${query.slice(0, 200)}`
-              )
+              console.info(`[orez] repl query: ${query.slice(0, 200)}`)
             }
-            return handleReplicationMessage(
-              data,
-              socket,
-              db,
-              connection
-            )
+            return handleReplicationMessage(data, socket, db, connection)
           }
 
           // check for no-op queries
@@ -368,12 +329,9 @@ export async function startPgProxy(
           // regular query: set search_path based on database name, then forward
           await mutex.acquire()
           try {
-            const searchPath =
-              DB_SCHEMA_MAP[dbName] || 'public'
+            const searchPath = DB_SCHEMA_MAP[dbName] || 'public'
             if (currentSearchPath !== searchPath) {
-              await db.exec(
-                `SET search_path TO ${searchPath}`
-              )
+              await db.exec(`SET search_path TO ${searchPath}`)
               currentSearchPath = searchPath
             }
             let result = await db.execProtocolRaw(data, {
@@ -398,9 +356,7 @@ export async function startPgProxy(
 
   return new Promise((resolve, reject) => {
     server.listen(config.pgPort, '127.0.0.1', () => {
-      console.info(
-        `[orez] pg proxy listening on port ${config.pgPort}`
-      )
+      console.info(`[orez] pg proxy listening on port ${config.pgPort}`)
       resolve(server)
     })
     server.on('error', reject)
@@ -415,15 +371,9 @@ async function handleReplicationMessage(
 ): Promise<Uint8Array | undefined> {
   if (data[0] !== 0x51) return undefined
 
-  const view = new DataView(
-    data.buffer,
-    data.byteOffset,
-    data.byteLength
-  )
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
   const len = view.getInt32(1)
-  const query = new TextDecoder()
-    .decode(data.subarray(5, 1 + len - 1))
-    .replace(/\0$/, '')
+  const query = new TextDecoder().decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
   const upper = query.trim().toUpperCase()
 
   // check if this is a START_REPLICATION command
@@ -446,9 +396,7 @@ async function handleReplicationMessage(
     })
 
     handleStartReplication(query, writer, db).catch((err) => {
-      console.info(
-        `[orez] replication stream ended: ${err}`
-      )
+      console.info(`[orez] replication stream ended: ${err}`)
     })
     return undefined
   }

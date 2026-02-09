@@ -6,7 +6,7 @@
  * it's talking to a real postgres with logical replication.
  */
 
-import type { PGlite } from '@electric-sql/pglite'
+import { getChangesSince, getCurrentWatermark, type ChangeRecord } from './change-tracker'
 import {
   encodeBegin,
   encodeCommit,
@@ -21,7 +21,8 @@ import {
   inferColumns,
   type ColumnInfo,
 } from './pgoutput-encoder'
-import { getChangesSince, getCurrentWatermark, type ChangeRecord } from './change-tracker'
+
+import type { PGlite } from '@electric-sql/pglite'
 
 export interface ReplicationWriter {
   write(data: Uint8Array): void
@@ -176,7 +177,10 @@ function buildErrorResponse(message: string): Uint8Array {
  * handle a replication query. returns response bytes or null if not handled.
  * async because slot operations need to write to pglite.
  */
-export async function handleReplicationQuery(query: string, db: PGlite): Promise<Uint8Array | null> {
+export async function handleReplicationQuery(
+  query: string,
+  db: PGlite
+): Promise<Uint8Array | null> {
   const trimmed = query.trim().replace(/;$/, '').trim()
   const upper = trimmed.toUpperCase()
 
@@ -212,7 +216,9 @@ export async function handleReplicationQuery(query: string, db: PGlite): Promise
     const match = trimmed.match(/DROP_REPLICATION_SLOT\s+"?(\w[^"\s]*)"?/i)
     const slotName = match?.[1]
     if (slotName) {
-      await db.query(`DELETE FROM public._zero_replication_slots WHERE slot_name = $1`, [slotName])
+      await db.query(`DELETE FROM public._zero_replication_slots WHERE slot_name = $1`, [
+        slotName,
+      ])
     }
     return buildCommandComplete('DROP_REPLICATION_SLOT')
   }

@@ -1,5 +1,6 @@
-import { startZeroLite } from '../../src/index'
 import { join } from 'node:path'
+
+import { startZeroLite } from '../../src/index'
 
 const lite = await startZeroLite({
   dataDir: join(import.meta.dir, '../.zero-lite'),

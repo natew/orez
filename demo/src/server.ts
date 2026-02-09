@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+
 import postgres from 'postgres'
 
 const PORT = Number(process.env.PORT || 3456)
@@ -21,7 +22,9 @@ export default {
     }
 
     if (url.pathname === '/api/health') {
-      return new Response(JSON.stringify({ status: 'ok', timestamp: Date.now() }), { headers })
+      return new Response(JSON.stringify({ status: 'ok', timestamp: Date.now() }), {
+        headers,
+      })
     }
 
     if (url.pathname === '/api/todos' && req.method === 'GET') {
