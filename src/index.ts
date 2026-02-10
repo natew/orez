@@ -46,7 +46,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const zeroPort = config.skipZeroCache
     ? config.zeroPort
     : await findPort(config.zeroPort)
-  if (pgPort !== config.pgPort) log.debug.orez(`port ${config.pgPort} in use, using ${pgPort}`)
+  if (pgPort !== config.pgPort)
+    log.debug.orez(`port ${config.pgPort} in use, using ${pgPort}`)
   if (!config.skipZeroCache && zeroPort !== config.zeroPort)
     log.debug.orez(`port ${config.zeroPort} in use, using ${zeroPort}`)
   config.pgPort = pgPort
@@ -71,7 +72,10 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const pgServer = await startPgProxy(instances, config)
 
   log.orez(`db up ${port(pgPort, 'green')}`)
-  if (migrationsApplied > 0) log.orez(`${migrationsApplied} migration${migrationsApplied === 1 ? '' : 's'} applied`)
+  if (migrationsApplied > 0)
+    log.orez(
+      `${migrationsApplied} migration${migrationsApplied === 1 ? '' : 's'} applied`
+    )
 
   // seed data if needed
   await seedIfNeeded(db, config)
