@@ -19,7 +19,7 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
   debug: 3,
 }
 
-let currentLevel: LogLevel = 'info'
+let currentLevel: LogLevel = 'warn'
 
 export function setLogLevel(level: LogLevel) {
   currentLevel = level
@@ -44,11 +44,11 @@ function makeLogger(label: string, color: string, level: LogLevel = 'info') {
 }
 
 export const log = {
-  orez: makeLogger('orez', COLORS.cyan),
-  pglite: makeLogger('pglite', COLORS.green),
-  proxy: makeLogger('pg-proxy', COLORS.yellow),
-  zero: makeLogger('zero-cache', COLORS.magenta),
-  s3: makeLogger('orez/s3', COLORS.blue),
+  orez: makeLogger('orez', COLORS.cyan, 'warn'),
+  pglite: makeLogger('pglite', COLORS.green, 'warn'),
+  proxy: makeLogger('pg-proxy', COLORS.yellow, 'warn'),
+  zero: makeLogger('zero-cache', COLORS.magenta, 'warn'),
+  s3: makeLogger('orez/s3', COLORS.blue, 'warn'),
   debug: {
     orez: makeLogger('orez', COLORS.cyan, 'debug'),
     pglite: makeLogger('pglite', COLORS.green, 'debug'),

@@ -124,7 +124,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     await waitForZeroCache(config)
     log.zero(`ready ${port(config.zeroPort, 'magenta')}`)
   } else {
-    log.debug.orez('skipping zero-cache (skipZeroCache=true)')
+    log.orez('skip zero-cache')
   }
 
   const stop = async () => {

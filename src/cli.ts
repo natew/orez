@@ -89,8 +89,7 @@ const main = defineCommand({
     },
     'log-level': {
       type: 'string',
-      description: 'log level: error, warn, info, debug',
-      default: 'info',
+      description: 'log level: error, warn, info, debug (default: warn)',
     },
     s3: {
       type: 'boolean',
@@ -132,7 +131,7 @@ const main = defineCommand({
       pgPassword: args['pg-password'],
       skipZeroCache: args['skip-zero-cache'],
       disableWasmSqlite: args['disable-wasm-sqlite'],
-      logLevel: args['log-level'] as 'error' | 'warn' | 'info' | 'debug',
+      logLevel: (args['log-level'] as 'error' | 'warn' | 'info' | 'debug') || undefined,
       onDbReady: args['on-db-ready'],
     })
 
