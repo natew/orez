@@ -6,6 +6,7 @@
       "name": "zerolite",
       "dependencies": {
         "@electric-sql/pglite": "^0.2.17",
+        "@electric-sql/pglite-tools": "0.2.4",
         "@rocicorp/zero": ">=0.1.0",
         "bedrock-sqlite": "0.0.16",
         "citty": "^0.2.0",
@@ -44,6 +45,8 @@
     "@ecies/ciphers": ["@ecies/ciphers@0.2.5", "", { "peerDependencies": { "@noble/ciphers": "^1.0.0" } }, "sha512-GalEZH4JgOMHYYcYmVqnFirFsjZHeoGMDt9IxEnM9F7GRUUyUksJ7Ou53L83WHJq3RWKD3AcBpo0iQh0oMpf8A=="],
 
     "@electric-sql/pglite": ["@electric-sql/pglite@0.2.17", "", {}, "sha512-qEpKRT2oUaWDH6tjRxLHjdzMqRUGYDnGZlKrnL4dJ77JVMcP2Hpo3NYnOSPKdZdeec57B6QPprCUFg0picx5Pw=="],
+
+    "@electric-sql/pglite-tools": ["@electric-sql/pglite-tools@0.2.4", "", {}, "sha512-RI961WSzss/RLpsI0Zu8wqZmfkoFcfmqFGvn0UAHAZnVylJFWu054kyWB5bKTlICzAYTlNuuDYiHFmb6Ucezhg=="],
 
     "@esbuild/aix-ppc64": ["@esbuild/aix-ppc64@0.27.3", "", { "os": "aix", "cpu": "ppc64" }, "sha512-9fJMTNFTWZMh5qwrBItuziu834eOCUcEqymSH7pY+zoMVEZg3gcPuBNxH1EvfVYe9h0x/Ptw8KBzv7qxb7l8dg=="],
 

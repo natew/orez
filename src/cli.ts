@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 import { defineCommand, runMain } from 'citty'
 
@@ -38,6 +40,134 @@ const s3Command = defineCommand({
       server.close()
       process.exit(0)
     })
+  },
+})
+
+const pgDumpCommand = defineCommand({
+  meta: {
+    name: 'pg_dump',
+    description: 'dump the pglite postgres database to a SQL file',
+  },
+  args: {
+    'data-dir': {
+      type: 'string',
+      description: 'data directory',
+      default: '.orez',
+    },
+    output: {
+      type: 'string',
+      description: 'output file path (default: stdout)',
+      alias: 'o',
+    },
+  },
+  async run({ args }) {
+    const { PGlite } = await import('@electric-sql/pglite')
+    const { vector } = await import('@electric-sql/pglite/vector')
+    const { pg_trgm } = await import('@electric-sql/pglite/contrib/pg_trgm')
+    const { pgDump } = await import('@electric-sql/pglite-tools/pg_dump')
+
+    const dataPath = resolve(args['data-dir'], 'pgdata-postgres')
+    if (!existsSync(dataPath)) {
+      console.error(`error: no database found at ${dataPath}`)
+      process.exit(1)
+    }
+
+    let db: InstanceType<typeof PGlite> | undefined
+    try {
+      db = new PGlite({
+        dataDir: dataPath,
+        extensions: { vector, pg_trgm },
+      })
+      await db.waitReady
+
+      const file = await pgDump({ pg: db })
+      const sql = await file.text()
+
+      if (args.output) {
+        writeFileSync(args.output, sql)
+        log.orez(`dump written to ${args.output}`)
+      } else {
+        process.stdout.write(sql)
+      }
+    } catch (err: any) {
+      if (err?.message?.includes('lock')) {
+        console.error(
+          'error: database is locked — stop orez first before running pg_dump'
+        )
+      } else {
+        console.error(`error: ${err?.message ?? err}`)
+      }
+      process.exit(1)
+    } finally {
+      await db?.close()
+    }
+  },
+})
+
+const pgRestoreCommand = defineCommand({
+  meta: {
+    name: 'pg_restore',
+    description: 'restore a SQL dump into the pglite postgres database',
+  },
+  args: {
+    file: {
+      type: 'positional',
+      description: 'SQL file to restore',
+      required: true,
+    },
+    'data-dir': {
+      type: 'string',
+      description: 'data directory',
+      default: '.orez',
+    },
+    clean: {
+      type: 'boolean',
+      description: 'drop and recreate public schema before restoring',
+      default: false,
+    },
+  },
+  async run({ args }) {
+    const { PGlite } = await import('@electric-sql/pglite')
+    const { vector } = await import('@electric-sql/pglite/vector')
+    const { pg_trgm } = await import('@electric-sql/pglite/contrib/pg_trgm')
+
+    const sqlFile = args.file
+    if (!existsSync(sqlFile)) {
+      console.error(`error: file not found: ${sqlFile}`)
+      process.exit(1)
+    }
+
+    const dataPath = resolve(args['data-dir'], 'pgdata-postgres')
+    const sql = readFileSync(sqlFile, 'utf-8')
+
+    let db: InstanceType<typeof PGlite> | undefined
+    try {
+      db = new PGlite({
+        dataDir: dataPath,
+        extensions: { vector, pg_trgm },
+      })
+      await db.waitReady
+
+      if (args.clean) {
+        log.orez('dropping and recreating public schema')
+        await db.exec('DROP SCHEMA public CASCADE')
+        await db.exec('CREATE SCHEMA public')
+      }
+
+      await db.exec(sql)
+      log.orez(`restored ${sqlFile} into ${dataPath}`)
+    } catch (err: any) {
+      if (err?.message?.includes('lock')) {
+        console.error(
+          'error: database is locked — stop orez first before running pg_restore'
+        )
+      } else {
+        console.error(`error: ${err?.message ?? err}`)
+      }
+      process.exit(1)
+    } finally {
+      await db?.close()
+    }
   },
 })
 
@@ -119,6 +249,8 @@ const main = defineCommand({
   },
   subCommands: {
     s3: s3Command,
+    pg_dump: pgDumpCommand,
+    pg_restore: pgRestoreCommand,
   },
   async run({ args }) {
     const { config, stop } = await startZeroLite({
