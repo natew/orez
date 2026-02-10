@@ -17,12 +17,12 @@ import { createServer, type Server, type Socket } from 'node:net'
 import { fromNodeSocket } from 'pg-gateway/node'
 
 import { log } from './log.js'
-import { handleReplicationQuery, handleStartReplication } from './replication/handler.js'
 import { Mutex } from './mutex.js'
+import { handleReplicationQuery, handleStartReplication } from './replication/handler.js'
 
 import type { ZeroLiteConfig } from './config.js'
-import type { PGlite } from '@electric-sql/pglite'
 import type { PGliteInstances } from './pglite-manager.js'
+import type { PGlite } from '@electric-sql/pglite'
 
 // query rewrites: make pglite look like real postgres with logical replication
 const QUERY_REWRITES: Array<{ match: RegExp; replace: string }> = [

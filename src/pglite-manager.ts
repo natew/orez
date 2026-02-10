@@ -35,7 +35,7 @@ async function createInstance(
     debug: config.logLevel === 'debug' ? 1 : 0,
     relaxedDurability: true,
     ...userOpts,
-    extensions: withExtensions ? (userOpts.extensions || { vector, pg_trgm }) : {},
+    extensions: withExtensions ? userOpts.extensions || { vector, pg_trgm } : {},
   })
 
   await db.waitReady
@@ -51,7 +51,9 @@ async function createInstance(
  * has its own session state, so transactions on one database can't be
  * corrupted by queries on another.
  */
-export async function createPGliteInstances(config: ZeroLiteConfig): Promise<PGliteInstances> {
+export async function createPGliteInstances(
+  config: ZeroLiteConfig
+): Promise<PGliteInstances> {
   // migrate from old single-instance layout (pgdata → pgdata-postgres)
   const oldDataPath = resolve(config.dataDir, 'pgdata')
   const newDataPath = resolve(config.dataDir, 'pgdata-postgres')

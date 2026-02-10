@@ -144,7 +144,11 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       })
     }
     pgServer.close()
-    await Promise.all([instances.postgres.close(), instances.cvr.close(), instances.cdb.close()])
+    await Promise.all([
+      instances.postgres.close(),
+      instances.cvr.close(),
+      instances.cdb.close(),
+    ])
     cleanupEnvLocal()
     log.orez('stopped')
   }

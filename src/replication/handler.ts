@@ -7,8 +7,6 @@
  */
 
 import { log } from '../log.js'
-
-import type { Mutex } from '../mutex.js'
 import {
   getChangesSince,
   getCurrentWatermark,
@@ -30,6 +28,7 @@ import {
   type ColumnInfo,
 } from './pgoutput-encoder.js'
 
+import type { Mutex } from '../mutex.js'
 import type { PGlite } from '@electric-sql/pglite'
 
 export interface ReplicationWriter {
