@@ -30,7 +30,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "vitest run",
+    "test": "vitest run --exclude src/integration/",
+    "test:integration": "vitest run src/integration/",
+    "test:all": "vitest run",
     "test:watch": "vitest",
     "lint": "oxlint --import-plugin --ignore-pattern sqlite-wasm/",
     "format": "oxfmt .",

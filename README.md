@@ -16,7 +16,7 @@ Exports a CLI, programmatic API, and Vite plugin.
 bun install orez
 ```
 
-`@rocicorp/zero` is included as a dependency and provides the zero-cache binary.
+PGlite extensions `pgvector` and `pg_trgm` are enabled by default on the postgres instance.
 
 ## CLI
 
@@ -39,12 +39,6 @@ bunx orez
 --disable-wasm-sqlite     use native @rocicorp/zero-sqlite3 instead of wasm bedrock-sqlite
 --on-db-ready=CMD         command to run after db+proxy are ready, before zero-cache starts
 --on-healthy=CMD          command to run once all services are healthy
-```
-
-Subcommands for standalone servers:
-
-```
-bunx orez s3 --port=9200 --data-dir=.orez
 ```
 
 ## Programmatic
