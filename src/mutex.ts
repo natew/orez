@@ -22,6 +22,3 @@ export class Mutex {
     }
   }
 }
-
-// shared mutex instance for serializing pglite access across proxy and replication handler
-export const pgMutex = new Mutex()

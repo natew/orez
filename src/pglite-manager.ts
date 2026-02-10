@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, readdirSync, existsSync, mkdirSync, renameSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 import { PGlite } from '@electric-sql/pglite'
@@ -9,11 +9,22 @@ import { log } from './log.js'
 
 import type { ZeroLiteConfig } from './config.js'
 
-export async function createPGliteInstance(config: ZeroLiteConfig): Promise<PGlite> {
-  const dataPath = resolve(config.dataDir, 'pgdata')
+export interface PGliteInstances {
+  postgres: PGlite
+  cvr: PGlite
+  cdb: PGlite
+}
+
+// create a single pglite instance with given dataDir suffix
+async function createInstance(
+  config: ZeroLiteConfig,
+  name: string,
+  withExtensions: boolean
+): Promise<PGlite> {
+  const dataPath = resolve(config.dataDir, `pgdata-${name}`)
   mkdirSync(dataPath, { recursive: true })
 
-  log.debug.pglite(`creating instance at ${dataPath}`)
+  log.debug.pglite(`creating ${name} instance at ${dataPath}`)
   const {
     dataDir: _d,
     debug: _dbg,
@@ -24,34 +35,53 @@ export async function createPGliteInstance(config: ZeroLiteConfig): Promise<PGli
     debug: config.logLevel === 'debug' ? 1 : 0,
     relaxedDurability: true,
     ...userOpts,
-    extensions: userOpts.extensions || { vector, pg_trgm },
+    extensions: withExtensions ? (userOpts.extensions || { vector, pg_trgm }) : {},
   })
 
   await db.waitReady
-  log.debug.pglite('ready')
+  log.debug.pglite(`${name} ready`)
+  return db
+}
 
-  // ensure plpgsql is available (needed by migrations and trigger functions)
-  await db.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
+/**
+ * create separate pglite instances for each "database".
+ *
+ * this mirrors real postgresql where postgres, zero_cvr, and zero_cdb are
+ * independent databases with separate transaction contexts. each instance
+ * has its own session state, so transactions on one database can't be
+ * corrupted by queries on another.
+ */
+export async function createPGliteInstances(config: ZeroLiteConfig): Promise<PGliteInstances> {
+  // migrate from old single-instance layout (pgdata → pgdata-postgres)
+  const oldDataPath = resolve(config.dataDir, 'pgdata')
+  const newDataPath = resolve(config.dataDir, 'pgdata-postgres')
+  if (existsSync(oldDataPath) && !existsSync(newDataPath)) {
+    renameSync(oldDataPath, newDataPath)
+    log.debug.pglite('migrated pgdata → pgdata-postgres')
+  }
 
-  // create schemas for multi-db simulation
-  await db.exec('CREATE SCHEMA IF NOT EXISTS zero_cvr')
-  await db.exec('CREATE SCHEMA IF NOT EXISTS zero_cdb')
+  // create all 3 instances in parallel (only postgres needs app extensions)
+  const [postgres, cvr, cdb] = await Promise.all([
+    createInstance(config, 'postgres', true),
+    createInstance(config, 'cvr', false),
+    createInstance(config, 'cdb', false),
+  ])
 
-  // create empty publication for zero-cache
-  // the app's migrations (via --on-db-ready) add specific tables to it,
-  // excluding private tables like user/session/account.
-  // DO NOT use FOR ALL TABLES - it auto-includes every future table.
+  // postgres-specific setup
+  await postgres.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
+
+  // create empty publication for zero-cache on postgres instance
   const pubName = process.env.ZERO_APP_PUBLICATIONS || 'zero_pub'
-  const pubs = await db.query<{ count: string }>(
+  const pubs = await postgres.query<{ count: string }>(
     `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
     [pubName]
   )
   if (Number(pubs.rows[0].count) === 0) {
     const quoted = '"' + pubName.replace(/"/g, '""') + '"'
-    await db.exec(`CREATE PUBLICATION ${quoted}`)
+    await postgres.exec(`CREATE PUBLICATION ${quoted}`)
   }
 
-  return db
+  return { postgres, cvr, cdb }
 }
 
 export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise<void> {

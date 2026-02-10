@@ -6,6 +6,10 @@
  *
  * regular connections: forwarded to pglite via execProtocolRaw()
  * replication connections: intercepted, replication protocol faked
+ *
+ * each "database" (postgres, zero_cvr, zero_cdb) maps to its own pglite
+ * instance with independent transaction context, preventing cross-database
+ * query interleaving that causes CVR concurrent modification errors.
  */
 
 import { createServer, type Server, type Socket } from 'node:net'
@@ -14,16 +18,11 @@ import { fromNodeSocket } from 'pg-gateway/node'
 
 import { log } from './log.js'
 import { handleReplicationQuery, handleStartReplication } from './replication/handler.js'
+import { Mutex } from './mutex.js'
 
 import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
-
-// database name -> search_path mapping
-const DB_SCHEMA_MAP: Record<string, string> = {
-  postgres: 'public',
-  zero_cvr: 'zero_cvr, public',
-  zero_cdb: 'zero_cdb, public',
-}
+import type { PGliteInstances } from './pglite-manager.js'
 
 // query rewrites: make pglite look like real postgres with logical replication
 const QUERY_REWRITES: Array<{ match: RegExp; replace: string }> = [
@@ -246,14 +245,30 @@ function stripReadyForQuery(data: Uint8Array): Uint8Array {
   return result
 }
 
-import { pgMutex } from './mutex.js'
+export async function startPgProxy(
+  dbInput: PGlite | PGliteInstances,
+  config: ZeroLiteConfig
+): Promise<Server> {
+  // normalize input: single PGlite instance = use it for all databases (backwards compat for tests)
+  const instances: PGliteInstances =
+    'postgres' in dbInput
+      ? (dbInput as PGliteInstances)
+      : { postgres: dbInput as PGlite, cvr: dbInput as PGlite, cdb: dbInput as PGlite }
 
-const mutex = pgMutex
+  // per-instance mutexes for serializing pglite access
+  const mutexes = {
+    postgres: new Mutex(),
+    cvr: new Mutex(),
+    cdb: new Mutex(),
+  }
 
-// module-level search_path tracking
-let currentSearchPath = 'public'
+  // helper to get instance + mutex for a database name
+  function getDbContext(dbName: string): { db: PGlite; mutex: Mutex } {
+    if (dbName === 'zero_cvr') return { db: instances.cvr, mutex: mutexes.cvr }
+    if (dbName === 'zero_cdb') return { db: instances.cdb, mutex: mutexes.cdb }
+    return { db: instances.postgres, mutex: mutexes.postgres }
+  }
 
-export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<Server> {
   const server = createServer(async (socket: Socket) => {
     // prevent idle timeouts from killing connections
     socket.setKeepAlive(true, 30000)
@@ -264,11 +279,12 @@ export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<
 
     // clean up pglite transaction state when a client disconnects
     socket.on('close', async () => {
+      const { db, mutex } = getDbContext(dbName)
       await mutex.acquire()
       try {
         await db.exec('ROLLBACK')
       } catch {
-        // no transaction to rollback, that's fine
+        // no transaction to rollback
       } finally {
         mutex.release()
       }
@@ -302,13 +318,14 @@ export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<
           log.debug.proxy(
             `connection: db=${dbName} user=${params?.user} replication=${params?.replication || 'none'}`
           )
+          const { db } = getDbContext(dbName)
           await db.waitReady
         },
 
         async onMessage(data, state) {
           if (!state.isAuthenticated) return
 
-          // handle replication connections
+          // handle replication connections (always go to postgres instance)
           if (isReplicationConnection) {
             if (data[0] === 0x51) {
               const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
@@ -318,7 +335,13 @@ export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<
                 .replace(/\0$/, '')
               log.debug.proxy(`repl query: ${query.slice(0, 200)}`)
             }
-            return handleReplicationMessage(data, socket, db, connection)
+            return handleReplicationMessage(
+              data,
+              socket,
+              instances.postgres,
+              mutexes.postgres,
+              connection
+            )
           }
 
           // check for no-op queries
@@ -333,31 +356,27 @@ export async function startPgProxy(db: PGlite, config: ZeroLiteConfig): Promise<
           // intercept and rewrite queries
           data = interceptQuery(data)
 
-          // regular query: set search_path based on database name, then forward
+          // message-level locking on the connection's pglite instance
+          const { db, mutex } = getDbContext(dbName)
           await mutex.acquire()
+
+          let result: Uint8Array
           try {
-            const searchPath = DB_SCHEMA_MAP[dbName] || 'public'
-            if (currentSearchPath !== searchPath) {
-              try {
-                await db.exec(`SET search_path TO ${searchPath}`)
-              } catch {
-                // pglite may be in aborted transaction state — reset it
-                await db.exec('ROLLBACK')
-                await db.exec(`SET search_path TO ${searchPath}`)
-              }
-              currentSearchPath = searchPath
-            }
-            let result = await db.execProtocolRaw(data, {
+            result = await db.execProtocolRaw(data, {
               throwOnError: false,
             })
-            // strip ReadyForQuery from non-Sync responses
-            if (data[0] !== 0x53 && data[0] !== 0x51) {
-              result = stripReadyForQuery(result)
-            }
-            return result
-          } finally {
+          } catch (err) {
             mutex.release()
+            throw err
           }
+
+          // strip ReadyForQuery from non-Sync/non-SimpleQuery responses
+          if (data[0] !== 0x53 && data[0] !== 0x51) {
+            result = stripReadyForQuery(result)
+          }
+
+          mutex.release()
+          return result
         },
       })
     } catch (err) {
@@ -380,6 +399,7 @@ async function handleReplicationMessage(
   data: Uint8Array,
   socket: Socket,
   db: PGlite,
+  mutex: Mutex,
   connection: Awaited<ReturnType<typeof fromNodeSocket>>
 ): Promise<Uint8Array | undefined> {
   if (data[0] !== 0x51) return undefined
@@ -408,27 +428,22 @@ async function handleReplicationMessage(
       socket.destroy()
     })
 
-    handleStartReplication(query, writer, db).catch((err) => {
+    handleStartReplication(query, writer, db, mutex).catch((err) => {
       log.debug.proxy(`replication stream ended: ${err}`)
     })
     return undefined
   }
 
-  // handle other replication queries
-  const response = await handleReplicationQuery(query, db)
-  if (response) return response
-
-  // apply query rewrites (e.g. SET TRANSACTION → SELECT 1) before forwarding
-  data = interceptQuery(data)
-
-  // fall through to pglite for unrecognized queries
+  // handle replication queries + fallthrough to pglite, all under mutex
   await mutex.acquire()
   try {
-    const searchPath = 'public'
-    if (currentSearchPath !== searchPath) {
-      await db.exec(`SET search_path TO ${searchPath}`)
-      currentSearchPath = searchPath
-    }
+    const response = await handleReplicationQuery(query, db)
+    if (response) return response
+
+    // apply query rewrites before forwarding
+    data = interceptQuery(data)
+
+    // fall through to pglite for unrecognized queries
     return await db.execProtocolRaw(data, {
       throwOnError: false,
     })

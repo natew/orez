@@ -7,7 +7,8 @@
  */
 
 import { log } from '../log.js'
-import { pgMutex } from '../mutex.js'
+
+import type { Mutex } from '../mutex.js'
 import {
   getChangesSince,
   getCurrentWatermark,
@@ -258,7 +259,8 @@ export async function handleReplicationQuery(
 export async function handleStartReplication(
   query: string,
   writer: ReplicationWriter,
-  db: PGlite
+  db: PGlite,
+  mutex: Mutex
 ): Promise<void> {
   log.debug.proxy('replication: entering streaming mode')
 
@@ -281,7 +283,7 @@ export async function handleStartReplication(
   // the change-streamer's initial copy also queries PGlite via the proxy, and
   // direct db.query()/db.exec() calls here bypass the proxy's mutex, causing
   // "already in transaction" errors when they interleave.
-  await pgMutex.acquire()
+  await mutex.acquire()
   try {
     // install change tracking triggers on shard schema tables (e.g. chat_0.clients)
     // these track zero-cache's lastMutationID for .server promise resolution
@@ -425,7 +427,7 @@ export async function handleStartReplication(
       )
     }
   } finally {
-    pgMutex.release()
+    mutex.release()
   }
 
   // track which tables we've sent RELATION messages for
@@ -440,12 +442,12 @@ export async function handleStartReplication(
     while (running) {
       try {
         // acquire mutex to avoid conflicting with proxy connections
-        await pgMutex.acquire()
+        await mutex.acquire()
         let changes: Awaited<ReturnType<typeof getChangesSince>>
         try {
           changes = await getChangesSince(db, lastWatermark, 100)
         } finally {
-          pgMutex.release()
+          mutex.release()
         }
 
         if (changes.length > 0) {

@@ -7,6 +7,7 @@ import {
   handleStartReplication,
   type ReplicationWriter,
 } from './handler'
+import { Mutex } from '../mutex'
 
 // parse wire protocol RowDescription+DataRow response into columns/values
 function parseResponse(buf: Uint8Array): { columns: string[]; values: string[] } | null {
@@ -116,6 +117,7 @@ describe('handleReplicationQuery', () => {
 describe('handleStartReplication', () => {
   let db: PGlite
   let replicationPromise: Promise<void>
+  const testMutex = new Mutex()
 
   beforeEach(async () => {
     db = new PGlite()
@@ -160,7 +162,8 @@ describe('handleStartReplication', () => {
     replicationPromise = handleStartReplication(
       'START_REPLICATION SLOT "s" LOGICAL 0/0',
       writer,
-      db
+      db,
+      testMutex
     )
 
     await new Promise((r) => setTimeout(r, 200))
@@ -175,7 +178,8 @@ describe('handleStartReplication', () => {
     replicationPromise = handleStartReplication(
       'START_REPLICATION SLOT "s" LOGICAL 0/0',
       writer,
-      db
+      db,
+      testMutex
     )
 
     await new Promise((r) => setTimeout(r, 700))
@@ -190,7 +194,8 @@ describe('handleStartReplication', () => {
     replicationPromise = handleStartReplication(
       'START_REPLICATION SLOT "s" LOGICAL 0/0',
       writer,
-      db
+      db,
+      testMutex
     )
 
     await new Promise((r) => setTimeout(r, 100))
@@ -220,7 +225,8 @@ describe('handleStartReplication', () => {
     replicationPromise = handleStartReplication(
       'START_REPLICATION SLOT "s" LOGICAL 0/0',
       writer,
-      db
+      db,
+      testMutex
     )
 
     await new Promise((r) => setTimeout(r, 100))
@@ -246,7 +252,8 @@ describe('handleStartReplication', () => {
     replicationPromise = handleStartReplication(
       'START_REPLICATION SLOT "s" LOGICAL 0/0',
       writer,
-      db
+      db,
+      testMutex
     )
 
     await new Promise((r) => setTimeout(r, 100))
@@ -271,7 +278,8 @@ describe('handleStartReplication', () => {
     replicationPromise = handleStartReplication(
       'START_REPLICATION SLOT "s" LOGICAL 0/0',
       writer,
-      db
+      db,
+      testMutex
     )
 
     await new Promise((r) => setTimeout(r, 100))
@@ -291,7 +299,8 @@ describe('handleStartReplication', () => {
     replicationPromise = handleStartReplication(
       'START_REPLICATION SLOT "s" LOGICAL 0/0',
       writer,
-      db
+      db,
+      testMutex
     )
 
     await new Promise((r) => setTimeout(r, 100))
@@ -313,7 +322,8 @@ describe('handleStartReplication', () => {
     replicationPromise = handleStartReplication(
       'START_REPLICATION SLOT "s" LOGICAL 0/0',
       writer,
-      db
+      db,
+      testMutex
     )
 
     await new Promise((r) => setTimeout(r, 100))

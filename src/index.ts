@@ -14,7 +14,7 @@ import { basename, dirname, resolve } from 'node:path'
 import { getConfig, getConnectionString } from './config.js'
 import { log, setLogLevel } from './log.js'
 import { startPgProxy } from './pg-proxy.js'
-import { createPGliteInstance, runMigrations } from './pglite-manager.js'
+import { createPGliteInstances, runMigrations } from './pglite-manager.js'
 import { findPort } from './port.js'
 import { installChangeTracking } from './replication/change-tracker.js'
 
@@ -57,18 +57,19 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
   mkdirSync(config.dataDir, { recursive: true })
 
-  // start pglite
-  const db = await createPGliteInstance(config)
+  // start pglite (separate instances for postgres, zero_cvr, zero_cdb)
+  const instances = await createPGliteInstances(config)
+  const db = instances.postgres
 
-  // run migrations
+  // run migrations (on postgres instance only)
   await runMigrations(db, config)
 
-  // install change tracking
+  // install change tracking (on postgres instance only)
   log.debug.orez('installing change tracking')
   await installChangeTracking(db)
 
-  // start tcp proxy
-  const pgServer = await startPgProxy(db, config)
+  // start tcp proxy (routes connections to correct instance by database name)
+  const pgServer = await startPgProxy(instances, config)
 
   // seed data if needed
   await seedIfNeeded(db, config)
@@ -143,12 +144,12 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       })
     }
     pgServer.close()
-    await db.close()
+    await Promise.all([instances.postgres.close(), instances.cvr.close(), instances.cdb.close()])
     cleanupEnvLocal()
     log.orez('stopped')
   }
 
-  return { config, stop, db, pgPort: config.pgPort, zeroPort: config.zeroPort }
+  return { config, stop, db, instances, pgPort: config.pgPort, zeroPort: config.zeroPort }
 }
 
 // use .env.development.local so it overrides .env.development in vite's load order:
