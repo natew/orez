@@ -5,9 +5,9 @@
  * pglite proxy produces pgoutput messages decodable by zero-cache's
  * PgoutputParser.
  *
- * note: our proxy encodes all column types as text (typeOid=25) and
- * stores change data as jsonb. this differs from real postgres which
- * uses proper type OIDs, but zero-cache handles re-mapping downstream.
+ * our proxy stores change data as jsonb and encodes values as text in
+ * pgoutput tuples. RELATION messages carry correct postgres type OIDs
+ * so zero-cache can apply proper value conversions (e.g. timestamp → number).
  */
 
 import { createConnection, type Socket } from 'node:net'
@@ -534,19 +534,23 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     expect(names).toContain('int_val')
     expect(names).toContain('text_val')
 
-    // typeOids: boolean columns use 16, everything else is 25 (text)
+    // typeOids match actual postgres column types
+    const expectedOids: Record<string, number> = {
+      id: 25,        // text
+      int_val: 23,   // integer
+      big_val: 20,   // bigint
+      flt_val: 701,  // double precision (float8)
+      bool_val: 16,  // boolean
+      text_val: 25,  // text
+    }
     for (const col of rel.columns) {
-      if (col.name === 'bool_val') {
-        expect(col.typeOid).toBe(16)
-      } else {
-        expect(col.typeOid).toBe(25)
-      }
+      expect(col.typeOid, `typeOid for ${col.name}`).toBe(expectedOids[col.name])
     }
 
     s.close()
   })
 
-  it('values encoded as text (typeOid=25) from jsonb', async () => {
+  it('values encoded as text format from jsonb', async () => {
     const s = await stream()
     await db.exec(`
       INSERT INTO public.foo (id, int_val, big_val, flt_val, bool_val, text_val)

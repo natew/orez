@@ -276,7 +276,7 @@ export async function handleStartReplication(
   // declared outside mutex block so they're accessible in the poll loop
   const tableKeyColumns = new Map<string, Set<string>>()
   const excludedColumns = new Map<string, Set<string>>()
-  const booleanColumns = new Map<string, Set<string>>()
+  const columnTypeOids = new Map<string, Map<string, number>>()
 
   // acquire mutex for all setup queries to avoid conflicting with proxy connections.
   // the change-streamer's initial copy also queries PGlite via the proxy, and
@@ -387,8 +387,30 @@ export async function handleStartReplication(
     log.debug.proxy(`loaded primary keys for ${tableKeyColumns.size} tables`)
 
     // build excluded columns lookup (types zero-cache can't handle)
-    // also track boolean columns so we can send correct typeOid (16) in RELATION messages.
+    // also build column type OID map so RELATION messages carry correct postgres type OIDs.
+    // zero-cache uses these to select value parsers (e.g. timestamp → number via timestampToFpMillis).
     const UNSUPPORTED_TYPES = new Set(['tsvector', 'tsquery', 'USER-DEFINED'])
+    const PG_DATA_TYPE_OIDS: Record<string, number> = {
+      boolean: 16,
+      bytea: 17,
+      bigint: 20,
+      smallint: 21,
+      integer: 23,
+      text: 25,
+      json: 114,
+      real: 700,
+      'double precision': 701,
+      'character': 1042,
+      'character varying': 1043,
+      date: 1082,
+      'time without time zone': 1083,
+      'timestamp without time zone': 1114,
+      'timestamp with time zone': 1184,
+      'time with time zone': 1266,
+      numeric: 1700,
+      uuid: 2950,
+      jsonb: 3802,
+    }
     for (const schema of relevantSchemas) {
       const colResult = await db.query<{
         table_name: string
@@ -410,13 +432,14 @@ export async function handleStartReplication(
           }
           cols.add(column_name)
         }
-        if (data_type === 'boolean') {
-          let cols = booleanColumns.get(key)
+        const oid = PG_DATA_TYPE_OIDS[data_type]
+        if (oid !== undefined) {
+          let cols = columnTypeOids.get(key)
           if (!cols) {
-            cols = new Set()
-            booleanColumns.set(key, cols)
+            cols = new Map()
+            columnTypeOids.set(key, cols)
           }
-          cols.add(column_name)
+          cols.set(column_name, oid)
         }
       }
     }
@@ -457,7 +480,7 @@ export async function handleStartReplication(
             txCounter++,
             tableKeyColumns,
             excludedColumns,
-            booleanColumns
+            columnTypeOids
           )
           lastWatermark = changes[changes.length - 1].watermark
         }
@@ -491,7 +514,7 @@ async function streamChanges(
   txId: number,
   tableKeyColumns: Map<string, Set<string>>,
   excludedColumns: Map<string, Set<string>>,
-  booleanColumns: Map<string, Set<string>>
+  columnTypeOids: Map<string, Map<string, number>>
 ): Promise<void> {
   const ts = nowMicros()
   const lsn = nextLsn()
@@ -531,10 +554,10 @@ async function streamChanges(
     if (!row) continue
 
     const keySet = tableKeyColumns.get(qualifiedKey)
-    const boolSet = booleanColumns.get(qualifiedKey)
+    const typeOids = columnTypeOids.get(qualifiedKey)
     const columns = inferColumns(row).map((col) => ({
       ...col,
-      typeOid: boolSet?.has(col.name) ? 16 : col.typeOid,
+      typeOid: typeOids?.get(col.name) ?? col.typeOid,
       isKey: keySet?.has(col.name) ?? false,
     }))
 
