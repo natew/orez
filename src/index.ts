@@ -399,7 +399,7 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
   const zeroEntry = resolvePackage('@rocicorp/zero')
 
   if (!zeroEntry) {
-    throw new Error('zero-cache binary not found. install @rocicorp/zero')
+    throw new Error('zero-cache not found. install @rocicorp/zero')
   }
 
   // patch sqlite to use wasm before starting zero-cache (unless disabled)
