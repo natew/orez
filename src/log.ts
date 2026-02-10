@@ -2,6 +2,7 @@ import type { LogLevel } from './config.js'
 
 const RESET = '\x1b[0m'
 const BOLD = '\x1b[1m'
+const DIM = '\x1b[2m'
 
 const COLORS = {
   cyan: '\x1b[36m',
@@ -26,6 +27,11 @@ export function setLogLevel(level: LogLevel) {
 
 function prefix(label: string, color: string): string {
   return `${BOLD}${color}[${label}]${RESET}`
+}
+
+/** format a port number with matching dim color */
+export function port(n: number, color: keyof typeof COLORS): string {
+  return `${DIM}${COLORS[color]}:${n}${RESET}`
 }
 
 function makeLogger(label: string, color: string, level: LogLevel = 'info') {

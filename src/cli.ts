@@ -90,7 +90,7 @@ const main = defineCommand({
     'log-level': {
       type: 'string',
       description: 'log level: error, warn, info, debug',
-      default: 'warn',
+      default: 'info',
     },
     s3: {
       type: 'boolean',

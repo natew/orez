@@ -86,16 +86,17 @@ export async function createPGliteInstances(
   return { postgres, cvr, cdb }
 }
 
-export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise<void> {
+/** run pending migrations, returns count of newly applied migrations */
+export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise<number> {
   if (!config.migrationsDir) {
     log.debug.orez('no migrations directory configured, skipping')
-    return
+    return 0
   }
 
   const migrationsDir = resolve(config.migrationsDir)
   if (!existsSync(migrationsDir)) {
     log.debug.orez('no migrations directory found, skipping')
-    return
+    return 0
   }
 
   // create migrations tracking table
@@ -119,6 +120,7 @@ export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise
       .sort()
   }
 
+  let applied = 0
   for (const file of files) {
     const name = file.replace(/\.sql$/, '')
 
@@ -146,7 +148,9 @@ export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise
 
     await db.query('INSERT INTO public.migrations (name) VALUES ($1)', [name])
     log.debug.orez(`applied migration: ${name}`)
+    applied++
   }
 
   log.debug.orez('migrations complete')
+  return applied
 }

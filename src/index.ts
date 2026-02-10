@@ -12,7 +12,7 @@ import { createRequire } from 'node:module'
 import { basename, dirname, resolve } from 'node:path'
 
 import { getConfig, getConnectionString } from './config.js'
-import { log, setLogLevel } from './log.js'
+import { log, port, setLogLevel } from './log.js'
 import { startPgProxy } from './pg-proxy.js'
 import { createPGliteInstances, runMigrations } from './pglite-manager.js'
 import { findPort } from './port.js'
@@ -46,13 +46,12 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const zeroPort = config.skipZeroCache
     ? config.zeroPort
     : await findPort(config.zeroPort)
-  if (pgPort !== config.pgPort) log.orez(`port ${config.pgPort} in use, using ${pgPort}`)
+  if (pgPort !== config.pgPort) log.debug.orez(`port ${config.pgPort} in use, using ${pgPort}`)
   if (!config.skipZeroCache && zeroPort !== config.zeroPort)
-    log.orez(`port ${config.zeroPort} in use, using ${zeroPort}`)
+    log.debug.orez(`port ${config.zeroPort} in use, using ${zeroPort}`)
   config.pgPort = pgPort
   config.zeroPort = zeroPort
 
-  log.orez('starting...')
   log.debug.orez(`data dir: ${resolve(config.dataDir)}`)
 
   mkdirSync(config.dataDir, { recursive: true })
@@ -62,7 +61,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const db = instances.postgres
 
   // run migrations (on postgres instance only)
-  await runMigrations(db, config)
+  const migrationsApplied = await runMigrations(db, config)
 
   // install change tracking (on postgres instance only)
   log.debug.orez('installing change tracking')
@@ -70,6 +69,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
   // start tcp proxy (routes connections to correct instance by database name)
   const pgServer = await startPgProxy(instances, config)
+
+  log.orez(`db up ${port(pgPort, 'green')}`)
+  if (migrationsApplied > 0) log.orez(`${migrationsApplied} migration${migrationsApplied === 1 ? '' : 's'} applied`)
 
   // seed data if needed
   await seedIfNeeded(db, config)
@@ -79,7 +81,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
   // run on-db-ready command (e.g. migrations) before zero-cache starts
   if (config.onDbReady) {
-    log.orez(`running on-db-ready: ${config.onDbReady}`)
+    log.debug.orez(`running on-db-ready: ${config.onDbReady}`)
     const upstreamUrl = getConnectionString(config, 'postgres')
     const cvrUrl = getConnectionString(config, 'zero_cvr')
     const cdbUrl = getConnectionString(config, 'zero_cdb')
@@ -98,7 +100,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       })
       child.on('exit', (code) => {
         if (code === 0) {
-          log.orez('on-db-ready complete')
+          log.orez('on-db-ready done')
           resolve()
         } else {
           reject(new Error(`on-db-ready exited with code ${code}`))
@@ -118,15 +120,15 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // start zero-cache
   let zeroCacheProcess: ChildProcess | null = null
   if (!config.skipZeroCache) {
-    log.orez('starting zero-cache...')
     zeroCacheProcess = await startZeroCache(config)
     await waitForZeroCache(config)
+    log.zero(`ready ${port(config.zeroPort, 'magenta')}`)
   } else {
-    log.orez('skipping zero-cache (skipZeroCache=true)')
+    log.debug.orez('skipping zero-cache (skipZeroCache=true)')
   }
 
   const stop = async () => {
-    log.orez('shutting down...')
+    log.debug.orez('shutting down')
     if (zeroCacheProcess && !zeroCacheProcess.killed) {
       zeroCacheProcess.kill('SIGTERM')
       // wait up to 3s for graceful exit, then force kill
@@ -150,7 +152,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       instances.cdb.close(),
     ])
     cleanupEnvLocal()
-    log.orez('stopped')
+    log.debug.orez('stopped')
   }
 
   return { config, stop, db, instances, pgPort: config.pgPort, zeroPort: config.zeroPort }
@@ -224,10 +226,10 @@ async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
     // table might not exist yet
   }
 
-  log.orez('seeding demo data...')
+  log.debug.orez('seeding demo data')
   const seedFile = resolve(config.seedFile)
   if (!existsSync(seedFile)) {
-    log.orez('no seed file found, skipping')
+    log.debug.orez('no seed file found, skipping')
     return
   }
 
@@ -240,7 +242,7 @@ async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   for (const stmt of statements) {
     await db.exec(stmt)
   }
-  log.orez('seeded demo data')
+  log.orez('seeded')
 }
 
 function patchSqliteForWasm(): void {
@@ -263,7 +265,7 @@ function patchSqliteForWasm(): void {
       }
       const pkgDir = resolve(nodeModules, '@rocicorp', 'zero-sqlite3')
       if (!existsSync(resolve(pkgDir, 'package.json'))) {
-        log.orez('@rocicorp/zero-sqlite3 not found, skipping wasm patch')
+        log.debug.orez('@rocicorp/zero-sqlite3 not found, skipping wasm patch')
         return
       }
       libDir = resolve(pkgDir, 'lib')
@@ -289,7 +291,7 @@ function patchSqliteForWasm(): void {
     // resolve bedrock-sqlite's dist entry point
     const bedrockEntry = resolvePackage('bedrock-sqlite')
     if (!existsSync(bedrockEntry)) {
-      log.orez('bedrock-sqlite not found, skipping wasm patch')
+      log.debug.orez('bedrock-sqlite not found, skipping wasm patch')
       return
     }
 
@@ -458,14 +460,14 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
   child.stdout?.on('data', (data: Buffer) => {
     const lines = data.toString().trim().split('\n')
     for (const line of lines) {
-      log.zero(line)
+      log.debug.zero(line)
     }
   })
 
   child.stderr?.on('data', (data: Buffer) => {
     const lines = data.toString().trim().split('\n')
     for (const line of lines) {
-      log.zero(line)
+      log.debug.zero(line)
     }
   })
 
@@ -488,10 +490,7 @@ async function waitForZeroCache(
   while (Date.now() - start < timeoutMs) {
     try {
       const res = await fetch(url)
-      if (res.ok) {
-        log.zero('ready')
-        return
-      }
+      if (res.ok) return
     } catch {
       // not ready yet
     }
