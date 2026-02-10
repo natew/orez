@@ -1,6 +1,6 @@
 {
   "name": "orez",
-  "version": "0.0.25",
+  "version": "0.0.26",
   "description": "PGlite-powered zero-sync development backend. No Docker required.",
   "type": "module",
   "license": "MIT",
@@ -46,7 +46,7 @@
     "@electric-sql/pglite": "^0.2.17",
     "@electric-sql/pglite-tools": "0.2.4",
     "@rocicorp/zero": ">=0.1.0",
-    "bedrock-sqlite": "0.0.17",
+    "bedrock-sqlite": "0.0.18",
     "citty": "^0.2.0",
     "pg-gateway": "^0.3.0-beta.4"
   },
