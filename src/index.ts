@@ -360,8 +360,11 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
     }
   })
 
+  let stderrBuf = ''
   child.stderr?.on('data', (data: Buffer) => {
-    const lines = data.toString().trim().split('\n')
+    const chunk = data.toString()
+    stderrBuf += chunk
+    const lines = chunk.trim().split('\n')
     for (const line of lines) {
       log.debug.zero(line)
     }
@@ -369,7 +372,22 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
 
   child.on('exit', (code) => {
     if (code !== 0 && code !== null) {
-      log.zero(`exited with code ${code}`)
+      if (stderrBuf.includes('Could not locate the bindings file')) {
+        log.zero(
+          'native @rocicorp/zero-sqlite3 not found — native deps were not compiled.\n' +
+            'either:\n' +
+            '  • remove --disable-wasm-sqlite to use the built-in wasm sqlite\n' +
+            '  • install with native deps: bun install --trust @rocicorp/zero-sqlite3\n' +
+            '    or add "trustedDependencies": ["@rocicorp/zero-sqlite3"] to package.json'
+        )
+      } else {
+        const lastLines = stderrBuf.trim().split('\n').slice(-5).join('\n')
+        if (lastLines) {
+          log.zero(`exited with code ${code}:\n${lastLines}`)
+        } else {
+          log.zero(`exited with code ${code}`)
+        }
+      }
     }
   })
 
