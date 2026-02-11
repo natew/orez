@@ -216,46 +216,60 @@ async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   log.orez('seeded')
 }
 
-// create a fake @rocicorp/zero-sqlite3 package in tmpdir that redirects to
-// bedrock-sqlite (wasm). uses NODE_PATH to make node resolve our shim first —
-// no require hooks, no Module._resolveFilename monkey-patching, no .cjs files
-// in the package (which all break vite).
+// write three files to tmpdir:
+//   1. shim.cjs — wraps bedrock-sqlite as @rocicorp/zero-sqlite3
+//   2. hooks.mjs — ESM loader hook that resolves @rocicorp/zero-sqlite3 → shim
+//   3. register.mjs — --import entrypoint that registers the hook
+// uses node's module.register() API for ESM resolution interception.
+// returns the path to register.mjs (passed via --import in NODE_OPTIONS).
 function writeSqliteShim(): string {
   const tmp = process.env.TMPDIR || process.env.TEMP || '/tmp'
-  const dir = resolve(tmp, 'orez-sqlite', 'node_modules', '@rocicorp', 'zero-sqlite3')
+  const dir = resolve(tmp, 'orez-sqlite')
   mkdirSync(dir, { recursive: true })
 
   const bedrockEntry = resolvePackage('bedrock-sqlite')
 
+  // ESM loader hooks — resolve + load @rocicorp/zero-sqlite3 as our shim.
+  // uses a load hook to inline the shim source so we control the format.
+  const hooksPath = resolve(dir, 'hooks.mjs')
   writeFileSync(
-    resolve(dir, 'package.json'),
-    '{"name":"@rocicorp/zero-sqlite3","main":"./index.js"}\n'
-  )
+    hooksPath,
+    `const SHIM_URL = 'orez-sqlite-shim://shim';
+const BEDROCK_PATH = '${bedrockEntry}';
 
-  writeFileSync(
-    resolve(dir, 'index.js'),
-    `'use strict';
-var mod = require('${bedrockEntry}');
-var OrigDatabase = mod.Database;
-var SqliteError = mod.SqliteError;
-function Database() {
-  var db = new OrigDatabase(...arguments);
-  try {
-    db.pragma('busy_timeout = 30000');
-    db.pragma('synchronous = normal');
-  } catch(e) {}
+export function resolve(specifier, context, nextResolve) {
+  if (specifier === '@rocicorp/zero-sqlite3' || specifier.startsWith('@rocicorp/zero-sqlite3/')) {
+    return { url: SHIM_URL, shortCircuit: true };
+  }
+  return nextResolve(specifier, context);
+}
+
+export function load(url, context, nextLoad) {
+  if (url === SHIM_URL) {
+    return {
+      format: 'module',
+      shortCircuit: true,
+      source: \`
+import { createRequire } from 'node:module';
+const require = createRequire('\${BEDROCK_PATH}');
+const mod = require('\${BEDROCK_PATH}');
+const OrigDatabase = mod.Database;
+const SqliteError = mod.SqliteError;
+function Database(...args) {
+  const db = new OrigDatabase(...args);
+  try { db.pragma('busy_timeout = 30000'); db.pragma('synchronous = normal'); } catch(e) {}
   return db;
 }
 Database.prototype = OrigDatabase.prototype;
 Database.prototype.constructor = Database;
-Object.keys(OrigDatabase).forEach(function(k) { Database[k] = OrigDatabase[k]; });
+Object.keys(OrigDatabase).forEach(k => { Database[k] = OrigDatabase[k]; });
 Database.prototype.unsafeMode = function() { return this; };
 if (!Database.prototype.defaultSafeIntegers) Database.prototype.defaultSafeIntegers = function() { return this; };
 if (!Database.prototype.serialize) Database.prototype.serialize = function() { throw new Error('not supported in wasm'); };
 if (!Database.prototype.backup) Database.prototype.backup = function() { throw new Error('not supported in wasm'); };
-var tmpDb = new OrigDatabase(':memory:');
-var tmpStmt = tmpDb.prepare('SELECT 1');
-var SP = Object.getPrototypeOf(tmpStmt);
+const tmpDb = new OrigDatabase(':memory:');
+const tmpStmt = tmpDb.prepare('SELECT 1');
+const SP = Object.getPrototypeOf(tmpStmt);
 if (!SP.safeIntegers) SP.safeIntegers = function() { return this; };
 SP.scanStatus = function() { return undefined; };
 SP.scanStatusV2 = function() { return []; };
@@ -270,13 +284,27 @@ Database.SQLITE_SCANSTAT_SELECTID = 5;
 Database.SQLITE_SCANSTAT_PARENTID = 6;
 Database.SQLITE_SCANSTAT_NCYCLE = 7;
 Database.SQLITE_SCANSTAT_COMPLEX = 8;
-module.exports = Database;
-module.exports.SqliteError = SqliteError;
+export default Database;
+export { SqliteError };
+\`
+    };
+  }
+  return nextLoad(url, context);
+}
 `
   )
 
-  // return the node_modules root so it can be prepended to NODE_PATH
-  return resolve(tmp, 'orez-sqlite', 'node_modules')
+  // register entrypoint — passed via --import
+  const registerPath = resolve(dir, 'register.mjs')
+  const hooksUrl = `file://${hooksPath}`
+  writeFileSync(
+    registerPath,
+    `import { register } from 'node:module';
+register('${hooksUrl}', import.meta.url);
+`
+  )
+
+  return registerPath
 }
 
 async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
@@ -332,21 +360,17 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
     throw new Error('zero-cache cli.js not found. install @rocicorp/zero')
   }
 
-  // wasm sqlite: create a fake @rocicorp/zero-sqlite3 in tmpdir and prepend
-  // to NODE_PATH so node resolves our shim first. no require hooks, no
-  // Module._resolveFilename monkey-patching (which conflicts with vite).
+  // wasm sqlite: write shim + ESM loader to tmpdir, pass --import to intercept
+  // @rocicorp/zero-sqlite3 resolution with our bedrock-sqlite wasm build
   if (!config.disableWasmSqlite) {
-    const shimNodeModules = writeSqliteShim()
-    const existingNodePath = process.env.NODE_PATH || ''
-    env.NODE_PATH = existingNodePath
-      ? `${shimNodeModules}:${existingNodePath}`
-      : shimNodeModules
+    const registerPath = writeSqliteShim()
+    const registerUrl = `file://${registerPath}`
+    const existing = process.env.NODE_OPTIONS || ''
+    env.NODE_OPTIONS = `--import ${registerUrl} --max-old-space-size=16384 ${existing}`.trim()
+  } else {
+    const existing = process.env.NODE_OPTIONS || ''
+    if (existing) env.NODE_OPTIONS = existing
   }
-
-  const nodeOptions = !config.disableWasmSqlite
-    ? `--max-old-space-size=16384 ${process.env.NODE_OPTIONS || ''}`
-    : process.env.NODE_OPTIONS || ''
-  if (nodeOptions.trim()) env.NODE_OPTIONS = nodeOptions.trim()
 
   const child = spawn(zeroCacheBin, [], {
     env,
