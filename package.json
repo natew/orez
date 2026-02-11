@@ -49,6 +49,7 @@
     "bedrock-sqlite": "0.0.22",
     "citty": "^0.2.0",
     "pg-gateway": "^0.3.0-beta.4",
+    "postgres": "^3.4.5",
     "pgsql-parser": "^17.9.11"
   },
   "peerDependencies": {

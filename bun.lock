@@ -12,6 +12,7 @@
         "citty": "^0.2.0",
         "pg-gateway": "^0.3.0-beta.4",
         "pgsql-parser": "^17.9.11",
+        "postgres": "^3.4.5",
       },
       "devDependencies": {
         "@types/node": "^22.0.0",

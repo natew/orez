@@ -375,6 +375,98 @@ async function execDumpFile(
   return { executed, skipped }
 }
 
+// try restoring via wire protocol (postgres running on given port)
+// returns true if connected and restored, false if connection unavailable
+async function tryWireRestore(opts: {
+  port: number
+  user: string
+  password: string
+  clean: boolean
+  sqlFile: string
+}): Promise<boolean> {
+  const postgres = (await import('postgres')).default
+  const sql = postgres({
+    host: '127.0.0.1',
+    port: opts.port,
+    user: opts.user,
+    password: opts.password,
+    database: 'postgres',
+    connect_timeout: 3,
+    max: 1, // single connection so BEGIN/COMMIT work correctly
+  })
+
+  try {
+    await sql`SELECT 1`
+  } catch {
+    await sql.end({ timeout: 0 }).catch(() => {})
+    return false
+  }
+
+  // connected — restore errors should propagate, not fall back
+  log.orez(`connected via wire protocol on port ${opts.port}`)
+  try {
+    if (opts.clean) {
+      log.orez('dropping and recreating public schema')
+      await sql.unsafe('DROP SCHEMA public CASCADE')
+      await sql.unsafe('CREATE SCHEMA public')
+    }
+
+    const db = { exec: (query: string) => sql.unsafe(query) as Promise<unknown> }
+    const { executed, skipped } = await execDumpFile(db, opts.sqlFile)
+    log.orez(
+      `restored ${opts.sqlFile} via wire protocol (${executed} statements, ${skipped} skipped)`
+    )
+    return true
+  } finally {
+    await sql.end()
+  }
+}
+
+// restore by opening PGlite directly (requires no other process holding the lock)
+async function directRestore(opts: {
+  dataDir: string
+  clean: boolean
+  sqlFile: string
+}): Promise<void> {
+  const { PGlite } = await import('@electric-sql/pglite')
+  const { vector } = await import('@electric-sql/pglite/vector')
+  const { pg_trgm } = await import('@electric-sql/pglite/contrib/pg_trgm')
+
+  const dataPath = resolve(opts.dataDir, 'pgdata-postgres')
+
+  let db: InstanceType<typeof PGlite> | undefined
+  try {
+    db = new PGlite({
+      dataDir: dataPath,
+      extensions: { vector, pg_trgm },
+      relaxedDurability: true,
+    })
+    await db.waitReady
+
+    if (opts.clean) {
+      log.orez('dropping and recreating public schema')
+      await db.exec('DROP SCHEMA public CASCADE')
+      await db.exec('CREATE SCHEMA public')
+    }
+
+    const { executed, skipped } = await execDumpFile(db, opts.sqlFile)
+    log.orez(
+      `restored ${opts.sqlFile} into ${dataPath} (${executed} statements, ${skipped} skipped)`
+    )
+  } catch (err: any) {
+    if (err?.message?.includes('lock')) {
+      console.error(
+        'error: database is locked — stop orez first before running pg_restore'
+      )
+    } else {
+      console.error(`error: ${err?.message ?? err}`)
+    }
+    process.exit(1)
+  } finally {
+    await db?.close()
+  }
+}
+
 const pgRestoreCommand = defineCommand({
   meta: {
     name: 'pg_restore',
@@ -396,12 +488,28 @@ const pgRestoreCommand = defineCommand({
       description: 'drop and recreate public schema before restoring',
       default: false,
     },
+    'pg-port': {
+      type: 'string',
+      description: 'postgresql port for wire protocol connection',
+      default: '6434',
+    },
+    'pg-user': {
+      type: 'string',
+      description: 'postgresql user',
+      default: 'user',
+    },
+    'pg-password': {
+      type: 'string',
+      description: 'postgresql password',
+      default: 'password',
+    },
+    direct: {
+      type: 'boolean',
+      description: 'force direct PGlite access, skip wire protocol auto-detection',
+      default: false,
+    },
   },
   async run({ args }) {
-    const { PGlite } = await import('@electric-sql/pglite')
-    const { vector } = await import('@electric-sql/pglite/vector')
-    const { pg_trgm } = await import('@electric-sql/pglite/contrib/pg_trgm')
-
     await loadModule() // initialize pgsql-parser WASM
 
     const sqlFile = args.file
@@ -410,39 +518,30 @@ const pgRestoreCommand = defineCommand({
       process.exit(1)
     }
 
-    const dataPath = resolve(args['data-dir'], 'pgdata-postgres')
-
-    let db: InstanceType<typeof PGlite> | undefined
-    try {
-      db = new PGlite({
-        dataDir: dataPath,
-        extensions: { vector, pg_trgm },
-        relaxedDurability: true,
-      })
-      await db.waitReady
-
-      if (args.clean) {
-        log.orez('dropping and recreating public schema')
-        await db.exec('DROP SCHEMA public CASCADE')
-        await db.exec('CREATE SCHEMA public')
-      }
-
-      const { executed, skipped } = await execDumpFile(db, sqlFile)
-      log.orez(
-        `restored ${sqlFile} into ${dataPath} (${executed} statements, ${skipped} skipped)`
-      )
-    } catch (err: any) {
-      if (err?.message?.includes('lock')) {
-        console.error(
-          'error: database is locked — stop orez first before running pg_restore'
-        )
-      } else {
+    // try wire protocol first (unless --direct)
+    if (!args.direct) {
+      try {
+        const restored = await tryWireRestore({
+          port: Number(args['pg-port']),
+          user: args['pg-user'],
+          password: args['pg-password'],
+          clean: args.clean,
+          sqlFile,
+        })
+        if (restored) return
+        log.orez('wire protocol unavailable, falling back to direct PGlite')
+      } catch (err: any) {
+        // connected but restore failed — report error, don't fall back
         console.error(`error: ${err?.message ?? err}`)
+        process.exit(1)
       }
-      process.exit(1)
-    } finally {
-      await db?.close()
     }
+
+    await directRestore({
+      dataDir: args['data-dir'],
+      clean: args.clean,
+      sqlFile,
+    })
   },
 })
 
