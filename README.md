@@ -1,6 +1,6 @@
 # orez
 
-It's [Zero](https://zero.rocicorp.dev) and [Postgres](https://pglite.dev) with no native dependencies in one package. Helped by a custom WASM fork of SQLite's [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) called [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite). No Docker, no Postgres install, no `node-gyp`, no platform-specific binaries.
+[Zero](https://zero.rocicorp.dev) and [PGlite](https://pglite.dev) made to play well together, with no native dependencies. Helped by a custom WASM fork of SQLite's [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) called [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite). No Docker, no Postgres install, no `node-gyp`, no platform-specific binaries.
 
 ```
 bunx orez
