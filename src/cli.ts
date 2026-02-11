@@ -227,7 +227,7 @@ function copyValueToLiteral(val: string): string {
 }
 
 // stream a sql dump file statement-by-statement with transaction batching
-async function execDumpFile(
+export async function execDumpFile(
   db: { exec: (sql: string) => Promise<unknown> },
   filePath: string
 ): Promise<{ executed: number; skipped: number }> {
@@ -251,7 +251,12 @@ async function execDumpFile(
   let copyTarget: { table: string; columns: string[] } | null = null
   // accumulate COPY rows for multi-row INSERT (reduces statement count ~50x)
   const COPY_ROWS_PER_INSERT = 50
+  // flush early if accumulated SQL exceeds this (prevents WASM OOM on huge rows)
+  const COPY_BATCH_MAX_BYTES = 1_000_000
+  // skip individual rows larger than this — PGlite WASM crashes around 24MB
+  const MAX_ROW_BYTES = 16_000_000
   let copyRows: string[] = []
+  let copyRowsBytes = 0
 
   async function flushCopyRows() {
     if (copyRows.length === 0 || !copyTarget) return
@@ -262,6 +267,7 @@ async function execDumpFile(
     executed += copyRows.length
     batchCount += copyRows.length
     copyRows = []
+    copyRowsBytes = 0
   }
 
   async function flushBatch() {
@@ -292,8 +298,35 @@ async function execDumpFile(
         continue
       }
       const values = line.split('\t').map(copyValueToLiteral)
-      copyRows.push(`(${values.join(', ')})`)
-      if (copyRows.length >= COPY_ROWS_PER_INSERT) {
+      const row = `(${values.join(', ')})`
+
+      // skip rows that exceed WASM memory limits (~24MB crashes PGlite)
+      if (row.length > MAX_ROW_BYTES) {
+        log.orez(
+          `skipping oversized row (${(row.length / 1_000_000).toFixed(1)}MB) in ${copyTarget.table}`
+        )
+        skipped++
+        continue
+      }
+
+      // flush accumulated rows before adding if this would exceed size limit
+      if (copyRows.length > 0 && copyRowsBytes + row.length > COPY_BATCH_MAX_BYTES) {
+        if (!inBatch) {
+          await db.exec('BEGIN')
+          inBatch = true
+        }
+        await flushCopyRows()
+        if (batchCount >= BATCH_SIZE) {
+          await flushBatch()
+        }
+      }
+
+      copyRows.push(row)
+      copyRowsBytes += row.length
+      if (
+        copyRows.length >= COPY_ROWS_PER_INSERT ||
+        copyRowsBytes >= COPY_BATCH_MAX_BYTES
+      ) {
         if (!inBatch) {
           await db.exec('BEGIN')
           inBatch = true
@@ -388,8 +421,14 @@ async function execDumpFile(
     } else {
       // DDL runs outside batches
       await flushBatch()
-      await db.exec(rewritten)
-      executed++
+      try {
+        await db.exec(rewritten)
+        executed++
+      } catch (err: any) {
+        // non-fatal DDL errors (missing tables from filtered dumps, etc.)
+        log.orez(`warning: ${err?.message?.split('\n')[0] ?? err}`)
+        skipped++
+      }
     }
   }
 
