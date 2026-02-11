@@ -125,18 +125,23 @@ Your entire environment is forwarded to the zero-cache child process. This means
 
 orez provides sensible defaults for a few variables:
 
-| Variable                | Default             | Overridable |
-| ----------------------- | ------------------- | ----------- |
-| `NODE_ENV`              | `development`       | yes         |
-| `ZERO_LOG_LEVEL`        | from `--log-level`  | yes         |
-| `ZERO_NUM_SYNC_WORKERS` | `1`                 | yes         |
-| `ZERO_UPSTREAM_DB`      | _(managed by orez)_ | no          |
-| `ZERO_CVR_DB`           | _(managed by orez)_ | no          |
-| `ZERO_CHANGE_DB`        | _(managed by orez)_ | no          |
-| `ZERO_REPLICA_FILE`     | _(managed by orez)_ | no          |
-| `ZERO_PORT`             | _(managed by orez)_ | no          |
+| Variable                               | Default             | Overridable |
+| -------------------------------------- | ------------------- | ----------- |
+| `NODE_ENV`                             | `development`       | yes         |
+| `ZERO_LOG_LEVEL`                       | from `--log-level`  | yes         |
+| `ZERO_NUM_SYNC_WORKERS`                | `1`                 | yes         |
+| `ZERO_ENABLE_QUERY_PLANNER`            | `false`             | yes         |
+| `ZERO_INITIAL_SYNC_TABLE_COPY_WORKERS` | `999`               | yes         |
+| `ZERO_AUTO_RESET`                      | `true`              | yes         |
+| `ZERO_UPSTREAM_DB`                     | _(managed by orez)_ | no          |
+| `ZERO_CVR_DB`                          | _(managed by orez)_ | no          |
+| `ZERO_CHANGE_DB`                       | _(managed by orez)_ | no          |
+| `ZERO_REPLICA_FILE`                    | _(managed by orez)_ | no          |
+| `ZERO_PORT`                            | _(managed by orez)_ | no          |
 
 The `--log-level` flag controls both zero-cache (`ZERO_LOG_LEVEL`) and PGlite's debug output. Default is `warn` to keep output quiet. Set to `info` or `debug` for troubleshooting.
+
+`ZERO_INITIAL_SYNC_TABLE_COPY_WORKERS` is set high to work around a postgres.js bug where concurrent COPY TO STDOUT on reused connections hangs. This gives each table its own connection during initial sync. `ZERO_AUTO_RESET` lets zero-cache recover from replication errors (e.g. after `pg_restore`) by wiping and resyncing instead of crashing. `ZERO_ENABLE_QUERY_PLANNER` is disabled because it causes freezes with both WASM and native SQLite.
 
 The layering is: orez defaults → your env → orez-managed connection vars. So setting `ZERO_LOG_LEVEL=debug` in your shell overrides the `--log-level` default, but you can't override the database connection strings (orez needs to point zero-cache at its own proxy).
 
@@ -196,7 +201,7 @@ src/
   log.ts                colored log prefixes
   mutex.ts              simple mutex for serializing pglite access
   port.ts               auto port finding
-  pg-proxy.ts           tcp proxy with per-instance routing and query rewriting
+  pg-proxy.ts           raw tcp proxy implementing postgresql wire protocol
   pglite-manager.ts     multi-instance pglite creation and migration runner
   s3-local.ts           local s3-compatible server (orez/s3)
   vite-plugin.ts        vite dev server plugin (orez/vite)

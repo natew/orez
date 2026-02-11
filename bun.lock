@@ -8,9 +8,8 @@
         "@electric-sql/pglite": "^0.2.17",
         "@electric-sql/pglite-tools": "0.2.4",
         "@rocicorp/zero": ">=0.1.0",
-        "bedrock-sqlite": "0.0.28",
+        "bedrock-sqlite": "0.0.30",
         "citty": "^0.2.0",
-        "pg-gateway": "^0.3.0-beta.4",
         "pgsql-parser": "^17.9.11",
         "postgres": "^3.4.5",
       },
@@ -480,7 +479,7 @@
 
     "basic-auth": ["basic-auth@2.0.1", "", { "dependencies": { "safe-buffer": "5.1.2" } }, "sha512-NF+epuEdnUYVlGuhaxbbq+dvJttwLnGY+YixlXlME5KpQ5W3CnXA5cVTneY3SPbPDRkcjMbifrwmFYcClgOZeg=="],
 
-    "bedrock-sqlite": ["bedrock-sqlite@0.0.28", "", {}, "sha512-GUVgMKgKsgz4o/VNlKwRGiAQM5SMVS8NvsZZTGKAcHjnq8/15zP+OzAkr4GoUZnDq2OBgpZg+PJ85fGuWN9VmA=="],
+    "bedrock-sqlite": ["bedrock-sqlite@0.0.30", "", {}, "sha512-iPVBckaXu5C8z1o280R3zhJyNXViREvmeO/ykyW7iEUoX+0Dx4Hc8f5k9kEg1VqOIvn/HnhNfM4chbGsm3Wy4g=="],
 
     "bignumber.js": ["bignumber.js@9.3.1", "", {}, "sha512-Ko0uX15oIUS7wJ3Rb30Fs6SkVbLmPBAKdlm7q9+ak9bbIeFf0MwuBsQV6z7+X768/cHsfg+WlysDWJcmthjsjQ=="],
 
@@ -769,8 +768,6 @@
     "pathval": ["pathval@2.0.1", "", {}, "sha512-//nshmD55c46FuFw26xV/xFAaB5HF9Xdap7HJBBnrKdAd6/GxDBaNA1870O79+9ueg61cZLSVc+OaFlfmObYVQ=="],
 
     "pg-format": ["pg-format-fix@1.0.5", "", {}, "sha512-HcXVy9Zk4kn87P0+U9XSxGtenNyknbPB87NreixSBk0lYJy89u+d/zQbS+f/aTTxABQ/B6FH1KdBB5EsGzRS2w=="],
-
-    "pg-gateway": ["pg-gateway@0.3.0-beta.4", "", {}, "sha512-CTjsM7Z+0Nx2/dyZ6r8zRsc3f9FScoD5UAOlfUx1Fdv/JOIWvRbF7gou6l6vP+uypXQVoYPgw8xZDXgMGvBa4Q=="],
 
     "pg-int8": ["pg-int8@1.0.1", "", {}, "sha512-WCtabS6t3c8SkpDBUlb1kjOs7l66xsGdKpIPZsg4wR+B3+u9UAum2odSsF9tnvxg80h4ZxLWMy4pRjOsFIqQpw=="],
 

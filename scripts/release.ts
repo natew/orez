@@ -72,7 +72,8 @@ if (!skipTest) {
   run('bun run test')
   if (hasSqliteWasm) {
     console.info('\nchecking bedrock-sqlite...')
-    run('bunx vitest run', { cwd: sqliteWasmDir })
+    run('bun install', { cwd: sqliteWasmDir })
+    run('bun run test', { cwd: sqliteWasmDir })
   }
 }
 

@@ -90,6 +90,7 @@ const pgDumpCommand = defineCommand({
       } else {
         process.stdout.write(sql)
       }
+      process.exit(0)
     } catch (err: any) {
       if (err?.message?.includes('lock')) {
         console.error(
@@ -624,7 +625,7 @@ const pgRestoreCommand = defineCommand({
           clean: args.clean,
           sqlFile,
         })
-        if (restored) return
+        if (restored) process.exit(0)
         log.orez('wire protocol unavailable, falling back to direct PGlite')
       } catch (err: any) {
         // connected but restore failed — report error, don't fall back
@@ -638,6 +639,7 @@ const pgRestoreCommand = defineCommand({
       clean: args.clean,
       sqlFile,
     })
+    process.exit(0)
   },
 })
 

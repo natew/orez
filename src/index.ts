@@ -304,6 +304,14 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
     // loops with wasm sqlite and has caused freezes with native too.
     // planner is an optimization, not required for correctness.
     ZERO_ENABLE_QUERY_PLANNER: 'false',
+    // work around postgres.js bug: concurrent COPY TO STDOUT on a reused
+    // connection causes .readable() to hang indefinitely. setting workers
+    // high ensures each table gets its own connection (1 COPY per conn).
+    // zero-cache already applies this workaround on windows (initial-sync.js).
+    ZERO_INITIAL_SYNC_TABLE_COPY_WORKERS: '999',
+    // auto-reset on replication errors (e.g. after pg_restore) instead of
+    // crashing — zero-cache wipes its replica and resyncs from scratch.
+    ZERO_AUTO_RESET: 'true',
   }
 
   const env: Record<string, string> = {
@@ -370,7 +378,7 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
 
 async function waitForZeroCache(
   config: ZeroLiteConfig,
-  timeoutMs = 60000
+  timeoutMs = 120000
 ): Promise<void> {
   const start = Date.now()
   const url = `http://127.0.0.1:${config.zeroPort}/`
@@ -378,7 +386,7 @@ async function waitForZeroCache(
   while (Date.now() - start < timeoutMs) {
     try {
       const res = await fetch(url)
-      if (res.ok) return
+      if (res.ok || res.status === 404) return
     } catch {
       // not ready yet
     }
