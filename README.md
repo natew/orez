@@ -169,7 +169,7 @@ The pgoutput encoder produces spec-compliant binary messages: Begin, Relation, I
 
 ## Tests
 
-141 tests — 104 orez tests across 7 test files covering the full stack from binary encoding to TCP-level integration, plus 37 bedrock-sqlite tests covering the WASM SQLite engine:
+145 tests — 108 orez tests across 8 test files covering the full stack from binary encoding to TCP-level integration, plus 37 bedrock-sqlite tests covering the WASM SQLite engine:
 
 ```
 bun run test                                # orez tests
@@ -238,17 +238,30 @@ pg_restore options:
   --clean             drop and recreate public schema before restoring
 ```
 
-Restore streams the dump file statement-by-statement so it can handle large dumps without loading everything into memory. It also automatically filters out things PGlite can't handle:
+`pg_restore` also supports connecting to a running orez instance via wire protocol — just pass `--pg-port`:
 
-- Extensions not available in PGlite (`pg_stat_statements`, `pg_buffercache`, `pg_cron`, etc.)
-- `SET transaction_timeout` (PostgreSQL 18+ artifact)
-- psql meta-commands like `\restrict`
+```
+bunx orez pg_restore backup.sql --pg-port 6434
+bunx orez pg_restore backup.sql --pg-port 6434 --pg-user user --pg-password password
+bunx orez pg_restore backup.sql --direct   # force direct PGlite access, skip wire protocol
+```
 
-This means you can take a dump from a production Postgres database and restore it directly into orez — unsupported statements are silently skipped and the rest executes normally.
+Restore streams the dump file line-by-line so it can handle large dumps without loading everything into memory. SQL is parsed using [pgsql-parser](https://www.npmjs.com/package/pgsql-parser) (the real PostgreSQL C parser compiled to WASM) for accurate statement classification and rewriting.
 
-orez must not be running when using these commands — PGlite data directories are single-process. The commands will detect a locked database and tell you to stop orez first.
+### What restore handles automatically
 
-Standard Postgres tools (`pg_dump`, `pg_restore`, `psql`) also work against the running proxy since orez presents a standard PostgreSQL 16.4 version string over the wire.
+- **COPY FROM stdin → INSERT**: PGlite WASM doesn't support the COPY protocol, so COPY blocks are converted to batched multi-row INSERTs (50 rows per statement, flushed at 1MB)
+- **Unsupported extensions**: `pg_stat_statements`, `pg_buffercache`, `pg_cron`, etc. — CREATE, DROP, and COMMENT ON EXTENSION statements are skipped
+- **Idempotent DDL**: `CREATE SCHEMA` → `IF NOT EXISTS`, `CREATE FUNCTION/VIEW` → `OR REPLACE`
+- **Oversized rows**: Rows larger than 16MB are skipped with a warning (PGlite WASM crashes around 24MB per value)
+- **Missing table references**: DDL errors from filtered dumps (e.g. ALTER TABLE on excluded tables) log a warning and continue
+- **Transaction batching**: Data statements are grouped 200 per transaction with CHECKPOINT every 3 batches to manage WASM memory
+- **PostgreSQL 18+ artifacts**: `SET transaction_timeout` silently skipped
+- **psql meta-commands**: `\restrict` and similar silently skipped
+
+This means you can take a `pg_dump` from a production Postgres database and restore it directly into orez — incompatible statements are handled automatically.
+
+When orez is not running, `pg_restore` opens PGlite directly. When orez is running, pass `--pg-port` to restore through the wire protocol. Standard Postgres tools (`pg_dump`, `pg_restore`, `psql`) also work against the running proxy since orez presents a standard PostgreSQL 16.4 version string over the wire.
 
 ## Extra: orez/s3
 
