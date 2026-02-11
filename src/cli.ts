@@ -162,22 +162,68 @@ const BATCH_SIZE = 500
 // run CHECKPOINT every N batches to flush WAL and reclaim wasm memory
 const CHECKPOINT_INTERVAL = 10
 
-// true for statements that are data manipulation (INSERT/UPDATE/DELETE/COPY)
+// true for statements that are data manipulation (INSERT/UPDATE/DELETE)
 // these get batched into transactions. DDL runs outside batches.
+// note: COPY FROM stdin is handled separately by the copy-data converter
 function isDataStatement(stmt: string): boolean {
   try {
     const parsed = parseSync(stmt)
     if (parsed.stmts.length === 0) return false
     const nodeType = Object.keys(parsed.stmts[0].stmt)[0]
     return (
-      nodeType === 'InsertStmt' ||
-      nodeType === 'UpdateStmt' ||
-      nodeType === 'DeleteStmt' ||
-      nodeType === 'CopyStmt'
+      nodeType === 'InsertStmt' || nodeType === 'UpdateStmt' || nodeType === 'DeleteStmt'
     )
   } catch {
     return false
   }
+}
+
+// detect COPY ... FROM stdin and extract table + columns from AST
+function parseCopyFromStdin(stmt: string): { table: string; columns: string[] } | null {
+  try {
+    const parsed = parseSync(stmt)
+    if (parsed.stmts.length === 0) return null
+    const node = parsed.stmts[0].stmt.CopyStmt
+    if (!node || !node.is_from) return null
+    const schema = node.relation.schemaname
+    const table = schema
+      ? `"${schema}"."${node.relation.relname}"`
+      : `"${node.relation.relname}"`
+    const columns = node.attlist ? node.attlist.map((a: any) => `"${a.String.sval}"`) : []
+    return { table, columns }
+  } catch {
+    return null
+  }
+}
+
+// convert a COPY text-format value to a SQL literal
+// handles: \N → NULL, \\ → \, \t \n \r escapes, and single-quote escaping
+function copyValueToLiteral(val: string): string {
+  if (val === '\\N') return 'NULL'
+  let result = ''
+  for (let i = 0; i < val.length; i++) {
+    if (val[i] === '\\' && i + 1 < val.length) {
+      const next = val[i + 1]
+      if (next === '\\') {
+        result += '\\'
+        i++
+      } else if (next === 'n') {
+        result += '\n'
+        i++
+      } else if (next === 'r') {
+        result += '\r'
+        i++
+      } else if (next === 't') {
+        result += '\t'
+        i++
+      } else {
+        result += val[i]
+      }
+    } else {
+      result += val[i]
+    }
+  }
+  return "'" + result.replace(/'/g, "''") + "'"
 }
 
 // stream a sql dump file statement-by-statement with transaction batching
@@ -201,6 +247,9 @@ async function execDumpFile(
   let inBatch = false
   let dollarTag: string | null = null // tracks $tag$ quoting
 
+  // copy-data mode: when we hit COPY ... FROM stdin, we read data lines until \.
+  let copyTarget: { table: string; columns: string[] } | null = null
+
   async function flushBatch() {
     if (inBatch) {
       await db.exec('COMMIT')
@@ -215,6 +264,29 @@ async function execDumpFile(
   }
 
   for await (const line of rl) {
+    // in copy-data mode: read tab-delimited rows until \.
+    if (copyTarget) {
+      if (line === '\\.') {
+        copyTarget = null
+        continue
+      }
+      const values = line.split('\t').map(copyValueToLiteral)
+      const colList =
+        copyTarget.columns.length > 0 ? ` (${copyTarget.columns.join(', ')})` : ''
+      const insert = `INSERT INTO ${copyTarget.table}${colList} VALUES (${values.join(', ')})`
+      if (!inBatch) {
+        await db.exec('BEGIN')
+        inBatch = true
+      }
+      await db.exec(insert)
+      executed++
+      batchCount++
+      if (batchCount >= BATCH_SIZE) {
+        await flushBatch()
+      }
+      continue
+    }
+
     // skip empty lines and sql comments (only outside dollar-quoted blocks)
     if (!dollarTag && (line === '' || line.startsWith('--'))) continue
 
@@ -241,6 +313,13 @@ async function execDumpFile(
 
     if (shouldSkipStatement(stmt)) {
       skipped++
+      continue
+    }
+
+    // check for COPY ... FROM stdin → convert to INSERTs
+    const copyInfo = parseCopyFromStdin(stmt)
+    if (copyInfo) {
+      copyTarget = copyInfo
       continue
     }
 
