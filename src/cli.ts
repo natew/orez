@@ -323,19 +323,32 @@ async function execDumpFile(
       continue
     }
 
-    // rewrite CREATE SCHEMA → CREATE SCHEMA IF NOT EXISTS
+    // rewrite statements to be idempotent so restores don't crash on "already exists"
     let rewritten = stmt
     try {
       const parsed = parseSync(stmt)
       if (parsed.stmts.length > 0) {
         const nodeType = Object.keys(parsed.stmts[0].stmt)[0]
-        if (
-          nodeType === 'CreateSchemaStmt' &&
-          !parsed.stmts[0].stmt.CreateSchemaStmt.if_not_exists
-        ) {
-          parsed.stmts[0].stmt.CreateSchemaStmt.if_not_exists = true
-          rewritten = deparseSync(parsed)
+        const node = parsed.stmts[0].stmt[nodeType]
+        let modified = false
+
+        // CREATE SCHEMA → CREATE SCHEMA IF NOT EXISTS
+        if (nodeType === 'CreateSchemaStmt' && !node.if_not_exists) {
+          node.if_not_exists = true
+          modified = true
         }
+        // CREATE FUNCTION/PROCEDURE → CREATE OR REPLACE
+        if (nodeType === 'CreateFunctionStmt' && !node.replace) {
+          node.replace = true
+          modified = true
+        }
+        // CREATE VIEW → CREATE OR REPLACE VIEW
+        if (nodeType === 'ViewStmt' && !node.replace) {
+          node.replace = true
+          modified = true
+        }
+
+        if (modified) rewritten = deparseSync(parsed)
       }
     } catch {
       // if parse/deparse fails, use original
