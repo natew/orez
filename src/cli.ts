@@ -153,6 +153,16 @@ function shouldSkipStatement(stmt: string): boolean {
       const extName = node.object?.String?.sval
       if (extName && UNSUPPORTED_EXTENSIONS.has(extName)) return true
     }
+
+    // skip CREATE/ALTER/DROP PUBLICATION — pglite doesn't support wal_level=logical
+    // internally, so CREATE PUBLICATION errors and can roll back the transaction
+    // (orez handles replication via its own change tracker, not publications)
+    if (
+      nodeType === 'CreatePublicationStmt' ||
+      nodeType === 'AlterPublicationStmt'
+    )
+      return true
+    if (nodeType === 'DropStmt' && node.removeType === 'OBJECT_PUBLICATION') return true
   }
 
   return false
