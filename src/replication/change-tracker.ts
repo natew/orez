@@ -67,6 +67,35 @@ export async function installChangeTracking(db: PGlite): Promise<void> {
     $$ LANGUAGE plpgsql;
   `)
 
+  // auto-install change tracking on tables created after startup (e.g. via restore
+  // or wire protocol). uses a DDL event trigger that fires on CREATE TABLE.
+  await db.exec(`
+    CREATE OR REPLACE FUNCTION public._zero_auto_track() RETURNS event_trigger AS $$
+    DECLARE
+      obj record;
+    BEGIN
+      FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands()
+                 WHERE command_tag = 'CREATE TABLE'
+      LOOP
+        IF obj.schema_name = 'public'
+           AND obj.object_identity NOT LIKE '%._zero_%'
+           AND obj.object_identity NOT LIKE '%.migrations'
+        THEN
+          EXECUTE format(
+            'CREATE TRIGGER _zero_change_trigger AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION public._zero_track_change()',
+            obj.object_identity
+          );
+        END IF;
+      END LOOP;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP EVENT TRIGGER IF EXISTS _zero_auto_track_trigger;
+    CREATE EVENT TRIGGER _zero_auto_track_trigger ON ddl_command_end
+      WHEN TAG IN ('CREATE TABLE')
+      EXECUTE FUNCTION public._zero_auto_track();
+  `)
+
   // install triggers on all public tables
   await installTriggersOnAllTables(db)
 }
@@ -138,6 +167,58 @@ async function installTriggersOnAllTables(db: PGlite): Promise<void> {
   }
 
   log.debug.pglite(`installed change tracking triggers on ${count} tables`)
+}
+
+/**
+ * re-install change tracking triggers on any public tables that don't have them.
+ * catches tables created between startup and replication start.
+ */
+export async function ensureChangeTrackingOnAllTables(db: PGlite): Promise<void> {
+  const pubName = process.env.ZERO_APP_PUBLICATIONS
+  let tables: { tablename: string }[]
+
+  if (pubName) {
+    const result = await db.query<{ tablename: string }>(
+      `SELECT tablename FROM pg_publication_tables
+       WHERE pubname = $1
+         AND schemaname = 'public'
+         AND tablename NOT LIKE '_zero_%'`,
+      [pubName]
+    )
+    tables = result.rows
+  } else {
+    const result = await db.query<{ tablename: string }>(
+      `SELECT tablename FROM pg_tables
+       WHERE schemaname = 'public'
+         AND tablename NOT IN ('migrations', '_zero_changes')
+         AND tablename NOT LIKE '_zero_%'`
+    )
+    tables = result.rows
+  }
+
+  // find tables missing the change trigger
+  const triggered = await db.query<{ event_object_table: string }>(
+    `SELECT DISTINCT event_object_table FROM information_schema.triggers
+     WHERE trigger_name = '_zero_change_trigger'
+       AND event_object_schema = 'public'`
+  )
+  const hasTracker = new Set(triggered.rows.map((r) => r.event_object_table))
+
+  let count = 0
+  for (const { tablename } of tables) {
+    if (hasTracker.has(tablename)) continue
+    const quoted = quoteIdent(tablename)
+    await db.exec(`
+      CREATE TRIGGER _zero_change_trigger
+        AFTER INSERT OR UPDATE OR DELETE ON public.${quoted}
+        FOR EACH ROW EXECUTE FUNCTION public._zero_track_change();
+    `)
+    count++
+  }
+
+  if (count > 0) {
+    log.debug.pglite(`installed change tracking on ${count} new tables`)
+  }
 }
 
 /**

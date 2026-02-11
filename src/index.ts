@@ -115,6 +115,14 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     await installChangeTracking(db)
   }
 
+  // run beforeZero callback (e.g. create tables before zero-cache starts)
+  if (config.beforeZero) {
+    log.debug.orez('running beforeZero callback')
+    await config.beforeZero(db)
+    // re-install change tracking on tables created by the callback
+    await installChangeTracking(db)
+  }
+
   // clean up stale sqlite replica from previous runs
   cleanupStaleReplica(config)
 
@@ -233,7 +241,6 @@ var SqliteError = mod.SqliteError;
 function Database() {
   var db = new OrigDatabase(...arguments);
   try {
-    db.pragma('journal_mode = delete');
     db.pragma('busy_timeout = 30000');
     db.pragma('synchronous = normal');
   } catch(e) {}

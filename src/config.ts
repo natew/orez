@@ -15,6 +15,7 @@ export interface ZeroLiteConfig {
   logLevel: LogLevel
   pgliteOptions: Partial<PGliteOptions>
   onDbReady: string
+  beforeZero: ((db: import('@electric-sql/pglite').PGlite) => Promise<void>) | null
 }
 
 export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConfig {
@@ -31,6 +32,7 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     logLevel: overrides.logLevel || 'warn',
     pgliteOptions: overrides.pgliteOptions || {},
     onDbReady: overrides.onDbReady || '',
+    beforeZero: overrides.beforeZero || null,
   }
 }
 

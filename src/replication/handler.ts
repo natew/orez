@@ -11,6 +11,7 @@ import {
   getChangesSince,
   getCurrentWatermark,
   installTriggersOnShardTables,
+  ensureChangeTrackingOnAllTables,
   type ChangeRecord,
 } from './change-tracker.js'
 import {
@@ -284,6 +285,9 @@ export async function handleStartReplication(
   // "already in transaction" errors when they interleave.
   await mutex.acquire()
   try {
+    // install change tracking triggers on any tables created after startup
+    await ensureChangeTrackingOnAllTables(db)
+
     // install change tracking triggers on shard schema tables (e.g. chat_0.clients)
     // these track zero-cache's lastMutationID for .server promise resolution
     await installTriggersOnShardTables(db)
