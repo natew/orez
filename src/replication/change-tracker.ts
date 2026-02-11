@@ -276,6 +276,17 @@ export async function getChangesSince(
   return result.rows
 }
 
+export async function purgeConsumedChanges(
+  db: PGlite,
+  watermark: number
+): Promise<number> {
+  const result = await db.query<{ count: string }>(
+    'WITH deleted AS (DELETE FROM public._zero_changes WHERE watermark <= $1 RETURNING 1) SELECT count(*)::text AS count FROM deleted',
+    [watermark]
+  )
+  return Number(result.rows[0]?.count || 0)
+}
+
 export async function getCurrentWatermark(db: PGlite): Promise<number> {
   const result = await db.query<{ last_value: string; is_called: boolean }>(
     'SELECT last_value, is_called FROM public._zero_watermark'

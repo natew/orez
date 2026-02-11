@@ -10,6 +10,7 @@ import { log } from '../log.js'
 import {
   getChangesSince,
   getCurrentWatermark,
+  purgeConsumedChanges,
   installTriggersOnShardTables,
   ensureChangeTrackingOnAllTables,
   type ChangeRecord,
@@ -465,7 +466,9 @@ export async function handleStartReplication(
   const pollIntervalIdle = 500
   const pollIntervalCatchUp = 20
   const batchSize = 2000
+  const purgeEveryN = 10
   let running = true
+  let pollsSincePurge = 0
 
   const poll = async () => {
     while (running) {
@@ -490,6 +493,21 @@ export async function handleStartReplication(
             columnTypeOids
           )
           lastWatermark = changes[changes.length - 1].watermark
+
+          // purge consumed changes periodically to free wasm memory
+          pollsSincePurge++
+          if (pollsSincePurge >= purgeEveryN) {
+            pollsSincePurge = 0
+            await mutex.acquire()
+            try {
+              const purged = await purgeConsumedChanges(db, lastWatermark)
+              if (purged > 0) {
+                log.debug.proxy(`purged ${purged} consumed changes`)
+              }
+            } finally {
+              mutex.release()
+            }
+          }
         }
 
         // send keepalive
