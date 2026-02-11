@@ -8,6 +8,8 @@ bunx orez
 
 Starts PGlite (WASM Postgres), a TCP proxy, and zero-cache with WASM SQLite. Exports a CLI, programmatic API, and Vite plugin. Comes with PGlite extensions `pgvector` and `pg_trgm` enabled by default. Includes `pg_dump` and `pg_restore` subcommands that can restore production Postgres dumps directly into PGlite — handling COPY→INSERT conversion, unsupported extension filtering, idempotent DDL rewriting, and WASM memory management automatically.
 
+Auto-configures Node heap size based on system memory, adaptively polls for replication changes (~500x faster catch-up after large restores), purges consumed WAL changes to prevent WASM OOM, and auto-tracks tables created at runtime via DDL event triggers.
+
 <p align="center">
   <img src="logo.svg" alt="orez is hebrew for rice — zero, pglite, and sqlite-wasm hanging out" width="320" />
 </p>
@@ -65,6 +67,18 @@ await stop()
 
 All options are optional with sensible defaults. Ports auto-find if in use.
 
+### `beforeZero` hook
+
+Run setup logic after the database is ready but before zero-cache starts — useful for creating tables, seeding data, or deploying permissions:
+
+```typescript
+const { stop } = await startZeroLite({
+  beforeZero: async (db) => {
+    await db.exec(`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT)`)
+  },
+})
+```
+
 ## Vite plugin
 
 ```typescript
@@ -111,13 +125,21 @@ Each instance has its own mutex for serializing queries. Extensions (pgvector, p
 
 zero-cache needs logical replication to stay in sync with the upstream database. PGlite doesn't support logical replication natively, so orez fakes it. Every mutation is captured by triggers into a changes table, then encoded into the pgoutput binary protocol and streamed to zero-cache through the replication connection. zero-cache can't tell the difference.
 
-The replication handler also tracks shard schema tables (e.g., `chat_0.clients`, `chat_0.mutations`) that zero-cache creates for mutation state. These are monitored via change tracking triggers so that `.server` promises on zero mutations resolve correctly.
+Replication polling is adaptive — 20ms intervals when catching up to pending changes, 500ms when idle — with a batch size of 2000 changes per poll. After a large `pg_restore` (40K+ rows), this catches up in seconds instead of minutes. Consumed changes are purged every 10 poll cycles to prevent the `_zero_changes` table from growing unbounded and triggering WASM out-of-memory.
+
+Tables created at runtime (e.g., zero-cache's shard schema tables like `chat_0.clients` and `chat_0.mutations`) are automatically detected via a DDL event trigger and enrolled in change tracking without a restart.
+
+The replication handler also tracks shard schema tables so that `.server` promises on zero mutations resolve correctly.
 
 ### Zero native dependencies
 
 The whole point of orez is that `bunx orez` works everywhere with no native compilation step. Postgres runs in-process as WASM via PGlite. But zero-cache also needs SQLite, and `@rocicorp/zero-sqlite3` ships as a compiled C addon — which means `node-gyp`, build tools, and platform-specific binaries.
 
 orez ships its own package, [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite) — SQLite's [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) recompiled to WASM with BEGIN CONCURRENT and WAL2 support. At startup, orez patches `@rocicorp/zero-sqlite3` to load bedrock-sqlite instead of the native C addon. Both databases run as WASM — nothing to compile, nothing platform-specific. Just `bun install` and go.
+
+### Auto heap sizing
+
+The CLI detects system memory and re-spawns the process with `--max-old-space-size` set to ~50% of available RAM (minimum 4GB). PGlite WASM needs substantial heap for large datasets and restores — this prevents cryptic V8 OOM crashes without requiring manual tuning.
 
 ## Environment variables
 
@@ -170,9 +192,83 @@ The proxy intercepts several things to convince zero-cache it's talking to a rea
 
 The pgoutput encoder produces spec-compliant binary messages: Begin, Relation, Insert, Update, Delete, Commit, and Keepalive. Column values are encoded as text (typeOid 25) except booleans which use typeOid 16 with `t`/`f` encoding, matching PostgreSQL's native boolean wire format.
 
+## Workarounds
+
+A lot of things don't "just work" when you replace Postgres with PGlite and native SQLite with WASM. Here's what orez does to make it seamless.
+
+### TCP proxy: raw wire protocol instead of pg-gateway
+
+The proxy implements the PostgreSQL wire protocol from scratch using raw TCP sockets. pg-gateway uses `Duplex.toWeb()` which deadlocks under concurrent connections with large responses. Raw `net.Socket` with manual message framing avoids this entirely.
+
+### Session state bleed between connections
+
+PGlite is single-session — all proxy connections share one session. If `pg_restore` sets `search_path = ''`, every subsequent connection inherits that. On disconnect, orez resets `search_path`, `statement_timeout`, `lock_timeout`, and `idle_in_transaction_session_timeout`, and rolls back any open transaction. Without this, the next connection gets a corrupted session.
+
+### Event loop starvation from mutex chains
+
+The mutex uses `setImmediate`/`setTimeout` between releases instead of resolving the next waiter as a microtask. Without this, releasing the mutex triggers a chain of synchronous PGlite executions that blocks all socket I/O — connections stall because reads and writes can't be processed between queries.
+
+### PGlite errors don't kill connections
+
+When `execProtocolRaw` throws (PGlite internal error), the proxy sends a proper ErrorResponse + ReadyForQuery over the wire instead of destroying the socket. The client sees an error message and continues working.
+
+### SQLite shim via NODE_PATH (not require hooks)
+
+zero-cache imports `@rocicorp/zero-sqlite3` (a native C addon). orez creates a fake package in `/tmp` that redirects to bedrock-sqlite WASM and prepends it to `NODE_PATH`. This avoids `Module._resolveFilename` monkey-patching or require hooks, both of which break Vite's module resolution.
+
+The shim also polyfills the better-sqlite3 API surface zero-cache expects: `unsafeMode()`, `defaultSafeIntegers()`, `serialize()`, `backup()`, and `scanStatus`/`scanStatusV2`/`scanStatusReset` on Statement prototypes (zero-cache's query planner calls these for scan statistics, which WASM doesn't support).
+
+### Query planner disabled
+
+`ZERO_ENABLE_QUERY_PLANNER` is set to `false` because it relies on SQLite scan statistics that trigger infinite loops in WASM sqlite (and have caused freezes with native sqlite too). The planner is an optimization, not required for correctness.
+
+### postgres.js COPY hang workaround
+
+`ZERO_INITIAL_SYNC_TABLE_COPY_WORKERS` is set to `999` to work around a postgres.js bug where concurrent `COPY TO STDOUT` on a reused connection causes `.readable()` to hang indefinitely. This gives each table its own connection during initial sync.
+
+### Type OIDs in RELATION messages
+
+Replication RELATION messages carry correct PostgreSQL type OIDs (not just text/25) so zero-cache selects the right value parsers. For example, `timestamp with time zone` gets OID 1184, which triggers `timestampToFpMillis` conversion. Without this, zero-cache misinterprets column types.
+
+### Unsupported column exclusion
+
+Columns with types zero-cache can't handle (`tsvector`, `tsquery`, `USER-DEFINED`) are filtered out of replication messages. Without exclusion, zero-cache crashes on the unknown types. The columns are removed from both new and old row data.
+
+### Publication-aware change tracking
+
+If `ZERO_APP_PUBLICATIONS` is set, only tables in that publication get change-tracking triggers. This prevents streaming changes for private tables (user sessions, accounts) that zero-cache doesn't know about. Stale triggers from previous installs (before the publication existed) are cleaned up automatically.
+
+### Stale replica cleanup on startup
+
+The SQLite replica (`zero-replica.db`) plus its WAL/SHM/WAL2 lock files are deleted on every startup. The replica is just a cache of PGlite data and is safe to recreate. Without cleanup, zero-cache can fail to start with stale lock files from a previous crash.
+
+### Data directory migration
+
+Existing installs that used a single PGlite instance (`pgdata/`) are auto-migrated to the multi-instance layout (`pgdata-postgres/`) on first run. No manual intervention needed.
+
+### Restore: dollar-quoting and statement boundaries
+
+The restore parser tracks `$$` and `$tag$` blocks to correctly identify statement boundaries in function bodies. Without this, semicolons inside `CREATE FUNCTION` bodies are misinterpreted as statement terminators.
+
+### Restore: broken trigger cleanup
+
+After restore, orez drops triggers whose backing functions don't exist. This happens when a filtered `pg_dump` includes triggers on public-schema tables that reference functions from excluded schemas. The triggers survive TOC filtering because they're associated with public tables, but the functions they reference weren't included.
+
+### Restore: wire protocol auto-detection
+
+`pg_restore` tries connecting via wire protocol first (for restoring into a running orez instance). If the connection fails, it falls back to direct PGlite access. But if the connection succeeds and the restore itself fails, it does *not* fall back — the error is real and should be reported, not masked by a retry.
+
+### Drizzle migration journal
+
+The migration runner reads drizzle's `meta/_journal.json` for correct ordering instead of relying on alphabetical filename sort. Falls back to alphabetical if no journal exists.
+
+### Callback-based message loop
+
+The proxy uses callback-based `socket.on('data')` events instead of async iterators for the message loop. Async iterators have unreliable behavior across runtimes (Node.js vs Bun). The callback approach with manual pause/resume works everywhere.
+
 ## Tests
 
-145 tests — 108 orez tests across 8 test files covering the full stack from binary encoding to TCP-level integration, plus 37 bedrock-sqlite tests covering the WASM SQLite engine:
+203 tests across 29 test files covering the full stack from binary encoding to TCP-level integration, including pg_restore end-to-end tests and bedrock-sqlite WASM engine tests:
 
 ```
 bun run test                                # orez tests
@@ -195,8 +291,9 @@ This is a development tool. It is not suitable for production use.
 
 ```
 src/
-  index.ts              main entry, orchestrates startup + sqlite wasm patching
+  cli-entry.ts          thin wrapper for auto heap sizing
   cli.ts                cli with citty
+  index.ts              main entry, orchestrates startup + sqlite wasm patching
   config.ts             configuration with defaults
   log.ts                colored log prefixes
   mutex.ts              simple mutex for serializing pglite access
@@ -206,9 +303,12 @@ src/
   s3-local.ts           local s3-compatible server (orez/s3)
   vite-plugin.ts        vite dev server plugin (orez/vite)
   replication/
-    handler.ts          replication protocol state machine
+    handler.ts          replication protocol state machine + adaptive polling
     pgoutput-encoder.ts binary pgoutput message encoder
-    change-tracker.ts   trigger installation, shard schema tracking, and change reader
+    change-tracker.ts   trigger installation, DDL event triggers, change purging
+  integration/
+    integration.test.ts end-to-end zero-cache sync test
+    restore.test.ts     pg_dump/restore integration test
 sqlite-wasm/
   Makefile              emscripten build for bedrock-sqlite wasm binary
   bedrock-sqlite.d.ts   typescript declarations
@@ -217,7 +317,7 @@ sqlite-wasm/
     vfs.c               custom VFS with SHM support for WAL/WAL2
     vfs.js              javascript VFS bridge
   test/
-    database.test.ts    37 tests for the wasm sqlite engine
+    database.test.ts    wasm sqlite engine tests
 ```
 
 ## Backup & Restore
