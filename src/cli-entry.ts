@@ -5,8 +5,8 @@
 
 import { spawn } from 'node:child_process'
 import { totalmem } from 'node:os'
-import { fileURLToPath } from 'node:url'
 import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const currentOpts = process.env.NODE_OPTIONS || ''
 
