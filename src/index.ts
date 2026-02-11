@@ -125,8 +125,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     await installChangeTracking(db)
   }
 
-  // clean up stale sqlite replica from previous runs
-  cleanupStaleReplica(config)
+  // clean up stale lock files from previous crash (keep replica for fast restart)
+  cleanupStaleLockFiles(config)
 
   // start zero-cache
   let zeroCacheProcess: ChildProcess | null = null
@@ -168,17 +168,18 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   return { config, stop, db, instances, pgPort: config.pgPort, zeroPort: config.zeroPort }
 }
 
-function cleanupStaleReplica(config: ZeroLiteConfig): void {
+function cleanupStaleLockFiles(config: ZeroLiteConfig): void {
   const replicaPath = resolve(config.dataDir, 'zero-replica.db')
-  // delete replica + all lock/wal files so zero-cache does a fresh sync
-  // the replica is just a cache of pglite data, safe to recreate
-  for (const suffix of ['', '-wal', '-shm', '-wal2']) {
+  // only delete lock/wal files that prevent zero-cache from starting after a crash.
+  // keep the replica db itself — zero-cache catches up via replication, which is
+  // nearly instant vs a full initial sync (COPY of all tables). if the replica is
+  // too stale, ZERO_AUTO_RESET=true makes zero-cache wipe and resync automatically.
+  for (const suffix of ['-wal', '-shm', '-wal2']) {
     const file = replicaPath + suffix
     try {
       if (existsSync(file)) {
         unlinkSync(file)
-        if (suffix) log.debug.orez(`cleaned up stale ${suffix} file`)
-        else log.debug.orez('cleaned up stale replica (will re-sync)')
+        log.debug.orez(`cleaned up stale ${suffix} file`)
       }
     } catch {
       // ignore
@@ -372,7 +373,7 @@ async function waitForZeroCache(
     } catch {
       // not ready yet
     }
-    await new Promise((r) => setTimeout(r, 500))
+    await new Promise((r) => setTimeout(r, 42))
   }
 
   log.zero('health check timed out, continuing anyway')

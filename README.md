@@ -208,9 +208,9 @@ The mutex uses `setImmediate`/`setTimeout` between releases instead of resolving
 
 When `execProtocolRaw` throws (PGlite internal error), the proxy sends a proper ErrorResponse + ReadyForQuery over the wire instead of destroying the socket. The client sees an error message and continues working.
 
-### SQLite shim via NODE_PATH (not require hooks)
+### SQLite shim via ESM loader hooks
 
-zero-cache imports `@rocicorp/zero-sqlite3` (a native C addon). orez creates a fake package in `/tmp` that redirects to bedrock-sqlite WASM and prepends it to `NODE_PATH`. This avoids `Module._resolveFilename` monkey-patching or require hooks, both of which break Vite's module resolution.
+zero-cache imports `@rocicorp/zero-sqlite3` (a native C addon) via ESM `import`. orez uses Node's `module.register()` API with `--import` to intercept resolution — ESM `resolve` and `load` hooks redirect `@rocicorp/zero-sqlite3` to bedrock-sqlite WASM at runtime. The hook templates live in `src/shim/` and are written to tmpdir with the resolved bedrock-sqlite path substituted.
 
 The shim also polyfills the better-sqlite3 API surface zero-cache expects: `unsafeMode()`, `defaultSafeIntegers()`, `serialize()`, `backup()`, and `scanStatus`/`scanStatusV2`/`scanStatusReset` on Statement prototypes (zero-cache's query planner calls these for scan statistics, which WASM doesn't support).
 
@@ -234,9 +234,9 @@ Columns with types zero-cache can't handle (`tsvector`, `tsquery`, `USER-DEFINED
 
 If `ZERO_APP_PUBLICATIONS` is set, only tables in that publication get change-tracking triggers. This prevents streaming changes for private tables (user sessions, accounts) that zero-cache doesn't know about. Stale triggers from previous installs (before the publication existed) are cleaned up automatically.
 
-### Stale replica cleanup on startup
+### Stale lock file cleanup on startup
 
-The SQLite replica (`zero-replica.db`) plus its WAL/SHM/WAL2 lock files are deleted on every startup. The replica is just a cache of PGlite data and is safe to recreate. Without cleanup, zero-cache can fail to start with stale lock files from a previous crash.
+Only the SQLite replica's lock files (`-wal`, `-shm`, `-wal2`) are deleted on startup — not the replica itself. The replica is a cache of PGlite data; keeping it lets zero-cache catch up via replication (nearly instant) instead of doing a full initial sync (COPY of all tables). If the replica is too stale, `ZERO_AUTO_RESET=true` makes zero-cache wipe and resync automatically. Lock files from a previous crash are cleaned to prevent startup failures.
 
 ### Data directory migration
 
