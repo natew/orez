@@ -412,11 +412,21 @@ export async function execDumpFile(
         await db.exec('BEGIN')
         inBatch = true
       }
-      await db.exec(rewritten)
-      executed++
-      batchCount++
-      if (batchCount >= BATCH_SIZE) {
-        await flushBatch()
+      try {
+        await db.exec(rewritten)
+        executed++
+        batchCount++
+        if (batchCount >= BATCH_SIZE) {
+          await flushBatch()
+        }
+      } catch (err: any) {
+        // non-fatal data errors (duplicate keys from internal tables, etc.)
+        log.orez(`warning: ${err?.message?.split('\n')[0] ?? err}`)
+        skipped++
+        // transaction is aborted, rollback and start fresh
+        try { await db.exec('ROLLBACK') } catch {}
+        inBatch = false
+        batchCount = 0
       }
     } else {
       // DDL runs outside batches
