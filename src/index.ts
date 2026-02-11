@@ -278,13 +278,10 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
     NODE_ENV: 'development',
     ZERO_LOG_LEVEL: config.logLevel,
     ZERO_NUM_SYNC_WORKERS: '1',
-  }
-
-  // when wasm sqlite may be used, disable the query planner — wasm's
-  // scanStatus returns garbage that causes infinite loops in zero-cache.
-  // when user forces native (--disable-wasm-sqlite), planner is safe.
-  if (!config.disableWasmSqlite) {
-    defaults.ZERO_ENABLE_QUERY_PLANNER = 'false'
+    // disable query planner — it relies on scanStatus which causes infinite
+    // loops with wasm sqlite and has caused freezes with native too.
+    // planner is an optimization, not required for correctness.
+    ZERO_ENABLE_QUERY_PLANNER: 'false',
   }
 
   const env: Record<string, string> = {
