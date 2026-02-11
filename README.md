@@ -254,10 +254,6 @@ After restore, orez drops triggers whose backing functions don't exist. This hap
 
 `pg_restore` tries connecting via wire protocol first (for restoring into a running orez instance). If the connection fails, it falls back to direct PGlite access. But if the connection succeeds and the restore itself fails, it does *not* fall back — the error is real and should be reported, not masked by a retry.
 
-### Drizzle migration journal
-
-The migration runner reads drizzle's `meta/_journal.json` for correct ordering instead of relying on alphabetical filename sort. Falls back to alphabetical if no journal exists.
-
 ### Callback-based message loop
 
 The proxy uses callback-based `socket.on('data')` events instead of async iterators for the message loop. Async iterators have unreliable behavior across runtimes (Node.js vs Bun). The callback approach with manual pause/resume works everywhere.
