@@ -461,7 +461,10 @@ export async function handleStartReplication(
   let txCounter = 1
 
   // polling + notification loop
-  const pollInterval = 500
+  // adaptive: poll fast when catching up, slow when idle
+  const pollIntervalIdle = 500
+  const pollIntervalCatchUp = 20
+  const batchSize = 2000
   let running = true
 
   const poll = async () => {
@@ -471,7 +474,7 @@ export async function handleStartReplication(
         await mutex.acquire()
         let changes: Awaited<ReturnType<typeof getChangesSince>>
         try {
-          changes = await getChangesSince(db, lastWatermark, 100)
+          changes = await getChangesSince(db, lastWatermark, batchSize)
         } finally {
           mutex.release()
         }
@@ -493,7 +496,9 @@ export async function handleStartReplication(
         const ts = nowMicros()
         writer.write(encodeKeepalive(currentLsn, ts, false))
 
-        await new Promise((resolve) => setTimeout(resolve, pollInterval))
+        // if we got a full batch, there's likely more - poll fast
+        const delay = changes.length >= batchSize ? pollIntervalCatchUp : pollIntervalIdle
+        await new Promise((resolve) => setTimeout(resolve, delay))
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         log.debug.proxy(`replication poll error: ${msg}`)
