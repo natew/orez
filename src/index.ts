@@ -366,7 +366,8 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
     const registerPath = writeSqliteShim()
     const registerUrl = `file://${registerPath}`
     const existing = process.env.NODE_OPTIONS || ''
-    env.NODE_OPTIONS = `--import ${registerUrl} --max-old-space-size=16384 ${existing}`.trim()
+    env.NODE_OPTIONS =
+      `--import ${registerUrl} --max-old-space-size=16384 ${existing}`.trim()
   } else {
     const existing = process.env.NODE_OPTIONS || ''
     if (existing) env.NODE_OPTIONS = existing
