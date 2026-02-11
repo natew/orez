@@ -31,9 +31,15 @@ let exitCode = 0
 async function isPortInUse(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const sock = createConnection({ port, host: '127.0.0.1' })
-    sock.on('connect', () => { sock.destroy(); resolve(true) })
+    sock.on('connect', () => {
+      sock.destroy()
+      resolve(true)
+    })
     sock.on('error', () => resolve(false))
-    sock.setTimeout(300, () => { sock.destroy(); resolve(false) })
+    sock.setTimeout(300, () => {
+      sock.destroy()
+      resolve(false)
+    })
   })
 }
 
@@ -55,7 +61,9 @@ async function main() {
     s3: await findFreePort(9290),
     bunny: await findFreePort(3533),
   }
-  log(`ports: pg=${PORTS.pg} zero=${PORTS.zero} web=${PORTS.web} s3=${PORTS.s3} bunny=${PORTS.bunny}`)
+  log(
+    `ports: pg=${PORTS.pg} zero=${PORTS.zero} web=${PORTS.web} s3=${PORTS.s3} bunny=${PORTS.bunny}`
+  )
 
   try {
     // step 1: build orez
@@ -87,7 +95,11 @@ async function main() {
       execSync('bun run one patch', { cwd: TEST_DIR, stdio: 'inherit', timeout: 30_000 })
     } catch {}
     try {
-      execSync('bun tko run generate-env', { cwd: TEST_DIR, stdio: 'inherit', timeout: 30_000 })
+      execSync('bun tko run generate-env', {
+        cwd: TEST_DIR,
+        stdio: 'inherit',
+        timeout: 30_000,
+      })
     } catch {}
 
     // step 4: copy local orez build into node_modules
@@ -98,10 +110,14 @@ async function main() {
     }
     const { mkdirSync: mkdir, cpSync } = await import('node:fs')
     mkdir(orezInModules, { recursive: true })
-    cpSync(resolve(OREZ_ROOT, 'dist'), resolve(orezInModules, 'dist'), { recursive: true })
+    cpSync(resolve(OREZ_ROOT, 'dist'), resolve(orezInModules, 'dist'), {
+      recursive: true,
+    })
     cpSync(resolve(OREZ_ROOT, 'package.json'), resolve(orezInModules, 'package.json'))
     if (existsSync(resolve(OREZ_ROOT, 'src'))) {
-      cpSync(resolve(OREZ_ROOT, 'src'), resolve(orezInModules, 'src'), { recursive: true })
+      cpSync(resolve(OREZ_ROOT, 'src'), resolve(orezInModules, 'src'), {
+        recursive: true,
+      })
     }
     log(`orez installed from local build`)
 
@@ -150,14 +166,18 @@ async function main() {
     log(`patching ports: 8081→${PORTS.web}, 5048→${PORTS.zero}`)
     execSync(
       `find src playwright.config.ts -type f \\( -name "*.ts" -o -name "*.tsx" \\) -exec sed -i '' ` +
-      `-e 's/localhost:8081/localhost:${PORTS.web}/g' ` +
-      `-e 's/localhost:5048/localhost:${PORTS.zero}/g' ` +
-      `-e "s/'5048'/'${PORTS.zero}'/g" {} +`,
+        `-e 's/localhost:8081/localhost:${PORTS.web}/g' ` +
+        `-e 's/localhost:5048/localhost:${PORTS.zero}/g' ` +
+        `-e "s/'5048'/'${PORTS.zero}'/g" {} +`,
       { cwd: TEST_DIR, stdio: 'inherit' }
     )
 
     // step 8: clean all caches (stale compiled modules with old ports)
-    for (const cache of ['node_modules/.vite', 'node_modules/.vxrn', 'node_modules/.cache']) {
+    for (const cache of [
+      'node_modules/.vite',
+      'node_modules/.vxrn',
+      'node_modules/.cache',
+    ]) {
       const cachePath = resolve(TEST_DIR, cache)
       if (existsSync(cachePath)) {
         rmSync(cachePath, { recursive: true, force: true })
@@ -204,7 +224,7 @@ async function main() {
           ZERO_MUTATE_URL: `http://localhost:${PORTS.web}/api/zero/push`,
           ZERO_QUERY_URL: `http://localhost:${PORTS.web}/api/zero/pull`,
         },
-      },
+      }
     )
     children.push(backendProc)
 
@@ -221,20 +241,24 @@ async function main() {
 
     // step 12: start web frontend (dev mode with --clean)
     log('starting web frontend')
-    const webProc = spawn('bun', ['run:dev', 'one', 'dev', '--clean', '--port', String(PORTS.web)], {
-      cwd: TEST_DIR,
-      stdio: 'inherit',
-      env: {
-        ...process.env,
-        ALLOW_MISSING_ENV: '1',
-        VITE_PORT_WEB: String(PORTS.web),
-        VITE_PORT_ZERO: String(PORTS.zero),
-        VITE_PUBLIC_ZERO_SERVER: `http://localhost:${PORTS.zero}`,
-        ONE_SERVER_URL: `http://localhost:${PORTS.web}`,
-        ZERO_MUTATE_URL: `http://localhost:${PORTS.web}/api/zero/push`,
-        ZERO_QUERY_URL: `http://localhost:${PORTS.web}/api/zero/pull`,
-      },
-    })
+    const webProc = spawn(
+      'bun',
+      ['run:dev', 'one', 'dev', '--clean', '--port', String(PORTS.web)],
+      {
+        cwd: TEST_DIR,
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          ALLOW_MISSING_ENV: '1',
+          VITE_PORT_WEB: String(PORTS.web),
+          VITE_PORT_ZERO: String(PORTS.zero),
+          VITE_PUBLIC_ZERO_SERVER: `http://localhost:${PORTS.zero}`,
+          ONE_SERVER_URL: `http://localhost:${PORTS.web}`,
+          ZERO_MUTATE_URL: `http://localhost:${PORTS.web}/api/zero/push`,
+          ZERO_QUERY_URL: `http://localhost:${PORTS.web}/api/zero/pull`,
+        },
+      }
+    )
     children.push(webProc)
 
     webProc.on('exit', (code) => {
@@ -267,7 +291,10 @@ async function main() {
         const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/)
         if (match) {
           let val = match[2].trim()
-          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          if (
+            (val.startsWith('"') && val.endsWith('"')) ||
+            (val.startsWith("'") && val.endsWith("'"))
+          ) {
             val = val.slice(1, -1)
           }
           dotenvVars[match[1]] = val
@@ -344,7 +371,9 @@ async function waitForPort(port: number, timeoutMs: number, name: string): Promi
     } catch {}
     await new Promise((r) => setTimeout(r, 1000))
   }
-  throw new Error(`${name} (port ${port}) not ready after ${Math.round(timeoutMs / 1000)}s`)
+  throw new Error(
+    `${name} (port ${port}) not ready after ${Math.round(timeoutMs / 1000)}s`
+  )
 }
 
 process.on('SIGINT', async () => {

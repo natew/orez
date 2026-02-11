@@ -563,9 +563,19 @@ async function handleRegularMessage(
   let result: Uint8Array
   try {
     result = await db.execProtocolRaw(data, { throwOnError: false })
-  } catch (err) {
+  } catch (err: any) {
     mutex.release()
-    throw err
+    // send error response instead of killing the connection — PGlite internal
+    // errors shouldn't terminate the client's tcp session
+    log.debug.proxy(`execProtocolRaw error: ${err?.message || err}`)
+    const errMsg = err?.message || 'internal error'
+    const errResp = buildErrorResponse(errMsg)
+    const rfq = buildReadyForQuery(0x45) // 'E' = failed transaction
+    const combined = new Uint8Array(errResp.length + rfq.length)
+    combined.set(errResp, 0)
+    combined.set(rfq, errResp.length)
+    await socketWrite(socket, combined)
+    return
   }
 
   // strip ReadyForQuery from non-Sync/non-SimpleQuery responses
@@ -679,7 +689,10 @@ export async function startPgProxy(
       const { db } = getDbContext(dbName)
       await db.waitReady
 
-      // clean up pglite transaction state when client disconnects
+      // clean up pglite session state when client disconnects.
+      // pglite is single-session — all connections share one session, so SET
+      // commands from one connection (e.g. pg_restore setting search_path='')
+      // bleed into subsequent connections. reset on close to prevent this.
       socket.on('close', async () => {
         const { db: closeDb, mutex: closeMutex } = getDbContext(dbName)
         await closeMutex.acquire()
@@ -687,6 +700,14 @@ export async function startPgProxy(
           await closeDb.exec('ROLLBACK')
         } catch {
           // no transaction to rollback
+        }
+        try {
+          await closeDb.exec(`SET search_path TO public`)
+          await closeDb.exec(`RESET statement_timeout`)
+          await closeDb.exec(`RESET lock_timeout`)
+          await closeDb.exec(`RESET idle_in_transaction_session_timeout`)
+        } catch {
+          // best-effort reset
         } finally {
           closeMutex.release()
         }
@@ -702,8 +723,12 @@ export async function startPgProxy(
         instances.postgres,
         mutexes.postgres
       )
-    } catch (err) {
-      // connection error during handshake or message loop
+    } catch (err: any) {
+      const msg = err?.message || err
+      // suppress expected errors (client disconnected, auth failures)
+      if (msg !== 'auth failed' && msg !== 'socket closed') {
+        log.debug.proxy(`connection error: ${msg}`)
+      }
       if (!socket.destroyed) {
         socket.destroy()
       }
