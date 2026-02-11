@@ -424,7 +424,9 @@ export async function execDumpFile(
         log.orez(`warning: ${err?.message?.split('\n')[0] ?? err}`)
         skipped++
         // transaction is aborted, rollback and start fresh
-        try { await db.exec('ROLLBACK') } catch {}
+        try {
+          await db.exec('ROLLBACK')
+        } catch {}
         inBatch = false
         batchCount = 0
       }
