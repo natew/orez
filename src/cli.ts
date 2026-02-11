@@ -158,9 +158,9 @@ function shouldSkipStatement(stmt: string): boolean {
 }
 
 // how many data statements to batch into a single transaction
-const BATCH_SIZE = 500
+const BATCH_SIZE = 200
 // run CHECKPOINT every N batches to flush WAL and reclaim wasm memory
-const CHECKPOINT_INTERVAL = 10
+const CHECKPOINT_INTERVAL = 3
 
 // true for statements that are data manipulation (INSERT/UPDATE/DELETE)
 // these get batched into transactions. DDL runs outside batches.
@@ -249,6 +249,20 @@ async function execDumpFile(
 
   // copy-data mode: when we hit COPY ... FROM stdin, we read data lines until \.
   let copyTarget: { table: string; columns: string[] } | null = null
+  // accumulate COPY rows for multi-row INSERT (reduces statement count ~50x)
+  const COPY_ROWS_PER_INSERT = 50
+  let copyRows: string[] = []
+
+  async function flushCopyRows() {
+    if (copyRows.length === 0 || !copyTarget) return
+    const colList =
+      copyTarget.columns.length > 0 ? ` (${copyTarget.columns.join(', ')})` : ''
+    const insert = `INSERT INTO ${copyTarget.table}${colList} VALUES ${copyRows.join(', ')}`
+    await db.exec(insert)
+    executed += copyRows.length
+    batchCount += copyRows.length
+    copyRows = []
+  }
 
   async function flushBatch() {
     if (inBatch) {
@@ -267,22 +281,27 @@ async function execDumpFile(
     // in copy-data mode: read tab-delimited rows until \.
     if (copyTarget) {
       if (line === '\\.') {
+        if (copyRows.length > 0) {
+          if (!inBatch) {
+            await db.exec('BEGIN')
+            inBatch = true
+          }
+          await flushCopyRows()
+        }
         copyTarget = null
         continue
       }
       const values = line.split('\t').map(copyValueToLiteral)
-      const colList =
-        copyTarget.columns.length > 0 ? ` (${copyTarget.columns.join(', ')})` : ''
-      const insert = `INSERT INTO ${copyTarget.table}${colList} VALUES (${values.join(', ')})`
-      if (!inBatch) {
-        await db.exec('BEGIN')
-        inBatch = true
-      }
-      await db.exec(insert)
-      executed++
-      batchCount++
-      if (batchCount >= BATCH_SIZE) {
-        await flushBatch()
+      copyRows.push(`(${values.join(', ')})`)
+      if (copyRows.length >= COPY_ROWS_PER_INSERT) {
+        if (!inBatch) {
+          await db.exec('BEGIN')
+          inBatch = true
+        }
+        await flushCopyRows()
+        if (batchCount >= BATCH_SIZE) {
+          await flushBatch()
+        }
       }
       continue
     }
