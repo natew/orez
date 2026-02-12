@@ -10,6 +10,7 @@ import { log } from '../log.js'
 import {
   getChangesSince,
   getCurrentWatermark,
+  purgeConsumedChanges,
   installTriggersOnShardTables,
   type ChangeRecord,
 } from './change-tracker.js'
@@ -342,7 +343,7 @@ export async function handleStartReplication(
     for (const schema of relevantSchemas) {
       if (schema === 'public') continue
       const shardTables = await db.query<{ tablename: string }>(
-        `SELECT tablename FROM pg_tables WHERE schemaname = $1`,
+        `SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename = 'clients'`,
         [schema]
       )
       for (const { tablename } of shardTables.rows) {
@@ -457,22 +458,60 @@ export async function handleStartReplication(
   let txCounter = 1
 
   // polling + notification loop
-  const pollInterval = 500
+  // adaptive: poll fast when catching up, slow when idle
+  const pollIntervalIdle = 500
+  const pollIntervalCatchUp = 20
+  const batchSize = 2000
+  const purgeEveryN = 10
+  const shardRescanEveryN = 20
   let running = true
+  let pollsSincePurge = 0
+  let pollsSinceShardRescan = 0
 
   const poll = async () => {
     while (running) {
       try {
+        // periodically re-scan for new shard schemas (e.g. chat_0 created by zero-cache)
+        pollsSinceShardRescan++
+        if (pollsSinceShardRescan >= shardRescanEveryN) {
+          pollsSinceShardRescan = 0
+          await mutex.acquire()
+          try {
+            await installTriggersOnShardTables(db)
+          } finally {
+            mutex.release()
+          }
+        }
+
         // acquire mutex to avoid conflicting with proxy connections
         await mutex.acquire()
         let changes: Awaited<ReturnType<typeof getChangesSince>>
         try {
-          changes = await getChangesSince(db, lastWatermark, 100)
+          changes = await getChangesSince(db, lastWatermark, batchSize)
         } finally {
           mutex.release()
         }
 
         if (changes.length > 0) {
+          // filter out shard tables that zero-cache doesn't expect.
+          // only `clients` is needed (for .server promise resolution).
+          // other shard tables (replicas, mutations) crash zero-cache
+          // with "Unknown table" in change-processor.
+          const batchEnd = changes[changes.length - 1].watermark
+          changes = changes.filter((c) => {
+            const dot = c.table_name.indexOf('.')
+            if (dot === -1) return true
+            const schema = c.table_name.substring(0, dot)
+            if (schema === 'public') return true
+            const table = c.table_name.substring(dot + 1)
+            return table === 'clients'
+          })
+
+          if (changes.length === 0) {
+            lastWatermark = batchEnd
+            continue
+          }
+
           await streamChanges(
             changes,
             writer,
@@ -482,14 +521,31 @@ export async function handleStartReplication(
             excludedColumns,
             columnTypeOids
           )
-          lastWatermark = changes[changes.length - 1].watermark
+          lastWatermark = batchEnd
+
+          // purge consumed changes periodically to free wasm memory
+          pollsSincePurge++
+          if (pollsSincePurge >= purgeEveryN) {
+            pollsSincePurge = 0
+            await mutex.acquire()
+            try {
+              const purged = await purgeConsumedChanges(db, lastWatermark)
+              if (purged > 0) {
+                log.debug.proxy(`purged ${purged} consumed changes`)
+              }
+            } finally {
+              mutex.release()
+            }
+          }
         }
 
         // send keepalive
         const ts = nowMicros()
         writer.write(encodeKeepalive(currentLsn, ts, false))
 
-        await new Promise((resolve) => setTimeout(resolve, pollInterval))
+        // if we got a full batch, there's likely more - poll fast
+        const delay = changes.length >= batchSize ? pollIntervalCatchUp : pollIntervalIdle
+        await new Promise((resolve) => setTimeout(resolve, delay))
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         log.debug.proxy(`replication poll error: ${msg}`)

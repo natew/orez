@@ -364,6 +364,232 @@ describe('pgoutput-encoder', () => {
     })
   })
 
+  // roundtrip tests: encode with orez → parse with zero-cache's parser
+  // this validates the fundamental contract between orez and zero-cache
+  describe('roundtrip: orez encoder → zero-cache parser', () => {
+    // absolute path bypasses package.json exports restriction
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const {
+      PgoutputParser,
+    } = require('/Users/n8/orez/node_modules/@rocicorp/zero/out/zero-cache/src/services/change-source/pg/logical-replication/pgoutput-parser.js')
+
+    // mock type parsers: unknown OIDs default to String (identity for text)
+    const typeParsers = { getTypeParser: () => String }
+
+    function makeParser() {
+      return new PgoutputParser(typeParsers)
+    }
+
+    it('BEGIN roundtrip', () => {
+      const lsn = 0x1000200n
+      const ts = BigInt(Date.now()) * 1000n
+      const parser = makeParser()
+      const parsed = parser.parse(encodeBegin(lsn, ts, 42))
+
+      expect(parsed.tag).toBe('begin')
+      expect(parsed.commitLsn).toBe('00000000/01000200')
+      expect(parsed.xid).toBe(42)
+      expect(parsed.commitTime).toBe(ts)
+    })
+
+    it('COMMIT roundtrip', () => {
+      const lsn = 0x1000200n
+      const endLsn = 0x1000300n
+      const ts = BigInt(Date.now()) * 1000n
+      const parser = makeParser()
+      const parsed = parser.parse(encodeCommit(0, lsn, endLsn, ts))
+
+      expect(parsed.tag).toBe('commit')
+      expect(parsed.commitLsn).toBe('00000000/01000200')
+      expect(parsed.commitEndLsn).toBe('00000000/01000300')
+      expect(parsed.commitTime).toBe(ts)
+    })
+
+    it('RELATION roundtrip', () => {
+      const oid = getTableOid('rt.rel_test')
+      const cols: ColumnInfo[] = [
+        { name: 'id', typeOid: 25, typeMod: -1, isKey: true },
+        { name: 'name', typeOid: 25, typeMod: -1 },
+      ]
+      const parser = makeParser()
+      const parsed = parser.parse(encodeRelation(oid, 'public', 'rel_test', 0x64, cols))
+
+      expect(parsed.tag).toBe('relation')
+      expect(parsed.schema).toBe('public')
+      expect(parsed.name).toBe('rel_test')
+      expect(parsed.columns).toHaveLength(2)
+      expect(parsed.keyColumns).toEqual(['id'])
+    })
+
+    it('INSERT roundtrip', () => {
+      const oid = getTableOid('rt.ins_test')
+      const cols: ColumnInfo[] = [
+        { name: 'id', typeOid: 25, typeMod: -1, isKey: true },
+        { name: 'val', typeOid: 25, typeMod: -1 },
+      ]
+      const parser = makeParser()
+      parser.parse(encodeRelation(oid, 'public', 'ins_test', 0x64, cols))
+
+      const parsed = parser.parse(encodeInsert(oid, { id: 'abc', val: 'hello' }, cols))
+      expect(parsed.tag).toBe('insert')
+      expect(parsed.new.id).toBe('abc')
+      expect(parsed.new.val).toBe('hello')
+    })
+
+    it('INSERT with null', () => {
+      const oid = getTableOid('rt.null_test')
+      const cols: ColumnInfo[] = [
+        { name: 'id', typeOid: 25, typeMod: -1, isKey: true },
+        { name: 'opt', typeOid: 25, typeMod: -1 },
+      ]
+      const parser = makeParser()
+      parser.parse(encodeRelation(oid, 'public', 'null_test', 0x64, cols))
+
+      const parsed = parser.parse(encodeInsert(oid, { id: 'x', opt: null }, cols))
+      expect(parsed.new.opt).toBeNull()
+    })
+
+    it('UPDATE with old row roundtrip', () => {
+      const oid = getTableOid('rt.upd_test')
+      const cols: ColumnInfo[] = [
+        { name: 'id', typeOid: 25, typeMod: -1, isKey: true },
+        { name: 'val', typeOid: 25, typeMod: -1 },
+      ]
+      const parser = makeParser()
+      parser.parse(encodeRelation(oid, 'public', 'upd_test', 0x64, cols))
+
+      const parsed = parser.parse(
+        encodeUpdate(oid, { id: '1', val: 'new' }, { id: '1', val: 'old' }, cols)
+      )
+      expect(parsed.tag).toBe('update')
+      expect(parsed.new.val).toBe('new')
+      expect(parsed.old.val).toBe('old')
+    })
+
+    it('UPDATE without old row', () => {
+      const oid = getTableOid('rt.upd_no_old')
+      const cols: ColumnInfo[] = [
+        { name: 'id', typeOid: 25, typeMod: -1, isKey: true },
+        { name: 'val', typeOid: 25, typeMod: -1 },
+      ]
+      const parser = makeParser()
+      parser.parse(encodeRelation(oid, 'public', 'upd_no_old', 0x64, cols))
+
+      const parsed = parser.parse(encodeUpdate(oid, { id: '1', val: 'v' }, null, cols))
+      expect(parsed.tag).toBe('update')
+      expect(parsed.new.val).toBe('v')
+      expect(parsed.old).toBeNull()
+      expect(parsed.key).toBeNull()
+    })
+
+    it('DELETE roundtrip', () => {
+      const oid = getTableOid('rt.del_test')
+      const cols: ColumnInfo[] = [
+        { name: 'id', typeOid: 25, typeMod: -1, isKey: true },
+        { name: 'val', typeOid: 25, typeMod: -1 },
+      ]
+      const parser = makeParser()
+      parser.parse(encodeRelation(oid, 'public', 'del_test', 0x64, cols))
+
+      const parsed = parser.parse(encodeDelete(oid, { id: 'gone', val: 'x' }, cols))
+      expect(parsed.tag).toBe('delete')
+      expect(parsed.key.id).toBe('gone')
+    })
+
+    it('full transaction: BEGIN → RELATION → INSERT → COMMIT', () => {
+      const parser = makeParser()
+      const lsn = 0x2000000n
+      const endLsn = 0x2000100n
+      const ts = BigInt(Date.now()) * 1000n
+
+      const begin = parser.parse(encodeBegin(lsn, ts, 1))
+      expect(begin.commitLsn).toBe('00000000/02000000')
+
+      const oid = getTableOid('rt.full_tx')
+      const cols: ColumnInfo[] = [
+        { name: 'id', typeOid: 25, typeMod: -1, isKey: true },
+        { name: 'data', typeOid: 25, typeMod: -1 },
+      ]
+      parser.parse(encodeRelation(oid, 'public', 'full_tx', 0x64, cols))
+
+      const ins = parser.parse(encodeInsert(oid, { id: '1', data: 'test' }, cols))
+      expect(ins.new.id).toBe('1')
+
+      const commit = parser.parse(encodeCommit(0, lsn, endLsn, ts))
+      expect(commit.commitLsn).toBe(begin.commitLsn)
+    })
+
+    it('XLogData + CopyData wrapper roundtrip with parser', () => {
+      const lsn = 0x3000000n
+      const ts = BigInt(Date.now()) * 1000n
+      const pgoutput = encodeBegin(lsn, ts, 1)
+      const xlog = wrapXLogData(lsn, lsn, ts, pgoutput)
+      const frame = wrapCopyData(xlog)
+
+      // unwrap CopyData
+      const copyLen = r32(frame, 1)
+      const inner = frame.subarray(5, 1 + copyLen)
+
+      // parse like stream.js
+      expect(inner[0]).toBe(0x77)
+      const streamLsn = new DataView(inner.buffer, inner.byteOffset).getBigUint64(1)
+      expect(streamLsn).toBe(lsn)
+
+      // parse pgoutput
+      const parser = makeParser()
+      const parsed = parser.parse(inner.subarray(25))
+      expect(parsed.tag).toBe('begin')
+      expect(parsed.commitLsn).toBe('00000000/03000000')
+    })
+
+    it('shard schema encoding', () => {
+      const oid = getTableOid('rt.chat_0.clients')
+      const cols: ColumnInfo[] = [
+        { name: 'id', typeOid: 25, typeMod: -1, isKey: true },
+        { name: 'lastMutationID', typeOid: 20, typeMod: -1 },
+      ]
+      const parser = makeParser()
+      const rel = parser.parse(encodeRelation(oid, 'chat_0', 'clients', 0x64, cols))
+      expect(rel.schema).toBe('chat_0')
+      expect(rel.name).toBe('clients')
+    })
+
+    it('LSN ordering: slot < streaming changes', () => {
+      // validates that streaming changes will be seen as "new" by zero-cache
+      let testLsn = 0x1000000n
+      const next = () => {
+        testLsn += 0x100n
+        return testLsn
+      }
+
+      const slotLsn = next() // CREATE_REPLICATION_SLOT
+      const beginLsn = next() // first streaming BEGIN
+      const commitLsn = next() // first streaming COMMIT
+
+      expect(beginLsn).toBeGreaterThan(slotLsn)
+      expect(commitLsn).toBeGreaterThan(beginLsn)
+
+      // verify lexi version ordering is preserved
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const {
+        versionToLexi,
+      } = require('/Users/n8/orez/node_modules/@rocicorp/zero/out/zero-cache/src/types/lexi-version.js')
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const {
+        toBigInt: lsnToBigInt,
+      } = require('/Users/n8/orez/node_modules/@rocicorp/zero/out/zero-cache/src/services/change-source/pg/lsn.js')
+
+      const slotHex = `00000000/${slotLsn.toString(16).padStart(8, '0')}`.toUpperCase()
+      const beginHex = `00000000/${beginLsn.toString(16).padStart(8, '0')}`.toUpperCase()
+
+      const slotVersion = versionToLexi(lsnToBigInt(slotHex))
+      const beginVersion = versionToLexi(lsnToBigInt(beginHex))
+
+      // lexi versions must maintain ordering
+      expect(beginVersion > slotVersion).toBe(true)
+    })
+  })
+
   describe('double-wrap: CopyData(XLogData(message))', () => {
     // this is the exact framing zero-cache expects for every replication message
     it('produces parseable nested structure', () => {

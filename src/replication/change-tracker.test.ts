@@ -3,6 +3,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import {
   installChangeTracking,
+  installTriggersOnShardTables,
+  purgeConsumedChanges,
   getChangesSince,
   getCurrentWatermark,
 } from './change-tracker'
@@ -182,5 +184,117 @@ describe('change-tracker', () => {
     expect(special).toHaveLength(1)
     expect(special[0].op).toBe('INSERT')
     expect(special[0].row_data).toMatchObject({ val: 'works' })
+  })
+})
+
+describe('shard table tracking', () => {
+  let db: PGlite
+
+  beforeEach(async () => {
+    db = new PGlite()
+    await db.waitReady
+    await installChangeTracking(db)
+  })
+
+  afterEach(async () => {
+    await db.close()
+  })
+
+  it('only tracks clients table in shard schemas, not replicas/mutations', async () => {
+    // zero-cache creates shard schemas like chat_0 with clients, replicas, mutations.
+    // only clients needs tracking — replicas/mutations changes crash zero-cache
+    // with "Unknown table chat_0.replicas" because they aren't in zero's schema.
+    await db.exec(`
+      CREATE SCHEMA chat_0;
+      CREATE TABLE chat_0.clients (
+        "clientGroupID" TEXT NOT NULL,
+        "clientID" TEXT NOT NULL,
+        "lastMutationID" BIGINT,
+        "userID" TEXT,
+        PRIMARY KEY ("clientGroupID", "clientID")
+      );
+      CREATE TABLE chat_0.replicas (
+        id TEXT PRIMARY KEY,
+        version TEXT,
+        cookie TEXT
+      );
+      CREATE TABLE chat_0.mutations (
+        id TEXT PRIMARY KEY,
+        "clientID" TEXT,
+        name TEXT,
+        args JSONB
+      );
+    `)
+
+    await installTriggersOnShardTables(db)
+
+    // insert into all three tables
+    await db.exec(
+      `INSERT INTO chat_0.clients ("clientGroupID", "clientID", "lastMutationID") VALUES ('cg1', 'c1', 1)`
+    )
+    await db.exec(`INSERT INTO chat_0.replicas (id, version) VALUES ('r1', 'v1')`)
+    await db.exec(
+      `INSERT INTO chat_0.mutations (id, "clientID", name) VALUES ('m1', 'c1', 'sendMessage')`
+    )
+
+    const changes = await getChangesSince(db, 0)
+    const tables = changes.map((c) => c.table_name)
+
+    // only clients should be tracked
+    expect(tables).toContain('chat_0.clients')
+    expect(tables).not.toContain('chat_0.replicas')
+    expect(tables).not.toContain('chat_0.mutations')
+  })
+
+  it('purges consumed changes to prevent OOM', async () => {
+    // _zero_changes accumulates forever in 0.0.37. with wasm pglite,
+    // this eventually causes OOM. we need a purge mechanism.
+    await db.exec(`
+      CREATE TABLE public.items (id SERIAL PRIMARY KEY, val TEXT)
+    `)
+    await installChangeTracking(db)
+
+    // insert some data
+    for (let i = 0; i < 10; i++) {
+      await db.exec(`INSERT INTO public.items (val) VALUES ('item${i}')`)
+    }
+
+    const changes = await getChangesSince(db, 0)
+    expect(changes).toHaveLength(10)
+    const lastWatermark = changes[changes.length - 1].watermark
+
+    // purge consumed changes up to the watermark we've processed
+    await purgeConsumedChanges(db, lastWatermark)
+
+    // after purge, no changes before that watermark should remain
+    const remaining = await getChangesSince(db, 0)
+    expect(remaining).toHaveLength(0)
+  })
+
+  it('tracks tables created after initial installChangeTracking', async () => {
+    // simulate zero-cache creating shard schema AFTER replication starts.
+    // in production, zero-cache creates chat_0 schema + clients table
+    // after the replication connection is already established.
+    // the change tracker must pick up these new tables.
+    await db.exec(`
+      CREATE SCHEMA chat_0;
+      CREATE TABLE chat_0.clients (
+        "clientGroupID" TEXT NOT NULL,
+        "clientID" TEXT NOT NULL,
+        "lastMutationID" BIGINT,
+        PRIMARY KEY ("clientGroupID", "clientID")
+      );
+    `)
+
+    // re-running installTriggersOnShardTables should pick up new tables
+    await installTriggersOnShardTables(db)
+
+    await db.exec(
+      `INSERT INTO chat_0.clients ("clientGroupID", "clientID", "lastMutationID") VALUES ('cg1', 'c1', 1)`
+    )
+
+    const changes = await getChangesSince(db, 0)
+    expect(changes).toHaveLength(1)
+    expect(changes[0].table_name).toBe('chat_0.clients')
   })
 })

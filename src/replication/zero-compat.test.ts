@@ -940,4 +940,108 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
 
     s.close()
   })
+
+  it('shard replicas/mutations changes NOT streamed (only clients)', async () => {
+    // zero-cache creates shard schemas (chat_0) with clients, replicas, mutations.
+    // if we stream replicas/mutations changes, zero-cache crashes with
+    // "Unknown table chat_0.replicas". only clients changes should be streamed.
+    await db.exec(`
+      CREATE SCHEMA chat_0;
+      CREATE TABLE chat_0.clients (
+        "clientGroupID" TEXT NOT NULL,
+        "clientID" TEXT NOT NULL,
+        "lastMutationID" BIGINT,
+        PRIMARY KEY ("clientGroupID", "clientID")
+      );
+      CREATE TABLE chat_0.replicas (
+        id TEXT PRIMARY KEY,
+        version TEXT
+      );
+      CREATE TABLE chat_0.mutations (
+        id TEXT PRIMARY KEY,
+        "clientID" TEXT,
+        name TEXT
+      );
+    `)
+    await installChangeTracking(db)
+
+    const s = await stream()
+    const q = s.messages
+
+    // insert into all three shard tables + a public table
+    await db.exec(
+      `INSERT INTO chat_0.clients ("clientGroupID", "clientID", "lastMutationID") VALUES ('cg1', 'c1', 1)`
+    )
+    await db.exec(`INSERT INTO chat_0.replicas (id, version) VALUES ('r1', 'v1')`)
+    await db.exec(
+      `INSERT INTO chat_0.mutations (id, "clientID", name) VALUES ('m1', 'c1', 'send')`
+    )
+    await db.exec(`INSERT INTO public.foo (id) VALUES ('normal')`)
+
+    // collect all inserts for a few seconds
+    const inserts: ZcInsert[] = []
+    const deadline = Date.now() + 4000
+    while (Date.now() < deadline) {
+      const m = await q.dequeue(1500).catch(() => null)
+      if (!m) break
+      if (m.tag === 'insert') inserts.push(m as ZcInsert)
+    }
+
+    // should see clients + foo inserts, but NOT replicas or mutations
+    const streamedTables = inserts.map((i) => `${i.relation.schema}.${i.relation.name}`)
+    expect(streamedTables).toContain('public.foo')
+    expect(streamedTables).toContain('chat_0.clients')
+    expect(streamedTables).not.toContain('chat_0.replicas')
+    expect(streamedTables).not.toContain('chat_0.mutations')
+
+    s.close()
+  })
+
+  it('shard clients table created AFTER replication starts still gets tracked', async () => {
+    // zero-cache creates shard schemas after the replication connection is live.
+    // the poll loop must detect new shard tables and install triggers dynamically.
+    const s = await stream()
+    const q = s.messages
+
+    // give replication time to start polling
+    await new Promise((r) => setTimeout(r, 300))
+
+    // now create shard schema (simulating zero-cache's DDL during initial sync)
+    await db.exec(`
+      CREATE SCHEMA chat_0;
+      CREATE TABLE chat_0.clients (
+        "clientGroupID" TEXT NOT NULL,
+        "clientID" TEXT NOT NULL,
+        "lastMutationID" BIGINT,
+        PRIMARY KEY ("clientGroupID", "clientID")
+      );
+    `)
+
+    // wait for poll loop to detect new table (rescan every ~10s)
+    await new Promise((r) => setTimeout(r, 12000))
+
+    // insert data that should be captured
+    await db.exec(
+      `INSERT INTO chat_0.clients ("clientGroupID", "clientID", "lastMutationID") VALUES ('cg1', 'c1', 42)`
+    )
+
+    // the insert should appear in the replication stream
+    let found = false
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      const m = await q.dequeue(2000).catch(() => null)
+      if (!m) break
+      if (m.tag === 'insert') {
+        const ins = m as ZcInsert
+        if (ins.relation.schema === 'chat_0' && ins.relation.name === 'clients') {
+          found = true
+          break
+        }
+      }
+    }
+
+    expect(found).toBe(true)
+
+    s.close()
+  })
 })

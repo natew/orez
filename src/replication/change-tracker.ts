@@ -158,10 +158,31 @@ export async function installTriggersOnShardTables(db: PGlite): Promise<void> {
 
   if (result.rows.length === 0) return
 
+  // only track `clients` — that's the table zero-cache expects in the
+  // replication stream (needed for .server promise resolution). other shard
+  // tables like `replicas` are zero-cache internal state and streaming them
+  // back causes "Unknown table" crashes in zero-cache's change-processor.
   let count = 0
   for (const { nspname } of result.rows) {
+    // remove stale triggers from non-clients tables (from previous versions)
+    const stale = await db.query<{ event_object_table: string }>(
+      `SELECT DISTINCT event_object_table FROM information_schema.triggers
+       WHERE trigger_name = '_zero_change_trigger'
+         AND event_object_schema = $1
+         AND event_object_table != 'clients'`,
+      [nspname]
+    )
+    for (const { event_object_table } of stale.rows) {
+      const qs = quoteIdent(nspname)
+      const qt = quoteIdent(event_object_table)
+      await db.exec(`DROP TRIGGER IF EXISTS _zero_change_trigger ON ${qs}.${qt}`)
+      log.debug.pglite(
+        `removed stale shard trigger from ${nspname}.${event_object_table}`
+      )
+    }
+
     const tables = await db.query<{ tablename: string }>(
-      `SELECT tablename FROM pg_tables WHERE schemaname = $1`,
+      `SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename = 'clients'`,
       [nspname]
     )
 
@@ -193,6 +214,17 @@ export async function getChangesSince(
     [watermark, limit]
   )
   return result.rows
+}
+
+export async function purgeConsumedChanges(
+  db: PGlite,
+  watermark: number
+): Promise<number> {
+  const result = await db.query<{ count: string }>(
+    'WITH deleted AS (DELETE FROM public._zero_changes WHERE watermark <= $1 RETURNING 1) SELECT count(*)::text AS count FROM deleted',
+    [watermark]
+  )
+  return Number(result.rows[0]?.count || 0)
 }
 
 export async function getCurrentWatermark(db: PGlite): Promise<number> {
