@@ -727,7 +727,9 @@ describe('tcp replication', () => {
           if (result) allDecoded.push(result)
         }
       }
-      const relations = allDecoded.filter((m) => m.type === 'Relation') as RelationMessage[]
+      const relations = allDecoded.filter(
+        (m) => m.type === 'Relation'
+      ) as RelationMessage[]
       const tableNames = relations.map((r) => r.tableName)
       if (tableNames.includes('items') && tableNames.includes('products')) break
     }

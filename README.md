@@ -1,6 +1,6 @@
 # orez
 
-[Zero](https://zero.rocicorp.dev) is amazing, but getting started can take a lot - setting up Postgres, approving native SQLite, and then configuring the two to work together. 
+[Zero](https://zero.rocicorp.dev) is amazing, but getting started can take a lot - setting up Postgres, approving native SQLite, and then configuring the two to work together.
 
 `orez` is an experiment at making Zero work on [PGlite](https://pglite.dev) and SQLite-wasm, and then packing the two together so running them is as simple as possible. It's intended as a dev-mode tool, with a CLI, programmatic API, and Vite plugin.
 
