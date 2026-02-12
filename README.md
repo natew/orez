@@ -1,18 +1,16 @@
-# orez
+<p align="center">
+  <img src="orez.png" alt="orez" width="320" />
+</p>
 
-[Zero](https://zero.rocicorp.dev) and [PGlite](https://pglite.dev) made to play well together, with no native dependencies. Helped by a custom WASM fork of SQLite's [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) called [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite), and [pgsql-parser](https://www.npmjs.com/package/pgsql-parser) (the real PostgreSQL C parser compiled to WASM) for SQL analysis. No Docker, no Postgres install, no `node-gyp`, no platform-specific binaries.
+[Zero](https://zero.rocicorp.dev) is amazing, but setting it up alongside Postgres requires effort, native dependencies, and oftentimes Docker. 
+
+orez makes [PGlite](https://pglite.dev) work with Zero by hacking together logical replication on top. To remove all native dependences, it also ships a custom WASM fork of the same SQLite [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) that Zero uses. Inlcudes a CLI, programmatic API, and Vite plugin.
 
 ```
 bunx orez
 ```
 
-Starts PGlite (WASM Postgres), a TCP proxy, and zero-cache with WASM SQLite. Exports a CLI, programmatic API, and Vite plugin. Comes with PGlite extensions `pgvector` and `pg_trgm` enabled by default. Includes `pg_dump` and `pg_restore` subcommands that can restore production Postgres dumps directly into PGlite — handling COPY→INSERT conversion, unsupported extension filtering, idempotent DDL rewriting, and WASM memory management automatically.
-
-Auto-configures Node heap size based on system memory, adaptively polls for replication changes (~500x faster catch-up after large restores), purges consumed WAL changes to prevent WASM OOM, and auto-tracks tables created at runtime via DDL event triggers.
-
-<p align="center">
-  <img src="logo.svg" alt="orez is hebrew for rice — zero, pglite, and sqlite-wasm hanging out" width="320" />
-</p>
+orez auto-configures Node heap size based on system memory, adaptively polls for replication changes (~500x faster catch-up after large restores), purges consumed WAL changes to prevent WASM OOM, and auto-tracks tables created at runtime via DDL event triggers. Includes `pg_dump` and `pg_restore` subcommands that can restore production Postgres dumps directly into PGlite — handling COPY→INSERT conversion, unsupported extension filtering, idempotent DDL rewriting, and WASM memory management automatically. It uses [pgsql-parser](https://www.npmjs.com/package/pgsql-parser) (the real PostgreSQL C parser, compiled to WASM) for SQL analysis. Comes with PGlite extensions `pgvector` and `pg_trgm` enabled by default. 
 
 ## CLI
 
