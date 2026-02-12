@@ -9,7 +9,7 @@ export interface OrezPluginOptions extends Partial<ZeroLiteConfig> {
   s3Port?: number
 }
 
-export default function orez(options?: OrezPluginOptions): Plugin {
+export function orezPlugin(options?: OrezPluginOptions): Plugin {
   let stop: (() => Promise<void>) | null = null
   let s3Server: Server | null = null
 

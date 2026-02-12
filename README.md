@@ -1,14 +1,20 @@
 # orez
 
-[Zero](https://zero.rocicorp.dev) is amazing, but setting it up alongside Postgres requires effort, native dependencies, and oftentimes Docker.
-
-orez makes [PGlite](https://pglite.dev) work with Zero with a few things - a proxy that adds logical replication to PGLite, and then a bunch of iterations figuring out setup and setting that make them both happy together. To remove all native dependences, orez also ships a custom WASM fork of the same SQLite [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) that Zero uses. Inlcudes a CLI, programmatic API, and Vite plugin.
+[Zero](https://zero.rocicorp.dev) is powerful, but running it locally means Postgres with native dependencies, native SQLite, and often just using Docker. orez is an experiment at making Postgres and Zero work with no setup or native dependencies at all — a drop-in [PGlite](https://pglite.dev) backend with logical replication, native-free WASM SQLite, and auto-configuration. CLI, programmatic API, and Vite plugin included.
 
 ```
 bunx orez
 ```
 
-orez auto-configures Node heap size based on system memory, adaptively polls for replication changes (~500x faster catch-up after large restores), purges consumed WAL changes to prevent WASM OOM, and auto-tracks tables created at runtime via DDL event triggers. Includes `pg_dump` and `pg_restore` subcommands that can restore production Postgres dumps directly into PGlite — handling COPY→INSERT conversion, unsupported extension filtering, idempotent DDL rewriting, and WASM memory management automatically. It uses [pgsql-parser](https://www.npmjs.com/package/pgsql-parser) (the real PostgreSQL C parser, compiled to WASM) for SQL analysis. Comes with PGlite extensions `pgvector` and `pg_trgm` enabled by default.
+**What orez handles automatically:**
+
+- **Memory management** — auto-sizes Node heap based on system RAM, purges consumed WAL, batches restores with CHECKPOINTs to prevent WASM OOM
+- **Fast replication** — adaptive polling (20ms when catching up, 500ms idle — ~500x faster after large restores), auto-tracks tables created at runtime
+- **Auto-recovery** — resets on replication errors, finds available ports if configured ones are busy, cleans stale locks while preserving cache
+- **PGlite compatibility** — rewrites unsupported queries, fakes wire protocol responses, filters unsupported column types, cleans session state between connections
+- **Production restores** — `pg_dump`/`pg_restore` with COPY→INSERT conversion, skips unsupported extensions, handles oversized rows, recovers from non-fatal errors
+- **Zero-cache workarounds** — fixes concurrent COPY bug, disables query planner (WASM infinite loop), respects publication filtering
+- **Extensions** — pgvector and pg_trgm enabled by default
 
 ## CLI
 
@@ -76,11 +82,11 @@ CLI hooks receive env vars: `DATABASE_URL`, `OREZ_PG_PORT`, `OREZ_ZERO_PORT`. Ch
 ## Vite plugin
 
 ```typescript
-import orez from 'orez/vite'
+import { orezPlugin } from 'orez/vite'
 
 export default {
   plugins: [
-    orez({
+    orezPlugin({
       pgPort: 6434,
       zeroPort: 5849,
       migrationsDir: 'src/database/migrations',
