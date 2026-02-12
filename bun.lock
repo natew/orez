@@ -31,7 +31,7 @@
     },
     "sqlite-wasm": {
       "name": "bedrock-sqlite",
-      "version": "0.0.34",
+      "version": "0.0.40",
       "devDependencies": {
         "typescript": "^5.7.0",
         "vitest": "^3.0.0",

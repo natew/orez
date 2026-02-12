@@ -12,7 +12,6 @@ import {
   getCurrentWatermark,
   purgeConsumedChanges,
   installTriggersOnShardTables,
-  ensureChangeTrackingOnAllTables,
   type ChangeRecord,
 } from './change-tracker.js'
 import {
@@ -294,9 +293,6 @@ export async function handleStartReplication(
   // "already in transaction" errors when they interleave.
   await mutex.acquire()
   try {
-    // install change tracking triggers on any tables created after startup
-    await ensureChangeTrackingOnAllTables(db)
-
     // install change tracking triggers on shard schema tables (e.g. chat_0.clients)
     // these track zero-cache's lastMutationID for .server promise resolution
     await installTriggersOnShardTables(db)
@@ -355,7 +351,7 @@ export async function handleStartReplication(
     for (const schema of relevantSchemas) {
       if (schema === 'public') continue
       const shardTables = await db.query<{ tablename: string }>(
-        `SELECT tablename FROM pg_tables WHERE schemaname = $1`,
+        `SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename = 'clients'`,
         [schema]
       )
       for (const { tablename } of shardTables.rows) {
@@ -496,6 +492,25 @@ export async function handleStartReplication(
         }
 
         if (changes.length > 0) {
+          // filter out shard tables that zero-cache doesn't expect.
+          // only `clients` is needed (for .server promise resolution).
+          // other shard tables (replicas, mutations) crash zero-cache
+          // with "Unknown table" in change-processor.
+          const batchEnd = changes[changes.length - 1].watermark
+          changes = changes.filter((c) => {
+            const dot = c.table_name.indexOf('.')
+            if (dot === -1) return true
+            const schema = c.table_name.substring(0, dot)
+            if (schema === 'public') return true
+            const table = c.table_name.substring(dot + 1)
+            return table === 'clients'
+          })
+
+          if (changes.length === 0) {
+            lastWatermark = batchEnd
+            continue
+          }
+
           const tables = [...new Set(changes.map((c) => c.table_name))].join(',')
           console.info(
             `[orez-repl#${handlerId}] found ${changes.length} changes [${tables}] (wm ${lastWatermark}→${changes[changes.length - 1].watermark}, type=${typeof changes[0].watermark})`
@@ -509,7 +524,7 @@ export async function handleStartReplication(
             excludedColumns,
             columnTypeOids
           )
-          lastWatermark = changes[changes.length - 1].watermark
+          lastWatermark = batchEnd
 
           // purge consumed changes periodically to free wasm memory
           pollsSincePurge++

@@ -67,35 +67,6 @@ export async function installChangeTracking(db: PGlite): Promise<void> {
     $$ LANGUAGE plpgsql;
   `)
 
-  // auto-install change tracking on tables created after startup (e.g. via restore
-  // or wire protocol). uses a DDL event trigger that fires on CREATE TABLE.
-  await db.exec(`
-    CREATE OR REPLACE FUNCTION public._zero_auto_track() RETURNS event_trigger AS $$
-    DECLARE
-      obj record;
-    BEGIN
-      FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands()
-                 WHERE command_tag = 'CREATE TABLE'
-      LOOP
-        IF obj.schema_name = 'public'
-           AND obj.object_identity NOT LIKE '%._zero_%'
-           AND obj.object_identity NOT LIKE '%.migrations'
-        THEN
-          EXECUTE format(
-            'CREATE TRIGGER _zero_change_trigger AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION public._zero_track_change()',
-            obj.object_identity
-          );
-        END IF;
-      END LOOP;
-    END;
-    $$ LANGUAGE plpgsql;
-
-    DROP EVENT TRIGGER IF EXISTS _zero_auto_track_trigger;
-    CREATE EVENT TRIGGER _zero_auto_track_trigger ON ddl_command_end
-      WHEN TAG IN ('CREATE TABLE')
-      EXECUTE FUNCTION public._zero_auto_track();
-  `)
-
   // install triggers on all public tables
   await installTriggersOnAllTables(db)
 }
@@ -239,10 +210,31 @@ export async function installTriggersOnShardTables(db: PGlite): Promise<void> {
 
   if (result.rows.length === 0) return
 
+  // only track `clients` — that's the table zero-cache expects in the
+  // replication stream (needed for .server promise resolution).  other shard
+  // tables like `replicas` are zero-cache internal state and streaming them
+  // back causes "Unknown table" crashes in zero-cache's change-processor.
   let count = 0
   for (const { nspname } of result.rows) {
+    // remove stale triggers from non-clients tables (from previous versions)
+    const stale = await db.query<{ event_object_table: string }>(
+      `SELECT DISTINCT event_object_table FROM information_schema.triggers
+       WHERE trigger_name = '_zero_change_trigger'
+         AND event_object_schema = $1
+         AND event_object_table != 'clients'`,
+      [nspname]
+    )
+    for (const { event_object_table } of stale.rows) {
+      const qs = quoteIdent(nspname)
+      const qt = quoteIdent(event_object_table)
+      await db.exec(`DROP TRIGGER IF EXISTS _zero_change_trigger ON ${qs}.${qt}`)
+      log.debug.pglite(
+        `removed stale shard trigger from ${nspname}.${event_object_table}`
+      )
+    }
+
     const tables = await db.query<{ tablename: string }>(
-      `SELECT tablename FROM pg_tables WHERE schemaname = $1`,
+      `SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename = 'clients'`,
       [nspname]
     )
 
