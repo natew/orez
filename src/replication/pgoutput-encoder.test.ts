@@ -575,13 +575,17 @@ describe('pgoutput-encoder', () => {
 
       // verify lexi version ordering is preserved
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const {
-        versionToLexi,
-      } = require('/Users/n8/orez/node_modules/@rocicorp/zero/out/zero-cache/src/types/lexi-version.js')
+      const lexiPath = join(
+        import.meta.dirname,
+        '../../node_modules/@rocicorp/zero/out/zero-cache/src/types/lexi-version.js'
+      )
+      const { versionToLexi } = require(lexiPath)
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const {
-        toBigInt: lsnToBigInt,
-      } = require('/Users/n8/orez/node_modules/@rocicorp/zero/out/zero-cache/src/services/change-source/pg/lsn.js')
+      const lsnPath = join(
+        import.meta.dirname,
+        '../../node_modules/@rocicorp/zero/out/zero-cache/src/services/change-source/pg/lsn.js'
+      )
+      const { toBigInt: lsnToBigInt } = require(lsnPath)
 
       const slotHex = `00000000/${slotLsn.toString(16).padStart(8, '0')}`.toUpperCase()
       const beginHex = `00000000/${beginLsn.toString(16).padStart(8, '0')}`.toUpperCase()
