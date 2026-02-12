@@ -16,7 +16,7 @@ export interface PGliteInstances {
 }
 
 // create a single pglite instance with given dataDir suffix
-async function createInstance(
+export async function createInstance(
   config: ZeroLiteConfig,
   name: string,
   withExtensions: boolean

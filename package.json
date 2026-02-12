@@ -40,6 +40,8 @@
     "check": "tsc --noEmit",
     "demo:test": "bun demo/src/test/run-e2e.ts",
     "check:all": "bun run lint && bun run format:check && bun run check && bun run test",
+    "test:chat": "bun scripts/test-chat-integration.ts",
+    "test:chat:smoke": "bun scripts/test-chat-integration.ts --smoke",
     "release": "bun scripts/release.ts"
   },
   "dependencies": {

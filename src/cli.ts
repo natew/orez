@@ -750,6 +750,11 @@ const main = defineCommand({
       description: 'use native @rocicorp/zero-sqlite3 instead of wasm bedrock-sqlite',
       default: false,
     },
+    'log-env': {
+      type: 'boolean',
+      description: 'log ZERO_* and related environment variables on startup',
+      default: false,
+    },
     'on-db-ready': {
       type: 'string',
       description: 'command to run after db+proxy are ready, before zero-cache starts',
@@ -760,6 +765,21 @@ const main = defineCommand({
       description: 'command to run once all services are healthy',
       default: '',
     },
+    admin: {
+      type: 'boolean',
+      description: 'start admin web ui',
+      default: false,
+    },
+    'admin-port': {
+      type: 'string',
+      description: 'admin ui port (default: auto)',
+      default: '0',
+    },
+    'admin-logs': {
+      type: 'boolean',
+      description: 'write logs to .orez/logs/ (default: true when --admin)',
+      default: true,
+    },
   },
   subCommands: {
     s3: s3Command,
@@ -767,7 +787,8 @@ const main = defineCommand({
     pg_restore: pgRestoreCommand,
   },
   async run({ args }) {
-    const { config, stop } = await startZeroLite({
+    const startTime = Date.now()
+    const { config, stop, logStore, zeroEnv, actions, httpLogStore } = await startZeroLite({
       pgPort: Number(args['pg-port']),
       zeroPort: Number(args['zero-port']),
       dataDir: args['data-dir'],
@@ -778,7 +799,11 @@ const main = defineCommand({
       skipZeroCache: args['skip-zero-cache'],
       disableWasmSqlite: args['disable-wasm-sqlite'],
       logLevel: (args['log-level'] as 'error' | 'warn' | 'info' | 'debug') || undefined,
+      logEnv: args['log-env'],
       onDbReady: args['on-db-ready'],
+      admin: args.admin,
+      adminPort: Number(args['admin-port']),
+      adminLogs: args['admin-logs'],
     })
 
     let s3Server: import('node:http').Server | null = null
@@ -788,6 +813,27 @@ const main = defineCommand({
         port: Number(args['s3-port']),
         dataDir: args['data-dir'],
       })
+    }
+
+    let adminServer: import('node:http').Server | null = null
+    if (args.admin && logStore) {
+      const { findPort } = await import('./port.js')
+      const adminPort = Number(args['admin-port']) || (config.zeroPort + 2)
+      const resolvedPort = await findPort(adminPort)
+      const { startAdminServer } = await import('./admin/server.js')
+      adminServer = await startAdminServer({
+        port: resolvedPort,
+        logStore,
+        config,
+        zeroEnv,
+        actions,
+        startTime,
+        httpLog: httpLogStore || undefined,
+      })
+      log.orez(`admin: http://127.0.0.1:${resolvedPort}`)
+      if (args['admin-logs']) {
+        log.orez(`logs: ${resolve(args['data-dir'], 'logs', 'orez.log')}`)
+      }
     }
 
     log.orez('ready')
@@ -817,11 +863,13 @@ const main = defineCommand({
     }
 
     process.on('SIGINT', async () => {
+      adminServer?.close()
       s3Server?.close()
       await stop()
       process.exit(0)
     })
     process.on('SIGTERM', async () => {
+      adminServer?.close()
       s3Server?.close()
       await stop()
       process.exit(0)

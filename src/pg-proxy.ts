@@ -464,6 +464,14 @@ async function performHandshake(
   return { params }
 }
 
+// ── connection tracking ──
+
+// per-database active connection count. pglite is single-session so all
+// connections share one transaction context. we skip ROLLBACK on close when
+// other connections are still active to avoid killing their transactions.
+const activeConns: Record<string, number> = {}
+let connCounter = 0
+
 // ── message loop ──
 
 // process messages from a connected, authenticated client.
@@ -674,6 +682,7 @@ export async function startPgProxy(
 
     let dbName = 'postgres'
     let isReplicationConnection = false
+    const connId = ++connCounter
 
     try {
       // perform startup handshake
@@ -682,18 +691,29 @@ export async function startPgProxy(
       dbName = params.database || 'postgres'
       isReplicationConnection = params.replication === 'database'
 
-      log.debug.proxy(
-        `connection: db=${dbName} user=${params.user} replication=${params.replication || 'none'}`
-      )
+      // track active connections per database
+      activeConns[dbName] = (activeConns[dbName] || 0) + 1
+
+      console.info(`[orez-proxy#${connId}] connect db=${dbName} repl=${params.replication || 'none'}`)
 
       const { db } = getDbContext(dbName)
       await db.waitReady
 
       // clean up pglite session state when client disconnects.
-      // pglite is single-session — all connections share one session, so SET
-      // commands from one connection (e.g. pg_restore setting search_path='')
-      // bleed into subsequent connections. reset on close to prevent this.
+      // pglite is single-session — all connections share one session.
+      // only ROLLBACK + reset when this is the LAST connection for this db,
+      // to avoid killing another connection's active transaction.
       socket.on('close', async () => {
+        activeConns[dbName] = Math.max(0, (activeConns[dbName] || 1) - 1)
+        const remaining = activeConns[dbName]
+        const shouldRollback = remaining === 0
+
+        console.info(
+          `[orez-proxy#${connId}] close [${dbName}] (remaining=${remaining}, shouldRollback=${shouldRollback})`
+        )
+
+        if (!shouldRollback) return
+
         const { db: closeDb, mutex: closeMutex } = getDbContext(dbName)
         await closeMutex.acquire()
         try {

@@ -14,8 +14,12 @@ export interface ZeroLiteConfig {
   disableWasmSqlite: boolean
   logLevel: LogLevel
   pgliteOptions: Partial<PGliteOptions>
+  logEnv: boolean
   onDbReady: string
   beforeZero: ((db: import('@electric-sql/pglite').PGlite) => Promise<void>) | null
+  admin: boolean
+  adminPort: number
+  adminLogs: boolean
 }
 
 export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConfig {
@@ -31,8 +35,12 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     disableWasmSqlite: overrides.disableWasmSqlite ?? false,
     logLevel: overrides.logLevel || 'warn',
     pgliteOptions: overrides.pgliteOptions || {},
+    logEnv: overrides.logEnv ?? false,
     onDbReady: overrides.onDbReady || '',
     beforeZero: overrides.beforeZero || null,
+    admin: overrides.admin ?? false,
+    adminPort: overrides.adminPort || 0,
+    adminLogs: overrides.adminLogs ?? true,
   }
 }
 

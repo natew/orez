@@ -7,21 +7,23 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { totalmem } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { getConfig, getConnectionString } from './config.js'
-import { log, port, setLogLevel } from './log.js'
+import { log, port, setLogLevel, addLogListener } from './log.js'
 import { startPgProxy } from './pg-proxy.js'
-import { createPGliteInstances, runMigrations } from './pglite-manager.js'
+import { createInstance, createPGliteInstances, runMigrations } from './pglite-manager.js'
 import { findPort } from './port.js'
 import { installChangeTracking } from './replication/change-tracker.js'
 
 import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
+import type { LogStore } from './admin/log-store.js'
+import type { HttpLogStore } from './admin/http-proxy.js'
 
 export { getConfig, getConnectionString } from './config.js'
 export type { LogLevel, ZeroLiteConfig } from './config.js'
@@ -42,6 +44,21 @@ function resolvePackage(pkg: string): string {
 export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const config = getConfig(overrides)
   setLogLevel(config.logLevel)
+
+  // when admin ui enabled, create log store and capture all log output
+  const SOURCE_MAP: Record<string, string> = {
+    'orez': 'orez', 'pglite': 'pglite', 'pg-proxy': 'proxy',
+    'zero': 'zero', 'zero-cache': 'zero', 'orez/s3': 's3',
+  }
+  let logStore: LogStore | null = null
+  let removeLogListener: (() => void) | null = null
+  if (config.admin) {
+    const { createLogStore } = await import('./admin/log-store.js')
+    logStore = createLogStore(config.dataDir, config.adminLogs)
+    removeLogListener = addLogListener((source, level, msg) => {
+      logStore!.push(SOURCE_MAP[source] || source, level, msg)
+    })
+  }
 
   // find available ports
   const pgPort = await findPort(config.pgPort)
@@ -73,7 +90,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // start tcp proxy (routes connections to correct instance by database name)
   const pgServer = await startPgProxy(instances, config)
 
-  log.orez(`db up ${port(pgPort, 'green')}`)
+  log.pglite(`postgres up ${port(pgPort, 'green')}`)
   if (migrationsApplied > 0)
     log.orez(
       `${migrationsApplied} migration${migrationsApplied === 1 ? '' : 's'} applied`
@@ -128,18 +145,121 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // clean up stale lock files from previous crash (keep replica for fast restart)
   cleanupStaleLockFiles(config)
 
-  // start zero-cache
+  // http proxy for admin traffic logging
+  let httpLogStore: HttpLogStore | null = null
+  let httpProxyServer: import('node:http').Server | null = null
+  let zeroInternalPort = zeroPort
+  if (config.admin && !config.skipZeroCache) {
+    const { createHttpLogStore } = await import('./admin/http-proxy.js')
+    httpLogStore = createHttpLogStore()
+    zeroInternalPort = await findPort(zeroPort + 100)
+  }
+
+  // start zero-cache with auto-recovery for stale change db
   let zeroCacheProcess: ChildProcess | null = null
+  let zeroEnv: Record<string, string> = {}
+  const cdbResets = { count: 0, lastReset: 0 }
+  const MAX_CDB_RESETS = 10
+  const MIN_RESET_INTERVAL_MS = 60_000
+
   if (!config.skipZeroCache) {
-    zeroCacheProcess = await startZeroCache(config)
-    await waitForZeroCache(config)
+    let currentResult = await startZeroCache(config, zeroInternalPort)
+    zeroCacheProcess = currentResult.child
+    zeroEnv = currentResult.env
+
+    // watch for stale changeLog crashes and auto-recover
+    const attachCdbRecovery = (result: typeof currentResult) => {
+      result.child.on('exit', async (code) => {
+        if (code === 0 || code === null) return
+        if (!result.stderrBuf.includes('changeLog_pkey')) return
+
+        const now = Date.now()
+        if (cdbResets.count >= MAX_CDB_RESETS) {
+          log.zero('change db reset limit reached, not retrying')
+          return
+        }
+        const elapsed = now - cdbResets.lastReset
+        if (elapsed < MIN_RESET_INTERVAL_MS) {
+          log.zero(`change db reset too soon (${Math.round(elapsed / 1000)}s ago), not retrying`)
+          return
+        }
+
+        cdbResets.count++
+        cdbResets.lastReset = now
+        log.zero(`stale change db detected, resetting (${cdbResets.count}/${MAX_CDB_RESETS})`)
+
+        try {
+          await instances.cdb.close()
+          const cdbPath = resolve(config.dataDir, 'pgdata-cdb')
+          rmSync(cdbPath, { recursive: true, force: true })
+          instances.cdb = await createInstance(config, 'cdb', false)
+
+          currentResult = await startZeroCache(config, zeroInternalPort)
+          zeroCacheProcess = currentResult.child
+          attachCdbRecovery(currentResult)
+          await waitForZeroCache(config, undefined, zeroInternalPort)
+          log.zero(`recovered, ready ${port(config.zeroPort, 'magenta')}`)
+        } catch (err) {
+          log.zero(`recovery failed: ${err}`)
+        }
+      })
+    }
+
+    attachCdbRecovery(currentResult)
+    await waitForZeroCache(config, undefined, zeroInternalPort)
     log.zero(`ready ${port(config.zeroPort, 'magenta')}`)
+
+    // start http proxy for admin traffic logging
+    if (httpLogStore) {
+      const { startHttpProxy } = await import('./admin/http-proxy.js')
+      httpProxyServer = await startHttpProxy({
+        listenPort: zeroPort,
+        targetPort: zeroInternalPort,
+        httpLog: httpLogStore,
+      })
+    }
   } else {
     log.orez('skip zero-cache')
   }
 
+  // admin action handlers
+  const actions = {
+    restartZero: config.skipZeroCache ? undefined : async () => {
+      if (zeroCacheProcess && !zeroCacheProcess.killed) {
+        zeroCacheProcess.kill('SIGTERM')
+        await new Promise<void>((r) => {
+          const t = setTimeout(() => { zeroCacheProcess?.kill('SIGKILL'); r() }, 3000)
+          zeroCacheProcess!.on('exit', () => { clearTimeout(t); r() })
+        })
+      }
+      const zc = await startZeroCache(config, zeroInternalPort)
+      zeroCacheProcess = zc.child
+      await waitForZeroCache(config, undefined, zeroInternalPort)
+      log.zero(`restarted ${port(config.zeroPort, 'magenta')}`)
+    },
+    resetZero: config.skipZeroCache ? undefined : async () => {
+      if (zeroCacheProcess && !zeroCacheProcess.killed) {
+        zeroCacheProcess.kill('SIGTERM')
+        await new Promise<void>((r) => {
+          const t = setTimeout(() => { zeroCacheProcess?.kill('SIGKILL'); r() }, 3000)
+          zeroCacheProcess!.on('exit', () => { clearTimeout(t); r() })
+        })
+      }
+      const replicaPath = resolve(config.dataDir, 'zero-replica.db')
+      for (const suffix of ['', '-wal', '-shm', '-wal2']) {
+        try { if (existsSync(replicaPath + suffix)) unlinkSync(replicaPath + suffix) } catch {}
+      }
+      const zc = await startZeroCache(config, zeroInternalPort)
+      zeroCacheProcess = zc.child
+      await waitForZeroCache(config, undefined, zeroInternalPort)
+      log.zero(`reset and restarted ${port(config.zeroPort, 'magenta')}`)
+    },
+  }
+
   const stop = async () => {
     log.debug.orez('shutting down')
+    removeLogListener?.()
+    httpProxyServer?.close()
     if (zeroCacheProcess && !zeroCacheProcess.killed) {
       zeroCacheProcess.kill('SIGTERM')
       // wait up to 3s for graceful exit, then force kill
@@ -165,7 +285,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     log.debug.orez('stopped')
   }
 
-  return { config, stop, db, instances, pgPort: config.pgPort, zeroPort: config.zeroPort }
+  return { config, stop, db, instances, pgPort: config.pgPort, zeroPort: config.zeroPort, logStore, zeroEnv, actions, httpLogStore }
 }
 
 function cleanupStaleLockFiles(config: ZeroLiteConfig): void {
@@ -244,7 +364,7 @@ function writeSqliteShim(): string {
   return registerPath
 }
 
-async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
+async function startZeroCache(config: ZeroLiteConfig, portOverride?: number): Promise<{ child: ChildProcess; env: Record<string, string>; stderrBuf: string }> {
   // resolve @rocicorp/zero entry for finding zero-cache modules
   const zeroEntry = resolvePackage('@rocicorp/zero')
 
@@ -263,7 +383,7 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
   // defaults that can be overridden by user env
   const defaults: Record<string, string> = {
     NODE_ENV: 'development',
-    ZERO_LOG_LEVEL: config.logLevel,
+    ZERO_LOG_LEVEL: 'info',
     ZERO_NUM_SYNC_WORKERS: '1',
     // disable query planner — it relies on scanStatus which causes infinite
     // loops with wasm sqlite and has caused freezes with native too.
@@ -289,7 +409,7 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
     ZERO_CVR_DB: cvrUrl,
     ZERO_CHANGE_DB: cdbUrl,
     ZERO_REPLICA_FILE: resolve(config.dataDir, 'zero-replica.db'),
-    ZERO_PORT: String(config.zeroPort),
+    ZERO_PORT: String(portOverride || config.zeroPort),
   }
 
   const zeroCacheBin = resolve(zeroEntry, '..', 'cli.js')
@@ -313,31 +433,82 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
     env.NODE_OPTIONS = `--max-old-space-size=${heapMB} ${existing}`.trim()
   }
 
+  // log env vars if --log-env was passed
+  if (config.logEnv) {
+    const zeroVars = Object.entries(env)
+      .filter(([key]) => key.startsWith('ZERO_') || key === 'NODE_ENV')
+      .sort(([a], [b]) => a.localeCompare(b))
+    log.orez('zero-cache env:')
+    for (const [key, value] of zeroVars) {
+      log.orez(`  ${key}=${value}`)
+    }
+  }
+
   const child = spawn(zeroCacheBin, [], {
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 
+  // zero-cache uses structured logging when piped (not a tty).
+  // multiline format: timestamp + "[" on one line, context lines, "] message" on another.
+  // single-line format: timestamp + [ context ] message, or timestamp + key=val,... message
+  // we buffer multiline blocks and extract just the message.
+  const timestampRe = /^\d{4}-\d{2}-\d{2}T[\d:.+\-Z]+\s*/
+  let inBlock = false
+  const zeroLog = (line: string) => {
+    let stripped = line.replace(timestampRe, '')
+
+    // start of multiline context block: line ends with "[" (possibly after timestamp)
+    if (!inBlock && /^\[?\s*$/.test(stripped)) {
+      inBlock = true
+      return
+    }
+
+    // inside multiline block: skip context lines, look for "] message"
+    if (inBlock) {
+      const closeMatch = stripped.match(/^\]\s*(.*)$/)
+      if (closeMatch) {
+        inBlock = false
+        const msg = closeMatch[1].trim()
+        if (msg) log.zero(msg)
+      }
+      // context continuation lines like "'pid=8278'," — skip
+      return
+    }
+
+    // single-line: strip inline [ context ] and key=val prefixes
+    stripped = stripped.replace(/\[.*?\]\s*/g, '')
+    stripped = stripped.replace(/^(?:\w+=\S+,)*\w+=\S+\s+/, '')
+    stripped = stripped.trim()
+
+    if (!stripped || /^[\[\]',\s]*$/.test(stripped)) return
+
+    log.zero(stripped)
+  }
+
   child.stdout?.on('data', (data: Buffer) => {
     const lines = data.toString().trim().split('\n')
     for (const line of lines) {
-      log.debug.zero(line)
+      zeroLog(line)
     }
   })
 
-  let stderrBuf = ''
+  const result = { child, env, stderrBuf: '' }
+
   child.stderr?.on('data', (data: Buffer) => {
     const chunk = data.toString()
-    stderrBuf += chunk
+    result.stderrBuf += chunk
     const lines = chunk.trim().split('\n')
     for (const line of lines) {
-      log.debug.zero(line)
+      zeroLog(line)
     }
   })
 
   child.on('exit', (code) => {
     if (code !== 0 && code !== null) {
-      if (stderrBuf.includes('Could not locate the bindings file')) {
+      // changeLog_pkey errors are handled by the recovery logic in startZeroLite
+      if (result.stderrBuf.includes('changeLog_pkey')) return
+      if (result.stderrBuf.includes('Could not locate the bindings file')) {
         log.zero(
           'native @rocicorp/zero-sqlite3 not found — native deps were not compiled.\n' +
             'either:\n' +
@@ -346,7 +517,7 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
             '    or add "trustedDependencies": ["@rocicorp/zero-sqlite3"] to package.json'
         )
       } else {
-        const lastLines = stderrBuf.trim().split('\n').slice(-5).join('\n')
+        const lastLines = result.stderrBuf.trim().split('\n').slice(-5).join('\n')
         if (lastLines) {
           log.zero(`exited with code ${code}:\n${lastLines}`)
         } else {
@@ -356,15 +527,16 @@ async function startZeroCache(config: ZeroLiteConfig): Promise<ChildProcess> {
     }
   })
 
-  return child
+  return result
 }
 
 async function waitForZeroCache(
   config: ZeroLiteConfig,
-  timeoutMs = 120000
+  timeoutMs = 120000,
+  portOverride?: number,
 ): Promise<void> {
   const start = Date.now()
-  const url = `http://127.0.0.1:${config.zeroPort}/`
+  const url = `http://127.0.0.1:${portOverride || config.zeroPort}/`
 
   while (Date.now() - start < timeoutMs) {
     try {
