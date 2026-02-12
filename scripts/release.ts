@@ -78,8 +78,10 @@ for (const p of packages) {
   console.info(`  ${p.pkg.name}: ${p.pkg.version} -> ${p.next}`)
 }
 
-// check: lint, types, tests
+// check: format, lint, types, tests
 console.info('\nchecking...')
+run('bun run format')
+run('bun run format:check')
 run('bun run lint')
 run('bun run check')
 if (!skipTest) {
@@ -167,9 +169,6 @@ for (const p of packages) {
   console.info(`\npublishing ${name}@${p.next}...`)
   run('npm publish --access public', { cwd: tmpDir })
 }
-
-// format before commit
-run('bun run format')
 
 // git commit + tag + push
 const tag = `v${orezNext}`

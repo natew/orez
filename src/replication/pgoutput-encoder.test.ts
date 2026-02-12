@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 import { describe, it, expect } from 'vitest'
 
 import {
@@ -367,11 +369,13 @@ describe('pgoutput-encoder', () => {
   // roundtrip tests: encode with orez → parse with zero-cache's parser
   // this validates the fundamental contract between orez and zero-cache
   describe('roundtrip: orez encoder → zero-cache parser', () => {
-    // absolute path bypasses package.json exports restriction
+    // relative path bypasses package.json exports restriction
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const {
-      PgoutputParser,
-    } = require('/Users/n8/orez/node_modules/@rocicorp/zero/out/zero-cache/src/services/change-source/pg/logical-replication/pgoutput-parser.js')
+    const parserPath = join(
+      import.meta.dirname,
+      '../../node_modules/@rocicorp/zero/out/zero-cache/src/services/change-source/pg/logical-replication/pgoutput-parser.js'
+    )
+    const { PgoutputParser } = require(parserPath)
 
     // mock type parsers: unknown OIDs default to String (identity for text)
     const typeParsers = { getTypeParser: () => String }
