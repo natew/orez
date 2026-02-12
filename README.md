@@ -73,13 +73,12 @@ All options are optional with sensible defaults. Ports auto-find if in use.
 
 ### Lifecycle hooks
 
-| Hook        | CLI                 | Programmatic                   | When                                                            |
-| ----------- | ------------------- | ------------------------------ | --------------------------------------------------------------- |
-| on-db-ready | `--on-db-ready=CMD` | `onDbReady: 'CMD'`             | after db + proxy are ready, before zero-cache                   |
-| before-zero | —                   | `beforeZero: async (db) => {}` | after on-db-ready, before zero-cache (receives PGlite instance) |
-| on-healthy  | `--on-healthy=CMD`  | —                              | after all services are healthy                                  |
+| Hook        | CLI                 | Programmatic                          | When                                |
+| ----------- | ------------------- | ------------------------------------- | ----------------------------------- |
+| on-db-ready | `--on-db-ready=CMD` | `onDbReady: 'CMD'` or `onDbReady: fn` | after db + proxy ready, before zero |
+| on-healthy  | `--on-healthy=CMD`  | `onHealthy: 'CMD'` or `onHealthy: fn` | after all services ready            |
 
-CLI hooks receive env vars: `DATABASE_URL`, `OREZ_PG_PORT`, `OREZ_ZERO_PORT`. Change tracking triggers are automatically re-installed after `onDbReady` and `beforeZero` run, so tables created by those hooks are tracked without extra setup.
+Hooks can be shell command strings (CLI) or callback functions (programmatic). Shell commands receive env vars: `DATABASE_URL`, `OREZ_PG_PORT`, `OREZ_ZERO_PORT`. Change tracking triggers are re-installed after `onDbReady`, so tables created by hooks are tracked.
 
 ## Vite plugin
 
@@ -92,12 +91,15 @@ export default {
       pgPort: 6434,
       zeroPort: 5849,
       migrationsDir: 'src/database/migrations',
+      // lifecycle hooks (optional)
+      onDbReady: () => console.log('db ready'),
+      onHealthy: () => console.log('all services healthy'),
     }),
   ],
 }
 ```
 
-Starts orez when vite dev server starts, stops on close.
+Starts orez when vite dev server starts, stops on close. Supports all `startZeroLite` options plus `s3` and `s3Port` for local S3.
 
 ## How it works
 

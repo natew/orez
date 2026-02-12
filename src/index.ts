@@ -9,7 +9,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, resolve } from 'node:path'
+import { resolve } from 'node:path'
 
 import { createLogStore, type LogStore } from './admin/log-store.js'
 import { getConfig, getConnectionString } from './config.js'
@@ -23,7 +23,42 @@ import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
 
 export { getConfig, getConnectionString } from './config.js'
-export type { LogLevel, ZeroLiteConfig } from './config.js'
+export type { Hook, LogLevel, ZeroLiteConfig } from './config.js'
+
+// helper to run a hook (string command or callback function)
+async function runHook(
+  hook: string | (() => void | Promise<void>) | undefined,
+  name: string,
+  env: Record<string, string>
+): Promise<void> {
+  if (!hook) return
+
+  if (typeof hook === 'function') {
+    log.debug.orez(`running ${name} callback`)
+    await hook()
+    log.orez(`${name} done`)
+    return
+  }
+
+  // string command
+  log.debug.orez(`running ${name}: ${hook}`)
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(hook, {
+      shell: true,
+      stdio: 'inherit',
+      env: { ...process.env, ...env },
+    })
+    child.on('exit', (code) => {
+      if (code === 0) {
+        log.orez(`${name} done`)
+        resolve()
+      } else {
+        reject(new Error(`${name} exited with code ${code}`))
+      }
+    })
+    child.on('error', reject)
+  })
+}
 
 // resolve a package entry — import.meta.resolve doesn't work in vitest
 function resolvePackage(pkg: string): string {
@@ -89,34 +124,17 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // seed data if needed
   await seedIfNeeded(db, config)
 
-  // run on-db-ready command (e.g. migrations) before zero-cache starts
+  // run on-db-ready hook (e.g. migrations) before zero-cache starts
   if (config.onDbReady) {
-    log.debug.orez(`running on-db-ready: ${config.onDbReady}`)
     const upstreamUrl = getConnectionString(config, 'postgres')
     const cvrUrl = getConnectionString(config, 'zero_cvr')
     const cdbUrl = getConnectionString(config, 'zero_cdb')
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(config.onDbReady, {
-        shell: true,
-        stdio: 'inherit',
-        env: {
-          ...process.env,
-          ZERO_UPSTREAM_DB: upstreamUrl,
-          ZERO_CVR_DB: cvrUrl,
-          ZERO_CHANGE_DB: cdbUrl,
-          DATABASE_URL: upstreamUrl,
-          OREZ_PG_PORT: String(config.pgPort),
-        },
-      })
-      child.on('exit', (code) => {
-        if (code === 0) {
-          log.orez('on-db-ready done')
-          resolve()
-        } else {
-          reject(new Error(`on-db-ready exited with code ${code}`))
-        }
-      })
-      child.on('error', reject)
+    await runHook(config.onDbReady, 'on-db-ready', {
+      ZERO_UPSTREAM_DB: upstreamUrl,
+      ZERO_CVR_DB: cvrUrl,
+      ZERO_CHANGE_DB: cdbUrl,
+      DATABASE_URL: upstreamUrl,
+      OREZ_PG_PORT: String(config.pgPort),
     })
 
     // re-install change tracking on tables created by on-db-ready
@@ -140,6 +158,14 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     log.orez('skip zero-cache')
   }
 
+  // run on-healthy hook after all services are ready
+  if (config.onHealthy) {
+    await runHook(config.onHealthy, 'on-healthy', {
+      OREZ_PG_PORT: String(config.pgPort),
+      OREZ_ZERO_PORT: String(config.zeroPort),
+    })
+  }
+
   const killZeroCache = async () => {
     if (zeroCacheProcess && !zeroCacheProcess.killed) {
       zeroCacheProcess.kill('SIGTERM')
@@ -158,17 +184,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     }
   }
 
-  const restartZero = async () => {
+  const restartZeroCache = async (cleanup = false) => {
     await killZeroCache()
-    const result = await startZeroCache(config, logStore)
-    zeroCacheProcess = result.process
-    zeroEnv = result.env
-    await waitForZeroCache(config)
-  }
-
-  const resetZero = async () => {
-    await killZeroCache()
-    cleanupStaleReplica(config)
+    if (cleanup) cleanupStaleReplica(config)
     const result = await startZeroCache(config, logStore)
     zeroCacheProcess = result.process
     zeroEnv = result.env
@@ -196,8 +214,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     zeroPort: config.zeroPort,
     logStore,
     zeroEnv,
-    restartZero: config.skipZeroCache ? undefined : restartZero,
-    resetZero: config.skipZeroCache ? undefined : resetZero,
+    restartZero: config.skipZeroCache ? undefined : () => restartZeroCache(false),
+    resetZero: config.skipZeroCache ? undefined : () => restartZeroCache(true),
   }
 }
 

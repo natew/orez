@@ -1,12 +1,17 @@
 import { startZeroLite } from './index.js'
 
-import type { ZeroLiteConfig } from './config.js'
+import type { Hook, ZeroLiteConfig } from './config.js'
 import type { Server } from 'node:http'
 import type { Plugin } from 'vite'
 
-export interface OrezPluginOptions extends Partial<ZeroLiteConfig> {
+export interface OrezPluginOptions extends Partial<
+  Omit<ZeroLiteConfig, 'onDbReady' | 'onHealthy'>
+> {
   s3?: boolean
   s3Port?: number
+  // lifecycle hooks - callback functions (preferred for vite) or shell commands
+  onDbReady?: Hook
+  onHealthy?: Hook
 }
 
 export function orezPlugin(options?: OrezPluginOptions): Plugin {

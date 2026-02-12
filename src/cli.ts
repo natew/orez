@@ -788,7 +788,8 @@ const main = defineCommand({
         skipZeroCache: args['skip-zero-cache'],
         disableWasmSqlite: args['disable-wasm-sqlite'],
         logLevel: (args['log-level'] as 'error' | 'warn' | 'info' | 'debug') || undefined,
-        onDbReady: args['on-db-ready'],
+        onDbReady: args['on-db-ready'] || undefined,
+        onHealthy: args['on-healthy'] || undefined,
       })
 
     let s3Server: import('node:http').Server | null = null
@@ -820,24 +821,6 @@ const main = defineCommand({
     )
     if (!config.skipZeroCache) {
       log.zero(`http://localhost:${config.zeroPort}`)
-    }
-
-    if (args['on-healthy']) {
-      log.orez(`running on-healthy: ${args['on-healthy']}`)
-      const child = spawn(args['on-healthy'], {
-        shell: true,
-        stdio: 'inherit',
-        env: {
-          ...process.env,
-          OREZ_PG_PORT: String(config.pgPort),
-          OREZ_ZERO_PORT: String(config.zeroPort),
-        },
-      })
-      child.on('exit', (code) => {
-        if (code !== 0 && code !== null) {
-          log.orez(`on-healthy command exited with code ${code}`)
-        }
-      })
     }
 
     process.on('SIGINT', async () => {

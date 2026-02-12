@@ -2,6 +2,9 @@ import type { PGliteOptions } from '@electric-sql/pglite'
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
 
+// lifecycle hooks - can be shell command string (CLI) or callback (programmatic)
+export type Hook = string | (() => void | Promise<void>)
+
 export interface ZeroLiteConfig {
   dataDir: string
   pgPort: number
@@ -15,7 +18,9 @@ export interface ZeroLiteConfig {
   disableWasmSqlite: boolean
   logLevel: LogLevel
   pgliteOptions: Partial<PGliteOptions>
-  onDbReady: string
+  // lifecycle hooks
+  onDbReady?: Hook // after db+proxy ready, before zero-cache
+  onHealthy?: Hook // after all services ready
 }
 
 export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConfig {
@@ -32,7 +37,8 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     disableWasmSqlite: overrides.disableWasmSqlite ?? false,
     logLevel: overrides.logLevel || 'warn',
     pgliteOptions: overrides.pgliteOptions || {},
-    onDbReady: overrides.onDbReady || '',
+    onDbReady: overrides.onDbReady,
+    onHealthy: overrides.onHealthy,
   }
 }
 
