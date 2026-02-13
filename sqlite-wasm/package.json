@@ -1,6 +1,6 @@
 {
   "name": "bedrock-sqlite",
-  "version": "0.0.55",
+  "version": "0.1.0",
   "description": "WASM build of SQLite (bedrock branch) with better-sqlite3 compatible API. Supports BEGIN CONCURRENT and WAL2.",
   "license": "MIT",
   "type": "module",
