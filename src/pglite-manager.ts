@@ -31,17 +31,37 @@ async function createInstance(
     ...userOpts
   } = config.pgliteOptions as Record<string, any>
 
-  const db = new PGlite({
-    dataDir: dataPath,
-    debug: config.logLevel === 'debug' ? 1 : 0,
-    relaxedDurability: true,
-    ...userOpts,
-    extensions: withExtensions ? userOpts.extensions || { vector, pg_trgm } : {},
-  })
+  try {
+    const db = new PGlite({
+      dataDir: dataPath,
+      debug: config.logLevel === 'debug' ? 1 : 0,
+      relaxedDurability: true,
+      ...userOpts,
+      extensions: withExtensions ? userOpts.extensions || { vector, pg_trgm } : {},
+    })
 
-  await db.waitReady
-  log.debug.pglite(`${name} ready`)
-  return db
+    await db.waitReady
+    log.debug.pglite(`${name} ready`)
+    return db
+  } catch (err) {
+    const msg = String(err)
+    if (msg.includes('Aborted()') || msg.includes('_pg_initdb')) {
+      log.pglite(`failed to start ${name} database`)
+      log.pglite(``)
+      log.pglite(`the data directory may be corrupted or locked.`)
+      log.pglite(`to fix, try one of:`)
+      log.pglite(``)
+      log.pglite(`  1. remove lock files:`)
+      log.pglite(`     rm -f ${dataPath}/postmaster.pid ${dataPath}/.s.PGSQL.*`)
+      log.pglite(``)
+      log.pglite(`  2. start fresh (loses data):`)
+      log.pglite(
+        `     rm -rf ${config.dataDir}/pgdata-* ${config.dataDir}/zero-replica.db*`
+      )
+      log.pglite(``)
+    }
+    throw err
+  }
 }
 
 /**
