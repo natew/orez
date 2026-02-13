@@ -41,9 +41,9 @@ export function port(n: number, color: keyof typeof COLORS): string {
   return `${DIM}${COLORS[color]}:${n}${RESET}`
 }
 
-/** format a url with yellow color */
+/** format a url with green color */
 export function url(u: string): string {
-  return `${COLORS.yellow}${u}${RESET}`
+  return `${COLORS.green}${u}${RESET}`
 }
 
 // map logger labels to logStore source names

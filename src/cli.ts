@@ -895,9 +895,9 @@ const main = defineCommand({
       description: 'command to run once all services are healthy',
       default: '',
     },
-    admin: {
+    'disable-admin': {
       type: 'boolean',
-      description: 'start admin dashboard',
+      description: 'disable admin dashboard',
       default: false,
     },
     'admin-port': {
@@ -912,7 +912,7 @@ const main = defineCommand({
     pg_restore: pgRestoreCommand,
   },
   async run({ args }) {
-    const adminPort = args.admin ? Number(args['admin-port']) : 0
+    const adminPort = args['disable-admin'] ? 0 : Number(args['admin-port'])
     const {
       config,
       stop,
@@ -948,7 +948,7 @@ const main = defineCommand({
     }
 
     let adminServer: import('node:http').Server | null = null
-    if (args.admin && logStore && zeroEnv) {
+    if (!args['disable-admin'] && logStore && zeroEnv) {
       const { startAdminServer } = await import('./admin/server.js')
       adminServer = await startAdminServer({
         port: config.adminPort,
@@ -963,7 +963,7 @@ const main = defineCommand({
     }
 
     log.pg(
-      `postgresql://${config.pgUser}:${config.pgPassword}@127.0.0.1:${config.pgPort}/postgres`
+      `ready ${url(`postgresql://${config.pgUser}:${config.pgPassword}@127.0.0.1:${config.pgPort}/postgres`)}`
     )
 
     let stopping = false

@@ -458,6 +458,16 @@ export function getAdminHtml(): string {
     '    logView.style.display = "block";\n' +
     '    toolbar.style.display = "flex";\n' +
     '    activeSource = source;\n' +
+    '    // default zero tab to info level (too verbose otherwise)\n' +
+    '    var levelSelect = document.getElementById("level-filter");\n' +
+    '    if (source === "zero") {\n' +
+    '      activeLevel = "info";\n' +
+    '      levelSelect.value = "info";\n' +
+    '    } else if (activeLevel === "info" && levelSelect.value === "info") {\n' +
+    '      // reset to all levels when leaving zero tab if still on info\n' +
+    '      activeLevel = "";\n' +
+    '      levelSelect.value = "";\n' +
+    '    }\n' +
     '    lastCursor = 0;\n' +
     '    logView.innerHTML = "";\n' +
     '    fetchLogs();\n' +
