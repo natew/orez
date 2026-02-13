@@ -7,13 +7,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 
@@ -431,9 +425,17 @@ async function startZeroCache(
   // detect log level from zero-cache output
   const detectLevel = (line: string, fallback: string): string => {
     const lower = line.toLowerCase()
-    if (lower.includes('"level":"error"') || lower.includes(' error ') || lower.includes('error:'))
+    if (
+      lower.includes('"level":"error"') ||
+      lower.includes(' error ') ||
+      lower.includes('error:')
+    )
       return 'error'
-    if (lower.includes('"level":"warn"') || lower.includes(' warn ') || lower.includes('warning:'))
+    if (
+      lower.includes('"level":"warn"') ||
+      lower.includes(' warn ') ||
+      lower.includes('warning:')
+    )
       return 'warn'
     if (lower.includes('"level":"debug"') || lower.includes(' debug ')) return 'debug'
     return fallback

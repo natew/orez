@@ -556,7 +556,12 @@ async function tryWireRestore(opts: {
     // clear zero replica so it does a fresh sync from restored upstream
     // this is critical: without it, zero-cache will have stale table list
     const orezDir = resolve(opts.dataDir)
-    for (const file of ['zero-replica.db', 'zero-replica.db-shm', 'zero-replica.db-wal', 'zero-replica.db-wal2']) {
+    for (const file of [
+      'zero-replica.db',
+      'zero-replica.db-shm',
+      'zero-replica.db-wal',
+      'zero-replica.db-wal2',
+    ]) {
       try {
         unlinkSync(resolve(orezDir, file))
       } catch {}
