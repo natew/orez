@@ -12,12 +12,11 @@ export interface SqliteModeConfig {
   zeroSqlitePath?: string
 }
 
-// journal mode differs between native and wasm
-// - native: wal2 for better concurrency
-// - wasm: delete for compatibility (wal2 corrupts wasm vfs on certain operations)
+// journal mode - zero-cache requires wal2 for replica sync (BEGIN CONCURRENT)
+// both modes use wal2 now - bedrock-sqlite wasm should support it
 export const JOURNAL_MODE: Record<SqliteMode, string> = {
   native: 'wal2',
-  wasm: 'delete',
+  wasm: 'wal2',
 }
 
 // common pragmas shared by both modes

@@ -23,8 +23,6 @@ import { createPGliteInstances, runMigrations } from './pglite-manager.js'
 import { findPort } from './port.js'
 import { installChangeTracking } from './replication/change-tracker.js'
 import {
-  applySqliteMode,
-  cleanupShim,
   resolveSqliteMode,
   resolveSqliteModeConfig,
   type SqliteMode,
@@ -390,9 +388,6 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     try {
       unlinkSync(pidFile)
     } catch {}
-    // restore original @rocicorp/zero-sqlite3 if we shimmed it
-    // (next start will re-apply shim if needed for wasm mode)
-    cleanupShim(sqliteModeConfig?.zeroSqlitePath)
     log.debug.orez('stopped')
   }
 
@@ -464,7 +459,66 @@ async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   log.orez('seeded')
 }
 
-// writeSqliteShim replaced by sqlite-mode/apply-mode.ts applySqliteMode()
+// write shim to tmpdir and return node_modules path for NODE_PATH
+// this approach doesn't modify node_modules - just shadows it via NODE_PATH
+function writeTmpShim(bedrockPath: string): string {
+  const tmp = process.env.TMPDIR || process.env.TEMP || '/tmp'
+  const dir = resolve(tmp, 'orez-sqlite', 'node_modules', '@rocicorp', 'zero-sqlite3')
+  mkdirSync(dir, { recursive: true })
+
+  writeFileSync(
+    resolve(dir, 'package.json'),
+    '{"name":"@rocicorp/zero-sqlite3","main":"./index.js"}\n'
+  )
+
+  // use wal2 journal mode - required by zero-cache for replica sync
+  writeFileSync(
+    resolve(dir, 'index.js'),
+    `'use strict';
+// orez wasm shim - shadows @rocicorp/zero-sqlite3 via NODE_PATH
+var mod = require('${bedrockPath}');
+var OrigDatabase = mod.Database;
+var SqliteError = mod.SqliteError;
+function Database() {
+  var db = new OrigDatabase(...arguments);
+  try {
+    db.pragma('journal_mode = wal2');
+    db.pragma('busy_timeout = 30000');
+    db.pragma('synchronous = normal');
+  } catch(e) {}
+  return db;
+}
+Database.prototype = OrigDatabase.prototype;
+Database.prototype.constructor = Database;
+Object.keys(OrigDatabase).forEach(function(k) { Database[k] = OrigDatabase[k]; });
+Database.prototype.unsafeMode = function() { return this; };
+if (!Database.prototype.defaultSafeIntegers) Database.prototype.defaultSafeIntegers = function() { return this; };
+if (!Database.prototype.serialize) Database.prototype.serialize = function() { throw new Error('not supported in wasm'); };
+if (!Database.prototype.backup) Database.prototype.backup = function() { throw new Error('not supported in wasm'); };
+var tmpDb = new OrigDatabase(':memory:');
+var tmpStmt = tmpDb.prepare('SELECT 1');
+var SP = Object.getPrototypeOf(tmpStmt);
+if (!SP.safeIntegers) SP.safeIntegers = function() { return this; };
+SP.scanStatus = function() { return undefined; };
+SP.scanStatusV2 = function() { return []; };
+SP.scanStatusReset = function() {};
+tmpDb.close();
+Database.SQLITE_SCANSTAT_NLOOP = 0;
+Database.SQLITE_SCANSTAT_NVISIT = 1;
+Database.SQLITE_SCANSTAT_EST = 2;
+Database.SQLITE_SCANSTAT_NAME = 3;
+Database.SQLITE_SCANSTAT_EXPLAIN = 4;
+Database.SQLITE_SCANSTAT_SELECTID = 5;
+Database.SQLITE_SCANSTAT_PARENTID = 6;
+Database.SQLITE_SCANSTAT_NCYCLE = 7;
+Database.SQLITE_SCANSTAT_COMPLEX = 8;
+module.exports = Database;
+module.exports.SqliteError = SqliteError;
+`
+  )
+
+  return resolve(tmp, 'orez-sqlite', 'node_modules')
+}
 
 async function startZeroCache(
   config: ZeroLiteConfig,
@@ -520,19 +574,15 @@ async function startZeroCache(
     throw new Error('zero-cache cli.js not found. install @rocicorp/zero')
   }
 
-  // apply sqlite mode - either wasm shim or restore to native
-  if (sqliteModeConfig) {
-    const result = applySqliteMode(sqliteModeConfig)
-    if (!result.success) {
-      // native mode failure is fatal - user explicitly requested native but we can't provide it
-      if (sqliteMode === 'native') {
-        throw new Error(`cannot use native sqlite: ${result.error}`)
-      }
-      // wasm mode failure is also fatal now - can't safely proceed without backup
-      throw new Error(`cannot apply sqlite mode: ${result.error}`)
-    } else if (result.shimPath) {
-      log.debug.orez(`shimmed @rocicorp/zero-sqlite3 at ${result.shimPath}`)
-    }
+  // wasm mode: write shim to tmpdir and use NODE_PATH to shadow the real package
+  // this is non-destructive - doesn't modify node_modules
+  if (sqliteMode === 'wasm' && sqliteModeConfig?.bedrockPath) {
+    const shimNodeModules = writeTmpShim(sqliteModeConfig.bedrockPath)
+    const existingNodePath = process.env.NODE_PATH || ''
+    env.NODE_PATH = existingNodePath
+      ? `${shimNodeModules}:${existingNodePath}`
+      : shimNodeModules
+    log.debug.orez(`using wasm sqlite shim via NODE_PATH: ${shimNodeModules}`)
   }
 
   const nodeOptions =

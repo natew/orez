@@ -13,7 +13,7 @@ import { chromium, type Page, type ConsoleMessage } from 'playwright'
 
 const args = process.argv.slice(2)
 const headed = args.includes('--headed')
-const phaseArg = args.find(a => a.startsWith('--phase='))
+const phaseArg = args.find((a) => a.startsWith('--phase='))
 const targetPhase = phaseArg ? parseInt(phaseArg.split('=')[1]) : 3
 
 const BASE_URL = 'http://localhost:8081'
@@ -68,7 +68,6 @@ async function main() {
     if (targetPhase >= 3) {
       await runPhase3(page)
     }
-
   } catch (err: any) {
     console.error(`\n❌ Test failed: ${err.message}`)
   } finally {
@@ -94,7 +93,7 @@ async function main() {
   }
 
   // check .orez logs if failed
-  const failed = results.some(r => !r.passed)
+  const failed = results.some((r) => !r.passed)
   if (failed) {
     console.log('\n📁 Check .orez logs:')
     console.log(`   cat ${CHAT_DIR}/.orez/logs/orez.log | tail -50`)
@@ -239,9 +238,12 @@ async function runPhase3(page: Page) {
 async function dumpOrezLogs() {
   try {
     const { execSync } = await import('node:child_process')
-    const logs = execSync(`tail -30 ${CHAT_DIR}/.orez/logs/orez.log 2>/dev/null || echo "no logs"`, {
-      encoding: 'utf-8',
-    })
+    const logs = execSync(
+      `tail -30 ${CHAT_DIR}/.orez/logs/orez.log 2>/dev/null || echo "no logs"`,
+      {
+        encoding: 'utf-8',
+      }
+    )
     console.log('\n📜 .orez/logs/orez.log (last 30 lines):')
     console.log(logs)
   } catch {}
