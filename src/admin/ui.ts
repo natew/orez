@@ -20,6 +20,10 @@ export function getAdminHtml(): string {
     '  --purple: #aaa;\n' +
     '}\n' +
     '* { margin: 0; padding: 0; box-sizing: border-box; }\n' +
+    '::-webkit-scrollbar { width: 8px; height: 8px; }\n' +
+    '::-webkit-scrollbar-track { background: var(--bg); }\n' +
+    '::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }\n' +
+    '::-webkit-scrollbar-thumb:hover { background: #555; }\n' +
     'body {\n' +
     '  font-family: -apple-system, BlinkMacSystemFont, "SF Pro", system-ui, sans-serif;\n' +
     '  background: var(--bg);\n' +
@@ -183,9 +187,9 @@ export function getAdminHtml(): string {
     '  transform: translateX(-50%);\n' +
     '  padding: 6px 16px;\n' +
     '  border-radius: 20px;\n' +
-    '  background: var(--accent);\n' +
-    '  color: #fff;\n' +
-    '  border: none;\n' +
+    '  background: #333;\n' +
+    '  color: var(--text);\n' +
+    '  border: 1px solid var(--border);\n' +
     '  font-size: 12px;\n' +
     '  font-family: inherit;\n' +
     '  cursor: pointer;\n' +
