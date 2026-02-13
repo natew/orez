@@ -435,25 +435,31 @@ async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   log.orez('seeded')
 }
 
-// create a fake @rocicorp/zero-sqlite3 package in tmpdir that redirects to
-// bedrock-sqlite (wasm). uses NODE_PATH to make node resolve our shim first —
-// no require hooks, no Module._resolveFilename monkey-patching, no .cjs files
-// in the package (which all break vite).
-function writeSqliteShim(): string {
-  const tmp = process.env.TMPDIR || process.env.TEMP || '/tmp'
-  const dir = resolve(tmp, 'orez-sqlite', 'node_modules', '@rocicorp', 'zero-sqlite3')
-  mkdirSync(dir, { recursive: true })
+// overwrite @rocicorp/zero-sqlite3 with a shim that uses bedrock-sqlite (wasm).
+// NODE_PATH doesn't work because local node_modules is searched first, so we
+// have to overwrite the actual package in place.
+function writeSqliteShim(): void {
+  const zeroSqlitePath = resolvePackage('@rocicorp/zero-sqlite3')
+  if (!zeroSqlitePath) {
+    log.debug.orez('warning: @rocicorp/zero-sqlite3 not found, skipping shim')
+    return
+  }
+
+  // find the package root (contains package.json)
+  let dir = zeroSqlitePath
+  while (dir && !existsSync(resolve(dir, 'package.json'))) {
+    const parent = resolve(dir, '..')
+    if (parent === dir) break
+    dir = parent
+  }
 
   const bedrockEntry = resolvePackage('bedrock-sqlite')
+  if (!bedrockEntry) {
+    log.debug.orez('warning: bedrock-sqlite not found, skipping shim')
+    return
+  }
 
-  writeFileSync(
-    resolve(dir, 'package.json'),
-    '{"name":"@rocicorp/zero-sqlite3","main":"./index.js"}\n'
-  )
-
-  writeFileSync(
-    resolve(dir, 'index.js'),
-    `'use strict';
+  const shimCode = `'use strict';
 var mod = require('${bedrockEntry}');
 var OrigDatabase = mod.Database;
 var SqliteError = mod.SqliteError;
@@ -493,10 +499,18 @@ Database.SQLITE_SCANSTAT_COMPLEX = 8;
 module.exports = Database;
 module.exports.SqliteError = SqliteError;
 `
-  )
 
-  // return the node_modules root so it can be prepended to NODE_PATH
-  return resolve(tmp, 'orez-sqlite', 'node_modules')
+  // overwrite the package's index.js and lib/index.js
+  const indexPath = resolve(dir, 'lib', 'index.js')
+  if (existsSync(indexPath)) {
+    writeFileSync(indexPath, shimCode)
+    log.debug.orez(`shimmed @rocicorp/zero-sqlite3 at ${indexPath}`)
+  } else {
+    // fallback: try root index.js
+    const rootIndex = resolve(dir, 'index.js')
+    writeFileSync(rootIndex, shimCode)
+    log.debug.orez(`shimmed @rocicorp/zero-sqlite3 at ${rootIndex}`)
+  }
 }
 
 async function startZeroCache(
@@ -551,15 +565,9 @@ async function startZeroCache(
     throw new Error('zero-cache cli.js not found. install @rocicorp/zero')
   }
 
-  // wasm sqlite: create a fake @rocicorp/zero-sqlite3 in tmpdir and prepend
-  // to NODE_PATH so node resolves our shim first. no require hooks, no
-  // Module._resolveFilename monkey-patching (which conflicts with vite).
+  // wasm sqlite: overwrite @rocicorp/zero-sqlite3 with our bedrock-sqlite shim
   if (!config.disableWasmSqlite) {
-    const shimNodeModules = writeSqliteShim()
-    const existingNodePath = process.env.NODE_PATH || ''
-    env.NODE_PATH = existingNodePath
-      ? `${shimNodeModules}:${existingNodePath}`
-      : shimNodeModules
+    writeSqliteShim()
   }
 
   const nodeOptions = !config.disableWasmSqlite
