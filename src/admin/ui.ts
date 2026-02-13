@@ -341,6 +341,7 @@ export function getAdminHtml(): string {
     '    <div class="spacer"></div>\n' +
     '    <span class="badge"><span class="dot"></span> pg <span id="pg-port">-</span></span>\n' +
     '    <span class="badge"><span class="dot"></span> zero <span id="zero-port">-</span></span>\n' +
+    '    <span class="badge" id="sqlite-badge">sqlite: --</span>\n' +
     '    <span class="badge" id="uptime-badge">&#9201; --</span>\n' +
     '  </div>\n' +
     '\n' +
@@ -634,6 +635,7 @@ export function getAdminHtml(): string {
     '  fetch("/api/status").then(function(res) { return res.json(); }).then(function(data) {\n' +
     '    document.getElementById("pg-port").textContent = ":" + data.pgPort;\n' +
     '    document.getElementById("zero-port").textContent = ":" + data.zeroPort;\n' +
+    '    document.getElementById("sqlite-badge").textContent = "sqlite: " + (data.sqliteMode || "wasm");\n' +
     '    var m = Math.floor(data.uptime / 60);\n' +
     '    var s = data.uptime % 60;\n' +
     '    document.getElementById("uptime-badge").textContent = "\\u23F1 " + (m > 0 ? m + "m " : "") + s + "s";\n' +

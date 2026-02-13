@@ -8,7 +8,6 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 
 import {
@@ -23,6 +22,14 @@ import { startPgProxy } from './pg-proxy.js'
 import { createPGliteInstances, runMigrations } from './pglite-manager.js'
 import { findPort } from './port.js'
 import { installChangeTracking } from './replication/change-tracker.js'
+import {
+  applySqliteMode,
+  cleanupShim,
+  resolveSqliteMode,
+  resolveSqliteModeConfig,
+  type SqliteMode,
+  type SqliteModeConfig,
+} from './sqlite-mode/index.js'
 
 import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
@@ -65,18 +72,8 @@ async function runHook(
   })
 }
 
-// resolve a package entry — import.meta.resolve doesn't work in vitest
-function resolvePackage(pkg: string): string {
-  try {
-    const resolved = import.meta.resolve(pkg)
-    if (resolved) return resolved.replace('file://', '')
-  } catch {}
-  try {
-    const require = createRequire(import.meta.url)
-    return require.resolve(pkg)
-  } catch {}
-  return ''
-}
+// resolvePackage moved to sqlite-mode/resolve-mode.ts
+import { resolvePackage } from './sqlite-mode/resolve-mode.js'
 
 export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const config = getConfig(overrides)
@@ -110,6 +107,20 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     adminPort > 0 ? createHttpLogStore() : undefined
 
   log.debug.orez(`data dir: ${resolve(config.dataDir)}`)
+
+  // resolve sqlite mode config early (used for shim application and cleanup)
+  // requested wasm can fall back to native if required packages are missing.
+  let sqliteMode = resolveSqliteMode(config.disableWasmSqlite)
+  let sqliteModeConfig = resolveSqliteModeConfig(config.disableWasmSqlite)
+  if (sqliteMode === 'wasm' && !sqliteModeConfig) {
+    log.orez(
+      'warning: wasm sqlite requested but dependencies are missing, falling back to native sqlite'
+    )
+    sqliteMode = 'native'
+    config.disableWasmSqlite = true
+    sqliteModeConfig = resolveSqliteModeConfig(true)
+  }
+  log.orez(`sqlite: ${sqliteMode}`)
 
   mkdirSync(config.dataDir, { recursive: true })
 
@@ -174,7 +185,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   if (!config.skipZeroCache) {
     // use internal port when http proxy is enabled
     const zeroConfig = httpLog ? { ...config, zeroPort: zeroInternalPort } : config
-    const result = await startZeroCache(zeroConfig, logStore)
+    const result = await startZeroCache(zeroConfig, logStore, sqliteMode, sqliteModeConfig)
     zeroCacheProcess = result.process
     zeroEnv = result.env
     await waitForZeroCache(zeroConfig)
@@ -189,7 +200,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       log.debug.orez(`http proxy listening on ${config.zeroPort}`)
     }
 
-    log.zero(`ready ${port(config.zeroPort, 'magenta')}`)
+    log.zero(`ready ${port(config.zeroPort, 'magenta')} (sqlite: ${sqliteMode})`)
   } else {
     log.orez('skip zero-cache')
   }
@@ -225,7 +236,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     await killZeroCache()
     // use internal port when http proxy is enabled
     const zeroConfig = httpLog ? { ...config, zeroPort: zeroInternalPort } : config
-    const result = await startZeroCache(zeroConfig, logStore)
+    const result = await startZeroCache(zeroConfig, logStore, sqliteMode, sqliteModeConfig)
     zeroCacheProcess = result.process
     zeroEnv = result.env
     await waitForZeroCache(zeroConfig)
@@ -322,7 +333,12 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       log.orez('starting zero-cache...')
       // use internal port when http proxy is enabled
       const zeroConfig = httpLog ? { ...config, zeroPort: zeroInternalPort } : config
-      const result = await startZeroCache(zeroConfig, logStore)
+      const result = await startZeroCache(
+        zeroConfig,
+        logStore,
+        sqliteMode,
+        sqliteModeConfig
+      )
       zeroCacheProcess = result.process
       zeroEnv = result.env
 
@@ -364,6 +380,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     try {
       unlinkSync(pidFile)
     } catch {}
+    // restore original @rocicorp/zero-sqlite3 if we shimmed it
+    // (next start will re-apply shim if needed for wasm mode)
+    cleanupShim(sqliteModeConfig?.zeroSqlitePath)
     log.debug.orez('stopped')
   }
 
@@ -435,87 +454,13 @@ async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   log.orez('seeded')
 }
 
-// overwrite @rocicorp/zero-sqlite3 with a shim that uses bedrock-sqlite (wasm).
-// NODE_PATH doesn't work because local node_modules is searched first, so we
-// have to overwrite the actual package in place.
-function writeSqliteShim(): void {
-  const zeroSqlitePath = resolvePackage('@rocicorp/zero-sqlite3')
-  if (!zeroSqlitePath) {
-    log.debug.orez('warning: @rocicorp/zero-sqlite3 not found, skipping shim')
-    return
-  }
-
-  // find the package root (contains package.json)
-  let dir = zeroSqlitePath
-  while (dir && !existsSync(resolve(dir, 'package.json'))) {
-    const parent = resolve(dir, '..')
-    if (parent === dir) break
-    dir = parent
-  }
-
-  const bedrockEntry = resolvePackage('bedrock-sqlite')
-  if (!bedrockEntry) {
-    log.debug.orez('warning: bedrock-sqlite not found, skipping shim')
-    return
-  }
-
-  const shimCode = `'use strict';
-var mod = require('${bedrockEntry}');
-var OrigDatabase = mod.Database;
-var SqliteError = mod.SqliteError;
-function Database() {
-  var db = new OrigDatabase(...arguments);
-  try {
-    db.pragma('journal_mode = wal2');
-    db.pragma('busy_timeout = 30000');
-    db.pragma('synchronous = normal');
-  } catch(e) {}
-  return db;
-}
-Database.prototype = OrigDatabase.prototype;
-Database.prototype.constructor = Database;
-Object.keys(OrigDatabase).forEach(function(k) { Database[k] = OrigDatabase[k]; });
-Database.prototype.unsafeMode = function() { return this; };
-if (!Database.prototype.defaultSafeIntegers) Database.prototype.defaultSafeIntegers = function() { return this; };
-if (!Database.prototype.serialize) Database.prototype.serialize = function() { throw new Error('not supported in wasm'); };
-if (!Database.prototype.backup) Database.prototype.backup = function() { throw new Error('not supported in wasm'); };
-var tmpDb = new OrigDatabase(':memory:');
-var tmpStmt = tmpDb.prepare('SELECT 1');
-var SP = Object.getPrototypeOf(tmpStmt);
-if (!SP.safeIntegers) SP.safeIntegers = function() { return this; };
-SP.scanStatus = function() { return undefined; };
-SP.scanStatusV2 = function() { return []; };
-SP.scanStatusReset = function() {};
-tmpDb.close();
-Database.SQLITE_SCANSTAT_NLOOP = 0;
-Database.SQLITE_SCANSTAT_NVISIT = 1;
-Database.SQLITE_SCANSTAT_EST = 2;
-Database.SQLITE_SCANSTAT_NAME = 3;
-Database.SQLITE_SCANSTAT_EXPLAIN = 4;
-Database.SQLITE_SCANSTAT_SELECTID = 5;
-Database.SQLITE_SCANSTAT_PARENTID = 6;
-Database.SQLITE_SCANSTAT_NCYCLE = 7;
-Database.SQLITE_SCANSTAT_COMPLEX = 8;
-module.exports = Database;
-module.exports.SqliteError = SqliteError;
-`
-
-  // overwrite the package's index.js and lib/index.js
-  const indexPath = resolve(dir, 'lib', 'index.js')
-  if (existsSync(indexPath)) {
-    writeFileSync(indexPath, shimCode)
-    log.debug.orez(`shimmed @rocicorp/zero-sqlite3 at ${indexPath}`)
-  } else {
-    // fallback: try root index.js
-    const rootIndex = resolve(dir, 'index.js')
-    writeFileSync(rootIndex, shimCode)
-    log.debug.orez(`shimmed @rocicorp/zero-sqlite3 at ${rootIndex}`)
-  }
-}
+// writeSqliteShim replaced by sqlite-mode/apply-mode.ts applySqliteMode()
 
 async function startZeroCache(
   config: ZeroLiteConfig,
-  logStore?: LogStore
+  logStore?: LogStore,
+  sqliteMode: SqliteMode = resolveSqliteMode(config.disableWasmSqlite),
+  sqliteModeConfig?: SqliteModeConfig | null
 ): Promise<{ process: ChildProcess; env: Record<string, string> }> {
   // resolve @rocicorp/zero entry for finding zero-cache modules
   const zeroEntry = resolvePackage('@rocicorp/zero')
@@ -524,7 +469,7 @@ async function startZeroCache(
     throw new Error('zero-cache not found. install @rocicorp/zero')
   }
 
-  if (config.disableWasmSqlite) {
+  if (sqliteMode === 'native') {
     log.debug.orez('wasm sqlite disabled, using native @rocicorp/zero-sqlite3')
   }
 
@@ -565,12 +510,22 @@ async function startZeroCache(
     throw new Error('zero-cache cli.js not found. install @rocicorp/zero')
   }
 
-  // wasm sqlite: overwrite @rocicorp/zero-sqlite3 with our bedrock-sqlite shim
-  if (!config.disableWasmSqlite) {
-    writeSqliteShim()
+  // apply sqlite mode - either wasm shim or restore to native
+  if (sqliteModeConfig) {
+    const result = applySqliteMode(sqliteModeConfig)
+    if (!result.success) {
+      // native mode failure is fatal - user explicitly requested native but we can't provide it
+      if (sqliteMode === 'native') {
+        throw new Error(`cannot use native sqlite: ${result.error}`)
+      }
+      // wasm mode failure is also fatal now - can't safely proceed without backup
+      throw new Error(`cannot apply sqlite mode: ${result.error}`)
+    } else if (result.shimPath) {
+      log.debug.orez(`shimmed @rocicorp/zero-sqlite3 at ${result.shimPath}`)
+    }
   }
 
-  const nodeOptions = !config.disableWasmSqlite
+  const nodeOptions = sqliteMode === 'wasm'
     ? `--max-old-space-size=16384 ${process.env.NODE_OPTIONS || ''}`
     : process.env.NODE_OPTIONS || ''
   if (nodeOptions.trim()) env.NODE_OPTIONS = nodeOptions.trim()

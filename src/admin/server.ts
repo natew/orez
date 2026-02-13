@@ -93,6 +93,7 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
           uptime: Math.floor((Date.now() - startTime) / 1000),
           logLevel: config.logLevel,
           skipZeroCache: config.skipZeroCache,
+          sqliteMode: config.disableWasmSqlite ? 'native' : 'wasm',
         })
         return
       }
