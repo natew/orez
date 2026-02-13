@@ -331,14 +331,18 @@ export async function startPgProxy(
 
     // clean up pglite transaction state when a client disconnects
     socket.on('close', async () => {
-      const { db, mutex } = getDbContext(dbName)
-      await mutex.acquire()
       try {
-        await db.exec('ROLLBACK')
+        const { db, mutex } = getDbContext(dbName)
+        await mutex.acquire()
+        try {
+          await db.exec('ROLLBACK')
+        } catch {
+          // no transaction to rollback, or db is closed
+        } finally {
+          mutex.release()
+        }
       } catch {
-        // no transaction to rollback
-      } finally {
-        mutex.release()
+        // instance may have been replaced during reset, ignore
       }
     })
 

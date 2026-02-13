@@ -169,14 +169,96 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     })
   }
 
-  // handle SIGUSR1 to restart zero-cache (sent by pg_restore after clearing replica)
+  // flag to ignore connection errors during reset
+  let resettingZeroState = false
+
+  // handle SIGUSR1 to reset zero state (sent by pg_restore)
   if (!config.skipZeroCache) {
     process.on('SIGUSR1', async () => {
-      log.orez('received SIGUSR1, restarting zero-cache...')
-      await restartZeroCache(false) // replica already cleared by pg_restore
-      log.zero(`ready ${port(config.zeroPort, 'magenta')}`)
+      resettingZeroState = true
+      try {
+        log.orez('received SIGUSR1, resetting zero state...')
+
+        // stop zero-cache first so it stops making connections
+        log.orez('stopping zero-cache...')
+        await killZeroCache()
+        log.orez('zero-cache stopped')
+
+        // give connections time to drain
+        await new Promise((r) => setTimeout(r, 500))
+
+        // close CVR/CDB instances
+        log.orez('closing CVR/CDB...')
+        try {
+          await instances.cvr.close()
+        } catch (e: any) {
+          log.debug.orez(`cvr close error (expected): ${e?.message || e}`)
+        }
+        try {
+          await instances.cdb.close()
+        } catch (e: any) {
+          log.debug.orez(`cdb close error (expected): ${e?.message || e}`)
+        }
+        log.orez('CVR/CDB closed')
+
+        // delete zero state files
+        log.orez('deleting zero state files...')
+        const { rmSync } = await import('node:fs')
+        for (const dir of ['pgdata-cvr', 'pgdata-cdb']) {
+          try {
+            rmSync(resolve(config.dataDir, dir), { recursive: true, force: true })
+          } catch {}
+        }
+        cleanupStaleReplica(config)
+        log.orez('zero state files deleted')
+
+        // recreate CVR/CDB with fresh instances
+        log.orez('recreating CVR/CDB...')
+        const { PGlite } = await import('@electric-sql/pglite')
+        mkdirSync(resolve(config.dataDir, 'pgdata-cvr'), { recursive: true })
+        mkdirSync(resolve(config.dataDir, 'pgdata-cdb'), { recursive: true })
+        instances.cvr = new PGlite({ dataDir: resolve(config.dataDir, 'pgdata-cvr'), relaxedDurability: true })
+        instances.cdb = new PGlite({ dataDir: resolve(config.dataDir, 'pgdata-cdb'), relaxedDurability: true })
+        await instances.cvr.waitReady
+        await instances.cdb.waitReady
+        log.orez('CVR/CDB recreated')
+
+        // restart zero-cache
+        log.orez('starting zero-cache...')
+        const result = await startZeroCache(config, logStore)
+        zeroCacheProcess = result.process
+        zeroEnv = result.env
+
+        // listen for early exit
+        zeroCacheProcess.once('exit', (code) => {
+          if (code !== 0) {
+            log.orez(`zero-cache exited early with code ${code}`)
+          }
+        })
+
+        await waitForZeroCache(config)
+        log.orez('zero state reset complete')
+        log.zero(`ready ${port(config.zeroPort, 'magenta')}`)
+      } catch (err: any) {
+        log.orez(`SIGUSR1 reset failed: ${err?.message || err}`)
+        console.error(err)
+      } finally {
+        resettingZeroState = false
+      }
     })
   }
+
+  // ignore network errors during zero state reset
+  process.on('uncaughtException', (err: any) => {
+    if (resettingZeroState) {
+      const code = err?.code
+      if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'ENOTCONN' || code === 'ERR_STREAM_DESTROYED') {
+        log.debug.orez(`ignoring ${code} during reset`)
+        return
+      }
+    }
+    throw err
+  })
 
   const killZeroCache = async () => {
     if (zeroCacheProcess && !zeroCacheProcess.killed) {

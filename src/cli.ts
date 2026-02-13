@@ -554,33 +554,87 @@ async function tryWireRestore(opts: {
       `restored ${opts.sqlFile} via wire protocol (${executed} statements, ${skipped} skipped)`
     )
 
-    // clear zero replica so it does a fresh sync from restored upstream
-    // this is critical: without it, zero-cache will have stale table list
-    const orezDir = resolve(opts.dataDir)
-    for (const file of [
-      'zero-replica.db',
-      'zero-replica.db-shm',
-      'zero-replica.db-wal',
-      'zero-replica.db-wal2',
-    ]) {
-      try {
-        unlinkSync(resolve(orezDir, file))
-      } catch {}
+    // clear zero replication state so zero-cache does a fresh sync
+    await sql.unsafe('TRUNCATE _zero_changes').catch(() => {})
+    await sql.unsafe('TRUNCATE _zero_replication_slots').catch(() => {})
+    log.orez('cleared zero replication state')
+
+    // clear zero change tracking state (prevents duplicate key errors on restart)
+    const cdbSql = postgres({
+      host: '127.0.0.1',
+      port: opts.port,
+      user: opts.user,
+      password: opts.password,
+      database: 'zero_cdb',
+      connect_timeout: 3,
+      max: 1,
+      onnotice: () => {},
+    })
+    try {
+      // find and truncate all change tracking tables
+      const cdbSchemas = await cdbSql<{ schemaname: string; tablename: string }[]>`
+        SELECT schemaname, tablename FROM pg_tables
+        WHERE schemaname LIKE '%/cdc'
+      `
+      for (const { schemaname, tablename } of cdbSchemas) {
+        await cdbSql.unsafe(`TRUNCATE "${schemaname}"."${tablename}"`).catch(() => {})
+      }
+      if (cdbSchemas.length > 0) {
+        log.orez(`cleared ${cdbSchemas.length} zero change tracking table(s)`)
+      }
+    } catch {
+      // zero_cdb might not exist yet
+    } finally {
+      await cdbSql.end({ timeout: 1 }).catch(() => {})
     }
-    // also clear CVR/CDB state
-    const { rmSync } = await import('node:fs')
-    for (const dir of ['pgdata-cvr', 'pgdata-cdb']) {
-      try {
-        rmSync(resolve(orezDir, dir), { recursive: true, force: true })
-      } catch {}
+
+    // restore publication membership - add all tables with _0_version column (zero's marker)
+    // this is more reliable than capturing before restore (which fails if previous restore was broken)
+    const pubName = process.env.ZERO_APP_PUBLICATIONS || 'zero_pub'
+    const quoted = '"' + pubName.replace(/"/g, '""') + '"'
+
+    // ensure publication exists
+    await sql.unsafe(`CREATE PUBLICATION ${quoted}`).catch(() => {})
+
+    // find all tables with _0_version column (zero-tracked tables)
+    const zeroTables = await sql<{ table_name: string }[]>`
+      SELECT DISTINCT c.table_name
+      FROM information_schema.columns c
+      JOIN information_schema.tables t ON t.table_name = c.table_name AND t.table_schema = c.table_schema
+      WHERE c.table_schema = 'public'
+        AND c.column_name = '_0_version'
+        AND t.table_type = 'BASE TABLE'
+    `
+
+    // get tables already in publication
+    const inPub = await sql<{ tablename: string }[]>`
+      SELECT tablename FROM pg_publication_tables WHERE pubname = ${pubName} AND schemaname = 'public'
+    `
+    const inPubSet = new Set(inPub.map((r) => r.tablename))
+
+    // add tables not already in publication
+    const toAdd = zeroTables.map((r) => r.table_name).filter((t) => !inPubSet.has(t))
+    if (toAdd.length > 0) {
+      const tableList = toAdd.map((t) => `"public"."${t}"`).join(', ')
+      await sql.unsafe(`ALTER PUBLICATION ${quoted} ADD TABLE ${tableList}`).catch(() => {})
+      log.orez(`added ${toAdd.length} table(s) to publication ${pubName}`)
     }
-    log.orez('cleared zero replica')
+
+    log.orez('restore complete')
   } finally {
     await sql.end({ timeout: 1 })
   }
 
-  // after major restore, a full restart is more reliable than hot-reload
-  log.orez('restore complete - restart orez to pick up changes')
+  // signal orez to reset zero state (CVR/CDB + zero-cache)
+  const pidFile = resolve(opts.dataDir, 'orez.pid')
+  if (existsSync(pidFile)) {
+    try {
+      const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10)
+      if (pid && pid > 0) {
+        process.kill(pid, 'SIGUSR1')
+      }
+    } catch {}
+  }
 
   return true
 }
