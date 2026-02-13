@@ -217,8 +217,14 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         const { PGlite } = await import('@electric-sql/pglite')
         mkdirSync(resolve(config.dataDir, 'pgdata-cvr'), { recursive: true })
         mkdirSync(resolve(config.dataDir, 'pgdata-cdb'), { recursive: true })
-        instances.cvr = new PGlite({ dataDir: resolve(config.dataDir, 'pgdata-cvr'), relaxedDurability: true })
-        instances.cdb = new PGlite({ dataDir: resolve(config.dataDir, 'pgdata-cdb'), relaxedDurability: true })
+        instances.cvr = new PGlite({
+          dataDir: resolve(config.dataDir, 'pgdata-cvr'),
+          relaxedDurability: true,
+        })
+        instances.cdb = new PGlite({
+          dataDir: resolve(config.dataDir, 'pgdata-cdb'),
+          relaxedDurability: true,
+        })
         await instances.cvr.waitReady
         await instances.cdb.waitReady
         log.orez('CVR/CDB recreated')
@@ -252,7 +258,12 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   process.on('uncaughtException', (err: any) => {
     if (resettingZeroState) {
       const code = err?.code
-      if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'ENOTCONN' || code === 'ERR_STREAM_DESTROYED') {
+      if (
+        code === 'ECONNRESET' ||
+        code === 'EPIPE' ||
+        code === 'ENOTCONN' ||
+        code === 'ERR_STREAM_DESTROYED'
+      ) {
         log.debug.orez(`ignoring ${code} during reset`)
         return
       }

@@ -616,7 +616,9 @@ async function tryWireRestore(opts: {
     const toAdd = zeroTables.map((r) => r.table_name).filter((t) => !inPubSet.has(t))
     if (toAdd.length > 0) {
       const tableList = toAdd.map((t) => `"public"."${t}"`).join(', ')
-      await sql.unsafe(`ALTER PUBLICATION ${quoted} ADD TABLE ${tableList}`).catch(() => {})
+      await sql
+        .unsafe(`ALTER PUBLICATION ${quoted} ADD TABLE ${tableList}`)
+        .catch(() => {})
       log.orez(`added ${toAdd.length} table(s) to publication ${pubName}`)
     }
 
