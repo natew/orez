@@ -883,7 +883,7 @@ const main = defineCommand({
     'disable-wasm-sqlite': {
       type: 'boolean',
       description: 'use native @rocicorp/zero-sqlite3 instead of wasm bedrock-sqlite',
-      default: true,
+      default: false,
     },
     'on-db-ready': {
       type: 'string',
