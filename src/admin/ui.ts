@@ -628,11 +628,6 @@ export function getAdminHtml(): string {
     '    document.querySelectorAll("[data-zero-action]").forEach(function(btn) {\n' +
     '      btn.disabled = zeroDisabled;\n' +
     '    });\n' +
-    '    // set initial level filter to match --log-level (user can change to see more)\n' +
-    '    if (!levelSetByUser && data.logLevel && activeLevel !== data.logLevel) {\n' +
-    '      activeLevel = data.logLevel;\n' +
-    '      document.getElementById("level-filter").value = data.logLevel;\n' +
-    '    }\n' +
     '  }).catch(function() {});\n' +
     '}\n' +
     '\n' +

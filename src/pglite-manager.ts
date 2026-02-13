@@ -15,18 +15,11 @@ export interface PGliteInstances {
   cdb: PGlite
 }
 
-// detect pglite corruption errors (wasm abort during init)
-function isCorruptionError(err: unknown): boolean {
-  const msg = String(err)
-  return msg.includes('Aborted()') || msg.includes('_pg_initdb')
-}
-
 // create a single pglite instance with given dataDir suffix
 async function createInstance(
   config: ZeroLiteConfig,
   name: string,
-  withExtensions: boolean,
-  isRetry = false
+  withExtensions: boolean
 ): Promise<PGlite> {
   const dataPath = resolve(config.dataDir, `pgdata-${name}`)
   mkdirSync(dataPath, { recursive: true })
@@ -38,29 +31,17 @@ async function createInstance(
     ...userOpts
   } = config.pgliteOptions as Record<string, any>
 
-  try {
-    const db = new PGlite({
-      dataDir: dataPath,
-      debug: config.logLevel === 'debug' ? 1 : 0,
-      relaxedDurability: true,
-      ...userOpts,
-      extensions: withExtensions ? userOpts.extensions || { vector, pg_trgm } : {},
-    })
+  const db = new PGlite({
+    dataDir: dataPath,
+    debug: config.logLevel === 'debug' ? 1 : 0,
+    relaxedDurability: true,
+    ...userOpts,
+    extensions: withExtensions ? userOpts.extensions || { vector, pg_trgm } : {},
+  })
 
-    await db.waitReady
-    log.debug.pglite(`${name} ready`)
-    return db
-  } catch (err) {
-    if (isCorruptionError(err) && !isRetry) {
-      // corrupted data directory - backup and retry with fresh init
-      const backupPath = `${dataPath}.corrupt.${Date.now()}`
-      log.pglite(`corrupted data detected in ${name}, backing up to ${backupPath}`)
-      renameSync(dataPath, backupPath)
-      log.pglite(`retrying ${name} with fresh database`)
-      return createInstance(config, name, withExtensions, true)
-    }
-    throw err
-  }
+  await db.waitReady
+  log.debug.pglite(`${name} ready`)
+  return db
 }
 
 /**
