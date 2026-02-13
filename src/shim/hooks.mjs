@@ -34,7 +34,7 @@ const OrigDatabase = mod.Database;
 const SqliteError = mod.SqliteError;
 function Database(...args) {
   const db = new OrigDatabase(...args);
-  try { db.pragma('journal_mode = delete'); db.pragma('busy_timeout = 30000'); db.pragma('synchronous = normal'); } catch(e) {}
+  try { db.pragma('journal_mode = wal2'); db.pragma('busy_timeout = 30000'); db.pragma('synchronous = normal'); } catch(e) {}
   return db;
 }
 Database.prototype = OrigDatabase.prototype;
