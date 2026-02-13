@@ -185,7 +185,12 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   if (!config.skipZeroCache) {
     // use internal port when http proxy is enabled
     const zeroConfig = httpLog ? { ...config, zeroPort: zeroInternalPort } : config
-    const result = await startZeroCache(zeroConfig, logStore, sqliteMode, sqliteModeConfig)
+    const result = await startZeroCache(
+      zeroConfig,
+      logStore,
+      sqliteMode,
+      sqliteModeConfig
+    )
     zeroCacheProcess = result.process
     zeroEnv = result.env
     await waitForZeroCache(zeroConfig)
@@ -236,7 +241,12 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     await killZeroCache()
     // use internal port when http proxy is enabled
     const zeroConfig = httpLog ? { ...config, zeroPort: zeroInternalPort } : config
-    const result = await startZeroCache(zeroConfig, logStore, sqliteMode, sqliteModeConfig)
+    const result = await startZeroCache(
+      zeroConfig,
+      logStore,
+      sqliteMode,
+      sqliteModeConfig
+    )
     zeroCacheProcess = result.process
     zeroEnv = result.env
     await waitForZeroCache(zeroConfig)
@@ -525,9 +535,10 @@ async function startZeroCache(
     }
   }
 
-  const nodeOptions = sqliteMode === 'wasm'
-    ? `--max-old-space-size=16384 ${process.env.NODE_OPTIONS || ''}`
-    : process.env.NODE_OPTIONS || ''
+  const nodeOptions =
+    sqliteMode === 'wasm'
+      ? `--max-old-space-size=16384 ${process.env.NODE_OPTIONS || ''}`
+      : process.env.NODE_OPTIONS || ''
   if (nodeOptions.trim()) env.NODE_OPTIONS = nodeOptions.trim()
 
   const child = spawn(zeroCacheBin, [], {

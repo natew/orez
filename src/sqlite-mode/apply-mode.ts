@@ -149,7 +149,8 @@ export function applyWasmShim(config: SqliteModeConfig): ApplyResult {
     // cannot safely proceed - would lose ability to restore
     return {
       success: false,
-      error: 'cannot apply wasm shim: file is already shimmed with no backup. reinstall @rocicorp/zero-sqlite3',
+      error:
+        'cannot apply wasm shim: file is already shimmed with no backup. reinstall @rocicorp/zero-sqlite3',
     }
   }
 
@@ -188,7 +189,8 @@ export function restoreNativeMode(zeroSqlitePath: string): ApplyResult {
   // no backup available - this is a problem
   return {
     success: false,
-    error: 'cannot restore native mode: no backup found. reinstall @rocicorp/zero-sqlite3'
+    error:
+      'cannot restore native mode: no backup found. reinstall @rocicorp/zero-sqlite3',
   }
 }
 

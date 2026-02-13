@@ -3,6 +3,7 @@
  */
 
 import { createRequire } from 'node:module'
+
 import type { SqliteMode, SqliteModeConfig } from './types.js'
 
 /**

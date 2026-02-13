@@ -5,6 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
@@ -126,7 +127,10 @@ module.exports = require('better-sqlite3');
 `
 
   beforeEach(() => {
-    testDir = join(tmpdir(), `orez-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    testDir = join(
+      tmpdir(),
+      `orez-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    )
     mockPackageDir = join(testDir, 'node_modules', '@rocicorp', 'zero-sqlite3', 'lib')
     mkdirSync(mockPackageDir, { recursive: true })
     mockIndexPath = join(mockPackageDir, 'index.js')
@@ -216,7 +220,10 @@ module.exports = require('better-sqlite3');
 `
 
   beforeEach(() => {
-    testDir = join(tmpdir(), `orez-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    testDir = join(
+      tmpdir(),
+      `orez-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    )
     mockPackageDir = join(testDir, 'node_modules', '@rocicorp', 'zero-sqlite3', 'lib')
     mkdirSync(mockPackageDir, { recursive: true })
     mockIndexPath = join(mockPackageDir, 'index.js')
@@ -284,7 +291,7 @@ module.exports = require('better-sqlite3');
 
     // shim should have same journal_mode
     const newWasmContent = readFileSync(mockIndexPath, 'utf-8')
-    expect(newWasmContent).toContain("journal_mode = delete")
+    expect(newWasmContent).toContain('journal_mode = delete')
   })
 
   it('multiple wasm applies are idempotent', () => {
@@ -385,13 +392,13 @@ describe('shim contract tests', () => {
   it('wasm shim sets journal_mode = delete', () => {
     const shim = generateCjsShim({ mode: 'wasm', bedrockPath: '/path' })
     expect(shim).toContain("db.pragma('journal_mode = delete')")
-    expect(shim).not.toContain("journal_mode = wal2")
+    expect(shim).not.toContain('journal_mode = wal2')
   })
 
   it('native shim sets journal_mode = wal2', () => {
     const shim = generateCjsShim({ mode: 'native', bedrockPath: '/path' })
     expect(shim).toContain("db.pragma('journal_mode = wal2')")
-    expect(shim).not.toContain("journal_mode = delete")
+    expect(shim).not.toContain('journal_mode = delete')
   })
 
   it('both modes set busy_timeout and synchronous', () => {
