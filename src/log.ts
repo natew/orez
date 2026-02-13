@@ -1,4 +1,5 @@
 import type { LogLevel } from './config.js'
+import type { LogStore } from './admin/log-store.js'
 
 const RESET = '\x1b[0m'
 const BOLD = '\x1b[1m'
@@ -20,9 +21,15 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
 }
 
 let currentLevel: LogLevel = 'warn'
+let logStore: LogStore | undefined
 
 export function setLogLevel(level: LogLevel) {
   currentLevel = level
+}
+
+/** hook up logStore for admin dashboard observability */
+export function setLogStore(store: LogStore | undefined) {
+  logStore = store
 }
 
 function prefix(label: string, color: string): string {
@@ -39,11 +46,29 @@ export function url(u: string): string {
   return `${COLORS.yellow}${u}${RESET}`
 }
 
+// map logger labels to logStore source names
+const LABEL_TO_SOURCE: Record<string, string> = {
+  orez: 'orez',
+  'orez:pg': 'orez',
+  pglite: 'pglite',
+  'pg-proxy': 'proxy',
+  'orez:zero': 'zero',
+  'orez:s3': 's3',
+}
+
 function makeLogger(label: string, color: string, level: LogLevel = 'info') {
   const p = prefix(label, color)
+  const source = LABEL_TO_SOURCE[label] || 'orez'
+  // zero logs are handled specially in startZeroCache with better level detection
+  const skipLogStore = source === 'zero'
   return (...args: unknown[]) => {
     if (LEVEL_PRIORITY[level] <= LEVEL_PRIORITY[currentLevel]) {
       console.info(p, ...args)
+    }
+    // always push to logStore if available (admin captures all levels)
+    if (logStore && !skipLogStore) {
+      const msg = args.map((a) => (typeof a === 'string' ? a : String(a))).join(' ')
+      logStore.push(source, level, msg)
     }
   }
 }

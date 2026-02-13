@@ -12,8 +12,9 @@ import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 
 import { createLogStore, type LogStore } from './admin/log-store.js'
+import { createHttpLogStore, startHttpProxy, type HttpLogStore } from './admin/http-proxy.js'
 import { getConfig, getConnectionString } from './config.js'
-import { log, port, setLogLevel } from './log.js'
+import { log, port, setLogLevel, setLogStore } from './log.js'
 import { startPgProxy } from './pg-proxy.js'
 import { createPGliteInstances, runMigrations } from './pglite-manager.js'
 import { findPort } from './port.js'
@@ -97,6 +98,13 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const logStore: LogStore | undefined =
     adminPort > 0 ? createLogStore(config.dataDir) : undefined
 
+  // wire up logStore so all log.* calls flow to admin dashboard
+  setLogStore(logStore)
+
+  // create http log store for HTTP tab
+  const httpLog: HttpLogStore | undefined =
+    adminPort > 0 ? createHttpLogStore() : undefined
+
   log.debug.orez(`data dir: ${resolve(config.dataDir)}`)
 
   mkdirSync(config.dataDir, { recursive: true })
@@ -148,14 +156,37 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // clean up stale sqlite replica from previous runs
   cleanupStaleReplica(config)
 
+  // when admin is enabled, zero-cache runs on internal port with http proxy in front
+  let zeroInternalPort = config.zeroPort
+  let httpProxyServer: import('node:http').Server | null = null
+  if (httpLog && !config.skipZeroCache) {
+    zeroInternalPort = await findPort(config.zeroPort + 1000)
+    log.debug.orez(`http proxy: public ${config.zeroPort} → internal ${zeroInternalPort}`)
+  }
+
   // start zero-cache
   let zeroCacheProcess: ChildProcess | null = null
   let zeroEnv: Record<string, string> = {}
   if (!config.skipZeroCache) {
-    const result = await startZeroCache(config, logStore)
+    // use internal port when http proxy is enabled
+    const zeroConfig = httpLog
+      ? { ...config, zeroPort: zeroInternalPort }
+      : config
+    const result = await startZeroCache(zeroConfig, logStore)
     zeroCacheProcess = result.process
     zeroEnv = result.env
-    await waitForZeroCache(config)
+    await waitForZeroCache(zeroConfig)
+
+    // start http proxy in front of zero-cache when admin is enabled
+    if (httpLog) {
+      httpProxyServer = await startHttpProxy({
+        listenPort: config.zeroPort,
+        targetPort: zeroInternalPort,
+        httpLog,
+      })
+      log.debug.orez(`http proxy listening on ${config.zeroPort}`)
+    }
+
     log.zero(`ready ${port(config.zeroPort, 'magenta')}`)
   } else {
     log.orez('skip zero-cache')
@@ -168,108 +199,6 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       OREZ_ZERO_PORT: String(config.zeroPort),
     })
   }
-
-  // flag to ignore connection errors during reset
-  let resettingZeroState = false
-
-  // handle SIGUSR1 to reset zero state (sent by pg_restore)
-  if (!config.skipZeroCache) {
-    process.on('SIGUSR1', async () => {
-      resettingZeroState = true
-      try {
-        log.orez('received SIGUSR1, resetting zero state...')
-
-        // stop zero-cache first so it stops making connections
-        log.orez('stopping zero-cache...')
-        await killZeroCache()
-        log.orez('zero-cache stopped')
-
-        // give connections time to drain
-        await new Promise((r) => setTimeout(r, 500))
-
-        // close CVR/CDB instances
-        log.orez('closing CVR/CDB...')
-        try {
-          await instances.cvr.close()
-        } catch (e: any) {
-          log.debug.orez(`cvr close error (expected): ${e?.message || e}`)
-        }
-        try {
-          await instances.cdb.close()
-        } catch (e: any) {
-          log.debug.orez(`cdb close error (expected): ${e?.message || e}`)
-        }
-        log.orez('CVR/CDB closed')
-
-        // delete zero state files
-        log.orez('deleting zero state files...')
-        const { rmSync } = await import('node:fs')
-        for (const dir of ['pgdata-cvr', 'pgdata-cdb']) {
-          try {
-            rmSync(resolve(config.dataDir, dir), { recursive: true, force: true })
-          } catch {}
-        }
-        cleanupStaleReplica(config)
-        log.orez('zero state files deleted')
-
-        // recreate CVR/CDB with fresh instances
-        log.orez('recreating CVR/CDB...')
-        const { PGlite } = await import('@electric-sql/pglite')
-        mkdirSync(resolve(config.dataDir, 'pgdata-cvr'), { recursive: true })
-        mkdirSync(resolve(config.dataDir, 'pgdata-cdb'), { recursive: true })
-        instances.cvr = new PGlite({
-          dataDir: resolve(config.dataDir, 'pgdata-cvr'),
-          relaxedDurability: true,
-        })
-        instances.cdb = new PGlite({
-          dataDir: resolve(config.dataDir, 'pgdata-cdb'),
-          relaxedDurability: true,
-        })
-        await instances.cvr.waitReady
-        await instances.cdb.waitReady
-        log.orez('CVR/CDB recreated')
-
-        // restart zero-cache
-        log.orez('starting zero-cache...')
-        const result = await startZeroCache(config, logStore)
-        zeroCacheProcess = result.process
-        zeroEnv = result.env
-
-        // listen for early exit
-        zeroCacheProcess.once('exit', (code) => {
-          if (code !== 0) {
-            log.orez(`zero-cache exited early with code ${code}`)
-          }
-        })
-
-        await waitForZeroCache(config)
-        log.orez('zero state reset complete')
-        log.zero(`ready ${port(config.zeroPort, 'magenta')}`)
-      } catch (err: any) {
-        log.orez(`SIGUSR1 reset failed: ${err?.message || err}`)
-        console.error(err)
-      } finally {
-        resettingZeroState = false
-      }
-    })
-  }
-
-  // ignore network errors during zero state reset
-  process.on('uncaughtException', (err: any) => {
-    if (resettingZeroState) {
-      const code = err?.code
-      if (
-        code === 'ECONNRESET' ||
-        code === 'EPIPE' ||
-        code === 'ENOTCONN' ||
-        code === 'ERR_STREAM_DESTROYED'
-      ) {
-        log.debug.orez(`ignoring ${code} during reset`)
-        return
-      }
-    }
-    throw err
-  })
 
   const killZeroCache = async () => {
     if (zeroCacheProcess && !zeroCacheProcess.killed) {
@@ -289,17 +218,114 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     }
   }
 
-  const restartZeroCache = async (cleanup = false) => {
+  // simple restart without any state cleanup
+  const restartZeroCache = async () => {
     await killZeroCache()
-    if (cleanup) cleanupStaleReplica(config)
-    const result = await startZeroCache(config, logStore)
+    // use internal port when http proxy is enabled
+    const zeroConfig = httpLog ? { ...config, zeroPort: zeroInternalPort } : config
+    const result = await startZeroCache(zeroConfig, logStore)
     zeroCacheProcess = result.process
     zeroEnv = result.env
-    await waitForZeroCache(config)
+    await waitForZeroCache(zeroConfig)
+  }
+
+  // unified reset function for zero state
+  // modes:
+  //   'cache-only' - deletes replica file only (fast, for minor sync issues)
+  //   'full' - deletes CVR/CDB + replica and recreates instances (for schema changes)
+  let resetInProgress = false
+  const resetZeroState = async (mode: 'cache-only' | 'full'): Promise<void> => {
+    if (resetInProgress) {
+      log.orez('reset already in progress, skipping')
+      return
+    }
+    resetInProgress = true
+
+    try {
+      log.orez(`resetting zero state (${mode})...`)
+
+      // stop zero-cache first
+      log.orez('stopping zero-cache...')
+      await killZeroCache()
+      log.orez('zero-cache stopped')
+
+      if (mode === 'full') {
+        // give connections time to drain before closing instances
+        await new Promise((r) => setTimeout(r, 500))
+
+        // close CVR/CDB instances
+        log.orez('closing CVR/CDB...')
+        await instances.cvr.close().catch((e: any) => {
+          log.debug.orez(`cvr close error (expected): ${e?.message || e}`)
+        })
+        await instances.cdb.close().catch((e: any) => {
+          log.debug.orez(`cdb close error (expected): ${e?.message || e}`)
+        })
+        log.orez('CVR/CDB closed')
+
+        // delete CVR/CDB data directories
+        log.orez('deleting CVR/CDB data...')
+        const { rmSync } = await import('node:fs')
+        for (const dir of ['pgdata-cvr', 'pgdata-cdb']) {
+          try {
+            rmSync(resolve(config.dataDir, dir), { recursive: true, force: true })
+          } catch {}
+        }
+
+        // recreate CVR/CDB instances
+        log.orez('recreating CVR/CDB...')
+        const { PGlite } = await import('@electric-sql/pglite')
+        mkdirSync(resolve(config.dataDir, 'pgdata-cvr'), { recursive: true })
+        mkdirSync(resolve(config.dataDir, 'pgdata-cdb'), { recursive: true })
+        instances.cvr = new PGlite({
+          dataDir: resolve(config.dataDir, 'pgdata-cvr'),
+          relaxedDurability: true,
+        })
+        instances.cdb = new PGlite({
+          dataDir: resolve(config.dataDir, 'pgdata-cdb'),
+          relaxedDurability: true,
+        })
+        await instances.cvr.waitReady
+        await instances.cdb.waitReady
+        log.orez('CVR/CDB recreated')
+      }
+
+      // always clean up replica file
+      cleanupStaleReplica(config)
+      log.orez('replica cleaned up')
+
+      // restart zero-cache
+      log.orez('starting zero-cache...')
+      // use internal port when http proxy is enabled
+      const zeroConfig = httpLog ? { ...config, zeroPort: zeroInternalPort } : config
+      const result = await startZeroCache(zeroConfig, logStore)
+      zeroCacheProcess = result.process
+      zeroEnv = result.env
+
+      await waitForZeroCache(zeroConfig)
+      log.orez(`zero state reset complete (${mode})`)
+      log.zero(`ready ${port(config.zeroPort, 'magenta')}`)
+    } catch (err: any) {
+      log.orez(`reset failed: ${err?.message || err}`)
+      throw err
+    } finally {
+      resetInProgress = false
+    }
+  }
+
+  // handle SIGUSR1 to reset zero state (sent by pg_restore)
+  if (!config.skipZeroCache) {
+    process.on('SIGUSR1', () => {
+      log.orez('received SIGUSR1')
+      resetZeroState('full').catch((err) => {
+        log.orez(`SIGUSR1 reset failed: ${err?.message || err}`)
+      })
+    })
   }
 
   const stop = async () => {
     log.debug.orez('shutting down')
+    httpProxyServer?.close()
     await killZeroCache()
     pgServer.close()
     await Promise.all([
@@ -321,9 +347,13 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     pgPort: config.pgPort,
     zeroPort: config.zeroPort,
     logStore,
+    httpLog,
     zeroEnv,
-    restartZero: config.skipZeroCache ? undefined : () => restartZeroCache(false),
-    resetZero: config.skipZeroCache ? undefined : () => restartZeroCache(true),
+    restartZero: config.skipZeroCache ? undefined : restartZeroCache,
+    // cache-only reset: just replica file (fast, for minor sync issues)
+    resetZero: config.skipZeroCache ? undefined : () => resetZeroState('cache-only'),
+    // full reset: CVR/CDB + replica (for schema changes, used by pg_restore via SIGUSR1)
+    resetZeroFull: config.skipZeroCache ? undefined : () => resetZeroState('full'),
   }
 }
 

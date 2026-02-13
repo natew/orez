@@ -401,6 +401,7 @@ export function getAdminHtml(): string {
     '        <span class="action-label zero">zero</span>\n' +
     '        <button class="action-btn blue" data-zero-action onclick="doAction(\'restart-zero\', this)">&#x21bb; Restart</button>\n' +
     '        <button class="action-btn orange" data-zero-action onclick="doAction(\'reset-zero\', this)">&#x21ba; Reset</button>\n' +
+    '        <button class="action-btn red" data-zero-action onclick="doAction(\'reset-zero-full\', this)">&#x26a0; Full Reset</button>\n' +
     '      </div>\n' +
     '      <div class="action-row">\n' +
     '        <span class="action-label logs">logs</span>\n' +
@@ -636,6 +637,9 @@ export function getAdminHtml(): string {
     'function doAction(action, btn) {\n' +
     '  if (action === "reset-zero") {\n' +
     '    if (!confirm("Reset zero-cache? This deletes the replica and resyncs from scratch.")) return;\n' +
+    '  }\n' +
+    '  if (action === "reset-zero-full") {\n' +
+    '    if (!confirm("Full reset zero state? This deletes CVR, CDB, and replica databases. Use after schema changes.")) return;\n' +
     '  }\n' +
     '  btn.disabled = true;\n' +
     '  var origText = btn.textContent;\n' +

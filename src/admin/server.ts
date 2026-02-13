@@ -15,6 +15,7 @@ import type { LogStore } from './log-store.js'
 export interface AdminActions {
   restartZero?: () => Promise<void>
   resetZero?: () => Promise<void>
+  resetZeroFull?: () => Promise<void>
 }
 
 export interface AdminServerOpts {
@@ -110,9 +111,20 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
           json(res, { ok: false, message: 'zero-cache not running' }, 400)
           return
         }
-        log.orez('admin: resetting zero-cache')
+        log.orez('admin: resetting zero-cache (cache-only)')
         await actions.resetZero()
-        json(res, { ok: true, message: 'zero-cache reset and restarted' })
+        json(res, { ok: true, message: 'zero-cache reset (cache-only) and restarted' })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/actions/reset-zero-full') {
+        if (!actions?.resetZeroFull) {
+          json(res, { ok: false, message: 'zero-cache not running' }, 400)
+          return
+        }
+        log.orez('admin: resetting zero-cache (full)')
+        await actions.resetZeroFull()
+        json(res, { ok: true, message: 'zero-cache reset (full) and restarted' })
         return
       }
 

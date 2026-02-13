@@ -9,3 +9,4 @@ dist
 .orez-integration*
 .env.*.local
 test-chat/
+.orez-*

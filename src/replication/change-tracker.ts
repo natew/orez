@@ -76,12 +76,10 @@ function quoteIdent(name: string): string {
 }
 
 async function installTriggersOnAllTables(db: PGlite): Promise<void> {
-  // use the configured app publication to determine which tables to track.
-  // this avoids streaming changes for private tables (user, account, session, etc.)
-  // that zero-cache doesn't know about.
-  const pubName = process.env.ZERO_APP_PUBLICATIONS
+  // If a publication is configured, prefer it. If not configured (or temporarily empty),
+  // fall back to all eligible public tables so orez stays automatic in dev flows.
+  const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
   let tables: { tablename: string }[]
-
   if (pubName) {
     const result = await db.query<{ tablename: string }>(
       `SELECT tablename FROM pg_publication_tables
@@ -91,38 +89,47 @@ async function installTriggersOnAllTables(db: PGlite): Promise<void> {
       [pubName]
     )
     tables = result.rows
-    log.debug.pglite(`using publication "${pubName}" (${tables.length} tables)`)
-    if (tables.length === 0) {
-      log.debug.pglite(
-        `publication "${pubName}" has no tables yet (will be populated by migrations)`
+    if (tables.length > 0) {
+      log.debug.pglite(`using publication "${pubName}" (${tables.length} tables)`)
+    } else {
+      log.pglite(
+        `publication "${pubName}" is empty; falling back to all public tables`
       )
-    }
-
-    // drop stale triggers from tables NOT in the publication
-    // (these may exist from a prior install before the publication was created)
-    const publishedSet = new Set(tables.map((t) => t.tablename))
-    const allTriggered = await db.query<{ event_object_table: string }>(
-      `SELECT DISTINCT event_object_table FROM information_schema.triggers
-       WHERE trigger_name = '_zero_change_trigger'
-         AND event_object_schema = 'public'`
-    )
-    for (const { event_object_table } of allTriggered.rows) {
-      if (!publishedSet.has(event_object_table)) {
-        const quoted = quoteIdent(event_object_table)
-        await db.exec(`DROP TRIGGER IF EXISTS _zero_change_trigger ON public.${quoted}`)
-        log.debug.pglite(
-          `removed stale trigger from non-published table: ${event_object_table}`
-        )
-      }
+      const all = await db.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables
+         WHERE schemaname = 'public'
+           AND tablename NOT IN ('migrations', '_zero_changes')
+           AND tablename NOT LIKE '_zero_%'`
+      )
+      tables = all.rows
     }
   } else {
-    const result = await db.query<{ tablename: string }>(
+    const all = await db.query<{ tablename: string }>(
       `SELECT tablename FROM pg_tables
        WHERE schemaname = 'public'
          AND tablename NOT IN ('migrations', '_zero_changes')
          AND tablename NOT LIKE '_zero_%'`
     )
-    tables = result.rows
+    tables = all.rows
+    log.debug.pglite(`using all public tables (${tables.length})`)
+  }
+
+  // drop stale triggers from tables NOT in the publication
+  // (these may exist from a prior install before the publication was created)
+  const publishedSet = new Set(tables.map((t) => t.tablename))
+  const allTriggered = await db.query<{ event_object_table: string }>(
+    `SELECT DISTINCT event_object_table FROM information_schema.triggers
+     WHERE trigger_name = '_zero_change_trigger'
+       AND event_object_schema = 'public'`
+  )
+  for (const { event_object_table } of allTriggered.rows) {
+    if (!publishedSet.has(event_object_table)) {
+      const quoted = quoteIdent(event_object_table)
+      await db.exec(`DROP TRIGGER IF EXISTS _zero_change_trigger ON public.${quoted}`)
+      log.debug.pglite(
+        `removed stale trigger from non-published table: ${event_object_table}`
+      )
+    }
   }
 
   let count = 0

@@ -150,15 +150,17 @@ export async function createPGliteInstances(
   // postgres-specific setup
   await postgres.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
 
-  // create empty publication for zero-cache on postgres instance
-  const pubName = process.env.ZERO_APP_PUBLICATIONS || 'zero_pub'
-  const pubs = await postgres.query<{ count: string }>(
-    `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
-    [pubName]
-  )
-  if (Number(pubs.rows[0].count) === 0) {
-    const quoted = '"' + pubName.replace(/"/g, '""') + '"'
-    await postgres.exec(`CREATE PUBLICATION ${quoted}`)
+  // create publication only when explicitly configured
+  const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
+  if (pubName) {
+    const pubs = await postgres.query<{ count: string }>(
+      `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
+      [pubName]
+    )
+    if (Number(pubs.rows[0].count) === 0) {
+      const quoted = '"' + pubName.replace(/"/g, '""') + '"'
+      await postgres.exec(`CREATE PUBLICATION ${quoted}`)
+    }
   }
 
   return { postgres, cvr, cdb }

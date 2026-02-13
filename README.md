@@ -11,8 +11,8 @@ bunx orez
 **What oreZ handles automatically:**
 
 - **Memory management** — auto-sizes Node heap based on system RAM, purges consumed WAL, batches restores with CHECKPOINTs to prevent WASM OOM
-- **Real-time replication** — changes sync instantly via pg_notify triggers, with adaptive polling as fallback; auto-tracks tables created at runtime
-- **Auto-recovery** — resets on replication errors, finds available ports if configured ones are busy, cleans stale locks while preserving cache
+- **Real-time replication** — changes sync instantly via pg_notify triggers, with adaptive polling as fallback; tracks configured/public tables and shard `clients` tables
+- **Auto-recovery** — finds available ports if configured ones are busy and provides reset/restart controls for zero-cache state
 - **PGlite compatibility** — rewrites unsupported queries, fakes wire protocol responses, filters unsupported column types, cleans session state between connections
 - **Admin dashboard** — live zero-cache logs, restart/reset controls, connection info (`--admin`)
 - **Production restores** — `pg_dump`/`pg_restore` with COPY→INSERT conversion, skips unsupported extensions, handles oversized rows, auto-restarts zero-cache
@@ -56,8 +56,7 @@ bunx orez --admin
 
 Open `http://localhost:6477` for a real-time dashboard with:
 
-- **Logs** — live-streaming logs from zero-cache, PGlite, proxy, and oreZ, filterable by source and level
-- **HTTP** — request log showing method, path, status, duration, and response size with expandable headers
+- **Logs** — live-streaming logs from zero-cache, filterable by source and level
 - **Env** — environment variables passed to zero-cache
 - **Actions** — restart zero-cache, reset (wipe replica + resync), clear logs
 
@@ -151,7 +150,7 @@ zero-cache needs logical replication to stay in sync with the upstream database.
 
 Change notifications are **real-time via pg_notify** — triggers fire a notification on every write, waking the replication handler immediately. Polling is only a fallback for edge cases (e.g., bulk restores that bypass triggers). Fallback polling is adaptive: 20ms when catching up, 500ms when idle. Batch size is 2000 changes per poll. Consumed changes are purged every 10 cycles to prevent the `_zero_changes` table from growing unbounded.
 
-Tables created at runtime (e.g., zero-cache's shard schema tables like `chat_0.clients` and `chat_0.mutations`) are automatically detected via a DDL event trigger and enrolled in change tracking without a restart.
+Shard schemas (e.g., `chat_0`) are re-scanned periodically and change tracking is installed for shard `clients` tables.
 
 The replication handler also tracks shard schema tables so that `.server` promises on zero mutations resolve correctly.
 
@@ -169,23 +168,19 @@ Your entire environment is forwarded to the zero-cache child process. This means
 
 oreZ provides sensible defaults for a few variables:
 
-| Variable                               | Default             | Overridable |
-| -------------------------------------- | ------------------- | ----------- |
-| `NODE_ENV`                             | `development`       | yes         |
-| `ZERO_LOG_LEVEL`                       | from `--log-level`  | yes         |
-| `ZERO_NUM_SYNC_WORKERS`                | `1`                 | yes         |
-| `ZERO_ENABLE_QUERY_PLANNER`            | `false`             | yes         |
-| `ZERO_INITIAL_SYNC_TABLE_COPY_WORKERS` | `999`               | yes         |
-| `ZERO_AUTO_RESET`                      | `true`              | yes         |
-| `ZERO_UPSTREAM_DB`                     | _(managed by oreZ)_ | no          |
-| `ZERO_CVR_DB`                          | _(managed by oreZ)_ | no          |
-| `ZERO_CHANGE_DB`                       | _(managed by oreZ)_ | no          |
-| `ZERO_REPLICA_FILE`                    | _(managed by oreZ)_ | no          |
-| `ZERO_PORT`                            | _(managed by oreZ)_ | no          |
+| Variable                    | Default             | Overridable |
+| --------------------------- | ------------------- | ----------- |
+| `NODE_ENV`                  | `development`       | yes         |
+| `ZERO_LOG_LEVEL`            | from `--log-level`  | yes         |
+| `ZERO_NUM_SYNC_WORKERS`     | `1`                 | yes         |
+| `ZERO_ENABLE_QUERY_PLANNER` | `false`             | yes         |
+| `ZERO_UPSTREAM_DB`          | _(managed by oreZ)_ | no          |
+| `ZERO_CVR_DB`               | _(managed by oreZ)_ | no          |
+| `ZERO_CHANGE_DB`            | _(managed by oreZ)_ | no          |
+| `ZERO_REPLICA_FILE`         | _(managed by oreZ)_ | no          |
+| `ZERO_PORT`                 | _(managed by oreZ)_ | no          |
 
-The `--log-level` flag controls both zero-cache (`ZERO_LOG_LEVEL`) and PGlite's debug output. Default is `warn` to keep output quiet. Set to `info` or `debug` for troubleshooting.
-
-`ZERO_INITIAL_SYNC_TABLE_COPY_WORKERS` is set high to work around a postgres.js bug where concurrent COPY TO STDOUT on reused connections hangs. This gives each table its own connection during initial sync. `ZERO_AUTO_RESET` lets zero-cache recover from replication errors (e.g. after `pg_restore`) by wiping and resyncing instead of crashing. `ZERO_ENABLE_QUERY_PLANNER` is disabled because it causes freezes with both WASM and native SQLite.
+The `--log-level` flag controls zero-cache (`ZERO_LOG_LEVEL`) and oreZ console output. Default is `warn` to keep output quiet. Set to `info` or `debug` for troubleshooting. `ZERO_ENABLE_QUERY_PLANNER` is disabled by default because it can freeze with wasm sqlite.
 
 The layering is: oreZ defaults → your env → oreZ-managed connection vars. So setting `ZERO_LOG_LEVEL=debug` in your shell overrides the `--log-level` default, but you can't override the database connection strings (oreZ needs to point zero-cache at its own proxy).
 
@@ -218,9 +213,9 @@ The pgoutput encoder produces spec-compliant binary messages: Begin, Relation, I
 
 A lot of things don't "just work" when you replace Postgres with PGlite and native SQLite with WASM. Here's what oreZ does to make it seamless.
 
-### TCP proxy: raw wire protocol instead of pg-gateway
+### TCP proxy and message handling
 
-The proxy implements the PostgreSQL wire protocol from scratch using raw TCP sockets. pg-gateway uses `Duplex.toWeb()` which deadlocks under concurrent connections with large responses. Raw `net.Socket` with manual message framing avoids this entirely.
+The proxy runs on raw `net.Socket` and uses `pg-gateway` for connection/auth protocol handling, with oreZ intercepting and rewriting messages where needed (logical replication commands, query rewrites, replication slot views).
 
 ### Session state bleed between connections
 
@@ -244,10 +239,6 @@ The shim also polyfills the better-sqlite3 API surface zero-cache expects: `unsa
 
 `ZERO_ENABLE_QUERY_PLANNER` is set to `false` because it relies on SQLite scan statistics that trigger infinite loops in WASM sqlite (and have caused freezes with native sqlite too). The planner is an optimization, not required for correctness.
 
-### postgres.js COPY hang workaround
-
-`ZERO_INITIAL_SYNC_TABLE_COPY_WORKERS` is set to `999` to work around a postgres.js bug where concurrent `COPY TO STDOUT` on a reused connection causes `.readable()` to hang indefinitely. This gives each table its own connection during initial sync.
-
 ### Type OIDs in RELATION messages
 
 Replication RELATION messages carry correct PostgreSQL type OIDs (not just text/25) so zero-cache selects the right value parsers. For example, `timestamp with time zone` gets OID 1184, which triggers `timestampToFpMillis` conversion. Without this, zero-cache misinterprets column types.
@@ -260,9 +251,9 @@ Columns with types zero-cache can't handle (`tsvector`, `tsquery`, `USER-DEFINED
 
 If `ZERO_APP_PUBLICATIONS` is set, only tables in that publication get change-tracking triggers. This prevents streaming changes for private tables (user sessions, accounts) that zero-cache doesn't know about. Stale triggers from previous installs (before the publication existed) are cleaned up automatically.
 
-### Stale lock file cleanup on startup
+### Replica cleanup on startup
 
-Only the SQLite replica's lock files (`-wal`, `-shm`, `-wal2`) are deleted on startup — not the replica itself. The replica is a cache of PGlite data; keeping it lets zero-cache catch up via replication (nearly instant) instead of doing a full initial sync (COPY of all tables). If the replica is too stale, `ZERO_AUTO_RESET=true` makes zero-cache wipe and resync automatically. Lock files from a previous crash are cleaned to prevent startup failures.
+oreZ deletes the SQLite replica file (`zero-replica.db`) and related files (`-wal`, `-shm`, `-wal2`) on startup/reset so zero-cache performs a fresh sync.
 
 ### Data directory migration
 
@@ -286,7 +277,7 @@ The proxy uses callback-based `socket.on('data')` events instead of async iterat
 
 ## Tests
 
-203 tests across 29 test files covering the full stack from binary encoding to TCP-level integration, including pg_restore end-to-end tests and bedrock-sqlite WASM engine tests:
+Tests cover the full stack from binary encoding to TCP-level integration, including pg_restore end-to-end tests and bedrock-sqlite WASM engine tests:
 
 ```
 bun run test                                # orez tests
@@ -323,7 +314,7 @@ src/
   replication/
     handler.ts          replication protocol state machine + adaptive polling
     pgoutput-encoder.ts binary pgoutput message encoder
-    change-tracker.ts   trigger installation, DDL event triggers, change purging
+    change-tracker.ts   trigger installation, shard tracking, change purging
   integration/
     integration.test.ts end-to-end zero-cache sync test
     restore.test.ts     pg_dump/restore integration test

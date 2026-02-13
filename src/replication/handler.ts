@@ -299,24 +299,35 @@ export async function handleStartReplication(
     $$ LANGUAGE plpgsql;
   `)
 
-    // install notify trigger on tracked tables (use configured publication if available)
-    const pubName = process.env.ZERO_APP_PUBLICATIONS
+    // install notify triggers from configured publication when available.
+    // if publication is missing/empty, fall back to all eligible public tables.
+    const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
     let tables: { tablename: string }[]
     if (pubName) {
       const result = await db.query<{ tablename: string }>(
         `SELECT tablename FROM pg_publication_tables
-       WHERE pubname = $1 AND schemaname = 'public' AND tablename NOT LIKE '_zero_%'`,
+         WHERE pubname = $1 AND schemaname = 'public' AND tablename NOT LIKE '_zero_%'`,
         [pubName]
       )
       tables = result.rows
+      if (tables.length === 0) {
+        log.proxy(`publication "${pubName}" is empty; falling back to all public tables`)
+        const all = await db.query<{ tablename: string }>(
+          `SELECT tablename FROM pg_tables
+           WHERE schemaname = 'public'
+             AND tablename NOT IN ('migrations', '_zero_changes')
+             AND tablename NOT LIKE '_zero_%'`
+        )
+        tables = all.rows
+      }
     } else {
-      const result = await db.query<{ tablename: string }>(
+      const all = await db.query<{ tablename: string }>(
         `SELECT tablename FROM pg_tables
-       WHERE schemaname = 'public'
-         AND tablename NOT IN ('migrations', '_zero_changes')
-         AND tablename NOT LIKE '_zero_%'`
+         WHERE schemaname = 'public'
+           AND tablename NOT IN ('migrations', '_zero_changes')
+           AND tablename NOT LIKE '_zero_%'`
       )
-      tables = result.rows
+      tables = all.rows
     }
 
     for (const { tablename } of tables) {

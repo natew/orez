@@ -554,12 +554,12 @@ async function tryWireRestore(opts: {
       `restored ${opts.sqlFile} via wire protocol (${executed} statements, ${skipped} skipped)`
     )
 
-    // clear zero replication state so zero-cache does a fresh sync
+    // clear zero replication state
     await sql.unsafe('TRUNCATE _zero_changes').catch(() => {})
     await sql.unsafe('TRUNCATE _zero_replication_slots').catch(() => {})
     log.orez('cleared zero replication state')
 
-    // clear zero change tracking state (prevents duplicate key errors on restart)
+    // clear zero cdb change tracking state
     const cdbSql = postgres({
       host: '127.0.0.1',
       port: opts.port,
@@ -571,16 +571,14 @@ async function tryWireRestore(opts: {
       onnotice: () => {},
     })
     try {
-      // find and truncate all change tracking tables
-      const cdbSchemas = await cdbSql<{ schemaname: string; tablename: string }[]>`
-        SELECT schemaname, tablename FROM pg_tables
-        WHERE schemaname LIKE '%/cdc'
+      const cdbTables = await cdbSql<{ schemaname: string; tablename: string }[]>`
+        SELECT schemaname, tablename FROM pg_tables WHERE schemaname LIKE '%/cdc'
       `
-      for (const { schemaname, tablename } of cdbSchemas) {
+      for (const { schemaname, tablename } of cdbTables) {
         await cdbSql.unsafe(`TRUNCATE "${schemaname}"."${tablename}"`).catch(() => {})
       }
-      if (cdbSchemas.length > 0) {
-        log.orez(`cleared ${cdbSchemas.length} zero change tracking table(s)`)
+      if (cdbTables.length > 0) {
+        log.orez(`cleared ${cdbTables.length} cdc table(s)`)
       }
     } catch {
       // zero_cdb might not exist yet
@@ -588,38 +586,18 @@ async function tryWireRestore(opts: {
       await cdbSql.end({ timeout: 1 }).catch(() => {})
     }
 
-    // restore publication membership - add all tables with _0_version column (zero's marker)
-    // this is more reliable than capturing before restore (which fails if previous restore was broken)
-    const pubName = process.env.ZERO_APP_PUBLICATIONS || 'zero_pub'
-    const quoted = '"' + pubName.replace(/"/g, '""') + '"'
-
-    // ensure publication exists
-    await sql.unsafe(`CREATE PUBLICATION ${quoted}`).catch(() => {})
-
-    // find all tables with _0_version column (zero-tracked tables)
-    const zeroTables = await sql<{ table_name: string }[]>`
-      SELECT DISTINCT c.table_name
-      FROM information_schema.columns c
-      JOIN information_schema.tables t ON t.table_name = c.table_name AND t.table_schema = c.table_schema
-      WHERE c.table_schema = 'public'
-        AND c.column_name = '_0_version'
-        AND t.table_type = 'BASE TABLE'
-    `
-
-    // get tables already in publication
-    const inPub = await sql<{ tablename: string }[]>`
-      SELECT tablename FROM pg_publication_tables WHERE pubname = ${pubName} AND schemaname = 'public'
-    `
-    const inPubSet = new Set(inPub.map((r) => r.tablename))
-
-    // add tables not already in publication
-    const toAdd = zeroTables.map((r) => r.table_name).filter((t) => !inPubSet.has(t))
-    if (toAdd.length > 0) {
-      const tableList = toAdd.map((t) => `"public"."${t}"`).join(', ')
-      await sql
-        .unsafe(`ALTER PUBLICATION ${quoted} ADD TABLE ${tableList}`)
-        .catch(() => {})
-      log.orez(`added ${toAdd.length} table(s) to publication ${pubName}`)
+    const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
+    if (pubName) {
+      const quoted = '"' + pubName.replace(/"/g, '""') + '"'
+      await sql.unsafe(`CREATE PUBLICATION ${quoted}`).catch(() => {})
+      const pubTables = await sql<{ count: string }[]>`
+        SELECT count(*)::text AS count
+        FROM pg_publication_tables
+        WHERE pubname = ${pubName}
+          AND schemaname = 'public'
+      `
+      const count = Number(pubTables[0]?.count || '0')
+      log.orez(`publication "${pubName}" has ${count} table(s) after restore`)
     }
 
     log.orez('restore complete')
@@ -860,7 +838,7 @@ const main = defineCommand({
   },
   async run({ args }) {
     const adminPort = args.admin ? Number(args['admin-port']) : 0
-    const { config, stop, zeroEnv, logStore, restartZero, resetZero } =
+    const { config, stop, zeroEnv, logStore, httpLog, restartZero, resetZero, resetZeroFull } =
       await startZeroLite({
         pgPort: Number(args['pg-port']),
         zeroPort: Number(args['zero-port']),
@@ -892,9 +870,10 @@ const main = defineCommand({
       adminServer = await startAdminServer({
         port: config.adminPort,
         logStore,
+        httpLog,
         config,
         zeroEnv,
-        actions: { restartZero, resetZero },
+        actions: { restartZero, resetZero, resetZeroFull },
         startTime: Date.now(),
       })
       log.orez(`admin: ${url(`http://localhost:${config.adminPort}`)}`)
