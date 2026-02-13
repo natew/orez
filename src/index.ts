@@ -466,7 +466,7 @@ var SqliteError = mod.SqliteError;
 function Database() {
   var db = new OrigDatabase(...arguments);
   try {
-    db.pragma('journal_mode = delete');
+    db.pragma('journal_mode = wal2');
     db.pragma('busy_timeout = 30000');
     db.pragma('synchronous = normal');
   } catch(e) {}
