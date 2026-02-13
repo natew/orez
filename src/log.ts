@@ -34,6 +34,11 @@ export function port(n: number, color: keyof typeof COLORS): string {
   return `${DIM}${COLORS[color]}:${n}${RESET}`
 }
 
+/** format a url with yellow color */
+export function url(u: string): string {
+  return `${COLORS.yellow}${u}${RESET}`
+}
+
 function makeLogger(label: string, color: string, level: LogLevel = 'info') {
   const p = prefix(label, color)
   return (...args: unknown[]) => {
@@ -45,15 +50,17 @@ function makeLogger(label: string, color: string, level: LogLevel = 'info') {
 
 export const log = {
   orez: makeLogger('orez', COLORS.cyan, 'warn'),
+  pg: makeLogger('orez:pg', COLORS.green, 'warn'),
   pglite: makeLogger('pglite', COLORS.green, 'warn'),
   proxy: makeLogger('pg-proxy', COLORS.yellow, 'warn'),
-  zero: makeLogger('zero-cache', COLORS.magenta, 'warn'),
-  s3: makeLogger('orez/s3', COLORS.blue, 'warn'),
+  zero: makeLogger('orez:zero', COLORS.magenta, 'warn'),
+  s3: makeLogger('orez:s3', COLORS.blue, 'warn'),
   debug: {
     orez: makeLogger('orez', COLORS.cyan, 'debug'),
+    pg: makeLogger('orez:pg', COLORS.green, 'debug'),
     pglite: makeLogger('pglite', COLORS.green, 'debug'),
     proxy: makeLogger('pg-proxy', COLORS.yellow, 'debug'),
-    zero: makeLogger('zero-cache', COLORS.magenta, 'debug'),
-    s3: makeLogger('orez/s3', COLORS.blue, 'debug'),
+    zero: makeLogger('orez:zero', COLORS.magenta, 'debug'),
+    s3: makeLogger('orez:s3', COLORS.blue, 'debug'),
   },
 }

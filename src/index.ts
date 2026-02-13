@@ -119,7 +119,6 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // start tcp proxy (routes connections to correct instance by database name)
   const pgServer = await startPgProxy(instances, config)
 
-  log.orez(`db up ${port(pgPort, 'green')}`)
   if (migrationsApplied > 0)
     log.orez(
       `${migrationsApplied} migration${migrationsApplied === 1 ? '' : 's'} applied`

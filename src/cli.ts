@@ -7,7 +7,7 @@ import { defineCommand, runMain } from 'citty'
 import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
 import { startZeroLite } from './index.js'
-import { log } from './log.js'
+import { log, url } from './log.js'
 
 const s3Command = defineCommand({
   meta: {
@@ -841,28 +841,35 @@ const main = defineCommand({
         actions: { restartZero, resetZero },
         startTime: Date.now(),
       })
-      log.orez(`admin: http://localhost:${config.adminPort}`)
+      log.orez(`admin: ${url(`http://localhost:${config.adminPort}`)}`)
     }
 
-    log.orez('ready')
-    log.orez(
-      `pg: postgresql://${config.pgUser}:${config.pgPassword}@127.0.0.1:${config.pgPort}/postgres`
+    log.pg(
+      `postgresql://${config.pgUser}:${config.pgPassword}@127.0.0.1:${config.pgPort}/postgres`
     )
-    if (!config.skipZeroCache) {
-      log.zero(`http://localhost:${config.zeroPort}`)
+
+    let stopping = false
+    const shutdown = async (reason: string, exitCode = 0) => {
+      if (stopping) return
+      stopping = true
+      log.debug.orez(`shutdown requested: ${reason}`)
+      adminServer?.close()
+      s3Server?.close()
+      await stop()
+      process.exit(exitCode)
     }
 
-    process.on('SIGINT', async () => {
-      adminServer?.close()
-      s3Server?.close()
-      await stop()
-      process.exit(0)
+    process.on('SIGINT', () => shutdown('SIGINT'))
+    process.on('SIGTERM', () => shutdown('SIGTERM'))
+
+    // handle crashes - try to clean up so next startup isn't corrupted
+    process.on('uncaughtException', async (err) => {
+      log.orez(`uncaught exception: ${err.message}`)
+      await shutdown('uncaughtException', 1)
     })
-    process.on('SIGTERM', async () => {
-      adminServer?.close()
-      s3Server?.close()
-      await stop()
-      process.exit(0)
+    process.on('unhandledRejection', async (reason) => {
+      log.orez(`unhandled rejection: ${reason}`)
+      await shutdown('unhandledRejection', 1)
     })
   },
 })

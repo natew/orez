@@ -1,4 +1,11 @@
-import { readFileSync, readdirSync, existsSync, mkdirSync, renameSync } from 'node:fs'
+import {
+  readFileSync,
+  readdirSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+} from 'node:fs'
 import { join, resolve } from 'node:path'
 
 import { PGlite } from '@electric-sql/pglite'
@@ -8,6 +15,51 @@ import { vector } from '@electric-sql/pglite/vector'
 import { log } from './log.js'
 
 import type { ZeroLiteConfig } from './config.js'
+
+// check if a process is running (works on unix systems)
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0) // signal 0 = check existence, don't actually kill
+    return true
+  } catch {
+    return false
+  }
+}
+
+// clean stale lock files left behind by crashes
+// returns true if locks were cleaned
+function cleanStaleLocks(dataPath: string): boolean {
+  const pidFile = join(dataPath, 'postmaster.pid')
+  if (!existsSync(pidFile)) return false
+
+  try {
+    const content = readFileSync(pidFile, 'utf-8')
+    const pid = parseInt(content.split('\n')[0], 10)
+
+    if (pid && isProcessRunning(pid)) {
+      // process is still running, don't touch it
+      return false
+    }
+
+    // process is gone, clean up stale locks
+    const lockFiles = [
+      pidFile,
+      ...readdirSync(dataPath)
+        .filter((f) => f.startsWith('.s.PGSQL.'))
+        .map((f) => join(dataPath, f)),
+    ]
+
+    for (const file of lockFiles) {
+      try {
+        unlinkSync(file)
+      } catch {}
+    }
+
+    return lockFiles.length > 0
+  } catch {
+    return false
+  }
+}
 
 export interface PGliteInstances {
   postgres: PGlite
@@ -23,6 +75,11 @@ async function createInstance(
 ): Promise<PGlite> {
   const dataPath = resolve(config.dataDir, `pgdata-${name}`)
   mkdirSync(dataPath, { recursive: true })
+
+  // clean stale locks from previous crashes before trying to open
+  if (cleanStaleLocks(dataPath)) {
+    log.debug.pglite(`cleaned stale locks in ${name}`)
+  }
 
   log.debug.pglite(`creating ${name} instance at ${dataPath}`)
   const {

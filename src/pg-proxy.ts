@@ -251,6 +251,16 @@ function buildParseCompleteResponse(): Uint8Array {
   return pc
 }
 
+/** read a big-endian int32 from a Uint8Array at the given offset */
+function readInt32BE(data: Uint8Array, offset: number): number {
+  return (
+    ((data[offset] << 24) >>> 0) +
+    (data[offset + 1] << 16) +
+    (data[offset + 2] << 8) +
+    data[offset + 3]
+  )
+}
+
 /**
  * strip ReadyForQuery messages from a response buffer.
  */
@@ -262,8 +272,10 @@ function stripReadyForQuery(data: Uint8Array): Uint8Array {
   while (offset < data.length) {
     const msgType = data[offset]
     if (offset + 5 > data.length) break
-    const msgLen = new DataView(data.buffer, data.byteOffset + offset + 1).getInt32(0)
+    const msgLen = readInt32BE(data, offset + 1)
     const totalLen = 1 + msgLen
+
+    if (totalLen <= 0 || offset + totalLen > data.length) break
 
     if (msgType !== 0x5a) {
       parts.push(data.subarray(offset, offset + totalLen))
