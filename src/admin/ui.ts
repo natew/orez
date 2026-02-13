@@ -411,7 +411,6 @@ export function getAdminHtml(): string {
     '<script>\n' +
     'var activeSource = "";\n' +
     'var activeLevel = "";\n' +
-    'var levelSetByUser = false;\n' +
     'var lastCursor = 0;\n' +
     'var autoScroll = true;\n' +
     'var envLoaded = false;\n' +
@@ -462,7 +461,6 @@ export function getAdminHtml(): string {
     '\n' +
     'document.getElementById("level-filter").addEventListener("change", function(e) {\n' +
     '  activeLevel = e.target.value;\n' +
-    '  levelSetByUser = true;\n' +
     '  lastCursor = 0;\n' +
     '  logView.innerHTML = "";\n' +
     '  fetchLogs();\n' +
