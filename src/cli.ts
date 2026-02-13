@@ -527,6 +527,7 @@ async function tryWireRestore(opts: {
     database: 'postgres',
     connect_timeout: 3,
     max: 1, // single connection so BEGIN/COMMIT work correctly
+    onnotice: () => {}, // suppress pglite transaction warnings
   })
 
   try {
@@ -574,21 +575,23 @@ async function tryWireRestore(opts: {
       } catch {}
     }
     log.orez('cleared zero replica')
-
-    // signal the running orez process to restart zero-cache
-    const pidFile = resolve(orezDir, 'orez.pid')
-    try {
-      const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10)
-      process.kill(pid, 'SIGUSR1')
-      log.orez('signaled orez to restart zero-cache')
-    } catch {
-      log.orez('(restart orez to pick up changes)')
-    }
-
-    return true
   } finally {
-    await sql.end()
+    await sql.end({ timeout: 1 })
   }
+
+  // signal the running orez process to restart zero-cache
+  // this MUST happen after sql.end() to avoid race conditions
+  const orezDir = resolve(opts.dataDir)
+  const pidFile = resolve(orezDir, 'orez.pid')
+  try {
+    const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10)
+    process.kill(pid, 'SIGUSR1')
+    log.orez('signaled orez to restart zero-cache')
+  } catch {
+    log.orez('(restart orez to pick up changes)')
+  }
+
+  return true
 }
 
 // restore by opening PGlite directly (requires no other process holding the lock)
