@@ -11,7 +11,7 @@ export interface LogEntry {
 
 export interface LogStore {
   push(source: string, level: string, msg: string): void
-  query(opts?: { source?: string; level?: string; since?: number }): {
+  query(opts?: { source?: string; level?: string; since?: number; limit?: number }): {
     entries: LogEntry[]
     cursor: number
   }
@@ -71,8 +71,9 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
     }
   }
 
-  function query(opts?: { source?: string; level?: string; since?: number }) {
+  function query(opts?: { source?: string; level?: string; since?: number; limit?: number }) {
     let result = entries
+    const limit = opts?.limit ?? 1000
 
     if (opts?.since) {
       const since = opts.since
@@ -94,6 +95,11 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
     if (opts?.level) {
       const maxPriority = LEVEL_PRIORITY[opts.level] ?? 3
       result = result.filter((e) => (LEVEL_PRIORITY[e.level] ?? 3) <= maxPriority)
+    }
+
+    // limit results to prevent UI slowdown
+    if (result.length > limit) {
+      result = result.slice(-limit)
     }
 
     return {

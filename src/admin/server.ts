@@ -68,8 +68,10 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
         const source = url.searchParams.get('source') || undefined
         const level = url.searchParams.get('level') || undefined
         const sinceStr = url.searchParams.get('since')
+        const limitStr = url.searchParams.get('limit')
         const since = sinceStr ? Number(sinceStr) : undefined
-        json(res, logStore.query({ source, level, since }))
+        const limit = limitStr ? Number(limitStr) : undefined
+        json(res, logStore.query({ source, level, since, limit }))
         return
       }
 
