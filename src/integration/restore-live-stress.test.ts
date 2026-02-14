@@ -283,6 +283,7 @@ describe('live restore stress with connected frontend', { timeout: 360_000 }, ()
   let pgPort: number
   let zeroPort: number
   let shutdown: () => Promise<void>
+  let restartZero: (() => Promise<void>) | undefined
   let dataDir: string
   let dumpFile: string
 
@@ -313,6 +314,7 @@ describe('live restore stress with connected frontend', { timeout: 360_000 }, ()
     pgPort = started.pgPort
     zeroPort = started.zeroPort
     shutdown = started.stop
+    restartZero = started.restartZero
     await waitForZero(zeroPort, 90_000)
   }, 180_000)
 
@@ -336,6 +338,10 @@ describe('live restore stress with connected frontend', { timeout: 360_000 }, ()
       )
     `)
     await installAllowAllPermissions(db, ['restore_live_probe'])
+    if (restartZero) {
+      await restartZero()
+      await waitForZero(zeroPort, 60_000)
+    }
     const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
     if (pubName) {
       const quotedPub = '"' + pubName.replace(/"/g, '""') + '"'
