@@ -23,6 +23,9 @@ import { createPGliteInstances, runMigrations } from './pglite-manager.js'
 import { findPort } from './port.js'
 import { installChangeTracking } from './replication/change-tracker.js'
 import {
+  formatNativeBootstrapInstructions,
+  hasMissingNativeBinarySignature,
+  inspectNativeSqliteBinary,
   resolveSqliteMode,
   resolveSqliteModeConfig,
   type SqliteMode,
@@ -31,6 +34,8 @@ import {
 
 import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
+
+type ZeroChildProcess = ChildProcess & { __orezTail?: string[] }
 
 export { getConfig, getConnectionString } from './config.js'
 export type { Hook, LogLevel, ZeroLiteConfig } from './config.js'
@@ -126,6 +131,12 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const pidFile = resolve(config.dataDir, 'orez.pid')
   writeFileSync(pidFile, String(process.pid))
 
+  // write admin port file so pg_restore can find it
+  const adminFile = resolve(config.dataDir, 'orez.admin')
+  if (adminPort > 0) {
+    writeFileSync(adminFile, String(adminPort))
+  }
+
   // start pglite (separate instances for postgres, zero_cvr, zero_cdb)
   const instances = await createPGliteInstances(config)
   const db = instances.postgres
@@ -191,7 +202,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     )
     zeroCacheProcess = result.process
     zeroEnv = result.env
-    await waitForZeroCache(zeroConfig)
+    await waitForZeroCache(zeroConfig, zeroCacheProcess, 60000, sqliteMode)
 
     // start http proxy in front of zero-cache when admin is enabled
     if (httpLog) {
@@ -247,7 +258,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     )
     zeroCacheProcess = result.process
     zeroEnv = result.env
-    await waitForZeroCache(zeroConfig)
+    await waitForZeroCache(zeroConfig, zeroCacheProcess, 60000, sqliteMode)
   }
 
   // unified reset function for zero state
@@ -312,6 +323,38 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         await instances.cvr.waitReady
         await instances.cdb.waitReady
         log.orez('CVR/CDB recreated')
+
+        // remove stale zero shard schemas from upstream; these can outlive CVR/CDB
+        // and cause dispatcher errors after full reset.
+        const shardSchemas = await db.query<{ schemaname: string }>(
+          `SELECT DISTINCT schemaname
+           FROM pg_tables
+           WHERE tablename IN ('clients', 'replicas', 'mutations')
+             AND schemaname NOT IN (
+               'pg_catalog',
+               'information_schema',
+               'pg_toast',
+               'public',
+               '_orez'
+             )
+             AND schemaname NOT LIKE 'pg_%'`
+        )
+        for (const { schemaname } of shardSchemas.rows) {
+          const quoted = '"' + schemaname.replace(/"/g, '""') + '"'
+          await db.exec(`DROP SCHEMA IF EXISTS ${quoted} CASCADE`)
+        }
+        if (shardSchemas.rows.length > 0) {
+          log.orez(`dropped ${shardSchemas.rows.length} stale shard schema(s)`)
+        }
+
+        // clear upstream replication tracking so zero-cache starts from a
+        // clean change stream baseline after full reset.
+        await db.exec(`TRUNCATE _orez._zero_changes`).catch(() => {})
+        await db.exec(`TRUNCATE _orez._zero_replication_slots`).catch(() => {})
+        await db
+          .exec(`ALTER SEQUENCE _orez._zero_watermark RESTART WITH 1`)
+          .catch(() => {})
+        log.orez('cleared upstream replication tracking state')
       }
 
       // always clean up replica file
@@ -332,10 +375,12 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
           OREZ_PG_PORT: String(config.pgPort),
         })
 
-        // re-install change tracking on any tables created/modified by on-db-ready
-        log.debug.orez('re-installing change tracking after on-db-ready')
-        await installChangeTracking(db)
       }
+
+      // always re-install change tracking after a full reset so public table
+      // triggers reflect any schema changes introduced by restore.
+      log.debug.orez('re-installing change tracking after full reset')
+      await installChangeTracking(db)
 
       // restart zero-cache
       log.orez('starting zero-cache...')
@@ -350,7 +395,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       zeroCacheProcess = result.process
       zeroEnv = result.env
 
-      await waitForZeroCache(zeroConfig)
+      await waitForZeroCache(zeroConfig, zeroCacheProcess, 60000, sqliteMode)
       log.orez(`zero state reset complete (${mode})`)
       log.zero(`ready ${port(config.zeroPort, 'magenta')}`)
     } catch (err: any) {
@@ -365,12 +410,20 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     }
   }
 
-  // handle SIGUSR1 to reset zero state (sent by pg_restore)
+  // handle SIGUSR1 to reset zero state (sent by pg_restore after restore completes)
   if (!config.skipZeroCache) {
     process.on('SIGUSR1', () => {
-      log.orez('received SIGUSR1')
+      log.orez('received SIGUSR1 - full reset')
       resetZeroState('full').catch((err) => {
         log.orez(`SIGUSR1 reset failed: ${err?.message || err}`)
+      })
+    })
+
+    // handle SIGUSR2 to quiesce zero-cache (sent by pg_restore before restore starts)
+    process.on('SIGUSR2', () => {
+      log.orez('received SIGUSR2 - stopping zero-cache for restore')
+      killZeroCache().catch((err) => {
+        log.orez(`SIGUSR2 stop failed: ${err?.message || err}`)
       })
     })
   }
@@ -388,6 +441,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     try {
       unlinkSync(pidFile)
     } catch {}
+    try {
+      unlinkSync(adminFile)
+    } catch {}
     log.debug.orez('stopped')
   }
 
@@ -402,6 +458,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     httpLog,
     zeroEnv,
     restartZero: config.skipZeroCache ? undefined : restartZeroCache,
+    // stop zero-cache without restart (for pg_restore to safely modify schema)
+    stopZero: config.skipZeroCache ? undefined : killZeroCache,
     // cache-only reset: just replica file (fast, for minor sync issues)
     resetZero: config.skipZeroCache ? undefined : () => resetZeroState('cache-only'),
     // full reset: CVR/CDB + replica (for schema changes, used by pg_restore via SIGUSR1)
@@ -594,7 +652,14 @@ async function startZeroCache(
   const child = spawn(zeroCacheBin, [], {
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
-  })
+  }) as ZeroChildProcess
+  child.__orezTail = []
+
+  const pushTail = (line: string) => {
+    const tail = child.__orezTail!
+    tail.push(line)
+    if (tail.length > 80) tail.splice(0, tail.length - 80)
+  }
 
   // detect log level from zero-cache output
   const detectLevel = (line: string, fallback: string): string => {
@@ -618,21 +683,28 @@ async function startZeroCache(
   child.stdout?.on('data', (data: Buffer) => {
     const lines = data.toString().trim().split('\n')
     for (const line of lines) {
-      log.debug.zero(line)
-      logStore?.push('zero', detectLevel(line, 'info'), line)
+      pushTail(`stdout: ${line}`)
+      const level = detectLevel(line, 'info')
+      if (level === 'warn' || level === 'error') log.zero(line)
+      else log.debug.zero(line)
+      logStore?.push('zero', level, line)
     }
   })
 
   child.stderr?.on('data', (data: Buffer) => {
     const lines = data.toString().trim().split('\n')
     for (const line of lines) {
-      log.debug.zero(line)
-      logStore?.push('zero', detectLevel(line, 'error'), line)
+      pushTail(`stderr: ${line}`)
+      const level = detectLevel(line, 'error')
+      if (level === 'warn' || level === 'error') log.zero(line)
+      else log.debug.zero(line)
+      logStore?.push('zero', level, line)
     }
   })
 
   child.on('exit', (code) => {
     if (code !== 0 && code !== null) {
+      pushTail(`exit: code ${code}`)
       log.zero(`exited with code ${code}`)
       logStore?.push('zero', 'error', `exited with code ${code}`)
     }
@@ -643,20 +715,48 @@ async function startZeroCache(
 
 async function waitForZeroCache(
   config: ZeroLiteConfig,
-  timeoutMs = 60000
+  zeroProcess?: ChildProcess | null,
+  timeoutMs = 60000,
+  sqliteMode: SqliteMode = resolveSqliteMode(config.disableWasmSqlite)
 ): Promise<void> {
   const start = Date.now()
   const url = `http://127.0.0.1:${config.zeroPort}/`
 
   while (Date.now() - start < timeoutMs) {
+    if (zeroProcess && zeroProcess.exitCode !== null) {
+      const tail = (zeroProcess as ZeroChildProcess).__orezTail
+      const details = tail?.length ? `\n${tail.slice(-20).join('\n')}` : ''
+      throw new Error(
+        `zero-cache exited with code ${zeroProcess.exitCode}${details}${nativeStartupDiagnostics(details, sqliteMode)}`
+      )
+    }
+
     try {
-      const res = await fetch(url)
-      if (res.ok) return
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 1000)
+      const res = await fetch(url, { signal: controller.signal })
+      clearTimeout(timer)
+      // zero may return 404 on "/" while still being healthy.
+      if (res.ok || res.status === 404) return
     } catch {
       // not ready yet
     }
     await new Promise((r) => setTimeout(r, 500))
   }
 
-  log.zero('health check timed out, continuing anyway')
+  const tail = (zeroProcess as ZeroChildProcess | null | undefined)?.__orezTail
+  const details = tail?.length ? `\n${tail.slice(-20).join('\n')}` : ''
+  throw new Error(
+    `zero-cache health check timed out after ${timeoutMs}ms${details}${nativeStartupDiagnostics(details, sqliteMode)}`
+  )
+}
+
+function nativeStartupDiagnostics(details: string, sqliteMode: SqliteMode): string {
+  if (sqliteMode !== 'native') return ''
+  if (!details) return ''
+  if (!hasMissingNativeBinarySignature(details)) return ''
+
+  const check = inspectNativeSqliteBinary()
+  const instructions = formatNativeBootstrapInstructions(check)
+  return `\n\nnative sqlite startup diagnostics:\n${instructions}`
 }

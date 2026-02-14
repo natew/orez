@@ -57,10 +57,10 @@ const QUERY_REWRITES: Array<{ match: RegExp; replace: string }> = [
     match: /\bSET\s+TRANSACTION\s*;/gi,
     replace: ';',
   },
-  // redirect pg_replication_slots to our fake table
+  // redirect pg_replication_slots to our fake table in _orez schema
   {
     match: /\bpg_replication_slots\b/g,
-    replace: 'public._zero_replication_slots',
+    replace: '_orez._zero_replication_slots',
   },
 ]
 

@@ -13,13 +13,16 @@ export interface ChangeRecord {
 }
 
 export async function installChangeTracking(db: PGlite): Promise<void> {
+  // use _orez schema for internal tables - survives pg_restore of public schema
+  await db.exec(`CREATE SCHEMA IF NOT EXISTS _orez`)
+
   // create changes table and watermark sequence
   await db.exec(`
-    CREATE SEQUENCE IF NOT EXISTS public._zero_watermark;
+    CREATE SEQUENCE IF NOT EXISTS _orez._zero_watermark;
 
-    CREATE TABLE IF NOT EXISTS public._zero_changes (
+    CREATE TABLE IF NOT EXISTS _orez._zero_changes (
       id BIGSERIAL PRIMARY KEY,
-      watermark BIGINT NOT NULL DEFAULT nextval('public._zero_watermark'),
+      watermark BIGINT NOT NULL DEFAULT nextval('_orez._zero_watermark'),
       table_name TEXT NOT NULL,
       op TEXT NOT NULL,
       row_data JSONB,
@@ -27,9 +30,9 @@ export async function installChangeTracking(db: PGlite): Promise<void> {
       changed_at TIMESTAMPTZ DEFAULT NOW()
     );
 
-    CREATE INDEX IF NOT EXISTS _zero_changes_watermark_idx ON public._zero_changes (watermark);
+    CREATE INDEX IF NOT EXISTS _zero_changes_watermark_idx ON _orez._zero_changes (watermark);
 
-    CREATE TABLE IF NOT EXISTS public._zero_replication_slots (
+    CREATE TABLE IF NOT EXISTS _orez._zero_replication_slots (
       slot_name TEXT PRIMARY KEY,
       restart_lsn TEXT NOT NULL DEFAULT '0/1000000',
       confirmed_flush_lsn TEXT NOT NULL DEFAULT '0/1000000',
@@ -42,7 +45,7 @@ export async function installChangeTracking(db: PGlite): Promise<void> {
     );
   `)
 
-  // create trigger function
+  // create trigger function (writes to _orez schema)
   await db.exec(`
     CREATE OR REPLACE FUNCTION public._zero_track_change() RETURNS TRIGGER AS $$
     DECLARE
@@ -50,15 +53,15 @@ export async function installChangeTracking(db: PGlite): Promise<void> {
     BEGIN
       qualified_name := TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME;
       IF TG_OP = 'DELETE' THEN
-        INSERT INTO public._zero_changes (table_name, op, old_data)
+        INSERT INTO _orez._zero_changes (table_name, op, old_data)
         VALUES (qualified_name, 'DELETE', row_to_json(OLD)::jsonb);
         RETURN OLD;
       ELSIF TG_OP = 'UPDATE' THEN
-        INSERT INTO public._zero_changes (table_name, op, row_data, old_data)
+        INSERT INTO _orez._zero_changes (table_name, op, row_data, old_data)
         VALUES (qualified_name, 'UPDATE', row_to_json(NEW)::jsonb, row_to_json(OLD)::jsonb);
         RETURN NEW;
       ELSIF TG_OP = 'INSERT' THEN
-        INSERT INTO public._zero_changes (table_name, op, row_data)
+        INSERT INTO _orez._zero_changes (table_name, op, row_data)
         VALUES (qualified_name, 'INSERT', row_to_json(NEW)::jsonb);
         RETURN NEW;
       END IF;
@@ -98,7 +101,7 @@ async function installTriggersOnAllTables(db: PGlite): Promise<void> {
     const all = await db.query<{ tablename: string }>(
       `SELECT tablename FROM pg_tables
        WHERE schemaname = 'public'
-         AND tablename NOT IN ('migrations', '_zero_changes')
+         AND tablename NOT IN ('migrations')
          AND tablename NOT LIKE '_zero_%'`
     )
     tables = all.rows
@@ -208,7 +211,7 @@ export async function getChangesSince(
   limit = 1000
 ): Promise<ChangeRecord[]> {
   const result = await db.query<ChangeRecord>(
-    'SELECT * FROM public._zero_changes WHERE watermark > $1 ORDER BY watermark LIMIT $2',
+    'SELECT * FROM _orez._zero_changes WHERE watermark > $1 ORDER BY watermark LIMIT $2',
     [watermark, limit]
   )
   return result.rows
@@ -219,7 +222,7 @@ export async function purgeConsumedChanges(
   watermark: number
 ): Promise<number> {
   const result = await db.query<{ count: string }>(
-    'WITH deleted AS (DELETE FROM public._zero_changes WHERE watermark <= $1 RETURNING 1) SELECT count(*)::text AS count FROM deleted',
+    'WITH deleted AS (DELETE FROM _orez._zero_changes WHERE watermark <= $1 RETURNING 1) SELECT count(*)::text AS count FROM deleted',
     [watermark]
   )
   return Number(result.rows[0]?.count || 0)
@@ -227,7 +230,7 @@ export async function purgeConsumedChanges(
 
 export async function getCurrentWatermark(db: PGlite): Promise<number> {
   const result = await db.query<{ last_value: string; is_called: boolean }>(
-    'SELECT last_value, is_called FROM public._zero_watermark'
+    'SELECT last_value, is_called FROM _orez._zero_watermark'
   )
   const { last_value, is_called } = result.rows[0]
   if (!is_called) return 0

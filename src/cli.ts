@@ -9,6 +9,32 @@ import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 import { startZeroLite } from './index.js'
 import { log, url } from './log.js'
 
+// detect admin port from running orez instance
+async function detectAdminPort(dataDir: string): Promise<number | null> {
+  const pidFile = resolve(dataDir, 'orez.pid')
+  const adminFile = resolve(dataDir, 'orez.admin')
+
+  if (!existsSync(pidFile)) return null
+
+  // check if admin port file exists
+  if (existsSync(adminFile)) {
+    try {
+      const port = parseInt(readFileSync(adminFile, 'utf-8').trim(), 10)
+      if (port > 0) return port
+    } catch {}
+  }
+
+  // fallback: try common admin ports
+  for (const port of [6477, 6478, 6479]) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) })
+      if (res.ok) return port
+    } catch {}
+  }
+
+  return null
+}
+
 const s3Command = defineCommand({
   meta: {
     name: 's3',
@@ -539,6 +565,23 @@ async function tryWireRestore(opts: {
 
   // connected — restore errors should propagate, not fall back
   log.orez(`connected via wire protocol on port ${opts.port}`)
+
+  // automatically stop zero-cache before restore to prevent conflicts
+  const adminPort = await detectAdminPort(opts.dataDir)
+  if (adminPort) {
+    log.orez('stopping zero-cache for restore...')
+    try {
+      await fetch(`http://127.0.0.1:${adminPort}/api/actions/stop-zero`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(10_000),
+      })
+      // give zero-cache time to stop
+      await new Promise((r) => setTimeout(r, 1000))
+    } catch {
+      log.orez('warning: could not stop zero-cache (may not be running)')
+    }
+  }
+
   try {
     const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
     let pubTablesBeforeRestore: string[] = []
@@ -570,12 +613,12 @@ async function tryWireRestore(opts: {
       `restored ${opts.sqlFile} via wire protocol (${executed} statements, ${skipped} skipped)`
     )
 
-    // clear zero replication state
-    await sql.unsafe('TRUNCATE _zero_changes').catch(() => {})
-    await sql.unsafe('TRUNCATE _zero_replication_slots').catch(() => {})
+    // clear zero replication state (in _orez schema)
+    await sql.unsafe('TRUNCATE _orez._zero_changes').catch(() => {})
+    await sql.unsafe('TRUNCATE _orez._zero_replication_slots').catch(() => {})
     log.orez('cleared zero replication state')
 
-    // clear zero cdb change tracking state
+    // drop zero cdb cdc schemas so zero-cache can recreate them fresh
     const cdbSql = postgres({
       host: '127.0.0.1',
       port: opts.port,
@@ -587,14 +630,14 @@ async function tryWireRestore(opts: {
       onnotice: () => {},
     })
     try {
-      const cdbTables = await cdbSql<{ schemaname: string; tablename: string }[]>`
-        SELECT schemaname, tablename FROM pg_tables WHERE schemaname LIKE '%/cdc'
+      const cdcSchemas = await cdbSql<{ nspname: string }[]>`
+        SELECT DISTINCT nspname FROM pg_namespace WHERE nspname LIKE '%/cdc'
       `
-      for (const { schemaname, tablename } of cdbTables) {
-        await cdbSql.unsafe(`TRUNCATE "${schemaname}"."${tablename}"`).catch(() => {})
+      for (const { nspname } of cdcSchemas) {
+        await cdbSql.unsafe(`DROP SCHEMA IF EXISTS "${nspname}" CASCADE`).catch(() => {})
       }
-      if (cdbTables.length > 0) {
-        log.orez(`cleared ${cdbTables.length} cdc table(s)`)
+      if (cdcSchemas.length > 0) {
+        log.orez(`dropped ${cdcSchemas.length} cdc schema(s) from zero_cdb`)
       }
     } catch {
       // zero_cdb might not exist yet
@@ -617,19 +660,16 @@ async function tryWireRestore(opts: {
       const existingSet = new Set(existingPublicTables.map((r) => r.tablename))
 
       // Prefer pre-restore publication membership; if unavailable, fall back to
-      // zero-marked tables (_0_version) from the restored schema.
+      // ALL public tables (prod dumps don't have _0_version columns yet).
       const desired = new Set<string>(
         pubTablesBeforeRestore.filter((t) => existingSet.has(t))
       )
       if (desired.size === 0) {
-        const zeroMarked = await sql<{ tablename: string }[]>`
-          SELECT DISTINCT table_name AS tablename
-          FROM information_schema.columns
-          WHERE table_schema = 'public'
-            AND column_name = '_0_version'
-        `
-        for (const { tablename } of zeroMarked) {
-          if (existingSet.has(tablename)) desired.add(tablename)
+        // Add all public tables except internal ones
+        for (const { tablename } of existingPublicTables) {
+          if (!tablename.startsWith('_')) {
+            desired.add(tablename)
+          }
         }
       }
 
@@ -661,34 +701,37 @@ async function tryWireRestore(opts: {
       log.orez(`publication "${pubName}" has ${count} table(s) after restore`)
     }
 
+    // drop zero shard schemas to prevent conflicts when zero restarts
+    const shardSchemas = await sql<{ nspname: string }[]>`
+      SELECT nspname FROM pg_namespace
+      WHERE nspname LIKE 'chat_%'
+         OR nspname LIKE 'zero_%'
+         OR nspname LIKE 'startchat_%'
+    `
+    for (const { nspname } of shardSchemas) {
+      await sql.unsafe(`DROP SCHEMA IF EXISTS "${nspname}" CASCADE`).catch(() => {})
+    }
+    if (shardSchemas.length > 0) {
+      log.orez(`dropped ${shardSchemas.length} shard schema(s)`)
+    }
+
     log.orez('restore complete')
   } finally {
     await sql.end({ timeout: 1 })
   }
 
-  // signal orez to reset zero state (CVR/CDB + zero-cache)
-  const pidFile = resolve(opts.dataDir, 'orez.pid')
-  const resetFile = resolve(opts.dataDir, 'orez.resetting')
-  if (existsSync(pidFile)) {
+  // restart zero-cache so it recreates shard schemas fresh
+  if (adminPort) {
+    log.orez('restarting zero-cache...')
     try {
-      const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10)
-      if (pid && pid > 0) {
-        log.orez('signaling orez to reset...')
-        process.kill(pid, 'SIGUSR1')
-
-        // wait for reset to complete (orez writes .resetting file during reset)
-        const deadline = Date.now() + 120_000
-        await new Promise((r) => setTimeout(r, 500)) // give handler time to start
-        while (existsSync(resetFile) && Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 500))
-        }
-        if (existsSync(resetFile)) {
-          log.orez('warning: reset timed out, continuing anyway')
-        } else {
-          log.orez('reset complete')
-        }
-      }
-    } catch {}
+      await fetch(`http://127.0.0.1:${adminPort}/api/actions/restart-zero`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(10_000),
+      })
+      log.orez('zero-cache restarting')
+    } catch {
+      log.orez('warning: could not restart zero-cache')
+    }
   }
 
   return true
@@ -803,7 +846,10 @@ const pgRestoreCommand = defineCommand({
           sqlFile,
           dataDir: args['data-dir'],
         })
-        if (restored) return
+        if (restored) {
+          // ensure clean exit - don't let any lingering handles keep process alive
+          process.exit(0)
+        }
         log.orez('wire protocol unavailable, falling back to direct PGlite')
       } catch (err: any) {
         // connected but restore failed — report error, don't fall back
@@ -920,6 +966,7 @@ const main = defineCommand({
       logStore,
       httpLog,
       restartZero,
+      stopZero,
       resetZero,
       resetZeroFull,
     } = await startZeroLite({
@@ -956,7 +1003,7 @@ const main = defineCommand({
         httpLog,
         config,
         zeroEnv,
-        actions: { restartZero, resetZero, resetZeroFull },
+        actions: { restartZero, stopZero, resetZero, resetZeroFull },
         startTime: Date.now(),
       })
       log.orez(`admin: ${url(`http://localhost:${config.adminPort}`)}`)

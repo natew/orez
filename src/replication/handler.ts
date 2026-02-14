@@ -210,7 +210,7 @@ export async function handleReplicationQuery(
 
     // persist slot so pg_replication_slots queries find it
     await db.query(
-      `INSERT INTO public._zero_replication_slots (slot_name, restart_lsn, confirmed_flush_lsn)
+      `INSERT INTO _orez._zero_replication_slots (slot_name, restart_lsn, confirmed_flush_lsn)
        VALUES ($1, $2, $2)
        ON CONFLICT (slot_name) DO UPDATE SET restart_lsn = $2, confirmed_flush_lsn = $2`,
       [slotName, lsn]
@@ -226,7 +226,7 @@ export async function handleReplicationQuery(
     const match = trimmed.match(/DROP_REPLICATION_SLOT\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i)
     const slotName = match?.[1] || match?.[2] || match?.[3]
     if (slotName) {
-      await db.query(`DELETE FROM public._zero_replication_slots WHERE slot_name = $1`, [
+      await db.query(`DELETE FROM _orez._zero_replication_slots WHERE slot_name = $1`, [
         slotName,
       ])
     }
@@ -612,6 +612,17 @@ async function streamChanges(
       }
     }
 
+    // zero-cache expects specific camel-cased keys in shard clients rows.
+    // Some upstream paths can surface lower-cased variants; normalize them.
+    if (schema !== 'public' && tableName === 'clients') {
+      const sample = rowData || oldData
+      if (sample) {
+        log.debug.proxy(`shard clients keys: ${Object.keys(sample).join(', ')}`)
+      }
+      rowData = normalizeShardClientsRow(rowData)
+      oldData = normalizeShardClientsRow(oldData)
+    }
+
     const row = rowData || oldData
     if (!row) continue
 
@@ -656,6 +667,23 @@ async function streamChanges(
   const endLsn = nextLsn()
   const commitMsg = wrapXLogData(endLsn, endLsn, ts, encodeCommit(0, lsn, endLsn, ts))
   writer.write(wrapCopyData(commitMsg))
+}
+
+function normalizeShardClientsRow(
+  row: Record<string, unknown> | null
+): Record<string, unknown> | null {
+  if (!row) return row
+  const out: Record<string, unknown> = { ...row }
+  if (out.clientGroupID === undefined && out.clientgroupid !== undefined) {
+    out.clientGroupID = out.clientgroupid
+  }
+  if (out.clientID === undefined && out.clientid !== undefined) {
+    out.clientID = out.clientid
+  }
+  if (out.lastMutationID === undefined && out.lastmutationid !== undefined) {
+    out.lastMutationID = out.lastmutationid
+  }
+  return out
 }
 
 export { buildErrorResponse }
