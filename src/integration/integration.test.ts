@@ -14,6 +14,16 @@ import { startZeroLite } from '../index.js'
 
 import type { PGlite } from '@electric-sql/pglite'
 
+const SYNC_PROTOCOL_VERSION = 45
+
+function encodeSecProtocols(
+  initConnectionMessage: unknown,
+  authToken: string | undefined
+): string {
+  const payload = JSON.stringify({ initConnectionMessage, authToken })
+  return encodeURIComponent(Buffer.from(payload, 'utf-8').toString('base64'))
+}
+
 // simple async queue for collecting websocket messages
 class Queue<T> {
   private items: T[] = []
@@ -116,9 +126,14 @@ describe('orez integration', { timeout: 120000 }, () => {
   })
 
   test('zero-cache starts and accepts websocket connections', async () => {
+    const secProtocol = encodeSecProtocols(
+      ['initConnection', { desiredQueriesPatch: [] }],
+      undefined
+    )
     const ws = new WebSocket(
-      `ws://localhost:${zeroPort}/sync/v4/connect` +
-        `?clientGroupID=test-cg&clientID=test-client&wsid=ws1&schemaVersion=1&baseCookie=&ts=${Date.now()}&lmid=0`
+      `ws://localhost:${zeroPort}/sync/v${SYNC_PROTOCOL_VERSION}/connect` +
+        `?clientGroupID=test-cg&clientID=test-client&wsid=ws1&schemaVersion=1&baseCookie=&ts=${Date.now()}&lmid=0`,
+      secProtocol
     )
 
     const connected = new Promise<void>((resolve, reject) => {
@@ -318,33 +333,50 @@ describe('orez integration', { timeout: 120000 }, () => {
 
   // --- helpers ---
 
-  function connectAndSubscribe(
-    port: number,
-    downstream: Queue<unknown>,
-    query: Record<string, unknown>
-  ): WebSocket {
-    const ws = new WebSocket(
-      `ws://localhost:${port}/sync/v4/connect` +
-        `?clientGroupID=test-cg-${Date.now()}&clientID=test-client&wsid=ws1&schemaVersion=1&baseCookie=&ts=${Date.now()}&lmid=0`
-    )
+function connectAndSubscribe(
+  port: number,
+  downstream: Queue<unknown>,
+  query: Record<string, unknown>
+): WebSocket {
+  const table = String((query as { table?: unknown }).table ?? '')
+  const clientSchema =
+    table === 'foo'
+      ? {
+          tables: {
+            foo: {
+              columns: {
+                id: { type: 'string' },
+                value: { type: 'string' },
+                num: { type: 'number' },
+              },
+              primaryKey: ['id'],
+            },
+          },
+        }
+      : undefined
+
+  const secProtocol = encodeSecProtocols(
+    [
+      'initConnection',
+      {
+        desiredQueriesPatch: [{ op: 'put', hash: 'q1', ast: query }],
+        ...(clientSchema ? { clientSchema } : {}),
+      },
+    ],
+    undefined
+  )
+  const ws = new WebSocket(
+    `ws://localhost:${port}/sync/v${SYNC_PROTOCOL_VERSION}/connect` +
+      `?clientGroupID=test-cg-${Date.now()}&clientID=test-client&wsid=ws1&schemaVersion=1&baseCookie=&ts=${Date.now()}&lmid=0`,
+    secProtocol
+  )
 
     ws.on('message', (data) => {
       downstream.enqueue(JSON.parse(data.toString()))
     })
 
-    ws.on('open', () => {
-      ws.send(
-        JSON.stringify([
-          'initConnection',
-          {
-            desiredQueriesPatch: [{ op: 'put', hash: 'q1', ast: query }],
-          },
-        ])
-      )
-    })
-
-    return ws
-  }
+  return ws
+}
 
   async function drainInitialPokes(downstream: Queue<unknown>) {
     // drain messages until we've seen the initial data sync complete
