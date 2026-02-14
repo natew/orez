@@ -158,6 +158,14 @@ The replication handler also tracks shard schema tables so that `.server` promis
 
 The whole point of oreZ is that `bunx orez` works everywhere with no native compilation step. Postgres runs in-process as WASM via PGlite. zero-cache also needs SQLite, and `@rocicorp/zero-sqlite3` ships as a compiled C addon — so orez ships [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite), SQLite's [bedrock branch](https://sqlite.org/src/timeline?t=begin-concurrent) recompiled to WASM with BEGIN CONCURRENT and WAL2 support. At startup, oreZ patches `@rocicorp/zero-sqlite3` to load bedrock-sqlite instead of the native C addon. Both databases run as WASM — nothing to compile, nothing platform-specific. Just `bun install` and go.
 
+If you explicitly run native sqlite mode (`--disable-wasm-sqlite`), bootstrap the native addon deterministically first:
+
+```bash
+bun run native:bootstrap
+```
+
+This verifies `better_sqlite3.node` under the active Bun package path for `@rocicorp/zero-sqlite3`, reinstalls the package if needed, and fails with exact expected paths + repair commands if still missing. Copying a binary from another repo (for example `~/chat`) is not automated; keep that as a manual emergency fallback only.
+
 ### Auto heap sizing
 
 The CLI detects system memory on startup and re-spawns the process with `--max-old-space-size` set to ~50% of available RAM (minimum 4GB). PGlite WASM needs substantial heap for large datasets and restores — this prevents cryptic V8 OOM crashes without requiring manual tuning.
@@ -281,6 +289,7 @@ Tests cover the full stack from binary encoding to TCP-level integration, includ
 
 ```
 bun run test                                # orez tests
+bun run test:integration:native             # native sqlite guard + startup integration
 cd sqlite-wasm && bunx vitest run           # bedrock-sqlite tests
 ```
 
