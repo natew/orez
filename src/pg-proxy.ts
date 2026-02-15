@@ -261,10 +261,14 @@ function readInt32BE(data: Uint8Array, offset: number): number {
   )
 }
 
-// pglite transaction state warnings to suppress (benign, but noisy)
+// pglite warnings to suppress (benign, but noisy)
 // 25001: "there is already a transaction in progress"
 // 25P01: "there is no transaction in progress"
-const SUPPRESS_NOTICE_CODES = new Set(['25001', '25P01'])
+// 55000: "wal_level is insufficient to publish logical changes"
+//        pglite internally tries to create a publication for change streaming, but embedded
+//        pglite doesn't support wal_level=logical (server-level postgres config). the
+//        change-streamer still works because it falls back to polling.
+const SUPPRESS_NOTICE_CODES = new Set(['25001', '25P01', '55000'])
 
 /**
  * extract SQLSTATE code from a NoticeResponse message.
