@@ -21,6 +21,11 @@ import { log, port, setLogLevel, setLogStore } from './log.js'
 import { startPgProxy } from './pg-proxy.js'
 import { createPGliteInstances, runMigrations } from './pglite-manager.js'
 import { findPort } from './port.js'
+import {
+  cleanCdcStateOnStartup,
+  hasCdcCorruptionSignature,
+  recoverFromCdcCorruption,
+} from './recovery.js'
 import { installChangeTracking } from './replication/change-tracker.js'
 import {
   formatNativeBootstrapInstructions,
@@ -242,6 +247,11 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // clean up stale sqlite replica from previous runs
   cleanupStaleReplica(config)
 
+  // proactively clean CDC state to prevent duplicate key errors on restart.
+  // this handles cases where orez was killed (SIGKILL) mid-transaction,
+  // leaving stale watermarks in the changeLog table.
+  await cleanCdcStateOnStartup(instances.cdb)
+
   // when admin is enabled, zero-cache runs on internal port with http proxy in front
   let zeroInternalPort = config.zeroPort
   let httpProxyServer: import('node:http').Server | null = null
@@ -256,15 +266,48 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   if (!config.skipZeroCache) {
     // use internal port when http proxy is enabled
     const zeroConfig = httpLog ? { ...config, zeroPort: zeroInternalPort } : config
-    const result = await startZeroCache(
-      zeroConfig,
-      logStore,
-      sqliteMode,
-      sqliteModeConfig
-    )
-    zeroCacheProcess = result.process
-    zeroEnv = result.env
-    await waitForZeroCache(zeroConfig, zeroCacheProcess, 60000, sqliteMode)
+
+    // helper to start zero-cache and wait for it (including stability check)
+    const tryStartZeroCache = async () => {
+      const result = await startZeroCache(
+        zeroConfig,
+        logStore,
+        sqliteMode,
+        sqliteModeConfig
+      )
+      zeroCacheProcess = result.process
+      zeroEnv = result.env
+      await waitForZeroCache(zeroConfig, zeroCacheProcess, 60000, sqliteMode)
+
+      // stability check: wait a bit to catch early crashes (e.g. change-streamer)
+      // zero-cache can pass health check but crash shortly after when workers start
+      await new Promise((r) => setTimeout(r, 2000))
+      if (zeroCacheProcess.exitCode !== null) {
+        const tail = (zeroCacheProcess as ZeroChildProcess).__orezTail
+        const details = tail?.length ? tail.slice(-20).join('\n') : ''
+        throw new Error(`zero-cache crashed during startup stability check\n${details}`)
+      }
+    }
+
+    try {
+      await tryStartZeroCache()
+    } catch (err: any) {
+      const errMsg = err?.message || String(err)
+      // check for CDC corruption (duplicate key in changeLog)
+      if (hasCdcCorruptionSignature(errMsg)) {
+        await recoverFromCdcCorruption({
+          config,
+          instances,
+          zeroCacheProcess,
+        })
+        log.orez('retrying zero-cache startup...')
+        await tryStartZeroCache()
+        log.orez('CDC corruption auto-recovery successful')
+      } else {
+        // not CDC corruption, rethrow
+        throw err
+      }
+    }
 
     // start http proxy in front of zero-cache when admin is enabled
     if (httpLog) {
