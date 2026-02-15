@@ -261,6 +261,43 @@ function readInt32BE(data: Uint8Array, offset: number): number {
   )
 }
 
+// pglite transaction state warnings to suppress (benign, but noisy)
+// 25001: "there is already a transaction in progress"
+// 25P01: "there is no transaction in progress"
+const SUPPRESS_NOTICE_CODES = new Set(['25001', '25P01'])
+
+/**
+ * extract SQLSTATE code from a NoticeResponse message.
+ * returns null if not a NoticeResponse or code not found.
+ */
+function extractNoticeCode(
+  data: Uint8Array,
+  offset: number,
+  totalLen: number
+): string | null {
+  if (data[offset] !== 0x4e) return null // not a NoticeResponse
+
+  let pos = offset + 5 // skip type byte + length
+  const end = offset + totalLen
+
+  while (pos < end) {
+    const fieldType = data[pos++]
+    if (fieldType === 0) break // terminator
+
+    // find null-terminated string
+    const strStart = pos
+    while (pos < end && data[pos] !== 0) pos++
+    if (pos >= end) break
+
+    if (fieldType === 0x43) {
+      // 'C' = SQLSTATE code
+      return new TextDecoder().decode(data.subarray(strStart, pos))
+    }
+    pos++ // skip null terminator
+  }
+  return null
+}
+
 /**
  * strip ReadyForQuery messages from a response buffer.
  */
@@ -284,6 +321,48 @@ function stripReadyForQuery(data: Uint8Array): Uint8Array {
     offset += totalLen
   }
 
+  if (parts.length === 0) return new Uint8Array(0)
+  if (parts.length === 1) return parts[0]
+
+  const total = parts.reduce((sum, p) => sum + p.length, 0)
+  const result = new Uint8Array(total)
+  let pos = 0
+  for (const p of parts) {
+    result.set(p, pos)
+    pos += p.length
+  }
+  return result
+}
+
+/**
+ * strip NoticeResponse messages with specific SQLSTATE codes from a response buffer.
+ * pglite emits benign transaction state warnings that we suppress to reduce noise.
+ */
+function stripTransactionWarnings(data: Uint8Array): Uint8Array {
+  if (data.length === 0) return data
+
+  const parts: Uint8Array[] = []
+  let offset = 0
+  let stripped = false
+
+  while (offset < data.length) {
+    if (offset + 5 > data.length) break
+    const msgLen = readInt32BE(data, offset + 1)
+    const totalLen = 1 + msgLen
+
+    if (totalLen <= 0 || offset + totalLen > data.length) break
+
+    const code = extractNoticeCode(data, offset, totalLen)
+    if (code && SUPPRESS_NOTICE_CODES.has(code)) {
+      stripped = true
+    } else {
+      parts.push(data.subarray(offset, offset + totalLen))
+    }
+
+    offset += totalLen
+  }
+
+  if (!stripped) return data
   if (parts.length === 0) return new Uint8Array(0)
   if (parts.length === 1) return parts[0]
 
@@ -436,6 +515,9 @@ export async function startPgProxy(
             throw err
           }
 
+          // strip benign transaction state warnings from pglite
+          result = stripTransactionWarnings(result)
+
           // strip ReadyForQuery from non-Sync/non-SimpleQuery responses
           if (data[0] !== 0x53 && data[0] !== 0x51) {
             result = stripReadyForQuery(result)
@@ -510,9 +592,10 @@ async function handleReplicationMessage(
     data = interceptQuery(data)
 
     // fall through to pglite for unrecognized queries
-    return await db.execProtocolRaw(data, {
+    const result = await db.execProtocolRaw(data, {
       throwOnError: false,
     })
+    return stripTransactionWarnings(result)
   } finally {
     mutex.release()
   }
