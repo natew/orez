@@ -715,11 +715,15 @@ export { default } from './index.wasm.js';
   if (!existsSync(pkgPath)) {
     writeFileSync(
       pkgPath,
-      JSON.stringify({
-        name: '@rocicorp/zero-sqlite3',
-        version: '0.0.0-orez-shim',
-        main: './index.js',
-      }, null, 2) + '\n'
+      JSON.stringify(
+        {
+          name: '@rocicorp/zero-sqlite3',
+          version: '0.0.0-orez-shim',
+          main: './index.js',
+        },
+        null,
+        2
+      ) + '\n'
     )
   }
 
