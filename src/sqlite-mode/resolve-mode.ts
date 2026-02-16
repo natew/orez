@@ -2,13 +2,10 @@
  * mode resolution - canonical place to determine sqlite mode from config/env
  *
  * priority:
- * 1. explicit --disable-wasm-sqlite flag → native
- * 2. explicit --force-wasm-sqlite flag → wasm
- * 3. native binary available → native (auto-detect)
- * 4. fallback → wasm
+ * 1. explicit --disable-wasm-sqlite flag → native (requires compiled binary)
+ * 2. default → wasm (works everywhere, no compilation needed)
  */
 
-import { inspectNativeSqliteBinary } from './native-binary.js'
 import { resolvePackage } from './package-resolve.js'
 
 import type { SqliteMode, SqliteModeConfig } from './types.js'
@@ -18,24 +15,20 @@ export { resolvePackage } from './package-resolve.js'
  * resolve sqlite mode from config
  * single source of truth for mode selection
  *
+ * wasm is the default - it works everywhere without compilation.
+ * native is opt-in via --disable-wasm-sqlite for users who need it.
+ *
  * @param disableWasmSqlite - explicit flag to force native mode
- * @param forceWasmSqlite - explicit flag to force wasm mode (overrides auto-detect)
+ * @param _forceWasmSqlite - deprecated, wasm is now default
  */
 export function resolveSqliteMode(
   disableWasmSqlite: boolean,
-  forceWasmSqlite: boolean = false
+  _forceWasmSqlite: boolean = false
 ): SqliteMode {
   // explicit native request
   if (disableWasmSqlite) return 'native'
 
-  // explicit wasm request
-  if (forceWasmSqlite) return 'wasm'
-
-  // auto-detect: prefer native if binary is available
-  const nativeCheck = inspectNativeSqliteBinary()
-  if (nativeCheck.found) return 'native'
-
-  // fallback to wasm
+  // wasm is the default - works everywhere
   return 'wasm'
 }
 
@@ -50,26 +43,23 @@ export function resolveSqliteModeConfig(
   const mode = resolveSqliteMode(disableWasmSqlite, forceWasmSqlite)
   const zeroSqlitePath = resolvePackage('@rocicorp/zero-sqlite3') || undefined
 
-  // native mode may still need zero-sqlite3 path for restoring from a prior shim
+  // native mode needs zero-sqlite3 path
   if (mode === 'native') {
     return { mode, zeroSqlitePath }
   }
 
-  // wasm mode needs bedrock-sqlite and zero-sqlite3 paths
+  // wasm mode only needs bedrock-sqlite - we write a shim
+  // directly into node_modules/@rocicorp/zero-sqlite3
   const bedrockPath = resolvePackage('bedrock-sqlite')
 
   if (!bedrockPath) {
     return null // bedrock-sqlite not installed
   }
 
-  if (!zeroSqlitePath) {
-    return null // zero-sqlite3 not installed
-  }
-
   return {
     mode,
     bedrockPath,
-    zeroSqlitePath,
+    zeroSqlitePath, // optional - may not exist if using shim
   }
 }
 
