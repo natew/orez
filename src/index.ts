@@ -303,8 +303,19 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         log.orez('retrying zero-cache startup...')
         await tryStartZeroCache()
         log.orez('CDC corruption auto-recovery successful')
+      } else if (
+        // native sqlite failed to load at runtime - fallback to wasm
+        sqliteMode === 'native' &&
+        !config.disableWasmSqlite &&
+        hasMissingNativeBinarySignature(errMsg)
+      ) {
+        log.orez('native sqlite failed to load, falling back to wasm...')
+        sqliteMode = 'wasm'
+        sqliteModeConfig = resolveSqliteModeConfig(false, true) // force wasm
+        await tryStartZeroCache()
+        log.orez('wasm fallback successful')
       } else {
-        // not CDC corruption, rethrow
+        // unrecoverable error, rethrow
         throw err
       }
     }
