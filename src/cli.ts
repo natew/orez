@@ -93,6 +93,7 @@ const pgDumpCommand = defineCommand({
     const { PGlite } = await import('@electric-sql/pglite')
     const { vector } = await import('@electric-sql/pglite/vector')
     const { pg_trgm } = await import('@electric-sql/pglite/contrib/pg_trgm')
+    const { pgcrypto } = await import('@electric-sql/pglite/contrib/pgcrypto')
     const { pgDump } = await import('@electric-sql/pglite-tools/pg_dump')
 
     const dataPath = resolve(args['data-dir'], 'pgdata-postgres')
@@ -105,7 +106,7 @@ const pgDumpCommand = defineCommand({
     try {
       db = new PGlite({
         dataDir: dataPath,
-        extensions: { vector, pg_trgm },
+        extensions: { vector, pg_trgm, pgcrypto },
       })
       await db.waitReady
 
@@ -748,6 +749,7 @@ async function directRestore(opts: {
   const { PGlite } = await import('@electric-sql/pglite')
   const { vector } = await import('@electric-sql/pglite/vector')
   const { pg_trgm } = await import('@electric-sql/pglite/contrib/pg_trgm')
+  const { pgcrypto } = await import('@electric-sql/pglite/contrib/pgcrypto')
 
   const dataPath = resolve(opts.dataDir, 'pgdata-postgres')
 
@@ -755,7 +757,7 @@ async function directRestore(opts: {
   try {
     db = new PGlite({
       dataDir: dataPath,
-      extensions: { vector, pg_trgm },
+      extensions: { vector, pg_trgm, pgcrypto },
       relaxedDurability: true,
     })
     await db.waitReady

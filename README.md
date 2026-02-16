@@ -39,7 +39,7 @@ bunx orez
 - **PGlite compatibility** — rewrites unsupported queries, fakes wire protocol responses, filters unsupported column types
 - **Admin dashboard** — live logs, HTTP request inspector, restart/reset controls, env viewer
 - **Production restores** — `pg_dump`/`pg_restore` with COPY→INSERT conversion, auto-coordinates with zero-cache
-- **Extensions** — pgvector and pg_trgm enabled by default
+- **Extensions** — pgvector, pg_trgm, pgcrypto, uuid-ossp, citext, hstore, ltree, fuzzystrmatch, btree_gin, btree_gist, cube, earthdistance enabled by default (lazy-loaded, no overhead unless used)
 
 ## CLI
 

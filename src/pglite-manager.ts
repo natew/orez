@@ -9,7 +9,17 @@ import {
 import { join, resolve } from 'node:path'
 
 import { PGlite } from '@electric-sql/pglite'
+import { btree_gin } from '@electric-sql/pglite/contrib/btree_gin'
+import { btree_gist } from '@electric-sql/pglite/contrib/btree_gist'
+import { citext } from '@electric-sql/pglite/contrib/citext'
+import { cube } from '@electric-sql/pglite/contrib/cube'
+import { earthdistance } from '@electric-sql/pglite/contrib/earthdistance'
+import { fuzzystrmatch } from '@electric-sql/pglite/contrib/fuzzystrmatch'
+import { hstore } from '@electric-sql/pglite/contrib/hstore'
+import { ltree } from '@electric-sql/pglite/contrib/ltree'
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm'
+import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto'
+import { uuid_ossp } from '@electric-sql/pglite/contrib/uuid_ossp'
 import { vector } from '@electric-sql/pglite/vector'
 
 import { log } from './log.js'
@@ -94,7 +104,22 @@ async function createInstance(
       debug: config.logLevel === 'debug' ? 1 : 0,
       relaxedDurability: true,
       ...userOpts,
-      extensions: withExtensions ? userOpts.extensions || { vector, pg_trgm } : {},
+      extensions: withExtensions
+        ? userOpts.extensions || {
+            vector,
+            pg_trgm,
+            pgcrypto,
+            uuid_ossp,
+            citext,
+            hstore,
+            ltree,
+            fuzzystrmatch,
+            btree_gin,
+            btree_gist,
+            cube,
+            earthdistance,
+          }
+        : {},
     })
 
     await db.waitReady
