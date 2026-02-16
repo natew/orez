@@ -3,9 +3,12 @@
  *
  * priority:
  * 1. explicit --disable-wasm-sqlite flag → native (requires compiled binary)
- * 2. default → wasm (works everywhere, no compilation needed)
+ * 2. explicit --force-wasm-sqlite flag → wasm
+ * 3. native binary exists → native (auto-detect, faster)
+ * 4. fallback → wasm (works everywhere)
  */
 
+import { inspectNativeSqliteBinary } from './native-binary.js'
 import { resolvePackage } from './package-resolve.js'
 
 import type { SqliteMode, SqliteModeConfig } from './types.js'
@@ -15,20 +18,26 @@ export { resolvePackage } from './package-resolve.js'
  * resolve sqlite mode from config
  * single source of truth for mode selection
  *
- * wasm is the default - it works everywhere without compilation.
- * native is opt-in via --disable-wasm-sqlite for users who need it.
+ * auto-detects native if binary exists (faster), otherwise wasm.
  *
  * @param disableWasmSqlite - explicit flag to force native mode
- * @param _forceWasmSqlite - deprecated, wasm is now default
+ * @param forceWasmSqlite - explicit flag to force wasm mode
  */
 export function resolveSqliteMode(
   disableWasmSqlite: boolean,
-  _forceWasmSqlite: boolean = false
+  forceWasmSqlite: boolean = false
 ): SqliteMode {
   // explicit native request
   if (disableWasmSqlite) return 'native'
 
-  // wasm is the default - works everywhere
+  // explicit wasm request
+  if (forceWasmSqlite) return 'wasm'
+
+  // auto-detect: use native if binary is compiled
+  const nativeCheck = inspectNativeSqliteBinary()
+  if (nativeCheck.found) return 'native'
+
+  // fallback to wasm
   return 'wasm'
 }
 
