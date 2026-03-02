@@ -463,16 +463,28 @@ export async function handleStartReplication(
   const sentRelations = new Set<string>()
   let txCounter = 1
 
-  // polling + notification loop
-  // adaptive: poll fast when catching up, slow when idle
+  // event-driven + polling loop
+  // uses pg_notify to wake up immediately on changes, with polling fallback
   const pollIntervalIdle = 500
-  const pollIntervalCatchUp = 20
+  const pollIntervalActive = 1 // minimal delay when processing changes
   const batchSize = 2000
   const purgeEveryN = 10
   const shardRescanEveryN = 20
   let running = true
   let pollsSincePurge = 0
   let pollsSinceShardRescan = 0
+  let notifyPending = false
+
+  // set up LISTEN to wake up immediately on changes
+  let unsubscribe: (() => Promise<void>) | null = null
+  try {
+    unsubscribe = await db.listen('_zero_changes', () => {
+      notifyPending = true
+    })
+    log.debug.proxy('replication: listening for _zero_changes notifications')
+  } catch {
+    log.debug.proxy('replication: LISTEN not available, using polling only')
+  }
 
   const poll = async () => {
     while (running) {
@@ -497,6 +509,9 @@ export async function handleStartReplication(
         } finally {
           mutex.release()
         }
+
+        // reset notify flag after checking for changes
+        notifyPending = false
 
         if (changes.length > 0) {
           // filter out shard tables that zero-cache doesn't expect.
@@ -543,15 +558,24 @@ export async function handleStartReplication(
               mutex.release()
             }
           }
+
+          // got changes - continue immediately to check for more
+          continue
         }
 
         // send keepalive
         const ts = nowMicros()
         writer.write(encodeKeepalive(currentLsn, ts, false))
 
-        // if we got a full batch, there's likely more - poll fast
-        const delay = changes.length >= batchSize ? pollIntervalCatchUp : pollIntervalIdle
-        await new Promise((resolve) => setTimeout(resolve, delay))
+        // no changes: wait for notify or poll interval
+        // use a short timeout so we can check notifyPending flag
+        const checkInterval = 10
+        const maxWait = pollIntervalIdle
+        let waited = 0
+        while (waited < maxWait && !notifyPending && running) {
+          await new Promise((resolve) => setTimeout(resolve, checkInterval))
+          waited += checkInterval
+        }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         log.debug.proxy(`replication poll error: ${msg}`)
@@ -565,7 +589,13 @@ export async function handleStartReplication(
   }
 
   log.debug.proxy('replication: starting poll loop')
-  await poll()
+  try {
+    await poll()
+  } finally {
+    if (unsubscribe) {
+      await unsubscribe().catch(() => {})
+    }
+  }
   log.debug.proxy('replication: poll loop exited')
 }
 
