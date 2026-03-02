@@ -8,12 +8,13 @@
  */
 
 import WebSocket from 'ws'
+
 import { startZeroLite } from '../index.js'
-import { installChangeTracking } from '../replication/change-tracker.js'
 import {
   ensureTablesInPublications,
   installAllowAllPermissions,
 } from '../integration/test-permissions.js'
+import { installChangeTracking } from '../replication/change-tracker.js'
 
 import type { PGlite } from '@electric-sql/pglite'
 
@@ -34,14 +35,20 @@ const CLIENT_SCHEMA = {
   },
 }
 
-function encodeSecProtocols(initConnectionMessage: unknown, authToken: string | undefined): string {
+function encodeSecProtocols(
+  initConnectionMessage: unknown,
+  authToken: string | undefined
+): string {
   const payload = JSON.stringify({ initConnectionMessage, authToken })
   return encodeURIComponent(Buffer.from(payload, 'utf-8').toString('base64'))
 }
 
 class Queue<T> {
   private items: T[] = []
-  private waiters: Array<{ resolve: (v: T) => void; timer?: ReturnType<typeof setTimeout> }> = []
+  private waiters: Array<{
+    resolve: (v: T) => void
+    timer?: ReturnType<typeof setTimeout>
+  }> = []
 
   enqueue(item: T) {
     const waiter = this.waiters.shift()
@@ -138,7 +145,11 @@ async function runBenchmark() {
         'initConnection',
         {
           desiredQueriesPatch: [
-            { op: 'put', hash: 'q1', ast: { table: 'bench_items', orderBy: [['id', 'asc']] } },
+            {
+              op: 'put',
+              hash: 'q1',
+              ast: { table: 'bench_items', orderBy: [['id', 'asc']] },
+            },
           ],
           clientSchema: CLIENT_SCHEMA,
         },
@@ -200,7 +211,12 @@ async function runBenchmark() {
     const replicationTimeout = Date.now() + 60000
     while (receivedIds.size < NUM_MUTATIONS && Date.now() < replicationTimeout) {
       const msg = (await downstream.dequeue('timeout' as any, 1000)) as any
-      if (msg !== 'timeout' && Array.isArray(msg) && msg[0] === 'pokePart' && msg[1]?.rowsPatch) {
+      if (
+        msg !== 'timeout' &&
+        Array.isArray(msg) &&
+        msg[0] === 'pokePart' &&
+        msg[1]?.rowsPatch
+      ) {
         for (const row of msg[1].rowsPatch) {
           if (row.op === 'put' && row.tableName === 'bench_items' && row.value?.id) {
             receivedIds.add(row.value.id)
@@ -220,7 +236,9 @@ async function runBenchmark() {
 
     console.log(`\n=== Results ===`)
     console.log(`total time: ${totalMs.toFixed(1)}ms`)
-    console.log(`insert time: ${insertMs.toFixed(1)}ms (${(insertMs / NUM_MUTATIONS).toFixed(1)}ms/op)`)
+    console.log(
+      `insert time: ${insertMs.toFixed(1)}ms (${(insertMs / NUM_MUTATIONS).toFixed(1)}ms/op)`
+    )
     console.log(`replication time: ${replicationMs.toFixed(1)}ms`)
     console.log(`per mutation (end-to-end): ${perMutation.toFixed(1)}ms`)
     console.log(`mutations received: ${receivedIds.size}/${NUM_MUTATIONS}`)
@@ -232,7 +250,9 @@ async function runBenchmark() {
       for (let i = 0; i < NUM_MUTATIONS; i++) {
         if (!receivedIds.has(`bench-${i}`)) missing.push(i)
       }
-      console.log(`missing: ${missing.slice(0, 10).join(', ')}${missing.length > 10 ? '...' : ''}`)
+      console.log(
+        `missing: ${missing.slice(0, 10).join(', ')}${missing.length > 10 ? '...' : ''}`
+      )
     }
   } finally {
     await result.stop()

@@ -463,24 +463,41 @@ export async function handleStartReplication(
   const sentRelations = new Set<string>()
   let txCounter = 1
 
-  // event-driven + polling loop
-  // uses pg_notify to wake up immediately on changes, with polling fallback
+  // event-driven replication with promise-based wakeup
+  // uses pg_notify to wake up immediately, polling only as fallback
   const pollIntervalIdle = 500
-  const pollIntervalActive = 1 // minimal delay when processing changes
   const batchSize = 2000
   const purgeEveryN = 10
   const shardRescanEveryN = 20
   let running = true
   let pollsSincePurge = 0
   let pollsSinceShardRescan = 0
-  let notifyPending = false
+
+  // promise-based wakeup mechanism
+  let wakeupResolve: (() => void) | null = null
+  const wakeup = () => {
+    if (wakeupResolve) {
+      wakeupResolve()
+      wakeupResolve = null
+    }
+  }
+  const waitForWakeup = (timeoutMs: number): Promise<void> => {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        wakeupResolve = null
+        resolve()
+      }, timeoutMs)
+      wakeupResolve = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+    })
+  }
 
   // set up LISTEN to wake up immediately on changes
   let unsubscribe: (() => Promise<void>) | null = null
   try {
-    unsubscribe = await db.listen('_zero_changes', () => {
-      notifyPending = true
-    })
+    unsubscribe = await db.listen('_zero_changes', wakeup)
     log.debug.proxy('replication: listening for _zero_changes notifications')
   } catch {
     log.debug.proxy('replication: LISTEN not available, using polling only')
@@ -509,9 +526,6 @@ export async function handleStartReplication(
         } finally {
           mutex.release()
         }
-
-        // reset notify flag after checking for changes
-        notifyPending = false
 
         if (changes.length > 0) {
           // filter out shard tables that zero-cache doesn't expect.
@@ -567,15 +581,8 @@ export async function handleStartReplication(
         const ts = nowMicros()
         writer.write(encodeKeepalive(currentLsn, ts, false))
 
-        // no changes: wait for notify or poll interval
-        // use a short timeout so we can check notifyPending flag
-        const checkInterval = 10
-        const maxWait = pollIntervalIdle
-        let waited = 0
-        while (waited < maxWait && !notifyPending && running) {
-          await new Promise((resolve) => setTimeout(resolve, checkInterval))
-          waited += checkInterval
-        }
+        // no changes: wait for notify signal or poll interval
+        await waitForWakeup(pollIntervalIdle)
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         log.debug.proxy(`replication poll error: ${msg}`)
