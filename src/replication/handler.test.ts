@@ -6,6 +6,7 @@ import { installChangeTracking } from './change-tracker'
 import {
   handleReplicationQuery,
   handleStartReplication,
+  resetReplicationState,
   type ReplicationWriter,
 } from './handler'
 
@@ -120,6 +121,7 @@ describe('handleStartReplication', () => {
   const testMutex = new Mutex()
 
   beforeEach(async () => {
+    resetReplicationState()
     db = new PGlite()
     await db.waitReady
     await db.exec(`

@@ -28,6 +28,9 @@ import type { PGlite } from '@electric-sql/pglite'
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 
+// abort previous replication handler when a new one starts
+let abortPreviousReplication: (() => void) | null = null
+
 // clean version string: strip emscripten compiler info that breaks pg_restore/pg_dump
 const PG_VERSION_STRING =
   "'PostgreSQL 17.4 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 12.2.0, 64-bit'"
@@ -560,8 +563,13 @@ async function handleReplicationMessage(
   if (upper.startsWith('START_REPLICATION')) {
     await connection.detach()
 
+    // abort any previous replication handler to prevent zombies
+    if (abortPreviousReplication) {
+      log.proxy('aborting previous replication handler')
+      abortPreviousReplication()
+    }
+
     let aborted = false
-    const abortController = new AbortController()
     const writer = {
       write(chunk: Uint8Array) {
         if (!socket.destroyed && !aborted) {
@@ -573,14 +581,16 @@ async function handleReplicationMessage(
       },
     }
 
+    const abort = () => {
+      aborted = true
+      socket.destroy()
+    }
+    abortPreviousReplication = abort
+
     // drain incoming standby status updates
     socket.on('data', (_chunk: Buffer) => {})
 
-    socket.on('close', () => {
-      aborted = true
-      abortController.abort()
-      socket.destroy()
-    })
+    socket.on('close', abort)
 
     handleStartReplication(query, writer, db, mutex).catch((err) => {
       log.debug.proxy(`replication stream ended: ${err}`)

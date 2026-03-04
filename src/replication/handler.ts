@@ -38,6 +38,15 @@ export interface ReplicationWriter {
 
 // current lsn counter
 let currentLsn = 0x1000000n
+// persistent watermark across handler restarts so new handlers
+// don't replay already-streamed changes
+let lastStreamedWatermark = 0
+
+/** reset module state (for tests) */
+export function resetReplicationState(): void {
+  currentLsn = 0x1000000n
+  lastStreamedWatermark = 0
+}
 function nextLsn(): bigint {
   currentLsn += 0x100n
   return currentLsn
@@ -208,6 +217,9 @@ export async function handleReplicationQuery(
     const lsn = lsnToString(nextLsn())
     const snapshotName = `00000003-00000001-1`
 
+    // fresh slot = fresh zero-cache instance, reset watermark
+    lastStreamedWatermark = 0
+
     // persist slot so pg_replication_slots queries find it
     await db.query(
       `INSERT INTO _orez._zero_replication_slots (slot_name, restart_lsn, confirmed_flush_lsn)
@@ -272,7 +284,9 @@ export async function handleStartReplication(
   new DataView(copyBoth.buffer).setInt16(6, 0) // 0 columns
   writer.write(copyBoth)
 
-  let lastWatermark = 0
+  // resume from where the previous handler left off to avoid
+  // replaying already-streamed changes after reconnect
+  let lastWatermark = lastStreamedWatermark
 
   // declared outside mutex block so they're accessible in the poll loop
   const tableKeyColumns = new Map<string, Set<string>>()
@@ -474,6 +488,7 @@ export async function handleStartReplication(
   const shardRescanEveryN = 20
   let running = true
   let pollsSincePurge = 0
+  let tryAcquireFailures = 0
   let pollsSinceShardRescan = 0
 
   // promise-based wakeup mechanism
@@ -530,11 +545,20 @@ export async function handleStartReplication(
         }
 
         // try to acquire mutex without blocking proxy connections.
-        // if the mutex is busy (proxy handling zero-cache queries), skip
-        // this iteration to avoid starving initial sync.
+        // use tryAcquire first to yield to proxy queries, but after
+        // consecutive failures fall back to blocking acquire so
+        // replication doesn't stall (which blocks .server promises).
         if (!mutex.tryAcquire()) {
-          await waitForWakeup(pollIntervalIdle)
-          continue
+          tryAcquireFailures++
+          if (tryAcquireFailures < 3) {
+            await waitForWakeup(pollIntervalIdle)
+            continue
+          }
+          // too many failures - block to ensure progress
+          await mutex.acquire()
+          tryAcquireFailures = 0
+        } else {
+          tryAcquireFailures = 0
         }
         let changes: Awaited<ReturnType<typeof getChangesSince>>
         try {
@@ -544,6 +568,7 @@ export async function handleStartReplication(
         }
 
         if (changes.length > 0) {
+          log.debug.proxy(`replication: got ${changes.length} changes, watermark ${lastWatermark}→${changes[changes.length - 1].watermark}`)
           // filter out shard tables that zero-cache doesn't expect.
           // only `clients` is needed (for .server promise resolution).
           // other shard tables (replicas, mutations) crash zero-cache
@@ -560,6 +585,7 @@ export async function handleStartReplication(
 
           if (changes.length === 0) {
             lastWatermark = batchEnd
+            lastStreamedWatermark = batchEnd
             continue
           }
 
@@ -573,6 +599,7 @@ export async function handleStartReplication(
             columnTypeOids
           )
           lastWatermark = batchEnd
+          lastStreamedWatermark = batchEnd
 
           // purge consumed changes periodically to free wasm memory
           pollsSincePurge++
@@ -610,7 +637,7 @@ export async function handleStartReplication(
     }
   }
 
-  log.debug.proxy('replication: starting poll loop')
+  log.debug.proxy(`replication: starting poll loop (watermark=${lastWatermark})`)
   try {
     await poll()
   } finally {
