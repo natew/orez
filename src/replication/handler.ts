@@ -621,6 +621,9 @@ export async function handleStartReplication(
   log.debug.proxy('replication: poll loop exited')
 }
 
+// cache column info per table to avoid per-change allocation
+const cachedColumns = new Map<string, ReturnType<typeof inferColumns>>()
+
 async function streamChanges(
   changes: ChangeRecord[],
   writer: ReplicationWriter,
@@ -677,13 +680,18 @@ async function streamChanges(
     const row = rowData || oldData
     if (!row) continue
 
-    const keySet = tableKeyColumns.get(qualifiedKey)
-    const typeOids = columnTypeOids.get(qualifiedKey)
-    const columns = inferColumns(row).map((col) => ({
-      ...col,
-      typeOid: typeOids?.get(col.name) ?? col.typeOid,
-      isKey: keySet?.has(col.name) ?? false,
-    }))
+    // use cached columns or build and cache them
+    let columns = cachedColumns.get(qualifiedKey)
+    if (!columns) {
+      const keySet = tableKeyColumns.get(qualifiedKey)
+      const typeOids = columnTypeOids.get(qualifiedKey)
+      columns = inferColumns(row).map((col) => ({
+        ...col,
+        typeOid: typeOids?.get(col.name) ?? col.typeOid,
+        isKey: keySet?.has(col.name) ?? false,
+      }))
+      cachedColumns.set(qualifiedKey, columns)
+    }
 
     // send RELATION if not yet sent
     if (!sentRelations.has(qualifiedKey)) {
