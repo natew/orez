@@ -21,11 +21,11 @@
 ## Test Commands
 
 ```bash
-# Full clean (removes all data AND kills ports before)
-bun lite:clean
+# Full clean and run after (removes all data AND kills ports before)
+bun lite:fresh
 
-# Full clean wasm (removes all data AND kills ports before)
-bun lite:clean:wasm
+# Full clean and run after wasm (removes all data AND kills ports before)
+bun lite:fresh:wasm
 
 # Run test (native mode)
 cd ~/chat && bun src/integration/e2e/orez.ts --disable-wasm-sqlite
@@ -45,8 +45,8 @@ cd ~/chat && bun src/integration/e2e/orez.ts
 
 **Root cause of earlier test failures**:
 
-- Test script bug: was using `bun lite:clean` for native mode, which doesn't pass `--disable-wasm-sqlite`
-- Fixed to use `bun lite:clean:no-wasm` for native mode
+- Test script bug: was using `bun lite:fresh` for native mode, which doesn't pass `--disable-wasm-sqlite`
+- Fixed to use `bun lite:fresh:no-wasm` for native mode
 - The `replica db must be in wal2 mode (current: delete)` error was because test ran in wasm mode (which uses `delete` journal mode) instead of native mode
 
 **latest with `--disable-wasm-sqlite` (properly cleaned)**:

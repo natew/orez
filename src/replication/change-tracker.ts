@@ -3,13 +3,11 @@ import { log } from '../log.js'
 import type { PGlite } from '@electric-sql/pglite'
 
 export interface ChangeRecord {
-  id: number
   watermark: number
   table_name: string
   op: 'INSERT' | 'UPDATE' | 'DELETE'
   row_data: Record<string, unknown> | null
   old_data: Record<string, unknown> | null
-  changed_at: string
 }
 
 export async function installChangeTracking(db: PGlite): Promise<void> {
@@ -17,20 +15,17 @@ export async function installChangeTracking(db: PGlite): Promise<void> {
   await db.exec(`CREATE SCHEMA IF NOT EXISTS _orez`)
 
   // create changes table and watermark sequence
+  // watermark is the primary key - monotonically increasing, no separate id needed
   await db.exec(`
     CREATE SEQUENCE IF NOT EXISTS _orez._zero_watermark;
 
     CREATE TABLE IF NOT EXISTS _orez._zero_changes (
-      id BIGSERIAL PRIMARY KEY,
-      watermark BIGINT NOT NULL DEFAULT nextval('_orez._zero_watermark'),
+      watermark BIGINT NOT NULL DEFAULT nextval('_orez._zero_watermark') PRIMARY KEY,
       table_name TEXT NOT NULL,
-      op TEXT NOT NULL,
+      op TEXT NOT NULL CHECK (op IN ('INSERT', 'UPDATE', 'DELETE')),
       row_data JSONB,
-      old_data JSONB,
-      changed_at TIMESTAMPTZ DEFAULT NOW()
+      old_data JSONB
     );
-
-    CREATE INDEX IF NOT EXISTS _zero_changes_watermark_idx ON _orez._zero_changes (watermark);
 
     CREATE TABLE IF NOT EXISTS _orez._zero_replication_slots (
       slot_name TEXT PRIMARY KEY,
@@ -45,27 +40,25 @@ export async function installChangeTracking(db: PGlite): Promise<void> {
     );
   `)
 
-  // create trigger function (writes to _orez schema)
+  // create trigger functions (writes to _orez schema)
+  // uses to_jsonb() directly instead of row_to_json()::jsonb to avoid double conversion.
+  // per-row trigger for single-row operations
   await db.exec(`
     CREATE OR REPLACE FUNCTION public._zero_track_change() RETURNS TRIGGER AS $$
-    DECLARE
-      qualified_name TEXT;
     BEGIN
-      qualified_name := TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME;
       IF TG_OP = 'DELETE' THEN
         INSERT INTO _orez._zero_changes (table_name, op, old_data)
-        VALUES (qualified_name, 'DELETE', row_to_json(OLD)::jsonb);
+        VALUES (TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME, 'DELETE', to_jsonb(OLD));
         RETURN OLD;
       ELSIF TG_OP = 'UPDATE' THEN
         INSERT INTO _orez._zero_changes (table_name, op, row_data, old_data)
-        VALUES (qualified_name, 'UPDATE', row_to_json(NEW)::jsonb, row_to_json(OLD)::jsonb);
+        VALUES (TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME, 'UPDATE', to_jsonb(NEW), to_jsonb(OLD));
         RETURN NEW;
-      ELSIF TG_OP = 'INSERT' THEN
+      ELSE
         INSERT INTO _orez._zero_changes (table_name, op, row_data)
-        VALUES (qualified_name, 'INSERT', row_to_json(NEW)::jsonb);
+        VALUES (TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME, 'INSERT', to_jsonb(NEW));
         RETURN NEW;
       END IF;
-      RETURN NULL;
     END;
     $$ LANGUAGE plpgsql;
   `)
@@ -212,10 +205,10 @@ export async function installTriggersOnShardTables(db: PGlite): Promise<void> {
 export async function getChangesSince(
   db: PGlite,
   watermark: number,
-  limit = 1000
+  limit = 50000
 ): Promise<ChangeRecord[]> {
   const result = await db.query<ChangeRecord>(
-    'SELECT * FROM _orez._zero_changes WHERE watermark > $1 ORDER BY watermark LIMIT $2',
+    'SELECT watermark, table_name, op, row_data, old_data FROM _orez._zero_changes WHERE watermark > $1 ORDER BY watermark LIMIT $2',
     [watermark, limit]
   )
   return result.rows
@@ -225,11 +218,8 @@ export async function purgeConsumedChanges(
   db: PGlite,
   watermark: number
 ): Promise<number> {
-  const result = await db.query<{ count: string }>(
-    'WITH deleted AS (DELETE FROM _orez._zero_changes WHERE watermark <= $1 RETURNING 1) SELECT count(*)::text AS count FROM deleted',
-    [watermark]
-  )
-  return Number(result.rows[0]?.count || 0)
+  const result = await db.exec(`DELETE FROM _orez._zero_changes WHERE watermark <= ${Number(watermark)}`)
+  return result[0]?.affectedRows ?? 0
 }
 
 export async function getCurrentWatermark(db: PGlite): Promise<number> {

@@ -482,8 +482,8 @@ export async function handleStartReplication(
 
   // event-driven replication with promise-based wakeup
   // uses pg_notify to wake up immediately, polling only as fallback
-  const pollIntervalIdle = 200
-  const batchSize = 2000
+  const pollIntervalIdle = 50
+  const batchSize = 50000
   const purgeEveryN = 5
   const shardRescanEveryN = 20
   let running = true
@@ -663,8 +663,12 @@ async function streamChanges(
   const ts = nowMicros()
   const lsn = nextLsn()
 
+  // collect all encoded messages into a list, then batch-write
+  // to minimize syscalls (each writer.write → socket.write is a syscall)
+  const messages: Uint8Array[] = []
+
   // BEGIN
-  writer.write(encodeWrappedChange(lsn, lsn, ts, encodeBegin(lsn, ts, txId)))
+  messages.push(encodeWrappedChange(lsn, lsn, ts, encodeBegin(lsn, ts, txId)))
 
   for (const change of changes) {
     // parse schema-qualified name (schema.table or bare table)
@@ -693,13 +697,8 @@ async function streamChanges(
       }
     }
 
-    // zero-cache expects specific camel-cased keys in shard clients rows.
-    // Some upstream paths can surface lower-cased variants; normalize them.
+    // zero-cache expects specific camel-cased keys in shard clients rows
     if (schema !== 'public' && tableName === 'clients') {
-      const sample = rowData || oldData
-      if (sample) {
-        log.debug.proxy(`shard clients keys: ${Object.keys(sample).join(', ')}`)
-      }
       rowData = normalizeShardClientsRow(rowData)
       oldData = normalizeShardClientsRow(oldData)
     }
@@ -723,11 +722,11 @@ async function streamChanges(
     // send RELATION if not yet sent
     if (!sentRelations.has(qualifiedKey)) {
       const relMsg = encodeRelation(tableOid, schema, tableName, 0x64, columns)
-      writer.write(encodeWrappedChange(lsn, lsn, ts, relMsg))
+      messages.push(encodeWrappedChange(lsn, lsn, ts, relMsg))
       sentRelations.add(qualifiedKey)
     }
 
-    // send the change
+    // encode the change
     let changeMsg: Uint8Array | null = null
     switch (change.op) {
       case 'INSERT':
@@ -746,12 +745,23 @@ async function streamChanges(
         continue
     }
 
-    writer.write(encodeWrappedChange(lsn, lsn, ts, changeMsg))
+    messages.push(encodeWrappedChange(lsn, lsn, ts, changeMsg))
   }
 
   // COMMIT
   const endLsn = nextLsn()
-  writer.write(encodeWrappedChange(endLsn, endLsn, ts, encodeCommit(0, lsn, endLsn, ts)))
+  messages.push(encodeWrappedChange(endLsn, endLsn, ts, encodeCommit(0, lsn, endLsn, ts)))
+
+  // batch-write all messages in a single buffer to minimize syscalls
+  let totalSize = 0
+  for (const msg of messages) totalSize += msg.length
+  const batch = new Uint8Array(totalSize)
+  let offset = 0
+  for (const msg of messages) {
+    batch.set(msg, offset)
+    offset += msg.length
+  }
+  writer.write(batch)
 }
 
 function normalizeShardClientsRow(

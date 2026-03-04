@@ -151,11 +151,22 @@ describe('handleStartReplication', () => {
     return { written, writer }
   }
 
-  // extract the pgoutput message type from a CopyData(XLogData(msg)) frame
-  function payloadType(msg: Uint8Array): number | null {
-    if (msg[0] !== 0x64) return null // CopyData
-    if (msg[5] !== 0x77) return null // XLogData
-    return msg[30] // actual message type byte
+  // extract all pgoutput message types from a (possibly batched) buffer.
+  // each CopyData frame: 0x64 + int32(len) + payload
+  // XLogData payload: 0x77 + 24 bytes header + actual message type byte
+  function extractPayloadTypes(buf: Uint8Array): number[] {
+    const types: number[] = []
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+    let pos = 0
+    while (pos < buf.length) {
+      if (buf[pos] !== 0x64) break // not CopyData
+      const len = dv.getInt32(pos + 1)
+      if (buf[pos + 5] === 0x77 && pos + 30 < buf.length) {
+        types.push(buf[pos + 30])
+      }
+      pos += 1 + len
+    }
+    return types
   }
 
   it('sends CopyBothResponse first', async () => {
@@ -204,7 +215,7 @@ describe('handleStartReplication', () => {
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('streamed', 123)`)
     await new Promise((r) => setTimeout(r, 700))
 
-    const types = written.map(payloadType).filter((t): t is number => t !== null)
+    const types = written.flatMap(extractPayloadTypes)
 
     expect(types).toContain(0x42) // BEGIN
     expect(types).toContain(0x52) // RELATION
@@ -242,7 +253,7 @@ describe('handleStartReplication', () => {
     await db.exec(`DELETE FROM public.items WHERE name = 'mut'`)
     await new Promise((r) => setTimeout(r, 700))
 
-    const types = written.map(payloadType).filter((t): t is number => t !== null)
+    const types = written.flatMap(extractPayloadTypes)
     expect(types).toContain(0x49) // INSERT
     expect(types).toContain(0x55) // UPDATE
     expect(types).toContain(0x44) // DELETE
@@ -266,7 +277,7 @@ describe('handleStartReplication', () => {
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('b', 2)`)
     await new Promise((r) => setTimeout(r, 700))
 
-    const types = written.map(payloadType).filter((t): t is number => t !== null)
+    const types = written.flatMap(extractPayloadTypes)
     const relationCount = types.filter((t) => t === 0x52).length
     expect(relationCount).toBe(1)
   }, 10_000)
@@ -290,7 +301,7 @@ describe('handleStartReplication', () => {
     await db.exec(`INSERT INTO public.other (label) VALUES ('b')`)
     await new Promise((r) => setTimeout(r, 700))
 
-    const types = written.map(payloadType).filter((t): t is number => t !== null)
+    const types = written.flatMap(extractPayloadTypes)
     const relationCount = types.filter((t) => t === 0x52).length
     expect(relationCount).toBe(2)
   })
@@ -314,7 +325,7 @@ describe('handleStartReplication', () => {
     // wait multiple poll cycles
     await new Promise((r) => setTimeout(r, 1500))
 
-    const inserts = written.map(payloadType).filter((t) => t === 0x49)
+    const inserts = written.flatMap(extractPayloadTypes).filter((t) => t === 0x49)
     expect(inserts.length).toBe(20)
   }, 10_000)
 
@@ -336,7 +347,7 @@ describe('handleStartReplication', () => {
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('tx2', 2)`)
     await new Promise((r) => setTimeout(r, 700))
 
-    const types = written.map(payloadType).filter((t): t is number => t !== null)
+    const types = written.flatMap(extractPayloadTypes)
     const begins = types.filter((t) => t === 0x42).length
     const commits = types.filter((t) => t === 0x43).length
     expect(begins).toBe(commits)
