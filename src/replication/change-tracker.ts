@@ -138,7 +138,11 @@ async function installTriggersOnAllTables(db: PGlite): Promise<void> {
     count++
   }
 
-  log.debug.pglite(`installed change tracking triggers on ${count} tables`)
+  if (count > 0) {
+    log.pglite(`installed change tracking triggers on ${count} tables`)
+  } else {
+    log.debug.pglite(`no tables to install change tracking triggers on`)
+  }
 }
 
 /**

@@ -182,7 +182,28 @@ describe('orez integration', { timeout: 120000 }, () => {
   beforeEach(async () => {
     // clean tables between tests
     await db.exec(`DELETE FROM foo; DELETE FROM bar;`)
+    // wait for replication to consume cleanup changes so zero-cache's replica is clean
+    await waitForReplicationCatchup(db)
+    // settle time for zero-cache to finish processing previous client views
+    await new Promise((r) => setTimeout(r, 2000))
   })
+
+  // wait until the replication handler has consumed all pending changes.
+  // zero-cache queries its own sqlite replica, so data written to pglite
+  // isn't visible to clients until replication streams it through.
+  async function waitForReplicationCatchup(
+    pglite: PGlite,
+    timeoutMs = 15000
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const result = await pglite.query<{ count: string }>(
+        `SELECT count(*)::text as count FROM _orez._zero_changes`
+      )
+      if (Number(result.rows[0]?.count) === 0) return
+      await new Promise((r) => setTimeout(r, 100))
+    }
+  }
 
   test('zero-cache starts and accepts websocket connections', async () => {
     const cg = `test-cg-${Date.now()}`
@@ -223,6 +244,11 @@ describe('orez integration', { timeout: 120000 }, () => {
       'hello',
       42,
     ])
+
+    // wait for replication to deliver the row to zero-cache's replica
+    await waitForReplicationCatchup(db)
+    // extra settle time for zero-cache to process the replication stream
+    await new Promise((r) => setTimeout(r, 1000))
 
     const downstream = new Queue<unknown>()
     const ws = connectAndSubscribe(zeroPort, downstream, {
@@ -426,7 +452,6 @@ describe('orez integration', { timeout: 120000 }, () => {
 
   async function drainInitialPokes(downstream: Queue<unknown>) {
     // drain messages until we've seen the initial data sync complete
-    // pattern: connected → pokeStart/End → pokeStart/pokePart(queries)/pokeEnd → pokeStart/pokePart(data)/pokeEnd
     let settled = false
     const timeout = Date.now() + 30000
 
@@ -435,7 +460,6 @@ describe('orez integration', { timeout: 120000 }, () => {
       if (msg === 'timeout') {
         settled = true
       } else if (Array.isArray(msg) && msg[0] === 'pokeEnd') {
-        // after a pokeEnd, check if another poke comes quickly
         const next = (await downstream.dequeue('timeout' as any, 2000)) as any
         if (next === 'timeout') {
           settled = true
@@ -466,24 +490,13 @@ describe('orez integration', { timeout: 120000 }, () => {
   ): Promise<any[]> {
     const rows: any[] = []
     const deadline = Date.now() + windowMs
-    // first wait for the pokePart with data
+    // collect all poke parts until timeout
     while (Date.now() < deadline) {
       const remaining = Math.max(1000, deadline - Date.now())
       const msg = (await downstream.dequeue('timeout' as any, remaining)) as any
       if (msg === 'timeout') break
       if (Array.isArray(msg) && msg[0] === 'pokePart' && msg[1]?.rowsPatch) {
         rows.push(...msg[1].rowsPatch)
-        // check if more poke parts come quickly
-        const more = (await downstream.dequeue('timeout' as any, 2000)) as any
-        if (
-          more !== 'timeout' &&
-          Array.isArray(more) &&
-          more[0] === 'pokePart' &&
-          more[1]?.rowsPatch
-        ) {
-          rows.push(...more[1].rowsPatch)
-        }
-        break
       }
     }
     return rows

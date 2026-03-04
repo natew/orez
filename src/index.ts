@@ -134,6 +134,47 @@ async function syncManagedPublications(
   }
 }
 
+/**
+ * ensure publications have table membership after on-db-ready.
+ * handles the case where orez pre-created an empty publication and the app's
+ * migration skipped adding tables because the publication already existed.
+ */
+async function ensurePublicationHasTables(
+  db: PGlite,
+  names: string[]
+): Promise<void> {
+  for (const pub of names) {
+    const inPub = await db.query<{ count: string }>(
+      `SELECT count(*)::text as count FROM pg_publication_tables
+       WHERE pubname = $1 AND schemaname = 'public'`,
+      [pub]
+    )
+    if (Number(inPub.rows[0]?.count) > 0) continue
+
+    // publication exists but has no tables — add all public tables
+    const pubExists = await db.query<{ count: string }>(
+      `SELECT count(*)::text as count FROM pg_publication WHERE pubname = $1`,
+      [pub]
+    )
+    if (Number(pubExists.rows[0]?.count) === 0) continue
+
+    const tables = await db.query<{ tablename: string }>(
+      `SELECT tablename FROM pg_tables
+       WHERE schemaname = 'public'
+         AND tablename NOT LIKE '_zero_%'
+         AND tablename NOT LIKE '\\_%'`
+    )
+    if (tables.rows.length === 0) continue
+
+    const tableList = tables.rows
+      .map((t) => `"public"."${t.tablename.replace(/"/g, '""')}"`)
+      .join(', ')
+    const quotedPub = '"' + pub.replace(/"/g, '""') + '"'
+    await db.exec(`ALTER PUBLICATION ${quotedPub} ADD TABLE ${tableList}`)
+    log.orez(`publication "${pub}" was empty, added ${tables.rows.length} table(s)`)
+  }
+}
+
 // resolvePackage moved to sqlite-mode/resolve-mode.ts
 import { resolvePackage } from './sqlite-mode/resolve-mode.js'
 
@@ -238,8 +279,13 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       OREZ_PG_PORT: String(config.pgPort),
     })
 
-    // re-install change tracking on tables created by on-db-ready
+    // re-sync publication membership after on-db-ready.
+    // for orez-managed publications, add any new public tables.
+    // for user-managed publications, ensure the publication isn't empty
+    // (app migrations may have created the pub with tables, but if orez
+    // pre-created an empty pub, the migration may have skipped adding tables).
     await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
+    await ensurePublicationHasTables(db, managedPub.names)
     log.debug.orez('re-installing change tracking after on-db-ready')
     await installChangeTracking(db)
   }

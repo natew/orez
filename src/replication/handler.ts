@@ -34,6 +34,7 @@ import type { PGlite } from '@electric-sql/pglite'
 
 export interface ReplicationWriter {
   write(data: Uint8Array): void
+  readonly closed?: boolean
 }
 
 // current lsn counter
@@ -334,6 +335,9 @@ export async function handleStartReplication(
         FOR EACH STATEMENT EXECUTE FUNCTION public._zero_notify_change();
     `)
     }
+    if (tables.length > 0) {
+      log.proxy(`installed notify triggers on ${tables.length} public table(s)`)
+    }
 
     // discover shard schemas (e.g. chat_0) and install NOTIFY triggers
     const shardSchemas = await db.query<{ nspname: string }>(
@@ -465,9 +469,9 @@ export async function handleStartReplication(
 
   // event-driven replication with promise-based wakeup
   // uses pg_notify to wake up immediately, polling only as fallback
-  const pollIntervalIdle = 500
+  const pollIntervalIdle = 200
   const batchSize = 2000
-  const purgeEveryN = 10
+  const purgeEveryN = 5
   const shardRescanEveryN = 20
   let running = true
   let pollsSincePurge = 0
@@ -505,21 +509,34 @@ export async function handleStartReplication(
 
   const poll = async () => {
     while (running) {
+      // check if the connection was closed
+      if (writer.closed) {
+        log.debug.proxy('replication: writer closed, exiting poll loop')
+        running = false
+        break
+      }
+
       try {
         // periodically re-scan for new shard schemas (e.g. chat_0 created by zero-cache)
         pollsSinceShardRescan++
         if (pollsSinceShardRescan >= shardRescanEveryN) {
-          pollsSinceShardRescan = 0
-          await mutex.acquire()
-          try {
-            await installTriggersOnShardTables(db)
-          } finally {
-            mutex.release()
+          if (mutex.tryAcquire()) {
+            pollsSinceShardRescan = 0
+            try {
+              await installTriggersOnShardTables(db)
+            } finally {
+              mutex.release()
+            }
           }
         }
 
-        // acquire mutex to avoid conflicting with proxy connections
-        await mutex.acquire()
+        // try to acquire mutex without blocking proxy connections.
+        // if the mutex is busy (proxy handling zero-cache queries), skip
+        // this iteration to avoid starving initial sync.
+        if (!mutex.tryAcquire()) {
+          await waitForWakeup(pollIntervalIdle)
+          continue
+        }
         let changes: Awaited<ReturnType<typeof getChangesSince>>
         try {
           changes = await getChangesSince(db, lastWatermark, batchSize)
@@ -560,9 +577,8 @@ export async function handleStartReplication(
 
           // purge consumed changes periodically to free wasm memory
           pollsSincePurge++
-          if (pollsSincePurge >= purgeEveryN) {
+          if (pollsSincePurge >= purgeEveryN && mutex.tryAcquire()) {
             pollsSincePurge = 0
-            await mutex.acquire()
             try {
               const purged = await purgeConsumedChanges(db, lastWatermark)
               if (purged > 0) {

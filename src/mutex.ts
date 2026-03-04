@@ -13,6 +13,15 @@ export class Mutex {
     })
   }
 
+  // non-blocking acquire: returns true if lock was obtained, false otherwise
+  tryAcquire(): boolean {
+    if (!this.locked) {
+      this.locked = true
+      return true
+    }
+    return false
+  }
+
   release(): void {
     const next = this.queue.shift()
     if (next) {

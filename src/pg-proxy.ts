@@ -565,11 +565,16 @@ async function handleReplicationMessage(
   if (upper.startsWith('START_REPLICATION')) {
     await connection.detach()
 
+    let aborted = false
+    const abortController = new AbortController()
     const writer = {
       write(chunk: Uint8Array) {
-        if (!socket.destroyed) {
+        if (!socket.destroyed && !aborted) {
           socket.write(chunk)
         }
+      },
+      get closed() {
+        return socket.destroyed || aborted
       },
     }
 
@@ -577,6 +582,8 @@ async function handleReplicationMessage(
     socket.on('data', (_chunk: Buffer) => {})
 
     socket.on('close', () => {
+      aborted = true
+      abortController.abort()
       socket.destroy()
     })
 
