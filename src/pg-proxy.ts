@@ -161,6 +161,16 @@ function rebuildSimpleQuery(newQuery: string): Uint8Array {
   return buf
 }
 
+// apply all rewrites in one pass, using replace directly (no separate test)
+function applyRewrites(query: string): string {
+  let result = query
+  for (const rw of QUERY_REWRITES) {
+    rw.match.lastIndex = 0
+    result = result.replace(rw.match, rw.replace)
+  }
+  return result
+}
+
 /**
  * intercept and rewrite query messages to make pglite look like real postgres.
  */
@@ -170,36 +180,17 @@ function interceptQuery(data: Uint8Array): Uint8Array {
   if (msgType === 0x51) {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
     const len = view.getInt32(1)
-    let query = textDecoder.decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
-
-    let modified = false
-    for (const rw of QUERY_REWRITES) {
-      if (rw.match.test(query)) {
-        query = query.replace(rw.match, rw.replace)
-        modified = true
-        rw.match.lastIndex = 0
-      }
-      rw.match.lastIndex = 0
-    }
-
-    if (modified) {
-      return rebuildSimpleQuery(query)
+    const original = textDecoder.decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
+    const rewritten = applyRewrites(original)
+    if (rewritten !== original) {
+      return rebuildSimpleQuery(rewritten)
     }
   } else if (msgType === 0x50) {
-    const query = extractParseQuery(data)
-    if (query) {
-      let newQuery = query
-      let modified = false
-      for (const rw of QUERY_REWRITES) {
-        if (rw.match.test(newQuery)) {
-          newQuery = newQuery.replace(rw.match, rw.replace)
-          modified = true
-          rw.match.lastIndex = 0
-        }
-        rw.match.lastIndex = 0
-      }
-      if (modified) {
-        return rebuildParseMessage(data, newQuery)
+    const original = extractParseQuery(data)
+    if (original) {
+      const rewritten = applyRewrites(original)
+      if (rewritten !== original) {
+        return rebuildParseMessage(data, rewritten)
       }
     }
   }
