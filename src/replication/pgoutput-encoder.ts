@@ -10,6 +10,9 @@
 // postgres epoch: 2000-01-01 in microseconds from unix epoch
 const PG_EPOCH_MICROS = 946684800000000n
 
+// shared encoder instance - avoids per-call allocation
+const encoder = new TextEncoder()
+
 // table oid tracking
 const tableOids = new Map<string, number>()
 let nextOid = 16384
@@ -39,10 +42,27 @@ export function inferColumns(row: Record<string, unknown>): ColumnInfo[] {
   }))
 }
 
-function encodeString(str: string): Uint8Array {
-  return new TextEncoder().encode(str)
+// reusable scratch buffer for building messages (64KB, grows if needed)
+let scratch = new Uint8Array(65536)
+let scratchView = new DataView(scratch.buffer)
+
+function ensureScratch(size: number): void {
+  if (scratch.length < size) {
+    const newSize = Math.max(size, scratch.length * 2)
+    scratch = new Uint8Array(newSize)
+    scratchView = new DataView(scratch.buffer)
+  }
 }
 
+function writeInt16At(offset: number, val: number): void {
+  scratchView.setInt16(offset, val)
+}
+
+function writeInt32At(offset: number, val: number): void {
+  scratchView.setInt32(offset, val)
+}
+
+// legacy helpers for standalone buffers
 function writeInt16(buf: Uint8Array, offset: number, val: number): void {
   new DataView(buf.buffer, buf.byteOffset).setInt16(offset, val)
 }
@@ -89,14 +109,14 @@ export function encodeRelation(
   replicaIdentity: number,
   columns: ColumnInfo[]
 ): Uint8Array {
-  const schemaBytes = encodeString(schema)
-  const nameBytes = encodeString(tableName)
+  const schemaBytes = encoder.encode(schema)
+  const nameBytes = encoder.encode(tableName)
 
   // calculate column sizes
   let columnsSize = 0
   const colNameBytes: Uint8Array[] = []
   for (const col of columns) {
-    const nb = encodeString(col.name)
+    const nb = encoder.encode(col.name)
     colNameBytes.push(nb)
     columnsSize += 1 + nb.length + 1 + 4 + 4 // flags + name + null + typeOid + typeMod
   }
@@ -133,19 +153,25 @@ export function encodeRelation(
   return buf
 }
 
-function encodeTupleData(
+// encode tuple data directly into scratch buffer starting at given offset.
+// returns the number of bytes written.
+function encodeTupleDataInto(
   row: Record<string, unknown>,
-  columns: ColumnInfo[]
-): Uint8Array {
-  const parts: Uint8Array[] = []
-  let totalSize = 2 // ncolumns (int16)
+  columns: ColumnInfo[],
+  startOffset: number
+): number {
+  let pos = startOffset
 
-  const values: (Uint8Array | null)[] = []
+  // reserve space for ncolumns
+  ensureScratch(pos + 2 + columns.length * 32)
+  writeInt16At(pos, columns.length)
+  pos += 2
+
   for (const col of columns) {
     const val = row[col.name]
     if (val === null || val === undefined) {
-      values.push(null)
-      totalSize += 1 // 'n' byte
+      ensureScratch(pos + 1)
+      scratch[pos++] = 0x6e // 'n' for null
     } else {
       // convert to postgresql text format
       let strVal: string
@@ -156,28 +182,48 @@ function encodeTupleData(
       } else {
         strVal = String(val)
       }
-      const bytes = encodeString(strVal)
-      values.push(bytes)
-      totalSize += 1 + 4 + bytes.length // 't' + len + data
-    }
-  }
-
-  const buf = new Uint8Array(totalSize)
-  let pos = 0
-  writeInt16(buf, pos, columns.length)
-  pos += 2
-
-  for (const val of values) {
-    if (val === null) {
-      buf[pos++] = 0x6e // 'n' for null
-    } else {
-      buf[pos++] = 0x74 // 't' for text
-      writeInt32(buf, pos, val.length)
+      const bytes = encoder.encode(strVal)
+      ensureScratch(pos + 1 + 4 + bytes.length)
+      scratch[pos++] = 0x74 // 't' for text
+      writeInt32At(pos, bytes.length)
       pos += 4
-      buf.set(val, pos)
-      pos += val.length
+      scratch.set(bytes, pos)
+      pos += bytes.length
     }
   }
+
+  return pos - startOffset
+}
+
+/**
+ * encode a complete change message wrapped in CopyData(XLogData(...)).
+ * avoids intermediate buffer allocations by writing directly into one buffer.
+ */
+export function encodeWrappedChange(
+  walStart: bigint,
+  walEnd: bigint,
+  timestamp: bigint,
+  changeData: Uint8Array
+): Uint8Array {
+  // CopyData header: 'd' + int32 len
+  // XLogData header: 'w' + int64 walStart + int64 walEnd + int64 timestamp
+  // then changeData
+  const xlogSize = 1 + 8 + 8 + 8 + changeData.length
+  const totalSize = 1 + 4 + xlogSize
+  const buf = new Uint8Array(totalSize)
+
+  // CopyData
+  buf[0] = 0x64 // 'd'
+  writeInt32(buf, 1, 4 + xlogSize)
+
+  // XLogData
+  buf[5] = 0x77 // 'w'
+  writeInt64(buf, 6, walStart)
+  writeInt64(buf, 14, walEnd)
+  writeInt64(buf, 22, timestamp - PG_EPOCH_MICROS)
+
+  // change payload
+  buf.set(changeData, 30)
 
   return buf
 }
@@ -188,13 +234,14 @@ export function encodeInsert(
   row: Record<string, unknown>,
   columns: ColumnInfo[]
 ): Uint8Array {
-  const tuple = encodeTupleData(row, columns)
-  const buf = new Uint8Array(1 + 4 + 1 + tuple.length)
-  buf[0] = 0x49 // 'I'
-  writeInt32(buf, 1, tableOid)
-  buf[5] = 0x4e // 'N' for new tuple
-  buf.set(tuple, 6)
-  return buf
+  // write header + tuple directly into scratch
+  const headerSize = 1 + 4 + 1 // 'I' + oid + 'N'
+  ensureScratch(headerSize + 2 + columns.length * 64)
+  scratch[0] = 0x49 // 'I'
+  writeInt32At(1, tableOid)
+  scratch[5] = 0x4e // 'N' for new tuple
+  const tupleLen = encodeTupleDataInto(row, columns, 6)
+  return scratch.slice(0, 6 + tupleLen)
 }
 
 // encode an UPDATE message
@@ -204,26 +251,21 @@ export function encodeUpdate(
   oldRow: Record<string, unknown> | null,
   columns: ColumnInfo[]
 ): Uint8Array {
-  const newTuple = encodeTupleData(row, columns)
+  ensureScratch(1 + 4 + 1 + columns.length * 128)
+  scratch[0] = 0x55 // 'U'
+  writeInt32At(1, tableOid)
 
   if (oldRow) {
-    const oldTuple = encodeTupleData(oldRow, columns)
-    const buf = new Uint8Array(1 + 4 + 1 + oldTuple.length + 1 + newTuple.length)
-    buf[0] = 0x55 // 'U'
-    writeInt32(buf, 1, tableOid)
-    buf[5] = 0x4f // 'O' for old tuple
-    buf.set(oldTuple, 6)
-    buf[6 + oldTuple.length] = 0x4e // 'N' for new tuple
-    buf.set(newTuple, 7 + oldTuple.length)
-    return buf
+    scratch[5] = 0x4f // 'O' for old tuple
+    const oldLen = encodeTupleDataInto(oldRow, columns, 6)
+    scratch[6 + oldLen] = 0x4e // 'N' for new tuple
+    const newLen = encodeTupleDataInto(row, columns, 7 + oldLen)
+    return scratch.slice(0, 7 + oldLen + newLen)
   }
 
-  const buf = new Uint8Array(1 + 4 + 1 + newTuple.length)
-  buf[0] = 0x55 // 'U'
-  writeInt32(buf, 1, tableOid)
-  buf[5] = 0x4e // 'N'
-  buf.set(newTuple, 6)
-  return buf
+  scratch[5] = 0x4e // 'N'
+  const newLen = encodeTupleDataInto(row, columns, 6)
+  return scratch.slice(0, 6 + newLen)
 }
 
 // encode a DELETE message
@@ -232,13 +274,12 @@ export function encodeDelete(
   oldRow: Record<string, unknown>,
   columns: ColumnInfo[]
 ): Uint8Array {
-  const tuple = encodeTupleData(oldRow, columns)
-  const buf = new Uint8Array(1 + 4 + 1 + tuple.length)
-  buf[0] = 0x44 // 'D'
-  writeInt32(buf, 1, tableOid)
-  buf[5] = 0x4b // 'K' for key tuple
-  buf.set(tuple, 6)
-  return buf
+  ensureScratch(1 + 4 + 1 + columns.length * 64)
+  scratch[0] = 0x44 // 'D'
+  writeInt32At(1, tableOid)
+  scratch[5] = 0x4b // 'K' for key tuple
+  const tupleLen = encodeTupleDataInto(oldRow, columns, 6)
+  return scratch.slice(0, 6 + tupleLen)
 }
 
 // wrap a pgoutput message in XLogData format

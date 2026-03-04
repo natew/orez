@@ -24,6 +24,10 @@ import type { ZeroLiteConfig } from './config.js'
 import type { PGliteInstances } from './pglite-manager.js'
 import type { PGlite } from '@electric-sql/pglite'
 
+// shared encoder/decoder instances
+const textEncoder = new TextEncoder()
+const textDecoder = new TextDecoder()
+
 // clean version string: strip emscripten compiler info that breaks pg_restore/pg_dump
 const PG_VERSION_STRING =
   "'PostgreSQL 17.4 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 12.2.0, 64-bit'"
@@ -78,7 +82,7 @@ const SERVER_PARAMS: [string, string][] = [
 
 // build a ParameterStatus wire protocol message (type 'S', 0x53)
 function buildParameterStatus(name: string, value: string): Uint8Array {
-  const encoder = new TextEncoder()
+  const encoder = textEncoder
   const nameBytes = encoder.encode(name)
   const valueBytes = encoder.encode(value)
   const len = 4 + nameBytes.length + 1 + valueBytes.length + 1
@@ -109,7 +113,7 @@ function extractParseQuery(data: Uint8Array): string | null {
   offset++
   const queryStart = offset
   while (offset < data.length && data[offset] !== 0) offset++
-  return new TextDecoder().decode(data.subarray(queryStart, offset))
+  return textDecoder.decode(data.subarray(queryStart, offset))
 }
 
 /**
@@ -126,7 +130,7 @@ function rebuildParseMessage(data: Uint8Array, newQuery: string): Uint8Array {
   offset++
 
   const suffix = data.subarray(offset)
-  const encoder = new TextEncoder()
+  const encoder = textEncoder
   const queryBytes = encoder.encode(newQuery)
 
   const totalLen = 4 + nameBytes.length + queryBytes.length + 1 + suffix.length
@@ -148,7 +152,7 @@ function rebuildParseMessage(data: Uint8Array, newQuery: string): Uint8Array {
  * rebuild a Simple Query message with a modified query string.
  */
 function rebuildSimpleQuery(newQuery: string): Uint8Array {
-  const encoder = new TextEncoder()
+  const encoder = textEncoder
   const queryBytes = encoder.encode(newQuery + '\0')
   const buf = new Uint8Array(5 + queryBytes.length)
   buf[0] = 0x51
@@ -166,7 +170,7 @@ function interceptQuery(data: Uint8Array): Uint8Array {
   if (msgType === 0x51) {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
     const len = view.getInt32(1)
-    let query = new TextDecoder().decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
+    let query = textDecoder.decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
 
     let modified = false
     for (const rw of QUERY_REWRITES) {
@@ -211,7 +215,7 @@ function isNoopQuery(data: Uint8Array): boolean {
   if (data[0] === 0x51) {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
     const len = view.getInt32(1)
-    query = new TextDecoder().decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
+    query = textDecoder.decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
   } else if (data[0] === 0x50) {
     query = extractParseQuery(data)
   }
@@ -223,7 +227,7 @@ function isNoopQuery(data: Uint8Array): boolean {
  * build a synthetic "SET" command complete response.
  */
 function buildSetCompleteResponse(): Uint8Array {
-  const encoder = new TextEncoder()
+  const encoder = textEncoder
   const tag = encoder.encode('SET\0')
   const cc = new Uint8Array(1 + 4 + tag.length)
   cc[0] = 0x43
@@ -295,7 +299,7 @@ function extractNoticeCode(
 
     if (fieldType === 0x43) {
       // 'C' = SQLSTATE code
-      return new TextDecoder().decode(data.subarray(strStart, pos))
+      return textDecoder.decode(data.subarray(strStart, pos))
     }
     pos++ // skip null terminator
   }
@@ -479,7 +483,7 @@ export async function startPgProxy(
             if (data[0] === 0x51) {
               const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
               const len = view.getInt32(1)
-              const query = new TextDecoder()
+              const query = textDecoder
                 .decode(data.subarray(5, 1 + len - 1))
                 .replace(/\0$/, '')
               log.debug.proxy(`repl query: ${query.slice(0, 200)}`)
@@ -558,7 +562,7 @@ async function handleReplicationMessage(
 
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
   const len = view.getInt32(1)
-  const query = new TextDecoder().decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
+  const query = textDecoder.decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
   const upper = query.trim().toUpperCase()
 
   // check if this is a START_REPLICATION command

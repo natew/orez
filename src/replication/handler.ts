@@ -7,9 +7,10 @@
  */
 
 import { log } from '../log.js'
+
+const textEncoder = new TextEncoder()
 import {
   getChangesSince,
-  getCurrentWatermark,
   purgeConsumedChanges,
   installTriggersOnShardTables,
   type ChangeRecord,
@@ -22,11 +23,9 @@ import {
   encodeUpdate,
   encodeDelete,
   encodeKeepalive,
-  wrapXLogData,
-  wrapCopyData,
+  encodeWrappedChange,
   getTableOid,
   inferColumns,
-  type ColumnInfo,
 } from './pgoutput-encoder.js'
 
 import type { Mutex } from '../mutex.js'
@@ -57,7 +56,7 @@ function nowMicros(): bigint {
 // build a wire protocol row description + data row response
 function buildSimpleResponse(columns: string[], values: string[]): Uint8Array {
   const parts: Uint8Array[] = []
-  const encoder = new TextEncoder()
+  const encoder = textEncoder
 
   // RowDescription (0x54)
   let rdSize = 6 // int32 len + int16 numFields
@@ -141,7 +140,7 @@ function buildSimpleResponse(columns: string[], values: string[]): Uint8Array {
 }
 
 function buildCommandComplete(tag: string): Uint8Array {
-  const encoder = new TextEncoder()
+  const encoder = textEncoder
   const tagBytes = encoder.encode(tag + '\0')
   const cc = new Uint8Array(1 + 4 + tagBytes.length)
   cc[0] = 0x43
@@ -160,7 +159,7 @@ function buildCommandComplete(tag: string): Uint8Array {
 }
 
 function buildErrorResponse(message: string): Uint8Array {
-  const encoder = new TextEncoder()
+  const encoder = textEncoder
   const msgBytes = encoder.encode(message)
   // S(severity) + M(message) + null terminator
   const fields = new Uint8Array(2 + 6 + 2 + msgBytes.length + 1 + 1) // S + ERROR\0 + M + msg\0 + terminator
@@ -635,8 +634,7 @@ async function streamChanges(
   const lsn = nextLsn()
 
   // BEGIN
-  const beginMsg = wrapXLogData(lsn, lsn, ts, encodeBegin(lsn, ts, txId))
-  writer.write(wrapCopyData(beginMsg))
+  writer.write(encodeWrappedChange(lsn, lsn, ts, encodeBegin(lsn, ts, txId)))
 
   for (const change of changes) {
     // parse schema-qualified name (schema.table or bare table)
@@ -690,7 +688,7 @@ async function streamChanges(
     // send RELATION if not yet sent
     if (!sentRelations.has(qualifiedKey)) {
       const relMsg = encodeRelation(tableOid, schema, tableName, 0x64, columns)
-      writer.write(wrapCopyData(wrapXLogData(lsn, lsn, ts, relMsg)))
+      writer.write(encodeWrappedChange(lsn, lsn, ts, relMsg))
       sentRelations.add(qualifiedKey)
     }
 
@@ -713,13 +711,12 @@ async function streamChanges(
         continue
     }
 
-    writer.write(wrapCopyData(wrapXLogData(lsn, lsn, ts, changeMsg)))
+    writer.write(encodeWrappedChange(lsn, lsn, ts, changeMsg))
   }
 
   // COMMIT
   const endLsn = nextLsn()
-  const commitMsg = wrapXLogData(endLsn, endLsn, ts, encodeCommit(0, lsn, endLsn, ts))
-  writer.write(wrapCopyData(commitMsg))
+  writer.write(encodeWrappedChange(endLsn, endLsn, ts, encodeCommit(0, lsn, endLsn, ts)))
 }
 
 function normalizeShardClientsRow(
