@@ -139,10 +139,7 @@ async function syncManagedPublications(
  * handles the case where orez pre-created an empty publication and the app's
  * migration skipped adding tables because the publication already existed.
  */
-async function ensurePublicationHasTables(
-  db: PGlite,
-  names: string[]
-): Promise<void> {
+async function ensurePublicationHasTables(db: PGlite, names: string[]): Promise<void> {
   for (const pub of names) {
     const inPub = await db.query<{ count: string }>(
       `SELECT count(*)::text as count FROM pg_publication_tables
