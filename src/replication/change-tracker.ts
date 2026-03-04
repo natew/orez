@@ -218,7 +218,9 @@ export async function purgeConsumedChanges(
   db: PGlite,
   watermark: number
 ): Promise<number> {
-  const result = await db.exec(`DELETE FROM _orez._zero_changes WHERE watermark <= ${Number(watermark)}`)
+  const result = await db.exec(
+    `DELETE FROM _orez._zero_changes WHERE watermark <= ${Number(watermark)}`
+  )
   return result[0]?.affectedRows ?? 0
 }
 

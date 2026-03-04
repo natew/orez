@@ -568,7 +568,9 @@ export async function handleStartReplication(
         }
 
         if (changes.length > 0) {
-          log.debug.proxy(`replication: got ${changes.length} changes, watermark ${lastWatermark}→${changes[changes.length - 1].watermark}`)
+          log.debug.proxy(
+            `replication: got ${changes.length} changes, watermark ${lastWatermark}→${changes[changes.length - 1].watermark}`
+          )
           // filter out shard tables that zero-cache doesn't expect.
           // only `clients` is needed (for .server promise resolution).
           // other shard tables (replicas, mutations) crash zero-cache
