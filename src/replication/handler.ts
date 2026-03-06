@@ -320,24 +320,15 @@ export async function handleStartReplication(
     // the change-streamer's initial copy also queries PGlite via the proxy, and
     // direct db.query()/db.exec() calls here bypass the proxy's mutex, causing
     // "already in transaction" errors when they interleave.
+    // phase 1: DDL operations (trigger installation) under mutex
+    // split into two phases so proxy queries can run between them
     await mutex.acquire()
+    let relevantSchemas: string[]
     try {
       // install change tracking triggers on shard schema tables (e.g. chat_0.clients)
-      // these track zero-cache's lastMutationID for .server promise resolution
       await installTriggersOnShardTables(db)
 
-      // set up LISTEN for real-time change notifications
-      await db.exec(`
-      CREATE OR REPLACE FUNCTION public._zero_notify_change() RETURNS TRIGGER AS $$
-      BEGIN
-        PERFORM pg_notify('_zero_changes', TG_TABLE_NAME);
-        RETURN NULL;
-      END;
-      $$ LANGUAGE plpgsql;
-    `)
-
-      // install notify triggers from configured publication when available.
-      // when publication is configured but empty, install none to preserve scope.
+      // set up LISTEN + install notify triggers in one batch
       const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
       let tables: { tablename: string }[]
       if (pubName) {
@@ -362,20 +353,26 @@ export async function handleStartReplication(
         tables = all.rows
       }
 
+      // combine notify function creation + trigger installations into single exec
+      const ddlParts: string[] = [
+        `CREATE OR REPLACE FUNCTION public._zero_notify_change() RETURNS TRIGGER AS $$
+        BEGIN
+          PERFORM pg_notify('_zero_changes', TG_TABLE_NAME);
+          RETURN NULL;
+        END;
+        $$ LANGUAGE plpgsql;`,
+      ]
       for (const { tablename } of tables) {
         const quoted = '"' + tablename.replace(/"/g, '""') + '"'
-        await db.exec(`
-        DROP TRIGGER IF EXISTS _zero_notify_trigger ON public.${quoted};
-        CREATE TRIGGER _zero_notify_trigger
-          AFTER INSERT OR UPDATE OR DELETE ON public.${quoted}
-          FOR EACH STATEMENT EXECUTE FUNCTION public._zero_notify_change();
-      `)
-      }
-      if (tables.length > 0) {
-        log.proxy(`installed notify triggers on ${tables.length} public table(s)`)
+        ddlParts.push(
+          `DROP TRIGGER IF EXISTS _zero_notify_trigger ON public.${quoted};
+          CREATE TRIGGER _zero_notify_trigger
+            AFTER INSERT OR UPDATE OR DELETE ON public.${quoted}
+            FOR EACH STATEMENT EXECUTE FUNCTION public._zero_notify_change();`
+        )
       }
 
-      // discover shard schemas (e.g. chat_0) and install NOTIFY triggers
+      // discover shard schemas and install their triggers in same batch
       const shardSchemas = await db.query<{ nspname: string }>(
         `SELECT nspname FROM pg_namespace
        WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'public')
@@ -384,112 +381,122 @@ export async function handleStartReplication(
          AND nspname NOT LIKE '_zero_%'
          AND nspname NOT LIKE '%/%'`
       )
-      const relevantSchemas = ['public', ...shardSchemas.rows.map((r) => r.nspname)]
+      relevantSchemas = ['public', ...shardSchemas.rows.map((r) => r.nspname)]
 
-      for (const schema of relevantSchemas) {
-        if (schema === 'public') continue
-        const shardTables = await db.query<{ tablename: string }>(
-          `SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename = 'clients'`,
-          [schema]
+      const shardClientSchemas = shardSchemas.rows
+        .map((r) => r.nspname)
+        .filter((s) => s !== 'public')
+      if (shardClientSchemas.length > 0) {
+        const shardTables = await db.query<{ schemaname: string; tablename: string }>(
+          `SELECT schemaname, tablename FROM pg_tables
+           WHERE schemaname = ANY($1) AND tablename = 'clients'`,
+          [shardClientSchemas]
         )
-        for (const { tablename } of shardTables.rows) {
-          const quotedSchema = '"' + schema.replace(/"/g, '""') + '"'
-          const quotedTable = '"' + tablename.replace(/"/g, '""') + '"'
-          await db.exec(`
-          DROP TRIGGER IF EXISTS _zero_notify_trigger ON ${quotedSchema}.${quotedTable};
-          CREATE TRIGGER _zero_notify_trigger
-            AFTER INSERT OR UPDATE OR DELETE ON ${quotedSchema}.${quotedTable}
-            FOR EACH STATEMENT EXECUTE FUNCTION public._zero_notify_change();
-        `)
+        for (const { schemaname, tablename } of shardTables.rows) {
+          const qs = '"' + schemaname.replace(/"/g, '""') + '"'
+          const qt = '"' + tablename.replace(/"/g, '""') + '"'
+          ddlParts.push(
+            `DROP TRIGGER IF EXISTS _zero_notify_trigger ON ${qs}.${qt};
+            CREATE TRIGGER _zero_notify_trigger
+              AFTER INSERT OR UPDATE OR DELETE ON ${qs}.${qt}
+              FOR EACH STATEMENT EXECUTE FUNCTION public._zero_notify_change();`
+          )
         }
         if (shardTables.rows.length > 0) {
           log.debug.proxy(
-            `installed notify triggers on ${shardTables.rows.length} tables in schema "${schema}"`
+            `installed notify triggers on ${shardTables.rows.length} shard tables`
           )
         }
       }
 
-      // build primary key lookup for all relevant schemas
-      for (const schema of relevantSchemas) {
-        const pkResult = await db.query<{ table_name: string; column_name: string }>(
-          `SELECT tc.table_name, kcu.column_name
+      await db.exec(ddlParts.join('\n'))
+      if (tables.length > 0) {
+        log.proxy(`installed notify triggers on ${tables.length} public table(s)`)
+      }
+    } finally {
+      mutex.release()
+    }
+
+    // phase 2: schema introspection (read-only, separate mutex acquisition)
+    // releasing between phases lets proxy queries run during the gap
+    await mutex.acquire()
+    try {
+      // combined PK + column introspection in a single query using UNION ALL
+      const schemaResult = await db.query<{
+        kind: string
+        table_schema: string
+        table_name: string
+        column_name: string
+        data_type: string | null
+      }>(
+        `SELECT 'pk' AS kind, tc.table_schema, tc.table_name, kcu.column_name, NULL AS data_type
          FROM information_schema.table_constraints tc
          JOIN information_schema.key_column_usage kcu
            ON tc.constraint_name = kcu.constraint_name
            AND tc.table_schema = kcu.table_schema
          WHERE tc.constraint_type = 'PRIMARY KEY'
-           AND tc.table_schema = $1`,
-          [schema]
-        )
-        for (const { table_name, column_name } of pkResult.rows) {
-          const key = `${schema}.${table_name}`
+           AND tc.table_schema = ANY($1)
+         UNION ALL
+         SELECT 'col' AS kind, table_schema, table_name, column_name, data_type
+         FROM information_schema.columns
+         WHERE table_schema = ANY($1)`,
+        [relevantSchemas]
+      )
+
+      for (const row of schemaResult.rows) {
+        const key = `${row.table_schema}.${row.table_name}`
+        if (row.kind === 'pk') {
           let keys = tableKeyColumns.get(key)
           if (!keys) {
             keys = new Set()
             tableKeyColumns.set(key, keys)
           }
-          keys.add(column_name)
-        }
-      }
-      log.debug.proxy(`loaded primary keys for ${tableKeyColumns.size} tables`)
-
-      // build excluded columns lookup (types zero-cache can't handle)
-      // also build column type OID map so RELATION messages carry correct postgres type OIDs.
-      // zero-cache uses these to select value parsers (e.g. timestamp → number via timestampToFpMillis).
-      const UNSUPPORTED_TYPES = new Set(['tsvector', 'tsquery', 'USER-DEFINED'])
-      const PG_DATA_TYPE_OIDS: Record<string, number> = {
-        boolean: 16,
-        bytea: 17,
-        bigint: 20,
-        smallint: 21,
-        integer: 23,
-        text: 25,
-        json: 114,
-        real: 700,
-        'double precision': 701,
-        character: 1042,
-        'character varying': 1043,
-        date: 1082,
-        'time without time zone': 1083,
-        'timestamp without time zone': 1114,
-        'timestamp with time zone': 1184,
-        'time with time zone': 1266,
-        numeric: 1700,
-        uuid: 2950,
-        jsonb: 3802,
-      }
-      for (const schema of relevantSchemas) {
-        const colResult = await db.query<{
-          table_name: string
-          column_name: string
-          data_type: string
-        }>(
-          `SELECT table_name, column_name, data_type
-         FROM information_schema.columns
-         WHERE table_schema = $1`,
-          [schema]
-        )
-        for (const { table_name, column_name, data_type } of colResult.rows) {
-          const key = `${schema}.${table_name}`
-          if (UNSUPPORTED_TYPES.has(data_type)) {
+          keys.add(row.column_name)
+        } else {
+          const UNSUPPORTED_TYPES = new Set(['tsvector', 'tsquery', 'USER-DEFINED'])
+          const PG_DATA_TYPE_OIDS: Record<string, number> = {
+            boolean: 16,
+            bytea: 17,
+            bigint: 20,
+            smallint: 21,
+            integer: 23,
+            text: 25,
+            json: 114,
+            real: 700,
+            'double precision': 701,
+            character: 1042,
+            'character varying': 1043,
+            date: 1082,
+            'time without time zone': 1083,
+            'timestamp without time zone': 1114,
+            'timestamp with time zone': 1184,
+            'time with time zone': 1266,
+            numeric: 1700,
+            uuid: 2950,
+            jsonb: 3802,
+          }
+          if (row.data_type && UNSUPPORTED_TYPES.has(row.data_type)) {
             let cols = excludedColumns.get(key)
             if (!cols) {
               cols = new Set()
               excludedColumns.set(key, cols)
             }
-            cols.add(column_name)
+            cols.add(row.column_name)
           }
-          const oid = PG_DATA_TYPE_OIDS[data_type]
-          if (oid !== undefined) {
-            let cols = columnTypeOids.get(key)
-            if (!cols) {
-              cols = new Map()
-              columnTypeOids.set(key, cols)
+          if (row.data_type) {
+            const oid = PG_DATA_TYPE_OIDS[row.data_type]
+            if (oid !== undefined) {
+              let cols = columnTypeOids.get(key)
+              if (!cols) {
+                cols = new Map()
+                columnTypeOids.set(key, cols)
+              }
+              cols.set(row.column_name, oid)
             }
-            cols.set(column_name, oid)
           }
         }
       }
+      log.debug.proxy(`loaded primary keys for ${tableKeyColumns.size} tables`)
       if (excludedColumns.size > 0) {
         log.debug.proxy(
           `excluding unsupported columns: ${[...excludedColumns.entries()].map(([t, c]) => `${t}(${[...c].join(',')})`).join(', ')}`
@@ -511,9 +518,9 @@ export async function handleStartReplication(
 
   // event-driven replication with promise-based wakeup
   // uses pg_notify to wake up immediately, polling only as fallback.
-  // idle interval must be generous to avoid starving zero-cache's
-  // initial sync which hammers PGlite through the proxy.
-  const pollIntervalIdle = 500
+  // adaptive: yield generously during initial sync (zero-cache hammers PGlite),
+  // then tighten up once streaming begins (changes need to flow fast).
+  const pollIntervalIdle = 250
   const batchSize = 50000
   const purgeEveryN = 5
   const shardRescanEveryN = 40
@@ -521,6 +528,7 @@ export async function handleStartReplication(
   let pollsSincePurge = 0
   let tryAcquireFailures = 0
   let pollsSinceShardRescan = 0
+  let hasStreamedOnce = false
 
   // promise-based wakeup mechanism
   let wakeupResolve: (() => void) | null = null
@@ -576,19 +584,26 @@ export async function handleStartReplication(
         }
 
         // try to acquire mutex without blocking proxy connections.
-        // use tryAcquire to yield to proxy queries. during initial sync
-        // zero-cache hammers PGlite, so we back off exponentially to
-        // avoid starving it. only fall back to blocking after many
-        // consecutive failures (gives zero-cache time to finish sync).
+        // adaptive: before first stream, yield generously so zero-cache's
+        // initial sync can finish. after first stream, be more aggressive
+        // since replication speed directly affects client sync latency.
         if (!mutex.tryAcquire()) {
           tryAcquireFailures++
-          if (tryAcquireFailures < 20) {
-            // exponential backoff: 500, 1000, 1500... up to ~10s
-            const backoff = Math.min(pollIntervalIdle * tryAcquireFailures, 10_000)
-            await waitForWakeup(backoff)
-            continue
+          if (hasStreamedOnce) {
+            // post-sync: short backoff then block to keep replication responsive
+            if (tryAcquireFailures < 5) {
+              await waitForWakeup(50 * tryAcquireFailures)
+              continue
+            }
+          } else {
+            // pre-sync: yield generously for zero-cache initial sync
+            if (tryAcquireFailures < 20) {
+              const backoff = Math.min(pollIntervalIdle * tryAcquireFailures, 5_000)
+              await waitForWakeup(backoff)
+              continue
+            }
           }
-          // many failures - block to ensure progress
+          // block to ensure replication progress
           await mutex.acquire()
           tryAcquireFailures = 0
         } else {
@@ -640,6 +655,7 @@ export async function handleStartReplication(
           )
           lastWatermark = batchEnd
           lastStreamedWatermark = batchEnd
+          hasStreamedOnce = true
 
           // purge consumed changes periodically to free wasm memory
           pollsSincePurge++
