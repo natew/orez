@@ -369,6 +369,132 @@ setup('setup', async ({ page }) => {
     }
   }
 
+  // patch sendMessageIn to wait for pointer-events before clicking.
+  // MessageInput.tsx applies 'disable-all-pointer-events' until Zero syncs
+  // hasChannelPermission, which blocks Playwright clicks on the textbox.
+  log('patching helpers.ts: sendMessageIn waits for pointer-events')
+  const helpersPath = resolve(e2eDir, 'helpers.ts')
+  if (existsSync(helpersPath)) {
+    let helpers = readFileSync(helpersPath, 'utf-8')
+    helpers = helpers.replace(
+      `await channelInput.click()\n  await page.waitForTimeout(200)\n  await channelInput.pressSequentially`,
+      `// wait for pointer-events to be enabled (zero data sync for channel permissions)
+  await page.waitForFunction(
+    (testId) => {
+      const el = document.querySelector(\`[data-testid="\${testId}"] [role="textbox"]\`)
+      return el ? getComputedStyle(el).pointerEvents !== 'none' : false
+    },
+    \`\${inputName}-input\`,
+    { timeout: 60000 }
+  )
+  await channelInput.click()
+  await page.waitForTimeout(200)
+  await channelInput.pressSequentially`,
+    )
+    // scale waitForMessage default timeout (not caught by timeout: N regex
+    // because function params use = not :)
+    helpers = helpers.replace(
+      'async function waitForMessage(page: Page, text: string, timeout = 10_000)',
+      'async function waitForMessage(page: Page, text: string, timeout = 60_000)',
+    )
+    // patch openTestChannel and openChannel to wait for actual content (not just DOM attachment).
+    // under PGlite latency, "Not found" renders while Zero data is still syncing.
+    // wait (without reload!) for Zero to sync and content to appear.
+    // NOTE: timeout values are ALREADY SCALED by scaleTimeout (10_000 → 30000)
+    helpers = helpers.replace(
+      /await page\.waitForSelector\('\[data-testid="channel-main"\]', \{\s*timeout: \d+,\s*state: 'attached',\s*\}\)\s*\}/g,
+      `await page.waitForSelector('[data-testid="channel-main"]', {
+    timeout: 30000,
+    state: 'attached',
+  })
+  // if "Not found" is showing, wait for Zero data to sync (no reload - that resets ws state)
+  await page.waitForFunction(
+    () => {
+      const main = document.querySelector('[data-testid="channel-main"]')
+      if (!main) return false
+      const h4 = main.querySelector('h4')
+      return !(h4 && h4.textContent?.includes('Not found'))
+    },
+    { timeout: 60000 }
+  ).catch(() => {})
+}`,
+    )
+    // patch loginAsAdmin: after login, wait for channel content to sync from Zero.
+    // loginAsAdmin navigates to channel URL but only waits for admin username in sidebar,
+    // not for the actual channel data. tests immediately interact with "Not found" content.
+    helpers = helpers.replace(
+      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  console.info(\`✅ Logged in as admin\`)`,
+      `await dismissOnboarding(page)
+  await dismissViteOverlay(page)
+  // if navigated to a channel, wait for channel content to sync from Zero
+  // (loginAsAdmin only waits for admin username, not channel data)
+  try {
+    const channelMain = page.locator('[data-testid="channel-main"]')
+    const hasChannel = await channelMain.count().then(c => c > 0).catch(() => false)
+    if (hasChannel) {
+      await page.waitForFunction(
+        () => {
+          const main = document.querySelector('[data-testid="channel-main"]')
+          if (!main) return false
+          const h4 = main.querySelector('h4')
+          return !(h4 && h4.textContent?.includes('Not found'))
+        },
+        { timeout: 120000 }
+      )
+    }
+  } catch (e) {
+    console.info('[loginAsAdmin] channel content wait timed out, continuing...', page.url())
+  }
+  console.info(\`✅ Logged in as admin\`)`,
+    )
+    writeFileSync(helpersPath, helpers)
+  }
+
+  // patch input-focus.test.ts: wait for pointer-events before clicking channel textbox
+  const focusTestPath = resolve(e2eDir, 'input-focus.test.ts')
+  if (existsSync(focusTestPath)) {
+    let focusTest = readFileSync(focusTestPath, 'utf-8')
+    // add pointer-events wait before channelTextbox.click() calls
+    focusTest = focusTest.replace(
+      /await channelTextbox\.waitFor\(\{ state: 'visible'.*?\}\)\n\n\s*await channelTextbox\.click\(\)/,
+      `await channelTextbox.waitFor({ state: 'visible', timeout: 30000 })
+
+    // wait for pointer-events to be enabled (zero data sync)
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector('[data-testid="channel-input"] [role="textbox"]')
+        return el ? getComputedStyle(el).pointerEvents !== 'none' : false
+      },
+      { timeout: 120000 }
+    )
+    await channelTextbox.click()`,
+    )
+    // also increase the test timeout (60s → 300s) since permissions sync is slow
+    focusTest = focusTest.replace(
+      /test\.setTimeout\(\d+\)/,
+      'test.setTimeout(300000)',
+    )
+    writeFileSync(focusTestPath, focusTest)
+  }
+
+  // patch multi-context tests: increase test timeout for tests with 2+ browser contexts.
+  // each context needs full Zero sync under PGlite latency (30-60s each).
+  // standard 3x scaling isn't enough for multi-context tests.
+  for (const testFile of [
+    'permissions-messages.test.ts',
+    'multi-user-sync.test.ts',
+  ]) {
+    const testPath = resolve(e2eDir, testFile)
+    if (existsSync(testPath)) {
+      let content = readFileSync(testPath, 'utf-8')
+      content = content.replace(
+        /test\.setTimeout\(\d+\)/,
+        'test.setTimeout(300000)',
+      )
+      writeFileSync(testPath, content)
+    }
+  }
+
   // increase playwright config default timeout and disable maxFailures for PGlite
   for (const cfgPath of [
     resolve(TEST_DIR, 'playwright.config.ts'),
@@ -379,6 +505,8 @@ setup('setup', async ({ page }) => {
       cfg = cfg.replace(/timeout:\s*20\s*\*\s*1000,/, 'timeout: 120 * 1000,')
       // disable maxFailures so one slow test doesn't interrupt others
       cfg = cfg.replace(/maxFailures:\s*\d+/, 'maxFailures: 0')
+      // ensure retries are disabled (tests must genuinely pass)
+      cfg = cfg.replace(/retries:\s*\d+/, 'retries: 0')
       writeFileSync(cfgPath, cfg)
     }
   }
@@ -389,7 +517,7 @@ setup('setup', async ({ page }) => {
     let e2e = readFileSync(tkoE2ePath, 'utf-8')
     e2e = e2e.replace(
       /timeout:\s*time\.ms\.minutes\(8\)/,
-      'timeout: time.ms.minutes(15)'
+      'timeout: time.ms.minutes(20)'
     )
     writeFileSync(tkoE2ePath, e2e)
   }
@@ -431,7 +559,7 @@ setup('setup', async ({ page }) => {
     execSync(testCmd.join(' '), {
       cwd: TEST_DIR,
       stdio: 'inherit',
-      timeout: 600_000,
+      timeout: 1_200_000,
       env: {
         ...process.env,
         PATH: localPath,
