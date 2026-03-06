@@ -7,6 +7,11 @@
  */
 
 import { log } from '../log.js'
+import { appendFileSync } from 'node:fs'
+const DIAG = '/tmp/orez-repl-diag.log'
+function diag(msg: string) {
+  try { appendFileSync(DIAG, `${new Date().toISOString()} ${msg}\n`) } catch {}
+}
 
 const textEncoder = new TextEncoder()
 import {
@@ -274,7 +279,7 @@ export async function handleStartReplication(
   db: PGlite,
   mutex: Mutex
 ): Promise<void> {
-  log.debug.proxy('replication: entering streaming mode')
+  log.repl('entering streaming mode')
 
   // send CopyBothResponse to enter streaming mode
   const copyBoth = new Uint8Array(1 + 4 + 1 + 2)
@@ -481,11 +486,13 @@ export async function handleStartReplication(
   let txCounter = 1
 
   // event-driven replication with promise-based wakeup
-  // uses pg_notify to wake up immediately, polling only as fallback
-  const pollIntervalIdle = 50
+  // uses pg_notify to wake up immediately, polling only as fallback.
+  // idle interval must be generous to avoid starving zero-cache's
+  // initial sync which hammers PGlite through the proxy.
+  const pollIntervalIdle = 500
   const batchSize = 50000
   const purgeEveryN = 5
-  const shardRescanEveryN = 20
+  const shardRescanEveryN = 40
   let running = true
   let pollsSincePurge = 0
   let tryAcquireFailures = 0
@@ -545,16 +552,19 @@ export async function handleStartReplication(
         }
 
         // try to acquire mutex without blocking proxy connections.
-        // use tryAcquire first to yield to proxy queries, but after
-        // consecutive failures fall back to blocking acquire so
-        // replication doesn't stall (which blocks .server promises).
+        // use tryAcquire to yield to proxy queries. during initial sync
+        // zero-cache hammers PGlite, so we back off exponentially to
+        // avoid starving it. only fall back to blocking after many
+        // consecutive failures (gives zero-cache time to finish sync).
         if (!mutex.tryAcquire()) {
           tryAcquireFailures++
-          if (tryAcquireFailures < 3) {
-            await waitForWakeup(pollIntervalIdle)
+          if (tryAcquireFailures < 20) {
+            // exponential backoff: 500, 1000, 1500... up to ~10s
+            const backoff = Math.min(pollIntervalIdle * tryAcquireFailures, 10_000)
+            await waitForWakeup(backoff)
             continue
           }
-          // too many failures - block to ensure progress
+          // many failures - block to ensure progress
           await mutex.acquire()
           tryAcquireFailures = 0
         } else {
@@ -568,14 +578,18 @@ export async function handleStartReplication(
         }
 
         if (changes.length > 0) {
-          log.debug.proxy(
-            `replication: got ${changes.length} changes, watermark ${lastWatermark}→${changes[changes.length - 1].watermark}`
+          // summarize which tables changed
+          const tableSummary = [...new Set(changes.map((c) => c.table_name))].join(',')
+          diag(`found ${changes.length} changes [${tableSummary}]`)
+          log.repl(
+            `found ${changes.length} changes [${tableSummary}] (wm ${lastWatermark}→${changes[changes.length - 1].watermark})`
           )
           // filter out shard tables that zero-cache doesn't expect.
           // only `clients` is needed (for .server promise resolution).
           // other shard tables (replicas, mutations) crash zero-cache
           // with "Unknown table" in change-processor.
           const batchEnd = changes[changes.length - 1].watermark
+          const preFilterCount = changes.length
           changes = changes.filter((c) => {
             const dot = c.table_name.indexOf('.')
             if (dot === -1) return true
@@ -584,6 +598,8 @@ export async function handleStartReplication(
             const table = c.table_name.substring(dot + 1)
             return table === 'clients'
           })
+          diag(`filter: ${preFilterCount} → ${changes.length} changes`)
+          log.repl(`filter: ${preFilterCount} → ${changes.length} changes`)
 
           if (changes.length === 0) {
             lastWatermark = batchEnd
@@ -625,11 +641,14 @@ export async function handleStartReplication(
         const ts = nowMicros()
         writer.write(encodeKeepalive(currentLsn, ts, false))
 
+        log.debug.repl(`idle (lastWatermark=${lastWatermark})`)
+
         // no changes: wait for notify signal or poll interval
         await waitForWakeup(pollIntervalIdle)
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        log.debug.proxy(`replication poll error: ${msg}`)
+        diag(`poll error: ${msg}`)
+        log.repl(`replication poll error: ${msg}`)
         if (msg.includes('closed') || msg.includes('destroyed')) {
           running = false
           break
@@ -639,7 +658,7 @@ export async function handleStartReplication(
     }
   }
 
-  log.debug.proxy(`replication: starting poll loop (watermark=${lastWatermark})`)
+  log.repl(`starting poll (lastWatermark=${lastWatermark})`)
   try {
     await poll()
   } finally {
@@ -647,7 +666,7 @@ export async function handleStartReplication(
       await unsubscribe().catch(() => {})
     }
   }
-  log.debug.proxy('replication: poll loop exited')
+  log.repl('poll loop exited')
 }
 
 // cache column info per table to avoid per-change allocation
@@ -701,8 +720,10 @@ async function streamChanges(
 
     // zero-cache expects specific camel-cased keys in shard clients rows
     if (schema !== 'public' && tableName === 'clients') {
+      log.repl(`clients row BEFORE: ${JSON.stringify(rowData)}`)
       rowData = normalizeShardClientsRow(rowData)
       oldData = normalizeShardClientsRow(oldData)
+      log.repl(`clients row AFTER: ${JSON.stringify(rowData)}`)
     }
 
     const row = rowData || oldData
@@ -763,6 +784,8 @@ async function streamChanges(
     batch.set(msg, offset)
     offset += msg.length
   }
+  diag(`streaming ${messages.length} wal messages (${totalSize} bytes, txId=${txId})`)
+  log.repl(`streaming ${messages.length} wal messages (${totalSize} bytes, txId=${txId})`)
   writer.write(batch)
 }
 

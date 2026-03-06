@@ -179,6 +179,8 @@ export function startHttpProxy(opts: {
     })
 
     proxyReq.on('error', () => socket.destroy())
+    // disable default socket timeout - websocket connections are long-lived
+    proxyReq.setTimeout(0)
     proxyReq.write(head)
     proxyReq.end()
   })

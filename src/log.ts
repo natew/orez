@@ -54,6 +54,7 @@ const LABEL_TO_SOURCE: Record<string, string> = {
   'pg-proxy': 'proxy',
   'orez:zero': 'zero',
   'orez:s3': 's3',
+  'orez:repl': 'proxy',
 }
 
 function makeLogger(label: string, color: string, level: LogLevel = 'info') {
@@ -80,6 +81,7 @@ export const log = {
   proxy: makeLogger('pg-proxy', COLORS.yellow, 'warn'),
   zero: makeLogger('orez:zero', COLORS.magenta, 'warn'),
   s3: makeLogger('orez:s3', COLORS.blue, 'warn'),
+  repl: makeLogger('orez:repl', COLORS.yellow, 'warn'),
   debug: {
     orez: makeLogger('orez', COLORS.cyan, 'debug'),
     pg: makeLogger('orez:pg', COLORS.green, 'debug'),
@@ -87,5 +89,6 @@ export const log = {
     proxy: makeLogger('pg-proxy', COLORS.yellow, 'debug'),
     zero: makeLogger('orez:zero', COLORS.magenta, 'debug'),
     s3: makeLogger('orez:s3', COLORS.blue, 'debug'),
+    repl: makeLogger('orez:repl', COLORS.yellow, 'debug'),
   },
 }

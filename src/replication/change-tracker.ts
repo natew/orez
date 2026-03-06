@@ -143,7 +143,12 @@ async function installTriggersOnAllTables(db: PGlite): Promise<void> {
  * zero-cache creates shard schemas (e.g. chat_0) with clients/mutations
  * tables that track mutation confirmations. these must be replicated
  * for .server promises to resolve.
+ *
+ * caches already-processed schemas to avoid redundant queries on
+ * subsequent calls (the poll loop calls this periodically).
  */
+const processedShardSchemas = new Set<string>()
+
 export async function installTriggersOnShardTables(db: PGlite): Promise<void> {
   const result = await db.query<{ nspname: string }>(
     `SELECT nspname FROM pg_namespace
@@ -156,12 +161,16 @@ export async function installTriggersOnShardTables(db: PGlite): Promise<void> {
 
   if (result.rows.length === 0) return
 
+  // filter to only new schemas we haven't processed yet
+  const newSchemas = result.rows.filter((r) => !processedShardSchemas.has(r.nspname))
+  if (newSchemas.length === 0) return
+
   // only track `clients` — that's the table zero-cache expects in the
   // replication stream (needed for .server promise resolution). other shard
   // tables like `replicas` are zero-cache internal state and streaming them
   // back causes "Unknown table" crashes in zero-cache's change-processor.
   let count = 0
-  for (const { nspname } of result.rows) {
+  for (const { nspname } of newSchemas) {
     // remove stale triggers from non-clients tables (from previous versions)
     const stale = await db.query<{ event_object_table: string }>(
       `SELECT DISTINCT event_object_table FROM information_schema.triggers
@@ -195,6 +204,8 @@ export async function installTriggersOnShardTables(db: PGlite): Promise<void> {
       `)
       count++
     }
+
+    processedShardSchemas.add(nspname)
   }
 
   if (count > 0) {

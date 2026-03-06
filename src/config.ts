@@ -37,7 +37,7 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     skipZeroCache: overrides.skipZeroCache || false,
     disableWasmSqlite: overrides.disableWasmSqlite ?? false,
     forceWasmSqlite: overrides.forceWasmSqlite ?? false,
-    logLevel: overrides.logLevel || 'warn',
+    logLevel: overrides.logLevel || (process.env.OREZ_LOG_LEVEL as LogLevel) || 'warn',
     pgliteOptions: overrides.pgliteOptions || {},
     onDbReady: overrides.onDbReady,
     onHealthy: overrides.onHealthy,

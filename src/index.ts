@@ -923,7 +923,7 @@ async function waitForZeroCache(
   const start = Date.now()
   const url = `http://127.0.0.1:${config.zeroPort}/`
 
-  while (Date.now() - start < timeoutMs) {
+  const checkProcessAlive = () => {
     if (zeroProcess && zeroProcess.exitCode !== null) {
       const tail = (zeroProcess as ZeroChildProcess).__orezTail
       const details = tail?.length ? `\n${tail.slice(-20).join('\n')}` : ''
@@ -931,18 +931,27 @@ async function waitForZeroCache(
         `zero-cache exited with code ${zeroProcess.exitCode}${details}${nativeStartupDiagnostics(details, sqliteMode)}`
       )
     }
+  }
 
+  // phase 1: wait for HTTP health check
+  while (Date.now() - start < timeoutMs) {
+    checkProcessAlive()
     try {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), 1000)
       const res = await fetch(url, { signal: controller.signal })
       clearTimeout(timer)
       // zero may return 404 on "/" while still being healthy.
-      if (res.ok || res.status === 404) return
+      if (res.ok || res.status === 404) break
     } catch {
       // not ready yet
     }
     await new Promise((r) => setTimeout(r, 500))
+  }
+
+  if (Date.now() - start < timeoutMs) {
+    log.debug.orez('zero-cache HTTP health check passed')
+    return
   }
 
   const tail = (zeroProcess as ZeroChildProcess | null | undefined)?.__orezTail
