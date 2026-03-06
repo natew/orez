@@ -28,6 +28,52 @@ import type { PGlite } from '@electric-sql/pglite'
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 
+// schema query cache: identical information_schema/catalog queries from multiple
+// zero-cache clients are deduplicated. first query executes, all others get cached result.
+interface CachedQueryResult {
+  result: Uint8Array
+  expiresAt: number
+}
+const schemaQueryCache = new Map<string, CachedQueryResult>()
+const schemaQueryInFlight = new Map<string, Promise<Uint8Array>>()
+const SCHEMA_CACHE_TTL_MS = 30_000
+
+function isCacheableQuery(query: string): boolean {
+  const q = query.trimStart().toLowerCase()
+  return (
+    (q.includes('information_schema.') ||
+      q.includes('pg_catalog.') ||
+      q.includes('pg_tables') ||
+      q.includes('pg_namespace') ||
+      q.includes('pg_class') ||
+      q.includes('pg_attribute') ||
+      q.includes('pg_type') ||
+      q.includes('pg_publication')) &&
+    !q.startsWith('insert') &&
+    !q.startsWith('update') &&
+    !q.startsWith('delete') &&
+    !q.startsWith('create') &&
+    !q.startsWith('alter') &&
+    !q.startsWith('drop')
+  )
+}
+
+function extractQueryText(data: Uint8Array): string | null {
+  if (data[0] === 0x51) {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+    const len = view.getInt32(1)
+    return textDecoder.decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
+  }
+  if (data[0] === 0x50) {
+    return extractParseQuery(data)
+  }
+  return null
+}
+
+function invalidateSchemaCache() {
+  schemaQueryCache.clear()
+}
+
 // abort previous replication handler when a new one starts
 let abortPreviousReplication: (() => void) | null = null
 
@@ -301,13 +347,16 @@ function extractNoticeCode(
 }
 
 /**
- * strip ReadyForQuery messages from a response buffer.
+ * single-pass response message filter. strips ReadyForQuery messages (when
+ * stripRfq=true) and benign transaction state warnings in one scan.
  */
-function stripReadyForQuery(data: Uint8Array): Uint8Array {
+function stripResponseMessages(data: Uint8Array, stripRfq: boolean): Uint8Array {
   if (data.length === 0) return data
 
   const parts: Uint8Array[] = []
   let offset = 0
+  let stripped = false
+
   while (offset < data.length) {
     const msgType = data[offset]
     if (offset + 5 > data.length) break
@@ -316,49 +365,18 @@ function stripReadyForQuery(data: Uint8Array): Uint8Array {
 
     if (totalLen <= 0 || offset + totalLen > data.length) break
 
-    if (msgType !== 0x5a) {
-      parts.push(data.subarray(offset, offset + totalLen))
-    }
-
-    offset += totalLen
-  }
-
-  if (parts.length === 0) return new Uint8Array(0)
-  if (parts.length === 1) return parts[0]
-
-  const total = parts.reduce((sum, p) => sum + p.length, 0)
-  const result = new Uint8Array(total)
-  let pos = 0
-  for (const p of parts) {
-    result.set(p, pos)
-    pos += p.length
-  }
-  return result
-}
-
-/**
- * strip NoticeResponse messages with specific SQLSTATE codes from a response buffer.
- * pglite emits benign transaction state warnings that we suppress to reduce noise.
- */
-function stripTransactionWarnings(data: Uint8Array): Uint8Array {
-  if (data.length === 0) return data
-
-  const parts: Uint8Array[] = []
-  let offset = 0
-  let stripped = false
-
-  while (offset < data.length) {
-    if (offset + 5 > data.length) break
-    const msgLen = readInt32BE(data, offset + 1)
-    const totalLen = 1 + msgLen
-
-    if (totalLen <= 0 || offset + totalLen > data.length) break
-
-    const code = extractNoticeCode(data, offset, totalLen)
-    if (code && SUPPRESS_NOTICE_CODES.has(code)) {
+    // strip ReadyForQuery (0x5a) when requested
+    if (stripRfq && msgType === 0x5a) {
       stripped = true
-    } else {
-      parts.push(data.subarray(offset, offset + totalLen))
+    }
+    // strip benign transaction state notices
+    else {
+      const code = extractNoticeCode(data, offset, totalLen)
+      if (code && SUPPRESS_NOTICE_CODES.has(code)) {
+        stripped = true
+      } else {
+        parts.push(data.subarray(offset, offset + totalLen))
+      }
     }
 
     offset += totalLen
@@ -507,29 +525,63 @@ export async function startPgProxy(
           // intercept and rewrite queries
           data = interceptQuery(data)
 
-          // message-level locking on the connection's pglite instance
           const { db, mutex } = getDbContext(dbName)
-          await mutex.acquire()
+
+          // cache Simple Query (0x51) schema queries
+          const isSimpleQuery = data[0] === 0x51
+          const queryText = isSimpleQuery ? extractQueryText(data) : null
+          const cacheable = queryText && isCacheableQuery(queryText)
+          if (cacheable) {
+            const cached = schemaQueryCache.get(queryText!)
+            if (cached && Date.now() < cached.expiresAt) {
+              return stripResponseMessages(cached.result, false)
+            }
+            const inflight = schemaQueryInFlight.get(queryText!)
+            if (inflight) {
+              return stripResponseMessages(await inflight, false)
+            }
+          }
+
+          const execute = async (): Promise<Uint8Array> => {
+            await mutex.acquire()
+            let result: Uint8Array
+            try {
+              result = await db.execProtocolRaw(data, {
+                throwOnError: false,
+              })
+            } catch (err) {
+              mutex.release()
+              throw err
+            }
+            mutex.release()
+            return result
+          }
 
           let result: Uint8Array
-          try {
-            result = await db.execProtocolRaw(data, {
-              throwOnError: false,
-            })
-          } catch (err) {
-            mutex.release()
-            throw err
+          if (cacheable) {
+            const promise = execute()
+            schemaQueryInFlight.set(queryText!, promise)
+            try {
+              result = await promise
+              schemaQueryCache.set(queryText!, {
+                result,
+                expiresAt: Date.now() + SCHEMA_CACHE_TTL_MS,
+              })
+            } finally {
+              schemaQueryInFlight.delete(queryText!)
+            }
+          } else {
+            result = await execute()
+            if (isSimpleQuery && queryText) {
+              const q = queryText.trimStart().toLowerCase()
+              if (q.startsWith('create') || q.startsWith('alter') || q.startsWith('drop')) {
+                invalidateSchemaCache()
+              }
+            }
           }
 
-          // strip benign transaction state warnings from pglite
-          result = stripTransactionWarnings(result)
-
-          // strip ReadyForQuery from non-Sync/non-SimpleQuery responses
-          if (data[0] !== 0x53 && data[0] !== 0x51) {
-            result = stripReadyForQuery(result)
-          }
-
-          mutex.release()
+          const stripRfq = data[0] !== 0x53 && data[0] !== 0x51
+          result = stripResponseMessages(result, stripRfq)
           return result
         },
       })
@@ -622,7 +674,7 @@ async function handleReplicationMessage(
     const result = await db.execProtocolRaw(data, {
       throwOnError: false,
     })
-    return stripTransactionWarnings(result)
+    return stripResponseMessages(result, false)
   } finally {
     mutex.release()
   }
