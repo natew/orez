@@ -51,6 +51,10 @@ export async function installChangeTracking(db: PGlite): Promise<void> {
         VALUES (TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME, 'DELETE', to_jsonb(OLD));
         RETURN OLD;
       ELSIF TG_OP = 'UPDATE' THEN
+        -- skip no-op updates where no columns actually changed
+        IF to_jsonb(NEW) = to_jsonb(OLD) THEN
+          RETURN NEW;
+        END IF;
         INSERT INTO _orez._zero_changes (table_name, op, row_data, old_data)
         VALUES (TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME, 'UPDATE', to_jsonb(NEW), to_jsonb(OLD));
         RETURN NEW;
