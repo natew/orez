@@ -49,7 +49,9 @@ let scratchView = new DataView(scratch.buffer)
 function ensureScratch(size: number): void {
   if (scratch.length < size) {
     const newSize = Math.max(size, scratch.length * 2)
-    scratch = new Uint8Array(newSize)
+    const newScratch = new Uint8Array(newSize)
+    newScratch.set(scratch)
+    scratch = newScratch
     scratchView = new DataView(scratch.buffer)
   }
 }
