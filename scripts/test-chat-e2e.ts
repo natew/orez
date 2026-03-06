@@ -18,7 +18,15 @@
  */
 
 import { execSync } from 'node:child_process'
-import { existsSync, cpSync, rmSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs'
+import {
+  existsSync,
+  cpSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  symlinkSync,
+} from 'node:fs'
 import { resolve } from 'node:path'
 
 const OREZ_ROOT = resolve(import.meta.dirname, '..')
@@ -98,7 +106,13 @@ function main() {
     log('RETRY mode: reusing test-chat/')
     // sync critical source dirs so schema changes are picked up
     log('syncing src/ from ~/chat')
-    for (const dir of ['src/database', 'src/data', 'src/server', 'src/apps', 'src/constants']) {
+    for (const dir of [
+      'src/database',
+      'src/data',
+      'src/server',
+      'src/apps',
+      'src/constants',
+    ]) {
       const src = resolve(CHAT_SOURCE, dir)
       const dst = resolve(TEST_DIR, dir)
       if (existsSync(src)) {
@@ -176,7 +190,9 @@ function main() {
   } else {
     mkdirSync(sqliteDst, { recursive: true })
   }
-  cpSync(resolve(SQLITE_WASM_DIR, 'dist'), resolve(sqliteDst, 'dist'), { recursive: true })
+  cpSync(resolve(SQLITE_WASM_DIR, 'dist'), resolve(sqliteDst, 'dist'), {
+    recursive: true,
+  })
   cpSync(resolve(SQLITE_WASM_DIR, 'package.json'), resolve(sqliteDst, 'package.json'))
   if (existsSync(resolve(SQLITE_WASM_DIR, 'bedrock-sqlite.d.ts'))) {
     cpSync(
@@ -194,7 +210,9 @@ function main() {
   // patch lite:backend to use local orez binary (bun run orez resolves to global)
   // always start from source scripts to avoid double-patching
   const testPkgPath = resolve(TEST_DIR, 'package.json')
-  const sourcePkg = JSON.parse(readFileSync(resolve(CHAT_SOURCE, 'package.json'), 'utf-8'))
+  const sourcePkg = JSON.parse(
+    readFileSync(resolve(CHAT_SOURCE, 'package.json'), 'utf-8')
+  )
   const testPkg = JSON.parse(readFileSync(testPkgPath, 'utf-8'))
   testPkg.scripts = { ...sourcePkg.scripts }
   const localOrezBin = resolve(orezDst, 'dist', 'cli-entry.js')
@@ -313,7 +331,13 @@ setup('setup', async ({ page }) => {
   log(`orez version: ${localOrezVersion} (local build)`)
 
   // kill any stale processes on our offset ports from previous runs
-  const testPorts = [8081 + offset, 5048 + offset, 5632 + offset, 9290 + offset, 3533 + offset]
+  const testPorts = [
+    8081 + offset,
+    5048 + offset,
+    5632 + offset,
+    9290 + offset,
+    3533 + offset,
+  ]
   for (const p of testPorts) {
     try {
       execSync(`lsof -ti:${p} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' })

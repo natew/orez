@@ -6,11 +6,14 @@
  * it's talking to a real postgres with logical replication.
  */
 
-import { log } from '../log.js'
 import { appendFileSync } from 'node:fs'
+
+import { log } from '../log.js'
 const DIAG = '/tmp/orez-repl-diag.log'
 function diag(msg: string) {
-  try { appendFileSync(DIAG, `${new Date().toISOString()} ${msg}\n`) } catch {}
+  try {
+    appendFileSync(DIAG, `${new Date().toISOString()} ${msg}\n`)
+  } catch {}
 }
 
 const textEncoder = new TextEncoder()
