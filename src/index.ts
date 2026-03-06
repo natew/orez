@@ -297,7 +297,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
   // when admin is enabled, zero-cache runs on internal port with http proxy in front
   let zeroInternalPort = config.zeroPort
-  let httpProxyServer: import('node:http').Server | null = null
+  let httpProxyServer: import('node:net').Server | null = null
   if (httpLog && !config.skipZeroCache) {
     zeroInternalPort = await findPort(config.zeroPort + 1000)
     log.debug.orez(`http proxy: public ${config.zeroPort} → internal ${zeroInternalPort}`)

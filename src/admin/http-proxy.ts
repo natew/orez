@@ -1,12 +1,4 @@
-import {
-  createServer,
-  request as httpRequest,
-  type Server,
-  type IncomingMessage,
-  type ServerResponse,
-} from 'node:http'
-
-import type { Socket } from 'node:net'
+import { createServer, connect, type Socket, type Server } from 'node:net'
 
 export interface HttpLogEntry {
   id: number
@@ -72,14 +64,22 @@ export function createHttpLogStore(): HttpLogStore {
   return { push, query, clear }
 }
 
-function flatHeaders(headers: Record<string, any>): Record<string, string> {
+function parseHeaders(raw: string): Record<string, string> {
   const out: Record<string, string> = {}
-  for (const [k, v] of Object.entries(headers)) {
-    out[k] = Array.isArray(v) ? v.join(', ') : String(v ?? '')
+  const lines = raw.split('\r\n')
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i] === '') break
+    const idx = lines[i].indexOf(': ')
+    if (idx > 0) {
+      out[lines[i].slice(0, idx).toLowerCase()] = lines[i].slice(idx + 2)
+    }
   }
   return out
 }
 
+// raw tcp proxy that avoids bun's broken node:http upgrade handling.
+// bun silently drops socket.write() data in http server upgrade events,
+// so we do everything at the net level instead.
 export function startHttpProxy(opts: {
   listenPort: number
   targetPort: number
@@ -87,106 +87,61 @@ export function startHttpProxy(opts: {
 }): Promise<Server> {
   const { listenPort, targetPort, httpLog } = opts
 
-  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+  const server = createServer((client: Socket) => {
     const start = Date.now()
-    let reqSize = 0
-    const reqChunks: Buffer[] = []
+    const target = connect(targetPort, '127.0.0.1')
+    let logged = false
+    let reqMethod = ''
+    let reqPath = ''
+    let reqHeaders: Record<string, string> = {}
 
-    req.on('data', (chunk: Buffer) => {
-      reqSize += chunk.length
-      reqChunks.push(chunk)
+    // intercept first client chunk to extract request info
+    client.once('data', (chunk: Buffer) => {
+      const str = chunk.toString('utf8')
+      const firstLine = str.split('\r\n')[0] || ''
+      const parts = firstLine.split(' ')
+      reqMethod = parts[0] || 'GET'
+      reqPath = parts[1] || '/'
+      reqHeaders = parseHeaders(str)
+
+      target.write(chunk)
+      client.pipe(target)
     })
 
-    req.on('end', () => {
-      const proxyReq = httpRequest(
-        {
-          hostname: '127.0.0.1',
-          port: targetPort,
-          path: req.url,
-          method: req.method,
-          headers: req.headers,
-        },
-        (proxyRes) => {
-          let resSize = 0
-          proxyRes.on('data', (chunk: Buffer) => {
-            resSize += chunk.length
-          })
-          proxyRes.on('end', () => {
-            httpLog.push({
-              ts: start,
-              method: req.method || 'GET',
-              path: req.url || '/',
-              status: proxyRes.statusCode || 0,
-              duration: Date.now() - start,
-              reqSize,
-              resSize,
-              reqHeaders: flatHeaders(req.headers),
-              resHeaders: flatHeaders(proxyRes.headers),
-            })
-          })
-          res.writeHead(proxyRes.statusCode || 200, proxyRes.headers)
-          proxyRes.pipe(res)
-        }
-      )
+    // intercept first target chunk to extract response info and log
+    target.once('data', (chunk: Buffer) => {
+      const str = chunk.toString('utf8')
+      const firstLine = str.split('\r\n')[0] || ''
+      const status = parseInt(firstLine.split(' ')[1]) || 0
+      const resHeaders = parseHeaders(str)
 
-      proxyReq.on('error', (err) => {
-        res.writeHead(502)
-        res.end('proxy error: ' + err.message)
-      })
-
-      for (const chunk of reqChunks) proxyReq.write(chunk)
-      proxyReq.end()
-    })
-  })
-
-  // websocket upgrade passthrough
-  server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) => {
-    const start = Date.now()
-    const proxyReq = httpRequest({
-      hostname: '127.0.0.1',
-      port: targetPort,
-      path: req.url,
-      method: req.method,
-      headers: req.headers,
-    })
-
-    proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
-      httpLog.push({
-        ts: start,
-        method: 'WS',
-        path: req.url || '/',
-        status: 101,
-        duration: Date.now() - start,
-        reqSize: 0,
-        resSize: 0,
-        reqHeaders: flatHeaders(req.headers),
-        resHeaders: flatHeaders(proxyRes.headers),
-      })
-
-      // forward the 101 response
-      let rawHeaders = 'HTTP/1.1 101 Switching Protocols\r\n'
-      for (const [k, v] of Object.entries(proxyRes.headers)) {
-        rawHeaders += `${k}: ${Array.isArray(v) ? v.join(', ') : v}\r\n`
+      if (!logged) {
+        logged = true
+        httpLog.push({
+          ts: start,
+          method: status === 101 ? 'WS' : reqMethod,
+          path: reqPath,
+          status,
+          duration: Date.now() - start,
+          reqSize: 0,
+          resSize: chunk.length,
+          reqHeaders,
+          resHeaders,
+        })
       }
-      rawHeaders += '\r\n'
-      socket.write(rawHeaders)
-      if (proxyHead.length) socket.write(proxyHead)
 
-      proxySocket.pipe(socket)
-      socket.pipe(proxySocket)
-      proxySocket.on('error', () => socket.destroy())
-      socket.on('error', () => proxySocket.destroy())
+      client.write(chunk)
+      target.pipe(client)
     })
 
-    proxyReq.on('error', () => socket.destroy())
-    // disable default socket timeout - websocket connections are long-lived
-    proxyReq.setTimeout(0)
-    proxyReq.write(head)
-    proxyReq.end()
+    target.on('error', () => client.destroy())
+    client.on('error', () => target.destroy())
+    target.on('close', () => client.destroy())
+    client.on('close', () => target.destroy())
   })
 
   return new Promise((resolve, reject) => {
-    server.listen(listenPort, '127.0.0.1', () => resolve(server))
+    server.listen(listenPort, '127.0.0.1', () => resolve(server as any))
     server.on('error', reject)
   })
 }
