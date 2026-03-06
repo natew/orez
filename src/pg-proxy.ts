@@ -546,9 +546,12 @@ export async function startPgProxy(
             await mutex.acquire()
             let result: Uint8Array
             try {
-              result = await db.execProtocolRaw(data, {
-                throwOnError: false,
-              })
+              // only sync to filesystem on Sync (0x53) and SimpleQuery (0x51)
+              // which complete a transaction. skip for intermediate extended
+              // protocol messages (Parse/Bind/Describe/Execute/Close) to reduce
+              // FS overhead from 6x to 1x per query.
+              const syncToFs = data[0] === 0x53 || data[0] === 0x51
+              result = await db.execProtocolRaw(data, { syncToFs })
             } catch (err) {
               mutex.release()
               throw err
