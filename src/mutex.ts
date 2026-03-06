@@ -1,7 +1,9 @@
 // simple mutex for serializing pglite access
+// uses head-index instead of Array.shift() for O(1) release
 export class Mutex {
   private locked = false
   private queue: Array<() => void> = []
+  private head = 0
 
   async acquire(): Promise<void> {
     if (!this.locked) {
@@ -23,10 +25,17 @@ export class Mutex {
   }
 
   release(): void {
-    const next = this.queue.shift()
-    if (next) {
+    if (this.head < this.queue.length) {
+      const next = this.queue[this.head++]!
+      // compact periodically to prevent unbounded array growth
+      if (this.head > 64) {
+        this.queue = this.queue.slice(this.head)
+        this.head = 0
+      }
       next()
     } else {
+      this.queue = []
+      this.head = 0
       this.locked = false
     }
   }
