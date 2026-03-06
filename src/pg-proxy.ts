@@ -412,6 +412,10 @@ export async function startPgProxy(
 
     // clean up pglite transaction state when a client disconnects
     socket.on('close', async () => {
+      // replication sockets don't own a transaction — skip ROLLBACK
+      // to avoid accidentally rolling back another connection's work
+      // (PGlite is single-session, all connections share transaction state)
+      if (isReplicationConnection) return
       try {
         const { db, mutex } = getDbContext(dbName)
         await mutex.acquire()
@@ -583,7 +587,14 @@ async function handleReplicationMessage(
 
     const abort = () => {
       aborted = true
-      socket.destroy()
+      // use end() instead of destroy() to flush any pending writes.
+      // the first handler may have just written 1MB+ of WAL data that
+      // hasn't been fully flushed to the network. destroy() would discard
+      // buffered data, causing zero-cache to receive truncated/corrupt
+      // WAL messages which breaks its internal state.
+      if (!socket.destroyed) {
+        socket.end()
+      }
     }
     abortPreviousReplication = abort
 
@@ -593,7 +604,7 @@ async function handleReplicationMessage(
     socket.on('close', abort)
 
     handleStartReplication(query, writer, db, mutex).catch((err) => {
-      log.debug.proxy(`replication stream ended: ${err}`)
+      log.proxy(`replication stream ended: ${err}`)
     })
     return undefined
   }

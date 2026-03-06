@@ -6,15 +6,7 @@
  * it's talking to a real postgres with logical replication.
  */
 
-import { appendFileSync } from 'node:fs'
-
 import { log } from '../log.js'
-const DIAG = '/tmp/orez-repl-diag.log'
-function diag(msg: string) {
-  try {
-    appendFileSync(DIAG, `${new Date().toISOString()} ${msg}\n`)
-  } catch {}
-}
 
 const textEncoder = new TextEncoder()
 import {
@@ -50,10 +42,21 @@ let currentLsn = 0x1000000n
 // don't replay already-streamed changes
 let lastStreamedWatermark = 0
 
+// cached setup results so reconnects skip the expensive mutex-holding setup phase.
+// zero-cache reconnects the replication stream after initial sync, and if setup
+// takes too long (holding the mutex, blocking proxy queries), zero-cache's
+// queries timeout and it kills the connection.
+let cachedTableKeyColumns: Map<string, Set<string>> | null = null
+let cachedExcludedColumns: Map<string, Set<string>> | null = null
+let cachedColumnTypeOids: Map<string, Map<string, number>> | null = null
+
 /** reset module state (for tests) */
 export function resetReplicationState(): void {
   currentLsn = 0x1000000n
   lastStreamedWatermark = 0
+  cachedTableKeyColumns = null
+  cachedExcludedColumns = null
+  cachedColumnTypeOids = null
 }
 function nextLsn(): bigint {
   currentLsn += 0x100n
@@ -296,192 +299,210 @@ export async function handleStartReplication(
   // replaying already-streamed changes after reconnect
   let lastWatermark = lastStreamedWatermark
 
-  // declared outside mutex block so they're accessible in the poll loop
-  const tableKeyColumns = new Map<string, Set<string>>()
-  const excludedColumns = new Map<string, Set<string>>()
-  const columnTypeOids = new Map<string, Map<string, number>>()
+  // use cached setup results on reconnect to avoid holding the mutex
+  // for seconds doing trigger installation + schema queries. zero-cache
+  // disconnects if its proxy queries are blocked too long by the mutex.
+  let tableKeyColumns: Map<string, Set<string>>
+  let excludedColumns: Map<string, Set<string>>
+  let columnTypeOids: Map<string, Map<string, number>>
 
-  // acquire mutex for all setup queries to avoid conflicting with proxy connections.
-  // the change-streamer's initial copy also queries PGlite via the proxy, and
-  // direct db.query()/db.exec() calls here bypass the proxy's mutex, causing
-  // "already in transaction" errors when they interleave.
-  await mutex.acquire()
-  try {
-    // install change tracking triggers on shard schema tables (e.g. chat_0.clients)
-    // these track zero-cache's lastMutationID for .server promise resolution
-    await installTriggersOnShardTables(db)
+  if (cachedTableKeyColumns && cachedExcludedColumns && cachedColumnTypeOids) {
+    log.repl('reconnect: using cached setup (skipping mutex)')
+    tableKeyColumns = cachedTableKeyColumns
+    excludedColumns = cachedExcludedColumns
+    columnTypeOids = cachedColumnTypeOids
+  } else {
+    tableKeyColumns = new Map()
+    excludedColumns = new Map()
+    columnTypeOids = new Map()
 
-    // set up LISTEN for real-time change notifications
-    await db.exec(`
-    CREATE OR REPLACE FUNCTION public._zero_notify_change() RETURNS TRIGGER AS $$
-    BEGIN
-      PERFORM pg_notify('_zero_changes', TG_TABLE_NAME);
-      RETURN NULL;
-    END;
-    $$ LANGUAGE plpgsql;
-  `)
+    // acquire mutex for all setup queries to avoid conflicting with proxy connections.
+    // the change-streamer's initial copy also queries PGlite via the proxy, and
+    // direct db.query()/db.exec() calls here bypass the proxy's mutex, causing
+    // "already in transaction" errors when they interleave.
+    await mutex.acquire()
+    try {
+      // install change tracking triggers on shard schema tables (e.g. chat_0.clients)
+      // these track zero-cache's lastMutationID for .server promise resolution
+      await installTriggersOnShardTables(db)
 
-    // install notify triggers from configured publication when available.
-    // when publication is configured but empty, install none to preserve scope.
-    const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
-    let tables: { tablename: string }[]
-    if (pubName) {
-      const result = await db.query<{ tablename: string }>(
-        `SELECT tablename FROM pg_publication_tables
-         WHERE pubname = $1 AND schemaname = 'public' AND tablename NOT LIKE '_zero_%'`,
-        [pubName]
-      )
-      tables = result.rows
-      if (tables.length === 0) {
-        log.proxy(
-          `publication "${pubName}" is empty; installing no public notify triggers`
-        )
-      }
-    } else {
-      const all = await db.query<{ tablename: string }>(
-        `SELECT tablename FROM pg_tables
-         WHERE schemaname = 'public'
-           AND tablename NOT IN ('migrations', '_zero_changes')
-           AND tablename NOT LIKE '_zero_%'`
-      )
-      tables = all.rows
-    }
-
-    for (const { tablename } of tables) {
-      const quoted = '"' + tablename.replace(/"/g, '""') + '"'
+      // set up LISTEN for real-time change notifications
       await db.exec(`
-      DROP TRIGGER IF EXISTS _zero_notify_trigger ON public.${quoted};
-      CREATE TRIGGER _zero_notify_trigger
-        AFTER INSERT OR UPDATE OR DELETE ON public.${quoted}
-        FOR EACH STATEMENT EXECUTE FUNCTION public._zero_notify_change();
+      CREATE OR REPLACE FUNCTION public._zero_notify_change() RETURNS TRIGGER AS $$
+      BEGIN
+        PERFORM pg_notify('_zero_changes', TG_TABLE_NAME);
+        RETURN NULL;
+      END;
+      $$ LANGUAGE plpgsql;
     `)
-    }
-    if (tables.length > 0) {
-      log.proxy(`installed notify triggers on ${tables.length} public table(s)`)
-    }
 
-    // discover shard schemas (e.g. chat_0) and install NOTIFY triggers
-    const shardSchemas = await db.query<{ nspname: string }>(
-      `SELECT nspname FROM pg_namespace
-     WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'public')
-       AND nspname NOT LIKE 'pg_%'
-       AND nspname NOT LIKE 'zero_%'
-       AND nspname NOT LIKE '_zero_%'
-       AND nspname NOT LIKE '%/%'`
-    )
-    const relevantSchemas = ['public', ...shardSchemas.rows.map((r) => r.nspname)]
+      // install notify triggers from configured publication when available.
+      // when publication is configured but empty, install none to preserve scope.
+      const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
+      let tables: { tablename: string }[]
+      if (pubName) {
+        const result = await db.query<{ tablename: string }>(
+          `SELECT tablename FROM pg_publication_tables
+           WHERE pubname = $1 AND schemaname = 'public' AND tablename NOT LIKE '_zero_%'`,
+          [pubName]
+        )
+        tables = result.rows
+        if (tables.length === 0) {
+          log.proxy(
+            `publication "${pubName}" is empty; installing no public notify triggers`
+          )
+        }
+      } else {
+        const all = await db.query<{ tablename: string }>(
+          `SELECT tablename FROM pg_tables
+           WHERE schemaname = 'public'
+             AND tablename NOT IN ('migrations', '_zero_changes')
+             AND tablename NOT LIKE '_zero_%'`
+        )
+        tables = all.rows
+      }
 
-    for (const schema of relevantSchemas) {
-      if (schema === 'public') continue
-      const shardTables = await db.query<{ tablename: string }>(
-        `SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename = 'clients'`,
-        [schema]
-      )
-      for (const { tablename } of shardTables.rows) {
-        const quotedSchema = '"' + schema.replace(/"/g, '""') + '"'
-        const quotedTable = '"' + tablename.replace(/"/g, '""') + '"'
+      for (const { tablename } of tables) {
+        const quoted = '"' + tablename.replace(/"/g, '""') + '"'
         await db.exec(`
-        DROP TRIGGER IF EXISTS _zero_notify_trigger ON ${quotedSchema}.${quotedTable};
+        DROP TRIGGER IF EXISTS _zero_notify_trigger ON public.${quoted};
         CREATE TRIGGER _zero_notify_trigger
-          AFTER INSERT OR UPDATE OR DELETE ON ${quotedSchema}.${quotedTable}
+          AFTER INSERT OR UPDATE OR DELETE ON public.${quoted}
           FOR EACH STATEMENT EXECUTE FUNCTION public._zero_notify_change();
       `)
       }
-      if (shardTables.rows.length > 0) {
+      if (tables.length > 0) {
+        log.proxy(`installed notify triggers on ${tables.length} public table(s)`)
+      }
+
+      // discover shard schemas (e.g. chat_0) and install NOTIFY triggers
+      const shardSchemas = await db.query<{ nspname: string }>(
+        `SELECT nspname FROM pg_namespace
+       WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'public')
+         AND nspname NOT LIKE 'pg_%'
+         AND nspname NOT LIKE 'zero_%'
+         AND nspname NOT LIKE '_zero_%'
+         AND nspname NOT LIKE '%/%'`
+      )
+      const relevantSchemas = ['public', ...shardSchemas.rows.map((r) => r.nspname)]
+
+      for (const schema of relevantSchemas) {
+        if (schema === 'public') continue
+        const shardTables = await db.query<{ tablename: string }>(
+          `SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename = 'clients'`,
+          [schema]
+        )
+        for (const { tablename } of shardTables.rows) {
+          const quotedSchema = '"' + schema.replace(/"/g, '""') + '"'
+          const quotedTable = '"' + tablename.replace(/"/g, '""') + '"'
+          await db.exec(`
+          DROP TRIGGER IF EXISTS _zero_notify_trigger ON ${quotedSchema}.${quotedTable};
+          CREATE TRIGGER _zero_notify_trigger
+            AFTER INSERT OR UPDATE OR DELETE ON ${quotedSchema}.${quotedTable}
+            FOR EACH STATEMENT EXECUTE FUNCTION public._zero_notify_change();
+        `)
+        }
+        if (shardTables.rows.length > 0) {
+          log.debug.proxy(
+            `installed notify triggers on ${shardTables.rows.length} tables in schema "${schema}"`
+          )
+        }
+      }
+
+      // build primary key lookup for all relevant schemas
+      for (const schema of relevantSchemas) {
+        const pkResult = await db.query<{ table_name: string; column_name: string }>(
+          `SELECT tc.table_name, kcu.column_name
+         FROM information_schema.table_constraints tc
+         JOIN information_schema.key_column_usage kcu
+           ON tc.constraint_name = kcu.constraint_name
+           AND tc.table_schema = kcu.table_schema
+         WHERE tc.constraint_type = 'PRIMARY KEY'
+           AND tc.table_schema = $1`,
+          [schema]
+        )
+        for (const { table_name, column_name } of pkResult.rows) {
+          const key = `${schema}.${table_name}`
+          let keys = tableKeyColumns.get(key)
+          if (!keys) {
+            keys = new Set()
+            tableKeyColumns.set(key, keys)
+          }
+          keys.add(column_name)
+        }
+      }
+      log.debug.proxy(`loaded primary keys for ${tableKeyColumns.size} tables`)
+
+      // build excluded columns lookup (types zero-cache can't handle)
+      // also build column type OID map so RELATION messages carry correct postgres type OIDs.
+      // zero-cache uses these to select value parsers (e.g. timestamp → number via timestampToFpMillis).
+      const UNSUPPORTED_TYPES = new Set(['tsvector', 'tsquery', 'USER-DEFINED'])
+      const PG_DATA_TYPE_OIDS: Record<string, number> = {
+        boolean: 16,
+        bytea: 17,
+        bigint: 20,
+        smallint: 21,
+        integer: 23,
+        text: 25,
+        json: 114,
+        real: 700,
+        'double precision': 701,
+        character: 1042,
+        'character varying': 1043,
+        date: 1082,
+        'time without time zone': 1083,
+        'timestamp without time zone': 1114,
+        'timestamp with time zone': 1184,
+        'time with time zone': 1266,
+        numeric: 1700,
+        uuid: 2950,
+        jsonb: 3802,
+      }
+      for (const schema of relevantSchemas) {
+        const colResult = await db.query<{
+          table_name: string
+          column_name: string
+          data_type: string
+        }>(
+          `SELECT table_name, column_name, data_type
+         FROM information_schema.columns
+         WHERE table_schema = $1`,
+          [schema]
+        )
+        for (const { table_name, column_name, data_type } of colResult.rows) {
+          const key = `${schema}.${table_name}`
+          if (UNSUPPORTED_TYPES.has(data_type)) {
+            let cols = excludedColumns.get(key)
+            if (!cols) {
+              cols = new Set()
+              excludedColumns.set(key, cols)
+            }
+            cols.add(column_name)
+          }
+          const oid = PG_DATA_TYPE_OIDS[data_type]
+          if (oid !== undefined) {
+            let cols = columnTypeOids.get(key)
+            if (!cols) {
+              cols = new Map()
+              columnTypeOids.set(key, cols)
+            }
+            cols.set(column_name, oid)
+          }
+        }
+      }
+      if (excludedColumns.size > 0) {
         log.debug.proxy(
-          `installed notify triggers on ${shardTables.rows.length} tables in schema "${schema}"`
+          `excluding unsupported columns: ${[...excludedColumns.entries()].map(([t, c]) => `${t}(${[...c].join(',')})`).join(', ')}`
         )
       }
-    }
 
-    // build primary key lookup for all relevant schemas
-    for (const schema of relevantSchemas) {
-      const pkResult = await db.query<{ table_name: string; column_name: string }>(
-        `SELECT tc.table_name, kcu.column_name
-       FROM information_schema.table_constraints tc
-       JOIN information_schema.key_column_usage kcu
-         ON tc.constraint_name = kcu.constraint_name
-         AND tc.table_schema = kcu.table_schema
-       WHERE tc.constraint_type = 'PRIMARY KEY'
-         AND tc.table_schema = $1`,
-        [schema]
-      )
-      for (const { table_name, column_name } of pkResult.rows) {
-        const key = `${schema}.${table_name}`
-        let keys = tableKeyColumns.get(key)
-        if (!keys) {
-          keys = new Set()
-          tableKeyColumns.set(key, keys)
-        }
-        keys.add(column_name)
-      }
+      // cache for subsequent reconnects
+      cachedTableKeyColumns = tableKeyColumns
+      cachedExcludedColumns = excludedColumns
+      cachedColumnTypeOids = columnTypeOids
+    } finally {
+      mutex.release()
     }
-    log.debug.proxy(`loaded primary keys for ${tableKeyColumns.size} tables`)
-
-    // build excluded columns lookup (types zero-cache can't handle)
-    // also build column type OID map so RELATION messages carry correct postgres type OIDs.
-    // zero-cache uses these to select value parsers (e.g. timestamp → number via timestampToFpMillis).
-    const UNSUPPORTED_TYPES = new Set(['tsvector', 'tsquery', 'USER-DEFINED'])
-    const PG_DATA_TYPE_OIDS: Record<string, number> = {
-      boolean: 16,
-      bytea: 17,
-      bigint: 20,
-      smallint: 21,
-      integer: 23,
-      text: 25,
-      json: 114,
-      real: 700,
-      'double precision': 701,
-      character: 1042,
-      'character varying': 1043,
-      date: 1082,
-      'time without time zone': 1083,
-      'timestamp without time zone': 1114,
-      'timestamp with time zone': 1184,
-      'time with time zone': 1266,
-      numeric: 1700,
-      uuid: 2950,
-      jsonb: 3802,
-    }
-    for (const schema of relevantSchemas) {
-      const colResult = await db.query<{
-        table_name: string
-        column_name: string
-        data_type: string
-      }>(
-        `SELECT table_name, column_name, data_type
-       FROM information_schema.columns
-       WHERE table_schema = $1`,
-        [schema]
-      )
-      for (const { table_name, column_name, data_type } of colResult.rows) {
-        const key = `${schema}.${table_name}`
-        if (UNSUPPORTED_TYPES.has(data_type)) {
-          let cols = excludedColumns.get(key)
-          if (!cols) {
-            cols = new Set()
-            excludedColumns.set(key, cols)
-          }
-          cols.add(column_name)
-        }
-        const oid = PG_DATA_TYPE_OIDS[data_type]
-        if (oid !== undefined) {
-          let cols = columnTypeOids.get(key)
-          if (!cols) {
-            cols = new Map()
-            columnTypeOids.set(key, cols)
-          }
-          cols.set(column_name, oid)
-        }
-      }
-    }
-    if (excludedColumns.size > 0) {
-      log.debug.proxy(
-        `excluding unsupported columns: ${[...excludedColumns.entries()].map(([t, c]) => `${t}(${[...c].join(',')})`).join(', ')}`
-      )
-    }
-  } finally {
-    mutex.release()
   }
 
   // track which tables we've sent RELATION messages for
@@ -583,7 +604,6 @@ export async function handleStartReplication(
         if (changes.length > 0) {
           // summarize which tables changed
           const tableSummary = [...new Set(changes.map((c) => c.table_name))].join(',')
-          diag(`found ${changes.length} changes [${tableSummary}]`)
           log.repl(
             `found ${changes.length} changes [${tableSummary}] (wm ${lastWatermark}→${changes[changes.length - 1].watermark})`
           )
@@ -601,7 +621,6 @@ export async function handleStartReplication(
             const table = c.table_name.substring(dot + 1)
             return table === 'clients'
           })
-          diag(`filter: ${preFilterCount} → ${changes.length} changes`)
           log.repl(`filter: ${preFilterCount} → ${changes.length} changes`)
 
           if (changes.length === 0) {
@@ -650,7 +669,6 @@ export async function handleStartReplication(
         await waitForWakeup(pollIntervalIdle)
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        diag(`poll error: ${msg}`)
         log.repl(`replication poll error: ${msg}`)
         if (msg.includes('closed') || msg.includes('destroyed')) {
           running = false
@@ -723,10 +741,8 @@ async function streamChanges(
 
     // zero-cache expects specific camel-cased keys in shard clients rows
     if (schema !== 'public' && tableName === 'clients') {
-      log.repl(`clients row BEFORE: ${JSON.stringify(rowData)}`)
       rowData = normalizeShardClientsRow(rowData)
       oldData = normalizeShardClientsRow(oldData)
-      log.repl(`clients row AFTER: ${JSON.stringify(rowData)}`)
     }
 
     const row = rowData || oldData
@@ -787,7 +803,6 @@ async function streamChanges(
     batch.set(msg, offset)
     offset += msg.length
   }
-  diag(`streaming ${messages.length} wal messages (${totalSize} bytes, txId=${txId})`)
   log.repl(`streaming ${messages.length} wal messages (${totalSize} bytes, txId=${txId})`)
   writer.write(batch)
 }
