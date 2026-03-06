@@ -25,6 +25,7 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
+  readdirSync,
   symlinkSync,
 } from 'node:fs'
 import { resolve } from 'node:path'
@@ -321,6 +322,77 @@ setup('setup', async ({ page }) => {
 })
 `
   )
+
+  // scale up ALL assertion/wait timeouts across e2e tests and helpers for PGlite latency
+  // PGlite under parallel load is ~3x slower than postgres, so triple all timeouts
+  const e2eDir = resolve(TEST_DIR, 'src/integration/e2e')
+  const scaleTimeout = (content: string): string => {
+    // scale test.setTimeout() calls (test-level timeouts)
+    content = content.replace(
+      /test\.setTimeout\(\s*(\d+)_?(\d*)\s*\)/g,
+      (_match, major, minor) => {
+        const ms = Number(major + (minor || ''))
+        return `test.setTimeout(${Math.max(ms * 3, 60_000)})`
+      }
+    )
+    // scale { timeout: N } assertion/wait timeouts (but not 300_000+ setup timeouts)
+    // under 8 parallel workers, zero-cache initial sync through PGlite can take 30s+
+    content = content.replace(
+      /timeout:\s*(\d+)_?(\d*)\b/g,
+      (_match, major, minor) => {
+        const ms = Number(major + (minor || ''))
+        if (ms >= 60_000) return _match // leave large timeouts alone
+        return `timeout: ${Math.max(ms * 3, 30_000)}`
+      }
+    )
+    // scale timeoutMs defaults
+    content = content.replace(
+      /timeoutMs\s*=\s*(\d+)_?(\d*)/g,
+      (_match, major, minor) => {
+        const ms = Number(major + (minor || ''))
+        return `timeoutMs = ${ms * 3}`
+      }
+    )
+    return content
+  }
+
+  // patch all .ts files in e2e dir
+  log('scaling e2e timeouts 3x for PGlite latency')
+  for (const entry of readdirSync(e2eDir)) {
+    if (!entry.endsWith('.ts')) continue
+    if (entry === 'global.setup.ts') continue // already custom-patched above
+    const filePath = resolve(e2eDir, entry)
+    const content = readFileSync(filePath, 'utf-8')
+    const patched = scaleTimeout(content)
+    if (patched !== content) {
+      writeFileSync(filePath, patched)
+    }
+  }
+
+  // increase playwright config default timeout and disable maxFailures for PGlite
+  for (const cfgPath of [
+    resolve(TEST_DIR, 'playwright.config.ts'),
+    resolve(TEST_DIR, 'src/integration/playwright.config.ts'),
+  ]) {
+    if (existsSync(cfgPath)) {
+      let cfg = readFileSync(cfgPath, 'utf-8')
+      cfg = cfg.replace(/timeout:\s*20\s*\*\s*1000,/, 'timeout: 120 * 1000,')
+      // disable maxFailures so one slow test doesn't interrupt others
+      cfg = cfg.replace(/maxFailures:\s*\d+/, 'maxFailures: 0')
+      writeFileSync(cfgPath, cfg)
+    }
+  }
+
+  // increase tko test runner timeout for playwright (default 8min is too tight for PGlite)
+  const tkoE2ePath = resolve(TEST_DIR, 'scripts/test/e2e.ts')
+  if (existsSync(tkoE2ePath)) {
+    let e2e = readFileSync(tkoE2ePath, 'utf-8')
+    e2e = e2e.replace(
+      /timeout:\s*time\.ms\.minutes\(8\)/,
+      'timeout: time.ms.minutes(15)'
+    )
+    writeFileSync(tkoE2ePath, e2e)
+  }
 
   log('local packages installed')
 
