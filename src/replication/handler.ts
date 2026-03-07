@@ -851,7 +851,9 @@ async function streamChanges(
     batch.set(msg, offset)
     offset += msg.length
   }
-  log.debug.repl(`streaming ${messages.length} wal messages (${totalSize} bytes, txId=${txId})`)
+  log.debug.repl(
+    `streaming ${messages.length} wal messages (${totalSize} bytes, txId=${txId})`
+  )
   writer.write(batch)
 }
 
