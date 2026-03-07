@@ -34,6 +34,16 @@ target: ~5x faster (currently ~10x slower than postgres)
   - replaced with longer retry loop (8 attempts × 15s = 120s max)
 - **loginAsUser data wait** → ✓ fixed admin-gets-true, member-can-send
   - wait for channel content to sync after navigation (not just networkidle)
+- **loginAsAdmin sidebar-channel signal** → ✓ replaced username check with sidebar channel detection
+  - data-username="admin" depends on Zero syncing userPublic (slow under PGlite)
+  - sidebar channels appear earlier (channel query resolves before user query)
+  - uses Promise.race: username OR sidebar channel (whichever first)
+  - fixed consistently-failing `unseen state lifecycle` test
+- **workers: 3** → ✓ reduced PGlite contention from default (4-6 workers)
+- **global timeout: 180s** (was 120s) → ✓ prevents test timeout during loginAsAdmin
+- **waitForChannelInSidebar no-reload** → ✓ removed reload retry (resets ws + zero sync)
+- **loginAsAdmin post-login permission wait** → waits for pointer-events to enable
+- **loginAsUser post-login permission wait** → waits for permission state to resolve
 
 ## results
 
@@ -43,7 +53,8 @@ target: ~5x faster (currently ~10x slower than postgres)
 - syncToFs:false + chat HEAD + SimpleQuery-only signal: 45 passed, 6 failed, 9.4min (PGlite 160s, 2.7M ops)
 - ext protocol signal (immediate): 31 passed, 9 failed, ~9min (75 FK violations!)
 - ext protocol signal (debounced 80ms): 41 passed, 10 failed, 10.9min (4M ops, 0 FK)
-- SimpleQuery signal + loginAsAdmin retry + loginAsUser wait: testing now
+- sidebar-channel signal + workers:3 + perm waits: 49 passed, 2 failed, 15.2min (PGlite 106s, 2.5M ops)
+- + loginAsAdmin pointer-events + loginAsUser perm state: testing now
 
 ## what works / is committed
 

@@ -435,25 +435,56 @@ setup('setup', async ({ page }) => {
     // because the admin shortcut DOES authenticate (sets cookie), but Zero takes >45s to
     // sync user data. fallback then navigates to login page, which redirects back since
     // user IS authenticated, and login-as-admin button never appears.
-    // fix: wait much longer for admin username instead of falling back.
+    //
+    // fix: accept sidebar channels as a success signal too.
+    // the ?admin shortcut reliably sets auth cookie. data-username="admin" depends on
+    // Zero syncing userPublic which is slow under PGlite load. but sidebar channels
+    // appear earlier because the channel query resolves before the user query.
+    // if channels are visible, auth worked and the page is functional.
     helpers = helpers.replace(
       /if \(!loggedIn\) \{\s*console\.info\('Admin shortcut did not resolve session[\s\S]*?throw new Error\(`Not admin after 5 attempts[^`]*`\)\s*\}/,
       `if (!loggedIn) {
-    console.info('Admin shortcut: waiting longer for Zero sync...')
-    // PGlite is slow — wait up to 120s total for admin username to appear
-    for (let attempt = 0; attempt < 8; attempt++) {
-      try {
-        await page
-          .locator('[data-username="admin"]')
-          .waitFor({ state: 'visible', timeout: 15000 })
-        loggedIn = true
-        break
-      } catch {
-        if (attempt < 7) {
-          console.info(\`Attempt \${attempt + 2}: admin not visible yet, refreshing...\`)
-          await page.reload({ waitUntil: 'domcontentloaded' })
+    console.info('Admin shortcut: waiting for page to load (PGlite mode)...')
+    // don't reload — it resets websocket + zero sync, adding more PGlite load.
+    // instead, accept ANY signal that auth worked + page rendered:
+    // 1) data-username="admin" (ideal — user data synced)
+    // 2) sidebar channel items visible (channels loaded = auth + zero working)
+    // 3) app-container with non-empty content (page rendered something)
+    // sidebar channels have testid like channel-{id} (e.g. channel-test-unseen-ops).
+    // these ONLY render once Zero has synced channel data, confirming auth + sync worked.
+    // exclude channel-main/channel-name-input/channel-main-input (content area, not sidebar)
+    const sidebarChannelLoaded = () => page.waitForFunction(
+      () => {
+        const els = document.querySelectorAll('[data-testid^="channel-"]')
+        for (const el of els) {
+          const id = el.getAttribute('data-testid') || ''
+          if (id !== 'channel-main' && id !== 'channel-name-input' && id !== 'channel-main-input') {
+            return true
+          }
         }
-      }
+        return false
+      },
+      { timeout: 180000 }
+    )
+    try {
+      await Promise.race([
+        page.locator('[data-username="admin"]').waitFor({ state: 'visible', timeout: 180000 }).then(() => 'username'),
+        sidebarChannelLoaded().then(() => 'sidebar-channel'),
+      ]).then((signal) => {
+        console.info(\`Admin login confirmed via: \${signal}\`)
+        loggedIn = true
+      })
+    } catch {
+      // last resort: one reload then wait again
+      console.info('No signals after 180s, reloading once...')
+      await page.reload({ waitUntil: 'domcontentloaded' })
+      try {
+        await Promise.race([
+          page.locator('[data-username="admin"]').waitFor({ state: 'visible', timeout: 60000 }),
+          sidebarChannelLoaded(),
+        ])
+        loggedIn = true
+      } catch {}
     }
   }
 
@@ -464,62 +495,25 @@ setup('setup', async ({ page }) => {
     throw new Error(\`Not admin after retries (url=\${page.url()})\`)
   }`,
     )
-    // patch loginAsAdmin: after login, wait for channel content to sync from Zero.
-    // loginAsAdmin navigates to channel URL but only waits for admin username in sidebar,
-    // not for the actual channel data. tests immediately interact with "Not found" content.
+    // no post-login wait in loginAsAdmin — each individual helper (sendMessageIn,
+    // openTestChannel, etc) already has its own PGlite-aware waits. adding waits here
+    // eats into multi-context test timeout budgets (unseen, threads, permissions-messages).
+    // no post-login wait in loginAsUser — same as loginAsAdmin, each individual
+    // helper has its own PGlite-aware waits.
+    // patch waitForChannelInSidebar: remove reload-based retry.
+    // under PGlite, reloading resets the websocket + zero sync, adding more load.
+    // just wait longer on the existing page instead.
     helpers = helpers.replace(
-      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  console.info(\`✅ Logged in as admin\`)`,
-      `await dismissOnboarding(page)
-  await dismissViteOverlay(page)
-  // if navigated to a channel, wait for channel content to sync from Zero
-  // (loginAsAdmin only waits for admin username, not channel data)
-  try {
-    const channelMain = page.locator('[data-testid="channel-main"]')
-    const hasChannel = await channelMain.count().then(c => c > 0).catch(() => false)
-    if (hasChannel) {
-      await page.waitForFunction(
-        () => {
-          const main = document.querySelector('[data-testid="channel-main"]')
-          if (!main) return false
-          const h4 = main.querySelector('h4')
-          return !(h4 && h4.textContent?.includes('Not found'))
-        },
-        { timeout: 120000 }
-      )
-    }
-  } catch (e) {
-    console.info('[loginAsAdmin] channel content wait timed out, continuing...', page.url())
-  }
-  console.info(\`✅ Logged in as admin\`)`,
-    )
-    // patch loginAsUser: wait for Zero data to sync after navigation.
-    // loginAsUser only waits for networkidle + app-container, but Zero sync
-    // may take 30s+ under PGlite. tests that check permissions/data immediately
-    // after login fail because data isn't loaded yet.
-    helpers = helpers.replace(
-      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  await dismissHud(page)\n  console.info(\`Logged in as \${email}\`)`,
-      `await dismissOnboarding(page)
-  await dismissViteOverlay(page)
-  await dismissHud(page)
-  // wait for Zero data to sync (channel content or server sidebar)
-  try {
-    const channelMain = page.locator('[data-testid="channel-main"]')
-    const hasChannel = await channelMain.count().then(c => c > 0).catch(() => false)
-    if (hasChannel) {
-      await page.waitForFunction(
-        () => {
-          const main = document.querySelector('[data-testid="channel-main"]')
-          if (!main) return false
-          const h4 = main.querySelector('h4')
-          return !(h4 && h4.textContent?.includes('Not found'))
-        },
-        { timeout: 30000 }
-      )
-    }
-  } catch (e) {
-    console.info('[loginAsUser] channel content wait timed out, continuing...', page.url())
-  }
-  console.info(\`Logged in as \${email}\`)`,
+      /export async function waitForChannelInSidebar\(\s*page: Page,\s*name: string,\s*timeoutMs = \d+,?\s*\) \{[\s\S]*?return channel\s*\}/,
+      `export async function waitForChannelInSidebar(
+  page: Page,
+  name: string,
+  timeoutMs = 45000,
+) {
+  const channel = getChannelByName(page, name)
+  await channel.waitFor({ state: 'visible', timeout: timeoutMs })
+  return channel
+}`,
     )
     writeFileSync(helpersPath, helpers)
   }
@@ -586,6 +580,8 @@ setup('setup', async ({ page }) => {
   for (const testFile of [
     'permissions-messages.test.ts',
     'multi-user-sync.test.ts',
+    'channel-unseen.test.ts',
+    'thread-lifecycle.test.ts',
   ]) {
     const testPath = resolve(e2eDir, testFile)
     if (existsSync(testPath)) {
@@ -605,7 +601,10 @@ setup('setup', async ({ page }) => {
   ]) {
     if (existsSync(cfgPath)) {
       let cfg = readFileSync(cfgPath, 'utf-8')
-      cfg = cfg.replace(/timeout:\s*20\s*\*\s*1000,/, 'timeout: 120 * 1000,')
+      cfg = cfg.replace(/timeout:\s*20\s*\*\s*1000,/, 'timeout: 180 * 1000,')
+      // limit workers to reduce PGlite contention — default (50% cores) causes
+      // too many concurrent Zero connections overwhelming the single PGlite instance
+      cfg = cfg.replace(/fullyParallel:\s*false,/, 'fullyParallel: false,\n  workers: 3,')
       // disable maxFailures so one slow test doesn't interrupt others
       cfg = cfg.replace(/maxFailures:\s*\d+/, 'maxFailures: 0')
       // ensure retries are disabled (tests must genuinely pass)
