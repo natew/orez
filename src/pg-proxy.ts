@@ -458,12 +458,30 @@ export async function startPgProxy(
   }
 
   // helper to get instance + mutex + tx state for a database name
-  function getDbContext(dbName: string): { db: PGlite; mutex: Mutex; txState: PgLiteTxState } {
+  function getDbContext(dbName: string): {
+    db: PGlite
+    mutex: Mutex
+    txState: PgLiteTxState
+  } {
     if (dbName === 'zero_cvr')
       return { db: instances.cvr, mutex: mutexes.cvr, txState: txStates.cvr }
     if (dbName === 'zero_cdb')
       return { db: instances.cdb, mutex: mutexes.cdb, txState: txStates.cdb }
     return { db: instances.postgres, mutex: mutexes.postgres, txState: txStates.postgres }
+  }
+
+  // shared debounce timer for extended protocol write signaling.
+  // 2ms trailing-edge: each Sync resets the timer, so the signal fires
+  // 2ms after the LAST write in a pipeline (coalesces rapid sequential writes).
+  // 2ms is enough because postgres.js pipelines are sub-ms per statement.
+  let signalTimer: ReturnType<typeof setTimeout> | null = null
+  function debouncedSignal() {
+    if (signalTimer) clearTimeout(signalTimer)
+    signalTimer = setTimeout(() => {
+      signalTimer = null
+      log.debug.proxy('ext-write: debounced signal firing')
+      signalReplicationChange()
+    }, 2)
   }
 
   const server = createServer(async (socket: Socket) => {
@@ -476,6 +494,9 @@ export async function startPgProxy(
 
     let dbName = 'postgres'
     let isReplicationConnection = false
+    // track extended protocol writes (Parse with INSERT/UPDATE/DELETE/COPY/TRUNCATE)
+    // so we can signal replication on Sync (0x53) after the pipeline completes
+    let extWritePending = false
     // clean up pglite transaction state when a client disconnects
     socket.on('close', async () => {
       // replication sockets don't own a transaction — skip ROLLBACK
@@ -569,6 +590,15 @@ export async function startPgProxy(
             }
           }
 
+          // detect extended protocol writes on postgres db for replication signaling
+          if (dbName === 'postgres' && msgType === 0x50) {
+            const q = extractParseQuery(data)?.trimStart().toLowerCase()
+            if (q && /^(insert|update|delete|copy|truncate)/.test(q)) {
+              extWritePending = true
+              log.debug.proxy(`ext-write: detected ${q.slice(0, 40)}`)
+            }
+          }
+
           // intercept and rewrite queries
           data = interceptQuery(data)
 
@@ -595,7 +625,9 @@ export async function startPgProxy(
             // transactions from OTHER connections, but let the SAME connection
             // handle its own errors (e.g. ROLLBACK TO SAVEPOINT in migrations).
             if (txState.status === 0x45 && txState.owner !== socket) {
-              try { await db.exec('ROLLBACK') } catch {}
+              try {
+                await db.exec('ROLLBACK')
+              } catch {}
               txState.status = 0x49
               txState.owner = null
             }
@@ -643,7 +675,11 @@ export async function startPgProxy(
             result = await execute()
             if (isSimpleQuery && queryText) {
               const q = queryText.trimStart().toLowerCase()
-              if (q.startsWith('create') || q.startsWith('alter') || q.startsWith('drop')) {
+              if (
+                q.startsWith('create') ||
+                q.startsWith('alter') ||
+                q.startsWith('drop')
+              ) {
                 invalidateSchemaCache()
               }
             }
@@ -655,6 +691,7 @@ export async function startPgProxy(
           // signal replication handler on postgres writes for instant sync
           if (dbName === 'postgres') {
             if (isSimpleQuery && queryText) {
+              // immediate signal for SimpleQuery writes
               const q = queryText.trimStart().toLowerCase()
               if (
                 q.startsWith('insert') ||
@@ -665,6 +702,12 @@ export async function startPgProxy(
               ) {
                 signalReplicationChange()
               }
+            } else if (msgType === 0x53 && extWritePending) {
+              // debounced signal for extended protocol writes.
+              // fires 5ms after the last Sync in a pipeline, coalescing
+              // rapid sequential writes (e.g. server→channel→member)
+              extWritePending = false
+              debouncedSignal()
             }
           }
 

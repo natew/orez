@@ -716,8 +716,9 @@ function Database(...args) {
   const db = new OrigDatabase(...args);
   try {
     db.pragma('journal_mode = wal2');
+    db.pragma('synchronous = off');
+    db.pragma('temp_store = memory');
     db.pragma('busy_timeout = 30000');
-    db.pragma('synchronous = normal');
   } catch(e) {}
   return db;
 }
@@ -838,8 +839,7 @@ async function startZeroCache(
     throw new Error('zero-cache cli.js not found. install @rocicorp/zero')
   }
 
-  // wasm mode: install shim into node_modules/@rocicorp/zero-sqlite3
-  // backs up original and replaces with wasm wrapper
+  // install wasm shim into node_modules/@rocicorp/zero-sqlite3
   if (sqliteMode === 'wasm' && sqliteModeConfig?.bedrockPath) {
     installWasmShim(sqliteModeConfig.bedrockPath, zeroEntry)
   }

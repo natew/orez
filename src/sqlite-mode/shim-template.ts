@@ -29,8 +29,9 @@ function Database() {
   var db = new OrigDatabase(...arguments);
   try {
     db.pragma('journal_mode = ${journalMode}');
-    db.pragma('busy_timeout = ${busy_timeout}');
     db.pragma('synchronous = ${synchronous}');
+    db.pragma('temp_store = memory');
+    db.pragma('busy_timeout = ${busy_timeout}');
   } catch(e) {}
   return db;
 }

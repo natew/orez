@@ -527,7 +527,7 @@ export async function handleStartReplication(
 
   // event-driven replication: proxy signals changes directly via signalReplicationChange(),
   // pg_notify as secondary signal, polling as final fallback.
-  const pollIntervalIdle = 50
+  const pollIntervalIdle = 10
   const batchSize = 50000
   const purgeEveryN = 5
   const shardRescanEveryN = 40
@@ -539,8 +539,11 @@ export async function handleStartReplication(
 
   // promise-based wakeup mechanism
   let wakeupResolve: (() => void) | null = null
+  let lastWakeupTime = 0
   const wakeup = () => {
     if (wakeupResolve) {
+      lastWakeupTime = performance.now()
+      log.debug.repl('signal received, waking up')
       wakeupResolve()
       wakeupResolve = null
     }
@@ -597,25 +600,26 @@ export async function handleStartReplication(
         // post-sync: short backoff since writes signal us directly.
         // pre-sync: yield more generously so zero-cache initial copy can finish.
         if (!mutex.tryAcquire()) {
-          tryAcquireFailures++
           if (hasStreamedOnce) {
-            if (tryAcquireFailures < 3) {
-              await waitForWakeup(25)
-              continue
-            }
+            // post-sync: block immediately. change query is fast (~0.5ms),
+            // so holding the mutex briefly doesn't starve proxy connections.
+            // avoids 25ms+ backoff delays that cause test flakiness.
+            await mutex.acquire()
           } else {
+            tryAcquireFailures++
             if (tryAcquireFailures < 10) {
-              await waitForWakeup(Math.min(50 * tryAcquireFailures, 500))
+              // pre-sync: yield so zero-cache initial copy can finish
+              await waitForWakeup(Math.min(10 * tryAcquireFailures, 100))
               continue
             }
+            await mutex.acquire()
+            tryAcquireFailures = 0
           }
-          // block to ensure replication progress
-          await mutex.acquire()
-          tryAcquireFailures = 0
         } else {
           tryAcquireFailures = 0
         }
         let changes: Awaited<ReturnType<typeof getChangesSince>>
+        const queryStart = performance.now()
         try {
           try {
             changes = await getChangesSince(db, lastWatermark, batchSize)
@@ -641,10 +645,13 @@ export async function handleStartReplication(
         }
 
         if (changes.length > 0) {
+          const queryMs = performance.now() - queryStart
+          const signalToQueryMs =
+            lastWakeupTime > 0 ? (performance.now() - lastWakeupTime).toFixed(1) : '?'
           // summarize which tables changed
           const tableSummary = [...new Set(changes.map((c) => c.table_name))].join(',')
           log.repl(
-            `found ${changes.length} changes [${tableSummary}] (wm ${lastWatermark}→${changes[changes.length - 1].watermark})`
+            `found ${changes.length} changes [${tableSummary}] (wm ${lastWatermark}→${changes[changes.length - 1].watermark}) query=${queryMs.toFixed(1)}ms signal→query=${signalToQueryMs}ms`
           )
           // filter out shard tables that zero-cache doesn't expect.
           // only `clients` is needed (for .server promise resolution).

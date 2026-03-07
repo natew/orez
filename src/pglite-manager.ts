@@ -83,20 +83,24 @@ async function createInstance(
   name: string,
   withExtensions: boolean
 ): Promise<PGlite> {
-  const dataPath = resolve(config.dataDir, `pgdata-${name}`)
-  mkdirSync(dataPath, { recursive: true })
-
-  // clean stale locks from previous crashes before trying to open
-  if (cleanStaleLocks(dataPath)) {
-    log.debug.pglite(`cleaned stale locks in ${name}`)
-  }
-
-  log.debug.pglite(`creating ${name} instance at ${dataPath}`)
   const {
-    dataDir: _d,
+    dataDir: userDataDir,
     debug: _dbg,
     ...userOpts
   } = config.pgliteOptions as Record<string, any>
+
+  const useMemory = typeof userDataDir === 'string' && userDataDir.startsWith('memory://')
+  const dataPath = useMemory ? 'memory://' : resolve(config.dataDir, `pgdata-${name}`)
+
+  if (!useMemory) {
+    mkdirSync(dataPath, { recursive: true })
+    // clean stale locks from previous crashes before trying to open
+    if (cleanStaleLocks(dataPath)) {
+      log.debug.pglite(`cleaned stale locks in ${name}`)
+    }
+  }
+
+  log.debug.pglite(`creating ${name} instance at ${dataPath}`)
 
   try {
     const db = new PGlite({
@@ -123,6 +127,18 @@ async function createInstance(
     })
 
     await db.waitReady
+
+    // tune postgres internals for throughput over durability.
+    // pglite defaults are conservative for embedded use — these settings
+    // match what a real postgres would use for a dev/test workload.
+    await db.exec(`
+      SET work_mem = '64MB';
+      SET maintenance_work_mem = '128MB';
+      SET effective_cache_size = '512MB';
+      SET random_page_cost = 1.1;
+      SET jit = off;
+    `)
+
     log.debug.pglite(`${name} ready`)
     return db
   } catch (err) {
@@ -158,11 +174,14 @@ export async function createPGliteInstances(
   config: ZeroLiteConfig
 ): Promise<PGliteInstances> {
   // migrate from old single-instance layout (pgdata → pgdata-postgres)
-  const oldDataPath = resolve(config.dataDir, 'pgdata')
-  const newDataPath = resolve(config.dataDir, 'pgdata-postgres')
-  if (existsSync(oldDataPath) && !existsSync(newDataPath)) {
-    renameSync(oldDataPath, newDataPath)
-    log.debug.pglite('migrated pgdata → pgdata-postgres')
+  const pgliteDataDir = (config.pgliteOptions as Record<string, any>)?.dataDir
+  if (!pgliteDataDir || !String(pgliteDataDir).startsWith('memory://')) {
+    const oldDataPath = resolve(config.dataDir, 'pgdata')
+    const newDataPath = resolve(config.dataDir, 'pgdata-postgres')
+    if (existsSync(oldDataPath) && !existsSync(newDataPath)) {
+      renameSync(oldDataPath, newDataPath)
+      log.debug.pglite('migrated pgdata → pgdata-postgres')
+    }
   }
 
   // create all 3 instances in parallel (only postgres needs app extensions)

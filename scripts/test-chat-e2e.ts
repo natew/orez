@@ -349,22 +349,16 @@ setup('setup', async ({ page }) => {
     )
     // scale { timeout: N } assertion/wait timeouts (but not 300_000+ setup timeouts)
     // under 8 parallel workers, zero-cache initial sync through PGlite can take 30s+
-    content = content.replace(
-      /timeout:\s*(\d+)_?(\d*)\b/g,
-      (_match, major, minor) => {
-        const ms = Number(major + (minor || ''))
-        if (ms >= 60_000) return _match // leave large timeouts alone
-        return `timeout: ${Math.max(ms * 3, 30_000)}`
-      }
-    )
+    content = content.replace(/timeout:\s*(\d+)_?(\d*)\b/g, (_match, major, minor) => {
+      const ms = Number(major + (minor || ''))
+      if (ms >= 60_000) return _match // leave large timeouts alone
+      return `timeout: ${Math.max(ms * 3, 30_000)}`
+    })
     // scale timeoutMs defaults
-    content = content.replace(
-      /timeoutMs\s*=\s*(\d+)_?(\d*)/g,
-      (_match, major, minor) => {
-        const ms = Number(major + (minor || ''))
-        return `timeoutMs = ${ms * 3}`
-      }
-    )
+    content = content.replace(/timeoutMs\s*=\s*(\d+)_?(\d*)/g, (_match, major, minor) => {
+      const ms = Number(major + (minor || ''))
+      return `timeoutMs = ${ms * 3}`
+    })
     return content
   }
 
@@ -401,13 +395,13 @@ setup('setup', async ({ page }) => {
   )
   await channelInput.click()
   await page.waitForTimeout(200)
-  await channelInput.pressSequentially`,
+  await channelInput.pressSequentially`
     )
     // scale waitForMessage default timeout (not caught by timeout: N regex
     // because function params use = not :)
     helpers = helpers.replace(
       'async function waitForMessage(page: Page, text: string, timeout = 10_000)',
-      'async function waitForMessage(page: Page, text: string, timeout = 60_000)',
+      'async function waitForMessage(page: Page, text: string, timeout = 60_000)'
     )
     // patch openTestChannel and openChannel to wait for actual content (not just DOM attachment).
     // under PGlite latency, "Not found" renders while Zero data is still syncing.
@@ -429,7 +423,7 @@ setup('setup', async ({ page }) => {
     },
     { timeout: 60000 }
   ).catch(() => {})
-}`,
+}`
     )
     // rewrite loginAsAdmin: the fallback to /auth/login?showAdmin is broken under PGlite
     // because the admin shortcut DOES authenticate (sets cookie), but Zero takes >45s to
@@ -493,7 +487,7 @@ setup('setup', async ({ page }) => {
       console.info(\`[browser]\\n\${consoleLogs.join('\\n')}\`)
     }
     throw new Error(\`Not admin after retries (url=\${page.url()})\`)
-  }`,
+  }`
     )
     // no post-login wait in loginAsAdmin — each individual helper (sendMessageIn,
     // openTestChannel, etc) already has its own PGlite-aware waits. adding waits here
@@ -513,7 +507,7 @@ setup('setup', async ({ page }) => {
   const channel = getChannelByName(page, name)
   await channel.waitFor({ state: 'visible', timeout: timeoutMs })
   return channel
-}`,
+}`
     )
     writeFileSync(helpersPath, helpers)
   }
@@ -534,15 +528,20 @@ setup('setup', async ({ page }) => {
     state: 'visible',
     timeout: 30_000,
   })
-  // wait for user data to sync from Zero (user-id shows "—" until synced)
+  // wait for user AND server data to sync from Zero (shows "—" until synced)
   await page.waitForFunction(
     () => {
-      const el = document.querySelector('[data-testid="perm-user-id"]')
-      return el && el.textContent && el.textContent !== '—'
+      const userId = document.querySelector('[data-testid="perm-user-id"]')
+      const serverName = document.querySelector('[data-testid="perm-server-name"]')
+      const channelName = document.querySelector('[data-testid="perm-channel-name"]')
+      const userOk = userId && userId.textContent && userId.textContent !== '—'
+      const serverOk = serverName && serverName.textContent && serverName.textContent !== '—'
+      const channelOk = channelName && channelName.textContent && channelName.textContent !== '—'
+      return userOk && serverOk && channelOk
     },
-    { timeout: 60_000 }
+    { timeout: 90_000 }
   )
-}`,
+}`
     )
     writeFileSync(permHelpersPath, permHelpers)
   }
@@ -564,14 +563,36 @@ setup('setup', async ({ page }) => {
       },
       { timeout: 120000 }
     )
-    await channelTextbox.click()`,
+    await channelTextbox.click()`
     )
     // also increase the test timeout (60s → 300s) since permissions sync is slow
-    focusTest = focusTest.replace(
-      /test\.setTimeout\(\d+\)/,
-      'test.setTimeout(300000)',
-    )
+    focusTest = focusTest.replace(/test\.setTimeout\(\d+\)/, 'test.setTimeout(300000)')
     writeFileSync(focusTestPath, focusTest)
+  }
+
+  // patch permissions-messages: wait for channel data to sync before checking readonly state.
+  // the "Unable to post" text depends on channelPermission being synced from Zero.
+  const permMsgsPath = resolve(e2eDir, 'permissions-messages.test.ts')
+  if (existsSync(permMsgsPath)) {
+    let permMsgs = readFileSync(permMsgsPath, 'utf-8')
+    // before the "Unable to post" assertion, wait for channel to fully load
+    permMsgs = permMsgs.replace(
+      /\/\/ readonly channel shows disabled message\n\s*await expect\(page\.locator\('text=Unable to post in this channel'\)\.first\(\)\)\.toBeVisible\(\s*\{[^}]*\}\s*,?\s*\)/,
+      `// wait for channel permissions to sync from Zero before checking readonly state
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector('[data-testid="channel-main"]')
+        if (!el) return false
+        const h4 = el.querySelector('h4')
+        return !(h4 && h4.textContent?.includes('Not found'))
+      },
+      { timeout: 60000 }
+    ).catch(() => {})
+    await expect(page.locator('text=Unable to post in this channel').first()).toBeVisible(
+      { timeout: 60000 }
+    )`
+    )
+    writeFileSync(permMsgsPath, permMsgs)
   }
 
   // patch multi-context tests: increase test timeout for tests with 2+ browser contexts.
@@ -586,10 +607,7 @@ setup('setup', async ({ page }) => {
     const testPath = resolve(e2eDir, testFile)
     if (existsSync(testPath)) {
       let content = readFileSync(testPath, 'utf-8')
-      content = content.replace(
-        /test\.setTimeout\(\d+\)/,
-        'test.setTimeout(300000)',
-      )
+      content = content.replace(/test\.setTimeout\(\d+\)/, 'test.setTimeout(300000)')
       writeFileSync(testPath, content)
     }
   }
@@ -602,8 +620,8 @@ setup('setup', async ({ page }) => {
     if (existsSync(cfgPath)) {
       let cfg = readFileSync(cfgPath, 'utf-8')
       cfg = cfg.replace(/timeout:\s*20\s*\*\s*1000,/, 'timeout: 180 * 1000,')
-      // limit workers to reduce PGlite contention — default (50% cores) causes
-      // too many concurrent Zero connections overwhelming the single PGlite instance
+      // 3 workers: empirically the sweet spot for PGlite contention (16 cores available).
+      // more workers = more Zero connections = higher per-test latency that cancels out gains.
       cfg = cfg.replace(/fullyParallel:\s*false,/, 'fullyParallel: false,\n  workers: 3,')
       // disable maxFailures so one slow test doesn't interrupt others
       cfg = cfg.replace(/maxFailures:\s*\d+/, 'maxFailures: 0')

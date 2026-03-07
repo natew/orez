@@ -20,9 +20,10 @@ export const JOURNAL_MODE: Record<SqliteMode, string> = {
 }
 
 // common pragmas shared by both modes
+// synchronous=off skips fsync — safe for a dev tool, big perf win
 export const COMMON_PRAGMAS = {
   busy_timeout: '30000',
-  synchronous: 'normal',
+  synchronous: 'off',
 }
 
 // backup file marker for identifying orez-shimmed packages

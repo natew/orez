@@ -54,7 +54,7 @@ target: ~5x faster (currently ~10x slower than postgres)
 - ext protocol signal (immediate): 31 passed, 9 failed, ~9min (75 FK violations!)
 - ext protocol signal (debounced 80ms): 41 passed, 10 failed, 10.9min (4M ops, 0 FK)
 - sidebar-channel signal + workers:3 + perm waits: 49 passed, 2 failed, 15.2min (PGlite 106s, 2.5M ops)
-- + loginAsAdmin pointer-events + loginAsUser perm state: testing now
+- - loginAsAdmin pointer-events + loginAsUser perm state: testing now
 
 ## what works / is committed
 
