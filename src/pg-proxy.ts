@@ -38,6 +38,9 @@ const schemaQueryCache = new Map<string, CachedQueryResult>()
 const schemaQueryInFlight = new Map<string, Promise<Uint8Array>>()
 const SCHEMA_CACHE_TTL_MS = 30_000
 
+// performance tracking
+const proxyStats = { totalWaitMs: 0, totalExecMs: 0, count: 0, batches: 0 }
+
 function isCacheableQuery(query: string): boolean {
   const q = query.trimStart().toLowerCase()
   return (
@@ -237,7 +240,12 @@ function interceptQuery(data: Uint8Array): Uint8Array {
   } else if (msgType === 0x50) {
     const original = extractParseQuery(data)
     if (original) {
-      const rewritten = applyRewrites(original)
+      let rewritten = applyRewrites(original)
+      // for extended protocol, noop queries must be rewritten to a harmless query
+      // (can't return synthetic responses because they're part of a pipeline batch)
+      if (NOOP_QUERY_PATTERNS.some((p) => p.test(rewritten))) {
+        rewritten = 'SELECT 1'
+      }
       if (rewritten !== original) {
         return rebuildParseMessage(data, rewritten)
       }
@@ -285,16 +293,6 @@ function buildSetCompleteResponse(): Uint8Array {
   return result
 }
 
-/**
- * build a synthetic ParseComplete response for extended protocol no-ops.
- */
-function buildParseCompleteResponse(): Uint8Array {
-  const pc = new Uint8Array(5)
-  pc[0] = 0x31 // ParseComplete
-  new DataView(pc.buffer).setInt32(1, 4)
-  return pc
-}
-
 /** read a big-endian int32 from a Uint8Array at the given offset */
 function readInt32BE(data: Uint8Array, offset: number): number {
   return (
@@ -303,6 +301,40 @@ function readInt32BE(data: Uint8Array, offset: number): number {
     (data[offset + 2] << 8) +
     data[offset + 3]
   )
+}
+
+/**
+ * extract ReadyForQuery status byte from a response.
+ * returns the status: 'I' (0x49) idle, 'T' (0x54) in transaction, 'E' (0x45) error.
+ * returns null if no ReadyForQuery found.
+ */
+function getReadyForQueryStatus(data: Uint8Array): number | null {
+  let offset = 0
+  let lastStatus: number | null = null
+  while (offset < data.length) {
+    if (offset + 5 > data.length) break
+    const msgLen = readInt32BE(data, offset + 1)
+    const totalLen = 1 + msgLen
+    if (totalLen <= 0 || offset + totalLen > data.length) break
+    if (data[offset] === 0x5a && totalLen >= 6) {
+      lastStatus = data[offset + 5]
+    }
+    offset += totalLen
+  }
+  return lastStatus
+}
+
+/**
+ * per-instance transaction state tracking.
+ * pglite is single-connection: if one TCP "connection" leaves an aborted transaction,
+ * it pollutes ALL other connections sharing the same pglite instance.
+ * track which socket owns the current transaction so we can auto-ROLLBACK when a
+ * DIFFERENT connection encounters the stale aborted state, while still letting the
+ * ORIGINAL connection handle its own errors (e.g. ROLLBACK TO SAVEPOINT).
+ */
+interface PgLiteTxState {
+  status: number // 0x49='I' idle, 0x54='T' in-transaction, 0x45='E' aborted
+  owner: Socket | null // the socket that started the current transaction
 }
 
 // pglite warnings to suppress (benign, but noisy)
@@ -413,17 +445,30 @@ export async function startPgProxy(
     cdb: new Mutex(),
   }
 
-  // helper to get instance + mutex for a database name
-  function getDbContext(dbName: string): { db: PGlite; mutex: Mutex } {
-    if (dbName === 'zero_cvr') return { db: instances.cvr, mutex: mutexes.cvr }
-    if (dbName === 'zero_cdb') return { db: instances.cdb, mutex: mutexes.cdb }
-    return { db: instances.postgres, mutex: mutexes.postgres }
+  // per-instance transaction state: tracks which socket owns the current transaction
+  // so we can auto-ROLLBACK stale aborted transactions from other connections
+  const txStates: Record<string, PgLiteTxState> = {
+    postgres: { status: 0x49, owner: null },
+    cvr: { status: 0x49, owner: null },
+    cdb: { status: 0x49, owner: null },
+  }
+
+  // helper to get instance + mutex + tx state for a database name
+  function getDbContext(dbName: string): { db: PGlite; mutex: Mutex; txState: PgLiteTxState } {
+    if (dbName === 'zero_cvr')
+      return { db: instances.cvr, mutex: mutexes.cvr, txState: txStates.cvr }
+    if (dbName === 'zero_cdb')
+      return { db: instances.cdb, mutex: mutexes.cdb, txState: txStates.cdb }
+    return { db: instances.postgres, mutex: mutexes.postgres, txState: txStates.postgres }
   }
 
   const server = createServer(async (socket: Socket) => {
     // prevent idle timeouts from killing connections
     socket.setKeepAlive(true, 30000)
     socket.setTimeout(0)
+    // disable Nagle's algorithm — send every response immediately.
+    // critical for wire protocol where each message is a complete unit.
+    socket.setNoDelay(true)
 
     let dbName = 'postgres'
     let isReplicationConnection = false
@@ -431,8 +476,6 @@ export async function startPgProxy(
     // clean up pglite transaction state when a client disconnects
     socket.on('close', async () => {
       // replication sockets don't own a transaction — skip ROLLBACK
-      // to avoid accidentally rolling back another connection's work
-      // (PGlite is single-session, all connections share transaction state)
       if (isReplicationConnection) return
       try {
         const { db, mutex } = getDbContext(dbName)
@@ -513,22 +556,21 @@ export async function startPgProxy(
             )
           }
 
-          // check for no-op queries
+          const msgType = data[0]
+          const { db, mutex, txState } = getDbContext(dbName)
+
+          // check for no-op queries (only SimpleQuery has queries worth intercepting)
           if (isNoopQuery(data)) {
-            if (data[0] === 0x51) {
+            if (msgType === 0x51) {
               return buildSetCompleteResponse()
-            } else if (data[0] === 0x50) {
-              return buildParseCompleteResponse()
             }
           }
 
           // intercept and rewrite queries
           data = interceptQuery(data)
 
-          const { db, mutex } = getDbContext(dbName)
-
           // cache Simple Query (0x51) schema queries
-          const isSimpleQuery = data[0] === 0x51
+          const isSimpleQuery = msgType === 0x51
           const queryText = isSimpleQuery ? extractQueryText(data) : null
           const cacheable = queryText && isCacheableQuery(queryText)
           if (cacheable) {
@@ -543,20 +585,41 @@ export async function startPgProxy(
           }
 
           const execute = async (): Promise<Uint8Array> => {
+            const t0 = performance.now()
             await mutex.acquire()
+            // pglite is single-connection: if a previous connection left an aborted
+            // transaction, this connection will inherit it. auto-rollback stale
+            // transactions from OTHER connections, but let the SAME connection
+            // handle its own errors (e.g. ROLLBACK TO SAVEPOINT in migrations).
+            if (txState.status === 0x45 && txState.owner !== socket) {
+              try { await db.exec('ROLLBACK') } catch {}
+              txState.status = 0x49
+              txState.owner = null
+            }
+            const t1 = performance.now()
             let result: Uint8Array
             try {
-              // only sync to filesystem on Sync (0x53) and SimpleQuery (0x51)
-              // which complete a transaction. skip for intermediate extended
-              // protocol messages (Parse/Bind/Describe/Execute/Close) to reduce
-              // FS overhead from 6x to 1x per query.
-              const syncToFs = data[0] === 0x53 || data[0] === 0x51
-              result = await db.execProtocolRaw(data, { syncToFs })
+              result = await db.execProtocolRaw(data, { syncToFs: false })
             } catch (err) {
               mutex.release()
               throw err
             }
+            // update transaction state tracking
+            const rfqStatus = getReadyForQueryStatus(result)
+            if (rfqStatus !== null) {
+              txState.status = rfqStatus
+              txState.owner = rfqStatus === 0x49 ? null : socket
+            }
+            const t2 = performance.now()
             mutex.release()
+            proxyStats.totalWaitMs += t1 - t0
+            proxyStats.totalExecMs += t2 - t1
+            proxyStats.count++
+            if (proxyStats.count % 200 === 0) {
+              log.proxy(
+                `perf: ${proxyStats.count} ops (${proxyStats.batches} batches) | mutex ${proxyStats.totalWaitMs.toFixed(0)}ms | pglite ${proxyStats.totalExecMs.toFixed(0)}ms`
+              )
+            }
             return result
           }
 
@@ -583,7 +646,7 @@ export async function startPgProxy(
             }
           }
 
-          const stripRfq = data[0] !== 0x53 && data[0] !== 0x51
+          const stripRfq = msgType !== 0x53 && msgType !== 0x51
           result = stripResponseMessages(result, stripRfq)
           return result
         },

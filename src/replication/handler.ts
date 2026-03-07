@@ -42,6 +42,15 @@ let currentLsn = 0x1000000n
 // don't replay already-streamed changes
 let lastStreamedWatermark = 0
 
+// direct wakeup from proxy — bypasses pg_notify for instant replication
+let _replicationWakeup: (() => void) | null = null
+
+/** signal the replication handler that changes may be available.
+ *  called by the proxy after executing writes on the postgres instance. */
+export function signalReplicationChange() {
+  _replicationWakeup?.()
+}
+
 // cached setup results so reconnects skip the expensive mutex-holding setup phase.
 // zero-cache reconnects the replication stream after initial sync, and if setup
 // takes too long (holding the mutex, blocking proxy queries), zero-cache's
@@ -516,11 +525,9 @@ export async function handleStartReplication(
   const sentRelations = new Set<string>()
   let txCounter = 1
 
-  // event-driven replication with promise-based wakeup
-  // uses pg_notify to wake up immediately, polling only as fallback.
-  // adaptive: yield generously during initial sync (zero-cache hammers PGlite),
-  // then tighten up once streaming begins (changes need to flow fast).
-  const pollIntervalIdle = 250
+  // event-driven replication: proxy signals changes directly via signalReplicationChange(),
+  // pg_notify as secondary signal, polling as final fallback.
+  const pollIntervalIdle = 50
   const batchSize = 50000
   const purgeEveryN = 5
   const shardRescanEveryN = 40
@@ -551,13 +558,16 @@ export async function handleStartReplication(
     })
   }
 
-  // set up LISTEN to wake up immediately on changes
+  // register direct wakeup so the proxy can signal us immediately
+  _replicationWakeup = wakeup
+
+  // also set up LISTEN as secondary signal
   let unsubscribe: (() => Promise<void>) | null = null
   try {
     unsubscribe = await db.listen('_zero_changes', wakeup)
     log.debug.proxy('replication: listening for _zero_changes notifications')
   } catch {
-    log.debug.proxy('replication: LISTEN not available, using polling only')
+    log.debug.proxy('replication: LISTEN not available')
   }
 
   const poll = async () => {
@@ -584,22 +594,18 @@ export async function handleStartReplication(
         }
 
         // try to acquire mutex without blocking proxy connections.
-        // adaptive: before first stream, yield generously so zero-cache's
-        // initial sync can finish. after first stream, be more aggressive
-        // since replication speed directly affects client sync latency.
+        // post-sync: short backoff since writes signal us directly.
+        // pre-sync: yield more generously so zero-cache initial copy can finish.
         if (!mutex.tryAcquire()) {
           tryAcquireFailures++
           if (hasStreamedOnce) {
-            // post-sync: short backoff then block to keep replication responsive
-            if (tryAcquireFailures < 5) {
-              await waitForWakeup(50 * tryAcquireFailures)
+            if (tryAcquireFailures < 3) {
+              await waitForWakeup(25)
               continue
             }
           } else {
-            // pre-sync: yield generously for zero-cache initial sync
-            if (tryAcquireFailures < 20) {
-              const backoff = Math.min(pollIntervalIdle * tryAcquireFailures, 5_000)
-              await waitForWakeup(backoff)
+            if (tryAcquireFailures < 10) {
+              await waitForWakeup(Math.min(50 * tryAcquireFailures, 500))
               continue
             }
           }
@@ -611,7 +617,25 @@ export async function handleStartReplication(
         }
         let changes: Awaited<ReturnType<typeof getChangesSince>>
         try {
-          changes = await getChangesSince(db, lastWatermark, batchSize)
+          try {
+            changes = await getChangesSince(db, lastWatermark, batchSize)
+          } catch (queryErr: unknown) {
+            // pglite is single-connection — if we acquire the mutex between
+            // extended protocol messages and the previous query left an aborted
+            // transaction, we'll get 25P02. rollback and retry once.
+            const code =
+              queryErr && typeof queryErr === 'object' && 'code' in queryErr
+                ? (queryErr as { code: string }).code
+                : ''
+            if (code === '25P02') {
+              try {
+                await db.exec('ROLLBACK')
+              } catch {}
+              changes = await getChangesSince(db, lastWatermark, batchSize)
+            } else {
+              throw queryErr
+            }
+          }
         } finally {
           mutex.release()
         }
@@ -699,6 +723,7 @@ export async function handleStartReplication(
   try {
     await poll()
   } finally {
+    _replicationWakeup = null
     if (unsubscribe) {
       await unsubscribe().catch(() => {})
     }
