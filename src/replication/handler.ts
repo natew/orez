@@ -316,7 +316,7 @@ export async function handleStartReplication(
   let columnTypeOids: Map<string, Map<string, number>>
 
   if (cachedTableKeyColumns && cachedExcludedColumns && cachedColumnTypeOids) {
-    log.repl('reconnect: using cached setup (skipping mutex)')
+    log.debug.repl('reconnect: using cached setup (skipping mutex)')
     tableKeyColumns = cachedTableKeyColumns
     excludedColumns = cachedExcludedColumns
     columnTypeOids = cachedColumnTypeOids
@@ -650,7 +650,7 @@ export async function handleStartReplication(
             lastWakeupTime > 0 ? (performance.now() - lastWakeupTime).toFixed(1) : '?'
           // summarize which tables changed
           const tableSummary = [...new Set(changes.map((c) => c.table_name))].join(',')
-          log.repl(
+          log.debug.repl(
             `found ${changes.length} changes [${tableSummary}] (wm ${lastWatermark}→${changes[changes.length - 1].watermark}) query=${queryMs.toFixed(1)}ms signal→query=${signalToQueryMs}ms`
           )
           // filter out shard tables that zero-cache doesn't expect.
@@ -667,7 +667,7 @@ export async function handleStartReplication(
             const table = c.table_name.substring(dot + 1)
             return table === 'clients'
           })
-          log.repl(`filter: ${preFilterCount} → ${changes.length} changes`)
+          log.debug.repl(`filter: ${preFilterCount} → ${changes.length} changes`)
 
           if (changes.length === 0) {
             lastWatermark = batchEnd
@@ -851,7 +851,7 @@ async function streamChanges(
     batch.set(msg, offset)
     offset += msg.length
   }
-  log.repl(`streaming ${messages.length} wal messages (${totalSize} bytes, txId=${txId})`)
+  log.debug.repl(`streaming ${messages.length} wal messages (${totalSize} bytes, txId=${txId})`)
   writer.write(batch)
 }
 

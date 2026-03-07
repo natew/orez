@@ -651,7 +651,7 @@ export async function startPgProxy(
             proxyStats.totalExecMs += t2 - t1
             proxyStats.count++
             if (proxyStats.count % 200 === 0) {
-              log.proxy(
+              log.debug.proxy(
                 `perf: ${proxyStats.count} ops (${proxyStats.batches} batches) | mutex ${proxyStats.totalWaitMs.toFixed(0)}ms | pglite ${proxyStats.totalExecMs.toFixed(0)}ms`
               )
             }
