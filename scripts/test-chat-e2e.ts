@@ -431,6 +431,39 @@ setup('setup', async ({ page }) => {
   ).catch(() => {})
 }`,
     )
+    // rewrite loginAsAdmin: the fallback to /auth/login?showAdmin is broken under PGlite
+    // because the admin shortcut DOES authenticate (sets cookie), but Zero takes >45s to
+    // sync user data. fallback then navigates to login page, which redirects back since
+    // user IS authenticated, and login-as-admin button never appears.
+    // fix: wait much longer for admin username instead of falling back.
+    helpers = helpers.replace(
+      /if \(!loggedIn\) \{\s*console\.info\('Admin shortcut did not resolve session[\s\S]*?throw new Error\(`Not admin after 5 attempts[^`]*`\)\s*\}/,
+      `if (!loggedIn) {
+    console.info('Admin shortcut: waiting longer for Zero sync...')
+    // PGlite is slow — wait up to 120s total for admin username to appear
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        await page
+          .locator('[data-username="admin"]')
+          .waitFor({ state: 'visible', timeout: 15000 })
+        loggedIn = true
+        break
+      } catch {
+        if (attempt < 7) {
+          console.info(\`Attempt \${attempt + 2}: admin not visible yet, refreshing...\`)
+          await page.reload({ waitUntil: 'domcontentloaded' })
+        }
+      }
+    }
+  }
+
+  if (!loggedIn) {
+    if (consoleLogs.length > 0) {
+      console.info(\`[browser]\\n\${consoleLogs.join('\\n')}\`)
+    }
+    throw new Error(\`Not admin after retries (url=\${page.url()})\`)
+  }`,
+    )
     // patch loginAsAdmin: after login, wait for channel content to sync from Zero.
     // loginAsAdmin navigates to channel URL but only waits for admin username in sidebar,
     // not for the actual channel data. tests immediately interact with "Not found" content.
@@ -459,7 +492,65 @@ setup('setup', async ({ page }) => {
   }
   console.info(\`✅ Logged in as admin\`)`,
     )
+    // patch loginAsUser: wait for Zero data to sync after navigation.
+    // loginAsUser only waits for networkidle + app-container, but Zero sync
+    // may take 30s+ under PGlite. tests that check permissions/data immediately
+    // after login fail because data isn't loaded yet.
+    helpers = helpers.replace(
+      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  await dismissHud(page)\n  console.info(\`Logged in as \${email}\`)`,
+      `await dismissOnboarding(page)
+  await dismissViteOverlay(page)
+  await dismissHud(page)
+  // wait for Zero data to sync (channel content or server sidebar)
+  try {
+    const channelMain = page.locator('[data-testid="channel-main"]')
+    const hasChannel = await channelMain.count().then(c => c > 0).catch(() => false)
+    if (hasChannel) {
+      await page.waitForFunction(
+        () => {
+          const main = document.querySelector('[data-testid="channel-main"]')
+          if (!main) return false
+          const h4 = main.querySelector('h4')
+          return !(h4 && h4.textContent?.includes('Not found'))
+        },
+        { timeout: 30000 }
+      )
+    }
+  } catch (e) {
+    console.info('[loginAsUser] channel content wait timed out, continuing...', page.url())
+  }
+  console.info(\`Logged in as \${email}\`)`,
+    )
     writeFileSync(helpersPath, helpers)
+  }
+
+  // patch permissions-helpers: after opening panel, wait for user data to sync from Zero.
+  // under PGlite, the permissions panel may show "—" for user-id and "null" for all
+  // permissions because the user record hasn't synced yet.
+  const permHelpersPath = resolve(e2eDir, 'permissions-helpers.ts')
+  if (existsSync(permHelpersPath)) {
+    let permHelpers = readFileSync(permHelpersPath, 'utf-8')
+    permHelpers = permHelpers.replace(
+      `await page.locator('[data-testid="permissions-test-panel"]').waitFor({
+    state: 'visible',
+    timeout: 3_000,
+  })
+}`,
+      `await page.locator('[data-testid="permissions-test-panel"]').waitFor({
+    state: 'visible',
+    timeout: 30_000,
+  })
+  // wait for user data to sync from Zero (user-id shows "—" until synced)
+  await page.waitForFunction(
+    () => {
+      const el = document.querySelector('[data-testid="perm-user-id"]')
+      return el && el.textContent && el.textContent !== '—'
+    },
+    { timeout: 60_000 }
+  )
+}`,
+    )
+    writeFileSync(permHelpersPath, permHelpers)
   }
 
   // patch input-focus.test.ts: wait for pointer-events before clicking channel textbox

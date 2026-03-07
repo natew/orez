@@ -18,7 +18,11 @@ import { fromNodeSocket } from 'pg-gateway/node'
 
 import { log } from './log.js'
 import { Mutex } from './mutex.js'
-import { handleReplicationQuery, handleStartReplication } from './replication/handler.js'
+import {
+  handleReplicationQuery,
+  handleStartReplication,
+  signalReplicationChange,
+} from './replication/handler.js'
 
 import type { ZeroLiteConfig } from './config.js'
 import type { PGliteInstances } from './pglite-manager.js'
@@ -472,7 +476,6 @@ export async function startPgProxy(
 
     let dbName = 'postgres'
     let isReplicationConnection = false
-
     // clean up pglite transaction state when a client disconnects
     socket.on('close', async () => {
       // replication sockets don't own a transaction — skip ROLLBACK
@@ -648,6 +651,23 @@ export async function startPgProxy(
 
           const stripRfq = msgType !== 0x53 && msgType !== 0x51
           result = stripResponseMessages(result, stripRfq)
+
+          // signal replication handler on postgres writes for instant sync
+          if (dbName === 'postgres') {
+            if (isSimpleQuery && queryText) {
+              const q = queryText.trimStart().toLowerCase()
+              if (
+                q.startsWith('insert') ||
+                q.startsWith('update') ||
+                q.startsWith('delete') ||
+                q.startsWith('copy') ||
+                q.startsWith('truncate')
+              ) {
+                signalReplicationChange()
+              }
+            }
+          }
+
           return result
         },
       })
