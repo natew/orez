@@ -63,11 +63,13 @@ function makeLogger(label: string, color: string, level: LogLevel = 'info') {
   // zero logs are handled specially in startZeroCache with better level detection
   const skipLogStore = source === 'zero'
   return (...args: unknown[]) => {
-    if (LEVEL_PRIORITY[level] <= LEVEL_PRIORITY[currentLevel]) {
+    const shouldLog = LEVEL_PRIORITY[level] <= LEVEL_PRIORITY[currentLevel]
+    if (shouldLog) {
       console.info(p, ...args)
     }
-    // always push to logStore if available (admin captures all levels)
-    if (logStore && !skipLogStore) {
+    // push to logStore for non-debug messages, or debug only if console level allows it.
+    // debug-level logs from the poll loop are very high volume and bloat the store.
+    if (logStore && !skipLogStore && (level !== 'debug' || shouldLog)) {
       const msg = args.map((a) => (typeof a === 'string' ? a : String(a))).join(' ')
       logStore.push(source, level, msg)
     }

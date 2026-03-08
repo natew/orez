@@ -527,7 +527,7 @@ export async function handleStartReplication(
 
   // event-driven replication: proxy signals changes directly via signalReplicationChange(),
   // pg_notify as secondary signal, polling as final fallback.
-  const pollIntervalIdle = 10
+  const pollIntervalIdle = 100
   const batchSize = 50000
   const purgeEveryN = 5
   const shardRescanEveryN = 40

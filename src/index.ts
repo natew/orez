@@ -807,10 +807,11 @@ async function startZeroCache(
   const cdbUrl = getConnectionString(config, 'zero_cdb')
 
   // defaults that can be overridden by user env
-  // when admin is enabled and user hasn't set ZERO_LOG_LEVEL, capture debug
-  // logs for the admin UI while still respecting --log-level for console output
+  // when admin is enabled and user hasn't set ZERO_LOG_LEVEL, use 'info'
+  // to avoid flooding stdout with debug logs (each line triggers log processing).
+  // debug was too expensive — tens of thousands of lines per minute.
   const zeroLogLevel =
-    config.adminPort > 0 && !process.env.ZERO_LOG_LEVEL ? 'debug' : config.logLevel
+    config.adminPort > 0 && !process.env.ZERO_LOG_LEVEL ? 'info' : config.logLevel
   const defaults: Record<string, string> = {
     NODE_ENV: 'development',
     ZERO_LOG_LEVEL: zeroLogLevel,

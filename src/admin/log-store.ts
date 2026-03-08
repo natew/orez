@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, appendFileSync, statSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, appendFile, statSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 
 export interface LogEntry {
@@ -37,6 +37,10 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
   // track file sizes to rotate per-source
   const fileSizes: Record<string, number> = {}
 
+  // buffered async disk writes — avoids appendFileSync blocking the event loop
+  const writeBuffers: Record<string, string[]> = {}
+  const FLUSH_INTERVAL_MS = 2000
+
   function getLogFile(source: string): string {
     return join(logsDir, `${source}.log`)
   }
@@ -55,6 +59,28 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
     } catch {}
   }
 
+  function flushBuffers() {
+    for (const source in writeBuffers) {
+      const buf = writeBuffers[source]
+      if (buf.length === 0) continue
+      const data = buf.join('')
+      buf.length = 0
+      try {
+        const logFile = getLogFile(source)
+        appendFile(logFile, data, () => {})
+        fileSizes[source] = (fileSizes[source] || 0) + data.length
+        if (fileSizes[source] > MAX_FILE_SIZE) {
+          rotateIfNeeded(source)
+        }
+      } catch {}
+    }
+  }
+
+  if (writeToDisk) {
+    const timer = setInterval(flushBuffers, FLUSH_INTERVAL_MS)
+    if (timer.unref) timer.unref()
+  }
+
   function push(source: string, level: string, msg: string) {
     const entry: LogEntry = {
       id: nextId++,
@@ -68,16 +94,10 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
       entries.splice(0, entries.length - MAX_ENTRIES)
     }
     if (writeToDisk) {
-      try {
-        const ts = new Date(entry.ts).toISOString()
-        const logFile = getLogFile(source)
-        appendFileSync(logFile, `[${ts}] [${level}] ${entry.msg}\n`)
-        // check rotation every ~100 writes to this source
-        fileSizes[source] = (fileSizes[source] || 0) + entry.msg.length + 50
-        if (fileSizes[source] > MAX_FILE_SIZE) {
-          rotateIfNeeded(source)
-        }
-      } catch {}
+      const ts = new Date(entry.ts).toISOString()
+      const line = `[${ts}] [${level}] ${entry.msg}\n`
+      if (!writeBuffers[source]) writeBuffers[source] = []
+      writeBuffers[source].push(line)
     }
   }
 
