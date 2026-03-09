@@ -497,6 +497,10 @@ export async function startPgProxy(
     // track extended protocol writes (Parse with INSERT/UPDATE/DELETE/COPY/TRUNCATE)
     // so we can signal replication on Sync (0x53) after the pipeline completes
     let extWritePending = false
+    // hold mutex across entire extended protocol pipeline (Parse→Sync).
+    // prevents other connections from interleaving and corrupting PGlite's
+    // unnamed portal/statement state during the pipeline.
+    let pipelineMutexHeld = false
     // clean up pglite transaction state when a client disconnects
     socket.on('close', async () => {
       // replication sockets don't own a transaction — skip ROLLBACK
@@ -583,19 +587,98 @@ export async function startPgProxy(
           const msgType = data[0]
           const { db, mutex, txState } = getDbContext(dbName)
 
+          // extended protocol pipeline: hold mutex across Parse→Sync to prevent
+          // other connections from interleaving and corrupting unnamed portal state.
+          // 0x50=Parse, 0x42=Bind, 0x44=Describe, 0x45=Execute, 0x43=Close, 0x48=Flush
+          const isExtendedMsg =
+            msgType === 0x50 ||
+            msgType === 0x42 ||
+            msgType === 0x44 ||
+            msgType === 0x45 ||
+            msgType === 0x43 ||
+            msgType === 0x48
+          const isSyncInPipeline = msgType === 0x53 && pipelineMutexHeld
+
+          if (isExtendedMsg || isSyncInPipeline) {
+            // acquire mutex on first message of pipeline
+            if (!pipelineMutexHeld) {
+              const t0 = performance.now()
+              await mutex.acquire()
+              proxyStats.totalWaitMs += performance.now() - t0
+              pipelineMutexHeld = true
+              // auto-rollback stale transactions from other connections
+              if (txState.status === 0x45 && txState.owner !== socket) {
+                try {
+                  await db.exec('ROLLBACK')
+                } catch {}
+                txState.status = 0x49
+                txState.owner = null
+              }
+            }
+
+            // detect extended protocol writes for replication signaling
+            if (dbName === 'postgres' && msgType === 0x50) {
+              const q = extractParseQuery(data)?.trimStart().toLowerCase()
+              if (q && /^(insert|update|delete|copy|truncate)/.test(q)) {
+                extWritePending = true
+                log.debug.proxy(`ext-write: detected ${q.slice(0, 40)}`)
+              }
+            }
+
+            // apply query rewrites
+            data = interceptQuery(data)
+
+            const t1 = performance.now()
+            let result: Uint8Array
+            try {
+              result = await db.execProtocolRaw(data, { syncToFs: false })
+            } catch (err) {
+              mutex.release()
+              pipelineMutexHeld = false
+              throw err
+            }
+            const t2 = performance.now()
+            proxyStats.totalExecMs += t2 - t1
+            proxyStats.count++
+
+            // update transaction state
+            const rfqStatus = getReadyForQueryStatus(result)
+            if (rfqStatus !== null) {
+              txState.status = rfqStatus
+              txState.owner = rfqStatus === 0x49 ? null : socket
+            }
+
+            // release mutex on Sync (end of pipeline)
+            if (msgType === 0x53) {
+              mutex.release()
+              pipelineMutexHeld = false
+              proxyStats.batches++
+
+              // signal replication handler on postgres writes
+              if (dbName === 'postgres' && extWritePending) {
+                extWritePending = false
+                debouncedSignal()
+              }
+            } else {
+              // strip ReadyForQuery from non-Sync pipeline messages
+              result = stripResponseMessages(result, true)
+            }
+
+            if (proxyStats.count % 200 === 0) {
+              log.debug.proxy(
+                `perf: ${proxyStats.count} ops (${proxyStats.batches} batches) | mutex ${proxyStats.totalWaitMs.toFixed(0)}ms | pglite ${proxyStats.totalExecMs.toFixed(0)}ms`
+              )
+            }
+
+            return result
+          }
+
+          // Simple Query (0x51) or standalone Sync — per-message mutex
+
           // check for no-op queries (only SimpleQuery has queries worth intercepting)
           if (isNoopQuery(data)) {
             if (msgType === 0x51) {
               return buildSetCompleteResponse()
-            }
-          }
-
-          // detect extended protocol writes on postgres db for replication signaling
-          if (dbName === 'postgres' && msgType === 0x50) {
-            const q = extractParseQuery(data)?.trimStart().toLowerCase()
-            if (q && /^(insert|update|delete|copy|truncate)/.test(q)) {
-              extWritePending = true
-              log.debug.proxy(`ext-write: detected ${q.slice(0, 40)}`)
             }
           }
 
@@ -620,10 +703,6 @@ export async function startPgProxy(
           const execute = async (): Promise<Uint8Array> => {
             const t0 = performance.now()
             await mutex.acquire()
-            // pglite is single-connection: if a previous connection left an aborted
-            // transaction, this connection will inherit it. auto-rollback stale
-            // transactions from OTHER connections, but let the SAME connection
-            // handle its own errors (e.g. ROLLBACK TO SAVEPOINT in migrations).
             if (txState.status === 0x45 && txState.owner !== socket) {
               try {
                 await db.exec('ROLLBACK')
@@ -639,7 +718,6 @@ export async function startPgProxy(
               mutex.release()
               throw err
             }
-            // update transaction state tracking
             const rfqStatus = getReadyForQueryStatus(result)
             if (rfqStatus !== null) {
               txState.status = rfqStatus
@@ -689,25 +767,16 @@ export async function startPgProxy(
           result = stripResponseMessages(result, stripRfq)
 
           // signal replication handler on postgres writes for instant sync
-          if (dbName === 'postgres') {
-            if (isSimpleQuery && queryText) {
-              // immediate signal for SimpleQuery writes
-              const q = queryText.trimStart().toLowerCase()
-              if (
-                q.startsWith('insert') ||
-                q.startsWith('update') ||
-                q.startsWith('delete') ||
-                q.startsWith('copy') ||
-                q.startsWith('truncate')
-              ) {
-                signalReplicationChange()
-              }
-            } else if (msgType === 0x53 && extWritePending) {
-              // debounced signal for extended protocol writes.
-              // fires 5ms after the last Sync in a pipeline, coalescing
-              // rapid sequential writes (e.g. server→channel→member)
-              extWritePending = false
-              debouncedSignal()
+          if (dbName === 'postgres' && isSimpleQuery && queryText) {
+            const q = queryText.trimStart().toLowerCase()
+            if (
+              q.startsWith('insert') ||
+              q.startsWith('update') ||
+              q.startsWith('delete') ||
+              q.startsWith('copy') ||
+              q.startsWith('truncate')
+            ) {
+              signalReplicationChange()
             }
           }
 
