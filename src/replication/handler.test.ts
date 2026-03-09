@@ -7,6 +7,7 @@ import {
   handleReplicationQuery,
   handleStartReplication,
   resetReplicationState,
+  signalReplicationChange,
   type ReplicationWriter,
 } from './handler'
 
@@ -137,6 +138,8 @@ describe('handleStartReplication', () => {
   afterEach(async () => {
     // closing db causes poll loop to exit with 'closed' error
     await db.close()
+    // wake handler from idle sleep so it hits the closed db and exits
+    signalReplicationChange()
     // wait for the replication promise to settle
     await replicationPromise?.catch(() => {})
   })
@@ -213,6 +216,7 @@ describe('handleStartReplication', () => {
 
     await new Promise((r) => setTimeout(r, 100))
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('streamed', 123)`)
+    signalReplicationChange()
     await new Promise((r) => setTimeout(r, 700))
 
     const types = written.flatMap(extractPayloadTypes)
@@ -245,12 +249,15 @@ describe('handleStartReplication', () => {
     await new Promise((r) => setTimeout(r, 100))
 
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('mut', 1)`)
+    signalReplicationChange()
     await new Promise((r) => setTimeout(r, 700))
 
     await db.exec(`UPDATE public.items SET value = 2 WHERE name = 'mut'`)
+    signalReplicationChange()
     await new Promise((r) => setTimeout(r, 700))
 
     await db.exec(`DELETE FROM public.items WHERE name = 'mut'`)
+    signalReplicationChange()
     await new Promise((r) => setTimeout(r, 700))
 
     const types = written.flatMap(extractPayloadTypes)
@@ -272,9 +279,11 @@ describe('handleStartReplication', () => {
     await new Promise((r) => setTimeout(r, 100))
 
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('a', 1)`)
+    signalReplicationChange()
     await new Promise((r) => setTimeout(r, 700))
 
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('b', 2)`)
+    signalReplicationChange()
     await new Promise((r) => setTimeout(r, 700))
 
     const types = written.flatMap(extractPayloadTypes)
@@ -299,6 +308,7 @@ describe('handleStartReplication', () => {
 
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('a', 1)`)
     await db.exec(`INSERT INTO public.other (label) VALUES ('b')`)
+    signalReplicationChange()
     await new Promise((r) => setTimeout(r, 700))
 
     const types = written.flatMap(extractPayloadTypes)
@@ -321,8 +331,9 @@ describe('handleStartReplication', () => {
     for (let i = 0; i < 20; i++) {
       await db.exec(`INSERT INTO public.items (name, value) VALUES ('r${i}', ${i})`)
     }
+    signalReplicationChange()
 
-    // wait multiple poll cycles
+    // wait for handler to process
     await new Promise((r) => setTimeout(r, 1500))
 
     const inserts = written.flatMap(extractPayloadTypes).filter((t) => t === 0x49)
@@ -342,9 +353,11 @@ describe('handleStartReplication', () => {
     await new Promise((r) => setTimeout(r, 100))
 
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('tx1', 1)`)
+    signalReplicationChange()
     await new Promise((r) => setTimeout(r, 700))
 
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('tx2', 2)`)
+    signalReplicationChange()
     await new Promise((r) => setTimeout(r, 700))
 
     const types = written.flatMap(extractPayloadTypes)

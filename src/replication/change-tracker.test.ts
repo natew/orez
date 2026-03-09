@@ -4,6 +4,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import {
   installChangeTracking,
   installTriggersOnShardTables,
+  resetShardSchemaCache,
   purgeConsumedChanges,
   getChangesSince,
   getCurrentWatermark,
@@ -208,6 +209,7 @@ describe('shard table tracking', () => {
   let db: PGlite
 
   beforeEach(async () => {
+    resetShardSchemaCache()
     db = new PGlite()
     await db.waitReady
     await installChangeTracking(db)

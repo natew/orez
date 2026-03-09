@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { getConfig } from '../config'
 import { startPgProxy } from '../pg-proxy'
 import { installChangeTracking } from './change-tracker'
+import { signalReplicationChange } from './handler'
 
 import type { Server, AddressInfo } from 'node:net'
 
@@ -559,8 +560,9 @@ describe('tcp replication', () => {
       "START_REPLICATION SLOT \"stream_test\" LOGICAL 0/0 (proto_version '1', publication_names 'zero_takeout')"
     )
 
-    // insert data right away - the poll loop will pick it up once it starts
+    // insert data right away - signal so the handler picks it up immediately
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('tcp_streamed', 42)`)
+    signalReplicationChange()
 
     // collect everything for long enough to catch the change
     const allRaw = await replClient.collectStream(3000)
@@ -626,9 +628,11 @@ describe('tcp replication', () => {
     await replClient.collectStream(200) // skip CopyBothResponse
 
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('upd_target', 10)`)
+    signalReplicationChange()
     await replClient.collectStream(1500)
 
     await db.exec(`UPDATE public.items SET value = 20 WHERE name = 'upd_target'`)
+    signalReplicationChange()
     const stream = await replClient.collectStream(1500)
 
     const decoded: PgOutputMessage[] = []
@@ -670,9 +674,11 @@ describe('tcp replication', () => {
     await replClient.collectStream(200)
 
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('del_target', 99)`)
+    signalReplicationChange()
     await replClient.collectStream(1500)
 
     await db.exec(`DELETE FROM public.items WHERE name = 'del_target'`)
+    signalReplicationChange()
     const stream = await replClient.collectStream(1500)
 
     const decoded: PgOutputMessage[] = []
@@ -715,6 +721,7 @@ describe('tcp replication', () => {
     // insert into both tables
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('multi1', 1)`)
     await db.exec(`INSERT INTO public.products (label) VALUES ('multi2')`)
+    signalReplicationChange()
 
     // collect until we see both relations (with timeout)
     const allDecoded: PgOutputMessage[] = []
@@ -763,6 +770,7 @@ describe('tcp replication', () => {
     for (let i = 0; i < count; i++) {
       await db.exec(`INSERT INTO public.items (name, value) VALUES ('rapid${i}', ${i})`)
     }
+    signalReplicationChange()
 
     // give enough time for all changes to stream
     const stream = await replClient.collectStream(2000)

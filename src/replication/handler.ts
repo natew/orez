@@ -527,20 +527,24 @@ export async function handleStartReplication(
 
   // event-driven replication: proxy signals changes directly via signalReplicationChange(),
   // pg_notify as secondary signal, polling as final fallback.
-  const pollIntervalIdle = 100
+  const pollIntervalIdle = 5000
   const batchSize = 50000
   const purgeEveryN = 5
-  const shardRescanEveryN = 40
+  const shardRescanIntervalMs = 10_000
   let running = true
   let pollsSincePurge = 0
   let tryAcquireFailures = 0
-  let pollsSinceShardRescan = 0
+  let lastShardRescan = -shardRescanIntervalMs
   let hasStreamedOnce = false
 
-  // promise-based wakeup mechanism
+  // promise-based wakeup mechanism.
+  // signalPending captures signals that arrive while the handler is
+  // processing (not in waitForWakeup), preventing signal loss.
   let wakeupResolve: (() => void) | null = null
+  let signalPending = false
   let lastWakeupTime = 0
   const wakeup = () => {
+    signalPending = true
     if (wakeupResolve) {
       lastWakeupTime = performance.now()
       log.debug.repl('signal received, waking up')
@@ -548,15 +552,15 @@ export async function handleStartReplication(
       wakeupResolve = null
     }
   }
-  const waitForWakeup = (timeoutMs: number): Promise<void> => {
+  const waitForWakeup = (timeoutMs: number): Promise<boolean> => {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         wakeupResolve = null
-        resolve()
+        resolve(false)
       }, timeoutMs)
       wakeupResolve = () => {
         clearTimeout(timer)
-        resolve()
+        resolve(true)
       }
     })
   }
@@ -574,6 +578,9 @@ export async function handleStartReplication(
   }
 
   const poll = async () => {
+    let queryPending = true // query immediately on first iteration
+    let idleTimeoutCount = 0
+
     while (running) {
       // check if the connection was closed
       if (writer.closed) {
@@ -583,16 +590,59 @@ export async function handleStartReplication(
       }
 
       try {
+        // when no query is pending, wait for a signal or timeout.
+        // signals fire instantly when the proxy processes a write,
+        // so we only hit the timeout when truly idle.
+        if (!queryPending) {
+          // check if a signal arrived while we were processing
+          if (!signalPending) {
+            const wasSignaled = await waitForWakeup(pollIntervalIdle)
+            if (writer.closed) {
+              running = false
+              break
+            }
+            if (!wasSignaled) {
+              idleTimeoutCount++
+              // send keepalive on every timeout
+              writer.write(encodeKeepalive(currentLsn, nowMicros(), false))
+              log.debug.repl(`idle keepalive (lastWatermark=${lastWatermark})`)
+              // re-scan for new shard schemas during idle
+              if (performance.now() - lastShardRescan > shardRescanIntervalMs) {
+                if (mutex.tryAcquire()) {
+                  lastShardRescan = performance.now()
+                  try {
+                    await installTriggersOnShardTables(db)
+                  } finally {
+                    mutex.release()
+                  }
+                }
+              }
+              // safety poll every ~30s to catch edge cases (6 * 5000ms)
+              if (idleTimeoutCount < 6) continue
+              idleTimeoutCount = 0
+              log.debug.repl('safety poll')
+              // fall through to query
+            } else {
+              idleTimeoutCount = 0
+            }
+          } else {
+            idleTimeoutCount = 0
+          }
+          signalPending = false
+        }
+        queryPending = false
+
         // periodically re-scan for new shard schemas (e.g. chat_0 created by zero-cache)
-        pollsSinceShardRescan++
-        if (pollsSinceShardRescan >= shardRescanEveryN) {
+        if (performance.now() - lastShardRescan > shardRescanIntervalMs) {
           if (mutex.tryAcquire()) {
-            pollsSinceShardRescan = 0
+            lastShardRescan = performance.now()
             try {
               await installTriggersOnShardTables(db)
             } finally {
               mutex.release()
             }
+          } else {
+            log.debug.repl('shard rescan skipped: mutex busy')
           }
         }
 
@@ -610,6 +660,7 @@ export async function handleStartReplication(
             if (tryAcquireFailures < 10) {
               // pre-sync: yield so zero-cache initial copy can finish
               await waitForWakeup(Math.min(10 * tryAcquireFailures, 100))
+              queryPending = true
               continue
             }
             await mutex.acquire()
@@ -673,9 +724,9 @@ export async function handleStartReplication(
             lastWatermark = batchEnd
             lastStreamedWatermark = batchEnd
             // all changes were filtered out (e.g. shard internal tables).
-            // sleep briefly to avoid a tight loop when zero-cache is
-            // continuously writing internal state.
-            await waitForWakeup(pollIntervalIdle)
+            // brief wait to avoid tight loop, then recheck.
+            await waitForWakeup(200)
+            queryPending = true
             continue
           }
 
@@ -707,17 +758,15 @@ export async function handleStartReplication(
           }
 
           // got changes - continue immediately to check for more
+          queryPending = true
           continue
         }
 
-        // send keepalive
+        // no changes: send keepalive
         const ts = nowMicros()
         writer.write(encodeKeepalive(currentLsn, ts, false))
-
         log.debug.repl(`idle (lastWatermark=${lastWatermark})`)
-
-        // no changes: wait for notify signal or poll interval
-        await waitForWakeup(pollIntervalIdle)
+        // next iteration will wait for signal at the top
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         log.repl(`replication poll error: ${msg}`)
@@ -734,7 +783,10 @@ export async function handleStartReplication(
   try {
     await poll()
   } finally {
-    _replicationWakeup = null
+    // only clear if still pointing to our wakeup (a new handler may have replaced it)
+    if (_replicationWakeup === wakeup) {
+      _replicationWakeup = null
+    }
     if (unsubscribe) {
       await unsubscribe().catch(() => {})
     }

@@ -153,6 +153,11 @@ async function installTriggersOnAllTables(db: PGlite): Promise<void> {
  */
 const processedShardSchemas = new Set<string>()
 
+/** reset shard schema cache (for tests) */
+export function resetShardSchemaCache(): void {
+  processedShardSchemas.clear()
+}
+
 export async function installTriggersOnShardTables(db: PGlite): Promise<void> {
   const result = await db.query<{ nspname: string }>(
     `SELECT nspname FROM pg_namespace

@@ -17,7 +17,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import { getConfig } from '../config'
 import { startPgProxy } from '../pg-proxy'
-import { installChangeTracking } from './change-tracker'
+import { installChangeTracking, resetShardSchemaCache } from './change-tracker'
+import { signalReplicationChange } from './handler'
 
 import type { Server, AddressInfo } from 'node:net'
 
@@ -447,6 +448,7 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
   let port: number
 
   beforeEach(async () => {
+    resetShardSchemaCache()
     db = new PGlite()
     await db.waitReady
     await db.exec(`
@@ -467,12 +469,23 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     await db.exec(`CREATE PUBLICATION zero_pub FOR ALL TABLES`)
     await installChangeTracking(db)
 
+    // auto-signal the replication handler after every db.exec() call.
+    // in production, writes go through the TCP proxy which signals automatically.
+    // in tests, db.exec() bypasses the proxy, so we signal explicitly.
+    const origExec = db.exec.bind(db)
+    ;(db as any).exec = async (sql: string) => {
+      const result = await origExec(sql)
+      signalReplicationChange()
+      return result
+    }
+
     const config = { ...getConfig(), pgPort: 0 }
     server = await startPgProxy(db, config)
     port = (server.address() as AddressInfo).port
   })
 
   afterEach(async () => {
+    signalReplicationChange()
     server?.close()
     await db?.close()
   })
@@ -967,6 +980,9 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
 
     const s = await stream()
     const q = s.messages
+
+    // give handler time to finish setup (trigger installation)
+    await new Promise((r) => setTimeout(r, 300))
 
     // insert into all three shard tables + a public table
     await db.exec(
