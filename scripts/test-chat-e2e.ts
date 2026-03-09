@@ -261,96 +261,34 @@ function main() {
     }
   }
 
-  // scale up assertion/wait timeouts across e2e tests and helpers for PGlite latency
-  // PGlite is slower than postgres, so double timeouts as a buffer
+  // scale timeouts 2x across e2e tests for PGlite latency
   const e2eDir = resolve(TEST_DIR, 'src/integration/e2e')
   const scaleTimeout = (content: string): string => {
-    // scale test.setTimeout() calls — floor at 180s (PGlite login + sync takes 60-90s)
     content = content.replace(
       /test\.setTimeout\(\s*(\d+)_?(\d*)\s*\)/g,
       (_match, major, minor) => {
         const ms = Number(major + (minor || ''))
-        return `test.setTimeout(${Math.max(ms * 2, 180_000)})`
+        return `test.setTimeout(${ms * 2})`
       }
     )
-    // scale { timeout: N } assertion/wait timeouts 3x (but not 60_000+ timeouts)
     content = content.replace(/timeout:\s*(\d+)_?(\d*)\b/g, (_match, major, minor) => {
       const ms = Number(major + (minor || ''))
-      if (ms >= 60_000) return _match // leave large timeouts alone
-      return `timeout: ${ms * 3}`
+      if (ms >= 60_000) return _match
+      return `timeout: ${ms * 2}`
     })
-    // scale function default params: timeout = N, timeoutMs = N
-    content = content.replace(
-      /(timeout(?:Ms)?)\s*=\s*(\d+)_?(\d*)/g,
-      (_match, name, major, minor) => {
-        const ms = Number(major + (minor || ''))
-        if (ms >= 60_000) return _match
-        return `${name} = ${ms * 3}`
-      }
-    )
     return content
   }
 
-  // bump loginAsAdmin timeouts in helpers.ts so the fast path has enough time
-  // under PGlite and doesn't fall into the fallback path (which breaks when
-  // the auth cookie is already set from the ?admin shortcut)
-  const helpersPath = resolve(e2eDir, 'helpers.ts')
-  if (existsSync(helpersPath)) {
-    let helpers = readFileSync(helpersPath, 'utf-8')
-    helpers = helpers.replace(
-      `await page.locator('[data-username="admin"]').waitFor({\n      state: 'visible',\n      timeout: 15_000,\n    })`,
-      `await page.locator('[data-username="admin"]').waitFor({\n      state: 'visible',\n      timeout: 60_000,\n    })`
-    )
-    // after loginAsAdmin confirms, wait for sidebar channels to sync from Zero
-    // PGlite syncs user data (data-username) before channel data
-    helpers = helpers.replace(
-      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  console.info(\`✅ Logged in as admin\`)`,
-      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  // wait for channel data to sync from zero (PGlite latency)\n  await page.locator('[data-testid^="channel-"]').first().waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {})\n  console.info(\`✅ Logged in as admin\`)`
-    )
-    // wait for pointer-events before clicking textbox in sendMessageIn
-    // PGlite is slower to sync channel permissions, which gate pointer-events
-    helpers = helpers.replace(
-      `await channelInput.click()\n  await page.waitForTimeout(200)`,
-      `await page.waitForFunction(\n    (testId) => {\n      const el = document.querySelector(\`[data-testid="\${testId}"] [role="textbox"]\`)\n      return el ? getComputedStyle(el).pointerEvents !== 'none' : false\n    },\n    \`\${inputName}-input\`,\n    { timeout: 30000 }\n  ).catch(() => {})\n  await channelInput.click()\n  await page.waitForTimeout(200)`
-    )
-    // stabilize hoverMessage: wait for message element to be attached before scrolling
-    // under PGlite, Zero resync can re-render the message list, detaching DOM elements
-    helpers = helpers.replace(
-      `await directEl.scrollIntoViewIfNeeded()`,
-      `await directEl.waitFor({ state: 'attached', timeout: 10_000 })\n    await directEl.scrollIntoViewIfNeeded()`
-    )
-    // after loginAsUser, wait for sidebar channels to sync from Zero
-    helpers = helpers.replace(
-      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  await dismissHud(page)\n  console.info(\`Logged in as \${email}\`)`,
-      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  await dismissHud(page)\n  // wait for channel data to sync from zero (PGlite latency)\n  await page.locator('[data-testid^="channel-"]').first().waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {})\n  console.info(\`Logged in as \${email}\`)`
-    )
-    writeFileSync(helpersPath, helpers)
-  }
-
   // patch all .ts files in e2e dir
-  log('scaling e2e assertion timeouts 3x for PGlite latency')
+  log('scaling e2e timeouts 2x for PGlite latency')
   for (const entry of readdirSync(e2eDir)) {
     if (!entry.endsWith('.ts')) continue
-    // global.setup.ts gets scaled too (e.g. waitForURL 45s → 90s)
     const filePath = resolve(e2eDir, entry)
     const content = readFileSync(filePath, 'utf-8')
     const patched = scaleTimeout(content)
     if (patched !== content) {
       writeFileSync(filePath, patched)
     }
-  }
-
-  // permissions-messages readonly test: channel permissions sync is slow under PGlite
-  // the 3x scaled timeout (30s) isn't enough — bump to 60s
-  const permMsgsPath = resolve(e2eDir, 'permissions-messages.test.ts')
-  if (existsSync(permMsgsPath)) {
-    let permMsgs = readFileSync(permMsgsPath, 'utf-8')
-    // bump the "Unable to post" assertion timeout (already 30000 from 3x scaling)
-    permMsgs = permMsgs.replace(
-      /Unable to post in this channel.*?timeout:\s*(\d+)/s,
-      (match, timeout) => match.replace(`timeout: ${timeout}`, 'timeout: 60000')
-    )
-    writeFileSync(permMsgsPath, permMsgs)
   }
 
   // adjust playwright config for PGlite: bump default timeout, disable maxFailures
@@ -360,7 +298,7 @@ function main() {
   ]) {
     if (existsSync(cfgPath)) {
       let cfg = readFileSync(cfgPath, 'utf-8')
-      cfg = cfg.replace(/timeout:\s*20\s*\*\s*1000,/, 'timeout: 60 * 1000,')
+      cfg = cfg.replace(/timeout:\s*20\s*\*\s*1000,/, 'timeout: 40 * 1000,')
       // limit workers to reduce PGlite contention
       cfg = cfg.replace(/fullyParallel:\s*false,/, 'fullyParallel: false,\n  workers: 2,')
       // disable maxFailures so one slow test doesn't interrupt others
