@@ -21,6 +21,7 @@ import { log, port, setLogLevel, setLogStore } from './log.js'
 import { startPgProxy } from './pg-proxy.js'
 import { createPGliteInstances, runMigrations } from './pglite-manager.js'
 import { findPort } from './port.js'
+import { orezTitle } from './process-title.js'
 import {
   cleanCdcStateOnStartup,
   hasCdcCorruptionSignature,
@@ -845,10 +846,18 @@ async function startZeroCache(
     installWasmShim(sqliteModeConfig.bedrockPath, zeroEntry)
   }
 
-  const nodeOptions =
-    sqliteMode === 'wasm'
-      ? `--max-old-space-size=16384 ${process.env.NODE_OPTIONS || ''}`
-      : process.env.NODE_OPTIONS || ''
+  // preload script to label the zero-cache child process
+  const preloadPath = resolve(config.dataDir, '.orez-zero-title.cjs')
+  const zeroTitle = orezTitle('orez [zero]')
+  writeFileSync(preloadPath, `process.title = ${JSON.stringify(zeroTitle)}\n`)
+
+  const nodeOptions = [
+    sqliteMode === 'wasm' ? '--max-old-space-size=16384' : '',
+    `--require ${preloadPath}`,
+    process.env.NODE_OPTIONS || '',
+  ]
+    .filter(Boolean)
+    .join(' ')
   if (nodeOptions.trim()) env.NODE_OPTIONS = nodeOptions.trim()
 
   const child = spawn(zeroCacheBin, [], {

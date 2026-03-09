@@ -3,6 +3,10 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
+import { orezTitle } from './process-title.js'
+
+process.title = orezTitle()
+
 import { defineCommand, runMain } from 'citty'
 import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 

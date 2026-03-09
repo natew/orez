@@ -8,6 +8,10 @@ import { totalmem } from 'node:os'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { orezTitle } from './process-title.js'
+
+process.title = orezTitle()
+
 const currentOpts = process.env.NODE_OPTIONS || ''
 
 if (!currentOpts.includes('--max-old-space-size') && !process.env.__OREZ_SPAWNED) {
