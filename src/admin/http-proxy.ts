@@ -90,6 +90,13 @@ export function startHttpProxy(opts: {
   const server = createServer((client: Socket) => {
     const start = Date.now()
     const target = connect(targetPort, '127.0.0.1')
+
+    // keep websocket connections alive (zero client uses long-lived ws)
+    client.setKeepAlive(true, 30_000)
+    client.setTimeout(0)
+    target.setKeepAlive(true, 30_000)
+    target.setTimeout(0)
+
     let logged = false
     let reqMethod = ''
     let reqPath = ''
