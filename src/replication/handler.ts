@@ -672,6 +672,10 @@ export async function handleStartReplication(
           if (changes.length === 0) {
             lastWatermark = batchEnd
             lastStreamedWatermark = batchEnd
+            // all changes were filtered out (e.g. shard internal tables).
+            // sleep briefly to avoid a tight loop when zero-cache is
+            // continuously writing internal state.
+            await waitForWakeup(pollIntervalIdle)
             continue
           }
 
