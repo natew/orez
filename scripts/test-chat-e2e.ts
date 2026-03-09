@@ -305,13 +305,13 @@ function main() {
     // PGlite syncs user data (data-username) before channel data
     helpers = helpers.replace(
       `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  console.info(\`✅ Logged in as admin\`)`,
-      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  // wait for channel data to sync from zero (PGlite latency)\n  await page.locator('[data-testid^=\"channel-\"]').first().waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {})\n  console.info(\`✅ Logged in as admin\`)`
+      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  // wait for channel data to sync from zero (PGlite latency)\n  await page.locator('[data-testid^="channel-"]').first().waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {})\n  console.info(\`✅ Logged in as admin\`)`
     )
     // wait for pointer-events before clicking textbox in sendMessageIn
     // PGlite is slower to sync channel permissions, which gate pointer-events
     helpers = helpers.replace(
       `await channelInput.click()\n  await page.waitForTimeout(200)`,
-      `await page.waitForFunction(\n    (testId) => {\n      const el = document.querySelector(\`[data-testid=\"\${testId}\"] [role=\"textbox\"]\`)\n      return el ? getComputedStyle(el).pointerEvents !== 'none' : false\n    },\n    \`\${inputName}-input\`,\n    { timeout: 30000 }\n  ).catch(() => {})\n  await channelInput.click()\n  await page.waitForTimeout(200)`
+      `await page.waitForFunction(\n    (testId) => {\n      const el = document.querySelector(\`[data-testid="\${testId}"] [role="textbox"]\`)\n      return el ? getComputedStyle(el).pointerEvents !== 'none' : false\n    },\n    \`\${inputName}-input\`,\n    { timeout: 30000 }\n  ).catch(() => {})\n  await channelInput.click()\n  await page.waitForTimeout(200)`
     )
     // stabilize hoverMessage: wait for message element to be attached before scrolling
     // under PGlite, Zero resync can re-render the message list, detaching DOM elements
@@ -322,7 +322,7 @@ function main() {
     // after loginAsUser, wait for sidebar channels to sync from Zero
     helpers = helpers.replace(
       `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  await dismissHud(page)\n  console.info(\`Logged in as \${email}\`)`,
-      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  await dismissHud(page)\n  // wait for channel data to sync from zero (PGlite latency)\n  await page.locator('[data-testid^=\"channel-\"]').first().waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {})\n  console.info(\`Logged in as \${email}\`)`
+      `await dismissOnboarding(page)\n  await dismissViteOverlay(page)\n  await dismissHud(page)\n  // wait for channel data to sync from zero (PGlite latency)\n  await page.locator('[data-testid^="channel-"]').first().waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {})\n  console.info(\`Logged in as \${email}\`)`
     )
     writeFileSync(helpersPath, helpers)
   }
