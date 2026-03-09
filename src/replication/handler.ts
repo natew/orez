@@ -529,7 +529,7 @@ export async function handleStartReplication(
   // pg_notify as secondary signal, polling as final fallback.
   const pollIntervalIdle = 5000
   const batchSize = 50000
-  const purgeEveryN = 5
+  const purgeEveryN = 1
   const shardRescanIntervalMs = 10_000
   let running = true
   let pollsSincePurge = 0
