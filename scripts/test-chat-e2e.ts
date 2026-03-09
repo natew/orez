@@ -280,11 +280,14 @@ function main() {
       return `timeout: ${ms * 3}`
     })
     // scale function default params: timeout = N, timeoutMs = N
-    content = content.replace(/(timeout(?:Ms)?)\s*=\s*(\d+)_?(\d*)/g, (_match, name, major, minor) => {
-      const ms = Number(major + (minor || ''))
-      if (ms >= 60_000) return _match
-      return `${name} = ${ms * 3}`
-    })
+    content = content.replace(
+      /(timeout(?:Ms)?)\s*=\s*(\d+)_?(\d*)/g,
+      (_match, name, major, minor) => {
+        const ms = Number(major + (minor || ''))
+        if (ms >= 60_000) return _match
+        return `${name} = ${ms * 3}`
+      }
+    )
     return content
   }
 
