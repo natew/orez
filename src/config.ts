@@ -17,6 +17,7 @@ export interface ZeroLiteConfig {
   skipZeroCache: boolean
   disableWasmSqlite: boolean
   forceWasmSqlite: boolean
+  useWorkerThreads: boolean
   logLevel: LogLevel
   pgliteOptions: Partial<PGliteOptions>
   // lifecycle hooks
@@ -37,6 +38,7 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     skipZeroCache: overrides.skipZeroCache || false,
     disableWasmSqlite: overrides.disableWasmSqlite ?? false,
     forceWasmSqlite: overrides.forceWasmSqlite ?? false,
+    useWorkerThreads: overrides.useWorkerThreads ?? true,
     logLevel: overrides.logLevel || (process.env.OREZ_LOG_LEVEL as LogLevel) || 'warn',
     pgliteOptions: overrides.pgliteOptions || {},
     onDbReady: overrides.onDbReady,

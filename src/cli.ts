@@ -944,6 +944,11 @@ const main = defineCommand({
       description: 'force wasm bedrock-sqlite even if native is available',
       default: false,
     },
+    'no-worker-threads': {
+      type: 'boolean',
+      description: 'run pglite in-process instead of worker threads',
+      default: false,
+    },
     'on-db-ready': {
       type: 'string',
       description: 'command to run after db+proxy are ready, before zero-cache starts',
@@ -994,6 +999,7 @@ const main = defineCommand({
       skipZeroCache: args['skip-zero-cache'],
       disableWasmSqlite: args['disable-wasm-sqlite'],
       forceWasmSqlite: args['force-wasm-sqlite'],
+      useWorkerThreads: !args['no-worker-threads'],
       logLevel: (args['log-level'] as 'error' | 'warn' | 'info' | 'debug') || undefined,
       onDbReady: args['on-db-ready'] || undefined,
       onHealthy: args['on-healthy'] || undefined,

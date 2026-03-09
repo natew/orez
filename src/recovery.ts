@@ -7,12 +7,13 @@ import { mkdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import { log } from './log.js'
+import { createPGliteWorker } from './pglite-manager.js'
 
 import type { PGlite } from '@electric-sql/pglite'
 import type { ChildProcess } from 'node:child_process'
 
 export interface RecoveryContext {
-  config: { dataDir: string }
+  config: { dataDir: string; useWorkerThreads?: boolean }
   instances: {
     postgres: PGlite
     cvr: PGlite
@@ -74,19 +75,27 @@ export async function recoverFromCdcCorruption(ctx: RecoveryContext): Promise<vo
   }
 
   // recreate CVR/CDB instances
-  const { PGlite } = await import('@electric-sql/pglite')
-  mkdirSync(resolve(config.dataDir, 'pgdata-cvr'), { recursive: true })
-  mkdirSync(resolve(config.dataDir, 'pgdata-cdb'), { recursive: true })
-  instances.cvr = new PGlite({
-    dataDir: resolve(config.dataDir, 'pgdata-cvr'),
-    relaxedDurability: true,
-  })
-  instances.cdb = new PGlite({
-    dataDir: resolve(config.dataDir, 'pgdata-cdb'),
-    relaxedDurability: true,
-  })
-  await instances.cvr.waitReady
-  await instances.cdb.waitReady
+  if (config.useWorkerThreads) {
+    const cvrProxy = createPGliteWorker(resolve(config.dataDir, 'pgdata-cvr'), 'cvr')
+    const cdbProxy = createPGliteWorker(resolve(config.dataDir, 'pgdata-cdb'), 'cdb')
+    await Promise.all([cvrProxy.waitReady, cdbProxy.waitReady])
+    instances.cvr = cvrProxy as unknown as PGlite
+    instances.cdb = cdbProxy as unknown as PGlite
+  } else {
+    const { PGlite: PGliteCtor } = await import('@electric-sql/pglite')
+    mkdirSync(resolve(config.dataDir, 'pgdata-cvr'), { recursive: true })
+    mkdirSync(resolve(config.dataDir, 'pgdata-cdb'), { recursive: true })
+    instances.cvr = new PGliteCtor({
+      dataDir: resolve(config.dataDir, 'pgdata-cvr'),
+      relaxedDurability: true,
+    })
+    instances.cdb = new PGliteCtor({
+      dataDir: resolve(config.dataDir, 'pgdata-cdb'),
+      relaxedDurability: true,
+    })
+    await instances.cvr.waitReady
+    await instances.cdb.waitReady
+  }
   log.orez('recreated CVR/CDB instances')
 
   // clear upstream replication tracking

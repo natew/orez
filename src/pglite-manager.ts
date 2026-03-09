@@ -23,6 +23,7 @@ import { uuid_ossp } from '@electric-sql/pglite/contrib/uuid_ossp'
 import { vector } from '@electric-sql/pglite/vector'
 
 import { log } from './log.js'
+import { PGliteWorkerProxy } from './pglite-ipc.js'
 
 import type { ZeroLiteConfig } from './config.js'
 
@@ -208,6 +209,97 @@ export async function createPGliteInstances(
   }
 
   return { postgres, cvr, cdb }
+}
+
+/**
+ * create worker-backed pglite instances.
+ *
+ * each instance runs in its own worker thread with a separate event loop,
+ * so PGlite WASM execution doesn't block the proxy or replication handler.
+ * ArrayBuffers are transferred (not copied) for wire protocol data.
+ */
+export async function createPGliteWorkerInstances(
+  config: ZeroLiteConfig
+): Promise<PGliteInstances> {
+  // migrate from old single-instance layout (pgdata → pgdata-postgres)
+  const pgliteDataDir = (config.pgliteOptions as Record<string, any>)?.dataDir
+  if (!pgliteDataDir || !String(pgliteDataDir).startsWith('memory://')) {
+    const oldDataPath = resolve(config.dataDir, 'pgdata')
+    const newDataPath = resolve(config.dataDir, 'pgdata-postgres')
+    if (existsSync(oldDataPath) && !existsSync(newDataPath)) {
+      renameSync(oldDataPath, newDataPath)
+      log.debug.pglite('migrated pgdata → pgdata-postgres')
+    }
+  }
+
+  const useMemory =
+    typeof pgliteDataDir === 'string' && pgliteDataDir.startsWith('memory://')
+  const { dataDir: _ud, debug: _dbg, ...userOpts } = config.pgliteOptions as Record<string, any>
+
+  function makeWorkerConfig(name: string, withExtensions: boolean) {
+    const dataPath = useMemory ? 'memory://' : resolve(config.dataDir, `pgdata-${name}`)
+    if (!useMemory) {
+      mkdirSync(dataPath, { recursive: true })
+      if (cleanStaleLocks(dataPath)) {
+        log.debug.pglite(`cleaned stale locks in ${name}`)
+      }
+    }
+    return {
+      dataDir: dataPath,
+      name,
+      withExtensions,
+      debug: config.logLevel === 'debug' ? 1 : 0,
+      pgliteOptions: userOpts,
+    }
+  }
+
+  log.pglite('starting worker threads for postgres, cvr, cdb')
+
+  // create all 3 worker proxies in parallel
+  const pgProxy = new PGliteWorkerProxy(makeWorkerConfig('postgres', true))
+  const cvrProxy = new PGliteWorkerProxy(makeWorkerConfig('cvr', false))
+  const cdbProxy = new PGliteWorkerProxy(makeWorkerConfig('cdb', false))
+
+  await Promise.all([pgProxy.waitReady, cvrProxy.waitReady, cdbProxy.waitReady])
+
+  log.pglite('all worker threads ready')
+
+  // postgres-specific setup
+  await pgProxy.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
+
+  // create publication only when explicitly configured
+  const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
+  if (pubName) {
+    const pubs = await pgProxy.query<{ count: string }>(
+      `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
+      [pubName]
+    )
+    if (Number(pubs.rows[0].count) === 0) {
+      const quoted = '"' + pubName.replace(/"/g, '""') + '"'
+      await pgProxy.exec(`CREATE PUBLICATION ${quoted}`)
+    }
+  }
+
+  // cast to PGlite — our proxy implements the same interface surface
+  return {
+    postgres: pgProxy as unknown as PGlite,
+    cvr: cvrProxy as unknown as PGlite,
+    cdb: cdbProxy as unknown as PGlite,
+  }
+}
+
+/** create a single worker-backed PGlite instance (for CVR/CDB recreation during reset) */
+export function createPGliteWorker(
+  dataDir: string,
+  name: string,
+): PGliteWorkerProxy {
+  return new PGliteWorkerProxy({
+    dataDir,
+    name,
+    withExtensions: false,
+    debug: 0,
+    pgliteOptions: {},
+  })
 }
 
 /** run pending migrations, returns count of newly applied migrations */

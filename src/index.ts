@@ -19,7 +19,12 @@ import { createLogStore, type LogStore } from './admin/log-store.js'
 import { getConfig, getConnectionString } from './config.js'
 import { log, port, setLogLevel, setLogStore } from './log.js'
 import { startPgProxy } from './pg-proxy.js'
-import { createPGliteInstances, runMigrations } from './pglite-manager.js'
+import {
+  createPGliteInstances,
+  createPGliteWorkerInstances,
+  createPGliteWorker,
+  runMigrations,
+} from './pglite-manager.js'
 import { findPort } from './port.js'
 import { orezTitle } from './process-title.js'
 import {
@@ -28,6 +33,7 @@ import {
   recoverFromCdcCorruption,
 } from './recovery.js'
 import { installChangeTracking } from './replication/change-tracker.js'
+import { resetReplicationState } from './replication/handler.js'
 import {
   formatNativeBootstrapInstructions,
   hasMissingNativeBinarySignature,
@@ -238,7 +244,11 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   }
 
   // start pglite (separate instances for postgres, zero_cvr, zero_cdb)
-  const instances = await createPGliteInstances(config)
+  // worker threads give each instance its own event loop so PGlite WASM
+  // execution doesn't block the proxy or replication handler
+  const instances = config.useWorkerThreads
+    ? await createPGliteWorkerInstances(config)
+    : await createPGliteInstances(config)
   const db = instances.postgres
   const managedPub = getManagedPublicationConfig()
   if (managedPub.managedByOrez) {
@@ -469,19 +479,33 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
         // recreate CVR/CDB instances
         log.orez('recreating CVR/CDB...')
-        const { PGlite } = await import('@electric-sql/pglite')
-        mkdirSync(resolve(config.dataDir, 'pgdata-cvr'), { recursive: true })
-        mkdirSync(resolve(config.dataDir, 'pgdata-cdb'), { recursive: true })
-        instances.cvr = new PGlite({
-          dataDir: resolve(config.dataDir, 'pgdata-cvr'),
-          relaxedDurability: true,
-        })
-        instances.cdb = new PGlite({
-          dataDir: resolve(config.dataDir, 'pgdata-cdb'),
-          relaxedDurability: true,
-        })
-        await instances.cvr.waitReady
-        await instances.cdb.waitReady
+        if (config.useWorkerThreads) {
+          const cvrProxy = createPGliteWorker(
+            resolve(config.dataDir, 'pgdata-cvr'),
+            'cvr',
+          )
+          const cdbProxy = createPGliteWorker(
+            resolve(config.dataDir, 'pgdata-cdb'),
+            'cdb',
+          )
+          await Promise.all([cvrProxy.waitReady, cdbProxy.waitReady])
+          instances.cvr = cvrProxy as unknown as PGlite
+          instances.cdb = cdbProxy as unknown as PGlite
+        } else {
+          const { PGlite: PGliteCtor } = await import('@electric-sql/pglite')
+          mkdirSync(resolve(config.dataDir, 'pgdata-cvr'), { recursive: true })
+          mkdirSync(resolve(config.dataDir, 'pgdata-cdb'), { recursive: true })
+          instances.cvr = new PGliteCtor({
+            dataDir: resolve(config.dataDir, 'pgdata-cvr'),
+            relaxedDurability: true,
+          })
+          instances.cdb = new PGliteCtor({
+            dataDir: resolve(config.dataDir, 'pgdata-cdb'),
+            relaxedDurability: true,
+          })
+          await instances.cvr.waitReady
+          await instances.cdb.waitReady
+        }
         log.orez('CVR/CDB recreated')
 
         // remove stale zero shard schemas from upstream; these can outlive CVR/CDB
@@ -516,6 +540,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
           .catch(() => {})
         log.orez('cleared upstream replication tracking state')
       }
+
+      // clear cached schema info so the handler re-introspects on reconnect
+      resetReplicationState()
 
       // always clean up replica file
       cleanupStaleReplica(config)
