@@ -234,7 +234,11 @@ export async function createPGliteWorkerInstances(
 
   const useMemory =
     typeof pgliteDataDir === 'string' && pgliteDataDir.startsWith('memory://')
-  const { dataDir: _ud, debug: _dbg, ...userOpts } = config.pgliteOptions as Record<string, any>
+  const {
+    dataDir: _ud,
+    debug: _dbg,
+    ...userOpts
+  } = config.pgliteOptions as Record<string, any>
 
   function makeWorkerConfig(name: string, withExtensions: boolean) {
     const dataPath = useMemory ? 'memory://' : resolve(config.dataDir, `pgdata-${name}`)
@@ -289,10 +293,7 @@ export async function createPGliteWorkerInstances(
 }
 
 /** create a single worker-backed PGlite instance (for CVR/CDB recreation during reset) */
-export function createPGliteWorker(
-  dataDir: string,
-  name: string,
-): PGliteWorkerProxy {
+export function createPGliteWorker(dataDir: string, name: string): PGliteWorkerProxy {
   return new PGliteWorkerProxy({
     dataDir,
     name,

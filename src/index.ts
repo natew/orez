@@ -482,11 +482,11 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         if (config.useWorkerThreads) {
           const cvrProxy = createPGliteWorker(
             resolve(config.dataDir, 'pgdata-cvr'),
-            'cvr',
+            'cvr'
           )
           const cdbProxy = createPGliteWorker(
             resolve(config.dataDir, 'pgdata-cdb'),
-            'cdb',
+            'cdb'
           )
           await Promise.all([cvrProxy.waitReady, cdbProxy.waitReady])
           instances.cvr = cvrProxy as unknown as PGlite

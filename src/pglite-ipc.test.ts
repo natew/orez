@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll } from 'vitest'
+
 import { PGliteWorkerProxy } from './pglite-ipc.js'
 
 describe('PGliteWorkerProxy', () => {

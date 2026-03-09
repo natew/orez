@@ -9,9 +9,9 @@
  * keep IPC overhead near-zero for wire protocol data.
  */
 
-import { Worker } from 'node:worker_threads'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { Worker } from 'node:worker_threads'
 
 import { log } from './log.js'
 import { signalReplicationChange } from './replication/handler.js'
@@ -99,31 +99,34 @@ export class PGliteWorkerProxy {
   }
 
   private installMessageHandler() {
-    this.worker.on('message', (msg: { type: string; id?: number; [key: string]: any }) => {
-      if (msg.type === 'notification') {
-        const callbacks = this.notificationCallbacks.get(msg.channel)
-        if (callbacks) {
-          for (const cb of callbacks) {
-            try {
-              cb(msg.payload)
-            } catch {}
+    this.worker.on(
+      'message',
+      (msg: { type: string; id?: number; [key: string]: any }) => {
+        if (msg.type === 'notification') {
+          const callbacks = this.notificationCallbacks.get(msg.channel)
+          if (callbacks) {
+            for (const cb of callbacks) {
+              try {
+                cb(msg.payload)
+              } catch {}
+            }
           }
+          return
         }
-        return
-      }
 
-      const req = this.pending.get(msg.id!)
-      if (!req) return
-      this.pending.delete(msg.id!)
+        const req = this.pending.get(msg.id!)
+        if (!req) return
+        this.pending.delete(msg.id!)
 
-      if (msg.type === 'error') {
-        const err = new Error(msg.message) as Error & { code?: string }
-        if (msg.code) err.code = msg.code
-        req.reject(err)
-      } else {
-        req.resolve(msg)
+        if (msg.type === 'error') {
+          const err = new Error(msg.message) as Error & { code?: string }
+          if (msg.code) err.code = msg.code
+          req.reject(err)
+        } else {
+          req.resolve(msg)
+        }
       }
-    })
+    )
   }
 
   private send(msg: Record<string, unknown>, transfer?: ArrayBuffer[]): Promise<any> {
@@ -146,10 +149,7 @@ export class PGliteWorkerProxy {
     // copy to a transferable buffer then transfer (avoids copying in the worker)
     const buf = new ArrayBuffer(data.byteLength)
     new Uint8Array(buf).set(data)
-    const result = await this.send(
-      { type: 'execProtocolRaw', data: buf, options },
-      [buf]
-    )
+    const result = await this.send({ type: 'execProtocolRaw', data: buf, options }, [buf])
     return new Uint8Array(result.data)
   }
 
