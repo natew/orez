@@ -173,9 +173,10 @@ for (const p of packages) {
     }
   }
 
-  // resolve workspace:* references in the tmp package.json
+  // resolve workspace:* references and set version in the tmp package.json
   const tmpPkgPath = join(tmpDir, 'package.json')
   const tmpPkg = JSON.parse(readFileSync(tmpPkgPath, 'utf-8'))
+  tmpPkg.version = p.next
   for (const depField of ['dependencies', 'devDependencies', 'peerDependencies']) {
     const deps = tmpPkg[depField]
     if (!deps) continue
