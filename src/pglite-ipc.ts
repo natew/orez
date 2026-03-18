@@ -24,9 +24,17 @@ interface PendingRequest {
 }
 
 const WRITE_PREFIXES = ['insert', 'update', 'delete', 'copy', 'truncate']
-function isWriteSQL(sql: string): boolean {
+// shard-internal tables that the replication handler filters out.
+// signaling for these just causes spurious wakeups + mutex contention.
+const SHARD_INTERNAL_TABLES = ['"replicas"', '"mutations"', '"replicationState"']
+function isReplicatedWrite(sql: string): boolean {
   const q = sql.trimStart().toLowerCase()
-  return WRITE_PREFIXES.some((p) => q.startsWith(p))
+  if (!WRITE_PREFIXES.some((p) => q.startsWith(p))) return false
+  // skip shard-internal writes (zero-cache manages these, not replicated)
+  for (const t of SHARD_INTERNAL_TABLES) {
+    if (q.includes(t.toLowerCase())) return false
+  }
+  return true
 }
 
 // resolve worker file path — .ts in dev/test (vitest), .js when compiled
@@ -158,7 +166,7 @@ export class PGliteWorkerProxy {
     params?: any[]
   ): Promise<{ rows: T[]; affectedRows?: number }> {
     const result = await this.send({ type: 'query', sql, params })
-    if (this.name === 'postgres' && isWriteSQL(sql)) {
+    if (this.name === 'postgres' && isReplicatedWrite(sql)) {
       signalReplicationChange()
     }
     return { rows: result.rows ?? [], affectedRows: result.affectedRows }
@@ -166,7 +174,7 @@ export class PGliteWorkerProxy {
 
   async exec(sql: string): Promise<{ affectedRows?: number }[]> {
     const result = await this.send({ type: 'exec', sql })
-    if (this.name === 'postgres' && isWriteSQL(sql)) {
+    if (this.name === 'postgres' && isReplicatedWrite(sql)) {
       signalReplicationChange()
     }
     return result.results ?? []

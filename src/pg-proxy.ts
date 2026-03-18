@@ -471,16 +471,15 @@ export async function startPgProxy(
   }
 
   // signal replication handler after writes complete.
-  // setTimeout(0) defers to the next event loop tick, ensuring the socket
-  // response is flushed before the handler wakes up and acquires the mutex.
-  // coalesces writes that complete in the same tick.
+  // 2ms trailing-edge debounce coalesces rapid sequential writes and ensures
+  // the socket response is fully flushed before the handler acquires the mutex.
   let signalTimer: ReturnType<typeof setTimeout> | null = null
   function signalWrite() {
-    if (signalTimer) return // already scheduled for this tick
+    if (signalTimer) clearTimeout(signalTimer)
     signalTimer = setTimeout(() => {
       signalTimer = null
       signalReplicationChange()
-    }, 0)
+    }, 2)
   }
 
   const server = createServer(async (socket: Socket) => {

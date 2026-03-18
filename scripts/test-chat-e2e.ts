@@ -260,7 +260,7 @@ function main() {
   // scale timeouts for PGlite latency (replication is trigger-based,
   // slightly slower than postgres WAL for mutation confirmation)
   const e2eDir = resolve(TEST_DIR, 'src/integration/e2e')
-  const SCALE = 1.5
+  const SCALE = 2
   log(`scaling e2e timeouts ${SCALE}x for PGlite latency`)
   for (const entry of readdirSync(e2eDir)) {
     if (!entry.endsWith('.ts')) continue
