@@ -8,9 +8,9 @@
  * run: vitest run src/integration/replication-latency.test.ts
  */
 
+import postgres from 'postgres'
 import { describe, expect, test, beforeAll, afterAll } from 'vitest'
 import WebSocket from 'ws'
-import postgres from 'postgres'
 
 import { startZeroLite } from '../index.js'
 import { installChangeTracking } from '../replication/change-tracker.js'
@@ -108,7 +108,9 @@ describe('replication latency', { timeout: 120000 }, () => {
     const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
     if (pubName) {
       const quotedPub = '"' + pubName.replace(/"/g, '""') + '"'
-      await db.exec(`ALTER PUBLICATION ${quotedPub} ADD TABLE "public"."latency_test"`).catch(() => {})
+      await db
+        .exec(`ALTER PUBLICATION ${quotedPub} ADD TABLE "public"."latency_test"`)
+        .catch(() => {})
       await installChangeTracking(db)
     }
     await installAllowAllPermissions(db, ['latency_test'])
@@ -169,7 +171,9 @@ describe('replication latency', { timeout: 120000 }, () => {
     const max = latencies[latencies.length - 1]
 
     console.log(`\n[replication latency] ${NUM_WRITES} single inserts via wire protocol:`)
-    console.log(`  avg=${avg.toFixed(1)}ms  p50=${p50.toFixed(1)}ms  p95=${p95.toFixed(1)}ms  p99=${p99.toFixed(1)}ms  max=${max.toFixed(1)}ms`)
+    console.log(
+      `  avg=${avg.toFixed(1)}ms  p50=${p50.toFixed(1)}ms  p95=${p95.toFixed(1)}ms  p99=${p99.toFixed(1)}ms  max=${max.toFixed(1)}ms`
+    )
     console.log(`  all: ${latencies.map((l) => l.toFixed(0)).join(', ')}ms`)
 
     // assert reasonable latency — under 200ms avg means the UI re-render
@@ -204,13 +208,17 @@ describe('replication latency', { timeout: 120000 }, () => {
     const pokeParts = messages.filter((m) => Array.isArray(m) && m[0] === 'pokePart')
 
     console.log(`\n[poke batches] after 1 INSERT:`)
-    console.log(`  pokeStart=${pokeStarts.length}  pokePart=${pokeParts.length}  pokeEnd=${pokeEnds.length}`)
+    console.log(
+      `  pokeStart=${pokeStarts.length}  pokePart=${pokeParts.length}  pokeEnd=${pokeEnds.length}`
+    )
     console.log(`  total messages: ${messages.length}`)
     for (const msg of messages) {
       if (Array.isArray(msg)) {
         const type = msg[0]
         if (type === 'pokePart' && msg[1]?.rowsPatch) {
-          const tables = msg[1].rowsPatch.map((r: any) => `${r.op}:${r.tableName}`).join(', ')
+          const tables = msg[1].rowsPatch
+            .map((r: any) => `${r.op}:${r.tableName}`)
+            .join(', ')
           console.log(`    pokePart: ${tables}`)
         } else {
           console.log(`    ${type}`)
@@ -259,11 +267,15 @@ describe('replication latency', { timeout: 120000 }, () => {
     const pokeStarts = messages.filter((m) => Array.isArray(m) && m[0] === 'pokeStart')
     const pokeParts = messages.filter((m) => Array.isArray(m) && m[0] === 'pokePart')
 
-    console.log(`\n[shard poke batches] after INSERT + shard schemas=${shardSchemas.length}:`)
+    console.log(
+      `\n[shard poke batches] after INSERT + shard schemas=${shardSchemas.length}:`
+    )
     console.log(`  pokeStart=${pokeStarts.length}  pokePart=${pokeParts.length}`)
     for (const msg of messages) {
       if (Array.isArray(msg) && msg[0] === 'pokePart' && msg[1]?.rowsPatch) {
-        const tables = msg[1].rowsPatch.map((r: any) => `${r.op}:${r.tableName}`).join(', ')
+        const tables = msg[1].rowsPatch
+          .map((r: any) => `${r.op}:${r.tableName}`)
+          .join(', ')
         console.log(`    pokePart: ${tables}`)
       }
     }
@@ -310,7 +322,9 @@ describe('replication latency', { timeout: 120000 }, () => {
     const replicationMs = totalMs - writeMs
 
     console.log(`\n[replication latency] ${NUM_WRITES} rapid sequential inserts:`)
-    console.log(`  write=${writeMs.toFixed(1)}ms  replication=${replicationMs.toFixed(1)}ms  total=${totalMs.toFixed(1)}ms`)
+    console.log(
+      `  write=${writeMs.toFixed(1)}ms  replication=${replicationMs.toFixed(1)}ms  total=${totalMs.toFixed(1)}ms`
+    )
     console.log(`  received ${receivedIds.size}/${NUM_WRITES} rows`)
 
     expect(receivedIds.size).toBe(NUM_WRITES)

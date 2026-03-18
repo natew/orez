@@ -68,10 +68,11 @@ const orezPkg = JSON.parse(readFileSync(orezPkgPath, 'utf-8'))
 const orezNext = bumpVersion(orezPkg.version)
 packages.push({ dir: root, pkgPath: orezPkgPath, pkg: orezPkg, next: orezNext })
 
-// bedrock-sqlite (workspace)
+// bedrock-sqlite (workspace) — skip if wasm dist not built
 const sqliteWasmDir = resolve(root, 'sqlite-wasm')
 const sqlitePkgPath = resolve(sqliteWasmDir, 'package.json')
-if (existsSync(sqlitePkgPath)) {
+const sqliteDistExists = existsSync(resolve(sqliteWasmDir, 'dist', 'sqlite3.wasm'))
+if (existsSync(sqlitePkgPath) && sqliteDistExists) {
   const sqlitePkg = JSON.parse(readFileSync(sqlitePkgPath, 'utf-8'))
   const sqliteNext = bumpVersion(sqlitePkg.version)
   packages.push({
@@ -80,6 +81,8 @@ if (existsSync(sqlitePkgPath)) {
     pkg: sqlitePkg,
     next: sqliteNext,
   })
+} else if (existsSync(sqlitePkgPath) && !sqliteDistExists) {
+  console.info('skipping bedrock-sqlite (no wasm dist built)')
 }
 
 // for --pack-only, use current versions instead of bumping

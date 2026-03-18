@@ -200,7 +200,8 @@ function main() {
     const sqliteDst = resolve(TEST_DIR, 'node_modules', 'bedrock-sqlite')
     if (existsSync(sqliteDst)) {
       const sqliteDistDst = resolve(sqliteDst, 'dist')
-      if (existsSync(sqliteDistDst)) rmSync(sqliteDistDst, { recursive: true, force: true })
+      if (existsSync(sqliteDistDst))
+        rmSync(sqliteDistDst, { recursive: true, force: true })
     } else {
       mkdirSync(sqliteDst, { recursive: true })
     }
