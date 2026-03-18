@@ -11,6 +11,7 @@ import { log } from '../log.js'
 const textEncoder = new TextEncoder()
 import {
   getChangesSince,
+  getCurrentWatermark,
   purgeConsumedChanges,
   installTriggersOnShardTables,
   type ChangeRecord,
@@ -237,8 +238,16 @@ export async function handleReplicationQuery(
     const lsn = lsnToString(nextLsn())
     const snapshotName = `00000003-00000001-1`
 
-    // fresh slot = fresh zero-cache instance, reset watermark
-    lastStreamedWatermark = 0
+    // set watermark to current DB state so replication only delivers changes
+    // that happen AFTER this point. this mirrors real postgres behavior where
+    // CREATE_REPLICATION_SLOT creates a consistent snapshot — the initial copy
+    // captures everything up to this point, and replication picks up from here.
+    // on reconnect this is effectively a no-op since the watermark is already
+    // at or past the current DB state.
+    const currentWm = await getCurrentWatermark(db)
+    if (currentWm > lastStreamedWatermark) {
+      lastStreamedWatermark = currentWm
+    }
 
     // persist slot so pg_replication_slots queries find it
     await db.query(

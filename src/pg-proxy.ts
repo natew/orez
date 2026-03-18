@@ -470,18 +470,17 @@ export async function startPgProxy(
     return { db: instances.postgres, mutex: mutexes.postgres, txState: txStates.postgres }
   }
 
-  // shared debounce timer for extended protocol write signaling.
-  // 2ms trailing-edge: each Sync resets the timer, so the signal fires
-  // 2ms after the LAST write in a pipeline (coalesces rapid sequential writes).
-  // 2ms is enough because postgres.js pipelines are sub-ms per statement.
+  // signal replication handler after writes complete.
+  // setTimeout(0) defers to the next event loop tick, ensuring the socket
+  // response is flushed before the handler wakes up and acquires the mutex.
+  // coalesces writes that complete in the same tick.
   let signalTimer: ReturnType<typeof setTimeout> | null = null
-  function debouncedSignal() {
-    if (signalTimer) clearTimeout(signalTimer)
+  function signalWrite() {
+    if (signalTimer) return // already scheduled for this tick
     signalTimer = setTimeout(() => {
       signalTimer = null
-      log.debug.proxy('ext-write: debounced signal firing')
       signalReplicationChange()
-    }, 2)
+    }, 0)
   }
 
   const server = createServer(async (socket: Socket) => {
@@ -657,7 +656,7 @@ export async function startPgProxy(
               // signal replication handler on postgres writes
               if (dbName === 'postgres' && extWritePending) {
                 extWritePending = false
-                debouncedSignal()
+                signalWrite()
               }
             } else {
               // strip ReadyForQuery from non-Sync pipeline messages

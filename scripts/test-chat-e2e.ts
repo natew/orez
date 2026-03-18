@@ -193,24 +193,27 @@ function main() {
     cpSync(resolve(OREZ_ROOT, 'src'), resolve(orezDst, 'src'), { recursive: true })
   }
 
-  // step 4: copy bedrock-sqlite dist
-  log('installing local bedrock-sqlite build')
-  const sqliteDst = resolve(TEST_DIR, 'node_modules', 'bedrock-sqlite')
-  if (existsSync(sqliteDst)) {
-    const sqliteDistDst = resolve(sqliteDst, 'dist')
-    if (existsSync(sqliteDistDst)) rmSync(sqliteDistDst, { recursive: true, force: true })
+  // step 4: copy bedrock-sqlite dist (skip if wasm dist not built — wasm is disabled anyway)
+  const sqliteWasmDist = resolve(SQLITE_WASM_DIR, 'dist')
+  if (existsSync(sqliteWasmDist)) {
+    log('installing local bedrock-sqlite build')
+    const sqliteDst = resolve(TEST_DIR, 'node_modules', 'bedrock-sqlite')
+    if (existsSync(sqliteDst)) {
+      const sqliteDistDst = resolve(sqliteDst, 'dist')
+      if (existsSync(sqliteDistDst)) rmSync(sqliteDistDst, { recursive: true, force: true })
+    } else {
+      mkdirSync(sqliteDst, { recursive: true })
+    }
+    cpSync(sqliteWasmDist, resolve(sqliteDst, 'dist'), { recursive: true })
+    cpSync(resolve(SQLITE_WASM_DIR, 'package.json'), resolve(sqliteDst, 'package.json'))
+    if (existsSync(resolve(SQLITE_WASM_DIR, 'bedrock-sqlite.d.ts'))) {
+      cpSync(
+        resolve(SQLITE_WASM_DIR, 'bedrock-sqlite.d.ts'),
+        resolve(sqliteDst, 'bedrock-sqlite.d.ts')
+      )
+    }
   } else {
-    mkdirSync(sqliteDst, { recursive: true })
-  }
-  cpSync(resolve(SQLITE_WASM_DIR, 'dist'), resolve(sqliteDst, 'dist'), {
-    recursive: true,
-  })
-  cpSync(resolve(SQLITE_WASM_DIR, 'package.json'), resolve(sqliteDst, 'package.json'))
-  if (existsSync(resolve(SQLITE_WASM_DIR, 'bedrock-sqlite.d.ts'))) {
-    cpSync(
-      resolve(SQLITE_WASM_DIR, 'bedrock-sqlite.d.ts'),
-      resolve(sqliteDst, 'bedrock-sqlite.d.ts')
-    )
+    log('skipping bedrock-sqlite (no wasm dist built, wasm is disabled)')
   }
 
   // ensure orez bin link is correct
@@ -244,15 +247,8 @@ function main() {
   // (wasm shim had SQLITE_IOERR issues; native works reliably)
   log('using native @rocicorp/zero-sqlite3 (wasm disabled)')
 
-  // step 6: build database migrations
-  log('building database migrations')
-  execSync('bun migrate build', {
-    cwd: TEST_DIR,
-    stdio: 'inherit',
-    timeout: 120_000,
-  })
-
-  // step 7: clean .orez data dir (fresh state each run)
+  // step 6: clean .orez data dir (fresh state each run)
+  // migrations run automatically via orez's --on-db-ready hook in lite:backend
   // with PORT_OFFSET, env.ts sets OREZ_DATA_DIR=/tmp/orez-{offset}
   for (const dir of [resolve(TEST_DIR, '.orez'), `/tmp/orez-${portOffset}`]) {
     if (existsSync(dir)) {
@@ -261,63 +257,41 @@ function main() {
     }
   }
 
-  // scale timeouts 2x across e2e tests for PGlite latency
+  // scale timeouts for PGlite latency (replication is trigger-based,
+  // slightly slower than postgres WAL for mutation confirmation)
   const e2eDir = resolve(TEST_DIR, 'src/integration/e2e')
-  const scaleTimeout = (content: string): string => {
-    content = content.replace(
-      /test\.setTimeout\(\s*(\d+)_?(\d*)\s*\)/g,
-      (_match, major, minor) => {
-        const ms = Number(major + (minor || ''))
-        return `test.setTimeout(${ms * 2})`
-      }
-    )
-    content = content.replace(/timeout:\s*(\d+)_?(\d*)\b/g, (_match, major, minor) => {
-      const ms = Number(major + (minor || ''))
-      if (ms >= 60_000) return _match
-      return `timeout: ${ms * 2}`
-    })
-    return content
-  }
-
-  // patch all .ts files in e2e dir
-  log('scaling e2e timeouts 2x for PGlite latency')
+  const SCALE = 1.5
+  log(`scaling e2e timeouts ${SCALE}x for PGlite latency`)
   for (const entry of readdirSync(e2eDir)) {
     if (!entry.endsWith('.ts')) continue
     const filePath = resolve(e2eDir, entry)
     const content = readFileSync(filePath, 'utf-8')
-    const patched = scaleTimeout(content)
-    if (patched !== content) {
-      writeFileSync(filePath, patched)
-    }
+    let patched = content.replace(
+      /test\.setTimeout\(\s*(\d+)_?(\d*)\s*\)/g,
+      (_match, major, minor) => {
+        const ms = Number(major + (minor || ''))
+        return `test.setTimeout(${Math.round(ms * SCALE)})`
+      }
+    )
+    patched = patched.replace(/timeout:\s*(\d+)_?(\d*)\b/g, (_match, major, minor) => {
+      const ms = Number(major + (minor || ''))
+      if (ms >= 60_000) return _match
+      return `timeout: ${Math.round(ms * SCALE)}`
+    })
+    if (patched !== content) writeFileSync(filePath, patched)
   }
 
-  // adjust playwright config for PGlite: bump default timeout, disable maxFailures
+  // adjust playwright config
   for (const cfgPath of [
     resolve(TEST_DIR, 'playwright.config.ts'),
     resolve(TEST_DIR, 'src/integration/playwright.config.ts'),
   ]) {
     if (existsSync(cfgPath)) {
       let cfg = readFileSync(cfgPath, 'utf-8')
-      cfg = cfg.replace(/timeout:\s*20\s*\*\s*1000,/, 'timeout: 40 * 1000,')
-      // limit workers to reduce PGlite contention
-      cfg = cfg.replace(/fullyParallel:\s*false,/, 'fullyParallel: false,\n  workers: 2,')
-      // disable maxFailures so one slow test doesn't interrupt others
       cfg = cfg.replace(/maxFailures:\s*\d+/, 'maxFailures: 0')
-      // ensure retries are disabled (tests must genuinely pass)
       cfg = cfg.replace(/retries:\s*\d+/, 'retries: 0')
       writeFileSync(cfgPath, cfg)
     }
-  }
-
-  // bump tko test runner timeout for playwright (default 10min is tight for PGlite)
-  const tkoE2ePath = resolve(TEST_DIR, 'scripts/test/e2e.ts')
-  if (existsSync(tkoE2ePath)) {
-    let e2e = readFileSync(tkoE2ePath, 'utf-8')
-    e2e = e2e.replace(
-      /timeout:\s*time\.ms\.minutes\(\d+\)/g,
-      'timeout: time.ms.minutes(15)'
-    )
-    writeFileSync(tkoE2ePath, e2e)
   }
 
   log('local packages installed')
