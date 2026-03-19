@@ -159,6 +159,10 @@ function buildParameterStatus(name: string, value: string): Uint8Array {
 // pglite rejects SET TRANSACTION if any query (e.g. SET search_path) ran first
 const NOOP_QUERY_PATTERNS: RegExp[] = [/^\s*SET\s+TRANSACTION\b/i, /^\s*SET\s+SESSION\b/i]
 
+// ping queries (SELECT 1, SELECT 2, etc.) — respond synthetically to avoid
+// mutex contention during zero-cache connection warmup
+const PING_QUERY_RE = /^\s*SELECT\s+(\d+)\s*$/i
+
 /**
  * extract query text from a Parse message (0x50).
  */
@@ -294,6 +298,67 @@ function buildSetCompleteResponse(): Uint8Array {
   const result = new Uint8Array(cc.length + rfq.length)
   result.set(cc, 0)
   result.set(rfq, cc.length)
+  return result
+}
+
+/**
+ * build a synthetic response for SELECT <n> (ping queries).
+ * returns RowDescription + DataRow + CommandComplete + ReadyForQuery
+ * without touching PGlite or the mutex.
+ */
+function buildSelectIntResponse(val: string): Uint8Array {
+  const enc = textEncoder
+  const parts: Uint8Array[] = []
+
+  // RowDescription: 1 column named "?column?" type int4 (oid 23)
+  const colName = enc.encode('?column?\0')
+  const rdLen = 4 + 2 + colName.length + 4 + 2 + 4 + 2 + 4 + 2
+  const rd = new Uint8Array(1 + rdLen)
+  const rdv = new DataView(rd.buffer)
+  rd[0] = 0x54
+  rdv.setInt32(1, rdLen)
+  rdv.setInt16(5, 1)
+  rd.set(colName, 7)
+  let p = 7 + colName.length
+  rdv.setInt32(p, 0); p += 4   // tableOid
+  rdv.setInt16(p, 0); p += 2   // colAttr
+  rdv.setInt32(p, 23); p += 4  // typeOid (int4)
+  rdv.setInt16(p, 4); p += 2   // typeLen
+  rdv.setInt32(p, -1); p += 4  // typeMod
+  rdv.setInt16(p, 0)           // format (text)
+  parts.push(rd)
+
+  // DataRow: 1 column with the value
+  const valBytes = enc.encode(val)
+  const drLen = 4 + 2 + 4 + valBytes.length
+  const dr = new Uint8Array(1 + drLen)
+  const drv = new DataView(dr.buffer)
+  dr[0] = 0x44
+  drv.setInt32(1, drLen)
+  drv.setInt16(5, 1)
+  drv.setInt32(7, valBytes.length)
+  dr.set(valBytes, 11)
+  parts.push(dr)
+
+  // CommandComplete
+  const tag = enc.encode('SELECT 1\0')
+  const cc = new Uint8Array(1 + 4 + tag.length)
+  cc[0] = 0x43
+  new DataView(cc.buffer).setInt32(1, 4 + tag.length)
+  cc.set(tag, 5)
+  parts.push(cc)
+
+  // ReadyForQuery
+  const rfq = new Uint8Array(6)
+  rfq[0] = 0x5a
+  new DataView(rfq.buffer).setInt32(1, 5)
+  rfq[5] = 0x49 // 'I' idle
+  parts.push(rfq)
+
+  const total = parts.reduce((s, p) => s + p.length, 0)
+  const result = new Uint8Array(total)
+  let off = 0
+  for (const part of parts) { result.set(part, off); off += part.length }
   return result
 }
 
@@ -676,6 +741,18 @@ export async function startPgProxy(
           }
 
           // Simple Query (0x51) or standalone Sync — per-message mutex
+
+          // fast-path for ping queries (SELECT 1, SELECT 2, etc.)
+          // zero-cache fires these in parallel during warmup — bypass mutex entirely
+          if (msgType === 0x51) {
+            const queryText = extractQueryText(data)
+            if (queryText) {
+              const pingMatch = queryText.match(PING_QUERY_RE)
+              if (pingMatch) {
+                return buildSelectIntResponse(pingMatch[1])
+              }
+            }
+          }
 
           // check for no-op queries (only SimpleQuery has queries worth intercepting)
           if (isNoopQuery(data)) {
