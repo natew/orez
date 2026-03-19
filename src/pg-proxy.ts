@@ -320,12 +320,17 @@ function buildSelectIntResponse(val: string): Uint8Array {
   rdv.setInt16(5, 1)
   rd.set(colName, 7)
   let p = 7 + colName.length
-  rdv.setInt32(p, 0); p += 4   // tableOid
-  rdv.setInt16(p, 0); p += 2   // colAttr
-  rdv.setInt32(p, 23); p += 4  // typeOid (int4)
-  rdv.setInt16(p, 4); p += 2   // typeLen
-  rdv.setInt32(p, -1); p += 4  // typeMod
-  rdv.setInt16(p, 0)           // format (text)
+  rdv.setInt32(p, 0)
+  p += 4 // tableOid
+  rdv.setInt16(p, 0)
+  p += 2 // colAttr
+  rdv.setInt32(p, 23)
+  p += 4 // typeOid (int4)
+  rdv.setInt16(p, 4)
+  p += 2 // typeLen
+  rdv.setInt32(p, -1)
+  p += 4 // typeMod
+  rdv.setInt16(p, 0) // format (text)
   parts.push(rd)
 
   // DataRow: 1 column with the value
@@ -358,7 +363,10 @@ function buildSelectIntResponse(val: string): Uint8Array {
   const total = parts.reduce((s, p) => s + p.length, 0)
   const result = new Uint8Array(total)
   let off = 0
-  for (const part of parts) { result.set(part, off); off += part.length }
+  for (const part of parts) {
+    result.set(part, off)
+    off += part.length
+  }
   return result
 }
 
