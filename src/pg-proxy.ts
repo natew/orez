@@ -546,10 +546,10 @@ export async function startPgProxy(
   // signal replication handler after writes complete.
   // 8ms trailing-edge debounce gives the PushProcessor time to read, parse,
   // and confirm the mutation response before the replication handler streams
-  // the same change. with real postgres, the WAL→logical replication path
-  // is naturally slower (~10-50ms) so this race never occurs. orez's
-  // trigger-based replication is fast enough to beat the PushProcessor.
-  // tested: setImmediate fails, 4ms fails, 8ms passes reliably.
+  // the same change. pg_notify alone is too slow (PGlite notification delivery
+  // is delayed by mutex contention). with real postgres, WAL→logical replication
+  // is naturally slower than the response path so this race never occurs.
+  // tested: setImmediate fails, 4ms fails, 8ms passes, pg_notify-only too slow.
   let signalTimer: ReturnType<typeof setTimeout> | null = null
   function signalWrite() {
     if (signalTimer) clearTimeout(signalTimer)
