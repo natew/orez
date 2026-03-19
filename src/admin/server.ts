@@ -59,7 +59,18 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
     const url = new URL(req.url || '/', 'http://localhost:' + opts.port)
 
     try {
-      if (req.method === 'GET' && url.pathname === '/') {
+      const uiPaths = new Set([
+        '/',
+        '/all',
+        '/zero',
+        '/pglite',
+        '/proxy',
+        '/orez',
+        '/s3',
+        '/http',
+        '/env',
+      ])
+      if (req.method === 'GET' && uiPaths.has(url.pathname)) {
         res.writeHead(200, { ...headers, 'Content-Type': 'text/html' })
         res.end(html)
         return

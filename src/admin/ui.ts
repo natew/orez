@@ -36,14 +36,14 @@ export function getAdminHtml(): string {
     '.header {\n' +
     '  display: flex;\n' +
     '  align-items: center;\n' +
-    '  padding: 12px 16px;\n' +
+    '  padding: 4px 12px;\n' +
     '  background: var(--surface);\n' +
     '  border-bottom: 0.5px solid var(--border);\n' +
-    '  gap: 12px;\n' +
+    '  gap: 8px;\n' +
     '  flex-shrink: 0;\n' +
     '}\n' +
     '.header .logo {\n' +
-    '  font-size: 15px;\n' +
+    '  font-size: 12px;\n' +
     '  font-weight: 700;\n' +
     '  color: var(--accent);\n' +
     '  letter-spacing: -0.5px;\n' +
@@ -51,12 +51,12 @@ export function getAdminHtml(): string {
     '.badge {\n' +
     '  display: inline-flex;\n' +
     '  align-items: center;\n' +
-    '  padding: 2px 8px;\n' +
+    '  padding: 1px 6px;\n' +
     '  border-radius: 12px;\n' +
-    '  font-size: 11px;\n' +
+    '  font-size: 10px;\n' +
     '  border: 0.5px solid var(--border);\n' +
     '  color: var(--text-dim);\n' +
-    '  gap: 4px;\n' +
+    '  gap: 3px;\n' +
     '}\n' +
     '.badge .dot {\n' +
     '  width: 6px;\n' +
@@ -67,15 +67,15 @@ export function getAdminHtml(): string {
     '.spacer { flex: 1; }\n' +
     '.tabs {\n' +
     '  display: flex;\n' +
-    '  padding: 0 16px;\n' +
+    '  padding: 0 12px;\n' +
     '  background: var(--surface);\n' +
     '  border-bottom: 0.5px solid var(--border);\n' +
-    '  gap: 2px;\n' +
+    '  gap: 0;\n' +
     '  flex-shrink: 0;\n' +
     '}\n' +
     '.tab {\n' +
-    '  padding: 8px 14px;\n' +
-    '  font-size: 12px;\n' +
+    '  padding: 4px 10px;\n' +
+    '  font-size: 11px;\n' +
     '  color: var(--text-dim);\n' +
     '  cursor: pointer;\n' +
     '  border-bottom: 2px solid transparent;\n' +
@@ -94,13 +94,13 @@ export function getAdminHtml(): string {
     '.toolbar {\n' +
     '  display: flex;\n' +
     '  align-items: center;\n' +
-    '  padding: 8px 16px;\n' +
-    '  gap: 10px;\n' +
+    '  padding: 3px 12px;\n' +
+    '  gap: 8px;\n' +
     '  border-bottom: 0.5px solid var(--border);\n' +
     '  flex-shrink: 0;\n' +
     '}\n' +
     '.toolbar label {\n' +
-    '  font-size: 11px;\n' +
+    '  font-size: 10px;\n' +
     '  color: var(--text-dim);\n' +
     '  text-transform: uppercase;\n' +
     '  letter-spacing: 0.5px;\n' +
@@ -109,9 +109,9 @@ export function getAdminHtml(): string {
     '  background: var(--surface);\n' +
     '  color: var(--text);\n' +
     '  border: 0.5px solid var(--border);\n' +
-    '  border-radius: 6px;\n' +
-    '  padding: 4px 8px;\n' +
-    '  font-size: 12px;\n' +
+    '  border-radius: 4px;\n' +
+    '  padding: 2px 6px;\n' +
+    '  font-size: 11px;\n' +
     '  font-family: inherit;\n' +
     '  cursor: pointer;\n' +
     '}\n' +
@@ -120,23 +120,23 @@ export function getAdminHtml(): string {
     '  background: var(--surface);\n' +
     '  color: var(--text);\n' +
     '  border: 0.5px solid var(--border);\n' +
-    '  border-radius: 6px;\n' +
-    '  padding: 4px 8px;\n' +
-    '  font-size: 12px;\n' +
+    '  border-radius: 4px;\n' +
+    '  padding: 2px 6px;\n' +
+    '  font-size: 11px;\n' +
     '  font-family: inherit;\n' +
-    '  width: 200px;\n' +
+    '  width: 180px;\n' +
     '}\n' +
     '.toolbar input[type="text"]:focus { outline: none; border-color: var(--accent); }\n' +
     '.toolbar input[type="text"]::placeholder { color: var(--text-dim); }\n' +
     '.sep { width: 1px; height: 20px; background: var(--border); }\n' +
     '.action-btn {\n' +
-    '  padding: 5px 12px;\n' +
-    '  border-radius: 6px;\n' +
+    '  padding: 2px 8px;\n' +
+    '  border-radius: 4px;\n' +
     '  border: 1px solid;\n' +
     '  background: transparent;\n' +
     '  cursor: pointer;\n' +
     '  font-family: inherit;\n' +
-    '  font-size: 11px;\n' +
+    '  font-size: 10px;\n' +
     '  transition: all 0.15s ease;\n' +
     '  white-space: nowrap;\n' +
     '}\n' +
@@ -164,9 +164,9 @@ export function getAdminHtml(): string {
     '.log-view {\n' +
     '  height: 100%;\n' +
     '  overflow-y: auto;\n' +
-    '  padding: 8px 16px;\n' +
-    '  font-size: 12px;\n' +
-    '  line-height: 1.5;\n' +
+    '  padding: 4px 12px;\n' +
+    '  font-size: 11px;\n' +
+    '  line-height: 1.4;\n' +
     '}\n' +
     '.log-line { white-space: pre-wrap; word-break: break-all; }\n' +
     '.log-line .ts { color: var(--text-dim); }\n' +
@@ -291,27 +291,12 @@ export function getAdminHtml(): string {
     '}\n' +
     '.http-detail .hdr-key { color: var(--accent); }\n' +
     '.http-detail .hdr-val { color: var(--text-dim); }\n' +
-    // actions panel
-    '.actions-panel {\n' +
-    '  flex-shrink: 0;\n' +
-    '  border-top: 0.5px solid var(--border);\n' +
-    '  background: var(--surface);\n' +
-    '  padding: 8px 16px;\n' +
-    '}\n' +
-    '.action-row {\n' +
+    '.toolbar-actions {\n' +
     '  display: flex;\n' +
     '  align-items: center;\n' +
-    '  gap: 8px;\n' +
-    '  padding: 4px 0;\n' +
+    '  gap: 6px;\n' +
+    '  margin-left: auto;\n' +
     '}\n' +
-    '.action-label {\n' +
-    '  font-size: 11px;\n' +
-    '  font-weight: 600;\n' +
-    '  width: 7ch;\n' +
-    '  flex-shrink: 0;\n' +
-    '}\n' +
-    '.action-label.zero { color: var(--purple); }\n' +
-    '.action-label.logs { color: var(--text-dim); }\n' +
     // toast
     '.toast {\n' +
     '  position: fixed;\n' +
@@ -336,7 +321,7 @@ export function getAdminHtml(): string {
     '</style>\n' +
     '</head>\n' +
     '<body>\n' +
-    '  <div class="header">\n' +
+    '  <div class="header" id="admin-header">\n' +
     '    <span class="logo">&#9670; oreZ admin</span>\n' +
     '    <div class="spacer"></div>\n' +
     '    <span class="badge"><span class="dot"></span> pg <span id="pg-port">-</span></span>\n' +
@@ -365,11 +350,34 @@ export function getAdminHtml(): string {
     '      <option value="info">info+</option>\n' +
     '      <option value="debug">debug+</option>\n' +
     '    </select>\n' +
+    '    <div class="toolbar-actions" id="toolbar-log-actions">\n' +
+    '      <button class="action-btn gray" onclick="doAction(\'clear-logs\', this)">&#x2715; Clear</button>\n' +
+    '    </div>\n' +
+    '  </div>\n' +
+    '\n' +
+    '  <div class="toolbar" id="zero-toolbar" style="display:none">\n' +
+    '    <label>Level</label>\n' +
+    '    <select id="zero-level-filter">\n' +
+    '      <option value="">all levels</option>\n' +
+    '      <option value="error">error only</option>\n' +
+    '      <option value="warn">warn+</option>\n' +
+    '      <option value="info" selected>info+</option>\n' +
+    '      <option value="debug">debug+</option>\n' +
+    '    </select>\n' +
+    '    <div class="toolbar-actions">\n' +
+    '      <button class="action-btn blue" data-zero-action onclick="doAction(\'restart-zero\', this)">&#x21bb; Restart</button>\n' +
+    '      <button class="action-btn orange" data-zero-action onclick="doAction(\'reset-zero\', this)">&#x21ba; Reset</button>\n' +
+    '      <button class="action-btn red" data-zero-action onclick="doAction(\'reset-zero-full\', this)">&#x26a0; Full</button>\n' +
+    '      <button class="action-btn gray" onclick="doAction(\'clear-logs\', this)">&#x2715; Clear</button>\n' +
+    '    </div>\n' +
     '  </div>\n' +
     '\n' +
     '  <div class="toolbar" id="http-toolbar" style="display:none">\n' +
     '    <label>Filter</label>\n' +
     '    <input type="text" id="http-path-filter" placeholder="filter by path...">\n' +
+    '    <div class="toolbar-actions">\n' +
+    '      <button class="action-btn gray" onclick="doAction(\'clear-http\', this)">&#x2715; Clear</button>\n' +
+    '    </div>\n' +
     '  </div>\n' +
     '\n' +
     '  <div class="content-area">\n' +
@@ -396,32 +404,23 @@ export function getAdminHtml(): string {
     '      </div>\n' +
     '      <button class="jump-btn" id="jump-btn" onclick="jumpToBottom()">&#x2193; Jump to bottom</button>\n' +
     '    </div>\n' +
-    '\n' +
-    '    <div class="actions-panel" id="actions-panel">\n' +
-    '      <div class="action-row">\n' +
-    '        <span class="action-label zero">zero</span>\n' +
-    '        <button class="action-btn blue" data-zero-action onclick="doAction(\'restart-zero\', this)">&#x21bb; Restart</button>\n' +
-    '        <button class="action-btn orange" data-zero-action onclick="doAction(\'reset-zero\', this)">&#x21ba; Reset</button>\n' +
-    '        <button class="action-btn red" data-zero-action onclick="doAction(\'reset-zero-full\', this)">&#x26a0; Full Reset</button>\n' +
-    '      </div>\n' +
-    '      <div class="action-row">\n' +
-    '        <span class="action-label logs">logs</span>\n' +
-    '        <button class="action-btn gray" onclick="doAction(\'clear-logs\', this)">&#x2715; Clear Logs</button>\n' +
-    '        <button class="action-btn gray" onclick="doAction(\'clear-http\', this)">&#x2715; Clear HTTP</button>\n' +
-    '      </div>\n' +
-    '    </div>\n' +
     '  </div>\n' +
     '\n' +
     '  <div class="toast" id="toast"></div>\n' +
     '\n' +
     '<script>\n' +
-    'var activeSource = "";\n' +
-    'var activeLevel = "";\n' +
+    '// resolve initial tab from url path\n' +
+    'var pathMap = {"/":"","/all":"","/zero":"zero","/pglite":"pglite","/proxy":"proxy","/orez":"orez","/s3":"s3","/http":"http","/env":"env"};\n' +
+    'var initPath = window.location.pathname.replace(/\\/$/, "") || "/";\n' +
+    'var initSource = pathMap[initPath] !== undefined ? pathMap[initPath] : "";\n' +
+    'var standalone = initPath !== "/" && initPath !== "/all";\n' +
+    'var activeSource = initSource;\n' +
+    'var activeLevel = initSource === "zero" ? "info" : "";\n' +
     'var lastCursor = 0;\n' +
     'var autoScroll = true;\n' +
     'var envLoaded = false;\n' +
-    'var isEnvTab = false;\n' +
-    'var isHttpTab = false;\n' +
+    'var isEnvTab = initSource === "env";\n' +
+    'var isHttpTab = initSource === "http";\n' +
     'var httpCursor = 0;\n' +
     'var httpAutoScroll = true;\n' +
     '\n' +
@@ -431,20 +430,21 @@ export function getAdminHtml(): string {
     'var jumpBtn = document.getElementById("jump-btn");\n' +
     'var toastEl = document.getElementById("toast");\n' +
     'var toolbar = document.getElementById("toolbar");\n' +
+    'var zeroToolbar = document.getElementById("zero-toolbar");\n' +
     'var httpToolbar = document.getElementById("http-toolbar");\n' +
     '\n' +
-    'document.getElementById("tab-bar").addEventListener("click", function(e) {\n' +
-    '  var tab = e.target.closest(".tab");\n' +
-    '  if (!tab) return;\n' +
-    '  document.querySelectorAll(".tab").forEach(function(t) { t.classList.remove("active"); });\n' +
-    '  tab.classList.add("active");\n' +
-    '  var source = tab.dataset.source;\n' +
+    'function sourceToPath(s) { return s ? "/" + s : "/"; }\n' +
+    '\n' +
+    'function switchTab(source, pushState) {\n' +
     '  isEnvTab = source === "env";\n' +
     '  isHttpTab = source === "http";\n' +
+    '  var isZero = source === "zero";\n' +
+    '  if (pushState) history.pushState(null, "", sourceToPath(source));\n' +
     '  logView.style.display = "none";\n' +
     '  envView.style.display = "none";\n' +
     '  httpView.style.display = "none";\n' +
     '  toolbar.style.display = "none";\n' +
+    '  zeroToolbar.style.display = "none";\n' +
     '  httpToolbar.style.display = "none";\n' +
     '  if (isEnvTab) {\n' +
     '    envView.style.display = "block";\n' +
@@ -457,25 +457,44 @@ export function getAdminHtml(): string {
     '    fetchHttp();\n' +
     '  } else {\n' +
     '    logView.style.display = "block";\n' +
-    '    toolbar.style.display = "flex";\n' +
     '    activeSource = source;\n' +
-    '    // default zero tab to info level (too verbose otherwise)\n' +
-    '    var levelSelect = document.getElementById("level-filter");\n' +
-    '    if (source === "zero") {\n' +
+    '    if (isZero) {\n' +
+    '      zeroToolbar.style.display = "flex";\n' +
     '      activeLevel = "info";\n' +
-    '      levelSelect.value = "info";\n' +
-    '    } else if (activeLevel === "info" && levelSelect.value === "info") {\n' +
-    '      // reset to all levels when leaving zero tab if still on info\n' +
-    '      activeLevel = "";\n' +
-    '      levelSelect.value = "";\n' +
+    '    } else {\n' +
+    '      toolbar.style.display = "flex";\n' +
+    '      if (activeLevel === "info") { activeLevel = ""; document.getElementById("level-filter").value = ""; }\n' +
     '    }\n' +
     '    lastCursor = 0;\n' +
     '    logView.innerHTML = "";\n' +
     '    fetchLogs();\n' +
     '  }\n' +
+    '}\n' +
+    '\n' +
+    '// standalone mode: hide header + tabs\n' +
+    'if (standalone) {\n' +
+    '  document.getElementById("admin-header").style.display = "none";\n' +
+    '  document.getElementById("tab-bar").style.display = "none";\n' +
+    '}\n' +
+    '// activate initial tab\n' +
+    'switchTab(initSource, false);\n' +
+    '\n' +
+    'document.getElementById("tab-bar").addEventListener("click", function(e) {\n' +
+    '  var tab = e.target.closest(".tab");\n' +
+    '  if (!tab) return;\n' +
+    '  document.querySelectorAll(".tab").forEach(function(t) { t.classList.remove("active"); });\n' +
+    '  tab.classList.add("active");\n' +
+    '  switchTab(tab.dataset.source, true);\n' +
     '});\n' +
     '\n' +
     'document.getElementById("level-filter").addEventListener("change", function(e) {\n' +
+    '  activeLevel = e.target.value;\n' +
+    '  lastCursor = 0;\n' +
+    '  logView.innerHTML = "";\n' +
+    '  fetchLogs();\n' +
+    '});\n' +
+    '\n' +
+    'document.getElementById("zero-level-filter").addEventListener("change", function(e) {\n' +
     '  activeLevel = e.target.value;\n' +
     '  lastCursor = 0;\n' +
     '  logView.innerHTML = "";\n' +
@@ -684,7 +703,6 @@ export function getAdminHtml(): string {
     '  setTimeout(function() { toastEl.className = "toast"; }, 2500);\n' +
     '}\n' +
     '\n' +
-    'fetchLogs();\n' +
     'fetchStatus();\n' +
     'setInterval(function() {\n' +
     '  if (document.hidden) return;\n' +
@@ -697,6 +715,12 @@ export function getAdminHtml(): string {
     '  if (isHttpTab) fetchHttp();\n' +
     '  else if (!isEnvTab) fetchLogs();\n' +
     '  fetchStatus();\n' +
+    '});\n' +
+    'window.addEventListener("popstate", function() {\n' +
+    '  var p = window.location.pathname.replace(/\\/$/, "") || "/";\n' +
+    '  var s = pathMap[p] !== undefined ? pathMap[p] : "";\n' +
+    '  var tab = document.querySelector(".tab[data-source=\\"" + s + "\\"]");\n' +
+    '  if (tab) tab.click();\n' +
     '});\n' +
     '</script>\n' +
     '</body>\n' +
