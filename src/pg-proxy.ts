@@ -544,12 +544,12 @@ export async function startPgProxy(
   }
 
   // signal replication handler after writes complete.
-  // 8ms trailing-edge debounce coalesces rapid sequential writes and gives
-  // the PushProcessor time to confirm the mutation before the replication
-  // stream delivers it. without this delay, zero-cache may see the change
-  // via replication before the mutation confirmation, treating it as an
-  // external change and triggering unnecessary re-renders/rebases.
-  // tested: 4ms fails, 8ms passes reliably.
+  // 8ms trailing-edge debounce gives the PushProcessor time to read, parse,
+  // and confirm the mutation response before the replication handler streams
+  // the same change. with real postgres, the WAL→logical replication path
+  // is naturally slower (~10-50ms) so this race never occurs. orez's
+  // trigger-based replication is fast enough to beat the PushProcessor.
+  // tested: setImmediate fails, 4ms fails, 8ms passes reliably.
   let signalTimer: ReturnType<typeof setTimeout> | null = null
   function signalWrite() {
     if (signalTimer) clearTimeout(signalTimer)
