@@ -263,9 +263,15 @@ function main() {
   const e2eDir = resolve(TEST_DIR, 'src/integration/e2e')
   const SCALE = 2
   log(`scaling e2e timeouts ${SCALE}x for PGlite latency`)
-  for (const entry of readdirSync(e2eDir)) {
-    if (!entry.endsWith('.ts')) continue
-    const filePath = resolve(e2eDir, entry)
+  const e2eFiles: string[] = []
+  const collectTs = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) collectTs(resolve(dir, entry.name))
+      else if (entry.name.endsWith('.ts')) e2eFiles.push(resolve(dir, entry.name))
+    }
+  }
+  collectTs(e2eDir)
+  for (const filePath of e2eFiles) {
     const content = readFileSync(filePath, 'utf-8')
     let patched = content.replace(
       /test\.setTimeout\(\s*(\d+)_?(\d*)\s*\)/g,

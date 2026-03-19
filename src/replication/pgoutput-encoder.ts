@@ -183,6 +183,18 @@ function encodeTupleDataInto(
         strVal = JSON.stringify(val)
       } else {
         strVal = String(val)
+        // normalize ISO timestamps to postgres text format.
+        // to_jsonb() produces "2026-03-19T07:20:11.643" but postgres
+        // pgoutput sends "2026-03-19 07:20:11.643" (space, no T).
+        // mismatch causes zero-cache to see different values during
+        // mutation reconciliation, triggering unnecessary rebases.
+        if (
+          (col.typeOid === 1114 || col.typeOid === 1184) &&
+          typeof val === 'string' &&
+          val.length >= 19
+        ) {
+          strVal = strVal.replace('T', ' ')
+        }
       }
       const bytes = encoder.encode(strVal)
       ensureScratch(pos + 1 + 4 + bytes.length)
