@@ -560,6 +560,12 @@ export async function startPgProxy(
   }
 
   const server = createServer(async (socket: Socket) => {
+    // suppress EPIPE/ECONNRESET from pg-gateway writing to closed sockets.
+    // happens during zero-cache startup reconnect cycles — harmless noise.
+    socket.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EPIPE' || err.code === 'ECONNRESET') return
+      log.proxy(`socket error: ${err.message}`)
+    })
     // prevent idle timeouts from killing connections
     socket.setKeepAlive(true, 30000)
     socket.setTimeout(0)
