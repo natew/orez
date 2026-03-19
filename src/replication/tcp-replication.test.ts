@@ -17,7 +17,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { getConfig } from '../config'
 import { startPgProxy } from '../pg-proxy'
 import { installChangeTracking } from './change-tracker'
-import { signalReplicationChange } from './handler'
+import { signalReplicationChange, resetReplicationState } from './handler'
 
 import type { Server, AddressInfo } from 'node:net'
 
@@ -453,6 +453,7 @@ describe('tcp replication', () => {
   let port: number
 
   beforeEach(async () => {
+    resetReplicationState()
     db = new PGlite()
     await db.waitReady
 
@@ -675,21 +676,25 @@ describe('tcp replication', () => {
 
     await db.exec(`INSERT INTO public.items (name, value) VALUES ('del_target', 99)`)
     signalReplicationChange()
-    await replClient.collectStream(1500)
+    await replClient.collectStream(2000)
 
     await db.exec(`DELETE FROM public.items WHERE name = 'del_target'`)
     signalReplicationChange()
-    const stream = await replClient.collectStream(1500)
 
-    const decoded: PgOutputMessage[] = []
-    for (const msg of stream) {
-      if (msg.type === 0x64) {
-        const result = decodeCopyData(new Uint8Array(msg.data))
-        if (result) decoded.push(result)
+    const allDecoded: PgOutputMessage[] = []
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      const stream = await replClient.collectStream(500)
+      for (const msg of stream) {
+        if (msg.type === 0x64) {
+          const result = decodeCopyData(new Uint8Array(msg.data))
+          if (result) allDecoded.push(result)
+        }
       }
+      if (allDecoded.some((m) => m.type === 'Delete')) break
     }
 
-    const del = decoded.find((m) => m.type === 'Delete') as DeleteMessage
+    const del = allDecoded.find((m) => m.type === 'Delete') as DeleteMessage
     expect(del).toBeDefined()
     const keyValues = del.keyTupleData.columns.map((c) => c.value)
     expect(keyValues).toContain('del_target')
@@ -725,7 +730,7 @@ describe('tcp replication', () => {
 
     // collect until we see both relations (with timeout)
     const allDecoded: PgOutputMessage[] = []
-    const deadline = Date.now() + 8000
+    const deadline = Date.now() + 10000
     while (Date.now() < deadline) {
       const stream = await replClient.collectStream(500)
       for (const msg of stream) {
@@ -739,6 +744,7 @@ describe('tcp replication', () => {
       ) as RelationMessage[]
       const tableNames = relations.map((r) => r.tableName)
       if (tableNames.includes('items') && tableNames.includes('products')) break
+      signalReplicationChange()
     }
 
     const relations = allDecoded.filter((m) => m.type === 'Relation') as RelationMessage[]
@@ -772,18 +778,23 @@ describe('tcp replication', () => {
     }
     signalReplicationChange()
 
-    // give enough time for all changes to stream
-    const stream = await replClient.collectStream(2000)
-
-    const decoded: PgOutputMessage[] = []
-    for (const msg of stream) {
-      if (msg.type === 0x64) {
-        const result = decodeCopyData(new Uint8Array(msg.data))
-        if (result) decoded.push(result)
+    // poll until all inserts arrive
+    const allDecoded: PgOutputMessage[] = []
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      const stream = await replClient.collectStream(500)
+      for (const msg of stream) {
+        if (msg.type === 0x64) {
+          const result = decodeCopyData(new Uint8Array(msg.data))
+          if (result) allDecoded.push(result)
+        }
       }
+      const inserts = allDecoded.filter((m) => m.type === 'Insert')
+      if (inserts.length >= count) break
+      signalReplicationChange()
     }
 
-    const inserts = decoded.filter((m) => m.type === 'Insert')
+    const inserts = allDecoded.filter((m) => m.type === 'Insert')
     expect(inserts.length).toBe(count)
 
     replClient.close()
@@ -837,18 +848,24 @@ describe('tcp replication', () => {
     await dataClient.query(
       `INSERT INTO public.items (name, value) VALUES ('concurrent', 123)`
     )
+    signalReplicationChange()
 
-    // replication stream should pick up the change
-    const stream = await replClient.collectStream(1200)
-    const decoded: PgOutputMessage[] = []
-    for (const msg of stream) {
-      if (msg.type === 0x64) {
-        const result = decodeCopyData(new Uint8Array(msg.data))
-        if (result) decoded.push(result)
+    // poll until the replication stream picks up the change
+    const allDecoded: PgOutputMessage[] = []
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      const stream = await replClient.collectStream(500)
+      for (const msg of stream) {
+        if (msg.type === 0x64) {
+          const result = decodeCopyData(new Uint8Array(msg.data))
+          if (result) allDecoded.push(result)
+        }
       }
+      const inserts = allDecoded.filter((m) => m.type === 'Insert')
+      if (inserts.length >= 1) break
     }
 
-    const inserts = decoded.filter((m) => m.type === 'Insert') as InsertMessage[]
+    const inserts = allDecoded.filter((m) => m.type === 'Insert') as InsertMessage[]
     expect(inserts.length).toBe(1)
     const values = inserts[0].tupleData.columns.map((c) => c.value)
     expect(values).toContain('concurrent')

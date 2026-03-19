@@ -18,7 +18,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { getConfig } from '../config'
 import { startPgProxy } from '../pg-proxy'
 import { installChangeTracking, resetShardSchemaCache } from './change-tracker'
-import { signalReplicationChange } from './handler'
+import { signalReplicationChange, resetReplicationState } from './handler'
 
 import type { Server, AddressInfo } from 'node:net'
 
@@ -448,6 +448,7 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
   let port: number
 
   beforeEach(async () => {
+    resetReplicationState()
     resetShardSchemaCache()
     db = new PGlite()
     await db.waitReady

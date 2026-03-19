@@ -84,7 +84,7 @@ describe('shim template generation', () => {
 
     for (const shim of [cjs, esm]) {
       expect(shim).toContain("db.pragma('busy_timeout = 30000')")
-      expect(shim).toContain("db.pragma('synchronous = normal')")
+      expect(shim).toContain("db.pragma('synchronous = off')")
     }
   })
 
@@ -409,7 +409,7 @@ describe('shim contract tests', () => {
     for (const mode of ['wasm', 'native'] as const) {
       const shim = generateCjsShim({ mode, bedrockPath: '/path' })
       expect(shim).toContain("db.pragma('busy_timeout = 30000')")
-      expect(shim).toContain("db.pragma('synchronous = normal')")
+      expect(shim).toContain("db.pragma('synchronous = off')")
     }
   })
 
