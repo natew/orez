@@ -543,16 +543,14 @@ export async function startPgProxy(
     return { db: instances.postgres, mutex: mutexes.postgres, txState: txStates.postgres }
   }
 
-  // signal replication handler after writes complete.
-  // 8ms trailing-edge debounce gives the PushProcessor time to read, parse,
-  // and confirm the mutation response before the replication handler streams
-  // the same change. pg_notify alone is too slow (PGlite notification delivery
-  // is delayed by mutex contention). with real postgres, WAL→logical replication
-  // is naturally slower than the response path so this race never occurs.
-  // tested: setImmediate fails, 4ms fails, 8ms passes, pg_notify-only too slow.
+  // signal replication handler after extended protocol writes complete.
+  // 8ms leading-edge debounce: fires exactly 8ms after the FIRST write,
+  // subsequent writes within that window are batched (handler polls all
+  // changes at once). gives the PushProcessor time to confirm the mutation
+  // before replication streams the same change to zero-cache.
   let signalTimer: ReturnType<typeof setTimeout> | null = null
   function signalWrite() {
-    if (signalTimer) clearTimeout(signalTimer)
+    if (signalTimer) return
     signalTimer = setTimeout(() => {
       signalTimer = null
       signalReplicationChange()
