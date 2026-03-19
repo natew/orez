@@ -899,8 +899,22 @@ async function startZeroCache(
     if (tail.length > 80) tail.splice(0, tail.length - 80)
   }
 
+  // known transient errors during zero-cache startup — demote to debug
+  const STARTUP_NOISE = [
+    '_zero.tableMetadata',
+    'Unable to create full ReplicationStatusEvent',
+    'replication slot',
+    'does not exist',
+    'error dropping',
+    'EPIPE',
+    'socket has been ended by the other party',
+  ]
+  const isStartupNoise = (line: string): boolean =>
+    STARTUP_NOISE.some((pattern) => line.includes(pattern))
+
   // detect log level from zero-cache output
   const detectLevel = (line: string, fallback: string): string => {
+    if (isStartupNoise(line)) return 'debug'
     const lower = line.toLowerCase()
     if (
       lower.includes('"level":"error"') ||
