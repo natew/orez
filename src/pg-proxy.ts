@@ -559,9 +559,23 @@ export async function startPgProxy(
     }, 8)
   }
 
+  // pg-gateway uses Node WebStream adapters internally. when zero-cache
+  // closes connections during startup, the WebStream write() throws EPIPE
+  // as an unhandled promise rejection that escapes socket error handlers.
+  // catch these globally while the proxy is running.
+  const suppressSocketErrors = (err: unknown) => {
+    const code = (err as NodeJS.ErrnoException)?.code
+    if (code === 'EPIPE' || code === 'ECONNRESET') return
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('ended by the other party')) return
+    // re-throw non-socket errors
+    throw err
+  }
+  process.on('uncaughtException', suppressSocketErrors)
+  process.on('unhandledRejection', suppressSocketErrors)
+
   const server = createServer(async (socket: Socket) => {
-    // suppress EPIPE/ECONNRESET from pg-gateway writing to closed sockets.
-    // happens during zero-cache startup reconnect cycles — harmless noise.
+    // also catch at socket level for errors that don't escape to process
     socket.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EPIPE' || err.code === 'ECONNRESET') return
       log.proxy(`socket error: ${err.message}`)
@@ -881,6 +895,11 @@ export async function startPgProxy(
         socket.destroy()
       }
     }
+  })
+
+  server.on('close', () => {
+    process.removeListener('uncaughtException', suppressSocketErrors)
+    process.removeListener('unhandledRejection', suppressSocketErrors)
   })
 
   return new Promise((resolve, reject) => {
