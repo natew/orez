@@ -17,6 +17,7 @@ export interface OrezPluginOptions extends Partial<
 export function orezPlugin(options?: OrezPluginOptions): Plugin {
   let stop: (() => Promise<void>) | null = null
   let s3Server: Server | null = null
+  let adminServer: Server | null = null
 
   return {
     name: 'orez',
@@ -24,6 +25,25 @@ export function orezPlugin(options?: OrezPluginOptions): Plugin {
     async configureServer(server) {
       const result = await startZeroLite(options)
       stop = result.stop
+
+      // start admin dashboard if adminPort is configured
+      if (result.config.adminPort > 0 && result.logStore) {
+        const { startAdminServer } = await import('./admin/server.js')
+        adminServer = await startAdminServer({
+          port: result.config.adminPort,
+          logStore: result.logStore,
+          httpLog: result.httpLog,
+          config: result.config,
+          zeroEnv: result.zeroEnv || {},
+          actions: {
+            restartZero: result.restartZero,
+            stopZero: result.stopZero,
+            resetZero: result.resetZero,
+            resetZeroFull: result.resetZeroFull,
+          },
+          startTime: Date.now(),
+        })
+      }
 
       if (options?.s3) {
         const { startS3Local } = await import('./s3-local.js')
@@ -34,6 +54,7 @@ export function orezPlugin(options?: OrezPluginOptions): Plugin {
       }
 
       server.httpServer?.on('close', async () => {
+        adminServer?.close()
         s3Server?.close()
         if (stop) {
           await stop()
