@@ -908,6 +908,8 @@ async function startZeroCache(
     'error dropping',
     'EPIPE',
     'socket has been ended by the other party',
+    'ideal db ping time',
+    'average ping to',
   ]
   const isStartupNoise = (line: string): boolean =>
     STARTUP_NOISE.some((pattern) => line.includes(pattern))
