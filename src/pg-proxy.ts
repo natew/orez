@@ -936,12 +936,17 @@ async function handleReplicationMessage(
     let aborted = false
     const writer = {
       write(chunk: Uint8Array) {
-        if (!socket.destroyed && !aborted) {
-          socket.write(chunk)
+        if (!socket.destroyed && !socket.writableEnded && !aborted) {
+          try {
+            socket.write(chunk)
+          } catch {
+            // socket may have closed between our check and write (EPIPE)
+            aborted = true
+          }
         }
       },
       get closed() {
-        return socket.destroyed || aborted
+        return socket.destroyed || socket.writableEnded || aborted
       },
     }
 
@@ -960,6 +965,11 @@ async function handleReplicationMessage(
 
     // drain incoming standby status updates
     socket.on('data', (_chunk: Buffer) => {})
+
+    // suppress socket errors (EPIPE/ECONNRESET) during shutdown
+    socket.on('error', () => {
+      aborted = true
+    })
 
     socket.on('close', abort)
 

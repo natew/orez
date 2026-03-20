@@ -488,6 +488,10 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
   afterEach(async () => {
     signalReplicationChange()
     server?.close()
+    // yield to let socket close events propagate so the replication
+    // poll loop exits before we close pglite (0.4.x close() is stricter)
+    await new Promise((r) => setTimeout(r, 50))
+    signalReplicationChange()
     await db?.close()
   })
 

@@ -591,9 +591,9 @@ export async function handleStartReplication(
     let idleTimeoutCount = 0
 
     while (running) {
-      // check if the connection was closed
-      if (writer.closed) {
-        log.debug.proxy('replication: writer closed, exiting poll loop')
+      // check if the connection or database was closed
+      if (writer.closed || db.closed) {
+        log.debug.proxy('replication: writer/db closed, exiting poll loop')
         running = false
         break
       }
@@ -606,7 +606,7 @@ export async function handleStartReplication(
           // check if a signal arrived while we were processing
           if (!signalPending) {
             const wasSignaled = await waitForWakeup(pollIntervalIdle)
-            if (writer.closed) {
+            if (writer.closed || db.closed) {
               running = false
               break
             }
@@ -779,7 +779,12 @@ export async function handleStartReplication(
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         log.repl(`replication poll error: ${msg}`)
-        if (msg.includes('closed') || msg.includes('destroyed')) {
+        if (
+          msg.includes('closed') ||
+          msg.includes('destroyed') ||
+          msg.includes('ECONNRESET') ||
+          msg.includes('EPIPE')
+        ) {
           running = false
           break
         }
