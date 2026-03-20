@@ -515,11 +515,16 @@ export async function startPgProxy(
       ? (dbInput as PGliteInstances)
       : { postgres: dbInput as PGlite, cvr: dbInput as PGlite, cdb: dbInput as PGlite }
 
-  // per-instance mutexes for serializing pglite access
+  // per-instance mutexes for serializing pglite access.
+  // when all instances are the same object (single-db mode), share one mutex
+  // to prevent concurrent protocol messages on the same pglite instance.
+  const sharedInstance =
+    instances.postgres === instances.cvr && instances.postgres === instances.cdb
+  const pgMutex = new Mutex()
   const mutexes = {
-    postgres: new Mutex(),
-    cvr: new Mutex(),
-    cdb: new Mutex(),
+    postgres: pgMutex,
+    cvr: sharedInstance ? pgMutex : new Mutex(),
+    cdb: sharedInstance ? pgMutex : new Mutex(),
   }
 
   // per-instance transaction state: tracks which socket owns the current transaction

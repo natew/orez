@@ -292,6 +292,117 @@ export async function createPGliteWorkerInstances(
   }
 }
 
+/**
+ * create a single pglite instance shared across all databases.
+ *
+ * uses one instance for postgres, cvr, and cdb — much lighter than three
+ * separate instances. intended for constrained environments like cloudflare
+ * workers where running 3 pglite instances is too expensive.
+ */
+export async function createSinglePGliteInstance(
+  config: ZeroLiteConfig
+): Promise<PGliteInstances> {
+  // migrate from old single-instance layout (pgdata → pgdata-postgres)
+  const pgliteDataDir = (config.pgliteOptions as Record<string, any>)?.dataDir
+  if (!pgliteDataDir || !String(pgliteDataDir).startsWith('memory://')) {
+    const oldDataPath = resolve(config.dataDir, 'pgdata')
+    const newDataPath = resolve(config.dataDir, 'pgdata-postgres')
+    if (existsSync(oldDataPath) && !existsSync(newDataPath)) {
+      renameSync(oldDataPath, newDataPath)
+      log.debug.pglite('migrated pgdata → pgdata-postgres')
+    }
+  }
+
+  log.pglite('starting single shared pglite instance')
+
+  const db = await createInstance(config, 'postgres', true)
+
+  // postgres-specific setup
+  await db.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
+
+  // create publication only when explicitly configured
+  const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
+  if (pubName) {
+    const pubs = await db.query<{ count: string }>(
+      `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
+      [pubName]
+    )
+    if (Number(pubs.rows[0].count) === 0) {
+      const quoted = '"' + pubName.replace(/"/g, '""') + '"'
+      await db.exec(`CREATE PUBLICATION ${quoted}`)
+    }
+  }
+
+  // same instance for all three — pg-proxy detects this and shares a mutex
+  return { postgres: db, cvr: db, cdb: db }
+}
+
+/**
+ * create a single worker-backed pglite instance shared across all databases.
+ */
+export async function createSinglePGliteWorkerInstance(
+  config: ZeroLiteConfig
+): Promise<PGliteInstances> {
+  // migrate from old single-instance layout (pgdata → pgdata-postgres)
+  const pgliteDataDir = (config.pgliteOptions as Record<string, any>)?.dataDir
+  if (!pgliteDataDir || !String(pgliteDataDir).startsWith('memory://')) {
+    const oldDataPath = resolve(config.dataDir, 'pgdata')
+    const newDataPath = resolve(config.dataDir, 'pgdata-postgres')
+    if (existsSync(oldDataPath) && !existsSync(newDataPath)) {
+      renameSync(oldDataPath, newDataPath)
+      log.debug.pglite('migrated pgdata → pgdata-postgres')
+    }
+  }
+
+  const useMemory =
+    typeof pgliteDataDir === 'string' && pgliteDataDir.startsWith('memory://')
+  const {
+    dataDir: _ud,
+    debug: _dbg,
+    ...userOpts
+  } = config.pgliteOptions as Record<string, any>
+
+  const dataPath = useMemory ? 'memory://' : resolve(config.dataDir, 'pgdata-postgres')
+  if (!useMemory) {
+    mkdirSync(dataPath, { recursive: true })
+    if (cleanStaleLocks(dataPath)) {
+      log.debug.pglite('cleaned stale locks in postgres')
+    }
+  }
+
+  log.pglite('starting single shared pglite worker thread')
+
+  const proxy = new PGliteWorkerProxy({
+    dataDir: dataPath,
+    name: 'postgres',
+    withExtensions: true,
+    debug: config.logLevel === 'debug' ? 1 : 0,
+    pgliteOptions: userOpts,
+  })
+
+  await proxy.waitReady
+  log.pglite('single worker thread ready')
+
+  // postgres-specific setup
+  await proxy.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
+
+  // create publication only when explicitly configured
+  const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
+  if (pubName) {
+    const pubs = await proxy.query<{ count: string }>(
+      `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
+      [pubName]
+    )
+    if (Number(pubs.rows[0].count) === 0) {
+      const quoted = '"' + pubName.replace(/"/g, '""') + '"'
+      await proxy.exec(`CREATE PUBLICATION ${quoted}`)
+    }
+  }
+
+  const db = proxy as unknown as PGlite
+  return { postgres: db, cvr: db, cdb: db }
+}
+
 /** create a single worker-backed PGlite instance (for CVR/CDB recreation during reset) */
 export function createPGliteWorker(dataDir: string, name: string): PGliteWorkerProxy {
   return new PGliteWorkerProxy({

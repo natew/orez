@@ -949,6 +949,11 @@ const main = defineCommand({
       description: 'run pglite in-process instead of worker threads',
       default: false,
     },
+    'single-db': {
+      type: 'boolean',
+      description: 'use a single pglite instance for all databases (lighter for constrained environments)',
+      default: false,
+    },
     'on-db-ready': {
       type: 'string',
       description: 'command to run after db+proxy are ready, before zero-cache starts',
@@ -1000,6 +1005,7 @@ const main = defineCommand({
       disableWasmSqlite: args['disable-wasm-sqlite'],
       forceWasmSqlite: args['force-wasm-sqlite'],
       useWorkerThreads: !args['no-worker-threads'],
+      singleDb: args['single-db'],
       logLevel: (args['log-level'] as 'error' | 'warn' | 'info' | 'debug') || undefined,
       onDbReady: args['on-db-ready'] || undefined,
       onHealthy: args['on-healthy'] || undefined,

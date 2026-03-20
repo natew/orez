@@ -22,6 +22,8 @@ import { startPgProxy } from './pg-proxy.js'
 import {
   createPGliteInstances,
   createPGliteWorkerInstances,
+  createSinglePGliteInstance,
+  createSinglePGliteWorkerInstance,
   createPGliteWorker,
   runMigrations,
 } from './pglite-manager.js'
@@ -243,12 +245,17 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     writeFileSync(adminFile, String(adminPort))
   }
 
-  // start pglite (separate instances for postgres, zero_cvr, zero_cdb)
-  // worker threads give each instance its own event loop so PGlite WASM
-  // execution doesn't block the proxy or replication handler
-  const instances = config.useWorkerThreads
-    ? await createPGliteWorkerInstances(config)
-    : await createPGliteInstances(config)
+  // start pglite instance(s).
+  // single-db mode uses one instance for all databases (lighter for constrained envs).
+  // otherwise, separate instances for postgres, zero_cvr, zero_cdb with optional
+  // worker threads for non-blocking WASM execution.
+  const instances = config.singleDb
+    ? config.useWorkerThreads
+      ? await createSinglePGliteWorkerInstance(config)
+      : await createSinglePGliteInstance(config)
+    : config.useWorkerThreads
+      ? await createPGliteWorkerInstances(config)
+      : await createPGliteInstances(config)
   const db = instances.postgres
   const managedPub = getManagedPublicationConfig()
   if (managedPub.managedByOrez) {
