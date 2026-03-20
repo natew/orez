@@ -65,7 +65,11 @@ export interface WebSocketUpgradeResult {
 export class HttpServiceAdapter {
   private fastify: InjectableFastify | null = null
   private wsRoutes: Map<string, WebSocketHandler> = new Map()
-  private wsPatterns: Array<{ regex: RegExp; pattern: string; handler: WebSocketHandler }> = []
+  private wsPatterns: Array<{
+    regex: RegExp
+    pattern: string
+    handler: WebSocketHandler
+  }> = []
   private initialized = false
 
   /**
@@ -183,13 +187,15 @@ export class HttpServiceAdapter {
 
     // invoke handler (fire-and-forget; handler manages the connection lifecycle)
     // errors in the handler should close the socket, not crash the DO
-    Promise.resolve(result.handler(result.server, result.request, result.url)).catch((err) => {
-      try {
-        result.server.close(1011, String(err))
-      } catch {
-        // socket may already be closed
+    Promise.resolve(result.handler(result.server, result.request, result.url)).catch(
+      (err) => {
+        try {
+          result.server.close(1011, String(err))
+        } catch {
+          // socket may already be closed
+        }
       }
-    })
+    )
 
     // return 101 with client socket for DO runtime.
     // CF Workers Response constructor accepts status 101 + webSocket property.

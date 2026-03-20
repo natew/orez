@@ -191,10 +191,16 @@ describe('Database.exec', () => {
   })
 
   it('executes multiple statements separated by semicolons', () => {
-    db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY); CREATE TABLE t2 (id INTEGER PRIMARY KEY)')
+    db.exec(
+      'CREATE TABLE t (id INTEGER PRIMARY KEY); CREATE TABLE t2 (id INTEGER PRIMARY KEY)'
+    )
     // verify both tables exist
-    const r1 = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='t'").get()
-    const r2 = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='t2'").get()
+    const r1 = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='t'")
+      .get()
+    const r2 = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='t2'")
+      .get()
     expect(r1).toEqual({ name: 't' })
     expect(r2).toEqual({ name: 't2' })
   })
@@ -231,7 +237,9 @@ describe('Database.prepare / Statement', () => {
   })
 
   it('run executes write and returns RunResult', () => {
-    const result = db.prepare('INSERT INTO items (name, val) VALUES (?, ?)').run('foo', 42)
+    const result = db
+      .prepare('INSERT INTO items (name, val) VALUES (?, ?)')
+      .run('foo', 42)
     expect(result).toHaveProperty('changes')
     expect(result).toHaveProperty('lastInsertRowid')
     expect(result.changes).toBe(1)

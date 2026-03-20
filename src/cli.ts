@@ -951,7 +951,8 @@ const main = defineCommand({
     },
     'single-db': {
       type: 'boolean',
-      description: 'use a single pglite instance for all databases (lighter for constrained environments)',
+      description:
+        'use a single pglite instance for all databases (lighter for constrained environments)',
       default: false,
     },
     'on-db-ready': {

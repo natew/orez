@@ -33,7 +33,9 @@ describe('postgres shim', () => {
 
   describe('tagged template queries', () => {
     it('basic select', async () => {
-      await sql.unsafe(`INSERT INTO test_users (name, email) VALUES ('alice', 'alice@test.com')`)
+      await sql.unsafe(
+        `INSERT INTO test_users (name, email) VALUES ('alice', 'alice@test.com')`
+      )
       const rows = await sql`SELECT * FROM test_users WHERE name = ${'alice'}`
       expect(rows).toHaveLength(1)
       expect(rows[0].name).toBe('alice')
@@ -41,9 +43,14 @@ describe('postgres shim', () => {
     })
 
     it('multiple parameters', async () => {
-      await sql.unsafe(`INSERT INTO test_users (name, email) VALUES ('bob', 'bob@test.com')`)
-      await sql.unsafe(`INSERT INTO test_users (name, email) VALUES ('carol', 'carol@test.com')`)
-      const rows = await sql`SELECT * FROM test_users WHERE name = ${'bob'} OR email = ${'carol@test.com'}`
+      await sql.unsafe(
+        `INSERT INTO test_users (name, email) VALUES ('bob', 'bob@test.com')`
+      )
+      await sql.unsafe(
+        `INSERT INTO test_users (name, email) VALUES ('carol', 'carol@test.com')`
+      )
+      const rows =
+        await sql`SELECT * FROM test_users WHERE name = ${'bob'} OR email = ${'carol@test.com'}`
       expect(rows).toHaveLength(2)
     })
 
@@ -105,8 +112,11 @@ describe('postgres shim', () => {
     })
 
     it('destructurable', async () => {
-      await sql.unsafe(`INSERT INTO test_users (name, email) VALUES ('zara', 'z@test.com')`)
-      const [{ name, email }] = await sql`SELECT name, email FROM test_users WHERE name = ${'zara'}`
+      await sql.unsafe(
+        `INSERT INTO test_users (name, email) VALUES ('zara', 'z@test.com')`
+      )
+      const [{ name, email }] =
+        await sql`SELECT name, email FROM test_users WHERE name = ${'zara'}`
       expect(name).toBe('zara')
       expect(email).toBe('z@test.com')
     })
@@ -136,13 +146,16 @@ describe('postgres shim', () => {
   describe('unsafe queries', () => {
     it('DDL without params', async () => {
       await sql.unsafe(`CREATE TABLE unsafe_test (id INT)`)
-      const rows = await sql`SELECT table_name FROM information_schema.tables WHERE table_name = 'unsafe_test'`
+      const rows =
+        await sql`SELECT table_name FROM information_schema.tables WHERE table_name = 'unsafe_test'`
       expect(rows).toHaveLength(1)
     })
 
     it('query with params', async () => {
       await sql.unsafe(`INSERT INTO test_users (name) VALUES ('unsafe_user')`)
-      const rows = await sql.unsafe('SELECT * FROM test_users WHERE name = $1', ['unsafe_user'])
+      const rows = await sql.unsafe('SELECT * FROM test_users WHERE name = $1', [
+        'unsafe_user',
+      ])
       expect(rows).toHaveLength(1)
       expect(rows[0].name).toBe('unsafe_user')
     })
@@ -243,7 +256,8 @@ describe('postgres shim', () => {
       const tableName = 'test_users'
       const colName = 'name'
       await sql.unsafe(`INSERT INTO test_users (name) VALUES ('ident_test')`)
-      const rows = await sql`SELECT ${sql(colName)} FROM ${sql(tableName)} WHERE name = ${'ident_test'}`
+      const rows =
+        await sql`SELECT ${sql(colName)} FROM ${sql(tableName)} WHERE name = ${'ident_test'}`
       expect(rows).toHaveLength(1)
       expect(rows[0].name).toBe('ident_test')
     })
@@ -285,7 +299,8 @@ describe('postgres shim', () => {
   describe('query modifiers', () => {
     it('.simple() returns the same pending query', async () => {
       await sql.unsafe(`INSERT INTO test_users (name) VALUES ('simple_test')`)
-      const rows = await sql`SELECT * FROM test_users WHERE name = ${'simple_test'}`.simple()
+      const rows =
+        await sql`SELECT * FROM test_users WHERE name = ${'simple_test'}`.simple()
       expect(rows).toHaveLength(1)
     })
   })
@@ -294,15 +309,11 @@ describe('postgres shim', () => {
 
   describe('error propagation', () => {
     it('propagates SQL errors from tagged template', async () => {
-      await expect(
-        sql`SELECT * FROM nonexistent_table`
-      ).rejects.toThrow()
+      await expect(sql`SELECT * FROM nonexistent_table`).rejects.toThrow()
     })
 
     it('propagates SQL errors from unsafe', async () => {
-      await expect(
-        sql.unsafe('SELECT * FROM nonexistent_table')
-      ).rejects.toThrow()
+      await expect(sql.unsafe('SELECT * FROM nonexistent_table')).rejects.toThrow()
     })
   })
 })

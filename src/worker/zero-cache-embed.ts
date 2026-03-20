@@ -182,7 +182,9 @@ export async function startZeroCacheEmbed(
       /\/out\/.*$/,
       '/out/zero-cache/src/server/runner/run-worker.js'
     )
-    const mod = await (import(runWorkerPath) as Promise<{ runWorker: typeof runWorkerFn }>)
+    const mod = await (import(runWorkerPath) as Promise<{
+      runWorker: typeof runWorkerFn
+    }>)
     runWorkerFn = mod.runWorker
   } catch (err) {
     throw new Error(
@@ -199,7 +201,9 @@ export async function startZeroCacheEmbed(
   // wait for "ready" message from zero-cache
   const readyPromise = new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
-      reject(new Error(`zero-cache embed: timed out waiting for ready after ${readyTimeout}ms`))
+      reject(
+        new Error(`zero-cache embed: timed out waiting for ready after ${readyTimeout}ms`)
+      )
     }, readyTimeout)
 
     parentEmitter.on('message', (msg: unknown) => {
@@ -256,10 +260,7 @@ export async function startZeroCacheEmbed(
       // runWorker completes — the ProcessManager's async exit handler
       // checks singleProcessMode() and must find it still set.
       if (runWorkerPromise) {
-        await Promise.race([
-          runWorkerPromise,
-          new Promise((r) => setTimeout(r, 5000)),
-        ])
+        await Promise.race([runWorkerPromise, new Promise((r) => setTimeout(r, 5000))])
       }
       // give async exit handlers time to complete
       await new Promise((r) => setTimeout(r, 200))

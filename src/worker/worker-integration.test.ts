@@ -11,9 +11,9 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
-import { createOrezWorker } from './index'
 import { InProcessWriter } from '../replication/handler.js'
 import { resetReplicationState, signalReplicationChange } from '../replication/handler.js'
+import { createOrezWorker } from './index'
 
 import type { OrezWorker } from './types'
 

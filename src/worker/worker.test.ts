@@ -2,6 +2,7 @@ import { PGlite } from '@electric-sql/pglite'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import { createOrezWorker } from './index'
+
 import type { OrezWorker } from './types'
 
 describe('orez/worker', () => {
@@ -35,7 +36,9 @@ describe('orez/worker', () => {
   })
 
   it('throws without pglite or pgliteOptions', async () => {
-    await expect(createOrezWorker({})).rejects.toThrow('provide either pglite or pgliteOptions')
+    await expect(createOrezWorker({})).rejects.toThrow(
+      'provide either pglite or pgliteOptions'
+    )
   })
 
   it('exec and query work', async () => {

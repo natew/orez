@@ -33,23 +33,25 @@ CF Durable Object
 ## Key findings from exploration
 
 **zero-cache supports this:**
+
 - `SINGLE_PROCESS=1` env var — runs all workers in-process via EventEmitter,
   no child_process.fork(). Entry: `runWorker(null, env)`
 - `upstream.type: "custom"` — uses WebSocket to a change source endpoint
   instead of PostgreSQL logical replication. Already exists in zero-cache.
 
 **orez's replication handler is transport-agnostic:**
+
 - `ReplicationWriter` interface is just `{ write(data: Uint8Array): void, closed?: boolean }`
 - Replace socket-based writer with callback-based writer = in-process streaming
 - Change tracker + pgoutput encoder work without TCP
 
 **What needs shimming (3 packages):**
 
-| Package | Current | Shim | Complexity |
-|---------|---------|------|-----------|
-| `postgres` | TCP to PostgreSQL | Tagged template API backed by PGlite in-process | Medium — need tagged templates, transactions, type config. NO replication (use custom upstream). |
-| `@rocicorp/zero-sqlite3` | Native Node.js SQLite bindings | DO's built-in SQLite (`this.ctx.storage.sql`) | Medium — Database class, StatementRunner (run/get/all), transactions (begin/beginConcurrent/beginImmediate) |
-| `fastify` | HTTP server on port | No-bind mode — extract route handlers, call from DO fetch() | Hard — WebSocket upgrade handling, route registration. May need targeted patching. |
+| Package                  | Current                        | Shim                                                        | Complexity                                                                                                  |
+| ------------------------ | ------------------------------ | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `postgres`               | TCP to PostgreSQL              | Tagged template API backed by PGlite in-process             | Medium — need tagged templates, transactions, type config. NO replication (use custom upstream).            |
+| `@rocicorp/zero-sqlite3` | Native Node.js SQLite bindings | DO's built-in SQLite (`this.ctx.storage.sql`)               | Medium — Database class, StatementRunner (run/get/all), transactions (begin/beginConcurrent/beginImmediate) |
+| `fastify`                | HTTP server on port            | No-bind mode — extract route handlers, call from DO fetch() | Hard — WebSocket upgrade handling, route registration. May need targeted patching.                          |
 
 ## Phases
 
@@ -59,10 +61,12 @@ PGlite + change tracking, importable without Node.js. Useful immediately for
 development and as foundation for everything else.
 
 **New files:**
+
 - `src/worker/index.ts` — `createOrezWorker(opts)` entry point
 - `src/worker/types.ts` — interfaces
 
 **API:**
+
 ```typescript
 import { createOrezWorker } from 'orez/worker'
 
@@ -70,10 +74,10 @@ const orez = await createOrezWorker({
   pgliteOptions: { wasmModule, fsBundle, loadDataDir, startParams },
 })
 
-orez.query('SELECT ...')        // direct PGlite access
+orez.query('SELECT ...') // direct PGlite access
 orez.exec('CREATE TABLE ...')
-orez.pool                       // pg-pool compat for on-zero
-orez.dumpDataDir('gzip')        // persistence
+orez.pool // pg-pool compat for on-zero
+orez.dumpDataDir('gzip') // persistence
 orez.close()
 ```
 
@@ -81,7 +85,7 @@ orez.close()
 `src/mutex.ts` (promise-based), `src/config.ts`
 
 **Validation:** import in browser/vitest, create PGlite, install change
-tracking, verify _orez._zero_changes populates on mutations.
+tracking, verify \_orez.\_zero_changes populates on mutations.
 
 ### Phase 2: Shim packages
 
@@ -102,6 +106,7 @@ await sql.unsafe('RAW SQL')
 ```
 
 Our shim wraps PGlite:
+
 ```typescript
 export function createPostgresShim(pglite: PGlite) {
   function sql(strings: TemplateStringsArray, ...values: any[]) {
@@ -178,8 +183,8 @@ Wire the shims together. Run zero-cache's `runWorker()` in-process with
 import { runWorker } from '@rocicorp/zero/out/zero-cache/src/server/main.js'
 
 export async function startZeroCacheEmbed(opts: {
-  pglite: PGlite,
-  doSqlite: SqlStorage,  // CF DO's built-in SQLite
+  pglite: PGlite
+  doSqlite: SqlStorage // CF DO's built-in SQLite
 }) {
   // register shims
   globalThis.__orez_pglite = opts.pglite
@@ -189,11 +194,11 @@ export async function startZeroCacheEmbed(opts: {
   const env = {
     ...process.env,
     SINGLE_PROCESS: '1',
-    ZERO_UPSTREAM_DB: 'pglite://in-process',  // shim intercepts this
+    ZERO_UPSTREAM_DB: 'pglite://in-process', // shim intercepts this
     ZERO_CVR_DB: 'pglite://in-process',
     ZERO_CHANGE_DB: 'pglite://in-process',
-    ZERO_REPLICA_FILE: ':do-sqlite:',         // shim intercepts this
-    ZERO_PORT: '0',                           // don't bind
+    ZERO_REPLICA_FILE: ':do-sqlite:', // shim intercepts this
+    ZERO_PORT: '0', // don't bind
   }
 
   await runWorker(null, env)
@@ -201,6 +206,7 @@ export async function startZeroCacheEmbed(opts: {
 ```
 
 **Bundler config** (esbuild/wrangler resolve aliases):
+
 ```javascript
 alias: {
   'postgres': './src/worker/shims/postgres.js',
@@ -228,8 +234,12 @@ interface ReplicationWriter {
 // new:
 class InProcessWriter implements ReplicationWriter {
   constructor(private onData: (data: Uint8Array) => void) {}
-  write(data: Uint8Array) { this.onData(data) }
-  get closed() { return false }
+  write(data: Uint8Array) {
+    this.onData(data)
+  }
+  get closed() {
+    return false
+  }
 }
 ```
 
@@ -279,6 +289,7 @@ Rebuild PGlite WASM with `--wal-segsize=1`. PGDATA: 22.7MB → ~7.6MB.
 ## Critical files
 
 **orez — existing (verify portability):**
+
 - `src/replication/change-tracker.ts` — pure SQL, portable
 - `src/replication/handler.ts` — ReplicationWriter interface, pgoutput encoding
 - `src/replication/pgoutput-encoder.ts` — binary message encoding
@@ -286,6 +297,7 @@ Rebuild PGlite WASM with `--wal-segsize=1`. PGDATA: 22.7MB → ~7.6MB.
 - `src/config.ts` — portable
 
 **orez — new:**
+
 - `src/worker/index.ts` — createOrezWorker()
 - `src/worker/types.ts` — interfaces
 - `src/worker/shims/postgres.ts` — PGlite-backed postgres driver
@@ -294,9 +306,11 @@ Rebuild PGlite WASM with `--wal-segsize=1`. PGDATA: 22.7MB → ~7.6MB.
 - `src/worker/zero-cache-embed.ts` — single-process zero-cache launcher
 
 **soot — modified:**
+
 - `src/worker/DataDO.ts` — use orez/worker
 
 **soot — deleted:**
+
 - `src/worker/zero-shim.ts` — replaced by real zero-cache
 - `src/worker/fake-websocket.ts` — no longer needed
 

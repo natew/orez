@@ -118,9 +118,10 @@ function createResultArray<T extends Record<string, unknown>>(
   // attach metadata
   const command = detectCommand(queryString)
   // for SELECT queries affectedRows is 0, use row count instead
-  result.count = (command === 'SELECT' || !pgliteResult.affectedRows)
-    ? rows.length
-    : pgliteResult.affectedRows
+  result.count =
+    command === 'SELECT' || !pgliteResult.affectedRows
+      ? rows.length
+      : pgliteResult.affectedRows
   result.command = command
   result.state = { status: 'idle', pid: 0, secret: 0 }
   result.statement = {
@@ -153,7 +154,12 @@ function serializeParam(value: unknown): unknown {
   if (value === null || value === undefined) return null
   if (value instanceof Identifier) return value // handled in template assembly
   if (typeof value === 'bigint') return value.toString()
-  if (typeof value === 'object' && !(value instanceof Date) && !Array.isArray(value) && !ArrayBuffer.isView(value)) {
+  if (
+    typeof value === 'object' &&
+    !(value instanceof Date) &&
+    !Array.isArray(value) &&
+    !ArrayBuffer.isView(value)
+  ) {
     return JSON.stringify(value)
   }
   return value
@@ -192,7 +198,9 @@ function buildQuery(
 
 function createPendingQuery<T>(
   promise: Promise<T>
-): T extends any[] ? Promise<T> & PendingQueryModifiers : Promise<T> & PendingQueryModifiers {
+): T extends any[]
+  ? Promise<T> & PendingQueryModifiers
+  : Promise<T> & PendingQueryModifiers {
   const pending = promise as any
 
   pending.simple = () => pending
@@ -203,8 +211,7 @@ function createPendingQuery<T>(
     Promise.reject(new Error('describe() not supported in worker mode'))
   pending.values = () =>
     Promise.reject(new Error('values() not supported in worker mode'))
-  pending.raw = () =>
-    Promise.reject(new Error('raw() not supported in worker mode'))
+  pending.raw = () => Promise.reject(new Error('raw() not supported in worker mode'))
 
   pending.readable = () => {
     throw new Error('readable() not supported in worker mode')
@@ -247,12 +254,10 @@ interface PendingQueryModifiers {
 // -- sql function factory for a given executor --
 // used both for the top-level sql and for transaction sql
 
-function createSqlFunction(
-  executor: {
-    query<T>(sql: string, params?: unknown[]): Promise<Results<T>>
-    exec(sql: string): Promise<Array<Results>>
-  }
-) {
+function createSqlFunction(executor: {
+  query<T>(sql: string, params?: unknown[]): Promise<Results<T>>
+  exec(sql: string): Promise<Array<Results>>
+}) {
   function sql(first: any, ...rest: any[]): any {
     // tagged template: sql`SELECT ...`
     if (first && Array.isArray(first.raw)) {
@@ -444,12 +449,15 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
 // when used as a bundler alias, zero-cache calls postgres(connectionURI, options).
 // we intercept by reading the PGlite instance from globalThis.__orez_pglite.
 
-function postgres(_urlOrOpts?: string | PostgresShimOptions, opts?: PostgresShimOptions): ReturnType<typeof createPostgresShim> {
+function postgres(
+  _urlOrOpts?: string | PostgresShimOptions,
+  opts?: PostgresShimOptions
+): ReturnType<typeof createPostgresShim> {
   const pglite = (globalThis as any).__orez_pglite as PGlite | undefined
   if (!pglite) {
     throw new Error(
       'postgres shim: no PGlite instance found on globalThis.__orez_pglite. ' +
-      'register PGlite before importing modules that use postgres.'
+        'register PGlite before importing modules that use postgres.'
     )
   }
 

@@ -6,10 +6,10 @@
  * but usable in any JS runtime (browser, vitest, bun, deno).
  */
 
-import type { PGlite, PGliteOptions, Results } from '@electric-sql/pglite'
+import type { Mutex } from '../mutex.js'
 import type { ChangeRecord } from '../replication/change-tracker.js'
 import type { ReplicationWriter } from '../replication/handler.js'
-import type { Mutex } from '../mutex.js'
+import type { PGlite, PGliteOptions, Results } from '@electric-sql/pglite'
 
 /** options for creating an orez worker */
 export interface OrezWorkerOptions {

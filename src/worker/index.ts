@@ -26,10 +26,10 @@ import {
 } from '../replication/change-tracker.js'
 import { handleStartReplication } from '../replication/handler.js'
 
-import type { PGlite, Results } from '@electric-sql/pglite'
 import type { ChangeRecord } from '../replication/change-tracker.js'
 import type { ReplicationWriter } from '../replication/handler.js'
 import type { OrezWorkerOptions, OrezWorker } from './types.js'
+import type { PGlite, Results } from '@electric-sql/pglite'
 
 export type { OrezWorkerOptions, OrezWorker } from './types.js'
 export type { ChangeRecord } from '../replication/change-tracker.js'

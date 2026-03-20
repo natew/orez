@@ -10,7 +10,10 @@ import {
 
 /** minimal mock fastify that records inject() calls and returns canned responses */
 function createMockFastify(
-  responses: Record<string, { status: number; body: string; headers?: Record<string, string> }>
+  responses: Record<
+    string,
+    { status: number; body: string; headers?: Record<string, string> }
+  >
 ): InjectableFastify {
   return {
     async ready() {},
@@ -121,7 +124,9 @@ describe('HttpServiceAdapter', () => {
         'GET /search?q=hello': { status: 200, body: 'found' },
       })
       await adapter.initialize(fastify)
-      const resp = await adapter.handleRequest(makeRequest('http://localhost/search?q=hello'))
+      const resp = await adapter.handleRequest(
+        makeRequest('http://localhost/search?q=hello')
+      )
       expect(resp.status).toBe(200)
       expect(await resp.text()).toBe('found')
     })
@@ -325,15 +330,15 @@ describe('HttpServiceAdapter', () => {
       const result = adapter.prepareWebSocketUpgrade(req, url) as WebSocketUpgradeResult
 
       // simulate what handleWebSocket does: invoke handler and catch errors
-      await Promise.resolve(result.handler(result.server as any, result.request, result.url)).catch(
-        (err) => {
-          try {
-            ;(result.server as any).close(1011, String(err))
-          } catch {
-            // socket may already be closed
-          }
+      await Promise.resolve(
+        result.handler(result.server as any, result.request, result.url)
+      ).catch((err) => {
+        try {
+          ;(result.server as any).close(1011, String(err))
+        } catch {
+          // socket may already be closed
         }
-      )
+      })
 
       expect(handler).toHaveBeenCalled()
       expect(mockServer.close).toHaveBeenCalledWith(1011, 'Error: handler boom')
