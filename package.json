@@ -18,6 +18,10 @@
     "./vite": {
       "types": "./dist/vite-plugin.d.ts",
       "import": "./dist/vite-plugin.js"
+    },
+    "./worker": {
+      "types": "./dist/worker/index.d.ts",
+      "import": "./dist/worker/index.js"
     }
   },
   "bin": {

@@ -367,3 +367,40 @@ describe('handleStartReplication', () => {
     expect(begins).toBeGreaterThanOrEqual(1)
   }, 10_000)
 })
+
+describe('InProcessWriter', () => {
+  it('routes data to callback', async () => {
+    const { InProcessWriter } = await import('./handler')
+    const received: Uint8Array[] = []
+    const writer = new InProcessWriter((data) => received.push(data))
+
+    const msg = new Uint8Array([1, 2, 3])
+    writer.write(msg)
+    expect(received).toHaveLength(1)
+    expect(received[0]).toEqual(msg)
+    expect(writer.closed).toBe(false)
+  })
+
+  it('stops delivering after close', async () => {
+    const { InProcessWriter } = await import('./handler')
+    const received: Uint8Array[] = []
+    const writer = new InProcessWriter((data) => received.push(data))
+
+    writer.write(new Uint8Array([1]))
+    writer.close()
+    writer.write(new Uint8Array([2]))
+
+    expect(received).toHaveLength(1)
+    expect(writer.closed).toBe(true)
+  })
+
+  it('implements ReplicationWriter interface', async () => {
+    const { InProcessWriter } = await import('./handler')
+    const writer = new InProcessWriter(() => {})
+
+    // type check: can assign to ReplicationWriter
+    const rw: ReplicationWriter = writer
+    expect(rw.write).toBeDefined()
+    expect(rw.closed).toBe(false)
+  })
+})

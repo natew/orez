@@ -37,6 +37,34 @@ export interface ReplicationWriter {
   readonly closed?: boolean
 }
 
+/**
+ * in-process replication writer. routes pgoutput data via callback
+ * instead of a TCP socket. used in CF Workers / embedded mode where
+ * there's no network between orez and zero-cache.
+ */
+export class InProcessWriter implements ReplicationWriter {
+  #onData: (data: Uint8Array) => void
+  #closed = false
+
+  constructor(onData: (data: Uint8Array) => void) {
+    this.#onData = onData
+  }
+
+  write(data: Uint8Array): void {
+    if (!this.#closed) {
+      this.#onData(data)
+    }
+  }
+
+  get closed(): boolean {
+    return this.#closed
+  }
+
+  close(): void {
+    this.#closed = true
+  }
+}
+
 // current lsn counter
 let currentLsn = 0x1000000n
 // persistent watermark across handler restarts so new handlers
