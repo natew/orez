@@ -58,10 +58,40 @@ export interface RunResult {
 // -- parameter serialization --
 // sqlite only accepts scalar values; serialize objects/booleans/dates/etc.
 // special case: a single object argument means named parameters (@key syntax)
+// convert named params (@key) in SQL to positional (?) and extract values in order.
+// CF DO SqlStorage doesn't support @key syntax, only ? placeholders.
+function convertNamedParams(
+  sql: string,
+  params: Record<string, unknown>
+): { sql: string; values: SqlStorageValue[] } {
+  const values: SqlStorageValue[] = []
+  // each @param occurrence gets its own ? placeholder and value
+  const converted = sql.replace(/@(\w+)/g, (_, name) => {
+    values.push(serializeValue(params[name]))
+    return '?'
+  })
+  return { sql: converted, values }
+}
+
+function serializeValue(p: unknown): SqlStorageValue {
+  if (p === null || p === undefined) return null
+  if (typeof p === 'string' || typeof p === 'number') return p
+  if (typeof p === 'boolean') return p ? 1 : 0
+  if (typeof p === 'bigint') return Number(p)
+  if (p instanceof ArrayBuffer || p instanceof Uint8Array) return p as any
+  if (typeof p === 'object') return JSON.stringify(p)
+  return String(p)
+}
+
 function serializeSqliteParams(params: unknown[]): SqlStorageValue[] {
-  // named parameters: .run({key: value}) → pass values in order
-  // sql.js handles this natively, but DO SqlStorage doesn't
-  // detect named params: single object arg with non-array, non-buffer
+  // better-sqlite3 API: stmt.run([val1, val2, ...]) spreads the array
+  // as positional parameters. detect this: single array argument.
+  if (params.length === 1 && Array.isArray(params[0])) {
+    return serializeSqliteParams(params[0])
+  }
+
+  // named parameters: .run({key: value}) → extract values matching @key placeholders
+  // handled at the exec level via convertNamedParams, return as marker here
   if (
     params.length === 1 &&
     params[0] !== null &&
@@ -70,20 +100,10 @@ function serializeSqliteParams(params: unknown[]): SqlStorageValue[] {
     !(params[0] instanceof ArrayBuffer) &&
     !(params[0] instanceof Uint8Array)
   ) {
-    // return the object as-is for sql.js named parameter binding
-    return params as any
+    return params as any // marker: the Statement methods detect this and convert
   }
 
-  return params.map((p) => {
-    if (p === null || p === undefined) return null
-    if (typeof p === 'string' || typeof p === 'number') return p
-    if (typeof p === 'boolean') return p ? 1 : 0
-    if (typeof p === 'bigint') return Number(p)
-    if (p instanceof ArrayBuffer || p instanceof Uint8Array) return p as any
-    // objects (including Date, arrays) → JSON string
-    if (typeof p === 'object') return JSON.stringify(p)
-    return String(p)
-  })
+  return params.map(serializeValue)
 }
 
 // -- Statement --
@@ -138,6 +158,24 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     return { intercepted: false }
   }
 
+  // resolve named params (@key) → positional (?), or return sql + values as-is
+  #resolveParams(params: unknown[]): { sql: string; values: SqlStorageValue[] } {
+    const serialized = serializeSqliteParams(params)
+    // detect named parameter marker: single non-array object
+    const first = serialized[0] as any
+    if (
+      serialized.length === 1 &&
+      first !== null &&
+      typeof first === 'object' &&
+      !Array.isArray(first) &&
+      !(first instanceof ArrayBuffer) &&
+      !(first instanceof Uint8Array)
+    ) {
+      return convertNamedParams(this.source, first as Record<string, unknown>)
+    }
+    return { sql: this.source, values: serialized }
+  }
+
   run(...params: unknown[]): RunResult {
     if (!this.#db.open) {
       throw new SqliteError('The database connection is not open', 'SQLITE_MISUSE')
@@ -152,11 +190,11 @@ export class Statement<T = Record<string, SqlStorageValue>> {
       upper.startsWith('ROLLBACK') ||
       upper === 'END' ||
       upper.startsWith('END ')
-    const serialized = serializeSqliteParams(params)
+    const { sql, values } = this.#resolveParams(params)
     const cursor =
-      isTxCmd && serialized.length === 0
-        ? this.#db._execTransactionAware(this.source, this.#sql)
-        : this.#sql.exec(this.source, ...serialized)
+      isTxCmd && values.length === 0
+        ? this.#db._execTransactionAware(sql, this.#sql)
+        : this.#sql.exec(sql, ...values)
     return {
       changes: cursor.rowsWritten,
       lastInsertRowid: 0,
@@ -172,7 +210,8 @@ export class Statement<T = Record<string, SqlStorageValue>> {
       return pragma.result.toArray()[0] as T
     }
 
-    const cursor = this.#sql.exec(this.source, ...serializeSqliteParams(params))
+    const { sql, values } = this.#resolveParams(params)
+    const cursor = this.#sql.exec(sql, ...values)
     const rows = cursor.toArray()
     return (rows[0] as T) ?? undefined
   }
@@ -186,7 +225,8 @@ export class Statement<T = Record<string, SqlStorageValue>> {
       return pragma.result.toArray() as T[]
     }
 
-    const cursor = this.#sql.exec(this.source, ...serializeSqliteParams(params))
+    const { sql, values } = this.#resolveParams(params)
+    const cursor = this.#sql.exec(sql, ...values)
     return cursor.toArray() as T[]
   }
 
@@ -252,7 +292,6 @@ export class Database {
   #sql: SqlStorageLike
   #open: boolean
   #inTransaction: boolean
-  #txDepth: number = 0
 
   constructor(sqlOrFilename: SqlStorageLike | string, _options?: { readonly?: boolean }) {
     if (typeof sqlOrFilename === 'string') {

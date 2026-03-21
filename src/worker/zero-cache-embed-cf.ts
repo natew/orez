@@ -117,8 +117,8 @@ export async function startZeroCacheEmbedCF(
 
   const parentEmitter = new EventEmitter()
 
-  parent.send = (message: unknown) => {
-    parentEmitter.emit('message', message)
+  parent.send = (message: unknown, sendHandle?: unknown) => {
+    parentEmitter.emit('message', message, sendHandle)
     return true
   }
   parent.kill = (signal = 'SIGTERM') => {
@@ -156,24 +156,25 @@ export async function startZeroCacheEmbedCF(
   }
 
   // wrap parent with onMessageType/onceMessageType helpers
+  // must forward sendHandle (second arg) for WebSocket handoff
   const wrappedParent = new Proxy(parent, {
     get(target, prop, receiver) {
       if (prop === 'onMessageType') {
-        return (type: string, handler: (msg: unknown) => void) => {
-          target.on('message', (data: unknown) => {
+        return (type: string, handler: (msg: unknown, sendHandle?: unknown) => void) => {
+          target.on('message', (data: unknown, sendHandle?: unknown) => {
             if (Array.isArray(data) && data.length === 2 && data[0] === type) {
-              handler(data[1])
+              handler(data[1], sendHandle)
             }
           })
           return receiver
         }
       }
       if (prop === 'onceMessageType') {
-        return (type: string, handler: (msg: unknown) => void) => {
-          const listener = (data: unknown) => {
+        return (type: string, handler: (msg: unknown, sendHandle?: unknown) => void) => {
+          const listener = (data: unknown, sendHandle?: unknown) => {
             if (Array.isArray(data) && data.length === 2 && data[0] === type) {
               target.off('message', listener)
-              handler(data[1])
+              handler(data[1], sendHandle)
             }
           }
           target.on('message', listener)
@@ -236,7 +237,9 @@ export async function startZeroCacheEmbedCF(
       }
 
       const url = new URL(request.url)
-      const isUpgrade = request.headers.get('upgrade')?.toLowerCase() === 'websocket'
+      const isUpgrade =
+        request.headers.get('upgrade')?.toLowerCase() === 'websocket' ||
+        request.headers.get('x-soot-ws-upgrade') === 'true'
 
       if (isUpgrade) {
         return handleWebSocketUpgrade(request, url, fastifyInstance)

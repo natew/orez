@@ -235,22 +235,19 @@ class WebSocket extends EventEmitter {
   }
 
   #setupListeners(): void {
+    // match ws npm package event signatures:
+    //   message: (data: Buffer|string, isBinary: boolean)
+    //   close: (code: number, reason: string)
+    //   error: (err: Error)
     const onMessage = (event: any) => {
       const data = event.data
-      this.emit('message', { data })
+      this.emit('message', data, typeof data !== 'string')
     }
     const onClose = (event: any) => {
-      this.emit('close', {
-        code: event.code ?? 1000,
-        reason: event.reason ?? '',
-        wasClean: event.wasClean ?? true,
-      })
+      this.emit('close', event.code ?? 1000, event.reason ?? '')
     }
     const onError = (event: any) => {
-      this.emit('error', {
-        message: event.message ?? 'WebSocket error',
-        error: event.error ?? new Error('WebSocket error'),
-      })
+      this.emit('error', event.error ?? new Error(event.message ?? 'WebSocket error'))
     }
     const onOpen = () => {
       this.emit('open')
