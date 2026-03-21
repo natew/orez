@@ -316,4 +316,49 @@ describe('postgres shim', () => {
       await expect(sql.unsafe('SELECT * FROM nonexistent_table')).rejects.toThrow()
     })
   })
+
+  // -- multi-statement queries --
+
+  describe('multi-statement DDL', () => {
+    it('handles multi-statement via unsafe()', async () => {
+      await sql.unsafe(`
+        CREATE SCHEMA IF NOT EXISTS test_schema;
+        CREATE TABLE IF NOT EXISTS test_schema.items (
+          id TEXT PRIMARY KEY,
+          value TEXT
+        )
+      `)
+      // verify schema and table were created
+      const result =
+        await sql`SELECT table_name FROM information_schema.tables WHERE table_schema = 'test_schema'`
+      expect(result.length).toBeGreaterThan(0)
+    })
+
+    it('handles multi-statement via tagged template', async () => {
+      await sql`
+        CREATE SCHEMA IF NOT EXISTS test_schema2;
+        CREATE TABLE IF NOT EXISTS test_schema2.things (
+          id TEXT PRIMARY KEY,
+          name TEXT
+        )
+      `
+      const result =
+        await sql`SELECT table_name FROM information_schema.tables WHERE table_schema = 'test_schema2'`
+      expect(result.length).toBeGreaterThan(0)
+    })
+
+    it('handles multi-statement with quoted identifiers containing special chars', async () => {
+      await sql.unsafe(`
+        CREATE SCHEMA IF NOT EXISTS "zero_0/cvr";
+        CREATE TABLE IF NOT EXISTS "zero_0/cvr"."clients" (
+          "clientGroupID" TEXT NOT NULL,
+          "clientID" TEXT NOT NULL,
+          PRIMARY KEY ("clientGroupID", "clientID")
+        )
+      `)
+      const result =
+        await sql`SELECT table_name FROM information_schema.tables WHERE table_schema = 'zero_0/cvr'`
+      expect(result.length).toBeGreaterThan(0)
+    })
+  })
 })

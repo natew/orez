@@ -1,0 +1,253 @@
+/**
+ * ws (websocket) shim for cloudflare workers.
+ *
+ * wraps CF Workers WebSocket (from WebSocketPair) to implement the
+ * ws npm package API that zero-cache uses. enables bundler aliasing
+ * so zero-cache's WebSocket handling works with CF durable WebSockets.
+ *
+ * usage with bundler alias:
+ *   alias: { 'ws': './src/worker/shims/ws.js' }
+ */
+
+import EventEmitter from 'node:events'
+import { Duplex } from 'node:stream'
+
+// -- readyState constants --
+const CONNECTING = 0
+const OPEN = 1
+const CLOSING = 2
+const CLOSED = 3
+
+// -- CF WebSocket interface (minimal) --
+interface CFWebSocket {
+  send(data: string | ArrayBuffer | ArrayBufferView): void
+  close(code?: number, reason?: string): void
+  addEventListener(type: string, handler: (event: any) => void): void
+  removeEventListener(type: string, handler: (event: any) => void): void
+  readyState: number
+  accept?(): void
+}
+
+// -- WebSocket shim --
+// wraps a CF WebSocket to match the ws package WebSocket API
+
+class WebSocket extends EventEmitter {
+  static readonly CONNECTING = CONNECTING
+  static readonly OPEN = OPEN
+  static readonly CLOSING = CLOSING
+  static readonly CLOSED = CLOSED
+
+  readonly CONNECTING = CONNECTING
+  readonly OPEN = OPEN
+  readonly CLOSING = CLOSING
+  readonly CLOSED = CLOSED
+
+  #ws: CFWebSocket
+  #url: string
+  #listeners = new Map<string, (event: any) => void>()
+
+  constructor(urlOrSocket: string | CFWebSocket, _protocols?: unknown, _opts?: unknown) {
+    super()
+
+    if (typeof urlOrSocket === 'string') {
+      this.#url = urlOrSocket
+      // on CF Workers, outbound WebSocket connections use the standard fetch API
+      // this path is for internal connections (change-streamer, etc.)
+      // for now, throw — we'll handle this if needed
+      throw new Error(
+        'ws shim: outbound WebSocket connections not yet supported. ' +
+          'use the CF Workers fetch API for outbound WebSocket.'
+      )
+    } else {
+      this.#ws = urlOrSocket
+      this.#url = ''
+      this.#setupListeners()
+    }
+  }
+
+  get url(): string {
+    return this.#url
+  }
+
+  get readyState(): number {
+    return this.#ws.readyState
+  }
+
+  send(
+    data: string | Buffer | ArrayBuffer | ArrayBufferView,
+    cb?: (err?: Error) => void
+  ): void {
+    try {
+      if (typeof data === 'string') {
+        this.#ws.send(data)
+      } else if (Buffer.isBuffer(data)) {
+        this.#ws.send(new Uint8Array(data.buffer, data.byteOffset, data.byteLength))
+      } else if (data instanceof ArrayBuffer) {
+        this.#ws.send(data)
+      } else if (ArrayBuffer.isView(data)) {
+        this.#ws.send(new Uint8Array(data.buffer, data.byteOffset, data.byteLength))
+      } else {
+        this.#ws.send(String(data))
+      }
+      cb?.()
+    } catch (err) {
+      cb?.(err as Error)
+    }
+  }
+
+  close(code?: number, reason?: string): void {
+    try {
+      this.#ws.close(code, reason)
+    } catch {
+      // socket may already be closed
+    }
+  }
+
+  terminate(): void {
+    // real ws.terminate() destroys the socket without a close frame.
+    // CF Workers don't expose raw socket destroy, so close with 1000.
+    this.close(1000)
+  }
+
+  ping(_data?: unknown, _mask?: boolean, _cb?: () => void): void {
+    // CF WebSockets handle ping/pong at the platform level
+    // emit pong immediately to satisfy liveness checks
+    this.emit('pong')
+  }
+
+  // standard EventTarget-style addEventListener (used by Connection)
+  addEventListener(type: string, handler: (event: any) => void): void {
+    // wrap to emit EventEmitter-style
+    this.on(type, handler)
+  }
+
+  removeEventListener(type: string, handler: (event: any) => void): void {
+    this.off(type, handler)
+  }
+
+  #setupListeners(): void {
+    const onMessage = (event: any) => {
+      const data = event.data
+      this.emit('message', { data })
+    }
+    const onClose = (event: any) => {
+      this.emit('close', {
+        code: event.code ?? 1000,
+        reason: event.reason ?? '',
+        wasClean: event.wasClean ?? true,
+      })
+    }
+    const onError = (event: any) => {
+      this.emit('error', {
+        message: event.message ?? 'WebSocket error',
+        error: event.error ?? new Error('WebSocket error'),
+      })
+    }
+    const onOpen = () => {
+      this.emit('open')
+    }
+
+    this.#ws.addEventListener('message', onMessage)
+    this.#ws.addEventListener('close', onClose)
+    this.#ws.addEventListener('error', onError)
+    this.#ws.addEventListener('open', onOpen)
+
+    this.#listeners.set('message', onMessage)
+    this.#listeners.set('close', onClose)
+    this.#listeners.set('error', onError)
+    this.#listeners.set('open', onOpen)
+  }
+}
+
+// -- WebSocketServer shim --
+// zero-cache uses WebSocketServer with { noServer: true } for handleUpgrade
+
+class WebSocketServer extends EventEmitter {
+  constructor(_opts?: { noServer?: boolean }) {
+    super()
+  }
+
+  /**
+   * handle a WebSocket upgrade. on CF Workers the upgrade is already done
+   * (WebSocketPair), so this just wraps the CF WebSocket in our shim.
+   *
+   * @param message - the HTTP request (IncomingMessage-like object)
+   * @param socket - the underlying socket (CF WebSocket on CF Workers)
+   * @param head - upgrade head buffer
+   * @param callback - receives the wrapped WebSocket
+   */
+  handleUpgrade(
+    _message: unknown,
+    socket: CFWebSocket | unknown,
+    _head: unknown,
+    callback: (ws: WebSocket) => void
+  ): void {
+    // wrap the CF WebSocket in our shim
+    const ws = new WebSocket(socket as CFWebSocket)
+    callback(ws)
+  }
+}
+
+// -- createWebSocketStream --
+// creates a Node.js Duplex stream from a WebSocket.
+// used by zero-cache's Connection class for streaming messages.
+
+function createWebSocketStream(
+  ws: WebSocket,
+  _opts?: { decodeStrings?: boolean }
+): Duplex {
+  const duplex = new Duplex({
+    objectMode: false,
+    decodeStrings: false,
+
+    read() {
+      // data is pushed from ws message events
+    },
+
+    write(
+      chunk: Buffer | string,
+      _encoding: string,
+      callback: (err?: Error | null) => void
+    ) {
+      try {
+        ws.send(typeof chunk === 'string' ? chunk : chunk.toString(), callback)
+      } catch (err) {
+        callback(err as Error)
+      }
+    },
+
+    destroy(err: Error | null, callback: (err?: Error | null) => void) {
+      ws.close()
+      callback(err)
+    },
+  })
+
+  // pipe ws messages into the readable side
+  ws.on('message', (event: any) => {
+    const data = event?.data ?? event
+    if (typeof data === 'string') {
+      duplex.push(data)
+    } else if (data instanceof ArrayBuffer) {
+      duplex.push(Buffer.from(data))
+    } else if (ArrayBuffer.isView(data)) {
+      duplex.push(Buffer.from(data.buffer, data.byteOffset, data.byteLength))
+    } else {
+      duplex.push(String(data))
+    }
+  })
+
+  ws.on('close', () => {
+    duplex.push(null) // signal end of readable
+    duplex.destroy()
+  })
+
+  ws.on('error', (event: any) => {
+    const err = event?.error ?? new Error(event?.message ?? 'WebSocket error')
+    duplex.destroy(err)
+  })
+
+  return duplex
+}
+
+export default WebSocket
+export { WebSocket, WebSocketServer, createWebSocketStream }

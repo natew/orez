@@ -148,10 +148,17 @@ describe('Database', () => {
     expect(db.inTransaction).toBe(false)
   })
 
-  it('throws when constructed with a string', () => {
-    expect(() => new Database('/path/to/db' as unknown as SqlStorageLike)).toThrow(
-      'requires a SqlStorageLike instance'
-    )
+  it('throws when constructed with a string and no globalThis storage', () => {
+    // clear any global DO storage
+    const prev = (globalThis as any).__orez_do_sqlite
+    delete (globalThis as any).__orez_do_sqlite
+    try {
+      expect(() => new Database('/path/to/db' as unknown as SqlStorageLike)).toThrow(
+        'no DO storage on globalThis.__orez_do_sqlite'
+      )
+    } finally {
+      if (prev) (globalThis as any).__orez_do_sqlite = prev
+    }
   })
 
   it('close sets open to false', () => {

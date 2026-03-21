@@ -32,6 +32,8 @@ export interface SqlStorageCursor {
 
 export interface SqlStorageLike {
   exec(query: string, ...bindings: SqlStorageValue[]): SqlStorageCursor
+  /** DO transaction API — if available, used instead of raw BEGIN/COMMIT */
+  transactionSync?<T>(fn: () => T): T
 }
 
 // -- SqliteError --
@@ -159,15 +161,27 @@ export class Database {
 
   constructor(sqlOrFilename: SqlStorageLike | string, _options?: { readonly?: boolean }) {
     if (typeof sqlOrFilename === 'string') {
-      throw new SqliteError(
-        'Database constructor requires a SqlStorageLike instance in DO environment',
-        'SQLITE_ERROR'
-      )
+      // when used as a bundler alias for @rocicorp/zero-sqlite3,
+      // zero-cache passes a file path. look up DO storage from globalThis.
+      const storage = (globalThis as any).__orez_do_sqlite as SqlStorageLike | undefined
+      if (!storage) {
+        throw new SqliteError(
+          'sqlite shim: no DO storage on globalThis.__orez_do_sqlite. ' +
+            'register DO storage before importing zero-cache.',
+          'SQLITE_ERROR'
+        )
+      }
+      this.#sql = storage
+      this.name = sqlOrFilename
+    } else {
+      this.#sql = sqlOrFilename
+      this.name = ':do-storage:'
     }
-    this.#sql = sqlOrFilename
-    this.name = ':do-storage:'
     this.#open = true
     this.#inTransaction = false
+
+    // expose storage for StatementRunner to access transactionSync
+    ;(this as any).__orez_sql = this.#sql
   }
 
   get open(): boolean {
@@ -205,6 +219,17 @@ export class Database {
       return options?.simple ? undefined : []
     }
 
+    // return sensible defaults for pragmas that DO SQLite may not support
+    // but that zero-cache's zqlite Database constructor expects
+    const pragmaDefaults: Record<string, unknown> = {
+      page_size: [{ page_size: 4096 }],
+      freelist_count: [{ freelist_count: 0 }],
+      auto_vacuum: [{ auto_vacuum: 0 }],
+      page_count: [{ page_count: 0 }],
+      journal_mode: [{ journal_mode: 'wal' }],
+      wal_checkpoint: [{ busy: 0, log: 0, checkpointed: 0 }],
+    }
+
     // parse pragma name and value
     const eqIndex = source.indexOf('=')
     const isSet = eqIndex !== -1
@@ -225,15 +250,30 @@ export class Database {
     try {
       const cursor = this.#sql.exec(`PRAGMA ${source}`)
       const rows = cursor.toArray()
-      if (options?.simple) {
-        if (rows.length === 0) return undefined
-        const firstKey = Object.keys(rows[0])[0]
-        return rows[0][firstKey]
+      if (rows.length > 0) {
+        if (options?.simple) {
+          const firstKey = Object.keys(rows[0])[0]
+          return rows[0][firstKey]
+        }
+        return rows
       }
-      return rows
+      // empty result — fall through to defaults
     } catch {
-      return options?.simple ? undefined : []
+      // DO SQLite may not support this pragma — fall through to defaults
     }
+
+    // return known defaults or empty
+    const pragmaName = trimmed.split(/[\s(]/)[0]
+    const defaultVal = pragmaDefaults[pragmaName]
+    if (defaultVal) {
+      if (options?.simple) {
+        const arr = defaultVal as Record<string, unknown>[]
+        const firstKey = Object.keys(arr[0])[0]
+        return arr[0][firstKey]
+      }
+      return defaultVal
+    }
+    return options?.simple ? undefined : []
   }
 
   /**
@@ -271,38 +311,49 @@ export class Database {
   transaction<F extends (...args: unknown[]) => unknown>(fn: F): TransactionFunction<F> {
     const self = this
 
-    const wrapWithBegin = (beginStmt: string): F => {
-      const wrapped = ((...args: unknown[]) => {
-        // handle nested transactions - if already in a transaction, just run fn
-        if (self.#inTransaction) {
-          return fn(...args)
-        }
+    const wrapInTransaction: F = ((...args: unknown[]) => {
+      // handle nested transactions — just run fn
+      if (self.#inTransaction) {
+        return fn(...args)
+      }
 
-        self.#sql.exec(beginStmt)
-        self.#inTransaction = true
-        try {
-          const result = fn(...args)
-          self.#sql.exec('COMMIT')
-          self.#inTransaction = false
-          return result
-        } catch (err) {
-          // attempt rollback, but don't mask original error
+      // DO SQLite requires transactionSync() — raw BEGIN/COMMIT is rejected.
+      // fall back to raw SQL only if transactionSync is unavailable.
+      if (self.#sql.transactionSync) {
+        return self.#sql.transactionSync(() => {
+          self.#inTransaction = true
           try {
-            self.#sql.exec('ROLLBACK')
-          } catch {
-            // swallow rollback errors
+            return fn(...args)
+          } finally {
+            self.#inTransaction = false
           }
-          self.#inTransaction = false
-          throw err
-        }
-      }) as F
-      return wrapped
-    }
+        })
+      }
 
-    const txn = wrapWithBegin('BEGIN') as TransactionFunction<F>
-    txn.deferred = wrapWithBegin('BEGIN DEFERRED')
-    txn.immediate = wrapWithBegin('BEGIN IMMEDIATE')
-    txn.exclusive = wrapWithBegin('BEGIN EXCLUSIVE')
+      // fallback for non-DO environments (tests with bedrock-sqlite)
+      self.#sql.exec('BEGIN')
+      self.#inTransaction = true
+      try {
+        const result = fn(...args)
+        self.#sql.exec('COMMIT')
+        self.#inTransaction = false
+        return result
+      } catch (err) {
+        try {
+          self.#sql.exec('ROLLBACK')
+        } catch {
+          // swallow rollback errors
+        }
+        self.#inTransaction = false
+        throw err
+      }
+    }) as F
+
+    // all variants use the same transactionSync wrapper on DO
+    const txn = wrapInTransaction as TransactionFunction<F>
+    txn.deferred = wrapInTransaction
+    txn.immediate = wrapInTransaction
+    txn.exclusive = wrapInTransaction
 
     return txn
   }
@@ -330,9 +381,14 @@ export class Database {
 export class StatementRunner {
   db: Database
   #stmtCache = new Map<string, Statement[]>()
+  /** DO SqlStorage for transactionSync — set when Database wraps DO storage */
+  #storage: SqlStorageLike | null = null
 
   constructor(db: Database) {
     this.db = db
+    // extract the SqlStorageLike from the Database for transactionSync access.
+    // the Database stores it privately, so we pass it via a well-known property.
+    this.#storage = (db as any).__orez_sql ?? null
   }
 
   #getStatement(sql: string): Statement {
@@ -379,24 +435,54 @@ export class StatementRunner {
     }
   }
 
+  // -- transaction methods --
+  // DO SQLite rejects raw BEGIN/COMMIT SQL. when transactionSync is
+  // available, begin() starts a transactionSync block and commit()
+  // lets it complete. for non-DO environments, falls back to raw SQL.
+
+  #txnResult: RunResult = { changes: 0, lastInsertRowid: 0 }
+
   begin(): RunResult {
+    // on DO, transactionSync is closure-based so begin/commit are
+    // effectively no-ops — the actual transaction wrapping happens
+    // at the Database.transaction() level or implicitly per-statement.
+    // we try raw SQL first and swallow the DO rejection.
+    if (this.#storage?.transactionSync) {
+      return this.#txnResult
+    }
     return this.run('BEGIN')
   }
 
   beginConcurrent(): RunResult {
-    // DO sqlite doesn't support BEGIN CONCURRENT — map to regular BEGIN
-    return this.run('BEGIN')
+    return this.begin()
   }
 
   beginImmediate(): RunResult {
+    if (this.#storage?.transactionSync) {
+      return this.#txnResult
+    }
     return this.run('BEGIN IMMEDIATE')
   }
 
   commit(): RunResult {
+    if (this.#storage?.transactionSync) {
+      return this.#txnResult
+    }
     return this.run('COMMIT')
   }
 
   rollback(): RunResult {
+    if (this.#storage?.transactionSync) {
+      return this.#txnResult
+    }
     return this.run('ROLLBACK')
   }
 }
+
+// -- default export --
+// matches @rocicorp/zero-sqlite3's default export: the Database class.
+// zero-cache's zqlite/src/db.js does:
+//   import SQLite3Database, { SqliteError } from "@rocicorp/zero-sqlite3"
+//   new SQLite3Database(path, options)
+
+export default Database

@@ -6,7 +6,16 @@
  */
 
 import { execSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join } from 'node:path'
 
@@ -18,10 +27,12 @@ const major = args.includes('--major')
 const canary = args.includes('--canary')
 const skipTest = args.includes('--skip-test')
 const packOnly = args.includes('--pack-only')
+const intoIdx = args.indexOf('--into')
+const into = intoIdx !== -1 ? args[intoIdx + 1] : null
 
-if (!patch && !minor && !major && !canary && !packOnly) {
+if (!patch && !minor && !major && !canary && !packOnly && !into) {
   console.info(
-    'usage: bun scripts/release.ts --patch|--minor|--major|--canary [--dry-run] [--skip-test] [--pack-only]'
+    'usage: bun scripts/release.ts --patch|--minor|--major|--canary [--dry-run] [--skip-test] [--pack-only] [--into <dir>]'
   )
   process.exit(1)
 }
@@ -50,6 +61,66 @@ function bumpVersion(current: string): string {
     : minor
       ? `${curMajor}.${curMinor + 1}.0`
       : `${curMajor}.${curMinor}.${curPatch + 1}`
+}
+
+// --into <dir>: quick local release, packs each package and unpacks into target node_modules
+if (into) {
+  if (!into || into.startsWith('--')) {
+    console.error('missing directory argument for --into')
+    process.exit(1)
+  }
+  const targetDir = resolve(into.replace(/^~/, process.env.HOME!))
+
+  console.info('building...')
+  run('bun run build')
+
+  const tmpDir = '/tmp/orez-release-into'
+  mkdirSync(tmpDir, { recursive: true })
+
+  // gather packages the same way the normal flow does
+  const pkgDirs: { name: string; dir: string }[] = []
+  const rootPkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf-8'))
+  pkgDirs.push({ name: rootPkg.name, dir: root })
+
+  const sqlDir = resolve(root, 'sqlite-wasm')
+  const sqlPkgPath = resolve(sqlDir, 'package.json')
+  if (existsSync(sqlPkgPath)) {
+    const sqlPkg = JSON.parse(readFileSync(sqlPkgPath, 'utf-8'))
+    pkgDirs.push({ name: sqlPkg.name, dir: sqlDir })
+  }
+
+  let released = 0
+  for (const { name, dir } of pkgDirs) {
+    const destDir = join(targetDir, 'node_modules', name)
+    if (!existsSync(destDir)) {
+      console.info(`  skip ${name} (not in target node_modules)`)
+      continue
+    }
+
+    try {
+      run(`npm pack --pack-destination ${tmpDir}`, { cwd: dir, silent: true })
+
+      const files = readdirSync(tmpDir)
+      const prefix = name.replace('@', '').replace('/', '-')
+      const packed = files.find((f) => f.startsWith(prefix) && f.endsWith('.tgz'))
+
+      if (!packed) {
+        console.warn(`  skip ${name}: pack produced no tgz`)
+        continue
+      }
+
+      const tgzPath = join(tmpDir, packed)
+      run(`tar -xzf ${tgzPath} -C ${destDir} --strip-components=1`, { silent: true })
+      rmSync(tgzPath)
+      released++
+      console.info(`  ✓ ${name}`)
+    } catch (err) {
+      console.warn(`  ✗ ${name}: ${err}`)
+    }
+  }
+
+  console.info(`\nreleased ${released} package(s) into ${targetDir}`)
+  process.exit(0)
 }
 
 // workspace packages: [dir, pkgPath, pkg, nextVersion]

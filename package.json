@@ -22,6 +22,61 @@
     "./worker": {
       "types": "./dist/worker/index.d.ts",
       "import": "./dist/worker/index.js"
+    },
+    "./worker/cf-embed": {
+      "types": "./dist/worker/zero-cache-embed-cf.d.ts",
+      "import": "./dist/worker/zero-cache-embed-cf.js",
+      "default": "./dist/worker/zero-cache-embed-cf.js"
+    },
+    "./worker/cf-patches": {
+      "types": "./dist/worker/cf-patches.d.ts",
+      "import": "./dist/worker/cf-patches.js",
+      "default": "./dist/worker/cf-patches.js"
+    },
+    "./worker/shims/postgres": {
+      "types": "./dist/worker/shims/postgres.d.ts",
+      "import": "./dist/worker/shims/postgres.js",
+      "default": "./dist/worker/shims/postgres.js"
+    },
+    "./worker/shims/sqlite": {
+      "types": "./dist/worker/shims/sqlite.d.ts",
+      "import": "./dist/worker/shims/sqlite.js",
+      "default": "./dist/worker/shims/sqlite.js"
+    },
+    "./worker/shims/fastify": {
+      "types": "./dist/worker/shims/fastify.d.ts",
+      "import": "./dist/worker/shims/fastify.js",
+      "default": "./dist/worker/shims/fastify.js"
+    },
+    "./worker/shims/ws": {
+      "types": "./dist/worker/shims/ws.d.ts",
+      "import": "./dist/worker/shims/ws.js",
+      "default": "./dist/worker/shims/ws.js"
+    },
+    "./worker/shims/sqlite-browser": {
+      "types": "./dist/worker/shims/sqlite-browser.d.ts",
+      "import": "./dist/worker/shims/sqlite-browser.js",
+      "default": "./dist/worker/shims/sqlite-browser.js"
+    },
+    "./worker/shims/ws-browser": {
+      "types": "./dist/worker/shims/ws-browser.d.ts",
+      "import": "./dist/worker/shims/ws-browser.js",
+      "default": "./dist/worker/shims/ws-browser.js"
+    },
+    "./worker/shims/node-stub": {
+      "types": "./dist/worker/shims/node-stub.d.ts",
+      "import": "./dist/worker/shims/node-stub.js",
+      "default": "./dist/worker/shims/node-stub.js"
+    },
+    "./worker/browser-embed": {
+      "types": "./dist/worker/browser-embed.d.ts",
+      "import": "./dist/worker/browser-embed.js",
+      "default": "./dist/worker/browser-embed.js"
+    },
+    "./worker/browser-build-config": {
+      "types": "./dist/worker/browser-build-config.d.ts",
+      "import": "./dist/worker/browser-build-config.js",
+      "default": "./dist/worker/browser-build-config.js"
     }
   },
   "bin": {
