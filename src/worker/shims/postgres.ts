@@ -465,14 +465,7 @@ async function executeQuery(
   // make FK constraints DEFERRABLE so zero-cache's batched CVR writes work
   // (zero-cache flushes desires before queries in the same transaction)
   if (/FOREIGN\s+KEY/i.test(text) && /CREATE\s+TABLE/i.test(text) && !/DEFERRABLE/i.test(text)) {
-    const before = text
-    text = text.replace(
-      /(ON\s+DELETE\s+CASCADE)/gi,
-      '$1 DEFERRABLE INITIALLY DEFERRED'
-    )
-    if (before !== text) {
-      console.log('[postgres-shim] added DEFERRABLE to FK constraint')
-    }
+    text = text.replace(/(ON\s+DELETE\s+CASCADE)/gi, '$1 DEFERRABLE INITIALLY DEFERRED')
   }
 
   const isMulti = hasMultipleStatements(text)
