@@ -250,12 +250,12 @@ export async function startZeroCacheEmbedBrowser(
       return isReady
     },
 
-    handleWebSocket(ws: WsLike, url = '/') {
+    handleWebSocket(ws: WsLike, url = '/', headers?: Record<string, string>) {
       if (!isReady || !fastifyInstance?.server) return
 
       const message = {
         url,
-        headers: {},
+        headers: headers || {},
         method: 'GET',
       }
 
