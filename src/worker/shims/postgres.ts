@@ -16,6 +16,8 @@
 
 import type { PGlite, Results, Transaction } from '@electric-sql/pglite'
 import { PassThrough } from 'stream'
+import { Mutex } from '../../mutex.js'
+import { handleStartReplication } from '../../replication/handler.js'
 
 // -- PostgresError --
 
@@ -349,6 +351,21 @@ interface PendingQueryModifiers {
   cursor(...args: unknown[]): never
 }
 
+type ReplicationCapableDb = {
+  query<T>(sql: string, params?: unknown[]): Promise<Results<T>>
+  exec(sql: string): Promise<Array<Results> | void>
+  listen?: (channel: string, cb: () => void) => Promise<() => Promise<void>>
+  closed?: boolean
+}
+
+function getSharedMutex(target: object): Mutex {
+  const existing = (target as any).__orez_mutex as Mutex | undefined
+  if (existing) return existing
+  const mutex = new Mutex()
+  ;(target as any).__orez_mutex = mutex
+  return mutex
+}
+
 // -- execute a query, routing multi-statement to exec() --
 // PGlite.query() only handles single statements. multi-statement DDL
 // (schema migrations, etc.) must use exec(). when params are present
@@ -656,6 +673,84 @@ function createCopyPendingQuery(copyQuery: string, executor: { query: (sql: stri
   return pending
 }
 
+function createReplicationPendingQuery(
+  replicationQuery: string,
+  db: ReplicationCapableDb
+): any {
+  const mutex = getSharedMutex(db as object)
+  const readable = new PassThrough()
+  const writable = new PassThrough()
+  let started = false
+  let startPromise: Promise<void> | null = null
+
+  const start = async () => {
+    if (started) return startPromise!
+    started = true
+    startPromise = handleStartReplication(
+      replicationQuery,
+      {
+        write(chunk: Uint8Array) {
+          // The replication handler emits wire-protocol frames:
+          // CopyBothResponse, then CopyData(XLogData|Keepalive). postgres.js
+          // exposes the inner streaming payload, so unwrap CopyData and skip
+          // the initial CopyBothResponse.
+          if (chunk[0] === 0x57) return
+          if (chunk[0] === 0x64 && chunk.length >= 6) {
+            readable.write(Buffer.from(chunk.subarray(5)))
+            return
+          }
+          readable.write(Buffer.from(chunk))
+        },
+        get closed() {
+          return readable.destroyed || writable.destroyed || !!db.closed
+        },
+      },
+      db as PGlite,
+      mutex
+    )
+      .catch((err) => {
+        // Closing the stream intentionally tears down the replication loop.
+        if (!readable.destroyed) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (!/closed|destroyed|ECONNRESET|EPIPE/i.test(msg)) {
+            readable.destroy(err instanceof Error ? err : new Error(msg))
+          }
+        }
+      })
+      .finally(() => {
+        if (!readable.destroyed) readable.end()
+      })
+    return Promise.resolve()
+  }
+
+  const pending = Promise.resolve() as any
+  pending.execute = () => pending
+  pending.simple = () => pending
+  pending.cancel = () => {
+    readable.destroy()
+    writable.destroy()
+  }
+  pending.readable = async () => {
+    await start()
+    return readable
+  }
+  pending.writable = async () => {
+    await start()
+    return writable
+  }
+  pending.describe = () => Promise.reject(new Error('not supported'))
+  pending.values = () => Promise.reject(new Error('not supported'))
+  pending.raw = () => Promise.reject(new Error('not supported'))
+  pending.forEach = () => Promise.reject(new Error('not supported'))
+  pending.cursor = () => {
+    throw new Error('not supported')
+  }
+  pending.stream = () => {
+    throw new Error('not supported')
+  }
+  return pending
+}
+
 // -- type parsers --
 // pre-populated parsers matching the postgres npm package's type registry.
 
@@ -742,6 +837,12 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
   // sql.unsafe(queryString, params?) — raw SQL execution
   sql.unsafe = (queryString: string, params?: unknown[]) => {
     const upper = queryString.trimStart().toUpperCase()
+
+    // START_REPLICATION — expose an in-process duplex stream backed by
+    // orez's replication handler instead of the TCP protocol adapter.
+    if (upper.startsWith('START_REPLICATION')) {
+      return createReplicationPendingQuery(queryString, pglite as ReplicationCapableDb)
+    }
 
     // COPY TO STDOUT — returns readable stream of rows
     if (upper.startsWith('COPY') && upper.includes('TO STDOUT')) {
