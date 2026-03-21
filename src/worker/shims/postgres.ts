@@ -462,6 +462,19 @@ async function executeQuery(
     if (intercepted) return intercepted
   }
 
+  // make FK constraints DEFERRABLE so zero-cache's batched CVR writes work
+  // (zero-cache flushes desires before queries in the same transaction)
+  if (/FOREIGN\s+KEY/i.test(text) && /CREATE\s+TABLE/i.test(text) && !/DEFERRABLE/i.test(text)) {
+    const before = text
+    text = text.replace(
+      /(ON\s+DELETE\s+CASCADE)/gi,
+      '$1 DEFERRABLE INITIALLY DEFERRED'
+    )
+    if (before !== text) {
+      console.log('[postgres-shim] added DEFERRABLE to FK constraint')
+    }
+  }
+
   const isMulti = hasMultipleStatements(text)
 
   if (!isMulti) {
@@ -742,6 +755,14 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
       return createCopyPendingQuery(queryString, pglite)
     }
 
+    // make FK constraints DEFERRABLE (zero-cache CVR creates tables via unsafe())
+    if (/FOREIGN\s+KEY/i.test(queryString) && /CREATE\s+TABLE/i.test(queryString) && !/DEFERRABLE/i.test(queryString)) {
+      queryString = queryString.replace(
+        /(ON\s+DELETE\s+CASCADE)/gi,
+        '$1 DEFERRABLE INITIALLY DEFERRED'
+      )
+    }
+
     const serializedParams = (params ?? []).map(serializeParam)
 
     // multi-statement with no params: split and run each individually
@@ -782,6 +803,8 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
     // isolation level is ignored — PGlite is single-connection
 
     return pglite.transaction(async (tx: Transaction) => {
+      // defer FK constraints so batched writes can insert in any order
+      await tx.query('SET CONSTRAINTS ALL DEFERRED').catch(() => {})
       const txSql = createSqlFunction(tx)
 
       function txSqlFn(first: any, ...rest: any[]): any {
