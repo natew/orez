@@ -109,6 +109,13 @@ export function inspect(obj: unknown) {
 export function stripVTControlCharacters(str: string) {
   return str
 }
+export function inherits(ctor: any, superCtor: any) {
+  ctor.prototype = Object.create(superCtor.prototype)
+  ctor.prototype.constructor = ctor
+}
+export function deprecate(fn: any) {
+  return fn
+}
 export const types = {
   isProxy: () => false,
   isRegExp: (v: unknown) => v instanceof RegExp,
@@ -130,6 +137,17 @@ export function execSync() {
 
 // stub for node:perf_hooks
 export const performance = globalThis.performance
+export const constants = {
+  NODE_PERFORMANCE_GC_MAJOR: 4,
+  NODE_PERFORMANCE_GC_MINOR: 1,
+  NODE_PERFORMANCE_GC_INCREMENTAL: 8,
+  NODE_PERFORMANCE_GC_WEAKCB: 16,
+}
+export class PerformanceObserver {
+  constructor(_cb: any) {}
+  observe() {}
+  disconnect() {}
+}
 
 // stub for node:stream/promises
 export function pipeline(..._args: unknown[]) {
@@ -159,5 +177,21 @@ export function release() {
   return '0.0.0'
 }
 
-// default export for modules that use default import
-export default {}
+// default export for modules that use default import or CJS require()
+export default {
+  randomUUID, randomBytes, timingSafeEqual,
+  hostname, platform, tmpdir, availableParallelism, arch, release,
+  existsSync, readFileSync, writeFileSync, rmSync, mkdirSync, statSync,
+  writeFile, readFile, promises,
+  fork, spawn, execSync,
+  createServer, createConnection,
+  fileURLToPath,
+  promisify, inspect, stripVTControlCharacters, inherits, deprecate, types,
+  performance, constants, PerformanceObserver,
+  getHeapStatistics,
+  gzip,
+  strict, ok,
+  createRequire,
+  pipeline,
+  Server, Session,
+}

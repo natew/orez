@@ -153,8 +153,10 @@ function detectCommand(sql: string): string {
 // from semicolons inside quoted strings.
 
 function hasMultipleStatements(sql: string): boolean {
+  // strip dollar-quoted strings ($$ ... $$)
+  let stripped = sql.replace(/(\$[a-zA-Z_]*\$)([\s\S]*?)\1/g, '')
   // strip string literals (single-quoted, with '' escape)
-  let stripped = sql.replace(/'(?:[^']|'')*'/g, '')
+  stripped = stripped.replace(/'(?:[^']|'')*'/g, '')
   // strip double-quoted identifiers
   stripped = stripped.replace(/"(?:[^"]|"")*"/g, '')
   // strip -- line comments
@@ -207,6 +209,11 @@ function buildQuery(
       if (val instanceof Identifier) {
         // identifiers are inlined (already escaped)
         text += val.value
+      } else if (Array.isArray(val)) {
+        // array expansion for IN clauses: sql`WHERE x IN ${sql([1,2,3])}`
+        const placeholders = val.map((_, j) => `$${params.length + j + 1}`).join(', ')
+        text += `(${placeholders})`
+        params.push(...val.map(serializeParam))
       } else {
         params.push(serializeParam(val))
         text += `$${params.length}`
@@ -234,7 +241,10 @@ function createPendingQuery<T>(
   pending.describe = () =>
     Promise.reject(new Error('describe() not supported in worker mode'))
   pending.values = () =>
-    Promise.reject(new Error('values() not supported in worker mode'))
+    promise.then((rows: any) => {
+      if (!Array.isArray(rows)) return []
+      return rows.map((row: any) => Object.values(row))
+    })
   pending.raw = () => Promise.reject(new Error('raw() not supported in worker mode'))
 
   pending.readable = () => {
@@ -408,27 +418,22 @@ async function executeQuery(
 
   if (!isMulti) {
     // single statement — use query() with params
-    try {
-      const r = await (params.length > 0
-        ? executor.query(text, params)
-        : executor.query(text))
-      return createResultArray(r as Results<any>, text)
-    } catch (err: any) {
-      // fallback: if PGlite rejects multi-statement via query(), try exec()
-      if (err?.message?.includes('multiple commands') && params.length === 0) {
-        const results = await executor.exec(text)
-        const last = results[results.length - 1] ?? { rows: [], fields: [], affectedRows: 0 }
-        return createResultArray(last as Results<any>, text)
-      }
-      throw err
-    }
+    const r = await (params.length > 0
+      ? executor.query(text, params)
+      : executor.query(text))
+    return createResultArray(r as Results<any>, text)
   }
 
+  // multi-statement: ALWAYS split and run individually
+  // PGliteWorker's execProtocol rejects multi-statement SQL, and exec() also
+  // uses execProtocol internally. splitting upfront avoids all these issues.
   if (params.length === 0) {
-    // multi-statement, no params — use exec()
-    const results = await executor.exec(text)
-    const last = results[results.length - 1] ?? { rows: [], fields: [], affectedRows: 0 }
-    return createResultArray(last as Results<any>, text)
+    const stmts = splitStatements(text)
+    let lastResult: Results<any> = { rows: [], fields: [], affectedRows: 0 } as any
+    for (const stmt of stmts) {
+      lastResult = (await executor.query(stmt)) as Results<any>
+    }
+    return createResultArray(lastResult, text)
   }
 
   // multi-statement WITH params — split and run each statement,
@@ -461,7 +466,12 @@ async function executeQuery(
 function splitStatements(sql: string): string[] {
   // strip string literals to find real semicolons
   const literals: string[] = []
-  let stripped = sql.replace(/'(?:[^']|'')*'/g, (match) => {
+  // dollar-quoted strings first ($$ ... $$ or $tag$ ... $tag$)
+  let stripped = sql.replace(/(\$[a-zA-Z_]*\$)([\s\S]*?)\1/g, (match) => {
+    literals.push(match)
+    return `__LIT${literals.length - 1}__`
+  })
+  stripped = stripped.replace(/'(?:[^']|'')*'/g, (match) => {
     literals.push(match)
     return `__LIT${literals.length - 1}__`
   })
@@ -469,6 +479,10 @@ function splitStatements(sql: string): string[] {
     literals.push(match)
     return `__LIT${literals.length - 1}__`
   })
+  // strip -- comments
+  stripped = stripped.replace(/--[^\n]*/g, '')
+  // strip /* block comments */
+  stripped = stripped.replace(/\/\*[\s\S]*?\*\//g, '')
 
   // split on semicolons
   const parts = stripped
@@ -680,24 +694,13 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
 
     const serializedParams = (params ?? []).map(serializeParam)
 
-    // multi-statement with no params: return array of result sets (postgres npm compat)
+    // multi-statement with no params: split and run each individually
+    // PGliteWorker's execProtocol rejects multi-statement, so always split upfront
     if (hasMultipleStatements(queryString) && serializedParams.length === 0) {
       const promise = (async () => {
         const intercepted = await interceptReplicationQuery(queryString, pglite)
         if (intercepted) return intercepted
-        try {
-          const results = await pglite.exec(queryString)
-          const resultArrays = results.map((r) => createResultArray(r as Results<any>, queryString))
-          const combined = resultArrays as any
-          combined.count = resultArrays.length
-          combined.command = 'SELECT'
-          combined.state = { status: 'idle', pid: 0, secret: 0 }
-          combined.statement = { name: '', string: queryString, types: [], columns: [] }
-          combined.columns = []
-          return combined
-        } catch (err: any) {
-          // fallback: split and run individually in tx context
-          if (!pglite.exec) {
+        {
             const statements = splitStatements(queryString)
             const resultArrays = []
             for (const stmt of statements) {
@@ -711,8 +714,6 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
             combined.statement = { name: '', string: queryString, types: [], columns: [] }
             combined.columns = []
             return combined
-          }
-          throw err
         }
       })()
       return createPendingQuery(promise)
