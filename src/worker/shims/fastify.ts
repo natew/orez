@@ -7,11 +7,17 @@
  * listen(). on CF Workers we skip listen() and route DO fetch()
  * through inject().
  *
+ * supports { websocket: true } routes: when a handoff event arrives on
+ * the server, matches against websocket routes and calls the handler
+ * with the socket directly. this enables the serving-replicator's
+ * in-process WebSocket connection to the change-streamer.
+ *
  * usage with bundler alias:
  *   alias: { 'fastify': './src/worker/shims/fastify.js' }
  */
 
 import EventEmitter from 'node:events'
+import { WebSocket as WsShim, WebSocketServer as WsServerShim } from './ws.js'
 
 // -- types matching fastify's minimal surface used by zero-cache --
 
@@ -82,20 +88,77 @@ class FakeHttpServer extends EventEmitter {
   }
 }
 
+// use the real WebSocketServer from the WS shim — it wraps raw sockets
+// in a proper WebSocket class with ping/pong/on/emit etc.
+
+// -- route pattern matching --
+// converts fastify route patterns like "/replication/:version/changes"
+// to regex for matching incoming URLs
+
+function patternToRegex(pattern: string): RegExp {
+  const escaped = pattern
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/:(\w+)/g, '(?<$1>[^/]+)')
+  return new RegExp(`^${escaped}$`)
+}
+
 // -- fastify shim instance --
 
 class FastifyShim {
   server: FakeHttpServer
+  websocketServer: WsServerShim
   #routes = new Map<string, RouteHandler>()
+  #wsRoutes: Array<{ pattern: RegExp; handler: (ws: unknown, req: any) => void }> = []
   #readyResolvers: Array<() => void> = []
 
   constructor() {
     this.server = new FakeHttpServer()
+    this.websocketServer = new WsServerShim()
+    this.#installWsHandoffHandler()
   }
 
-  // route registration
-  get(path: string, handler: RouteHandler) {
-    this.#routes.set(`GET:${path}`, handler)
+  // listen for in-process WebSocket handoff events on the server.
+  // when the WS shim creates an in-process connection, it emits a handoff
+  // event. we match the URL against registered { websocket: true } routes
+  // and call the handler with the socket.
+  #installWsHandoffHandler() {
+    this.server.onMessageType('handoff', (msg: any, socket?: any) => {
+      if (!socket || !msg?.message?.url) return
+      const url = msg.message.url
+      const parsedUrl = new URL(url, 'http://localhost')
+      const pathname = parsedUrl.pathname
+
+      for (const route of this.#wsRoutes) {
+        if (route.pattern.test(pathname)) {
+          const req = {
+            url,
+            headers: msg.message.headers || {},
+            method: msg.message.method || 'GET',
+          }
+          // wrap socket through handleUpgrade so it gets the full WS API
+          // (ping, on, once, terminate, etc.) needed by zero-cache's streamOut
+          this.websocketServer.handleUpgrade(req, socket, Buffer.from(new Uint8Array(0)), (ws: any) => {
+            route.handler(ws, req)
+          })
+          return
+        }
+      }
+    })
+  }
+
+  // route registration — supports optional { websocket: true } option
+  get(path: string, optsOrHandler: any, handler?: any) {
+    if (typeof optsOrHandler === 'function') {
+      this.#routes.set(`GET:${path}`, optsOrHandler)
+    } else if (optsOrHandler?.websocket && handler) {
+      // websocket route — register for handoff matching
+      this.#wsRoutes.push({
+        pattern: patternToRegex(path),
+        handler,
+      })
+    } else if (handler) {
+      this.#routes.set(`GET:${path}`, handler)
+    }
   }
   post(path: string, handler: RouteHandler) {
     this.#routes.set(`POST:${path}`, handler)
@@ -107,7 +170,7 @@ class FastifyShim {
     this.#routes.set(`DELETE:${path}`, handler)
   }
 
-  // plugin registration (no-op for now — zero-cache doesn't use plugins)
+  // plugin registration (no-op — zero-cache registers @fastify/websocket here)
   register(_plugin: unknown, _opts?: unknown): this {
     return this
   }

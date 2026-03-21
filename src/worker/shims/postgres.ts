@@ -14,10 +14,12 @@
  *   const rows = await sql`SELECT * FROM users WHERE id = ${id}`
  */
 
-import type { PGlite, Results, Transaction } from '@electric-sql/pglite'
 import { PassThrough } from 'stream'
+
 import { Mutex } from '../../mutex.js'
-import { handleStartReplication } from '../../replication/handler.js'
+import { handleStartReplication, signalReplicationChange } from '../../replication/handler.js'
+
+import type { PGlite, Results, Transaction } from '@electric-sql/pglite'
 
 // -- PostgresError --
 
@@ -107,6 +109,16 @@ function createResultArray<T extends Record<string, unknown>>(
   pgliteResult: Results<T>,
   queryString: string
 ): ResultArray<T> {
+  // guard against undefined/null results (e.g. DDL on PGlite proxy)
+  if (!pgliteResult) {
+    const empty = [] as unknown as ResultArray<T>
+    empty.count = 0
+    empty.command = detectCommand(queryString)
+    empty.state = { status: 'idle', pid: 0, secret: 0 }
+    empty.statement = { name: '', string: queryString, types: [], columns: [] }
+    empty.columns = []
+    return empty
+  }
   const rows = pgliteResult.rows
   const columns: ColumnMeta[] = (pgliteResult.fields || []).map((f, i) => ({
     name: f.name,
@@ -212,26 +224,55 @@ function buildQuery(
       if (val instanceof Identifier) {
         // identifiers are inlined (already escaped)
         text += val.value
-      } else if (val && typeof val === 'object' && '_isHelper' in val && (val as any)._isHelper) {
+      } else if (
+        val &&
+        typeof val === 'object' &&
+        '_isHelper' in val &&
+        (val as any)._isHelper
+      ) {
         // sql(object) helper — expand based on preceding SQL context
-        const helper = val as { _isHelper: true; _data: Record<string, any>; toInsert: () => any; toUpdate: () => any }
+        const helper = val as {
+          _isHelper: true
+          _data: Record<string, any>
+          toInsert: () => any
+          toUpdate: () => any
+        }
         const before = text.trimEnd().toUpperCase()
-        if (/\)\s*$/.test(before) || /SET\s*$/i.test(before) || /DO\s+UPDATE\s+SET\s*$/i.test(before)) {
+        if (
+          /\)\s*$/.test(before) ||
+          /SET\s*$/i.test(before) ||
+          /DO\s+UPDATE\s+SET\s*$/i.test(before)
+        ) {
           // UPDATE SET context: col1 = $1, col2 = $2
           const { set, params: updateParams } = helper.toUpdate()
           // rebase placeholder indices
-          const rebasedSet = set.replace(/\$(\d+)/g, (_: string, n: string) => `$${params.length + Number(n)}`)
+          const rebasedSet = set.replace(
+            /\$(\d+)/g,
+            (_: string, n: string) => `$${params.length + Number(n)}`
+          )
           text += rebasedSet
           params.push(...updateParams.map(serializeParam))
         } else {
           // INSERT context: (col1, col2) VALUES ($1, $2)
-          const { columns, values: placeholders, params: insertParams } = helper.toInsert()
+          const {
+            columns,
+            values: placeholders,
+            params: insertParams,
+          } = helper.toInsert()
           // rebase placeholder indices
-          const rebasedPlaceholders = placeholders.replace(/\$(\d+)/g, (_: string, n: string) => `$${params.length + Number(n)}`)
+          const rebasedPlaceholders = placeholders.replace(
+            /\$(\d+)/g,
+            (_: string, n: string) => `$${params.length + Number(n)}`
+          )
           text += `(${columns}) VALUES (${rebasedPlaceholders})`
           params.push(...insertParams.map(serializeParam))
         }
-      } else if (val && typeof val === 'object' && '_isArrayExpansion' in val && (val as any)._isArrayExpansion) {
+      } else if (
+        val &&
+        typeof val === 'object' &&
+        '_isArrayExpansion' in val &&
+        (val as any)._isArrayExpansion
+      ) {
         // sql([1,2,3]) — expand for IN clauses: ($1, $2, $3)
         const arr = (val as any)._values as unknown[]
         const placeholders = arr.map((_, j) => `$${params.length + j + 1}`).join(', ')
@@ -241,22 +282,34 @@ function buildQuery(
         // raw array in template tag
         // check context: json_to_recordset etc. need JSON, everything else needs PG array
         const before = text.trimEnd()
-        const needsJson = /json_to_record(?:set)?|json_(?:array|build|each|populate)\s*\(\s*$/i.test(before)
-          || (/\(\s*$/.test(before) && /json/i.test(before.slice(Math.max(0, before.length - 40))))
+        const needsJson =
+          /json_to_record(?:set)?|json_(?:array|build|each|populate)\s*\(\s*$/i.test(
+            before
+          ) ||
+          (/\(\s*$/.test(before) &&
+            /json/i.test(before.slice(Math.max(0, before.length - 40))))
         if (needsJson) {
           params.push(JSON.stringify(val))
           text += `$${params.length}::json`
         } else {
           // PostgreSQL array literal: {val1,val2,...}
-          const pgArray = `{${val.map((v: any) => {
-            if (v === null || v === undefined) return 'NULL'
-            const s = String(v)
-            // quote if contains special chars
-            if (s.includes(',') || s.includes('"') || s.includes('{') || s.includes('}') || s.includes(' ')) {
-              return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-            }
-            return s
-          }).join(',')}}`
+          const pgArray = `{${val
+            .map((v: any) => {
+              if (v === null || v === undefined) return 'NULL'
+              const s = String(v)
+              // quote if contains special chars
+              if (
+                s.includes(',') ||
+                s.includes('"') ||
+                s.includes('{') ||
+                s.includes('}') ||
+                s.includes(' ')
+              ) {
+                return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+              }
+              return s
+            })
+            .join(',')}}`
           params.push(pgArray)
           text += `$${params.length}`
         }
@@ -264,8 +317,11 @@ function buildQuery(
         const serialized = serializeParam(val)
         params.push(serialized)
         // add ::json cast for JSON values (PGlite needs explicit type for json_to_recordset etc.)
-        const needsJsonCast = typeof serialized === 'string' && typeof val === 'object' && val !== null
-          && (serialized.startsWith('[') || serialized.startsWith('{'))
+        const needsJsonCast =
+          typeof serialized === 'string' &&
+          typeof val === 'object' &&
+          val !== null &&
+          (serialized.startsWith('[') || serialized.startsWith('{'))
         text += `$${params.length}${needsJsonCast ? '::json' : ''}`
       }
     }
@@ -381,7 +437,10 @@ async function interceptReplicationQuery(
   const upper = text.trimStart().toUpperCase()
 
   // wal_level check: zero-cache verifies logical replication is enabled
-  if (upper.includes('WAL_LEVEL') && (upper.includes('CURRENT_SETTING') || upper.startsWith('SHOW'))) {
+  if (
+    upper.includes('WAL_LEVEL') &&
+    (upper.includes('CURRENT_SETTING') || upper.startsWith('SHOW'))
+  ) {
     if (upper.includes('VERSION')) {
       return fakeResult([{ walLevel: 'logical', version: '170004' }], text)
     }
@@ -406,10 +465,17 @@ async function interceptReplicationQuery(
         [slotName, lsn]
       )
     } catch {}
-    return fakeResult([{
-      slot_name: slotName, consistent_point: lsn,
-      snapshot_name: '00000003-00000001-1', output_plugin: 'pgoutput',
-    }], text)
+    return fakeResult(
+      [
+        {
+          slot_name: slotName,
+          consistent_point: lsn,
+          snapshot_name: '00000003-00000001-1',
+          output_plugin: 'pgoutput',
+        },
+      ],
+      text
+    )
   }
 
   // DROP_REPLICATION_SLOT
@@ -432,10 +498,17 @@ async function interceptReplicationQuery(
 
   // IDENTIFY_SYSTEM
   if (upper === 'IDENTIFY_SYSTEM' || upper === 'IDENTIFY_SYSTEM;') {
-    return fakeResult([{
-      systemid: '1234567890', timeline: '1',
-      xlogpos: '0/1000100', dbname: 'template1',
-    }], text)
+    return fakeResult(
+      [
+        {
+          systemid: '1234567890',
+          timeline: '1',
+          xlogpos: '0/1000100',
+          dbname: 'template1',
+        },
+      ],
+      text
+    )
   }
 
   // ALTER ROLE ... REPLICATION
@@ -451,10 +524,15 @@ async function interceptReplicationQuery(
   return null
 }
 
-function fakeResult(rows: Record<string, unknown>[], queryString: string, command?: string): ResultArray<any> {
-  const columns: ColumnMeta[] = rows.length > 0
-    ? Object.keys(rows[0]).map((name, i) => ({ name, type: 25, table: 0, number: i }))
-    : []
+function fakeResult(
+  rows: Record<string, unknown>[],
+  queryString: string,
+  command?: string
+): ResultArray<any> {
+  const columns: ColumnMeta[] =
+    rows.length > 0
+      ? Object.keys(rows[0]).map((name, i) => ({ name, type: 25, table: 0, number: i }))
+      : []
   const result = [...rows] as ResultArray<any>
   result.count = rows.length
   result.command = command || detectCommand(queryString)
@@ -481,7 +559,11 @@ async function executeQuery(
 
   // make FK constraints DEFERRABLE so zero-cache's batched CVR writes work
   // (zero-cache flushes desires before queries in the same transaction)
-  if (/FOREIGN\s+KEY/i.test(text) && /CREATE\s+TABLE/i.test(text) && !/DEFERRABLE/i.test(text)) {
+  if (
+    /FOREIGN\s+KEY/i.test(text) &&
+    /CREATE\s+TABLE/i.test(text) &&
+    !/DEFERRABLE/i.test(text)
+  ) {
     text = text.replace(/(ON\s+DELETE\s+CASCADE)/gi, '$1 DEFERRABLE INITIALLY DEFERRED')
   }
 
@@ -492,7 +574,10 @@ async function executeQuery(
     const r = await (params.length > 0
       ? executor.query(text, params)
       : executor.query(text))
-    return createResultArray(r as Results<any>, text)
+    const result = createResultArray(r as Results<any>, text)
+    // signal replication handler for write operations so changes propagate
+    if (isWriteCommand(text)) signalReplicationChange()
+    return result
   }
 
   // multi-statement: ALWAYS split and run individually
@@ -504,7 +589,9 @@ async function executeQuery(
     for (const stmt of stmts) {
       lastResult = (await executor.query(stmt)) as Results<any>
     }
-    return createResultArray(lastResult, text)
+    const result = createResultArray(lastResult, text)
+    if (isWriteCommand(text)) signalReplicationChange()
+    return result
   }
 
   // multi-statement WITH params — split and run each statement,
@@ -530,7 +617,15 @@ async function executeQuery(
     }
   }
 
-  return createResultArray(lastResult, text)
+  const result = createResultArray(lastResult, text)
+  if (isWriteCommand(text)) signalReplicationChange()
+  return result
+}
+
+const WRITE_COMMANDS = new Set(['INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER'])
+
+function isWriteCommand(sql: string): boolean {
+  return WRITE_COMMANDS.has(detectCommand(sql))
 }
 
 // split SQL into individual statements, respecting string literals
@@ -601,7 +696,9 @@ function createSqlFunction(
         },
         toUpdate() {
           const keys = Object.keys(first)
-          const set = keys.map((k, i) => `"${k.replace(/"/g, '""')}" = $${i + 1}`).join(', ')
+          const set = keys
+            .map((k, i) => `"${k.replace(/"/g, '""')}" = $${i + 1}`)
+            .join(', ')
           return { set, params: keys.map((k) => first[k]) }
         },
       }
@@ -621,7 +718,10 @@ function createSqlFunction(
 
 // -- COPY TO STDOUT support --
 
-function createCopyPendingQuery(copyQuery: string, executor: { query: (sql: string, params?: unknown[]) => Promise<Results<any>> }): any {
+function createCopyPendingQuery(
+  copyQuery: string,
+  executor: { query: (sql: string, params?: unknown[]) => Promise<Results<any>> }
+): any {
   // extract the query from COPY (SELECT ...) TO STDOUT or COPY table TO STDOUT
   let selectQuery: string
   const parenMatch = copyQuery.match(/COPY\s*\(([\s\S]+)\)\s*TO\s+STDOUT/i)
@@ -629,7 +729,7 @@ function createCopyPendingQuery(copyQuery: string, executor: { query: (sql: stri
     selectQuery = parenMatch[1].trim()
   } else {
     const tableMatch = copyQuery.match(
-      /COPY\s+("(?:[^"]|"")*"(?:\."(?:[^"]|"")*")*|\S+)\s+TO\s+STDOUT/i,
+      /COPY\s+("(?:[^"]|"")*"(?:\."(?:[^"]|"")*")*|\S+)\s+TO\s+STDOUT/i
     )
     selectQuery = tableMatch ? `SELECT * FROM ${tableMatch[1]}` : 'SELECT 1 WHERE false'
   }
@@ -646,8 +746,15 @@ function createCopyPendingQuery(copyQuery: string, executor: { query: (sql: stri
       const values = Object.values(row).map((v: any) => {
         if (v === null || v === undefined) return '\\N'
         if (typeof v === 'boolean') return v ? 't' : 'f'
-        if (typeof v === 'object') return JSON.stringify(v).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n')
-        return String(v).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n')
+        if (typeof v === 'object')
+          return JSON.stringify(v)
+            .replace(/\\/g, '\\\\')
+            .replace(/\t/g, '\\t')
+            .replace(/\n/g, '\\n')
+        return String(v)
+          .replace(/\\/g, '\\\\')
+          .replace(/\t/g, '\\t')
+          .replace(/\n/g, '\\n')
       })
       const line = values.join('\t') + '\n'
       const chunk = encoder ? encoder.encode(line) : Buffer.from(line)
@@ -668,8 +775,12 @@ function createCopyPendingQuery(copyQuery: string, executor: { query: (sql: stri
   pending.values = () => Promise.reject(new Error('not supported'))
   pending.raw = () => Promise.reject(new Error('not supported'))
   pending.forEach = () => Promise.reject(new Error('not supported'))
-  pending.cursor = () => { throw new Error('not supported') }
-  pending.stream = () => { throw new Error('not supported') }
+  pending.cursor = () => {
+    throw new Error('not supported')
+  }
+  pending.stream = () => {
+    throw new Error('not supported')
+  }
   return pending
 }
 
@@ -754,11 +865,25 @@ function createReplicationPendingQuery(
 // -- type parsers --
 // pre-populated parsers matching the postgres npm package's type registry.
 
-function identity(x: string) { return x }
-function parseFloat_(x: string) { return parseFloat(x) }
-function parseInt_(x: string) { return parseInt(x, 10) }
-function parseBool(x: string) { return x === 't' || x === 'true' }
-function parseJSON(x: string) { try { return JSON.parse(x) } catch { return x } }
+function identity(x: string) {
+  return x
+}
+function parseFloat_(x: string) {
+  return parseFloat(x)
+}
+function parseInt_(x: string) {
+  return parseInt(x, 10)
+}
+function parseBool(x: string) {
+  return x === 't' || x === 'true'
+}
+function parseJSON(x: string) {
+  try {
+    return JSON.parse(x)
+  } catch {
+    return x
+  }
+}
 
 function makeArrayParser(elementParser: (x: string) => unknown) {
   const fn = (x: string) => {
@@ -776,41 +901,41 @@ function makeArrayParser(elementParser: (x: string) => unknown) {
 function buildDefaultParsers(): Record<number, (value: string) => unknown> {
   const p: Record<number, any> = {}
   // scalar types
-  p[16] = parseBool       // bool
-  p[17] = identity        // bytea
-  p[20] = identity        // int8 (bigint as string)
-  p[21] = parseInt_       // int2
-  p[23] = parseInt_       // int4
-  p[25] = identity        // text
-  p[26] = parseInt_       // oid
-  p[114] = parseJSON      // json
-  p[700] = parseFloat_    // float4
-  p[701] = parseFloat_    // float8
-  p[1042] = identity      // bpchar
-  p[1043] = identity      // varchar
-  p[1082] = identity      // date
-  p[1083] = identity      // time
-  p[1114] = identity      // timestamp
-  p[1184] = identity      // timestamptz
-  p[1266] = identity      // timetz
-  p[1700] = identity      // numeric
-  p[2950] = identity      // uuid
-  p[3802] = parseJSON     // jsonb
+  p[16] = parseBool // bool
+  p[17] = identity // bytea
+  p[20] = identity // int8 (bigint as string)
+  p[21] = parseInt_ // int2
+  p[23] = parseInt_ // int4
+  p[25] = identity // text
+  p[26] = parseInt_ // oid
+  p[114] = parseJSON // json
+  p[700] = parseFloat_ // float4
+  p[701] = parseFloat_ // float8
+  p[1042] = identity // bpchar
+  p[1043] = identity // varchar
+  p[1082] = identity // date
+  p[1083] = identity // time
+  p[1114] = identity // timestamp
+  p[1184] = identity // timestamptz
+  p[1266] = identity // timetz
+  p[1700] = identity // numeric
+  p[2950] = identity // uuid
+  p[3802] = parseJSON // jsonb
   // array types
-  p[1000] = makeArrayParser(parseBool)    // bool[]
-  p[1005] = makeArrayParser(parseInt_)    // int2[]
-  p[1007] = makeArrayParser(parseInt_)    // int4[]
-  p[1009] = makeArrayParser(identity)     // text[]
-  p[1016] = makeArrayParser(identity)     // int8[]
-  p[1021] = makeArrayParser(parseFloat_)  // float4[]
-  p[1022] = makeArrayParser(parseFloat_)  // float8[]
-  p[1015] = makeArrayParser(identity)     // varchar[]
-  p[1182] = makeArrayParser(identity)     // date[]
-  p[1115] = makeArrayParser(identity)     // timestamp[]
-  p[1185] = makeArrayParser(identity)     // timestamptz[]
-  p[2951] = makeArrayParser(identity)     // uuid[]
-  p[199] = makeArrayParser(parseJSON)     // json[]
-  p[3807] = makeArrayParser(parseJSON)    // jsonb[]
+  p[1000] = makeArrayParser(parseBool) // bool[]
+  p[1005] = makeArrayParser(parseInt_) // int2[]
+  p[1007] = makeArrayParser(parseInt_) // int4[]
+  p[1009] = makeArrayParser(identity) // text[]
+  p[1016] = makeArrayParser(identity) // int8[]
+  p[1021] = makeArrayParser(parseFloat_) // float4[]
+  p[1022] = makeArrayParser(parseFloat_) // float8[]
+  p[1015] = makeArrayParser(identity) // varchar[]
+  p[1182] = makeArrayParser(identity) // date[]
+  p[1115] = makeArrayParser(identity) // timestamp[]
+  p[1185] = makeArrayParser(identity) // timestamptz[]
+  p[2951] = makeArrayParser(identity) // uuid[]
+  p[199] = makeArrayParser(parseJSON) // json[]
+  p[3807] = makeArrayParser(parseJSON) // jsonb[]
   return p
 }
 
@@ -850,7 +975,11 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
     }
 
     // make FK constraints DEFERRABLE (zero-cache CVR creates tables via unsafe())
-    if (/FOREIGN\s+KEY/i.test(queryString) && /CREATE\s+TABLE/i.test(queryString) && !/DEFERRABLE/i.test(queryString)) {
+    if (
+      /FOREIGN\s+KEY/i.test(queryString) &&
+      /CREATE\s+TABLE/i.test(queryString) &&
+      !/DEFERRABLE/i.test(queryString)
+    ) {
       queryString = queryString.replace(
         /(ON\s+DELETE\s+CASCADE)/gi,
         '$1 DEFERRABLE INITIALLY DEFERRED'
@@ -866,19 +995,19 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
         const intercepted = await interceptReplicationQuery(queryString, pglite)
         if (intercepted) return intercepted
         {
-            const statements = splitStatements(queryString)
-            const resultArrays = []
-            for (const stmt of statements) {
-              const r = await pglite.query(stmt)
-              resultArrays.push(createResultArray(r as Results<any>, stmt))
-            }
-            const combined = resultArrays as any
-            combined.count = resultArrays.length
-            combined.command = 'SELECT'
-            combined.state = { status: 'idle', pid: 0, secret: 0 }
-            combined.statement = { name: '', string: queryString, types: [], columns: [] }
-            combined.columns = []
-            return combined
+          const statements = splitStatements(queryString)
+          const resultArrays = []
+          for (const stmt of statements) {
+            const r = await pglite.query(stmt)
+            resultArrays.push(createResultArray(r as Results<any>, stmt))
+          }
+          const combined = resultArrays as any
+          combined.count = resultArrays.length
+          combined.command = 'SELECT'
+          combined.state = { status: 'idle', pid: 0, secret: 0 }
+          combined.statement = { name: '', string: queryString, types: [], columns: [] }
+          combined.columns = []
+          return combined
         }
       })()
       return createPendingQuery(promise)
@@ -899,7 +1028,7 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
     return pglite.transaction(async (tx: Transaction) => {
       // defer FK constraints so batched writes can insert in any order
       await tx.query('SET CONSTRAINTS ALL DEFERRED').catch(() => {})
-      const txSql = createSqlFunction(tx)
+      const txSql = createSqlFunction(tx, pglite)
 
       function txSqlFn(first: any, ...rest: any[]): any {
         return txSql(first, ...rest)
@@ -972,6 +1101,10 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
       const result = await cb(txSqlFn)
       // match postgres behavior: unwrap array results via Promise.all
       return Array.isArray(result) ? await Promise.all(result) : result
+    }).then((result) => {
+      // signal replication after transaction commits so changes propagate
+      signalReplicationChange()
+      return result
     })
   }
 

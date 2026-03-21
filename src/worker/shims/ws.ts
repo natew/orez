@@ -53,23 +53,34 @@ class WebSocket extends EventEmitter {
       this.#url = urlOrSocket
       // check for in-process connections (fastify shim uses port 0 or 1)
       const parsedUrl = new URL(urlOrSocket, 'http://localhost')
-      const isInProcess = parsedUrl.port === '0' || parsedUrl.port === '1' || parsedUrl.hostname === 'localhost'
+      const isInProcess =
+        parsedUrl.port === '0' ||
+        parsedUrl.port === '1' ||
+        parsedUrl.hostname === 'localhost'
 
       if (isInProcess) {
         // in-process: connect via fastify server's handoff mechanism
         const fastifyInstance = (globalThis as any).__orez_fastify_instance
         if (fastifyInstance?.server) {
           // create paired message channels for bidirectional communication
+          // the client-side WS (this) and serverWs are cross-linked so
+          // ping/pong, messages, and close propagate between them
+          const clientSide = this
           const serverWs: any = {
             readyState: 1,
             _listeners: {} as Record<string, Function[]>,
             send: (data: string | ArrayBuffer) => {
               // deliver to client side
-              queueMicrotask(() => this.emit('message', data))
+              queueMicrotask(() => clientSide.emit('message', data))
             },
             close: (code?: number, reason?: string) => {
               serverWs.readyState = 3
-              queueMicrotask(() => this.emit('close', code || 1000, reason || ''))
+              queueMicrotask(() => clientSide.emit('close', code || 1000, reason || ''))
+            },
+            ping: () => {
+              // ping from server → deliver 'ping' event to client
+              // (expectPingsForLiveness listens for 'ping', not 'pong')
+              queueMicrotask(() => clientSide.emit('ping'))
             },
             addEventListener: (type: string, handler: Function) => {
               if (!serverWs._listeners[type]) serverWs._listeners[type] = []
@@ -97,7 +108,9 @@ class WebSocket extends EventEmitter {
             },
             addEventListener: () => {},
             removeEventListener: () => {},
-            get readyState() { return 1 },
+            get readyState() {
+              return 1
+            },
           } as CFWebSocket
 
           // emit handoff to fastify server
@@ -105,8 +118,14 @@ class WebSocket extends EventEmitter {
           queueMicrotask(() => {
             fastifyInstance.server.emit(
               'message',
-              ['handoff', { message: { url: path, headers: {}, method: 'GET' }, head: new Uint8Array(0) }],
-              serverWs,
+              [
+                'handoff',
+                {
+                  message: { url: path, headers: {}, method: 'GET' },
+                  head: new Uint8Array(0),
+                },
+              ],
+              serverWs
             )
             this.emit('open')
           })
@@ -121,14 +140,24 @@ class WebSocket extends EventEmitter {
           accept: () => {},
           send: (data: string | ArrayBuffer) => nativeWs.send(data),
           close: (code?: number, reason?: string) => nativeWs.close(code, reason),
-          addEventListener: (type: string, handler: (event: any) => void) => nativeWs.addEventListener(type, handler),
-          removeEventListener: (type: string, handler: (event: any) => void) => nativeWs.removeEventListener(type, handler),
-          get readyState() { return nativeWs.readyState },
+          addEventListener: (type: string, handler: (event: any) => void) =>
+            nativeWs.addEventListener(type, handler),
+          removeEventListener: (type: string, handler: (event: any) => void) =>
+            nativeWs.removeEventListener(type, handler),
+          get readyState() {
+            return nativeWs.readyState
+          },
         } as CFWebSocket
         nativeWs.addEventListener('open', () => this.emit('open'))
-        nativeWs.addEventListener('message', (ev: MessageEvent) => this.emit('message', ev.data))
-        nativeWs.addEventListener('close', (ev: CloseEvent) => this.emit('close', ev.code, ev.reason))
-        nativeWs.addEventListener('error', (ev: Event) => this.emit('error', new Error('WebSocket error')))
+        nativeWs.addEventListener('message', (ev: MessageEvent) =>
+          this.emit('message', ev.data)
+        )
+        nativeWs.addEventListener('close', (ev: CloseEvent) =>
+          this.emit('close', ev.code, ev.reason)
+        )
+        nativeWs.addEventListener('error', (ev: Event) =>
+          this.emit('error', new Error('WebSocket error'))
+        )
       } else {
         throw new Error(
           'ws shim: outbound WebSocket connections not yet supported. ' +
@@ -187,8 +216,11 @@ class WebSocket extends EventEmitter {
   }
 
   ping(_data?: unknown, _mask?: boolean, _cb?: () => void): void {
-    // CF WebSockets handle ping/pong at the platform level
-    // emit pong immediately to satisfy liveness checks
+    // forward ping to underlying socket if it supports it (in-process pairs)
+    if (typeof (this.#ws as any).ping === 'function') {
+      ;(this.#ws as any).ping()
+    }
+    // also emit pong locally (CF WebSockets handle ping/pong at platform level)
     this.emit('pong')
   }
 

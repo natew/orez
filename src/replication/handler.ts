@@ -605,6 +605,10 @@ export async function handleStartReplication(
   // register direct wakeup so the proxy can signal us immediately
   _replicationWakeup = wakeup
 
+  // expose on globalThis so external code (e.g. pglite-pool) can signal
+  // without importing from this module (works across separate bundles)
+  ;(globalThis as any).__orez_signal_replication = wakeup
+
   // also set up LISTEN as secondary signal
   let unsubscribe: (() => Promise<void>) | null = null
   try {
