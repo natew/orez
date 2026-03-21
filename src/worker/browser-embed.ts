@@ -178,6 +178,7 @@ export async function startZeroCacheEmbedBrowser(
     ZERO_LOG_LEVEL: opts.env?.ZERO_LOG_LEVEL || 'info',
     ZERO_NUM_SYNC_WORKERS: opts.env?.ZERO_NUM_SYNC_WORKERS || '1',
     ZERO_ENABLE_QUERY_PLANNER: 'false',
+    ZERO_QUERY_URL: 'http://localhost:1/api/zero/pull',
     ...opts.env,
   }
 

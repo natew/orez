@@ -244,6 +244,11 @@ class WebSocketServer extends EventEmitter {
     super()
   }
 
+  close(cb?: (err?: Error) => void): void {
+    // no-op — browser embed has no real server to close
+    cb?.()
+  }
+
   /**
    * handle a WebSocket upgrade. on CF Workers the upgrade is already done
    * (WebSocketPair), so this just wraps the CF WebSocket in our shim.
