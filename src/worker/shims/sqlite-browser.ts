@@ -50,7 +50,22 @@ export function createSqlJsStorage(sqlJsDb: SqlJsDatabase): SqlStorageLike {
       const stmt = sqlJsDb.prepare(query)
       try {
         if (bindings.length > 0) {
-          stmt.bind(bindings as unknown[])
+          // named parameters: single object arg → pass object with prefixed keys to sql.js
+          if (bindings.length === 1 && bindings[0] !== null && typeof bindings[0] === 'object'
+            && !Array.isArray(bindings[0]) && !(bindings[0] instanceof ArrayBuffer)) {
+            // sql.js expects keys with $/:/@  prefix for named params
+            // better-sqlite3 accepts keys without prefix — add @ prefix
+            const obj = bindings[0] as Record<string, unknown>
+            const prefixed: Record<string, unknown> = {}
+            for (const [k, v] of Object.entries(obj)) {
+              // add @ prefix if not already prefixed
+              const key = k.startsWith('$') || k.startsWith(':') || k.startsWith('@') ? k : `@${k}`
+              prefixed[key] = v
+            }
+            stmt.bind(prefixed as any)
+          } else {
+            stmt.bind(bindings as unknown[])
+          }
         }
 
         const rows: Record<string, SqlStorageValue>[] = []
@@ -78,19 +93,36 @@ export function createSqlJsStorage(sqlJsDb: SqlJsDatabase): SqlStorageLike {
       }
     },
 
-    // sql.js supports raw BEGIN/COMMIT, so transactionSync wraps them
+    // sql.js transaction handling with nested transaction support
     transactionSync<T>(fn: () => T): T {
-      sqlJsDb.run('BEGIN')
+      // check if already in a transaction by trying BEGIN
+      let inTransaction = false
+      try {
+        sqlJsDb.run('BEGIN')
+      } catch {
+        // already in a transaction — use savepoint instead
+        inTransaction = true
+      }
+
+      if (inTransaction) {
+        const sp = `sp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+        sqlJsDb.run(`SAVEPOINT "${sp}"`)
+        try {
+          const result = fn()
+          sqlJsDb.run(`RELEASE SAVEPOINT "${sp}"`)
+          return result
+        } catch (err) {
+          try { sqlJsDb.run(`ROLLBACK TO SAVEPOINT "${sp}"`) } catch {}
+          throw err
+        }
+      }
+
       try {
         const result = fn()
         sqlJsDb.run('COMMIT')
         return result
       } catch (err) {
-        try {
-          sqlJsDb.run('ROLLBACK')
-        } catch {
-          // swallow rollback errors
-        }
+        try { sqlJsDb.run('ROLLBACK') } catch {}
         throw err
       }
     },

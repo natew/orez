@@ -15,6 +15,7 @@
  */
 
 import type { PGlite, Results, Transaction } from '@electric-sql/pglite'
+import { PassThrough } from 'stream'
 
 // -- PostgresError --
 
@@ -209,6 +210,25 @@ function buildQuery(
       if (val instanceof Identifier) {
         // identifiers are inlined (already escaped)
         text += val.value
+      } else if (val && typeof val === 'object' && '_isHelper' in val && (val as any)._isHelper) {
+        // sql(object) helper — expand based on preceding SQL context
+        const helper = val as { _isHelper: true; _data: Record<string, any>; toInsert: () => any; toUpdate: () => any }
+        const before = text.trimEnd().toUpperCase()
+        if (/\)\s*$/.test(before) || /SET\s*$/i.test(before) || /DO\s+UPDATE\s+SET\s*$/i.test(before)) {
+          // UPDATE SET context: col1 = $1, col2 = $2
+          const { set, params: updateParams } = helper.toUpdate()
+          // rebase placeholder indices
+          const rebasedSet = set.replace(/\$(\d+)/g, (_: string, n: string) => `$${params.length + Number(n)}`)
+          text += rebasedSet
+          params.push(...updateParams.map(serializeParam))
+        } else {
+          // INSERT context: (col1, col2) VALUES ($1, $2)
+          const { columns, values: placeholders, params: insertParams } = helper.toInsert()
+          // rebase placeholder indices
+          const rebasedPlaceholders = placeholders.replace(/\$(\d+)/g, (_: string, n: string) => `$${params.length + Number(n)}`)
+          text += `(${columns}) VALUES (${rebasedPlaceholders})`
+          params.push(...insertParams.map(serializeParam))
+        }
       } else if (Array.isArray(val)) {
         // array expansion for IN clauses: sql`WHERE x IN ${sql([1,2,3])}`
         const placeholders = val.map((_, j) => `$${params.length + j + 1}`).join(', ')
@@ -549,7 +569,7 @@ function createSqlFunction(
 
 // -- COPY TO STDOUT support --
 
-function createCopyPendingQuery(copyQuery: string, pglite: PGlite): any {
+function createCopyPendingQuery(copyQuery: string, executor: { query: (sql: string, params?: unknown[]) => Promise<Results<any>> }): any {
   // extract the query from COPY (SELECT ...) TO STDOUT or COPY table TO STDOUT
   let selectQuery: string
   const parenMatch = copyQuery.match(/COPY\s*\(([\s\S]+)\)\s*TO\s+STDOUT/i)
@@ -562,27 +582,28 @@ function createCopyPendingQuery(copyQuery: string, pglite: PGlite): any {
     selectQuery = tableMatch ? `SELECT * FROM ${tableMatch[1]}` : 'SELECT 1 WHERE false'
   }
 
+  // returns a Node.js Readable stream (via PassThrough) compatible with pipeline()
   const readablePromise = (async () => {
-    const result = await pglite.query(selectQuery)
-    // create a ReadableStream that emits rows in COPY text format
+    const result = await executor.query(selectQuery)
     const rows = result.rows as any[]
-    let idx = 0
-    return new ReadableStream({
-      pull(controller) {
-        if (idx >= rows.length) {
-          controller.close()
-          return
-        }
-        const row = rows[idx++]
-        const values = Object.values(row).map((v: any) => {
-          if (v === null || v === undefined) return '\\N'
-          if (typeof v === 'boolean') return v ? 't' : 'f'
-          if (typeof v === 'object') return JSON.stringify(v).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n')
-          return String(v).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n')
-        })
-        controller.enqueue(new TextEncoder().encode(values.join('\t') + '\n'))
-      },
-    })
+    const pt = new PassThrough()
+
+    // write all rows as TSV-encoded COPY output, using Buffer for stream compatibility
+    const encoder = typeof Buffer !== 'undefined' ? null : new TextEncoder()
+    for (const row of rows) {
+      const values = Object.values(row).map((v: any) => {
+        if (v === null || v === undefined) return '\\N'
+        if (typeof v === 'boolean') return v ? 't' : 'f'
+        if (typeof v === 'object') return JSON.stringify(v).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n')
+        return String(v).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n')
+      })
+      const line = values.join('\t') + '\n'
+      const chunk = encoder ? encoder.encode(line) : Buffer.from(line)
+      pt.push(chunk)
+    }
+    // signal end of stream
+    pt.push(null)
+    return pt
   })()
 
   const pending = readablePromise as any
@@ -590,7 +611,7 @@ function createCopyPendingQuery(copyQuery: string, pglite: PGlite): any {
   pending.simple = () => pending
   pending.cancel = () => {}
   pending.readable = () => readablePromise
-  pending.writable = () => Promise.resolve(new WritableStream())
+  pending.writable = () => Promise.resolve(new PassThrough())
   pending.describe = () => Promise.reject(new Error('not supported'))
   pending.values = () => Promise.reject(new Error('not supported'))
   pending.raw = () => Promise.reject(new Error('not supported'))
@@ -740,17 +761,58 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
 
       // add unsafe to transaction sql
       txSqlFn.unsafe = (queryString: string, params?: unknown[]) => {
-        const serializedParams = params?.map(serializeParam)
-        const promise = (
-          serializedParams && serializedParams.length > 0
-            ? tx.query(queryString, serializedParams)
-            : tx.query(queryString)
-        ).then((r) => createResultArray(r as Results<any>, queryString))
+        // COPY TO STDOUT — returns readable stream of rows
+        const upper = queryString.trimStart().toUpperCase()
+        if (upper.startsWith('COPY') && upper.includes('TO STDOUT')) {
+          return createCopyPendingQuery(queryString, tx)
+        }
+
+        const serializedParams = (params ?? []).map(serializeParam)
+
+        // multi-statement: split and run each (PGlite rejects multi-statement in execProtocol)
+        if (hasMultipleStatements(queryString) && serializedParams.length === 0) {
+          const promise = (async () => {
+            const stmts = splitStatements(queryString)
+            const resultArrays = []
+            for (const stmt of stmts) {
+              const r = await tx.query(stmt)
+              resultArrays.push(createResultArray(r as Results<any>, stmt))
+            }
+            const combined = resultArrays as any
+            combined.count = resultArrays.length
+            combined.command = 'SELECT'
+            combined.state = { status: 'idle', pid: 0, secret: 0 }
+            combined.statement = { name: '', string: queryString, types: [], columns: [] }
+            combined.columns = []
+            return combined
+          })()
+          return createPendingQuery(promise)
+        }
+
+        const promise = executeQuery(tx, queryString, serializedParams, pglite)
         return createPendingQuery(promise)
       }
 
       // add begin (savepoint) to transaction sql
       txSqlFn.begin = sql.begin
+
+      // savepoint(name?, fn) — runs fn(sql) inside a SAVEPOINT
+      let _savepointIdx = 0
+      txSqlFn.savepoint = async (nameOrFn: any, maybeFn?: any) => {
+        const fn = typeof nameOrFn === 'function' ? nameOrFn : maybeFn
+        const name = typeof nameOrFn === 'string' ? nameOrFn : `sp_${_savepointIdx++}`
+        const spName = name.replace(/[^a-zA-Z0-9_]/g, '_')
+
+        await tx.query(`SAVEPOINT "${spName}"`)
+        try {
+          const result = await fn(txSqlFn)
+          await tx.query(`RELEASE SAVEPOINT "${spName}"`)
+          return result
+        } catch (err) {
+          await tx.query(`ROLLBACK TO SAVEPOINT "${spName}"`).catch(() => {})
+          throw err
+        }
+      }
 
       // add no-op end
       txSqlFn.end = async () => {}

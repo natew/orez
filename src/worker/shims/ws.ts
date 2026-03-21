@@ -51,13 +51,28 @@ class WebSocket extends EventEmitter {
 
     if (typeof urlOrSocket === 'string') {
       this.#url = urlOrSocket
-      // on CF Workers, outbound WebSocket connections use the standard fetch API
-      // this path is for internal connections (change-streamer, etc.)
-      // for now, throw — we'll handle this if needed
-      throw new Error(
-        'ws shim: outbound WebSocket connections not yet supported. ' +
-          'use the CF Workers fetch API for outbound WebSocket.'
-      )
+      // in browser: use native WebSocket for outbound connections
+      // in CF Workers: would need fetch API (not supported yet)
+      if (typeof globalThis.WebSocket === 'function') {
+        const nativeWs = new globalThis.WebSocket(urlOrSocket) as any
+        this.#ws = {
+          accept: () => {},
+          send: (data: string | ArrayBuffer) => nativeWs.send(data),
+          close: (code?: number, reason?: string) => nativeWs.close(code, reason),
+          addEventListener: (type: string, handler: (event: any) => void) => nativeWs.addEventListener(type, handler),
+          removeEventListener: (type: string, handler: (event: any) => void) => nativeWs.removeEventListener(type, handler),
+          get readyState() { return nativeWs.readyState },
+        } as CFWebSocket
+        nativeWs.addEventListener('open', () => this.emit('open'))
+        nativeWs.addEventListener('message', (ev: MessageEvent) => this.emit('message', ev.data))
+        nativeWs.addEventListener('close', (ev: CloseEvent) => this.emit('close', ev.code, ev.reason))
+        nativeWs.addEventListener('error', (ev: Event) => this.emit('error', new Error('WebSocket error')))
+      } else {
+        throw new Error(
+          'ws shim: outbound WebSocket connections not yet supported. ' +
+            'use the CF Workers fetch API for outbound WebSocket.'
+        )
+      }
     } else {
       this.#ws = urlOrSocket
       this.#url = ''

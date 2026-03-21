@@ -55,6 +55,32 @@ export interface RunResult {
   lastInsertRowid: number | bigint
 }
 
+// -- parameter serialization --
+// sqlite only accepts scalar values; serialize objects/booleans/dates/etc.
+// special case: a single object argument means named parameters (@key syntax)
+function serializeSqliteParams(params: unknown[]): SqlStorageValue[] {
+  // named parameters: .run({key: value}) → pass values in order
+  // sql.js handles this natively, but DO SqlStorage doesn't
+  // detect named params: single object arg with non-array, non-buffer
+  if (params.length === 1 && params[0] !== null && typeof params[0] === 'object'
+    && !Array.isArray(params[0]) && !(params[0] instanceof ArrayBuffer)
+    && !(params[0] instanceof Uint8Array)) {
+    // return the object as-is for sql.js named parameter binding
+    return params as any
+  }
+
+  return params.map((p) => {
+    if (p === null || p === undefined) return null
+    if (typeof p === 'string' || typeof p === 'number') return p
+    if (typeof p === 'boolean') return p ? 1 : 0
+    if (typeof p === 'bigint') return Number(p)
+    if (p instanceof ArrayBuffer || p instanceof Uint8Array) return p as any
+    // objects (including Date, arrays) → JSON string
+    if (typeof p === 'object') return JSON.stringify(p)
+    return String(p)
+  })
+}
+
 // -- Statement --
 
 export class Statement<T = Record<string, SqlStorageValue>> {
@@ -65,14 +91,24 @@ export class Statement<T = Record<string, SqlStorageValue>> {
   constructor(sql: SqlStorageLike, db: Database, source: string) {
     this.#sql = sql
     this.#db = db
+    // auto-add IF NOT EXISTS to CREATE TABLE/INDEX (shared sqlite in browser)
     this.source = source
+      .replace(/CREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS)/gi, 'CREATE TABLE IF NOT EXISTS ')
+      .replace(/CREATE\s+INDEX\s+(?!IF\s+NOT\s+EXISTS)/gi, 'CREATE INDEX IF NOT EXISTS ')
+      .replace(/CREATE\s+UNIQUE\s+INDEX\s+(?!IF\s+NOT\s+EXISTS)/gi, 'CREATE UNIQUE INDEX IF NOT EXISTS ')
   }
 
   run(...params: unknown[]): RunResult {
     if (!this.#db.open) {
       throw new SqliteError('The database connection is not open', 'SQLITE_MISUSE')
     }
-    const cursor = this.#sql.exec(this.source, ...(params as SqlStorageValue[]))
+    // use transaction-aware execution for BEGIN/COMMIT/ROLLBACK
+    const upper = this.source.trimStart().toUpperCase()
+    const isTxCmd = upper.startsWith('BEGIN') || upper.startsWith('COMMIT') || upper.startsWith('ROLLBACK') || upper === 'END' || upper.startsWith('END ')
+    const serialized = serializeSqliteParams(params)
+    const cursor = isTxCmd && serialized.length === 0
+      ? this.#db._execTransactionAware(this.source, this.#sql)
+      : this.#sql.exec(this.source, ...serialized)
     return {
       changes: cursor.rowsWritten,
       lastInsertRowid: 0,
@@ -83,7 +119,7 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     if (!this.#db.open) {
       throw new SqliteError('The database connection is not open', 'SQLITE_MISUSE')
     }
-    const cursor = this.#sql.exec(this.source, ...(params as SqlStorageValue[]))
+    const cursor = this.#sql.exec(this.source, ...serializeSqliteParams(params))
     const rows = cursor.toArray()
     return (rows[0] as T) ?? undefined
   }
@@ -92,7 +128,7 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     if (!this.#db.open) {
       throw new SqliteError('The database connection is not open', 'SQLITE_MISUSE')
     }
-    const cursor = this.#sql.exec(this.source, ...(params as SqlStorageValue[]))
+    const cursor = this.#sql.exec(this.source, ...serializeSqliteParams(params))
     return cursor.toArray() as T[]
   }
 
@@ -158,6 +194,7 @@ export class Database {
   #sql: SqlStorageLike
   #open: boolean
   #inTransaction: boolean
+  #txDepth: number = 0
 
   constructor(sqlOrFilename: SqlStorageLike | string, _options?: { readonly?: boolean }) {
     if (typeof sqlOrFilename === 'string') {
@@ -190,6 +227,46 @@ export class Database {
 
   get inTransaction(): boolean {
     return this.#inTransaction
+  }
+
+  // transaction nesting: converts nested BEGIN to SAVEPOINT
+  // uses shared counter on SqlStorageLike to handle multiple Database instances sharing one sql.js db
+  _execTransactionAware(sql: string, sqlStorage: SqlStorageLike): SqlStorageCursor {
+    const upper = sql.trimStart().toUpperCase()
+    const shared = sqlStorage as any
+
+    if (upper.startsWith('BEGIN')) {
+      shared.__txDepth = (shared.__txDepth || 0) + 1
+      if (shared.__txDepth > 1) {
+        return sqlStorage.exec(`SAVEPOINT _nested_${shared.__txDepth}`)
+      }
+      this.#inTransaction = true
+      return sqlStorage.exec(sql)
+    }
+
+    if (upper.startsWith('COMMIT') || upper === 'END' || upper.startsWith('END ')) {
+      if ((shared.__txDepth || 0) > 1) {
+        const result = sqlStorage.exec(`RELEASE SAVEPOINT _nested_${shared.__txDepth}`)
+        shared.__txDepth--
+        return result
+      }
+      shared.__txDepth = 0
+      this.#inTransaction = false
+      return sqlStorage.exec(sql)
+    }
+
+    if (upper.startsWith('ROLLBACK')) {
+      if ((shared.__txDepth || 0) > 1) {
+        const result = sqlStorage.exec(`ROLLBACK TO SAVEPOINT _nested_${shared.__txDepth}`)
+        shared.__txDepth--
+        return result
+      }
+      shared.__txDepth = 0
+      this.#inTransaction = false
+      return sqlStorage.exec(sql)
+    }
+
+    return sqlStorage.exec(sql)
   }
 
   /** prepare a statement */
