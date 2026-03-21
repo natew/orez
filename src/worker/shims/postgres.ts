@@ -229,14 +229,42 @@ function buildQuery(
           text += `(${columns}) VALUES (${rebasedPlaceholders})`
           params.push(...insertParams.map(serializeParam))
         }
-      } else if (Array.isArray(val)) {
-        // array expansion for IN clauses: sql`WHERE x IN ${sql([1,2,3])}`
-        const placeholders = val.map((_, j) => `$${params.length + j + 1}`).join(', ')
+      } else if (val && typeof val === 'object' && '_isArrayExpansion' in val && (val as any)._isArrayExpansion) {
+        // sql([1,2,3]) — expand for IN clauses: ($1, $2, $3)
+        const arr = (val as any)._values as unknown[]
+        const placeholders = arr.map((_, j) => `$${params.length + j + 1}`).join(', ')
         text += `(${placeholders})`
-        params.push(...val.map(serializeParam))
+        params.push(...arr.map(serializeParam))
+      } else if (Array.isArray(val)) {
+        // raw array in template tag
+        // check context: json_to_recordset etc. need JSON, everything else needs PG array
+        const before = text.trimEnd()
+        const needsJson = /json_to_record(?:set)?|json_(?:array|build|each|populate)\s*\(\s*$/i.test(before)
+          || (/\(\s*$/.test(before) && /json/i.test(before.slice(Math.max(0, before.length - 40))))
+        if (needsJson) {
+          params.push(JSON.stringify(val))
+          text += `$${params.length}::json`
+        } else {
+          // PostgreSQL array literal: {val1,val2,...}
+          const pgArray = `{${val.map((v: any) => {
+            if (v === null || v === undefined) return 'NULL'
+            const s = String(v)
+            // quote if contains special chars
+            if (s.includes(',') || s.includes('"') || s.includes('{') || s.includes('}') || s.includes(' ')) {
+              return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+            }
+            return s
+          }).join(',')}}`
+          params.push(pgArray)
+          text += `$${params.length}`
+        }
       } else {
-        params.push(serializeParam(val))
-        text += `$${params.length}`
+        const serialized = serializeParam(val)
+        params.push(serialized)
+        // add ::json cast for JSON values (PGlite needs explicit type for json_to_recordset etc.)
+        const needsJsonCast = typeof serialized === 'string' && typeof val === 'object' && val !== null
+          && (serialized.startsWith('[') || serialized.startsWith('{'))
+        text += `$${params.length}${needsJsonCast ? '::json' : ''}`
       }
     }
   }
@@ -557,8 +585,9 @@ function createSqlFunction(
     }
 
     // sql(array) — parameter expansion for IN clauses
+    // wrap in marker object so buildQuery knows to expand (not serialize as JSON)
     if (Array.isArray(first)) {
-      return first
+      return { _isArrayExpansion: true, _values: first }
     }
 
     throw new Error('postgres shim: unsupported sql() call')

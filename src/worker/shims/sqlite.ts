@@ -98,11 +98,33 @@ export class Statement<T = Record<string, SqlStorageValue>> {
       .replace(/CREATE\s+UNIQUE\s+INDEX\s+(?!IF\s+NOT\s+EXISTS)/gi, 'CREATE UNIQUE INDEX IF NOT EXISTS ')
   }
 
+  // intercept PRAGMAs that sql.js can't handle (wal2, etc.)
+  #interceptPragma(): { intercepted: boolean; result?: SqlStorageCursor } {
+    const upper = this.source.trimStart().toUpperCase()
+    if (!upper.startsWith('PRAGMA')) return { intercepted: false }
+
+    // PRAGMA journal_mode — always report wal2 (sql.js doesn't support WAL)
+    if (/PRAGMA\s+journal_mode\s*=/i.test(this.source)) {
+      const value = this.source.split('=')[1]?.trim().replace(/['"]/g, '') || 'wal2'
+      return { intercepted: true, result: {
+        toArray: () => [{ journal_mode: value }], rowsRead: 1, rowsWritten: 0, columnNames: ['journal_mode'],
+      }}
+    }
+    if (/PRAGMA\s+journal_mode\s*$/i.test(this.source)) {
+      return { intercepted: true, result: {
+        toArray: () => [{ journal_mode: 'wal2' }], rowsRead: 1, rowsWritten: 0, columnNames: ['journal_mode'],
+      }}
+    }
+    return { intercepted: false }
+  }
+
   run(...params: unknown[]): RunResult {
     if (!this.#db.open) {
       throw new SqliteError('The database connection is not open', 'SQLITE_MISUSE')
     }
-    // use transaction-aware execution for BEGIN/COMMIT/ROLLBACK
+    const pragma = this.#interceptPragma()
+    if (pragma.intercepted) return { changes: 0, lastInsertRowid: 0 }
+
     const upper = this.source.trimStart().toUpperCase()
     const isTxCmd = upper.startsWith('BEGIN') || upper.startsWith('COMMIT') || upper.startsWith('ROLLBACK') || upper === 'END' || upper.startsWith('END ')
     const serialized = serializeSqliteParams(params)
@@ -119,6 +141,11 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     if (!this.#db.open) {
       throw new SqliteError('The database connection is not open', 'SQLITE_MISUSE')
     }
+    const pragma = this.#interceptPragma()
+    if (pragma.intercepted && pragma.result) {
+      return pragma.result.toArray()[0] as T
+    }
+
     const cursor = this.#sql.exec(this.source, ...serializeSqliteParams(params))
     const rows = cursor.toArray()
     return (rows[0] as T) ?? undefined
@@ -128,6 +155,11 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     if (!this.#db.open) {
       throw new SqliteError('The database connection is not open', 'SQLITE_MISUSE')
     }
+    const pragma = this.#interceptPragma()
+    if (pragma.intercepted && pragma.result) {
+      return pragma.result.toArray() as T[]
+    }
+
     const cursor = this.#sql.exec(this.source, ...serializeSqliteParams(params))
     return cursor.toArray() as T[]
   }
@@ -303,7 +335,7 @@ export class Database {
       freelist_count: [{ freelist_count: 0 }],
       auto_vacuum: [{ auto_vacuum: 0 }],
       page_count: [{ page_count: 0 }],
-      journal_mode: [{ journal_mode: 'wal' }],
+      journal_mode: [{ journal_mode: 'wal2' }],
       wal_checkpoint: [{ busy: 0, log: 0, checkpointed: 0 }],
     }
 
@@ -312,6 +344,13 @@ export class Database {
     const isSet = eqIndex !== -1
 
     if (isSet) {
+      // intercept journal_mode set — sql.js doesn't support wal/wal2, fake it
+      const pragmaName = source.substring(0, eqIndex).trim().toLowerCase()
+      const pragmaValue = source.substring(eqIndex + 1).trim().replace(/['"]/g, '')
+      if (pragmaName === 'journal_mode') {
+        return options?.simple ? pragmaValue : [{ journal_mode: pragmaValue }]
+      }
+
       // setting a pragma - execute it and return result
       try {
         const cursor = this.#sql.exec(`PRAGMA ${source}`)
@@ -323,7 +362,18 @@ export class Database {
       }
     }
 
-    // reading a pragma
+    // reading a pragma — check defaults first for pragmas we intercept
+    const pragmaName = trimmed.split(/[\s(]/)[0]
+    const defaultVal = pragmaDefaults[pragmaName]
+    if (defaultVal) {
+      if (options?.simple) {
+        const firstRow = (defaultVal as any[])[0]
+        return firstRow ? firstRow[Object.keys(firstRow)[0]] : undefined
+      }
+      return defaultVal
+    }
+
+    // try real execution for unknown pragmas
     try {
       const cursor = this.#sql.exec(`PRAGMA ${source}`)
       const rows = cursor.toArray()
@@ -334,14 +384,9 @@ export class Database {
         }
         return rows
       }
-      // empty result — fall through to defaults
     } catch {
-      // DO SQLite may not support this pragma — fall through to defaults
+      // sql.js may not support this pragma
     }
-
-    // return known defaults or empty
-    const pragmaName = trimmed.split(/[\s(]/)[0]
-    const defaultVal = pragmaDefaults[pragmaName]
     if (defaultVal) {
       if (options?.simple) {
         const arr = defaultVal as Record<string, unknown>[]
