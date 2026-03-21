@@ -17,7 +17,10 @@
 import { PassThrough } from 'stream'
 
 import { Mutex } from '../../mutex.js'
-import { handleStartReplication, signalReplicationChange } from '../../replication/handler.js'
+import {
+  handleStartReplication,
+  signalReplicationChange,
+} from '../../replication/handler.js'
 
 import type { PGlite, Results, Transaction } from '@electric-sql/pglite'
 
@@ -1025,87 +1028,94 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
     const cb = typeof optionsOrCb === 'function' ? optionsOrCb : maybeCb!
     // isolation level is ignored — PGlite is single-connection
 
-    return pglite.transaction(async (tx: Transaction) => {
-      // defer FK constraints so batched writes can insert in any order
-      await tx.query('SET CONSTRAINTS ALL DEFERRED').catch(() => {})
-      const txSql = createSqlFunction(tx, pglite)
+    return pglite
+      .transaction(async (tx: Transaction) => {
+        // defer FK constraints so batched writes can insert in any order
+        await tx.query('SET CONSTRAINTS ALL DEFERRED').catch(() => {})
+        const txSql = createSqlFunction(tx, pglite)
 
-      function txSqlFn(first: any, ...rest: any[]): any {
-        return txSql(first, ...rest)
-      }
-
-      // add unsafe to transaction sql
-      txSqlFn.unsafe = (queryString: string, params?: unknown[]) => {
-        // COPY TO STDOUT — returns readable stream of rows
-        const upper = queryString.trimStart().toUpperCase()
-        if (upper.startsWith('COPY') && upper.includes('TO STDOUT')) {
-          return createCopyPendingQuery(queryString, tx)
+        function txSqlFn(first: any, ...rest: any[]): any {
+          return txSql(first, ...rest)
         }
 
-        const serializedParams = (params ?? []).map(serializeParam)
+        // add unsafe to transaction sql
+        txSqlFn.unsafe = (queryString: string, params?: unknown[]) => {
+          // COPY TO STDOUT — returns readable stream of rows
+          const upper = queryString.trimStart().toUpperCase()
+          if (upper.startsWith('COPY') && upper.includes('TO STDOUT')) {
+            return createCopyPendingQuery(queryString, tx)
+          }
 
-        // multi-statement: split and run each (PGlite rejects multi-statement in execProtocol)
-        if (hasMultipleStatements(queryString) && serializedParams.length === 0) {
-          const promise = (async () => {
-            const stmts = splitStatements(queryString)
-            const resultArrays = []
-            for (const stmt of stmts) {
-              const r = await tx.query(stmt)
-              resultArrays.push(createResultArray(r as Results<any>, stmt))
-            }
-            const combined = resultArrays as any
-            combined.count = resultArrays.length
-            combined.command = 'SELECT'
-            combined.state = { status: 'idle', pid: 0, secret: 0 }
-            combined.statement = { name: '', string: queryString, types: [], columns: [] }
-            combined.columns = []
-            return combined
-          })()
+          const serializedParams = (params ?? []).map(serializeParam)
+
+          // multi-statement: split and run each (PGlite rejects multi-statement in execProtocol)
+          if (hasMultipleStatements(queryString) && serializedParams.length === 0) {
+            const promise = (async () => {
+              const stmts = splitStatements(queryString)
+              const resultArrays = []
+              for (const stmt of stmts) {
+                const r = await tx.query(stmt)
+                resultArrays.push(createResultArray(r as Results<any>, stmt))
+              }
+              const combined = resultArrays as any
+              combined.count = resultArrays.length
+              combined.command = 'SELECT'
+              combined.state = { status: 'idle', pid: 0, secret: 0 }
+              combined.statement = {
+                name: '',
+                string: queryString,
+                types: [],
+                columns: [],
+              }
+              combined.columns = []
+              return combined
+            })()
+            return createPendingQuery(promise)
+          }
+
+          const promise = executeQuery(tx, queryString, serializedParams, pglite)
           return createPendingQuery(promise)
         }
 
-        const promise = executeQuery(tx, queryString, serializedParams, pglite)
-        return createPendingQuery(promise)
-      }
+        // add begin (savepoint) to transaction sql
+        txSqlFn.begin = sql.begin
 
-      // add begin (savepoint) to transaction sql
-      txSqlFn.begin = sql.begin
+        // savepoint(name?, fn) — runs fn(sql) inside a SAVEPOINT
+        let _savepointIdx = 0
+        txSqlFn.savepoint = async (nameOrFn: any, maybeFn?: any) => {
+          const fn = typeof nameOrFn === 'function' ? nameOrFn : maybeFn
+          const name = typeof nameOrFn === 'string' ? nameOrFn : `sp_${_savepointIdx++}`
+          const spName = name.replace(/[^a-zA-Z0-9_]/g, '_')
 
-      // savepoint(name?, fn) — runs fn(sql) inside a SAVEPOINT
-      let _savepointIdx = 0
-      txSqlFn.savepoint = async (nameOrFn: any, maybeFn?: any) => {
-        const fn = typeof nameOrFn === 'function' ? nameOrFn : maybeFn
-        const name = typeof nameOrFn === 'string' ? nameOrFn : `sp_${_savepointIdx++}`
-        const spName = name.replace(/[^a-zA-Z0-9_]/g, '_')
-
-        await tx.query(`SAVEPOINT "${spName}"`)
-        try {
-          const result = await fn(txSqlFn)
-          await tx.query(`RELEASE SAVEPOINT "${spName}"`)
-          return result
-        } catch (err) {
-          await tx.query(`ROLLBACK TO SAVEPOINT "${spName}"`).catch(() => {})
-          throw err
+          await tx.query(`SAVEPOINT "${spName}"`)
+          try {
+            const result = await fn(txSqlFn)
+            await tx.query(`RELEASE SAVEPOINT "${spName}"`)
+            return result
+          } catch (err) {
+            await tx.query(`ROLLBACK TO SAVEPOINT "${spName}"`).catch(() => {})
+            throw err
+          }
         }
-      }
 
-      // add no-op end
-      txSqlFn.end = async () => {}
+        // add no-op end
+        txSqlFn.end = async () => {}
 
-      // add options
-      txSqlFn.options = sql.options
+        // add options
+        txSqlFn.options = sql.options
 
-      // add PostgresError
-      txSqlFn.PostgresError = PostgresError
+        // add PostgresError
+        txSqlFn.PostgresError = PostgresError
 
-      const result = await cb(txSqlFn)
-      // match postgres behavior: unwrap array results via Promise.all
-      return Array.isArray(result) ? await Promise.all(result) : result
-    }).then((result) => {
-      // signal replication after transaction commits so changes propagate
-      signalReplicationChange()
-      return result
-    })
+        const result = await cb(txSqlFn)
+        // match postgres behavior: unwrap array results via Promise.all
+        return Array.isArray(result) ? await Promise.all(result) : result
+      })
+      .then((result) => {
+        // signal replication after transaction commits so changes propagate
+        signalReplicationChange()
+        return result
+      })
   }
 
   // sql.end() — no-op (PGlite lifecycle managed elsewhere)

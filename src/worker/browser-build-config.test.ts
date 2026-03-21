@@ -24,7 +24,6 @@ describe('browser build config', () => {
     it('includes Node.js polyfills', () => {
       const aliases = getBrowserAliases()
       expect(aliases['node:events']).toBe('events')
-      expect(aliases['node:crypto']).toBe('crypto-browserify')
       expect(aliases['node:stream']).toBe('stream-browserify')
       expect(aliases['node:path']).toBe('path-browserify')
     })
@@ -35,6 +34,7 @@ describe('browser build config', () => {
       expect(aliases['node:net']).toBe('orez/worker/shims/node-stub')
       expect(aliases['node:child_process']).toBe('orez/worker/shims/node-stub')
       expect(aliases['node:http']).toBe('orez/worker/shims/node-stub')
+      expect(aliases['node:crypto']).toBe('orez/worker/shims/node-stub')
     })
   })
 

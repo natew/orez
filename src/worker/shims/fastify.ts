@@ -17,6 +17,7 @@
  */
 
 import EventEmitter from 'node:events'
+
 import { WebSocket as WsShim, WebSocketServer as WsServerShim } from './ws.js'
 
 // -- types matching fastify's minimal surface used by zero-cache --
@@ -137,9 +138,14 @@ class FastifyShim {
           }
           // wrap socket through handleUpgrade so it gets the full WS API
           // (ping, on, once, terminate, etc.) needed by zero-cache's streamOut
-          this.websocketServer.handleUpgrade(req, socket, Buffer.from(new Uint8Array(0)), (ws: any) => {
-            route.handler(ws, req)
-          })
+          this.websocketServer.handleUpgrade(
+            req,
+            socket,
+            Buffer.from(new Uint8Array(0)),
+            (ws: any) => {
+              route.handler(ws, req)
+            }
+          )
           return
         }
       }

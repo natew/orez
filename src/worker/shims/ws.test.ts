@@ -48,8 +48,11 @@ describe('WebSocket shim', () => {
       expect(ws).toBeInstanceOf(WebSocket)
     })
 
-    it('throws on string URL (not yet supported)', () => {
-      expect(() => new WebSocket('ws://localhost')).toThrow('not yet supported')
+    it('handles string URL for localhost (in-process)', () => {
+      // no longer throws — localhost URLs use the in-process path
+      // without a fastify instance it emits close instead of throwing
+      const ws = new WebSocket('ws://localhost')
+      expect(ws).toBeInstanceOf(WebSocket)
     })
 
     it('sets up event listeners on CF WebSocket', () => {

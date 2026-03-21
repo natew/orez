@@ -292,10 +292,7 @@ export async function startZeroCacheEmbedBrowser(
       isReady = false
       wrappedParent.kill('SIGTERM')
       if (runWorkerPromise) {
-        await Promise.race([
-          runWorkerPromise,
-          new Promise((r) => setTimeout(r, 5000)),
-        ])
+        await Promise.race([runWorkerPromise, new Promise((r) => setTimeout(r, 5000))])
       }
       if (origExit) {
         ;(globalThis as any).process.exit = origExit

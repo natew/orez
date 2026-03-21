@@ -12,7 +12,11 @@ function createMockSqlJsDb() {
     run(sql: string, params?: unknown[]) {
       // minimal DML support for testing
       const upper = sql.trim().toUpperCase()
-      if (upper.startsWith('BEGIN') || upper.startsWith('COMMIT') || upper.startsWith('ROLLBACK')) {
+      if (
+        upper.startsWith('BEGIN') ||
+        upper.startsWith('COMMIT') ||
+        upper.startsWith('ROLLBACK')
+      ) {
         return
       }
       if (upper.startsWith('CREATE TABLE')) {
@@ -43,7 +47,10 @@ function createMockSqlJsDb() {
       }
     },
 
-    exec(sql: string, params?: unknown[]): Array<{ columns: string[]; values: unknown[][] }> {
+    exec(
+      sql: string,
+      params?: unknown[]
+    ): Array<{ columns: string[]; values: unknown[][] }> {
       const upper = sql.trim().toUpperCase()
       if (upper.startsWith('SELECT')) {
         const match = sql.match(/FROM\s+(\w+)/i)

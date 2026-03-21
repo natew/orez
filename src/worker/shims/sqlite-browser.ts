@@ -20,7 +20,10 @@ import type { SqlStorageLike, SqlStorageCursor, SqlStorageValue } from './sqlite
 // sql.js Database interface (minimal, to avoid hard dependency)
 interface SqlJsDatabase {
   run(sql: string, params?: unknown[]): void
-  exec(sql: string, params?: unknown[]): Array<{
+  exec(
+    sql: string,
+    params?: unknown[]
+  ): Array<{
     columns: string[]
     values: unknown[][]
   }>
@@ -51,15 +54,21 @@ export function createSqlJsStorage(sqlJsDb: SqlJsDatabase): SqlStorageLike {
       try {
         if (bindings.length > 0) {
           // named parameters: single object arg → pass object with prefixed keys to sql.js
-          if (bindings.length === 1 && bindings[0] !== null && typeof bindings[0] === 'object'
-            && !Array.isArray(bindings[0]) && !(bindings[0] instanceof ArrayBuffer)) {
+          if (
+            bindings.length === 1 &&
+            bindings[0] !== null &&
+            typeof bindings[0] === 'object' &&
+            !Array.isArray(bindings[0]) &&
+            !(bindings[0] instanceof ArrayBuffer)
+          ) {
             // sql.js expects keys with $/:/@  prefix for named params
             // better-sqlite3 accepts keys without prefix — add @ prefix
             const obj = bindings[0] as Record<string, unknown>
             const prefixed: Record<string, unknown> = {}
             for (const [k, v] of Object.entries(obj)) {
               // add @ prefix if not already prefixed
-              const key = k.startsWith('$') || k.startsWith(':') || k.startsWith('@') ? k : `@${k}`
+              const key =
+                k.startsWith('$') || k.startsWith(':') || k.startsWith('@') ? k : `@${k}`
               prefixed[key] = v
             }
             stmt.bind(prefixed as any)
@@ -112,7 +121,9 @@ export function createSqlJsStorage(sqlJsDb: SqlJsDatabase): SqlStorageLike {
           sqlJsDb.run(`RELEASE SAVEPOINT "${sp}"`)
           return result
         } catch (err) {
-          try { sqlJsDb.run(`ROLLBACK TO SAVEPOINT "${sp}"`) } catch {}
+          try {
+            sqlJsDb.run(`ROLLBACK TO SAVEPOINT "${sp}"`)
+          } catch {}
           throw err
         }
       }
@@ -122,7 +133,9 @@ export function createSqlJsStorage(sqlJsDb: SqlJsDatabase): SqlStorageLike {
         sqlJsDb.run('COMMIT')
         return result
       } catch (err) {
-        try { sqlJsDb.run('ROLLBACK') } catch {}
+        try {
+          sqlJsDb.run('ROLLBACK')
+        } catch {}
         throw err
       }
     },

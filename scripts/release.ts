@@ -25,7 +25,7 @@ const patch = args.includes('--patch')
 const minor = args.includes('--minor')
 const major = args.includes('--major')
 const canary = args.includes('--canary')
-const skipTest = args.includes('--skip-test')
+const skipTest = args.includes('--skip-test') || args.includes('--skip-all')
 const packOnly = args.includes('--pack-only')
 const intoIdx = args.indexOf('--into')
 const into = intoIdx !== -1 ? args[intoIdx + 1] : null

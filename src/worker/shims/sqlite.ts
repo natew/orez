@@ -62,9 +62,14 @@ function serializeSqliteParams(params: unknown[]): SqlStorageValue[] {
   // named parameters: .run({key: value}) → pass values in order
   // sql.js handles this natively, but DO SqlStorage doesn't
   // detect named params: single object arg with non-array, non-buffer
-  if (params.length === 1 && params[0] !== null && typeof params[0] === 'object'
-    && !Array.isArray(params[0]) && !(params[0] instanceof ArrayBuffer)
-    && !(params[0] instanceof Uint8Array)) {
+  if (
+    params.length === 1 &&
+    params[0] !== null &&
+    typeof params[0] === 'object' &&
+    !Array.isArray(params[0]) &&
+    !(params[0] instanceof ArrayBuffer) &&
+    !(params[0] instanceof Uint8Array)
+  ) {
     // return the object as-is for sql.js named parameter binding
     return params as any
   }
@@ -95,7 +100,10 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     this.source = source
       .replace(/CREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS)/gi, 'CREATE TABLE IF NOT EXISTS ')
       .replace(/CREATE\s+INDEX\s+(?!IF\s+NOT\s+EXISTS)/gi, 'CREATE INDEX IF NOT EXISTS ')
-      .replace(/CREATE\s+UNIQUE\s+INDEX\s+(?!IF\s+NOT\s+EXISTS)/gi, 'CREATE UNIQUE INDEX IF NOT EXISTS ')
+      .replace(
+        /CREATE\s+UNIQUE\s+INDEX\s+(?!IF\s+NOT\s+EXISTS)/gi,
+        'CREATE UNIQUE INDEX IF NOT EXISTS '
+      )
   }
 
   // intercept PRAGMAs that sql.js can't handle (wal2, etc.)
@@ -106,14 +114,26 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     // PRAGMA journal_mode — always report wal2 (sql.js doesn't support WAL)
     if (/PRAGMA\s+journal_mode\s*=/i.test(this.source)) {
       const value = this.source.split('=')[1]?.trim().replace(/['"]/g, '') || 'wal2'
-      return { intercepted: true, result: {
-        toArray: () => [{ journal_mode: value }], rowsRead: 1, rowsWritten: 0, columnNames: ['journal_mode'],
-      }}
+      return {
+        intercepted: true,
+        result: {
+          toArray: () => [{ journal_mode: value }],
+          rowsRead: 1,
+          rowsWritten: 0,
+          columnNames: ['journal_mode'],
+        },
+      }
     }
     if (/PRAGMA\s+journal_mode\s*$/i.test(this.source)) {
-      return { intercepted: true, result: {
-        toArray: () => [{ journal_mode: 'wal2' }], rowsRead: 1, rowsWritten: 0, columnNames: ['journal_mode'],
-      }}
+      return {
+        intercepted: true,
+        result: {
+          toArray: () => [{ journal_mode: 'wal2' }],
+          rowsRead: 1,
+          rowsWritten: 0,
+          columnNames: ['journal_mode'],
+        },
+      }
     }
     return { intercepted: false }
   }
@@ -126,11 +146,17 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     if (pragma.intercepted) return { changes: 0, lastInsertRowid: 0 }
 
     const upper = this.source.trimStart().toUpperCase()
-    const isTxCmd = upper.startsWith('BEGIN') || upper.startsWith('COMMIT') || upper.startsWith('ROLLBACK') || upper === 'END' || upper.startsWith('END ')
+    const isTxCmd =
+      upper.startsWith('BEGIN') ||
+      upper.startsWith('COMMIT') ||
+      upper.startsWith('ROLLBACK') ||
+      upper === 'END' ||
+      upper.startsWith('END ')
     const serialized = serializeSqliteParams(params)
-    const cursor = isTxCmd && serialized.length === 0
-      ? this.#db._execTransactionAware(this.source, this.#sql)
-      : this.#sql.exec(this.source, ...serialized)
+    const cursor =
+      isTxCmd && serialized.length === 0
+        ? this.#db._execTransactionAware(this.source, this.#sql)
+        : this.#sql.exec(this.source, ...serialized)
     return {
       changes: cursor.rowsWritten,
       lastInsertRowid: 0,
@@ -263,10 +289,43 @@ export class Database {
 
   // transaction nesting: converts nested BEGIN to SAVEPOINT
   // uses shared counter on SqlStorageLike to handle multiple Database instances sharing one sql.js db
+  //
+  // CF DO SQLite rejects raw BEGIN/COMMIT/ROLLBACK/SAVEPOINT statements —
+  // it requires state.storage.transactionSync() instead. when transactionSync
+  // is available, all transaction control statements become no-ops here.
+  // DO handles atomicity via its own write coalescing mechanism.
   _execTransactionAware(sql: string, sqlStorage: SqlStorageLike): SqlStorageCursor {
     const upper = sql.trimStart().toUpperCase()
     const shared = sqlStorage as any
+    const noopCursor: SqlStorageCursor = {
+      toArray: () => [],
+      rowsRead: 0,
+      rowsWritten: 0,
+      columnNames: [],
+    }
 
+    // CF DO: all transaction control is no-op (DO coalesces writes automatically)
+    if (sqlStorage.transactionSync) {
+      if (upper.startsWith('BEGIN')) {
+        shared.__txDepth = (shared.__txDepth || 0) + 1
+        this.#inTransaction = true
+        return noopCursor
+      }
+      if (
+        upper.startsWith('COMMIT') ||
+        upper === 'END' ||
+        upper.startsWith('END ') ||
+        upper.startsWith('ROLLBACK')
+      ) {
+        shared.__txDepth = Math.max(0, (shared.__txDepth || 0) - 1)
+        if (shared.__txDepth === 0) this.#inTransaction = false
+        return noopCursor
+      }
+      // non-tx statement inside a "transaction" — just execute normally
+      return sqlStorage.exec(sql)
+    }
+
+    // non-DO path: real BEGIN/COMMIT/ROLLBACK with SAVEPOINT nesting
     if (upper.startsWith('BEGIN')) {
       shared.__txDepth = (shared.__txDepth || 0) + 1
       if (shared.__txDepth > 1) {
@@ -289,7 +348,9 @@ export class Database {
 
     if (upper.startsWith('ROLLBACK')) {
       if ((shared.__txDepth || 0) > 1) {
-        const result = sqlStorage.exec(`ROLLBACK TO SAVEPOINT _nested_${shared.__txDepth}`)
+        const result = sqlStorage.exec(
+          `ROLLBACK TO SAVEPOINT _nested_${shared.__txDepth}`
+        )
         shared.__txDepth--
         return result
       }
@@ -346,7 +407,10 @@ export class Database {
     if (isSet) {
       // intercept journal_mode set — sql.js doesn't support wal/wal2, fake it
       const pragmaName = source.substring(0, eqIndex).trim().toLowerCase()
-      const pragmaValue = source.substring(eqIndex + 1).trim().replace(/['"]/g, '')
+      const pragmaValue = source
+        .substring(eqIndex + 1)
+        .trim()
+        .replace(/['"]/g, '')
       if (pragmaName === 'journal_mode') {
         return options?.simple ? pragmaValue : [{ journal_mode: pragmaValue }]
       }
@@ -415,7 +479,22 @@ export class Database {
       .filter((s) => s.length > 0)
 
     for (const stmt of statements) {
-      this.#sql.exec(stmt)
+      // route transaction control through _execTransactionAware
+      // so CF DO's transactionSync short-circuit applies
+      const upper = stmt.trimStart().toUpperCase()
+      const isTxCmd =
+        upper.startsWith('BEGIN') ||
+        upper.startsWith('COMMIT') ||
+        upper.startsWith('ROLLBACK') ||
+        upper === 'END' ||
+        upper.startsWith('END ') ||
+        upper.startsWith('SAVEPOINT') ||
+        upper.startsWith('RELEASE ')
+      if (isTxCmd) {
+        this._execTransactionAware(stmt, this.#sql)
+      } else {
+        this.#sql.exec(stmt)
+      }
     }
 
     return this

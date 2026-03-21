@@ -21,14 +21,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 export function patchZeroCacheForCF(nodeModulesPath: string): void {
-  const zcBase = resolve(
-    nodeModulesPath,
-    '@rocicorp',
-    'zero',
-    'out',
-    'zero-cache',
-    'src'
-  )
+  const zcBase = resolve(nodeModulesPath, '@rocicorp', 'zero', 'out', 'zero-cache', 'src')
 
   patchWorkerUrls(zcBase)
   patchProcesses(zcBase)
@@ -97,7 +90,8 @@ const __zc_workers = {
   // replace the dynamic import in childWorker with a synchronous lookup.
   // original: import(moduleUrl.href).then(async ({ default: runWorker }) => ...
   // patched:  lookup __zc_workers by name, then continue as before
-  const dynamicImportPattern = 'import(moduleUrl.href).then(async ({ default: runWorker })'
+  const dynamicImportPattern =
+    'import(moduleUrl.href).then(async ({ default: runWorker })'
   const staticLookup =
     '((async () => { ' +
     'const _name = moduleUrl.hostname || moduleUrl.pathname.split("/").pop()?.replace(".js",""); ' +

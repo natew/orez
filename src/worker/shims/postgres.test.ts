@@ -166,7 +166,6 @@ describe('postgres shim', () => {
       const result = await sql.unsafe(`SELECT 1 as a`)
       expect(result[0].a).toBe(1)
     })
-
   })
 
   // -- transactions --
