@@ -42,7 +42,7 @@ class WebSocket extends EventEmitter {
   readonly CLOSING = CLOSING
   readonly CLOSED = CLOSED
 
-  #ws: CFWebSocket
+  #ws!: CFWebSocket
   #url: string
   #listeners = new Map<string, (event: any) => void>()
 
@@ -51,9 +51,71 @@ class WebSocket extends EventEmitter {
 
     if (typeof urlOrSocket === 'string') {
       this.#url = urlOrSocket
-      // in browser: use native WebSocket for outbound connections
-      // in CF Workers: would need fetch API (not supported yet)
-      if (typeof globalThis.WebSocket === 'function') {
+      // check for in-process connections (fastify shim uses port 0 or 1)
+      const parsedUrl = new URL(urlOrSocket, 'http://localhost')
+      const isInProcess = parsedUrl.port === '0' || parsedUrl.port === '1' || parsedUrl.hostname === 'localhost'
+
+      if (isInProcess) {
+        // in-process: connect via fastify server's handoff mechanism
+        const fastifyInstance = (globalThis as any).__orez_fastify_instance
+        if (fastifyInstance?.server) {
+          // create paired message channels for bidirectional communication
+          const serverWs: any = {
+            readyState: 1,
+            _listeners: {} as Record<string, Function[]>,
+            send: (data: string | ArrayBuffer) => {
+              // deliver to client side
+              queueMicrotask(() => this.emit('message', data))
+            },
+            close: (code?: number, reason?: string) => {
+              serverWs.readyState = 3
+              queueMicrotask(() => this.emit('close', code || 1000, reason || ''))
+            },
+            addEventListener: (type: string, handler: Function) => {
+              if (!serverWs._listeners[type]) serverWs._listeners[type] = []
+              serverWs._listeners[type].push(handler)
+            },
+            removeEventListener: (type: string, handler: Function) => {
+              const arr = serverWs._listeners[type]
+              if (arr) {
+                const idx = arr.indexOf(handler)
+                if (idx >= 0) arr.splice(idx, 1)
+              }
+            },
+          }
+
+          this.#ws = {
+            accept: () => {},
+            send: (data: string | ArrayBuffer) => {
+              // deliver to server side
+              const handlers = serverWs._listeners['message'] || []
+              for (const h of handlers) h({ data })
+            },
+            close: (code?: number, reason?: string) => {
+              const handlers = serverWs._listeners['close'] || []
+              for (const h of handlers) h({ code, reason })
+            },
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            get readyState() { return 1 },
+          } as CFWebSocket
+
+          // emit handoff to fastify server
+          const path = parsedUrl.pathname + parsedUrl.search
+          queueMicrotask(() => {
+            fastifyInstance.server.emit(
+              'message',
+              ['handoff', { message: { url: path, headers: {}, method: 'GET' }, head: new Uint8Array(0) }],
+              serverWs,
+            )
+            this.emit('open')
+          })
+        } else {
+          // no fastify instance — emit close immediately
+          queueMicrotask(() => this.emit('close', 1006, 'no fastify server'))
+        }
+      } else if (typeof globalThis.WebSocket === 'function') {
+        // real outbound WebSocket for external connections
         const nativeWs = new globalThis.WebSocket(urlOrSocket) as any
         this.#ws = {
           accept: () => {},
