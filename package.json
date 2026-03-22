@@ -87,7 +87,7 @@
     "src"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/cli-entry.js",
     "dev": "tsc --watch",
     "test": "vitest run --exclude 'src/integration/' --exclude 'src/wasm-sqlite.test.ts'",
     "test:integration": "vitest run src/integration/",
