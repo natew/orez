@@ -198,7 +198,7 @@ describe('orez integration', { timeout: 120000 }, () => {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       const result = await pglite.query<{ count: string }>(
-        `SELECT count(*)::text as count FROM _orez._zero_changes`
+        `SELECT count(*)::text as count FROM _orez.changes`
       )
       if (Number(result.rows[0]?.count) === 0) return
       await new Promise((r) => setTimeout(r, 100))

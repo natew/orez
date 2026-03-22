@@ -540,10 +540,10 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
         // clear upstream replication tracking so zero-cache starts from a
         // clean change stream baseline after full reset.
-        await db.exec(`TRUNCATE _orez._zero_changes`).catch(() => {})
+        await db.exec(`TRUNCATE _orez.changes`).catch(() => {})
         await db.exec(`TRUNCATE _orez._zero_replication_slots`).catch(() => {})
         await db
-          .exec(`ALTER SEQUENCE _orez._zero_watermark RESTART WITH 1`)
+          .exec(`ALTER SEQUENCE _orez.watermark RESTART WITH 1`)
           .catch(() => {})
         log.orez('cleared upstream replication tracking state')
       }

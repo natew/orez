@@ -393,7 +393,7 @@ export async function handleStartReplication(
         const all = await db.query<{ tablename: string }>(
           `SELECT tablename FROM pg_tables
            WHERE schemaname = 'public'
-             AND tablename NOT IN ('migrations', '_zero_changes')
+             AND tablename NOT IN ('migrations', 'changes')
              AND tablename NOT LIKE '_zero_%'`
         )
         tables = all.rows
@@ -403,7 +403,7 @@ export async function handleStartReplication(
       const ddlParts: string[] = [
         `CREATE OR REPLACE FUNCTION public._zero_notify_change() RETURNS TRIGGER AS $$
         BEGIN
-          PERFORM pg_notify('_zero_changes', TG_TABLE_NAME);
+          PERFORM pg_notify('changes', TG_TABLE_NAME);
           RETURN NULL;
         END;
         $$ LANGUAGE plpgsql;`,
@@ -612,8 +612,8 @@ export async function handleStartReplication(
   // also set up LISTEN as secondary signal
   let unsubscribe: (() => Promise<void>) | null = null
   try {
-    unsubscribe = await db.listen('_zero_changes', wakeup)
-    log.debug.proxy('replication: listening for _zero_changes notifications')
+    unsubscribe = await db.listen('changes', wakeup)
+    log.debug.proxy('replication: listening for changes notifications')
   } catch {
     log.debug.proxy('replication: LISTEN not available')
   }
@@ -637,6 +637,9 @@ export async function handleStartReplication(
         if (!queryPending) {
           // check if a signal arrived while we were processing
           if (!signalPending) {
+            log.repl(
+              `waiting for signal (lastWm=${lastWatermark}, streamed=${hasStreamedOnce})`
+            )
             const wasSignaled = await waitForWakeup(pollIntervalIdle)
             if (writer.closed || db.closed) {
               running = false
@@ -690,6 +693,9 @@ export async function handleStartReplication(
         // try to acquire mutex without blocking proxy connections.
         // post-sync: short backoff since writes signal us directly.
         // pre-sync: yield more generously so zero-cache initial copy can finish.
+        log.repl(
+          `pre-query: tryAcquire mutex (streamed=${hasStreamedOnce}, fails=${tryAcquireFailures})`
+        )
         if (!mutex.tryAcquire()) {
           if (hasStreamedOnce) {
             // post-sync: block immediately. change query is fast (~0.5ms),

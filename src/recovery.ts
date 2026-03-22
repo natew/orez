@@ -100,9 +100,9 @@ export async function recoverFromCdcCorruption(ctx: RecoveryContext): Promise<vo
 
   // clear upstream replication tracking
   const db = instances.postgres
-  await db.exec(`TRUNCATE _orez._zero_changes`).catch(() => {})
+  await db.exec(`TRUNCATE _orez.changes`).catch(() => {})
   await db.exec(`TRUNCATE _orez._zero_replication_slots`).catch(() => {})
-  await db.exec(`ALTER SEQUENCE _orez._zero_watermark RESTART WITH 1`).catch(() => {})
+  await db.exec(`ALTER SEQUENCE _orez.watermark RESTART WITH 1`).catch(() => {})
 
   // drop stale shard schemas
   const shardSchemas = await db.query<{ schemaname: string }>(

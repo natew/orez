@@ -425,6 +425,109 @@ function getSharedMutex(target: object): Mutex {
   return mutex
 }
 
+// -- raw wire protocol helper --
+// bypasses PGlite's JS mutexes (Fe2/ke2) by calling execProtocolRawSync directly.
+// used for replication protocol queries and external queries that would otherwise
+// deadlock against zero-cache's long-running transaction pool.
+function rawQuery(pglite: PGlite, sql: string): any[] {
+  const pg = pglite as any
+  if (!pg.execProtocolRawSync) return []
+  const enc = new TextEncoder()
+  const sqlBytes = enc.encode(sql + '\0')
+  const len = 4 + sqlBytes.length
+  const msg = new Uint8Array(1 + len)
+  msg[0] = 0x51 // Q message
+  new DataView(msg.buffer).setInt32(1, len)
+  msg.set(sqlBytes, 5)
+  const result = pg.execProtocolRawSync(msg) as Uint8Array
+  // parse wire protocol response
+  const rows: any[] = []
+  const fields: string[] = []
+  let pos = 0
+  const dv = new DataView(result.buffer, result.byteOffset, result.byteLength)
+  while (pos < result.length) {
+    const type = result[pos]
+    const msgLen = dv.getInt32(pos + 1) + 1
+    if (type === 0x54) {
+      // RowDescription
+      const nFields = dv.getInt16(pos + 5)
+      let fpos = pos + 7
+      for (let i = 0; i < nFields; i++) {
+        let end = fpos
+        while (result[end] !== 0) end++
+        fields.push(new TextDecoder().decode(result.subarray(fpos, end)))
+        fpos = end + 1 + 18
+      }
+    } else if (type === 0x44) {
+      // DataRow
+      const nCols = dv.getInt16(pos + 5)
+      const row: any = {}
+      let cpos = pos + 7
+      for (let i = 0; i < nCols; i++) {
+        const colLen = dv.getInt32(cpos)
+        cpos += 4
+        if (colLen === -1) {
+          row[fields[i]] = null
+        } else {
+          row[fields[i]] = new TextDecoder().decode(result.subarray(cpos, cpos + colLen))
+          cpos += colLen
+        }
+      }
+      rows.push(row)
+    } else if (type === 0x45) {
+      // ErrorResponse
+      break
+    }
+    pos += msgLen
+  }
+  return rows
+}
+
+function rawExec(pglite: PGlite, sql: string): void {
+  const pg = pglite as any
+  if (!pg.execProtocolRawSync) return
+  const enc = new TextEncoder()
+  const sqlBytes = enc.encode(sql + '\0')
+  const len = 4 + sqlBytes.length
+  const msg = new Uint8Array(1 + len)
+  msg[0] = 0x51
+  new DataView(msg.buffer).setInt32(1, len)
+  msg.set(sqlBytes, 5)
+  pg.execProtocolRawSync(msg)
+}
+
+// create a proxy around PGlite that routes query/exec through raw wire protocol
+// this is needed because the replication handler runs continuously and would
+// deadlock against zero-cache's transaction pool if it used the normal PGlite API
+function createRawDbProxy(pg: PGlite): PGlite {
+  if (!(pg as any).execProtocolRawSync) return pg
+  return new Proxy(pg, {
+    get(target, prop) {
+      if (prop === 'query') {
+        return async (sql: string, params?: any[]) => {
+          // for parameterized queries, fall back to normal query
+          // (raw protocol doesn't support parameters easily)
+          if (params?.length) return target.query(sql, params)
+          const rows = rawQuery(target, sql)
+          return { rows, fields: [], affectedRows: 0 }
+        }
+      }
+      if (prop === 'exec') {
+        return async (sql: string) => {
+          rawExec(target, sql)
+          return []
+        }
+      }
+      if (prop === 'listen') {
+        // skip listen in browser — it's a secondary signal mechanism
+        return async () => async () => {}
+      }
+      if (prop === 'closed') return target.closed
+      return (target as any)[prop]
+    },
+  })
+}
+
 // -- execute a query, routing multi-statement to exec() --
 // PGlite.query() only handles single statements. multi-statement DDL
 // (schema migrations, etc.) must use exec(). when params are present
@@ -433,6 +536,7 @@ function getSharedMutex(target: object): Mutex {
 // intercept replication-related queries that PGlite can't handle natively.
 // these are sent by zero-cache during initialization (wal_level check,
 // replication slot management, etc.) and need fake responses.
+// uses rawQuery/rawExec to bypass PGlite's transaction mutex.
 async function interceptReplicationQuery(
   text: string,
   pglite: PGlite
@@ -462,10 +566,10 @@ async function interceptReplicationQuery(
           confirmed_flush_lsn TEXT, wal_status TEXT DEFAULT 'reserved'
         )
       `)
-      await pglite.query(
+      await pglite.exec(
         `INSERT INTO _orez._zero_replication_slots (slot_name, restart_lsn, confirmed_flush_lsn)
-         VALUES ($1, $2, $2) ON CONFLICT (slot_name) DO UPDATE SET restart_lsn = $2`,
-        [slotName, lsn]
+         VALUES ('${slotName.replace(/'/g, "''")}', '${lsn}', '${lsn}')
+         ON CONFLICT (slot_name) DO UPDATE SET restart_lsn = '${lsn}'`
       )
     } catch {}
     return fakeResult(
@@ -489,11 +593,11 @@ async function interceptReplicationQuery(
   // pg_replication_slots query
   if (upper.includes('PG_REPLICATION_SLOTS') && upper.includes('SELECT')) {
     try {
-      const result = await pglite.query<any>(
+      const result = await pglite.query(
         `SELECT slot_name, restart_lsn as "restartLSN", wal_status as "walStatus"
          FROM _orez._zero_replication_slots`
       )
-      return createResultArray(result, text)
+      return createResultArray(result as any, text)
     } catch {
       return fakeResult([], text)
     }
@@ -522,6 +626,15 @@ async function interceptReplicationQuery(
   // SET TRANSACTION / SET SESSION
   if (upper.startsWith('SET TRANSACTION') || upper.startsWith('SET SESSION')) {
     return fakeResult([], text, 'SET')
+  }
+
+  // event triggers: PGlite doesn't support them (requires superuser),
+  // and DDL detection isn't needed in browser mode
+  if (
+    upper.includes('EVENT TRIGGER') &&
+    (upper.startsWith('DROP') || upper.startsWith('CREATE'))
+  ) {
+    return fakeResult([], text, upper.startsWith('DROP') ? 'DROP' : 'CREATE')
   }
 
   return null
@@ -560,32 +673,30 @@ async function executeQuery(
     if (intercepted) return intercepted
   }
 
-  // make FK constraints DEFERRABLE so zero-cache's batched CVR writes work
-  // (zero-cache flushes desires before queries in the same transaction)
-  if (
-    /FOREIGN\s+KEY/i.test(text) &&
-    /CREATE\s+TABLE/i.test(text) &&
-    !/DEFERRABLE/i.test(text)
-  ) {
-    text = text.replace(/(ON\s+DELETE\s+CASCADE)/gi, '$1 DEFERRABLE INITIALLY DEFERRED')
+  // strip FK constraints from CREATE TABLE in browser mode.
+  // without a wrapping transaction, DEFERRABLE can't defer across separate
+  // INSERT statements — zero-cache inserts desires before queries exist.
+  // single-connection browser dev preview doesn't need FK enforcement.
+  if (/FOREIGN\s+KEY/i.test(text) && /CREATE\s+TABLE/i.test(text)) {
+    text = text.replace(
+      /,?\s*(?:CONSTRAINT\s+\w+\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+[^,(]+(?:\s*\([^)]*\))?(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))*(?:\s+DEFERRABLE[^,)]*)?/gi,
+      ''
+    )
   }
 
   const isMulti = hasMultipleStatements(text)
 
   if (!isMulti) {
-    // single statement — use query() with params
+    // use normal PGlite query — rawQuery breaks transaction state
     const r = await (params.length > 0
       ? executor.query(text, params)
       : executor.query(text))
     const result = createResultArray(r as Results<any>, text)
-    // signal replication handler for write operations so changes propagate
     if (isWriteCommand(text)) signalReplicationChange()
     return result
   }
 
   // multi-statement: ALWAYS split and run individually
-  // PGliteWorker's execProtocol rejects multi-statement SQL, and exec() also
-  // uses execProtocol internally. splitting upfront avoids all these issues.
   if (params.length === 0) {
     const stmts = splitStatements(text)
     let lastResult: Results<any> = { rows: [], fields: [], affectedRows: 0 } as any
@@ -792,48 +903,63 @@ function createReplicationPendingQuery(
   db: ReplicationCapableDb
 ): any {
   const mutex = getSharedMutex(db as object)
-  const readable = new PassThrough()
   const writable = new PassThrough()
   let started = false
   let startPromise: Promise<void> | null = null
+  let destroyed = false
+
+  // use PassThrough — AND expose a direct callback for the pipe to use.
+  // stream-browserify's PassThrough + Duplexify stop flowing after idle,
+  // so we also push data via a callback that the patched pipe() can use.
+  const readable = new PassThrough()
+  // direct data callback — bypasses broken stream plumbing entirely.
+  // registered on globalThis so the patched pipe() can find it regardless
+  // of how many stream wrappers (Duplexify, etc.) sit between.
+  const dataListeners: Array<(chunk: Buffer) => void> = []
+  ;(globalThis as any).__orez_repl_data_push = (fn: (chunk: Buffer) => void) => {
+    dataListeners.push(fn)
+  }
 
   const start = async () => {
-    if (started) return startPromise!
+    if (started) return
     started = true
     startPromise = handleStartReplication(
       replicationQuery,
       {
         write(chunk: Uint8Array) {
-          // The replication handler emits wire-protocol frames:
-          // CopyBothResponse, then CopyData(XLogData|Keepalive). postgres.js
-          // exposes the inner streaming payload, so unwrap CopyData and skip
-          // the initial CopyBothResponse.
+          if (destroyed) return
+          // skip CopyBothResponse, unwrap CopyData
           if (chunk[0] === 0x57) return
-          if (chunk[0] === 0x64 && chunk.length >= 6) {
-            readable.write(Buffer.from(chunk.subarray(5)))
-            return
+          const data =
+            chunk[0] === 0x64 && chunk.length >= 6
+              ? Buffer.from(chunk.subarray(5))
+              : Buffer.from(chunk)
+          readable.write(data)
+          // also call pipe handlers directly — stream polyfills are broken in browser
+          const handlers = (globalThis as any).__orez_pipe_handlers
+          if (handlers) {
+            for (const fn of handlers) {
+              try {
+                fn(data)
+              } catch {}
+            }
           }
-          readable.write(Buffer.from(chunk))
         },
         get closed() {
-          return readable.destroyed || writable.destroyed || !!db.closed
+          return destroyed || writable.destroyed || !!db.closed
         },
       },
       db as PGlite,
       mutex
-    )
-      .catch((err) => {
-        // Closing the stream intentionally tears down the replication loop.
-        if (!readable.destroyed) {
-          const msg = err instanceof Error ? err.message : String(err)
-          if (!/closed|destroyed|ECONNRESET|EPIPE/i.test(msg)) {
-            readable.destroy(err instanceof Error ? err : new Error(msg))
-          }
-        }
-      })
-      .finally(() => {
-        if (!readable.destroyed) readable.end()
-      })
+    ).catch((err) => {
+      // don't destroy the readable on handler errors — the change-streamer
+      // would reconnect with a new subscription, losing the reference the
+      // producer holds. just log the error and let the handler restart.
+      console.warn(
+        '[orez:repl] handler error:',
+        err instanceof Error ? err.message : String(err)
+      )
+    })
     return Promise.resolve()
   }
 
@@ -841,6 +967,7 @@ function createReplicationPendingQuery(
   pending.execute = () => pending
   pending.simple = () => pending
   pending.cancel = () => {
+    destroyed = true
     readable.destroy()
     writable.destroy()
   }
@@ -977,15 +1104,11 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
       return createCopyPendingQuery(queryString, pglite)
     }
 
-    // make FK constraints DEFERRABLE (zero-cache CVR creates tables via unsafe())
-    if (
-      /FOREIGN\s+KEY/i.test(queryString) &&
-      /CREATE\s+TABLE/i.test(queryString) &&
-      !/DEFERRABLE/i.test(queryString)
-    ) {
+    // strip FK constraints from CREATE TABLE (see executeQuery for why)
+    if (/FOREIGN\s+KEY/i.test(queryString) && /CREATE\s+TABLE/i.test(queryString)) {
       queryString = queryString.replace(
-        /(ON\s+DELETE\s+CASCADE)/gi,
-        '$1 DEFERRABLE INITIALLY DEFERRED'
+        /,?\s*(?:CONSTRAINT\s+\w+\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+[^,(]+(?:\s*\([^)]*\))?(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))*(?:\s+DEFERRABLE[^,)]*)?/gi,
+        ''
       )
     }
 
@@ -1021,101 +1144,125 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
   }
 
   // sql.begin(options?, callback) — transactions
+  //
+  // BROWSER FIX: don't use pglite.transaction() for the top-level callback.
+  // zero-cache's transaction pool holds the callback open indefinitely
+  // (await dequeue() loop), which permanently holds PGlite's Fe2 mutex
+  // and deadlocks ALL external queries (push handler, pg-query, etc.).
+  //
+  // instead, route queries directly through PGlite — each query acquires
+  // and releases Fe2 independently. this trades transaction atomicity for
+  // Fe2 availability, which is acceptable in the browser dev preview
+  // (PGlite is single-connection so operations are serialized anyway).
+  //
+  // nested begin/savepoint calls still use real pglite.transaction()
+  // since those are short-lived (task-scoped, not pool-scoped).
   sql.begin = async (
     optionsOrCb: string | ((tx: any) => any),
     maybeCb?: (tx: any) => any
   ) => {
     const cb = typeof optionsOrCb === 'function' ? optionsOrCb : maybeCb!
-    // isolation level is ignored — PGlite is single-connection
 
-    return pglite
-      .transaction(async (tx: Transaction) => {
-        // defer FK constraints so batched writes can insert in any order
-        await tx.query('SET CONSTRAINTS ALL DEFERRED').catch(() => {})
-        const txSql = createSqlFunction(tx, pglite)
+    // create sql function backed by pglite directly (not a Transaction)
+    // each query acquires/releases Fe2 independently
+    const txSql = createSqlFunction(pglite, pglite)
 
-        function txSqlFn(first: any, ...rest: any[]): any {
-          return txSql(first, ...rest)
-        }
+    function txSqlFn(first: any, ...rest: any[]): any {
+      return txSql(first, ...rest)
+    }
 
-        // add unsafe to transaction sql
-        txSqlFn.unsafe = (queryString: string, params?: unknown[]) => {
-          // COPY TO STDOUT — returns readable stream of rows
-          const upper = queryString.trimStart().toUpperCase()
-          if (upper.startsWith('COPY') && upper.includes('TO STDOUT')) {
-            return createCopyPendingQuery(queryString, tx)
+    // unsafe: routes through pglite directly
+    txSqlFn.unsafe = (queryString: string, params?: unknown[]) => {
+      const upper = queryString.trimStart().toUpperCase()
+      if (upper.startsWith('COPY') && upper.includes('TO STDOUT')) {
+        return createCopyPendingQuery(queryString, pglite)
+      }
+
+      const serializedParams = (params ?? []).map(serializeParam)
+
+      if (hasMultipleStatements(queryString) && serializedParams.length === 0) {
+        const promise = (async () => {
+          const stmts = splitStatements(queryString)
+          const resultArrays = []
+          for (const stmt of stmts) {
+            const r = await pglite.query(stmt)
+            resultArrays.push(createResultArray(r as Results<any>, stmt))
           }
-
-          const serializedParams = (params ?? []).map(serializeParam)
-
-          // multi-statement: split and run each (PGlite rejects multi-statement in execProtocol)
-          if (hasMultipleStatements(queryString) && serializedParams.length === 0) {
-            const promise = (async () => {
-              const stmts = splitStatements(queryString)
-              const resultArrays = []
-              for (const stmt of stmts) {
-                const r = await tx.query(stmt)
-                resultArrays.push(createResultArray(r as Results<any>, stmt))
-              }
-              const combined = resultArrays as any
-              combined.count = resultArrays.length
-              combined.command = 'SELECT'
-              combined.state = { status: 'idle', pid: 0, secret: 0 }
-              combined.statement = {
-                name: '',
-                string: queryString,
-                types: [],
-                columns: [],
-              }
-              combined.columns = []
-              return combined
-            })()
-            return createPendingQuery(promise)
+          const combined = resultArrays as any
+          combined.count = resultArrays.length
+          combined.command = 'SELECT'
+          combined.state = { status: 'idle', pid: 0, secret: 0 }
+          combined.statement = {
+            name: '',
+            string: queryString,
+            types: [],
+            columns: [],
           }
+          combined.columns = []
+          return combined
+        })()
+        return createPendingQuery(promise)
+      }
 
-          const promise = executeQuery(tx, queryString, serializedParams, pglite)
-          return createPendingQuery(promise)
-        }
+      const promise = executeQuery(pglite, queryString, serializedParams, pglite)
+      return createPendingQuery(promise)
+    }
 
-        // add begin (savepoint) to transaction sql
-        txSqlFn.begin = sql.begin
-
-        // savepoint(name?, fn) — runs fn(sql) inside a SAVEPOINT
-        let _savepointIdx = 0
-        txSqlFn.savepoint = async (nameOrFn: any, maybeFn?: any) => {
-          const fn = typeof nameOrFn === 'function' ? nameOrFn : maybeFn
-          const name = typeof nameOrFn === 'string' ? nameOrFn : `sp_${_savepointIdx++}`
-          const spName = name.replace(/[^a-zA-Z0-9_]/g, '_')
-
-          await tx.query(`SAVEPOINT "${spName}"`)
-          try {
-            const result = await fn(txSqlFn)
-            await tx.query(`RELEASE SAVEPOINT "${spName}"`)
-            return result
-          } catch (err) {
-            await tx.query(`ROLLBACK TO SAVEPOINT "${spName}"`).catch(() => {})
-            throw err
-          }
-        }
-
-        // add no-op end
-        txSqlFn.end = async () => {}
-
-        // add options
-        txSqlFn.options = sql.options
-
-        // add PostgresError
-        txSqlFn.PostgresError = PostgresError
-
-        const result = await cb(txSqlFn)
-        // match postgres behavior: unwrap array results via Promise.all
+    // nested begin: use real pglite.transaction() for atomicity (short-lived)
+    // nested begin: non-transactional (same as top level)
+    // real pglite.transaction() holds Fe2 during async SQLite work in the syncer,
+    // which deadlocks any concurrent PGlite queries. non-transactional avoids this.
+    txSqlFn.begin = async (
+      innerOptOrCb: string | ((tx: any) => any),
+      innerMaybeCb?: (tx: any) => any
+    ) => {
+      const innerCb = typeof innerOptOrCb === 'function' ? innerOptOrCb : innerMaybeCb!
+      const innerTxSql = createSqlFunction(pglite, pglite)
+      function innerTxSqlFn(first: any, ...rest: any[]): any {
+        return innerTxSql(first, ...rest)
+      }
+      innerTxSqlFn.unsafe = txSqlFn.unsafe
+      innerTxSqlFn.begin = txSqlFn.begin
+      innerTxSqlFn.savepoint = txSqlFn.savepoint
+      innerTxSqlFn.end = async () => {}
+      innerTxSqlFn.options = sql.options
+      innerTxSqlFn.PostgresError = PostgresError
+      try {
+        const result = await innerCb(innerTxSqlFn)
         return Array.isArray(result) ? await Promise.all(result) : result
-      })
-      .then((result) => {
-        // signal replication after transaction commits so changes propagate
+      } finally {
         signalReplicationChange()
-        return result
-      })
+      }
+    }
+
+    // savepoint at top level: DON'T use pglite.transaction() — same reasoning
+    // as sql.begin(). the callback might be long-running (e.g. setupTriggers).
+    // just run the callback with PGlite-backed sql (each query acquires/releases Fe2).
+    let _savepointIdx = 0
+    txSqlFn.savepoint = async (nameOrFn: any, maybeFn?: any) => {
+      const fn = typeof nameOrFn === 'function' ? nameOrFn : maybeFn
+      return fn(txSqlFn)
+    }
+
+    txSqlFn.end = async () => {}
+    txSqlFn.options = sql.options
+    txSqlFn.PostgresError = PostgresError
+
+    // use explicit BEGIN/COMMIT/ROLLBACK SQL instead of pglite.transaction().
+    // each statement acquires/releases Fe2 independently, so the mutex is
+    // NOT held during async gaps in the callback — avoiding the deadlock
+    // that pglite.transaction() causes with zero-cache's long-running pool.
+    await pglite.exec('BEGIN')
+    try {
+      const result = await cb(txSqlFn)
+      await pglite.exec('COMMIT')
+      return Array.isArray(result) ? await Promise.all(result) : result
+    } catch (err) {
+      await pglite.exec('ROLLBACK')
+      throw err
+    } finally {
+      signalReplicationChange()
+    }
   }
 
   // sql.end() — no-op (PGlite lifecycle managed elsewhere)

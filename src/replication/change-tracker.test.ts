@@ -151,7 +151,7 @@ describe('change-tracker', () => {
     try {
       await db.exec(`CREATE PUBLICATION "zero_scope"`)
       await installChangeTracking(db) // reinstall picks up publication scope
-      await db.exec(`TRUNCATE _orez._zero_changes`)
+      await db.exec(`TRUNCATE _orez.changes`)
 
       await db.exec(`INSERT INTO public.items (name, value) VALUES ('x', 1)`)
       const changes = await getChangesSince(db, 0)

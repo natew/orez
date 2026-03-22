@@ -419,11 +419,11 @@ describe('live restore stress with connected frontend', { timeout: 360_000 }, ()
     ])
     const tracked = await db.query<{ count: string }>(
       `SELECT count(*)::text as count
-       FROM _orez._zero_changes
+       FROM _orez.changes
        WHERE table_name = 'public.restore_live_probe'`
     )
     if (Number(tracked.rows[0]?.count || '0') === 0) {
-      throw new Error('post-reset write was not captured in _orez._zero_changes')
+      throw new Error('post-reset write was not captured in _orez.changes')
     }
 
     await waitForPokeWithValue(downstreamAfterReset, marker, 30_000)

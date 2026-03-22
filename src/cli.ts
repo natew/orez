@@ -621,7 +621,7 @@ async function tryWireRestore(opts: {
     )
 
     // clear zero replication state (in _orez schema)
-    await sql.unsafe('TRUNCATE _orez._zero_changes').catch(() => {})
+    await sql.unsafe('TRUNCATE _orez.changes').catch(() => {})
     await sql.unsafe('TRUNCATE _orez._zero_replication_slots').catch(() => {})
     log.orez('cleared zero replication state')
 
