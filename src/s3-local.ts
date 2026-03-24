@@ -90,7 +90,11 @@ export function startS3Local(config: S3LocalConfig): Promise<Server> {
             function walkList(dir: string) {
               if (keys.length >= maxKeys) return
               let entries
-              try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+              try {
+                entries = readdirSync(dir, { withFileTypes: true })
+              } catch {
+                return
+              }
               for (const entry of entries) {
                 if (keys.length >= maxKeys) break
                 const full = join(dir, entry.name)
@@ -104,7 +108,9 @@ export function startS3Local(config: S3LocalConfig): Promise<Server> {
             }
             walkList(baseDir)
 
-            const keysXml = keys.map((k) => `<Contents><Key>${k}</Key></Contents>`).join('')
+            const keysXml = keys
+              .map((k) => `<Contents><Key>${k}</Key></Contents>`)
+              .join('')
             const xml = `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><KeyCount>${keys.length}</KeyCount>${keysXml}</ListBucketResult>`
             res.writeHead(200, { ...headers, 'Content-Type': 'application/xml' })
             res.end(xml)

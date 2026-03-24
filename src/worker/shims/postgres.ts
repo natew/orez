@@ -606,6 +606,11 @@ async function interceptReplicationQuery(
 
   // pg_replication_slots query
   if (upper.includes('PG_REPLICATION_SLOTS') && upper.includes('SELECT')) {
+    // if query includes pg_terminate_backend, it's stopExistingReplicationSlotSubscribers
+    // — PGlite has no real replication slots or active_pid, return empty result
+    if (upper.includes('PG_TERMINATE_BACKEND')) {
+      return fakeResult([], text)
+    }
     try {
       const result = await pglite.query(
         `SELECT slot_name, restart_lsn as "restartLSN", wal_status as "walStatus"

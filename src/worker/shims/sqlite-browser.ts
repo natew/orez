@@ -159,11 +159,8 @@ export function createInMemoryStorage(): SqlStorageLike {
   }
 
   // minimal stub — zero-cache's schema migrations will likely fail
-  // but this allows the embed to start for basic PGlite-only use cases
-  console.warn(
-    '[orez] no sql.js database available. sqlite operations will fail. ' +
-      'set globalThis.__orez_sqljs_db or pass a sql.js Database to the embed.'
-  )
+  // but this allows the embed to start for basic PGlite-only use cases.
+  // note: this fires during normal init before sql.js is wired up — not an error.
 
   return {
     exec(_query: string, ..._bindings: SqlStorageValue[]): SqlStorageCursor {
