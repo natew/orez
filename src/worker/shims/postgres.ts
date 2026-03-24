@@ -626,9 +626,18 @@ async function interceptReplicationQuery(
     return fakeResult([], text, 'ALTER ROLE')
   }
 
-  // SET TRANSACTION / SET SESSION
-  if (upper.startsWith('SET TRANSACTION') || upper.startsWith('SET SESSION')) {
+  // SET TRANSACTION / SET SESSION / SET LOCAL — PGlite doesn't support SET LOCAL
+  if (
+    upper.startsWith('SET TRANSACTION') ||
+    upper.startsWith('SET SESSION') ||
+    upper.startsWith('SET LOCAL')
+  ) {
     return fakeResult([], text, 'SET')
+  }
+
+  // pg_settings query (wal_sender_timeout etc.) — not available in PGlite
+  if (upper.includes('PG_SETTINGS') && upper.includes('WAL_SENDER_TIMEOUT')) {
+    return fakeResult([{ walSenderTimeoutMs: 60000 }], text)
   }
 
   // event triggers: PGlite doesn't support them (requires superuser),
