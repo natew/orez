@@ -777,9 +777,7 @@ export async function handleStartReplication(
             continue
           }
 
-          log.debug.repl(
-            `streaming ${changes.length} changes to writer`
-          )
+          log.debug.repl(`streaming ${changes.length} changes to writer`)
           await streamChanges(
             changes,
             writer,
