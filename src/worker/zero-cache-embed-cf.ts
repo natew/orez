@@ -345,9 +345,16 @@ function handleWebSocketUpgrade(request: Request, url: URL, fastify: any): Respo
   }
 
   // return 101 with client socket
+  // must echo Sec-WebSocket-Protocol — browsers reject the upgrade without it
+  const secProtocol = request.headers.get('sec-websocket-protocol')
+  const upgradeHeaders: Record<string, string> = {}
+  if (secProtocol) {
+    upgradeHeaders['Sec-WebSocket-Protocol'] = secProtocol
+  }
   try {
     return new Response(null, {
       status: 101,
+      headers: upgradeHeaders,
       // @ts-expect-error CF Workers Response extension
       webSocket: client,
     })

@@ -19,7 +19,8 @@ import { resolve } from 'node:path'
 
 // import bedrock-sqlite directly (our wasm build)
 // @ts-expect-error - CJS module
-import { Database } from 'bedrock-sqlite'
+import bedrockSqlite from 'bedrock-sqlite'
+const { Database } = bedrockSqlite
 import { describe, test, expect, beforeEach, afterEach } from 'vitest'
 
 // helper: temp db file

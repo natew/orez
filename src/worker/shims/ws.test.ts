@@ -164,18 +164,16 @@ describe('WebSocket shim', () => {
       const handler = vi.fn()
       ws.on('message', handler)
       cfWs._fire('message', { data: 'hello' })
-      expect(handler).toHaveBeenCalledWith({ data: 'hello' })
+      // ws npm API: message handler gets (data, isBinary)
+      expect(handler).toHaveBeenCalledWith('hello', false)
     })
 
     it('emits close events from CF WebSocket', () => {
       const handler = vi.fn()
       ws.on('close', handler)
       cfWs._fire('close', { code: 1000, reason: 'normal', wasClean: true })
-      expect(handler).toHaveBeenCalledWith({
-        code: 1000,
-        reason: 'normal',
-        wasClean: true,
-      })
+      // ws npm API: close handler gets (code, reason)
+      expect(handler).toHaveBeenCalledWith(1000, 'normal')
     })
 
     it('emits error events from CF WebSocket', () => {

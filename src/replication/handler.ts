@@ -777,6 +777,7 @@ export async function handleStartReplication(
             continue
           }
 
+          log.repl(`streaming ${changes.length} changes to writer, handlers=${(globalThis as any).__orez_pipe_handlers?.length ?? 0}`)
           await streamChanges(
             changes,
             writer,
@@ -788,6 +789,7 @@ export async function handleStartReplication(
           )
           lastWatermark = batchEnd
           lastStreamedWatermark = batchEnd
+          log.repl(`streamed ok, watermark=${batchEnd}`)
           hasStreamedOnce = true
 
           // purge consumed changes periodically to free wasm memory
