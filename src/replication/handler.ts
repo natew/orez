@@ -331,7 +331,7 @@ export async function handleStartReplication(
   db: PGlite,
   mutex: Mutex
 ): Promise<void> {
-  log.repl('entering streaming mode')
+  log.debug.repl('entering streaming mode')
 
   // send CopyBothResponse to enter streaming mode
   const copyBoth = new Uint8Array(1 + 4 + 1 + 2)
@@ -637,7 +637,7 @@ export async function handleStartReplication(
         if (!queryPending) {
           // check if a signal arrived while we were processing
           if (!signalPending) {
-            log.repl(
+            log.debug.repl(
               `waiting for signal (lastWm=${lastWatermark}, streamed=${hasStreamedOnce})`
             )
             const wasSignaled = await waitForWakeup(pollIntervalIdle)
@@ -693,7 +693,7 @@ export async function handleStartReplication(
         // try to acquire mutex without blocking proxy connections.
         // post-sync: short backoff since writes signal us directly.
         // pre-sync: yield more generously so zero-cache initial copy can finish.
-        log.repl(
+        log.debug.repl(
           `pre-query: tryAcquire mutex (streamed=${hasStreamedOnce}, fails=${tryAcquireFailures})`
         )
         if (!mutex.tryAcquire()) {
@@ -777,8 +777,8 @@ export async function handleStartReplication(
             continue
           }
 
-          log.repl(
-            `streaming ${changes.length} changes to writer, handlers=${(globalThis as any).__orez_pipe_handlers?.length ?? 0}`
+          log.debug.repl(
+            `streaming ${changes.length} changes to writer`
           )
           await streamChanges(
             changes,
@@ -791,7 +791,7 @@ export async function handleStartReplication(
           )
           lastWatermark = batchEnd
           lastStreamedWatermark = batchEnd
-          log.repl(`streamed ok, watermark=${batchEnd}`)
+          log.debug.repl(`streamed ok, watermark=${batchEnd}`)
           hasStreamedOnce = true
 
           // purge consumed changes periodically to free wasm memory
@@ -835,7 +835,7 @@ export async function handleStartReplication(
     }
   }
 
-  log.repl(`starting poll (lastWatermark=${lastWatermark})`)
+  log.debug.repl(`starting poll (lastWatermark=${lastWatermark})`)
   try {
     await poll()
   } finally {
