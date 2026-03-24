@@ -4,14 +4,14 @@
 
 // path polyfill (minimal)
 const path = {
-  resolve: function() {
+  resolve: function () {
     var parts = []
     for (var i = 0; i < arguments.length; i++) {
       parts.push(arguments[i])
     }
     return '/' + parts.join('/').replace(/\/+/g, '/').replace(/^\//, '')
   },
-  dirname: function(p) {
+  dirname: function (p) {
     var idx = p.lastIndexOf('/')
     return idx > 0 ? p.substring(0, idx) : '/'
   },
@@ -19,7 +19,7 @@ const path = {
 
 // crypto polyfill
 const crypto = {
-  randomFillSync: function(buf) {
+  randomFillSync: function (buf) {
     globalThis.crypto.getRandomValues(buf)
     return buf
   },

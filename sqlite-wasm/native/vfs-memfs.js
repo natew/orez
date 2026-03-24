@@ -10,8 +10,8 @@ addToLibrary({
 
   // in-memory file storage
   $_memfs: {
-    files: {},  // path → { data: Uint8Array, size: number }
-    fds: {},    // fd → { path: string, pos: number }
+    files: {}, // path → { data: Uint8Array, size: number }
+    fds: {}, // fd → { path: string, pos: number }
     nextFd: 10,
   },
 
@@ -251,8 +251,7 @@ addToLibrary({
     return SQLITE_OK
   },
 
-  nodejsShmBarrier: function (fi) {
-  },
+  nodejsShmBarrier: function (fi) {},
 
   nodejsShmUnmap__deps: ['$_shmRegistry'],
   nodejsShmUnmap: function (fi, deleteFlag) {

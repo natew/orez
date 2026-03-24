@@ -777,7 +777,9 @@ export async function handleStartReplication(
             continue
           }
 
-          log.repl(`streaming ${changes.length} changes to writer, handlers=${(globalThis as any).__orez_pipe_handlers?.length ?? 0}`)
+          log.repl(
+            `streaming ${changes.length} changes to writer, handlers=${(globalThis as any).__orez_pipe_handlers?.length ?? 0}`
+          )
           await streamChanges(
             changes,
             writer,
