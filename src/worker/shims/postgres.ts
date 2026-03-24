@@ -25,6 +25,17 @@ import {
   signalReplicationChange,
 } from '../../replication/handler.js'
 
+// debounced signal — matches orez pg-proxy's 8ms debounce.
+// ensures signal fires even during long-running mutagen callbacks.
+let _signalTimer: ReturnType<typeof setTimeout> | null = null
+function debouncedSignal() {
+  if (_signalTimer) return
+  _signalTimer = setTimeout(() => {
+    _signalTimer = null
+    signalReplicationChange()
+  }, 8)
+}
+
 import type { PGlite, Results, Transaction } from '@electric-sql/pglite'
 
 // -- PostgresError --
@@ -704,7 +715,10 @@ async function executeQuery(
       ? executor.query(text, params)
       : executor.query(text))
     const result = createResultArray(r as Results<any>, text)
-    if (isWriteCommand(text)) signalReplicationChange()
+    if (isWriteCommand(text)) {
+      signalReplicationChange()
+      debouncedSignal() // also fire debounced in case immediate signal is consumed
+    }
     return result
   }
 
@@ -1280,6 +1294,7 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
     try {
       const result = await cb(txSqlFn)
       await pglite.exec('COMMIT')
+      signalReplicationChange() // signal immediately after commit, don't wait for finally
       return Array.isArray(result) ? await Promise.all(result) : result
     } catch (err) {
       await pglite.exec('ROLLBACK')
