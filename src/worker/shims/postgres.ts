@@ -710,7 +710,7 @@ async function executeQuery(
       ? executor.query(text, params)
       : executor.query(text))
     const result = createResultArray(r as Results<any>, text)
-    if (isWriteCommand(text)) signalReplicationChange()
+    trackChangeIfNeeded(text, r as Results<any>, pglite!)
     return result
   }
 
@@ -720,9 +720,9 @@ async function executeQuery(
     let lastResult: Results<any> = { rows: [], fields: [], affectedRows: 0 } as any
     for (const stmt of stmts) {
       lastResult = (await executor.query(stmt)) as Results<any>
+      trackChangeIfNeeded(stmt, lastResult, pglite!)
     }
     const result = createResultArray(lastResult, text)
-    if (isWriteCommand(text)) signalReplicationChange()
     return result
   }
 
@@ -743,14 +743,15 @@ async function executeQuery(
         remapped = remapped.replace(new RegExp(`\\$${origN}\\b`), `$${i + 1}`)
       })
       lastResult = (await executor.query(remapped, stmtParams)) as Results<any>
+      trackChangeIfNeeded(stmt, lastResult, pglite!)
     } else {
       // no params in this statement — can use query() directly
       lastResult = (await executor.query(stmt)) as Results<any>
+      trackChangeIfNeeded(stmt, lastResult, pglite!)
     }
   }
 
   const result = createResultArray(lastResult, text)
-  if (isWriteCommand(text)) signalReplicationChange()
   return result
 }
 
@@ -758,6 +759,39 @@ const WRITE_COMMANDS = new Set(['INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 
 
 function isWriteCommand(sql: string): boolean {
   return WRITE_COMMANDS.has(detectCommand(sql))
+}
+
+// track changes to user tables for replication — writes to _orez.changes
+// and signals the replication handler. this is needed because PGlite doesn't
+// have WAL-based change capture, so we manually track mutations.
+function trackChangeIfNeeded(text: string, r: Results<any> | null, pglite: PGlite): void {
+  if (!pglite || !isWriteCommand(text)) return
+  const m = text.match(/(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"?(\w+)"?/i)
+  if (!m) return
+  const table = m[1]
+  // skip internal tables
+  if (table.startsWith('_') || table.startsWith('zero')) return
+  const op = text.trimStart().toUpperCase().startsWith('INSERT')
+    ? 'INSERT'
+    : text.trimStart().toUpperCase().startsWith('UPDATE')
+      ? 'UPDATE'
+      : 'DELETE'
+  setTimeout(() => {
+    pglite
+      .query("SELECT nextval('_orez.watermark') as wm")
+      .then((wmr: any) => {
+        const wm = wmr?.rows?.[0]?.wm || Date.now()
+        pglite
+          .query(
+            'INSERT INTO _orez.changes (watermark, table_name, op, row_data) VALUES ($1, $2, $3, $4)',
+            [wm, 'public.' + table, op, JSON.stringify(r?.rows?.[0] || {})]
+          )
+          .catch(() => {})
+      })
+      .catch(() => {})
+  }, 0)
+  signalReplicationChange()
+  setTimeout(() => signalReplicationChange(), 100)
 }
 
 // split SQL into individual statements, respecting string literals
@@ -1155,6 +1189,7 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
           const resultArrays = []
           for (const stmt of statements) {
             const r = await pglite.query(stmt)
+            trackChangeIfNeeded(stmt, r as Results<any>, pglite)
             resultArrays.push(createResultArray(r as Results<any>, stmt))
           }
           const combined = resultArrays as any
@@ -1216,6 +1251,7 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
           const resultArrays = []
           for (const stmt of stmts) {
             const r = await pglite.query(stmt)
+            trackChangeIfNeeded(stmt, r as Results<any>, pglite)
             resultArrays.push(createResultArray(r as Results<any>, stmt))
           }
           const combined = resultArrays as any
