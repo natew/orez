@@ -62,6 +62,31 @@ LINK_FLAGS = \
 
 all: dist/sqlite3.js dist/package.json
 
+# browser build: in-memory VFS, web+worker environment
+browser: dist/sqlite3-browser.js
+
+JS_PRE_FILES_BROWSER = native/api.js native/vfs-pre-browser.js
+JS_LIB_FILES_BROWSER = native/vfs-memfs.js
+
+LINK_FLAGS_BROWSER = \
+	-s EXPORTED_FUNCTIONS=@$(EXPORTED_FUNCS_JSON) \
+	-s EXPORTED_RUNTIME_METHODS=cwrap,addFunction,removeFunction,getValue,setValue \
+	-s NODEJS_CATCH_EXIT=0 \
+	-s NODEJS_CATCH_REJECTION=0 \
+	-s MODULARIZE=0 \
+	-s ALLOW_TABLE_GROWTH=1 \
+	-s ALLOW_MEMORY_GROWTH=1 \
+	-s MAXIMUM_MEMORY=536870912 \
+	-s ENVIRONMENT=web,worker \
+	-s FILESYSTEM=0 \
+	-s WASM_BIGINT \
+	-s WASM_ASYNC_COMPILATION=0
+
+dist/sqlite3-browser.js: $(OBJECT_FILES) $(EXPORTED_FUNCS_JSON) $(JS_PRE_FILES_BROWSER) $(JS_LIB_FILES_BROWSER)
+	mkdir -p dist
+	emcc $(LINK_FLAGS_BROWSER) $(EM_FLAGS) $(OBJECT_FILES) --js-library $(JS_LIB_FILES_BROWSER) \
+		$(foreach f,$(JS_PRE_FILES_BROWSER),--pre-js $(f)) -o $@
+
 dist/sqlite3.js: $(OBJECT_FILES) $(EXPORTED_FUNCS_JSON) $(JS_PRE_FILES) $(JS_LIB_FILES)
 	mkdir -p dist
 	emcc $(LINK_FLAGS) $(EM_FLAGS) $(OBJECT_FILES) --js-library $(JS_LIB_FILES) \
