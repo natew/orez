@@ -1390,21 +1390,7 @@ function postgres(
   _urlOrOpts?: string | PostgresShimOptions,
   opts?: PostgresShimOptions
 ): ReturnType<typeof createPostgresShim> {
-  // 3-instance architecture: route by URL to the correct PGlite instance
-  // (postgres/cvr/cdb). when __orez_pglite_instances is set, zero-cache
-  // is running with separate PGlite databases for each role.
-  const instances = (globalThis as any).__orez_pglite_instances as
-    | { postgres: PGlite; cvr: PGlite; cdb: PGlite }
-    | undefined
-  let pglite: PGlite | undefined
-  if (instances && typeof _urlOrOpts === 'string') {
-    if (_urlOrOpts.includes('/zero_cvr')) pglite = instances.cvr
-    else if (_urlOrOpts.includes('/zero_cdb')) pglite = instances.cdb
-    else pglite = instances.postgres
-  } else {
-    pglite = (globalThis as any).__orez_pglite as PGlite | undefined
-  }
-
+  const pglite = (globalThis as any).__orez_pglite as PGlite | undefined
   if (!pglite) {
     throw new Error(
       'postgres shim: no PGlite instance found on globalThis.__orez_pglite. ' +
