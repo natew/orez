@@ -1384,11 +1384,22 @@ function postgres(
   _urlOrOpts?: string | PostgresShimOptions,
   opts?: PostgresShimOptions
 ): ReturnType<typeof createPostgresShim> {
-  const pglite = (globalThis as any).__orez_pglite as PGlite | undefined
+  // multi-instance routing: if __orez_pglite_instances is set, route by URL
+  const instances = (globalThis as any).__orez_pglite_instances as
+    | { postgres: PGlite; cvr: PGlite; cdb: PGlite }
+    | undefined
+  let pglite: PGlite | undefined
+  if (instances && typeof _urlOrOpts === 'string') {
+    if (_urlOrOpts.includes('/zero_cvr')) pglite = instances.cvr
+    else if (_urlOrOpts.includes('/zero_cdb')) pglite = instances.cdb
+    else pglite = instances.postgres
+  } else {
+    pglite = (globalThis as any).__orez_pglite as PGlite | undefined
+  }
   if (!pglite) {
     throw new Error(
-      'postgres shim: no PGlite instance found on globalThis.__orez_pglite. ' +
-        'register PGlite before importing modules that use postgres.'
+      'postgres shim: no PGlite instance found. ' +
+        'set globalThis.__orez_pglite or __orez_pglite_instances.'
     )
   }
 
