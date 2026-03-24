@@ -1280,6 +1280,7 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
     try {
       const result = await cb(txSqlFn)
       await pglite.exec('COMMIT')
+      signalReplicationChange() // signal immediately after commit, don't wait for finally
       return Array.isArray(result) ? await Promise.all(result) : result
     } catch (err) {
       await pglite.exec('ROLLBACK')
