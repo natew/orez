@@ -83,6 +83,7 @@ export function getBrowserDefine(): Record<string, string> {
   return {
     'process.env.NODE_ENV': '"development"',
     'process.env.SINGLE_PROCESS': '"1"',
+    'process.versions.node': '"20.0.0"',
   }
 }
 
