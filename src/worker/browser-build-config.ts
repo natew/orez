@@ -54,6 +54,7 @@ export function getBrowserAliases(): Record<string, string> {
     'node:buffer': 'buffer',
     'node:process': 'process/browser',
     'node:crypto': 'orez/worker/shims/node-stub',
+    'crypto-browserify': 'orez/worker/shims/node-stub',
     'node:stream': 'stream-browserify',
     'node:path': 'path-browserify',
     'node:os': 'os-browserify/browser',
