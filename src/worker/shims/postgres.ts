@@ -593,12 +593,6 @@ async function interceptReplicationQuery(
     return fakeResult([], text, 'DROP_REPLICATION_SLOT')
   }
 
-  // pg_terminate_backend on replication slots — no-op in browser mode
-  // zero-cache calls this to stop existing replication slot subscribers before starting new ones
-  if (upper.includes('PG_TERMINATE_BACKEND')) {
-    return fakeResult([], text)
-  }
-
   // pg_replication_slots query
   if (upper.includes('PG_REPLICATION_SLOTS') && upper.includes('SELECT')) {
     try {
