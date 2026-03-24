@@ -1,3 +1,6 @@
+// NOTE THIS IS NOT OREZ NODE THIS IS NOT A GOOD REFERENCE BECAUSE ITS OUR EARLY GUESS AT WHAT COULD WORK
+// DO NOT STUDY THIS, THE OTHER STUFF IN SRC IS WHERE YOU EANT TO LOOK
+
 /**
  * postgres shim for cloudflare workers.
  *
@@ -936,7 +939,13 @@ function createReplicationPendingQuery(
               : Buffer.from(chunk)
           readable.write(data)
           // also call pipe handlers directly — stream polyfills are broken in browser
-          const handlers = (globalThis as any).__orez_pipe_handlers
+          const handlers = (globalThis as any).__orez_pipe_handlers as
+            | Array<(chunk: Buffer) => void>
+            | undefined
+          if (handlers && handlers.length > 0) {
+            ;(globalThis as any).__orez_repl_bypass_count =
+              ((globalThis as any).__orez_repl_bypass_count || 0) + 1
+          }
           if (handlers) {
             for (const fn of handlers) {
               try {
@@ -1045,8 +1054,14 @@ function buildDefaultParsers(): Record<number, (value: string) => unknown> {
   p[1043] = identity // varchar
   p[1082] = identity // date
   p[1083] = identity // time
-  p[1114] = identity // timestamp
-  p[1184] = identity // timestamptz
+  // timestamps → epoch ms (zero-cache expects number, not string)
+  const parseTimestamp = (val: string) => {
+    if (typeof val === 'number') return val
+    const d = Date.parse(val)
+    return isNaN(d) ? val : d
+  }
+  p[1114] = parseTimestamp // timestamp
+  p[1184] = parseTimestamp // timestamptz
   p[1266] = identity // timetz
   p[1700] = identity // numeric
   p[2950] = identity // uuid
