@@ -20,6 +20,11 @@
 // the interface that the ws shim expects (same as CF WebSocket)
 // on/off are needed because createWebSocketStream uses ws.on('message')
 interface WsCompatible {
+  // ws constants — zero-cache uses ws.OPEN / ws.CONNECTING in switch statements
+  CONNECTING: number
+  OPEN: number
+  CLOSING: number
+  CLOSED: number
   readyState: number
   send(data: string | ArrayBuffer | ArrayBufferView): void
   close(code?: number, reason?: string): void
@@ -85,6 +90,12 @@ export function messagePortToWs(port: MessagePort): WsCompatible {
   }
 
   return {
+    // ws constants — zero-cache uses ws.OPEN / ws.CONNECTING in switch statements
+    CONNECTING: 0,
+    OPEN: 1,
+    CLOSING: 2,
+    CLOSED: 3,
+
     get readyState() {
       return closed ? 3 : 1 // CLOSED or OPEN
     },
@@ -117,6 +128,11 @@ export function messagePortToWs(port: MessagePort): WsCompatible {
  */
 export function browserWsToWs(ws: WebSocket): WsCompatible {
   return {
+    CONNECTING: 0,
+    OPEN: 1,
+    CLOSING: 2,
+    CLOSED: 3,
+
     get readyState() {
       return ws.readyState
     },
