@@ -246,14 +246,39 @@ export async function startZeroCacheEmbedBrowser(
 
   await readyPromise
 
+  // wait for fastify instance — ZeroDispatcher is constructed AFTER the ready
+  // signal fires, so __orez_fastify_instance may not be set yet
   fastifyInstance = (globalThis as any).__orez_fastify_instance
+  if (!fastifyInstance) {
+    for (let i = 0; i < 100; i++) {
+      await new Promise((r) => setTimeout(r, 50))
+      fastifyInstance = (globalThis as any).__orez_fastify_instance
+      if (fastifyInstance) break
+    }
+  }
 
   return {
     get ready() {
       return isReady
     },
 
-    handleWebSocket(ws: WsLike, url = '/', headers?: Record<string, string>) {
+    async handleWebSocket(ws: WsLike, url = '/', headers?: Record<string, string>) {
+      // lazily resolve fastifyInstance — ZeroDispatcher is constructed AFTER the
+      // ready signal fires, so __orez_fastify_instance may not be set yet.
+      // the dispatcher's instance is the one with the WS handoff handler,
+      // and it's always the LAST Fastify() call. we need to wait for it.
+      //
+      // check: the dispatcher's server will have 'message' listeners (from
+      // installWebSocketHandoff). poll until we find an instance with listeners.
+      for (let i = 0; i < 100; i++) {
+        fastifyInstance = (globalThis as any).__orez_fastify_instance
+        // the dispatcher's server has 2+ 'message' listeners:
+        //   1. from FastifyShim#installWsHandoffHandler (every instance has this)
+        //   2. from ZeroDispatcher's installWebSocketHandoff (only the dispatcher has this)
+        // wait for >= 2 to ensure we have the dispatcher's instance
+        if (fastifyInstance?.server?.listenerCount?.('message') >= 2) break
+        await new Promise((r) => setTimeout(r, 50))
+      }
       if (!isReady || !fastifyInstance?.server) return
 
       const message = {
@@ -261,6 +286,8 @@ export async function startZeroCacheEmbedBrowser(
         headers: headers || {},
         method: 'GET',
       }
+
+      // emit handoff
 
       // feed the WebSocket into zero-cache's handoff mechanism.
       // the fastify shim's server is an EventEmitter with onMessageType.

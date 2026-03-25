@@ -283,7 +283,8 @@ function tryParseJson(str: string): unknown {
 
 function Fastify(_opts?: unknown): FastifyShim {
   const instance = new FastifyShim()
-  // register on globalThis so the CF embed can access it
+  // always overwrite — the ZeroDispatcher (which has the WS handoff routes)
+  // is created LAST, so the final instance is the one handleWebSocket needs.
   ;(globalThis as any).__orez_fastify_instance = instance
   return instance
 }

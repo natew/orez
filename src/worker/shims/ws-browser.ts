@@ -18,12 +18,15 @@
  */
 
 // the interface that the ws shim expects (same as CF WebSocket)
+// on/off are needed because createWebSocketStream uses ws.on('message')
 interface WsCompatible {
   readyState: number
   send(data: string | ArrayBuffer | ArrayBufferView): void
   close(code?: number, reason?: string): void
   addEventListener(type: string, handler: (event: any) => void): void
   removeEventListener(type: string, handler: (event: any) => void): void
+  on(type: string, handler: (event: any) => void): void
+  off(type: string, handler: (event: any) => void): void
 }
 
 /**
@@ -31,14 +34,29 @@ interface WsCompatible {
  *
  * MessagePort uses postMessage/onmessage, while the ws shim expects
  * send/addEventListener('message'). this bridges the two.
+ *
+ * messages that arrive before any listener is registered are buffered
+ * and replayed when the first 'message' listener is added. this prevents
+ * a race where the port starts receiving data before the connection
+ * handler (e.g. createWebSocketStream / proxyInbound) has set up its
+ * listener — which would silently drop messages.
  */
 export function messagePortToWs(port: MessagePort): WsCompatible {
   const listeners = new Map<string, Set<(event: any) => void>>()
   let closed = false
 
+  // buffer messages until a 'message' listener is registered
+  const pendingMessages: any[] = []
+
   function addListener(type: string, handler: (event: any) => void) {
     if (!listeners.has(type)) listeners.set(type, new Set())
     listeners.get(type)!.add(handler)
+
+    // flush buffered messages when first 'message' listener is added
+    if (type === 'message' && pendingMessages.length > 0) {
+      const queued = pendingMessages.splice(0)
+      for (const event of queued) handler(event)
+    }
   }
 
   function removeListener(type: string, handler: (event: any) => void) {
@@ -46,7 +64,15 @@ export function messagePortToWs(port: MessagePort): WsCompatible {
   }
 
   function emit(type: string, event: any) {
-    for (const h of listeners.get(type) || []) h(event)
+    const handlers = listeners.get(type)
+    if (!handlers || handlers.size === 0) {
+      // no listeners yet — buffer message events
+      if (type === 'message') {
+        pendingMessages.push(event)
+      }
+      return
+    }
+    for (const h of handlers) h(event)
   }
 
   // forward port messages → ws 'message' events
@@ -78,6 +104,8 @@ export function messagePortToWs(port: MessagePort): WsCompatible {
 
     addEventListener: addListener,
     removeEventListener: removeListener,
+    on: addListener,
+    off: removeListener,
   }
 }
 
@@ -106,6 +134,14 @@ export function browserWsToWs(ws: WebSocket): WsCompatible {
     },
 
     removeEventListener(type: string, handler: (event: any) => void) {
+      ws.removeEventListener(type, handler)
+    },
+
+    on(type: string, handler: (event: any) => void) {
+      ws.addEventListener(type, handler)
+    },
+
+    off(type: string, handler: (event: any) => void) {
       ws.removeEventListener(type, handler)
     },
   }
