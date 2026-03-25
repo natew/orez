@@ -952,19 +952,16 @@ async function streamChanges(
   const endLsn = nextLsn()
   messages.push(encodeWrappedChange(endLsn, endLsn, ts, encodeCommit(0, lsn, endLsn, ts)))
 
-  // batch-write all messages in a single buffer to minimize syscalls
+  // write messages individually — works for both TCP sockets and in-process
+  // pipes (browser pipe handler parses one message per write() call)
   let totalSize = 0
   for (const msg of messages) totalSize += msg.length
-  const batch = new Uint8Array(totalSize)
-  let offset = 0
-  for (const msg of messages) {
-    batch.set(msg, offset)
-    offset += msg.length
-  }
   log.debug.repl(
     `streaming ${messages.length} wal messages (${totalSize} bytes, txId=${txId})`
   )
-  writer.write(batch)
+  for (const msg of messages) {
+    writer.write(msg)
+  }
 }
 
 function normalizeShardClientsRow(
