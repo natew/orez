@@ -862,6 +862,9 @@ export async function createBrowserProxy(
     // message buffer: postgres sends multiple protocol messages in one write,
     // we need to split them and process each individually
     let pendingBuffer: Uint8Array | null = null
+    // guard against re-entrant onmessage: async handlers can interleave at
+    // await points, causing concurrent modifications to pendingBuffer.
+    let processing = false
 
     port.onmessage = async (ev: MessageEvent) => {
       if (connClosed) return
@@ -878,6 +881,10 @@ export async function createBrowserProxy(
         pendingBuffer = incoming
       }
 
+      // if another invocation is already processing, just buffer
+      if (processing) return
+      processing = true
+      try {
       // process all complete messages in the buffer
       while (pendingBuffer && pendingBuffer.length >= 5) {
         const msgType: number = pendingBuffer[0]
@@ -891,6 +898,7 @@ export async function createBrowserProxy(
 
         await processMessage(data)
       }
+      } finally { processing = false }
     }
 
     let _pmCount = 0
@@ -948,6 +956,11 @@ export async function createBrowserProxy(
 
       // Terminate (0x58) — client wants to close the connection
       if (msgType === 0x58) {
+        // release mutex if held — connection terminated mid-pipeline
+        if (pipelineMutexHeld) {
+          mutex.release()
+          pipelineMutexHeld = false
+        }
         connClosed = true
         port.close()
         return

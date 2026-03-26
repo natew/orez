@@ -74,7 +74,8 @@ class WebSocket extends EventEmitter {
             _listeners: {} as Record<string, Function[]>,
             send: (data: string | ArrayBuffer) => {
               // deliver to client side
-              queueMicrotask(() => clientSide.emit('message', data))
+              // wrap in event object — zero-cache handleMessage reads event.data
+              queueMicrotask(() => clientSide.emit('message', { data }))
             },
             close: (code?: number, reason?: string) => {
               serverWs.readyState = 3
