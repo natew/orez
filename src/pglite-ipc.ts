@@ -26,13 +26,14 @@ interface PendingRequest {
 const WRITE_PREFIXES = ['insert', 'update', 'delete', 'copy', 'truncate']
 // shard-internal tables that the replication handler filters out.
 // signaling for these just causes spurious wakeups + mutex contention.
-const SHARD_INTERNAL_TABLES = ['"replicas"', '"mutations"', '"replicationState"']
+// pre-lowercased so we don't call toLowerCase() per iteration
+const SHARD_INTERNAL_TABLES = ['"replicas"', '"mutations"', '"replicationstate"']
 function isReplicatedWrite(sql: string): boolean {
   const q = sql.trimStart().toLowerCase()
   if (!WRITE_PREFIXES.some((p) => q.startsWith(p))) return false
   // skip shard-internal writes (zero-cache manages these, not replicated)
   for (const t of SHARD_INTERNAL_TABLES) {
-    if (q.includes(t.toLowerCase())) return false
+    if (q.includes(t)) return false
   }
   return true
 }

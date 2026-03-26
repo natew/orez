@@ -45,24 +45,45 @@ const SCHEMA_CACHE_TTL_MS = 30_000
 // performance tracking
 const proxyStats = { totalWaitMs: 0, totalExecMs: 0, count: 0, batches: 0 }
 
-function isCacheableQuery(query: string): boolean {
-  const q = query.trimStart().toLowerCase()
-  return (
-    (q.includes('information_schema.') ||
-      q.includes('pg_catalog.') ||
-      q.includes('pg_tables') ||
-      q.includes('pg_namespace') ||
-      q.includes('pg_class') ||
-      q.includes('pg_attribute') ||
-      q.includes('pg_type') ||
-      q.includes('pg_publication')) &&
-    !q.startsWith('insert') &&
-    !q.startsWith('update') &&
-    !q.startsWith('delete') &&
-    !q.startsWith('create') &&
-    !q.startsWith('alter') &&
-    !q.startsWith('drop')
-  )
+// query classification helpers — operate on pre-normalized (trimmed+lowercased) query strings
+const SCHEMA_QUERY_MARKERS = [
+  'information_schema.',
+  'pg_catalog.',
+  'pg_tables',
+  'pg_namespace',
+  'pg_class',
+  'pg_attribute',
+  'pg_type',
+  'pg_publication',
+]
+const WRITE_PREFIXES = ['insert', 'update', 'delete', 'copy', 'truncate']
+const DDL_PREFIXES = ['create', 'alter', 'drop']
+const MUTATING_PREFIXES = [...WRITE_PREFIXES, ...DDL_PREFIXES]
+
+function isCacheableNormalized(q: string): boolean {
+  // fast-fail: mutating queries are never cacheable
+  for (const p of MUTATING_PREFIXES) {
+    if (q.startsWith(p)) return false
+  }
+  // check if it touches schema/catalog tables
+  for (const marker of SCHEMA_QUERY_MARKERS) {
+    if (q.includes(marker)) return true
+  }
+  return false
+}
+
+function isWriteNormalized(q: string): boolean {
+  for (const p of WRITE_PREFIXES) {
+    if (q.startsWith(p)) return true
+  }
+  return false
+}
+
+function isDDLNormalized(q: string): boolean {
+  for (const p of DDL_PREFIXES) {
+    if (q.startsWith(p)) return true
+  }
+  return false
 }
 
 function extractQueryText(data: Uint8Array): string | null {
@@ -795,10 +816,13 @@ export async function startPgProxy(
           // intercept and rewrite queries
           data = interceptQuery(data)
 
-          // cache Simple Query (0x51) schema queries
+          // normalize query once for all classification checks
           const isSimpleQuery = msgType === 0x51
           const queryText = isSimpleQuery ? extractQueryText(data) : null
-          const cacheable = queryText && isCacheableQuery(queryText)
+          const queryNorm = queryText ? queryText.trimStart().toLowerCase() : null
+          const cacheable = queryNorm && isCacheableNormalized(queryNorm)
+
+          // cache Simple Query schema queries
           if (cacheable) {
             const cached = schemaQueryCache.get(queryText!)
             if (cached && Date.now() < cached.expiresAt) {
@@ -861,15 +885,8 @@ export async function startPgProxy(
             }
           } else {
             result = await execute()
-            if (isSimpleQuery && queryText) {
-              const q = queryText.trimStart().toLowerCase()
-              if (
-                q.startsWith('create') ||
-                q.startsWith('alter') ||
-                q.startsWith('drop')
-              ) {
-                invalidateSchemaCache()
-              }
+            if (queryNorm && isDDLNormalized(queryNorm)) {
+              invalidateSchemaCache()
             }
           }
 
@@ -877,17 +894,8 @@ export async function startPgProxy(
           result = stripResponseMessages(result, stripRfq)
 
           // signal replication handler on postgres writes for instant sync
-          if (dbName === 'postgres' && isSimpleQuery && queryText) {
-            const q = queryText.trimStart().toLowerCase()
-            if (
-              q.startsWith('insert') ||
-              q.startsWith('update') ||
-              q.startsWith('delete') ||
-              q.startsWith('copy') ||
-              q.startsWith('truncate')
-            ) {
-              signalReplicationChange()
-            }
+          if (dbName === 'postgres' && queryNorm && isWriteNormalized(queryNorm)) {
+            signalReplicationChange()
           }
 
           return result

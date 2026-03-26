@@ -32,6 +32,32 @@ import {
 import type { Mutex } from '../mutex.js'
 import type { PGlite } from '@electric-sql/pglite'
 
+// types pglite can't replicate — excluded from change tracking columns
+const UNSUPPORTED_TYPES = new Set(['tsvector', 'tsquery', 'USER-DEFINED'])
+
+// pg data_type string → wire protocol oid mapping
+const PG_DATA_TYPE_OIDS: Record<string, number> = {
+  boolean: 16,
+  bytea: 17,
+  bigint: 20,
+  smallint: 21,
+  integer: 23,
+  text: 25,
+  json: 114,
+  real: 700,
+  'double precision': 701,
+  character: 1042,
+  'character varying': 1043,
+  date: 1082,
+  'time without time zone': 1083,
+  'timestamp without time zone': 1114,
+  'timestamp with time zone': 1184,
+  'time with time zone': 1266,
+  numeric: 1700,
+  uuid: 2950,
+  jsonb: 3802,
+}
+
 export interface ReplicationWriter {
   write(data: Uint8Array): void
   readonly closed?: boolean
@@ -499,28 +525,6 @@ export async function handleStartReplication(
           }
           keys.add(row.column_name)
         } else {
-          const UNSUPPORTED_TYPES = new Set(['tsvector', 'tsquery', 'USER-DEFINED'])
-          const PG_DATA_TYPE_OIDS: Record<string, number> = {
-            boolean: 16,
-            bytea: 17,
-            bigint: 20,
-            smallint: 21,
-            integer: 23,
-            text: 25,
-            json: 114,
-            real: 700,
-            'double precision': 701,
-            character: 1042,
-            'character varying': 1043,
-            date: 1082,
-            'time without time zone': 1083,
-            'timestamp without time zone': 1114,
-            'timestamp with time zone': 1184,
-            'time with time zone': 1266,
-            numeric: 1700,
-            uuid: 2950,
-            jsonb: 3802,
-          }
           if (row.data_type && UNSUPPORTED_TYPES.has(row.data_type)) {
             let cols = excludedColumns.get(key)
             if (!cols) {
