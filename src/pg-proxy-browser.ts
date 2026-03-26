@@ -794,8 +794,11 @@ export async function createBrowserProxy(
 
     const write = (data: Uint8Array) => {
       if (connClosed) return
-      const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer
-      port.postMessage(buf, [buf])
+      // copy instead of transfer — transfer detaches the buffer which can
+      // cause issues if the caller still references the original data
+      const copy = new Uint8Array(data.length)
+      copy.set(data)
+      port.postMessage(copy.buffer, [copy.buffer])
     }
 
     // step 1: send AuthenticationClearTextPassword (R, type=3) — ask for password
@@ -890,8 +893,13 @@ export async function createBrowserProxy(
       }
     }
 
+    let _pmCount = 0
     async function processMessage(data: Uint8Array) {
+      _pmCount++
       const msgType = data[0]
+      if (_pmCount <= 120 || _pmCount % 50 === 0) {
+        console.debug(`[pg-proxy-pm] #${_pmCount} ${dbName} type=0x${msgType.toString(16)} len=${data.length} mutex=${pipelineMutexHeld}`)
+      }
 
       // replication connection: handle replication commands
       if (isReplicationConnection && msgType === 0x51) {
@@ -968,13 +976,17 @@ export async function createBrowserProxy(
 
         data = interceptQuery(data)
         let result: Uint8Array
+        const t0 = performance.now()
         try {
           result = await db.execProtocolRaw(data, { syncToFs: false })
         } catch (err) {
+          console.warn(`[pg-proxy-raw] execProtocolRaw error on ${dbName}: ${(err as any)?.message}`)
           mutex.release()
           pipelineMutexHeld = false
-          return // silently drop on error
+          return
         }
+        const dt = performance.now() - t0
+        if (dt > 100) console.debug(`[pg-proxy-raw] slow query on ${dbName}: ${dt.toFixed(0)}ms`)
 
         // update transaction state
         const rfqStatus = getReadyForQueryStatus(result)

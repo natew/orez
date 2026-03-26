@@ -22,6 +22,8 @@
 import { Buffer } from 'buffer'
 import { EventEmitter } from 'events'
 
+let _globalRecvCount = 0
+
 /**
  * create a socket factory for the postgres npm package.
  * each call to the factory creates a new MessageChannel,
@@ -69,10 +71,13 @@ class MessagePortSocket extends EventEmitter {
         buf = Buffer.from(ev.data)
       }
       if (buf) {
-        if (recvCount <= 5) {
-          console.debug(`[pg-socket] recv#${recvCount} len=${buf.length} hasReadUInt32BE=${typeof buf.readUInt32BE}`)
+        _globalRecvCount++
+        if (_globalRecvCount % 100 === 0 || _globalRecvCount <= 5) {
+          console.debug(`[pg-socket-global] recv#${_globalRecvCount} len=${buf.length}`)
         }
         this.emit('data', buf)
+      } else {
+        console.warn(`[pg-socket] unexpected data type at recv#${recvCount}:`, typeof ev.data)
       }
     }
 
