@@ -68,6 +68,11 @@
       "import": "./dist/worker/shims/node-stub.js",
       "default": "./dist/worker/shims/node-stub.js"
     },
+    "./worker/shims/stream-browser": {
+      "types": "./dist/worker/shims/stream-browser.d.ts",
+      "import": "./dist/worker/shims/stream-browser.js",
+      "default": "./dist/worker/shims/stream-browser.js"
+    },
     "./worker/browser-embed": {
       "types": "./dist/worker/browser-embed.d.ts",
       "import": "./dist/worker/browser-embed.js",
