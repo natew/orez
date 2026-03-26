@@ -778,33 +778,48 @@ export async function createBrowserProxy(
       port.postMessage(buf, [buf])
     }
 
-    // send AuthenticationOk (R)
-    const authOk = new Uint8Array([0x52, 0, 0, 0, 8, 0, 0, 0, 0])
-    write(authOk)
+    // step 1: send AuthenticationClearTextPassword (R, type=3) — ask for password
+    const authRequest = new Uint8Array([0x52, 0, 0, 0, 8, 0, 0, 0, 3])
+    write(authRequest)
 
-    // send ParameterStatus messages
-    for (const [name, value] of SERVER_PARAMS) {
-      write(buildParameterStatus(name, value))
+    // step 2: wait for Password message (p), then send AuthOk + params
+    port.onmessage = (ev: MessageEvent) => {
+      const data2 = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data as Uint8Array
+      if (!data2 || data2[0] !== 0x70) {
+        console.warn('[pg-proxy-repl-raw] expected password message, got type=0x' + data2?.[0]?.toString(16))
+      }
+
+      // send AuthenticationOk (R, type=0)
+      const authOk = new Uint8Array([0x52, 0, 0, 0, 8, 0, 0, 0, 0])
+      write(authOk)
+
+      // send ParameterStatus messages
+      for (const [name, value] of SERVER_PARAMS) {
+        write(buildParameterStatus(name, value))
+      }
+
+      // send BackendKeyData (K) — fake pid + secret
+      const bkd = new Uint8Array(13)
+      bkd[0] = 0x4b // K
+      new DataView(bkd.buffer).setInt32(1, 12)
+      new DataView(bkd.buffer).setInt32(5, 1) // pid
+      new DataView(bkd.buffer).setInt32(9, 0) // secret
+      write(bkd)
+
+      // send ReadyForQuery (Z) — idle
+      const rfq = new Uint8Array(6)
+      rfq[0] = 0x5a
+      new DataView(rfq.buffer).setInt32(1, 5)
+      rfq[5] = 0x49 // I = idle
+      write(rfq)
+
+      console.debug('[pg-proxy-repl-raw] auth complete, ready for queries')
+
+      // step 3: handle subsequent messages (queries, replication commands)
+      installQueryHandler()
     }
 
-    // send BackendKeyData (K) — fake pid + secret
-    const bkd = new Uint8Array(13)
-    bkd[0] = 0x4b // K
-    new DataView(bkd.buffer).setInt32(1, 12) // length
-    new DataView(bkd.buffer).setInt32(5, 1) // pid
-    new DataView(bkd.buffer).setInt32(9, 0) // secret
-    write(bkd)
-
-    // send ReadyForQuery (Z) — idle
-    const rfq = new Uint8Array(6)
-    rfq[0] = 0x5a
-    new DataView(rfq.buffer).setInt32(1, 5)
-    rfq[5] = 0x49 // I = idle
-    write(rfq)
-
-    console.debug('[pg-proxy-repl-raw] auth complete, ready for queries')
-
-    // handle subsequent messages
+    function installQueryHandler() {
     port.onmessage = async (ev: MessageEvent) => {
       if (connClosed) return
       const data = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data as Uint8Array
@@ -852,7 +867,9 @@ export async function createBrowserProxy(
         try {
           const response = await handleReplicationQuery(query, db)
           if (response) {
+            console.debug(`[pg-proxy-repl-raw] sending response: ${response.length} bytes, first=0x${response[0].toString(16)}`)
             write(response)
+            console.debug(`[pg-proxy-repl-raw] response sent`)
             return
           }
 
@@ -875,6 +892,7 @@ export async function createBrowserProxy(
         mutex.release()
       }
     }
+    } // end installQueryHandler
   }
 
   function handleRegularConnection(port: MessagePort, firstEvent: MessageEvent) {
