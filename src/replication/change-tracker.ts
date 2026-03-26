@@ -17,10 +17,10 @@ export async function installChangeTracking(db: PGlite): Promise<void> {
   // create changes table and watermark sequence
   // watermark is the primary key - monotonically increasing, no separate id needed
   await db.exec(`
-    CREATE SEQUENCE IF NOT EXISTS _orez.watermark;
+    CREATE SEQUENCE IF NOT EXISTS _orez._zero_watermark;
 
-    CREATE TABLE IF NOT EXISTS _orez.changes (
-      watermark BIGINT NOT NULL DEFAULT nextval('_orez.watermark') PRIMARY KEY,
+    CREATE TABLE IF NOT EXISTS _orez._zero_changes (
+      watermark BIGINT NOT NULL DEFAULT nextval('_orez._zero_watermark') PRIMARY KEY,
       table_name TEXT NOT NULL,
       op TEXT NOT NULL CHECK (op IN ('INSERT', 'UPDATE', 'DELETE')),
       row_data JSONB,
@@ -47,7 +47,7 @@ export async function installChangeTracking(db: PGlite): Promise<void> {
     CREATE OR REPLACE FUNCTION public._zero_track_change() RETURNS TRIGGER AS $$
     BEGIN
       IF TG_OP = 'DELETE' THEN
-        INSERT INTO _orez.changes (table_name, op, old_data)
+        INSERT INTO _orez._zero_changes (table_name, op, old_data)
         VALUES (TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME, 'DELETE', to_jsonb(OLD));
         RETURN OLD;
       ELSIF TG_OP = 'UPDATE' THEN
@@ -55,11 +55,11 @@ export async function installChangeTracking(db: PGlite): Promise<void> {
         IF to_jsonb(NEW) = to_jsonb(OLD) THEN
           RETURN NEW;
         END IF;
-        INSERT INTO _orez.changes (table_name, op, row_data, old_data)
+        INSERT INTO _orez._zero_changes (table_name, op, row_data, old_data)
         VALUES (TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME, 'UPDATE', to_jsonb(NEW), to_jsonb(OLD));
         RETURN NEW;
       ELSE
-        INSERT INTO _orez.changes (table_name, op, row_data)
+        INSERT INTO _orez._zero_changes (table_name, op, row_data)
         VALUES (TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME, 'INSERT', to_jsonb(NEW));
         RETURN NEW;
       END IF;
@@ -228,7 +228,7 @@ export async function getChangesSince(
   limit = 50000
 ): Promise<ChangeRecord[]> {
   const result = await db.query<ChangeRecord>(
-    'SELECT watermark, table_name, op, row_data, old_data FROM _orez.changes WHERE watermark > $1 ORDER BY watermark LIMIT $2',
+    'SELECT watermark, table_name, op, row_data, old_data FROM _orez._zero_changes WHERE watermark > $1 ORDER BY watermark LIMIT $2',
     [watermark, limit]
   )
   return result.rows
@@ -239,14 +239,14 @@ export async function purgeConsumedChanges(
   watermark: number
 ): Promise<number> {
   const result = await db.exec(
-    `DELETE FROM _orez.changes WHERE watermark <= ${Number(watermark)}`
+    `DELETE FROM _orez._zero_changes WHERE watermark <= ${Number(watermark)}`
   )
   return result[0]?.affectedRows ?? 0
 }
 
 export async function getCurrentWatermark(db: PGlite): Promise<number> {
   const result = await db.query<{ last_value: string; is_called: boolean }>(
-    'SELECT last_value, is_called FROM _orez.watermark'
+    'SELECT last_value, is_called FROM _orez._zero_watermark'
   )
   const { last_value, is_called } = result.rows[0]
   if (!is_called) return 0

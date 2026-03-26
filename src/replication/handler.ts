@@ -419,7 +419,7 @@ export async function handleStartReplication(
         const all = await db.query<{ tablename: string }>(
           `SELECT tablename FROM pg_tables
            WHERE schemaname = 'public'
-             AND tablename NOT IN ('migrations', 'changes')
+             AND tablename NOT IN ('migrations', '_zero_changes')
              AND tablename NOT LIKE '_zero_%'`
         )
         tables = all.rows
@@ -429,7 +429,7 @@ export async function handleStartReplication(
       const ddlParts: string[] = [
         `CREATE OR REPLACE FUNCTION public._zero_notify_change() RETURNS TRIGGER AS $$
         BEGIN
-          PERFORM pg_notify('changes', TG_TABLE_NAME);
+          PERFORM pg_notify('_zero_changes', TG_TABLE_NAME);
           RETURN NULL;
         END;
         $$ LANGUAGE plpgsql;`,
@@ -616,8 +616,8 @@ export async function handleStartReplication(
   // also set up LISTEN as secondary signal
   let unsubscribe: (() => Promise<void>) | null = null
   try {
-    unsubscribe = await db.listen('changes', wakeup)
-    log.debug.proxy('replication: listening for changes notifications')
+    unsubscribe = await db.listen('_zero_changes', wakeup)
+    log.debug.proxy('replication: listening for _zero_changes notifications')
   } catch {
     log.debug.proxy('replication: LISTEN not available')
   }

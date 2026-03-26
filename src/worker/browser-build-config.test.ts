@@ -24,7 +24,7 @@ describe('browser build config', () => {
     it('includes Node.js polyfills', () => {
       const aliases = getBrowserAliases()
       expect(aliases['node:events']).toBe('events')
-      expect(aliases['node:stream']).toBe('stream-browserify')
+      expect(aliases['node:stream']).toBe('orez/worker/shims/stream-browser')
       expect(aliases['node:path']).toBe('path-browserify')
     })
 
