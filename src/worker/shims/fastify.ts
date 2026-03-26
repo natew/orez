@@ -124,32 +124,41 @@ class FastifyShim {
   // and call the handler with the socket.
   #installWsHandoffHandler() {
     this.server.onMessageType('handoff', (msg: any, socket?: any) => {
-      if (!socket || !msg?.message?.url) return
-      const url = msg.message.url
-      const parsedUrl = new URL(url, 'http://localhost')
-      const pathname = parsedUrl.pathname
-
-      for (const route of this.#wsRoutes) {
-        if (route.pattern.test(pathname)) {
-          const req = {
-            url,
-            headers: msg.message.headers || {},
-            method: msg.message.method || 'GET',
-          }
-          // wrap socket through handleUpgrade so it gets the full WS API
-          // (ping, on, once, terminate, etc.) needed by zero-cache's streamOut
-          this.websocketServer.handleUpgrade(
-            req,
-            socket,
-            Buffer.from(new Uint8Array(0)),
-            (ws: any) => {
-              route.handler(ws, req)
-            }
-          )
-          return
-        }
-      }
+      this.tryHandoff(msg, socket)
     })
+  }
+
+  // try to match a handoff message against registered websocket routes.
+  // returns true if a route matched, false otherwise.
+  // this is public so callers (ws shim, browser-embed) can iterate
+  // all fastify instances and stop at the first match.
+  tryHandoff(msg: any, socket?: any): boolean {
+    if (!socket || !msg?.message?.url) return false
+    const url = msg.message.url
+    const parsedUrl = new URL(url, 'http://localhost')
+    const pathname = parsedUrl.pathname
+
+    for (const route of this.#wsRoutes) {
+      if (route.pattern.test(pathname)) {
+        const req = {
+          url,
+          headers: msg.message.headers || {},
+          method: msg.message.method || 'GET',
+        }
+        // wrap socket through handleUpgrade so it gets the full WS API
+        // (ping, on, once, terminate, etc.) needed by zero-cache's streamOut
+        this.websocketServer.handleUpgrade(
+          req,
+          socket,
+          Buffer.from(new Uint8Array(0)),
+          (ws: any) => {
+            route.handler(ws, req)
+          }
+        )
+        return true
+      }
+    }
+    return false
   }
 
   // route registration — supports optional { websocket: true } option
@@ -286,6 +295,9 @@ function Fastify(_opts?: unknown): FastifyShim {
   // always overwrite — the ZeroDispatcher (which has the WS handoff routes)
   // is created LAST, so the final instance is the one handleWebSocket needs.
   ;(globalThis as any).__orez_fastify_instance = instance
+  // track all instances so callers can try handoff against each one
+  ;(globalThis as any).__orez_fastify_instances = (globalThis as any).__orez_fastify_instances || []
+  ;(globalThis as any).__orez_fastify_instances.push(instance)
   return instance
 }
 

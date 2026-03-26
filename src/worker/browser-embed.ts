@@ -263,40 +263,46 @@ export async function startZeroCacheEmbedBrowser(
     },
 
     async handleWebSocket(ws: WsLike, url = '/', headers?: Record<string, string>) {
-      // lazily resolve fastifyInstance — ZeroDispatcher is constructed AFTER the
-      // ready signal fires, so __orez_fastify_instance may not be set yet.
-      // the dispatcher's instance is the one with the WS handoff handler,
-      // and it's always the LAST Fastify() call. we need to wait for it.
-      //
-      // check: the dispatcher's server will have 'message' listeners (from
-      // installWebSocketHandoff). poll until we find an instance with listeners.
+      // lazily resolve fastify instances — ZeroDispatcher is constructed AFTER the
+      // ready signal fires, so instances may not all be registered yet.
+      // poll until we have instances with ws routes (tryHandoff will check).
+      let instances: any[] = []
       for (let i = 0; i < 100; i++) {
+        instances = (globalThis as any).__orez_fastify_instances || []
         fastifyInstance = (globalThis as any).__orez_fastify_instance
-        // the dispatcher's server has 2+ 'message' listeners:
-        //   1. from FastifyShim#installWsHandoffHandler (every instance has this)
-        //   2. from ZeroDispatcher's installWebSocketHandoff (only the dispatcher has this)
-        // wait for >= 2 to ensure we have the dispatcher's instance
-        if (fastifyInstance?.server?.listenerCount?.('message') >= 2) break
+        // wait until we have at least one instance with 2+ message listeners
+        // (the dispatcher's instance has both the shim handler + installWebSocketHandoff)
+        if (instances.some((inst: any) => inst?.server?.listenerCount?.('message') >= 2)) break
         await new Promise((r) => setTimeout(r, 50))
       }
-      if (!isReady || !fastifyInstance?.server) return
+      if (!isReady) return
 
-      const message = {
-        url,
-        headers: headers || {},
-        method: 'GET',
+      const handoffMsg = {
+        message: {
+          url,
+          headers: headers || {},
+          method: 'GET',
+        },
+        head: new Uint8Array(0),
       }
 
-      // emit handoff
+      // try all fastify instances via tryHandoff, stop at first match
+      let handled = false
+      for (const inst of instances) {
+        if (inst?.tryHandoff?.(handoffMsg, ws)) {
+          handled = true
+          break
+        }
+      }
 
-      // feed the WebSocket into zero-cache's handoff mechanism.
-      // the fastify shim's server is an EventEmitter with onMessageType.
-      // installWebSocketHandoff (non-Server branch) listens for "handoff".
-      fastifyInstance.server.emit(
-        'message',
-        ['handoff', { message, head: new Uint8Array(0) }],
-        ws // the WebSocket-like object as sendHandle
-      )
+      // fallback: emit directly on the last instance's server
+      if (!handled && fastifyInstance?.server) {
+        fastifyInstance.server.emit(
+          'message',
+          ['handoff', handoffMsg],
+          ws
+        )
+      }
     },
 
     async handleHttp(request: HttpRequest): Promise<HttpResponse> {

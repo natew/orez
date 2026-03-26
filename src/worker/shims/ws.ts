@@ -63,8 +63,10 @@ class WebSocket extends EventEmitter {
 
       if (isInProcess) {
         // in-process: connect via fastify server's handoff mechanism
-        const fastifyInstance = (globalThis as any).__orez_fastify_instance
-        if (fastifyInstance?.server) {
+        // try all registered fastify instances via tryHandoff, stop at first match
+        const instances: any[] = (globalThis as any).__orez_fastify_instances || []
+        const fallbackInstance = (globalThis as any).__orez_fastify_instance
+        if (instances.length > 0 || fallbackInstance?.server) {
           // create paired message channels for bidirectional communication
           // the client-side WS (this) and serverWs are cross-linked so
           // ping/pong, messages, and close propagate between them
@@ -99,10 +101,13 @@ class WebSocket extends EventEmitter {
             },
           }
 
+          // client-side internal ws — forwards send() to server,
+          // receives messages from server via addEventListener.
+          // addEventListener MUST work because WebSocket#setupListeners registers here.
+          const clientWsListeners: Record<string, Function[]> = {}
           this.#ws = {
             accept: () => {},
             send: (data: string | ArrayBuffer) => {
-              // deliver to server side
               const handlers = serverWs._listeners['message'] || []
               for (const h of handlers) h({ data })
             },
@@ -110,27 +115,50 @@ class WebSocket extends EventEmitter {
               const handlers = serverWs._listeners['close'] || []
               for (const h of handlers) h({ code, reason })
             },
-            addEventListener: () => {},
-            removeEventListener: () => {},
+            addEventListener: (type: string, handler: Function) => {
+              if (!clientWsListeners[type]) clientWsListeners[type] = []
+              clientWsListeners[type].push(handler)
+            },
+            removeEventListener: (type: string, handler: Function) => {
+              const arr = clientWsListeners[type]
+              if (arr) { const idx = arr.indexOf(handler); if (idx >= 0) arr.splice(idx, 1) }
+            },
             get readyState() {
               return 1
             },
           } as CFWebSocket
 
-          // emit handoff to fastify server
+          // wire server → client: when server sends data, deliver to client's
+          // addEventListener handlers AND emit on the WebSocket instance
+          const origServerSend = serverWs.send
+          serverWs.send = (data: string | ArrayBuffer) => {
+            const handlers = clientWsListeners['message'] || []
+            for (const h of handlers) h({ data })
+            queueMicrotask(() => clientSide.emit('message', { data }))
+          }
+
+          // try handoff against all fastify instances, stop at first match
           const path = parsedUrl.pathname + parsedUrl.search
+          const handoffMsg = {
+            message: { url: path, headers: {}, method: 'GET' },
+            head: new Uint8Array(0),
+          }
           queueMicrotask(() => {
-            fastifyInstance.server.emit(
-              'message',
-              [
-                'handoff',
-                {
-                  message: { url: path, headers: {}, method: 'GET' },
-                  head: new Uint8Array(0),
-                },
-              ],
-              serverWs
-            )
+            let handled = false
+            for (const inst of instances) {
+              if (inst?.tryHandoff?.(handoffMsg, serverWs)) {
+                handled = true
+                break
+              }
+            }
+            // fallback: if no instance handled it and we have a fallback, emit directly
+            if (!handled && fallbackInstance?.server) {
+              fallbackInstance.server.emit(
+                'message',
+                ['handoff', handoffMsg],
+                serverWs
+              )
+            }
             this.emit('open')
           })
         } else {
@@ -229,13 +257,40 @@ class WebSocket extends EventEmitter {
   }
 
   // standard EventTarget-style addEventListener (used by Connection)
+  // for 'message' events, wrap the handler so EventEmitter-style (data, isBinary)
+  // args get converted to DOM-style { data } events. streamOut uses
+  // addEventListener('message', ({data}) => ...) which needs DOM-style events.
+  #adapterMap = new WeakMap<Function, Function>()
+
   addEventListener(type: string, handler: (event: any) => void): void {
-    // wrap to emit EventEmitter-style
-    this.on(type, handler)
+    if (type === 'message') {
+      const wrapper = (data: any, isBinary?: boolean) => {
+        // if already a DOM-style event object with .data, pass through
+        if (data && typeof data === 'object' && 'data' in data) {
+          handler(data)
+        } else {
+          handler({ data, isBinary })
+        }
+      }
+      this.#adapterMap.set(handler, wrapper)
+      this.on(type, wrapper)
+    } else {
+      this.on(type, handler)
+    }
   }
 
   removeEventListener(type: string, handler: (event: any) => void): void {
-    this.off(type, handler)
+    if (type === 'message') {
+      const wrapper = this.#adapterMap.get(handler)
+      if (wrapper) {
+        this.off(type, wrapper as any)
+        this.#adapterMap.delete(handler)
+      } else {
+        this.off(type, handler)
+      }
+    } else {
+      this.off(type, handler)
+    }
   }
 
   #setupListeners(): void {
