@@ -8,7 +8,9 @@
  * setup: set globalThis.__orez_proxy_connect before importing.
  */
 
-import postgres from 'postgres'
+// import the REAL postgres package — the bundler must NOT alias this to ourselves.
+// the build script adds 'postgres-real' → real postgres package resolution.
+import postgres from 'postgres-real'
 import { createSocketFactory } from './postgres-socket.js'
 
 const getProxyConnect = (): ((port: MessagePort) => void) => {
