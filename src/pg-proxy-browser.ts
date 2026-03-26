@@ -528,6 +528,60 @@ function stripResponseMessages(data: Uint8Array, stripRfq: boolean): Uint8Array 
  * readable receives Uint8Array messages from the port.
  * writable sends Uint8Array messages via the port.
  */
+function messagePortToDuplexWithInject(port: MessagePort): {
+  duplex: DuplexStream<Uint8Array>
+  rawWrite: (data: Uint8Array) => void
+  injectMessage: (data: Uint8Array) => void
+} {
+  let readController: ReadableStreamDefaultController<Uint8Array>
+  let msgCount = 0
+  const readable = new ReadableStream<Uint8Array>({
+    start(controller) {
+      readController = controller
+      port.onmessage = (ev: MessageEvent) => {
+        msgCount++
+        if (ev.data instanceof ArrayBuffer) {
+          controller.enqueue(new Uint8Array(ev.data))
+        } else if (ev.data instanceof Uint8Array) {
+          controller.enqueue(ev.data)
+        }
+      }
+    },
+    cancel() {
+      port.close()
+    },
+  })
+
+  const writable = new WritableStream<Uint8Array>({
+    write(chunk) {
+      const buf = chunk.buffer.slice(
+        chunk.byteOffset,
+        chunk.byteOffset + chunk.byteLength
+      ) as ArrayBuffer
+      port.postMessage(buf, [buf])
+    },
+    close() {
+      port.close()
+    },
+  })
+
+  const rawWrite = (data: Uint8Array) => {
+    const buf = data.buffer.slice(
+      data.byteOffset,
+      data.byteOffset + data.byteLength
+    ) as ArrayBuffer
+    port.postMessage(buf, [buf])
+  }
+
+  const injectMessage = (data: Uint8Array) => {
+    if (readController) {
+      readController.enqueue(data)
+    }
+  }
+
+  return { duplex: { readable, writable }, rawWrite, injectMessage }
+}
+
 function messagePortToDuplex(port: MessagePort): {
   duplex: DuplexStream<Uint8Array>
   rawWrite: (data: Uint8Array) => void
@@ -657,7 +711,182 @@ export async function createBrowserProxy(
     }
 
     port.start()
-    const { duplex, rawWrite } = messagePortToDuplex(port)
+
+    // peek at the first message to detect replication connections.
+    // replication connections bypass pg-gateway entirely and are handled
+    // with raw MessagePort communication — matching orez-node where
+    // handleReplicationMessage writes directly to the TCP socket.
+    let firstMessage = true
+    const origOnMessage = port.onmessage
+    port.onmessage = (ev: MessageEvent) => {
+      if (!firstMessage) return // handled by pg-gateway or raw handler
+      firstMessage = false
+
+      const data = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data
+      if (!(data instanceof Uint8Array) || data.length < 8) {
+        // not a valid startup message, let pg-gateway handle it
+        port.onmessage = origOnMessage
+        handleRegularConnection(port, ev)
+        return
+      }
+
+      // parse startup message params
+      const params = parseStartupParams(data)
+      if (params.replication === 'database') {
+        console.debug(`[pg-proxy] detected replication connection db=${params.database || 'postgres'}`)
+        handleRawReplicationConnection(port, data, params, getDbContext(params.database || 'postgres'))
+      } else {
+        // regular connection — create pg-gateway PostgresConnection
+        handleRegularConnection(port, ev)
+      }
+    }
+  }
+
+  /** parse startup message key-value params */
+  function parseStartupParams(data: Uint8Array): Record<string, string> {
+    const params: Record<string, string> = {}
+    // skip: int32 length + int32 protocol version = 8 bytes
+    let pos = 8
+    while (pos < data.length - 1) {
+      const keyStart = pos
+      while (pos < data.length && data[pos] !== 0) pos++
+      if (pos >= data.length) break
+      const key = textDecoder.decode(data.subarray(keyStart, pos))
+      pos++ // skip null
+      const valStart = pos
+      while (pos < data.length && data[pos] !== 0) pos++
+      const val = textDecoder.decode(data.subarray(valStart, pos))
+      pos++ // skip null
+      if (key) params[key] = val
+    }
+    return params
+  }
+
+  /** handle replication connection with raw MessagePort (no pg-gateway) */
+  function handleRawReplicationConnection(
+    port: MessagePort,
+    startupData: Uint8Array,
+    params: Record<string, string>,
+    ctx: { db: PGlite; mutex: Mutex; txState: PgLiteTxState }
+  ) {
+    const { db, mutex } = ctx
+    let connClosed = false
+
+    const write = (data: Uint8Array) => {
+      if (connClosed) return
+      const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer
+      port.postMessage(buf, [buf])
+    }
+
+    // send AuthenticationOk (R)
+    const authOk = new Uint8Array([0x52, 0, 0, 0, 8, 0, 0, 0, 0])
+    write(authOk)
+
+    // send ParameterStatus messages
+    for (const [name, value] of SERVER_PARAMS) {
+      write(buildParameterStatus(name, value))
+    }
+
+    // send BackendKeyData (K) — fake pid + secret
+    const bkd = new Uint8Array(13)
+    bkd[0] = 0x4b // K
+    new DataView(bkd.buffer).setInt32(1, 12) // length
+    new DataView(bkd.buffer).setInt32(5, 1) // pid
+    new DataView(bkd.buffer).setInt32(9, 0) // secret
+    write(bkd)
+
+    // send ReadyForQuery (Z) — idle
+    const rfq = new Uint8Array(6)
+    rfq[0] = 0x5a
+    new DataView(rfq.buffer).setInt32(1, 5)
+    rfq[5] = 0x49 // I = idle
+    write(rfq)
+
+    console.debug('[pg-proxy-repl-raw] auth complete, ready for queries')
+
+    // handle subsequent messages
+    port.onmessage = async (ev: MessageEvent) => {
+      if (connClosed) return
+      const data = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data as Uint8Array
+      if (!data || !(data instanceof Uint8Array)) return
+
+      const msgType = data[0]
+
+      // SimpleQuery (0x51)
+      if (msgType === 0x51) {
+        const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+        const len = view.getInt32(1)
+        const query = textDecoder.decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
+        const upper = query.trim().toUpperCase()
+
+        console.debug(`[pg-proxy-repl-raw] query: ${query.slice(0, 100)}`)
+
+        if (upper.startsWith('START_REPLICATION')) {
+          // enter replication mode — write directly to port
+          if (abortPreviousReplication) {
+            abortPreviousReplication()
+          }
+
+          let aborted = false
+          const writer = {
+            write(chunk: Uint8Array) {
+              if (!connClosed && !aborted) {
+                try { write(chunk) } catch { aborted = true }
+              }
+            },
+            get closed() { return connClosed || aborted },
+          }
+          abortPreviousReplication = () => { aborted = true; connClosed = true; port.close() }
+
+          // drain incoming standby status updates (ignore them)
+          port.onmessage = () => {}
+
+          handleStartReplication(query, writer, db, mutex).catch((err) => {
+            console.warn(`[pg-proxy-repl-raw] replication ended: ${err}`)
+          })
+          return
+        }
+
+        // other replication queries (IDENTIFY_SYSTEM, CREATE/DROP SLOT, etc.)
+        await mutex.acquire()
+        try {
+          const response = await handleReplicationQuery(query, db)
+          if (response) {
+            write(response)
+            return
+          }
+
+          // not a replication query — forward to PGlite
+          const data2 = interceptQuery(data)
+          const result = await db.execProtocolRaw(data2, { syncToFs: false })
+          write(result)
+        } finally {
+          mutex.release()
+        }
+        return
+      }
+
+      // extended protocol — forward to PGlite
+      await mutex.acquire()
+      try {
+        const result = await db.execProtocolRaw(data, { syncToFs: false })
+        write(result)
+      } finally {
+        mutex.release()
+      }
+    }
+  }
+
+  function handleRegularConnection(port: MessagePort, firstEvent: MessageEvent) {
+    // create duplex AFTER we know it's not a replication connection.
+    // the first message (startup) needs to be re-injected into the readable stream.
+    const { duplex, rawWrite, injectMessage } = messagePortToDuplexWithInject(port)
+    // re-inject the startup message that we consumed for detection
+    if (firstEvent.data instanceof ArrayBuffer) {
+      injectMessage(new Uint8Array(firstEvent.data))
+    } else if (firstEvent.data instanceof Uint8Array) {
+      injectMessage(firstEvent.data)
+    }
 
     // opaque identity token for this connection (used for tx state ownership)
     const connId = {}
