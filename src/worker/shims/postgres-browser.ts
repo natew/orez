@@ -43,7 +43,8 @@ function browserPostgres(urlOrOptions?: any, options?: any) {
   // disable auto-subscribe
   if (opts.no_subscribe === undefined) opts.no_subscribe = true
   // limit pool size — too many concurrent connections overwhelm the MessagePort proxy
-  if (opts.max === undefined || opts.max > 1) opts.max = 1
+  // limit pool size for browser — too many concurrent connections can overwhelm
+  if (!opts.max || opts.max > 2) opts.max = 2
 
   console.debug(`[postgres-browser] creating client db=${opts.database} repl=${!!opts.connection?.replication} fetch_types=${opts.fetch_types} max=${opts.max} keys=${Object.keys(opts).sort().join(',')}`)
   const client = postgres(opts)

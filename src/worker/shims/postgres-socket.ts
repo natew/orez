@@ -108,12 +108,14 @@ class MessagePortSocket extends EventEmitter {
       ? Buffer.from(data)
       : data instanceof Uint8Array ? data : Buffer.from(data)
 
-    // transfer ArrayBuffer for zero-copy
-    const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
-    this.port.postMessage(buf, [buf])
+    // copy (not transfer) — the postgres package may reference the buffer after write
+    const copy = new Uint8Array(bytes.length)
+    copy.set(bytes)
+    this.port.postMessage(copy.buffer, [copy.buffer])
 
     if (typeof encoding === 'function') encoding()
     else if (typeof callback === 'function') callback()
+
     return true
   }
 

@@ -897,9 +897,15 @@ export async function createBrowserProxy(
     async function processMessage(data: Uint8Array) {
       _pmCount++
       const msgType = data[0]
-      if (_pmCount <= 120 || _pmCount % 50 === 0) {
-        console.debug(`[pg-proxy-pm] #${_pmCount} ${dbName} type=0x${msgType.toString(16)} len=${data.length} mutex=${pipelineMutexHeld}`)
+      // log every message with type name for debugging
+      const typeNames: Record<number, string> = {
+        0x50: 'Parse', 0x42: 'Bind', 0x44: 'Describe', 0x45: 'Execute',
+        0x43: 'Close', 0x48: 'Flush', 0x53: 'Sync', 0x51: 'Query',
+        0x58: 'Terminate', 0x70: 'Password', 0x46: 'FunctionCall',
+        0x64: 'CopyData', 0x63: 'CopyDone', 0x66: 'CopyFail',
       }
+      const name = typeNames[msgType] || `unknown(0x${msgType.toString(16)})`
+      console.debug(`[pg-proxy-pm] #${_pmCount} ${dbName} ${name} len=${data.length}`)
 
       // replication connection: handle replication commands
       if (isReplicationConnection && msgType === 0x51) {
@@ -932,11 +938,18 @@ export async function createBrowserProxy(
           if (response) { write(response); return }
           data = interceptQuery(data)
           let result = await db.execProtocolRaw(data, { syncToFs: false })
-          // result = stripResponseMessages(result, false) // disabled for debugging
+          result = stripResponseMessages(result, false)
           write(result)
         } finally {
           mutex.release()
         }
+        return
+      }
+
+      // Terminate (0x58) — client wants to close the connection
+      if (msgType === 0x58) {
+        connClosed = true
+        port.close()
         return
       }
 
@@ -1003,9 +1016,25 @@ export async function createBrowserProxy(
             extWritePending = false
             signalWrite()
           }
+          // verify ReadyForQuery and check for errors in the response
+          const rfq = getReadyForQueryStatus(result)
+          if (rfq === null) {
+            console.warn(`[pg-proxy-raw] Sync missing RFQ! db=${dbName} len=${result.length}`)
+          }
+          // check for ErrorResponse (0x45 'E')
+          let pos = 0
+          while (pos < result.length) {
+            if (pos + 5 > result.length) break
+            const t = result[pos]
+            const l = readInt32BE(result, pos + 1)
+            if (t === 0x45) { // ErrorResponse
+              console.warn(`[pg-proxy-raw] ErrorResponse in Sync! db=${dbName} rfq=${rfq === 0x49 ? 'I' : rfq === 0x45 ? 'E' : rfq}`)
+            }
+            pos += 1 + l
+          }
         } else {
-          // strip ReadyForQuery from non-Sync messages
-          // result = stripResponseMessages(result, true) // disabled for debugging
+          // strip ReadyForQuery from non-Sync pipeline messages
+          result = stripResponseMessages(result, true)
         }
 
         write(result)
@@ -1037,7 +1066,7 @@ export async function createBrowserProxy(
           txState.owner = rfqStatus === 0x49 ? null : connId
         }
         // strip notices (wal_level warnings, transaction state notices)
-        // result = stripResponseMessages(result, false) // disabled for debugging
+        result = stripResponseMessages(result, false)
         // signal writes
         if (dbName === 'postgres' && msgType === 0x51) {
           const qn = extractQueryText(data)?.trimStart().toLowerCase()
