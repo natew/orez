@@ -706,13 +706,17 @@ export async function createBrowserProxy(
   // subsequent writes within that window are batched (handler polls all
   // changes at once). gives the PushProcessor time to confirm the mutation
   // before replication streams the same change to zero-cache.
-  let signalTimer: ReturnType<typeof setTimeout> | null = null
+  // signal replication after writes. uses queueMicrotask instead of setTimeout
+  // because macrotasks (setTimeout) get starved by continuous microtask chains
+  // (async/await) and by Atomics.wait in SAB mode.
+  let signalPending = false
   function signalWrite() {
-    if (signalTimer) return
-    signalTimer = setTimeout(() => {
-      signalTimer = null
+    if (signalPending) return
+    signalPending = true
+    queueMicrotask(() => {
+      signalPending = false
       signalReplicationChange()
-    }, 8)
+    })
   }
 
   let closed = false
@@ -1152,10 +1156,12 @@ export async function createBrowserProxy(
               pos += 1 + l
             }
           } else {
-            // strip ReadyForQuery from non-Sync pipeline messages
+            // strip ReadyForQuery + notices from non-Sync pipeline messages
             result = stripResponseMessages(result, true)
           }
 
+          // strip benign notices (25P01 etc.) from ALL results including Sync
+          result = stripResponseMessages(result, false)
           write(result)
           return
         }
@@ -1564,10 +1570,7 @@ export async function createBrowserProxy(
     handleConnection,
     close() {
       closed = true
-      if (signalTimer) {
-        clearTimeout(signalTimer)
-        signalTimer = null
-      }
+      signalPending = false
     },
   }
 }
