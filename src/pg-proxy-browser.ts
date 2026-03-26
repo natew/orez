@@ -732,13 +732,12 @@ export async function createBrowserProxy(
 
       // parse startup message params
       const params = parseStartupParams(data)
-      if (params.replication === 'database') {
-        console.debug(`[pg-proxy] detected replication connection db=${params.database || 'postgres'}`)
-        handleRawReplicationConnection(port, data, params, getDbContext(params.database || 'postgres'))
-      } else {
-        // regular connection — create pg-gateway PostgresConnection
-        handleRegularConnection(port, ev)
-      }
+      const dbName = params.database || 'postgres'
+      const isRepl = params.replication === 'database'
+      console.debug(`[pg-proxy] connection: db=${dbName} repl=${isRepl}`)
+      // handle ALL connections with raw MessagePort (bypass pg-gateway).
+      // pg-gateway's WritableStream doesn't reliably flush in browser Web Workers.
+      handleRawConnection(port, data, params, getDbContext(dbName), isRepl)
     }
   }
 
@@ -762,14 +761,17 @@ export async function createBrowserProxy(
     return params
   }
 
-  /** handle replication connection with raw MessagePort (no pg-gateway) */
-  function handleRawReplicationConnection(
+  /** handle ANY connection with raw MessagePort (no pg-gateway) */
+  function handleRawConnection(
     port: MessagePort,
     startupData: Uint8Array,
     params: Record<string, string>,
-    ctx: { db: PGlite; mutex: Mutex; txState: PgLiteTxState }
+    ctx: { db: PGlite; mutex: Mutex; txState: PgLiteTxState },
+    isReplicationConnection: boolean
   ) {
-    const { db, mutex } = ctx
+    const { db, mutex, txState } = ctx
+    const connId = {}
+    const dbName = params.database || 'postgres'
     let connClosed = false
 
     const write = (data: Uint8Array) => {
@@ -819,29 +821,26 @@ export async function createBrowserProxy(
       installQueryHandler()
     }
 
+    let pipelineMutexHeld = false
+    let extWritePending = false
+
     function installQueryHandler() {
     port.onmessage = async (ev: MessageEvent) => {
       if (connClosed) return
-      const data = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data as Uint8Array
+      let data = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data as Uint8Array
       if (!data || !(data instanceof Uint8Array)) return
 
       const msgType = data[0]
 
-      // SimpleQuery (0x51)
-      if (msgType === 0x51) {
+      // replication connection: handle replication commands
+      if (isReplicationConnection && msgType === 0x51) {
         const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
         const len = view.getInt32(1)
         const query = textDecoder.decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
         const upper = query.trim().toUpperCase()
 
-        console.debug(`[pg-proxy-repl-raw] query: ${query.slice(0, 100)}`)
-
         if (upper.startsWith('START_REPLICATION')) {
-          // enter replication mode — write directly to port
-          if (abortPreviousReplication) {
-            abortPreviousReplication()
-          }
-
+          if (abortPreviousReplication) abortPreviousReplication()
           let aborted = false
           const writer = {
             write(chunk: Uint8Array) {
@@ -852,30 +851,18 @@ export async function createBrowserProxy(
             get closed() { return connClosed || aborted },
           }
           abortPreviousReplication = () => { aborted = true; connClosed = true; port.close() }
-
-          // drain incoming standby status updates (ignore them)
           port.onmessage = () => {}
-
-          handleStartReplication(query, writer, db, mutex).catch((err) => {
-            console.warn(`[pg-proxy-repl-raw] replication ended: ${err}`)
-          })
+          handleStartReplication(query, writer, db, mutex).catch(() => {})
           return
         }
 
-        // other replication queries (IDENTIFY_SYSTEM, CREATE/DROP SLOT, etc.)
+        // replication queries (IDENTIFY_SYSTEM, CREATE/DROP SLOT)
         await mutex.acquire()
         try {
           const response = await handleReplicationQuery(query, db)
-          if (response) {
-            console.debug(`[pg-proxy-repl-raw] sending response: ${response.length} bytes, first=0x${response[0].toString(16)}`)
-            write(response)
-            console.debug(`[pg-proxy-repl-raw] response sent`)
-            return
-          }
-
-          // not a replication query — forward to PGlite
-          const data2 = interceptQuery(data)
-          const result = await db.execProtocolRaw(data2, { syncToFs: false })
+          if (response) { write(response); return }
+          data = interceptQuery(data)
+          const result = await db.execProtocolRaw(data, { syncToFs: false })
           write(result)
         } finally {
           mutex.release()
@@ -883,10 +870,97 @@ export async function createBrowserProxy(
         return
       }
 
-      // extended protocol — forward to PGlite
+      // regular query handling (SimpleQuery or extended protocol)
+
+      // extended protocol pipeline: Parse(0x50), Bind(0x42), Describe(0x44),
+      // Execute(0x45), Close(0x43), Flush(0x48)
+      const isExtendedMsg = msgType === 0x50 || msgType === 0x42 ||
+        msgType === 0x44 || msgType === 0x45 || msgType === 0x43 || msgType === 0x48
+      const isSyncInPipeline = msgType === 0x53 && pipelineMutexHeld
+
+      if (isExtendedMsg || isSyncInPipeline) {
+        if (!pipelineMutexHeld) {
+          await mutex.acquire()
+          pipelineMutexHeld = true
+          // auto-rollback stale transactions
+          if (txState.status === 0x45 && txState.owner !== connId) {
+            try { await db.exec('ROLLBACK') } catch {}
+            txState.status = 0x49
+            txState.owner = null
+          }
+        }
+
+        // detect writes for replication signaling
+        if (dbName === 'postgres' && msgType === 0x50) {
+          const q = extractParseQuery(data)?.trimStart().toLowerCase()
+          if (q && /^(insert|update|delete|copy|truncate)/.test(q)) {
+            extWritePending = true
+          }
+        }
+
+        data = interceptQuery(data)
+        let result: Uint8Array
+        try {
+          result = await db.execProtocolRaw(data, { syncToFs: false })
+        } catch (err) {
+          mutex.release()
+          pipelineMutexHeld = false
+          return // silently drop on error
+        }
+
+        // update transaction state
+        const rfqStatus = getReadyForQueryStatus(result)
+        if (rfqStatus !== null) {
+          txState.status = rfqStatus
+          txState.owner = rfqStatus === 0x49 ? null : connId
+        }
+
+        // release mutex on Sync
+        if (msgType === 0x53) {
+          mutex.release()
+          pipelineMutexHeld = false
+          if (dbName === 'postgres' && extWritePending) {
+            extWritePending = false
+            signalWrite()
+          }
+        } else {
+          // strip ReadyForQuery from non-Sync messages
+          result = stripResponseMessages(result, true)
+        }
+
+        write(result)
+        return
+      }
+
+      // SimpleQuery (0x51) or standalone Sync
+      if (msgType === 0x51) {
+        const queryText = extractQueryText(data)
+        // ping fast-path
+        if (queryText) {
+          const pingMatch = queryText.match(PING_QUERY_RE)
+          if (pingMatch) { write(buildSelectIntResponse(pingMatch[1])); return }
+        }
+        if (isNoopQuery(data)) { write(buildSetCompleteResponse()); return }
+      }
+
+      data = interceptQuery(data)
       await mutex.acquire()
       try {
+        if (txState.status === 0x45 && txState.owner !== connId) {
+          try { await db.exec('ROLLBACK') } catch {}
+          txState.status = 0x49; txState.owner = null
+        }
         const result = await db.execProtocolRaw(data, { syncToFs: false })
+        const rfqStatus = getReadyForQueryStatus(result)
+        if (rfqStatus !== null) {
+          txState.status = rfqStatus
+          txState.owner = rfqStatus === 0x49 ? null : connId
+        }
+        // signal writes
+        if (dbName === 'postgres' && msgType === 0x51) {
+          const qn = extractQueryText(data)?.trimStart().toLowerCase()
+          if (qn && isWriteNormalized(qn)) signalReplicationChange()
+        }
         write(result)
       } finally {
         mutex.release()
