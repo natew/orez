@@ -389,6 +389,14 @@ function buildSelectIntResponse(val: string): Uint8Array {
 }
 
 /** read a big-endian int32 from a Uint8Array at the given offset */
+function concatUint8Arrays(bufs: Uint8Array[]): Uint8Array {
+  const totalLen = bufs.reduce((s, b) => s + b.length, 0)
+  const result = new Uint8Array(totalLen)
+  let offset = 0
+  for (const b of bufs) { result.set(b, offset); offset += b.length }
+  return result
+}
+
 function readInt32BE(data: Uint8Array, offset: number): number {
   return (
     ((data[offset] << 24) >>> 0) +
@@ -857,6 +865,7 @@ export async function createBrowserProxy(
 
     let pipelineMutexHeld = false
     let extWritePending = false
+    let pipelineBuffer: Uint8Array[] = []
 
     function installQueryHandler() {
     // message buffer: postgres sends multiple protocol messages in one write,
@@ -984,6 +993,7 @@ export async function createBrowserProxy(
         if (!pipelineMutexHeld) {
           await mutex.acquire()
           pipelineMutexHeld = true
+          pipelineBuffer = []
           // auto-rollback stale transactions
           if (txState.status === 0x45 && txState.owner !== connId) {
             try { await db.exec('ROLLBACK') } catch {}
@@ -1001,10 +1011,41 @@ export async function createBrowserProxy(
         }
 
         data = interceptQuery(data)
+
+        // batch: accumulate pipeline messages, send all at once on Sync.
+        // reduces MessagePort round-trips from 5 per query to 1.
+        // (browser MessagePort is ~40ms/hop vs TCP ~0.1ms — batching saves ~5s on init)
+        if (msgType !== 0x53) {
+          pipelineBuffer.push(data)
+          // Flush (0x48): send buffered messages now — describeFirst queries
+          // need the response before the postgres package sends Bind
+          if (msgType === 0x48) {
+            const combined = concatUint8Arrays(pipelineBuffer)
+            pipelineBuffer = []
+            let flushResult: Uint8Array
+            try {
+              flushResult = await db.execProtocolRaw(combined, { syncToFs: false })
+            } catch (err) {
+              console.warn(`[pg-proxy-raw] execProtocolRaw flush error on ${dbName}: ${(err as any)?.message}`)
+              mutex.release()
+              pipelineMutexHeld = false
+              return
+            }
+            flushResult = stripResponseMessages(flushResult, true)
+            write(flushResult)
+          }
+          return // buffered or flushed, don't fall through to Sync handling
+        }
+
+        // Sync: flush all buffered messages + Sync in one call to PGlite
+        pipelineBuffer.push(data)
+        const combined = concatUint8Arrays(pipelineBuffer)
+        pipelineBuffer = []
+
         let result: Uint8Array
         const t0 = performance.now()
         try {
-          result = await db.execProtocolRaw(data, { syncToFs: false })
+          result = await db.execProtocolRaw(combined, { syncToFs: false })
         } catch (err) {
           console.warn(`[pg-proxy-raw] execProtocolRaw error on ${dbName}: ${(err as any)?.message}`)
           mutex.release()
