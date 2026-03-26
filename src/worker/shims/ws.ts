@@ -121,7 +121,10 @@ class WebSocket extends EventEmitter {
             },
             removeEventListener: (type: string, handler: Function) => {
               const arr = clientWsListeners[type]
-              if (arr) { const idx = arr.indexOf(handler); if (idx >= 0) arr.splice(idx, 1) }
+              if (arr) {
+                const idx = arr.indexOf(handler)
+                if (idx >= 0) arr.splice(idx, 1)
+              }
             },
             get readyState() {
               return 1
@@ -153,11 +156,7 @@ class WebSocket extends EventEmitter {
             }
             // fallback: if no instance handled it and we have a fallback, emit directly
             if (!handled && fallbackInstance?.server) {
-              fallbackInstance.server.emit(
-                'message',
-                ['handoff', handoffMsg],
-                serverWs
-              )
+              fallbackInstance.server.emit('message', ['handoff', handoffMsg], serverWs)
             }
             this.emit('open')
           })

@@ -52,23 +52,43 @@ export interface OrezBrowserInstance {
   handleWebSocket(ws: any, url?: string, headers?: Record<string, string>): void
 
   /** handle an HTTP request (push/pull) */
-  handleHttp(request: { method: string; url: string; headers?: Record<string, string>; body?: string | null }): Promise<{ status: number; headers: Record<string, string>; body: string }>
+  handleHttp(request: {
+    method: string
+    url: string
+    headers?: Record<string, string>
+    body?: string | null
+  }): Promise<{ status: number; headers: Record<string, string>; body: string }>
 
   /** stop everything */
   stop(): Promise<void>
 }
 
-export async function startOrezBrowser(config: OrezBrowserConfig): Promise<OrezBrowserInstance> {
+export async function startOrezBrowser(
+  config: OrezBrowserConfig
+): Promise<OrezBrowserInstance> {
   const appId = config.appId || 'zero'
   const publications = config.publications?.join(',') || `orez_${appId}_public`
 
   // step 1: create PGlite Web Workers (3 instances, like orez-node)
-  const pgPostgresWorker = new Worker(config.pgliteWorkerUrl, { type: 'module', name: 'pglite-postgres' })
-  const pgCvrWorker = new Worker(config.pgliteWorkerUrl, { type: 'module', name: 'pglite-cvr' })
-  const pgCdbWorker = new Worker(config.pgliteWorkerUrl, { type: 'module', name: 'pglite-cdb' })
+  const pgPostgresWorker = new Worker(config.pgliteWorkerUrl, {
+    type: 'module',
+    name: 'pglite-postgres',
+  })
+  const pgCvrWorker = new Worker(config.pgliteWorkerUrl, {
+    type: 'module',
+    name: 'pglite-cvr',
+  })
+  const pgCdbWorker = new Worker(config.pgliteWorkerUrl, {
+    type: 'module',
+    name: 'pglite-cdb',
+  })
 
   // init each PGlite worker
-  pgPostgresWorker.postMessage({ type: 'init', dataDir: 'idb://orez-postgres', name: 'postgres' })
+  pgPostgresWorker.postMessage({
+    type: 'init',
+    dataDir: 'idb://orez-postgres',
+    name: 'postgres',
+  })
   pgCvrWorker.postMessage({ type: 'init', dataDir: 'idb://orez-cvr', name: 'cvr' })
   pgCdbWorker.postMessage({ type: 'init', dataDir: 'idb://orez-cdb', name: 'cdb' })
 
@@ -106,7 +126,11 @@ export async function startOrezBrowser(config: OrezBrowserConfig): Promise<OrezB
   // zero-cache's postgres shim routes queries through this proxy.
   const { createBrowserProxy } = await import('./pg-proxy-browser.js')
   const proxy = await createBrowserProxy(
-    { postgres: pgPostgres as unknown as PGlite, cvr: pgCvr as unknown as PGlite, cdb: pgCdb as unknown as PGlite },
+    {
+      postgres: pgPostgres as unknown as PGlite,
+      cvr: pgCvr as unknown as PGlite,
+      cdb: pgCdb as unknown as PGlite,
+    },
     { pgPassword: '', pgUser: 'user' }
   )
   console.debug('[orez-browser] pg-proxy-browser started')
@@ -152,7 +176,12 @@ export async function startOrezBrowser(config: OrezBrowserConfig): Promise<OrezB
       zc.handleWebSocket(ws, url)
     },
 
-    async handleHttp(request: { method: string; url: string; headers?: Record<string, string>; body?: string | null }) {
+    async handleHttp(request: {
+      method: string
+      url: string
+      headers?: Record<string, string>
+      body?: string | null
+    }) {
       return zc.handleHttp(request)
     },
 
@@ -160,11 +189,7 @@ export async function startOrezBrowser(config: OrezBrowserConfig): Promise<OrezB
       await zc.stop()
       proxy.close()
       resetReplicationState()
-      await Promise.all([
-        pgPostgres.close(),
-        pgCvr.close(),
-        pgCdb.close(),
-      ])
+      await Promise.all([pgPostgres.close(), pgCvr.close(), pgCdb.close()])
     },
   }
 }

@@ -393,7 +393,10 @@ function concatUint8Arrays(bufs: Uint8Array[]): Uint8Array {
   const totalLen = bufs.reduce((s, b) => s + b.length, 0)
   const result = new Uint8Array(totalLen)
   let offset = 0
-  for (const b of bufs) { result.set(b, offset); offset += b.length }
+  for (const b of bufs) {
+    result.set(b, offset)
+    offset += b.length
+  }
   return result
 }
 
@@ -601,7 +604,9 @@ function messagePortToDuplex(port: MessagePort): {
       port.onmessage = (ev: MessageEvent) => {
         msgCount++
         if (msgCount <= 3) {
-          console.debug(`[pg-proxy-duplex] msg#${msgCount} type=${typeof ev.data} isAB=${ev.data instanceof ArrayBuffer} isU8=${ev.data instanceof Uint8Array} len=${ev.data?.byteLength ?? ev.data?.length ?? '?'}`)
+          console.debug(
+            `[pg-proxy-duplex] msg#${msgCount} type=${typeof ev.data} isAB=${ev.data instanceof ArrayBuffer} isU8=${ev.data instanceof Uint8Array} len=${ev.data?.byteLength ?? ev.data?.length ?? '?'}`
+          )
         }
         if (ev.data instanceof ArrayBuffer) {
           controller.enqueue(new Uint8Array(ev.data))
@@ -815,10 +820,15 @@ export async function createBrowserProxy(
 
     // step 2: wait for Password message (p), then send AuthOk + params
     port.onmessage = (ev: MessageEvent) => {
-      const data2 = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data as Uint8Array
-      console.debug(`[pg-proxy-raw-auth] ${dbName} repl=${isReplicationConnection} got msg type=0x${data2?.[0]?.toString(16)} len=${data2?.length}`)
+      const data2 =
+        ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : (ev.data as Uint8Array)
+      console.debug(
+        `[pg-proxy-raw-auth] ${dbName} repl=${isReplicationConnection} got msg type=0x${data2?.[0]?.toString(16)} len=${data2?.length}`
+      )
       if (!data2 || data2[0] !== 0x70) {
-        console.warn('[pg-proxy-raw-auth] expected password, got type=0x' + data2?.[0]?.toString(16))
+        console.warn(
+          '[pg-proxy-raw-auth] expected password, got type=0x' + data2?.[0]?.toString(16)
+        )
       }
 
       // send ALL auth response messages as ONE combined buffer.
@@ -854,7 +864,10 @@ export async function createBrowserProxy(
       const totalLen = parts.reduce((s, p) => s + p.length, 0)
       const combined = new Uint8Array(totalLen)
       let pos = 0
-      for (const p of parts) { combined.set(p, pos); pos += p.length }
+      for (const p of parts) {
+        combined.set(p, pos)
+        pos += p.length
+      }
       write(combined)
 
       console.debug('[pg-proxy-repl-raw] auth complete, ready for queries')
@@ -868,269 +881,330 @@ export async function createBrowserProxy(
     let pipelineBuffer: Uint8Array[] = []
 
     function installQueryHandler() {
-    // message buffer: postgres sends multiple protocol messages in one write,
-    // we need to split them and process each individually
-    let pendingBuffer: Uint8Array | null = null
-    // guard against re-entrant onmessage: async handlers can interleave at
-    // await points, causing concurrent modifications to pendingBuffer.
-    let processing = false
+      // message buffer: postgres sends multiple protocol messages in one write,
+      // we need to split them and process each individually
+      let pendingBuffer: Uint8Array | null = null
+      // guard against re-entrant onmessage: async handlers can interleave at
+      // await points, causing concurrent modifications to pendingBuffer.
+      let processing = false
 
-    port.onmessage = async (ev: MessageEvent) => {
-      if (connClosed) return
-      const incoming = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data as Uint8Array
-      if (!incoming || !(incoming instanceof Uint8Array)) return
+      port.onmessage = async (ev: MessageEvent) => {
+        if (connClosed) return
+        const incoming =
+          ev.data instanceof ArrayBuffer
+            ? new Uint8Array(ev.data)
+            : (ev.data as Uint8Array)
+        if (!incoming || !(incoming instanceof Uint8Array)) return
 
-      // append to pending buffer
-      if (pendingBuffer && pendingBuffer.length > 0) {
-        const combined = new Uint8Array(pendingBuffer.length + incoming.length)
-        combined.set(pendingBuffer)
-        combined.set(incoming, pendingBuffer.length)
-        pendingBuffer = combined
-      } else {
-        pendingBuffer = incoming
-      }
+        // append to pending buffer
+        if (pendingBuffer && pendingBuffer.length > 0) {
+          const combined = new Uint8Array(pendingBuffer.length + incoming.length)
+          combined.set(pendingBuffer)
+          combined.set(incoming, pendingBuffer.length)
+          pendingBuffer = combined
+        } else {
+          pendingBuffer = incoming
+        }
 
-      // if another invocation is already processing, just buffer
-      if (processing) return
-      processing = true
-      try {
-      // process all complete messages in the buffer
-      while (pendingBuffer && pendingBuffer.length >= 5) {
-        const msgType: number = pendingBuffer[0]
-        const msgLen: number = new DataView(pendingBuffer.buffer, pendingBuffer.byteOffset, pendingBuffer.byteLength).getInt32(1)
-        const totalLen: number = 1 + msgLen
-        if (totalLen > pendingBuffer.length) break // incomplete message, wait for more data
+        // if another invocation is already processing, just buffer
+        if (processing) return
+        processing = true
+        try {
+          // process all complete messages in the buffer
+          while (pendingBuffer && pendingBuffer.length >= 5) {
+            const msgType: number = pendingBuffer[0]
+            const msgLen: number = new DataView(
+              pendingBuffer.buffer,
+              pendingBuffer.byteOffset,
+              pendingBuffer.byteLength
+            ).getInt32(1)
+            const totalLen: number = 1 + msgLen
+            if (totalLen > pendingBuffer.length) break // incomplete message, wait for more data
 
-        // extract single message
-        const data = pendingBuffer.slice(0, totalLen)
-        pendingBuffer = pendingBuffer.length > totalLen ? pendingBuffer.slice(totalLen) : null
+            // extract single message
+            const data = pendingBuffer.slice(0, totalLen)
+            pendingBuffer =
+              pendingBuffer.length > totalLen ? pendingBuffer.slice(totalLen) : null
 
-        await processMessage(data)
-      }
-      } finally { processing = false }
-    }
-
-    let _pmCount = 0
-    async function processMessage(data: Uint8Array) {
-      _pmCount++
-      const msgType = data[0]
-      // log every message with type name for debugging
-      const typeNames: Record<number, string> = {
-        0x50: 'Parse', 0x42: 'Bind', 0x44: 'Describe', 0x45: 'Execute',
-        0x43: 'Close', 0x48: 'Flush', 0x53: 'Sync', 0x51: 'Query',
-        0x58: 'Terminate', 0x70: 'Password', 0x46: 'FunctionCall',
-        0x64: 'CopyData', 0x63: 'CopyDone', 0x66: 'CopyFail',
-      }
-      const name = typeNames[msgType] || `unknown(0x${msgType.toString(16)})`
-      console.debug(`[pg-proxy-pm] #${_pmCount} ${dbName} ${name} len=${data.length}`)
-
-      // replication connection: handle replication commands
-      if (isReplicationConnection && msgType === 0x51) {
-        const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
-        const len = view.getInt32(1)
-        const query = textDecoder.decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
-        const upper = query.trim().toUpperCase()
-
-        if (upper.startsWith('START_REPLICATION')) {
-          if (abortPreviousReplication) abortPreviousReplication()
-          let aborted = false
-          const writer = {
-            write(chunk: Uint8Array) {
-              if (!connClosed && !aborted) {
-                try { write(chunk) } catch { aborted = true }
-              }
-            },
-            get closed() { return connClosed || aborted },
+            await processMessage(data)
           }
-          abortPreviousReplication = () => { aborted = true; connClosed = true; port.close() }
-          port.onmessage = () => {}
-          handleStartReplication(query, writer, db, mutex).catch(() => {})
+        } finally {
+          processing = false
+        }
+      }
+
+      let _pmCount = 0
+      async function processMessage(data: Uint8Array) {
+        _pmCount++
+        const msgType = data[0]
+        // log every message with type name for debugging
+        const typeNames: Record<number, string> = {
+          0x50: 'Parse',
+          0x42: 'Bind',
+          0x44: 'Describe',
+          0x45: 'Execute',
+          0x43: 'Close',
+          0x48: 'Flush',
+          0x53: 'Sync',
+          0x51: 'Query',
+          0x58: 'Terminate',
+          0x70: 'Password',
+          0x46: 'FunctionCall',
+          0x64: 'CopyData',
+          0x63: 'CopyDone',
+          0x66: 'CopyFail',
+        }
+        const name = typeNames[msgType] || `unknown(0x${msgType.toString(16)})`
+        console.debug(`[pg-proxy-pm] #${_pmCount} ${dbName} ${name} len=${data.length}`)
+
+        // replication connection: handle replication commands
+        if (isReplicationConnection && msgType === 0x51) {
+          const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+          const len = view.getInt32(1)
+          const query = textDecoder
+            .decode(data.subarray(5, 1 + len - 1))
+            .replace(/\0$/, '')
+          const upper = query.trim().toUpperCase()
+
+          if (upper.startsWith('START_REPLICATION')) {
+            if (abortPreviousReplication) abortPreviousReplication()
+            let aborted = false
+            const writer = {
+              write(chunk: Uint8Array) {
+                if (!connClosed && !aborted) {
+                  try {
+                    write(chunk)
+                  } catch {
+                    aborted = true
+                  }
+                }
+              },
+              get closed() {
+                return connClosed || aborted
+              },
+            }
+            abortPreviousReplication = () => {
+              aborted = true
+              connClosed = true
+              port.close()
+            }
+            port.onmessage = () => {}
+            handleStartReplication(query, writer, db, mutex).catch(() => {})
+            return
+          }
+
+          // replication queries (IDENTIFY_SYSTEM, CREATE/DROP SLOT)
+          await mutex.acquire()
+          try {
+            const response = await handleReplicationQuery(query, db)
+            if (response) {
+              write(response)
+              return
+            }
+            data = interceptQuery(data)
+            let result = await db.execProtocolRaw(data, { syncToFs: false })
+            result = stripResponseMessages(result, false)
+            write(result)
+          } finally {
+            mutex.release()
+          }
           return
         }
 
-        // replication queries (IDENTIFY_SYSTEM, CREATE/DROP SLOT)
-        await mutex.acquire()
-        try {
-          const response = await handleReplicationQuery(query, db)
-          if (response) { write(response); return }
-          data = interceptQuery(data)
-          let result = await db.execProtocolRaw(data, { syncToFs: false })
-          result = stripResponseMessages(result, false)
-          write(result)
-        } finally {
-          mutex.release()
-        }
-        return
-      }
-
-      // Terminate (0x58) — client wants to close the connection
-      if (msgType === 0x58) {
-        // release mutex if held — connection terminated mid-pipeline
-        if (pipelineMutexHeld) {
-          mutex.release()
-          pipelineMutexHeld = false
-        }
-        connClosed = true
-        port.close()
-        return
-      }
-
-      // regular query handling (SimpleQuery or extended protocol)
-      if (msgType === 0x50) {
-        const q = extractParseQuery(data)
-        if (q) console.debug(`[pg-proxy-raw] ${dbName}: Parse ${q.slice(0,80)}`)
-      } else if (msgType === 0x51) {
-        console.debug(`[pg-proxy-raw] ${dbName}: SimpleQuery len=${data.length}`)
-      }
-
-      // extended protocol pipeline: Parse(0x50), Bind(0x42), Describe(0x44),
-      // Execute(0x45), Close(0x43), Flush(0x48)
-      const isExtendedMsg = msgType === 0x50 || msgType === 0x42 ||
-        msgType === 0x44 || msgType === 0x45 || msgType === 0x43 || msgType === 0x48
-      const isSyncInPipeline = msgType === 0x53 && pipelineMutexHeld
-
-      if (isExtendedMsg || isSyncInPipeline) {
-        if (!pipelineMutexHeld) {
-          await mutex.acquire()
-          pipelineMutexHeld = true
-          pipelineBuffer = []
-          // auto-rollback stale transactions
-          if (txState.status === 0x45 && txState.owner !== connId) {
-            try { await db.exec('ROLLBACK') } catch {}
-            txState.status = 0x49
-            txState.owner = null
+        // Terminate (0x58) — client wants to close the connection
+        if (msgType === 0x58) {
+          // release mutex if held — connection terminated mid-pipeline
+          if (pipelineMutexHeld) {
+            mutex.release()
+            pipelineMutexHeld = false
           }
+          connClosed = true
+          port.close()
+          return
         }
 
-        // detect writes for replication signaling
-        if (dbName === 'postgres' && msgType === 0x50) {
-          const q = extractParseQuery(data)?.trimStart().toLowerCase()
-          if (q && /^(insert|update|delete|copy|truncate)/.test(q)) {
-            extWritePending = true
+        // regular query handling (SimpleQuery or extended protocol)
+        if (msgType === 0x50) {
+          const q = extractParseQuery(data)
+          if (q) console.debug(`[pg-proxy-raw] ${dbName}: Parse ${q.slice(0, 80)}`)
+        } else if (msgType === 0x51) {
+          console.debug(`[pg-proxy-raw] ${dbName}: SimpleQuery len=${data.length}`)
+        }
+
+        // extended protocol pipeline: Parse(0x50), Bind(0x42), Describe(0x44),
+        // Execute(0x45), Close(0x43), Flush(0x48)
+        const isExtendedMsg =
+          msgType === 0x50 ||
+          msgType === 0x42 ||
+          msgType === 0x44 ||
+          msgType === 0x45 ||
+          msgType === 0x43 ||
+          msgType === 0x48
+        const isSyncInPipeline = msgType === 0x53 && pipelineMutexHeld
+
+        if (isExtendedMsg || isSyncInPipeline) {
+          if (!pipelineMutexHeld) {
+            await mutex.acquire()
+            pipelineMutexHeld = true
+            pipelineBuffer = []
+            // auto-rollback stale transactions
+            if (txState.status === 0x45 && txState.owner !== connId) {
+              try {
+                await db.exec('ROLLBACK')
+              } catch {}
+              txState.status = 0x49
+              txState.owner = null
+            }
+          }
+
+          // detect writes for replication signaling
+          if (dbName === 'postgres' && msgType === 0x50) {
+            const q = extractParseQuery(data)?.trimStart().toLowerCase()
+            if (q && /^(insert|update|delete|copy|truncate)/.test(q)) {
+              extWritePending = true
+            }
+          }
+
+          data = interceptQuery(data)
+
+          // batch: accumulate pipeline messages, send all at once on Sync.
+          // reduces MessagePort round-trips from 5 per query to 1.
+          // (browser MessagePort is ~40ms/hop vs TCP ~0.1ms — batching saves ~5s on init)
+          if (msgType !== 0x53) {
+            pipelineBuffer.push(data)
+            // Flush (0x48): send buffered messages now — describeFirst queries
+            // need the response before the postgres package sends Bind
+            if (msgType === 0x48) {
+              const combined = concatUint8Arrays(pipelineBuffer)
+              pipelineBuffer = []
+              let flushResult: Uint8Array
+              try {
+                flushResult = await db.execProtocolRaw(combined, { syncToFs: false })
+              } catch (err) {
+                console.warn(
+                  `[pg-proxy-raw] execProtocolRaw flush error on ${dbName}: ${(err as any)?.message}`
+                )
+                mutex.release()
+                pipelineMutexHeld = false
+                return
+              }
+              flushResult = stripResponseMessages(flushResult, true)
+              write(flushResult)
+            }
+            return // buffered or flushed, don't fall through to Sync handling
+          }
+
+          // Sync: flush all buffered messages + Sync in one call to PGlite
+          pipelineBuffer.push(data)
+          const combined = concatUint8Arrays(pipelineBuffer)
+          pipelineBuffer = []
+
+          let result: Uint8Array
+          const t0 = performance.now()
+          try {
+            result = await db.execProtocolRaw(combined, { syncToFs: false })
+          } catch (err) {
+            console.warn(
+              `[pg-proxy-raw] execProtocolRaw error on ${dbName}: ${(err as any)?.message}`
+            )
+            mutex.release()
+            pipelineMutexHeld = false
+            return
+          }
+          const dt = performance.now() - t0
+          if (dt > 100)
+            console.debug(`[pg-proxy-raw] slow query on ${dbName}: ${dt.toFixed(0)}ms`)
+
+          // update transaction state
+          const rfqStatus = getReadyForQueryStatus(result)
+          if (rfqStatus !== null) {
+            txState.status = rfqStatus
+            txState.owner = rfqStatus === 0x49 ? null : connId
+          }
+
+          // release mutex on Sync
+          if (msgType === 0x53) {
+            mutex.release()
+            pipelineMutexHeld = false
+            if (dbName === 'postgres' && extWritePending) {
+              extWritePending = false
+              signalWrite()
+            }
+            // verify ReadyForQuery and check for errors in the response
+            const rfq = getReadyForQueryStatus(result)
+            if (rfq === null) {
+              console.warn(
+                `[pg-proxy-raw] Sync missing RFQ! db=${dbName} len=${result.length}`
+              )
+            }
+            // check for ErrorResponse (0x45 'E')
+            let pos = 0
+            while (pos < result.length) {
+              if (pos + 5 > result.length) break
+              const t = result[pos]
+              const l = readInt32BE(result, pos + 1)
+              if (t === 0x45) {
+                // ErrorResponse
+                console.warn(
+                  `[pg-proxy-raw] ErrorResponse in Sync! db=${dbName} rfq=${rfq === 0x49 ? 'I' : rfq === 0x45 ? 'E' : rfq}`
+                )
+              }
+              pos += 1 + l
+            }
+          } else {
+            // strip ReadyForQuery from non-Sync pipeline messages
+            result = stripResponseMessages(result, true)
+          }
+
+          write(result)
+          return
+        }
+
+        // SimpleQuery (0x51) or standalone Sync
+        if (msgType === 0x51) {
+          const queryText = extractQueryText(data)
+          // ping fast-path
+          if (queryText) {
+            const pingMatch = queryText.match(PING_QUERY_RE)
+            if (pingMatch) {
+              write(buildSelectIntResponse(pingMatch[1]))
+              return
+            }
+          }
+          if (isNoopQuery(data)) {
+            write(buildSetCompleteResponse())
+            return
           }
         }
 
         data = interceptQuery(data)
-
-        // batch: accumulate pipeline messages, send all at once on Sync.
-        // reduces MessagePort round-trips from 5 per query to 1.
-        // (browser MessagePort is ~40ms/hop vs TCP ~0.1ms — batching saves ~5s on init)
-        if (msgType !== 0x53) {
-          pipelineBuffer.push(data)
-          // Flush (0x48): send buffered messages now — describeFirst queries
-          // need the response before the postgres package sends Bind
-          if (msgType === 0x48) {
-            const combined = concatUint8Arrays(pipelineBuffer)
-            pipelineBuffer = []
-            let flushResult: Uint8Array
-            try {
-              flushResult = await db.execProtocolRaw(combined, { syncToFs: false })
-            } catch (err) {
-              console.warn(`[pg-proxy-raw] execProtocolRaw flush error on ${dbName}: ${(err as any)?.message}`)
-              mutex.release()
-              pipelineMutexHeld = false
-              return
-            }
-            flushResult = stripResponseMessages(flushResult, true)
-            write(flushResult)
-          }
-          return // buffered or flushed, don't fall through to Sync handling
-        }
-
-        // Sync: flush all buffered messages + Sync in one call to PGlite
-        pipelineBuffer.push(data)
-        const combined = concatUint8Arrays(pipelineBuffer)
-        pipelineBuffer = []
-
-        let result: Uint8Array
-        const t0 = performance.now()
+        await mutex.acquire()
         try {
-          result = await db.execProtocolRaw(combined, { syncToFs: false })
-        } catch (err) {
-          console.warn(`[pg-proxy-raw] execProtocolRaw error on ${dbName}: ${(err as any)?.message}`)
+          if (txState.status === 0x45 && txState.owner !== connId) {
+            try {
+              await db.exec('ROLLBACK')
+            } catch {}
+            txState.status = 0x49
+            txState.owner = null
+          }
+          let result = await db.execProtocolRaw(data, { syncToFs: false })
+          const rfqStatus = getReadyForQueryStatus(result)
+          if (rfqStatus !== null) {
+            txState.status = rfqStatus
+            txState.owner = rfqStatus === 0x49 ? null : connId
+          }
+          // strip notices (wal_level warnings, transaction state notices)
+          result = stripResponseMessages(result, false)
+          // signal writes
+          if (dbName === 'postgres' && msgType === 0x51) {
+            const qn = extractQueryText(data)?.trimStart().toLowerCase()
+            if (qn && isWriteNormalized(qn)) signalReplicationChange()
+          }
+          write(result)
+        } finally {
           mutex.release()
-          pipelineMutexHeld = false
-          return
         }
-        const dt = performance.now() - t0
-        if (dt > 100) console.debug(`[pg-proxy-raw] slow query on ${dbName}: ${dt.toFixed(0)}ms`)
-
-        // update transaction state
-        const rfqStatus = getReadyForQueryStatus(result)
-        if (rfqStatus !== null) {
-          txState.status = rfqStatus
-          txState.owner = rfqStatus === 0x49 ? null : connId
-        }
-
-        // release mutex on Sync
-        if (msgType === 0x53) {
-          mutex.release()
-          pipelineMutexHeld = false
-          if (dbName === 'postgres' && extWritePending) {
-            extWritePending = false
-            signalWrite()
-          }
-          // verify ReadyForQuery and check for errors in the response
-          const rfq = getReadyForQueryStatus(result)
-          if (rfq === null) {
-            console.warn(`[pg-proxy-raw] Sync missing RFQ! db=${dbName} len=${result.length}`)
-          }
-          // check for ErrorResponse (0x45 'E')
-          let pos = 0
-          while (pos < result.length) {
-            if (pos + 5 > result.length) break
-            const t = result[pos]
-            const l = readInt32BE(result, pos + 1)
-            if (t === 0x45) { // ErrorResponse
-              console.warn(`[pg-proxy-raw] ErrorResponse in Sync! db=${dbName} rfq=${rfq === 0x49 ? 'I' : rfq === 0x45 ? 'E' : rfq}`)
-            }
-            pos += 1 + l
-          }
-        } else {
-          // strip ReadyForQuery from non-Sync pipeline messages
-          result = stripResponseMessages(result, true)
-        }
-
-        write(result)
-        return
-      }
-
-      // SimpleQuery (0x51) or standalone Sync
-      if (msgType === 0x51) {
-        const queryText = extractQueryText(data)
-        // ping fast-path
-        if (queryText) {
-          const pingMatch = queryText.match(PING_QUERY_RE)
-          if (pingMatch) { write(buildSelectIntResponse(pingMatch[1])); return }
-        }
-        if (isNoopQuery(data)) { write(buildSetCompleteResponse()); return }
-      }
-
-      data = interceptQuery(data)
-      await mutex.acquire()
-      try {
-        if (txState.status === 0x45 && txState.owner !== connId) {
-          try { await db.exec('ROLLBACK') } catch {}
-          txState.status = 0x49; txState.owner = null
-        }
-        let result = await db.execProtocolRaw(data, { syncToFs: false })
-        const rfqStatus = getReadyForQueryStatus(result)
-        if (rfqStatus !== null) {
-          txState.status = rfqStatus
-          txState.owner = rfqStatus === 0x49 ? null : connId
-        }
-        // strip notices (wal_level warnings, transaction state notices)
-        result = stripResponseMessages(result, false)
-        // signal writes
-        if (dbName === 'postgres' && msgType === 0x51) {
-          const qn = extractQueryText(data)?.trimStart().toLowerCase()
-          if (qn && isWriteNormalized(qn)) signalReplicationChange()
-        }
-        write(result)
-      } finally {
-        mutex.release()
-      }
-    } // end processMessage
+      } // end processMessage
     } // end installQueryHandler
   }
 
@@ -1219,17 +1293,23 @@ export async function createBrowserProxy(
             isReplicationConnection = true
           }
           dbName = params?.database || 'postgres'
-          console.debug(`[pg-proxy-conn] startup: db=${dbName} user=${params?.user} repl=${params?.replication || 'none'}`)
+          console.debug(
+            `[pg-proxy-conn] startup: db=${dbName} user=${params?.user} repl=${params?.replication || 'none'}`
+          )
           const { db } = getDbContext(dbName)
           await db.waitReady
         },
 
         async onMessage(data, state) {
           if (!state.isAuthenticated) {
-            console.debug(`[pg-proxy-conn] msg before auth, type=0x${data[0].toString(16)}`)
+            console.debug(
+              `[pg-proxy-conn] msg before auth, type=0x${data[0].toString(16)}`
+            )
             return
           }
-          console.debug(`[pg-proxy-conn] msg db=${dbName} type=0x${data[0].toString(16)} len=${data.length}`)
+          console.debug(
+            `[pg-proxy-conn] msg db=${dbName} type=0x${data[0].toString(16)} len=${data.length}`
+          )
 
           // handle replication connections (always go to postgres instance)
           if (isReplicationConnection) {
@@ -1505,7 +1585,9 @@ async function handleReplicationMessageBrowser(
 
   // for non-SimpleQuery messages (extended protocol), execute against PGlite directly.
   if (data[0] !== 0x51) {
-    console.debug(`[pg-proxy-repl] ext protocol msg type=0x${data[0].toString(16)} len=${data.length}`)
+    console.debug(
+      `[pg-proxy-repl] ext protocol msg type=0x${data[0].toString(16)} len=${data.length}`
+    )
     await mutex.acquire()
     try {
       const result = await db.execProtocolRaw(data, { syncToFs: false })
@@ -1569,7 +1651,9 @@ async function handleReplicationMessageBrowser(
     const testResult = await db.query('SELECT 1 as test')
     console.debug(`[pg-proxy-repl] db.query works: ${JSON.stringify(testResult.rows)}`)
     const response = await handleReplicationQuery(query, db)
-    console.debug(`[pg-proxy-repl] handleReplicationQuery result: ${response ? 'bytes(' + response.length + ')' : 'null'}`)
+    console.debug(
+      `[pg-proxy-repl] handleReplicationQuery result: ${response ? 'bytes(' + response.length + ')' : 'null'}`
+    )
     if (response) return response
 
     // apply query rewrites before forwarding

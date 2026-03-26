@@ -80,7 +80,9 @@ export class PGliteWebProxy {
         const callbacks = this.notificationCallbacks.get(msg.channel)
         if (callbacks) {
           for (const cb of callbacks) {
-            try { cb(msg.payload) } catch {}
+            try {
+              cb(msg.payload)
+            } catch {}
           }
         }
         return

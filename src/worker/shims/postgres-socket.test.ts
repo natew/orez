@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { Buffer } from 'buffer'
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 import { createSocketFactory } from './postgres-socket.js'
 
@@ -10,7 +11,12 @@ function createTestSocket() {
     proxyPort = port
   })
   const socket = factory()
-  return { socket, get proxyPort() { return proxyPort! } }
+  return {
+    socket,
+    get proxyPort() {
+      return proxyPort!
+    },
+  }
 }
 
 // helper: wait for next microtask
@@ -94,7 +100,9 @@ describe('MessagePortSocket', () => {
 
       await nextTick(10)
       expect(received.length).toBe(1)
-      expect(new Uint8Array(received[0])).toEqual(new Uint8Array([0x51, 0x00, 0x00, 0x00, 0x04]))
+      expect(new Uint8Array(received[0])).toEqual(
+        new Uint8Array([0x51, 0x00, 0x00, 0x00, 0x04])
+      )
     })
 
     it('returns true on successful write', async () => {
@@ -362,7 +370,9 @@ describe('MessagePortSocket', () => {
       await tick()
 
       let hadError: boolean | undefined
-      socket.on('close', (h: boolean) => { hadError = h })
+      socket.on('close', (h: boolean) => {
+        hadError = h
+      })
 
       socket.destroy()
       expect(hadError).toBe(false)

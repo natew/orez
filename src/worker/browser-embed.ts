@@ -272,7 +272,8 @@ export async function startZeroCacheEmbedBrowser(
         fastifyInstance = (globalThis as any).__orez_fastify_instance
         // wait until we have at least one instance with 2+ message listeners
         // (the dispatcher's instance has both the shim handler + installWebSocketHandoff)
-        if (instances.some((inst: any) => inst?.server?.listenerCount?.('message') >= 2)) break
+        if (instances.some((inst: any) => inst?.server?.listenerCount?.('message') >= 2))
+          break
         await new Promise((r) => setTimeout(r, 50))
       }
       if (!isReady) return
@@ -297,11 +298,7 @@ export async function startZeroCacheEmbedBrowser(
 
       // fallback: emit directly on the last instance's server
       if (!handled && fastifyInstance?.server) {
-        fastifyInstance.server.emit(
-          'message',
-          ['handoff', handoffMsg],
-          ws
-        )
+        fastifyInstance.server.emit('message', ['handoff', handoffMsg], ws)
       }
     },
 

@@ -13,6 +13,7 @@
 // is aliased to this file.
 // @ts-expect-error — resolved by bundler alias
 import postgres from 'postgres-real'
+
 import { createSocketFactory } from './postgres-socket.js'
 
 const getProxyConnect = (): ((port: MessagePort) => void) => {
@@ -22,9 +23,10 @@ const getProxyConnect = (): ((port: MessagePort) => void) => {
 }
 
 function browserPostgres(urlOrOptions?: any, options?: any) {
-  const opts: any = typeof urlOrOptions === 'string'
-    ? { ...(options || {}), host: urlOrOptions }
-    : { ...(urlOrOptions || {}) }
+  const opts: any =
+    typeof urlOrOptions === 'string'
+      ? { ...(options || {}), host: urlOrOptions }
+      : { ...(urlOrOptions || {}) }
 
   opts.socket = createSocketFactory(getProxyConnect())
 
@@ -46,7 +48,9 @@ function browserPostgres(urlOrOptions?: any, options?: any) {
   // limit pool size for browser — too many concurrent connections can overwhelm
   if (!opts.max || opts.max > 2) opts.max = 2
 
-  console.debug(`[postgres-browser] creating client db=${opts.database} repl=${!!opts.connection?.replication} fetch_types=${opts.fetch_types} max=${opts.max} keys=${Object.keys(opts).sort().join(',')}`)
+  console.debug(
+    `[postgres-browser] creating client db=${opts.database} repl=${!!opts.connection?.replication} fetch_types=${opts.fetch_types} max=${opts.max} keys=${Object.keys(opts).sort().join(',')}`
+  )
   const client = postgres(opts)
   return client
 }

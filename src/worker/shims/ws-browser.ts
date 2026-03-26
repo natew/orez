@@ -89,7 +89,8 @@ export function messagePortToWs(port: MessagePort): WsCompatible {
   function emit(type: string, event: any) {
     const onHandlers = onListeners.get(type)
     const domHandlers = domListeners.get(type)
-    const hasAny = (onHandlers && onHandlers.size > 0) || (domHandlers && domHandlers.size > 0)
+    const hasAny =
+      (onHandlers && onHandlers.size > 0) || (domHandlers && domHandlers.size > 0)
     if (!hasAny) {
       if (type === 'message') pendingMessages.push(event)
       return

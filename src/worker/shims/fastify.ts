@@ -296,7 +296,8 @@ function Fastify(_opts?: unknown): FastifyShim {
   // is created LAST, so the final instance is the one handleWebSocket needs.
   ;(globalThis as any).__orez_fastify_instance = instance
   // track all instances so callers can try handoff against each one
-  ;(globalThis as any).__orez_fastify_instances = (globalThis as any).__orez_fastify_instances || []
+  ;(globalThis as any).__orez_fastify_instances =
+    (globalThis as any).__orez_fastify_instances || []
   ;(globalThis as any).__orez_fastify_instances.push(instance)
   return instance
 }

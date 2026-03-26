@@ -28,9 +28,7 @@ import { EventEmitter } from 'events'
  * gives one port to the proxy via connectFn, and returns
  * a Socket-like object backed by the other port.
  */
-export function createSocketFactory(
-  connectFn: (port: MessagePort) => void
-) {
+export function createSocketFactory(connectFn: (port: MessagePort) => void) {
   return () => new MessagePortSocket(connectFn)
 }
 
@@ -130,16 +128,23 @@ class MessagePortSocket extends EventEmitter {
   }
 
   // postgres calls socket.write(chunk, fn) — returns boolean for backpressure
-  write(data: Uint8Array | Buffer | string, encoding?: any, callback?: Function): boolean {
+  write(
+    data: Uint8Array | Buffer | string,
+    encoding?: any,
+    callback?: Function
+  ): boolean {
     if (this._destroyed || !this.port) {
       if (typeof encoding === 'function') encoding()
       else if (typeof callback === 'function') callback()
       return false
     }
 
-    const bytes: Uint8Array = typeof data === 'string'
-      ? Buffer.from(data)
-      : data instanceof Uint8Array ? data : Buffer.from(data)
+    const bytes: Uint8Array =
+      typeof data === 'string'
+        ? Buffer.from(data)
+        : data instanceof Uint8Array
+          ? data
+          : Buffer.from(data)
 
     // copy before transfer — postgres may reference the buffer after write
     const copy = new Uint8Array(bytes.length)
@@ -263,21 +268,43 @@ class MessagePortSocket extends EventEmitter {
   }
 
   // no-ops — these configure TCP-level behavior that doesn't apply to MessagePort
-  setKeepAlive() { return this }
-  setNoDelay() { return this }
-  ref() { return this }
-  unref() { return this }
+  setKeepAlive() {
+    return this
+  }
+  setNoDelay() {
+    return this
+  }
+  ref() {
+    return this
+  }
+  unref() {
+    return this
+  }
   cork() {}
   uncork() {}
 
   // postgres skips connect() for custom sockets, but defensive for generic use
-  connect() { return this }
+  connect() {
+    return this
+  }
 
   // net.Socket address info stubs
-  address() { return { address: '127.0.0.1', family: 'IPv4', port: 0 } }
-  get remoteAddress() { return '127.0.0.1' }
-  get remotePort() { return 0 }
-  get remoteFamily() { return 'IPv4' }
-  get localAddress() { return '127.0.0.1' }
-  get localPort() { return 0 }
+  address() {
+    return { address: '127.0.0.1', family: 'IPv4', port: 0 }
+  }
+  get remoteAddress() {
+    return '127.0.0.1'
+  }
+  get remotePort() {
+    return 0
+  }
+  get remoteFamily() {
+    return 'IPv4'
+  }
+  get localAddress() {
+    return '127.0.0.1'
+  }
+  get localPort() {
+    return 0
+  }
 }

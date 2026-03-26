@@ -94,7 +94,10 @@ function migrateDataDir(config: ZeroLiteConfig): void {
 }
 
 /** create publication if ZERO_APP_PUBLICATIONS is set and publication doesn't exist */
-async function ensurePublication(db: { exec(sql: string): Promise<any>; query<T>(sql: string, params?: any[]): Promise<{ rows: T[] }> }): Promise<void> {
+async function ensurePublication(db: {
+  exec(sql: string): Promise<any>
+  query<T>(sql: string, params?: any[]): Promise<{ rows: T[] }>
+}): Promise<void> {
   await db.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
 
   const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
