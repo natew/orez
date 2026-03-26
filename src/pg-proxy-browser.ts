@@ -528,6 +528,7 @@ function stripResponseMessages(data: Uint8Array, stripRfq: boolean): Uint8Array 
  * readable receives Uint8Array messages from the port.
  * writable sends Uint8Array messages via the port.
  */
+let _globalWriteCount = 0
 function messagePortToDuplexWithInject(port: MessagePort): {
   duplex: DuplexStream<Uint8Array>
   rawWrite: (data: Uint8Array) => void
@@ -608,12 +609,11 @@ function messagePortToDuplex(port: MessagePort): {
     },
   })
 
-  let writeCount = 0
   const writable = new WritableStream<Uint8Array>({
     write(chunk) {
-      writeCount++
-      if (writeCount <= 3) {
-        console.debug(`[pg-proxy-duplex] write#${writeCount} len=${chunk.byteLength}`)
+      _globalWriteCount++
+      if (_globalWriteCount <= 200) {
+        console.debug(`[pg-proxy-ws-write] #${_globalWriteCount} len=${chunk.byteLength}`)
       }
       // transfer the ArrayBuffer for zero-copy
       const buf = chunk.buffer.slice(
@@ -716,28 +716,46 @@ export async function createBrowserProxy(
     // replication connections bypass pg-gateway entirely and are handled
     // with raw MessagePort communication — matching orez-node where
     // handleReplicationMessage writes directly to the TCP socket.
-    let firstMessage = true
-    const origOnMessage = port.onmessage
+    // buffer messages until the connection handler is installed
+    const buffered: MessageEvent[] = []
+    let handlerInstalled = false
+
     port.onmessage = (ev: MessageEvent) => {
-      if (!firstMessage) return // handled by pg-gateway or raw handler
-      firstMessage = false
+      if (handlerInstalled) return // shouldn't happen — handler replaced port.onmessage
+      buffered.push(ev)
+      if (buffered.length > 1) return // only process first message
 
       const data = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data
       if (!(data instanceof Uint8Array) || data.length < 8) {
-        // not a valid startup message, let pg-gateway handle it
-        port.onmessage = origOnMessage
+        handlerInstalled = true
         handleRegularConnection(port, ev)
+        // flush buffered messages to the new handler
+        for (let i = 1; i < buffered.length; i++) {
+          port.onmessage?.(buffered[i])
+        }
         return
       }
 
       // parse startup message params
-      const params = parseStartupParams(data)
-      const dbName = params.database || 'postgres'
-      const isRepl = params.replication === 'database'
-      console.debug(`[pg-proxy] connection: db=${dbName} repl=${isRepl}`)
-      // handle ALL connections with raw MessagePort (bypass pg-gateway).
-      // pg-gateway's WritableStream doesn't reliably flush in browser Web Workers.
-      handleRawConnection(port, data, params, getDbContext(dbName), isRepl)
+      try {
+        const params = parseStartupParams(data)
+        const dbName = params.database || 'postgres'
+        const isRepl = params.replication === 'database'
+        console.debug(`[pg-proxy] connection: db=${dbName} repl=${isRepl}`)
+        // all connections handled with raw MessagePort (no pg-gateway).
+        // pg-gateway uses for-await on ReadableStream which is broken
+        // in browser Web Workers (same root cause as patches #9, #18, #20).
+        handleRawConnection(port, data, params, getDbContext(dbName), isRepl)
+        handlerInstalled = true
+        // flush any messages that arrived while we were processing the startup
+        for (let i = 1; i < buffered.length; i++) {
+          if (port.onmessage) {
+            port.onmessage(buffered[i])
+          }
+        }
+      } catch (err: any) {
+        console.error(`[pg-proxy] connection error: ${err?.message || err}`)
+      }
     }
   }
 
@@ -787,33 +805,46 @@ export async function createBrowserProxy(
     // step 2: wait for Password message (p), then send AuthOk + params
     port.onmessage = (ev: MessageEvent) => {
       const data2 = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data as Uint8Array
+      console.debug(`[pg-proxy-raw-auth] ${dbName} repl=${isReplicationConnection} got msg type=0x${data2?.[0]?.toString(16)} len=${data2?.length}`)
       if (!data2 || data2[0] !== 0x70) {
-        console.warn('[pg-proxy-repl-raw] expected password message, got type=0x' + data2?.[0]?.toString(16))
+        console.warn('[pg-proxy-raw-auth] expected password, got type=0x' + data2?.[0]?.toString(16))
       }
 
-      // send AuthenticationOk (R, type=0)
-      const authOk = new Uint8Array([0x52, 0, 0, 0, 8, 0, 0, 0, 0])
-      write(authOk)
+      // send ALL auth response messages as ONE combined buffer.
+      // the postgres package reads from the socket and buffers data.
+      // sending as individual postMessage calls creates separate data events,
+      // which is fine for TCP but may cause issues with MessagePort timing.
+      const parts: Uint8Array[] = []
 
-      // send ParameterStatus messages
+      // AuthenticationOk (R, type=0)
+      parts.push(new Uint8Array([0x52, 0, 0, 0, 8, 0, 0, 0, 0]))
+
+      // ParameterStatus messages
       for (const [name, value] of SERVER_PARAMS) {
-        write(buildParameterStatus(name, value))
+        parts.push(buildParameterStatus(name, value))
       }
 
-      // send BackendKeyData (K) — fake pid + secret
+      // BackendKeyData (K)
       const bkd = new Uint8Array(13)
-      bkd[0] = 0x4b // K
+      bkd[0] = 0x4b
       new DataView(bkd.buffer).setInt32(1, 12)
-      new DataView(bkd.buffer).setInt32(5, 1) // pid
-      new DataView(bkd.buffer).setInt32(9, 0) // secret
-      write(bkd)
+      new DataView(bkd.buffer).setInt32(5, 1)
+      new DataView(bkd.buffer).setInt32(9, 0)
+      parts.push(bkd)
 
-      // send ReadyForQuery (Z) — idle
+      // ReadyForQuery (Z)
       const rfq = new Uint8Array(6)
       rfq[0] = 0x5a
       new DataView(rfq.buffer).setInt32(1, 5)
-      rfq[5] = 0x49 // I = idle
-      write(rfq)
+      rfq[5] = 0x49
+      parts.push(rfq)
+
+      // combine and send as single message
+      const totalLen = parts.reduce((s, p) => s + p.length, 0)
+      const combined = new Uint8Array(totalLen)
+      let pos = 0
+      for (const p of parts) { combined.set(p, pos); pos += p.length }
+      write(combined)
 
       console.debug('[pg-proxy-repl-raw] auth complete, ready for queries')
 
@@ -825,11 +856,41 @@ export async function createBrowserProxy(
     let extWritePending = false
 
     function installQueryHandler() {
+    // message buffer: postgres sends multiple protocol messages in one write,
+    // we need to split them and process each individually
+    let pendingBuffer: Uint8Array | null = null
+
     port.onmessage = async (ev: MessageEvent) => {
       if (connClosed) return
-      let data = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data as Uint8Array
-      if (!data || !(data instanceof Uint8Array)) return
+      const incoming = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data as Uint8Array
+      if (!incoming || !(incoming instanceof Uint8Array)) return
 
+      // append to pending buffer
+      if (pendingBuffer && pendingBuffer.length > 0) {
+        const combined = new Uint8Array(pendingBuffer.length + incoming.length)
+        combined.set(pendingBuffer)
+        combined.set(incoming, pendingBuffer.length)
+        pendingBuffer = combined
+      } else {
+        pendingBuffer = incoming
+      }
+
+      // process all complete messages in the buffer
+      while (pendingBuffer && pendingBuffer.length >= 5) {
+        const msgType: number = pendingBuffer[0]
+        const msgLen: number = new DataView(pendingBuffer.buffer, pendingBuffer.byteOffset, pendingBuffer.byteLength).getInt32(1)
+        const totalLen: number = 1 + msgLen
+        if (totalLen > pendingBuffer.length) break // incomplete message, wait for more data
+
+        // extract single message
+        const data = pendingBuffer.slice(0, totalLen)
+        pendingBuffer = pendingBuffer.length > totalLen ? pendingBuffer.slice(totalLen) : null
+
+        await processMessage(data)
+      }
+    }
+
+    async function processMessage(data: Uint8Array) {
       const msgType = data[0]
 
       // replication connection: handle replication commands
@@ -862,7 +923,8 @@ export async function createBrowserProxy(
           const response = await handleReplicationQuery(query, db)
           if (response) { write(response); return }
           data = interceptQuery(data)
-          const result = await db.execProtocolRaw(data, { syncToFs: false })
+          let result = await db.execProtocolRaw(data, { syncToFs: false })
+          result = stripResponseMessages(result, false)
           write(result)
         } finally {
           mutex.release()
@@ -871,6 +933,12 @@ export async function createBrowserProxy(
       }
 
       // regular query handling (SimpleQuery or extended protocol)
+      if (msgType === 0x50) {
+        const q = extractParseQuery(data)
+        if (q) console.debug(`[pg-proxy-raw] ${dbName}: Parse ${q.slice(0,80)}`)
+      } else if (msgType === 0x51) {
+        console.debug(`[pg-proxy-raw] ${dbName}: SimpleQuery len=${data.length}`)
+      }
 
       // extended protocol pipeline: Parse(0x50), Bind(0x42), Describe(0x44),
       // Execute(0x45), Close(0x43), Flush(0x48)
@@ -950,12 +1018,14 @@ export async function createBrowserProxy(
           try { await db.exec('ROLLBACK') } catch {}
           txState.status = 0x49; txState.owner = null
         }
-        const result = await db.execProtocolRaw(data, { syncToFs: false })
+        let result = await db.execProtocolRaw(data, { syncToFs: false })
         const rfqStatus = getReadyForQueryStatus(result)
         if (rfqStatus !== null) {
           txState.status = rfqStatus
           txState.owner = rfqStatus === 0x49 ? null : connId
         }
+        // strip notices (wal_level warnings, transaction state notices)
+        result = stripResponseMessages(result, false)
         // signal writes
         if (dbName === 'postgres' && msgType === 0x51) {
           const qn = extractQueryText(data)?.trimStart().toLowerCase()
@@ -965,7 +1035,7 @@ export async function createBrowserProxy(
       } finally {
         mutex.release()
       }
-    }
+    } // end processMessage
     } // end installQueryHandler
   }
 
