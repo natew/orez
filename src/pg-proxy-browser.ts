@@ -1019,9 +1019,12 @@ async function handleReplicationMessageBrowser(
   // the replication connection also does regular queries (e.g. pg_settings)
   // before starting the replication stream.
   if (data[0] !== 0x51) {
+    console.debug(`[pg-proxy-repl] ext protocol msg type=0x${data[0].toString(16)} len=${data.length}`)
     await mutex.acquire()
     try {
-      return await db.execProtocolRaw(data, { syncToFs: false })
+      const result = await db.execProtocolRaw(data, { syncToFs: false })
+      console.debug(`[pg-proxy-repl] ext protocol result len=${result.length}`)
+      return result
     } finally {
       mutex.release()
     }
@@ -1072,9 +1075,15 @@ async function handleReplicationMessageBrowser(
   }
 
   // handle replication queries + fallthrough to pglite, all under mutex
+  console.debug(`[pg-proxy-repl] query: ${query.slice(0, 100)}`)
+  console.debug(`[pg-proxy-repl] acquiring mutex...`)
   await mutex.acquire()
+  console.debug(`[pg-proxy-repl] mutex acquired, testing db access...`)
   try {
+    const testResult = await db.query('SELECT 1 as test')
+    console.debug(`[pg-proxy-repl] db.query works: ${JSON.stringify(testResult.rows)}`)
     const response = await handleReplicationQuery(query, db)
+    console.debug(`[pg-proxy-repl] handleReplicationQuery result: ${response ? 'bytes(' + response.length + ')' : 'null'}`)
     if (response) return response
 
     // apply query rewrites before forwarding
