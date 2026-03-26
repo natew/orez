@@ -1154,12 +1154,20 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
       return createCopyPendingQuery(queryString, pglite)
     }
 
-    // strip FK constraints from CREATE TABLE (see executeQuery for why)
-    if (/FOREIGN\s+KEY/i.test(queryString) && /CREATE\s+TABLE/i.test(queryString)) {
-      queryString = queryString.replace(
-        /,?\s*(?:CONSTRAINT\s+\w+\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+[^,(]+(?:\s*\([^)]*\))?(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))*(?:\s+DEFERRABLE[^,)]*)?/gi,
-        ''
-      )
+    // strip FK constraints (see executeQuery for why)
+    if (/FOREIGN\s+KEY/i.test(queryString)) {
+      if (/CREATE\s+TABLE/i.test(queryString)) {
+        queryString = queryString.replace(
+          /,?\s*(?:CONSTRAINT\s+\w+\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+[^,(]+(?:\s*\([^)]*\))?(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))*(?:\s+DEFERRABLE[^,)]*)?/gi,
+          ''
+        )
+      }
+      if (/ALTER\s+TABLE/i.test(queryString) && /ADD\s+CONSTRAINT/i.test(queryString)) {
+        queryString = queryString.replace(
+          /ALTER\s+TABLE\s+[^\s]+\s+ADD\s+CONSTRAINT\s+[^\s]+\s*\n?\s*FOREIGN\s+KEY\s*\([^)]*\)\s*\n?\s*REFERENCES\s+[^;]+/gi,
+          'SELECT 1'
+        )
+      }
     }
 
     const serializedParams = (params ?? []).map(serializeParam)
