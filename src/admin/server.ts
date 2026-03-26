@@ -29,29 +29,41 @@ export interface AdminServerOpts {
   httpLog?: HttpLogStore
 }
 
-function corsHeaders(): Record<string, string> {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': '*',
-  }
+const CORS_HEADERS: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': '*',
+}
+
+const JSON_HEADERS: Record<string, string> = {
+  ...CORS_HEADERS,
+  'Content-Type': 'application/json',
 }
 
 function json(res: ServerResponse, data: unknown, status = 200) {
-  const headers = { ...corsHeaders(), 'Content-Type': 'application/json' }
-  res.writeHead(status, headers)
+  res.writeHead(status, JSON_HEADERS)
   res.end(JSON.stringify(data))
 }
+
+const UI_PATHS = new Set([
+  '/',
+  '/all',
+  '/zero',
+  '/pglite',
+  '/proxy',
+  '/orez',
+  '/s3',
+  '/http',
+  '/env',
+])
 
 export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
   const { logStore, config, zeroEnv, actions, startTime } = opts
   const html = getAdminHtml()
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    const headers = corsHeaders()
-
     if (req.method === 'OPTIONS') {
-      res.writeHead(200, headers)
+      res.writeHead(200, CORS_HEADERS)
       res.end()
       return
     }
@@ -59,19 +71,8 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
     const url = new URL(req.url || '/', 'http://localhost:' + opts.port)
 
     try {
-      const uiPaths = new Set([
-        '/',
-        '/all',
-        '/zero',
-        '/pglite',
-        '/proxy',
-        '/orez',
-        '/s3',
-        '/http',
-        '/env',
-      ])
-      if (req.method === 'GET' && uiPaths.has(url.pathname)) {
-        res.writeHead(200, { ...headers, 'Content-Type': 'text/html' })
+      if (req.method === 'GET' && UI_PATHS.has(url.pathname)) {
+        res.writeHead(200, { ...CORS_HEADERS, 'Content-Type': 'text/html' })
         res.end(html)
         return
       }
@@ -174,7 +175,7 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
         return
       }
 
-      res.writeHead(404, headers)
+      res.writeHead(404, CORS_HEADERS)
       res.end('not found')
     } catch (err: any) {
       json(res, { error: err?.message ?? 'internal error' }, 500)

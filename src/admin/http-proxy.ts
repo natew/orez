@@ -23,6 +23,7 @@ export interface HttpLogStore {
 }
 
 const MAX_ENTRIES = 10_000
+const TRIM_BATCH = Math.floor(MAX_ENTRIES * 0.1)
 
 export function createHttpLogStore(): HttpLogStore {
   const entries: HttpLogEntry[] = []
@@ -31,7 +32,9 @@ export function createHttpLogStore(): HttpLogStore {
   function push(entry: Omit<HttpLogEntry, 'id'>) {
     const full: HttpLogEntry = { ...entry, id: nextId++ }
     entries.push(full)
-    if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES)
+    if (entries.length > MAX_ENTRIES + TRIM_BATCH) {
+      entries.splice(0, entries.length - MAX_ENTRIES)
+    }
   }
 
   function query(opts?: { since?: number; path?: string }) {

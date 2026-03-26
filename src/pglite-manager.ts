@@ -78,6 +78,38 @@ export interface PGliteInstances {
   cdb: PGlite
 }
 
+// shared setup extracted from the 4 factory functions below
+
+/** migrate old single-instance pgdata dir to the new pgdata-postgres layout */
+function migrateDataDir(config: ZeroLiteConfig): void {
+  const pgliteDataDir = (config.pgliteOptions as Record<string, any>)?.dataDir
+  if (!pgliteDataDir || !String(pgliteDataDir).startsWith('memory://')) {
+    const oldDataPath = resolve(config.dataDir, 'pgdata')
+    const newDataPath = resolve(config.dataDir, 'pgdata-postgres')
+    if (existsSync(oldDataPath) && !existsSync(newDataPath)) {
+      renameSync(oldDataPath, newDataPath)
+      log.debug.pglite('migrated pgdata → pgdata-postgres')
+    }
+  }
+}
+
+/** create publication if ZERO_APP_PUBLICATIONS is set and publication doesn't exist */
+async function ensurePublication(db: { exec(sql: string): Promise<any>; query<T>(sql: string, params?: any[]): Promise<{ rows: T[] }> }): Promise<void> {
+  await db.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
+
+  const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
+  if (pubName) {
+    const pubs = await db.query<{ count: string }>(
+      `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
+      [pubName]
+    )
+    if (Number(pubs.rows[0].count) === 0) {
+      const quoted = '"' + pubName.replace(/"/g, '""') + '"'
+      await db.exec(`CREATE PUBLICATION ${quoted}`)
+    }
+  }
+}
+
 // create a single pglite instance with given dataDir suffix
 async function createInstance(
   config: ZeroLiteConfig,
@@ -174,40 +206,15 @@ async function createInstance(
 export async function createPGliteInstances(
   config: ZeroLiteConfig
 ): Promise<PGliteInstances> {
-  // migrate from old single-instance layout (pgdata → pgdata-postgres)
-  const pgliteDataDir = (config.pgliteOptions as Record<string, any>)?.dataDir
-  if (!pgliteDataDir || !String(pgliteDataDir).startsWith('memory://')) {
-    const oldDataPath = resolve(config.dataDir, 'pgdata')
-    const newDataPath = resolve(config.dataDir, 'pgdata-postgres')
-    if (existsSync(oldDataPath) && !existsSync(newDataPath)) {
-      renameSync(oldDataPath, newDataPath)
-      log.debug.pglite('migrated pgdata → pgdata-postgres')
-    }
-  }
+  migrateDataDir(config)
 
-  // create all 3 instances in parallel (only postgres needs app extensions)
   const [postgres, cvr, cdb] = await Promise.all([
     createInstance(config, 'postgres', true),
     createInstance(config, 'cvr', false),
     createInstance(config, 'cdb', false),
   ])
 
-  // postgres-specific setup
-  await postgres.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
-
-  // create publication only when explicitly configured
-  const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
-  if (pubName) {
-    const pubs = await postgres.query<{ count: string }>(
-      `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
-      [pubName]
-    )
-    if (Number(pubs.rows[0].count) === 0) {
-      const quoted = '"' + pubName.replace(/"/g, '""') + '"'
-      await postgres.exec(`CREATE PUBLICATION ${quoted}`)
-    }
-  }
-
+  await ensurePublication(postgres)
   return { postgres, cvr, cdb }
 }
 
@@ -221,17 +228,9 @@ export async function createPGliteInstances(
 export async function createPGliteWorkerInstances(
   config: ZeroLiteConfig
 ): Promise<PGliteInstances> {
-  // migrate from old single-instance layout (pgdata → pgdata-postgres)
-  const pgliteDataDir = (config.pgliteOptions as Record<string, any>)?.dataDir
-  if (!pgliteDataDir || !String(pgliteDataDir).startsWith('memory://')) {
-    const oldDataPath = resolve(config.dataDir, 'pgdata')
-    const newDataPath = resolve(config.dataDir, 'pgdata-postgres')
-    if (existsSync(oldDataPath) && !existsSync(newDataPath)) {
-      renameSync(oldDataPath, newDataPath)
-      log.debug.pglite('migrated pgdata → pgdata-postgres')
-    }
-  }
+  migrateDataDir(config)
 
+  const pgliteDataDir = (config.pgliteOptions as Record<string, any>)?.dataDir
   const useMemory =
     typeof pgliteDataDir === 'string' && pgliteDataDir.startsWith('memory://')
   const {
@@ -259,32 +258,15 @@ export async function createPGliteWorkerInstances(
 
   log.pglite('starting worker threads for postgres, cvr, cdb')
 
-  // create all 3 worker proxies in parallel
   const pgProxy = new PGliteWorkerProxy(makeWorkerConfig('postgres', true))
   const cvrProxy = new PGliteWorkerProxy(makeWorkerConfig('cvr', false))
   const cdbProxy = new PGliteWorkerProxy(makeWorkerConfig('cdb', false))
 
   await Promise.all([pgProxy.waitReady, cvrProxy.waitReady, cdbProxy.waitReady])
-
   log.pglite('all worker threads ready')
 
-  // postgres-specific setup
-  await pgProxy.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
+  await ensurePublication(pgProxy)
 
-  // create publication only when explicitly configured
-  const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
-  if (pubName) {
-    const pubs = await pgProxy.query<{ count: string }>(
-      `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
-      [pubName]
-    )
-    if (Number(pubs.rows[0].count) === 0) {
-      const quoted = '"' + pubName.replace(/"/g, '""') + '"'
-      await pgProxy.exec(`CREATE PUBLICATION ${quoted}`)
-    }
-  }
-
-  // cast to PGlite — our proxy implements the same interface surface
   return {
     postgres: pgProxy as unknown as PGlite,
     cvr: cvrProxy as unknown as PGlite,
@@ -302,36 +284,11 @@ export async function createPGliteWorkerInstances(
 export async function createSinglePGliteInstance(
   config: ZeroLiteConfig
 ): Promise<PGliteInstances> {
-  // migrate from old single-instance layout (pgdata → pgdata-postgres)
-  const pgliteDataDir = (config.pgliteOptions as Record<string, any>)?.dataDir
-  if (!pgliteDataDir || !String(pgliteDataDir).startsWith('memory://')) {
-    const oldDataPath = resolve(config.dataDir, 'pgdata')
-    const newDataPath = resolve(config.dataDir, 'pgdata-postgres')
-    if (existsSync(oldDataPath) && !existsSync(newDataPath)) {
-      renameSync(oldDataPath, newDataPath)
-      log.debug.pglite('migrated pgdata → pgdata-postgres')
-    }
-  }
-
+  migrateDataDir(config)
   log.pglite('starting single shared pglite instance')
 
   const db = await createInstance(config, 'postgres', true)
-
-  // postgres-specific setup
-  await db.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
-
-  // create publication only when explicitly configured
-  const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
-  if (pubName) {
-    const pubs = await db.query<{ count: string }>(
-      `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
-      [pubName]
-    )
-    if (Number(pubs.rows[0].count) === 0) {
-      const quoted = '"' + pubName.replace(/"/g, '""') + '"'
-      await db.exec(`CREATE PUBLICATION ${quoted}`)
-    }
-  }
+  await ensurePublication(db)
 
   // same instance for all three — pg-proxy detects this and shares a mutex
   return { postgres: db, cvr: db, cdb: db }
@@ -343,17 +300,9 @@ export async function createSinglePGliteInstance(
 export async function createSinglePGliteWorkerInstance(
   config: ZeroLiteConfig
 ): Promise<PGliteInstances> {
-  // migrate from old single-instance layout (pgdata → pgdata-postgres)
-  const pgliteDataDir = (config.pgliteOptions as Record<string, any>)?.dataDir
-  if (!pgliteDataDir || !String(pgliteDataDir).startsWith('memory://')) {
-    const oldDataPath = resolve(config.dataDir, 'pgdata')
-    const newDataPath = resolve(config.dataDir, 'pgdata-postgres')
-    if (existsSync(oldDataPath) && !existsSync(newDataPath)) {
-      renameSync(oldDataPath, newDataPath)
-      log.debug.pglite('migrated pgdata → pgdata-postgres')
-    }
-  }
+  migrateDataDir(config)
 
+  const pgliteDataDir = (config.pgliteOptions as Record<string, any>)?.dataDir
   const useMemory =
     typeof pgliteDataDir === 'string' && pgliteDataDir.startsWith('memory://')
   const {
@@ -383,21 +332,7 @@ export async function createSinglePGliteWorkerInstance(
   await proxy.waitReady
   log.pglite('single worker thread ready')
 
-  // postgres-specific setup
-  await proxy.exec('CREATE EXTENSION IF NOT EXISTS plpgsql')
-
-  // create publication only when explicitly configured
-  const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
-  if (pubName) {
-    const pubs = await proxy.query<{ count: string }>(
-      `SELECT count(*) as count FROM pg_publication WHERE pubname = $1`,
-      [pubName]
-    )
-    if (Number(pubs.rows[0].count) === 0) {
-      const quoted = '"' + pubName.replace(/"/g, '""') + '"'
-      await proxy.exec(`CREATE PUBLICATION ${quoted}`)
-    }
-  }
+  await ensurePublication(proxy)
 
   const db = proxy as unknown as PGlite
   return { postgres: db, cvr: db, cdb: db }

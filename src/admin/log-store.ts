@@ -21,6 +21,8 @@ export interface LogStore {
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g
 const MAX_ENTRIES = 50_000
+// trim in batches of 10% to avoid O(n) splice on every single push
+const TRIM_BATCH = Math.floor(MAX_ENTRIES * 0.1)
 const MAX_FILE_SIZE = 5 * 1024 * 1024
 const LEVEL_PRIORITY: Record<string, number> = { error: 0, warn: 1, info: 2, debug: 3 }
 
@@ -90,7 +92,9 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
       msg: msg.replace(ANSI_RE, ''),
     }
     entries.push(entry)
-    if (entries.length > MAX_ENTRIES) {
+    // trim in batches to amortize the O(n) splice cost — instead of shifting
+    // 50k elements on every push, we shift once every ~5k pushes
+    if (entries.length > MAX_ENTRIES + TRIM_BATCH) {
       entries.splice(0, entries.length - MAX_ENTRIES)
     }
     if (writeToDisk) {
