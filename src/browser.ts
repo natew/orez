@@ -112,17 +112,19 @@ export async function startOrezBrowser(config: OrezBrowserConfig): Promise<OrezB
   console.debug('[orez-browser] pg-proxy-browser started')
 
   // step 4: start zero-cache (SINGLE_PROCESS=1)
-  // zero-cache uses the postgres shim which wraps PGlite via the proxies.
-  // the postgres shim + handler.ts provide the same replication interception
-  // as pg-proxy does in orez-node.
+  // zero-cache uses the real postgres package with a MessagePort socket
+  // that connects to pg-proxy-browser. identical to orez-node where
+  // zero-cache uses real postgres over TCP to pg-proxy.
   //
-  // install PGlite globals for the postgres shim
-  ;(globalThis as any).__orez_pglite = pgPostgres
-  ;(globalThis as any).__orez_pglite_instances = {
-    postgres: pgPostgres,
-    cvr: pgCvr,
-    cdb: pgCdb,
+  // set up the proxy connect function for postgres-browser.ts shim
+  ;(globalThis as any).__orez_proxy_connect = (port: MessagePort) => {
+    proxy.handleConnection(port)
   }
+  ;(globalThis as any).__orez_proxy_password = ''
+  ;(globalThis as any).__orez_proxy_user = 'user'
+
+  // PGlite global still needed for browser-embed's sqlite setup
+  ;(globalThis as any).__orez_pglite = pgPostgres
 
   // start zero-cache via browser-embed's runWorker
   const { startZeroCacheEmbedBrowser } = await import('./worker/browser-embed.js')

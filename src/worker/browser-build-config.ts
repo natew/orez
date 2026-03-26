@@ -42,7 +42,10 @@
 export function getBrowserAliases(): Record<string, string> {
   return {
     // -- orez shims for zero-cache dependencies --
-    postgres: 'orez/worker/shims/postgres',
+    // postgres-browser uses the real postgres package with MessagePort transport
+    // to pg-proxy-browser, matching orez-node's wire protocol architecture.
+    // falls back to old PGlite-wrapping shim if postgres-browser isn't available.
+    postgres: 'orez/worker/shims/postgres-browser',
     '@rocicorp/zero-sqlite3': 'orez/worker/shims/sqlite',
     fastify: 'orez/worker/shims/fastify',
     ws: 'orez/worker/shims/ws',
