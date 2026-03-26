@@ -966,6 +966,13 @@ async function streamChanges(
   for (const msg of messages) {
     writer.write(msg)
   }
+
+  // hook for arch instrumentation (soot-arch sq-write events)
+  const hook = (globalThis as any).__orez_on_repl_commit
+  if (hook) {
+    const tables = new Set(changes.map((c) => c.table_name))
+    hook({ changes: changes.length, tables: [...tables], txId })
+  }
 }
 
 function normalizeShardClientsRow(
