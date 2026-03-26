@@ -554,8 +554,13 @@ function messagePortToDuplex(port: MessagePort): {
     },
   })
 
+  let writeCount = 0
   const writable = new WritableStream<Uint8Array>({
     write(chunk) {
+      writeCount++
+      if (writeCount <= 3) {
+        console.debug(`[pg-proxy-duplex] write#${writeCount} len=${chunk.byteLength}`)
+      }
       // transfer the ArrayBuffer for zero-copy
       const buf = chunk.buffer.slice(
         chunk.byteOffset,
@@ -716,6 +721,7 @@ export async function createBrowserProxy(
         // but tools like pg_restore also need encoding, datestyle, etc.
         // write directly to the port since pg-gateway owns the writable stream
         onAuthenticated() {
+          console.debug(`[pg-proxy-conn] authenticated db=${dbName}`)
           for (const [name, value] of SERVER_PARAMS) {
             rawWrite(buildParameterStatus(name, value))
           }
@@ -733,7 +739,11 @@ export async function createBrowserProxy(
         },
 
         async onMessage(data, state) {
-          if (!state.isAuthenticated) return
+          if (!state.isAuthenticated) {
+            console.debug(`[pg-proxy-conn] msg before auth, type=0x${data[0].toString(16)}`)
+            return
+          }
+          console.debug(`[pg-proxy-conn] msg db=${dbName} type=0x${data[0].toString(16)} len=${data.length}`)
 
           // handle replication connections (always go to postgres instance)
           if (isReplicationConnection) {
@@ -1005,7 +1015,17 @@ async function handleReplicationMessageBrowser(
   mutex: Mutex,
   connection: PostgresConnection
 ): Promise<Uint8Array | undefined> {
-  if (data[0] !== 0x51) return undefined
+  // for non-SimpleQuery messages (extended protocol), execute against PGlite directly.
+  // the replication connection also does regular queries (e.g. pg_settings)
+  // before starting the replication stream.
+  if (data[0] !== 0x51) {
+    await mutex.acquire()
+    try {
+      return await db.execProtocolRaw(data, { syncToFs: false })
+    } finally {
+      mutex.release()
+    }
+  }
 
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
   const len = view.getInt32(1)
