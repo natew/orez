@@ -24,7 +24,7 @@
 // NOTE: this file is meant to be bundled with PGlite as external
 // the consumer provides PGlite via importScripts or ESM import
 
-declare const self: DedicatedWorkerGlobalScope
+declare const self: any
 
 const listeners = new Map<number, () => Promise<void>>()
 let db: any // PGlite instance — type depends on how it's loaded

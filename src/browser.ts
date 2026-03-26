@@ -147,7 +147,7 @@ export async function startOrezBrowser(config: OrezBrowserConfig): Promise<OrezB
     },
 
     handleWebSocket(ws: any, url = '/', headers?: Record<string, string>) {
-      zc.handleWebSocket(ws, url, headers)
+      zc.handleWebSocket(ws, url)
     },
 
     async handleHttp(request: { method: string; url: string; headers?: Record<string, string>; body?: string | null }) {
