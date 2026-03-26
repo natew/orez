@@ -47,37 +47,55 @@ interface WsCompatible {
  * listener — which would silently drop messages.
  */
 export function messagePortToWs(port: MessagePort): WsCompatible {
-  const listeners = new Map<string, Set<(event: any) => void>>()
+  // separate listener sets for on() vs addEventListener() to match real ws behavior.
+  // in the ws package, on() is EventEmitter-style and addEventListener() is DOM-style.
+  // createWebSocketStream uses ws.on('message') exclusively for inbound data.
+  // streamOut uses ws.addEventListener('message') for ack handling.
+  // if they share the same set, ack messages reach both handlers and
+  // handleMessage tries to parse acks as protocol messages, closing the connection.
+  const onListeners = new Map<string, Set<(event: any) => void>>()
+  const domListeners = new Map<string, Set<(event: any) => void>>()
   let closed = false
 
-  // buffer messages until a 'message' listener is registered
+  // buffer messages until a 'message' listener is registered (either kind)
   const pendingMessages: any[] = []
 
-  function addListener(type: string, handler: (event: any) => void) {
-    if (!listeners.has(type)) listeners.set(type, new Set())
-    listeners.get(type)!.add(handler)
-
-    // flush buffered messages when first 'message' listener is added
+  function addOnListener(type: string, handler: (event: any) => void) {
+    if (!onListeners.has(type)) onListeners.set(type, new Set())
+    onListeners.get(type)!.add(handler)
     if (type === 'message' && pendingMessages.length > 0) {
       const queued = pendingMessages.splice(0)
       for (const event of queued) handler(event)
     }
   }
 
-  function removeListener(type: string, handler: (event: any) => void) {
-    listeners.get(type)?.delete(handler)
+  function removeOnListener(type: string, handler: (event: any) => void) {
+    onListeners.get(type)?.delete(handler)
+  }
+
+  function addDomListener(type: string, handler: (event: any) => void) {
+    if (!domListeners.has(type)) domListeners.set(type, new Set())
+    domListeners.get(type)!.add(handler)
+    if (type === 'message' && pendingMessages.length > 0) {
+      const queued = pendingMessages.splice(0)
+      for (const event of queued) handler(event)
+    }
+  }
+
+  function removeDomListener(type: string, handler: (event: any) => void) {
+    domListeners.get(type)?.delete(handler)
   }
 
   function emit(type: string, event: any) {
-    const handlers = listeners.get(type)
-    if (!handlers || handlers.size === 0) {
-      // no listeners yet — buffer message events
-      if (type === 'message') {
-        pendingMessages.push(event)
-      }
+    const onHandlers = onListeners.get(type)
+    const domHandlers = domListeners.get(type)
+    const hasAny = (onHandlers && onHandlers.size > 0) || (domHandlers && domHandlers.size > 0)
+    if (!hasAny) {
+      if (type === 'message') pendingMessages.push(event)
       return
     }
-    for (const h of handlers) h(event)
+    if (onHandlers) for (const h of onHandlers) h(event)
+    if (domHandlers) for (const h of domHandlers) h(event)
   }
 
   // forward port messages → ws 'message' events
@@ -102,7 +120,6 @@ export function messagePortToWs(port: MessagePort): WsCompatible {
 
     send(data: string | ArrayBuffer | ArrayBufferView) {
       if (closed) return
-      // MessagePort uses postMessage (structured clone)
       port.postMessage(data)
     },
 
@@ -113,10 +130,10 @@ export function messagePortToWs(port: MessagePort): WsCompatible {
       emit('close', { code: code ?? 1000, reason: '', wasClean: true })
     },
 
-    addEventListener: addListener,
-    removeEventListener: removeListener,
-    on: addListener,
-    off: removeListener,
+    addEventListener: addDomListener,
+    removeEventListener: removeDomListener,
+    on: addOnListener,
+    off: removeOnListener,
   }
 }
 
