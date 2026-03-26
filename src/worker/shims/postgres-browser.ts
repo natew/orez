@@ -40,10 +40,10 @@ function browserPostgres(urlOrOptions?: any, options?: any) {
   opts.ssl = false
   opts.password = (globalThis as any).__orez_proxy_password || ''
   opts.username = (globalThis as any).__orez_proxy_user || 'user'
-  // disable auto-subscribe — the postgres package creates a replication
-  // connection internally for logical decoding. zero-cache manages its
-  // own replication via stream.js.
+  // disable auto-subscribe
   if (opts.no_subscribe === undefined) opts.no_subscribe = true
+  // limit pool size — too many concurrent connections overwhelm the MessagePort proxy
+  if (opts.max === undefined || opts.max > 1) opts.max = 1
 
   console.debug(`[postgres-browser] creating client db=${opts.database} repl=${!!opts.connection?.replication} fetch_types=${opts.fetch_types} max=${opts.max} keys=${Object.keys(opts).sort().join(',')}`)
   const client = postgres(opts)

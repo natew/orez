@@ -932,7 +932,7 @@ export async function createBrowserProxy(
           if (response) { write(response); return }
           data = interceptQuery(data)
           let result = await db.execProtocolRaw(data, { syncToFs: false })
-          result = stripResponseMessages(result, false)
+          // result = stripResponseMessages(result, false) // disabled for debugging
           write(result)
         } finally {
           mutex.release()
@@ -1005,7 +1005,7 @@ export async function createBrowserProxy(
           }
         } else {
           // strip ReadyForQuery from non-Sync messages
-          result = stripResponseMessages(result, true)
+          // result = stripResponseMessages(result, true) // disabled for debugging
         }
 
         write(result)
@@ -1037,7 +1037,7 @@ export async function createBrowserProxy(
           txState.owner = rfqStatus === 0x49 ? null : connId
         }
         // strip notices (wal_level warnings, transaction state notices)
-        result = stripResponseMessages(result, false)
+        // result = stripResponseMessages(result, false) // disabled for debugging
         // signal writes
         if (dbName === 'postgres' && msgType === 0x51) {
           const qn = extractQueryText(data)?.trimStart().toLowerCase()
@@ -1249,7 +1249,7 @@ export async function createBrowserProxy(
               }
             } else {
               // strip ReadyForQuery from non-Sync pipeline messages
-              result = stripResponseMessages(result, true)
+              // result = stripResponseMessages(result, true) // disabled for debugging
             }
 
             if (proxyStats.count % 200 === 0) {
