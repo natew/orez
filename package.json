@@ -78,6 +78,26 @@
       "import": "./dist/worker/browser-embed.js",
       "default": "./dist/worker/browser-embed.js"
     },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js",
+      "default": "./dist/browser.js"
+    },
+    "./pg-proxy-browser": {
+      "types": "./dist/pg-proxy-browser.d.ts",
+      "import": "./dist/pg-proxy-browser.js",
+      "default": "./dist/pg-proxy-browser.js"
+    },
+    "./pglite-web-proxy": {
+      "types": "./dist/pglite-web-proxy.d.ts",
+      "import": "./dist/pglite-web-proxy.js",
+      "default": "./dist/pglite-web-proxy.js"
+    },
+    "./pglite-web-worker": {
+      "types": "./dist/pglite-web-worker.d.ts",
+      "import": "./dist/pglite-web-worker.js",
+      "default": "./dist/pglite-web-worker.js"
+    },
     "./worker/browser-build-config": {
       "types": "./dist/worker/browser-build-config.d.ts",
       "import": "./dist/worker/browser-build-config.js",
