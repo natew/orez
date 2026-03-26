@@ -19,6 +19,7 @@
  * wire protocol to pg-proxy over TCP.
  */
 
+import { Buffer } from 'buffer'
 import { EventEmitter } from 'events'
 
 /**
@@ -56,19 +57,14 @@ class MessagePortSocket extends EventEmitter {
     // give server port to pg-proxy-browser
     this.connectFn(this.channel.port2)
 
-    // forward incoming data from proxy
+    // forward incoming data from proxy — wrap as Buffer (postgres package needs readUInt32BE etc.)
     this.port.onmessage = (ev: MessageEvent) => {
       if (this._destroyed) return
-      let data: Buffer | Uint8Array
       if (ev.data instanceof ArrayBuffer) {
-        data = new Uint8Array(ev.data)
+        this.emit('data', Buffer.from(new Uint8Array(ev.data)))
       } else if (ev.data instanceof Uint8Array) {
-        data = ev.data
-      } else {
-        return
+        this.emit('data', Buffer.from(ev.data))
       }
-      // postgres package expects Buffer
-      this.emit('data', data)
     }
 
     this.port.start()
@@ -94,12 +90,9 @@ class MessagePortSocket extends EventEmitter {
       return false
     }
 
-    let bytes: Uint8Array
-    if (typeof data === 'string') {
-      bytes = new TextEncoder().encode(data)
-    } else {
-      bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
-    }
+    const bytes: Uint8Array = typeof data === 'string'
+      ? Buffer.from(data)
+      : data instanceof Uint8Array ? data : Buffer.from(data)
 
     // transfer ArrayBuffer for zero-copy
     const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
