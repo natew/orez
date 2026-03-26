@@ -58,12 +58,21 @@ class MessagePortSocket extends EventEmitter {
     this.connectFn(this.channel.port2)
 
     // forward incoming data from proxy — wrap as Buffer (postgres package needs readUInt32BE etc.)
+    let recvCount = 0
     this.port.onmessage = (ev: MessageEvent) => {
       if (this._destroyed) return
+      recvCount++
+      let buf: Buffer | null = null
       if (ev.data instanceof ArrayBuffer) {
-        this.emit('data', Buffer.from(new Uint8Array(ev.data)))
+        buf = Buffer.from(new Uint8Array(ev.data))
       } else if (ev.data instanceof Uint8Array) {
-        this.emit('data', Buffer.from(ev.data))
+        buf = Buffer.from(ev.data)
+      }
+      if (buf) {
+        if (recvCount <= 5) {
+          console.debug(`[pg-socket] recv#${recvCount} len=${buf.length} hasReadUInt32BE=${typeof buf.readUInt32BE}`)
+        }
+        this.emit('data', buf)
       }
     }
 

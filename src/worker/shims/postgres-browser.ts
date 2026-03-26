@@ -41,7 +41,12 @@ function browserPostgres(urlOrOptions?: any, options?: any) {
   opts.password = (globalThis as any).__orez_proxy_password || ''
   opts.username = (globalThis as any).__orez_proxy_user || 'user'
 
-  return postgres(opts)
+  const client = postgres(opts)
+  // log connection errors for debugging
+  if (opts.connection?.replication) {
+    console.debug('[postgres-browser] created replication client', opts.database)
+  }
+  return client
 }
 
 Object.assign(browserPostgres, postgres)

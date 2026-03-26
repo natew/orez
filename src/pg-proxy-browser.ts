@@ -1015,9 +1015,9 @@ async function handleReplicationMessageBrowser(
   mutex: Mutex,
   connection: PostgresConnection
 ): Promise<Uint8Array | undefined> {
+  console.debug(`[pg-proxy-repl] ENTRY type=0x${data[0].toString(16)} len=${data.length}`)
+
   // for non-SimpleQuery messages (extended protocol), execute against PGlite directly.
-  // the replication connection also does regular queries (e.g. pg_settings)
-  // before starting the replication stream.
   if (data[0] !== 0x51) {
     console.debug(`[pg-proxy-repl] ext protocol msg type=0x${data[0].toString(16)} len=${data.length}`)
     await mutex.acquire()
