@@ -701,15 +701,22 @@ async function executeQuery(
     if (intercepted) return intercepted
   }
 
-  // strip FK constraints from CREATE TABLE in browser mode.
-  // without a wrapping transaction, DEFERRABLE can't defer across separate
-  // INSERT statements — zero-cache inserts desires before queries exist.
-  // single-connection browser dev preview doesn't need FK enforcement.
-  if (/FOREIGN\s+KEY/i.test(text) && /CREATE\s+TABLE/i.test(text)) {
-    text = text.replace(
-      /,?\s*(?:CONSTRAINT\s+\w+\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+[^,(]+(?:\s*\([^)]*\))?(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))*(?:\s+DEFERRABLE[^,)]*)?/gi,
-      ''
-    )
+  // strip FK constraints — PGlite doesn't support cross-schema FKs,
+  // and browser single-process mode doesn't need FK enforcement.
+  // covers CREATE TABLE inline FKs and ALTER TABLE ADD CONSTRAINT FKs.
+  if (/FOREIGN\s+KEY/i.test(text)) {
+    if (/CREATE\s+TABLE/i.test(text)) {
+      text = text.replace(
+        /,?\s*(?:CONSTRAINT\s+\w+\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+[^,(]+(?:\s*\([^)]*\))?(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))*(?:\s+DEFERRABLE[^,)]*)?/gi,
+        ''
+      )
+    }
+    if (/ALTER\s+TABLE/i.test(text) && /ADD\s+CONSTRAINT/i.test(text)) {
+      text = text.replace(
+        /ALTER\s+TABLE\s+[^\s]+\s+ADD\s+CONSTRAINT\s+[^\s]+\s*\n?\s*FOREIGN\s+KEY\s*\([^)]*\)\s*\n?\s*REFERENCES\s+[^;]+/gi,
+        'SELECT 1'
+      )
+    }
   }
 
   const isMulti = hasMultipleStatements(text)
