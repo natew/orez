@@ -532,13 +532,20 @@ function messagePortToDuplex(port: MessagePort): {
   duplex: DuplexStream<Uint8Array>
   rawWrite: (data: Uint8Array) => void
 } {
+  let msgCount = 0
   const readable = new ReadableStream<Uint8Array>({
     start(controller) {
       port.onmessage = (ev: MessageEvent) => {
+        msgCount++
+        if (msgCount <= 3) {
+          console.debug(`[pg-proxy-duplex] msg#${msgCount} type=${typeof ev.data} isAB=${ev.data instanceof ArrayBuffer} isU8=${ev.data instanceof Uint8Array} len=${ev.data?.byteLength ?? ev.data?.length ?? '?'}`)
+        }
         if (ev.data instanceof ArrayBuffer) {
           controller.enqueue(new Uint8Array(ev.data))
         } else if (ev.data instanceof Uint8Array) {
           controller.enqueue(ev.data)
+        } else {
+          console.warn(`[pg-proxy-duplex] unexpected data type:`, typeof ev.data, ev.data)
         }
       }
     },
@@ -644,6 +651,7 @@ export async function createBrowserProxy(
       return
     }
 
+    port.start()
     const { duplex, rawWrite } = messagePortToDuplex(port)
 
     // opaque identity token for this connection (used for tx state ownership)
@@ -719,9 +727,7 @@ export async function createBrowserProxy(
             isReplicationConnection = true
           }
           dbName = params?.database || 'postgres'
-          log.debug.proxy(
-            `connection: db=${dbName} user=${params?.user} replication=${params?.replication || 'none'}`
-          )
+          console.debug(`[pg-proxy-conn] startup: db=${dbName} user=${params?.user} repl=${params?.replication || 'none'}`)
           const { db } = getDbContext(dbName)
           await db.waitReady
         },
