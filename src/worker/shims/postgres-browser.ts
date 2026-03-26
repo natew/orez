@@ -8,8 +8,10 @@
  * setup: set globalThis.__orez_proxy_connect before importing.
  */
 
-// import the REAL postgres package — the bundler must NOT alias this to ourselves.
-// the build script adds 'postgres-real' → real postgres package resolution.
+// import the REAL postgres package — the bundler aliases 'postgres-real' to the
+// actual postgres npm package, avoiding circular resolution since 'postgres'
+// is aliased to this file.
+// @ts-expect-error — resolved by bundler alias
 import postgres from 'postgres-real'
 import { createSocketFactory } from './postgres-socket.js'
 
