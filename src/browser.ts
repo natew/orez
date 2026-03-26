@@ -102,15 +102,39 @@ export async function startOrezBrowser(config: OrezBrowserConfig): Promise<OrezB
   } catch {}
 
   // step 3: start pg-proxy-browser
-  // TODO: import { createBrowserProxy } from './pg-proxy-browser.js'
-  // const proxy = await createBrowserProxy(
-  //   { postgres: pgPostgres, cvr: pgCvr, cdb: pgCdb },
-  //   { pgPassword: '', pgUser: 'user' }
-  // )
+  // the proxy handles wire protocol, replication, mutexes — like orez-node's pg-proxy.
+  // zero-cache's postgres shim routes queries through this proxy.
+  const { createBrowserProxy } = await import('./pg-proxy-browser.js')
+  const proxy = await createBrowserProxy(
+    { postgres: pgPostgres as unknown as PGlite, cvr: pgCvr as unknown as PGlite, cdb: pgCdb as unknown as PGlite },
+    { pgPassword: '', pgUser: 'user' }
+  )
+  console.debug('[orez-browser] pg-proxy-browser started')
 
   // step 4: start zero-cache (SINGLE_PROCESS=1)
-  // TODO: zero-cache connects to pg-proxy-browser via wire protocol
-  // uses browser-embed.ts's runWorker pattern but with pg-proxy instead of postgres shim
+  // zero-cache uses the postgres shim which wraps PGlite via the proxies.
+  // the postgres shim + handler.ts provide the same replication interception
+  // as pg-proxy does in orez-node.
+  //
+  // install PGlite globals for the postgres shim
+  ;(globalThis as any).__orez_pglite = pgPostgres
+  ;(globalThis as any).__orez_pglite_instances = {
+    postgres: pgPostgres,
+    cvr: pgCvr,
+    cdb: pgCdb,
+  }
+
+  // start zero-cache via browser-embed's runWorker
+  const { startZeroCacheEmbedBrowser } = await import('./worker/browser-embed.js')
+  const zc = await startZeroCacheEmbedBrowser({
+    pglite: pgPostgres as unknown as PGlite,
+    appId,
+    publications: config.publications,
+    env: {
+      ZERO_LOG_LEVEL: config.logLevel || 'info',
+    },
+  })
+  console.debug('[orez-browser] zero-cache started')
 
   // step 5: expose API
   const { signalReplicationChange } = await import('./replication/handler.js')
@@ -122,17 +146,17 @@ export async function startOrezBrowser(config: OrezBrowserConfig): Promise<OrezB
       signalReplicationChange()
     },
 
-    handleWebSocket(_ws, _url, _headers) {
-      // TODO: feed WS into zero-cache's fastify handoff
-      console.warn('[orez-browser] handleWebSocket not yet implemented')
+    handleWebSocket(ws: any, url = '/', headers?: Record<string, string>) {
+      zc.handleWebSocket(ws, url, headers)
     },
 
-    async handleHttp(_request) {
-      // TODO: fastify.inject()
-      return { status: 503, headers: {}, body: 'not yet implemented' }
+    async handleHttp(request: { method: string; url: string; headers?: Record<string, string>; body?: string | null }) {
+      return zc.handleHttp(request)
     },
 
     async stop() {
+      await zc.stop()
+      proxy.close()
       resetReplicationState()
       await Promise.all([
         pgPostgres.close(),
