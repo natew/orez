@@ -383,11 +383,15 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     }
 
     // start http proxy in front of zero-cache when admin is enabled
+    // also exposes read-only /__orez/api/logs and /__orez/api/status
     if (httpLog) {
       httpProxyServer = await startHttpProxy({
         listenPort: config.zeroPort,
         targetPort: zeroInternalPort,
         httpLog,
+        logStore,
+        config,
+        startTime: Date.now(),
       })
       log.debug.orez(`http proxy listening on ${config.zeroPort}`)
     }

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, appendFile, statSync, renameSync } from 'node:fs'
+import { mkdirSync, appendFile, stat, rename } from 'node:fs'
 import { join } from 'node:path'
 
 export interface LogEntry {
@@ -24,7 +24,10 @@ const MAX_ENTRIES = 50_000
 // trim in batches of 10% to avoid O(n) splice on every single push
 const TRIM_BATCH = Math.floor(MAX_ENTRIES * 0.1)
 const MAX_FILE_SIZE = 5 * 1024 * 1024
+const MAX_QUERY_LIMIT = 5000
 const LEVEL_PRIORITY: Record<string, number> = { error: 0, warn: 1, info: 2, debug: 3 }
+const VALID_SOURCES = new Set(['orez', 'zero', 'pglite', 'proxy', 's3'])
+const VALID_LEVELS = new Set(['error', 'warn', 'info', 'debug'])
 
 export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
   const entries: LogEntry[] = []
@@ -38,9 +41,11 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
 
   // track file sizes to rotate per-source
   const fileSizes: Record<string, number> = {}
+  let rotating = false
 
   // buffered async disk writes — avoids appendFileSync blocking the event loop
   const writeBuffers: Record<string, string[]> = {}
+  const MAX_BUFFER_SIZE = 10_000
   const FLUSH_INTERVAL_MS = 2000
 
   function getLogFile(source: string): string {
@@ -48,17 +53,24 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
   }
 
   function rotateIfNeeded(source: string) {
-    if (!writeToDisk) return
-    try {
-      const logFile = getLogFile(source)
-      if (!existsSync(logFile)) return
-      const stat = statSync(logFile)
-      fileSizes[source] = stat.size
-      if (stat.size > MAX_FILE_SIZE) {
-        renameSync(logFile, logFile + '.1')
-        fileSizes[source] = 0
+    if (!writeToDisk || rotating) return
+    rotating = true
+    const logFile = getLogFile(source)
+    stat(logFile, (err, stats) => {
+      if (err) {
+        rotating = false
+        return
       }
-    } catch {}
+      fileSizes[source] = stats.size
+      if (stats.size > MAX_FILE_SIZE) {
+        rename(logFile, logFile + '.1', () => {
+          fileSizes[source] = 0
+          rotating = false
+        })
+      } else {
+        rotating = false
+      }
+    })
   }
 
   function flushBuffers() {
@@ -67,14 +79,14 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
       if (buf.length === 0) continue
       const data = buf.join('')
       buf.length = 0
-      try {
-        const logFile = getLogFile(source)
-        appendFile(logFile, data, () => {})
+      const logFile = getLogFile(source)
+      appendFile(logFile, data, (err) => {
+        if (err) return
         fileSizes[source] = (fileSizes[source] || 0) + data.length
         if (fileSizes[source] > MAX_FILE_SIZE) {
           rotateIfNeeded(source)
         }
-      } catch {}
+      })
     }
   }
 
@@ -101,7 +113,12 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
       const ts = new Date(entry.ts).toISOString()
       const line = `[${ts}] [${level}] ${entry.msg}\n`
       if (!writeBuffers[source]) writeBuffers[source] = []
-      writeBuffers[source].push(line)
+      const buf = writeBuffers[source]
+      buf.push(line)
+      // cap buffer size to prevent unbounded growth if flushBuffers is delayed
+      if (buf.length > MAX_BUFFER_SIZE) {
+        buf.splice(0, buf.length - MAX_BUFFER_SIZE)
+      }
     }
   }
 
@@ -112,7 +129,8 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
     limit?: number
   }) {
     let result = entries
-    const limit = opts?.limit ?? 1000
+    // clamp limit to prevent oversized responses
+    const limit = Math.min(Math.max(opts?.limit ?? 1000, 1), MAX_QUERY_LIMIT)
 
     if (opts?.since) {
       const since = opts.since
@@ -126,12 +144,12 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
       result = result.slice(lo)
     }
 
-    if (opts?.source) {
+    if (opts?.source && VALID_SOURCES.has(opts.source)) {
       const source = opts.source
       result = result.filter((e) => e.source === source)
     }
 
-    if (opts?.level) {
+    if (opts?.level && VALID_LEVELS.has(opts.level)) {
       const maxPriority = LEVEL_PRIORITY[opts.level] ?? 3
       result = result.filter((e) => (LEVEL_PRIORITY[e.level] ?? 3) <= maxPriority)
     }
