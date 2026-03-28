@@ -42,14 +42,26 @@ self.onmessage = async (ev: MessageEvent) => {
         db = new PGlite({
           dataDir: msg.dataDir || 'idb://orez-pglite',
           relaxedDurability: true,
+          initialMemory: 32 * 1024 * 1024,
+          startParams: [
+            '--single', '-F', '-O', '-j',
+            '-c', 'search_path=public',
+            '-c', 'exit_on_error=false',
+            '-c', 'log_checkpoints=false',
+            '-c', 'shared_buffers=4MB',
+            '-c', 'wal_buffers=1MB',
+          ],
           ...(msg.pgliteOptions || {}),
           // extensions loaded by consumer if needed
         })
         await db.waitReady
 
-        // tune for throughput
+        // tune postgres internals — modest values for embedded use
         await db.exec(`
-          SET work_mem = '16MB';
+          SET work_mem = '4MB';
+          SET maintenance_work_mem = '16MB';
+          SET effective_cache_size = '64MB';
+          SET random_page_cost = 1.1;
           SET jit = off;
         `)
 

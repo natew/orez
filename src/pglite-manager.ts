@@ -113,6 +113,19 @@ async function ensurePublication(db: {
   }
 }
 
+// pglite startParams replaces defaults, so always include required flags
+const PGLITE_BASE_FLAGS = ['--single', '-F', '-O', '-j', '-c', 'search_path=public', '-c', 'exit_on_error=false', '-c', 'log_checkpoints=false']
+
+// cvr/cdb are just zero-cache bookkeeping — minimal fixed memory
+const ZERO_START_PARAMS = [
+  ...PGLITE_BASE_FLAGS,
+  '-c', 'shared_buffers=128kB',
+  '-c', 'wal_buffers=64kB',
+  '-c', 'work_mem=64kB',
+  '-c', 'maintenance_work_mem=1MB',
+  '-c', 'temp_buffers=800kB',
+]
+
 // create a single pglite instance with given dataDir suffix
 async function createInstance(
   config: ZeroLiteConfig,
@@ -138,42 +151,53 @@ async function createInstance(
 
   log.debug.pglite(`creating ${name} instance at ${dataPath}`)
 
+  const isMain = withExtensions
+
   try {
     const db = new PGlite({
       dataDir: dataPath,
       debug: config.logLevel === 'debug' ? 1 : 0,
       relaxedDurability: true,
-      ...userOpts,
-      extensions: withExtensions
-        ? userOpts.extensions || {
-            vector,
-            pg_trgm,
-            pgcrypto,
-            uuid_ossp,
-            citext,
-            hstore,
-            ltree,
-            fuzzystrmatch,
-            btree_gin,
-            btree_gist,
-            cube,
-            earthdistance,
-          }
-        : {},
+      initialMemory: isMain ? 32 * 1024 * 1024 : 16 * 1024 * 1024,
+      ...(isMain ? {} : { startParams: ZERO_START_PARAMS }),
+      // main instance: user overrides via pgliteOptions, zero instances: fixed
+      ...(isMain ? {
+        startParams: [
+          ...PGLITE_BASE_FLAGS,
+          '-c', 'shared_buffers=4MB',
+          '-c', 'wal_buffers=1MB',
+        ],
+        ...userOpts,
+        extensions: userOpts.extensions || {
+          vector,
+          pg_trgm,
+          pgcrypto,
+          uuid_ossp,
+          citext,
+          hstore,
+          ltree,
+          fuzzystrmatch,
+          btree_gin,
+          btree_gist,
+          cube,
+          earthdistance,
+        },
+      } : { extensions: {} }),
     })
 
     await db.waitReady
 
-    // tune postgres internals for throughput over durability.
-    // pglite defaults are conservative for embedded use — these settings
-    // match what a real postgres would use for a dev/test workload.
-    await db.exec(`
-      SET work_mem = '64MB';
-      SET maintenance_work_mem = '128MB';
-      SET effective_cache_size = '512MB';
-      SET random_page_cost = 1.1;
-      SET jit = off;
-    `)
+    if (isMain) {
+      await db.exec(`
+        SET work_mem = '4MB';
+        SET maintenance_work_mem = '16MB';
+        SET effective_cache_size = '64MB';
+        SET random_page_cost = 1.1;
+        SET jit = off;
+      `)
+    } else {
+      await db.exec(`SET jit = off;`)
+    }
 
     log.debug.pglite(`${name} ready`)
     return db

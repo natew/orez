@@ -38,42 +38,64 @@ const listeners = new Map<number, () => Promise<void>>()
 
 let db: PGlite
 
+const PGLITE_BASE_FLAGS = ['--single', '-F', '-O', '-j', '-c', 'search_path=public', '-c', 'exit_on_error=false', '-c', 'log_checkpoints=false']
+
+const ZERO_START_PARAMS = [
+  ...PGLITE_BASE_FLAGS,
+  '-c', 'shared_buffers=128kB',
+  '-c', 'wal_buffers=64kB',
+  '-c', 'work_mem=64kB',
+  '-c', 'maintenance_work_mem=1MB',
+  '-c', 'temp_buffers=800kB',
+]
+
 async function init() {
   const { dataDir: _userDataDir, debug: _dbg, ...userOpts } = config.pgliteOptions || {}
+  const isMain = config.withExtensions
 
   db = new PGlite({
     dataDir: config.dataDir,
     debug: config.debug,
     relaxedDurability: true,
-    ...userOpts,
-    extensions: config.withExtensions
-      ? userOpts.extensions || {
-          vector,
-          pg_trgm,
-          pgcrypto,
-          uuid_ossp,
-          citext,
-          hstore,
-          ltree,
-          fuzzystrmatch,
-          btree_gin,
-          btree_gist,
-          cube,
-          earthdistance,
-        }
-      : {},
+    initialMemory: isMain ? 32 * 1024 * 1024 : 16 * 1024 * 1024,
+    ...(isMain ? {} : { startParams: ZERO_START_PARAMS }),
+    ...(isMain ? {
+      startParams: [
+        ...PGLITE_BASE_FLAGS,
+        '-c', 'shared_buffers=4MB',
+        '-c', 'wal_buffers=1MB',
+      ],
+      ...userOpts,
+      extensions: userOpts.extensions || {
+        vector,
+        pg_trgm,
+        pgcrypto,
+        uuid_ossp,
+        citext,
+        hstore,
+        ltree,
+        fuzzystrmatch,
+        btree_gin,
+        btree_gist,
+        cube,
+        earthdistance,
+      },
+    } : { extensions: {} }),
   } as any)
 
   await db.waitReady
 
-  // tune postgres internals
-  await db.exec(`
-    SET work_mem = '64MB';
-    SET maintenance_work_mem = '128MB';
-    SET effective_cache_size = '512MB';
-    SET random_page_cost = 1.1;
-    SET jit = off;
-  `)
+  if (isMain) {
+    await db.exec(`
+      SET work_mem = '4MB';
+      SET maintenance_work_mem = '16MB';
+      SET effective_cache_size = '64MB';
+      SET random_page_cost = 1.1;
+      SET jit = off;
+    `)
+  } else {
+    await db.exec(`SET jit = off;`)
+  }
 
   port.postMessage({ type: 'ready' })
 }
