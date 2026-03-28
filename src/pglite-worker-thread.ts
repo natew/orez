@@ -38,15 +38,31 @@ const listeners = new Map<number, () => Promise<void>>()
 
 let db: PGlite
 
-const PGLITE_BASE_FLAGS = ['--single', '-F', '-O', '-j', '-c', 'search_path=public', '-c', 'exit_on_error=false', '-c', 'log_checkpoints=false']
+const PGLITE_BASE_FLAGS = [
+  '--single',
+  '-F',
+  '-O',
+  '-j',
+  '-c',
+  'search_path=public',
+  '-c',
+  'exit_on_error=false',
+  '-c',
+  'log_checkpoints=false',
+]
 
 const ZERO_START_PARAMS = [
   ...PGLITE_BASE_FLAGS,
-  '-c', 'shared_buffers=128kB',
-  '-c', 'wal_buffers=64kB',
-  '-c', 'work_mem=64kB',
-  '-c', 'maintenance_work_mem=1MB',
-  '-c', 'temp_buffers=800kB',
+  '-c',
+  'shared_buffers=128kB',
+  '-c',
+  'wal_buffers=64kB',
+  '-c',
+  'work_mem=64kB',
+  '-c',
+  'maintenance_work_mem=1MB',
+  '-c',
+  'temp_buffers=800kB',
 ]
 
 async function init() {
@@ -59,28 +75,32 @@ async function init() {
     relaxedDurability: true,
     initialMemory: isMain ? 32 * 1024 * 1024 : 16 * 1024 * 1024,
     ...(isMain ? {} : { startParams: ZERO_START_PARAMS }),
-    ...(isMain ? {
-      startParams: [
-        ...PGLITE_BASE_FLAGS,
-        '-c', 'shared_buffers=4MB',
-        '-c', 'wal_buffers=1MB',
-      ],
-      ...userOpts,
-      extensions: userOpts.extensions || {
-        vector,
-        pg_trgm,
-        pgcrypto,
-        uuid_ossp,
-        citext,
-        hstore,
-        ltree,
-        fuzzystrmatch,
-        btree_gin,
-        btree_gist,
-        cube,
-        earthdistance,
-      },
-    } : { extensions: {} }),
+    ...(isMain
+      ? {
+          startParams: [
+            ...PGLITE_BASE_FLAGS,
+            '-c',
+            'shared_buffers=4MB',
+            '-c',
+            'wal_buffers=1MB',
+          ],
+          ...userOpts,
+          extensions: userOpts.extensions || {
+            vector,
+            pg_trgm,
+            pgcrypto,
+            uuid_ossp,
+            citext,
+            hstore,
+            ltree,
+            fuzzystrmatch,
+            btree_gin,
+            btree_gist,
+            cube,
+            earthdistance,
+          },
+        }
+      : { extensions: {} }),
   } as any)
 
   await db.waitReady
