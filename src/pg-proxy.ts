@@ -147,14 +147,16 @@ const QUERY_REWRITES: Array<{ match: RegExp; replace: string }> = [
   // PGlite doesn't have real replication slots, so the built-in function errors.
   // this runs AFTER the table rewrite above, so the table name is already replaced.
   {
-    match: /SELECT\s+pg_drop_replication_slot\(slot_name\)\s+FROM\s+_orez\._zero_replication_slots/gi,
+    match:
+      /SELECT\s+pg_drop_replication_slot\(slot_name\)\s+FROM\s+_orez\._zero_replication_slots/gi,
     replace: 'DELETE FROM _orez._zero_replication_slots',
   },
   // pg_terminate_backend on replication slots — PGlite is single-process, there are
   // no backends to terminate. rewrite to a plain SELECT so zero-cache sees the slots
   // but doesn't call the unsupported function.
   {
-    match: /pg_terminate_backend\(active_pid\)\s+as\s+terminated,\s*active_pid\s+as\s+pid/gi,
+    match:
+      /pg_terminate_backend\(active_pid\)\s+as\s+terminated,\s*active_pid\s+as\s+pid/gi,
     replace: 'false as terminated, NULL::int as pid',
   },
 ]
