@@ -1055,11 +1055,20 @@ const main = defineCommand({
     process.on('SIGTERM', () => shutdown('SIGTERM'))
 
     // handle crashes - try to clean up so next startup isn't corrupted
+    // EPIPE/ECONNRESET are transient socket errors (e.g. client disconnect) — not crashes
+    const isSocketError = (err: unknown): boolean => {
+      const code = (err as NodeJS.ErrnoException)?.code
+      if (code === 'EPIPE' || code === 'ECONNRESET') return true
+      const msg = err instanceof Error ? err.message : String(err)
+      return msg.includes('ended by the other party')
+    }
     process.on('uncaughtException', async (err) => {
+      if (isSocketError(err)) return
       log.orez(`uncaught exception: ${err.message}`)
       await shutdown('uncaughtException', 1)
     })
     process.on('unhandledRejection', async (reason) => {
+      if (isSocketError(reason)) return
       log.orez(`unhandled rejection: ${reason}`)
       await shutdown('unhandledRejection', 1)
     })

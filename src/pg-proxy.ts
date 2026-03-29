@@ -613,7 +613,10 @@ export async function startPgProxy(
   process.on('unhandledRejection', suppressSocketErrors)
 
   const server = createServer(async (socket: Socket) => {
-    // also catch at socket level for errors that don't escape to process
+    // when the remote end sends FIN, destroy our socket immediately so
+    // pg-gateway's WebStream adapter won't attempt further writes (EPIPE).
+    socket.on('end', () => socket.destroy())
+    // catch socket-level errors (EPIPE/ECONNRESET are expected during teardown)
     socket.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EPIPE' || err.code === 'ECONNRESET') return
       log.proxy(`socket error: ${err.message}`)
