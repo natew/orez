@@ -69,6 +69,52 @@ bunx orez
 
 Ports auto-increment if already in use.
 
+## Config File
+
+Create an `orez.config.ts` (or `.js` / `.mjs`) in your project root:
+
+```typescript
+import { defineConfig } from 'orez'
+
+export default defineConfig({
+  pgPort: 5433,
+  zeroPort: 4848,
+  adminPort: 6477,
+  migrations: './db/migrations',
+  seed: './db/seed.sql',
+  s3: true,
+  s3Port: 9300,
+  logLevel: 'info',
+  onHealthy: 'echo "ready!"',
+})
+```
+
+All options mirror the CLI flags in camelCase. CLI flags override config file values, so `orez --pg-port 6000` wins over `pgPort: 5433` in the config.
+
+| Config key          | CLI flag                | Default    |
+| ------------------- | ----------------------- | ---------- |
+| `pgPort`            | `--pg-port`             | `6434`     |
+| `zeroPort`          | `--zero-port`           | `5849`     |
+| `adminPort`         | `--admin-port`          | `6477`     |
+| `s3Port`            | `--s3-port`             | `9200`     |
+| `dataDir`           | `--data-dir`            | `.orez`    |
+| `pgUser`            | `--pg-user`             | `user`     |
+| `pgPassword`        | `--pg-password`         | `password` |
+| `migrations`        | `--migrations`          | —          |
+| `seed`              | `--seed`                | —          |
+| `skipZeroCache`     | `--skip-zero-cache`     | `false`    |
+| `s3`                | `--s3`                  | `false`    |
+| `disableAdmin`      | `--disable-admin`       | `false`    |
+| `disableWasmSqlite` | `--disable-wasm-sqlite` | `false`    |
+| `forceWasmSqlite`   | `--force-wasm-sqlite`   | `false`    |
+| `noWorkerThreads`   | `--no-worker-threads`   | `false`    |
+| `singleDb`          | `--single-db`           | `false`    |
+| `logLevel`          | `--log-level`           | `warn`     |
+| `onDbReady`         | `--on-db-ready`         | —          |
+| `onHealthy`         | `--on-healthy`          | —          |
+
+`.ts` config files require Node 22.6+ or Bun. Use `.js`/`.mjs` on older Node versions.
+
 ## Admin Dashboard
 
 Enabled by default at `http://localhost:6477`.
@@ -328,7 +374,8 @@ src/
   cli-entry.ts          auto heap sizing wrapper
   cli.ts                cli with citty
   index.ts              main entry, orchestrates startup
-  config.ts             configuration with defaults
+  config.ts             configuration types and defaults
+  load-config.ts        orez.config.ts file loader
   log.ts                colored log prefixes, log files
   mutex.ts              serializing pglite access
   port.ts               auto port finding

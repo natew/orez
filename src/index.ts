@@ -51,8 +51,8 @@ import type { PGlite } from '@electric-sql/pglite'
 
 type ZeroChildProcess = ChildProcess & { __orezTail?: string[] }
 
-export { getConfig, getConnectionString } from './config.js'
-export type { Hook, LogLevel, ZeroLiteConfig } from './config.js'
+export { defineConfig, getConfig, getConnectionString } from './config.js'
+export type { Hook, LogLevel, OrezConfig, ZeroLiteConfig } from './config.js'
 export { installChangeTracking } from './replication/change-tracker.js'
 
 // helper to run a hook (string command or callback function)

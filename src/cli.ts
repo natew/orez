@@ -11,6 +11,7 @@ import { defineCommand, runMain } from 'citty'
 import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
 import { startZeroLite } from './index.js'
+import { loadConfigFile, resolveOrezConfig } from './load-config.js'
 import { log, url } from './log.js'
 
 // detect admin port from running orez instance
@@ -982,7 +983,75 @@ const main = defineCommand({
     pg_restore: pgRestoreCommand,
   },
   async run({ args }) {
-    const adminPort = args['disable-admin'] ? 0 : Number(args['admin-port'])
+    // load orez.config.ts/js/mjs if present
+    const fileConfig = await loadConfigFile()
+
+    // build cli overrides — only include values the user actually passed
+    // (citty fills defaults for all args, so we detect "user passed" by
+    //  comparing against the declared defaults above)
+    const cliDefaults: Record<string, unknown> = {
+      'pg-port': '6434',
+      'zero-port': '5849',
+      'data-dir': '.orez',
+      migrations: '',
+      seed: '',
+      'pg-user': 'user',
+      'pg-password': 'password',
+      'skip-zero-cache': false,
+      'log-level': undefined,
+      s3: false,
+      's3-port': '9200',
+      'disable-wasm-sqlite': false,
+      'force-wasm-sqlite': false,
+      'no-worker-threads': false,
+      'single-db': false,
+      'on-db-ready': '',
+      'on-healthy': '',
+      'disable-admin': false,
+      'admin-port': '6477',
+    }
+    const wasSet = (key: string) => {
+      const val = (args as Record<string, unknown>)[key]
+      const def = cliDefaults[key]
+      return val !== def
+    }
+
+    const cliOverrides = resolveOrezConfig(fileConfig, {
+      ...(wasSet('pg-port') && { pgPort: Number(args['pg-port']) }),
+      ...(wasSet('zero-port') && { zeroPort: Number(args['zero-port']) }),
+      ...(wasSet('admin-port') && { adminPort: Number(args['admin-port']) }),
+      ...(wasSet('data-dir') && { dataDir: args['data-dir'] }),
+      ...(wasSet('migrations') && { migrations: args.migrations }),
+      ...(wasSet('seed') && { seed: args.seed }),
+      ...(wasSet('pg-user') && { pgUser: args['pg-user'] }),
+      ...(wasSet('pg-password') && { pgPassword: args['pg-password'] }),
+      ...(wasSet('skip-zero-cache') && { skipZeroCache: args['skip-zero-cache'] }),
+      ...(wasSet('log-level') && {
+        logLevel: args['log-level'] as 'error' | 'warn' | 'info' | 'debug',
+      }),
+      ...(wasSet('s3') && { s3: args.s3 }),
+      ...(wasSet('s3-port') && { s3Port: Number(args['s3-port']) }),
+      ...(wasSet('disable-wasm-sqlite') && {
+        disableWasmSqlite: args['disable-wasm-sqlite'],
+      }),
+      ...(wasSet('force-wasm-sqlite') && { forceWasmSqlite: args['force-wasm-sqlite'] }),
+      ...(wasSet('no-worker-threads') && { noWorkerThreads: args['no-worker-threads'] }),
+      ...(wasSet('single-db') && { singleDb: args['single-db'] }),
+      ...(wasSet('on-db-ready') && { onDbReady: args['on-db-ready'] }),
+      ...(wasSet('on-healthy') && { onHealthy: args['on-healthy'] }),
+      ...(wasSet('disable-admin') && { disableAdmin: args['disable-admin'] }),
+    })
+
+    // resolve aliases and compute final values
+    const resolvedMigrations = cliOverrides.migrations ?? cliOverrides.migrationsDir ?? ''
+    const resolvedSeed = cliOverrides.seed ?? cliOverrides.seedFile ?? ''
+    const resolvedUseWorkerThreads =
+      cliOverrides.noWorkerThreads != null
+        ? !cliOverrides.noWorkerThreads
+        : (cliOverrides.useWorkerThreads ?? true)
+    const resolvedDisableAdmin = cliOverrides.disableAdmin ?? false
+    const resolvedAdminPort = resolvedDisableAdmin ? 0 : (cliOverrides.adminPort ?? 6477)
+
     const {
       config,
       stop,
@@ -994,35 +1063,37 @@ const main = defineCommand({
       resetZero,
       resetZeroFull,
     } = await startZeroLite({
-      pgPort: Number(args['pg-port']),
-      zeroPort: Number(args['zero-port']),
-      adminPort,
-      dataDir: args['data-dir'],
-      migrationsDir: args.migrations,
-      seedFile: args.seed,
-      pgUser: args['pg-user'],
-      pgPassword: args['pg-password'],
-      skipZeroCache: args['skip-zero-cache'],
-      disableWasmSqlite: args['disable-wasm-sqlite'],
-      forceWasmSqlite: args['force-wasm-sqlite'],
-      useWorkerThreads: !args['no-worker-threads'],
-      singleDb: args['single-db'],
-      logLevel: (args['log-level'] as 'error' | 'warn' | 'info' | 'debug') || undefined,
-      onDbReady: args['on-db-ready'] || undefined,
-      onHealthy: args['on-healthy'] || undefined,
+      pgPort: cliOverrides.pgPort,
+      zeroPort: cliOverrides.zeroPort,
+      adminPort: resolvedAdminPort,
+      dataDir: cliOverrides.dataDir,
+      migrationsDir: resolvedMigrations,
+      seedFile: resolvedSeed,
+      pgUser: cliOverrides.pgUser,
+      pgPassword: cliOverrides.pgPassword,
+      skipZeroCache: cliOverrides.skipZeroCache,
+      disableWasmSqlite: cliOverrides.disableWasmSqlite,
+      forceWasmSqlite: cliOverrides.forceWasmSqlite,
+      useWorkerThreads: resolvedUseWorkerThreads,
+      singleDb: cliOverrides.singleDb,
+      logLevel: cliOverrides.logLevel,
+      onDbReady: cliOverrides.onDbReady || undefined,
+      onHealthy: cliOverrides.onHealthy || undefined,
+      pgliteOptions: cliOverrides.pgliteOptions,
     })
 
+    const s3Enabled = cliOverrides.s3 ?? false
     let s3Server: import('node:http').Server | null = null
-    if (args.s3) {
+    if (s3Enabled) {
       const { startS3Local } = await import('./s3-local.js')
       s3Server = await startS3Local({
-        port: Number(args['s3-port']),
-        dataDir: args['data-dir'],
+        port: cliOverrides.s3Port ?? 9200,
+        dataDir: config.dataDir,
       })
     }
 
     let adminServer: import('node:http').Server | null = null
-    if (!args['disable-admin'] && logStore && zeroEnv) {
+    if (!resolvedDisableAdmin && logStore && zeroEnv) {
       const { startAdminServer } = await import('./admin/server.js')
       adminServer = await startAdminServer({
         port: config.adminPort,

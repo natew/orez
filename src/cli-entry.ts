@@ -19,10 +19,20 @@ if (!currentOpts.includes('--max-old-space-size') && !process.env.__OREZ_SPAWNED
   const heapMB = Math.max(4096, Math.round(memMB * 0.5))
   const cliPath = resolve(dirname(fileURLToPath(import.meta.url)), 'cli.js')
 
+  // enable --experimental-strip-types so orez.config.ts works on Node 22.6+
+  // (Node 23.6+ has it by default; harmless if already enabled)
+  let nodeOpts = `--max-old-space-size=${heapMB} ${currentOpts}`.trim()
+  if (!nodeOpts.includes('--experimental-strip-types')) {
+    const [major, minor] = process.versions.node.split('.').map(Number)
+    if (major > 22 || (major === 22 && minor >= 6)) {
+      nodeOpts = `--experimental-strip-types ${nodeOpts}`
+    }
+  }
+
   const child = spawn(process.execPath, [cliPath, ...process.argv.slice(2)], {
     env: {
       ...process.env,
-      NODE_OPTIONS: `--max-old-space-size=${heapMB} ${currentOpts}`.trim(),
+      NODE_OPTIONS: nodeOpts,
       __OREZ_SPAWNED: '1',
     },
     stdio: 'inherit',
