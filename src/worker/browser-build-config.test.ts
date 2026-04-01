@@ -15,7 +15,7 @@ describe('browser build config', () => {
 
     it('includes orez shims', () => {
       const aliases = getBrowserAliases()
-      expect(aliases.postgres).toBe('orez/worker/shims/postgres')
+      expect(aliases.postgres).toBe('orez/worker/shims/postgres-browser')
       expect(aliases['@rocicorp/zero-sqlite3']).toBe('orez/worker/shims/sqlite')
       expect(aliases.fastify).toBe('orez/worker/shims/fastify')
       expect(aliases.ws).toBe('orez/worker/shims/ws')
