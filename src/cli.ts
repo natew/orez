@@ -1080,6 +1080,9 @@ const main = defineCommand({
       onDbReady: cliOverrides.onDbReady || undefined,
       onHealthy: cliOverrides.onHealthy || undefined,
       pgliteOptions: cliOverrides.pgliteOptions,
+      zeroPublications: cliOverrides.zeroPublications,
+      zeroMutateUrl: cliOverrides.zeroMutateUrl,
+      zeroQueryUrl: cliOverrides.zeroQueryUrl,
     })
 
     const s3Enabled = cliOverrides.s3 ?? false

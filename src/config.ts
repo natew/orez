@@ -21,6 +21,9 @@ export interface ZeroLiteConfig {
   singleDb: boolean
   logLevel: LogLevel
   pgliteOptions: Partial<PGliteOptions>
+  zeroPublications?: string
+  zeroMutateUrl?: string
+  zeroQueryUrl?: string
   // lifecycle hooks
   onDbReady?: Hook // after db+proxy ready, before zero-cache
   onHealthy?: Hook // after all services ready
@@ -79,6 +82,12 @@ export interface OrezConfig {
   onHealthy?: Hook
   /** pglite options */
   pgliteOptions?: Partial<PGliteOptions>
+  /** ZERO_APP_PUBLICATIONS — comma-separated publication names */
+  zeroPublications?: string
+  /** ZERO_MUTATE_URL — push/mutate endpoint for zero-cache */
+  zeroMutateUrl?: string
+  /** ZERO_QUERY_URL — pull/query endpoint for zero-cache */
+  zeroQueryUrl?: string
 }
 
 /** type-safe helper for orez.config.ts */
@@ -103,6 +112,9 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     singleDb: overrides.singleDb ?? false,
     logLevel: overrides.logLevel || (process.env.OREZ_LOG_LEVEL as LogLevel) || 'warn',
     pgliteOptions: overrides.pgliteOptions || {},
+    zeroPublications: overrides.zeroPublications,
+    zeroMutateUrl: overrides.zeroMutateUrl,
+    zeroQueryUrl: overrides.zeroQueryUrl,
     onDbReady: overrides.onDbReady,
     onHealthy: overrides.onHealthy,
   }

@@ -258,6 +258,10 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       ? await createPGliteWorkerInstances(config)
       : await createPGliteInstances(config)
   const db = instances.postgres
+  // config-based publications take precedence over env var
+  if (config.zeroPublications && !process.env.ZERO_APP_PUBLICATIONS) {
+    process.env.ZERO_APP_PUBLICATIONS = config.zeroPublications
+  }
   const managedPub = getManagedPublicationConfig()
   if (managedPub.managedByOrez) {
     log.debug.orez(`using managed publication: ${managedPub.names.join(', ')}`)
@@ -873,6 +877,8 @@ async function startZeroCache(
     ZERO_CHANGE_DB: cdbUrl,
     ZERO_REPLICA_FILE: resolve(config.dataDir, 'zero-replica.db'),
     ZERO_PORT: String(config.zeroPort),
+    ...(config.zeroMutateUrl ? { ZERO_MUTATE_URL: config.zeroMutateUrl } : {}),
+    ...(config.zeroQueryUrl ? { ZERO_QUERY_URL: config.zeroQueryUrl } : {}),
   }
 
   const zeroCacheBin = resolve(zeroEntry, '..', 'cli.js')
