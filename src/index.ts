@@ -722,7 +722,6 @@ async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   log.orez('seeded')
 }
 
-
 async function startZeroCache(
   config: ZeroLiteConfig,
   logStore?: LogStore,
