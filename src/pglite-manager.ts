@@ -521,3 +521,27 @@ export async function runMigrations(db: PGlite, config: ZeroLiteConfig): Promise
   log.debug.orez('migrations complete')
   return applied
 }
+
+/**
+ * run periodic CHECKPOINT on all pglite instances to compact WAL files.
+ * without this, pg_wal/ grows unboundedly since relaxedDurability defers writes.
+ * returns a cleanup function to stop the timer.
+ */
+export function startPeriodicCheckpoint(
+  instances: PGliteInstances,
+  intervalMs = 5 * 60 * 1000
+): () => void {
+  const checkpoint = async () => {
+    for (const [name, db] of Object.entries(instances) as [string, PGlite][]) {
+      if (!db || name === 'postgresReplicas') continue
+      try {
+        await db.exec('CHECKPOINT')
+      } catch {}
+    }
+  }
+  const timer = setInterval(checkpoint, intervalMs)
+  if (timer.unref) timer.unref()
+  // run one immediately on startup to reclaim any WAL from previous runs
+  checkpoint()
+  return () => clearInterval(timer)
+}
