@@ -329,13 +329,16 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     instances.postgresReplicas = await createReadReplicas(db, config.readReplicas, config)
   }
 
-  // clean up stale lock files from previous crash (keep replica for fast restart)
-  cleanupStaleLockFiles(config)
-
-  // proactively clean CDC state to prevent duplicate key errors on restart.
-  // this handles cases where orez was killed (SIGKILL) mid-transaction,
-  // leaving stale watermarks in the changeLog table.
-  await cleanCdcStateOnStartup(instances.cdb)
+  // clean up stale lock files from previous crash (keep replica for fast restart).
+  // if lock files were present, it means the previous shutdown was unclean (SIGKILL)
+  // and CDC state may be corrupt — clean it along with the replica to avoid
+  // duplicate watermark errors when zero-cache tries to replay changes.
+  const hadStaleLocks = cleanupStaleLockFiles(config)
+  if (hadStaleLocks) {
+    log.debug.orez('unclean shutdown detected, cleaning CDC state and replica')
+    cleanupStaleReplica(config)
+    await cleanCdcStateOnStartup(instances.cdb)
+  }
 
   // when admin is enabled, zero-cache runs on internal port with http proxy in front
   let zeroInternalPort = config.zeroPort
@@ -650,8 +653,34 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     })
   }
 
+  // auto-recover from runtime CDC corruption crashes.
+  // when zero-cache exits unexpectedly, check tail buffer for CDC signatures
+  // and trigger a full reset+restart if detected.
+  let shuttingDown = false
+  const installCrashWatcher = () => {
+    if (!zeroCacheProcess || config.skipZeroCache) return
+    zeroCacheProcess.on('exit', (code) => {
+      if (shuttingDown || resetInProgress || code === 0 || code === null) return
+      const tail = (zeroCacheProcess as ZeroChildProcess)?.__orezTail
+      const details = tail?.length ? tail.join('\n') : ''
+      if (hasCdcCorruptionSignature(details)) {
+        log.orez('zero-cache crashed with CDC corruption, auto-recovering...')
+        resetZeroState('full')
+          .then(() => {
+            log.orez('CDC auto-recovery successful')
+            installCrashWatcher()
+          })
+          .catch((err) => {
+            log.orez(`CDC auto-recovery failed: ${err?.message || err}`)
+          })
+      }
+    })
+  }
+  installCrashWatcher()
+
   const stop = async () => {
     log.debug.orez('shutting down')
+    shuttingDown = true
     stopCheckpoint()
     httpProxyServer?.close()
     await killZeroCache()
@@ -690,18 +719,22 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   }
 }
 
-/** clean lock files only — keeps replica intact for fast incremental sync on restart */
-function cleanupStaleLockFiles(config: ZeroLiteConfig): void {
+/** clean lock files only — keeps replica intact for fast incremental sync on restart.
+ *  returns true if any stale lock files were found (indicates unclean shutdown). */
+function cleanupStaleLockFiles(config: ZeroLiteConfig): boolean {
   const replicaPath = resolve(config.dataDir, 'zero-replica.db')
+  let found = false
   for (const suffix of ['-wal', '-shm', '-wal2']) {
     const file = replicaPath + suffix
     try {
       if (existsSync(file)) {
         unlinkSync(file)
         log.debug.orez(`cleaned up stale ${suffix} file`)
+        found = true
       }
     } catch {}
   }
+  return found
 }
 
 /** delete replica + all lock/wal files — forces zero-cache to do a full resync */
