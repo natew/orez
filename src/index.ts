@@ -890,6 +890,12 @@ async function startZeroCache(
     'socket has been ended by the other party',
     'ideal db ping time',
     'average ping to',
+    // node.js warnings from stale replica timestamps causing negative setTimeout
+    'TimeoutNegativeWarning',
+    'does not allow a negative number',
+    // otel metrics export noise when no collector is configured
+    'PeriodicExportingMetricReader',
+    'OTLPExporterError',
   ]
   const isStartupNoise = (line: string): boolean =>
     STARTUP_NOISE.some((pattern) => line.includes(pattern))
