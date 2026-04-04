@@ -162,6 +162,29 @@ export class PGliteWorkerProxy {
     return new Uint8Array(result.data)
   }
 
+  /**
+   * execute multiple wire protocol messages in a single IPC round-trip.
+   * each message is executed sequentially in the worker, and all results
+   * are concatenated and returned. eliminates N-1 postMessage round-trips
+   * for extended protocol pipelines (Parse→Bind→Execute→Sync).
+   */
+  async execProtocolRawBatch(
+    messages: Uint8Array[],
+    options?: { syncToFs?: boolean; throwOnError?: boolean }
+  ): Promise<Uint8Array> {
+    const buffers: ArrayBuffer[] = []
+    for (const msg of messages) {
+      const buf = new ArrayBuffer(msg.byteLength)
+      new Uint8Array(buf).set(msg)
+      buffers.push(buf)
+    }
+    const result = await this.send(
+      { type: 'execProtocolRawBatch', buffers, options },
+      buffers
+    )
+    return new Uint8Array(result.data)
+  }
+
   async query<T = any>(
     sql: string,
     params?: any[]
@@ -202,6 +225,15 @@ export class PGliteWorkerProxy {
       }
       await this.send({ type: 'unlisten', listenId }).catch(() => {})
     }
+  }
+
+  /**
+   * dump the PGlite data directory as a tar blob.
+   * used to create read replicas from an existing instance.
+   */
+  async dumpDataDir(): Promise<ArrayBuffer> {
+    const result = await this.send({ type: 'dumpDataDir' })
+    return result.data as ArrayBuffer
   }
 
   async close(): Promise<void> {

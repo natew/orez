@@ -5,6 +5,11 @@ export class Mutex {
   private queue: Array<() => void> = []
   private head = 0
 
+  /** check if the mutex is currently held (non-blocking, no side effects) */
+  get isLocked(): boolean {
+    return this.locked
+  }
+
   async acquire(): Promise<void> {
     if (!this.locked) {
       this.locked = true

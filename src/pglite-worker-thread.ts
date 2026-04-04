@@ -28,6 +28,8 @@ export interface WorkerInitConfig {
   withExtensions: boolean
   debug: number
   pgliteOptions?: Record<string, unknown>
+  /** tar dump from another instance's dumpDataDir() — used for read replicas */
+  loadDataDir?: ArrayBuffer
 }
 
 const port = parentPort!
@@ -73,6 +75,7 @@ async function init() {
     dataDir: config.dataDir,
     debug: config.debug,
     relaxedDurability: true,
+    ...(config.loadDataDir ? { loadDataDir: new Blob([config.loadDataDir]) } : {}),
     initialMemory: isMain ? 32 * 1024 * 1024 : 16 * 1024 * 1024,
     ...(isMain ? {} : { startParams: ZERO_START_PARAMS }),
     ...(isMain
@@ -135,6 +138,34 @@ port.on('message', async (msg: { type: string; id: number; [key: string]: unknow
         break
       }
 
+      case 'execProtocolRawBatch': {
+        // execute multiple wire protocol messages serially, return concatenated result.
+        // eliminates N-1 IPC round-trips for extended protocol pipelines.
+        const buffers = msg.buffers as ArrayBuffer[]
+        const opts = msg.options as any
+        const resultParts: Uint8Array[] = []
+        let totalLen = 0
+        for (const ab of buffers) {
+          const input = new Uint8Array(ab)
+          const result = await db.execProtocolRaw(input, opts)
+          // copy each result (pglite reuses wasm memory between calls)
+          const copy = new Uint8Array(result.byteLength)
+          copy.set(result)
+          resultParts.push(copy)
+          totalLen += copy.byteLength
+        }
+        // concatenate all results into one transferable buffer
+        const combined = new ArrayBuffer(totalLen)
+        const view = new Uint8Array(combined)
+        let offset = 0
+        for (const part of resultParts) {
+          view.set(part, offset)
+          offset += part.byteLength
+        }
+        port.postMessage({ type: 'result', id, data: combined }, [combined])
+        break
+      }
+
       case 'query': {
         const result = await db.query(msg.sql as string, msg.params as any[])
         port.postMessage({
@@ -172,6 +203,14 @@ port.on('message', async (msg: { type: string; id: number; [key: string]: unknow
           listeners.delete(listenId)
         }
         port.postMessage({ type: 'result', id })
+        break
+      }
+
+      case 'dumpDataDir': {
+        const dump = await db.dumpDataDir('none')
+        // convert Blob/File to ArrayBuffer for transfer
+        const arrayBuf = await (dump as Blob).arrayBuffer()
+        port.postMessage({ type: 'result', id, data: arrayBuf }, [arrayBuf])
         break
       }
 
