@@ -76,6 +76,8 @@ export interface PGliteInstances {
   postgres: PGlite
   cvr: PGlite
   cdb: PGlite
+  /** read replicas of the postgres instance (empty if disabled) */
+  postgresReplicas: PGlite[]
 }
 
 // shared setup extracted from the 4 factory functions below
@@ -262,7 +264,7 @@ export async function createPGliteInstances(
   ])
 
   await ensurePublication(postgres)
-  return { postgres, cvr, cdb }
+  return { postgres, cvr, cdb, postgresReplicas: [] }
 }
 
 /**
@@ -318,6 +320,7 @@ export async function createPGliteWorkerInstances(
     postgres: pgProxy as unknown as PGlite,
     cvr: cvrProxy as unknown as PGlite,
     cdb: cdbProxy as unknown as PGlite,
+    postgresReplicas: [],
   }
 }
 
@@ -338,7 +341,7 @@ export async function createSinglePGliteInstance(
   await ensurePublication(db)
 
   // same instance for all three — pg-proxy detects this and shares a mutex
-  return { postgres: db, cvr: db, cdb: db }
+  return { postgres: db, cvr: db, cdb: db, postgresReplicas: [] }
 }
 
 /**
@@ -382,7 +385,7 @@ export async function createSinglePGliteWorkerInstance(
   await ensurePublication(proxy)
 
   const db = proxy as unknown as PGlite
-  return { postgres: db, cvr: db, cdb: db }
+  return { postgres: db, cvr: db, cdb: db, postgresReplicas: [] }
 }
 
 /** create a single worker-backed PGlite instance (for CVR/CDB recreation during reset) */
@@ -394,6 +397,56 @@ export function createPGliteWorker(dataDir: string, name: string): PGliteWorkerP
     debug: 0,
     pgliteOptions: {},
   })
+}
+
+/**
+ * create read replicas of the postgres instance.
+ *
+ * dumps the primary's data directory and initializes N new worker threads
+ * from the dump. each replica is an independent PGlite instance on its own
+ * core, handling read queries concurrently.
+ *
+ * call this AFTER migrations, seed, on-db-ready — the dump captures the
+ * full database state at the time of cloning.
+ */
+export async function createReadReplicas(
+  primary: PGlite,
+  count: number,
+  config: ZeroLiteConfig
+): Promise<PGlite[]> {
+  if (count <= 0) return []
+
+  const proxy = primary as unknown as PGliteWorkerProxy
+  if (typeof proxy.dumpDataDir !== 'function') {
+    log.pglite('read replicas require worker threads (dumpDataDir not available)')
+    return []
+  }
+
+  log.pglite(`creating ${count} read replica(s)...`)
+  const t0 = performance.now()
+
+  const dump = await proxy.dumpDataDir()
+  log.debug.pglite(`primary dump: ${(dump.byteLength / 1024 / 1024).toFixed(1)}MB`)
+
+  const { dataDir: _ud, debug: _dbg, ...userOpts } = config.pgliteOptions as Record<string, any>
+
+  const replicas: PGliteWorkerProxy[] = []
+  for (let i = 0; i < count; i++) {
+    const replica = new PGliteWorkerProxy({
+      dataDir: 'memory://',
+      name: `postgres-replica-${i}`,
+      withExtensions: true,
+      debug: config.logLevel === 'debug' ? 1 : 0,
+      pgliteOptions: userOpts,
+      loadDataDir: dump,
+    })
+    replicas.push(replica)
+  }
+
+  await Promise.all(replicas.map((r) => r.waitReady))
+  log.pglite(`${count} read replica(s) ready in ${(performance.now() - t0).toFixed(0)}ms`)
+
+  return replicas as unknown as PGlite[]
 }
 
 /** run pending migrations, returns count of newly applied migrations */

@@ -312,6 +312,13 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     await installChangeTracking(db)
   }
 
+  // create read replicas after the primary is fully initialized
+  // (migrations, seed, change tracking, publications all set up)
+  if (config.readReplicas > 0 && config.useWorkerThreads) {
+    const { createReadReplicas } = await import('./pglite-manager.js')
+    instances.postgresReplicas = await createReadReplicas(db, config.readReplicas, config)
+  }
+
   // clean up stale sqlite replica from previous runs
   cleanupStaleReplica(config)
 

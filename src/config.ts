@@ -1,3 +1,4 @@
+import { availableParallelism } from 'node:os'
 import type { PGliteOptions } from '@electric-sql/pglite'
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
@@ -19,6 +20,7 @@ export interface ZeroLiteConfig {
   forceWasmSqlite: boolean
   useWorkerThreads: boolean
   singleDb: boolean
+  readReplicas: number
   logLevel: LogLevel
   pgliteOptions: Partial<PGliteOptions>
   zeroPublications?: string
@@ -80,6 +82,8 @@ export interface OrezConfig {
   onDbReady?: Hook
   /** command to run once all services healthy */
   onHealthy?: Hook
+  /** number of pglite read replicas for postgres (default: auto, 0 to disable) */
+  readReplicas?: number
   /** pglite options */
   pgliteOptions?: Partial<PGliteOptions>
   /** ZERO_APP_PUBLICATIONS — comma-separated publication names */
@@ -110,6 +114,10 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     forceWasmSqlite: overrides.forceWasmSqlite ?? false,
     useWorkerThreads: overrides.useWorkerThreads ?? true,
     singleDb: overrides.singleDb ?? false,
+    // singleDb shares one pglite instance for all databases — replicas make no sense
+    readReplicas: (overrides.singleDb ?? false)
+      ? 0
+      : (overrides.readReplicas ?? Math.min(Math.ceil(availableParallelism() * 0.5), 4)),
     logLevel: overrides.logLevel || (process.env.OREZ_LOG_LEVEL as LogLevel) || 'warn',
     pgliteOptions: overrides.pgliteOptions || {},
     zeroPublications: overrides.zeroPublications,

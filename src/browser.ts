@@ -130,6 +130,7 @@ export async function startOrezBrowser(
       postgres: pgPostgres as unknown as PGlite,
       cvr: pgCvr as unknown as PGlite,
       cdb: pgCdb as unknown as PGlite,
+      postgresReplicas: [],
     },
     { pgPassword: '', pgUser: 'user' }
   )

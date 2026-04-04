@@ -682,7 +682,7 @@ export async function createBrowserProxy(
   const instances: PGliteInstances =
     'postgres' in dbInput
       ? (dbInput as PGliteInstances)
-      : { postgres: dbInput as PGlite, cvr: dbInput as PGlite, cdb: dbInput as PGlite }
+      : { postgres: dbInput as PGlite, cvr: dbInput as PGlite, cdb: dbInput as PGlite, postgresReplicas: [] }
 
   // per-instance mutexes for serializing pglite access.
   // when all instances are the same object (single-db mode), share one mutex
