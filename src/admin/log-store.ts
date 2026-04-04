@@ -1,4 +1,4 @@
-import { mkdirSync, appendFile, stat, rename } from 'node:fs'
+import { mkdirSync, appendFile, stat, rename, unlink, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 export interface LogEntry {
@@ -20,16 +20,20 @@ export interface LogStore {
 }
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g
-const MAX_ENTRIES = 50_000
+const MAX_ENTRIES = 20_000
 // trim in batches of 10% to avoid O(n) splice on every single push
 const TRIM_BATCH = Math.floor(MAX_ENTRIES * 0.1)
-const MAX_FILE_SIZE = 5 * 1024 * 1024
+const MAX_FILE_SIZE = 2 * 1024 * 1024
 const MAX_QUERY_LIMIT = 5000
 const LEVEL_PRIORITY: Record<string, number> = { error: 0, warn: 1, info: 2, debug: 3 }
 const VALID_SOURCES = new Set(['orez', 'zero', 'pglite', 'proxy', 's3'])
 const VALID_LEVELS = new Set(['error', 'warn', 'info', 'debug'])
 
-export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
+export function createLogStore(
+  dataDir: string,
+  writeToDisk = true,
+  maxFileSize = MAX_FILE_SIZE
+): LogStore {
   const entries: LogEntry[] = []
   let nextId = 1
 
@@ -37,38 +41,49 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
 
   if (writeToDisk) {
     mkdirSync(logsDir, { recursive: true })
+    // clean up old rotated log files on startup
+    try {
+      for (const f of readdirSync(logsDir)) {
+        if (/\.log\.\d+$/.test(f)) {
+          unlink(join(logsDir, f), () => {})
+        }
+      }
+    } catch {}
   }
 
-  // track file sizes to rotate per-source
+  // track file sizes and rotation state per-source
   const fileSizes: Record<string, number> = {}
-  let rotating = false
+  const rotating: Record<string, boolean> = {}
 
   // buffered async disk writes — avoids appendFileSync blocking the event loop
   const writeBuffers: Record<string, string[]> = {}
   const MAX_BUFFER_SIZE = 10_000
-  const FLUSH_INTERVAL_MS = 2000
+  const FLUSH_INTERVAL_MS = 3000
 
   function getLogFile(source: string): string {
     return join(logsDir, `${source}.log`)
   }
 
   function rotateIfNeeded(source: string) {
-    if (!writeToDisk || rotating) return
-    rotating = true
+    if (!writeToDisk || rotating[source]) return
+    rotating[source] = true
     const logFile = getLogFile(source)
     stat(logFile, (err, stats) => {
       if (err) {
-        rotating = false
+        rotating[source] = false
         return
       }
       fileSizes[source] = stats.size
-      if (stats.size > MAX_FILE_SIZE) {
-        rename(logFile, logFile + '.1', () => {
-          fileSizes[source] = 0
-          rotating = false
+      if (stats.size > maxFileSize) {
+        // delete old backup first, then rename current
+        unlink(logFile + '.1', () => {
+          rename(logFile, logFile + '.1', () => {
+            fileSizes[source] = 0
+            rotating[source] = false
+          })
         })
       } else {
-        rotating = false
+        rotating[source] = false
       }
     })
   }
@@ -83,7 +98,7 @@ export function createLogStore(dataDir: string, writeToDisk = true): LogStore {
       appendFile(logFile, data, (err) => {
         if (err) return
         fileSizes[source] = (fileSizes[source] || 0) + data.length
-        if (fileSizes[source] > MAX_FILE_SIZE) {
+        if (fileSizes[source] > maxFileSize) {
           rotateIfNeeded(source)
         }
       })
