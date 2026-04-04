@@ -982,6 +982,21 @@ const main = defineCommand({
       description: 'admin dashboard port',
       default: '6477',
     },
+    'checkpoint-interval': {
+      type: 'string',
+      description: 'WAL checkpoint interval in seconds (0 to disable, default: 300)',
+      default: '',
+    },
+    'max-log-size': {
+      type: 'string',
+      description: 'max log file size in MB before rotation (default: 2)',
+      default: '',
+    },
+    'disable-disk-logs': {
+      type: 'boolean',
+      description: 'disable writing logs to disk',
+      default: false,
+    },
   },
   subCommands: {
     s3: s3Command,
@@ -1016,6 +1031,9 @@ const main = defineCommand({
       'on-healthy': '',
       'disable-admin': false,
       'admin-port': '6477',
+      'checkpoint-interval': '',
+      'max-log-size': '',
+      'disable-disk-logs': false,
     }
     const wasSet = (key: string) => {
       const val = (args as Record<string, unknown>)[key]
@@ -1048,6 +1066,13 @@ const main = defineCommand({
       ...(wasSet('on-db-ready') && { onDbReady: args['on-db-ready'] }),
       ...(wasSet('on-healthy') && { onHealthy: args['on-healthy'] }),
       ...(wasSet('disable-admin') && { disableAdmin: args['disable-admin'] }),
+      ...(wasSet('checkpoint-interval') && {
+        checkpointIntervalMs: Number(args['checkpoint-interval']) * 1000,
+      }),
+      ...(wasSet('max-log-size') && {
+        maxLogFileSize: Number(args['max-log-size']) * 1024 * 1024,
+      }),
+      ...(wasSet('disable-disk-logs') && { disableDiskLogs: args['disable-disk-logs'] }),
     })
 
     // resolve aliases and compute final values
@@ -1092,6 +1117,9 @@ const main = defineCommand({
       zeroPublications: cliOverrides.zeroPublications,
       zeroMutateUrl: cliOverrides.zeroMutateUrl,
       zeroQueryUrl: cliOverrides.zeroQueryUrl,
+      checkpointIntervalMs: cliOverrides.checkpointIntervalMs,
+      maxLogFileSize: cliOverrides.maxLogFileSize,
+      disableDiskLogs: cliOverrides.disableDiskLogs,
     })
 
     const s3Enabled = cliOverrides.s3 ?? false

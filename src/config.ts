@@ -27,6 +27,10 @@ export interface ZeroLiteConfig {
   zeroPublications?: string
   zeroMutateUrl?: string
   zeroQueryUrl?: string
+  // storage controls
+  checkpointIntervalMs: number // WAL checkpoint interval (default: 5min)
+  maxLogFileSize: number // log rotation threshold in bytes (default: 2MB)
+  disableDiskLogs: boolean // skip writing logs to disk (default: false)
   // lifecycle hooks
   onDbReady?: Hook // after db+proxy ready, before zero-cache
   onHealthy?: Hook // after all services ready
@@ -93,6 +97,12 @@ export interface OrezConfig {
   zeroMutateUrl?: string
   /** ZERO_QUERY_URL — pull/query endpoint for zero-cache */
   zeroQueryUrl?: string
+  /** WAL checkpoint interval in ms (default: 300000 = 5min, 0 to disable) */
+  checkpointIntervalMs?: number
+  /** max log file size in bytes before rotation (default: 2097152 = 2MB) */
+  maxLogFileSize?: number
+  /** disable writing logs to disk (default: false) */
+  disableDiskLogs?: boolean
 }
 
 /** type-safe helper for orez.config.ts */
@@ -126,6 +136,9 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     zeroPublications: overrides.zeroPublications,
     zeroMutateUrl: overrides.zeroMutateUrl,
     zeroQueryUrl: overrides.zeroQueryUrl,
+    checkpointIntervalMs: overrides.checkpointIntervalMs ?? 5 * 60 * 1000,
+    maxLogFileSize: overrides.maxLogFileSize ?? 2 * 1024 * 1024,
+    disableDiskLogs: overrides.disableDiskLogs ?? false,
     onDbReady: overrides.onDbReady,
     onHealthy: overrides.onHealthy,
   }

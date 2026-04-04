@@ -26,6 +26,7 @@ import {
   createSinglePGliteWorkerInstance,
   createPGliteWorker,
   runMigrations,
+  startPeriodicCheckpoint,
 } from './pglite-manager.js'
 import { findPort } from './port.js'
 import { orezTitle } from './process-title.js'
@@ -209,7 +210,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
   // create log store for admin dashboard
   const logStore: LogStore | undefined =
-    adminPort > 0 ? createLogStore(config.dataDir) : undefined
+    adminPort > 0
+      ? createLogStore(config.dataDir, !config.disableDiskLogs, config.maxLogFileSize)
+      : undefined
 
   // wire up logStore so all log.* calls flow to admin dashboard
   setLogStore(logStore)
@@ -260,6 +263,12 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       ? await createPGliteWorkerInstances(config)
       : await createPGliteInstances(config)
   const db = instances.postgres
+
+  // periodic WAL checkpoint to prevent pg_wal/ from growing unboundedly
+  const stopCheckpoint = config.checkpointIntervalMs > 0
+    ? startPeriodicCheckpoint(instances, config.checkpointIntervalMs)
+    : () => {}
+
   // config-based publications take precedence over env var
   if (config.zeroPublications && !process.env.ZERO_APP_PUBLICATIONS) {
     process.env.ZERO_APP_PUBLICATIONS = config.zeroPublications
@@ -319,8 +328,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     instances.postgresReplicas = await createReadReplicas(db, config.readReplicas, config)
   }
 
-  // clean up stale sqlite replica from previous runs
-  cleanupStaleReplica(config)
+  // clean up stale lock files from previous crash (keep replica for fast restart)
+  cleanupStaleLockFiles(config)
 
   // proactively clean CDC state to prevent duplicate key errors on restart.
   // this handles cases where orez was killed (SIGKILL) mid-transaction,
@@ -642,6 +651,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
   const stop = async () => {
     log.debug.orez('shutting down')
+    stopCheckpoint()
     httpProxyServer?.close()
     await killZeroCache()
     pgServer.close()
@@ -679,10 +689,23 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   }
 }
 
+/** clean lock files only — keeps replica intact for fast incremental sync on restart */
+function cleanupStaleLockFiles(config: ZeroLiteConfig): void {
+  const replicaPath = resolve(config.dataDir, 'zero-replica.db')
+  for (const suffix of ['-wal', '-shm', '-wal2']) {
+    const file = replicaPath + suffix
+    try {
+      if (existsSync(file)) {
+        unlinkSync(file)
+        log.debug.orez(`cleaned up stale ${suffix} file`)
+      }
+    } catch {}
+  }
+}
+
+/** delete replica + all lock/wal files — forces zero-cache to do a full resync */
 function cleanupStaleReplica(config: ZeroLiteConfig): void {
   const replicaPath = resolve(config.dataDir, 'zero-replica.db')
-  // delete replica + all lock/wal files so zero-cache does a fresh sync
-  // the replica is just a cache of pglite data, safe to recreate
   for (const suffix of ['', '-wal', '-shm', '-wal2']) {
     const file = replicaPath + suffix
     try {
@@ -691,9 +714,7 @@ function cleanupStaleReplica(config: ZeroLiteConfig): void {
         if (suffix) log.debug.orez(`cleaned up stale ${suffix} file`)
         else log.debug.orez('cleaned up stale replica (will re-sync)')
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 }
 
