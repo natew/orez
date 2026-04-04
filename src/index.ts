@@ -819,6 +819,10 @@ async function startZeroCache(
     // loops with wasm sqlite and has caused freezes with native too.
     // planner is an optimization, not required for correctness.
     ZERO_ENABLE_QUERY_PLANNER: 'false',
+    // disable otel metrics export — zero-cache has built-in OTEL that tries
+    // to export even without a collector, causing periodic Bad Request errors.
+    // user can override by setting OTEL_SDK_DISABLED=false in their env.
+    OTEL_SDK_DISABLED: 'true',
   }
 
   const env: Record<string, string> = {
