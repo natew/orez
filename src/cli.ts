@@ -958,7 +958,8 @@ const main = defineCommand({
     },
     'read-replicas': {
       type: 'string',
-      description: 'number of pglite read replicas for postgres (0 to disable, default: auto)',
+      description:
+        'number of pglite read replicas for postgres (0 to disable, default: auto)',
       default: '',
     },
     'on-db-ready': {

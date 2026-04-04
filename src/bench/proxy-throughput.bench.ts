@@ -56,7 +56,10 @@ function readUntilReady(socket: Socket): Promise<Buffer[]> {
   return new Promise((resolve, reject) => {
     const messages: Buffer[] = []
     let buffer = Buffer.alloc(0)
-    const timeout = setTimeout(() => reject(new Error('timeout waiting for ReadyForQuery')), 10000)
+    const timeout = setTimeout(
+      () => reject(new Error('timeout waiting for ReadyForQuery')),
+      10000
+    )
 
     const onData = (data: Buffer) => {
       buffer = Buffer.concat([buffer, data])
@@ -86,7 +89,12 @@ function readUntilReady(socket: Socket): Promise<Buffer[]> {
   })
 }
 
-async function connectPg(port: number, user: string, password: string, database = 'postgres'): Promise<Socket> {
+async function connectPg(
+  port: number,
+  user: string,
+  password: string,
+  database = 'postgres'
+): Promise<Socket> {
   const socket = await new Promise<Socket>((resolve, reject) => {
     const s = createConnection({ host: '127.0.0.1', port }, () => resolve(s))
     s.setMaxListeners(0) // suppress MaxListenersExceeded warnings for benchmarks
@@ -117,7 +125,10 @@ async function connectPg(port: number, user: string, password: string, database 
   return socket
 }
 
-async function sendQuery(socket: Socket, sql: string): Promise<{ messages: Buffer[]; elapsed: number }> {
+async function sendQuery(
+  socket: Socket,
+  sql: string
+): Promise<{ messages: Buffer[]; elapsed: number }> {
   const t0 = performance.now()
   socket.write(buildSimpleQuery(sql))
   const messages = await readUntilReady(socket)
@@ -153,7 +164,12 @@ function formatResult(r: BenchResult) {
   ].join('\n')
 }
 
-async function benchSerial(socket: Socket, sql: string, ops: number, name: string): Promise<BenchResult> {
+async function benchSerial(
+  socket: Socket,
+  sql: string,
+  ops: number,
+  name: string
+): Promise<BenchResult> {
   const latencies: number[] = []
   const t0 = performance.now()
   for (let i = 0; i < ops; i++) {
@@ -249,9 +265,25 @@ async function run() {
     const s1 = await connectPg(pgPort, user, password)
 
     results.push(await benchSerial(s1, 'SELECT 1', 500, 'serial: SELECT 1 (ping)'))
-    results.push(await benchSerial(s1, 'SELECT * FROM bench_rows LIMIT 10', 500, 'serial: SELECT 10 rows'))
-    results.push(await benchSerial(s1, 'SELECT * FROM bench_rows', 200, 'serial: SELECT 1000 rows'))
-    results.push(await benchSerial(s1, "INSERT INTO bench_rows (value, num) VALUES ('x', 1)", 200, 'serial: INSERT'))
+    results.push(
+      await benchSerial(
+        s1,
+        'SELECT * FROM bench_rows LIMIT 10',
+        500,
+        'serial: SELECT 10 rows'
+      )
+    )
+    results.push(
+      await benchSerial(s1, 'SELECT * FROM bench_rows', 200, 'serial: SELECT 1000 rows')
+    )
+    results.push(
+      await benchSerial(
+        s1,
+        "INSERT INTO bench_rows (value, num) VALUES ('x', 1)",
+        200,
+        'serial: INSERT'
+      )
+    )
 
     s1.destroy()
 
@@ -262,8 +294,17 @@ async function run() {
       concSockets.push(await connectPg(pgPort, user, password))
     }
 
-    results.push(await benchConcurrent(concSockets, 'SELECT 1', 200, 'concurrent 4x: SELECT 1'))
-    results.push(await benchConcurrent(concSockets, 'SELECT * FROM bench_rows LIMIT 10', 200, 'concurrent 4x: SELECT 10 rows'))
+    results.push(
+      await benchConcurrent(concSockets, 'SELECT 1', 200, 'concurrent 4x: SELECT 1')
+    )
+    results.push(
+      await benchConcurrent(
+        concSockets,
+        'SELECT * FROM bench_rows LIMIT 10',
+        200,
+        'concurrent 4x: SELECT 10 rows'
+      )
+    )
 
     for (const s of concSockets) s.destroy()
 
@@ -282,7 +323,9 @@ async function run() {
     const pingRatio = concPing.opsPerSec / serialPing.opsPerSec
     const realRatio = concReal.opsPerSec / serialReal.opsPerSec
     console.log(`  === scaling analysis (ideal = 4.0x with 4 connections) ===`)
-    console.log(`  ping (no mutex/pglite):  ${pingRatio.toFixed(2)}x  ← main thread parallelism`)
+    console.log(
+      `  ping (no mutex/pglite):  ${pingRatio.toFixed(2)}x  ← main thread parallelism`
+    )
     console.log(`  real queries (mutex):    ${realRatio.toFixed(2)}x  ← bottleneck here`)
     console.log()
   } finally {

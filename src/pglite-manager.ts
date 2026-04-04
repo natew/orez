@@ -428,7 +428,11 @@ export async function createReadReplicas(
   const dump = await proxy.dumpDataDir()
   log.debug.pglite(`primary dump: ${(dump.byteLength / 1024 / 1024).toFixed(1)}MB`)
 
-  const { dataDir: _ud, debug: _dbg, ...userOpts } = config.pgliteOptions as Record<string, any>
+  const {
+    dataDir: _ud,
+    debug: _dbg,
+    ...userOpts
+  } = config.pgliteOptions as Record<string, any>
 
   const replicas: PGliteWorkerProxy[] = []
   for (let i = 0; i < count; i++) {

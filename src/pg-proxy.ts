@@ -28,7 +28,6 @@ import type { ZeroLiteConfig } from './config.js'
 import type { PGliteInstances } from './pglite-manager.js'
 import type { PGlite } from '@electric-sql/pglite'
 
-
 // shared encoder/decoder instances
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
@@ -428,10 +427,7 @@ interface ProcessedResponse {
   rfqStatus: number | null
 }
 
-function processResponse(
-  data: Uint8Array,
-  stripRfq: boolean
-): ProcessedResponse {
+function processResponse(data: Uint8Array, stripRfq: boolean): ProcessedResponse {
   if (data.length === 0) return { data, rfqStatus: null }
 
   let rfqStatus: number | null = null
@@ -907,12 +903,13 @@ export async function startPgProxy(
           // per-query replica spillover: when the primary is busy with another query,
           // route read-only SELECTs to an available replica instead of waiting.
           // only for: postgres db, non-write, non-DDL, not in a transaction, primary contended.
-          if (dbName === 'postgres'
-            && queryNorm
-            && !isWriteNormalized(queryNorm)
-            && !isDDLNormalized(queryNorm)
-            && txState.status === 0x49
-            && mutex.isLocked // primary is busy — try spilling to replica
+          if (
+            dbName === 'postgres' &&
+            queryNorm &&
+            !isWriteNormalized(queryNorm) &&
+            !isDDLNormalized(queryNorm) &&
+            txState.status === 0x49 &&
+            mutex.isLocked // primary is busy — try spilling to replica
           ) {
             const replica = tryAcquireReadReplica()
             if (replica) {
@@ -997,7 +994,12 @@ export async function startPgProxy(
             if (queryText) fanOutWriteToReplicas(queryText)
           }
           // fan-out DDL to replicas so schema stays in sync
-          if (dbName === 'postgres' && queryNorm && isDDLNormalized(queryNorm) && queryText) {
+          if (
+            dbName === 'postgres' &&
+            queryNorm &&
+            isDDLNormalized(queryNorm) &&
+            queryText
+          ) {
             fanOutWriteToReplicas(queryText)
           }
 
