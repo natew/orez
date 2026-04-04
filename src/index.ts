@@ -265,9 +265,10 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const db = instances.postgres
 
   // periodic WAL checkpoint to prevent pg_wal/ from growing unboundedly
-  const stopCheckpoint = config.checkpointIntervalMs > 0
-    ? startPeriodicCheckpoint(instances, config.checkpointIntervalMs)
-    : () => {}
+  const stopCheckpoint =
+    config.checkpointIntervalMs > 0
+      ? startPeriodicCheckpoint(instances, config.checkpointIntervalMs)
+      : () => {}
 
   // config-based publications take precedence over env var
   if (config.zeroPublications && !process.env.ZERO_APP_PUBLICATIONS) {
