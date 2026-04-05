@@ -1,7 +1,5 @@
 import { log } from '../log.js'
 
-import type { PGlite } from '@electric-sql/pglite'
-
 export interface ChangeRecord {
   watermark: number
   table_name: string
@@ -10,7 +8,19 @@ export interface ChangeRecord {
   old_data: Record<string, unknown> | null
 }
 
-export async function installChangeTracking(db: PGlite): Promise<void> {
+/**
+ * minimal db interface change tracking needs. any sql executor that provides
+ * these two methods (e.g., a PGlite instance or a proxy wrapper) is accepted.
+ * using a structural type here keeps this module free of heavy imports so it
+ * can be loaded as the standalone `orez/change-tracking` entrypoint without
+ * pulling in pglite-manager or other server-only modules.
+ */
+export interface ChangeTrackingDb {
+  exec(sql: string): Promise<Array<{ affectedRows?: number }>>
+  query<T>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>
+}
+
+export async function installChangeTracking(db: ChangeTrackingDb): Promise<void> {
   // use _orez schema for internal tables - survives pg_restore of public schema
   await db.exec(`CREATE SCHEMA IF NOT EXISTS _orez`)
 
@@ -75,7 +85,7 @@ function quoteIdent(name: string): string {
   return '"' + name.replace(/"/g, '""') + '"'
 }
 
-async function installTriggersOnAllTables(db: PGlite): Promise<void> {
+async function installTriggersOnAllTables(db: ChangeTrackingDb): Promise<void> {
   // If a publication is configured, respect it strictly. This avoids accidentally
   // streaming private tables when publication membership is temporarily empty.
   const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
@@ -158,7 +168,7 @@ export function resetShardSchemaCache(): void {
   processedShardSchemas.clear()
 }
 
-export async function installTriggersOnShardTables(db: PGlite): Promise<void> {
+export async function installTriggersOnShardTables(db: ChangeTrackingDb): Promise<void> {
   const result = await db.query<{ nspname: string }>(
     `SELECT nspname FROM pg_namespace
      WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'public')
@@ -223,7 +233,7 @@ export async function installTriggersOnShardTables(db: PGlite): Promise<void> {
 }
 
 export async function getChangesSince(
-  db: PGlite,
+  db: ChangeTrackingDb,
   watermark: number,
   limit = 50000
 ): Promise<ChangeRecord[]> {
@@ -235,7 +245,7 @@ export async function getChangesSince(
 }
 
 export async function purgeConsumedChanges(
-  db: PGlite,
+  db: ChangeTrackingDb,
   watermark: number
 ): Promise<number> {
   const result = await db.exec(
@@ -244,7 +254,7 @@ export async function purgeConsumedChanges(
   return result[0]?.affectedRows ?? 0
 }
 
-export async function getCurrentWatermark(db: PGlite): Promise<number> {
+export async function getCurrentWatermark(db: ChangeTrackingDb): Promise<number> {
   const result = await db.query<{ last_value: string; is_called: boolean }>(
     'SELECT last_value, is_called FROM _orez._zero_watermark'
   )

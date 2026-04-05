@@ -149,6 +149,15 @@ export class PerformanceObserver {
   disconnect() {}
 }
 
+// stub for node:worker_threads
+export class Worker {
+  constructor() {
+    throw new Error('Worker not available in browser')
+  }
+}
+export const isMainThread = true
+export const parentPort = null
+
 // stub for node:stream/promises
 export function pipeline(..._args: unknown[]) {
   return Promise.resolve()
@@ -220,4 +229,7 @@ export default {
   pipeline,
   Server,
   Session,
+  Worker,
+  isMainThread,
+  parentPort,
 }

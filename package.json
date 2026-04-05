@@ -23,6 +23,10 @@
       "types": "./dist/browser.d.ts",
       "import": "./dist/browser.js"
     },
+    "./change-tracking": {
+      "types": "./dist/change-tracking.d.ts",
+      "import": "./dist/change-tracking.js"
+    },
     "./worker/*": {
       "types": "./dist/worker/*.d.ts",
       "import": "./dist/worker/*.js"
