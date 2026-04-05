@@ -22,7 +22,4 @@ export {
   purgeConsumedChanges,
 } from './replication/change-tracker.js'
 
-export type {
-  ChangeRecord,
-  ChangeTrackingDb,
-} from './replication/change-tracker.js'
+export type { ChangeRecord, ChangeTrackingDb } from './replication/change-tracker.js'
