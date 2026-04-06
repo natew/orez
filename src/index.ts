@@ -815,6 +815,10 @@ async function startZeroCache(
     NODE_ENV: 'development',
     ZERO_LOG_LEVEL: zeroLogLevel,
     ZERO_NUM_SYNC_WORKERS: '1',
+    // wasm sqlite VFS uses in-process SHM — forked worker processes each get
+    // their own WASM instance with separate SHM, breaking WAL2 coordination.
+    // force single-process mode so all workers share one WASM instance.
+    ...(sqliteMode === 'wasm' ? { SINGLE_PROCESS: '1' } : {}),
     // disable query planner — it relies on scanStatus which causes infinite
     // loops with wasm sqlite and has caused freezes with native too.
     // planner is an optimization, not required for correctness.
