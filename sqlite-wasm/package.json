@@ -6,11 +6,30 @@
   "type": "module",
   "main": "dist/sqlite3.js",
   "types": "bedrock-sqlite.d.ts",
+  "exports": {
+    ".": {
+      "types": "./bedrock-sqlite.d.ts",
+      "default": "./dist/sqlite3.js"
+    },
+    "./async": {
+      "types": "./bedrock-sqlite-async.d.ts",
+      "default": "./dist/sqlite3-async.js"
+    },
+    "./browser": {
+      "types": "./bedrock-sqlite-browser.d.ts",
+      "default": "./dist/sqlite3-browser.js"
+    }
+  },
   "files": [
     "dist/sqlite3.js",
+    "dist/sqlite3-async.js",
     "dist/sqlite3.wasm",
+    "dist/sqlite3-browser.js",
+    "dist/sqlite3-browser.wasm",
     "dist/package.json",
-    "bedrock-sqlite.d.ts"
+    "bedrock-sqlite.d.ts",
+    "bedrock-sqlite-async.d.ts",
+    "bedrock-sqlite-browser.d.ts"
   ],
   "repository": {
     "type": "git",
@@ -29,7 +48,7 @@
     "bedrock"
   ],
   "scripts": {
-    "build:wasm": "docker run --rm -v $(pwd)/..:/workspace -w /workspace/sqlite-wasm -u $(id -u):$(id -g) emscripten/emsdk:5.0.0 make all",
+    "build:wasm": "docker run --rm -v $(pwd)/..:/workspace -w /workspace/sqlite-wasm -u $(id -u):$(id -g) emscripten/emsdk:5.0.0 make all browser",
     "clean": "make clean",
     "test": "vitest run",
     "prepublishOnly": "test -f dist/sqlite3.wasm || (echo 'Run build:wasm first' && exit 1)"
