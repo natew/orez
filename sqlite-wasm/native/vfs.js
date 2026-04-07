@@ -216,25 +216,42 @@ addToLibrary({
     if (!_shmRegistry[filePath]) _shmRegistry[filePath] = {}
     var reg = _shmRegistry[filePath]
     // track exclusive lock for barrier/flush coordination
-    if ((flags & 2) && (flags & 8)) {
+    if (flags & 2 && flags & 8) {
       // acquiring exclusive lock
       reg._hasExclusiveLock = true
     }
-    if ((flags & 1) && (flags & 8) && reg._hasExclusiveLock) {
+    if (flags & 1 && flags & 8 && reg._hasExclusiveLock) {
       // releasing exclusive lock — flush all pages to -shm file
       var shmPath = filePath + '-shm'
       var fd
-      try { fd = fs.openSync(shmPath, fs.constants.O_RDWR | fs.constants.O_CREAT, 0o644) }
-      catch (e) { reg._hasExclusiveLock = false; return SQLITE_OK }
+      try {
+        fd = fs.openSync(shmPath, fs.constants.O_RDWR | fs.constants.O_CREAT, 0o644)
+      } catch (e) {
+        reg._hasExclusiveLock = false
+        return SQLITE_OK
+      }
       for (var pgno in reg) {
         if (typeof reg[pgno] !== 'object' || !reg[pgno].ptr) continue
         var r = reg[pgno]
-        try { fs.writeSync(fd, HEAPU8.subarray(r.ptr, r.ptr + r.pgsz), 0, r.pgsz, Number(pgno) * r.pgsz) }
-        catch (e) {}
+        try {
+          fs.writeSync(
+            fd,
+            HEAPU8.subarray(r.ptr, r.ptr + r.pgsz),
+            0,
+            r.pgsz,
+            Number(pgno) * r.pgsz
+          )
+        } catch (e) {}
       }
-      try { fs.fsyncSync(fd) } catch (e) {}
+      try {
+        fs.fsyncSync(fd)
+      } catch (e) {}
       // record our own write mtime so the barrier can skip reads from our own flushes
-      try { reg._lastShmWrite = fs.fstatSync(fd).mtimeMs } catch (e) { reg._lastShmWrite = Date.now() }
+      try {
+        reg._lastShmWrite = fs.fstatSync(fd).mtimeMs
+      } catch (e) {
+        reg._lastShmWrite = Date.now()
+      }
       fs.closeSync(fd)
       reg._hasExclusiveLock = false
     }
@@ -249,17 +266,31 @@ addToLibrary({
     if (!reg || reg._hasExclusiveLock) return
     var shmPath = filePath + '-shm'
     var stat
-    try { stat = fs.statSync(shmPath) } catch (e) { return } // file doesn't exist yet
+    try {
+      stat = fs.statSync(shmPath)
+    } catch (e) {
+      return
+    } // file doesn't exist yet
     // if we wrote the file and nobody else has since, skip — heap is already current
     if (reg._lastShmWrite && stat.mtimeMs <= reg._lastShmWrite) return
     var fd
-    try { fd = fs.openSync(shmPath, fs.constants.O_RDONLY) }
-    catch (e) { return }
+    try {
+      fd = fs.openSync(shmPath, fs.constants.O_RDONLY)
+    } catch (e) {
+      return
+    }
     for (var pgno in reg) {
       if (typeof reg[pgno] !== 'object' || !reg[pgno].ptr) continue
       var r = reg[pgno]
-      try { fs.readSync(fd, HEAPU8.subarray(r.ptr, r.ptr + r.pgsz), 0, r.pgsz, Number(pgno) * r.pgsz) }
-      catch (e) {} // short read is fine — page doesn't exist in file yet
+      try {
+        fs.readSync(
+          fd,
+          HEAPU8.subarray(r.ptr, r.ptr + r.pgsz),
+          0,
+          r.pgsz,
+          Number(pgno) * r.pgsz
+        )
+      } catch (e) {} // short read is fine — page doesn't exist in file yet
     }
     fs.closeSync(fd)
     reg._lastShmWrite = stat.mtimeMs // treat as if we wrote it — prevents re-reading same data
@@ -271,7 +302,8 @@ addToLibrary({
       var regions = _shmRegistry[filePath]
       if (regions) {
         for (var pgno in regions) {
-          if (typeof regions[pgno] === 'object' && regions[pgno].ptr) _free(regions[pgno].ptr)
+          if (typeof regions[pgno] === 'object' && regions[pgno].ptr)
+            _free(regions[pgno].ptr)
         }
         delete _shmRegistry[filePath]
       }

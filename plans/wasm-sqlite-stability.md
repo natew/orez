@@ -11,7 +11,7 @@ this is why chat's e2e tests fail with WebSocket crashes ("connection closed
 abruptly") — zero-cache's change-streamer and syncer can't coordinate on the
 replica DB.
 
-additionally, `ZERO_NUM_SYNC_WORKERS` is set as a *default* in orez (line ~817
+additionally, `ZERO_NUM_SYNC_WORKERS` is set as a _default_ in orez (line ~817
 of index.ts) that gets overridden by consumer env vars. chat sets it to 14 via
 env.ts, so zero-cache spawns 14 workers — each with its own broken WASM SHM.
 
@@ -32,18 +32,21 @@ EventEmitter IPC instead of `fork()`. workers share one process and one WASM
 instance, so SHM is shared.
 
 **problem**: zero-cache's entry point (`server/runner/main.js`) has:
+
 ```js
-if (!singleProcessMode()) exitAfter(() => runWorker(parentWorker, process.env));
+if (!singleProcessMode()) exitAfter(() => runWorker(parentWorker, process.env))
 ```
+
 when `SINGLE_PROCESS=1`, this skips execution entirely — the process exits
 with code 0 because it thinks it's being loaded as a worker module.
 
 **custom entry point workaround**: wrote a `.mjs` file that imports
 `run-worker.js` directly, bypassing the guard:
+
 ```js
-import { exitAfter } from ".../life-cycle.js";
-import { runWorker } from ".../run-worker.js";
-exitAfter(() => runWorker(null, process.env));
+import { exitAfter } from '.../life-cycle.js'
+import { runWorker } from '.../run-worker.js'
+exitAfter(() => runWorker(null, process.env))
 ```
 
 **result**: zero-cache starts, health check passes, WebSocket connections work,
@@ -85,6 +88,7 @@ sqlite. the only viable fix is making forked workers share SHM so zero-cache
 can keep using fork() normally.
 
 **relevant code**: `node_modules/@rocicorp/zero/out/zero-cache/src/types/processes.js`
+
 - `singleProcessMode()` checks `process.env.SINGLE_PROCESS`
 - `childWorker()` uses `inProcChannel()` (EventEmitter pairs) when true
 - `inProcChannel()` creates two connected EventEmitters with send/kill methods
@@ -103,6 +107,7 @@ SINGLE_PROCESS path. same result as approach 1.
 ### 3. file-backed SHM in VFS
 
 modified `sqlite-wasm/native/vfs.js` to use filesystem for SHM:
+
 - `nodejsShmMap`: allocates WASM memory AND reads initial state from `.db-shm` file
 - `nodejsShmBarrier`: syncs WASM memory ↔ file
 - `nodejsShmLock`: tracks dirty pages via exclusive lock callbacks
@@ -121,6 +126,7 @@ SQLite's internal state, or from the SHM file not existing when barrier tries
 to read.
 
 **key insight**: the barrier approach is fundamentally tricky because:
+
 - the barrier function doesn't know if it's being called by a writer or reader
 - SQLite's WAL header uses two copies with a barrier between them
 - the writer's barrier is between writing copy 1 and copy 2 of the header
@@ -128,6 +134,7 @@ to read.
 
 **path forward**: tracking dirty state via lock callbacks (approach 3) is the
 right direction but needs more careful implementation:
+
 - only flush dirty pages on exclusive lock release (done)
 - only read on barrier when NOT holding an exclusive lock (done but IOERR)
 - handle missing SHM file gracefully (partially done)

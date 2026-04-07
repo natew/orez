@@ -71,7 +71,7 @@ the third VFS iteration was architecturally correct. the implementation needs:
 regions[pgno] = { ptr: ptr, pgsz: pgsz, dirty: false }
 
 // in nodejsShmLock: mark dirty on exclusive lock acquire
-if ((flags & SQLITE_SHM_LOCK) && (flags & SQLITE_SHM_EXCLUSIVE)) {
+if (flags & SQLITE_SHM_LOCK && flags & SQLITE_SHM_EXCLUSIVE) {
   reg._hasExclusiveLock = true
 }
 ```
@@ -80,17 +80,29 @@ if ((flags & SQLITE_SHM_LOCK) && (flags & SQLITE_SHM_EXCLUSIVE)) {
 
 ```javascript
 // in nodejsShmLock: flush pages to file when releasing exclusive lock
-if ((flags & SQLITE_SHM_UNLOCK) && (flags & SQLITE_SHM_EXCLUSIVE) && reg._hasExclusiveLock) {
+if (flags & SQLITE_SHM_UNLOCK && flags & SQLITE_SHM_EXCLUSIVE && reg._hasExclusiveLock) {
   var shmPath = filePath + '-shm'
   var fd
-  try { fd = fs.openSync(shmPath, fs.constants.O_RDWR | fs.constants.O_CREAT, 0o644) }
-  catch (e) { reg._hasExclusiveLock = false; return SQLITE_OK }
+  try {
+    fd = fs.openSync(shmPath, fs.constants.O_RDWR | fs.constants.O_CREAT, 0o644)
+  } catch (e) {
+    reg._hasExclusiveLock = false
+    return SQLITE_OK
+  }
   for (var pgno in reg) {
     if (typeof reg[pgno] !== 'object' || !reg[pgno].ptr) continue // skip metadata keys
     var r = reg[pgno]
-    fs.writeSync(fd, HEAPU8.subarray(r.ptr, r.ptr + r.pgsz), 0, r.pgsz, Number(pgno) * r.pgsz)
+    fs.writeSync(
+      fd,
+      HEAPU8.subarray(r.ptr, r.ptr + r.pgsz),
+      0,
+      r.pgsz,
+      Number(pgno) * r.pgsz
+    )
   }
-  try { fs.fsyncSync(fd) } catch (e) {}
+  try {
+    fs.fsyncSync(fd)
+  } catch (e) {}
   fs.closeSync(fd)
   reg._hasExclusiveLock = false
 }
@@ -103,13 +115,23 @@ if ((flags & SQLITE_SHM_UNLOCK) && (flags & SQLITE_SHM_EXCLUSIVE) && reg._hasExc
 if (reg._hasExclusiveLock) return // writer — don't read, you'll corrupt your own state
 var shmPath = filePath + '-shm'
 var fd
-try { fd = fs.openSync(shmPath, fs.constants.O_RDONLY) }
-catch (e) { return } // file doesn't exist yet — nothing to read
+try {
+  fd = fs.openSync(shmPath, fs.constants.O_RDONLY)
+} catch (e) {
+  return
+} // file doesn't exist yet — nothing to read
 for (var pgno in reg) {
   if (typeof reg[pgno] !== 'object' || !reg[pgno].ptr) continue
   var r = reg[pgno]
-  try { fs.readSync(fd, HEAPU8.subarray(r.ptr, r.ptr + r.pgsz), 0, r.pgsz, Number(pgno) * r.pgsz) }
-  catch (e) {} // short read is fine — page doesn't exist in file yet
+  try {
+    fs.readSync(
+      fd,
+      HEAPU8.subarray(r.ptr, r.ptr + r.pgsz),
+      0,
+      r.pgsz,
+      Number(pgno) * r.pgsz
+    )
+  } catch (e) {} // short read is fine — page doesn't exist in file yet
 }
 fs.closeSync(fd)
 ```
@@ -118,7 +140,7 @@ fs.closeSync(fd)
 
 - the `_shmRegistry` keys include metadata (`_hasExclusiveLock`). when iterating
   pages, skip keys that aren't page objects (check `typeof reg[pgno] === 'object'
-  && reg[pgno].ptr`)
+&& reg[pgno].ptr`)
 - `nodejsShmUnmap` must free `regions[pgno].ptr` not `regions[pgno]` (since page
   entries are now objects not raw pointers)
 - open the SHM file with `O_CREAT` on write but NOT on read — if the file
@@ -187,6 +209,7 @@ uses SHM for coordination.
 ### how the VFS SHM works
 
 SQLite's WAL2 coordination uses shared memory:
+
 - `xShmMap(pgno, pgsz)` — map a SHM page (WAL index header + hash tables)
 - `xShmLock(offset, n, flags)` — acquire/release byte-range locks on SHM
 - `xShmBarrier()` — memory fence between writes
@@ -199,6 +222,7 @@ processes.
 ### SQLite's barrier protocol
 
 writer:
+
 1. acquire exclusive SHM lock
 2. write WAL index header copy 1 to SHM
 3. call `xShmBarrier` — ensures copy 1 is visible
@@ -206,6 +230,7 @@ writer:
 5. release exclusive lock
 
 reader:
+
 1. acquire shared SHM lock
 2. read WAL index header copy 2 from SHM
 3. call `xShmBarrier` — ensures copy 2 is read before copy 1
@@ -223,7 +248,7 @@ the fix: barrier reads from file ONLY when NOT holding an exclusive lock
 ### key constants (from vfs-pre.js)
 
 ```javascript
-SQLITE_SHM_LOCK = 2       // not defined in vfs-pre.js, comes from sqlite3.h
+SQLITE_SHM_LOCK = 2 // not defined in vfs-pre.js, comes from sqlite3.h
 SQLITE_SHM_UNLOCK = 1
 SQLITE_SHM_SHARED = 4
 SQLITE_SHM_EXCLUSIVE = 8
@@ -232,20 +257,21 @@ SQLITE_SHM_EXCLUSIVE = 8
 **note**: these constants are NOT in `vfs-pre.js`. they're passed by SQLite's C
 code as flags to `xShmLock`. you'll need to define them in the VFS or use the
 numeric values directly:
+
 - lock + exclusive: `flags & 2 && flags & 8`
 - unlock + exclusive: `flags & 1 && flags & 8`
 
 ### files
 
-| file | what |
-|------|------|
-| `sqlite-wasm/native/vfs.js` | VFS implementation — SHM functions to fix |
-| `sqlite-wasm/native/vfs-pre.js` | VFS constants and helpers |
-| `sqlite-wasm/Makefile` | WASM build (`make`) |
-| `sqlite-wasm/dist/` | built artifacts (symlinked to node_modules/bedrock-sqlite/dist/) |
-| `src/index.ts:787-880` | startZeroCache — env setup, sqlite mode, spawn |
-| `src/integration/integration.test.ts` | integration test for verification |
-| `plans/wasm-sqlite-stability.md` | full research notes |
+| file                                  | what                                                             |
+| ------------------------------------- | ---------------------------------------------------------------- |
+| `sqlite-wasm/native/vfs.js`           | VFS implementation — SHM functions to fix                        |
+| `sqlite-wasm/native/vfs-pre.js`       | VFS constants and helpers                                        |
+| `sqlite-wasm/Makefile`                | WASM build (`make`)                                              |
+| `sqlite-wasm/dist/`                   | built artifacts (symlinked to node_modules/bedrock-sqlite/dist/) |
+| `src/index.ts:787-880`                | startZeroCache — env setup, sqlite mode, spawn                   |
+| `src/integration/integration.test.ts` | integration test for verification                                |
+| `plans/wasm-sqlite-stability.md`      | full research notes                                              |
 
 ## verification checklist
 
