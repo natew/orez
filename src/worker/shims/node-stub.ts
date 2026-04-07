@@ -34,6 +34,9 @@ export function writeFile() {
 export function readFile() {
   return Promise.resolve('')
 }
+export function stat() {
+  return Promise.resolve({ size: 0, isFile: () => false, isDirectory: () => false })
+}
 
 // stub for node:child_process
 export function fork() {
