@@ -188,38 +188,91 @@ addToLibrary({
     return process.platform == 'win32' ? 260 : 4096
   },
   // SHM methods for WAL/WAL2 support
-  // in single-threaded WASM, SHM is just malloc'd memory shared by pointer
+  // file-backed SHM for cross-process WAL2 coordination:
+  // - pages are malloc'd in WASM heap (per-process) but synced via a -shm file
+  // - writers flush dirty pages to the file on exclusive lock release
+  // - readers refresh from the file on xShmBarrier (only if another process wrote)
+  // SHM lock flag constants (from sqlite3.h, passed by C code):
+  //   SQLITE_SHM_UNLOCK=1, SQLITE_SHM_LOCK=2, SQLITE_SHM_SHARED=4, SQLITE_SHM_EXCLUSIVE=8
   nodejsShmMap__deps: ['$_shmRegistry'],
   nodejsShmMap: function (fi, pgno, pgsz, isWrite, ppOut) {
-    const filePath = _path(fi)
+    var filePath = _path(fi)
     if (!_shmRegistry[filePath]) _shmRegistry[filePath] = {}
-    const regions = _shmRegistry[filePath]
-    if (!(pgno in regions)) {
+    var regions = _shmRegistry[filePath]
+    if (!(pgno in regions) || typeof regions[pgno] !== 'object') {
       if (!isWrite) {
         setValue(ppOut, 0, '*')
         return SQLITE_OK
       }
-      const buf = _malloc(pgsz)
+      var buf = _malloc(pgsz)
       HEAPU8.fill(0, buf, buf + pgsz)
-      regions[pgno] = buf
+      regions[pgno] = { ptr: buf, pgsz: pgsz }
     }
-    setValue(ppOut, regions[pgno], '*')
+    setValue(ppOut, regions[pgno].ptr, '*')
     return SQLITE_OK
   },
   nodejsShmLock: function (fi, offset, n, flags) {
-    // single-threaded: all locks succeed immediately
+    var filePath = _path(fi)
+    if (!_shmRegistry[filePath]) _shmRegistry[filePath] = {}
+    var reg = _shmRegistry[filePath]
+    // track exclusive lock for barrier/flush coordination
+    if ((flags & 2) && (flags & 8)) {
+      // acquiring exclusive lock
+      reg._hasExclusiveLock = true
+    }
+    if ((flags & 1) && (flags & 8) && reg._hasExclusiveLock) {
+      // releasing exclusive lock — flush all pages to -shm file
+      var shmPath = filePath + '-shm'
+      var fd
+      try { fd = fs.openSync(shmPath, fs.constants.O_RDWR | fs.constants.O_CREAT, 0o644) }
+      catch (e) { reg._hasExclusiveLock = false; return SQLITE_OK }
+      for (var pgno in reg) {
+        if (typeof reg[pgno] !== 'object' || !reg[pgno].ptr) continue
+        var r = reg[pgno]
+        try { fs.writeSync(fd, HEAPU8.subarray(r.ptr, r.ptr + r.pgsz), 0, r.pgsz, Number(pgno) * r.pgsz) }
+        catch (e) {}
+      }
+      try { fs.fsyncSync(fd) } catch (e) {}
+      // record our own write mtime so the barrier can skip reads from our own flushes
+      try { reg._lastShmWrite = fs.fstatSync(fd).mtimeMs } catch (e) { reg._lastShmWrite = Date.now() }
+      fs.closeSync(fd)
+      reg._hasExclusiveLock = false
+    }
     return SQLITE_OK
   },
   nodejsShmBarrier: function (fi) {
-    // no-op in single-threaded WASM
+    // reader refresh: read from -shm file only when another process has written.
+    // skip if: holding exclusive lock (writer), or file mtime matches our last write
+    // (same process wrote it — WASM heap already has the data).
+    var filePath = _path(fi)
+    var reg = _shmRegistry[filePath]
+    if (!reg || reg._hasExclusiveLock) return
+    var shmPath = filePath + '-shm'
+    var stat
+    try { stat = fs.statSync(shmPath) } catch (e) { return } // file doesn't exist yet
+    // if we wrote the file and nobody else has since, skip — heap is already current
+    if (reg._lastShmWrite && stat.mtimeMs <= reg._lastShmWrite) return
+    var fd
+    try { fd = fs.openSync(shmPath, fs.constants.O_RDONLY) }
+    catch (e) { return }
+    for (var pgno in reg) {
+      if (typeof reg[pgno] !== 'object' || !reg[pgno].ptr) continue
+      var r = reg[pgno]
+      try { fs.readSync(fd, HEAPU8.subarray(r.ptr, r.ptr + r.pgsz), 0, r.pgsz, Number(pgno) * r.pgsz) }
+      catch (e) {} // short read is fine — page doesn't exist in file yet
+    }
+    fs.closeSync(fd)
+    reg._lastShmWrite = stat.mtimeMs // treat as if we wrote it — prevents re-reading same data
   },
   nodejsShmUnmap__deps: ['$_shmRegistry'],
   nodejsShmUnmap: function (fi, deleteFlag) {
     if (deleteFlag) {
-      const filePath = _path(fi)
-      const regions = _shmRegistry[filePath]
+      var filePath = _path(fi)
+      var regions = _shmRegistry[filePath]
       if (regions) {
-        for (const pgno in regions) _free(regions[pgno])
+        for (var pgno in regions) {
+          if (typeof regions[pgno] === 'object' && regions[pgno].ptr) _free(regions[pgno].ptr)
+        }
         delete _shmRegistry[filePath]
       }
     }

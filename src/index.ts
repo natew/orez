@@ -838,6 +838,9 @@ async function startZeroCache(
     ZERO_PORT: String(config.zeroPort),
     ...(config.zeroMutateUrl ? { ZERO_MUTATE_URL: config.zeroMutateUrl } : {}),
     ...(config.zeroQueryUrl ? { ZERO_QUERY_URL: config.zeroQueryUrl } : {}),
+    // wasm sqlite SHM is file-backed but not as robust as native mmap —
+    // force single sync worker to avoid multi-process SHM contention
+    ...(sqliteMode === 'wasm' ? { ZERO_NUM_SYNC_WORKERS: '1' } : {}),
   }
 
   const zeroCacheBin = resolve(zeroEntry, '..', 'cli.js')

@@ -101,6 +101,7 @@ describe('orez integration', { timeout: 120000 }, () => {
       dataDir,
       logLevel: 'info',
       skipZeroCache: false,
+      ...(process.env.FORCE_WASM === '1' ? { forceWasmSqlite: true } : {}),
     })
 
     db = result.db
