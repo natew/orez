@@ -45,6 +45,17 @@ function log(msg: string) {
   console.log(`\n\x1b[1m\x1b[36m[chat-e2e]\x1b[0m ${msg}`)
 }
 
+function syncChatWorkingTree() {
+  log('syncing working tree from ~/chat')
+  for (const path of ['app', 'scripts', 'src']) {
+    const src = resolve(CHAT_SOURCE, path)
+    const dst = resolve(TEST_DIR, path)
+    if (existsSync(src)) {
+      execSync(`rsync -a --delete "${src}/" "${dst}/"`, { stdio: 'inherit' })
+    }
+  }
+}
+
 function main() {
   // step 0: validate ~/chat exists
   if (!existsSync(CHAT_SOURCE)) {
@@ -117,28 +128,11 @@ function main() {
     })
   } else {
     log('RETRY mode: reusing test-chat/')
-    // sync critical source dirs so schema changes are picked up
-    log('syncing src/ from ~/chat')
-    for (const dir of [
-      'src/database',
-      'src/data',
-      'src/server',
-      'src/apps',
-      'src/constants',
-    ]) {
-      const src = resolve(CHAT_SOURCE, dir)
-      const dst = resolve(TEST_DIR, dir)
-      if (existsSync(src)) {
-        execSync(`rsync -a --delete "${src}/" "${dst}/"`, { stdio: 'inherit' })
-      }
-    }
-    // sync e2e tests
-    const e2eSrc = resolve(CHAT_SOURCE, 'src/integration/e2e')
-    const e2eDst = resolve(TEST_DIR, 'src/integration/e2e')
-    if (existsSync(e2eSrc)) {
-      execSync(`rsync -a --delete "${e2eSrc}/" "${e2eDst}/"`, { stdio: 'inherit' })
-    }
   }
+
+  // overlay the current ~/chat working tree so local uncommitted fixes and
+  // instrumentation are present in test-chat on both fresh and retry runs.
+  syncChatWorkingTree()
 
   // write .env.development with offset ports
   // vite needs these to override production hostnames in .env
@@ -164,8 +158,8 @@ function main() {
     `ZERO_UPSTREAM_DB="postgresql://user:password@127.0.0.1:${pgPort}/postgres"`,
     `ZERO_CVR_DB="postgresql://user:password@127.0.0.1:${pgPort}/zero_cvr"`,
     `ZERO_CHANGE_DB="postgresql://user:password@127.0.0.1:${pgPort}/zero_cdb"`,
-    `ZERO_MUTATE_URL="http://localhost:${webPort}/api/zero/push"`,
-    `ZERO_QUERY_URL="http://localhost:${webPort}/api/zero/pull"`,
+    `ZERO_MUTATE_URL="http://127.0.0.1:${webPort}/api/zero/push"`,
+    `ZERO_QUERY_URL="http://127.0.0.1:${webPort}/api/zero/pull"`,
     `CLOUDFLARE_R2_ACCESS_KEY="minio"`,
     `CLOUDFLARE_R2_ENDPOINT="http://localhost:${minioPort}/chat"`,
     `CLOUDFLARE_R2_PUBLIC_URL="http://localhost:${minioPort}/chat"`,
