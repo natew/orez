@@ -75,7 +75,7 @@
     "postgres": "^3.4.5"
   },
   "peerDependencies": {
-    "@rocicorp/zero": ">=0.25.0",
+    "@rocicorp/zero": ">=1.0.0",
     "vite": ">=5"
   },
   "peerDependenciesMeta": {
@@ -84,7 +84,7 @@
     }
   },
   "devDependencies": {
-    "@rocicorp/zero": "0.26.2",
+    "@rocicorp/zero": "1.2.0",
     "@rocicorp/zero-sqlite3": "^1.0.15",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",

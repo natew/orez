@@ -18,7 +18,7 @@ import { installChangeTracking } from '../replication/change-tracker.js'
 
 import type { PGlite } from '@electric-sql/pglite'
 
-const SYNC_PROTOCOL_VERSION = 45
+const SYNC_PROTOCOL_VERSION = 49
 const NUM_MUTATIONS = 100
 
 // test schema

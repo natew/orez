@@ -26,7 +26,7 @@ import {
 
 import type { PGlite } from '@electric-sql/pglite'
 
-const SYNC_PROTOCOL_VERSION = 45
+const SYNC_PROTOCOL_VERSION = 49
 const LIVE_CLIENT_SCHEMA = {
   tables: {
     restore_live_probe: {
