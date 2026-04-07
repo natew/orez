@@ -381,7 +381,7 @@ describe('orez integration', { timeout: 120000 }, () => {
     ws.close()
   })
 
-  test('concurrent inserts all replicate', async () => {
+  test('concurrent inserts all replicate', { timeout: 60000 }, async () => {
     const downstream = new Queue<unknown>()
     const ws = connectAndSubscribe(zeroPort, downstream, {
       table: 'foo',
