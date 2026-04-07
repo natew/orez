@@ -6,7 +6,7 @@
  * `bun run` command.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
@@ -53,6 +53,30 @@ import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
 
 type ZeroChildProcess = ChildProcess & { __orezTail?: string[] }
+
+function resolveNodeBinary(): string {
+  const explicitNode = process.env.NODE
+  if (explicitNode && existsSync(explicitNode)) {
+    return explicitNode
+  }
+
+  if (process.execPath.endsWith('/node')) {
+    return process.execPath
+  }
+
+  const whichResult = spawnSync('which', ['node'], {
+    encoding: 'utf8',
+    env: process.env,
+  })
+  const candidate = whichResult.stdout?.trim()
+  if (whichResult.status === 0 && candidate && existsSync(candidate)) {
+    return candidate
+  }
+
+  throw new Error(
+    'could not resolve a node binary for zero-cache; set process.env.NODE or ensure node is in PATH'
+  )
+}
 
 export { defineConfig, getConfig, getConnectionString } from './config.js'
 export type { Hook, LogLevel, OrezConfig, ZeroLiteConfig } from './config.js'
@@ -870,7 +894,8 @@ async function startZeroCache(
     .join(' ')
   if (nodeOptions.trim()) env.NODE_OPTIONS = nodeOptions.trim()
 
-  const child = spawn(zeroCacheBin, [], {
+  const nodeBinary = resolveNodeBinary()
+  const child = spawn(nodeBinary, [zeroCacheBin], {
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   }) as ZeroChildProcess
