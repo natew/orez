@@ -418,62 +418,24 @@ function readInt32BE(data: Uint8Array, offset: number): number {
 }
 
 /**
- * single-pass response processor: extracts ReadyForQuery status AND
- * optionally strips RFQ messages + benign notices in one scan.
- * replaces the previous two-function approach that scanned the buffer twice.
+ * extract ReadyForQuery status byte from a response.
+ * returns the status: 'I' (0x49) idle, 'T' (0x54) in transaction, 'E' (0x45) error.
+ * returns null if no ReadyForQuery found.
  */
-interface ProcessedResponse {
-  data: Uint8Array
-  rfqStatus: number | null
-}
-
-function processResponse(data: Uint8Array, stripRfq: boolean): ProcessedResponse {
-  if (data.length === 0) return { data, rfqStatus: null }
-
-  let rfqStatus: number | null = null
-  const parts: Uint8Array[] = []
+function getReadyForQueryStatus(data: Uint8Array): number | null {
   let offset = 0
-  let stripped = false
-
+  let lastStatus: number | null = null
   while (offset < data.length) {
-    const msgType = data[offset]
     if (offset + 5 > data.length) break
     const msgLen = readInt32BE(data, offset + 1)
     const totalLen = 1 + msgLen
     if (totalLen <= 0 || offset + totalLen > data.length) break
-
-    if (msgType === 0x5a && totalLen >= 6) {
-      rfqStatus = data[offset + 5]
-      if (stripRfq) {
-        stripped = true
-        offset += totalLen
-        continue
-      }
-    } else {
-      const code = extractNoticeCode(data, offset, totalLen)
-      if (code && SUPPRESS_NOTICE_CODES.has(code)) {
-        stripped = true
-        offset += totalLen
-        continue
-      }
+    if (data[offset] === 0x5a && totalLen >= 6) {
+      lastStatus = data[offset + 5]
     }
-
-    parts.push(data.subarray(offset, offset + totalLen))
     offset += totalLen
   }
-
-  if (!stripped) return { data, rfqStatus }
-  if (parts.length === 0) return { data: new Uint8Array(0), rfqStatus }
-  if (parts.length === 1) return { data: parts[0], rfqStatus }
-
-  const total = parts.reduce((sum, p) => sum + p.length, 0)
-  const result = new Uint8Array(total)
-  let pos = 0
-  for (const p of parts) {
-    result.set(p, pos)
-    pos += p.length
-  }
-  return { data: result, rfqStatus }
+  return lastStatus
 }
 
 /**
@@ -530,9 +492,54 @@ function extractNoticeCode(
   return null
 }
 
-// legacy wrapper for callers that only need filtering (no RFQ status)
+/**
+ * single-pass response message filter. strips ReadyForQuery messages (when
+ * stripRfq=true) and benign transaction state warnings in one scan.
+ */
 function stripResponseMessages(data: Uint8Array, stripRfq: boolean): Uint8Array {
-  return processResponse(data, stripRfq).data
+  if (data.length === 0) return data
+
+  const parts: Uint8Array[] = []
+  let offset = 0
+  let stripped = false
+
+  while (offset < data.length) {
+    const msgType = data[offset]
+    if (offset + 5 > data.length) break
+    const msgLen = readInt32BE(data, offset + 1)
+    const totalLen = 1 + msgLen
+
+    if (totalLen <= 0 || offset + totalLen > data.length) break
+
+    // strip ReadyForQuery (0x5a) when requested
+    if (stripRfq && msgType === 0x5a) {
+      stripped = true
+    }
+    // strip benign transaction state notices
+    else {
+      const code = extractNoticeCode(data, offset, totalLen)
+      if (code && SUPPRESS_NOTICE_CODES.has(code)) {
+        stripped = true
+      } else {
+        parts.push(data.subarray(offset, offset + totalLen))
+      }
+    }
+
+    offset += totalLen
+  }
+
+  if (!stripped) return data
+  if (parts.length === 0) return new Uint8Array(0)
+  if (parts.length === 1) return parts[0]
+
+  const total = parts.reduce((sum, p) => sum + p.length, 0)
+  const result = new Uint8Array(total)
+  let pos = 0
+  for (const p of parts) {
+    result.set(p, pos)
+    pos += p.length
+  }
+  return result
 }
 
 export async function startPgProxy(
@@ -543,12 +550,7 @@ export async function startPgProxy(
   const instances: PGliteInstances =
     'postgres' in dbInput
       ? (dbInput as PGliteInstances)
-      : {
-          postgres: dbInput as PGlite,
-          cvr: dbInput as PGlite,
-          cdb: dbInput as PGlite,
-          postgresReplicas: [],
-        }
+      : { postgres: dbInput as PGlite, cvr: dbInput as PGlite, cdb: dbInput as PGlite, postgresReplicas: [] }
 
   // per-instance mutexes for serializing pglite access.
   // when all instances are the same object (single-db mode), share one mutex
@@ -560,24 +562,6 @@ export async function startPgProxy(
     postgres: pgMutex,
     cvr: sharedInstance ? pgMutex : new Mutex(),
     cdb: sharedInstance ? pgMutex : new Mutex(),
-  }
-
-  // replica state: initialized lazily when replicas become available.
-  // instances.postgresReplicas is populated AFTER the proxy starts
-  // (replicas are created after migrations/on-db-ready run via TCP proxy).
-  const replicaMutexes: Mutex[] = []
-  let replicasInitialized = false
-  let nextReplicaIdx = 0
-
-  function ensureReplicaState() {
-    if (replicasInitialized) return
-    const replicas = instances.postgresReplicas
-    if (replicas.length === 0) return
-    replicasInitialized = true
-    for (let i = 0; i < replicas.length; i++) {
-      replicaMutexes.push(new Mutex())
-    }
-    log.proxy(`${replicas.length} postgres read replica(s) active`)
   }
 
   // per-instance transaction state: tracks which socket owns the current transaction
@@ -599,38 +583,6 @@ export async function startPgProxy(
     if (dbName === 'zero_cdb')
       return { db: instances.cdb, mutex: mutexes.cdb, txState: txStates.cdb }
     return { db: instances.postgres, mutex: mutexes.postgres, txState: txStates.postgres }
-  }
-
-  /**
-   * try to acquire a read replica for a postgres SELECT query.
-   * returns null if no replicas are available or all are busy.
-   * used for per-query routing: only non-transactional SELECTs can use replicas.
-   */
-  function tryAcquireReadReplica(): { db: PGlite; mutex: Mutex } | null {
-    ensureReplicaState()
-    const replicas = instances.postgresReplicas
-    if (replicas.length === 0) return null
-    // round-robin with tryAcquire: find the first available replica
-    for (let i = 0; i < replicas.length; i++) {
-      const idx = (nextReplicaIdx + i) % replicas.length
-      if (replicaMutexes[idx].tryAcquire()) {
-        nextReplicaIdx = idx + 1
-        return { db: replicas[idx], mutex: replicaMutexes[idx] }
-      }
-    }
-    return null // all replicas busy, fall back to primary
-  }
-
-  /**
-   * fan-out a write SQL to all postgres replicas.
-   * fire-and-forget — replica staleness is acceptable for a dev tool.
-   */
-  function fanOutWriteToReplicas(sql: string) {
-    const replicas = instances.postgresReplicas
-    if (replicas.length === 0) return
-    for (const replica of replicas) {
-      replica.exec(sql).catch(() => {})
-    }
   }
 
   // signal replication handler after extended protocol writes complete.
@@ -827,13 +779,11 @@ export async function startPgProxy(
             proxyStats.totalExecMs += t2 - t1
             proxyStats.count++
 
-            // single-pass: extract tx status + strip RFQ from non-Sync messages
-            const stripRfqFromPipeline = msgType !== 0x53
-            const processed = processResponse(result, stripRfqFromPipeline)
-            result = processed.data
-            if (processed.rfqStatus !== null) {
-              txState.status = processed.rfqStatus
-              txState.owner = processed.rfqStatus === 0x49 ? null : socket
+            // update transaction state
+            const rfqStatus = getReadyForQueryStatus(result)
+            if (rfqStatus !== null) {
+              txState.status = rfqStatus
+              txState.owner = rfqStatus === 0x49 ? null : socket
             }
 
             // release mutex on Sync (end of pipeline)
@@ -847,6 +797,9 @@ export async function startPgProxy(
                 extWritePending = false
                 signalWrite()
               }
+            } else {
+              // strip ReadyForQuery from non-Sync pipeline messages
+              result = stripResponseMessages(result, true)
             }
 
             if (proxyStats.count % 200 === 0) {
@@ -900,34 +853,6 @@ export async function startPgProxy(
             }
           }
 
-          // per-query replica spillover: when the primary is busy with another query,
-          // route read-only SELECTs to an available replica instead of waiting.
-          // only for: postgres db, non-write, non-DDL, not in a transaction, primary contended.
-          if (
-            dbName === 'postgres' &&
-            queryNorm &&
-            !isWriteNormalized(queryNorm) &&
-            !isDDLNormalized(queryNorm) &&
-            txState.status === 0x49 &&
-            mutex.isLocked // primary is busy — try spilling to replica
-          ) {
-            const replica = tryAcquireReadReplica()
-            if (replica) {
-              const t1 = performance.now()
-              let result: Uint8Array
-              try {
-                result = await replica.db.execProtocolRaw(data, { syncToFs: false })
-              } catch (err) {
-                replica.mutex.release()
-                throw err
-              }
-              replica.mutex.release()
-              proxyStats.totalExecMs += performance.now() - t1
-              proxyStats.count++
-              return processResponse(result, false).data
-            }
-          }
-
           const execute = async (): Promise<Uint8Array> => {
             const t0 = performance.now()
             await mutex.acquire()
@@ -946,17 +871,13 @@ export async function startPgProxy(
               mutex.release()
               throw err
             }
+            const rfqStatus = getReadyForQueryStatus(result)
+            if (rfqStatus !== null) {
+              txState.status = rfqStatus
+              txState.owner = rfqStatus === 0x49 ? null : socket
+            }
             const t2 = performance.now()
             mutex.release()
-
-            // single-pass: extract tx status + strip messages
-            const doStripRfq = msgType !== 0x53 && msgType !== 0x51
-            const processed = processResponse(result, doStripRfq)
-            if (processed.rfqStatus !== null) {
-              txState.status = processed.rfqStatus
-              txState.owner = processed.rfqStatus === 0x49 ? null : socket
-            }
-
             proxyStats.totalWaitMs += t1 - t0
             proxyStats.totalExecMs += t2 - t1
             proxyStats.count++
@@ -965,7 +886,7 @@ export async function startPgProxy(
                 `perf: ${proxyStats.count} ops (${proxyStats.batches} batches) | mutex ${proxyStats.totalWaitMs.toFixed(0)}ms | pglite ${proxyStats.totalExecMs.toFixed(0)}ms`
               )
             }
-            return processed.data
+            return result
           }
 
           let result: Uint8Array
@@ -988,19 +909,12 @@ export async function startPgProxy(
             }
           }
 
+          const stripRfq = msgType !== 0x53 && msgType !== 0x51
+          result = stripResponseMessages(result, stripRfq)
+
           // signal replication handler on postgres writes for instant sync
           if (dbName === 'postgres' && queryNorm && isWriteNormalized(queryNorm)) {
             signalReplicationChange()
-            if (queryText) fanOutWriteToReplicas(queryText)
-          }
-          // fan-out DDL to replicas so schema stays in sync
-          if (
-            dbName === 'postgres' &&
-            queryNorm &&
-            isDDLNormalized(queryNorm) &&
-            queryText
-          ) {
-            fanOutWriteToReplicas(queryText)
           }
 
           return result
