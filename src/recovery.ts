@@ -6,6 +6,11 @@
 import { mkdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 
+import {
+  isChildProcessRunning,
+  killProcessTree,
+  waitForChildProcessExit,
+} from './child-process.js'
 import { log } from './log.js'
 import { createPGliteWorker } from './pglite-manager.js'
 
@@ -50,9 +55,10 @@ export async function recoverFromCdcCorruption(ctx: RecoveryContext): Promise<vo
   log.orez('detected CDC state corruption, auto-recovering...')
 
   // kill the failed zero-cache process
-  if (zeroCacheProcess && !zeroCacheProcess.killed) {
-    zeroCacheProcess.kill('SIGKILL')
-    await new Promise((r) => setTimeout(r, 500))
+  if (isChildProcessRunning(zeroCacheProcess)) {
+    if (zeroCacheProcess.pid) killProcessTree(zeroCacheProcess.pid, 'SIGKILL')
+    else zeroCacheProcess.kill('SIGKILL')
+    await waitForChildProcessExit(zeroCacheProcess, 1000)
   }
 
   // close and delete CVR/CDB instances

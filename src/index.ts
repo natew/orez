@@ -16,6 +16,11 @@ import {
   type HttpLogStore,
 } from './admin/http-proxy.js'
 import { createLogStore, type LogStore } from './admin/log-store.js'
+import {
+  isChildProcessRunning,
+  killProcessTree,
+  waitForChildProcessExit,
+} from './child-process.js'
 import { getConfig, getConnectionString } from './config.js'
 import { log, port, setLogLevel, setLogStore } from './log.js'
 import { startPgProxy } from './pg-proxy.js'
@@ -460,21 +465,25 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   }
 
   const killZeroCache = async () => {
-    if (zeroCacheProcess && !zeroCacheProcess.killed) {
-      zeroCacheProcess.kill('SIGTERM')
-      await new Promise<void>((r) => {
-        const timeout = setTimeout(() => {
-          if (zeroCacheProcess && !zeroCacheProcess.killed) {
-            zeroCacheProcess.kill('SIGKILL')
-          }
-          r()
-        }, 3000)
-        zeroCacheProcess!.on('exit', () => {
-          clearTimeout(timeout)
-          r()
-        })
-      })
+    const child = zeroCacheProcess
+    if (!isChildProcessRunning(child)) return
+
+    try {
+      child.kill('SIGTERM')
+    } catch (err: any) {
+      if (err?.code !== 'ESRCH') throw err
+      return
     }
+
+    const exitedGracefully = await waitForChildProcessExit(child, 5000)
+    if (exitedGracefully) return
+
+    log.debug.orez(
+      `zero-cache pid ${child.pid} did not exit after SIGTERM, force killing`
+    )
+    if (child.pid) killProcessTree(child.pid, 'SIGKILL')
+    else child.kill('SIGKILL')
+    await waitForChildProcessExit(child, 1000)
   }
 
   // simple restart without any state cleanup

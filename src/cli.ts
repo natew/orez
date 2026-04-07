@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
+import { isPidRunning } from './child-process.js'
 import { orezTitle } from './process-title.js'
 
 process.title = orezTitle()
@@ -20,6 +21,24 @@ async function detectAdminPort(dataDir: string): Promise<number | null> {
   const adminFile = resolve(dataDir, 'orez.admin')
 
   if (!existsSync(pidFile)) return null
+
+  let pid: number | null = null
+  try {
+    const value = Number.parseInt(readFileSync(pidFile, 'utf-8').trim(), 10)
+    if (Number.isInteger(value) && value > 0) {
+      pid = value
+    }
+  } catch {}
+
+  if (!isPidRunning(pid)) {
+    try {
+      unlinkSync(pidFile)
+    } catch {}
+    try {
+      unlinkSync(adminFile)
+    } catch {}
+    return null
+  }
 
   // check if admin port file exists
   if (existsSync(adminFile)) {
