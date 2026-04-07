@@ -126,11 +126,7 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     useWorkerThreads: overrides.useWorkerThreads ?? true,
     singleDb: overrides.singleDb ?? false,
     // singleDb shares one pglite instance for all databases — replicas make no sense
-    readReplicas:
-      (overrides.singleDb ?? false)
-        ? 0
-        : (overrides.readReplicas ??
-          Math.min(Math.ceil(availableParallelism() * 0.5), 4)),
+    readReplicas: overrides.readReplicas ?? 0,
     logLevel: overrides.logLevel || (process.env.OREZ_LOG_LEVEL as LogLevel) || 'warn',
     pgliteOptions: overrides.pgliteOptions || {},
     zeroPublications: overrides.zeroPublications,
