@@ -280,6 +280,14 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     writeFileSync(adminFile, String(adminPort))
   }
 
+  // remove any stale ready marker from a previous run so external waiters
+  // (e.g. CI scripts) don't see a stale "ready" before this run finishes
+  // initializing. the marker is (re-)written after on-db-ready completes.
+  const readyFile = resolve(config.dataDir, 'orez.ready')
+  try {
+    unlinkSync(readyFile)
+  } catch {}
+
   // start pglite instance(s).
   // single-db mode uses one instance for all databases (lighter for constrained envs).
   // otherwise, separate instances for postgres, zero_cvr, zero_cdb with optional
@@ -350,6 +358,14 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     log.debug.orez('re-installing change tracking after on-db-ready')
     await installChangeTracking(db)
   }
+
+  // write the ready marker so external orchestrators (e.g. CI scripts that
+  // currently `wait:ports 6434`) can wait for orez to be fully initialized.
+  // important: the pg port is bound earlier (startPgProxy above) so that
+  // on-db-ready can connect, but external clients connecting before this
+  // marker exists race with on-db-ready and corrupt transaction state on
+  // the shared pglite session.
+  writeFileSync(readyFile, String(Date.now()))
 
   // create read replicas after the primary is fully initialized
   // (migrations, seed, change tracking, publications all set up)
@@ -728,6 +744,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     } catch {}
     try {
       unlinkSync(adminFile)
+    } catch {}
+    try {
+      unlinkSync(readyFile)
     } catch {}
     log.debug.orez('stopped')
   }
