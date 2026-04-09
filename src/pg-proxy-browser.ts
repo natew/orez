@@ -814,7 +814,8 @@ export async function createBrowserProxy(
         const params = parseStartupParams(data)
         const dbName = params.database || 'postgres'
         const isRepl = params.replication === 'database'
-        if (isDebugWire()) console.debug(`[pg-proxy] connection: db=${dbName} repl=${isRepl}`)
+        if (isDebugWire())
+          console.debug(`[pg-proxy] connection: db=${dbName} repl=${isRepl}`)
         // all connections handled with raw MessagePort (no pg-gateway).
         // pg-gateway uses for-await on ReadableStream which is broken
         // in browser Web Workers (same root cause as patches #9, #18, #20).
@@ -932,7 +933,8 @@ export async function createBrowserProxy(
       }
       write(combined)
 
-      if (isDebugWire()) console.debug('[pg-proxy-repl-raw] auth complete, ready for queries')
+      if (isDebugWire())
+        console.debug('[pg-proxy-repl-raw] auth complete, ready for queries')
 
       // step 3: handle subsequent messages (queries, replication commands)
       installQueryHandler()
@@ -1636,7 +1638,9 @@ async function handleReplicationMessageBrowser(
   connection: PostgresConnection
 ): Promise<Uint8Array | undefined> {
   if (isDebugWire()) {
-    console.debug(`[pg-proxy-repl] ENTRY type=0x${data[0].toString(16)} len=${data.length}`)
+    console.debug(
+      `[pg-proxy-repl] ENTRY type=0x${data[0].toString(16)} len=${data.length}`
+    )
   }
 
   // for non-SimpleQuery messages (extended protocol), execute against PGlite directly.
