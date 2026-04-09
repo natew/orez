@@ -29,6 +29,41 @@ import type { PGlite } from '@electric-sql/pglite'
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 
+// verbose wire-protocol logging. off by default — every postgres message hits
+// the hot path, so unconditional console.debug calls are surprisingly expensive
+// even when devtools is set to hide them (the interpolated strings still get
+// built, and devtools retains them).
+//
+// re-evaluated on every call so you can flip it at runtime from any iframe,
+// worker, or console without restarting. toggle via either:
+//   - env:    OREZ_DEBUG_WIRE=1 (picked up at process start)
+//   - global: globalThis.__OREZ_DEBUG_WIRE__ = true (works anywhere, anytime)
+function isDebugWire(): boolean {
+  try {
+    if ((globalThis as any).__OREZ_DEBUG_WIRE__ === true) return true
+    if (typeof process !== 'undefined' && process.env?.OREZ_DEBUG_WIRE) return true
+  } catch {}
+  return false
+}
+
+// postgres frontend/backend message type bytes — only used for debug-wire logging
+const PG_MSG_TYPE_NAMES: Record<number, string> = {
+  0x50: 'Parse',
+  0x42: 'Bind',
+  0x44: 'Describe',
+  0x45: 'Execute',
+  0x43: 'Close',
+  0x48: 'Flush',
+  0x53: 'Sync',
+  0x51: 'Query',
+  0x58: 'Terminate',
+  0x70: 'Password',
+  0x46: 'FunctionCall',
+  0x64: 'CopyData',
+  0x63: 'CopyDone',
+  0x66: 'CopyFail',
+}
+
 // schema query cache: identical information_schema/catalog queries from multiple
 // zero-cache clients are deduplicated. first query executes, all others get cached result.
 interface CachedQueryResult {
@@ -619,7 +654,7 @@ function messagePortToDuplex(port: MessagePort): {
     start(controller) {
       port.onmessage = (ev: MessageEvent) => {
         msgCount++
-        if (msgCount <= 3) {
+        if (isDebugWire() && msgCount <= 3) {
           console.debug(
             `[pg-proxy-duplex] msg#${msgCount} type=${typeof ev.data} isAB=${ev.data instanceof ArrayBuffer} isU8=${ev.data instanceof Uint8Array} len=${ev.data?.byteLength ?? ev.data?.length ?? '?'}`
           )
@@ -641,7 +676,7 @@ function messagePortToDuplex(port: MessagePort): {
   const writable = new WritableStream<Uint8Array>({
     write(chunk) {
       _globalWriteCount++
-      if (_globalWriteCount <= 200) {
+      if (isDebugWire() && _globalWriteCount <= 200) {
         console.debug(`[pg-proxy-ws-write] #${_globalWriteCount} len=${chunk.byteLength}`)
       }
       // transfer the ArrayBuffer for zero-copy
@@ -779,7 +814,7 @@ export async function createBrowserProxy(
         const params = parseStartupParams(data)
         const dbName = params.database || 'postgres'
         const isRepl = params.replication === 'database'
-        console.debug(`[pg-proxy] connection: db=${dbName} repl=${isRepl}`)
+        if (isDebugWire()) console.debug(`[pg-proxy] connection: db=${dbName} repl=${isRepl}`)
         // all connections handled with raw MessagePort (no pg-gateway).
         // pg-gateway uses for-await on ReadableStream which is broken
         // in browser Web Workers (same root cause as patches #9, #18, #20).
@@ -847,9 +882,11 @@ export async function createBrowserProxy(
     port.onmessage = (ev: MessageEvent) => {
       const data2 =
         ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : (ev.data as Uint8Array)
-      console.debug(
-        `[pg-proxy-raw-auth] ${dbName} repl=${isReplicationConnection} got msg type=0x${data2?.[0]?.toString(16)} len=${data2?.length}`
-      )
+      if (isDebugWire()) {
+        console.debug(
+          `[pg-proxy-raw-auth] ${dbName} repl=${isReplicationConnection} got msg type=0x${data2?.[0]?.toString(16)} len=${data2?.length}`
+        )
+      }
       if (!data2 || data2[0] !== 0x70) {
         console.warn(
           '[pg-proxy-raw-auth] expected password, got type=0x' + data2?.[0]?.toString(16)
@@ -895,7 +932,7 @@ export async function createBrowserProxy(
       }
       write(combined)
 
-      console.debug('[pg-proxy-repl-raw] auth complete, ready for queries')
+      if (isDebugWire()) console.debug('[pg-proxy-repl-raw] auth complete, ready for queries')
 
       // step 3: handle subsequent messages (queries, replication commands)
       installQueryHandler()
@@ -962,25 +999,10 @@ export async function createBrowserProxy(
       async function processMessage(data: Uint8Array) {
         _pmCount++
         const msgType = data[0]
-        // log every message with type name for debugging
-        const typeNames: Record<number, string> = {
-          0x50: 'Parse',
-          0x42: 'Bind',
-          0x44: 'Describe',
-          0x45: 'Execute',
-          0x43: 'Close',
-          0x48: 'Flush',
-          0x53: 'Sync',
-          0x51: 'Query',
-          0x58: 'Terminate',
-          0x70: 'Password',
-          0x46: 'FunctionCall',
-          0x64: 'CopyData',
-          0x63: 'CopyDone',
-          0x66: 'CopyFail',
+        if (isDebugWire()) {
+          const name = PG_MSG_TYPE_NAMES[msgType] || `unknown(0x${msgType.toString(16)})`
+          console.debug(`[pg-proxy-pm] #${_pmCount} ${dbName} ${name} len=${data.length}`)
         }
-        const name = typeNames[msgType] || `unknown(0x${msgType.toString(16)})`
-        console.debug(`[pg-proxy-pm] #${_pmCount} ${dbName} ${name} len=${data.length}`)
 
         // replication connection: handle replication commands
         if (isReplicationConnection && msgType === 0x51) {
@@ -1049,11 +1071,13 @@ export async function createBrowserProxy(
         }
 
         // regular query handling (SimpleQuery or extended protocol)
-        if (msgType === 0x50) {
-          const q = extractParseQuery(data)
-          if (q) console.debug(`[pg-proxy-raw] ${dbName}: Parse ${q.slice(0, 80)}`)
-        } else if (msgType === 0x51) {
-          console.debug(`[pg-proxy-raw] ${dbName}: SimpleQuery len=${data.length}`)
+        if (isDebugWire()) {
+          if (msgType === 0x50) {
+            const q = extractParseQuery(data)
+            if (q) console.debug(`[pg-proxy-raw] ${dbName}: Parse ${q.slice(0, 80)}`)
+          } else if (msgType === 0x51) {
+            console.debug(`[pg-proxy-raw] ${dbName}: SimpleQuery len=${data.length}`)
+          }
         }
 
         // extended protocol pipeline: Parse(0x50), Bind(0x42), Describe(0x44),
@@ -1137,7 +1161,7 @@ export async function createBrowserProxy(
             return
           }
           const dt = performance.now() - t0
-          if (dt > 100)
+          if (isDebugWire() && dt > 100)
             console.debug(`[pg-proxy-raw] slow query on ${dbName}: ${dt.toFixed(0)}ms`)
 
           // update transaction state
@@ -1308,7 +1332,7 @@ export async function createBrowserProxy(
         // but tools like pg_restore also need encoding, datestyle, etc.
         // write directly to the port since pg-gateway owns the writable stream
         onAuthenticated() {
-          console.debug(`[pg-proxy-conn] authenticated db=${dbName}`)
+          if (isDebugWire()) console.debug(`[pg-proxy-conn] authenticated db=${dbName}`)
           for (const [name, value] of SERVER_PARAMS) {
             rawWrite(buildParameterStatus(name, value))
           }
@@ -1320,23 +1344,29 @@ export async function createBrowserProxy(
             isReplicationConnection = true
           }
           dbName = params?.database || 'postgres'
-          console.debug(
-            `[pg-proxy-conn] startup: db=${dbName} user=${params?.user} repl=${params?.replication || 'none'}`
-          )
+          if (isDebugWire()) {
+            console.debug(
+              `[pg-proxy-conn] startup: db=${dbName} user=${params?.user} repl=${params?.replication || 'none'}`
+            )
+          }
           const { db } = getDbContext(dbName)
           await db.waitReady
         },
 
         async onMessage(data, state) {
           if (!state.isAuthenticated) {
-            console.debug(
-              `[pg-proxy-conn] msg before auth, type=0x${data[0].toString(16)}`
-            )
+            if (isDebugWire()) {
+              console.debug(
+                `[pg-proxy-conn] msg before auth, type=0x${data[0].toString(16)}`
+              )
+            }
             return
           }
-          console.debug(
-            `[pg-proxy-conn] msg db=${dbName} type=0x${data[0].toString(16)} len=${data.length}`
-          )
+          if (isDebugWire()) {
+            console.debug(
+              `[pg-proxy-conn] msg db=${dbName} type=0x${data[0].toString(16)} len=${data.length}`
+            )
+          }
 
           // handle replication connections (always go to postgres instance)
           if (isReplicationConnection) {
@@ -1605,17 +1635,23 @@ async function handleReplicationMessageBrowser(
   mutex: Mutex,
   connection: PostgresConnection
 ): Promise<Uint8Array | undefined> {
-  console.debug(`[pg-proxy-repl] ENTRY type=0x${data[0].toString(16)} len=${data.length}`)
+  if (isDebugWire()) {
+    console.debug(`[pg-proxy-repl] ENTRY type=0x${data[0].toString(16)} len=${data.length}`)
+  }
 
   // for non-SimpleQuery messages (extended protocol), execute against PGlite directly.
   if (data[0] !== 0x51) {
-    console.debug(
-      `[pg-proxy-repl] ext protocol msg type=0x${data[0].toString(16)} len=${data.length}`
-    )
+    if (isDebugWire()) {
+      console.debug(
+        `[pg-proxy-repl] ext protocol msg type=0x${data[0].toString(16)} len=${data.length}`
+      )
+    }
     await mutex.acquire()
     try {
       const result = await db.execProtocolRaw(data, { syncToFs: false })
-      console.debug(`[pg-proxy-repl] ext protocol result len=${result.length}`)
+      if (isDebugWire()) {
+        console.debug(`[pg-proxy-repl] ext protocol result len=${result.length}`)
+      }
       return result
     } finally {
       mutex.release()
@@ -1667,17 +1703,23 @@ async function handleReplicationMessageBrowser(
   }
 
   // handle replication queries + fallthrough to pglite, all under mutex
-  console.debug(`[pg-proxy-repl] query: ${query.slice(0, 100)}`)
-  console.debug(`[pg-proxy-repl] acquiring mutex...`)
+  if (isDebugWire()) {
+    console.debug(`[pg-proxy-repl] query: ${query.slice(0, 100)}`)
+    console.debug(`[pg-proxy-repl] acquiring mutex...`)
+  }
   await mutex.acquire()
-  console.debug(`[pg-proxy-repl] mutex acquired, testing db access...`)
+  if (isDebugWire()) console.debug(`[pg-proxy-repl] mutex acquired, testing db access...`)
   try {
     const testResult = await db.query('SELECT 1 as test')
-    console.debug(`[pg-proxy-repl] db.query works: ${JSON.stringify(testResult.rows)}`)
+    if (isDebugWire()) {
+      console.debug(`[pg-proxy-repl] db.query works: ${JSON.stringify(testResult.rows)}`)
+    }
     const response = await handleReplicationQuery(query, db)
-    console.debug(
-      `[pg-proxy-repl] handleReplicationQuery result: ${response ? 'bytes(' + response.length + ')' : 'null'}`
-    )
+    if (isDebugWire()) {
+      console.debug(
+        `[pg-proxy-repl] handleReplicationQuery result: ${response ? 'bytes(' + response.length + ')' : 'null'}`
+      )
+    }
     if (response) return response
 
     // apply query rewrites before forwarding
