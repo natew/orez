@@ -100,8 +100,23 @@ export function messagePortToWs(port: MessagePort): WsCompatible {
   }
 
   // forward port messages → ws 'message' events
+  // filter out control messages from sync-ws-patch.js (__close, __open)
   port.onmessage = (event: MessageEvent) => {
-    emit('message', { data: event.data })
+    const data = event.data
+    // control messages from sync-ws-patch.js — handle as close/open events
+    if (data && typeof data === 'object' && !ArrayBuffer.isView(data) && !(data instanceof ArrayBuffer)) {
+      if (data.__close) {
+        closed = true
+        port.close()
+        emit('close', { code: data.code ?? 1000, reason: data.reason ?? '', wasClean: true })
+        return
+      }
+      if (data.__open) {
+        // already open, ignore
+        return
+      }
+    }
+    emit('message', { data })
   }
 
   port.onmessageerror = (event: MessageEvent) => {
