@@ -280,10 +280,62 @@ describe('admin data explorer', { timeout: 60_000 }, () => {
 
   test('sqlite tables returns 404 when no replica', async () => {
     const res = await fetch(`${base}/api/sqlite/tables`)
-    // no zero-replica.db exists in our test data dir
+    expect(res.status).toBe(404)
     const data = await res.json()
-    // either 404 or error — bedrock-sqlite might not be available
-    expect(data.error).toBeTruthy()
+    expect(data.error).toContain('not found')
+  })
+
+  test('sqlite endpoints work when replica file exists', async () => {
+    // create a fake zero-replica.db using bedrock-sqlite
+    // @ts-expect-error - CJS module
+    const bedrock: any = await import('bedrock-sqlite')
+    const Ctor = bedrock.Database || bedrock.default?.Database || bedrock.default
+    const replicaPath = resolve(DATA_DIR, 'zero-replica.db')
+    const setupDb = new Ctor(replicaPath)
+    setupDb.exec(`
+      CREATE TABLE widgets (
+        id INTEGER PRIMARY KEY,
+        label TEXT NOT NULL,
+        count INTEGER
+      );
+      INSERT INTO widgets (label, count) VALUES
+        ('alpha', 1),
+        ('beta', 2),
+        ('gamma', 3);
+    `)
+    setupDb.close()
+
+    // list tables
+    const tablesRes = await fetch(`${base}/api/sqlite/tables`)
+    expect(tablesRes.status).toBe(200)
+    const tables = await tablesRes.json()
+    expect(tables.tables.some((t: any) => t.name === 'widgets')).toBe(true)
+
+    // browse table data
+    const browseRes = await fetch(`${base}/api/sqlite/table-data?table=widgets`)
+    expect(browseRes.status).toBe(200)
+    const browse = await browseRes.json()
+    expect(browse.rows.length).toBe(3)
+    expect(browse.total).toBe(3)
+
+    // search
+    const searchRes = await fetch(
+      `${base}/api/sqlite/table-data?table=widgets&search=beta`
+    )
+    const search = await searchRes.json()
+    expect(search.rows.length).toBe(1)
+    expect(search.rows[0].label).toBe('beta')
+
+    // raw query
+    const queryRes = await fetch(`${base}/api/sqlite/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql: 'SELECT count(*) as c FROM widgets' }),
+    })
+    expect(queryRes.status).toBe(200)
+    const q = await queryRes.json()
+    expect(q.rows[0].c).toBe(3)
+    expect(q.fields).toContain('c')
   })
 
   // --- CORS ---

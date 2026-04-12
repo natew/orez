@@ -308,7 +308,7 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
 
       // sqlite replica endpoints
       if (req.method === 'GET' && url.pathname === '/api/sqlite/tables') {
-        const sqliteDb = openSqliteReplica(opts.config.dataDir)
+        const sqliteDb = await openSqliteReplica(opts.config.dataDir)
         if (!sqliteDb) {
           json(res, { error: 'sqlite replica not found' }, 404)
           return
@@ -336,7 +336,7 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
           json(res, { error: 'missing table param' }, 400)
           return
         }
-        const sqliteDb = openSqliteReplica(opts.config.dataDir)
+        const sqliteDb = await openSqliteReplica(opts.config.dataDir)
         if (!sqliteDb) {
           json(res, { error: 'sqlite replica not found' }, 404)
           return
@@ -391,7 +391,7 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
           json(res, { error: 'missing sql' }, 400)
           return
         }
-        const sqliteDb = openSqliteReplica(opts.config.dataDir)
+        const sqliteDb = await openSqliteReplica(opts.config.dataDir)
         if (!sqliteDb) {
           json(res, { error: 'sqlite replica not found' }, 404)
           return
@@ -453,16 +453,22 @@ function quoteIdentPg(name: string): string {
   return '"' + name.replace(/"/g, '""') + '"'
 }
 
-function openSqliteReplica(dataDir: string): any | null {
+let cachedDatabaseCtor: any | null = null
+
+async function openSqliteReplica(dataDir: string): Promise<any | null> {
   const replicaPath = resolve(dataDir, 'zero-replica.db')
   if (!existsSync(replicaPath)) return null
   try {
-    // dynamic import would be async — use require for sync bedrock-sqlite
-    const BedrockSqlite = require('bedrock-sqlite')
-    const Ctor =
-      BedrockSqlite.Database || BedrockSqlite.default?.Database || BedrockSqlite
-    return new Ctor(replicaPath, { readonly: true })
-  } catch {
+    if (!cachedDatabaseCtor) {
+      const mod: any = await import('bedrock-sqlite')
+      cachedDatabaseCtor =
+        mod.Database || mod.default?.Database || mod.default || mod
+    }
+    return new cachedDatabaseCtor(replicaPath, { readonly: true })
+  } catch (err: any) {
+    log.debug.orez(
+      'admin: sqlite replica open failed: ' + (err?.message ?? err)
+    )
     return null
   }
 }
