@@ -6,14 +6,15 @@
  */
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { Server } from 'node:http'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { PGlite } from '@electric-sql/pglite'
+import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { startAdminServer } from './server.js'
-import type { LogStore } from './log-store.js'
+
 import type { ZeroLiteConfig } from '../config.js'
+import type { LogStore } from './log-store.js'
+import type { Server } from 'node:http'
 
 const TEST_PORT = 16400 + Math.floor(Math.random() * 500)
 const DATA_DIR = `.orez-admin-data-test-${Date.now()}`
@@ -112,11 +113,7 @@ describe('admin data explorer', { timeout: 60_000 }, () => {
 
   afterAll(async () => {
     server?.close()
-    await Promise.all([
-      postgres?.close(),
-      cvr?.close(),
-      cdb?.close(),
-    ])
+    await Promise.all([postgres?.close(), cvr?.close(), cdb?.close()])
     rmSync(DATA_DIR, { recursive: true, force: true })
   })
 
@@ -208,9 +205,7 @@ describe('admin data explorer', { timeout: 60_000 }, () => {
   })
 
   test('table-data with schema-qualified name', async () => {
-    const res = await fetch(
-      `${base}/api/db/table-data?db=postgres&table=public.posts`
-    )
+    const res = await fetch(`${base}/api/db/table-data?db=postgres&table=public.posts`)
     const data = await res.json()
     expect(data.rows.length).toBe(3)
     // check NULL values come through

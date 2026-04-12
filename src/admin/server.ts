@@ -1,20 +1,19 @@
+import { existsSync } from 'node:fs'
 import {
   createServer,
   type Server,
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http'
+import { resolve } from 'node:path'
 
 import { log } from '../log.js'
 import { getAdminHtml } from './ui.js'
 
-import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
-
-import type { PGlite } from '@electric-sql/pglite'
 import type { ZeroLiteConfig } from '../config.js'
 import type { HttpLogStore } from './http-proxy.js'
 import type { LogStore } from './log-store.js'
+import type { PGlite } from '@electric-sql/pglite'
 
 export interface AdminActions {
   restartZero?: () => Promise<void>
@@ -241,8 +240,10 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
           const params: any[] = []
           if (search) {
             // search across all text-castable columns
-            const conds = columns
-              .map((_: any, i: number) => `${quoteIdentPg(columns[i].name)}::text ILIKE $${params.length + 1}`)
+            const conds = columns.map(
+              (_: any, i: number) =>
+                `${quoteIdentPg(columns[i].name)}::text ILIKE $${params.length + 1}`
+            )
             if (conds.length > 0) {
               params.push('%' + search + '%')
               sql += ' WHERE ' + conds.join(' OR ')
@@ -458,7 +459,8 @@ function openSqliteReplica(dataDir: string): any | null {
   try {
     // dynamic import would be async — use require for sync bedrock-sqlite
     const BedrockSqlite = require('bedrock-sqlite')
-    const Ctor = BedrockSqlite.Database || BedrockSqlite.default?.Database || BedrockSqlite
+    const Ctor =
+      BedrockSqlite.Database || BedrockSqlite.default?.Database || BedrockSqlite
     return new Ctor(replicaPath, { readonly: true })
   } catch {
     return null
