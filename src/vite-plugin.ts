@@ -42,6 +42,7 @@ export function orezPlugin(options?: OrezPluginOptions): Plugin {
             resetZeroFull: result.resetZeroFull,
           },
           startTime: Date.now(),
+          db: result.instances,
         })
       }
 

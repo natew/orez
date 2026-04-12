@@ -8,6 +8,10 @@ import {
 import { log } from '../log.js'
 import { getAdminHtml } from './ui.js'
 
+import { existsSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+import type { PGlite } from '@electric-sql/pglite'
 import type { ZeroLiteConfig } from '../config.js'
 import type { HttpLogStore } from './http-proxy.js'
 import type { LogStore } from './log-store.js'
@@ -19,6 +23,12 @@ export interface AdminActions {
   resetZeroFull?: () => Promise<void>
 }
 
+export interface AdminDbInstances {
+  postgres: PGlite
+  cvr: PGlite
+  cdb: PGlite
+}
+
 export interface AdminServerOpts {
   port: number
   logStore: LogStore
@@ -27,6 +37,7 @@ export interface AdminServerOpts {
   actions?: AdminActions
   startTime: number
   httpLog?: HttpLogStore
+  db?: AdminDbInstances
 }
 
 const CORS_HEADERS: Record<string, string> = {
@@ -48,6 +59,7 @@ function json(res: ServerResponse, data: unknown, status = 200) {
 const UI_PATHS = new Set([
   '/',
   '/all',
+  '/data',
   '/zero',
   '/pglite',
   '/proxy',
@@ -175,6 +187,229 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
         return
       }
 
+      // db explorer endpoints
+      if (opts.db && req.method === 'GET' && url.pathname === '/api/db/tables') {
+        const dbName = url.searchParams.get('db') || 'postgres'
+        const instance = getDbInstance(opts.db, dbName)
+        if (!instance) {
+          json(res, { error: 'unknown db: ' + dbName }, 400)
+          return
+        }
+        try {
+          const result = await instance.query(
+            `SELECT table_schema, table_name, pg_total_relation_size(quote_ident(table_schema) || '.' || quote_ident(table_name)) as size_bytes
+             FROM information_schema.tables
+             WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+             ORDER BY table_schema, table_name`
+          )
+          json(res, { tables: result.rows })
+        } catch (err: any) {
+          json(res, { error: err?.message ?? 'query failed' }, 500)
+        }
+        return
+      }
+
+      if (opts.db && req.method === 'GET' && url.pathname === '/api/db/table-data') {
+        const dbName = url.searchParams.get('db') || 'postgres'
+        const table = url.searchParams.get('table')
+        if (!table) {
+          json(res, { error: 'missing table param' }, 400)
+          return
+        }
+        const instance = getDbInstance(opts.db, dbName)
+        if (!instance) {
+          json(res, { error: 'unknown db: ' + dbName }, 400)
+          return
+        }
+        const search = url.searchParams.get('search') || ''
+        const offset = Number(url.searchParams.get('offset') || '0')
+        const limit = Number(url.searchParams.get('limit') || '100')
+        try {
+          // get columns first
+          const colResult = await instance.query(
+            `SELECT column_name, data_type FROM information_schema.columns
+             WHERE table_schema || '.' || table_name = $1 OR table_name = $1
+             ORDER BY ordinal_position`,
+            [table]
+          )
+          const columns = colResult.rows.map((r: any) => ({
+            name: r.column_name,
+            type: r.data_type,
+          }))
+          // build query with optional search
+          let sql = `SELECT * FROM ${quoteIdentPg(table)}`
+          const params: any[] = []
+          if (search) {
+            // search across all text-castable columns
+            const conds = columns
+              .map((_: any, i: number) => `${quoteIdentPg(columns[i].name)}::text ILIKE $${params.length + 1}`)
+            if (conds.length > 0) {
+              params.push('%' + search + '%')
+              sql += ' WHERE ' + conds.join(' OR ')
+            }
+          }
+          // get total count
+          const countResult = await instance.query(
+            `SELECT count(*)::int as total FROM (${sql}) _c`,
+            params
+          )
+          const total = (countResult.rows[0] as any)?.total ?? 0
+          sql += ` LIMIT ${limit} OFFSET ${offset}`
+          const result = await instance.query(sql, params)
+          json(res, {
+            columns,
+            rows: result.rows,
+            total,
+            offset,
+            limit,
+          })
+        } catch (err: any) {
+          json(res, { error: err?.message ?? 'query failed' }, 500)
+        }
+        return
+      }
+
+      if (opts.db && req.method === 'POST' && url.pathname === '/api/db/query') {
+        const body = await readBody(req)
+        let parsed: { db?: string; sql?: string }
+        try {
+          parsed = JSON.parse(body)
+        } catch {
+          json(res, { error: 'invalid json body' }, 400)
+          return
+        }
+        const dbName = parsed.db || 'postgres'
+        const sql = parsed.sql
+        if (!sql) {
+          json(res, { error: 'missing sql' }, 400)
+          return
+        }
+        const instance = getDbInstance(opts.db, dbName)
+        if (!instance) {
+          json(res, { error: 'unknown db: ' + dbName }, 400)
+          return
+        }
+        try {
+          const start = performance.now()
+          const result = await instance.query(sql)
+          const durationMs = Math.round((performance.now() - start) * 100) / 100
+          json(res, {
+            fields: (result.fields || []).map((f: any) => f.name),
+            rows: result.rows,
+            rowCount: result.rows.length,
+            durationMs,
+          })
+        } catch (err: any) {
+          json(res, { error: err?.message ?? 'query failed' }, 400)
+        }
+        return
+      }
+
+      // sqlite replica endpoints
+      if (req.method === 'GET' && url.pathname === '/api/sqlite/tables') {
+        const sqliteDb = openSqliteReplica(opts.config.dataDir)
+        if (!sqliteDb) {
+          json(res, { error: 'sqlite replica not found' }, 404)
+          return
+        }
+        try {
+          const tables = sqliteDb
+            .prepare(
+              `SELECT name, (SELECT count(*) FROM pragma_table_info(m.name)) as col_count
+               FROM sqlite_master m WHERE type='table' AND name NOT LIKE 'sqlite_%'
+               ORDER BY name`
+            )
+            .all()
+          json(res, { tables })
+        } catch (err: any) {
+          json(res, { error: err?.message ?? 'query failed' }, 500)
+        } finally {
+          sqliteDb.close()
+        }
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/api/sqlite/table-data') {
+        const table = url.searchParams.get('table')
+        if (!table) {
+          json(res, { error: 'missing table param' }, 400)
+          return
+        }
+        const sqliteDb = openSqliteReplica(opts.config.dataDir)
+        if (!sqliteDb) {
+          json(res, { error: 'sqlite replica not found' }, 404)
+          return
+        }
+        const search = url.searchParams.get('search') || ''
+        const offset = Number(url.searchParams.get('offset') || '0')
+        const limit = Number(url.searchParams.get('limit') || '100')
+        try {
+          const columns = sqliteDb
+            .prepare(`SELECT name, type FROM pragma_table_info(?)`)
+            .all(table)
+          const quotedTable = '"' + table.replace(/"/g, '""') + '"'
+          let sql = `SELECT * FROM ${quotedTable}`
+          const params: any[] = []
+          if (search) {
+            const conds = columns.map(
+              (c: any) => `"${c.name.replace(/"/g, '""')}" LIKE ?`
+            )
+            if (conds.length > 0) {
+              params.push(...conds.map(() => '%' + search + '%'))
+              sql += ' WHERE ' + conds.join(' OR ')
+            }
+          }
+          const countRow = sqliteDb
+            .prepare(`SELECT count(*) as total FROM (${sql})`)
+            .get(...params)
+          const total = (countRow as any)?.total ?? 0
+          sql += ` LIMIT ? OFFSET ?`
+          params.push(limit, offset)
+          const stmt = sqliteDb.prepare(sql)
+          const rows = stmt.all(...params)
+          json(res, { columns, rows, total, offset, limit })
+        } catch (err: any) {
+          json(res, { error: err?.message ?? 'query failed' }, 500)
+        } finally {
+          sqliteDb.close()
+        }
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/sqlite/query') {
+        const body = await readBody(req)
+        let parsed: { sql?: string }
+        try {
+          parsed = JSON.parse(body)
+        } catch {
+          json(res, { error: 'invalid json body' }, 400)
+          return
+        }
+        const sql = parsed.sql
+        if (!sql) {
+          json(res, { error: 'missing sql' }, 400)
+          return
+        }
+        const sqliteDb = openSqliteReplica(opts.config.dataDir)
+        if (!sqliteDb) {
+          json(res, { error: 'sqlite replica not found' }, 404)
+          return
+        }
+        try {
+          const start = performance.now()
+          const stmt = sqliteDb.prepare(sql)
+          const fields = stmt.columns().map((c: any) => c.name)
+          const rows = stmt.all()
+          const durationMs = Math.round((performance.now() - start) * 100) / 100
+          json(res, { fields, rows, rowCount: rows.length, durationMs })
+        } catch (err: any) {
+          json(res, { error: err?.message ?? 'query failed' }, 400)
+        } finally {
+          sqliteDb.close()
+        }
+        return
+      }
+
       res.writeHead(404, CORS_HEADERS)
       res.end('not found')
     } catch (err: any) {
@@ -188,4 +423,44 @@ export function startAdminServer(opts: AdminServerOpts): Promise<Server> {
     })
     server.on('error', reject)
   })
+}
+
+function getDbInstance(db: AdminDbInstances, name: string): PGlite | null {
+  if (name === 'postgres' || name === 'main') return db.postgres
+  if (name === 'cvr') return db.cvr
+  if (name === 'cdb') return db.cdb
+  return null
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => resolve(Buffer.concat(chunks).toString()))
+    req.on('error', reject)
+  })
+}
+
+function quoteIdentPg(name: string): string {
+  if (name.includes('.')) {
+    return name
+      .split('.')
+      .map((p) => '"' + p.replace(/"/g, '""') + '"')
+      .join('.')
+  }
+  if (/^[a-z_][a-z0-9_]*$/.test(name)) return name
+  return '"' + name.replace(/"/g, '""') + '"'
+}
+
+function openSqliteReplica(dataDir: string): any | null {
+  const replicaPath = resolve(dataDir, 'zero-replica.db')
+  if (!existsSync(replicaPath)) return null
+  try {
+    // dynamic import would be async — use require for sync bedrock-sqlite
+    const BedrockSqlite = require('bedrock-sqlite')
+    const Ctor = BedrockSqlite.Database || BedrockSqlite.default?.Database || BedrockSqlite
+    return new Ctor(replicaPath, { readonly: true })
+  } catch {
+    return null
+  }
 }

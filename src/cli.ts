@@ -1107,6 +1107,7 @@ const main = defineCommand({
     const {
       config,
       stop,
+      instances,
       zeroEnv,
       logStore,
       httpLog,
@@ -1162,6 +1163,7 @@ const main = defineCommand({
         zeroEnv,
         actions: { restartZero, stopZero, resetZero, resetZeroFull },
         startTime: Date.now(),
+        db: instances,
       })
       log.orez(`admin: ${url(`http://localhost:${config.adminPort}`)}`)
     }
