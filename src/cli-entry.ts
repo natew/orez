@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-// thin wrapper that ensures the orez process has enough heap for pglite wasm.
-// calculates ~50% of system memory and re-execs with --max-old-space-size if needed.
+// by default runs cli.js in-process. when --bump-heap (or OREZ_BUMP_HEAP=1)
+// is set, re-execs with --max-old-space-size at ~50% of system memory —
+// needed for pglite wasm workloads. default off since memory usage was reduced.
 
 import { spawn } from 'node:child_process'
 import { totalmem } from 'node:os'
@@ -10,11 +11,21 @@ import { fileURLToPath } from 'node:url'
 
 import { orezTitle } from './process-title.js'
 
-process.title = orezTitle()
-
 const currentOpts = process.env.NODE_OPTIONS || ''
+const bumpHeapRequested =
+  process.argv.includes('--bump-heap') ||
+  process.env.OREZ_BUMP_HEAP === '1' ||
+  process.env.OREZ_BUMP_HEAP === 'true'
 
-if (!currentOpts.includes('--max-old-space-size') && !process.env.__OREZ_SPAWNED) {
+const willRespawn =
+  bumpHeapRequested &&
+  !currentOpts.includes('--max-old-space-size') &&
+  !process.env.__OREZ_SPAWNED
+
+// label the wrapper distinctly so it's not confused with the real orez process
+process.title = willRespawn ? orezTitle('orez [wrapper]') : orezTitle()
+
+if (willRespawn) {
   const memMB = Math.round(totalmem() / 1024 / 1024)
   const heapMB = Math.max(4096, Math.round(memMB * 0.5))
   const cliPath = resolve(dirname(fileURLToPath(import.meta.url)), 'cli.js')
@@ -29,7 +40,10 @@ if (!currentOpts.includes('--max-old-space-size') && !process.env.__OREZ_SPAWNED
     }
   }
 
-  const child = spawn(process.execPath, [cliPath, ...process.argv.slice(2)], {
+  // strip --bump-heap from argv so cli.ts doesn't see it as an unknown flag
+  const childArgs = process.argv.slice(2).filter((a) => a !== '--bump-heap')
+
+  const child = spawn(process.execPath, [cliPath, ...childArgs], {
     env: {
       ...process.env,
       NODE_OPTIONS: nodeOpts,
@@ -48,6 +62,14 @@ if (!currentOpts.includes('--max-old-space-size') && !process.env.__OREZ_SPAWNED
     else process.exit(code ?? 1)
   })
 } else {
-  // already have heap configured, run cli directly
-  await import('./cli.js')
+  // run cli directly — no heap bump, no wrapper process
+  // strip --bump-heap in case it was passed but we're already the spawned child
+  if (process.argv.includes('--bump-heap')) {
+    process.argv = process.argv.filter((a) => a !== '--bump-heap')
+  }
+  const [{ runMain }, { main }] = await Promise.all([
+    import('citty'),
+    import('./cli.js'),
+  ])
+  runMain(main)
 }

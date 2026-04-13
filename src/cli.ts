@@ -8,7 +8,7 @@ import { orezTitle } from './process-title.js'
 
 process.title = orezTitle()
 
-import { defineCommand, runMain } from 'citty'
+import { defineCommand } from 'citty'
 import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
 import { startZeroLite } from './index.js'
@@ -894,7 +894,7 @@ const pgRestoreCommand = defineCommand({
   },
 })
 
-const main = defineCommand({
+export const main = defineCommand({
   meta: {
     name: 'orez',
     description: 'pglite-powered zero-sync development backend',
@@ -1207,12 +1207,8 @@ const main = defineCommand({
   },
 })
 
-// only run CLI when executed directly (not when imported by tests)
-// import.meta.main is Bun-specific; for Node, check if this file is the entry point
-const isMain =
-  typeof (import.meta as any).main === 'boolean'
-    ? (import.meta as any).main
-    : process.argv[1]?.endsWith('cli.js') || process.argv[1]?.endsWith('cli.ts')
-if (isMain) {
-  runMain(main)
-}
+// note: runMain is invoked from cli-entry.ts, not here. attempts to detect
+// "is this the entry" via import.meta.main / process.argv[1] are fragile
+// because bin symlinks land argv[1] at ".../.bin/orez" and nested imports
+// flip import.meta.main. keeping the call in cli-entry (a dedicated entry)
+// is the only reliable signal.
