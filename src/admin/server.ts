@@ -461,14 +461,11 @@ async function openSqliteReplica(dataDir: string): Promise<any | null> {
   try {
     if (!cachedDatabaseCtor) {
       const mod: any = await import('bedrock-sqlite')
-      cachedDatabaseCtor =
-        mod.Database || mod.default?.Database || mod.default || mod
+      cachedDatabaseCtor = mod.Database || mod.default?.Database || mod.default || mod
     }
     return new cachedDatabaseCtor(replicaPath, { readonly: true })
   } catch (err: any) {
-    log.debug.orez(
-      'admin: sqlite replica open failed: ' + (err?.message ?? err)
-    )
+    log.debug.orez('admin: sqlite replica open failed: ' + (err?.message ?? err))
     return null
   }
 }

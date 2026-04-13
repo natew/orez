@@ -67,9 +67,6 @@ if (willRespawn) {
   if (process.argv.includes('--bump-heap')) {
     process.argv = process.argv.filter((a) => a !== '--bump-heap')
   }
-  const [{ runMain }, { main }] = await Promise.all([
-    import('citty'),
-    import('./cli.js'),
-  ])
+  const [{ runMain }, { main }] = await Promise.all([import('citty'), import('./cli.js')])
   runMain(main)
 }
