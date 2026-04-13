@@ -18,6 +18,7 @@ import {
 import { createLogStore, type LogStore } from './admin/log-store.js'
 import {
   isChildProcessRunning,
+  isPidRunning,
   killProcessTree,
   waitForChildProcessExit,
 } from './child-process.js'
@@ -270,8 +271,34 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
   mkdirSync(config.dataDir, { recursive: true })
 
-  // write pid file for IPC (pg_restore uses this to signal restart)
+  // write pid file for IPC (pg_restore uses this to signal restart).
+  // before overwriting, check for orphaned zero-cache processes from a
+  // previous orez run that didn't shut down cleanly (e.g. SIGKILL'd before
+  // the in-process watchdog could notice). sweep anything still holding
+  // the zero port so the new run can bind.
   const pidFile = resolve(config.dataDir, 'orez.pid')
+  if (!config.skipZeroCache && process.platform !== 'win32') {
+    try {
+      const priorPid = Number(readFileSync(pidFile, 'utf8').trim())
+      if (priorPid > 0 && priorPid !== process.pid && !isPidRunning(priorPid)) {
+        const result = spawnSync('lsof', ['-ti', `:${config.zeroPort}`], {
+          encoding: 'utf8',
+        })
+        const orphans = (result.stdout || '')
+          .split(/\s+/)
+          .map((v) => Number(v.trim()))
+          .filter((v) => Number.isInteger(v) && v > 0 && v !== process.pid)
+        for (const pid of orphans) {
+          log.orez(
+            `killing orphan pid ${pid} holding zero port ${config.zeroPort} from previous orez run`
+          )
+          try {
+            killProcessTree(pid, 'SIGKILL')
+          } catch {}
+        }
+      }
+    } catch {}
+  }
   writeFileSync(pidFile, String(process.pid))
 
   // write admin port file so pg_restore can find it
@@ -895,6 +922,17 @@ async function startZeroCache(
     ...(sqliteMode === 'wasm' ? { ZERO_NUM_SYNC_WORKERS: '1' } : {}),
   }
 
+  // high worker counts multiply the blast radius of any sync-worker bug
+  // (e.g. orphaned workers busy-looping on EOF'd sibling pipes). dev rarely
+  // benefits from more than a couple; warn so it's obvious where the CPU
+  // went.
+  const workerCount = Number(env.ZERO_NUM_SYNC_WORKERS)
+  if (Number.isFinite(workerCount) && workerCount > 4) {
+    log.orez(
+      `warning: ZERO_NUM_SYNC_WORKERS=${workerCount} is high for development — each worker consumes CPU/memory and amplifies any sync-loop bug. consider 2.`
+    )
+  }
+
   const zeroCacheBin = resolve(zeroEntry, '..', 'cli.js')
   if (!existsSync(zeroCacheBin)) {
     throw new Error('zero-cache cli.js not found. install @rocicorp/zero')
@@ -908,10 +946,23 @@ async function startZeroCache(
     }
   }
 
-  // preload script to label the zero-cache child process
+  // preload script to label the zero-cache child process AND self-destruct
+  // if the orez parent dies. macOS has no PR_SET_PDEATHSIG, so on a hard
+  // parent kill (SIGKILL) or a crash that skips the `stop()` path, zero-cache
+  // workers get reparented to init and can busy-loop on EOF'd sibling pipes
+  // at 100% CPU indefinitely. every forked zero-cache worker inherits
+  // NODE_OPTIONS, so the --require below runs in each one; they independently
+  // poll the captured orez pid and exit when it disappears.
   const preloadPath = resolve(config.dataDir, '.orez-zero-title.cjs')
   const zeroTitle = orezTitle('orez [zero]')
-  writeFileSync(preloadPath, `process.title = ${JSON.stringify(zeroTitle)}\n`)
+  writeFileSync(
+    preloadPath,
+    `process.title = ${JSON.stringify(zeroTitle)};\n` +
+      `const __orezPid = ${process.pid};\n` +
+      `setInterval(() => {\n` +
+      `  try { process.kill(__orezPid, 0); } catch { process.exit(0); }\n` +
+      `}, 1000).unref();\n`
+  )
 
   const nodeOptions = [
     sqliteMode === 'wasm' ? '--max-old-space-size=16384' : '',
@@ -925,7 +976,10 @@ async function startZeroCache(
   const nodeBinary = resolveNodeBinary()
   const child = spawn(nodeBinary, [zeroCacheBin], {
     env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // stdin piped (not 'ignore') so zero-cache's pipe fd to orez closes with
+    // EOF on parent death — belt-and-suspenders alongside the ppid watchdog
+    // in the --require preload above.
+    stdio: ['pipe', 'pipe', 'pipe'],
   }) as ZeroChildProcess
   child.__orezTail = []
 
