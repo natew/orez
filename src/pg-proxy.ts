@@ -644,17 +644,29 @@ export async function startPgProxy(
     // prevents other connections from interleaving and corrupting PGlite's
     // unnamed portal/statement state during the pipeline.
     let pipelineMutexHeld = false
-    // clean up pglite transaction state when a client disconnects
+    // clean up pglite transaction state when a client disconnects.
+    // CRITICAL: only ROLLBACK if this socket owns the current pglite
+    // transaction. pglite is single-session, so an unconditional ROLLBACK
+    // here clobbers any OTHER socket's active transaction. that was the
+    // fresh-boot race: migrate.ts's idle pool sockets closed after exit,
+    // ran ROLLBACK while zero-cache had just sent BEGIN, and zero-cache's
+    // next SAVEPOINT failed with "25P01: not in a transaction block".
     socket.on('close', async () => {
       // replication sockets don't own a transaction — skip ROLLBACK
       if (isReplicationConnection) return
       try {
-        const { db, mutex } = getDbContext(dbName)
+        const { db, mutex, txState } = getDbContext(dbName)
         await mutex.acquire()
         try {
-          await db.exec('ROLLBACK')
+          // only rollback OUR transaction. if idle (owner=null) there's
+          // nothing to do; if another socket owns it, leave theirs alone.
+          if (txState.owner === socket && txState.status !== 0x49) {
+            await db.exec('ROLLBACK')
+            txState.status = 0x49
+            txState.owner = null
+          }
         } catch {
-          // no transaction to rollback, or db is closed
+          // db is closed or rollback failed — ignore
         } finally {
           mutex.release()
         }
