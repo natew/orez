@@ -25,7 +25,6 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
-  readdirSync,
   symlinkSync,
 } from 'node:fs'
 import { resolve } from 'node:path'
@@ -52,6 +51,17 @@ function syncChatWorkingTree() {
     const dst = resolve(TEST_DIR, path)
     if (existsSync(src)) {
       execSync(`rsync -a --delete "${src}/" "${dst}/"`, { stdio: 'inherit' })
+    }
+  }
+  // also re-sync root config files that we later mutate (playwright config,
+  // package.json scripts). without this, a past RETRY=1 run's patches — e.g.
+  // the old `retries: 0` override — survive across reruns and silently turn
+  // flaky tests into hard fails in the next run.
+  for (const file of ['playwright.config.ts']) {
+    const src = resolve(CHAT_SOURCE, file)
+    const dst = resolve(TEST_DIR, file)
+    if (existsSync(src)) {
+      cpSync(src, dst)
     }
   }
 }
@@ -211,40 +221,17 @@ function main() {
     log('skipping bedrock-sqlite (no wasm dist built, wasm is disabled)')
   }
 
-  // ensure orez bin link is correct
+  // ensure node_modules/.bin/orez points at our freshly copied dist. `bun install`
+  // only writes this symlink on install; copying just the dist/ after install
+  // leaves a stale or missing link that breaks `bun run:dev orez` in lite:backend.
   const binDir = resolve(TEST_DIR, 'node_modules', '.bin')
   const orezBinLink = resolve(binDir, 'orez')
   if (existsSync(orezBinLink)) rmSync(orezBinLink)
   symlinkSync(resolve(orezDst, 'dist', 'cli-entry.js'), orezBinLink)
 
-  // patch lite:backend to use local orez binary (bun run orez resolves to global)
-  // always start from source scripts to avoid double-patching
-  const testPkgPath = resolve(TEST_DIR, 'package.json')
-  const sourcePkg = JSON.parse(
-    readFileSync(resolve(CHAT_SOURCE, 'package.json'), 'utf-8')
-  )
-  const testPkg = JSON.parse(readFileSync(testPkgPath, 'utf-8'))
-  testPkg.scripts = { ...sourcePkg.scripts }
-  const localOrezBin = resolve(orezDst, 'dist', 'cli-entry.js')
-  if (testPkg.scripts['lite:backend']) {
-    // replace bare `orez` command with absolute path to local cli-entry.js
-    // `bun run:dev ./path/to/cli-entry.js` works because bun treats absolute/relative
-    // paths as scripts to execute directly (unlike bare names which get resolved)
-    testPkg.scripts['lite:backend'] = testPkg.scripts['lite:backend'].replace(
-      /\borez\b/,
-      `${localOrezBin} --disable-wasm-sqlite`
-    )
-    log(`patched lite:backend → ${localOrezBin} --disable-wasm-sqlite`)
-  }
-  writeFileSync(testPkgPath, JSON.stringify(testPkg, null, 2) + '\n')
-
-  // step 5: skip wasm shim - use native @rocicorp/zero-sqlite3
-  // (wasm shim had SQLITE_IOERR issues; native works reliably)
-  log('using native @rocicorp/zero-sqlite3 (wasm disabled)')
-
-  // step 6: clean .orez data dir (fresh state each run)
-  // migrations run automatically via orez's --on-db-ready hook in lite:backend
-  // with PORT_OFFSET, env.ts sets OREZ_DATA_DIR=/tmp/orez-{offset}
+  // step 5: wipe .orez data so the boot uses a clean pglite dataset.
+  // with PORT_OFFSET, @take-out/env sets OREZ_DATA_DIR=/tmp/orez-{offset}, so
+  // clear both candidate locations.
   for (const dir of [resolve(TEST_DIR, '.orez'), `/tmp/orez-${portOffset}`]) {
     if (existsSync(dir)) {
       log(`cleaning ${dir}`)
@@ -252,48 +239,19 @@ function main() {
     }
   }
 
-  // scale timeouts for PGlite latency (replication is trigger-based,
-  // slightly slower than postgres WAL for mutation confirmation)
-  const e2eDir = resolve(TEST_DIR, 'src/integration/e2e')
-  const SCALE = 2
-  log(`scaling e2e timeouts ${SCALE}x for PGlite latency`)
-  const e2eFiles: string[] = []
-  const collectTs = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isDirectory()) collectTs(resolve(dir, entry.name))
-      else if (entry.name.endsWith('.ts')) e2eFiles.push(resolve(dir, entry.name))
-    }
-  }
-  collectTs(e2eDir)
-  for (const filePath of e2eFiles) {
-    const content = readFileSync(filePath, 'utf-8')
-    let patched = content.replace(
-      /test\.setTimeout\(\s*(\d+)_?(\d*)\s*\)/g,
-      (_match, major, minor) => {
-        const ms = Number(major + (minor || ''))
-        return `test.setTimeout(${Math.round(ms * SCALE)})`
-      }
-    )
-    patched = patched.replace(/timeout:\s*(\d+)_?(\d*)\b/g, (_match, major, minor) => {
-      const ms = Number(major + (minor || ''))
-      if (ms >= 60_000) return _match
-      return `timeout: ${Math.round(ms * SCALE)}`
-    })
-    if (patched !== content) writeFileSync(filePath, patched)
-  }
-
-  // adjust playwright config
-  for (const cfgPath of [
-    resolve(TEST_DIR, 'playwright.config.ts'),
-    resolve(TEST_DIR, 'src/integration/playwright.config.ts'),
-  ]) {
-    if (existsSync(cfgPath)) {
-      let cfg = readFileSync(cfgPath, 'utf-8')
-      cfg = cfg.replace(/maxFailures:\s*\d+/, 'maxFailures: 0')
-      cfg = cfg.replace(/retries:\s*\d+/, 'retries: 0')
-      writeFileSync(cfgPath, cfg)
-    }
-  }
+  // NOTE on what we intentionally do NOT touch:
+  //   * package.json scripts — chat's `lite:backend` already runs bare `orez`
+  //     (resolved via node_modules/.bin) and already passes --disable-wasm-sqlite.
+  //     rewriting it here silently drifts the isolated run away from the
+  //     direct `bun run test e2e --integration --lite` run in ~/chat, which is
+  //     the whole point of the harness ("same thing, isolated ports and dir").
+  //   * playwright.config.ts — maxFailures/retries etc. stay at whatever chat
+  //     ships. past overrides here (retries: 0, maxFailures: 0) masked real
+  //     chat-vs-test-chat divergences as "flakes" or ate the wall-clock budget.
+  //   * test file timeouts — chat wraps every `test.setTimeout(N)` in `t(N)`,
+  //     which already scales in lite mode via E2E_LITE=1. the raw-number regex
+  //     we used to run didn't match `t(...)` calls anyway, so it was a no-op
+  //     the whole time.
 
   log('local packages installed')
 
@@ -303,19 +261,26 @@ function main() {
   ).version
   log(`orez version: ${localOrezVersion} (local build)`)
 
-  // kill any stale processes on our offset ports from previous runs
-  const testPorts = [
-    8081 + offset,
-    5048 + offset,
-    5632 + offset,
-    9290 + offset,
-    3533 + offset,
-  ]
-  for (const p of testPorts) {
-    try {
-      execSync(`lsof -ti:${p} | xargs kill -9 2>/dev/null`, { stdio: 'ignore' })
-    } catch {}
-  }
+  // kill any stale processes from previous runs.
+  // chat's `clear-ports` script authoritative-ly enumerates web/zero/postgres/
+  // minio/agent-gateway from its env config, so delegate to it instead of
+  // hardcoding a list here that drifts when chat adds/renames ports.
+  // then also kill orez's zero internal port (zeroPort + 1000 — used as the
+  // change-streamer listener when admin is enabled). it's not in chat's `ports`
+  // map and was the source of past EADDRINUSE hangs on RETRY=1 reruns.
+  try {
+    execSync('bun run clear-ports', {
+      cwd: TEST_DIR,
+      stdio: 'ignore',
+      env: { ...process.env, PORT_OFFSET: portOffset },
+    })
+  } catch {}
+  const zeroInternalPort = 5048 + offset + 1000
+  try {
+    execSync(`lsof -ti:${zeroInternalPort} | xargs kill -9 2>/dev/null`, {
+      stdio: 'ignore',
+    })
+  } catch {}
 
   // step 8: run chat e2e tests in lite mode
   const testCmd = ['bun', 'run', 'test', 'e2e', '--integration', '--lite']
