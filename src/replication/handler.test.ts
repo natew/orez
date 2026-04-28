@@ -419,7 +419,7 @@ describe('lsnFromString', () => {
   it('combines high and low halves', () => {
     expect(lsnFromString('1/0')).toBe(0x100000000n)
     expect(lsnFromString('1/1')).toBe(0x100000001n)
-    expect(lsnFromString('A/B')).toBe(0xA0000000Bn)
+    expect(lsnFromString('A/B')).toBe(0xa0000000bn)
   })
 
   it('is case-insensitive', () => {
