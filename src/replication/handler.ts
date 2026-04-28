@@ -133,6 +133,27 @@ function lsnToString(lsn: bigint): string {
   return `${high.toString(16).toUpperCase()}/${low.toString(16).toUpperCase()}`
 }
 
+/**
+ * parse an LSN string like "0/01000300" into a bigint.
+ * returns null if the string doesn't match (e.g. "0/0" still parses to 0n).
+ */
+function lsnFromString(s: string): bigint | null {
+  const m = s.trim().match(/^([0-9a-f]+)\/([0-9a-f]+)$/i)
+  if (!m) return null
+  return (BigInt('0x' + m[1]) << 32n) | BigInt('0x' + m[2])
+}
+
+/**
+ * extract the client-supplied LSN from a START_REPLICATION query.
+ * format: START_REPLICATION SLOT name LOGICAL <high>/<low> [proto_version 'N', publication_names 'X']
+ * returns null if no parseable LSN is found.
+ */
+function extractStartLsn(query: string): bigint | null {
+  const m = query.match(/LOGICAL\s+([0-9a-f]+\/[0-9a-f]+)/i)
+  if (!m) return null
+  return lsnFromString(m[1])
+}
+
 function nowMicros(): bigint {
   return BigInt(Date.now()) * 1000n
 }
@@ -359,6 +380,23 @@ export async function handleStartReplication(
 ): Promise<void> {
   log.debug.repl('entering streaming mode')
 
+  // honor zero-cache's resume LSN. without this, after a page reload the
+  // in-memory currentLsn / lastStreamedWatermark are reset to defaults but
+  // changeLog persists with prior LSNs — re-streaming from BIGINT 0 makes
+  // the change-streamer try to INSERT (watermark, pos) tuples that already
+  // exist, hitting `changeLog_pkey` violations and tearing down the loop.
+  // by advancing currentLsn past the client's last-seen LSN we guarantee
+  // newly-emitted batches use strictly higher LSNs, and by jumping
+  // lastStreamedWatermark to the current sequence value we skip already-
+  // streamed _zero_changes rows.
+  const clientStartLsn = extractStartLsn(query)
+  if (clientStartLsn !== null && clientStartLsn > currentLsn) {
+    log.debug.repl(
+      `advancing currentLsn ${lsnToString(currentLsn)} → ${lsnToString(clientStartLsn)} from client START_REPLICATION`
+    )
+    currentLsn = clientStartLsn
+  }
+
   // send CopyBothResponse to enter streaming mode
   const copyBoth = new Uint8Array(1 + 4 + 1 + 2)
   copyBoth[0] = 0x57 // 'W' CopyBothResponse
@@ -368,7 +406,26 @@ export async function handleStartReplication(
   writer.write(copyBoth)
 
   // resume from where the previous handler left off to avoid
-  // replaying already-streamed changes after reconnect
+  // replaying already-streamed changes after reconnect.
+  // when client supplied an LSN (i.e. this is a reconnect to an existing
+  // slot), also bump lastStreamedWatermark to the current sequence value
+  // — anything before that has already been written to changeLog, so
+  // re-streaming would just produce duplicate-key errors.
+  if (clientStartLsn !== null) {
+    try {
+      const currentWm = await getCurrentWatermark(db)
+      if (currentWm > lastStreamedWatermark) {
+        log.debug.repl(
+          `advancing lastStreamedWatermark ${lastStreamedWatermark} → ${currentWm} on reconnect`
+        )
+        lastStreamedWatermark = currentWm
+      }
+    } catch (err) {
+      log.repl(
+        `getCurrentWatermark failed on reconnect: ${(err as Error)?.message || err}`
+      )
+    }
+  }
   let lastWatermark = lastStreamedWatermark
 
   // use cached setup results on reconnect to avoid holding the mutex

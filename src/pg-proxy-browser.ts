@@ -245,6 +245,35 @@ function extractParseQuery(data: Uint8Array): string | null {
   return textDecoder.decode(data.subarray(queryStart, offset))
 }
 
+// parse postgres ErrorResponse fields. expects `data` to be the full
+// ErrorResponse message (including type byte and length).
+// returns { code, message } extracted from 'C' and 'M' fields.
+function parseErrorFields(data: Uint8Array, start: number, length: number): {
+  code: string
+  message: string
+  severity: string
+} {
+  let code = ''
+  let message = ''
+  let severity = ''
+  // body starts after the 1-byte type + 4-byte length
+  let pos = start + 5
+  const end = start + 1 + length
+  while (pos < end) {
+    const fieldType = data[pos]
+    if (fieldType === 0) break
+    pos++
+    const strStart = pos
+    while (pos < end && data[pos] !== 0) pos++
+    const value = textDecoder.decode(data.subarray(strStart, pos))
+    pos++
+    if (fieldType === 0x43) code = value // 'C' SQLSTATE
+    else if (fieldType === 0x4d) message = value // 'M' message
+    else if (fieldType === 0x53) severity = value // 'S' severity
+  }
+  return { code, message, severity }
+}
+
 /**
  * rebuild a Parse message with a modified query string.
  */
@@ -992,6 +1021,9 @@ export async function createBrowserProxy(
     let pipelineMutexHeld = false
     let extWritePending = false
     let pipelineBuffer: Uint8Array[] = []
+    // remember the most recent Parse / SimpleQuery for diagnostic logging when
+    // an ErrorResponse fires. trimmed to 200 chars so we don't blow up logs.
+    let lastQueryForDiag = ''
 
     function installQueryHandler() {
       // message buffer: postgres sends multiple protocol messages in one write,
@@ -1157,11 +1189,15 @@ export async function createBrowserProxy(
             }
           }
 
-          // detect writes for replication signaling
-          if (dbName === 'postgres' && msgType === 0x50) {
-            const q = extractParseQuery(data)?.trimStart().toLowerCase()
-            if (q && /^(insert|update|delete|copy|truncate)/.test(q)) {
-              extWritePending = true
+          // detect writes for replication signaling and remember last query
+          if (msgType === 0x50) {
+            const parsed = extractParseQuery(data)
+            if (parsed) lastQueryForDiag = parsed.slice(0, 200)
+            if (dbName === 'postgres') {
+              const q = parsed?.trimStart().toLowerCase()
+              if (q && /^(insert|update|delete|copy|truncate)/.test(q)) {
+                extWritePending = true
+              }
             }
           }
 
@@ -1244,9 +1280,12 @@ export async function createBrowserProxy(
               const t = result[pos]
               const l = readInt32BE(result, pos + 1)
               if (t === 0x45) {
-                // ErrorResponse
+                const errFields = parseErrorFields(result, pos, l)
                 console.warn(
-                  `[pg-proxy-raw] ErrorResponse in Sync! db=${dbName} rfq=${rfq === 0x49 ? 'I' : rfq === 0x45 ? 'E' : rfq}`
+                  `[pg-proxy-raw] ErrorResponse in Sync! db=${dbName} rfq=${rfq === 0x49 ? 'I' : rfq === 0x45 ? 'E' : rfq} ` +
+                    `code=${errFields.code} severity=${errFields.severity} ` +
+                    `msg=${JSON.stringify(errFields.message)} ` +
+                    `query=${JSON.stringify(lastQueryForDiag)}`
                 )
               }
               pos += 1 + l
