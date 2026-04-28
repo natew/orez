@@ -711,7 +711,22 @@ export interface BrowserProxy {
 
 export async function createBrowserProxy(
   dbInput: PGlite | PGliteInstances,
-  config: { pgPassword: string; pgUser: string; pgPort?: number; logLevel?: string }
+  config: {
+    pgPassword: string
+    pgUser: string
+    pgPort?: number
+    logLevel?: string
+    /**
+     * declares that postgres/cvr/cdb are all backed by the same underlying
+     * PGlite, even if the references are distinct proxy wrappers. forces
+     * mutex coalescing so concurrent protocol messages cannot interleave on
+     * the shared instance (named-statement collisions, replication-slot races).
+     * defaults to autodetect via reference equality — set explicitly when the
+     * caller wraps one PGlite in three thin façades (e.g. orez-web's port
+     * proxies) that fool the reference check.
+     */
+    singleDb?: boolean
+  }
 ): Promise<BrowserProxy> {
   // normalize input: single PGlite instance = use it for all databases (backwards compat for tests)
   const instances: PGliteInstances =
@@ -727,8 +742,11 @@ export async function createBrowserProxy(
   // per-instance mutexes for serializing pglite access.
   // when all instances are the same object (single-db mode), share one mutex
   // to prevent concurrent protocol messages on the same pglite instance.
+  // explicit singleDb wins over reference equality — callers like orez-web
+  // hand us three distinct wrapper objects that all point at one PGlite.
   const sharedInstance =
-    instances.postgres === instances.cvr && instances.postgres === instances.cdb
+    config.singleDb === true ||
+    (instances.postgres === instances.cvr && instances.postgres === instances.cdb)
   const pgMutex = new Mutex()
   const mutexes = {
     postgres: pgMutex,
@@ -737,11 +755,18 @@ export async function createBrowserProxy(
   }
 
   // per-instance transaction state: tracks which connection owns the current transaction
-  // so we can auto-ROLLBACK stale aborted transactions from other connections
+  // so we can auto-ROLLBACK stale aborted transactions from other connections.
+  // shared-instance (singleDb) coalesces txState too — pglite is single-session,
+  // so an 'E' state from role A's aborted txn poisons every subsequent query
+  // unless role B can see "yes there's an aborted txn here" and ROLLBACK before
+  // its own work. without coalesce, each role's per-role txState reads idle
+  // even when pglite's actual session is in E, and the rescue at every
+  // mutex.acquire() site never fires for the foreign role.
+  const pgTxState: PgLiteTxState = { status: 0x49, owner: null }
   const txStates: Record<string, PgLiteTxState> = {
-    postgres: { status: 0x49, owner: null },
-    cvr: { status: 0x49, owner: null },
-    cdb: { status: 0x49, owner: null },
+    postgres: pgTxState,
+    cvr: sharedInstance ? pgTxState : { status: 0x49, owner: null },
+    cdb: sharedInstance ? pgTxState : { status: 0x49, owner: null },
   }
 
   // helper to get instance + mutex + tx state for a database name
@@ -1287,19 +1312,30 @@ export async function createBrowserProxy(
     // connection closed flag
     let connClosed = false
 
-    // clean up pglite transaction state when the connection ends
+    // clean up pglite transaction state when the connection ends.
+    // CRITICAL: only ROLLBACK if THIS connection owns the current pglite
+    // transaction. pglite is single-session and the singleDb path coalesces
+    // txState across roles, so an unconditional ROLLBACK here clobbers any
+    // OTHER connection's active transaction — exactly the cross-role
+    // pollution that 2eb1873 fixed on the node side. browser cleanup was
+    // missed and showed up as "current transaction is aborted, commands
+    // ignored" when a foreign connection closed mid-someone-else's-txn.
     const cleanup = async () => {
       if (connClosed) return
       connClosed = true
       // replication connections don't own a transaction — skip ROLLBACK
       if (isReplicationConnection) return
       try {
-        const { db, mutex } = getDbContext(dbName)
+        const { db, mutex, txState } = getDbContext(dbName)
         await mutex.acquire()
         try {
-          await db.exec('ROLLBACK')
+          if (txState.owner === connId && txState.status !== 0x49) {
+            await db.exec('ROLLBACK')
+            txState.status = 0x49
+            txState.owner = null
+          }
         } catch {
-          // no transaction to rollback, or db is closed
+          // db is closed or rollback failed — ignore
         } finally {
           mutex.release()
         }

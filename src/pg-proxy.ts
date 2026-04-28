@@ -560,8 +560,11 @@ export async function startPgProxy(
   // per-instance mutexes for serializing pglite access.
   // when all instances are the same object (single-db mode), share one mutex
   // to prevent concurrent protocol messages on the same pglite instance.
+  // explicit config.singleDb wins over reference equality — callers that wrap
+  // one PGlite in three distinct façades still need coalesced mutexes.
   const sharedInstance =
-    instances.postgres === instances.cvr && instances.postgres === instances.cdb
+    config.singleDb === true ||
+    (instances.postgres === instances.cvr && instances.postgres === instances.cdb)
   const pgMutex = new Mutex()
   const mutexes = {
     postgres: pgMutex,
@@ -570,11 +573,15 @@ export async function startPgProxy(
   }
 
   // per-instance transaction state: tracks which socket owns the current transaction
-  // so we can auto-ROLLBACK stale aborted transactions from other connections
+  // so we can auto-ROLLBACK stale aborted transactions from other connections.
+  // shared-instance (singleDb) coalesces txState — pglite is single-session,
+  // so an 'E' state from role A's aborted txn poisons every subsequent query
+  // unless role B can see the aborted state and ROLLBACK before its own work.
+  const pgTxState: PgLiteTxState = { status: 0x49, owner: null }
   const txStates: Record<string, PgLiteTxState> = {
-    postgres: { status: 0x49, owner: null },
-    cvr: { status: 0x49, owner: null },
-    cdb: { status: 0x49, owner: null },
+    postgres: pgTxState,
+    cvr: sharedInstance ? pgTxState : { status: 0x49, owner: null },
+    cdb: sharedInstance ? pgTxState : { status: 0x49, owner: null },
   }
 
   // helper to get instance + mutex + tx state for a database name
