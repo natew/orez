@@ -97,6 +97,38 @@ describe('createBrowserProxy singleDb mutex coalescing', () => {
     proxy.close()
   })
 
+  test('coordinated query/exec runs through the same per-db mutex', async () => {
+    // proxy.query / proxy.exec exist so out-of-band JSON callers (soot's
+    // project-server / main-thread SAB JSON channels) go through the same
+    // mutex + txState the wire-protocol path uses. this test pins that the
+    // API works end-to-end against a shared-PGlite façade setup; the actual
+    // 'E'-rescue behaviour is exercised by the soot integration suite where
+    // a wire-protocol abort populates txState first.
+    const facadePg = makeFacade(pg, 'postgres')
+    const facadeCvr = makeFacade(pg, 'cvr')
+    const facadeCdb = makeFacade(pg, 'cdb')
+    const proxy = await createBrowserProxy(
+      {
+        postgres: facadePg,
+        cvr: facadeCvr,
+        cdb: facadeCdb,
+        postgresReplicas: [],
+      },
+      { pgPassword: '', pgUser: 'u', singleDb: true }
+    )
+
+    const r1 = await proxy.query('postgres', 'SELECT 1 AS ok')
+    expect(r1.rows).toEqual([{ ok: 1 }])
+
+    const r2 = await proxy.exec(
+      'postgres',
+      'CREATE TABLE IF NOT EXISTS rescue_test (id int)'
+    )
+    expect(Array.isArray(r2)).toBe(true)
+
+    proxy.close()
+  })
+
   test('explicit singleDb=false on distinct façades preserves split mutexes', async () => {
     // negative case: when caller doesn't opt in and refs are distinct, the
     // legacy reference-equality heuristic gives separate mutexes (the bug we

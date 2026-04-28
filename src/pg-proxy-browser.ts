@@ -704,9 +704,33 @@ function messagePortToDuplex(port: MessagePort): {
   return { duplex: { readable, writable }, rawWrite }
 }
 
+/**
+ * wire-protocol database name. anything not matching `zero_cvr` / `zero_cdb`
+ * routes to postgres (see `getDbContext`).
+ */
+export type BrowserProxyDbName = 'postgres' | 'zero_cvr' | 'zero_cdb'
+
 export interface BrowserProxy {
   handleConnection(port: MessagePort): void
   close(): void
+  /**
+   * mutex-coordinated query for out-of-band JSON callers (e.g. soot's
+   * project-server / main-thread SAB JSON channels). takes the same per-db
+   * mutex the wire-protocol path uses and rescues a stale aborted txn before
+   * running. critical in singleDb mode where wire-protocol roles share a
+   * single PGlite session with these external callers — without going through
+   * here, an external query can land on an `E`-state session left by a
+   * different role and fail with "current transaction is aborted".
+   */
+  query(
+    dbName: BrowserProxyDbName,
+    sql: string,
+    params?: unknown[]
+  ): Promise<{ rows: unknown[]; affectedRows?: number }>
+  exec(
+    dbName: BrowserProxyDbName,
+    sql: string
+  ): Promise<Array<{ affectedRows: number }>>
 }
 
 export async function createBrowserProxy(
@@ -1655,12 +1679,81 @@ export async function createBrowserProxy(
     }
   }
 
+  // rescue any stale aborted txn left on the shared session before running an
+  // out-of-band JSON query. external callers don't own a transaction (each
+  // call is a single statement), so we always rescue when status is 'E' —
+  // there's no "is this mine" check like the wire path has.
+  async function rescueStaleAborted(db: PGlite, txState: PgLiteTxState) {
+    if (txState.status === 0x45) {
+      try {
+        await db.exec('ROLLBACK')
+      } catch (err) {
+        // surfaced for diagnosis only — a failing ROLLBACK still leaves us in
+        // a state where the next statement will get 25P02; that's the signal
+        // the caller needs anyway.
+        log.proxy(
+          `[pg-proxy] rescueStaleAborted: ROLLBACK failed: ${(err as Error)?.message || err}`
+        )
+      }
+      txState.status = 0x49
+      txState.owner = null
+    }
+  }
+
+  // detect writes that need replication signaling. wire path does this on
+  // postgres-bound INSERT/UPDATE/DELETE/COPY/TRUNCATE — same rule applies to
+  // out-of-band callers. without it, a project-server write via SAB JSON
+  // wouldn't wake up the replication stream until the next wire-protocol
+  // write came along.
+  function maybeSignalWriteForExternal(dbName: string, sql: string) {
+    if (dbName !== 'postgres' && dbName !== '') return
+    const head = sql.trimStart().toLowerCase()
+    if (/^(insert|update|delete|copy|truncate)/.test(head)) {
+      signalWrite()
+    }
+  }
+
+  async function externalQuery(dbName: string, sql: string, params?: unknown[]) {
+    if (closed) throw new Error('pg-proxy is closed')
+    const { db, mutex, txState } = getDbContext(dbName)
+    await mutex.acquire()
+    try {
+      await rescueStaleAborted(db, txState)
+      const result = await db.query(sql, params as Array<unknown> | undefined)
+      maybeSignalWriteForExternal(dbName, sql)
+      return {
+        rows: result.rows as unknown[],
+        affectedRows: result.affectedRows,
+      }
+    } finally {
+      mutex.release()
+    }
+  }
+
+  async function externalExec(dbName: string, sql: string) {
+    if (closed) throw new Error('pg-proxy is closed')
+    const { db, mutex, txState } = getDbContext(dbName)
+    await mutex.acquire()
+    try {
+      await rescueStaleAborted(db, txState)
+      const result = await db.exec(sql)
+      maybeSignalWriteForExternal(dbName, sql)
+      return result.map((r: { affectedRows?: number }) => ({
+        affectedRows: r.affectedRows ?? 0,
+      }))
+    } finally {
+      mutex.release()
+    }
+  }
+
   return {
     handleConnection,
     close() {
       closed = true
       signalPending = false
     },
+    query: externalQuery,
+    exec: externalExec,
   }
 }
 
