@@ -248,7 +248,11 @@ function extractParseQuery(data: Uint8Array): string | null {
 // parse postgres ErrorResponse fields. expects `data` to be the full
 // ErrorResponse message (including type byte and length).
 // returns { code, message } extracted from 'C' and 'M' fields.
-function parseErrorFields(data: Uint8Array, start: number, length: number): {
+function parseErrorFields(
+  data: Uint8Array,
+  start: number,
+  length: number
+): {
   code: string
   message: string
   severity: string
@@ -267,8 +271,10 @@ function parseErrorFields(data: Uint8Array, start: number, length: number): {
     while (pos < end && data[pos] !== 0) pos++
     const value = textDecoder.decode(data.subarray(strStart, pos))
     pos++
-    if (fieldType === 0x43) code = value // 'C' SQLSTATE
-    else if (fieldType === 0x4d) message = value // 'M' message
+    if (fieldType === 0x43)
+      code = value // 'C' SQLSTATE
+    else if (fieldType === 0x4d)
+      message = value // 'M' message
     else if (fieldType === 0x53) severity = value // 'S' severity
   }
   return { code, message, severity }
@@ -756,10 +762,7 @@ export interface BrowserProxy {
     sql: string,
     params?: unknown[]
   ): Promise<{ rows: unknown[]; affectedRows?: number }>
-  exec(
-    dbName: BrowserProxyDbName,
-    sql: string
-  ): Promise<Array<{ affectedRows: number }>>
+  exec(dbName: BrowserProxyDbName, sql: string): Promise<Array<{ affectedRows: number }>>
 }
 
 export async function createBrowserProxy(

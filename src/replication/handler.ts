@@ -146,13 +146,16 @@ function lsnFromString(s: string): bigint | null {
 /**
  * extract the client-supplied LSN from a START_REPLICATION query.
  * format: START_REPLICATION SLOT name LOGICAL <high>/<low> [proto_version 'N', publication_names 'X']
+ * accepts optional surrounding quotes (some clients send `LOGICAL '0/0'`).
  * returns null if no parseable LSN is found.
  */
-function extractStartLsn(query: string): bigint | null {
-  const m = query.match(/LOGICAL\s+([0-9a-f]+\/[0-9a-f]+)/i)
+export function extractStartLsn(query: string): bigint | null {
+  const m = query.match(/\bLOGICAL\s+'?([0-9a-f]+\/[0-9a-f]+)'?/i)
   if (!m) return null
   return lsnFromString(m[1])
 }
+
+export { lsnFromString }
 
 function nowMicros(): bigint {
   return BigInt(Date.now()) * 1000n
@@ -407,11 +410,14 @@ export async function handleStartReplication(
 
   // resume from where the previous handler left off to avoid
   // replaying already-streamed changes after reconnect.
-  // when client supplied an LSN (i.e. this is a reconnect to an existing
-  // slot), also bump lastStreamedWatermark to the current sequence value
-  // — anything before that has already been written to changeLog, so
-  // re-streaming would just produce duplicate-key errors.
-  if (clientStartLsn !== null) {
+  // when client supplied a NON-ZERO LSN (i.e. this is a reconnect to an
+  // existing slot with prior progress), also bump lastStreamedWatermark to
+  // the current sequence value — anything before that has already been
+  // written to changeLog, so re-streaming would just produce duplicate-key
+  // errors. `0/0` indicates "fresh slot" and must NOT trigger this jump,
+  // otherwise we'd skip rows that legitimately need to be streamed for the
+  // initial sync.
+  if (clientStartLsn !== null && clientStartLsn > 0n) {
     try {
       const currentWm = await getCurrentWatermark(db)
       if (currentWm > lastStreamedWatermark) {

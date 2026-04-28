@@ -4,8 +4,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { Mutex } from '../mutex'
 import { installChangeTracking } from './change-tracker'
 import {
+  extractStartLsn,
   handleReplicationQuery,
   handleStartReplication,
+  lsnFromString,
   resetReplicationState,
   signalReplicationChange,
   type ReplicationWriter,
@@ -402,5 +404,73 @@ describe('InProcessWriter', () => {
     const rw: ReplicationWriter = writer
     expect(rw.write).toBeDefined()
     expect(rw.closed).toBe(false)
+  })
+})
+
+describe('lsnFromString', () => {
+  it('parses 0/0 to 0n', () => {
+    expect(lsnFromString('0/0')).toBe(0n)
+  })
+
+  it('parses simple LSN', () => {
+    expect(lsnFromString('0/1000000')).toBe(0x1000000n)
+  })
+
+  it('combines high and low halves', () => {
+    expect(lsnFromString('1/0')).toBe(0x100000000n)
+    expect(lsnFromString('1/1')).toBe(0x100000001n)
+    expect(lsnFromString('A/B')).toBe(0xA0000000Bn)
+  })
+
+  it('is case-insensitive', () => {
+    expect(lsnFromString('0/ff')).toBe(0xffn)
+    expect(lsnFromString('0/FF')).toBe(0xffn)
+  })
+
+  it('tolerates surrounding whitespace', () => {
+    expect(lsnFromString('  0/100  ')).toBe(0x100n)
+  })
+
+  it('returns null for malformed input', () => {
+    expect(lsnFromString('0')).toBeNull()
+    expect(lsnFromString('0/')).toBeNull()
+    expect(lsnFromString('/0')).toBeNull()
+    expect(lsnFromString('xyz')).toBeNull()
+    expect(lsnFromString('')).toBeNull()
+  })
+})
+
+describe('extractStartLsn', () => {
+  it('extracts from a basic START_REPLICATION query', () => {
+    expect(extractStartLsn('START_REPLICATION SLOT "zero" LOGICAL 0/01000300')).toBe(
+      0x1000300n
+    )
+  })
+
+  it('handles trailing options', () => {
+    expect(
+      extractStartLsn(
+        `START_REPLICATION SLOT "zero" LOGICAL 0/01000300 (proto_version '4', publication_names 'orez_zero_public')`
+      )
+    ).toBe(0x1000300n)
+  })
+
+  it('handles 0/0 (fresh slot)', () => {
+    expect(extractStartLsn('START_REPLICATION SLOT "zero" LOGICAL 0/0')).toBe(0n)
+  })
+
+  it('handles quoted LSN', () => {
+    expect(extractStartLsn(`START_REPLICATION SLOT "zero" LOGICAL '0/01000300'`)).toBe(
+      0x1000300n
+    )
+  })
+
+  it('is case-insensitive on the keyword', () => {
+    expect(extractStartLsn('start_replication slot "z" logical 0/abc')).toBe(0xabcn)
+  })
+
+  it('returns null when no LSN is present', () => {
+    expect(extractStartLsn('START_REPLICATION SLOT "z"')).toBeNull()
+    expect(extractStartLsn('IDENTIFY_SYSTEM')).toBeNull()
   })
 })
