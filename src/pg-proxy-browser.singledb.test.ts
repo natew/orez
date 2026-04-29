@@ -15,9 +15,11 @@
  */
 
 import { PGlite } from '@electric-sql/pglite'
+import postgres from 'postgres'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { createBrowserProxy } from './pg-proxy-browser.js'
+import { createSocketFactory } from './worker/shims/postgres-socket.js'
 
 import type { PGliteInstances } from './pglite-manager.js'
 
@@ -42,6 +44,32 @@ function makeFacade(real: PGlite, label: string) {
     close: () => Promise.resolve(),
   }
   return facade as PGlite
+}
+
+function createSql(
+  proxy: ReturnType<typeof createBrowserProxy> extends Promise<infer T> ? T : never
+) {
+  return postgres({
+    socket: createSocketFactory((port) => proxy.handleConnection(port)),
+    database: 'postgres',
+    username: 'u',
+    password: '',
+    host: '127.0.0.1',
+    port: 0,
+    ssl: false,
+    max: 1,
+    no_subscribe: true,
+  } as any)
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
 }
 
 describe('createBrowserProxy singleDb mutex coalescing', () => {
@@ -128,6 +156,54 @@ describe('createBrowserProxy singleDb mutex coalescing', () => {
 
     proxy.close()
   })
+
+  test('singleDb waits for the owning transaction before serving another client', async () => {
+    await pg.exec(`
+      DROP TABLE IF EXISTS singledb_tx_owner;
+      CREATE TABLE singledb_tx_owner (id int);
+    `)
+    const facadePg = makeFacade(pg, 'postgres')
+    const facadeCvr = makeFacade(pg, 'cvr')
+    const facadeCdb = makeFacade(pg, 'cdb')
+    const proxy = await createBrowserProxy(
+      {
+        postgres: facadePg,
+        cvr: facadeCvr,
+        cdb: facadeCdb,
+        postgresReplicas: [],
+      },
+      { pgPassword: '', pgUser: 'u', singleDb: true }
+    )
+    const sql1 = createSql(proxy)
+    const sql2 = createSql(proxy)
+    const releaseTx = deferred<void>()
+    const txStarted = deferred<void>()
+
+    const tx = sql1.begin(async (sql) => {
+      await sql`INSERT INTO singledb_tx_owner VALUES (1)`
+      txStarted.resolve()
+      await releaseTx.promise
+    })
+    await txStarted.promise
+
+    let readCompleted = false
+    const read = sql2`SELECT count(*)::int AS count FROM singledb_tx_owner`.then(
+      (rows) => {
+        readCompleted = true
+        return rows[0]?.count
+      }
+    )
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(readCompleted).toBe(false)
+
+    releaseTx.resolve()
+    await tx
+    await expect(read).resolves.toBe(1)
+
+    await sql1.end({ timeout: 1 }).catch(() => {})
+    await sql2.end({ timeout: 1 }).catch(() => {})
+    proxy.close()
+  }, 10_000)
 
   test('explicit singleDb=false on distinct façades preserves split mutexes', async () => {
     // negative case: when caller doesn't opt in and refs are distinct, the

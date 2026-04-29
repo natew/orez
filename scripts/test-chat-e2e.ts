@@ -10,11 +10,13 @@
  *   bun scripts/test-chat-e2e.ts                     # full build + test
  *   RETRY=1 bun scripts/test-chat-e2e.ts             # skip orez build + web rebuild
  *   bun scripts/test-chat-e2e.ts --filter=messaging   # filter tests
+ *   bun scripts/test-chat-e2e.ts --single-db          # run lite backend with --single-db
  *
  * env:
- *   RETRY=1        skip orez build + web rebuild (iterative mode)
- *   FILTER=pattern filter playwright tests
- *   PORT_OFFSET=N  override port offset (default: 400)
+ *   RETRY=1         skip orez build + web rebuild (iterative mode)
+ *   FILTER=pattern  filter playwright tests
+ *   SINGLE_DB=1     run lite backend with --single-db
+ *   PORT_OFFSET=N   override port offset (default: 400)
  */
 
 import { execSync } from 'node:child_process'
@@ -37,6 +39,7 @@ const TEST_DIR = resolve(OREZ_ROOT, 'test-chat')
 const retry = process.env.RETRY === '1'
 const filterArg = process.argv.find((a) => a.startsWith('--filter='))
 const filter = filterArg?.split('=')[1] || process.env.FILTER || ''
+const singleDb = process.env.SINGLE_DB === '1' || process.argv.includes('--single-db')
 // use 400 to avoid colliding with chat dev (0) or chat's own test offset (300)
 const portOffset = process.env.PORT_OFFSET || '400'
 
@@ -57,13 +60,36 @@ function syncChatWorkingTree() {
   // package.json scripts). without this, a past RETRY=1 run's patches — e.g.
   // the old `retries: 0` override — survive across reruns and silently turn
   // flaky tests into hard fails in the next run.
-  for (const file of ['playwright.config.ts']) {
+  for (const file of ['package.json', 'playwright.config.ts']) {
     const src = resolve(CHAT_SOURCE, file)
     const dst = resolve(TEST_DIR, file)
     if (existsSync(src)) {
       cpSync(src, dst)
     }
   }
+}
+
+function enableSingleDbBackendScript() {
+  if (!singleDb) return
+
+  const packageJsonPath = resolve(TEST_DIR, 'package.json')
+  const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as {
+    scripts?: Record<string, string>
+  }
+  const script = packageJson.scripts?.['lite:backend']
+  if (typeof script !== 'string') {
+    throw new Error('~/chat package.json is missing scripts.lite:backend')
+  }
+  if (/\borez\s+--single-db\b/.test(script) || /\s--single-db(\s|$)/.test(script)) {
+    return
+  }
+  const nextScript = script.replace(/\borez\b/, 'orez --single-db')
+  if (nextScript === script) {
+    throw new Error('could not insert --single-db into scripts.lite:backend')
+  }
+  packageJson.scripts!['lite:backend'] = nextScript
+  writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`)
+  log('patched chat lite backend script with --single-db')
 }
 
 function main() {
@@ -143,6 +169,7 @@ function main() {
   // overlay the current ~/chat working tree so local uncommitted fixes and
   // instrumentation are present in test-chat on both fresh and retry runs.
   syncChatWorkingTree()
+  enableSingleDbBackendScript()
 
   // write .env.development with offset ports
   // vite needs these to override production hostnames in .env
@@ -239,12 +266,10 @@ function main() {
     }
   }
 
-  // NOTE on what we intentionally do NOT touch:
-  //   * package.json scripts — chat's `lite:backend` already runs bare `orez`
-  //     (resolved via node_modules/.bin) and already passes --disable-wasm-sqlite.
-  //     rewriting it here silently drifts the isolated run away from the
-  //     direct `bun run test e2e --integration --lite` run in ~/chat, which is
-  //     the whole point of the harness ("same thing, isolated ports and dir").
+  // NOTE on what we intentionally do NOT touch unless explicitly requested:
+  //   * package.json scripts — the default harness keeps chat's `lite:backend`
+  //     identical to ~/chat. `--single-db`/SINGLE_DB=1 is the one explicit
+  //     exception, used to validate the orez CLI single-db backend path.
   //   * playwright.config.ts — maxFailures/retries etc. stay at whatever chat
   //     ships. past overrides here (retries: 0, maxFailures: 0) masked real
   //     chat-vs-test-chat divergences as "flakes" or ate the wall-clock budget.
@@ -288,7 +313,7 @@ function main() {
   if (filter) testCmd.push('--filter', filter)
 
   log(`running: ${testCmd.join(' ')}`)
-  log(`PORT_OFFSET=${portOffset}`)
+  log(`PORT_OFFSET=${portOffset}${singleDb ? ' SINGLE_DB=1' : ''}`)
 
   // prepend node_modules/.bin to PATH so local orez is used instead of global
   const localPath = `${binDir}:${process.env.PATH}`

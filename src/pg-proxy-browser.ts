@@ -838,6 +838,63 @@ export async function createBrowserProxy(
     return { db: instances.postgres, mutex: mutexes.postgres, txState: txStates.postgres }
   }
 
+  const waitOneTurn = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+  async function acquireForOwner(
+    db: PGlite,
+    mutex: Mutex,
+    txState: PgLiteTxState,
+    owner: object | null
+  ) {
+    while (true) {
+      await mutex.acquire()
+      const ownsCurrentTransaction = owner !== null && txState.owner === owner
+      if (txState.status === 0x54 && !ownsCurrentTransaction) {
+        mutex.release()
+        await waitOneTurn()
+        continue
+      }
+      if (txState.status === 0x45 && !ownsCurrentTransaction) {
+        try {
+          await db.exec('ROLLBACK')
+        } catch {}
+        txState.status = 0x49
+        txState.owner = null
+      }
+      return
+    }
+  }
+
+  function tryAcquireForOwner(
+    mutex: Mutex,
+    txState: PgLiteTxState,
+    owner: object | null
+  ) {
+    if (!mutex.tryAcquire()) return false
+    const ownsCurrentTransaction = owner !== null && txState.owner === owner
+    if ((txState.status === 0x54 || txState.status === 0x45) && !ownsCurrentTransaction) {
+      mutex.release()
+      return false
+    }
+    return true
+  }
+
+  function transactionAwareMutex(
+    db: PGlite,
+    mutex: Mutex,
+    txState: PgLiteTxState,
+    owner: object | null
+  ): Mutex {
+    return {
+      get isLocked() {
+        return mutex.isLocked
+      },
+      acquire: () => acquireForOwner(db, mutex, txState, owner),
+      tryAcquire: () => tryAcquireForOwner(mutex, txState, owner),
+      release: () => mutex.release(),
+    } as Mutex
+  }
+
   // signal replication handler after extended protocol writes complete.
   // 8ms leading-edge debounce: fires exactly 8ms after the FIRST write,
   // subsequent writes within that window are batched (handler polls all
@@ -1122,12 +1179,17 @@ export async function createBrowserProxy(
               port.close()
             }
             port.onmessage = () => {}
-            handleStartReplication(query, writer, db, mutex).catch(() => {})
+            handleStartReplication(
+              query,
+              writer,
+              db,
+              transactionAwareMutex(db, mutex, txState, null)
+            ).catch(() => {})
             return
           }
 
           // replication queries (IDENTIFY_SYSTEM, CREATE/DROP SLOT)
-          await mutex.acquire()
+          await acquireForOwner(db, mutex, txState, null)
           try {
             const response = await handleReplicationQuery(query, db)
             if (response) {
@@ -1179,17 +1241,9 @@ export async function createBrowserProxy(
 
         if (isExtendedMsg || isSyncInPipeline) {
           if (!pipelineMutexHeld) {
-            await mutex.acquire()
+            await acquireForOwner(db, mutex, txState, connId)
             pipelineMutexHeld = true
             pipelineBuffer = []
-            // auto-rollback stale transactions
-            if (txState.status === 0x45 && txState.owner !== connId) {
-              try {
-                await db.exec('ROLLBACK')
-              } catch {}
-              txState.status = 0x49
-              txState.owner = null
-            }
           }
 
           // detect writes for replication signaling and remember last query
@@ -1322,15 +1376,8 @@ export async function createBrowserProxy(
         }
 
         data = interceptQuery(data)
-        await mutex.acquire()
+        await acquireForOwner(db, mutex, txState, connId)
         try {
-          if (txState.status === 0x45 && txState.owner !== connId) {
-            try {
-              await db.exec('ROLLBACK')
-            } catch {}
-            txState.status = 0x49
-            txState.owner = null
-          }
           let result = await db.execProtocolRaw(data, { syncToFs: false })
           const rfqStatus = getReadyForQueryStatus(result)
           if (rfqStatus !== null) {
@@ -1515,17 +1562,9 @@ export async function createBrowserProxy(
             // acquire mutex on first message of pipeline
             if (!pipelineMutexHeld) {
               const t0 = performance.now()
-              await mutex.acquire()
+              await acquireForOwner(db, mutex, txState, connId)
               proxyStats.totalWaitMs += performance.now() - t0
               pipelineMutexHeld = true
-              // auto-rollback stale transactions from other connections
-              if (txState.status === 0x45 && txState.owner !== connId) {
-                try {
-                  await db.exec('ROLLBACK')
-                } catch {}
-                txState.status = 0x49
-                txState.owner = null
-              }
             }
 
             // detect extended protocol writes for replication signaling
@@ -1629,14 +1668,7 @@ export async function createBrowserProxy(
 
           const execute = async (): Promise<Uint8Array> => {
             const t0 = performance.now()
-            await mutex.acquire()
-            if (txState.status === 0x45 && txState.owner !== connId) {
-              try {
-                await db.exec('ROLLBACK')
-              } catch {}
-              txState.status = 0x49
-              txState.owner = null
-            }
+            await acquireForOwner(db, mutex, txState, connId)
             const t1 = performance.now()
             let result: Uint8Array
             try {
@@ -1721,27 +1753,6 @@ export async function createBrowserProxy(
     }
   }
 
-  // rescue any stale aborted txn left on the shared session before running an
-  // out-of-band JSON query. external callers don't own a transaction (each
-  // call is a single statement), so we always rescue when status is 'E' —
-  // there's no "is this mine" check like the wire path has.
-  async function rescueStaleAborted(db: PGlite, txState: PgLiteTxState) {
-    if (txState.status === 0x45) {
-      try {
-        await db.exec('ROLLBACK')
-      } catch (err) {
-        // surfaced for diagnosis only — a failing ROLLBACK still leaves us in
-        // a state where the next statement will get 25P02; that's the signal
-        // the caller needs anyway.
-        log.proxy(
-          `[pg-proxy] rescueStaleAborted: ROLLBACK failed: ${(err as Error)?.message || err}`
-        )
-      }
-      txState.status = 0x49
-      txState.owner = null
-    }
-  }
-
   // detect writes that need replication signaling. wire path does this on
   // postgres-bound INSERT/UPDATE/DELETE/COPY/TRUNCATE — same rule applies to
   // out-of-band callers. without it, a project-server write via SAB JSON
@@ -1758,9 +1769,8 @@ export async function createBrowserProxy(
   async function externalQuery(dbName: string, sql: string, params?: unknown[]) {
     if (closed) throw new Error('pg-proxy is closed')
     const { db, mutex, txState } = getDbContext(dbName)
-    await mutex.acquire()
+    await acquireForOwner(db, mutex, txState, null)
     try {
-      await rescueStaleAborted(db, txState)
       const result = await db.query(sql, params as Array<unknown> | undefined)
       maybeSignalWriteForExternal(dbName, sql)
       return {
@@ -1775,9 +1785,8 @@ export async function createBrowserProxy(
   async function externalExec(dbName: string, sql: string) {
     if (closed) throw new Error('pg-proxy is closed')
     const { db, mutex, txState } = getDbContext(dbName)
-    await mutex.acquire()
+    await acquireForOwner(db, mutex, txState, null)
     try {
-      await rescueStaleAborted(db, txState)
       const result = await db.exec(sql)
       maybeSignalWriteForExternal(dbName, sql)
       return result.map((r: { affectedRows?: number }) => ({
