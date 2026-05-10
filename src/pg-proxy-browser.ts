@@ -748,6 +748,7 @@ export type BrowserProxyDbName = 'postgres' | 'zero_cvr' | 'zero_cdb'
 export interface BrowserProxy {
   handleConnection(port: MessagePort): void
   close(): void
+  createExternalSession(dbName?: BrowserProxyDbName): BrowserProxyExternalSession
   /**
    * mutex-coordinated query for out-of-band JSON callers (e.g. soot's
    * project-server / main-thread SAB JSON channels). takes the same per-db
@@ -763,6 +764,12 @@ export interface BrowserProxy {
     params?: unknown[]
   ): Promise<{ rows: unknown[]; affectedRows?: number }>
   exec(dbName: BrowserProxyDbName, sql: string): Promise<Array<{ affectedRows: number }>>
+}
+
+export interface BrowserProxyExternalSession {
+  query(sql: string, params?: unknown[]): Promise<{ rows: unknown[]; affectedRows?: number }>
+  exec(sql: string): Promise<Array<{ affectedRows: number }>>
+  close(): Promise<void>
 }
 
 export async function createBrowserProxy(
@@ -1766,34 +1773,122 @@ export async function createBrowserProxy(
     }
   }
 
-  async function externalQuery(dbName: string, sql: string, params?: unknown[]) {
+  function classifyExternalTransactionControl(
+    sql: string
+  ): 'begin' | 'commit' | 'rollback' | null {
+    const head = sql.trimStart().replace(/;+\s*$/, '').toLowerCase()
+    if (/^(begin|start\s+transaction)\b/.test(head)) return 'begin'
+    if (/^(commit|end)\b/.test(head)) return 'commit'
+    if (/^(rollback|abort)\b/.test(head)) return 'rollback'
+    return null
+  }
+
+  function updateExternalTxStateAfterSuccess(
+    txState: PgLiteTxState,
+    owner: object,
+    sql: string
+  ) {
+    const control = classifyExternalTransactionControl(sql)
+    if (control === 'begin') {
+      txState.status = 0x54
+      txState.owner = owner
+    } else if (control === 'commit' || control === 'rollback') {
+      txState.status = 0x49
+      txState.owner = null
+    }
+  }
+
+  function updateExternalTxStateAfterError(
+    txState: PgLiteTxState,
+    owner: object,
+    sql: string
+  ) {
+    const control = classifyExternalTransactionControl(sql)
+    if (control === 'commit' || control === 'rollback') {
+      txState.status = 0x49
+      txState.owner = null
+      return
+    }
+    txState.status = 0x45
+    txState.owner = owner
+  }
+
+  const defaultExternalOwner = {}
+
+  async function externalQuery(
+    dbName: string,
+    sql: string,
+    params?: unknown[],
+    owner: object = defaultExternalOwner
+  ) {
     if (closed) throw new Error('pg-proxy is closed')
     const { db, mutex, txState } = getDbContext(dbName)
-    await acquireForOwner(db, mutex, txState, null)
+    await acquireForOwner(db, mutex, txState, owner)
     try {
       const result = await db.query(sql, params as Array<unknown> | undefined)
+      updateExternalTxStateAfterSuccess(txState, owner, sql)
       maybeSignalWriteForExternal(dbName, sql)
       return {
         rows: result.rows as unknown[],
         affectedRows: result.affectedRows,
       }
+    } catch (err) {
+      updateExternalTxStateAfterError(txState, owner, sql)
+      throw err
     } finally {
       mutex.release()
     }
   }
 
-  async function externalExec(dbName: string, sql: string) {
+  async function externalExec(
+    dbName: string,
+    sql: string,
+    owner: object = defaultExternalOwner
+  ) {
     if (closed) throw new Error('pg-proxy is closed')
     const { db, mutex, txState } = getDbContext(dbName)
-    await acquireForOwner(db, mutex, txState, null)
+    await acquireForOwner(db, mutex, txState, owner)
     try {
       const result = await db.exec(sql)
+      updateExternalTxStateAfterSuccess(txState, owner, sql)
       maybeSignalWriteForExternal(dbName, sql)
       return result.map((r: { affectedRows?: number }) => ({
         affectedRows: r.affectedRows ?? 0,
       }))
+    } catch (err) {
+      updateExternalTxStateAfterError(txState, owner, sql)
+      throw err
     } finally {
       mutex.release()
+    }
+  }
+
+  function createExternalSession(
+    dbName: BrowserProxyDbName = 'postgres'
+  ): BrowserProxyExternalSession {
+    const owner = {}
+    return {
+      query(sql: string, params?: unknown[]) {
+        return externalQuery(dbName, sql, params, owner)
+      },
+      exec(sql: string) {
+        return externalExec(dbName, sql, owner)
+      },
+      async close() {
+        const { db, mutex, txState } = getDbContext(dbName)
+        await mutex.acquire()
+        try {
+          if (txState.owner === owner && txState.status !== 0x49) {
+            try {
+              await db.exec('ROLLBACK')
+            } catch {}
+            txState.status = 0x49
+            txState.owner = null
+          }
+        } finally {
+          mutex.release()
+        }
+      },
     }
   }
 
@@ -1803,6 +1898,7 @@ export async function createBrowserProxy(
       closed = true
       signalPending = false
     },
+    createExternalSession,
     query: externalQuery,
     exec: externalExec,
   }

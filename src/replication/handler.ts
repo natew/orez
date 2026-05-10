@@ -91,8 +91,21 @@ export class InProcessWriter implements ReplicationWriter {
   }
 }
 
-// current lsn counter
-let currentLsn = 0x1000000n
+const MIN_LSN = 0x1000000n
+const LSN_INCREMENT = 0x1_0000_0000n
+const LSN_TIME_SHIFT = 12n
+
+function lsnFloorFromTime(): bigint {
+  const timeLsn = BigInt(Date.now()) << LSN_TIME_SHIFT
+  return timeLsn > MIN_LSN ? timeLsn : MIN_LSN
+}
+
+// current lsn counter. seed from wall time so a restarted browser proxy never
+// emits stream lsns behind zero-cache's persisted initial-sync watermark.
+// use a large stride because zero-cache's initial backfill can reserve
+// watermarks after slot creation while app writes are already queued; the next
+// streamed transaction still has to land beyond that warmup range.
+let currentLsn = lsnFloorFromTime()
 // persistent watermark across handler restarts so new handlers
 // don't replay already-streamed changes
 let lastStreamedWatermark = 0
@@ -116,14 +129,16 @@ let cachedColumnTypeOids: Map<string, Map<string, number>> | null = null
 
 /** reset module state (for tests) */
 export function resetReplicationState(): void {
-  currentLsn = 0x1000000n
+  currentLsn = lsnFloorFromTime()
   lastStreamedWatermark = 0
   cachedTableKeyColumns = null
   cachedExcludedColumns = null
   cachedColumnTypeOids = null
 }
 function nextLsn(): bigint {
-  currentLsn += 0x100n
+  const floor = lsnFloorFromTime()
+  if (currentLsn < floor) currentLsn = floor
+  currentLsn += LSN_INCREMENT
   return currentLsn
 }
 
