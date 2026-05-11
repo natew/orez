@@ -146,7 +146,7 @@ async function installTriggersOnAllTables(db: ChangeTrackingDb): Promise<void> {
   }
 
   if (count > 0) {
-    log.pglite(`installed change tracking triggers on ${count} tables`)
+    log.debug.pglite(`installed change tracking triggers on ${count} tables`)
   } else {
     log.debug.pglite(`no tables to install change tracking triggers on`)
   }
