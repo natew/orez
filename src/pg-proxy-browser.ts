@@ -767,7 +767,10 @@ export interface BrowserProxy {
 }
 
 export interface BrowserProxyExternalSession {
-  query(sql: string, params?: unknown[]): Promise<{ rows: unknown[]; affectedRows?: number }>
+  query(
+    sql: string,
+    params?: unknown[]
+  ): Promise<{ rows: unknown[]; affectedRows?: number }>
   exec(sql: string): Promise<Array<{ affectedRows: number }>>
   close(): Promise<void>
 }
@@ -1776,7 +1779,10 @@ export async function createBrowserProxy(
   function classifyExternalTransactionControl(
     sql: string
   ): 'begin' | 'commit' | 'rollback' | null {
-    const head = sql.trimStart().replace(/;+\s*$/, '').toLowerCase()
+    const head = sql
+      .trimStart()
+      .replace(/;+\s*$/, '')
+      .toLowerCase()
     if (/^(begin|start\s+transaction)\b/.test(head)) return 'begin'
     if (/^(commit|end)\b/.test(head)) return 'commit'
     if (/^(rollback|abort)\b/.test(head)) return 'rollback'
