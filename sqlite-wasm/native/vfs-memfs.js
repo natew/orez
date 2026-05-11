@@ -15,6 +15,19 @@ addToLibrary({
     nextFd: 10,
   },
 
+  // expose _memfs on Module so downstream consumers can snapshot/restore for
+  // persistence (eg sootsim's compat sqlite stubs that checkpoint into IDB,
+  // and orez-web's zero-cache worker that already saves the replica memfs
+  // across reloads). __postset runs once during module init after the
+  // library is included but before runtime init completes, so Module._memfs
+  // is set by the time Module.onRuntimeInitialized fires.
+  //
+  // Module._memfs shape: { files: { [path]: { data: Uint8Array, size: number } }, ... }
+  // consumers should treat this as a snapshot surface: read files for IDB
+  // serialization on save; write files (Uint8Array data + size) on restore
+  // before the first openDatabase call.
+  $_memfs__postset: 'Module["_memfs"] = _memfs;',
+
   $_memfsGetOrCreate__deps: ['$_memfs'],
   $_memfsGetOrCreate: function (path) {
     if (!_memfs.files[path]) {
