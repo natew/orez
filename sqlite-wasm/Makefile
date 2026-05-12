@@ -9,8 +9,16 @@ JS_LIB_FILES = native/vfs.js
 OBJECT_FILES = build/sqlite3.o build/vfs.o
 EXPORTED_FUNCS_JSON = build/exp_funcs.json
 
-# compile flags — only enable features zero-cache actually uses.
-# removed (unused): FTS3/4/5, GEOPOLY, RTREE, SOUNDEX, DBSTAT, UPDATE_DELETE_LIMIT
+# compile flags — bedrock-sqlite is shared by zero-cache and the soot
+# compat sqlite stubs (op-sqlite, expo-sqlite, nitro-sqlite,
+# react-native-sqlite-storage). joplin and other real-world RN apps need
+# FTS4 for their notes_fts virtual table during schema migration;
+# without it `CREATE VIRTUAL TABLE notes_fts USING fts4(...)` fails with
+# "no such module: fts4", which rolls back the whole migration and
+# surfaces as confusing "no such table: notes_normalized" errors to
+# consumers. RTREE is similarly required by some demo apps for spatial
+# queries. FTS3 ships with FTS4 (same module).
+# still removed (unused): GEOPOLY, SOUNDEX, DBSTAT, UPDATE_DELETE_LIMIT.
 SQLITE_FLAGS = \
 	-DSQLITE_DEFAULT_CACHE_SIZE=-2000 \
 	-DSQLITE_DEFAULT_FOREIGN_KEYS=1 \
@@ -19,8 +27,13 @@ SQLITE_FLAGS = \
 	-DSQLITE_DQS=0 \
 	-DSQLITE_ENABLE_COLUMN_METADATA \
 	-DSQLITE_ENABLE_DESERIALIZE \
+	-DSQLITE_ENABLE_FTS3 \
+	-DSQLITE_ENABLE_FTS3_PARENTHESIS \
+	-DSQLITE_ENABLE_FTS4 \
+	-DSQLITE_ENABLE_FTS5 \
 	-DSQLITE_ENABLE_JSON1 \
 	-DSQLITE_ENABLE_MATH_FUNCTIONS \
+	-DSQLITE_ENABLE_RTREE \
 	-DSQLITE_ENABLE_STAT4 \
 	-DSQLITE_ENABLE_STMT_SCANSTATUS \
 	-DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
