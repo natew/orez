@@ -134,6 +134,7 @@ export function resetReplicationState(): void {
   cachedTableKeyColumns = null
   cachedExcludedColumns = null
   cachedColumnTypeOids = null
+  cachedColumns.clear()
 }
 function nextLsn(): bigint {
   const floor = lsnFloorFromTime()
@@ -539,8 +540,8 @@ export async function handleStartReplication(
       if (shardClientSchemas.length > 0) {
         const shardTables = await db.query<{ schemaname: string; tablename: string }>(
           `SELECT schemaname, tablename FROM pg_tables
-           WHERE schemaname = ANY($1) AND tablename = 'clients'`,
-          [shardClientSchemas]
+           WHERE schemaname = ANY($1) AND tablename = ANY($2)`,
+          [shardClientSchemas, ['clients', 'mutations']]
         )
         for (const { schemaname, tablename } of shardTables.rows) {
           const qs = '"' + schemaname.replace(/"/g, '""') + '"'
@@ -578,8 +579,9 @@ export async function handleStartReplication(
         table_name: string
         column_name: string
         data_type: string | null
+        ordinal_position: number
       }>(
-        `SELECT 'pk' AS kind, tc.table_schema, tc.table_name, kcu.column_name, NULL AS data_type
+        `SELECT 'pk' AS kind, tc.table_schema, tc.table_name, kcu.column_name, NULL AS data_type, kcu.ordinal_position
          FROM information_schema.table_constraints tc
          JOIN information_schema.key_column_usage kcu
            ON tc.constraint_name = kcu.constraint_name
@@ -587,9 +589,10 @@ export async function handleStartReplication(
          WHERE tc.constraint_type = 'PRIMARY KEY'
            AND tc.table_schema = ANY($1)
          UNION ALL
-         SELECT 'col' AS kind, table_schema, table_name, column_name, data_type
+         SELECT 'col' AS kind, table_schema, table_name, column_name, data_type, ordinal_position
          FROM information_schema.columns
-         WHERE table_schema = ANY($1)`,
+         WHERE table_schema = ANY($1)
+         ORDER BY table_schema, table_name, kind, ordinal_position`,
         [relevantSchemas]
       )
 
@@ -834,9 +837,9 @@ export async function handleStartReplication(
             `found ${changes.length} changes [${tableSummary}] (wm ${lastWatermark}→${changes[changes.length - 1].watermark}) query=${queryMs.toFixed(1)}ms signal→query=${signalToQueryMs}ms`
           )
           // filter out shard tables that zero-cache doesn't expect.
-          // only `clients` is needed (for .server promise resolution).
-          // other shard tables (replicas, mutations) crash zero-cache
-          // with "Unknown table" in change-processor.
+          // `clients` advances lmid; `mutations` carries mutation results.
+          // other shard tables (e.g. replicas) crash zero-cache with
+          // "Unknown table" in the change processor.
           const batchEnd = changes[changes.length - 1].watermark
           const preFilterCount = changes.length
           changes = changes.filter((c) => {
@@ -845,7 +848,7 @@ export async function handleStartReplication(
             const schema = c.table_name.substring(0, dot)
             if (schema === 'public') return true
             const table = c.table_name.substring(dot + 1)
-            return table === 'clients'
+            return table === 'clients' || table === 'mutations'
           })
           log.debug.repl(`filter: ${preFilterCount} → ${changes.length} changes`)
 
@@ -858,6 +861,15 @@ export async function handleStartReplication(
             queryPending = true
             continue
           }
+
+          await ensureMetadataForChangedTables(
+            db,
+            mutex,
+            changes,
+            tableKeyColumns,
+            excludedColumns,
+            columnTypeOids
+          )
 
           log.debug.repl(`streaming ${changes.length} changes to writer`)
           await streamChanges(
@@ -928,6 +940,106 @@ export async function handleStartReplication(
     }
   }
   log.repl('poll loop exited')
+}
+
+async function ensureMetadataForChangedTables(
+  db: PGlite,
+  mutex: Mutex,
+  changes: ChangeRecord[],
+  tableKeyColumns: Map<string, Set<string>>,
+  excludedColumns: Map<string, Set<string>>,
+  columnTypeOids: Map<string, Map<string, number>>
+): Promise<void> {
+  const missing = new Map<string, { schema: string; table: string }>()
+
+  for (const change of changes) {
+    if (
+      tableKeyColumns.has(change.table_name) ||
+      columnTypeOids.has(change.table_name) ||
+      excludedColumns.has(change.table_name)
+    ) {
+      continue
+    }
+
+    const dot = change.table_name.indexOf('.')
+    const schema = dot === -1 ? 'public' : change.table_name.substring(0, dot)
+    const table = dot === -1 ? change.table_name : change.table_name.substring(dot + 1)
+    missing.set(`${schema}.${table}`, { schema, table })
+  }
+
+  if (missing.size === 0) return
+
+  const schemas = [...new Set([...missing.values()].map((entry) => entry.schema))]
+  const tables = [...new Set([...missing.values()].map((entry) => entry.table))]
+
+  await mutex.acquire()
+  try {
+    const schemaResult = await db.query<{
+      kind: string
+      table_schema: string
+      table_name: string
+      column_name: string
+      data_type: string | null
+      ordinal_position: number
+    }>(
+      `SELECT 'pk' AS kind, tc.table_schema, tc.table_name, kcu.column_name, NULL AS data_type, kcu.ordinal_position
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+       WHERE tc.constraint_type = 'PRIMARY KEY'
+         AND tc.table_schema = ANY($1)
+         AND tc.table_name = ANY($2)
+       UNION ALL
+       SELECT 'col' AS kind, table_schema, table_name, column_name, data_type, ordinal_position
+       FROM information_schema.columns
+       WHERE table_schema = ANY($1)
+         AND table_name = ANY($2)
+       ORDER BY table_schema, table_name, kind, ordinal_position`,
+      [schemas, tables]
+    )
+
+    for (const row of schemaResult.rows) {
+      const key = `${row.table_schema}.${row.table_name}`
+      if (!missing.has(key)) continue
+
+      if (row.kind === 'pk') {
+        let keys = tableKeyColumns.get(key)
+        if (!keys) {
+          keys = new Set()
+          tableKeyColumns.set(key, keys)
+        }
+        keys.add(row.column_name)
+      } else {
+        if (row.data_type && UNSUPPORTED_TYPES.has(row.data_type)) {
+          let cols = excludedColumns.get(key)
+          if (!cols) {
+            cols = new Set()
+            excludedColumns.set(key, cols)
+          }
+          cols.add(row.column_name)
+        }
+        if (row.data_type) {
+          const oid = PG_DATA_TYPE_OIDS[row.data_type]
+          if (oid !== undefined) {
+            let cols = columnTypeOids.get(key)
+            if (!cols) {
+              cols = new Map()
+              columnTypeOids.set(key, cols)
+            }
+            cols.set(row.column_name, oid)
+          }
+        }
+      }
+    }
+
+    log.debug.repl(
+      `refreshed metadata for ${missing.size} late table(s): ${[...missing.keys()].join(',')}`
+    )
+    for (const key of missing.keys()) cachedColumns.delete(key)
+  } finally {
+    mutex.release()
+  }
 }
 
 // cache column info per table to avoid per-change allocation

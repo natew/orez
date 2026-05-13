@@ -158,14 +158,15 @@ async function installTriggersOnAllTables(db: ChangeTrackingDb): Promise<void> {
  * tables that track mutation confirmations. these must be replicated
  * for .server promises to resolve.
  *
- * caches already-processed schemas to avoid redundant queries on
- * subsequent calls (the poll loop calls this periodically).
+ * caches already-tracked shard tables to avoid redundant DDL while still
+ * handling zero-cache creating a schema before the internal tables exist.
  */
-const processedShardSchemas = new Set<string>()
+const trackedShardTables = new Set<string>()
+const TRACKED_SHARD_TABLES = new Set(['clients', 'mutations'])
 
 /** reset shard schema cache (for tests) */
 export function resetShardSchemaCache(): void {
-  processedShardSchemas.clear()
+  trackedShardTables.clear()
 }
 
 export async function installTriggersOnShardTables(db: ChangeTrackingDb): Promise<void> {
@@ -180,23 +181,20 @@ export async function installTriggersOnShardTables(db: ChangeTrackingDb): Promis
 
   if (result.rows.length === 0) return
 
-  // filter to only new schemas we haven't processed yet
-  const newSchemas = result.rows.filter((r) => !processedShardSchemas.has(r.nspname))
-  if (newSchemas.length === 0) return
-
-  // only track `clients` — that's the table zero-cache expects in the
-  // replication stream (needed for .server promise resolution). other shard
-  // tables like `replicas` are zero-cache internal state and streaming them
-  // back causes "Unknown table" crashes in zero-cache's change-processor.
+  // only track the shard tables zero-cache expects in the replication stream.
+  // `clients` advances LMID for successful .server promises; `mutations`
+  // carries per-mutation results for application errors. other shard tables
+  // like `replicas` are zero-cache internal state and streaming them back
+  // causes "Unknown table" crashes in zero-cache's change-processor.
   let count = 0
-  for (const { nspname } of newSchemas) {
-    // remove stale triggers from non-clients tables (from previous versions)
+  for (const { nspname } of result.rows) {
+    // remove stale triggers from non-replicated shard tables.
     const stale = await db.query<{ event_object_table: string }>(
       `SELECT DISTINCT event_object_table FROM information_schema.triggers
        WHERE trigger_name = '_zero_change_trigger'
          AND event_object_schema = $1
-         AND event_object_table != 'clients'`,
-      [nspname]
+         AND event_object_table != ALL($2)`,
+      [nspname, [...TRACKED_SHARD_TABLES]]
     )
     for (const { event_object_table } of stale.rows) {
       const qs = quoteIdent(nspname)
@@ -208,11 +206,14 @@ export async function installTriggersOnShardTables(db: ChangeTrackingDb): Promis
     }
 
     const tables = await db.query<{ tablename: string }>(
-      `SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename = 'clients'`,
-      [nspname]
+      `SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename = ANY($2)`,
+      [nspname, [...TRACKED_SHARD_TABLES]]
     )
 
     for (const { tablename } of tables.rows) {
+      const key = `${nspname}.${tablename}`
+      if (trackedShardTables.has(key)) continue
+
       const quotedSchema = quoteIdent(nspname)
       const quotedTable = quoteIdent(tablename)
       await db.exec(`
@@ -221,10 +222,9 @@ export async function installTriggersOnShardTables(db: ChangeTrackingDb): Promis
           AFTER INSERT OR UPDATE OR DELETE ON ${quotedSchema}.${quotedTable}
           FOR EACH ROW EXECUTE FUNCTION public._zero_track_change();
       `)
+      trackedShardTables.add(key)
       count++
     }
-
-    processedShardSchemas.add(nspname)
   }
 
   if (count > 0) {

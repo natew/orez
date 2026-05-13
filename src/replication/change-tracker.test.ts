@@ -219,9 +219,9 @@ describe('shard table tracking', () => {
     await db.close()
   })
 
-  it('only tracks clients table in shard schemas, not replicas/mutations', async () => {
+  it('only tracks mutation-confirmation tables in shard schemas', async () => {
     // zero-cache creates shard schemas like chat_0 with clients, replicas, mutations.
-    // only clients needs tracking — replicas/mutations changes crash zero-cache
+    // clients advance lmid and mutations carry server results; replicas stays internal.
     // with "Unknown table chat_0.replicas" because they aren't in zero's schema.
     await db.exec(`
       CREATE SCHEMA chat_0;
@@ -259,10 +259,10 @@ describe('shard table tracking', () => {
     const changes = await getChangesSince(db, 0)
     const tables = changes.map((c) => c.table_name)
 
-    // only clients should be tracked
+    // only mutation-confirmation tables should be tracked
     expect(tables).toContain('chat_0.clients')
+    expect(tables).toContain('chat_0.mutations')
     expect(tables).not.toContain('chat_0.replicas')
-    expect(tables).not.toContain('chat_0.mutations')
   })
 
   it('purges consumed changes to prevent OOM', async () => {
@@ -315,5 +315,43 @@ describe('shard table tracking', () => {
     const changes = await getChangesSince(db, 0)
     expect(changes).toHaveLength(1)
     expect(changes[0].table_name).toBe('chat_0.clients')
+  })
+
+  it('tracks shard tables created after the schema was scanned', async () => {
+    await db.exec(`CREATE SCHEMA chat_0`)
+
+    // first scan sees the schema but no internal tables yet.
+    await installTriggersOnShardTables(db)
+
+    await db.exec(`
+      CREATE TABLE chat_0.clients (
+        "clientGroupID" TEXT NOT NULL,
+        "clientID" TEXT NOT NULL,
+        "lastMutationID" BIGINT,
+        PRIMARY KEY ("clientGroupID", "clientID")
+      );
+      CREATE TABLE chat_0.mutations (
+        "clientGroupID" TEXT NOT NULL,
+        "clientID" TEXT NOT NULL,
+        "mutationID" BIGINT NOT NULL,
+        result JSONB,
+        PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+      );
+    `)
+
+    await installTriggersOnShardTables(db)
+
+    await db.exec(
+      `INSERT INTO chat_0.clients ("clientGroupID", "clientID", "lastMutationID") VALUES ('cg1', 'c1', 1)`
+    )
+    await db.exec(
+      `INSERT INTO chat_0.mutations ("clientGroupID", "clientID", "mutationID", result) VALUES ('cg1', 'c1', 1, '{}')`
+    )
+
+    const changes = await getChangesSince(db, 0)
+    expect(changes.map((change) => change.table_name).sort()).toEqual([
+      'chat_0.clients',
+      'chat_0.mutations',
+    ])
   })
 })

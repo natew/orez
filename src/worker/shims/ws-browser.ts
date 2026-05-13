@@ -26,7 +26,10 @@ interface WsCompatible {
   CLOSING: number
   CLOSED: number
   readyState: number
-  send(data: string | ArrayBuffer | ArrayBufferView): void
+  send(
+    data: string | ArrayBuffer | ArrayBufferView,
+    callback?: (err?: Error) => void,
+  ): void
   close(code?: number, reason?: string): void
   addEventListener(type: string, handler: (event: any) => void): void
   removeEventListener(type: string, handler: (event: any) => void): void
@@ -143,9 +146,24 @@ export function messagePortToWs(port: MessagePort): WsCompatible {
       return closed ? 3 : 1 // CLOSED or OPEN
     },
 
-    send(data: string | ArrayBuffer | ArrayBufferView) {
-      if (closed) return
-      port.postMessage(data)
+    send(data: string | ArrayBuffer | ArrayBufferView, callback?: (err?: Error) => void) {
+      if (closed) {
+        callback?.(new Error('WebSocket is closed'))
+        return
+      }
+
+      try {
+        port.postMessage(data)
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error))
+        if (callback) {
+          callback(err)
+          return
+        }
+        throw err
+      }
+
+      callback?.()
     },
 
     close(code?: number, _reason?: string) {
@@ -179,8 +197,19 @@ export function browserWsToWs(ws: WebSocket): WsCompatible {
       return ws.readyState
     },
 
-    send(data: string | ArrayBuffer | ArrayBufferView) {
-      ws.send(data)
+    send(data: string | ArrayBuffer | ArrayBufferView, callback?: (err?: Error) => void) {
+      try {
+        ws.send(data)
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error))
+        if (callback) {
+          callback(err)
+          return
+        }
+        throw err
+      }
+
+      callback?.()
     },
 
     close(code?: number, reason?: string) {

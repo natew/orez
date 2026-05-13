@@ -17,7 +17,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import { getConfig } from '../config'
 import { startPgProxy } from '../pg-proxy'
-import { installChangeTracking, resetShardSchemaCache } from './change-tracker'
+import {
+  installChangeTracking,
+  installTriggersOnShardTables,
+  resetShardSchemaCache,
+} from './change-tracker'
 import { signalReplicationChange, resetReplicationState } from './handler'
 
 import type { Server, AddressInfo } from 'node:net'
@@ -959,10 +963,10 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     s.close()
   })
 
-  it('shard replicas/mutations changes NOT streamed (only clients)', async () => {
+  it('streams shard mutation-confirmation tables but filters replicas', async () => {
     // zero-cache creates shard schemas (chat_0) with clients, replicas, mutations.
-    // if we stream replicas/mutations changes, zero-cache crashes with
-    // "Unknown table chat_0.replicas". only clients changes should be streamed.
+    // clients advance lmid and mutations carry server results; replicas is
+    // internal shard state that zero-cache does not expect in the change stream.
     await db.exec(`
       CREATE SCHEMA chat_0;
       CREATE TABLE chat_0.clients (
@@ -976,9 +980,11 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
         version TEXT
       );
       CREATE TABLE chat_0.mutations (
-        id TEXT PRIMARY KEY,
-        "clientID" TEXT,
-        name TEXT
+        "clientGroupID" TEXT NOT NULL,
+        "clientID" TEXT NOT NULL,
+        "mutationID" BIGINT NOT NULL,
+        result JSON,
+        PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
       );
     `)
     await installChangeTracking(db)
@@ -995,7 +1001,7 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     )
     await db.exec(`INSERT INTO chat_0.replicas (id, version) VALUES ('r1', 'v1')`)
     await db.exec(
-      `INSERT INTO chat_0.mutations (id, "clientID", name) VALUES ('m1', 'c1', 'send')`
+      `INSERT INTO chat_0.mutations ("clientGroupID", "clientID", "mutationID", result) VALUES ('cg1', 'c1', 1, '{}')`
     )
     await db.exec(`INSERT INTO public.foo (id) VALUES ('normal')`)
 
@@ -1008,12 +1014,92 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
       if (m.tag === 'insert') inserts.push(m as ZcInsert)
     }
 
-    // should see clients + foo inserts, but NOT replicas or mutations
+    // should see clients + mutations + foo inserts, but NOT replicas.
     const streamedTables = inserts.map((i) => `${i.relation.schema}.${i.relation.name}`)
     expect(streamedTables).toContain('public.foo')
     expect(streamedTables).toContain('chat_0.clients')
+    expect(streamedTables).toContain('chat_0.mutations')
     expect(streamedTables).not.toContain('chat_0.replicas')
-    expect(streamedTables).not.toContain('chat_0.mutations')
+
+    s.close()
+  })
+
+  it('refreshes metadata for shard tables missing from cached setup', async () => {
+    // zero-cache can create shard schemas after the first replication stream
+    // cached metadata. the next stream must not encode bigint/json shard
+    // columns as text, or zero-cache cannot parse mutation confirmations.
+    const warmup = await stream()
+    warmup.close()
+    await new Promise((r) => setTimeout(r, 50))
+
+    await db.exec(`
+      CREATE SCHEMA chat_0;
+      CREATE TABLE chat_0.clients (
+        "clientGroupID" TEXT NOT NULL,
+        "clientID" TEXT NOT NULL,
+        "lastMutationID" BIGINT,
+        PRIMARY KEY ("clientGroupID", "clientID")
+      );
+      CREATE TABLE chat_0.mutations (
+        "clientGroupID" TEXT NOT NULL,
+        "clientID" TEXT NOT NULL,
+        "mutationID" BIGINT NOT NULL,
+        result JSON,
+        PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+      );
+    `)
+    await installTriggersOnShardTables(db)
+
+    const s = await stream()
+    const q = s.messages
+
+    await db.exec(
+      `INSERT INTO chat_0.clients ("clientGroupID", "clientID", "lastMutationID") VALUES ('cg1', 'c1', 42)`
+    )
+    await db.exec(
+      `INSERT INTO chat_0.mutations ("clientGroupID", "clientID", "mutationID", result) VALUES ('cg1', 'c1', 42, '{"data":"ok"}')`
+    )
+
+    let clientsInsert: ZcInsert | null = null
+    let mutationsInsert: ZcInsert | null = null
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      const m = await q.dequeue(2000).catch(() => null)
+      if (!m) break
+      if (m.tag === 'insert') {
+        const ins = m as ZcInsert
+        if (ins.relation.schema === 'chat_0' && ins.relation.name === 'clients') {
+          clientsInsert = ins
+        }
+        if (ins.relation.schema === 'chat_0' && ins.relation.name === 'mutations') {
+          mutationsInsert = ins
+        }
+      }
+      if (clientsInsert && mutationsInsert) break
+    }
+
+    expect(clientsInsert).not.toBeNull()
+    expect(mutationsInsert).not.toBeNull()
+    expect([...clientsInsert!.relation.keyColumns].sort()).toEqual([
+      'clientGroupID',
+      'clientID',
+    ].sort())
+    expect(
+      clientsInsert!.relation.columns.find((col) => col.name === 'lastMutationID')
+        ?.typeOid
+    ).toBe(20)
+    expect([...mutationsInsert!.relation.keyColumns].sort()).toEqual([
+      'clientGroupID',
+      'clientID',
+      'mutationID',
+    ].sort())
+    expect(
+      mutationsInsert!.relation.columns.find((col) => col.name === 'mutationID')
+        ?.typeOid
+    ).toBe(20)
+    expect(
+      mutationsInsert!.relation.columns.find((col) => col.name === 'result')?.typeOid
+    ).toBe(114)
 
     s.close()
   })

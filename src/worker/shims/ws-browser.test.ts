@@ -66,6 +66,27 @@ describe('messagePortToWs', () => {
     expect(spy).toHaveBeenCalledWith('hello')
   })
 
+  it('send() invokes the ws callback after posting', () => {
+    const [port1] = createMockPorts()
+    const ws = messagePortToWs(port1 as any)
+    const callback = vi.fn()
+
+    ws.send('hello', callback)
+
+    expect(callback).toHaveBeenCalledWith()
+  })
+
+  it('send() reports an error to the callback after close', () => {
+    const [port1] = createMockPorts()
+    const ws = messagePortToWs(port1 as any)
+    const callback = vi.fn()
+
+    ws.close()
+    ws.send('ignored', callback)
+
+    expect(callback).toHaveBeenCalledWith(expect.any(Error))
+  })
+
   it('forwards port messages as ws message events', () => {
     const [port1, port2] = createMockPorts()
     const ws1 = messagePortToWs(port1 as any)
