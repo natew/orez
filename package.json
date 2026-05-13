@@ -1,6 +1,6 @@
 {
   "name": "orez",
-  "version": "0.2.17",
+  "version": "0.2.18",
   "description": "PGlite-powered zero-sync development backend. No Docker required.",
   "type": "module",
   "license": "MIT",

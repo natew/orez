@@ -1080,22 +1080,18 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
 
     expect(clientsInsert).not.toBeNull()
     expect(mutationsInsert).not.toBeNull()
-    expect([...clientsInsert!.relation.keyColumns].sort()).toEqual([
-      'clientGroupID',
-      'clientID',
-    ].sort())
+    expect([...clientsInsert!.relation.keyColumns].sort()).toEqual(
+      ['clientGroupID', 'clientID'].sort()
+    )
     expect(
       clientsInsert!.relation.columns.find((col) => col.name === 'lastMutationID')
         ?.typeOid
     ).toBe(20)
-    expect([...mutationsInsert!.relation.keyColumns].sort()).toEqual([
-      'clientGroupID',
-      'clientID',
-      'mutationID',
-    ].sort())
+    expect([...mutationsInsert!.relation.keyColumns].sort()).toEqual(
+      ['clientGroupID', 'clientID', 'mutationID'].sort()
+    )
     expect(
-      mutationsInsert!.relation.columns.find((col) => col.name === 'mutationID')
-        ?.typeOid
+      mutationsInsert!.relation.columns.find((col) => col.name === 'mutationID')?.typeOid
     ).toBe(20)
     expect(
       mutationsInsert!.relation.columns.find((col) => col.name === 'result')?.typeOid

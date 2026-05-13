@@ -28,7 +28,7 @@ interface WsCompatible {
   readyState: number
   send(
     data: string | ArrayBuffer | ArrayBufferView,
-    callback?: (err?: Error) => void,
+    callback?: (err?: Error) => void
   ): void
   close(code?: number, reason?: string): void
   addEventListener(type: string, handler: (event: any) => void): void
