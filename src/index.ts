@@ -729,10 +729,17 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     })
   }
 
-  // auto-recover from runtime CDC corruption crashes.
-  // when zero-cache exits unexpectedly, check tail buffer for CDC signatures
-  // and trigger a full reset+restart if detected.
+  // auto-recover when zero-cache exits unexpectedly. two failure modes:
+  //   - CDC corruption (recognizable signature) — needs a full state reset.
+  //   - any other crash (e.g. a change-streamer statement timeout) — orez
+  //     used to do nothing here, leaving the dead child so the proxy returned
+  //     502 on every /sync until a manual restart. now: restart it, and if
+  //     the crashes keep coming, escalate to one full reset before giving up.
   let shuttingDown = false
+  const ZERO_CRASH_WINDOW_MS = 5 * 60_000
+  const ZERO_CRASH_RESTART_BUDGET = 5
+  let zeroCrashTimes: number[] = []
+  let zeroFullResetTried = false
   const installCrashWatcher = () => {
     if (!zeroCacheProcess || config.skipZeroCache) return
     zeroCacheProcess.on('exit', (code) => {
@@ -749,7 +756,50 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
           .catch((err) => {
             log.orez(`CDC auto-recovery failed: ${err?.message || err}`)
           })
+        return
       }
+
+      // non-CDC unexpected crash — restart, bounded by a sliding-window
+      // budget so a genuinely broken instance can't restart-loop forever.
+      zeroCrashTimes = zeroCrashTimes.filter(
+        (t) => Date.now() - t < ZERO_CRASH_WINDOW_MS
+      )
+      if (zeroCrashTimes.length === 0) zeroFullResetTried = false
+      zeroCrashTimes.push(Date.now())
+
+      if (zeroCrashTimes.length > ZERO_CRASH_RESTART_BUDGET) {
+        if (zeroFullResetTried) {
+          log.orez(
+            'zero-cache kept crashing after a full reset — giving up auto-restart'
+          )
+          return
+        }
+        zeroFullResetTried = true
+        log.orez('zero-cache crash-looping — escalating to a full state reset')
+        resetZeroState('full')
+          .then(() => {
+            log.orez('zero-cache full-reset recovery successful')
+            zeroCrashTimes = []
+            installCrashWatcher()
+          })
+          .catch((err) => {
+            log.orez(`zero-cache full-reset recovery failed: ${err?.message || err}`)
+          })
+        return
+      }
+
+      log.orez(
+        `zero-cache exited unexpectedly (code ${code}) — restarting ` +
+          `(${zeroCrashTimes.length}/${ZERO_CRASH_RESTART_BUDGET})`
+      )
+      restartZeroCache()
+        .then(() => {
+          log.orez('zero-cache restart successful')
+          installCrashWatcher()
+        })
+        .catch((err) => {
+          log.orez(`zero-cache restart failed: ${err?.message || err}`)
+        })
     })
   }
   installCrashWatcher()
