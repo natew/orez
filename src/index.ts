@@ -761,17 +761,13 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
       // non-CDC unexpected crash — restart, bounded by a sliding-window
       // budget so a genuinely broken instance can't restart-loop forever.
-      zeroCrashTimes = zeroCrashTimes.filter(
-        (t) => Date.now() - t < ZERO_CRASH_WINDOW_MS
-      )
+      zeroCrashTimes = zeroCrashTimes.filter((t) => Date.now() - t < ZERO_CRASH_WINDOW_MS)
       if (zeroCrashTimes.length === 0) zeroFullResetTried = false
       zeroCrashTimes.push(Date.now())
 
       if (zeroCrashTimes.length > ZERO_CRASH_RESTART_BUDGET) {
         if (zeroFullResetTried) {
-          log.orez(
-            'zero-cache kept crashing after a full reset — giving up auto-restart'
-          )
+          log.orez('zero-cache kept crashing after a full reset — giving up auto-restart')
           return
         }
         zeroFullResetTried = true
