@@ -63,7 +63,18 @@
     "test:chat": "bun scripts/test-chat-integration.ts",
     "test:chat:smoke": "bun scripts/test-chat-integration.ts --smoke",
     "test:chat:e2e": "bun scripts/test-chat-e2e.ts",
-    "release": "bun scripts/release.ts"
+    "release": "bun scripts/release.ts",
+    "perf:load": "bun run perf/load/harness.ts",
+    "perf:memory": "bun run perf/memory/profile.ts",
+    "perf:bench": "bun run perf/scripts/bench-all.ts",
+    "perf:overhead": "bun run perf/scripts/bench-proxy-overhead.ts",
+    "perf:soak": "bun run perf/stability/soak.ts",
+    "perf:crash": "bun run perf/stability/crash-recovery.ts",
+    "perf:correctness": "bun test perf/stability/correctness.test.ts",
+    "perf:diagnose": "bun run perf/scripts/diagnose.ts",
+    "perf:quick": "bun run perf/scripts/quick-check.ts",
+    "perf:all": "bun run perf:bench && bun run perf:overhead && bun run perf:correctness && bun run perf:crash",
+    "perf:ci": "bun run perf:bench -- --output=perf/reports/bench.json && bun run perf:overhead && bun run perf:correctness"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.4.1",
