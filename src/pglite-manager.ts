@@ -115,7 +115,6 @@ async function ensurePublication(db: {
   }
 }
 
-// pglite startParams replaces defaults, so always include required flags
 const PGLITE_BASE_FLAGS = [
   '--single',
   '-F',
@@ -127,6 +126,27 @@ const PGLITE_BASE_FLAGS = [
   'exit_on_error=false',
   '-c',
   'log_checkpoints=false',
+  '-c',
+  'jit=off',
+  '-c',
+  'max_connections=5',
+  '-c',
+  'temp_buffers=1MB',
+]
+
+// main instance: tuned for development (matching soot browser config)
+const MAIN_START_PARAMS = [
+  ...PGLITE_BASE_FLAGS,
+  '-c',
+  'shared_buffers=1MB',
+  '-c',
+  'wal_buffers=64kB',
+  '-c',
+  'work_mem=1MB',
+  '-c',
+  'maintenance_work_mem=4MB',
+  '-c',
+  'effective_cache_size=16MB',
 ]
 
 // cvr/cdb are just zero-cache bookkeeping — minimal fixed memory
@@ -135,13 +155,15 @@ const ZERO_START_PARAMS = [
   '-c',
   'shared_buffers=128kB',
   '-c',
-  'wal_buffers=64kB',
+  'wal_buffers=32kB',
   '-c',
   'work_mem=64kB',
   '-c',
-  'maintenance_work_mem=1MB',
+  'maintenance_work_mem=512kB',
   '-c',
-  'temp_buffers=800kB',
+  'temp_buffers=400kB',
+  '-c',
+  'max_connections=1',
 ]
 
 // create a single pglite instance with given dataDir suffix
@@ -176,18 +198,12 @@ async function createInstance(
       dataDir: dataPath,
       debug: config.logLevel === 'debug' ? 1 : 0,
       relaxedDurability: true,
-      initialMemory: isMain ? 32 * 1024 * 1024 : 16 * 1024 * 1024,
+      initialMemory: isMain ? 16 * 1024 * 1024 : 8 * 1024 * 1024,
       ...(isMain ? {} : { startParams: ZERO_START_PARAMS }),
       // main instance: user overrides via pgliteOptions, zero instances: fixed
       ...(isMain
         ? {
-            startParams: [
-              ...PGLITE_BASE_FLAGS,
-              '-c',
-              'shared_buffers=4MB',
-              '-c',
-              'wal_buffers=1MB',
-            ],
+            startParams: MAIN_START_PARAMS,
             ...userOpts,
             extensions: userOpts.extensions || {
               vector,
@@ -211,14 +227,8 @@ async function createInstance(
 
     if (isMain) {
       await db.exec(`
-        SET work_mem = '4MB';
-        SET maintenance_work_mem = '16MB';
-        SET effective_cache_size = '64MB';
         SET random_page_cost = 1.1;
-        SET jit = off;
       `)
-    } else {
-      await db.exec(`SET jit = off;`)
     }
 
     log.debug.pglite(`${name} ready`)
