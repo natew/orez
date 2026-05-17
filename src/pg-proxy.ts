@@ -45,6 +45,17 @@ const SCHEMA_CACHE_TTL_MS = 30_000
 // performance tracking
 const proxyStats = { totalWaitMs: 0, totalExecMs: 0, count: 0, batches: 0 }
 
+// query classification cache — avoids re-running regex on every repeated query.
+// keys are trimmed+lowercased original query texts (before rewrites).
+// entries are invalidated on DDL (schema changes may affect classification).
+interface QueryClass {
+  isWrite: boolean
+  isDDL: boolean
+  isCacheable: boolean
+}
+const queryClassCache = new Map<string, QueryClass>()
+const QUERY_CLASS_CACHE_MAX = 500
+
 // query classification helpers — operate on pre-normalized (trimmed+lowercased) query strings
 const SCHEMA_QUERY_MARKERS = [
   'information_schema.',
@@ -86,6 +97,33 @@ function isDDLNormalized(q: string): boolean {
   return false
 }
 
+/**
+ * classify a query and cache the result.
+ * repeated queries (common in app workloads) hit the cache and skip all regex.
+ * invalidated on DDL (schema changes may reclassify queries).
+ */
+function classifyQuery(q: string): QueryClass {
+  const cached = queryClassCache.get(q)
+  if (cached) return cached
+
+  const result: QueryClass = {
+    isWrite: isWriteNormalized(q),
+    isDDL: isDDLNormalized(q),
+    isCacheable: isCacheableNormalized(q),
+  }
+
+  // LRU-ish eviction: clear oldest half when full
+  if (queryClassCache.size >= QUERY_CLASS_CACHE_MAX) {
+    const keys = [...queryClassCache.keys()]
+    for (let i = 0; i < Math.floor(keys.length / 2); i++) {
+      queryClassCache.delete(keys[i])
+    }
+  }
+
+  queryClassCache.set(q, result)
+  return result
+}
+
 function extractQueryText(data: Uint8Array): string | null {
   if (data[0] === 0x51) {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
@@ -100,6 +138,7 @@ function extractQueryText(data: Uint8Array): string | null {
 
 function invalidateSchemaCache() {
   schemaQueryCache.clear()
+  queryClassCache.clear()
 }
 
 // abort previous replication handler when a new one starts
@@ -301,22 +340,6 @@ function interceptQuery(data: Uint8Array): Uint8Array {
 }
 
 /**
- * check if a query should be intercepted as a no-op.
- */
-function isNoopQuery(data: Uint8Array): boolean {
-  let query: string | null = null
-  if (data[0] === 0x51) {
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
-    const len = view.getInt32(1)
-    query = textDecoder.decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
-  } else if (data[0] === 0x50) {
-    query = extractParseQuery(data)
-  }
-  if (!query) return false
-  return NOOP_QUERY_PATTERNS.some((p) => p.test(query!))
-}
-
-/**
  * build a synthetic "SET" command complete response.
  */
 function buildSetCompleteResponse(): Uint8Array {
@@ -495,6 +518,7 @@ function extractNoticeCode(
 /**
  * single-pass response message filter. strips ReadyForQuery messages (when
  * stripRfq=true) and benign transaction state warnings in one scan.
+ * returns the original buffer unchanged when nothing was stripped.
  */
 function stripResponseMessages(data: Uint8Array, stripRfq: boolean): Uint8Array {
   if (data.length === 0) return data
@@ -837,43 +861,50 @@ export async function startPgProxy(
 
           // Simple Query (0x51) or standalone Sync — per-message mutex
 
-          // fast-path for ping queries (SELECT 1, SELECT 2, etc.)
-          // zero-cache fires these in parallel during warmup — bypass mutex entirely
+          // extract query text ONCE for all checks (ping, noop, classification, caching)
+          let queryText: string | null = null
+          let queryClass: QueryClass | null = null
+          // cache/dedup key — the rewritten query when a rewrite applies, else
+          // the original. read and write paths MUST use the same key.
+          let schemaCacheKey: string | null = null
           if (msgType === 0x51) {
-            const queryText = extractQueryText(data)
+            queryText = extractQueryText(data)
             if (queryText) {
+              // fast-path: ping queries — bypass mutex entirely
               const pingMatch = queryText.match(PING_QUERY_RE)
               if (pingMatch) {
                 return buildSelectIntResponse(pingMatch[1])
               }
-            }
-          }
 
-          // check for no-op queries (only SimpleQuery has queries worth intercepting)
-          if (isNoopQuery(data)) {
-            if (msgType === 0x51) {
-              return buildSetCompleteResponse()
-            }
-          }
+              // fast-path: no-op queries — synthetic response, no mutex
+              if (NOOP_QUERY_PATTERNS.some((p) => p.test(queryText!))) {
+                return buildSetCompleteResponse()
+              }
 
-          // intercept and rewrite queries
-          data = interceptQuery(data)
+              // normalize once, classify once (cached for repeated queries)
+              queryClass = classifyQuery(queryText.trimStart().toLowerCase())
 
-          // normalize query once for all classification checks
-          const isSimpleQuery = msgType === 0x51
-          const queryText = isSimpleQuery ? extractQueryText(data) : null
-          const queryNorm = queryText ? queryText.trimStart().toLowerCase() : null
-          const cacheable = queryNorm && isCacheableNormalized(queryNorm)
-
-          // cache Simple Query schema queries
-          if (cacheable) {
-            const cached = schemaQueryCache.get(queryText!)
-            if (cached && Date.now() < cached.expiresAt) {
-              return stripResponseMessages(cached.result, false)
-            }
-            const inflight = schemaQueryInFlight.get(queryText!)
-            if (inflight) {
-              return stripResponseMessages(await inflight, false)
+              // schema query cache: identical information_schema queries deduplicated
+              if (queryClass.isCacheable) {
+                // apply rewrites before caching (version() etc. change the query)
+                const rewritten = applyRewrites(queryText)
+                schemaCacheKey = rewritten !== queryText ? rewritten : queryText
+                const cached = schemaQueryCache.get(schemaCacheKey)
+                if (cached && Date.now() < cached.expiresAt) {
+                  return stripResponseMessages(cached.result, false)
+                }
+                const inflight = schemaQueryInFlight.get(schemaCacheKey)
+                if (inflight) {
+                  return stripResponseMessages(await inflight, false)
+                }
+                // rewrite data for execution
+                if (rewritten !== queryText) {
+                  data = rebuildSimpleQuery(rewritten)
+                }
+              } else {
+                // apply query rewrites for non-cacheable queries
+                data = interceptQuery(data)
+              }
             }
           }
 
@@ -914,21 +945,22 @@ export async function startPgProxy(
           }
 
           let result: Uint8Array
-          if (cacheable) {
+          const cacheable = queryClass?.isCacheable ?? false
+          if (cacheable && schemaCacheKey) {
             const promise = execute()
-            schemaQueryInFlight.set(queryText!, promise)
+            schemaQueryInFlight.set(schemaCacheKey, promise)
             try {
               result = await promise
-              schemaQueryCache.set(queryText!, {
+              schemaQueryCache.set(schemaCacheKey, {
                 result,
                 expiresAt: Date.now() + SCHEMA_CACHE_TTL_MS,
               })
             } finally {
-              schemaQueryInFlight.delete(queryText!)
+              schemaQueryInFlight.delete(schemaCacheKey)
             }
           } else {
             result = await execute()
-            if (queryNorm && isDDLNormalized(queryNorm)) {
+            if (queryClass?.isDDL) {
               invalidateSchemaCache()
             }
           }
@@ -937,7 +969,7 @@ export async function startPgProxy(
           result = stripResponseMessages(result, stripRfq)
 
           // signal replication handler on postgres writes for instant sync
-          if (dbName === 'postgres' && queryNorm && isWriteNormalized(queryNorm)) {
+          if (dbName === 'postgres' && queryClass?.isWrite) {
             signalReplicationChange()
           }
 
