@@ -19,10 +19,11 @@
  *   bun run perf/memory/profile.ts --check-leaks             # detailed leak analysis
  */
 
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
-import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+
 import postgres from 'postgres'
 
 // ---- config ----
@@ -135,9 +136,9 @@ async function runLeakChecks(pgPort: number, _dataDir: string): Promise<LeakChec
   try {
     // Check 1: _orez change table size
     try {
-      const r = await sql.unsafe(
+      const r = (await sql.unsafe(
         `SELECT count(*) as cnt FROM _orez._zero_changes`
-      ) as any[]
+      )) as any[]
       const cnt = Number(r[0]?.cnt || 0)
       checks.push({
         name: '_orez._zero_changes rows',
@@ -156,9 +157,9 @@ async function runLeakChecks(pgPort: number, _dataDir: string): Promise<LeakChec
 
     // Check 2: publication tables
     try {
-      const r = await sql.unsafe(
+      const r = (await sql.unsafe(
         `SELECT count(*) as cnt FROM pg_publication_tables`
-      ) as any[]
+      )) as any[]
       const cnt = Number(r[0]?.cnt || 0)
       checks.push({
         name: 'publication table memberships',
@@ -177,9 +178,9 @@ async function runLeakChecks(pgPort: number, _dataDir: string): Promise<LeakChec
 
     // Check 3: pg_stat_activity connections
     try {
-      const r = await sql.unsafe(
+      const r = (await sql.unsafe(
         `SELECT count(*) as cnt FROM pg_stat_activity WHERE state = 'active'`
-      ) as any[]
+      )) as any[]
       const cnt = Number(r[0]?.cnt || 0)
       checks.push({
         name: 'active connections',
@@ -231,7 +232,9 @@ async function main() {
     workload: { queries: 0, writes: 0, connections: 0 },
   }
 
-  log(`Memory profile: ${config.durationSec}s, ${config.singleDb ? 'singleDb' : 'multi-instance'}`)
+  log(
+    `Memory profile: ${config.durationSec}s, ${config.singleDb ? 'singleDb' : 'multi-instance'}`
+  )
 
   // clean and create data dir
   if (existsSync(config.dataDir)) {
@@ -357,8 +360,16 @@ async function main() {
             `INSERT INTO mem_test_wide (col1, col2, col3, col4, col5, col6, col7, col8, col9, col10, col11, col12)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb)`,
             [
-              'a', 'b', 'c', 'd', 'e',
-              iter, iter + 1, iter + 2, iter + 3, iter + 4,
+              'a',
+              'b',
+              'c',
+              'd',
+              'e',
+              iter,
+              iter + 1,
+              iter + 2,
+              iter + 3,
+              iter + 4,
               JSON.stringify({ key: 'value', iter }),
               JSON.stringify({ arr: [1, 2, 3, 4, 5] }),
             ]
@@ -435,8 +446,7 @@ async function main() {
   report.summary.rssGrowth = last.rss - first.rss
   report.summary.heapGrowth = last.heapUsed - first.heapUsed
   if (last.elapsedSec > 0) {
-    report.summary.rssGrowthRateBytesPerSec =
-      report.summary.rssGrowth / last.elapsedSec
+    report.summary.rssGrowthRateBytesPerSec = report.summary.rssGrowth / last.elapsedSec
   }
   report.summary.snapshots = report.timeline.length
 
@@ -481,8 +491,12 @@ function printReport(report: ProfileReport) {
   console.log('  MEMORY PROFILE REPORT')
   console.log('='.repeat(65))
   console.log(`  Duration:       ${report.config.durationSec}s`)
-  console.log(`  Mode:           ${report.config.singleDb ? 'singleDb' : 'multi-instance'}`)
-  console.log(`  SQLite:         ${report.config.forceWasm ? 'WASM' : 'native (default)'}`)
+  console.log(
+    `  Mode:           ${report.config.singleDb ? 'singleDb' : 'multi-instance'}`
+  )
+  console.log(
+    `  SQLite:         ${report.config.forceWasm ? 'WASM' : 'native (default)'}`
+  )
   console.log(`  Startup:        ${report.startupMs}ms`)
   console.log(`  Snapshots:      ${report.summary.snapshots}`)
   console.log('  ---')
@@ -516,8 +530,7 @@ function printReport(report: ProfileReport) {
   }
 
   // growth assessment
-  const growthPerMin =
-    report.summary.rssGrowthRateBytesPerSec * 60
+  const growthPerMin = report.summary.rssGrowthRateBytesPerSec * 60
   console.log('  ---')
   if (report.summary.rssGrowth <= 0) {
     console.log('  Assessment: ✅ No RSS growth detected')

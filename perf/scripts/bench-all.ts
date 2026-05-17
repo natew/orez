@@ -13,8 +13,9 @@
  */
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+
 import postgres from 'postgres'
 
 // ---- config ----
@@ -225,10 +226,10 @@ async function runBenchmarks(config: BenchConfig): Promise<BenchResult[]> {
       await bench(
         'UPDATE single row',
         async () => {
-          await sql.unsafe(
-            `UPDATE bench_simple SET text_val = $1 WHERE int_val = $2`,
-            [`updated-${Date.now()}`, 500]
-          )
+          await sql.unsafe(`UPDATE bench_simple SET text_val = $1 WHERE int_val = $2`, [
+            `updated-${Date.now()}`,
+            500,
+          ])
         },
         config
       )
@@ -318,14 +319,15 @@ async function runBenchmarks(config: BenchConfig): Promise<BenchResult[]> {
     )
 
     await concurrentSql.end()
-
   } finally {
     await sql.end().catch(() => {})
   }
 
   // stop orez
   await orez.stop()
-  try { rmSync(config.dataDir, { recursive: true, force: true }) } catch {}
+  try {
+    rmSync(config.dataDir, { recursive: true, force: true })
+  } catch {}
 
   return results
 }
@@ -358,11 +360,21 @@ function printResults(results: BenchResult[]) {
   const concurrentRead = results.find((r) => r.name === '5 concurrent SELECT 1')
 
   console.log('\nSummary:')
-  if (simpleRead) console.log(`  Simple read:  ${simpleRead.p50Ms}ms p50, ${simpleRead.opsPerSec} ops/s`)
-  if (simpleWrite) console.log(`  Simple write: ${simpleWrite.p50Ms}ms p50, ${simpleWrite.opsPerSec} ops/s`)
+  if (simpleRead)
+    console.log(
+      `  Simple read:  ${simpleRead.p50Ms}ms p50, ${simpleRead.opsPerSec} ops/s`
+    )
+  if (simpleWrite)
+    console.log(
+      `  Simple write: ${simpleWrite.p50Ms}ms p50, ${simpleWrite.opsPerSec} ops/s`
+    )
   if (mixed) console.log(`  Mixed r/w:    ${mixed.p50Ms}ms p50, ${mixed.opsPerSec} ops/s`)
-  if (batch) console.log(`  Batch insert: ${batch.p50Ms}ms p50 (${(batch.opsPerSec * 10).toFixed(0)} rows/s)`)
-  if (concurrentRead) console.log(`  Concurrent:   ${concurrentRead.p50Ms}ms p50 (5 parallel reads)`)
+  if (batch)
+    console.log(
+      `  Batch insert: ${batch.p50Ms}ms p50 (${(batch.opsPerSec * 10).toFixed(0)} rows/s)`
+    )
+  if (concurrentRead)
+    console.log(`  Concurrent:   ${concurrentRead.p50Ms}ms p50 (5 parallel reads)`)
 }
 
 // ---- main ----

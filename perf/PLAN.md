@@ -1,6 +1,7 @@
 # orez Production Readiness Plan
 
 ## Goal
+
 Make orez viable for production use. Target: run reliably in ~1GB memory (singleDb mode, "free plan") and scale up for larger deployments.
 
 ## Architecture Overview
@@ -20,6 +21,7 @@ Make orez viable for production use. Target: run reliably in ~1GB memory (single
 ```
 
 Key components to measure:
+
 1. **pg-proxy** — TCP wire protocol → PGlite queries (main hot path)
 2. **change-tracker** — trigger-based CDC capturing changes
 3. **replication handler** — fakes PG logical replication for zero-cache
@@ -27,9 +29,11 @@ Key components to measure:
 5. **zero-cache child process** — spawned by orez, does actual sync work
 
 ## Phase 1: Instrumentation & Insights (CURRENT)
+
 Build measurement infrastructure before optimizing anything.
 
 ### 1.1 Load Testing Harness
+
 - [ ] `perf/load/harness.ts` — configurable load generator
   - Concurrent connections (1..N)
   - Mix of read/write queries
@@ -44,6 +48,7 @@ Build measurement infrastructure before optimizing anything.
 - [ ] `perf/load/report.ts` — summarize results as JSON/Markdown
 
 ### 1.2 Memory Profiling
+
 - [ ] `perf/memory/profile.ts` — heap snapshot at key lifecycle points
   - Startup baseline
   - After N queries
@@ -59,6 +64,7 @@ Build measurement infrastructure before optimizing anything.
 - [ ] `perf/memory/compare.ts` — compare snapshots, find deltas
 
 ### 1.3 Performance Micro-Benchmarks
+
 - [ ] `perf/scripts/bench-proxy.ts` — measure proxy overhead
   - Raw PGlite query vs. through-proxy query latency
   - Query classification overhead
@@ -75,6 +81,7 @@ Build measurement infrastructure before optimizing anything.
   - singleDb vs multi-instance startup
 
 ### 1.4 Correctness Testing
+
 - [ ] `perf/stability/correctness.test.ts` — property-based tests
   - All rows inserted = all rows replicated
   - No duplicate replication events
@@ -87,6 +94,7 @@ Build measurement infrastructure before optimizing anything.
   - Random kill/restart of zero-cache
 
 ### 1.5 Long-Term Stability
+
 - [ ] `perf/stability/soak.ts` — multi-hour soak test
   - Sustained load for N hours
   - Periodic health checks
@@ -102,6 +110,7 @@ Build measurement infrastructure before optimizing anything.
 ## Phase 2: Iterate & Improve (AFTER INSIGHTS)
 
 ### 2.1 Memory Optimization Targets
+
 - Proxy connection tracking maps — ensure cleanup
 - Schema query cache — TTL, size limit, eviction
 - Change tracker trigger state — verify no unbounded growth
@@ -109,18 +118,21 @@ Build measurement infrastructure before optimizing anything.
 - Zero-cache child process — max-old-space-size tuning
 
 ### 2.2 Latency Optimization Targets
+
 - Proxy hot path allocation reduction
 - Query classification pre-computation
 - Wire protocol buffer reuse
 - Replication WAL encoding optimization
 
 ### 2.3 Correctness Hardening
+
 - Transaction isolation edge cases
 - Concurrent DDL + DML safety
 - Publication membership edge cases
 - CDC corruption recovery hardening
 
 ### 2.4 Stability Hardening
+
 - File descriptor leak detection
 - Timer/setInterval leak detection
 - Child process zombie prevention
@@ -128,20 +140,20 @@ Build measurement infrastructure before optimizing anything.
 
 ## Key Metrics to Track
 
-| Metric | Target | How to Measure |
-|--------|--------|----------------|
-| Startup time (cold) | < 5s | wall clock in bench-startup |
-| Startup time (warm) | < 2s | wall clock in bench-startup |
-| Query latency (simple) | < 5ms p50 | proxy benchmark |
-| Query latency (through proxy) | < 10ms p50 | proxy benchmark |
-| Replication latency | < 100ms p95 | replication latency test |
-| Memory idle (singleDb) | < 200MB | heap snapshot |
-| Memory under load (singleDb) | < 500MB | heap snapshot |
-| Memory idle (3-instance) | < 500MB | heap snapshot |
-| Memory under load (3-instance) | < 1GB | heap snapshot |
-| Memory growth rate | < 10MB/hour | soak test |
-| Crashes per 24h | 0 | soak test |
-| Recovery success rate | 100% | crash-recovery test |
+| Metric                         | Target      | How to Measure              |
+| ------------------------------ | ----------- | --------------------------- |
+| Startup time (cold)            | < 5s        | wall clock in bench-startup |
+| Startup time (warm)            | < 2s        | wall clock in bench-startup |
+| Query latency (simple)         | < 5ms p50   | proxy benchmark             |
+| Query latency (through proxy)  | < 10ms p50  | proxy benchmark             |
+| Replication latency            | < 100ms p95 | replication latency test    |
+| Memory idle (singleDb)         | < 200MB     | heap snapshot               |
+| Memory under load (singleDb)   | < 500MB     | heap snapshot               |
+| Memory idle (3-instance)       | < 500MB     | heap snapshot               |
+| Memory under load (3-instance) | < 1GB       | heap snapshot               |
+| Memory growth rate             | < 10MB/hour | soak test                   |
+| Crashes per 24h                | 0           | soak test                   |
+| Recovery success rate          | 100%        | crash-recovery test         |
 
 ## Running Tests
 

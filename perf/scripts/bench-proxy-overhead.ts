@@ -11,8 +11,9 @@
  */
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+
 import { PGlite } from '@electric-sql/pglite'
 import postgres from 'postgres'
 
@@ -30,7 +31,12 @@ interface OverheadResult {
   proxyRuns: number
 }
 
-async function benchRaw(db: PGlite, query: string, params?: any[], runs = 50): Promise<number> {
+async function benchRaw(
+  db: PGlite,
+  query: string,
+  params?: any[],
+  runs = 50
+): Promise<number> {
   // warmup
   for (let i = 0; i < 5; i++) {
     await db.query(query, params)
@@ -191,9 +197,7 @@ async function main() {
   console.log('\n' + '='.repeat(75))
   console.log('  PROXY OVERHEAD ANALYSIS')
   console.log('='.repeat(75))
-  console.log(
-    '  Query                      raw       proxy     overhead  %'
-  )
+  console.log('  Query                      raw       proxy     overhead  %')
   console.log('  ' + '-'.repeat(70))
 
   for (const r of results) {
@@ -206,8 +210,7 @@ async function main() {
   console.log('='.repeat(75))
 
   // assessment
-  const avgOverhead =
-    results.reduce((a, r) => a + r.overheadPct, 0) / results.length
+  const avgOverhead = results.reduce((a, r) => a + r.overheadPct, 0) / results.length
   const maxOverhead = Math.max(...results.map((r) => r.overheadPct))
 
   console.log(`\nAverage overhead: ${avgOverhead.toFixed(1)}%`)
@@ -236,7 +239,9 @@ async function main() {
   await sql.end().catch(() => {})
   await orez.stop()
   await rawPg.close()
-  try { rmSync(dataDir, { recursive: true, force: true }) } catch {}
+  try {
+    rmSync(dataDir, { recursive: true, force: true })
+  } catch {}
 
   process.exit(avgOverhead > 50 ? 1 : 0)
 }

@@ -13,6 +13,7 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+
 import postgres from 'postgres'
 
 // ---- helpers ----
@@ -110,7 +111,7 @@ async function diagnosePg(pgPort: number) {
   try {
     // basic connectivity
     try {
-      const r = await sql.unsafe('SELECT 1 as ok') as any[]
+      const r = (await sql.unsafe('SELECT 1 as ok')) as any[]
       if (r[0]?.ok === 1) ok('Connected')
     } catch (e: any) {
       err(`Cannot connect: ${e.message}`)
@@ -119,31 +120,29 @@ async function diagnosePg(pgPort: number) {
 
     // version
     try {
-      const r = await sql.unsafe('SELECT version()') as any[]
+      const r = (await sql.unsafe('SELECT version()')) as any[]
       info(`Version: ${r[0]?.version?.slice(0, 60) || 'unknown'}`)
     } catch {}
 
     // database size
     try {
-      const r = await sql.unsafe(
+      const r = (await sql.unsafe(
         `SELECT pg_database_size(current_database()) as size`
-      ) as any[]
+      )) as any[]
       info(`Database size: ${formatBytes(Number(r[0]?.size || 0))}`)
     } catch {}
 
     // table count
     try {
-      const r = await sql.unsafe(
+      const r = (await sql.unsafe(
         `SELECT count(*) as cnt FROM information_schema.tables WHERE table_schema = 'public'`
-      ) as any[]
+      )) as any[]
       info(`Public tables: ${r[0]?.cnt || 0}`)
     } catch {}
 
     // publication status
     try {
-      const r = await sql.unsafe(
-        `SELECT pubname FROM pg_publication`
-      ) as any[]
+      const r = (await sql.unsafe(`SELECT pubname FROM pg_publication`)) as any[]
       if (r.length > 0) {
         ok(`Publications: ${r.map((x: any) => x.pubname).join(', ')}`)
       } else {
@@ -153,9 +152,9 @@ async function diagnosePg(pgPort: number) {
 
     // change tracking status
     try {
-      const r = await sql.unsafe(
+      const r = (await sql.unsafe(
         `SELECT count(*) as cnt FROM _orez._zero_changes`
-      ) as any[]
+      )) as any[]
       info(`CDC changes recorded: ${r[0]?.cnt || 0}`)
     } catch {
       warn('CDC table _orez._zero_changes not found')
@@ -163,12 +162,14 @@ async function diagnosePg(pgPort: number) {
 
     // replication slots
     try {
-      const r = await sql.unsafe(
+      const r = (await sql.unsafe(
         `SELECT slot_name, active, restart_lsn FROM _orez._zero_replication_slots`
-      ) as any[]
+      )) as any[]
       if (r.length > 0) {
         for (const slot of r) {
-          ok(`Slot "${slot.slot_name}": active=${slot.active}, restart=${slot.restart_lsn}`)
+          ok(
+            `Slot "${slot.slot_name}": active=${slot.active}, restart=${slot.restart_lsn}`
+          )
         }
       } else {
         warn('No replication slots')
@@ -179,19 +180,19 @@ async function diagnosePg(pgPort: number) {
 
     // latest change watermark
     try {
-      const r = await sql.unsafe(
+      const r = (await sql.unsafe(
         `SELECT max(watermark) as wm FROM _orez._zero_changes`
-      ) as any[]
+      )) as any[]
       info(`Latest CDC watermark: ${r[0]?.wm || 'none'}`)
     } catch {}
 
     // trigger status
     try {
-      const r = await sql.unsafe(
+      const r = (await sql.unsafe(
         `SELECT count(*) as cnt
          FROM information_schema.triggers
          WHERE trigger_name = '_zero_track_change_trigger'`
-      ) as any[]
+      )) as any[]
       if (Number(r[0]?.cnt || 0) > 0) {
         ok(`${r[0].cnt} change tracking triggers installed`)
       } else {
@@ -201,12 +202,12 @@ async function diagnosePg(pgPort: number) {
 
     // large tables (top 5)
     try {
-      const r = await sql.unsafe(
+      const r = (await sql.unsafe(
         `SELECT tablename, n_live_tup as rows
          FROM pg_stat_user_tables
          ORDER BY n_live_tup DESC
          LIMIT 5`
-      ) as any[]
+      )) as any[]
       if (r.length > 0) {
         info('Largest tables:')
         for (const t of r) {
@@ -272,7 +273,9 @@ async function diagnoseZero(zeroPort: number) {
     if (resp.ok) {
       const status = await resp.json()
       ok('Admin API reachable')
-      info(`Uptime: ${status.uptimeMs ? Math.round(status.uptimeMs / 1000) + 's' : 'unknown'}`)
+      info(
+        `Uptime: ${status.uptimeMs ? Math.round(status.uptimeMs / 1000) + 's' : 'unknown'}`
+      )
     }
   } catch {
     // admin not enabled, that's fine
@@ -283,7 +286,9 @@ async function diagnoseProcess() {
   header('Process Info')
 
   const mem = process.memoryUsage()
-  info(`Diagnostic script memory: RSS=${formatBytes(mem.rss)}, heap=${formatBytes(mem.heapUsed)}`)
+  info(
+    `Diagnostic script memory: RSS=${formatBytes(mem.rss)}, heap=${formatBytes(mem.heapUsed)}`
+  )
 
   // check for orphaned processes
   const { execSync } = await import('node:child_process')

@@ -23,8 +23,9 @@
  */
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+
 import postgres from 'postgres'
 import WebSocket from 'ws'
 
@@ -287,7 +288,8 @@ async function runBasicCrud(
     p95: percentile(latencies, 95),
     p99: percentile(latencies, 99),
     max: latencies.length > 0 ? Math.max(...latencies) : 0,
-    mean: latencies.length > 0 ? latencies.reduce((a, b) => a + b, 0) / latencies.length : 0,
+    mean:
+      latencies.length > 0 ? latencies.reduce((a, b) => a + b, 0) / latencies.length : 0,
   }
 }
 
@@ -522,7 +524,11 @@ async function runMixed(
   log(`Mixed: ${crudWorkers} CRUD workers + ${replConcurrency} repl workers`)
 
   const crudCfg = { ...config, concurrency: crudWorkers }
-  const replCfg = { ...config, concurrency: replConcurrency, durationSec: config.durationSec }
+  const replCfg = {
+    ...config,
+    concurrency: replConcurrency,
+    durationSec: config.durationSec,
+  }
 
   await Promise.all([
     runBasicCrud(pgPort, metrics, crudCfg),
@@ -632,7 +638,9 @@ async function main() {
 
   log(`Scenario: ${config.scenario}`)
   log(`Duration: ${config.durationSec}s, Concurrency: ${config.concurrency}`)
-  log(`Mode: ${config.singleDb ? 'singleDb' : 'multi-instance'}, SQLite: ${config.forceWasm ? 'WASM' : 'native (default)'}`)
+  log(
+    `Mode: ${config.singleDb ? 'singleDb' : 'multi-instance'}, SQLite: ${config.forceWasm ? 'WASM' : 'native (default)'}`
+  )
   log(`Data dir: ${config.dataDir}`)
 
   // clean data dir
@@ -666,7 +674,9 @@ async function main() {
   })
 
   const startupMs = now() - startTime
-  log(`orez ready in ${startupMs.toFixed(0)}ms (pg=${orez.pgPort}, zero=${orez.zeroPort})`)
+  log(
+    `orez ready in ${startupMs.toFixed(0)}ms (pg=${orez.pgPort}, zero=${orez.zeroPort})`
+  )
 
   if (config.profileMemory) {
     metrics.memory.snapshots.push(takeMemorySnapshot(startupMs / 1000))

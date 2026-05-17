@@ -15,8 +15,9 @@
  */
 
 import { existsSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
+
 import postgres from 'postgres'
 
 // ---- config ----
@@ -224,7 +225,10 @@ async function main() {
     const reportFile = resolve(config.reportDir, 'soak-report.json')
     const anomalyFile = resolve(config.reportDir, 'anomalies.jsonl')
     const timelineFile = resolve(config.reportDir, 'timeline.csv')
-    writeFileSync(timelineFile, 'elapsedSec,rss,heapUsed,queries,writes,errors,avgLatencyMs\n')
+    writeFileSync(
+      timelineFile,
+      'elapsedSec,rss,heapUsed,queries,writes,errors,avgLatencyMs\n'
+    )
     writeFileSync(anomalyFile, '') // clear
 
     const endTime = Date.now() + config.durationSec * 1000
@@ -236,10 +240,10 @@ async function main() {
       // do some writes
       try {
         const t0 = performance.now()
-        await sql.unsafe(
-          `INSERT INTO soak_test (worker_id, payload) VALUES ($1, $2)`,
-          [iter % 10, `data-${iter}-${Math.random().toString(36).slice(2, 15)}`]
-        )
+        await sql.unsafe(`INSERT INTO soak_test (worker_id, payload) VALUES ($1, $2)`, [
+          iter % 10,
+          `data-${iter}-${Math.random().toString(36).slice(2, 15)}`,
+        ])
         const lat = performance.now() - t0
         latencies.push(lat)
         highestLatency = Math.max(highestLatency, lat)
@@ -255,7 +259,10 @@ async function main() {
             type: 'error_burst',
             details: `${totalErrors} errors so far, latest: ${e.message}`,
           })
-          appendFileSync(anomalyFile, JSON.stringify(report.anomalies[report.anomalies.length - 1]) + '\n')
+          appendFileSync(
+            anomalyFile,
+            JSON.stringify(report.anomalies[report.anomalies.length - 1]) + '\n'
+          )
         }
       }
 
@@ -298,13 +305,16 @@ async function main() {
             type: 'connection_failure',
             details: `zero-cache health check failed: ${e.message}`,
           })
-          appendFileSync(anomalyFile, JSON.stringify(report.anomalies[report.anomalies.length - 1]) + '\n')
+          appendFileSync(
+            anomalyFile,
+            JSON.stringify(report.anomalies[report.anomalies.length - 1]) + '\n'
+          )
         }
 
         // check pg health
         let pgOk = false
         try {
-          const r = await sql.unsafe('SELECT 1 as ok') as any[]
+          const r = (await sql.unsafe('SELECT 1 as ok')) as any[]
           pgOk = r[0]?.ok === 1
         } catch (e: any) {
           notes.push(`pg unreachable: ${e.message}`)
@@ -345,7 +355,10 @@ async function main() {
             type: 'memory_spike',
             details: `RSS spiked to ${formatBytes(cycle.rss)} (peak was ${formatBytes(peakRss)})`,
           })
-          appendFileSync(anomalyFile, JSON.stringify(report.anomalies[report.anomalies.length - 1]) + '\n')
+          appendFileSync(
+            anomalyFile,
+            JSON.stringify(report.anomalies[report.anomalies.length - 1]) + '\n'
+          )
         }
 
         // detect latency spikes
@@ -356,14 +369,15 @@ async function main() {
             type: 'latency_spike',
             details: `avg query latency ${cycle.avgQueryMs}ms`,
           })
-          appendFileSync(anomalyFile, JSON.stringify(report.anomalies[report.anomalies.length - 1]) + '\n')
+          appendFileSync(
+            anomalyFile,
+            JSON.stringify(report.anomalies[report.anomalies.length - 1]) + '\n'
+          )
         }
 
         // status update
         const remaining = config.durationSec - elapsed
-        const status = zeroOk
-          ? `✅ zc:ok`
-          : `❌ zc:down`
+        const status = zeroOk ? `✅ zc:ok` : `❌ zc:down`
         log(
           `t=${formatDuration(Math.round(elapsed))} (${formatDuration(Math.round(remaining))} left) ` +
             `RSS=${formatBytes(mem.rss)} queries=${totalQueries} errs=${totalErrors} ` +

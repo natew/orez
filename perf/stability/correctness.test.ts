@@ -17,16 +17,17 @@
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
+
 import postgres from 'postgres'
-import WebSocket from 'ws'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import WebSocket from 'ws'
 
 import { startZeroLite } from '../../src/index.js'
-import { installChangeTracking } from '../../src/replication/change-tracker.js'
 import {
   ensureTablesInPublications,
   installAllowAllPermissions,
 } from '../../src/integration/test-permissions.js'
+import { installChangeTracking } from '../../src/replication/change-tracker.js'
 
 import type { PGlite } from '@electric-sql/pglite'
 
@@ -196,7 +197,11 @@ describe('orez correctness (all modes)', () => {
     zeroPort = orez.zeroPort
     db = orez.db
     stop = orez.stop
-    sqlMode = orez.config.forceWasmSqlite ? 'wasm' : (orez.config.disableWasmSqlite ? 'native' : 'auto')
+    sqlMode = orez.config.forceWasmSqlite
+      ? 'wasm'
+      : orez.config.disableWasmSqlite
+        ? 'native'
+        : 'auto'
 
     console.log(`[test] orez ready (pg=${pgPort}, zero=${zeroPort}, mode=${sqlMode})`)
 
@@ -226,7 +231,9 @@ describe('orez correctness (all modes)', () => {
 
   afterAll(async () => {
     await stop().catch(() => {})
-    try { rmSync(DATA_DIR, { recursive: true, force: true }) } catch {}
+    try {
+      rmSync(DATA_DIR, { recursive: true, force: true })
+    } catch {}
   })
 
   // ---- WS & Health (run early while zero-cache is fresh) ----
@@ -282,9 +289,14 @@ describe('orez correctness (all modes)', () => {
 
     try {
       const id = `basic-${Date.now()}`
-      await sql.unsafe(`INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`, [id, 'hello', 42])
+      await sql.unsafe(
+        `INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`,
+        [id, 'hello', 42]
+      )
 
-      const r = await sql.unsafe(`SELECT * FROM correctness_items WHERE id = $1`, [id]) as any[]
+      const r = (await sql.unsafe(`SELECT * FROM correctness_items WHERE id = $1`, [
+        id,
+      ])) as any[]
       expect(r.length).toBe(1)
       expect(r[0].value).toBe('hello')
       expect(r[0].counter).toBe(42)
@@ -296,9 +308,18 @@ describe('orez correctness (all modes)', () => {
   test('watermarks are strictly increasing, no duplicates', async () => {
     const id = `nodup-${Date.now()}`
     // Use direct db.query for reliable trigger testing
-    await db.query(`INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`, [id, 'a', 1])
-    await db.query(`UPDATE correctness_items SET value = $1, counter = counter + 1 WHERE id = $2`, ['b', id])
-    await db.query(`UPDATE correctness_items SET value = $1, counter = counter + 1 WHERE id = $2`, ['c', id])
+    await db.query(
+      `INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`,
+      [id, 'a', 1]
+    )
+    await db.query(
+      `UPDATE correctness_items SET value = $1, counter = counter + 1 WHERE id = $2`,
+      ['b', id]
+    )
+    await db.query(
+      `UPDATE correctness_items SET value = $1, counter = counter + 1 WHERE id = $2`,
+      ['c', id]
+    )
 
     const changes = await db.query<{ watermark: string }>(
       `SELECT watermark::text as watermark FROM _orez._zero_changes
@@ -382,7 +403,7 @@ describe('orez correctness (all modes)', () => {
     })
 
     try {
-      const r = await verify.unsafe('SELECT 1 as ok') as any[]
+      const r = (await verify.unsafe('SELECT 1 as ok')) as any[]
       expect(r[0]?.ok).toBe(1)
     } finally {
       await verify.end()
@@ -401,18 +422,23 @@ describe('orez correctness (all modes)', () => {
     }
 
     const sql = postgres({
-      host: '127.0.0.1', port: pgPort, database: 'postgres',
-      username: 'user', password: 'password', max: 1, no_subscribe: true,
+      host: '127.0.0.1',
+      port: pgPort,
+      database: 'postgres',
+      username: 'user',
+      password: 'password',
+      max: 1,
+      no_subscribe: true,
     })
     try {
       await sql.unsafe(
         `INSERT INTO correctness_items (id, value, counter) VALUES ${valueTuples.join(', ')} ON CONFLICT (id) DO NOTHING`
       )
 
-      const r = await sql.unsafe(
+      const r = (await sql.unsafe(
         `SELECT count(*) as cnt FROM correctness_items WHERE id LIKE $1`,
         [`${batchId}-%`]
-      ) as any[]
+      )) as any[]
       expect(Number(r[0]?.cnt || 0)).toBe(BATCH_SIZE)
     } finally {
       await sql.end()
@@ -421,7 +447,10 @@ describe('orez correctness (all modes)', () => {
 
   test('update to same value produces no change (no-op suppression)', async () => {
     const id = `noop-${Date.now()}`
-    await db.query(`INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`, [id, 'sameval', 1])
+    await db.query(
+      `INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`,
+      [id, 'sameval', 1]
+    )
 
     // Count changes for this specific row before the no-op update
     const before = await db.query<{ cnt: string }>(
@@ -431,7 +460,10 @@ describe('orez correctness (all modes)', () => {
     const beforeCnt = Number(before.rows[0]?.cnt || 0)
 
     // update to same value — should be suppressed by trigger
-    await db.query(`UPDATE correctness_items SET value = $1 WHERE id = $2`, ['sameval', id])
+    await db.query(`UPDATE correctness_items SET value = $1 WHERE id = $2`, [
+      'sameval',
+      id,
+    ])
     await new Promise((r) => setTimeout(r, 500))
 
     const after = await db.query<{ cnt: string }>(
@@ -447,15 +479,23 @@ describe('orez correctness (all modes)', () => {
   test('change tracking captures inserts, updates, and deletes', async () => {
     const id = `ct-${Date.now()}`
     const startWm = Number(
-      (await db.query<{ max: string }>(
-        `SELECT COALESCE(max(watermark), 0)::text as max FROM _orez._zero_changes`
-      )).rows[0]?.max
+      (
+        await db.query<{ max: string }>(
+          `SELECT COALESCE(max(watermark), 0)::text as max FROM _orez._zero_changes`
+        )
+      ).rows[0]?.max
     )
 
     // insert
-    await db.query(`INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`, [id, 'val1', 10])
+    await db.query(
+      `INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`,
+      [id, 'val1', 10]
+    )
     // update
-    await db.query(`UPDATE correctness_items SET value = $1, counter = $2 WHERE id = $3`, ['val2', 20, id])
+    await db.query(
+      `UPDATE correctness_items SET value = $1, counter = $2 WHERE id = $3`,
+      ['val2', 20, id]
+    )
     // delete
     await db.query(`DELETE FROM correctness_items WHERE id = $1`, [id])
 
@@ -490,17 +530,24 @@ if (forceNative) {
     test('initial sync delivers existing rows via poke', async () => {
       // insert data before connecting
       const id = `init-${Date.now()}`
-      await db.query(`INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`, [id, 'hello-init', 42])
+      await db.query(
+        `INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`,
+        [id, 'hello-init', 42]
+      )
 
       // wait for replication
       await new Promise((r) => setTimeout(r, 3000))
 
       const downstream = new Queue<unknown>()
-      const ws = connectAndSubscribe(zeroPort, {
-        schema: 'public',
-        table: 'correctness_items',
-        orderBy: [['id', 'asc']],
-      }, downstream)
+      const ws = connectAndSubscribe(
+        zeroPort,
+        {
+          schema: 'public',
+          table: 'correctness_items',
+          orderBy: [['id', 'asc']],
+        },
+        downstream
+      )
 
       const poke = await waitForPokePart(downstream, 30000)
       expect(poke.rowsPatch).toEqual(
@@ -517,18 +564,25 @@ if (forceNative) {
 
     test('live insert triggers poke', async () => {
       const downstream = new Queue<unknown>()
-      const ws = connectAndSubscribe(zeroPort, {
-        schema: 'public',
-        table: 'correctness_items',
-        orderBy: [['id', 'asc']],
-      }, downstream)
+      const ws = connectAndSubscribe(
+        zeroPort,
+        {
+          schema: 'public',
+          table: 'correctness_items',
+          orderBy: [['id', 'asc']],
+        },
+        downstream
+      )
 
       // drain initial pokes
       await drainInitialPokes(downstream)
 
       // insert
       const id = `live-${Date.now()}`
-      await db.query(`INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`, [id, 'live-val', 99])
+      await db.query(
+        `INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`,
+        [id, 'live-val', 99]
+      )
 
       const poke = await waitForPokePart(downstream, 30000)
       expect(poke.rowsPatch).toEqual(
