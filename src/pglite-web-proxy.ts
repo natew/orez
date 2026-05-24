@@ -34,6 +34,7 @@ export class PGliteWebProxy {
   private pending = new Map<number, PendingRequest>()
   private nextId = 1
   private notificationCallbacks = new Map<string, Set<(payload: string) => void>>()
+  private failure: Error | null = null
   readonly name: string
 
   readonly waitReady: Promise<void>
@@ -66,12 +67,26 @@ export class PGliteWebProxy {
 
       this.worker.addEventListener('message', onMessage)
       this.worker.addEventListener('error', (ev) => {
-        rejectReady(new Error(String(ev)))
+        const error = this.errorFromEvent(ev, 'worker failed during startup')
+        this.failPending(error)
+        rejectReady(error)
+      })
+      this.worker.addEventListener('messageerror', (ev) => {
+        const error = this.errorFromEvent(ev, 'worker message error during startup')
+        this.failPending(error)
+        rejectReady(error)
       })
     })
   }
 
   private installMessageHandler() {
+    this.worker.addEventListener('error', (ev) => {
+      this.failPending(this.errorFromEvent(ev, 'worker failed'))
+    })
+    this.worker.addEventListener('messageerror', (ev) => {
+      this.failPending(this.errorFromEvent(ev, 'worker message error'))
+    })
+
     this.worker.addEventListener('message', (ev: MessageEvent) => {
       const msg = ev.data
       if (!msg || typeof msg !== 'object') return
@@ -102,15 +117,40 @@ export class PGliteWebProxy {
     })
   }
 
+  private errorFromEvent(ev: Event, fallback: string): Error {
+    const maybeError = ev as ErrorEvent
+    if (maybeError.error instanceof Error) return maybeError.error
+    if (maybeError.message) return new Error(maybeError.message)
+    return new Error(fallback)
+  }
+
+  private failPending(error: Error) {
+    if (!this.failure) this.failure = error
+    this.closed = true
+    this.ready = false
+    for (const [, req] of this.pending) {
+      req.reject(error)
+    }
+    this.pending.clear()
+  }
+
   private send(msg: Record<string, unknown>, transfer?: Transferable[]): Promise<any> {
+    if (this.failure) return Promise.reject(this.failure)
+    if (this.closed) return Promise.reject(new Error('worker is closed'))
+
     const id = this.nextId++
     msg.id = id
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
-      if (transfer?.length) {
-        this.worker.postMessage(msg, transfer)
-      } else {
-        this.worker.postMessage(msg)
+      try {
+        if (transfer?.length) {
+          this.worker.postMessage(msg, transfer)
+        } else {
+          this.worker.postMessage(msg)
+        }
+      } catch (err) {
+        this.pending.delete(id)
+        reject(err instanceof Error ? err : new Error(String(err)))
       }
     })
   }
@@ -170,11 +210,12 @@ export class PGliteWebProxy {
   }
 
   async close(): Promise<void> {
-    this.closed = true
-    this.ready = false
     try {
       await this.send({ type: 'close' })
     } catch {}
+    this.closed = true
+    this.ready = false
+    this.failPending(new Error('worker is closed'))
     this.worker.terminate()
   }
 }

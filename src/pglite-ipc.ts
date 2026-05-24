@@ -51,6 +51,8 @@ export class PGliteWorkerProxy {
   private pending = new Map<number, PendingRequest>()
   private nextId = 1
   private notificationCallbacks = new Map<string, Set<(payload: string) => void>>()
+  private closed = false
+  private failure: Error | null = null
   readonly name: string
 
   /** resolves when the worker's PGlite instance is ready */
@@ -89,22 +91,29 @@ export class PGliteWorkerProxy {
 
     // handle unexpected worker crashes
     this.worker.on('error', (err) => {
+      const failure = new Error(`worker crashed: ${err.message}`)
       log.pglite(`worker ${config.name} error: ${err.message}`)
-      for (const [, req] of this.pending) {
-        req.reject(new Error(`worker crashed: ${err.message}`))
-      }
-      this.pending.clear()
+      this.failPending(failure)
     })
 
     this.worker.on('exit', (code) => {
+      if (this.closed) return
       if (code !== 0) {
+        const failure = new Error(`worker exited with code ${code}`)
         log.pglite(`worker ${config.name} exited with code ${code}`)
-        for (const [, req] of this.pending) {
-          req.reject(new Error(`worker exited with code ${code}`))
-        }
-        this.pending.clear()
+        this.failPending(failure)
+        return
       }
+      this.failPending(new Error('worker exited unexpectedly'))
     })
+  }
+
+  private failPending(error: Error) {
+    if (!this.failure) this.failure = error
+    for (const [, req] of this.pending) {
+      req.reject(error)
+    }
+    this.pending.clear()
   }
 
   private installMessageHandler() {
@@ -139,14 +148,22 @@ export class PGliteWorkerProxy {
   }
 
   private send(msg: Record<string, unknown>, transfer?: ArrayBuffer[]): Promise<any> {
+    if (this.failure) return Promise.reject(this.failure)
+    if (this.closed) return Promise.reject(new Error('worker is closed'))
+
     const id = this.nextId++
     msg.id = id
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
-      if (transfer?.length) {
-        this.worker.postMessage(msg, transfer)
-      } else {
-        this.worker.postMessage(msg)
+      try {
+        if (transfer?.length) {
+          this.worker.postMessage(msg, transfer)
+        } else {
+          this.worker.postMessage(msg)
+        }
+      } catch (err) {
+        this.pending.delete(id)
+        reject(err instanceof Error ? err : new Error(String(err)))
       }
     })
   }
@@ -242,6 +259,8 @@ export class PGliteWorkerProxy {
     } catch {
       // worker may already be gone
     }
+    this.closed = true
+    this.failPending(new Error('worker is closed'))
     await this.worker.terminate()
   }
 }

@@ -96,4 +96,21 @@ describe('PGliteWorkerProxy', () => {
   test('error propagation with SQL code', async () => {
     await expect(proxy.exec('SELECT * FROM nonexistent_table')).rejects.toThrow()
   })
+
+  test('rejects requests after worker exits', async () => {
+    const local = new PGliteWorkerProxy({
+      dataDir: 'memory://',
+      name: 'exit-test',
+      withExtensions: false,
+      debug: 0,
+      pgliteOptions: {},
+    })
+    await local.waitReady
+
+    await (local as any).worker.terminate()
+
+    await expect(local.query('SELECT 1')).rejects.toThrow(
+      /worker exited|worker is closed/
+    )
+  })
 })
