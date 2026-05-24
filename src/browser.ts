@@ -35,6 +35,12 @@ export interface OrezBrowserConfig {
 
   /** log level */
   logLevel?: string
+
+  /**
+   * intercept browser-mode orez admin routes before they reach zero-cache.
+   * default: true.
+   */
+  disableAdminApi?: boolean
 }
 
 export interface OrezBrowserInstance {
@@ -157,6 +163,7 @@ export async function startOrezBrowser(
     pglite: pgPostgres as unknown as PGlite,
     appId,
     publications: config.publications,
+    disableAdminApi: config.disableAdminApi ?? true,
     env: {
       ZERO_LOG_LEVEL: config.logLevel || 'info',
     },

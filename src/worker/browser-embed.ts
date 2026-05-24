@@ -36,7 +36,12 @@ import EventEmitter from 'node:events'
 // @ts-expect-error — internal zero-cache module, no type declarations
 import { runWorker as _runWorker } from '@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js'
 
+import { handleDisabledBrowserAdminRequest } from './browser-admin.js'
+
+import type { HttpRequest, HttpResponse } from './browser-admin.js'
 import type { PGlite } from '@electric-sql/pglite'
+
+export type { HttpRequest, HttpResponse } from './browser-admin.js'
 
 const runWorkerFn = _runWorker as (
   parent: unknown,
@@ -65,19 +70,17 @@ export interface ZeroCacheEmbedBrowserOptions {
 
   /** timeout in ms waiting for zero-cache ready (default: 30000) */
   readyTimeout?: number
-}
 
-export interface HttpRequest {
-  method: string
-  url: string
-  headers?: Record<string, string>
-  body?: string | null
-}
-
-export interface HttpResponse {
-  status: number
-  headers: Record<string, string>
-  body: string
+  /**
+   * intercept browser-mode orez admin routes before they reach zero-cache.
+   *
+   * browser embeds do not run the node admin dashboard or log store. leaving
+   * `/__orez/*` to fall through to zero-cache makes disabled admin look like
+   * an app/zero route miss. keep the contract explicit by returning empty
+   * admin responses for the small read-only surface and 404 for the rest.
+   * default: true.
+   */
+  disableAdminApi?: boolean
 }
 
 /** WebSocket-like object — matches CF WebSocket, browser WebSocket, or MessagePort adapter */
@@ -116,6 +119,7 @@ export async function startZeroCacheEmbedBrowser(
   const appId = opts.appId || 'zero'
   const publications = opts.publications?.join(',') || `orez_${appId}_public`
   const readyTimeout = opts.readyTimeout ?? 30000
+  const disableAdminApi = opts.disableAdminApi ?? true
 
   // set up sqlite storage from sql.js or in-memory
   if (opts.sqlite) {
@@ -303,6 +307,11 @@ export async function startZeroCacheEmbedBrowser(
     },
 
     async handleHttp(request: HttpRequest): Promise<HttpResponse> {
+      if (disableAdminApi) {
+        const adminResponse = handleDisabledBrowserAdminRequest(request)
+        if (adminResponse) return adminResponse
+      }
+
       if (!isReady || !fastifyInstance?.inject) {
         return { status: 503, headers: {}, body: 'not ready' }
       }
