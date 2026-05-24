@@ -24,6 +24,7 @@ import {
 } from './child-process.js'
 import { getConfig, getConnectionString } from './config.js'
 import { log, port, setLogLevel, setLogStore } from './log.js'
+import { DoBackend } from './pg-proxy-do-backend.js'
 import { startPgProxy } from './pg-proxy.js'
 import {
   createPGliteInstances,
@@ -319,22 +320,59 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // single-db mode uses one instance for all databases (lighter for constrained envs).
   // otherwise, separate instances for postgres, zero_cvr, zero_cdb with optional
   // worker threads for non-blocking WASM execution.
-  const instances = config.singleDb
-    ? config.useWorkerThreads
-      ? await createSinglePGliteWorkerInstance(config)
-      : await createSinglePGliteInstance(config)
-    : config.useWorkerThreads
-      ? await createPGliteWorkerInstances(config)
-      : await createPGliteInstances(config)
-  const db = instances.postgres
 
-  // periodic WAL checkpoint to prevent pg_wal/ from growing unboundedly
-  const stopCheckpoint =
-    config.checkpointIntervalMs > 0
-      ? startPeriodicCheckpoint(instances, config.checkpointIntervalMs)
-      : () => {}
+  // ── DO backend path (replaces PGlite) ──────────────────────────────
+  let instances: any, db: any, stopCheckpoint: any
+  let migrationsApplied = 0
+  let isDoBackend = false
 
-  // config-based publications take precedence over env var
+  if (config.doBackendUrl) {
+    isDoBackend = true
+    log.orez(`using DO backend: ${config.doBackendUrl}`)
+    const backendUrl = config.doBackendUrl.replace(/\/+$/, '')
+    const doInstances = {
+      postgres: new DoBackend(backendUrl, 'postgres'),
+      cvr: new DoBackend(backendUrl, 'zero_cvr'),
+      cdb: new DoBackend(backendUrl, 'zero_cdb'),
+      postgresReplicas: [],
+    }
+    await Promise.all([
+      doInstances.postgres.waitReady,
+      doInstances.cvr.waitReady,
+      doInstances.cdb.waitReady,
+    ])
+    instances = doInstances
+    db = doInstances.postgres
+    stopCheckpoint = () => {}
+  } else {
+    // ── PGlite backend (default) ────────────────────────────────────────────
+    instances = config.singleDb
+      ? config.useWorkerThreads
+        ? await createSinglePGliteWorkerInstance(config)
+        : await createSinglePGliteInstance(config)
+      : config.useWorkerThreads
+        ? await createPGliteWorkerInstances(config)
+        : await createPGliteInstances(config)
+    db = instances.postgres
+
+    // periodic WAL checkpoint
+    stopCheckpoint =
+      config.checkpointIntervalMs > 0
+        ? startPeriodicCheckpoint(instances, config.checkpointIntervalMs)
+        : () => {}
+
+    // config-based publications
+    if (config.zeroPublications && !process.env.ZERO_APP_PUBLICATIONS) {
+      process.env.ZERO_APP_PUBLICATIONS = config.zeroPublications
+    }
+
+    // run migrations & change tracking
+    migrationsApplied = await runMigrations(db, config)
+    log.debug.orez('installing change tracking')
+    await installChangeTracking(db)
+  }
+
+  // shared: publications config
   if (config.zeroPublications && !process.env.ZERO_APP_PUBLICATIONS) {
     process.env.ZERO_APP_PUBLICATIONS = config.zeroPublications
   }
@@ -343,13 +381,10 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     log.debug.orez(`using managed publication: ${managedPub.names.join(', ')}`)
   }
 
-  // run migrations (on postgres instance only)
-  const migrationsApplied = await runMigrations(db, config)
-  await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
-
-  // install change tracking (on postgres instance only)
-  log.debug.orez('installing change tracking')
-  await installChangeTracking(db)
+  // PGlite-only: sync publications
+  if (!isDoBackend) {
+    await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
+  }
 
   // start tcp proxy (routes connections to correct instance by database name)
   const pgServer = await startPgProxy(instances, config)
@@ -375,15 +410,13 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       OREZ_PG_PORT: String(config.pgPort),
     })
 
-    // re-sync publication membership after on-db-ready.
-    // for orez-managed publications, add any new public tables.
-    // for user-managed publications, ensure the publication isn't empty
-    // (app migrations may have created the pub with tables, but if orez
-    // pre-created an empty pub, the migration may have skipped adding tables).
-    await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
-    await ensurePublicationHasTables(db, managedPub.names)
-    log.debug.orez('re-installing change tracking after on-db-ready')
-    await installChangeTracking(db)
+    // re-sync publication membership (PGlite-only)
+    if (!isDoBackend) {
+      await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
+      await ensurePublicationHasTables(db, managedPub.names)
+      log.debug.orez('re-installing change tracking after on-db-ready')
+      await installChangeTracking(db)
+    }
   }
 
   // write the ready marker so external orchestrators (e.g. CI scripts that
@@ -624,7 +657,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
         // remove stale zero shard schemas from upstream; these can outlive CVR/CDB
         // and cause dispatcher errors after full reset.
-        const shardSchemas = await db.query<{ schemaname: string }>(
+        const shardSchemas = await db.query(
           `SELECT DISTINCT schemaname
            FROM pg_tables
            WHERE tablename IN ('clients', 'replicas', 'mutations')

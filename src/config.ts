@@ -30,6 +30,8 @@ export interface ZeroLiteConfig {
   // storage controls
   checkpointIntervalMs: number // WAL checkpoint interval (default: 5min)
   maxLogFileSize: number // log rotation threshold in bytes (default: 2MB)
+  /** DO backend URL — replaces PGlite with Durable Object SQLite */
+  doBackendUrl?: string
   disableDiskLogs: boolean // skip writing logs to disk (default: false)
   // lifecycle hooks
   onDbReady?: Hook // after db+proxy ready, before zero-cache
@@ -103,6 +105,8 @@ export interface OrezConfig {
   maxLogFileSize?: number
   /** disable writing logs to disk (default: false) */
   disableDiskLogs?: boolean
+  /** DO backend URL — replaces PGlite with Durable Object SQLite */
+  doBackendUrl?: string
 }
 
 /** type-safe helper for orez.config.ts */
@@ -135,6 +139,7 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     checkpointIntervalMs: overrides.checkpointIntervalMs ?? 5 * 60 * 1000,
     maxLogFileSize: overrides.maxLogFileSize ?? 2 * 1024 * 1024,
     disableDiskLogs: overrides.disableDiskLogs ?? false,
+    doBackendUrl: overrides.doBackendUrl,
     onDbReady: overrides.onDbReady,
     onHealthy: overrides.onHealthy,
   }
