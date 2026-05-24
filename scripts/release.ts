@@ -18,6 +18,8 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join } from 'node:path'
+import { stdin as input, stdout as output } from 'node:process'
+import { createInterface } from 'node:readline/promises'
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
@@ -29,6 +31,7 @@ const skipTest = args.includes('--skip-test') || args.includes('--skip-all')
 const packOnly = args.includes('--pack-only')
 const intoIdx = args.indexOf('--into')
 const into = intoIdx !== -1 ? args[intoIdx + 1] : null
+const canPromptForNpmOtp = Boolean(input.isTTY && output.isTTY && !process.env.CI)
 
 if (!patch && !minor && !major && !canary && !packOnly && !into) {
   console.info(
@@ -39,10 +42,91 @@ if (!patch && !minor && !major && !canary && !packOnly && !into) {
 
 const root = resolve(import.meta.dirname, '..')
 
-function run(cmd: string, opts?: { silent?: boolean; cwd?: string }) {
+function run(
+  cmd: string,
+  opts?: {
+    captureOnError?: boolean
+    cwd?: string
+    env?: NodeJS.ProcessEnv
+    silent?: boolean
+  }
+) {
   const cwd = opts?.cwd ?? root
   if (!opts?.silent) console.info(`$ ${cmd}`)
-  return execSync(cmd, { stdio: opts?.silent ? 'pipe' : 'inherit', cwd })
+  const env = opts?.env ? { ...process.env, ...opts.env } : process.env
+
+  try {
+    return execSync(cmd, {
+      stdio: opts?.silent || opts?.captureOnError ? 'pipe' : 'inherit',
+      cwd,
+      env,
+    })
+  } catch (err) {
+    if (opts?.captureOnError && err && typeof err === 'object') {
+      const error = err as Error & { stderr?: Buffer; stdout?: Buffer }
+      const stdout = error.stdout?.toString() ?? ''
+      const stderr = error.stderr?.toString() ?? ''
+      if (stdout) process.stdout.write(stdout)
+      if (stderr) process.stderr.write(stderr)
+      throw new Error([error.message, stdout, stderr].filter(Boolean).join('\n'))
+    }
+    throw err
+  }
+}
+
+function isPublishAuthOrOtpError(message: string) {
+  return (
+    /EOTP|one-time password|two-factor authentication|\botp\b/i.test(message) ||
+    /code E404[\s\S]*PUT https:\/\/registry\.npmjs\.org\/@[^/\s]+%2f[^/\s]+/i.test(
+      message
+    )
+  )
+}
+
+function redactNpmOtp(command: string) {
+  return command.replace(/--otp(?:=|\s+)\S+/g, '--otp=******')
+}
+
+let cachedNpmOtp = process.env.npm_config_otp || process.env.NPM_CONFIG_OTP
+let otpPromptInFlight: Promise<string> | undefined
+
+function getNpmOtp(reason: string, optional = false): Promise<string> {
+  if (otpPromptInFlight) return otpPromptInFlight
+
+  otpPromptInFlight = (async () => {
+    console.info(`\n${reason}`)
+
+    const rl = createInterface({ input, output })
+    try {
+      while (true) {
+        const code = (
+          await rl.question(
+            optional
+              ? 'npm 2FA code (6 digits, empty to skip): '
+              : 'npm 2FA code (6 digits): '
+          )
+        ).trim()
+
+        if (!code) {
+          if (optional) return ''
+          throw new Error('No OTP provided, aborting publish')
+        }
+
+        if (/^\d{6}$/.test(code)) {
+          cachedNpmOtp = code
+          return code
+        }
+
+        console.info('Enter a 6-digit code')
+      }
+    } finally {
+      rl.close()
+    }
+  })().finally(() => {
+    otpPromptInFlight = undefined
+  })
+
+  return otpPromptInFlight
 }
 
 function bumpVersion(current: string): string {
@@ -126,6 +210,7 @@ if (into) {
 // workspace packages: [dir, pkgPath, pkg, nextVersion]
 interface WorkspacePkg {
   dir: string
+  originalVersion: string
   pkgPath: string
   pkg: any
   next: string
@@ -137,7 +222,13 @@ const packages: WorkspacePkg[] = []
 const orezPkgPath = resolve(root, 'package.json')
 const orezPkg = JSON.parse(readFileSync(orezPkgPath, 'utf-8'))
 const orezNext = bumpVersion(orezPkg.version)
-packages.push({ dir: root, pkgPath: orezPkgPath, pkg: orezPkg, next: orezNext })
+packages.push({
+  dir: root,
+  originalVersion: orezPkg.version,
+  pkgPath: orezPkgPath,
+  pkg: orezPkg,
+  next: orezNext,
+})
 
 // bedrock-sqlite (workspace) — skip if wasm dist not built
 const sqliteWasmDir = resolve(root, 'sqlite-wasm')
@@ -148,6 +239,7 @@ if (existsSync(sqlitePkgPath) && sqliteDistExists) {
   const sqliteNext = bumpVersion(sqlitePkg.version)
   packages.push({
     dir: sqliteWasmDir,
+    originalVersion: sqlitePkg.version,
     pkgPath: sqlitePkgPath,
     pkg: sqlitePkg,
     next: sqliteNext,
@@ -213,12 +305,7 @@ if (dryRun) {
   // revert versions
   for (const p of packages) {
     const original = JSON.parse(readFileSync(p.pkgPath, 'utf-8'))
-    const [m, mi, pa] = p.next.split('.').map(Number)
-    original.version = major
-      ? `${m - 1}.0.0`
-      : minor
-        ? `${m}.${mi - 1}.0`
-        : `${m}.${mi}.${pa - 1}`
+    original.version = p.originalVersion
     writeFileSync(p.pkgPath, JSON.stringify(original, null, 2) + '\n')
   }
   run('bun install')
@@ -228,6 +315,79 @@ if (dryRun) {
 // publish each package from a tmp copy with workspace:* resolved
 const tmpBase = mkdtempSync(join(tmpdir(), 'orez-publish-'))
 console.info(`\n${packOnly ? 'packing to' : 'publishing from'} ${tmpBase}`)
+
+if (!packOnly) {
+  try {
+    run('npm whoami', { cwd: tmpBase, silent: true })
+  } catch (err) {
+    throw new Error(
+      `npm is not authenticated for publishing. Run \`npm login\` and then re-run the release.\n\n${err}`
+    )
+  }
+
+  if (!cachedNpmOtp && canPromptForNpmOtp) {
+    await getNpmOtp(
+      'Most orez npm publishes require 2FA. Provide the current code now so every package publish uses it.',
+      true
+    )
+  }
+}
+
+async function publishWithOtp(name: string, version: string, cwd: string) {
+  const tag = canary ? '--tag canary' : ''
+  const publishCommand = `npm publish --access public ${tag}`.trim()
+
+  console.info(`\npublishing ${name}@${version}...`)
+
+  let attempt = 0
+  let otp = cachedNpmOtp
+
+  while (true) {
+    attempt++
+
+    try {
+      console.info(
+        `$ ${redactNpmOtp(
+          [publishCommand, otp ? '--otp=******' : ''].filter(Boolean).join(' ')
+        )}`
+      )
+      const publishOutput = run(publishCommand, {
+        cwd,
+        env: otp ? { npm_config_otp: otp } : undefined,
+        silent: true,
+        captureOnError: true,
+      })
+      if (publishOutput.length) {
+        process.stdout.write(publishOutput)
+      }
+      return
+    } catch (err) {
+      const message = String(err)
+      const needsOtp = isPublishAuthOrOtpError(message)
+
+      if (needsOtp && attempt < 3) {
+        if (!canPromptForNpmOtp) {
+          throw new Error(
+            `npm requires a 2FA code to publish ${name}. Re-run with NPM_CONFIG_OTP set.\n\n${message}`
+          )
+        }
+
+        if (otp && cachedNpmOtp === otp) {
+          cachedNpmOtp = undefined
+        }
+
+        otp = await getNpmOtp(
+          attempt === 1
+            ? `npm requires a 2FA code to publish ${name}`
+            : `npm 2FA code expired, need a fresh one for ${name}`
+        )
+        continue
+      }
+
+      throw err
+    }
+  }
+}
 
 for (const p of packages) {
   const name = p.pkg.name
@@ -271,9 +431,7 @@ for (const p of packages) {
     console.info(`\npacking ${name}@${p.next}...`)
     run('npm pack', { cwd: tmpDir })
   } else {
-    console.info(`\npublishing ${name}@${p.next}...`)
-    const tag = canary ? '--tag canary' : ''
-    run(`npm publish --access public ${tag}`.trim(), { cwd: tmpDir })
+    await publishWithOtp(name, p.next, tmpDir)
   }
 }
 
