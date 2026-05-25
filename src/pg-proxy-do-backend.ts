@@ -177,7 +177,7 @@ function buildNotificationResponse(
 
 function extractQueryText(data: Uint8Array): string | null {
   if (data[0] !== 0x51) return null
-  const len = new DataView(data.buffer, data.byteOffset, 4).getInt32(1)
+  const len = new DataView(data.buffer, data.byteOffset, data.byteLength).getInt32(1)
   return textDecoder.decode(data.subarray(5, 1 + len - 1)).replace(/\0$/, '')
 }
 
@@ -269,6 +269,9 @@ function isCatalogQuery(sql: string): boolean {
       n.includes('pg_stat_') ||
       n.includes('pg_index') ||
       n.includes('pg_depend') ||
+      n.includes('pg_database') ||
+      n.includes('pg_sequence') ||
+      n.includes('pg_description') ||
       n.includes('pg_constraint') ||
       n.includes('pg_inherits') ||
       n.includes('pg_cast') ||
@@ -296,7 +299,8 @@ function isCatalogQuery(sql: string): boolean {
       n.includes('pg_describe_object') ||
       n.includes('has_') ||
       n.includes('obj_description') ||
-      n.includes('format_type'))
+      n.includes('format_type') ||
+      /\bfrom\s+pg_\w+/i.test(n))
   )
     return true
   if (
@@ -333,6 +337,10 @@ function rewriteSQL(sql: string): string {
     '_orez__zero_replication_slots'
   )
   result = result.replace(/(\b)_orez\.(\w+)/g, '$1_orez__$2')
+  // _zero schema references (quoted and unquoted)
+  result = result.replace(/(\b)_zero\.(\w+)/g, '$1_zero_$2')
+  // Quoted schema.table identifiers: "_zero.tableMetadata" → "_zero_tableMetadata"
+  result = result.replace(/"(_zero|_orez)\.(\w+)"/g, '"$1_$2"')
 
   // nextval → 1
   result = result.replace(/nextval\s*\([^)]*\)/gi, '1')
@@ -346,18 +354,43 @@ function rewriteSQL(sql: string): string {
 
   // Skipped PG features
   if (/^\s*create\s+(or\s+replace\s+)?(function|trigger)\s+/i.test(result)) return ''
+  if (/^\s*create\s+database\s/i.test(result)) return ''
   if (/^\s*cluster\s+/i.test(result)) return ''
   if (/^\s*(grant|revoke)\s+/i.test(result)) return ''
   if (/^\s*alter\s+default\s+privileges/i.test(result)) return ''
   if (/^\s*comment\s+on\s+/i.test(result)) return ''
   if (/^\s*(create|alter|drop)\s+publication\s+/i.test(result)) return ''
   if (/^\s*alter\s+table\s+.+replica\s+identity/i.test(result)) return ''
+  // PG-specific ALTER COLUMN (SQLite doesn't support)
+  if (/^\s*alter\s+table\s+.+alter\s+column\s+/i.test(result)) return ''
+
+  // Handle multi-statement SQL beginning with CREATE SCHEMA (remove that line)
+  result = result.replace(/^\s*create\s+schema\s+[^;]+;\s*/i, '')
   // CLOSE cursor — pg-specific
   if (/^\s*close\s+/i.test(result)) return ''
 
   // DDL schema flattening
   if (/^\s*(create|alter|drop)\s+(table|index|view|schema|sequence)\s+/i.test(result)) {
     result = result.replace(/(\w+)\.(\w+)/g, '$1_$2')
+  }
+  // PG type → SQLite type mapping for DDL
+  result = result.replace(/\bTIMESTAMPTZ\b/g, 'TEXT')
+  result = result.replace(/\bTIMESTAMP\b/ig, 'TEXT')
+  result = result.replace(/\bJSONB\b/g, 'TEXT')
+  result = result.replace(/\bDOUBLE\s+PRECISION\b/g, 'REAL')
+  result = result.replace(/\bBOOLEAN\b/gi, 'INTEGER')
+  result = result.replace(/\bBOOL\b/g, 'INTEGER')
+  result = result.replace(/\bBIGINT\b/g, 'INTEGER')
+  result = result.replace(/\bSMALLINT\b/g, 'INTEGER')
+  result = result.replace(/\bSERIAL\b/g, 'INTEGER')
+  result = result.replace(/\bBIGSERIAL\b/g, 'INTEGER')
+  result = result.replace(/\bBYTEA\b/g, 'BLOB')
+  // Strip CONSTRAINT name prefix (PG syntax, SQLite wants bare constraint)
+  result = result.replace(/\bconstraint\s+"?\w+"?\s+(primary\s+key|unique|foreign\s+key|check)\b/gi, '$1')
+  // ON CONFLICT DO NOTHING → INSERT OR IGNORE (if no conflict target)
+  if (/\bon\s+conflict\s+do\s+nothing\b/i.test(result)) {
+    result = result.replace(/^\s*insert\s+into\s+/i, 'INSERT OR IGNORE INTO ')
+    result = result.replace(/\bon\s+conflict\s+do\s+nothing\b/gi, '')
   }
 
   // DEALLOCATE / DISCARD / RESET
@@ -366,6 +399,8 @@ function rewriteSQL(sql: string): string {
   if (/^(listen|unlisten)/i.test(result)) return ''
   // SHOW
   if (/^show\s+/i.test(result)) return ''
+  // SET (LOCAL/SESSION/CONSTRAINTS/etc.) → skip (but allow SET that targets zero_0 tables)
+  if (/^set\s/i.test(result) && !/^set\s+"zero_0"\./i.test(result)) return ''
 
   return result
 }

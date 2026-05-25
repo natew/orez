@@ -139,7 +139,7 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     checkpointIntervalMs: overrides.checkpointIntervalMs ?? 5 * 60 * 1000,
     maxLogFileSize: overrides.maxLogFileSize ?? 2 * 1024 * 1024,
     disableDiskLogs: overrides.disableDiskLogs ?? false,
-    doBackendUrl: overrides.doBackendUrl,
+    doBackendUrl: overrides.doBackendUrl ?? process.env.DO_BACKEND_URL,
     onDbReady: overrides.onDbReady,
     onHealthy: overrides.onHealthy,
   }
