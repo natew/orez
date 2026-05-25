@@ -385,6 +385,11 @@ function rewriteSQL(sql: string): string {
   result = result.replace(/\bSERIAL\b/g, 'INTEGER')
   result = result.replace(/\bBIGSERIAL\b/g, 'INTEGER')
   result = result.replace(/\bBYTEA\b/g, 'BLOB')
+  // now() → CURRENT_TIMESTAMP (PG function not in SQLite)
+  result = result.replace(/\bnow\s*\(\s*\)/gi, "CURRENT_TIMESTAMP")
+  // true/false → 1/0 for DEFAULT and CHECK contexts
+  result = result.replace(/\bdefault\s+true\b/gi, 'DEFAULT 1')
+  result = result.replace(/\bdefault\s+false\b/gi, 'DEFAULT 0')
   // Strip CONSTRAINT name prefix (PG syntax, SQLite wants bare constraint)
   result = result.replace(/\bconstraint\s+"?\w+"?\s+(primary\s+key|unique|foreign\s+key|check)\b/gi, '$1')
   // ON CONFLICT DO NOTHING → INSERT OR IGNORE (if no conflict target)
