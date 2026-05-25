@@ -1,0 +1,11 @@
+name = "zero-do"
+main = "worker.ts"
+compatibility_date = "2025-04-01"
+
+[[durable_objects.bindings]]
+name = "ZERO_DO"
+class_name = "ZeroDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ZeroDO"]
