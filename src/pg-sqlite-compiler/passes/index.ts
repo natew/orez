@@ -28,7 +28,9 @@ export const DEFAULT_PASSES: Pass[] = [
  * Run all passes on a single top-level RawStmt entry.
  *
  * Input shape: `{ stmt: { TagName: data } }` (a libpg_query RawStmt).
- * Passes use `visit()` which expects a tagged node — so we hand them `rawStmt.stmt`.
+ * Passes use `walkAst()` (in passes/ast-utils.ts) which expects a tag-wrapped
+ * node — so we hand them `rawStmt.stmt`, the inner `{ TagName: data }`.
+ * Callbacks receive (data, parent, key) and mutate via `parent[key] = ...`.
  */
 export function runPasses(rawStmt: any, ctx: PassContext): void {
   const stmt = rawStmt?.stmt ?? rawStmt

@@ -3,70 +3,41 @@ import { walkAst } from './ast-utils.js'
 /**
  * Catalog pass.
  *
- * Rewrites `FROM pg_catalog.*`, `FROM pg_<table>`, and `FROM information_schema.*`
- * to a single-name table in the `_orez_catalog__*` namespace, where the
- * runtime (DurableObject init via `catalog/seed.ts`) seeds emulated catalog
- * tables.
+ * Rewrites schema-qualified PG catalog references to the
+ * `_orez_catalog__*` namespace (seeded by `catalog/seed.ts` at DO init):
+ *
+ *   pg_catalog.pg_class       → _orez_catalog__pg_class
+ *   information_schema.columns → _orez_catalog__information_schema_columns
  *
  * Why this matters:
- *   zero-cache (and every PG client library) probes the PG system catalog on
- *   startup — pg_class, pg_attribute, pg_namespace, pg_type, pg_publication,
- *   information_schema.columns, etc. SQLite has no such schemas. Without
- *   this rewrite, queries fail with "no such table: pg_class".
+ *   zero-cache (and most PG client libraries) probes the PG system catalog
+ *   on startup. They always qualify these references with `pg_catalog.` or
+ *   `information_schema.` — that's how `search_path` resolution works in PG
+ *   and how every generated catalog query (libpq, psql, postgres.js) emits
+ *   them.
  *
- * Naming convention (flat, since SQLite doesn't support cross-schema dots
- * without ATTACH DATABASE):
- *   pg_catalog.pg_class       → _orez_catalog__pg_class
- *   pg_class (no schema)      → _orez_catalog__pg_class
- *   information_schema.columns → _orez_catalog__information_schema_columns
- *   information_schema.tables  → _orez_catalog__information_schema_tables
+ * Why we DON'T rewrite bare `pg_class` (no schema):
+ *   - it's user-table-namespace ambiguous (an app could legitimately call
+ *     a table `pg_user`, `pg_views`, etc.)
+ *   - bare catalog refs only resolve in PG via search_path; clients
+ *     emitting catalog queries qualify them explicitly. Bare references in
+ *     real apps are essentially always user tables.
+ *   - silently hijacking them caused WRITE-path bugs (DML against a user
+ *     table got routed to a synthetic catalog table) in earlier iterations
+ *
+ * If a future workload sends bare catalog refs we'll add a per-statement
+ * opt-in (e.g. `WHERE rewrite_unqualified_catalog`) rather than a
+ * footgun-prone global toggle.
  *
  * Companion module: `catalog/seed.ts` creates the target tables on DO init.
  */
 import type { Pass } from '../types.js'
 
 const CATALOG_PREFIX = '_orez_catalog__'
-
-/** PG catalog tables we recognize (bare, no schema). */
-const PG_CATALOG_TABLES = new Set([
-  'pg_class',
-  'pg_attribute',
-  'pg_namespace',
-  'pg_type',
-  'pg_proc',
-  'pg_constraint',
-  'pg_index',
-  'pg_database',
-  'pg_roles',
-  'pg_user',
-  'pg_settings',
-  'pg_publication',
-  'pg_publication_tables',
-  'pg_publication_rel',
-  'pg_replication_slots',
-  'pg_stat_replication',
-  'pg_subscription',
-  'pg_description',
-  'pg_depend',
-  'pg_enum',
-  'pg_extension',
-  'pg_trigger',
-  'pg_sequence',
-  'pg_views',
-  'pg_tables',
-  'pg_collation',
-  'pg_am',
-  'pg_operator',
-  'pg_cast',
-  'pg_language',
-  'pg_statistic',
-  'pg_locks',
-])
-
 const FLATTENED_SCHEMAS = new Set(['information_schema'])
 
 function rewriteRangeVar(node: any): void {
-  // pg_catalog.* — strip schema, prefix relname
+  // pg_catalog.X — strip schema, prefix relname
   if (node.schemaname === 'pg_catalog') {
     node.relname = `${CATALOG_PREFIX}${node.relname}`
     delete node.schemaname
@@ -77,14 +48,6 @@ function rewriteRangeVar(node: any): void {
   if (FLATTENED_SCHEMAS.has(node.schemaname)) {
     node.relname = `${CATALOG_PREFIX}${node.schemaname}_${node.relname}`
     delete node.schemaname
-    return
-  }
-
-  // Bare table reference that matches a known PG catalog table — route to
-  // catalog as well (PG accepts `pg_class` unqualified when search_path
-  // includes pg_catalog, which it does by default).
-  if (!node.schemaname && PG_CATALOG_TABLES.has(node.relname)) {
-    node.relname = `${CATALOG_PREFIX}${node.relname}`
     return
   }
 }

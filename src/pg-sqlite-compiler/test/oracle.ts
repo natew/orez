@@ -12,7 +12,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { createConnection } from 'node:net'
+import { createConnection, createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
@@ -43,14 +43,62 @@ export interface OracleServer {
 }
 
 /**
- * Start a pgsqlite server on an ephemeral port with an ephemeral database.
- * Caller is responsible for calling stop() in a `finally` / `afterAll` hook.
+ * Pick a free TCP port by binding ephemeral and reading what we got.
+ * Then close immediately and hand the port to pgsqlite. There's a tiny TOCTOU
+ * window where another process could grab it before pgsqlite binds, but
+ * vitest's parallel test files all go through this helper, so the only races
+ * are against unrelated processes on the host — vanishingly unlikely in CI.
+ */
+async function getFreePort(): Promise<number> {
+  return new Promise((resolveFn, reject) => {
+    const server = createServer()
+    server.unref()
+    server.on('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address()
+      if (!addr || typeof addr === 'string') {
+        server.close()
+        reject(new Error('failed to get free port'))
+        return
+      }
+      const port = addr.port
+      server.close(() => resolveFn(port))
+    })
+  })
+}
+
+async function probePort(port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolveFn) => {
+    const sock = createConnection({ host: '127.0.0.1', port })
+    const cleanup = (val: boolean) => {
+      try {
+        sock.destroy()
+      } catch {}
+      resolveFn(val)
+    }
+    const timer = setTimeout(() => cleanup(false), timeoutMs)
+    sock.once('connect', () => {
+      clearTimeout(timer)
+      cleanup(true)
+    })
+    sock.once('error', () => {
+      clearTimeout(timer)
+      cleanup(false)
+    })
+  })
+}
+
+/**
+ * Start a pgsqlite server on an OS-assigned ephemeral port with an ephemeral
+ * database. Throws on probe timeout. Caller is responsible for calling
+ * `stop()` in a `finally` / `afterAll` hook — `stop()` awaits child exit
+ * and cleans up the tempdir.
  */
 export async function startPgsqliteServer(): Promise<OracleServer> {
   const bin = pgsqliteBinPath()
   if (!bin) throw new Error('pgsqlite binary not available')
 
-  const port = 5500 + Math.floor(Math.random() * 1000)
+  const port = await getFreePort()
   const tmpDir = mkdtempSync(resolve(tmpdir(), 'orez-oracle-'))
   const dbPath = resolve(tmpDir, 'pg.db')
 
@@ -60,18 +108,29 @@ export async function startPgsqliteServer(): Promise<OracleServer> {
     { stdio: ['ignore', 'pipe', 'pipe'] }
   )
 
-  // wait for "ready" by trying to connect on the port
+  const exited: Promise<void> = new Promise((res) => proc.once('exit', () => res()))
+
+  // wait for "ready" — poll until the server accepts a connection or we time out
+  let ready = false
   const start = Date.now()
-  while (Date.now() - start < 5_000) {
-    const ready = await new Promise<boolean>((resolveProbe) => {
-      const sock = createConnection({ host: '127.0.0.1', port }, () => {
-        sock.end()
-        resolveProbe(true)
-      })
-      sock.once('error', () => resolveProbe(false))
-    })
-    if (ready) break
+  while (Date.now() - start < 10_000) {
+    if (await probePort(port, 250)) {
+      ready = true
+      break
+    }
+    if (proc.exitCode !== null) {
+      throw new Error(`pgsqlite exited before becoming ready (code=${proc.exitCode})`)
+    }
     await new Promise((r) => setTimeout(r, 50))
+  }
+  if (!ready) {
+    try {
+      proc.kill('SIGKILL')
+    } catch {}
+    try {
+      rmSync(tmpDir, { recursive: true, force: true })
+    } catch {}
+    throw new Error(`pgsqlite did not become ready on port ${port} within 10s`)
   }
 
   return {
@@ -81,6 +140,17 @@ export async function startPgsqliteServer(): Promise<OracleServer> {
       try {
         proc.kill('SIGTERM')
       } catch {}
+      // wait up to 2s for graceful exit, then SIGKILL
+      const killTimer = setTimeout(() => {
+        try {
+          proc.kill('SIGKILL')
+        } catch {}
+      }, 2_000)
+      try {
+        await exited
+      } finally {
+        clearTimeout(killTimer)
+      }
       try {
         rmSync(tmpDir, { recursive: true, force: true })
       } catch {}

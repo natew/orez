@@ -58,7 +58,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             vendor/pgsqlite/build/target
-          key: pgsqlite-${{ runner.os }}-v0.0.22
+          # cache key derives from ensure.ts so PGSQLITE_PIN bumps invalidate
+          key: pgsqlite-${{ runner.os }}-${{ hashFiles('scripts/pgsqlite/ensure.ts') }}
+          restore-keys: |
+            pgsqlite-${{ runner.os }}-
 
       - run: bun install --frozen-lockfile
 

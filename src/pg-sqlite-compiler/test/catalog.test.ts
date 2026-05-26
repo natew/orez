@@ -36,9 +36,13 @@ describe('catalog pass — rewrite', () => {
     expect(sql).not.toMatch(/pg_catalog\./)
   })
 
-  it('bare pg_class (no schema) → _orez_catalog__pg_class', () => {
+  it('bare pg_class (no schema) is NOT rewritten — would hijack user tables', () => {
+    // Apps may legitimately have a table called `pg_user`/`pg_views`/etc.
+    // Catalog clients always qualify (`pg_catalog.pg_class`), so the bare
+    // form is treated as a user table.
     const { sql } = compile('SELECT relname FROM pg_class WHERE relkind = $1')
-    expect(sql).toMatch(/_orez_catalog__pg_class/)
+    expect(sql).not.toMatch(/_orez_catalog/)
+    expect(sql).toMatch(/FROM pg_class/i)
   })
 
   it('information_schema.columns → _orez_catalog__information_schema_columns', () => {
@@ -62,9 +66,18 @@ describe('catalog pass — rewrite', () => {
     expect(sql).toMatch(/_orez_catalog__information_schema_tables/)
   })
 
-  it('pg_publication → flat name', () => {
-    const { sql } = compile('SELECT pubname FROM pg_publication WHERE pubname IN ($1)')
+  it('schema-qualified pg_publication → flat name', () => {
+    const { sql } = compile(
+      'SELECT pubname FROM pg_catalog.pg_publication WHERE pubname IN ($1)'
+    )
     expect(sql).toMatch(/_orez_catalog__pg_publication/)
+  })
+
+  it('INSERT INTO pg_user (bare) is NOT rewritten — user-owned table', () => {
+    // Regression guard: earlier iterations rewrote bare PG catalog names,
+    // which silently redirected user DML at synthetic catalog tables.
+    const { sql } = compile('INSERT INTO pg_user (id) VALUES ($1)')
+    expect(sql).not.toMatch(/_orez_catalog/)
   })
 })
 
@@ -126,7 +139,7 @@ describe('catalog seed + pass roundtrip — executable', () => {
     const { db, setup } = freshDb()
     setup([])
     buildCatalogTables(db)
-    const { sql } = compile('SELECT nspname FROM pg_namespace ORDER BY oid')
+    const { sql } = compile('SELECT nspname FROM pg_catalog.pg_namespace ORDER BY oid')
     const rows = db.prepare(rewriteParams(sql)).all() as { nspname: string }[]
     expect(rows.map((r) => r.nspname)).toEqual([
       'pg_catalog',
@@ -140,12 +153,12 @@ describe('catalog seed + pass roundtrip — executable', () => {
     const { db, setup } = freshDb()
     setup(['CREATE TABLE message (id text PRIMARY KEY)'])
     buildCatalogTables(db, { publications: ['orez_zero_public'] })
-    const { sql } = compile('SELECT pubname FROM pg_publication')
+    const { sql } = compile('SELECT pubname FROM pg_catalog.pg_publication')
     const rows = db.prepare(rewriteParams(sql)).all() as { pubname: string }[]
     expect(rows.map((r) => r.pubname)).toEqual(['orez_zero_public'])
 
     const { sql: sql2 } = compile(
-      "SELECT pubname, tablename FROM pg_publication_tables WHERE pubname = 'orez_zero_public'"
+      "SELECT pubname, tablename FROM pg_catalog.pg_publication_tables WHERE pubname = 'orez_zero_public'"
     )
     const ptRows = db.prepare(rewriteParams(sql2)).all() as {
       pubname: string

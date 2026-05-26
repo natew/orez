@@ -85,7 +85,7 @@ describe('full compiler pipeline against chat-app workload', () => {
 
     // 5. pg_publication probe
     const { sql: pubSql } = compile(
-      "SELECT pubname FROM pg_publication WHERE pubname = 'orez_zero_public'"
+      "SELECT pubname FROM pg_catalog.pg_publication WHERE pubname = 'orez_zero_public'"
     )
     const pubs = db.prepare(rewriteParams(pubSql)).all() as { pubname: string }[]
     expect(pubs).toHaveLength(1)

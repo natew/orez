@@ -1,13 +1,18 @@
 /**
  * Corpus tests — run every vendored pgsqlite fixture through the compiler.
  *
- * This test is intentionally lenient: it asserts the compiler doesn't throw
- * for *most* fixtures. Specific buckets have their own oracle tests
- * (datetime.oracle.test.ts, etc.) that check translation correctness.
+ * Asserts the compiler doesn't throw for fixtures in each bucket, against a
+ * per-bucket **minimum-passing-count ratchet** (`BASELINE_OK`). Pass rates
+ * are already 94–100% — a flat 50% floor would silently mask real
+ * regressions. The ratchet is in absolute counts (not percentages) so adding
+ * new fixtures to a bucket can't make the threshold easier to clear.
  *
- * The numbers here are tracked as a regression bar: as we add passes, the
- * "didn't-throw" count should rise. We log a summary table at the end so a
- * human reviewing CI output can see the trendline.
+ * Bumping a baseline: improve coverage, run the test, copy the new count
+ * from the summary table into `BASELINE_OK`. Never lower a baseline without
+ * understanding *why* — that's the regression alarm.
+ *
+ * Specific buckets have their own oracle tests (datetime.oracle.test.ts,
+ * etc.) that check translation correctness in detail.
  */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -41,6 +46,24 @@ const BUCKETS = [
   'arithmetic',
   'misc',
 ]
+
+/**
+ * Minimum non-throwing fixture count per bucket. The corpus today passes at
+ * 99.2% overall; these baselines lock that in. Bump (never lower) when
+ * coverage improves.
+ */
+const BASELINE_OK: Record<string, number> = {
+  arithmetic: 60,
+  array: 74,
+  cast: 1,
+  catalog: 87,
+  'create-table': 5,
+  datetime: 74,
+  enum: 66,
+  insert: 65,
+  json: 106,
+  misc: 365,
+}
 
 interface BucketResult {
   bucket: string
@@ -93,9 +116,20 @@ describe('pgsqlite corpus survival', () => {
           }
         }
         results.push(result)
-        // be lenient at v1: require at least 50% non-throwing
-        const pctOk = (result.compileOk / Math.max(1, result.total)) * 100
-        expect(pctOk).toBeGreaterThanOrEqual(50)
+        const baseline = BASELINE_OK[bucket] ?? 0
+        if (result.compileOk < baseline) {
+          const sample = result.failures
+            .slice(0, 3)
+            .map((f) => `  - ${f.name}: ${f.error}`)
+            .join('\n')
+          throw new Error(
+            `corpus regression in bucket "${bucket}": got ${result.compileOk}/${result.total} passing, baseline is ${baseline}.\n` +
+              `If this is intentional (e.g. fixture set changed), update BASELINE_OK.\n` +
+              `Sample failures:\n${sample}`
+          )
+        }
+        // also require coverage doesn't collapse against the fixture set
+        expect(result.compileOk).toBeGreaterThanOrEqual(baseline)
       })
     })
   }
