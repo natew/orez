@@ -151,7 +151,7 @@ class MessagePortSocket extends EventEmitter {
     copy.set(bytes)
 
     try {
-      this.port.postMessage(copy.buffer, [copy.buffer])
+      this.port.postMessage(copy.buffer)
     } catch (err) {
       queueMicrotask(() => this.emit('error', err))
       if (typeof encoding === 'function') encoding()

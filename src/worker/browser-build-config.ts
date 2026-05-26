@@ -49,6 +49,7 @@ export function getBrowserAliases(): Record<string, string> {
     '@rocicorp/zero-sqlite3': 'orez/worker/shims/sqlite',
     fastify: 'orez/worker/shims/fastify',
     ws: 'orez/worker/shims/ws',
+    oxfmt: 'orez/worker/shims/oxfmt',
 
     // -- Node.js built-in polyfills --
     // these are needed because zero-cache imports node: modules.
@@ -60,7 +61,7 @@ export function getBrowserAliases(): Record<string, string> {
     'crypto-browserify': 'orez/worker/shims/node-stub',
     'node:stream': 'orez/worker/shims/stream-browser',
     'node:path': 'path-browserify',
-    'node:os': 'os-browserify/browser',
+    'node:os': 'orez/worker/shims/node-stub',
 
     // -- stubs for Node.js modules that zero-cache imports but doesn't --
     // -- use in SINGLE_PROCESS mode --

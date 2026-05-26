@@ -40,6 +40,24 @@ function rText(buf: Uint8Array, off: number): [string, number] {
   const str = new TextDecoder().decode(buf.subarray(off + 4, off + 4 + len))
   return [str, off + 4 + len]
 }
+function rTupleTextValues(buf: Uint8Array, off: number): [Array<string | null>, number] {
+  const values: Array<string | null> = []
+  const count = r16(buf, off)
+  let pos = off + 2
+  for (let i = 0; i < count; i++) {
+    const kind = buf[pos++]
+    if (kind === 0x6e) {
+      values.push(null)
+      continue
+    }
+    expect(kind).toBe(0x74)
+    const len = r32(buf, pos)
+    pos += 4
+    values.push(new TextDecoder().decode(buf.subarray(pos, pos + len)))
+    pos += len
+  }
+  return [values, pos]
+}
 
 describe('pgoutput-encoder', () => {
   describe('encodeBegin', () => {
@@ -276,6 +294,26 @@ describe('pgoutput-encoder', () => {
       }
       expect(buf[pos]).toBe(0x4e) // 'N' new tuple marker
     })
+
+    it('encodes sqlite integer booleans as postgres bool text', () => {
+      const boolCols: ColumnInfo[] = [
+        { name: 'id', typeOid: 25, typeMod: -1, isKey: true },
+        { name: 'completed', typeOid: 16, typeMod: -1 },
+      ]
+      const buf = encodeUpdate(
+        16384,
+        { id: '1', completed: 1 },
+        { id: '1', completed: 0 },
+        boolCols
+      )
+
+      expect(buf[5]).toBe(0x4f) // 'O' old tuple
+      const [oldValues, afterOld] = rTupleTextValues(buf, 6)
+      expect(oldValues).toEqual(['1', 'f'])
+      expect(buf[afterOld]).toBe(0x4e) // 'N' new tuple
+      const [newValues] = rTupleTextValues(buf, afterOld + 1)
+      expect(newValues).toEqual(['1', 't'])
+    })
   })
 
   describe('encodeDelete', () => {
@@ -364,6 +402,12 @@ describe('pgoutput-encoder', () => {
       const b = getTableOid('oid_test_y')
       expect(a).not.toBe(b)
     })
+
+    it('matches DoBackend catalog oids for flattened schema tables', () => {
+      expect(getTableOid('public.todo')).toBe(4392680)
+      expect(getTableOid('todo_0.clients')).toBe(9663976)
+      expect(getTableOid('todo_0.mutations')).toBe(8519194)
+    })
   })
 
   // roundtrip tests: encode with orez → parse with zero-cache's parser
@@ -384,8 +428,16 @@ describe('pgoutput-encoder', () => {
       PgoutputParser = (await import(parserPath)).PgoutputParser
     })
 
-    function makeParser() {
-      return new PgoutputParser(typeParsers)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    function makeParser(parserOverrides: any = typeParsers) {
+      return new PgoutputParser(parserOverrides)
+    }
+
+    function makeBoolAwareParser() {
+      return makeParser({
+        getTypeParser: (oid: number) =>
+          oid === 16 ? (value: string) => value === 't' : String,
+      })
     }
 
     it('BEGIN roundtrip', () => {
@@ -488,6 +540,23 @@ describe('pgoutput-encoder', () => {
       expect(parsed.new.val).toBe('v')
       expect(parsed.old).toBeNull()
       expect(parsed.key).toBeNull()
+    })
+
+    it('UPDATE roundtrip decodes sqlite boolean integers through zero-cache parser', () => {
+      const oid = getTableOid('rt.bool_update')
+      const cols: ColumnInfo[] = [
+        { name: 'id', typeOid: 25, typeMod: -1, isKey: true },
+        { name: 'completed', typeOid: 16, typeMod: -1 },
+      ]
+      const parser = makeBoolAwareParser()
+      parser.parse(encodeRelation(oid, 'public', 'bool_update', 0x64, cols))
+
+      const parsed = parser.parse(
+        encodeUpdate(oid, { id: '1', completed: 1 }, { id: '1', completed: 0 }, cols)
+      )
+      expect(parsed.tag).toBe('update')
+      expect(parsed.old.completed).toBe(false)
+      expect(parsed.new.completed).toBe(true)
     })
 
     it('DELETE roundtrip', () => {

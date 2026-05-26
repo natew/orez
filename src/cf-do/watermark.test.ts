@@ -42,7 +42,7 @@ class FakeSql {
       return new FakeResult([{ watermark }])
     }
 
-    if (sql.includes("sqlite_master") && sql.includes('%zero_watermark%')) {
+    if (sql.includes('sqlite_master') && sql.includes('%zero_watermark%')) {
       return new FakeResult([{ name: this.sequence.name }])
     }
 

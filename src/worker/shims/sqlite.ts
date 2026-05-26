@@ -39,6 +39,9 @@ export interface SqlStorageLike {
   transactionSync?<T>(fn: () => T): T
 }
 
+type SqliteConnectionRole = 'default' | 'replica-writer'
+const activeSnapshotPrefixes = new Set<string>()
+
 // -- SqliteError --
 
 export class SqliteError extends Error {
@@ -107,6 +110,178 @@ function serializeSqliteParams(params: unknown[]): SqlStorageValue[] {
   }
 
   return params.map(serializeValue)
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+function snapshotTableName(prefix: string, table: string): string {
+  return `${prefix}_${table.replace(/[^A-Za-z0-9_]/g, '_')}`
+}
+
+function isSnapshotInternalTable(name: string): boolean {
+  return name.startsWith('_orez_snapshot_')
+}
+
+function createSnapshotPrefix(): string {
+  const uuid =
+    typeof globalThis.crypto?.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 16)
+      : Math.random().toString(36).slice(2, 18)
+  return `_orez_snapshot_${Date.now().toString(36)}_${uuid}`
+}
+
+function isActiveSnapshotTable(name: string): boolean {
+  for (const prefix of activeSnapshotPrefixes) {
+    if (name.startsWith(`${prefix}_`)) return true
+  }
+  return false
+}
+
+function cleanupInactiveSnapshotTables(sql: SqlStorageLike): void {
+  try {
+    const rows = sql
+      .exec(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table'
+           AND name LIKE '_orez_snapshot_%'`
+      )
+      .toArray()
+    for (const row of rows) {
+      const name = String(row.name ?? '')
+      if (!isSnapshotInternalTable(name) || isActiveSnapshotTable(name)) continue
+      try {
+        sql.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(name)}`)
+      } catch {}
+    }
+  } catch {}
+}
+
+function shouldSnapshotTable(name: string): boolean {
+  return (
+    name !== '__miniflare_do_name' &&
+    name !== 'storage' &&
+    name !== 'sqlite_stat1' &&
+    !isSnapshotInternalTable(name)
+  )
+}
+
+function currentConnectionRole(): SqliteConnectionRole {
+  return (globalThis as any).__orez_zero_sqlite_role === 'replica-writer'
+    ? 'replica-writer'
+    : 'default'
+}
+
+function isSqliteCatalogQuery(sql: string): boolean {
+  return /\bsqlite_(?:master|schema)\b/i.test(sql)
+}
+
+function hasSnapshotCatalogName(row: Record<string, unknown>): boolean {
+  for (const key of ['name', 'tbl_name', 'table', 'tableName']) {
+    const value = row[key]
+    if (typeof value === 'string' && isSnapshotInternalTable(value)) return true
+  }
+  return false
+}
+
+function filterSnapshotCatalogRows<T>(sql: string, rows: T[]): T[] {
+  if (!isSqliteCatalogQuery(sql)) return rows
+  return rows.filter((row) => !hasSnapshotCatalogName(row as Record<string, unknown>))
+}
+
+function replaceIdentifierOutsideLiterals(
+  sql: string,
+  identifier: string,
+  replacement: string
+): string {
+  let out = ''
+  let i = 0
+
+  while (i < sql.length) {
+    const ch = sql[i]
+    const next = sql[i + 1]
+
+    if (ch === "'") {
+      const start = i
+      i++
+      while (i < sql.length) {
+        if (sql[i] === "'" && sql[i + 1] === "'") {
+          i += 2
+          continue
+        }
+        if (sql[i] === "'") {
+          i++
+          break
+        }
+        i++
+      }
+      out += sql.slice(start, i)
+      continue
+    }
+
+    if (ch === '"') {
+      const start = i
+      let value = ''
+      i++
+      while (i < sql.length) {
+        if (sql[i] === '"' && sql[i + 1] === '"') {
+          value += '"'
+          i += 2
+          continue
+        }
+        if (sql[i] === '"') {
+          i++
+          break
+        }
+        value += sql[i]
+        i++
+      }
+      out += value === identifier ? quoteIdentifier(replacement) : sql.slice(start, i)
+      continue
+    }
+
+    if (ch === '-' && next === '-') {
+      const start = i
+      i += 2
+      while (i < sql.length && sql[i] !== '\n') i++
+      out += sql.slice(start, i)
+      continue
+    }
+
+    if (ch === '/' && next === '*') {
+      const start = i
+      i += 2
+      while (i < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) i++
+      i = Math.min(sql.length, i + 2)
+      out += sql.slice(start, i)
+      continue
+    }
+
+    if (/[A-Za-z_]/.test(ch)) {
+      const start = i
+      i++
+      while (i < sql.length && /[A-Za-z0-9_]/.test(sql[i])) i++
+      const word = sql.slice(start, i)
+      out += word === identifier ? replacement : word
+      continue
+    }
+
+    out += ch
+    i++
+  }
+
+  return out
+}
+
+function rewriteSQLTables(sql: string, tables: Map<string, string>): string {
+  let rewritten = sql
+  const names = [...tables.keys()].sort((a, b) => b.length - a.length)
+  for (const name of names) {
+    const snapshot = tables.get(name)!
+    rewritten = replaceIdentifierOutsideLiterals(rewritten, name, snapshot)
+  }
+  return rewritten
 }
 
 // -- Statement --
@@ -193,7 +368,9 @@ export class Statement<T = Record<string, SqlStorageValue>> {
       upper.startsWith('ROLLBACK') ||
       upper === 'END' ||
       upper.startsWith('END ')
-    const { sql, values } = this.#resolveParams(params)
+    const resolved = this.#resolveParams(params)
+    const sql = this.#db._rewriteForSnapshot(resolved.sql)
+    const values = resolved.values
     const cursor =
       isTxCmd && values.length === 0
         ? this.#db._execTransactionAware(sql, this.#sql)
@@ -213,9 +390,11 @@ export class Statement<T = Record<string, SqlStorageValue>> {
       return pragma.result.toArray()[0] as T
     }
 
-    const { sql, values } = this.#resolveParams(params)
+    const resolved = this.#resolveParams(params)
+    const sql = this.#db._rewriteForSnapshot(resolved.sql)
+    const values = resolved.values
     const cursor = this.#sql.exec(sql, ...values)
-    const rows = cursor.toArray()
+    const rows = filterSnapshotCatalogRows(sql, cursor.toArray())
     return (rows[0] as T) ?? undefined
   }
 
@@ -228,9 +407,11 @@ export class Statement<T = Record<string, SqlStorageValue>> {
       return pragma.result.toArray() as T[]
     }
 
-    const { sql, values } = this.#resolveParams(params)
+    const resolved = this.#resolveParams(params)
+    const sql = this.#db._rewriteForSnapshot(resolved.sql)
+    const values = resolved.values
     const cursor = this.#sql.exec(sql, ...values)
-    return cursor.toArray() as T[]
+    return filterSnapshotCatalogRows(sql, cursor.toArray()) as T[]
   }
 
   iterate(...params: unknown[]): IterableIterator<T> {
@@ -271,7 +452,7 @@ export class Statement<T = Record<string, SqlStorageValue>> {
   /** columns() returns column name metadata */
   columns(): Array<{ name: string; column: string | null; table: string | null }> {
     // execute a dummy query to get column names
-    const cursor = this.#sql.exec(this.source)
+    const cursor = this.#sql.exec(this.#db._rewriteForSnapshot(this.source))
     return cursor.columnNames.map((name) => ({
       name,
       column: null,
@@ -295,6 +476,10 @@ export class Database {
   #sql: SqlStorageLike
   #open: boolean
   #inTransaction: boolean
+  #snapshotTables: Map<string, string> | null
+  #snapshotPrefix: string
+  #snapshotCounter: number
+  #connectionRole: SqliteConnectionRole
 
   constructor(sqlOrFilename: SqlStorageLike | string, _options?: { readonly?: boolean }) {
     if (typeof sqlOrFilename === 'string') {
@@ -316,6 +501,12 @@ export class Database {
     }
     this.#open = true
     this.#inTransaction = false
+    this.#snapshotTables = null
+    this.#snapshotPrefix = createSnapshotPrefix()
+    this.#snapshotCounter = 0
+    this.#connectionRole = currentConnectionRole()
+    activeSnapshotPrefixes.add(this.#snapshotPrefix)
+    cleanupInactiveSnapshotTables(this.#sql)
 
     // expose storage for StatementRunner to access transactionSync
     ;(this as any).__orez_sql = this.#sql
@@ -348,6 +539,15 @@ export class Database {
 
     // CF DO: all transaction control is no-op (DO coalesces writes automatically)
     if (sqlStorage.transactionSync) {
+      if (upper.startsWith('BEGIN CONCURRENT')) {
+        if (this.#connectionRole === 'replica-writer') {
+          shared.__txDepth = (shared.__txDepth || 0) + 1
+        } else {
+          this.#beginSnapshot()
+        }
+        this.#inTransaction = true
+        return noopCursor
+      }
       if (upper.startsWith('BEGIN')) {
         shared.__txDepth = (shared.__txDepth || 0) + 1
         this.#inTransaction = true
@@ -359,6 +559,7 @@ export class Database {
         upper.startsWith('END ') ||
         upper.startsWith('ROLLBACK')
       ) {
+        this.#dropSnapshot()
         shared.__txDepth = Math.max(0, (shared.__txDepth || 0) - 1)
         if (shared.__txDepth === 0) this.#inTransaction = false
         return noopCursor
@@ -402,6 +603,47 @@ export class Database {
     }
 
     return sqlStorage.exec(sql)
+  }
+
+  #beginSnapshot(): void {
+    this.#dropSnapshot()
+    const prefix = `${this.#snapshotPrefix}_${++this.#snapshotCounter}`
+    const tables = new Map<string, string>()
+    const rows = this.#sql
+      .exec(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table'
+         ORDER BY name`
+      )
+      .toArray()
+
+    for (const row of rows) {
+      const name = String(row.name ?? '')
+      if (!shouldSnapshotTable(name)) continue
+      const snapshot = snapshotTableName(prefix, name)
+      this.#sql.exec(
+        `CREATE TABLE ${quoteIdentifier(snapshot)} AS SELECT * FROM ${quoteIdentifier(name)}`
+      )
+      tables.set(name, snapshot)
+    }
+
+    this.#snapshotTables = tables
+  }
+
+  #dropSnapshot(): void {
+    const tables = this.#snapshotTables
+    if (!tables) return
+    this.#snapshotTables = null
+    for (const snapshot of tables.values()) {
+      try {
+        this.#sql.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(snapshot)}`)
+      } catch {}
+    }
+  }
+
+  _rewriteForSnapshot(sql: string): string {
+    if (!this.#snapshotTables) return sql
+    return rewriteSQLTables(sql, this.#snapshotTables)
   }
 
   /** prepare a statement */
@@ -535,7 +777,7 @@ export class Database {
       if (isTxCmd) {
         this._execTransactionAware(stmt, this.#sql)
       } else {
-        this.#sql.exec(stmt)
+        this.#sql.exec(this._rewriteForSnapshot(stmt))
       }
     }
 
@@ -603,6 +845,8 @@ export class Database {
 
   /** close the database connection */
   close(): this {
+    this.#dropSnapshot()
+    activeSnapshotPrefixes.delete(this.#snapshotPrefix)
     this.#open = false
     return this
   }
@@ -697,6 +941,9 @@ export class StatementRunner {
   }
 
   beginConcurrent(): RunResult {
+    if (this.#storage?.transactionSync) {
+      return this.run('BEGIN CONCURRENT')
+    }
     return this.begin()
   }
 
@@ -709,14 +956,14 @@ export class StatementRunner {
 
   commit(): RunResult {
     if (this.#storage?.transactionSync) {
-      return this.#txnResult
+      return this.run('COMMIT')
     }
     return this.run('COMMIT')
   }
 
   rollback(): RunResult {
     if (this.#storage?.transactionSync) {
-      return this.#txnResult
+      return this.run('ROLLBACK')
     }
     return this.run('ROLLBACK')
   }

@@ -31,6 +31,35 @@ interface CFWebSocket {
   accept?(): void
 }
 
+function debugWS(event: Record<string, unknown>): void {
+  try {
+    const log = (globalThis as any).__orez_ws_debug_log
+    if (typeof log === 'function') log(event)
+  } catch {
+    // debug logging must never affect websocket behavior
+  }
+}
+
+function summarizeWSData(data: unknown): Record<string, unknown> {
+  if (typeof data === 'string') {
+    return {
+      dataType: 'string',
+      bytes: data.length,
+      text: data.length > 300 ? `${data.slice(0, 300)}...` : data,
+    }
+  }
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(data)) {
+    return { dataType: 'buffer', bytes: data.byteLength }
+  }
+  if (data instanceof ArrayBuffer) {
+    return { dataType: 'arraybuffer', bytes: data.byteLength }
+  }
+  if (ArrayBuffer.isView(data)) {
+    return { dataType: data.constructor.name, bytes: data.byteLength }
+  }
+  return { dataType: typeof data }
+}
+
 // -- WebSocket shim --
 // wraps a CF WebSocket to match the ws package WebSocket API
 
@@ -198,6 +227,7 @@ class WebSocket extends EventEmitter {
     } else {
       this.#ws = urlOrSocket
       this.#url = ''
+      debugWS({ event: 'wrap-cf-socket', readyState: this.#ws.readyState })
       this.#setupListeners()
     }
   }
@@ -215,6 +245,7 @@ class WebSocket extends EventEmitter {
     cb?: (err?: Error) => void
   ): void {
     try {
+      debugWS({ event: 'send', url: this.#url, ...summarizeWSData(data) })
       if (typeof data === 'string') {
         this.#ws.send(data)
       } else if (Buffer.isBuffer(data)) {
@@ -299,15 +330,28 @@ class WebSocket extends EventEmitter {
     //   error: (err: Error)
     const onMessage = (event: any) => {
       const data = event.data
+      debugWS({ event: 'message', url: this.#url, ...summarizeWSData(data) })
       this.emit('message', data, typeof data !== 'string')
     }
     const onClose = (event: any) => {
+      debugWS({
+        event: 'close',
+        url: this.#url,
+        code: event.code ?? 1000,
+        reason: event.reason ?? '',
+      })
       this.emit('close', event.code ?? 1000, event.reason ?? '')
     }
     const onError = (event: any) => {
+      debugWS({
+        event: 'error',
+        url: this.#url,
+        message: event?.message ?? event?.error?.message ?? 'WebSocket error',
+      })
       this.emit('error', event.error ?? new Error(event.message ?? 'WebSocket error'))
     }
     const onOpen = () => {
+      debugWS({ event: 'open', url: this.#url })
       this.emit('open')
     }
 
@@ -352,6 +396,7 @@ class WebSocketServer extends EventEmitter {
     callback: (ws: WebSocket) => void
   ): void {
     // wrap the CF WebSocket in our shim
+    debugWS({ event: 'handle-upgrade' })
     const ws = new WebSocket(socket as CFWebSocket)
     callback(ws)
   }

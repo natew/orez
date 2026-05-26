@@ -174,6 +174,19 @@ describe('handleStartReplication', () => {
     return types
   }
 
+  function countCopyDataFrames(buf: Uint8Array): number {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+    let pos = 0
+    let count = 0
+    while (pos < buf.length) {
+      if (buf[pos] !== 0x64) return count
+      const len = dv.getInt32(pos + 1)
+      pos += 1 + len
+      count++
+    }
+    return count
+  }
+
   it('sends CopyBothResponse first', async () => {
     const { written, writer } = createWriter()
 
@@ -236,6 +249,28 @@ describe('handleStartReplication', () => {
     expect(beginIdx).toBeLessThan(relIdx)
     expect(relIdx).toBeLessThan(insIdx)
     expect(insIdx).toBeLessThan(comIdx)
+  })
+
+  it('writes one CopyData frame per socket chunk', async () => {
+    const { written, writer } = createWriter()
+
+    replicationPromise = handleStartReplication(
+      'START_REPLICATION SLOT "s" LOGICAL 0/0',
+      writer,
+      db,
+      testMutex
+    )
+
+    await new Promise((r) => setTimeout(r, 100))
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('chunked', 123)`)
+    signalReplicationChange()
+    await new Promise((r) => setTimeout(r, 700))
+
+    const copyDataWrites = written.filter((msg) => msg[0] === 0x64)
+    expect(copyDataWrites.length).toBeGreaterThanOrEqual(4)
+    for (const msg of copyDataWrites) {
+      expect(countCopyDataFrames(msg)).toBe(1)
+    }
   })
 
   it('streams UPDATE and DELETE operations', async () => {

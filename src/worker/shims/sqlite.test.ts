@@ -139,6 +139,7 @@ describe('Database', () => {
   })
 
   afterEach(() => {
+    db.close()
     mock._nativeDb.close()
   })
 
@@ -189,6 +190,7 @@ describe('Database.exec', () => {
   })
 
   afterEach(() => {
+    db.close()
     mock._nativeDb.close()
   })
 
@@ -229,6 +231,7 @@ describe('Database.prepare / Statement', () => {
   })
 
   afterEach(() => {
+    db.close()
     mock._nativeDb.close()
   })
 
@@ -549,6 +552,148 @@ describe('StatementRunner', () => {
     runner.run('INSERT INTO foo (name) VALUES (?)', 'c')
 
     expect(runner.all('SELECT count(*) as c FROM foo')).toEqual([{ c: 3 }])
+  })
+})
+
+describe('DO snapshot transactions', () => {
+  let mock: SqlStorageLike & { _nativeDb: any; transactionSync: <T>(fn: () => T) => T }
+  let live: Database
+  let snapshot: Database
+
+  beforeEach(() => {
+    mock = createMockSqlStorage() as SqlStorageLike & {
+      _nativeDb: any
+      transactionSync: <T>(fn: () => T) => T
+    }
+    mock.transactionSync = (fn) => fn()
+    live = new Database(mock)
+    snapshot = new Database(mock)
+    live.exec('CREATE TABLE todo (id TEXT PRIMARY KEY, title TEXT, _0_version TEXT)')
+    live.prepare('INSERT INTO todo VALUES (?, ?, ?)').run('1', 'old', '01')
+  })
+
+  afterEach(() => {
+    live.close()
+    snapshot.close()
+    mock._nativeDb.close()
+  })
+
+  it('keeps BEGIN CONCURRENT reads stable until rollback', () => {
+    snapshot.prepare('BEGIN CONCURRENT').run()
+    expect(snapshot.prepare('SELECT title FROM todo WHERE id = ?').get('1')).toEqual({
+      title: 'old',
+    })
+
+    live
+      .prepare('UPDATE todo SET title = ?, _0_version = ? WHERE id = ?')
+      .run('new', '02', '1')
+
+    expect(live.prepare('SELECT title FROM todo WHERE id = ?').get('1')).toEqual({
+      title: 'new',
+    })
+    expect(snapshot.prepare('SELECT title FROM todo WHERE id = ?').get('1')).toEqual({
+      title: 'old',
+    })
+
+    snapshot.prepare('ROLLBACK').run()
+    expect(snapshot.prepare('SELECT title FROM todo WHERE id = ?').get('1')).toEqual({
+      title: 'new',
+    })
+  })
+
+  it('hides snapshot tables from sqlite catalog queries', () => {
+    snapshot.prepare('BEGIN CONCURRENT').run()
+
+    expect(
+      live
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .all()
+    ).toEqual([{ name: 'todo' }])
+  })
+
+  it('does not rewrite table names inside string literals during snapshots', () => {
+    live.exec('CREATE TABLE log (id TEXT PRIMARY KEY, table_name TEXT, _0_version TEXT)')
+    live.prepare('INSERT INTO log VALUES (?, ?, ?)').run('1', 'todo', '01')
+    live.prepare('INSERT INTO log VALUES (?, ?, ?)').run('2', '"todo"', '02')
+
+    snapshot.prepare('BEGIN CONCURRENT').run()
+
+    expect(
+      snapshot.prepare("SELECT table_name FROM log WHERE table_name = 'todo'").get()
+    ).toEqual({ table_name: 'todo' })
+    expect(
+      snapshot.prepare('SELECT table_name FROM log WHERE table_name = ?').get('"todo"')
+    ).toEqual({ table_name: '"todo"' })
+  })
+
+  it('cleans inactive snapshot tables when opening a database', () => {
+    mock.exec('CREATE TABLE _orez_snapshot_1_todo AS SELECT * FROM todo')
+    expect(
+      mock
+        .exec("SELECT name FROM sqlite_master WHERE name = '_orez_snapshot_1_todo'")
+        .toArray()
+    ).toEqual([{ name: '_orez_snapshot_1_todo' }])
+
+    const reopened = new Database(mock)
+    try {
+      expect(
+        mock
+          .exec("SELECT name FROM sqlite_master WHERE name = '_orez_snapshot_1_todo'")
+          .toArray()
+      ).toEqual([])
+    } finally {
+      reopened.close()
+    }
+  })
+
+  it('does not remove another open connection snapshot', () => {
+    snapshot.prepare('BEGIN CONCURRENT').run()
+    const snapshotTables = mock
+      .exec("SELECT name FROM sqlite_master WHERE name LIKE '_orez_snapshot_%'")
+      .toArray()
+    expect(snapshotTables).toHaveLength(1)
+
+    const other = new Database(mock)
+    try {
+      live
+        .prepare('UPDATE todo SET title = ?, _0_version = ? WHERE id = ?')
+        .run('new', '02', '1')
+
+      expect(snapshot.prepare('SELECT title FROM todo WHERE id = ?').get('1')).toEqual({
+        title: 'old',
+      })
+    } finally {
+      other.close()
+    }
+  })
+
+  it('persists BEGIN CONCURRENT writes for the zero-cache replica writer', () => {
+    const globalObject = globalThis as any
+    const previousRole = globalObject.__orez_zero_sqlite_role
+    globalObject.__orez_zero_sqlite_role = 'replica-writer'
+    let writer: Database
+    try {
+      writer = new Database(mock)
+    } finally {
+      if (previousRole === undefined) {
+        delete globalObject.__orez_zero_sqlite_role
+      } else {
+        globalObject.__orez_zero_sqlite_role = previousRole
+      }
+    }
+
+    writer.prepare('BEGIN CONCURRENT').run()
+    writer.prepare('INSERT INTO todo VALUES (?, ?, ?)').run('2', 'writer row', '02')
+    writer.prepare('COMMIT').run()
+
+    expect(live.prepare('SELECT title FROM todo WHERE id = ?').get('2')).toEqual({
+      title: 'writer row',
+    })
+    expect(
+      live
+        .prepare("SELECT name FROM sqlite_master WHERE name LIKE '_orez_snapshot_%'")
+        .all()
+    ).toEqual([])
   })
 })
 

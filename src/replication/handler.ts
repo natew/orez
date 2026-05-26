@@ -117,6 +117,10 @@ let _replicationWakeup: (() => void) | null = null
  *  called by the proxy after executing writes on the postgres instance. */
 export function signalReplicationChange() {
   _replicationWakeup?.()
+  const globalWakeup = (globalThis as any).__orez_signal_replication
+  if (typeof globalWakeup === 'function' && globalWakeup !== _replicationWakeup) {
+    globalWakeup()
+  }
 }
 
 // cached setup results so reconnects skip the expensive mutex-holding setup phase.
@@ -1146,8 +1150,9 @@ async function streamChanges(
   const endLsn = nextLsn()
   messages.push(encodeWrappedChange(endLsn, endLsn, ts, encodeCommit(0, lsn, endLsn, ts)))
 
-  // write messages individually — works for both TCP sockets and in-process
-  // pipes (browser pipe handler parses one message per write() call)
+  // The MessagePort-backed socket delivers each write as one readable chunk.
+  // zero-cache parses one replication payload per chunk, so each CopyData frame
+  // must be written separately.
   let totalSize = 0
   for (const msg of messages) totalSize += msg.length
   log.debug.repl(

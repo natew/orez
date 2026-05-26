@@ -2,6 +2,7 @@
 import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
 import { RETURNING_INTERNAL_PREFIX } from './do-sql-tracking.js'
+import { signalReplicationChange } from './replication/handler.js'
 
 /**
  * DoBackend: a PGlite-compatible adapter that forwards SQL to Cloudflare Durable Objects.
@@ -145,6 +146,7 @@ interface TransactionMetadataSnapshot {
 }
 
 const MAX_REWRITE_CACHE_ENTRIES = 2048
+const METADATA_TABLE = '_orez_pg_metadata'
 
 // ── Utilities ─────────────────────────────────────────────────────────────
 
@@ -544,7 +546,9 @@ function columnRefTailName(value: any): string | null {
 
 function expressionOid(value: any): number | undefined {
   if (value?.TypeCast) {
-    return wireOidForTypeName(value.TypeCast.typeName) ?? expressionOid(value.TypeCast.arg)
+    return (
+      wireOidForTypeName(value.TypeCast.typeName) ?? expressionOid(value.TypeCast.arg)
+    )
   }
   const node = value
   if (!node || typeof node !== 'object') return undefined
@@ -630,12 +634,12 @@ function inferInsertParamOids(
   if (!table || !columns?.length || !Array.isArray(valuesLists)) return
 
   const metadata = schemaMetadata.get(table)
-  if (!metadata) return
   for (const valuesList of valuesLists) {
     const items = valuesList?.List?.items
     if (!Array.isArray(items)) continue
     for (let index = 0; index < Math.min(columns.length, items.length); index++) {
-      const column = metadata.get(columns[index])
+      const column =
+        metadata?.get(columns[index]) ?? fallbackMetadataForColumnName(columns[index])
       collectParamRefs(items[index], (paramNumber) =>
         setInferredParamOid(oids, paramNumber, column?.oid)
       )
@@ -645,7 +649,8 @@ function inferInsertParamOids(
   for (const targetNode of stmt.onConflictClause?.targetList ?? []) {
     const target = targetNode.ResTarget
     if (!target?.name) continue
-    const column = metadata.get(target.name)
+    const column =
+      metadata?.get(target.name) ?? fallbackMetadataForColumnName(target.name)
     collectParamRefs(target.val, (paramNumber) =>
       setInferredParamOid(oids, paramNumber, column?.oid)
     )
@@ -660,11 +665,11 @@ function inferUpdateParamOids(
   const table = flattenedRangeVarName(stmt.relation)
   if (!table) return
   const metadata = schemaMetadata.get(table)
-  if (!metadata) return
   for (const targetNode of stmt.targetList ?? []) {
     const target = targetNode.ResTarget
     if (!target?.name) continue
-    const column = metadata.get(target.name)
+    const column =
+      metadata?.get(target.name) ?? fallbackMetadataForColumnName(target.name)
     collectParamRefs(target.val, (paramNumber) =>
       setInferredParamOid(oids, paramNumber, column?.oid)
     )
@@ -1024,6 +1029,40 @@ function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
 
+function unquoteIdentifier(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1).replace(/""/g, '"')
+  }
+  return trimmed
+}
+
+function splitQualifiedIdentifier(value: string): string[] {
+  const parts: string[] = []
+  let current = ''
+  let quoted = false
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]
+    if (ch === '"') {
+      current += ch
+      if (quoted && value[i + 1] === '"') {
+        current += value[++i]
+      } else {
+        quoted = !quoted
+      }
+      continue
+    }
+    if (ch === '.' && !quoted) {
+      parts.push(current.trim())
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  if (current.trim()) parts.push(current.trim())
+  return parts
+}
+
 function flattenSchemaName(schema: string, name: string): string {
   if (schema === 'public' && name === 'migrations') return 'public_migrations'
   if (schema === 'public') return name
@@ -1048,6 +1087,29 @@ function flattenedRangeVarName(rangeVar: any): string | null {
   return rangeVar.schemaname
     ? flattenSchemaName(rangeVar.schemaname, rangeVar.relname)
     : rangeVar.relname
+}
+
+function flattenSQLIdentifier(value: string): string {
+  const parts = splitQualifiedIdentifier(value).map(unquoteIdentifier)
+  if (parts.length >= 2) return quoteIdentifier(flattenSchemaName(parts[0], parts[1]))
+  return quoteIdentifier(parts[0] ?? value)
+}
+
+function deleteReturningCountCTE(
+  sql: string
+): { sql: string; countColumn: string } | null {
+  const match = sql.match(
+    /^\s*WITH\s+("[^"]+"|[A-Za-z_][\w]*)\s+AS\s*\(\s*DELETE\s+FROM\s+((?:"[^"]+"|[A-Za-z_][\w/]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w/]*))?)\s+WHERE\s+([\s\S]*?)\s+RETURNING\s+[\s\S]*?\)\s*SELECT\s+COUNT\s*\(\s*\*\s*\)\s*(?:AS\s+("[^"]+"|[A-Za-z_][\w]*))?\s+FROM\s+("[^"]+"|[A-Za-z_][\w]*)\s*;?\s*$/i
+  )
+  if (!match) return null
+  if (unquoteIdentifier(match[1]) !== unquoteIdentifier(match[5])) return null
+  const table = flattenSQLIdentifier(match[2])
+  const where = match[3].trim()
+  const countColumn = match[4] ? unquoteIdentifier(match[4]) : 'count'
+  return {
+    sql: `DELETE FROM ${table} WHERE ${where} RETURNING 1 AS ${quoteIdentifier('__orez_deleted')}`,
+    countColumn,
+  }
 }
 
 function publicationTableRefForRangeVar(rangeVar: any): PublicationTableRef | null {
@@ -1553,7 +1615,10 @@ function rewriteArrayComparisonExpr(expr: any, context?: RewriteContext): any | 
 function rewriteJsonbExistenceExpr(expr: any, context?: RewriteContext): any | null {
   if (expr?.kind !== 'AEXPR_OP' || operatorName(expr) !== '?|') return null
   const jsonExpr = cloneAst(expr.lexpr)
-  const arrayExpr = sqliteJsonArrayExpr(rewriteNode(cloneAst(expr.rexpr), context), context)
+  const arrayExpr = sqliteJsonArrayExpr(
+    rewriteNode(cloneAst(expr.rexpr), context),
+    context
+  )
   return jsonbExistsAnyKeySubLink(jsonExpr, arrayExpr)
 }
 
@@ -2379,6 +2444,50 @@ function firstSourceTable(value: any, cteNames = new Set<string>()): string | nu
   return null
 }
 
+function collectSourceTables(
+  value: any,
+  out: Set<string>,
+  cteNames = new Set<string>()
+): void {
+  if (!value || typeof value !== 'object') return
+  if (Array.isArray(value)) {
+    for (const item of value) collectSourceTables(item, out, cteNames)
+    return
+  }
+
+  if (value.SelectStmt?.withClause?.ctes) {
+    const nextCtes = new Set(cteNames)
+    for (const cte of value.SelectStmt.withClause.ctes) {
+      const name = cte.CommonTableExpr?.ctename
+      if (name) nextCtes.add(name)
+    }
+    for (const cte of value.SelectStmt.withClause.ctes) {
+      collectSourceTables(cte.CommonTableExpr?.ctequery, out, nextCtes)
+    }
+    collectSourceTables({ ...value.SelectStmt, withClause: undefined }, out, nextCtes)
+    return
+  }
+
+  if (value.RangeVar) {
+    const table = flattenedRangeVarName(value.RangeVar)
+    if (table && !cteNames.has(table)) out.add(table)
+    return
+  }
+
+  for (const child of Object.values(value)) collectSourceTables(child, out, cteNames)
+}
+
+function sourceTablesFromSQL(sql: string): string[] {
+  try {
+    const parsed = parseSync(stripTrailingSemicolon(sql.trim()))
+    const tables = new Set<string>()
+    collectSourceTables(parsed.stmts[0]?.stmt, tables)
+    return [...tables]
+  } catch {
+    return []
+  }
+}
+
 function normalizeAlterTable(stmt: any): {
   skipIfColumnExistsByCmd: Map<any, RewrittenStatement['skipIfColumnExists']>
   skipIfColumnMissingByCmd: Map<any, RewrittenStatement['skipIfColumnMissing']>
@@ -2784,8 +2893,7 @@ function projectReturningResult(
   for (const item of projection.items) {
     if (item.kind === 'all') {
       for (const column of sourceColumns) {
-        if (!column.startsWith(RETURNING_INTERNAL_PREFIX))
-          visibleColumns.push(column)
+        if (!column.startsWith(RETURNING_INTERNAL_PREFIX)) visibleColumns.push(column)
       }
     } else {
       visibleColumns.push(item.name)
@@ -2856,11 +2964,7 @@ function keywordMatchesAt(source: string, keyword: string, index: number): boole
   return source.slice(index, index + keyword.length).toUpperCase() === keyword
 }
 
-function findKeywordOutsideQuotes(
-  source: string,
-  keyword: string,
-  start = 0
-): number {
+function findKeywordOutsideQuotes(source: string, keyword: string, start = 0): number {
   const upperKeyword = keyword.toUpperCase()
   let quote: "'" | '"' | null = null
   for (let i = start; i < source.length; i++) {
@@ -2923,9 +3027,7 @@ function selectWhereSQL(version: number, whereClause: any): string | null {
       op: 'SETOP_NONE',
     },
   }
-  const sql = stripTrailingSemicolon(
-    deparseSync({ version, stmts: [{ stmt }] }).trim()
-  )
+  const sql = stripTrailingSemicolon(deparseSync({ version, stmts: [{ stmt }] }).trim())
   const whereIndex = findKeywordOutsideQuotes(sql, 'WHERE')
   if (whereIndex < 0) return null
   return sql.slice(whereIndex + 'WHERE'.length).trim()
@@ -2989,7 +3091,8 @@ function parseExpressionTarget(source: string): { version: number; expr: any } |
     const parsed = parseSync(`SELECT ${source}`)
     const select = parsed.stmts[0]?.stmt?.SelectStmt
     const target = select?.targetList?.[0]?.ResTarget?.val
-    if (!target || parsed.stmts.length !== 1 || select.targetList.length !== 1) return null
+    if (!target || parsed.stmts.length !== 1 || select.targetList.length !== 1)
+      return null
     return { version: parsed.version, expr: target }
   } catch {
     return null
@@ -3148,11 +3251,7 @@ function compilePlpgsqlTriggerBody(
     const endIf = findKeywordOutsideQuotes(source, 'END IF', thenIndex + 'THEN'.length)
     if (thenIndex < 0 || endIf < 0) return null
     condition = source.slice(ifStart + 'IF'.length, thenIndex).trim()
-    const elseIndex = findKeywordOutsideQuotes(
-      source,
-      'ELSE',
-      thenIndex + 'THEN'.length
-    )
+    const elseIndex = findKeywordOutsideQuotes(source, 'ELSE', thenIndex + 'THEN'.length)
     if (elseIndex >= 0 && elseIndex < endIf) {
       const when = triggerConditionSQL(condition)
       if (!when) return null
@@ -3515,7 +3614,6 @@ function transactionAction(sql: string): TransactionAction | null {
     return null
   }
 }
-
 
 function commandTagForNodeType(nodeType: string, node: any): string {
   switch (nodeType) {
@@ -4310,6 +4408,116 @@ function pgDataTypeForWireOid(oid: number | undefined): string | null {
   }
 }
 
+function fallbackMetadataForColumnName(
+  column: string
+): Pick<
+  SchemaColumnMetadata,
+  'oid' | 'typeOid' | 'dataType' | 'typtype' | 'typname'
+> | null {
+  const lower = column.toLowerCase()
+  if (lower === 'ddldetection') {
+    return {
+      oid: PG_TYPE_BOOL,
+      typeOid: PG_TYPE_BOOL,
+      dataType: 'boolean',
+      typtype: 'b',
+      typname: 'bool',
+    }
+  }
+  if (
+    lower === 'publications' ||
+    lower === 'initialschema' ||
+    lower === 'initialsynccontext' ||
+    lower === 'subscribercontext' ||
+    lower === 'permissions' ||
+    lower === 'result' ||
+    lower === 'metadata' ||
+    lower === 'change' ||
+    lower === 'precommit' ||
+    lower === 'rowkey' ||
+    lower === 'refcounts' ||
+    lower === 'clientast' ||
+    lower === 'queryargs' ||
+    lower === 'clientschema' ||
+    lower === 'backfill'
+  ) {
+    return {
+      oid: PG_TYPE_JSON,
+      typeOid: PG_TYPE_JSON,
+      dataType: 'json',
+      typtype: 'b',
+      typname: 'json',
+    }
+  }
+  return null
+}
+
+function parsePublicationList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String)
+  if (typeof value !== 'string') return []
+  const trimmed = value.trim()
+  if (!trimmed) return []
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (Array.isArray(parsed)) return parsed.map(String)
+  } catch {}
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    return trimmed
+      .slice(1, -1)
+      .split(',')
+      .map((part) => part.trim().replace(/^"|"$/g, ''))
+      .filter(Boolean)
+  }
+  return []
+}
+
+function shardConfigInfoFromSqliteTable(
+  table: string
+): { appID: string; shardNum: string; schema: string } | null {
+  const match = /_(\d+)_shardConfig$/.exec(table)
+  if (!match) return null
+  const appID = table.slice(0, match.index)
+  if (!appID) return null
+  return {
+    appID,
+    shardNum: match[1],
+    schema: `${appID}_${match[1]}`,
+  }
+}
+
+function metadataPublicationDefinition(
+  appID: string,
+  shardNum: string
+): PublicationDefinition {
+  const shardSchema = `${appID}_${shardNum}`
+  const tables = new Map<string, PublicationTableRef>()
+  for (const table of [
+    {
+      table: `${appID}_permissions`,
+      schema: appID,
+      tableName: 'permissions',
+    },
+    {
+      table: `${shardSchema}_clients`,
+      schema: shardSchema,
+      tableName: 'clients',
+    },
+    {
+      table: `${shardSchema}_mutations`,
+      schema: shardSchema,
+      tableName: 'mutations',
+    },
+  ]) {
+    tables.set(table.table, table)
+  }
+  return {
+    name: `_${appID}_metadata_${shardNum}`,
+    allTables: false,
+    schemas: new Set(),
+    tables,
+  }
+}
+
 function publicationCatalogValue(name: string, field: CatalogTargetField): unknown {
   if (Object.hasOwn(field, 'value')) return field.value
   switch (field.source) {
@@ -4471,11 +4679,16 @@ export class DoBackend {
   private txDataSnapshots = new Map<string, string | null>()
   private txSnapshotCounter = 0
 
-  constructor(doUrl: string, dbName: string = 'postgres', namespace = 'default') {
+  constructor(
+    doUrl: string,
+    dbName: string = 'postgres',
+    namespace = 'default',
+    opts?: { fetch?: typeof fetch }
+  ) {
     this.doUrl = doUrl.replace(/\/+$/, '')
     this.dbName = dbName
     this.namespace = namespace
-    this.httpClient = new HttpClient()
+    this.httpClient = new HttpClient(opts?.fetch)
     this.skippedFunctionNames = getSkippedFunctionNames(dbName, namespace)
     this.triggerFunctions = new Map()
     this.schemaMetadata = new Map()
@@ -4489,7 +4702,136 @@ export class DoBackend {
     try {
       await this.httpClient.post(this.url('/exec'), JSON.stringify({ sql: 'SELECT 1' }))
     } catch {}
+    await this.loadDurableMetadata()
     this.ready = true
+  }
+
+  private async ensureMetadataTable(): Promise<void> {
+    await this.doExecResult(`
+      CREATE TABLE IF NOT EXISTS ${quoteIdentifier(METADATA_TABLE)} (
+        kind TEXT NOT NULL,
+        key TEXT NOT NULL,
+        subkey TEXT NOT NULL DEFAULT '',
+        value TEXT NOT NULL,
+        PRIMARY KEY (kind, key, subkey)
+      )
+    `)
+  }
+
+  private publicationToJSON(publication: PublicationDefinition): string {
+    return JSON.stringify({
+      name: publication.name,
+      allTables: publication.allTables,
+      schemas: [...publication.schemas],
+      tables: [...publication.tables.entries()],
+    })
+  }
+
+  private publicationFromJSON(value: string): PublicationDefinition | null {
+    try {
+      const parsed = JSON.parse(value)
+      return {
+        name: String(parsed.name),
+        allTables: Boolean(parsed.allTables),
+        schemas: new Set(Array.isArray(parsed.schemas) ? parsed.schemas.map(String) : []),
+        tables: new Map(
+          Array.isArray(parsed.tables)
+            ? parsed.tables.map(([key, table]: any[]) => [
+                String(key),
+                {
+                  table: String(table.table),
+                  schema: String(table.schema),
+                  tableName: String(table.tableName),
+                },
+              ])
+            : []
+        ),
+      }
+    } catch {
+      return null
+    }
+  }
+
+  private async loadDurableMetadata(): Promise<void> {
+    try {
+      await this.ensureMetadataTable()
+      const result = await this.doExecResult(
+        `SELECT kind, key, subkey, value FROM ${quoteIdentifier(METADATA_TABLE)}`
+      )
+      for (const row of result.rows) {
+        const kind = String(row.kind ?? '')
+        const key = String(row.key ?? '')
+        const subkey = String(row.subkey ?? '')
+        const value = String(row.value ?? '')
+        if (kind === 'schema-column') {
+          const metadata = JSON.parse(value) as SchemaColumnMetadata
+          let table = this.schemaMetadata.get(key)
+          if (!table) {
+            table = new Map()
+            this.schemaMetadata.set(key, table)
+          }
+          table.set(subkey, metadata)
+        } else if (kind === 'publication') {
+          const publication = this.publicationFromJSON(value)
+          if (publication) this.publications.set(key, publication)
+        }
+      }
+      if (await this.repairShardMetadataPublications()) {
+        await this.persistDurableMetadata()
+      }
+    } catch {}
+  }
+
+  private async repairShardMetadataPublications(): Promise<boolean> {
+    let changed = false
+    const tables = await this.listSqliteTables()
+    for (const table of tables) {
+      const shardConfig = shardConfigInfoFromSqliteTable(table.name)
+      if (!shardConfig) continue
+
+      let result: ExecResult
+      try {
+        result = await this.doExecResult(
+          `SELECT publications FROM ${quoteIdentifier(table.name)} LIMIT 1`
+        )
+      } catch {
+        continue
+      }
+
+      const publications = parsePublicationList(result.rows[0]?.publications)
+      const metadataPublicationName = `_${shardConfig.appID}_metadata_${shardConfig.shardNum}`
+      if (!publications.includes(metadataPublicationName)) continue
+      if (this.publications.has(metadataPublicationName)) continue
+
+      this.publications.set(
+        metadataPublicationName,
+        metadataPublicationDefinition(shardConfig.appID, shardConfig.shardNum)
+      )
+      changed = true
+    }
+    return changed
+  }
+
+  private async persistDurableMetadata(): Promise<void> {
+    try {
+      await this.ensureMetadataTable()
+      for (const [tableName, columns] of this.schemaMetadata) {
+        for (const [columnName, metadata] of columns) {
+          await this.doExecResult(
+            `INSERT OR REPLACE INTO ${quoteIdentifier(METADATA_TABLE)}
+              (kind, key, subkey, value) VALUES (?, ?, ?, ?)`,
+            ['schema-column', tableName, columnName, JSON.stringify(metadata)]
+          )
+        }
+      }
+      for (const [name, publication] of this.publications) {
+        await this.doExecResult(
+          `INSERT OR REPLACE INTO ${quoteIdentifier(METADATA_TABLE)}
+            (kind, key, subkey, value) VALUES (?, ?, '', ?)`,
+          ['publication', name, this.publicationToJSON(publication)]
+        )
+      }
+    } catch {}
   }
 
   async close(): Promise<void> {
@@ -4616,6 +4958,7 @@ export class DoBackend {
       await this.restoreTransactionDataSnapshots()
     } finally {
       if (snapshot) this.restoreTransactionMetadataSnapshot(snapshot)
+      await this.persistDurableMetadata()
       this.clearTransactionState()
     }
   }
@@ -4625,6 +4968,46 @@ export class DoBackend {
     options?: { syncToFs?: boolean; throwOnError?: boolean }
   ): Promise<Uint8Array> {
     if (!this.ready) await this.waitReady
+    if (this.hasMultipleProtocolMessages(message)) {
+      const responses: Uint8Array[] = []
+      let offset = 0
+      while (offset < message.length) {
+        const length = this.protocolMessageLength(message, offset)
+        if (!length) break
+        responses.push(
+          await this.execProtocolMessage(
+            message.subarray(offset, offset + length),
+            options
+          )
+        )
+        offset += length
+      }
+      return concat(...responses)
+    }
+    return this.execProtocolMessage(message, options)
+  }
+
+  private protocolMessageLength(message: Uint8Array, offset: number): number | null {
+    if (offset + 5 > message.length) return null
+    const length = new DataView(
+      message.buffer,
+      message.byteOffset + offset + 1,
+      message.byteLength - offset - 1
+    ).getInt32(0)
+    const total = 1 + length
+    if (total <= 0 || offset + total > message.length) return null
+    return total
+  }
+
+  private hasMultipleProtocolMessages(message: Uint8Array): boolean {
+    const firstLength = this.protocolMessageLength(message, 0)
+    return Boolean(firstLength && firstLength < message.length)
+  }
+
+  private async execProtocolMessage(
+    message: Uint8Array,
+    options?: { syncToFs?: boolean; throwOnError?: boolean }
+  ): Promise<Uint8Array> {
     const msgType = message[0]
     try {
       switch (msgType) {
@@ -4688,10 +5071,7 @@ export class DoBackend {
       } catch (err: any) {
         return concat(buildErrorResponse(err.message), this.readyForQuery())
       }
-      return concat(
-        buildCommandComplete(commandTagForSQL(sql)),
-        this.readyForQuery()
-      )
+      return concat(buildCommandComplete(commandTagForSQL(sql)), this.readyForQuery())
     }
 
     // SET (local) — skip
@@ -4723,7 +5103,7 @@ export class DoBackend {
     const rewrittenStatements = this.rewriteSQLStatements(sql)
     const rewritten = rewrittenSQLText(rewrittenStatements)
     if (rewritten === '' || rewritten.startsWith('--')) {
-      this.applyStatementMetadata(rewrittenStatements)
+      await this.applyStatementMetadata(rewrittenStatements)
       return concat(buildCommandComplete(commandTagForSQL(sql)), this.readyForQuery())
     }
 
@@ -4745,7 +5125,7 @@ export class DoBackend {
         : this.inTransaction
           ? await this.executeRewrittenStatements(rewrittenStatements)
           : await this.doExecResult(rewritten)
-      this.applyStatementMetadata(rewrittenStatements)
+      await this.applyStatementMetadata(rewrittenStatements)
       const tracking = statement ? this.trackingForStatement(statement) : undefined
       const visibleResult = this.visibleResultForTracking(result, tracking)
       return this.buildSQLResponse(sql, visibleResult.rows, visibleResult.columns, {
@@ -4756,7 +5136,8 @@ export class DoBackend {
     }
   }
 
-  private applyStatementMetadata(statements: RewrittenStatement[]): void {
+  private async applyStatementMetadata(statements: RewrittenStatement[]): Promise<void> {
+    let changed = false
     for (const statement of statements) {
       for (const column of statement.schemaColumns ?? []) {
         let table = this.schemaMetadata.get(column.table)
@@ -4765,14 +5146,18 @@ export class DoBackend {
           this.schemaMetadata.set(column.table, table)
         }
         table.set(column.column, column)
+        changed = true
       }
       for (const change of statement.schemaMetadataChanges ?? []) {
         this.applySchemaMetadataChange(change)
+        changed = true
       }
       for (const change of statement.publicationChanges ?? []) {
         this.applyPublicationChange(change)
+        changed = true
       }
     }
+    if (changed) await this.persistDurableMetadata()
   }
 
   private applySchemaMetadataChange(change: SchemaMetadataChange): void {
@@ -4981,7 +5366,7 @@ export class DoBackend {
     const portal = this.portals.get(portalName)
     if (!portal) return buildErrorResponse(`portal "${portalName}" does not exist`)
     if (!portal.sql?.trim()) {
-      this.applyStatementMetadata([
+      await this.applyStatementMetadata([
         {
           sql: '',
           schemaColumns: portal.schemaColumns ?? [],
@@ -5060,7 +5445,7 @@ export class DoBackend {
         tracking ? this.trackingRequest(tracking) : undefined
       )
       if (portal.schemaColumns?.length) {
-        this.applyStatementMetadata([{ sql, schemaColumns: portal.schemaColumns }])
+        await this.applyStatementMetadata([{ sql, schemaColumns: portal.schemaColumns }])
       }
       const visibleResult = this.visibleResultForTracking(result, tracking)
       const visibleRows = visibleResult.rows
@@ -5145,7 +5530,7 @@ export class DoBackend {
     const statements = this.rewriteSQLStatements(sql)
     const rewritten = rewrittenSQLText(statements)
     if (!rewritten) {
-      this.applyStatementMetadata(statements)
+      await this.applyStatementMetadata(statements)
       return []
     }
     if (isCatalogQuery(rewritten)) return (await this.handleCatalogQuery(rewritten)).rows
@@ -5157,7 +5542,7 @@ export class DoBackend {
       undefined,
       tracking ? this.trackingRequest(tracking) : undefined
     )
-    this.applyStatementMetadata(statements)
+    await this.applyStatementMetadata(statements)
     return this.visibleResultForTracking(result, tracking).rows
   }
 
@@ -5199,7 +5584,7 @@ export class DoBackend {
     const booleanParamNumbers = paramNumbersForOids(paramOIDs, isBooleanOid)
     const inferredJsonParamNumbers = paramNumbersForOids(paramOIDs, isJsonOid)
     if (!rewritten) {
-      this.applyStatementMetadata(statements)
+      await this.applyStatementMetadata(statements)
       return { rows: [] }
     }
     if (isCatalogQuery(rewritten)) {
@@ -5249,7 +5634,7 @@ export class DoBackend {
       execBound.params,
       tracking ? this.trackingRequest(tracking) : undefined
     )
-    this.applyStatementMetadata(statements)
+    await this.applyStatementMetadata(statements)
     return { rows: this.visibleResultForTracking(result, tracking).rows as T[] }
   }
 
@@ -5357,13 +5742,15 @@ export class DoBackend {
     track?: ChangeTrackingRequest
   ): Promise<ExecResult> {
     if (!sql.trim()) return { rows: [], columns: [] }
+    const deleteCountCTE = track ? null : deleteReturningCountCTE(sql)
+    const execSQL = deleteCountCTE?.sql ?? sql
     let lastErr: unknown
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const resp = await this.httpClient.post(
           this.url('/exec'),
           JSON.stringify({
-            sql,
+            sql: execSQL,
             ...(params?.length ? { params } : null),
             ...(track ? { track } : null),
           }),
@@ -5377,6 +5764,14 @@ export class DoBackend {
             : rows.length > 0
               ? Object.keys(rows[0])
               : []
+        if (deleteCountCTE) {
+          return {
+            rows: [{ [deleteCountCTE.countColumn]: rows.length }],
+            columns: [deleteCountCTE.countColumn],
+            affectedRows: rows.length,
+          }
+        }
+        if (track) signalReplicationChange()
         return { rows, columns, affectedRows: result.affectedRows }
       } catch (err) {
         lastErr = err
@@ -5439,8 +5834,7 @@ export class DoBackend {
     )
     for (const row of result.rows) {
       const name = String(row.name || '')
-      if (name && !name.startsWith('_orez_tx_'))
-        await this.snapshotTransactionTable(name)
+      if (name && !name.startsWith('_orez_tx_')) await this.snapshotTransactionTable(name)
     }
   }
 
@@ -5489,13 +5883,9 @@ export class DoBackend {
   private async doRawBatch(statements: string[]): Promise<void> {
     const sqls = statements.filter((sql) => sql.trim())
     if (sqls.length === 0) return
-    await this.httpClient.post(
-      this.url('/batch'),
-      JSON.stringify({ statements: sqls }),
-      {
-        'Content-Type': 'application/json',
-      }
-    )
+    await this.httpClient.post(this.url('/batch'), JSON.stringify({ statements: sqls }), {
+      'Content-Type': 'application/json',
+    })
   }
 
   private async shouldSkipStatement(statement: RewrittenStatement): Promise<boolean> {
@@ -5554,6 +5944,9 @@ export class DoBackend {
     let sqls: Array<string | { sql: string; track?: ChangeTrackingRequest }> = []
     const flush = async () => {
       if (sqls.length === 0) return
+      const hasTrackedWrite = sqls.some(
+        (statement) => typeof statement !== 'string' && Boolean(statement.track)
+      )
       await this.httpClient.post(
         this.url('/batch'),
         JSON.stringify({ statements: sqls }),
@@ -5561,6 +5954,7 @@ export class DoBackend {
           'Content-Type': 'application/json',
         }
       )
+      if (hasTrackedWrite) signalReplicationChange()
       sqls = []
     }
 
@@ -5644,6 +6038,8 @@ export class DoBackend {
         tableName: metadata.tableName,
       }
     }
+    const zeroInternalRef = this.zeroInternalTableRefForSqliteTable(name)
+    if (zeroInternalRef) return zeroInternalRef
     if (name === 'public_migrations') {
       return {
         table: name,
@@ -5656,6 +6052,32 @@ export class DoBackend {
       schema: 'public',
       tableName: name,
     }
+  }
+
+  private zeroInternalTableRefForSqliteTable(name: string): PublicationTableRef | null {
+    for (const publicationName of this.publications.keys()) {
+      const match = /^_(.+)_metadata_(\d+)$/.exec(publicationName)
+      if (!match) continue
+      const appID = match[1]
+      const shardNum = match[2]
+      const shardSchema = `${appID}_${shardNum}`
+      if (name === `${appID}_permissions`) {
+        return {
+          table: name,
+          schema: appID,
+          tableName: 'permissions',
+        }
+      }
+      for (const tableName of ['clients', 'mutations', 'replicas', 'shardConfig']) {
+        if (name !== `${shardSchema}_${tableName}`) continue
+        return {
+          table: name,
+          schema: shardSchema,
+          tableName,
+        }
+      }
+    }
+    return null
   }
 
   private generatedIndexName(
@@ -5718,7 +6140,9 @@ export class DoBackend {
       const signature = [
         isPrimaryKey ? 'primary' : 'index',
         unique ? 'unique' : 'plain',
-        ...Object.entries(indexColumns).map(([column, direction]) => `${column}:${direction}`),
+        ...Object.entries(indexColumns).map(
+          ([column, direction]) => `${column}:${direction}`
+        ),
       ].join('\0')
       if (seenSignatures.has(signature)) return
       seenSignatures.add(signature)
@@ -5762,7 +6186,8 @@ export class DoBackend {
         seq: Number(row.seq ?? 0),
         name: String(row.name ?? ''),
         unique: Number(row.unique ?? 0),
-        origin: row.origin === null || row.origin === undefined ? null : String(row.origin),
+        origin:
+          row.origin === null || row.origin === undefined ? null : String(row.origin),
         partial: Number(row.partial ?? 0),
       }))
       .filter((row): row is SqliteIndexInfo => Boolean(row.name))
@@ -5831,7 +6256,9 @@ export class DoBackend {
       }))
       if (columns.length === 0) continue
       const metadataPrimaryKey = columns
-        .filter((column) => this.schemaMetadata.get(table.name)?.get(column.name)?.primaryKey)
+        .filter(
+          (column) => this.schemaMetadata.get(table.name)?.get(column.name)?.primaryKey
+        )
         .map((column) => column.name)
       const info = {
         name: table.name,
@@ -6096,7 +6523,9 @@ export class DoBackend {
               elemPgTypeClass: metadata?.elemTyptype ?? null,
               typeOID: metadata?.typeOid ?? pgTypeOid(dataType),
               characterMaximumLength: metadata?.characterMaximumLength ?? null,
-              notNull: Boolean(metadata?.notNull || metadata?.primaryKey || column.notnull || column.pk),
+              notNull: Boolean(
+                metadata?.notNull || metadata?.primaryKey || column.notnull || column.pk
+              ),
               dflt: null,
             },
           ]
@@ -6280,12 +6709,12 @@ export class DoBackend {
         const index = number - 1
         out +=
           index >= 0 && index < params.length
-              ? this.sqlLiteral(params[index], {
-                  pgArrayAsJson: arrayParamNumbers.has(number),
-                  pgJsonAsJson: jsonParamNumbers.has(number),
-                  pgTimestampAsText: timestampParamNumbers.has(number),
-                  pgBooleanAsInteger: booleanParamNumbers.has(number),
-                })
+            ? this.sqlLiteral(params[index], {
+                pgArrayAsJson: arrayParamNumbers.has(number),
+                pgJsonAsJson: jsonParamNumbers.has(number),
+                pgTimestampAsText: timestampParamNumbers.has(number),
+                pgBooleanAsInteger: booleanParamNumbers.has(number),
+              })
             : sql.slice(i, end)
         i = end
         continue
@@ -6538,6 +6967,7 @@ export class DoBackend {
     column: string
   ): SchemaColumnMetadata | undefined {
     const table = firstSourceTableFromSQL(sql)
+    const sourceTables = sourceTablesFromSQL(sql)
     const resultColumn = selectResultColumnMetadata(sql).get(column)
     if (resultColumn?.oid) {
       return {
@@ -6549,6 +6979,16 @@ export class DoBackend {
       }
     }
     const source = resultColumn?.source ?? column
+    if (sourceTables.length > 0) {
+      let foundFromSource: SchemaColumnMetadata | undefined
+      for (const sourceTable of sourceTables) {
+        const metadata = this.schemaMetadata.get(sourceTable)?.get(source)
+        if (!metadata) continue
+        if (foundFromSource) return undefined
+        foundFromSource = metadata
+      }
+      if (foundFromSource) return foundFromSource
+    }
     if (table) {
       const metadata = this.schemaMetadata.get(table)?.get(source)
       if (metadata) return metadata
@@ -6561,7 +7001,17 @@ export class DoBackend {
       if (found) return undefined
       found = metadata
     }
-    return found
+    if (found) return found
+
+    const fallback = fallbackMetadataForColumnName(source)
+    if (!fallback) return undefined
+    return {
+      table: '',
+      schema: 'public',
+      tableName: '',
+      column,
+      ...fallback,
+    }
   }
 
   private fieldsForResult(
@@ -6581,11 +7031,39 @@ export class DoBackend {
     return inferFieldsFromSQL(sql)
   }
 
+  private metadataFieldsForSQL(sql: string): { name: string; oid?: number }[] {
+    const inferred = inferFieldsFromSQL(sql).map((field) => ({
+      name: field.name,
+      oid: field.oid ?? this.fieldMetadataForResultColumn(sql, field.name)?.oid,
+    }))
+    if (inferred.length > 0) return inferred
+
+    const selectList = extractTopLevelSelectList(sql)
+    if (!selectList) return []
+    const hasStar = splitTopLevelComma(selectList).some((part) => {
+      const trimmed = part.trim()
+      return trimmed === '*' || /(?:^|[.\s])\*$/.test(trimmed)
+    })
+    if (!hasStar) return []
+
+    const fields: { name: string; oid?: number }[] = []
+    for (const table of sourceTablesFromSQL(sql)) {
+      const columns = this.schemaMetadata.get(table)
+      if (!columns) continue
+      for (const column of columns.values()) {
+        fields.push({ name: column.column, oid: column.oid })
+      }
+    }
+    return fields
+  }
+
   private async describeFields(
     sql: string,
     metadataSql = sql
   ): Promise<{ name: string; oid?: number }[]> {
     if (isCatalogQuery(sql)) return (await this.handleCatalogQuery(sql)).fields
+    const metadataFields = this.metadataFieldsForSQL(metadataSql)
+    if (/\$\d+/.test(sql) && metadataFields.length > 0) return metadataFields
     if (isSelectLike(sql)) {
       try {
         const result = await this.doExecResult(
@@ -6595,6 +7073,7 @@ export class DoBackend {
         if (fields.length > 0) return fields
       } catch {}
     }
+    if (metadataFields.length > 0) return metadataFields
     return inferFieldsFromSQL(metadataSql)
   }
 
@@ -6653,12 +7132,18 @@ export class DoBackend {
 }
 
 class HttpClient {
+  private fetcher: typeof fetch
+
+  constructor(fetcher: typeof fetch = fetch) {
+    this.fetcher = fetcher
+  }
+
   async post(
     url: string,
     body: string,
     headers?: Record<string, string>
   ): Promise<string> {
-    const resp = await fetch(url, {
+    const resp = await this.fetcher(url, {
       method: 'POST',
       headers: headers ?? { 'Content-Type': 'application/json' },
       body,

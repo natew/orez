@@ -4,27 +4,28 @@
  * runs zero-cache in-process with SINGLE_PROCESS=1, using bundler aliases
  * to swap Node.js dependencies for CF-compatible shims:
  *
- *   postgres           → orez/worker/shims/postgres  (PGlite-backed)
+ *   postgres           → orez/worker/shims/postgres-browser
+ *                         (real postgres package over MessagePort)
  *   @rocicorp/zero-sqlite3 → orez/worker/shims/sqlite (DO SQLite)
  *   fastify            → orez/worker/shims/fastify   (route capture)
  *   ws                 → orez/worker/shims/ws        (CF WebSocket)
  *
- * the consumer's wrangler.toml must configure these aliases and enable
- * nodejs_compat for the remaining Node.js APIs (events, stream, etc.).
+ * the postgres MessagePort proxy is backed by DoBackend, so zero-cache still
+ * uses its real PG wire protocol, but storage is Cloudflare DO SQLite instead
+ * of PGlite.
  *
  * usage in a Durable Object:
  *
  *   import { startZeroCacheEmbedCF } from 'orez/worker'
  *
  *   // in ensureInitialized():
- *   globalThis.__orez_pglite = pglite      // for postgres shim
- *   globalThis.__orez_do_sqlite = ctx.storage.sql  // for sqlite shim
- *
  *   const zc = await startZeroCacheEmbedCF({ ... })
  *
  *   // in DO fetch():
  *   return zc.handleRequest(request)
  */
+
+import './shims/zero-process-env.js'
 
 import EventEmitter from 'node:events'
 
@@ -33,7 +34,8 @@ import EventEmitter from 'node:events'
 // @ts-expect-error — internal zero-cache module, no type declarations
 import { runWorker as _runWorker } from '@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js'
 
-import type { PGlite } from '@electric-sql/pglite'
+import { createBrowserProxy, type BrowserProxy } from '../pg-proxy-browser.js'
+import { DoBackend } from '../pg-proxy-do-backend.js'
 
 const runWorkerFn = _runWorker as (
   parent: unknown,
@@ -41,11 +43,31 @@ const runWorkerFn = _runWorker as (
 ) => Promise<void>
 
 export interface ZeroCacheEmbedCFOptions {
-  /** PGlite instance (also registered on globalThis.__orez_pglite) */
-  pglite: PGlite
-
   /** DO SQLite storage (also registered on globalThis.__orez_do_sqlite) */
   doSqlite: unknown
+
+  /**
+   * base URL for the DO SQL execution endpoints (`/exec`, `/batch`).
+   * ignored when `backends` is supplied.
+   */
+  backendUrl?: string
+
+  /** custom fetch used by DoBackend; lets a DO route directly to another DO stub. */
+  backendFetch?: typeof fetch
+
+  /** namespace sent to the DO SQL endpoints. */
+  backendNamespace?: string
+
+  /** pre-created DoBackend instances. mainly useful for tests. */
+  backends?: {
+    postgres: DoBackend
+    cvr: DoBackend
+    cdb: DoBackend
+  }
+
+  /** postgres username/password expected by the in-process proxy. */
+  pgUser?: string
+  pgPassword?: string
 
   /** zero app ID (default: 'zero') */
   appId?: string
@@ -55,6 +77,9 @@ export interface ZeroCacheEmbedCFOptions {
 
   /** additional env vars passed to zero-cache */
   env?: Record<string, string>
+
+  /** fetch implementation for Worker-local mutate/query API URLs. */
+  apiFetch?: typeof fetch
 
   /** timeout in ms waiting for zero-cache ready (default: 30000) */
   readyTimeout?: number
@@ -78,9 +103,8 @@ export interface ZeroCacheEmbedCF {
 /**
  * start zero-cache in embedded CF Workers mode.
  *
- * must be called AFTER setting up globalThis:
- *   globalThis.__orez_pglite = pgliteInstance
- *   globalThis.__orez_do_sqlite = ctx.storage.sql
+ * must be called with a DO SQLite handle for zero-cache's replica storage and
+ * a DoBackend target for upstream/CVR/change Postgres connections.
  */
 export async function startZeroCacheEmbedCF(
   opts: ZeroCacheEmbedCFOptions
@@ -88,10 +112,53 @@ export async function startZeroCacheEmbedCF(
   const appId = opts.appId || 'zero'
   const publications = opts.publications?.join(',') || `orez_${appId}_public`
   const readyTimeout = opts.readyTimeout ?? 30000
+  const pgUser = opts.pgUser || 'user'
+  const pgPassword = opts.pgPassword || ''
+  const backendUrl = opts.backendUrl || 'https://orez-do-backend.local'
+  const backendNamespace = opts.backendNamespace || appId
+
+  const backends =
+    opts.backends ??
+    ({
+      postgres: new DoBackend(backendUrl, 'postgres', backendNamespace, {
+        fetch: opts.backendFetch,
+      }),
+      cvr: new DoBackend(backendUrl, 'zero_cvr', backendNamespace, {
+        fetch: opts.backendFetch,
+      }),
+      cdb: new DoBackend(backendUrl, 'zero_cdb', backendNamespace, {
+        fetch: opts.backendFetch,
+      }),
+    } satisfies NonNullable<ZeroCacheEmbedCFOptions['backends']>)
+
+  await Promise.all([
+    backends.postgres.waitReady,
+    backends.cvr.waitReady,
+    backends.cdb.waitReady,
+  ])
+
+  const proxy: BrowserProxy = await createBrowserProxy(
+    {
+      postgres: backends.postgres as any,
+      cvr: backends.cvr as any,
+      cdb: backends.cdb as any,
+      postgresReplicas: [],
+    } as any,
+    {
+      pgUser,
+      pgPassword,
+      singleDb: false,
+      logLevel: opts.env?.ZERO_LOG_LEVEL || 'info',
+    }
+  )
 
   // ensure globals are set for shims
-  ;(globalThis as any).__orez_pglite = opts.pglite
   ;(globalThis as any).__orez_do_sqlite = opts.doSqlite
+  ;(globalThis as any).__orez_proxy_connect = (port: MessagePort) => {
+    proxy.handleConnection(port)
+  }
+  ;(globalThis as any).__orez_proxy_user = pgUser
+  ;(globalThis as any).__orez_proxy_password = pgPassword
 
   // ensure process.env exists (CF Workers doesn't have it natively)
   ;(globalThis as any).process ??= {}
@@ -130,8 +197,17 @@ export async function startZeroCacheEmbedCF(
   const origExit = (globalThis as any).process.exit
   const origNodeEnv = (globalThis as any).process.env.NODE_ENV
   const origKill = (globalThis as any).process.kill
+  const origFetch = (globalThis as any).fetch
   ;(globalThis as any).process.exit = (code?: number) => {
     parent.emit('exit', code ?? 0)
+  }
+  if (opts.apiFetch) {
+    ;(globalThis as any).fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init)
+      const url = new URL(request.url)
+      if (url.hostname === 'orez-zero-api.local') return opts.apiFetch!(request)
+      return origFetch(input as any, init as any)
+    }
   }
 
   // build env for zero-cache
@@ -139,21 +215,27 @@ export async function startZeroCacheEmbedCF(
     ...((globalThis as any).process.env as Record<string, string>),
     SINGLE_PROCESS: '1',
     NODE_ENV: 'development',
-    // these connection strings are intercepted by the postgres shim
-    ZERO_UPSTREAM_DB: 'pglite://in-process',
-    ZERO_CVR_DB: 'pglite://in-process',
-    ZERO_CHANGE_DB: 'pglite://in-process',
+    // postgres-browser intercepts these URLs and routes PG wire over
+    // MessagePort to the DoBackend-backed proxy above.
+    ZERO_UPSTREAM_DB: `postgres://${pgUser}:ignored@127.0.0.1/postgres`,
+    ZERO_CVR_DB: `postgres://${pgUser}:ignored@127.0.0.1/zero_cvr`,
+    ZERO_CHANGE_DB: `postgres://${pgUser}:ignored@127.0.0.1/zero_cdb`,
     // this path is intercepted by the sqlite shim
     ZERO_REPLICA_FILE: ':do-sqlite:',
     // don't bind a port — we route via inject/handoff
     ZERO_PORT: '0',
     ZERO_APP_ID: appId,
     ZERO_APP_PUBLICATIONS: publications,
+    ZERO_ADMIN_PASSWORD: opts.env?.ZERO_ADMIN_PASSWORD || crypto.randomUUID(),
     ZERO_LOG_LEVEL: opts.env?.ZERO_LOG_LEVEL || 'info',
     ZERO_NUM_SYNC_WORKERS: opts.env?.ZERO_NUM_SYNC_WORKERS || '1',
     ZERO_ENABLE_QUERY_PLANNER: 'false',
     ...opts.env,
   }
+  Object.assign((globalThis as any).process.env, env)
+
+  const debugEmbed =
+    env.OREZ_DEBUG_EMBED === '1' || (globalThis as any).__OREZ_DEBUG_EMBED__ === true
 
   // wrap parent with onMessageType/onceMessageType helpers
   // must forward sendHandle (second arg) for WebSocket handoff
@@ -204,6 +286,7 @@ export async function startZeroCacheEmbedCF(
     }, readyTimeout)
 
     parentEmitter.on('message', (msg: unknown) => {
+      if (debugEmbed) console.debug('[orez-zero-cache-cf] parent message', msg)
       if (Array.isArray(msg) && msg[0] === 'ready') {
         clearTimeout(timeout)
         isReady = true
@@ -214,6 +297,7 @@ export async function startZeroCacheEmbedCF(
 
   // start zero-cache
   runWorkerPromise = runWorkerFn(wrappedParent, env).catch((err) => {
+    if (debugEmbed) console.error('[orez-zero-cache-cf] runWorker error', err)
     if (!isReady) {
       throw err
     }
@@ -255,6 +339,12 @@ export async function startZeroCacheEmbedCF(
         await Promise.race([runWorkerPromise, new Promise((r) => setTimeout(r, 5000))])
       }
       await new Promise((r) => setTimeout(r, 200))
+      proxy.close()
+      await Promise.all([
+        backends.postgres.close(),
+        backends.cvr.close(),
+        backends.cdb.close(),
+      ])
       // restore all modified globals
       if (origExit) {
         ;(globalThis as any).process.exit = origExit
@@ -265,7 +355,13 @@ export async function startZeroCacheEmbedCF(
       if (origKill) {
         ;(globalThis as any).process.kill = origKill
       }
+      if (opts.apiFetch) {
+        ;(globalThis as any).fetch = origFetch
+      }
       delete (globalThis as any).process.env.SINGLE_PROCESS
+      delete (globalThis as any).__orez_proxy_connect
+      delete (globalThis as any).__orez_proxy_user
+      delete (globalThis as any).__orez_proxy_password
     },
   }
 }

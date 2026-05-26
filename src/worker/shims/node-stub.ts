@@ -64,8 +64,37 @@ export function platform() {
 export function tmpdir() {
   return '/tmp'
 }
+export function homedir() {
+  return '/tmp'
+}
 export function availableParallelism() {
   return 1
+}
+export function loadavg() {
+  return [0, 0, 0]
+}
+export function uptime() {
+  return 0
+}
+export function totalmem() {
+  return 128 * 1024 * 1024
+}
+export function freemem() {
+  return 64 * 1024 * 1024
+}
+export function cpus() {
+  return [{ model: 'worker', speed: 0 }]
+}
+export function networkInterfaces() {
+  return {
+    lo: [
+      {
+        address: '127.0.0.1',
+        family: 'IPv4',
+        internal: true,
+      },
+    ],
+  }
 }
 
 // stub for node:crypto
@@ -94,7 +123,23 @@ export class Session {
 
 // stub for node:v8
 export function getHeapStatistics() {
-  return { total_heap_size: 0, used_heap_size: 0 }
+  const heapSizeLimit = 128 * 1024 * 1024
+  return {
+    total_heap_size: 64 * 1024 * 1024,
+    total_heap_size_executable: 0,
+    total_physical_size: 64 * 1024 * 1024,
+    total_available_size: 64 * 1024 * 1024,
+    used_heap_size: 32 * 1024 * 1024,
+    heap_size_limit: heapSizeLimit,
+    malloced_memory: 0,
+    peak_malloced_memory: 0,
+    does_zap_garbage: 0,
+    number_of_native_contexts: 1,
+    number_of_detached_contexts: 0,
+    total_global_handles_size: 0,
+    used_global_handles_size: 0,
+    external_memory: 0,
+  }
 }
 
 // stub for node:zlib
@@ -197,9 +242,16 @@ export default {
   hostname,
   platform,
   tmpdir,
+  homedir,
   availableParallelism,
+  loadavg,
+  uptime,
+  totalmem,
+  freemem,
+  cpus,
   arch,
   release,
+  networkInterfaces,
   existsSync,
   readFileSync,
   writeFileSync,

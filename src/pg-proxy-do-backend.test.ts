@@ -218,6 +218,12 @@ function compactSQL(sql: string): string {
   return sql.replace(/\s+/g, ' ').trim()
 }
 
+function sqlContaining(sqls: string[], needle: string): string {
+  const found = [...sqls].reverse().find((sql) => compactSQL(sql).includes(needle))
+  expect(found).toBeDefined()
+  return found ?? ''
+}
+
 function startDoHttp(
   handler: (sql: string, url: URL) => { rows?: unknown[]; columns?: string[] } | Response
 ): Promise<{
@@ -310,14 +316,13 @@ describe('DoBackend', () => {
 
     await backend.query('SELECT 1 AS ok')
 
-    expect(http.requests.map((url) => url.searchParams.get('db'))).toEqual([
-      'postgres',
-      'postgres',
-    ])
-    expect(http.requests.map((url) => url.searchParams.get('ns'))).toEqual([
-      'chat-test-namespace',
-      'chat-test-namespace',
-    ])
+    expect(http.requests.length).toBeGreaterThanOrEqual(2)
+    expect(http.requests.every((url) => url.searchParams.get('db') === 'postgres')).toBe(
+      true
+    )
+    expect(
+      http.requests.every((url) => url.searchParams.get('ns') === 'chat-test-namespace')
+    ).toBe(true)
   })
 
   test('describes prepared statements with parameter and row metadata', async () => {
@@ -1102,10 +1107,7 @@ describe('DoBackend', () => {
     await backend.exec('CREATE PUBLICATION zero_chat FOR TABLE task_item')
 
     const result = await backend.execProtocolRaw(
-      msg(
-        0x51,
-        cstr("INSERT INTO task_item (id, body) VALUES ('t1', 'hello')")
-      )
+      msg(0x51, cstr("INSERT INTO task_item (id, body) VALUES ('t1', 'hello')"))
     )
 
     expect(messageTypes(result)).toEqual(['C', 'Z'])
@@ -1116,6 +1118,36 @@ describe('DoBackend', () => {
       returnRows: false,
     })
     expect(compactSQL(tracked.sql)).toContain('RETURNING *')
+  })
+
+  test('signals replication immediately after tracked writes', async () => {
+    const http = await startDoHttp((sql) => {
+      if (compactSQL(sql).includes('RETURNING *')) {
+        return { rows: [{ id: 't1', body: 'hello' }], columns: ['id', 'body'] }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'write-signal-test')
+    await backend.waitReady
+    await backend.exec('CREATE PUBLICATION zero_chat FOR TABLE task_item')
+
+    const globalObject = globalThis as any
+    const previousWakeup = globalObject.__orez_signal_replication
+    let wakeups = 0
+    globalObject.__orez_signal_replication = () => {
+      wakeups++
+    }
+    try {
+      await backend.query("INSERT INTO task_item (id, body) VALUES ('t1', 'hello')")
+    } finally {
+      if (previousWakeup === undefined) {
+        delete globalObject.__orez_signal_replication
+      } else {
+        globalObject.__orez_signal_replication = previousWakeup
+      }
+    }
+
+    expect(wakeups).toBe(1)
   })
 
   test('tracks full published rows while preserving client RETURNING projection', async () => {
@@ -1164,9 +1196,7 @@ describe('DoBackend', () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('sqlite_master')) {
         return {
-          rows: [
-            { name: 'server', sql: 'CREATE TABLE server (id varchar PRIMARY KEY)' },
-          ],
+          rows: [{ name: 'server', sql: 'CREATE TABLE server (id varchar PRIMARY KEY)' }],
           columns: ['name', 'sql'],
         }
       }
@@ -1598,7 +1628,7 @@ describe('DoBackend', () => {
     await backend.waitReady
 
     await backend.exec('SELECT 1')
-    const beforeCount = http.sqls.length
+    const beforeCount = http.sqls.filter((sql) => compactSQL(sql) === 'SELECT 1').length
 
     await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
     await backend.execProtocolRaw(msg(0x51, cstr('ROLLBACK')))
@@ -1606,7 +1636,9 @@ describe('DoBackend', () => {
     await backend.exec('SELECT 1')
     // BEGIN / ROLLBACK don't reach the DO; the cache invalidation should
     // re-issue the SELECT.
-    expect(http.sqls.length).toBe(beforeCount + 1)
+    expect(http.sqls.filter((sql) => compactSQL(sql) === 'SELECT 1').length).toBe(
+      beforeCount + 1
+    )
   })
 
   test('snapshots extended transaction writes for rollback', async () => {
@@ -1690,7 +1722,11 @@ describe('DoBackend', () => {
       }
       return { rows: [], columns: [] }
     })
-    const backend = new DoBackend(http.url, 'postgres', 'extended-tx-trigger-restore-test')
+    const backend = new DoBackend(
+      http.url,
+      'postgres',
+      'extended-tx-trigger-restore-test'
+    )
     await backend.waitReady
 
     await backend.execProtocolRaw(parseMessage('BEGIN'))
@@ -2093,7 +2129,9 @@ describe('DoBackend', () => {
       );
     `)
 
-    const sent = compactSQL(http.sqls.at(-1) || '')
+    const sent = compactSQL(
+      sqlContaining(http.sqls, 'CREATE TABLE IF NOT EXISTS "chat_0_shardConfig"')
+    )
     expect(sent).toContain('CREATE TABLE IF NOT EXISTS "chat_0_shardConfig"')
     expect(sent).toContain('publications text NOT NULL')
     expect(sent).not.toContain('text[]')
@@ -2199,6 +2237,54 @@ describe('DoBackend', () => {
     expect(dataRowValues(result)).toEqual([['["_chat_metadata_0","zero_chat"]', 'f']])
   })
 
+  test('falls back to zero-cache metadata column types when durable metadata is absent', async () => {
+    const http = await startDoHttp((sql) => {
+      const compact = compactSQL(sql)
+      if (
+        compact.includes('_orez_pg_metadata') ||
+        compact.includes('sqlite_master') ||
+        compact.startsWith('PRAGMA')
+      ) {
+        return { rows: [], columns: [] }
+      }
+      if (compact.startsWith('SELECT')) {
+        return {
+          rows: [
+            {
+              slot: 'slot_1',
+              version: '01',
+              publications: '["_chat_metadata_0","zero_chat"]',
+              ddlDetection: 1,
+            },
+          ],
+          columns: ['slot', 'version', 'publications', 'ddlDetection'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'missing-metadata-oid-test')
+    await backend.waitReady
+
+    const result = await backend.execProtocolRaw(
+      msg(
+        0x51,
+        cstr(`
+          SELECT * FROM "chat_0".replicas
+          JOIN "chat_0"."shardConfig" ON true
+          WHERE version = '01'
+        `)
+      )
+    )
+
+    expect(rowDescriptionOids(result)).toMatchObject({
+      publications: 114,
+      ddlDetection: 16,
+    })
+    expect(dataRowValues(result)).toEqual([
+      ['slot_1', '01', '["_chat_metadata_0","zero_chat"]', 't'],
+    ])
+  })
+
   test('resolves JSON metadata for columns from joined tables', async () => {
     const http = await startDoHttp((sql) => {
       if (compactSQL(sql).startsWith('SELECT')) {
@@ -2228,6 +2314,9 @@ describe('DoBackend', () => {
         "publications" TEXT[] NOT NULL,
         "ddlDetection" BOOL NOT NULL
       );
+      CREATE TABLE "chat_0/cdc"."replicationConfig" (
+        "publications" text NOT NULL
+      );
     `)
 
     const result = await backend.execProtocolRaw(
@@ -2247,6 +2336,285 @@ describe('DoBackend', () => {
     })
     expect(dataRowValues(result)).toEqual([
       ['slot_1', '01', '["_chat_metadata_0","zero_chat"]', 't'],
+    ])
+
+    await backend.execProtocolRaw(
+      parseMessage(
+        `
+          SELECT * FROM "chat_0".replicas
+          JOIN "chat_0"."shardConfig" ON true
+          WHERE version = $1
+        `,
+        'replica-at-version',
+        [25]
+      )
+    )
+    const described = await backend.execProtocolRaw(
+      describeStatement('replica-at-version')
+    )
+    expect(rowDescriptionOids(described)).toMatchObject({
+      publications: 114,
+      ddlDetection: 16,
+    })
+  })
+
+  test('hydrates persisted PG column metadata for existing DO tables', async () => {
+    const metadataRows: Record<string, unknown>[] = []
+    const http = await startDoHttp((sql) => {
+      const compact = compactSQL(sql)
+      if (compact.startsWith('CREATE TABLE IF NOT EXISTS "_orez_pg_metadata"')) {
+        return { rows: [], columns: [] }
+      }
+      if (compact.startsWith('SELECT kind, key, subkey, value FROM')) {
+        return {
+          rows: metadataRows,
+          columns: ['kind', 'key', 'subkey', 'value'],
+        }
+      }
+      if (compact.startsWith('DELETE FROM "_orez_pg_metadata"')) {
+        metadataRows.length = 0
+        return { rows: [], columns: [] }
+      }
+      if (compact.startsWith('INSERT OR REPLACE INTO "_orez_pg_metadata"')) {
+        return { rows: [], columns: [] }
+      }
+      return { rows: [], columns: [] }
+    })
+
+    const first = new DoBackend(http.url, 'postgres', 'durable-metadata-test')
+    await first.waitReady
+    await first.exec(`
+      CREATE TABLE "chat_0".replicas (
+        "slot" text PRIMARY KEY,
+        "version" text NOT NULL
+      );
+      CREATE TABLE "chat_0"."shardConfig" (
+        "publications" TEXT[] NOT NULL,
+        "ddlDetection" BOOL NOT NULL
+      );
+    `)
+
+    for (const body of http.bodies) {
+      if (
+        typeof body.sql === 'string' &&
+        compactSQL(body.sql).startsWith('INSERT OR REPLACE INTO "_orez_pg_metadata"')
+      ) {
+        const [kind, key, subkey, value] = body.params
+        metadataRows.push({ kind, key, subkey, value })
+      }
+    }
+
+    const second = new DoBackend(http.url, 'postgres', 'durable-metadata-test')
+    await second.waitReady
+    await second.execProtocolRaw(
+      parseMessage(
+        `
+          SELECT * FROM "chat_0".replicas
+          JOIN "chat_0"."shardConfig" ON true
+          WHERE version = $1
+        `,
+        'replica-at-version',
+        [25]
+      )
+    )
+    const described = await second.execProtocolRaw(
+      describeStatement('replica-at-version')
+    )
+
+    expect(rowDescriptionOids(described)).toMatchObject({
+      publications: 114,
+      ddlDetection: 16,
+    })
+  })
+
+  test('repairs internal metadata publication from shardConfig rows', async () => {
+    const http = await startDoHttp((sql) => {
+      const compact = compactSQL(sql)
+      if (compact.startsWith('CREATE TABLE IF NOT EXISTS "_orez_pg_metadata"')) {
+        return { rows: [], columns: [] }
+      }
+      if (compact.startsWith('SELECT kind, key, subkey, value FROM')) {
+        return { rows: [], columns: ['kind', 'key', 'subkey', 'value'] }
+      }
+      if (compact.startsWith('DELETE FROM "_orez_pg_metadata"')) {
+        return { rows: [], columns: [] }
+      }
+      if (compact.startsWith('INSERT OR REPLACE INTO "_orez_pg_metadata"')) {
+        return { rows: [], columns: [] }
+      }
+      if (compact.includes('sqlite_master')) {
+        return {
+          rows: [
+            {
+              name: 'todo_permissions',
+              sql: 'CREATE TABLE todo_permissions (permissions text, hash text)',
+            },
+            {
+              name: 'todo_0_clients',
+              sql: 'CREATE TABLE todo_0_clients (clientGroupID text, clientID text)',
+            },
+            {
+              name: 'todo_0_mutations',
+              sql: 'CREATE TABLE todo_0_mutations (clientGroupID text, mutation text)',
+            },
+            {
+              name: 'todo_0_shardConfig',
+              sql: 'CREATE TABLE todo_0_shardConfig (publications text)',
+            },
+          ],
+          columns: ['name', 'sql'],
+        }
+      }
+      if (compact === 'SELECT publications FROM "todo_0_shardConfig" LIMIT 1') {
+        return {
+          rows: [{ publications: '["_todo_metadata_0","zero_todo"]' }],
+          columns: ['publications'],
+        }
+      }
+      if (compact.includes('PRAGMA table_info("todo_permissions")')) {
+        return {
+          rows: [
+            { cid: 0, name: 'permissions', type: 'text', notnull: 0, pk: 0 },
+            { cid: 1, name: 'hash', type: 'text', notnull: 0, pk: 0 },
+          ],
+          columns: ['cid', 'name', 'type', 'notnull', 'pk'],
+        }
+      }
+      if (compact.includes('PRAGMA table_info("todo_0_clients")')) {
+        return {
+          rows: [
+            { cid: 0, name: 'clientGroupID', type: 'text', notnull: 1, pk: 1 },
+            { cid: 1, name: 'clientID', type: 'text', notnull: 1, pk: 2 },
+          ],
+          columns: ['cid', 'name', 'type', 'notnull', 'pk'],
+        }
+      }
+      if (compact.includes('PRAGMA table_info("todo_0_mutations")')) {
+        return {
+          rows: [
+            { cid: 0, name: 'clientGroupID', type: 'text', notnull: 1, pk: 1 },
+            { cid: 1, name: 'mutation', type: 'text', notnull: 1, pk: 0 },
+          ],
+          columns: ['cid', 'name', 'type', 'notnull', 'pk'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'metadata-publication-test')
+    await backend.waitReady
+
+    expect(
+      http.bodies.some(
+        (body) =>
+          body.params?.[0] === 'publication' && body.params?.[1] === '_todo_metadata_0'
+      )
+    ).toBe(true)
+
+    const publications = await (backend as any).handleCatalogQuery(`
+      SELECT pubname FROM pg_publication
+      WHERE pubname IN ('_todo_metadata_0', 'zero_todo')
+    `)
+    expect(publications.rows).toEqual([{ pubname: '_todo_metadata_0' }])
+
+    const publicationTables = await (backend as any).handleCatalogQuery(`
+      SELECT pubname, schemaname, tablename
+      FROM pg_publication_tables
+      WHERE pubname IN ('_todo_metadata_0')
+    `)
+    expect(publicationTables.rows).toEqual(
+      expect.arrayContaining([
+        {
+          pubname: '_todo_metadata_0',
+          schemaname: 'todo',
+          tablename: 'permissions',
+        },
+        {
+          pubname: '_todo_metadata_0',
+          schemaname: 'todo_0',
+          tablename: 'clients',
+        },
+        {
+          pubname: '_todo_metadata_0',
+          schemaname: 'todo_0',
+          tablename: 'mutations',
+        },
+      ])
+    )
+    expect(publicationTables.rows).toHaveLength(3)
+  })
+
+  test('repairing internal metadata publication preserves app publications', async () => {
+    const metadataRows: Record<string, unknown>[] = [
+      {
+        kind: 'publication',
+        key: 'zero_todo',
+        subkey: '',
+        value: JSON.stringify({
+          name: 'zero_todo',
+          allTables: false,
+          schemas: [],
+          tables: [['todo', { table: 'todo', schema: 'public', tableName: 'todo' }]],
+        }),
+      },
+    ]
+    let http: Awaited<ReturnType<typeof startDoHttp>>
+    http = await startDoHttp((sql) => {
+      const compact = compactSQL(sql)
+      if (compact.startsWith('CREATE TABLE IF NOT EXISTS "_orez_pg_metadata"')) {
+        return { rows: [], columns: [] }
+      }
+      if (compact.startsWith('SELECT kind, key, subkey, value FROM')) {
+        return {
+          rows: metadataRows,
+          columns: ['kind', 'key', 'subkey', 'value'],
+        }
+      }
+      if (compact.startsWith('INSERT OR REPLACE INTO "_orez_pg_metadata"')) {
+        const params = http.bodies.at(-1)?.params ?? []
+        const [kind, key, subkey, value] =
+          params.length === 3 ? [params[0], params[1], '', params[2]] : params
+        const existing = metadataRows.findIndex(
+          (row) => row.kind === kind && row.key === key && row.subkey === subkey
+        )
+        const row = { kind, key, subkey, value }
+        if (existing >= 0) metadataRows[existing] = row
+        else metadataRows.push(row)
+        return { rows: [], columns: [] }
+      }
+      if (compact.includes('sqlite_master')) {
+        return {
+          rows: [
+            {
+              name: 'todo_0_shardConfig',
+              sql: 'CREATE TABLE todo_0_shardConfig (publications text)',
+            },
+          ],
+          columns: ['name', 'sql'],
+        }
+      }
+      if (compact === 'SELECT publications FROM "todo_0_shardConfig" LIMIT 1') {
+        return {
+          rows: [{ publications: '["_todo_metadata_0","zero_todo"]' }],
+          columns: ['publications'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'metadata-merge-test')
+    await backend.waitReady
+
+    const publications = await (backend as any).handleCatalogQuery(`
+      SELECT pubname FROM pg_publication
+      WHERE pubname IN ('_todo_metadata_0', 'zero_todo')
+      ORDER BY pubname
+    `)
+    expect(publications.rows).toEqual([
+      { pubname: '_todo_metadata_0' },
+      { pubname: 'zero_todo' },
+    ])
+    expect(metadataRows.map((row) => row.key).sort()).toEqual([
+      '_todo_metadata_0',
+      'zero_todo',
     ])
   })
 
@@ -2300,6 +2668,82 @@ describe('DoBackend', () => {
     ])
   })
 
+  test('infers zero-cache JSON parameter oids without durable metadata', async () => {
+    const http = await startDoHttp((sql) => {
+      const compact = compactSQL(sql)
+      if (
+        compact.includes('_orez_pg_metadata') ||
+        compact.includes('sqlite_master') ||
+        compact.startsWith('PRAGMA')
+      ) {
+        return { rows: [], columns: [] }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'json-param-fallback-test')
+    await backend.waitReady
+
+    await backend.execProtocolRaw(
+      parseMessage(
+        `INSERT INTO "chat_0".replicas
+          ("slot", "version", "initialSchema", "initialSyncContext")
+         VALUES ($1, $2, $3, $4)`,
+        'replica-insert-no-metadata',
+        [0, 0, 0, 0]
+      )
+    )
+    let describe = await backend.execProtocolRaw(
+      describeStatement('replica-insert-no-metadata')
+    )
+    expect(parameterDescriptionOids(describe)).toEqual([0, 0, 114, 114])
+
+    await backend.execProtocolRaw(
+      parseMessage(
+        `UPDATE "chat_0".replicas
+          SET "subscriberContext" = $1
+          WHERE slot = $2`,
+        'replica-update-no-metadata',
+        [0, 0]
+      )
+    )
+    describe = await backend.execProtocolRaw(
+      describeStatement('replica-update-no-metadata')
+    )
+    expect(parameterDescriptionOids(describe)).toEqual([114, 0])
+  })
+
+  test('infers fallback insert params for ON CONFLICT without durable metadata', async () => {
+    const http = await startDoHttp((sql) => {
+      const compact = compactSQL(sql)
+      if (
+        compact.includes('_orez_pg_metadata') ||
+        compact.includes('sqlite_master') ||
+        compact.startsWith('PRAGMA')
+      ) {
+        return { rows: [], columns: [] }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'json-upsert-no-metadata')
+    await backend.waitReady
+
+    await backend.execProtocolRaw(
+      parseMessage(
+        `INSERT INTO "chat_0".replicas
+          ("slot", "version", "initialSchema", "initialSyncContext")
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT ("slot") DO UPDATE SET "initialSchema" = $5`,
+        'replica-upsert-no-metadata',
+        [0, 0, 0, 0, 0]
+      )
+    )
+    const describe = await backend.execProtocolRaw(
+      describeStatement('replica-upsert-no-metadata')
+    )
+
+    expect(parameterDescriptionOids(describe)).toEqual([0, 0, 114, 114, 114])
+  })
+
   test('splits Drizzle statement-breakpoint batches and drops PG constraint alters', async () => {
     const http = await startDoHttp(() => ({ rows: [], columns: [] }))
     const backend = new DoBackend(http.url, 'postgres', 'statement-batch-test')
@@ -2315,7 +2759,7 @@ describe('DoBackend', () => {
       CREATE TABLE "child" ("id" text PRIMARY KEY, "parentId" text);
     `)
 
-    const sent = http.sqls.at(-1) || ''
+    const sent = http.sqls.join('; ')
     expect(sent).toContain('CREATE TABLE IF NOT EXISTS parent')
     expect(sent).toContain('CREATE TABLE IF NOT EXISTS child')
     expect(sent).not.toContain('ADD CONSTRAINT')
@@ -2390,7 +2834,9 @@ describe('DoBackend', () => {
       'ALTER TABLE "appInstall" ADD COLUMN IF NOT EXISTS "id" varchar PRIMARY KEY NOT NULL DEFAULT md5(random()::text);'
     )
 
-    const sent = compactSQL(http.sqls.at(-1) || '')
+    const sent = compactSQL(
+      sqlContaining(http.sqls, 'ALTER TABLE "appInstall" ADD COLUMN id varchar')
+    )
     expect(sent).toContain('ALTER TABLE "appInstall" ADD COLUMN id varchar')
     expect(sent).not.toContain('IF NOT EXISTS')
     expect(sent).not.toContain('PRIMARY KEY')
@@ -2533,7 +2979,9 @@ describe('DoBackend', () => {
       );
     `)
 
-    const sent = compactSQL(http.sqls.at(-1) || '')
+    const sent = compactSQL(
+      sqlContaining(http.sqls, 'CREATE TABLE IF NOT EXISTS search_documents')
+    )
     expect(sent).toContain('search_vector text')
     expect(sent).toContain('embedding text')
     expect(sent).not.toContain('GENERATED')
@@ -2553,7 +3001,9 @@ describe('DoBackend', () => {
       );
     `)
 
-    const sent = compactSQL(http.sqls.at(-1) || '')
+    const sent = compactSQL(
+      sqlContaining(http.sqls, 'CREATE TABLE IF NOT EXISTS "privateChatsStats"')
+    )
     expect(sent).toContain('CREATE TABLE IF NOT EXISTS "privateChatsStats"')
     expect(sent).toContain('"createdAt" text DEFAULT CURRENT_TIMESTAMP')
   })
@@ -2575,7 +3025,9 @@ describe('DoBackend', () => {
       );
     `)
 
-    const sent = compactSQL(http.sqls.at(-1) || '')
+    const sent = compactSQL(
+      sqlContaining(http.sqls, 'CREATE TABLE IF NOT EXISTS "chat_0/cvr_rows"')
+    )
     expect(sent).toContain('CREATE TABLE IF NOT EXISTS "chat_0/cvr_rows"')
     expect(sent).toContain('"rowKey" text')
     expect(sent).not.toContain('FOREIGN KEY')
@@ -2610,7 +3062,12 @@ describe('DoBackend', () => {
         ADD COLUMN IF NOT EXISTS "hasOnboarded" BOOLEAN NOT NULL DEFAULT false;
     `)
 
-    const sent = compactSQL(http.sqls.at(-1) || '')
+    const sent = compactSQL(
+      sqlContaining(
+        http.sqls,
+        'ALTER TABLE "userPublic" ADD COLUMN "hasOnboarded" integer DEFAULT 0'
+      )
+    )
     expect(sent).toContain(
       'ALTER TABLE "userPublic" ADD COLUMN "hasOnboarded" integer DEFAULT 0'
     )
@@ -2629,7 +3086,7 @@ describe('DoBackend', () => {
         ADD COLUMN channel_id text;
     `)
 
-    const sent = http.sqls.at(-1) || ''
+    const sent = http.sqls.join('; ')
     expect(compactSQL(sent)).toContain(
       'ALTER TABLE search_documents ADD COLUMN server_id text'
     )
@@ -3014,6 +3471,40 @@ describe('DoBackend', () => {
     expect(http.sqls.some((sql) => compactSQL(sql).startsWith('INSERT INTO'))).toBe(false)
   })
 
+  test('executes zero-cache DELETE RETURNING count CTEs as SQLite deletes', async () => {
+    const http = await startDoHttp((sql) => {
+      if (compactSQL(sql).startsWith('DELETE FROM "todo_0/cdc_changeLog"')) {
+        return {
+          rows: [{ __orez_deleted: 1 }, { __orez_deleted: 1 }],
+          columns: ['__orez_deleted'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'zero_cdb', 'delete-count-cte-test')
+    await backend.waitReady
+
+    await backend.execProtocolRaw(
+      parseMessage(`
+        WITH purged AS (
+          DELETE FROM "todo_0/cdc"."changeLog"
+          WHERE watermark < $1
+          RETURNING watermark, pos
+        )
+        SELECT COUNT(*) AS deleted
+        FROM purged;
+      `)
+    )
+    await backend.execProtocolRaw(bindStatementParams(['a1zs3dw2usxs']))
+    const result = await backend.execProtocolRaw(executePortal())
+
+    expect(dataRowValues(result)).toEqual([['2']])
+    expect(compactSQL(http.sqls.at(-1) || '')).toBe(
+      'DELETE FROM "todo_0/cdc_changeLog" WHERE watermark < ? RETURNING 1 AS "__orez_deleted"'
+    )
+    expect(http.params.at(-1)).toEqual(['a1zs3dw2usxs'])
+  })
+
   test('skips DELETE USING cleanup statements when the target table is empty', async () => {
     const http = await startDoHttp((sql) => {
       if (
@@ -3152,7 +3643,11 @@ describe('DoBackend', () => {
 
   test('translates NEW column assignments in plpgsql row triggers', async () => {
     const http = await startDoHttp(() => ({ rows: [], columns: [] }))
-    const backend = new DoBackend(http.url, 'postgres', 'sqlite-new-assignment-trigger-test')
+    const backend = new DoBackend(
+      http.url,
+      'postgres',
+      'sqlite-new-assignment-trigger-test'
+    )
     await backend.waitReady
 
     await backend.exec(`
@@ -3191,7 +3686,11 @@ describe('DoBackend', () => {
 
   test('removes update target aliases from compiled SQLite triggers', async () => {
     const http = await startDoHttp(() => ({ rows: [], columns: [] }))
-    const backend = new DoBackend(http.url, 'postgres', 'sqlite-update-alias-trigger-test')
+    const backend = new DoBackend(
+      http.url,
+      'postgres',
+      'sqlite-update-alias-trigger-test'
+    )
     await backend.waitReady
 
     await backend.exec(`
@@ -3310,9 +3809,7 @@ describe('DoBackend', () => {
 
     const sent = http.sqls.map(compactSQL).join('\n')
     expect(sent).toContain('DROP TRIGGER IF EXISTS "messageReactionInsertTrigger"')
-    expect(sent).toContain(
-      'DROP TRIGGER IF EXISTS "messageReactionInsertTrigger_insert"'
-    )
+    expect(sent).toContain('DROP TRIGGER IF EXISTS "messageReactionInsertTrigger_insert"')
   })
 
   test('drops event trigger statements because event trigger creation is skipped', async () => {

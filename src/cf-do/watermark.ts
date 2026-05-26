@@ -57,9 +57,9 @@ export class DurableWatermarkState {
   private watermarkState(): number {
     try {
       const table = quoteIdent(WATERMARK_STATE_TABLE)
-      const row = this.sql
-        .exec(`SELECT last_value FROM ${table} WHERE id = 1`)
-        .one() as { last_value?: unknown } | undefined
+      const row = this.sql.exec(`SELECT last_value FROM ${table} WHERE id = 1`).one() as
+        | { last_value?: unknown }
+        | undefined
       return finitePositiveNumber(row?.last_value)
     } catch {
       return 0
@@ -68,9 +68,7 @@ export class DurableWatermarkState {
 
   private setWatermarkState(watermark: number): void {
     const table = quoteIdent(WATERMARK_STATE_TABLE)
-    this.sql.exec(
-      `INSERT OR IGNORE INTO ${table} (id, last_value) VALUES (1, 0)`
-    )
+    this.sql.exec(`INSERT OR IGNORE INTO ${table} (id, last_value) VALUES (1, 0)`)
     this.sql.exec(`UPDATE ${table} SET last_value = ? WHERE id = 1`, watermark)
   }
 
@@ -79,9 +77,7 @@ export class DurableWatermarkState {
     for (const name of this.watermarkSequenceTables()) {
       try {
         const row = this.sql
-          .exec(
-            `SELECT last_value, is_called FROM ${quoteIdent(name)} WHERE dummy = 1`
-          )
+          .exec(`SELECT last_value, is_called FROM ${quoteIdent(name)} WHERE dummy = 1`)
           .one() as { last_value?: unknown; is_called?: unknown } | undefined
         if (!row || !row.is_called) continue
         watermark = Math.max(watermark, finitePositiveNumber(row.last_value))

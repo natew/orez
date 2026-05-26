@@ -656,7 +656,7 @@ function messagePortToDuplexWithInject(port: MessagePort): {
         chunk.byteOffset,
         chunk.byteOffset + chunk.byteLength
       ) as ArrayBuffer
-      port.postMessage(buf, [buf])
+      port.postMessage(buf)
     },
     close() {
       port.close()
@@ -668,7 +668,7 @@ function messagePortToDuplexWithInject(port: MessagePort): {
       data.byteOffset,
       data.byteOffset + data.byteLength
     ) as ArrayBuffer
-    port.postMessage(buf, [buf])
+    port.postMessage(buf)
   }
 
   const injectMessage = (data: Uint8Array) => {
@@ -714,12 +714,12 @@ function messagePortToDuplex(port: MessagePort): {
       if (isDebugWire() && _globalWriteCount <= 200) {
         console.debug(`[pg-proxy-ws-write] #${_globalWriteCount} len=${chunk.byteLength}`)
       }
-      // transfer the ArrayBuffer for zero-copy
+      // CF workerd MessagePort does not support transfer lists.
       const buf = chunk.buffer.slice(
         chunk.byteOffset,
         chunk.byteOffset + chunk.byteLength
       ) as ArrayBuffer
-      port.postMessage(buf, [buf])
+      port.postMessage(buf)
     },
     close() {
       port.close()
@@ -733,7 +733,7 @@ function messagePortToDuplex(port: MessagePort): {
       data.byteOffset,
       data.byteOffset + data.byteLength
     ) as ArrayBuffer
-    port.postMessage(buf, [buf])
+    port.postMessage(buf)
   }
 
   return { duplex: { readable, writable }, rawWrite }
@@ -1020,7 +1020,7 @@ export async function createBrowserProxy(
       // cause issues if the caller still references the original data
       const copy = new Uint8Array(data.length)
       copy.set(data)
-      port.postMessage(copy.buffer, [copy.buffer])
+      port.postMessage(copy.buffer)
     }
 
     // step 1: send AuthenticationClearTextPassword (R, type=3) — ask for password

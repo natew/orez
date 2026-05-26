@@ -9,21 +9,32 @@
 
 // postgres epoch: 2000-01-01 in microseconds from unix epoch
 const PG_EPOCH_MICROS = 946684800000000n
+const PG_TYPE_BOOL = 16
+const PG_TYPE_TIMESTAMP = 1114
+const PG_TYPE_TIMESTAMPTZ = 1184
 
 // shared encoder instance - avoids per-call allocation
 const encoder = new TextEncoder()
 
-// table oid tracking
-const tableOids = new Map<string, number>()
-let nextOid = 16384
+function flattenRelationName(tableName: string): string {
+  const dot = tableName.indexOf('.')
+  if (dot < 0) return tableName
+  const schema = tableName.slice(0, dot)
+  const name = tableName.slice(dot + 1)
+  if (schema === 'public') return name
+  if (schema === '_orez' && name === '_zero_changes') return '_zero_changes'
+  if (schema === '_orez' && name === '_zero_replication_slots')
+    return '_orez__zero_replication_slots'
+  if (schema === '_orez') return `_orez__${name}`
+  if (schema === '_zero') return `_zero_${name}`
+  return `${schema}_${name}`
+}
 
 function getTableOid(tableName: string): number {
-  let oid = tableOids.get(tableName)
-  if (!oid) {
-    oid = nextOid++
-    tableOids.set(tableName, oid)
-  }
-  return oid
+  let hash = 0
+  const key = `table:${flattenRelationName(tableName)}`
+  for (let i = 0; i < key.length; i++) hash = (hash * 33 + key.charCodeAt(i)) >>> 0
+  return 50_000 + (hash % 10_000_000)
 }
 
 export interface ColumnInfo {
@@ -40,6 +51,50 @@ export function inferColumns(row: Record<string, unknown>): ColumnInfo[] {
     typeOid: 25, // text oid - safe default, zero-cache re-maps types
     typeMod: -1,
   }))
+}
+
+function postgresBooleanText(value: unknown): string | null {
+  if (typeof value === 'boolean') return value ? 't' : 'f'
+  if (typeof value === 'number') return value === 0 ? 'f' : 't'
+  if (typeof value === 'bigint') return value === 0n ? 'f' : 't'
+  if (typeof value !== 'string') return null
+  switch (value.trim().toLowerCase()) {
+    case 't':
+    case 'true':
+    case '1':
+      return 't'
+    case 'f':
+    case 'false':
+    case '0':
+      return 'f'
+    default:
+      return null
+  }
+}
+
+function postgresTupleTextValue(value: unknown, column: ColumnInfo): string {
+  if (column.typeOid === PG_TYPE_BOOL) {
+    const booleanText = postgresBooleanText(value)
+    if (booleanText !== null) return booleanText
+  }
+
+  if (typeof value === 'boolean') return value ? 't' : 'f'
+  if (typeof value === 'object') return JSON.stringify(value)
+
+  let strVal = String(value)
+  // normalize ISO timestamps to postgres text format.
+  // to_jsonb() produces "2026-03-19T07:20:11.643" but postgres
+  // pgoutput sends "2026-03-19 07:20:11.643" (space, no T).
+  // mismatch causes zero-cache to see different values during
+  // mutation reconciliation, triggering unnecessary rebases.
+  if (
+    (column.typeOid === PG_TYPE_TIMESTAMP || column.typeOid === PG_TYPE_TIMESTAMPTZ) &&
+    typeof value === 'string' &&
+    value.length >= 19
+  ) {
+    strVal = strVal.replace('T', ' ')
+  }
+  return strVal
 }
 
 // reusable scratch buffer for building messages (64KB, grows if needed)
@@ -175,27 +230,7 @@ function encodeTupleDataInto(
       ensureScratch(pos + 1)
       scratch[pos++] = 0x6e // 'n' for null
     } else {
-      // convert to postgresql text format
-      let strVal: string
-      if (typeof val === 'boolean') {
-        strVal = val ? 't' : 'f'
-      } else if (typeof val === 'object') {
-        strVal = JSON.stringify(val)
-      } else {
-        strVal = String(val)
-        // normalize ISO timestamps to postgres text format.
-        // to_jsonb() produces "2026-03-19T07:20:11.643" but postgres
-        // pgoutput sends "2026-03-19 07:20:11.643" (space, no T).
-        // mismatch causes zero-cache to see different values during
-        // mutation reconciliation, triggering unnecessary rebases.
-        if (
-          (col.typeOid === 1114 || col.typeOid === 1184) &&
-          typeof val === 'string' &&
-          val.length >= 19
-        ) {
-          strVal = strVal.replace('T', ' ')
-        }
-      }
+      const strVal = postgresTupleTextValue(val, col)
       const bytes = encoder.encode(strVal)
       ensureScratch(pos + 1 + 4 + bytes.length)
       scratch[pos++] = 0x74 // 't' for text
