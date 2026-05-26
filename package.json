@@ -34,6 +34,10 @@
     "./worker/shims/*": {
       "types": "./dist/worker/shims/*.d.ts",
       "import": "./dist/worker/shims/*.js"
+    },
+    "./cf-do": {
+      "types": "./dist/cf-do/worker.d.ts",
+      "import": "./dist/cf-do/worker.js"
     }
   },
   "bin": {
