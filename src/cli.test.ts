@@ -7,7 +7,9 @@ function runCli(
   args: string[]
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((res) => {
-    const child = spawn('bun', [resolve('dist/cli.js'), ...args], {
+    // cli-entry.js is the actual entry (cli.js only exports `main`; runMain
+    // is invoked from cli-entry).
+    const child = spawn('bun', [resolve('dist/cli-entry.js'), ...args], {
       timeout: 10_000,
       env: { ...process.env, NODE_ENV: 'test' },
     })
