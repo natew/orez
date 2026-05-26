@@ -1,0 +1,32 @@
+{
+  "source": "erans/pgsqlite tests/",
+  "bucket": "create-table",
+  "count": 5,
+  "cases": [
+    {
+      "name": "create_index_operator_class_test-1",
+      "sql": "CREATE TABLE test_users (id INTEGER PRIMARY KEY, email VARCHAR(255))",
+      "source": "create_index_operator_class_test.rs"
+    },
+    {
+      "name": "create_index_operator_class_test-2",
+      "sql": "INSERT INTO test_users (email) VALUES ('user@example.com'), ('admin@test.org')",
+      "source": "create_index_operator_class_test.rs"
+    },
+    {
+      "name": "create_index_operator_class_test-3",
+      "sql": "SELECT * FROM test_users WHERE email LIKE 'user%'",
+      "source": "create_index_operator_class_test.rs"
+    },
+    {
+      "name": "create_index_operator_class_test-4",
+      "sql": "CREATE INDEX \"test_users_email_like_idx\" ON \"test_users\" (\"email\" varchar_pattern_ops)",
+      "source": "create_index_operator_class_test.rs"
+    },
+    {
+      "name": "create_database_integration_test-1",
+      "sql": "CREATE DATABASE testdb",
+      "source": "create_database_integration_test.rs"
+    }
+  ]
+}

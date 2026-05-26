@@ -1,0 +1,337 @@
+{
+  "source": "erans/pgsqlite tests/",
+  "bucket": "insert",
+  "count": 66,
+  "cases": [
+    {
+      "name": "insert_translator_unit_test-1",
+      "sql": "CREATE TABLE test_table (id INT, date_col DATE, time_col TIME)",
+      "source": "insert_translator_unit_test.rs"
+    },
+    {
+      "name": "insert_translator_unit_test-2",
+      "sql": "SELECT typeof(date_col), typeof(time_col) FROM test_table WHERE id = 1",
+      "source": "insert_translator_unit_test.rs"
+    },
+    {
+      "name": "insert_translator_unit_test-3",
+      "sql": "SELECT date_col, time_col FROM test_table WHERE id = 1",
+      "source": "insert_translator_unit_test.rs"
+    },
+    {
+      "name": "returning_test-1",
+      "sql": "INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com') RETURNING *",
+      "source": "returning_test.rs"
+    },
+    {
+      "name": "returning_test-2",
+      "sql": "INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com') RETURNING id, name",
+      "source": "returning_test.rs"
+    },
+    {
+      "name": "returning_test-3",
+      "sql": "INSERT INTO users (name, email) VALUES \n         ('Charlie', 'charlie@example.com'),\n         ('David', 'david@example.com'),\n         ('Eve', 'eve@example.com')",
+      "source": "returning_test.rs"
+    },
+    {
+      "name": "returning_test-4",
+      "sql": "UPDATE users SET email = name || '@updated.com' WHERE name LIKE '%e' RETURNING name, email",
+      "source": "returning_test.rs"
+    },
+    {
+      "name": "returning_test-5",
+      "sql": "DELETE FROM users WHERE name = 'NonExistent' RETURNING *",
+      "source": "returning_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-1",
+      "sql": "CREATE TABLE edge_test (\n            id INTEGER PRIMARY KEY,\n            name TEXT,\n            value INTEGER\n        )",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-2",
+      "sql": "INSERT INTO edge_test (id, name, value) VALUES",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-3",
+      "sql": "INSERT INTO edge_test (id, name, value) VALUES (1, 'single', 100)",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-4",
+      "sql": "SELECT COUNT(*) FROM edge_test",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-5",
+      "sql": "CREATE TABLE null_test (\n            id INTEGER PRIMARY KEY,\n            name TEXT,\n            value INTEGER,\n            description TEXT\n        )",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-6",
+      "sql": "INSERT INTO null_test (id, name, value, description) VALUES\n            (1, 'test1', 100, NULL),\n            (2, NULL, 200, 'desc2'),\n            (3, 'test3', NULL, 'desc3'),\n            (4, NULL, NULL, NULL)",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-7",
+      "sql": "SELECT * FROM null_test ORDER BY id",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-8",
+      "sql": "CREATE TABLE type_test (\n            id INTEGER PRIMARY KEY,\n            bool_col BOOLEAN,\n            float_col REAL,\n            decimal_col NUMERIC(10,2),\n            date_col DATE,\n            time_col TIME,\n            timestamp_col TIMESTAMP\n        )",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-9",
+      "sql": "INSERT INTO type_test (id, bool_col, float_col, decimal_col, date_col, time_col, timestamp_col) VALUES\n            (1, true, 3.14, 123.45, '2025-01-01', '14:30:00', '2025-01-01 14:30:00'),\n            (2, false, 2.71, 999.99, '2025-12-31', '23:59:59', '2025-12-31 23:59:59.999999'),\n            (3, true, -1.23, 0.01, '1970-01-01', '00:00:00', '1970-01-01 00:00:00')",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-10",
+      "sql": "SELECT * FROM type_test ORDER BY id",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-11",
+      "sql": "CREATE TABLE returning_test (\n            id SERIAL PRIMARY KEY,\n            name TEXT,\n            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n        )",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-12",
+      "sql": "INSERT INTO returning_test (name) VALUES ('first') RETURNING id, name",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-13",
+      "sql": "INSERT INTO returning_test (name) VALUES ('second'), ('third')",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-14",
+      "sql": "SELECT id, name FROM returning_test ORDER BY id",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-15",
+      "sql": "CREATE TABLE constraint_test (\n            id INTEGER PRIMARY KEY,\n            email TEXT UNIQUE,\n            age INTEGER CHECK (age >= 0),\n            name VARCHAR(10)\n        )",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-16",
+      "sql": "INSERT INTO constraint_test (id, email, age, name) VALUES (1, 'test@example.com', 25, 'Test')",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-17",
+      "sql": "INSERT INTO constraint_test (id, email, age, name) VALUES\n            (2, 'new@example.com', 30, 'New'),\n            (3, 'test@example.com', 35, 'Duplicate')",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-18",
+      "sql": "SELECT COUNT(*) FROM constraint_test",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-19",
+      "sql": "INSERT INTO constraint_test (id, email, age, name) VALUES\n            (4, 'valid@example.com', 40, 'Valid'),\n            (5, 'invalid@example.com', -5, 'Invalid')",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-20",
+      "sql": "INSERT INTO constraint_test (id, email, age, name) VALUES\n            (6, 'long@example.com', 30, 'VeryLongNameThatExceedsLimit')",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-21",
+      "sql": "CREATE TABLE quote_test (\n            id INTEGER PRIMARY KEY,\n            name TEXT,\n            description TEXT\n        )",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-22",
+      "sql": "SELECT * FROM quote_test ORDER BY id",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-23",
+      "sql": "CREATE TABLE perf_test (\n            id INTEGER PRIMARY KEY,\n            name TEXT,\n            value INTEGER\n        )",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-24",
+      "sql": "INSERT INTO perf_test (id, name, value) VALUES ($1, $2, $3)",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-25",
+      "sql": "DELETE FROM perf_test",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-26",
+      "sql": "CREATE TABLE mixed_test (\n            id INTEGER PRIMARY KEY,\n            json_col TEXT,\n            binary_col BYTEA,\n            uuid_col TEXT\n        )",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-27",
+      "sql": "SELECT * FROM mixed_test ORDER BY id",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-28",
+      "sql": "INSERT INTO quote_test (id, name, description) VALUES\n            (1, 'O''Brien', 'It''s working'),\n            (2, 'Test \"quoted\"', 'Single '' and double \" quotes'),\n            (3, 'Normal', 'No quotes here')",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_comprehensive_test-29",
+      "sql": "INSERT INTO mixed_test (id, json_col, binary_col, uuid_col) VALUES\n            (1, '{\"key\": \"value\"}', '\\x0123456789ABCDEF', '550e8400-e29b-41d4-a716-446655440000'),\n            (2, '[\"array\", \"of\", \"values\"]', '\\xDEADBEEF', 'f47ac10b-58cc-4372-a567-0e02b2c3d479'),\n            (3, 'null', '\\x00', '00000000-0000-0000-0000-000000000000')",
+      "source": "batch_insert_comprehensive_test.rs"
+    },
+    {
+      "name": "batch_insert_datetime_functions_test-1",
+      "sql": "CREATE TABLE datetime_test (\n            id INTEGER PRIMARY KEY,\n            name TEXT,\n            created_date DATE,\n            created_time TIME,\n            created_timestamp TIMESTAMP\n        )",
+      "source": "batch_insert_datetime_functions_test.rs"
+    },
+    {
+      "name": "batch_insert_datetime_functions_test-2",
+      "sql": "INSERT INTO datetime_test (id, name, created_date, created_time, created_timestamp) VALUES \n            (1, 'test1', CURRENT_DATE, CURRENT_TIME, CURRENT_TIMESTAMP),\n            (2, 'test2', CURRENT_DATE, CURRENT_TIME, NOW()),\n            (3, 'test3', '2025-01-01', '14:30:00', '2025-01-01 14:30:00')",
+      "source": "batch_insert_datetime_functions_test.rs"
+    },
+    {
+      "name": "batch_insert_datetime_functions_test-3",
+      "sql": "SELECT COUNT(*) FROM datetime_test",
+      "source": "batch_insert_datetime_functions_test.rs"
+    },
+    {
+      "name": "batch_insert_datetime_functions_test-4",
+      "sql": "SELECT name, created_date, created_time, created_timestamp FROM datetime_test WHERE id = 3",
+      "source": "batch_insert_datetime_functions_test.rs"
+    },
+    {
+      "name": "batch_insert_datetime_functions_test-5",
+      "sql": "CREATE TABLE single_datetime_test (\n            id INTEGER PRIMARY KEY,\n            event_date DATE,\n            event_time TIME,\n            event_timestamp TIMESTAMP\n        )",
+      "source": "batch_insert_datetime_functions_test.rs"
+    },
+    {
+      "name": "batch_insert_datetime_functions_test-6",
+      "sql": "INSERT INTO single_datetime_test (id, event_date, event_time, event_timestamp) \n         VALUES (1, CURRENT_DATE, CURRENT_TIME, CURRENT_TIMESTAMP)",
+      "source": "batch_insert_datetime_functions_test.rs"
+    },
+    {
+      "name": "batch_insert_datetime_functions_test-7",
+      "sql": "SELECT COUNT(*) FROM single_datetime_test",
+      "source": "batch_insert_datetime_functions_test.rs"
+    },
+    {
+      "name": "batch_insert_datetime_functions_test-8",
+      "sql": "CREATE TABLE mixed_datetime_test (\n            id INTEGER PRIMARY KEY,\n            description TEXT,\n            event_date DATE,\n            event_timestamp TIMESTAMP\n        )",
+      "source": "batch_insert_datetime_functions_test.rs"
+    },
+    {
+      "name": "batch_insert_datetime_functions_test-9",
+      "sql": "INSERT INTO mixed_datetime_test (id, description, event_date, event_timestamp) VALUES \n            (1, 'Current', CURRENT_DATE, NOW()),\n            (2, 'Fixed', '2025-01-15', '2025-01-15 10:30:00'),\n            (3, 'Mixed', CURRENT_DATE, '2025-01-20 14:00:00'),\n            (4, 'Functions', CURRENT_DATE, CURRENT_TIMESTAMP)",
+      "source": "batch_insert_datetime_functions_test.rs"
+    },
+    {
+      "name": "batch_insert_datetime_functions_test-10",
+      "sql": "SELECT COUNT(*) FROM mixed_datetime_test",
+      "source": "batch_insert_datetime_functions_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-1",
+      "sql": "CREATE TABLE test_table (\n            id INTEGER PRIMARY KEY,\n            name TEXT,\n            value INTEGER\n        )",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-2",
+      "sql": "INSERT INTO test_table (id, name, value) VALUES \n            (1, 'test1', 100),\n            (2, 'test2'),  -- Missing value column\n            (3, 'test3', 300)",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-3",
+      "sql": "CREATE TABLE date_test (\n            id INTEGER PRIMARY KEY,\n            event_date DATE\n        )",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-4",
+      "sql": "INSERT INTO date_test (id, event_date) VALUES \n            (1, '2025-01-01'),\n            (2, '01/15/2025'),  -- Wrong format\n            (3, '2025-01-03')",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-5",
+      "sql": "CREATE TABLE time_test (\n            id INTEGER PRIMARY KEY,\n            event_time TIME\n        )",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-6",
+      "sql": "INSERT INTO time_test (id, event_time) VALUES \n            (1, '14:30:00'),\n            (2, '2:30 PM'),  -- Wrong format\n            (3, '16:45:00')",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-7",
+      "sql": "CREATE TABLE timestamp_test (\n            id INTEGER PRIMARY KEY,\n            event_timestamp TIMESTAMP\n        )",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-8",
+      "sql": "INSERT INTO timestamp_test (id, event_timestamp) VALUES \n            (1, '2025-01-01 14:30:00'),\n            (2, '2025-01-02T15:45:00Z'),  -- ISO format not supported\n            (3, '2025-01-03 16:00:00')",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-9",
+      "sql": "CREATE TABLE unique_test (\n            id INTEGER PRIMARY KEY,\n            email TEXT UNIQUE\n        )",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-10",
+      "sql": "INSERT INTO unique_test (id, email) VALUES (1, 'existing@example.com')",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-11",
+      "sql": "INSERT INTO unique_test (id, email) VALUES \n            (2, 'new1@example.com'),\n            (3, 'existing@example.com'),  -- Duplicate\n            (4, 'new2@example.com')",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "batch_insert_error_test-12",
+      "sql": "SELECT COUNT(*) FROM unique_test",
+      "source": "batch_insert_error_test.rs"
+    },
+    {
+      "name": "multirow_insert_returning_test-1",
+      "sql": "INSERT INTO users (name, email) VALUES \n         ('Alice', 'alice@example.com'),\n         ('Bob', 'bob@example.com'),\n         ('Charlie', 'charlie@example.com')\n         RETURNING id, name",
+      "source": "multirow_insert_returning_test.rs"
+    },
+    {
+      "name": "multirow_insert_returning_test-2",
+      "sql": "CREATE TABLE temp_users (name TEXT, email TEXT)",
+      "source": "multirow_insert_returning_test.rs"
+    },
+    {
+      "name": "multirow_insert_returning_test-3",
+      "sql": "INSERT INTO temp_users VALUES ('David', 'david@example.com'), ('Eve', 'eve@example.com')",
+      "source": "multirow_insert_returning_test.rs"
+    },
+    {
+      "name": "multirow_insert_returning_test-4",
+      "sql": "INSERT INTO users (name, email) \n         SELECT name, email FROM temp_users\n         RETURNING id, name, email",
+      "source": "multirow_insert_returning_test.rs"
+    },
+    {
+      "name": "multirow_insert_returning_test-5",
+      "sql": "SELECT * FROM users ORDER BY id",
+      "source": "multirow_insert_returning_test.rs"
+    },
+    {
+      "name": "multirow_insert_returning_test-6",
+      "sql": "INSERT INTO categories (name, description, created_at) \n         SELECT p0::VARCHAR, p1::TEXT, p2::TIMESTAMP WITHOUT TIME ZONE \n         FROM (VALUES \n           ('Technology', 'Posts about technology and programming', '2025-01-25 12:00:00'::timestamp, 0), \n           ('Lifestyle', 'Posts about lifestyle and personal development', '2025-01-25 12:00:01'::timestamp, 1)\n         ) AS imp_sen(p0, p1, p2, sen_counter) \n         ORDER BY sen_counter \n         RETURNING categories.id, categories.id AS id__1",
+      "source": "multirow_insert_returning_test.rs"
+    },
+    {
+      "name": "multirow_insert_returning_test-7",
+      "sql": "SELECT * FROM categories ORDER BY id",
+      "source": "multirow_insert_returning_test.rs"
+    }
+  ]
+}

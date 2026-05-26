@@ -38,6 +38,36 @@ jobs:
       - name: native sqlite guard
         run: bun run test:native:guard
 
+  compiler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo + pgsqlite build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            vendor/pgsqlite/build/target
+          key: pgsqlite-${{ runner.os }}-v0.0.22
+
+      - run: bun install --frozen-lockfile
+
+      - name: build pgsqlite (oracle)
+        run: bun run compiler:ensure-pgsqlite
+
+      - name: compiler tests (incl. pgsqlite oracle)
+        run: bun run test:compiler
+
   native-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 15

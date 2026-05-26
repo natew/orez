@@ -1,0 +1,377 @@
+{
+  "source": "erans/pgsqlite tests/",
+  "bucket": "array",
+  "count": 74,
+  "cases": [
+    {
+      "name": "array_binary_protocol_test-1",
+      "sql": "CREATE TABLE array_test (\n            id INTEGER PRIMARY KEY,\n            bool_array BOOLEAN[],\n            int2_array SMALLINT[],\n            int4_array INTEGER[],\n            int8_array BIGINT[],\n            float4_array REAL[],\n            float8_array DOUBLE PRECISION[],\n            text_array TEXT[],\n            varchar_array VARCHAR(50)[],\n            numeric_array NUMERIC(10,2)[]\n        )",
+      "source": "array_binary_protocol_test.rs"
+    },
+    {
+      "name": "array_binary_protocol_test-2",
+      "sql": "INSERT INTO array_test (id, bool_array, int2_array, int4_array, int8_array, float4_array, float8_array, text_array, varchar_array, numeric_array)\n        VALUES (\n            1,\n            ARRAY[true, false, true],\n            ARRAY[1, 2, 3],\n            ARRAY[100, 200, 300],\n            ARRAY[1000000, 2000000, 3000000],\n            ARRAY[1.5, 2.5, 3.5],\n            ARRAY[1.111, 2.222, 3.333],\n            ARRAY['hello', 'world', 'test'],\n            ARRAY['varchar1', 'varchar2', 'varchar3'],\n            ARRAY[123.45, 678.90, 999.99]\n        )",
+      "source": "array_binary_protocol_test.rs"
+    },
+    {
+      "name": "array_binary_protocol_test-3",
+      "sql": "CREATE TABLE array_null_test (\n            id INTEGER PRIMARY KEY,\n            int_array_with_nulls INTEGER[]\n        )",
+      "source": "array_binary_protocol_test.rs"
+    },
+    {
+      "name": "array_binary_protocol_test-4",
+      "sql": "INSERT INTO array_null_test (id, int_array_with_nulls)\n        VALUES (1, '[1, null, 3]'::INTEGER[])",
+      "source": "array_binary_protocol_test.rs"
+    },
+    {
+      "name": "array_binary_protocol_test-5",
+      "sql": "CREATE TABLE empty_array_test (\n            id INTEGER PRIMARY KEY,\n            empty_int_array INTEGER[],\n            empty_text_array TEXT[]\n        )",
+      "source": "array_binary_protocol_test.rs"
+    },
+    {
+      "name": "array_binary_protocol_test-6",
+      "sql": "INSERT INTO empty_array_test (id, empty_int_array, empty_text_array)\n        VALUES (1, ARRAY[]::INTEGER[], ARRAY[]::TEXT[])",
+      "source": "array_binary_protocol_test.rs"
+    },
+    {
+      "name": "array_operators_test-1",
+      "sql": "SELECT tags[1] FROM products WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-2",
+      "sql": "SELECT id, name FROM products WHERE 'portable' = ANY(tags)",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-3",
+      "sql": "SELECT id, name FROM products WHERE 5 < ALL(SELECT length(value) FROM json_each(tags))",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-4",
+      "sql": "SELECT id, name FROM products WHERE tags @> '[\"electronics\", \"portable\"]'",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-5",
+      "sql": "SELECT id, name FROM products WHERE tags <@ '[\"electronics\", \"computers\", \"portable\", \"desktop\", \"mobile\"]'",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-6",
+      "sql": "SELECT p.name, c.name \n         FROM products p, categories c \n         WHERE p.tags && c.subcategories",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-7",
+      "sql": "SELECT tags || '[\"new-tag\"]' AS combined FROM products WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-8",
+      "sql": "SELECT array_length(numbers, 1) FROM test_arrays WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-9",
+      "sql": "SELECT array_upper(numbers, 1), array_lower(numbers, 1) FROM test_arrays WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-10",
+      "sql": "SELECT array_ndims(matrix) FROM test_arrays WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-11",
+      "sql": "SELECT array_append(numbers, 6) FROM test_arrays WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-12",
+      "sql": "SELECT array_prepend(0, numbers) FROM test_arrays WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-13",
+      "sql": "SELECT array_cat(numbers, '[6, 7, 8]') FROM test_arrays WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-14",
+      "sql": "SELECT array_remove(numbers, 3) FROM test_arrays WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-15",
+      "sql": "SELECT array_replace(numbers, 3, 99) FROM test_arrays WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-16",
+      "sql": "SELECT array_position(numbers, 3) FROM test_arrays WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-17",
+      "sql": "SELECT array_positions('[1, 2, 3, 2, 4, 2]', 2)",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-18",
+      "sql": "SELECT array_agg(DISTINCT product ORDER BY product) AS products FROM sales",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-19",
+      "sql": "SELECT product, array_agg(amount) AS amounts \n         FROM sales \n         GROUP BY product \n         ORDER BY product",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-20",
+      "sql": "SELECT data_values[2:5] AS slice FROM test_data WHERE id = 1",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-21",
+      "sql": "SELECT value FROM unnest('[\"first\", \"second\", \"third\"]') AS t",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-22",
+      "sql": "SELECT value, ordinality FROM unnest('[\"first\", \"second\", \"third\"]') WITH ORDINALITY AS t ORDER BY ordinality",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_operators_test-23",
+      "sql": "SELECT value FROM unnest('[\"a\", \"b\", \"c\", \"d\"]') WITH ORDINALITY AS t WHERE ordinality > 2",
+      "source": "array_operators_test.rs"
+    },
+    {
+      "name": "array_concat_test-1",
+      "sql": "CREATE TABLE test_arrays (\n                id INTEGER PRIMARY KEY,\n                tags TEXT[],\n                numbers INTEGER[],\n                items_list TEXT[],\n                category_names TEXT[]\n            )",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-2",
+      "sql": "INSERT INTO test_arrays (id, tags, numbers, items_list, category_names) VALUES \n                (1, '{tag1,tag2}', '{1,2,3}', '{item1,item2}', '{cat1,cat2}'),\n                (2, '{tag3,tag4}', '{4,5,6}', '{item3,item4}', '{cat3,cat4}')",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-3",
+      "sql": "SELECT '{a,b}' || '{c,d}' AS concat_result",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-4",
+      "sql": "SELECT tags || '{new_tag}' AS extended_tags FROM test_arrays WHERE id = 1",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-5",
+      "sql": "SELECT tags || category_names AS all_tags FROM test_arrays WHERE id = 1",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-6",
+      "sql": "SELECT '{a,b}' || tags AS combined FROM test_arrays WHERE id = 1",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-7",
+      "sql": "SELECT 'hello' || ' world' AS greeting",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-8",
+      "sql": "SELECT 'id_' || id::TEXT AS prefixed_id FROM test_arrays WHERE id = 1",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-9",
+      "sql": "CREATE TABLE test_concat (\n                id INTEGER PRIMARY KEY,\n                tags_array TEXT[],\n                items TEXT[]\n            )",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-10",
+      "sql": "INSERT INTO test_concat (id, tags_array, items) VALUES \n                (1, '{tag1,tag2}', '{item1,item2}')",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-11",
+      "sql": "SELECT tags_array || items AS combined_data FROM test_concat",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-12",
+      "sql": "SELECT '{extra}' || tags_array AS final_tags FROM test_concat",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-13",
+      "sql": "CREATE TABLE test_funcs (\n                id INTEGER PRIMARY KEY,\n                base_array TEXT[]\n            )",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-14",
+      "sql": "INSERT INTO test_funcs (id, base_array) VALUES (1, '{a,b}')",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-15",
+      "sql": "CREATE TABLE naming_test (\n                user_tags TEXT[],\n                item_ids INTEGER[],\n                categories TEXT[],\n                keywords TEXT[],\n                elements TEXT[],\n                values_list TEXT[],\n                name_array TEXT[],\n                simple_string TEXT\n            )",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-16",
+      "sql": "INSERT INTO naming_test VALUES \n                ('{tag1}', '{1,2}', '{cat1}', '{kw1}', '{el1}', '{val1}', '{name1}', 'text')",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-17",
+      "sql": "SELECT simple_string || ' suffix' FROM naming_test",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-18",
+      "sql": "CREATE TABLE array_syntax_test (\n                id INTEGER PRIMARY KEY,\n                int_array INTEGER[],\n                text_array TEXT[]\n            )",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-19",
+      "sql": "INSERT INTO array_syntax_test (id, int_array, text_array) VALUES \n                (1, '{1,2,3}', '{a,b,c}'),\n                (2, '{4,5,6}', '{d,e,f}')",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-20",
+      "sql": "SELECT '{1,2}' || '{3,4}' AS combined",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-21",
+      "sql": "SELECT '{0}' || int_array AS prepended FROM array_syntax_test WHERE id = 1",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-22",
+      "sql": "SELECT text_array || '{z}' AS appended FROM array_syntax_test WHERE id = 1",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_concat_test-23",
+      "sql": "SELECT '{prefix}' || text_array AS wrapped FROM array_syntax_test WHERE id = 1",
+      "source": "array_concat_test.rs"
+    },
+    {
+      "name": "array_types_test-1",
+      "sql": "CREATE TABLE test_array_types (\n            id INTEGER PRIMARY KEY,\n            numbers INTEGER[],\n            names TEXT[],\n            matrix INTEGER[][]\n        )",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-2",
+      "sql": "SELECT int_array, text_array FROM array_data WHERE id = 1",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-3",
+      "sql": "SELECT int_array FROM array_data WHERE id = 3",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-4",
+      "sql": "SELECT ARRAY[1,2,3]",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-5",
+      "sql": "SELECT '{1,2,3}'::integer[]",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-6",
+      "sql": "SELECT json_array_length(data) FROM array_ops WHERE id = 1",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-7",
+      "sql": "SELECT json_extract(data, '$[0]') FROM array_ops WHERE id = 1",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-8",
+      "sql": "SELECT json_extract(data, '$[1]') FROM array_ops WHERE id = 2",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-9",
+      "sql": "SELECT id, name FROM products \n         WHERE json_extract(tags, '$') LIKE '%electronics%'",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-10",
+      "sql": "SELECT id, name FROM products \n         WHERE json_extract(tags, '$[0]') = 'electronics'",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-11",
+      "sql": "SELECT id FROM products WHERE 'electronics' = ANY(tags)",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-12",
+      "sql": "SELECT json_group_array(value) as value_array \n         FROM measurements \n         WHERE sensor_id = 1",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-13",
+      "sql": "SELECT sensor_id, json_group_array(value) as value_array \n         FROM measurements \n         GROUP BY sensor_id \n         ORDER BY sensor_id",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-14",
+      "sql": "SELECT array_agg(value) FROM measurements WHERE sensor_id = 1",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-15",
+      "sql": "SELECT json_extract(matrix, '$[0][0]') as elem FROM matrix_data WHERE id = 1",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-16",
+      "sql": "SELECT json_extract(matrix, '$[1][2]') as elem FROM matrix_data WHERE id = 1",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-17",
+      "sql": "SELECT json_array_length(matrix) as rows FROM matrix_data WHERE id = 1",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-18",
+      "sql": "SELECT json_extract(data, '$[1]') FROM nullable_arrays WHERE id = 1",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-19",
+      "sql": "SELECT data FROM nullable_arrays WHERE id = 3",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-20",
+      "sql": "SELECT json_array_length(data) FROM nullable_arrays WHERE id = 1",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-21",
+      "sql": "SELECT value FROM json_each((SELECT items FROM array_table WHERE id = 1))",
+      "source": "array_types_test.rs"
+    },
+    {
+      "name": "array_types_test-22",
+      "sql": "SELECT a.id, je.value \n         FROM array_table a, json_each(a.items) je \n         ORDER BY a.id, je.value",
+      "source": "array_types_test.rs"
+    }
+  ]
+}

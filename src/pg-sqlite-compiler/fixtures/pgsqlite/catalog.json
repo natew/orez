@@ -1,0 +1,447 @@
+{
+  "source": "erans/pgsqlite tests/",
+  "bucket": "catalog",
+  "count": 88,
+  "cases": [
+    {
+      "name": "information_schema_comprehensive_test-1",
+      "sql": "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name",
+      "source": "information_schema_comprehensive_test.rs"
+    },
+    {
+      "name": "information_schema_comprehensive_test-2",
+      "sql": "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
+      "source": "information_schema_comprehensive_test.rs"
+    },
+    {
+      "name": "information_schema_comprehensive_test-3",
+      "sql": "SELECT table_name, table_type, is_insertable_into FROM information_schema.tables WHERE table_name IN ('users', 'user_posts')",
+      "source": "information_schema_comprehensive_test.rs"
+    },
+    {
+      "name": "information_schema_comprehensive_test-4",
+      "sql": "SELECT * FROM information_schema.schemata",
+      "source": "information_schema_comprehensive_test.rs"
+    },
+    {
+      "name": "information_schema_comprehensive_test-5",
+      "sql": "SELECT * FROM information_schema.tables LIMIT 1",
+      "source": "information_schema_comprehensive_test.rs"
+    },
+    {
+      "name": "catalog_extended_protocol_test-1",
+      "sql": "SELECT relname, relkind FROM pg_catalog.pg_class WHERE relkind = 'r'",
+      "source": "catalog_extended_protocol_test.rs"
+    },
+    {
+      "name": "pg_proc_test-1",
+      "sql": "SELECT proname, prokind FROM pg_proc WHERE proname = 'length'",
+      "source": "pg_proc_test.rs"
+    },
+    {
+      "name": "pg_proc_test-2",
+      "sql": "SELECT * FROM pg_proc WHERE proname = 'count'",
+      "source": "pg_proc_test.rs"
+    },
+    {
+      "name": "pg_proc_test-3",
+      "sql": "SELECT COUNT(*) FROM pg_proc",
+      "source": "pg_proc_test.rs"
+    },
+    {
+      "name": "catalog_where_basic_test-1",
+      "sql": "SELECT relname, relkind FROM pg_catalog.pg_class",
+      "source": "catalog_where_basic_test.rs"
+    },
+    {
+      "name": "catalog_where_basic_test-2",
+      "sql": "SELECT relname FROM pg_catalog.pg_class WHERE relkind = 'r'",
+      "source": "catalog_where_basic_test.rs"
+    },
+    {
+      "name": "catalog_where_basic_test-3",
+      "sql": "SELECT attname FROM pg_catalog.pg_attribute WHERE attnum > 0",
+      "source": "catalog_where_basic_test.rs"
+    },
+    {
+      "name": "catalog_where_basic_test-4",
+      "sql": "SELECT relkind FROM pg_catalog.pg_class WHERE relkind IN ('r', 'i')",
+      "source": "catalog_where_basic_test.rs"
+    },
+    {
+      "name": "catalog_where_basic_test-5",
+      "sql": "SELECT relname FROM pg_catalog.pg_class WHERE relkind != 'v'",
+      "source": "catalog_where_basic_test.rs"
+    },
+    {
+      "name": "information_schema_table_constraints_test-1",
+      "sql": "SELECT constraint_name, table_name, constraint_type FROM information_schema.table_constraints ORDER BY table_name, constraint_name",
+      "source": "information_schema_table_constraints_test.rs"
+    },
+    {
+      "name": "information_schema_table_constraints_test-2",
+      "sql": "SELECT constraint_name, table_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 'test_table'",
+      "source": "information_schema_table_constraints_test.rs"
+    },
+    {
+      "name": "information_schema_table_constraints_test-3",
+      "sql": "SELECT * FROM information_schema.table_constraints WHERE table_name = 'simple_pk'",
+      "source": "information_schema_table_constraints_test.rs"
+    },
+    {
+      "name": "information_schema_table_constraints_test-4",
+      "sql": "SELECT constraint_type FROM information_schema.table_constraints WHERE table_name = 'constraint_test' ORDER BY constraint_type",
+      "source": "information_schema_table_constraints_test.rs"
+    },
+    {
+      "name": "pg_index_test-1",
+      "sql": "SELECT COUNT(*) FROM pg_index",
+      "source": "pg_index_test.rs"
+    },
+    {
+      "name": "pg_index_test-2",
+      "sql": "SELECT indexrelid, indrelid, indnatts, indnkeyatts, indisunique, indisprimary, indkey FROM pg_index ORDER BY indexrelid",
+      "source": "pg_index_test.rs"
+    },
+    {
+      "name": "pg_index_test-3",
+      "sql": "SELECT\n            ic.relname as index_name,\n            i.indnatts,\n            i.indkey\n        FROM pg_index i\n        JOIN pg_class ic ON i.indexrelid = ic.oid\n        JOIN pg_class tc ON i.indrelid = tc.oid\n        WHERE tc.relname = 'products' AND i.indnatts > 1\n        ORDER BY ic.relname",
+      "source": "pg_index_test.rs"
+    },
+    {
+      "name": "pg_database_simple_test-1",
+      "sql": "SELECT datname FROM pg_database",
+      "source": "pg_database_simple_test.rs"
+    },
+    {
+      "name": "pg_database_simple_test-2",
+      "sql": "SELECT oid, datname, datdba FROM pg_database",
+      "source": "pg_database_simple_test.rs"
+    },
+    {
+      "name": "pg_database_simple_test-3",
+      "sql": "SELECT datname FROM pg_catalog.pg_database",
+      "source": "pg_database_simple_test.rs"
+    },
+    {
+      "name": "pg_database_simple_test-4",
+      "sql": "SELECT 1 FROM pg_database WHERE datname = 'main'",
+      "source": "pg_database_simple_test.rs"
+    },
+    {
+      "name": "pg_database_simple_test-5",
+      "sql": "SELECT datname, datcollate, datctype FROM pg_database ORDER BY datname",
+      "source": "pg_database_simple_test.rs"
+    },
+    {
+      "name": "pg_constraint_test-1",
+      "sql": "SELECT conname, contype FROM pg_constraint",
+      "source": "pg_constraint_test.rs"
+    },
+    {
+      "name": "pg_constraint_test-2",
+      "sql": "SELECT conname, contype, conrelid, confrelid, conkey, confkey FROM pg_constraint WHERE contype = 'f'",
+      "source": "pg_constraint_test.rs"
+    },
+    {
+      "name": "pg_constraint_test-3",
+      "sql": "SELECT conname, contype, conkey FROM pg_constraint WHERE contype = 'p'",
+      "source": "pg_constraint_test.rs"
+    },
+    {
+      "name": "pg_constraint_test-4",
+      "sql": "SELECT conname, contype, condeferrable, condeferred, convalidated FROM pg_constraint ORDER BY conname",
+      "source": "pg_constraint_test.rs"
+    },
+    {
+      "name": "pg_constraint_test-5",
+      "sql": "SELECT conname, contype, confupdtype, confdeltype, confmatchtype FROM pg_constraint WHERE contype = 'f'",
+      "source": "pg_constraint_test.rs"
+    },
+    {
+      "name": "pg_database_test-2",
+      "sql": "SELECT * FROM pg_database",
+      "source": "pg_database_test.rs"
+    },
+    {
+      "name": "pg_database_test-5",
+      "sql": "SELECT datname FROM pg_database WHERE datname = 'main'",
+      "source": "pg_database_test.rs"
+    },
+    {
+      "name": "pg_database_test-6",
+      "sql": "SELECT datname FROM pg_database WHERE datname = 'nonexistent'",
+      "source": "pg_database_test.rs"
+    },
+    {
+      "name": "pg_database_test-7",
+      "sql": "SELECT current_database()",
+      "source": "pg_database_test.rs"
+    },
+    {
+      "name": "catalog_query_test-1",
+      "sql": "SELECT typname FROM pg_type WHERE oid = 23",
+      "source": "catalog_query_test.rs"
+    },
+    {
+      "name": "catalog_query_test-3",
+      "sql": "SELECT $1::int4",
+      "source": "catalog_query_test.rs"
+    },
+    {
+      "name": "information_schema_test-2",
+      "sql": "SELECT schema_name FROM information_schema.schemata",
+      "source": "information_schema_test.rs"
+    },
+    {
+      "name": "information_schema_test-3",
+      "sql": "SELECT table_name, table_type FROM information_schema.tables",
+      "source": "information_schema_test.rs"
+    },
+    {
+      "name": "information_schema_test-4",
+      "sql": "SELECT * FROM information_schema.tables WHERE table_name = 'test_table'",
+      "source": "information_schema_test.rs"
+    },
+    {
+      "name": "information_schema_test-5",
+      "sql": "SELECT table_name, table_type, is_insertable_into FROM information_schema.tables WHERE table_name IN ('test_table', 'test_view')",
+      "source": "information_schema_test.rs"
+    },
+    {
+      "name": "information_schema_test-6",
+      "sql": "SELECT table_name, column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = 'test_table' ORDER BY ordinal_position",
+      "source": "information_schema_test.rs"
+    },
+    {
+      "name": "information_schema_test-7",
+      "sql": "SELECT * FROM information_schema.columns WHERE table_name = 'simple_table'",
+      "source": "information_schema_test.rs"
+    },
+    {
+      "name": "information_schema_test-8",
+      "sql": "SELECT table_catalog, table_schema, table_name, column_name, data_type FROM information_schema.columns WHERE table_name = 'column_test'",
+      "source": "information_schema_test.rs"
+    },
+    {
+      "name": "pg_constraint_debug_test-1",
+      "sql": "SELECT * FROM pg_constraint",
+      "source": "pg_constraint_debug_test.rs"
+    },
+    {
+      "name": "catalog_basic_test-2",
+      "sql": "SELECT * FROM pg_catalog.pg_class WHERE relkind = 'r' LIMIT 1",
+      "source": "catalog_basic_test.rs"
+    },
+    {
+      "name": "pg_depend_debug_test-1",
+      "sql": "SELECT name FROM sqlite_master WHERE type='table' AND name='debug_table'",
+      "source": "pg_depend_debug_test.rs"
+    },
+    {
+      "name": "pg_depend_debug_test-2",
+      "sql": "SELECT * FROM pg_depend",
+      "source": "pg_depend_debug_test.rs"
+    },
+    {
+      "name": "pg_depend_debug_test-3",
+      "sql": "SELECT classid, objid FROM pg_depend",
+      "source": "pg_depend_debug_test.rs"
+    },
+    {
+      "name": "pg_depend_debug_test-4",
+      "sql": "SELECT name FROM sqlite_master WHERE type='table' AND name='pg_depend'",
+      "source": "pg_depend_debug_test.rs"
+    },
+    {
+      "name": "pg_depend_debug_test-5",
+      "sql": "SELECT sql FROM sqlite_master WHERE name = 'pg_depend'",
+      "source": "pg_depend_debug_test.rs"
+    },
+    {
+      "name": "pg_depend_debug_test-6",
+      "sql": "PRAGMA table_info(pg_depend)",
+      "source": "pg_depend_debug_test.rs"
+    },
+    {
+      "name": "pg_depend_debug_test-7",
+      "sql": "SELECT COUNT(*) FROM pg_depend",
+      "source": "pg_depend_debug_test.rs"
+    },
+    {
+      "name": "pg_depend_debug_test-8",
+      "sql": "SELECT * FROM pg_depend LIMIT 3",
+      "source": "pg_depend_debug_test.rs"
+    },
+    {
+      "name": "pg_depend_debug_test-9",
+      "sql": "SELECT value FROM __pgsqlite_metadata WHERE key = 'schema_version'",
+      "source": "pg_depend_debug_test.rs"
+    },
+    {
+      "name": "catalog_where_test-3",
+      "sql": "SELECT relname, relkind FROM pg_catalog.pg_class WHERE relkind IN ('r', 'i')",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_test-4",
+      "sql": "SELECT relname FROM pg_catalog.pg_class WHERE relname LIKE 'pgclass_test_%'",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_test-5",
+      "sql": "SELECT relname FROM pg_catalog.pg_class WHERE relname = 'pgclass_test_table1'",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_test-6",
+      "sql": "SELECT relname FROM pg_catalog.pg_class WHERE relkind = 'r' AND relname = 'pgclass_test_table1'",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_test-7",
+      "sql": "SELECT attname, attnum FROM pg_catalog.pg_attribute WHERE attnum > 0",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_test-8",
+      "sql": "SELECT 1 FROM pgattr_test_attrs LIMIT 1",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_test-9",
+      "sql": "SELECT attname, attnotnull FROM pg_catalog.pg_attribute WHERE attnum > 0",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_test-11",
+      "sql": "SELECT name FROM pgattr_test_attrs LIMIT 1",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_test-12",
+      "sql": "SELECT attname FROM pg_catalog.pg_attribute WHERE attnotnull = 't'",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_test-13",
+      "sql": "SELECT attname FROM pg_catalog.pg_attribute WHERE attnum > 0 AND attisdropped = 'f'",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_test-14",
+      "sql": "SELECT relname FROM pg_catalog.pg_class WHERE relkind IN ('r','p') AND relnamespace = 2200",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_test-15",
+      "sql": "SELECT relname FROM pg_catalog.pg_class WHERE relkind != 'i'",
+      "source": "catalog_where_test.rs"
+    },
+    {
+      "name": "catalog_where_simple_test-1",
+      "sql": "SELECT 1",
+      "source": "catalog_where_simple_test.rs"
+    },
+    {
+      "name": "pg_depend_test-1",
+      "sql": "SELECT classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype FROM pg_depend",
+      "source": "pg_depend_test.rs"
+    },
+    {
+      "name": "pg_depend_test-2",
+      "sql": "SELECT * FROM pg_depend WHERE deptype = 'a'",
+      "source": "pg_depend_test.rs"
+    },
+    {
+      "name": "pg_depend_test-4",
+      "sql": "SELECT refobjsubid FROM pg_depend WHERE deptype = 'a' ORDER BY refobjid",
+      "source": "pg_depend_test.rs"
+    },
+    {
+      "name": "information_schema_key_column_usage_test-1",
+      "sql": "SELECT constraint_name, table_name, column_name, ordinal_position FROM information_schema.key_column_usage ORDER BY table_name, constraint_name, ordinal_position",
+      "source": "information_schema_key_column_usage_test.rs"
+    },
+    {
+      "name": "information_schema_key_column_usage_test-2",
+      "sql": "SELECT constraint_name, table_name, column_name FROM information_schema.key_column_usage WHERE table_name = 'test_table'",
+      "source": "information_schema_key_column_usage_test.rs"
+    },
+    {
+      "name": "information_schema_key_column_usage_test-3",
+      "sql": "SELECT * FROM information_schema.key_column_usage WHERE table_name = 'simple_pk'",
+      "source": "information_schema_key_column_usage_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-1",
+      "sql": "CREATE TYPE status AS ENUM ('active', 'inactive', 'pending')",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-2",
+      "sql": "CREATE TABLE test_enum_table (id INTEGER PRIMARY KEY, current_status status)",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-3",
+      "sql": "SELECT relname FROM pg_catalog.pg_class WHERE relkind = 'r' AND relname = 'test_enum_table'",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-4",
+      "sql": "SELECT sql FROM sqlite_master WHERE type='table' AND name='test_enum_table'",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-5",
+      "sql": "SELECT table_name, column_name, pg_type FROM __pgsqlite_schema WHERE table_name = 'test_enum_table'",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-6",
+      "sql": "SELECT type_oid, type_name FROM __pgsqlite_enum_types",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-8",
+      "sql": "SELECT CAST(oid AS TEXT) FROM pg_catalog.pg_class WHERE relname = 'test_enum_table'",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-9",
+      "sql": "SELECT COUNT(*) FROM pg_catalog.pg_attribute",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-10",
+      "sql": "SELECT CAST(oid AS TEXT), typname FROM pg_catalog.pg_type WHERE typtype = 'e'",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-11",
+      "sql": "SELECT typname, typtype FROM pg_catalog.pg_type WHERE oid = $1",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-12",
+      "sql": "SELECT enumlabel FROM pg_catalog.pg_enum WHERE enumtypid = $1 ORDER BY enumsortorder",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-13",
+      "sql": "CREATE TYPE color AS ENUM ('red', 'green', 'blue')",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-14",
+      "sql": "CREATE TYPE size AS ENUM ('small', 'medium', 'large', 'extra_large')",
+      "source": "catalog_enum_test.rs"
+    },
+    {
+      "name": "catalog_enum_test-15",
+      "sql": "SELECT CAST(oid AS TEXT), typname FROM pg_catalog.pg_type WHERE typtype = 'e' ORDER BY typname",
+      "source": "catalog_enum_test.rs"
+    }
+  ]
+}

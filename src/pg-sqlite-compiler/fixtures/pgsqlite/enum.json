@@ -1,0 +1,337 @@
+{
+  "source": "erans/pgsqlite tests/",
+  "bucket": "enum",
+  "count": 66,
+  "cases": [
+    {
+      "name": "enum_where_test-1",
+      "sql": "CREATE TYPE status AS ENUM ('pending', 'active', 'inactive', 'deleted')",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-2",
+      "sql": "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, status status)",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-3",
+      "sql": "INSERT INTO items (id, name, status) VALUES (1, 'Item 1', 'active')",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-4",
+      "sql": "INSERT INTO items (id, name, status) VALUES (2, 'Item 2', 'pending')",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-5",
+      "sql": "INSERT INTO items (id, name, status) VALUES (3, 'Item 3', 'inactive')",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-6",
+      "sql": "INSERT INTO items (id, name, status) VALUES (4, 'Item 4', 'deleted')",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-7",
+      "sql": "SELECT id, name, status FROM items WHERE status = 'active'",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-8",
+      "sql": "SELECT id, name, status FROM items WHERE status != 'deleted'",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-9",
+      "sql": "CREATE TYPE priority AS ENUM ('low', 'medium', 'high', 'critical')",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-10",
+      "sql": "CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT, priority priority)",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-11",
+      "sql": "INSERT INTO tasks VALUES (1, 'Task 1', 'low'), (2, 'Task 2', 'high'), (3, 'Task 3', 'critical'), (4, 'Task 4', 'medium')",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-12",
+      "sql": "SELECT id, title, priority FROM tasks WHERE priority IN ('high', 'critical') ORDER BY id",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-13",
+      "sql": "SELECT COUNT(*) as cnt FROM tasks WHERE priority NOT IN ('low')",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-14",
+      "sql": "CREATE TYPE severity AS ENUM ('info', 'warning', 'error', 'fatal')",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-15",
+      "sql": "CREATE TABLE logs (id INTEGER PRIMARY KEY, message TEXT, severity severity)",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-16",
+      "sql": "INSERT INTO logs VALUES (1, 'Info message', 'info'), (2, 'Warning message', 'warning'), (3, 'Error message', 'error'), (4, 'Fatal message', 'fatal')",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-17",
+      "sql": "SELECT id, severity FROM logs WHERE severity = 'error' OR severity = 'fatal' ORDER BY id",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-18",
+      "sql": "CREATE TYPE state AS ENUM ('draft', 'published', 'archived')",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-19",
+      "sql": "CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT, state state)",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-20",
+      "sql": "INSERT INTO posts VALUES (1, 'Post 1', 'published'), (2, 'Post 2', NULL), (3, 'Post 3', 'draft'), (4, 'Post 4', NULL)",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-21",
+      "sql": "SELECT id FROM posts WHERE state IS NULL ORDER BY id",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_where_test-22",
+      "sql": "SELECT COUNT(*) as cnt FROM posts WHERE state IS NOT NULL",
+      "source": "enum_where_test.rs"
+    },
+    {
+      "name": "enum_cast_extended_test-1",
+      "sql": "CREATE TYPE status AS ENUM ('active', 'inactive', 'pending')",
+      "source": "enum_cast_extended_test.rs"
+    },
+    {
+      "name": "enum_cast_extended_test-3",
+      "sql": "INSERT INTO items (id, name, status) VALUES ($1, $2, $3::status)",
+      "source": "enum_cast_extended_test.rs"
+    },
+    {
+      "name": "enum_cast_extended_test-4",
+      "sql": "SELECT $1::status as casted",
+      "source": "enum_cast_extended_test.rs"
+    },
+    {
+      "name": "enum_cast_extended_test-6",
+      "sql": "CREATE TYPE priority AS ENUM ('low', 'medium', 'high')",
+      "source": "enum_cast_extended_test.rs"
+    },
+    {
+      "name": "enum_cast_extended_test-7",
+      "sql": "WITH priorities AS (\n            SELECT 'high'::priority as p\n            UNION ALL\n            SELECT 'low'::priority\n        )\n        SELECT * FROM priorities",
+      "source": "enum_cast_extended_test.rs"
+    },
+    {
+      "name": "enum_type_oid_test-1",
+      "sql": "CREATE TYPE mood AS ENUM ('happy', 'sad', 'neutral')",
+      "source": "enum_type_oid_test.rs"
+    },
+    {
+      "name": "enum_type_oid_test-2",
+      "sql": "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, mood mood)",
+      "source": "enum_type_oid_test.rs"
+    },
+    {
+      "name": "enum_type_oid_test-3",
+      "sql": "INSERT INTO people (id, name, mood) VALUES (1, 'Alice', 'happy')",
+      "source": "enum_type_oid_test.rs"
+    },
+    {
+      "name": "enum_type_oid_test-4",
+      "sql": "SELECT oid::text FROM pg_class WHERE relname = 'people'",
+      "source": "enum_type_oid_test.rs"
+    },
+    {
+      "name": "enum_type_oid_test-5",
+      "sql": "SELECT attrelid::text, attname, atttypid::text, attnum FROM pg_attribute LIMIT 20",
+      "source": "enum_type_oid_test.rs"
+    },
+    {
+      "name": "enum_type_oid_test-6",
+      "sql": "SELECT id, name, mood FROM people WHERE id = 1",
+      "source": "enum_type_oid_test.rs"
+    },
+    {
+      "name": "enum_type_oid_test-8",
+      "sql": "CREATE TABLE tasks (id INTEGER PRIMARY KEY, status status)",
+      "source": "enum_type_oid_test.rs"
+    },
+    {
+      "name": "enum_type_oid_test-9",
+      "sql": "INSERT INTO tasks (id, status) VALUES ($1, $2)",
+      "source": "enum_type_oid_test.rs"
+    },
+    {
+      "name": "enum_type_oid_test-10",
+      "sql": "SELECT id, status::text FROM tasks WHERE id = 1",
+      "source": "enum_type_oid_test.rs"
+    },
+    {
+      "name": "enum_cast_test-3",
+      "sql": "INSERT INTO items (id, name, status) VALUES (1, 'Item 1', 'active'::status)",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-4",
+      "sql": "SELECT 'pending'::status as casted_status",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-5",
+      "sql": "SELECT CAST('inactive' AS status) as casted_status",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-8",
+      "sql": "INSERT INTO tasks VALUES (1, 'Task 1', 'high'), (2, 'Task 2', 'low')",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-9",
+      "sql": "SELECT id, priority::text as priority_text FROM tasks ORDER BY id",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-10",
+      "sql": "CREATE TYPE color AS ENUM ('red', 'green', 'blue')",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-11",
+      "sql": "CREATE TABLE items (id INTEGER PRIMARY KEY, color color)",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-12",
+      "sql": "INSERT INTO items (id, color) VALUES (1, 'yellow'::color)",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-13",
+      "sql": "SELECT 'purple'::color as invalid_color",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-14",
+      "sql": "SELECT * FROM items WHERE color = 'purple'::color",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-17",
+      "sql": "INSERT INTO posts VALUES (1, 'Post 1', 'published'), (2, 'Post 2', 'draft'), (3, 'Post 3', 'published')",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-18",
+      "sql": "SELECT id, title FROM posts WHERE state = 'published'::state ORDER BY id",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-20",
+      "sql": "SELECT 'I am ' || 'happy'::mood::text as message",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_cast_test-21",
+      "sql": "SELECT UPPER('sad'::mood::text) as upper_mood",
+      "source": "enum_cast_test.rs"
+    },
+    {
+      "name": "enum_simple_test-2",
+      "sql": "CREATE TABLE tasks (id INTEGER PRIMARY KEY, name TEXT, status status)",
+      "source": "enum_simple_test.rs"
+    },
+    {
+      "name": "enum_simple_test-3",
+      "sql": "INSERT INTO tasks (id, name, status) VALUES (1, 'Task 1', 'active')",
+      "source": "enum_simple_test.rs"
+    },
+    {
+      "name": "enum_simple_test-4",
+      "sql": "SELECT id, name, status FROM tasks ORDER BY id",
+      "source": "enum_simple_test.rs"
+    },
+    {
+      "name": "enum_simple_test-6",
+      "sql": "CREATE TABLE items (id INTEGER PRIMARY KEY, priority priority)",
+      "source": "enum_simple_test.rs"
+    },
+    {
+      "name": "enum_simple_test-7",
+      "sql": "INSERT INTO items (id, priority) VALUES (1, 'invalid')",
+      "source": "enum_simple_test.rs"
+    },
+    {
+      "name": "enum_simple_test-8",
+      "sql": "INSERT INTO items (id, priority) VALUES (1, 'high')",
+      "source": "enum_simple_test.rs"
+    },
+    {
+      "name": "enum_error_handling_test-2",
+      "sql": "CREATE TABLE person (name TEXT, current_mood mood)",
+      "source": "enum_error_handling_test.rs"
+    },
+    {
+      "name": "enum_error_handling_test-3",
+      "sql": "INSERT INTO person (name, current_mood) VALUES ('Alice', 'angry')",
+      "source": "enum_error_handling_test.rs"
+    },
+    {
+      "name": "enum_error_handling_test-4",
+      "sql": "DROP TYPE nonexistent_type",
+      "source": "enum_error_handling_test.rs"
+    },
+    {
+      "name": "enum_error_handling_test-6",
+      "sql": "CREATE TABLE items (id INTEGER, item_status status)",
+      "source": "enum_error_handling_test.rs"
+    },
+    {
+      "name": "enum_error_handling_test-7",
+      "sql": "DROP TYPE status",
+      "source": "enum_error_handling_test.rs"
+    },
+    {
+      "name": "enum_error_handling_test-8",
+      "sql": "DROP TYPE status CASCADE",
+      "source": "enum_error_handling_test.rs"
+    },
+    {
+      "name": "enum_error_handling_test-9",
+      "sql": "ALTER TYPE nonexistent ADD VALUE 'new_value'",
+      "source": "enum_error_handling_test.rs"
+    },
+    {
+      "name": "enum_error_handling_test-10",
+      "sql": "DROP TYPE IF EXISTS nonexistent_type",
+      "source": "enum_error_handling_test.rs"
+    },
+    {
+      "name": "enum_error_handling_test-11",
+      "sql": "CREATE TYPE test_type AS ENUM ('a', 'b')",
+      "source": "enum_error_handling_test.rs"
+    },
+    {
+      "name": "enum_error_handling_test-12",
+      "sql": "DROP TYPE IF EXISTS test_type",
+      "source": "enum_error_handling_test.rs"
+    }
+  ]
+}

@@ -1,0 +1,307 @@
+{
+  "source": "erans/pgsqlite tests/",
+  "bucket": "arithmetic",
+  "count": 60,
+  "cases": [
+    {
+      "name": "arithmetic_null_test-1",
+      "sql": "SELECT val1 + val2 AS sum_result FROM null_data WHERE id = 1",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-2",
+      "sql": "SELECT val1 + val2 AS sum_result FROM null_data WHERE id = 2",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-3",
+      "sql": "SELECT val1 + val2 AS sum_result FROM null_data WHERE id = 3",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-4",
+      "sql": "SELECT val1 + val2 AS sum_result FROM null_data WHERE id = 4",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-5",
+      "sql": "SELECT amount * 1.1 AS with_tax FROM nullable WHERE id = 1",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-6",
+      "sql": "SELECT amount * 1.1 AS with_tax FROM nullable WHERE id = 2",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-7",
+      "sql": "SELECT (a + b) * c AS result FROM complex_null WHERE id = 1",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-8",
+      "sql": "SELECT (a + b) * c AS result FROM complex_null WHERE id = 2",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-9",
+      "sql": "SELECT (a + b) * c AS result FROM complex_null WHERE id = 3",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-10",
+      "sql": "SELECT price * 1.0 * (1.0 - COALESCE(discount, 0.0)) AS final_price FROM defaults WHERE id = 1",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-11",
+      "sql": "SELECT price * 1.0 * (1.0 - COALESCE(discount, 0.0)) AS final_price FROM defaults WHERE id = 2",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-12",
+      "sql": "SELECT base_val + 10.0 AS total FROM param_null WHERE id = 1",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-13",
+      "sql": "SELECT base_val + 10.0 AS total FROM param_null WHERE id = 2",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_null_test-14",
+      "sql": "SELECT CAST(50.0 + NULL AS REAL) AS total",
+      "source": "arithmetic_null_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-1",
+      "sql": "SELECT ((a + b) * c) / d AS complex_result FROM calc_data WHERE id = 1",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-2",
+      "sql": "SELECT CAST((a + (b * c)) AS REAL) / CAST(d AS REAL) AS different_grouping FROM calc_data WHERE id = 1",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-3",
+      "sql": "SELECT a * (b + (c * d)) AS deeply_nested FROM calc_data WHERE id = 1",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-4",
+      "sql": "SELECT quantity * price * (1 - discount) * (1 + tax_rate) AS total_amount FROM sales WHERE id = 1",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-5",
+      "sql": "SELECT quantity * price AS subtotal, quantity * price * (1 - discount) AS discounted, quantity * price * (1 - discount) * (1 + tax_rate) AS final_total FROM sales WHERE id = 1",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-6",
+      "sql": "SELECT ROUND(value * 2, 2) AS rounded_double FROM measurements WHERE id = 1",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-7",
+      "sql": "SELECT ABS(value) * 10.0 AS abs_times_ten FROM measurements WHERE id = 2",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-8",
+      "sql": "SELECT sqrt(value) + 10 AS sqrt_plus_ten FROM measurements WHERE id = 3",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-9",
+      "sql": "SELECT int_col + real_col AS int_plus_real FROM mixed WHERE id = 1",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-10",
+      "sql": "SELECT int_col * decimal_col AS int_times_decimal FROM mixed WHERE id = 1",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-11",
+      "sql": "SELECT decimal_col / int_col AS decimal_div_int FROM mixed WHERE id = 1",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-12",
+      "sql": "SELECT v1 + v2 * v3 - CAST(v4 AS REAL) / CAST(v5 AS REAL) + v1 * v2 + v3 * v4 - v5 AS long_expr FROM nums WHERE id = 1",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-13",
+      "sql": "SELECT ((((v1 + 1) * 2) - 3) / CAST(4 AS REAL)) * 5 AS chained FROM nums WHERE id = 1",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_complex_test-14",
+      "sql": "SELECT amount * 1.0 * CASE \n            WHEN status = 'premium' THEN 1.5 \n            WHEN status = 'standard' THEN 1.2 \n            ELSE 1.0 \n         END AS adjusted_amount \n         FROM conditions \n         ORDER BY id",
+      "source": "arithmetic_complex_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-1",
+      "sql": "SELECT numerator / denominator AS result FROM test_div WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-2",
+      "sql": "SELECT numerator / denominator AS result FROM test_div WHERE id = 2",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-3",
+      "sql": "SELECT big_val * 1000 AS huge FROM large_nums WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-4",
+      "sql": "SELECT big_val / 1000 AS tiny FROM large_nums WHERE id = 2",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-5",
+      "sql": "SELECT val + 100 AS result FROM negatives WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-6",
+      "sql": "SELECT val * -2 AS result FROM negatives WHERE id = 2",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-7",
+      "sql": "SELECT price * 1.1 AS TotalPrice FROM items WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-8",
+      "sql": "SELECT price * 1.2 as finalprice FROM items WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-9",
+      "sql": "SELECT price * 1.3 As MixedCase FROM items WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-10",
+      "sql": "SELECT int_val * real_val AS simple_mult FROM mixed_types WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-11",
+      "sql": "SELECT CAST(text_val AS REAL) + 10 AS text_math FROM mixed_types WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-12",
+      "sql": "SELECT a + b AS addition FROM calc WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-13",
+      "sql": "SELECT a - b AS subtraction FROM calc WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-14",
+      "sql": "SELECT a * b AS multiplication FROM calc WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-15",
+      "sql": "SELECT a / b AS division FROM calc WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-16",
+      "sql": "SELECT CAST(a AS INTEGER) % CAST(c AS INTEGER) AS modulo FROM calc WHERE id = 1",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_edge_cases_test-17",
+      "sql": "SELECT a.val + b.val AS sum_result FROM precision_test a, precision_test b WHERE a.id = 1 AND b.id = 2",
+      "source": "arithmetic_edge_cases_test.rs"
+    },
+    {
+      "name": "arithmetic_subquery_test-1",
+      "sql": "SELECT name, (SELECT SUM(amount * (1.0 - c.discount)) FROM orders o WHERE o.customer_id = c.id) AS total_after_discount \n         FROM customers c \n         ORDER BY id",
+      "source": "arithmetic_subquery_test.rs"
+    },
+    {
+      "name": "arithmetic_subquery_test-2",
+      "sql": "SELECT customer_id, avg_amount * 1.1 AS projected_avg \n         FROM (SELECT customer_id, AVG(amount) AS avg_amount FROM orders GROUP BY customer_id) t\n         ORDER BY customer_id",
+      "source": "arithmetic_subquery_test.rs"
+    },
+    {
+      "name": "arithmetic_subquery_test-3",
+      "sql": "WITH product_totals AS (\n            SELECT product, \n                   SUM(quantity) AS total_quantity,\n                   SUM(quantity * unit_price) AS total_revenue\n            FROM sales\n            GROUP BY product\n        )\n        SELECT product, \n               total_revenue / total_quantity AS avg_price_per_unit,\n               total_revenue * 1.2 AS projected_revenue\n        FROM product_totals\n        ORDER BY product",
+      "source": "arithmetic_subquery_test.rs"
+    },
+    {
+      "name": "arithmetic_subquery_test-4",
+      "sql": "WITH RECURSIVE factorial AS (\n            SELECT 1 AS n, 1.0 AS fact\n            UNION ALL\n            SELECT n + 1, fact * (n + 1)\n            FROM factorial\n            WHERE n < 5\n        )\n        SELECT n, fact AS factorial_value\n        FROM factorial\n        ORDER BY n",
+      "source": "arithmetic_subquery_test.rs"
+    },
+    {
+      "name": "arithmetic_subquery_test-5",
+      "sql": "SELECT p.name, r.name AS region, \n                price_with_tax, \n                price_with_tax + r.shipping_cost AS final_price\n         FROM products p\n         CROSS JOIN regions r\n         JOIN (\n            SELECT p2.id AS product_id, r2.id AS region_id,\n                   p2.base_price * (1 + r2.tax_rate) AS price_with_tax\n            FROM products p2\n            CROSS JOIN regions r2\n         ) calc ON calc.product_id = p.id AND calc.region_id = r.id\n         ORDER BY p.id, r.id",
+      "source": "arithmetic_subquery_test.rs"
+    },
+    {
+      "name": "arithmetic_subquery_test-6",
+      "sql": "SELECT category,\n                avg_value,\n                avg_value * 2 AS double_avg,\n                (SELECT (t2.avg_value - t1.avg_value) * 100 / t1.avg_value\n                 FROM (SELECT AVG(value) AS avg_value FROM metrics) t2) AS pct_diff_from_overall\n         FROM (SELECT category, AVG(value) AS avg_value FROM metrics GROUP BY category) t1\n         ORDER BY category",
+      "source": "arithmetic_subquery_test.rs"
+    },
+    {
+      "name": "arithmetic_aliasing_test-1",
+      "sql": "SELECT price * 1.1 AS price_with_markup FROM products WHERE id = 1",
+      "source": "arithmetic_aliasing_test.rs"
+    },
+    {
+      "name": "arithmetic_aliasing_test-2",
+      "sql": "SELECT price * quantity AS total, price * tax_rate AS tax_amount FROM products WHERE id = 1",
+      "source": "arithmetic_aliasing_test.rs"
+    },
+    {
+      "name": "arithmetic_aliasing_test-3",
+      "sql": "SELECT price + 10 adjusted_price FROM products WHERE id = 1",
+      "source": "arithmetic_aliasing_test.rs"
+    },
+    {
+      "name": "arithmetic_aliasing_test-4",
+      "sql": "SELECT cost * markup AS selling_price FROM items WHERE id = $1",
+      "source": "arithmetic_aliasing_test.rs"
+    },
+    {
+      "name": "arithmetic_aliasing_test-5",
+      "sql": "SELECT cost * markup + 5 AS final_price FROM items WHERE id = $1",
+      "source": "arithmetic_aliasing_test.rs"
+    },
+    {
+      "name": "arithmetic_aliasing_test-6",
+      "sql": "SELECT amount * 1.1 AS total_with_tax, created_at AT TIME ZONE 'UTC' AS utc_time FROM orders WHERE id = 1",
+      "source": "arithmetic_aliasing_test.rs"
+    },
+    {
+      "name": "arithmetic_aliasing_test-7",
+      "sql": "SELECT num * 2.0 AS result FROM test_values WHERE id = 1",
+      "source": "arithmetic_aliasing_test.rs"
+    },
+    {
+      "name": "arithmetic_aliasing_test-8",
+      "sql": "SELECT quantity * price AS total_value FROM inventory WHERE id = 1",
+      "source": "arithmetic_aliasing_test.rs"
+    },
+    {
+      "name": "arithmetic_aliasing_test-9",
+      "sql": "SELECT CAST(price AS REAL) / quantity AS unit_price FROM inventory WHERE id = 1",
+      "source": "arithmetic_aliasing_test.rs"
+    }
+  ]
+}

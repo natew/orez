@@ -1,0 +1,12 @@
+{
+  "source": "erans/pgsqlite tests/",
+  "bucket": "cast",
+  "count": 1,
+  "cases": [
+    {
+      "name": "cast_simple_test-1",
+      "sql": "SELECT CAST('hello' AS text) as val",
+      "source": "cast_simple_test.rs"
+    }
+  ]
+}

@@ -1,0 +1,397 @@
+{
+  "source": "erans/pgsqlite tests/",
+  "bucket": "datetime",
+  "count": 78,
+  "cases": [
+    {
+      "name": "datetime_translator_test-1",
+      "sql": "CREATE TABLE trigger_test (\n            id INTEGER PRIMARY KEY,\n            date_col DATE,\n            time_col TIME,\n            timestamp_col TIMESTAMP\n        )",
+      "source": "datetime_translator_test.rs"
+    },
+    {
+      "name": "datetime_translator_test-2",
+      "sql": "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE '__pgsqlite_datetime%'",
+      "source": "datetime_translator_test.rs"
+    },
+    {
+      "name": "datetime_translator_test-3",
+      "sql": "SELECT column_name, pg_type, sqlite_type FROM __pgsqlite_schema \n         WHERE table_name = 'trigger_test' AND pg_type IN ('date', 'time', 'timestamp')",
+      "source": "datetime_translator_test.rs"
+    },
+    {
+      "name": "datetime_translator_test-4",
+      "sql": "INSERT INTO trigger_test VALUES (1, '2024-01-15', '14:30:00', '2024-01-15 14:30:00')",
+      "source": "datetime_translator_test.rs"
+    },
+    {
+      "name": "datetime_translator_test-5",
+      "sql": "SELECT typeof(date_col), typeof(time_col), typeof(timestamp_col) \n         FROM trigger_test WHERE id = 1",
+      "source": "datetime_translator_test.rs"
+    },
+    {
+      "name": "datetime_translator_test-6",
+      "sql": "SELECT CAST(date_col AS TEXT), CAST(time_col AS TEXT), CAST(timestamp_col AS TEXT) FROM trigger_test WHERE id = 1",
+      "source": "datetime_translator_test.rs"
+    },
+    {
+      "name": "datetime_translator_test-7",
+      "sql": "CREATE TABLE translator_test (\n            id INTEGER PRIMARY KEY,\n            date_col DATE\n        )",
+      "source": "datetime_translator_test.rs"
+    },
+    {
+      "name": "datetime_translator_test-8",
+      "sql": "INSERT INTO translator_test VALUES (1, '2024-01-15')",
+      "source": "datetime_translator_test.rs"
+    },
+    {
+      "name": "datetime_translator_test-9",
+      "sql": "SELECT typeof(date_col) FROM translator_test WHERE id = 1",
+      "source": "datetime_translator_test.rs"
+    },
+    {
+      "name": "datetime_translator_test-10",
+      "sql": "SELECT date_col FROM translator_test WHERE id = 1",
+      "source": "datetime_translator_test.rs"
+    },
+    {
+      "name": "extract_debug_test-1",
+      "sql": "SELECT 1",
+      "source": "extract_debug_test.rs"
+    },
+    {
+      "name": "extract_debug_test-2",
+      "sql": "SELECT extract('year', 1686840645.0) as year",
+      "source": "extract_debug_test.rs"
+    },
+    {
+      "name": "extract_minimal_test-1",
+      "sql": "CREATE TABLE test_dates (id INTEGER PRIMARY KEY, ts REAL)",
+      "source": "extract_minimal_test.rs"
+    },
+    {
+      "name": "extract_minimal_test-2",
+      "sql": "INSERT INTO test_dates (id, ts) VALUES (1, 1686840645.0)",
+      "source": "extract_minimal_test.rs"
+    },
+    {
+      "name": "extract_minimal_test-3",
+      "sql": "SELECT EXTRACT(YEAR FROM to_timestamp(ts)) as year FROM test_dates WHERE id = 1",
+      "source": "extract_minimal_test.rs"
+    },
+    {
+      "name": "extract_minimal_test-4",
+      "sql": "SELECT EXTRACT(YEAR FROM to_timestamp(1686840645.0)) as year",
+      "source": "extract_minimal_test.rs"
+    },
+    {
+      "name": "datetime_functions_test-1",
+      "sql": "SELECT NOW() as now",
+      "source": "datetime_functions_test.rs"
+    },
+    {
+      "name": "datetime_functions_test-2",
+      "sql": "SELECT CURRENT_DATE as today",
+      "source": "datetime_functions_test.rs"
+    },
+    {
+      "name": "datetime_query_debug_test-1",
+      "sql": "CREATE TABLE test_events (id INTEGER PRIMARY KEY, ts REAL)",
+      "source": "datetime_query_debug_test.rs"
+    },
+    {
+      "name": "datetime_query_debug_test-2",
+      "sql": "INSERT INTO test_events (id, ts) VALUES (1, 1686840645.0)",
+      "source": "datetime_query_debug_test.rs"
+    },
+    {
+      "name": "datetime_query_debug_test-3",
+      "sql": "SELECT * FROM test_events",
+      "source": "datetime_query_debug_test.rs"
+    },
+    {
+      "name": "datetime_query_debug_test-4",
+      "sql": "SELECT EXTRACT(YEAR FROM 1686840645.0)",
+      "source": "datetime_query_debug_test.rs"
+    },
+    {
+      "name": "datetime_query_debug_test-5",
+      "sql": "SELECT extract('year', ts) FROM test_events WHERE id = 1",
+      "source": "datetime_query_debug_test.rs"
+    },
+    {
+      "name": "datetime_query_debug_test-6",
+      "sql": "SELECT EXTRACT(YEAR FROM ts) FROM test_events WHERE id = 1",
+      "source": "datetime_query_debug_test.rs"
+    },
+    {
+      "name": "datetime_query_debug_test-7",
+      "sql": "SELECT ts FROM test_events WHERE id = 1",
+      "source": "datetime_query_debug_test.rs"
+    },
+    {
+      "name": "datetime_working_test-2",
+      "sql": "SELECT CURRENT_DATE",
+      "source": "datetime_working_test.rs"
+    },
+    {
+      "name": "datetime_working_test-3",
+      "sql": "CREATE TABLE timestamps (id INTEGER PRIMARY KEY, ts DOUBLE PRECISION)",
+      "source": "datetime_working_test.rs"
+    },
+    {
+      "name": "datetime_working_test-4",
+      "sql": "INSERT INTO timestamps (id, ts) VALUES ($1, $2)",
+      "source": "datetime_working_test.rs"
+    },
+    {
+      "name": "datetime_working_test-5",
+      "sql": "SELECT to_timestamp(ts) FROM timestamps WHERE id = 1",
+      "source": "datetime_working_test.rs"
+    },
+    {
+      "name": "datetime_working_test-6",
+      "sql": "SELECT EXTRACT(YEAR FROM to_timestamp(ts)) as year,\n                EXTRACT(MONTH FROM to_timestamp(ts)) as month,\n                EXTRACT(DAY FROM to_timestamp(ts)) as day,\n                EXTRACT(HOUR FROM to_timestamp(ts)) as hour,\n                EXTRACT(MINUTE FROM to_timestamp(ts)) as minute\n         FROM timestamps WHERE id = 1",
+      "source": "datetime_working_test.rs"
+    },
+    {
+      "name": "datetime_working_test-9",
+      "sql": "SELECT DATE_TRUNC('hour', to_timestamp(ts)) as hour_trunc,\n                DATE_TRUNC('day', to_timestamp(ts)) as day_trunc,\n                DATE_TRUNC('month', to_timestamp(ts)) as month_trunc\n         FROM timestamps WHERE id = 1",
+      "source": "datetime_working_test.rs"
+    },
+    {
+      "name": "datetime_working_test-12",
+      "sql": "SELECT to_timestamp(ts) + 86400000000 as tomorrow,\n                to_timestamp(ts) - 3600000000 as hour_ago\n         FROM timestamps WHERE id = 1",
+      "source": "datetime_working_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-1",
+      "sql": "CREATE TABLE datetime_storage_test (\n            id INTEGER PRIMARY KEY,\n            date_col DATE,\n            time_col TIME,\n            timestamp_col TIMESTAMP,\n            timestamptz_col TIMESTAMPTZ,\n            timetz_col TIMETZ,\n            interval_col INTERVAL,\n            datetime_col DATETIME\n        )",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-2",
+      "sql": "SELECT sql FROM sqlite_master WHERE type='table' AND name='main.datetime_storage_test'",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-3",
+      "sql": "SELECT cid, name, type FROM pragma_table_info('datetime_storage_test') ORDER BY cid",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-4",
+      "sql": "CREATE TABLE datetime_aliases_test (\n            id INTEGER PRIMARY KEY,\n            ts_with_tz TIMESTAMP WITH TIME ZONE,\n            ts_without_tz TIMESTAMP WITHOUT TIME ZONE,\n            time_with_tz TIME WITH TIME ZONE,\n            time_without_tz TIME WITHOUT TIME ZONE,\n            mixed_case_date DaTe,\n            mixed_case_time TiMe,\n            mixed_case_timestamp TiMeStAmP\n        )",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-5",
+      "sql": "SELECT name, type FROM pragma_table_info('datetime_aliases_test') WHERE name != 'id' ORDER BY cid",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-6",
+      "sql": "CREATE TABLE datetime_metadata_test (\n            id INTEGER PRIMARY KEY,\n            date_col DATE,\n            time_col TIME,\n            timestamp_col TIMESTAMP,\n            timestamptz_col TIMESTAMPTZ,\n            timetz_col TIMETZ,\n            interval_col INTERVAL\n        )",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-7",
+      "sql": "SELECT column_name, pg_type, sqlite_type \n         FROM __pgsqlite_schema \n         WHERE table_name = 'datetime_metadata_test' \n         AND column_name != 'id'\n         ORDER BY column_name",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-8",
+      "sql": "CREATE TABLE datetime_values_test (\n            id INTEGER PRIMARY KEY,\n            date_col DATE,\n            time_col TIME,\n            timestamp_col TIMESTAMP,\n            timestamptz_col TIMESTAMPTZ,\n            timetz_col TIMETZ,\n            interval_col INTERVAL\n        )",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-9",
+      "sql": "INSERT INTO datetime_values_test VALUES (\n            1,\n            '2024-01-15',\n            '14:30:00',\n            '2024-01-15 14:30:00',\n            '2024-01-15 14:30:00+00',\n            '14:30:00+00',\n            '1 day 2 hours 30 minutes'\n        )",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-10",
+      "sql": "SELECT \n            typeof(date_col) as date_type,\n            typeof(time_col) as time_type,\n            typeof(timestamp_col) as timestamp_type,\n            typeof(timestamptz_col) as timestamptz_type,\n            typeof(timetz_col) as timetz_type,\n            typeof(interval_col) as interval_type,\n            date_col as date_raw,\n            time_col as time_raw,\n            timestamp_col as timestamp_raw,\n            timestamptz_col as timestamptz_raw,\n            timetz_col as timetz_raw,\n            interval_col as interval_raw\n         FROM datetime_values_test WHERE id = 1",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-11",
+      "sql": "SELECT date_col, time_col, timestamp_col FROM datetime_values_test WHERE id = 1",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-12",
+      "sql": "CREATE TABLE datetime_constraints_test (\n            id INTEGER PRIMARY KEY,\n            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,\n            updated_at TIMESTAMP,\n            birth_date DATE CHECK (birth_date > '1900-01-01'),\n            work_start TIME DEFAULT '09:00:00',\n            meeting_time TIMETZ\n        )",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-13",
+      "sql": "SELECT name, type FROM pragma_table_info('datetime_constraints_test') \n         WHERE name != 'id' ORDER BY cid",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-14",
+      "sql": "CREATE TABLE datetime_array_test (\n            id INTEGER PRIMARY KEY,\n            dates DATE[]\n        )",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-15",
+      "sql": "CREATE DOMAIN positive_date AS DATE CHECK (VALUE > '2000-01-01')",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-16",
+      "sql": "CREATE TABLE datetime_complex_test (\n            id INTEGER PRIMARY KEY,\n            nullable_date DATE NULL,\n            not_null_time TIME NOT NULL,\n            unique_timestamp TIMESTAMP UNIQUE,\n            primary_key_date DATE PRIMARY KEY\n        )",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-17",
+      "sql": "CREATE TABLE datetime_long_names_test (\n            id INTEGER PRIMARY KEY,\n            this_is_a_very_long_column_name_for_a_date_field DATE,\n            another_extremely_long_column_name_for_timestamp_with_timezone TIMESTAMPTZ\n        )",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-18",
+      "sql": "SELECT name, type FROM pragma_table_info('datetime_long_names_test') \n         WHERE name != 'id' ORDER BY cid",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-19",
+      "sql": "CREATE TABLE datetime_limitations_test (\n            id INTEGER PRIMARY KEY,\n            date_col DATE,\n            time_col TIME,\n            timestamp_col TIMESTAMP\n        )",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-20",
+      "sql": "INSERT INTO datetime_limitations_test VALUES (1, '2024-01-15', '14:30:00', '2024-01-15 14:30:00')",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-21",
+      "sql": "SELECT typeof(date_col), typeof(time_col), typeof(timestamp_col) \n         FROM datetime_limitations_test WHERE id = 1",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-22",
+      "sql": "CREATE TABLE \"DateTime Special Table\" (\n            \"ID Column\" INTEGER PRIMARY KEY,\n            \"Date Column!\" DATE,\n            \"Time (with parens)\" TIME,\n            \"Timestamp @ Special\" TIMESTAMP\n        )",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_storage_type_test-23",
+      "sql": "SELECT name, type FROM pragma_table_info('\"DateTime Special Table\"') \n           WHERE name != 'ID Column' ORDER BY cid",
+      "source": "datetime_storage_type_test.rs"
+    },
+    {
+      "name": "datetime_column_test-1",
+      "sql": "CREATE TABLE test_table (id INTEGER PRIMARY KEY, ts REAL)",
+      "source": "datetime_column_test.rs"
+    },
+    {
+      "name": "datetime_column_test-2",
+      "sql": "INSERT INTO test_table (id, ts) VALUES (1, 1686840645.0)",
+      "source": "datetime_column_test.rs"
+    },
+    {
+      "name": "datetime_column_test-3",
+      "sql": "SELECT ts FROM test_table WHERE id = 1",
+      "source": "datetime_column_test.rs"
+    },
+    {
+      "name": "datetime_column_test-4",
+      "sql": "SELECT extract('year', ts) as year FROM test_table WHERE id = 1",
+      "source": "datetime_column_test.rs"
+    },
+    {
+      "name": "datetime_column_test-5",
+      "sql": "SELECT EXTRACT(YEAR FROM ts) as year FROM test_table WHERE id = 1",
+      "source": "datetime_column_test.rs"
+    },
+    {
+      "name": "datetime_roundtrip_test-1",
+      "sql": "CREATE TABLE roundtrip_test (\n            id INTEGER PRIMARY KEY,\n            date_col DATE,\n            time_col TIME,\n            timestamp_col TIMESTAMP\n        )",
+      "source": "datetime_roundtrip_test.rs"
+    },
+    {
+      "name": "datetime_roundtrip_test-2",
+      "sql": "SELECT column_name, pg_type FROM __pgsqlite_schema WHERE table_name = 'roundtrip_test' ORDER BY column_name",
+      "source": "datetime_roundtrip_test.rs"
+    },
+    {
+      "name": "datetime_roundtrip_test-3",
+      "sql": "INSERT INTO roundtrip_test VALUES (1, '2024-01-15', '14:30:00', '2024-01-15 14:30:00')",
+      "source": "datetime_roundtrip_test.rs"
+    },
+    {
+      "name": "datetime_roundtrip_test-4",
+      "sql": "SELECT typeof(date_col), typeof(time_col), typeof(timestamp_col) FROM roundtrip_test WHERE id = 1",
+      "source": "datetime_roundtrip_test.rs"
+    },
+    {
+      "name": "datetime_roundtrip_test-5",
+      "sql": "SELECT date_col, time_col, timestamp_col FROM roundtrip_test WHERE id = 1",
+      "source": "datetime_roundtrip_test.rs"
+    },
+    {
+      "name": "datetime_roundtrip_test-6",
+      "sql": "CREATE TABLE simple_test (id INT, date_col DATE)",
+      "source": "datetime_roundtrip_test.rs"
+    },
+    {
+      "name": "datetime_roundtrip_test-7",
+      "sql": "INSERT INTO simple_test VALUES (1, '2024-01-15')",
+      "source": "datetime_roundtrip_test.rs"
+    },
+    {
+      "name": "datetime_roundtrip_test-8",
+      "sql": "SELECT date_col FROM simple_test WHERE id = 1",
+      "source": "datetime_roundtrip_test.rs"
+    },
+    {
+      "name": "datetime_conversion_success_test-1",
+      "sql": "CREATE TABLE dt_test (id INT, date_col DATE, time_col TIME)",
+      "source": "datetime_conversion_success_test.rs"
+    },
+    {
+      "name": "datetime_conversion_success_test-2",
+      "sql": "INSERT INTO dt_test VALUES (1, '2024-01-15', '14:30:00')",
+      "source": "datetime_conversion_success_test.rs"
+    },
+    {
+      "name": "datetime_conversion_success_test-3",
+      "sql": "SELECT typeof(date_col), typeof(time_col) FROM dt_test WHERE id = 1",
+      "source": "datetime_conversion_success_test.rs"
+    },
+    {
+      "name": "datetime_conversion_success_test-4",
+      "sql": "SELECT date_col, time_col FROM dt_test WHERE id = 1",
+      "source": "datetime_conversion_success_test.rs"
+    },
+    {
+      "name": "datetime_basic_test-2",
+      "sql": "SELECT CURRENT_TIMESTAMP as ts",
+      "source": "datetime_basic_test.rs"
+    },
+    {
+      "name": "datetime_basic_test-3",
+      "sql": "SELECT CAST(CURRENT_DATE AS TEXT) as today",
+      "source": "datetime_basic_test.rs"
+    },
+    {
+      "name": "datetime_debug_test-1",
+      "sql": "SELECT extract('year', 1686840645.0)",
+      "source": "datetime_debug_test.rs"
+    },
+    {
+      "name": "datetime_debug_test-2",
+      "sql": "SELECT date_trunc('hour', 1686840645.0)",
+      "source": "datetime_debug_test.rs"
+    },
+    {
+      "name": "datetime_debug_test-3",
+      "sql": "SELECT EXTRACT(YEAR FROM 1686840645.0) as year",
+      "source": "datetime_debug_test.rs"
+    },
+    {
+      "name": "datetime_debug_test-4",
+      "sql": "SELECT EXTRACT(YEAR FROM 1686840645.0) as year, \n                EXTRACT(MONTH FROM 1686840645.0) as month",
+      "source": "datetime_debug_test.rs"
+    }
+  ]
+}

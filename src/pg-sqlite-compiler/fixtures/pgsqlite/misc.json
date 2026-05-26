@@ -1,0 +1,1837 @@
+{
+  "source": "erans/pgsqlite tests/",
+  "bucket": "misc",
+  "count": 366,
+  "cases": [
+    {
+      "name": "result_cache_test-1",
+      "sql": "ALTER TABLE ddl_test ADD COLUMN extra INTEGER DEFAULT 0",
+      "source": "result_cache_test.rs"
+    },
+    {
+      "name": "result_cache_test-2",
+      "sql": "INSERT INTO ddl_test (id, data) VALUES (2, 'new')",
+      "source": "result_cache_test.rs"
+    },
+    {
+      "name": "result_cache_test-3",
+      "sql": "SELECT COUNT(*) FROM dml_test",
+      "source": "result_cache_test.rs"
+    },
+    {
+      "name": "numeric_debug_test-1",
+      "sql": "CREATE TABLE test_table (\n            id INTEGER PRIMARY KEY,\n            amount NUMERIC(5,2)\n        )",
+      "source": "numeric_debug_test.rs"
+    },
+    {
+      "name": "numeric_debug_test-2",
+      "sql": "SELECT * FROM __pgsqlite_numeric_constraints WHERE table_name = 'test_table'",
+      "source": "numeric_debug_test.rs"
+    },
+    {
+      "name": "numeric_debug_test-3",
+      "sql": "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE '__pgsqlite_numeric_%'",
+      "source": "numeric_debug_test.rs"
+    },
+    {
+      "name": "numeric_debug_test-4",
+      "sql": "INSERT INTO test_table (id, amount) VALUES (1, 123.45)",
+      "source": "numeric_debug_test.rs"
+    },
+    {
+      "name": "numeric_debug_test-5",
+      "sql": "INSERT INTO test_table (id, amount) VALUES (2, 123.456)",
+      "source": "numeric_debug_test.rs"
+    },
+    {
+      "name": "numeric_debug_test-6",
+      "sql": "INSERT INTO test_table (id, amount) VALUES (3, 1234.56)",
+      "source": "numeric_debug_test.rs"
+    },
+    {
+      "name": "profile_protocol_overhead-1",
+      "sql": "CREATE TABLE profile_simple (id INTEGER PRIMARY KEY, value TEXT)",
+      "source": "profile_protocol_overhead.rs"
+    },
+    {
+      "name": "profile_protocol_overhead-2",
+      "sql": "CREATE TABLE profile_complex (\n            id INTEGER PRIMARY KEY,\n            text_short TEXT,\n            text_long TEXT,\n            int_small INTEGER,\n            int_large INTEGER,\n            float_val REAL,\n            double_val DOUBLE PRECISION,\n            bool_val BOOLEAN,\n            bytes_small BYTEA,\n            bytes_large BYTEA,\n            numeric_val NUMERIC(19,4),\n            timestamp_val TIMESTAMP\n        )",
+      "source": "profile_protocol_overhead.rs"
+    },
+    {
+      "name": "profile_protocol_overhead-3",
+      "sql": "INSERT INTO profile_simple (id, value) VALUES ($1, $2)",
+      "source": "profile_protocol_overhead.rs"
+    },
+    {
+      "name": "profile_protocol_overhead-4",
+      "sql": "INSERT INTO profile_complex (\n                id, text_short, text_long, int_small, int_large,\n                float_val, double_val, bool_val, bytes_small, bytes_large,\n                numeric_val, timestamp_val\n            ) VALUES (\n                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12\n            )",
+      "source": "profile_protocol_overhead.rs"
+    },
+    {
+      "name": "profile_protocol_overhead-5",
+      "sql": "SELECT * FROM profile_simple WHERE id = $1",
+      "source": "profile_protocol_overhead.rs"
+    },
+    {
+      "name": "profile_protocol_overhead-6",
+      "sql": "SELECT * FROM profile_complex WHERE id = $1",
+      "source": "profile_protocol_overhead.rs"
+    },
+    {
+      "name": "profile_protocol_overhead-7",
+      "sql": "SELECT * FROM profile_complex WHERE id = $1 -- cached",
+      "source": "profile_protocol_overhead.rs"
+    },
+    {
+      "name": "profile_protocol_overhead-8",
+      "sql": "DROP TABLE IF EXISTS profile_simple",
+      "source": "profile_protocol_overhead.rs"
+    },
+    {
+      "name": "profile_protocol_overhead-9",
+      "sql": "DROP TABLE IF EXISTS profile_complex",
+      "source": "profile_protocol_overhead.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-1",
+      "sql": "CREATE TABLE prepared_test (\n            id INTEGER PRIMARY KEY,\n            amount NUMERIC(10,2),\n            rate NUMERIC(5,4)\n        )",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-2",
+      "sql": "INSERT INTO prepared_test (id, amount, rate) VALUES (1, 123.45, 0.9999)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-3",
+      "sql": "INSERT INTO prepared_test (id, amount, rate) VALUES (2, 99999999.999, 0.5)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-4",
+      "sql": "INSERT INTO prepared_test (id, amount, rate) VALUES (3, 100.00, 1.23456)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-5",
+      "sql": "UPDATE prepared_test SET amount = 999.99 WHERE id = 1",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-6",
+      "sql": "UPDATE prepared_test SET amount = 999.999 WHERE id = 1",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-7",
+      "sql": "CREATE TABLE tx_test (\n            id INTEGER PRIMARY KEY,\n            balance NUMERIC(10,2)\n        )",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-8",
+      "sql": "INSERT INTO tx_test VALUES (1, 1000.00)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-9",
+      "sql": "INSERT INTO tx_test VALUES \n         (2, 2000.00),\n         (3, 3000.999),  -- This should fail\n         (4, 4000.00)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-10",
+      "sql": "SELECT COUNT(*) FROM tx_test",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-11",
+      "sql": "CREATE TABLE error_test (\n            id INTEGER PRIMARY KEY,\n            amount NUMERIC(5,2)\n        )",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-12",
+      "sql": "INSERT INTO error_test VALUES (1, 9999.99)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-13",
+      "sql": "CREATE TABLE mixed_test (\n            id INTEGER PRIMARY KEY,\n            counter NUMERIC(5,0)\n        )",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-14",
+      "sql": "INSERT INTO mixed_test VALUES (0, 100)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-15",
+      "sql": "INSERT INTO mixed_test VALUES (1, 100000)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-16",
+      "sql": "INSERT INTO mixed_test VALUES (2, 200)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-17",
+      "sql": "INSERT INTO mixed_test VALUES (3, 100000)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-18",
+      "sql": "INSERT INTO mixed_test VALUES (4, 400)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-19",
+      "sql": "SELECT COUNT(*) FROM mixed_test WHERE counter <= 99999",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-20",
+      "sql": "CREATE TABLE prices (\n            id INTEGER PRIMARY KEY,\n            base_price NUMERIC(10,2),\n            tax_rate NUMERIC(3,2)\n        )",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-21",
+      "sql": "CREATE TABLE orders (\n            id INTEGER PRIMARY KEY,\n            price_id INTEGER,\n            quantity INTEGER,\n            total NUMERIC(12,2)\n        )",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-22",
+      "sql": "INSERT INTO prices VALUES (1, 100.00, 0.15)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-23",
+      "sql": "INSERT INTO orders \n         SELECT 1, 1, 10, p.base_price * (1 + p.tax_rate) * 10\n         FROM prices p WHERE p.id = 1",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-24",
+      "sql": "SELECT total::text FROM orders WHERE id = 1",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-25",
+      "sql": "INSERT INTO orders \n         SELECT 2, 1, 100000, p.base_price * (1 + p.tax_rate) * 100000\n         FROM prices p WHERE p.id = 1",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-26",
+      "sql": "CREATE TABLE special_test (\n            id INTEGER PRIMARY KEY,\n            value NUMERIC(10,2)\n        )",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-27",
+      "sql": "INSERT INTO special_test VALUES (1, 1.23e2)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-28",
+      "sql": "INSERT INTO special_test VALUES (2, 00123.45)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-29",
+      "sql": "INSERT INTO special_test VALUES (3, +456.78)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-30",
+      "sql": "INSERT INTO special_test VALUES (4, 0.01)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-31",
+      "sql": "SELECT id, value::text FROM special_test ORDER BY id",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-32",
+      "sql": "CREATE TABLE defaults_test (\n            id INTEGER PRIMARY KEY,\n            price NUMERIC(10,2) DEFAULT 99.99,\n            quantity NUMERIC(5,0) DEFAULT 1\n        )",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-33",
+      "sql": "INSERT INTO defaults_test (id) VALUES (1)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-34",
+      "sql": "INSERT INTO defaults_test (id, price) VALUES (2, 123.45)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-35",
+      "sql": "SELECT id, price::text, quantity::text FROM defaults_test ORDER BY id",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-36",
+      "sql": "CREATE TABLE cast_test (\n            id INTEGER PRIMARY KEY,\n            int_val INTEGER,\n            text_val TEXT,\n            numeric_val NUMERIC(10,2)\n        )",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-37",
+      "sql": "INSERT INTO cast_test VALUES (1, 123, '456.789', 789.01)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-38",
+      "sql": "INSERT INTO cast_test VALUES (4, 999, '99999999.999', 100.00)",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-39",
+      "sql": "INSERT INTO cast_test (id, numeric_val) \n         SELECT 2, CAST(int_val AS NUMERIC(10,2)) FROM cast_test WHERE id = 1",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-40",
+      "sql": "INSERT INTO cast_test (id, numeric_val) \n         SELECT 3, CAST(text_val AS NUMERIC(10,2)) FROM cast_test WHERE id = 1",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-41",
+      "sql": "SELECT numeric_val::text FROM cast_test WHERE id = 3",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-42",
+      "sql": "INSERT INTO cast_test (id, numeric_val) \n         SELECT 5, CAST(text_val AS NUMERIC(10,2)) FROM cast_test WHERE id = 4",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "numeric_constraints_extended_test-43",
+      "sql": "SELECT numeric_val::text FROM cast_test WHERE id = 2",
+      "source": "numeric_constraints_extended_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-1",
+      "sql": "DROP TABLE IF EXISTS small_value_test",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-2",
+      "sql": "CREATE TABLE small_value_test (\n            id INTEGER PRIMARY KEY,\n            bool_col BOOLEAN,\n            small_int INTEGER,\n            zero_val INTEGER,\n            one_val INTEGER,\n            small_float REAL\n        )",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-3",
+      "sql": "SELECT * FROM small_value_test WHERE id < 50",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-4",
+      "sql": "SELECT bool_col, small_int, zero_val, one_val, small_float \n             FROM small_value_test \n             WHERE id < 50",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-5",
+      "sql": "SELECT * FROM small_value_test",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-6",
+      "sql": "DROP TABLE IF EXISTS small_value_correct",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-7",
+      "sql": "CREATE TABLE small_value_correct (\n            bool_true BOOLEAN,\n            bool_false BOOLEAN,\n            zero INTEGER,\n            one INTEGER,\n            minus_one INTEGER,\n            small_pos INTEGER,\n            small_neg INTEGER,\n            small_float REAL,\n            empty_text TEXT\n        )",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-8",
+      "sql": "INSERT INTO small_value_correct VALUES (true, false, 0, 1, -1, 42, -42, 3.25, '')",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-9",
+      "sql": "SELECT * FROM small_value_correct",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-10",
+      "sql": "DROP TABLE IF EXISTS small_value_binary",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-11",
+      "sql": "CREATE TABLE small_value_binary (\n            id INTEGER PRIMARY KEY,\n            bool_val BOOLEAN,\n            int_val INTEGER,\n            float_val REAL\n        )",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-12",
+      "sql": "INSERT INTO small_value_binary VALUES (1, true, 42, 3.25)",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "small_value_optimization_test-13",
+      "sql": "SELECT * FROM small_value_binary WHERE id = $1",
+      "source": "small_value_optimization_test.rs"
+    },
+    {
+      "name": "query_test-1",
+      "sql": "SELECT id, name FROM test ORDER BY id",
+      "source": "query_test.rs"
+    },
+    {
+      "name": "query_test-2",
+      "sql": "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)",
+      "source": "query_test.rs"
+    },
+    {
+      "name": "query_test-3",
+      "sql": "INSERT INTO users (id, email) VALUES (1, 'test@example.com')",
+      "source": "query_test.rs"
+    },
+    {
+      "name": "query_test-4",
+      "sql": "SELECT * FROM users",
+      "source": "query_test.rs"
+    },
+    {
+      "name": "query_test-5",
+      "sql": "CREATE TABLE counter (value INTEGER)",
+      "source": "query_test.rs"
+    },
+    {
+      "name": "query_test-6",
+      "sql": "INSERT INTO counter VALUES (0)",
+      "source": "query_test.rs"
+    },
+    {
+      "name": "query_test-7",
+      "sql": "UPDATE counter SET value = 1",
+      "source": "query_test.rs"
+    },
+    {
+      "name": "query_test-8",
+      "sql": "SELECT value FROM counter",
+      "source": "query_test.rs"
+    },
+    {
+      "name": "query_test-9",
+      "sql": "UPDATE counter SET value = 2",
+      "source": "query_test.rs"
+    },
+    {
+      "name": "row_to_json_test-1",
+      "sql": "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-2",
+      "sql": "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30), (2, 'Bob', 25)",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-3",
+      "sql": "SELECT row_to_json(t) FROM (SELECT name, age FROM users WHERE id = 1) t",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-4",
+      "sql": "CREATE TABLE products (id INTEGER, name TEXT, price DECIMAL(10,2), in_stock BOOLEAN)",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-5",
+      "sql": "INSERT INTO products (id, name, price, in_stock) VALUES (1, 'Widget', 19.99, true)",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-6",
+      "sql": "SELECT row_to_json(p) FROM (SELECT id, name, price, in_stock FROM products WHERE id = 1) p",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-7",
+      "sql": "CREATE TABLE employees (id INTEGER, first_name TEXT, last_name TEXT, salary INTEGER)",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-8",
+      "sql": "INSERT INTO employees (id, first_name, last_name, salary) VALUES (1, 'John', 'Doe', 50000)",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-9",
+      "sql": "SELECT row_to_json(e) FROM (SELECT first_name AS fname, last_name AS lname, salary FROM employees WHERE id = 1) e",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-10",
+      "sql": "SELECT row_to_json('test value')",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-11",
+      "sql": "CREATE TABLE items (id INTEGER, name TEXT, category TEXT)",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-12",
+      "sql": "INSERT INTO items (id, name, category) VALUES (1, 'Apple', 'Fruit'), (2, 'Carrot', 'Vegetable')",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "row_to_json_test-13",
+      "sql": "SELECT row_to_json(i) FROM (SELECT name, category FROM items ORDER BY id) i",
+      "source": "row_to_json_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-1",
+      "sql": "CREATE TABLE binary_basic_test (\n            id INTEGER PRIMARY KEY,\n            bool_val BOOLEAN,\n            int_val INTEGER,\n            bigint_val BIGINT,\n            float_val REAL,\n            double_val DOUBLE PRECISION,\n            text_val TEXT\n        )",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-2",
+      "sql": "INSERT INTO binary_basic_test (id, bool_val, int_val, bigint_val, float_val, double_val, text_val) \n         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-3",
+      "sql": "SELECT * FROM binary_basic_test ORDER BY id",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-4",
+      "sql": "CREATE TABLE binary_comprehensive_test (\n            id INTEGER PRIMARY KEY,\n            -- Core types\n            bool_val BOOLEAN,\n            int2_val SMALLINT,\n            int4_val INTEGER,\n            int8_val BIGINT,\n            float4_val REAL,\n            float8_val DOUBLE PRECISION,\n            text_val TEXT,\n            varchar_val VARCHAR(100),\n            bytea_val BYTEA,\n            -- Advanced types\n            numeric_val NUMERIC(10, 2),\n            money_val MONEY,\n            -- Date/Time types\n            date_val DATE,\n            time_val TIME,\n            timestamp_val TIMESTAMP\n        )",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-5",
+      "sql": "SELECT * FROM binary_comprehensive_test ORDER BY id",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-6",
+      "sql": "SELECT id, bool_val, numeric_val, text_val FROM binary_comprehensive_test WHERE int4_val > $1",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-7",
+      "sql": "SELECT COUNT(*) as total, MAX(int8_val) as max_bigint FROM binary_comprehensive_test",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-8",
+      "sql": "INSERT INTO binary_comprehensive_test (id, bool_val, text_val) VALUES ($1, $2, $3)",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-9",
+      "sql": "SELECT bool_val, text_val FROM binary_comprehensive_test WHERE id = $1",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-10",
+      "sql": "INSERT INTO binary_comprehensive_test (id, text_val, numeric_val) VALUES ($1, $2, $3)",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-11",
+      "sql": "SELECT text_val, numeric_val FROM binary_comprehensive_test WHERE id = $1",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-12",
+      "sql": "SELECT COUNT(*) FROM binary_comprehensive_test",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-13",
+      "sql": "CREATE TABLE numeric_precision_test (\n            id INTEGER PRIMARY KEY,\n            small_decimal NUMERIC(5, 2),\n            large_decimal NUMERIC(20, 8),\n            money_val MONEY\n        )",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-14",
+      "sql": "INSERT INTO numeric_precision_test (id, small_decimal, large_decimal, money_val) VALUES ($1, $2, $3, $4)",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-15",
+      "sql": "SELECT * FROM numeric_precision_test ORDER BY id",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-16",
+      "sql": "CREATE TABLE error_test (\n            id INTEGER PRIMARY KEY,\n            not_null_val TEXT NOT NULL\n        )",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "integration_binary_protocol_test-17",
+      "sql": "INSERT INTO error_test (id, not_null_val) VALUES ($1, $2)",
+      "source": "integration_binary_protocol_test.rs"
+    },
+    {
+      "name": "uuid_test-1",
+      "sql": "SELECT gen_random_uuid() as uuid",
+      "source": "uuid_test.rs"
+    },
+    {
+      "name": "uuid_test-3",
+      "sql": "SELECT uuid_generate_v4() as uuid",
+      "source": "uuid_test.rs"
+    },
+    {
+      "name": "uuid_test-4",
+      "sql": "SELECT is_valid_uuid('not-a-uuid') as valid",
+      "source": "uuid_test.rs"
+    },
+    {
+      "name": "uuid_test-5",
+      "sql": "INSERT INTO users (id, name) VALUES (gen_random_uuid(), 'Bob')",
+      "source": "uuid_test.rs"
+    },
+    {
+      "name": "uuid_test-6",
+      "sql": "SELECT COUNT(*) as count FROM users",
+      "source": "uuid_test.rs"
+    },
+    {
+      "name": "uuid_test-7",
+      "sql": "CREATE TABLE uuid_test (id TEXT COLLATE uuid)",
+      "source": "uuid_test.rs"
+    },
+    {
+      "name": "uuid_test-8",
+      "sql": "SELECT COUNT(DISTINCT id) as count FROM uuid_test",
+      "source": "uuid_test.rs"
+    },
+    {
+      "name": "multirow_insert_test-1",
+      "sql": "CREATE TABLE orders (\n            order_id SERIAL PRIMARY KEY,\n            customer_id INTEGER,\n            product_id INTEGER,\n            quantity INTEGER,\n            order_date DATE,\n            total_amount NUMERIC(10,2)\n        )",
+      "source": "multirow_insert_test.rs"
+    },
+    {
+      "name": "multirow_insert_test-2",
+      "sql": "INSERT INTO orders (customer_id, product_id, quantity, order_date, total_amount) VALUES\n            (1, 1, 1, '2025-01-01', 999.99),\n            (1, 2, 2, '2025-01-01', 59.98),\n            (2, 3, 1, '2025-01-02', 79.99)",
+      "source": "multirow_insert_test.rs"
+    },
+    {
+      "name": "multirow_insert_test-3",
+      "sql": "SELECT customer_id, order_date FROM orders ORDER BY customer_id, product_id",
+      "source": "multirow_insert_test.rs"
+    },
+    {
+      "name": "numeric_single_test-1",
+      "sql": "CREATE TABLE products (\n            id INTEGER PRIMARY KEY,\n            price NUMERIC(10,2)\n        )",
+      "source": "numeric_single_test.rs"
+    },
+    {
+      "name": "numeric_single_test-2",
+      "sql": "INSERT INTO products VALUES (1, 99999999.99)",
+      "source": "numeric_single_test.rs"
+    },
+    {
+      "name": "numeric_single_test-3",
+      "sql": "INSERT INTO products VALUES (2, 99999999.999)",
+      "source": "numeric_single_test.rs"
+    },
+    {
+      "name": "numeric_single_test-4",
+      "sql": "INSERT INTO products VALUES (3, 999999999.99)",
+      "source": "numeric_single_test.rs"
+    },
+    {
+      "name": "numeric_single_test-5",
+      "sql": "SELECT id, price::text FROM products ORDER BY id",
+      "source": "numeric_single_test.rs"
+    },
+    {
+      "name": "numeric_single_test-6",
+      "sql": "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'products' AND name LIKE '%numeric%'",
+      "source": "numeric_single_test.rs"
+    },
+    {
+      "name": "test_datetime_standalone-1",
+      "sql": "SELECT NOW()",
+      "source": "test_datetime_standalone.rs"
+    },
+    {
+      "name": "test_datetime_standalone-2",
+      "sql": "SELECT CAST(NOW() AS TEXT)",
+      "source": "test_datetime_standalone.rs"
+    },
+    {
+      "name": "test_datetime_standalone-3",
+      "sql": "SELECT CURRENT_TIMESTAMP()",
+      "source": "test_datetime_standalone.rs"
+    },
+    {
+      "name": "test_datetime_standalone-4",
+      "sql": "CREATE TABLE test_ts (id INTEGER, ts TIMESTAMPTZ)",
+      "source": "test_datetime_standalone.rs"
+    },
+    {
+      "name": "test_datetime_standalone-5",
+      "sql": "INSERT INTO test_ts VALUES (1, NOW())",
+      "source": "test_datetime_standalone.rs"
+    },
+    {
+      "name": "test_datetime_standalone-6",
+      "sql": "SELECT ts FROM test_ts WHERE id = 1",
+      "source": "test_datetime_standalone.rs"
+    },
+    {
+      "name": "timezone_simple_test-1",
+      "sql": "SET TIME ZONE 'UTC'",
+      "source": "timezone_simple_test.rs"
+    },
+    {
+      "name": "timezone_simple_test-2",
+      "sql": "SHOW TimeZone",
+      "source": "timezone_simple_test.rs"
+    },
+    {
+      "name": "timezone_simple_test-3",
+      "sql": "CREATE TABLE ts_test (id INTEGER PRIMARY KEY, ts DOUBLE PRECISION)",
+      "source": "timezone_simple_test.rs"
+    },
+    {
+      "name": "timezone_simple_test-4",
+      "sql": "INSERT INTO ts_test (id, ts) VALUES ($1, $2)",
+      "source": "timezone_simple_test.rs"
+    },
+    {
+      "name": "timezone_simple_test-5",
+      "sql": "SELECT ts AT TIME ZONE 'UTC' as ts_utc FROM ts_test WHERE id = $1",
+      "source": "timezone_simple_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-1",
+      "sql": "CREATE TABLE numeric_test (id INTEGER PRIMARY KEY, small_int SMALLINT)",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-2",
+      "sql": "SELECT table_name, column_name, pg_type FROM __pgsqlite_schema WHERE table_name = 'numeric_test'",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-3",
+      "sql": "INSERT INTO numeric_test VALUES (1, 32767)",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-4",
+      "sql": "SELECT small_int FROM numeric_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-5",
+      "sql": "CREATE TABLE bool_test (\n            id INTEGER PRIMARY KEY,\n            flag BOOLEAN\n        )",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-6",
+      "sql": "INSERT INTO bool_test VALUES \n        (1, true),\n        (2, false),\n        (3, true),\n        (4, false)",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-7",
+      "sql": "SELECT id, flag FROM bool_test ORDER BY id",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-8",
+      "sql": "SELECT id FROM bool_test WHERE flag = true",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-9",
+      "sql": "SELECT 1 = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-10",
+      "sql": "SELECT 1 = 0",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-11",
+      "sql": "CREATE TABLE null_test (\n            id INTEGER PRIMARY KEY,\n            nullable_int INTEGER,\n            nullable_text TEXT,\n            nullable_real REAL\n        )",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-12",
+      "sql": "INSERT INTO null_test VALUES \n        (1, NULL, NULL, NULL),\n        (2, 42, 'hello', 3.14),\n        (3, NULL, 'world', NULL)",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-13",
+      "sql": "SELECT nullable_int, nullable_text, nullable_real FROM null_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-14",
+      "sql": "SELECT id FROM null_test WHERE nullable_int IS NULL",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-15",
+      "sql": "SELECT id FROM null_test WHERE nullable_text IS NOT NULL",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-16",
+      "sql": "SELECT NULL IS NULL",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-17",
+      "sql": "SELECT COALESCE(nullable_int, 0) FROM null_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-18",
+      "sql": "SELECT COUNT(*), COUNT(nullable_int) FROM null_test",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-19",
+      "sql": "CREATE TABLE text_test (\n            id INTEGER PRIMARY KEY,\n            short_text TEXT,\n            long_text TEXT,\n            fixed_char CHAR(3),\n            var_char VARCHAR(100)\n        )",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-20",
+      "sql": "INSERT INTO text_test VALUES \n        (1, 'hello', 'This is a longer text with multiple words', 'abc', 'variable'),\n        (2, '', 'Another test', 'xyz', ''),\n        (3, 'test', '', '123', 'test123')",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-21",
+      "sql": "SELECT short_text FROM text_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-22",
+      "sql": "SELECT short_text FROM text_test WHERE id = 2",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-23",
+      "sql": "SELECT short_text || ' ' || fixed_char FROM text_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-24",
+      "sql": "SELECT LENGTH(long_text) FROM text_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-25",
+      "sql": "SELECT UPPER(short_text), LOWER(fixed_char) FROM text_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-26",
+      "sql": "SELECT id FROM text_test WHERE long_text LIKE '%test%'",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-27",
+      "sql": "CREATE TABLE datetime_test (\n            id INTEGER PRIMARY KEY,\n            date_col DATE,\n            time_col TIME,\n            timestamp_col TIMESTAMP\n        )",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-28",
+      "sql": "INSERT INTO datetime_test VALUES \n        (1, '2024-01-15', '14:30:00', '2024-01-15 14:30:00'),\n        (2, '2024-12-31', '23:59:59', '2024-12-31 23:59:59'),\n        (3, '2024-06-15', '00:00:00', '2024-06-15 00:00:00')",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-29",
+      "sql": "SELECT date_col FROM datetime_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-30",
+      "sql": "SELECT time_col FROM datetime_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-31",
+      "sql": "SELECT timestamp_col FROM datetime_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-32",
+      "sql": "SELECT date('now')",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-33",
+      "sql": "SELECT date('2024-01-15', '+1 day')",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-34",
+      "sql": "CREATE TABLE bytea_test (\n            id INTEGER PRIMARY KEY,\n            data BYTEA\n        )",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-35",
+      "sql": "SELECT data FROM bytea_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-36",
+      "sql": "INSERT INTO bytea_test (id, data) VALUES (2, NULL)",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-37",
+      "sql": "SELECT data FROM bytea_test WHERE id = 2",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-38",
+      "sql": "SELECT LENGTH(data) FROM bytea_test WHERE id = 1",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-39",
+      "sql": "SELECT 42::text",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-40",
+      "sql": "SELECT CAST('123' AS INTEGER)",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-41",
+      "sql": "SELECT CAST(3.14 AS INTEGER)",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-42",
+      "sql": "SELECT 'Value: ' || 42",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-43",
+      "sql": "CREATE TABLE type_test (\n            id INTEGER PRIMARY KEY,\n            int_col INTEGER,\n            text_col TEXT,\n            real_col REAL\n        )",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-44",
+      "sql": "INSERT INTO type_test (id, int_col) VALUES ($1, $2)",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-45",
+      "sql": "INSERT INTO type_test (id, text_col) VALUES ($1, $2)",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-46",
+      "sql": "INSERT INTO type_test (id, real_col) VALUES ($1, $2)",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-47",
+      "sql": "INSERT INTO type_test (id, int_col, text_col, real_col) VALUES ($1, $2, $3, $4)",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-48",
+      "sql": "SELECT int_col, text_col, real_col FROM type_test WHERE id = 4",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-49",
+      "sql": "SELECT 9223372036854775807",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-50",
+      "sql": "SELECT -9223372036854775808",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "datatype_compat_test-51",
+      "sql": "SELECT 0, 0.0, ''",
+      "source": "datatype_compat_test.rs"
+    },
+    {
+      "name": "single_row_insert_parsing_test-1",
+      "sql": "CREATE TABLE test_insert (\n            id INTEGER PRIMARY KEY,\n            text_col TEXT,\n            date_col DATE\n        )",
+      "source": "single_row_insert_parsing_test.rs"
+    },
+    {
+      "name": "single_row_insert_parsing_test-2",
+      "sql": "INSERT INTO test_insert (text_col, date_col) VALUES ('Test 1', '2025-01-01');",
+      "source": "single_row_insert_parsing_test.rs"
+    },
+    {
+      "name": "single_row_insert_parsing_test-3",
+      "sql": "SELECT text_col, date_col FROM test_insert WHERE text_col = 'Test 1'",
+      "source": "single_row_insert_parsing_test.rs"
+    },
+    {
+      "name": "single_row_insert_parsing_test-4",
+      "sql": "INSERT INTO test_insert (text_col, date_col) VALUES ('Test 2', '2025-01-02')",
+      "source": "single_row_insert_parsing_test.rs"
+    },
+    {
+      "name": "single_row_insert_parsing_test-5",
+      "sql": "CREATE TABLE edge_test (\n            id INTEGER PRIMARY KEY,\n            text_col TEXT,\n            date_col DATE\n        )",
+      "source": "single_row_insert_parsing_test.rs"
+    },
+    {
+      "name": "single_row_insert_parsing_test-6",
+      "sql": "INSERT INTO edge_test (text_col, date_col) VALUES ('Test 1', '2025-01-01')  ;",
+      "source": "single_row_insert_parsing_test.rs"
+    },
+    {
+      "name": "single_row_insert_parsing_test-7",
+      "sql": "INSERT INTO edge_test (text_col, date_col) VALUES ('Test 2', '2025-01-02')\n;",
+      "source": "single_row_insert_parsing_test.rs"
+    },
+    {
+      "name": "single_row_insert_parsing_test-8",
+      "sql": "INSERT INTO edge_test (text_col, date_col) VALUES ('Test (with parens)', '2025-01-03');",
+      "source": "single_row_insert_parsing_test.rs"
+    },
+    {
+      "name": "single_row_insert_parsing_test-9",
+      "sql": "SELECT COUNT(*) FROM edge_test",
+      "source": "single_row_insert_parsing_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-1",
+      "sql": "CREATE TABLE products (\n            id INTEGER PRIMARY KEY,\n            price NUMERIC(10,2),\n            quantity NUMERIC(5,0),\n            tax_rate NUMERIC(3,3)\n        )",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-2",
+      "sql": "INSERT INTO products VALUES (1, 9999999.99, 99999, 0.999)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-3",
+      "sql": "INSERT INTO products VALUES (2, 0.01, 0, 0.000)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-4",
+      "sql": "INSERT INTO products VALUES (3, 99999999.999, 1, 0.5)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-5",
+      "sql": "INSERT INTO products VALUES (4, 100.999, 1, 0.5)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-6",
+      "sql": "INSERT INTO products VALUES (5, 100.00, 123.45, 0.5)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-7",
+      "sql": "INSERT INTO products VALUES (6, 100.00, 10, 1.000)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-8",
+      "sql": "CREATE TABLE accounts (\n            id INTEGER PRIMARY KEY,\n            balance NUMERIC(10,2)\n        )",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-9",
+      "sql": "INSERT INTO accounts VALUES (1, 1000.00)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-10",
+      "sql": "UPDATE accounts SET balance = 2000.50 WHERE id = 1",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-11",
+      "sql": "UPDATE accounts SET balance = 2000.555 WHERE id = 1",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-12",
+      "sql": "UPDATE accounts SET balance = 99999999.999 WHERE id = 1",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-13",
+      "sql": "CREATE TABLE prices (\n            id INTEGER PRIMARY KEY,\n            two_decimal NUMERIC(10,2),\n            four_decimal NUMERIC(10,4),\n            no_decimal NUMERIC(10,0)\n        )",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-14",
+      "sql": "INSERT INTO prices VALUES \n        (1, 123, 123, 123),\n        (2, 123.40, 123.4, 123),\n        (3, 123.46, 123.4568, 124)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-15",
+      "sql": "SELECT two_decimal::text, four_decimal::text, no_decimal::text FROM prices ORDER BY id",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-16",
+      "sql": "CREATE TABLE nullable_test (\n            id INTEGER PRIMARY KEY,\n            required_amount NUMERIC(10,2) NOT NULL,\n            optional_amount NUMERIC(10,2)\n        )",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-17",
+      "sql": "INSERT INTO nullable_test VALUES (1, 100.00, NULL)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-18",
+      "sql": "INSERT INTO nullable_test (id, required_amount, optional_amount) VALUES (2, NULL, 50.00)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-19",
+      "sql": "SELECT optional_amount::text FROM nullable_test WHERE id = 1",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-20",
+      "sql": "CREATE TABLE batch_test (\n            id INTEGER PRIMARY KEY,\n            amount NUMERIC(8,2)\n        )",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-21",
+      "sql": "INSERT INTO batch_test VALUES \n        (1, 100.00),\n        (2, 200.50),\n        (3, 999999.999),  -- This exceeds scale\n        (4, 300.00)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-22",
+      "sql": "SELECT COUNT(*) FROM batch_test",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-23",
+      "sql": "INSERT INTO batch_test VALUES \n        (1, 100.00),\n        (2, 200.50),\n        (3, 999999.99),\n        (4, 300.00)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-25",
+      "sql": "CREATE TABLE edge_cases (\n            id INTEGER PRIMARY KEY,\n            tiny NUMERIC(1,0),        -- Single digit\n            all_scale NUMERIC(3,3),   -- Only fractional part\n            large NUMERIC(38,10)      -- Large precision\n        )",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-26",
+      "sql": "INSERT INTO edge_cases (id, tiny) VALUES (1, 9)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-27",
+      "sql": "INSERT INTO edge_cases (id, tiny) VALUES (2, 10)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-28",
+      "sql": "UPDATE edge_cases SET all_scale = 0.999 WHERE id = 1",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-29",
+      "sql": "INSERT INTO edge_cases (id, all_scale) VALUES (3, 1.0)",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "numeric_constraints_integration_test-30",
+      "sql": "SELECT all_scale::text, large::text FROM edge_cases WHERE id = 1",
+      "source": "numeric_constraints_integration_test.rs"
+    },
+    {
+      "name": "timezone_prepared_alias_test-1",
+      "sql": "CREATE TABLE events (id INTEGER PRIMARY KEY, event_time DOUBLE PRECISION)",
+      "source": "timezone_prepared_alias_test.rs"
+    },
+    {
+      "name": "timezone_prepared_alias_test-2",
+      "sql": "INSERT INTO events (id, event_time) VALUES ($1, $2)",
+      "source": "timezone_prepared_alias_test.rs"
+    },
+    {
+      "name": "timezone_prepared_alias_test-3",
+      "sql": "SELECT event_time AT TIME ZONE 'UTC' as utc_time FROM events WHERE id = $1",
+      "source": "timezone_prepared_alias_test.rs"
+    },
+    {
+      "name": "timezone_prepared_alias_test-4",
+      "sql": "SELECT event_time FROM events WHERE id = $1",
+      "source": "timezone_prepared_alias_test.rs"
+    },
+    {
+      "name": "query_cache_test-1",
+      "sql": "CREATE TABLE cache_test (id INTEGER PRIMARY KEY, name TEXT)",
+      "source": "query_cache_test.rs"
+    },
+    {
+      "name": "query_cache_test-2",
+      "sql": "INSERT INTO cache_test (id, name) VALUES (1, 'test1'), (2, 'test2')",
+      "source": "query_cache_test.rs"
+    },
+    {
+      "name": "query_cache_test-3",
+      "sql": "SELECT id, name FROM cache_test WHERE id = 1",
+      "source": "query_cache_test.rs"
+    },
+    {
+      "name": "query_cache_test-5",
+      "sql": "CREATE TABLE norm_test (id INTEGER PRIMARY KEY, value TEXT)",
+      "source": "query_cache_test.rs"
+    },
+    {
+      "name": "query_cache_test-6",
+      "sql": "INSERT INTO norm_test (id, value) VALUES (1, 'test')",
+      "source": "query_cache_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-1",
+      "sql": "SELECT id, data FROM large_data ORDER BY id",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-2",
+      "sql": "INSERT INTO blob_data (id, large_text) VALUES ($1, $2)",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-3",
+      "sql": "INSERT INTO blob_data (id, large_blob) VALUES ($1, $2)",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-4",
+      "sql": "SELECT large_text FROM blob_data WHERE id = 1",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-5",
+      "sql": "SELECT large_blob FROM blob_data WHERE id = 2",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-6",
+      "sql": "CREATE TABLE format_test (\n            id INTEGER PRIMARY KEY,\n            num INTEGER,\n            txt TEXT,\n            bin BLOB\n        )",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-7",
+      "sql": "INSERT INTO format_test (id, num, txt, bin) VALUES (1, 42, 'hello', x'DEADBEEF')",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-8",
+      "sql": "SELECT id, num, txt, bin FROM format_test WHERE id = $1",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-9",
+      "sql": "SELECT * FROM suspension_test ORDER BY id",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-10",
+      "sql": "CREATE TABLE null_test (\n            id INTEGER PRIMARY KEY,\n            opt_int INTEGER,\n            opt_text TEXT,\n            opt_blob BYTEA\n        )",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-11",
+      "sql": "INSERT INTO null_test (id, opt_int, opt_text, opt_blob) VALUES ($1, $2, $3, $4)",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-13",
+      "sql": "SELECT opt_int, opt_text, opt_blob FROM null_test WHERE id = 1",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-14",
+      "sql": "SELECT opt_int, opt_text, opt_blob FROM null_test WHERE id = 2",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-15",
+      "sql": "INSERT INTO multi_test VALUES (1, 'one'); \n         INSERT INTO multi_test VALUES (2, 'two');\n         SELECT * FROM multi_test ORDER BY id",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-16",
+      "sql": "SELECT COUNT(*) FROM multi_test",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-17",
+      "sql": "WITH RECURSIVE r(i) AS (\n                SELECT 1\n                UNION ALL\n                SELECT i + 1 FROM r WHERE i < 1000000\n            )\n            SELECT COUNT(*) FROM r",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-18",
+      "sql": "INSERT INTO special_chars (id, content) VALUES ($1, $2)",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "protocol_edge_cases_test-20",
+      "sql": "SELECT content FROM special_chars WHERE id = $1::int4",
+      "source": "protocol_edge_cases_test.rs"
+    },
+    {
+      "name": "extended_protocol_test-1",
+      "sql": "SELECT id, name, age FROM users WHERE age > 20 ORDER BY id",
+      "source": "extended_protocol_test.rs"
+    },
+    {
+      "name": "extended_protocol_test-2",
+      "sql": "SELECT name FROM users WHERE id = $1::int4",
+      "source": "extended_protocol_test.rs"
+    },
+    {
+      "name": "extended_protocol_test-3",
+      "sql": "INSERT INTO users (id, name, age) VALUES ($1, $2, $3)",
+      "source": "extended_protocol_test.rs"
+    },
+    {
+      "name": "extended_protocol_test-4",
+      "sql": "SELECT name, age FROM users WHERE id = 3",
+      "source": "extended_protocol_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-1",
+      "sql": "CREATE TABLE basic_binary_test (\n            id INTEGER PRIMARY KEY,\n            bool_val BOOLEAN,\n            int4_val INTEGER,\n            int8_val BIGINT,\n            float8_val DOUBLE PRECISION,\n            text_val TEXT,\n            bytea_val BYTEA,\n            json_val TEXT\n        )",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-2",
+      "sql": "INSERT INTO basic_binary_test \n        (id, bool_val, int4_val, int8_val, float8_val, text_val, bytea_val, json_val) \n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-3",
+      "sql": "SELECT * FROM basic_binary_test WHERE id = $1",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-4",
+      "sql": "CREATE TABLE array_binary_test (\n            id INTEGER PRIMARY KEY,\n            int_array INTEGER[],\n            text_array TEXT[],\n            bool_array BOOLEAN[]\n        )",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-5",
+      "sql": "INSERT INTO array_binary_test (id, int_array, text_array, bool_array) VALUES ($1, $2, $3, $4)",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-6",
+      "sql": "SELECT * FROM array_binary_test WHERE id = $1",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-7",
+      "sql": "CREATE TABLE network_binary_test (\n            id INTEGER PRIMARY KEY,\n            inet_val INET,\n            cidr_val CIDR,\n            mac_val MACADDR\n        )",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-8",
+      "sql": "INSERT INTO network_binary_test (id, inet_val, cidr_val, mac_val) VALUES ($1, $2, $3, $4)",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-9",
+      "sql": "SELECT * FROM network_binary_test WHERE id = $1",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-10",
+      "sql": "CREATE TABLE null_binary_test (\n            id INTEGER PRIMARY KEY,\n            nullable_text TEXT,\n            nullable_int INTEGER,\n            nullable_bool BOOLEAN\n        )",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-11",
+      "sql": "INSERT INTO null_binary_test (id, nullable_text, nullable_int, nullable_bool) VALUES ($1, $2, $3, $4)",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "integration_simple_binary_test-12",
+      "sql": "SELECT * FROM null_binary_test WHERE id = $1",
+      "source": "integration_simple_binary_test.rs"
+    },
+    {
+      "name": "numeric_type_test-1",
+      "sql": "CREATE TABLE numeric_test (\n            id INTEGER PRIMARY KEY,\n            amount NUMERIC(10,2),\n            price DECIMAL(15,4)\n        )",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-2",
+      "sql": "INSERT INTO numeric_test (id, amount, price) VALUES (1, '123.45', '9999.9999')",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-3",
+      "sql": "INSERT INTO numeric_test (id, amount, price) VALUES (2, '0', '0.0001')",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-4",
+      "sql": "INSERT INTO numeric_test (id, amount, price) VALUES (3, '-456.78', '-1234.5678')",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-5",
+      "sql": "INSERT INTO numeric_test (id, amount, price) VALUES (4, '999999.99', '0')",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-6",
+      "sql": "SELECT id, amount::text, price::text FROM numeric_test ORDER BY id",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-7",
+      "sql": "CREATE TABLE numeric_test (\n            id INTEGER PRIMARY KEY,\n            amount NUMERIC\n        )",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-8",
+      "sql": "INSERT INTO numeric_test (id, amount) VALUES (1, 'not_a_number')",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-9",
+      "sql": "INSERT INTO numeric_test (id, amount) VALUES (2, '123.45.67')",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-10",
+      "sql": "INSERT INTO numeric_test (id, amount) VALUES (3, '12e34')",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-11",
+      "sql": "SELECT COUNT(*) FROM numeric_test",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-13",
+      "sql": "SELECT id, amount::text FROM numeric_test ORDER BY id",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-14",
+      "sql": "CREATE TABLE prices (\n            id INTEGER PRIMARY KEY,\n            price NUMERIC(10,2),\n            quantity INTEGER\n        )",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-15",
+      "sql": "INSERT INTO prices VALUES \n        (1, '10.50', 5),\n        (2, '25.99', 3),\n        (3, '100.00', 2)",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-16",
+      "sql": "SELECT COUNT(*) FROM prices",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-17",
+      "sql": "SELECT id, price::text, quantity FROM prices ORDER BY id",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-18",
+      "sql": "SELECT (SUM(price))::text as total_price FROM prices",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-19",
+      "sql": "SELECT (AVG(price))::text as avg_price FROM prices",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-20",
+      "sql": "CREATE TABLE range_test (\n            id INTEGER PRIMARY KEY,\n            price_range NUMRANGE\n        )",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-21",
+      "sql": "INSERT INTO range_test VALUES \n        (1, '[10.50,20.99)'),\n        (2, '[0,100]'),\n        (3, '(-50.5,50.5)')",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-22",
+      "sql": "SELECT id, price_range::text FROM range_test ORDER BY id",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-23",
+      "sql": "CREATE TABLE precision_test (\n            id INTEGER PRIMARY KEY,\n            exact_two NUMERIC(10,2),\n            exact_four NUMERIC(15,4),\n            unlimited NUMERIC\n        )",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-24",
+      "sql": "INSERT INTO precision_test VALUES \n        (1, 123.46, 123.4568, 123.456789),\n        (2, 0.01, 0.001, 0.001),\n        (3, 99999.99, 99999.9999, 999999.999999999)",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "numeric_type_test-25",
+      "sql": "SELECT exact_two::text, exact_four::text, unlimited::text FROM precision_test ORDER BY id",
+      "source": "numeric_type_test.rs"
+    },
+    {
+      "name": "enhanced_pg_attribute_test-1",
+      "sql": "SELECT attname, atthasdef, attidentity\n        FROM pg_attribute\n        WHERE attrelid = (SELECT oid FROM pg_class WHERE relname = 'products')\n        ORDER BY attnum",
+      "source": "enhanced_pg_attribute_test.rs"
+    },
+    {
+      "name": "enhanced_pg_attribute_test-2",
+      "sql": "SELECT attname, attnotnull, atthasdef, attidentity\n        FROM pg_attribute\n        WHERE attrelid = (SELECT oid FROM pg_class WHERE relname = 'users')\n        ORDER BY attnum",
+      "source": "enhanced_pg_attribute_test.rs"
+    },
+    {
+      "name": "enhanced_pg_attribute_test-3",
+      "sql": "SELECT\n            a.attname,\n            a.attnotnull,\n            a.atthasdef,\n            a.attidentity,\n            t.typname\n        FROM pg_attribute a\n        JOIN pg_type t ON a.atttypid = t.oid\n        WHERE a.attrelid = (SELECT oid FROM pg_class WHERE relname = 'articles')\n        AND a.attnum > 0\n        ORDER BY a.attnum",
+      "source": "enhanced_pg_attribute_test.rs"
+    },
+    {
+      "name": "enhanced_pg_attribute_test-4",
+      "sql": "SELECT\n            c.relname as table_name,\n            a.attname as column_name,\n            a.attnotnull as not_null,\n            a.atthasdef as has_default,\n            t.typname as data_type\n        FROM pg_class c\n        JOIN pg_attribute a ON c.oid = a.attrelid\n        JOIN pg_type t ON a.atttypid = t.oid\n        WHERE c.relname = 'orders'\n        AND a.attnum > 0\n        ORDER BY a.attnum",
+      "source": "enhanced_pg_attribute_test.rs"
+    },
+    {
+      "name": "timezone_test-3",
+      "sql": "SET TIME ZONE 'America/New_York'",
+      "source": "timezone_test.rs"
+    },
+    {
+      "name": "timezone_test-5",
+      "sql": "SET TIME ZONE '+05:30'",
+      "source": "timezone_test.rs"
+    },
+    {
+      "name": "timezone_test-7",
+      "sql": "SET search_path TO public,test",
+      "source": "timezone_test.rs"
+    },
+    {
+      "name": "timezone_test-8",
+      "sql": "SHOW search_path",
+      "source": "timezone_test.rs"
+    },
+    {
+      "name": "timezone_test-9",
+      "sql": "SET statement_timeout = '5min'",
+      "source": "timezone_test.rs"
+    },
+    {
+      "name": "timezone_test-10",
+      "sql": "SHOW statement_timeout",
+      "source": "timezone_test.rs"
+    },
+    {
+      "name": "timezone_test-11",
+      "sql": "SET TIME ZONE 'EST'",
+      "source": "timezone_test.rs"
+    },
+    {
+      "name": "timezone_test-12",
+      "sql": "CREATE TABLE events (id INTEGER PRIMARY KEY, event_time TIMESTAMPTZ)",
+      "source": "timezone_test.rs"
+    },
+    {
+      "name": "timezone_test-14",
+      "sql": "SELECT event_time FROM events WHERE id = 1",
+      "source": "timezone_test.rs"
+    },
+    {
+      "name": "orm_constraint_discovery_test-1",
+      "sql": "SELECT table_name FROM information_schema.tables WHERE table_name = 'test_table'",
+      "source": "orm_constraint_discovery_test.rs"
+    },
+    {
+      "name": "orm_constraint_discovery_test-2",
+      "sql": "SELECT column_name FROM information_schema.columns WHERE table_name = 'test_table' ORDER BY ordinal_position",
+      "source": "orm_constraint_discovery_test.rs"
+    },
+    {
+      "name": "orm_constraint_discovery_test-3",
+      "sql": "SELECT constraint_type FROM information_schema.table_constraints WHERE table_name = 'test_table'",
+      "source": "orm_constraint_discovery_test.rs"
+    },
+    {
+      "name": "orm_constraint_discovery_test-4",
+      "sql": "SELECT column_name FROM information_schema.key_column_usage WHERE table_name = 'test_table'",
+      "source": "orm_constraint_discovery_test.rs"
+    },
+    {
+      "name": "orm_constraint_discovery_test-5",
+      "sql": "SELECT table_name, column_name, data_type, is_nullable, column_default\n        FROM information_schema.columns\n        WHERE table_schema = 'public'\n        ORDER BY table_name, ordinal_position",
+      "source": "orm_constraint_discovery_test.rs"
+    },
+    {
+      "name": "orm_constraint_discovery_test-6",
+      "sql": "SELECT\n            tc.table_name,\n            tc.constraint_name,\n            tc.constraint_type,\n            kcu.column_name\n        FROM information_schema.table_constraints tc\n        JOIN information_schema.key_column_usage kcu\n            ON tc.constraint_name = kcu.constraint_name\n        WHERE tc.constraint_type = 'FOREIGN KEY'\n        ORDER BY tc.table_name, kcu.ordinal_position",
+      "source": "orm_constraint_discovery_test.rs"
+    },
+    {
+      "name": "orm_constraint_discovery_test-7",
+      "sql": "SELECT\n            constraint_name,\n            table_name,\n            constraint_type\n        FROM information_schema.table_constraints\n        ORDER BY table_name, constraint_type, constraint_name",
+      "source": "orm_constraint_discovery_test.rs"
+    },
+    {
+      "name": "orm_constraint_discovery_test-8",
+      "sql": "SELECT\n            c.table_name,\n            c.column_name,\n            c.data_type,\n            c.character_maximum_length,\n            c.numeric_precision,\n            c.numeric_scale,\n            c.is_nullable,\n            c.column_default,\n            c.ordinal_position\n        FROM information_schema.columns c\n        WHERE c.table_name = 'users'\n        ORDER BY c.ordinal_position",
+      "source": "orm_constraint_discovery_test.rs"
+    },
+    {
+      "name": "orm_constraint_discovery_test-9",
+      "sql": "SELECT DISTINCT\n            tc.constraint_name,\n            tc.constraint_type,\n            kcu.column_name,\n            kcu.ordinal_position\n        FROM information_schema.table_constraints tc\n        LEFT JOIN information_schema.key_column_usage kcu\n            ON tc.constraint_name = kcu.constraint_name\n            AND tc.table_name = kcu.table_name\n        WHERE tc.table_name = 'articles'\n        ORDER BY tc.constraint_type, kcu.ordinal_position",
+      "source": "orm_constraint_discovery_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-1",
+      "sql": "CREATE TABLE money_test (\n            id INTEGER PRIMARY KEY,\n            amount MONEY\n        )",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-2",
+      "sql": "INSERT INTO money_test (id, amount) VALUES ($1, $2)",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-3",
+      "sql": "SELECT CAST(amount AS TEXT) FROM money_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-4",
+      "sql": "SELECT id, CAST(amount AS TEXT) FROM money_test ORDER BY id",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-6",
+      "sql": "SELECT amount FROM money_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-7",
+      "sql": "CREATE TABLE int4range_test (\n            id INTEGER PRIMARY KEY,\n            range_val INT4RANGE\n        )",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-8",
+      "sql": "INSERT INTO int4range_test (id, range_val) VALUES ($1, $2)",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-9",
+      "sql": "SELECT CAST(range_val AS TEXT) FROM int4range_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-10",
+      "sql": "SELECT id, CAST(range_val AS TEXT) FROM int4range_test ORDER BY id",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-12",
+      "sql": "SELECT range_val FROM int4range_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-13",
+      "sql": "CREATE TABLE int8range_test (\n            id INTEGER PRIMARY KEY,\n            range_val INT8RANGE\n        )",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-14",
+      "sql": "INSERT INTO int8range_test (id, range_val) VALUES ($1, $2)",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-15",
+      "sql": "SELECT CAST(range_val AS TEXT) FROM int8range_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-16",
+      "sql": "SELECT id, CAST(range_val AS TEXT) FROM int8range_test ORDER BY id",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-18",
+      "sql": "SELECT range_val FROM int8range_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-19",
+      "sql": "CREATE TABLE numrange_test (\n            id INTEGER PRIMARY KEY,\n            range_val NUMRANGE\n        )",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-20",
+      "sql": "INSERT INTO numrange_test (id, range_val) VALUES ($1, $2)",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-21",
+      "sql": "SELECT range_val FROM numrange_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-22",
+      "sql": "SELECT id, range_val FROM numrange_test ORDER BY id",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-25",
+      "sql": "CREATE TABLE cidr_test (\n            id INTEGER PRIMARY KEY,\n            cidr_val CIDR\n        )",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-26",
+      "sql": "INSERT INTO cidr_test (id, cidr_val) VALUES ($1, $2)",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-27",
+      "sql": "SELECT CAST(cidr_val AS TEXT) FROM cidr_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-28",
+      "sql": "SELECT id, CAST(cidr_val AS TEXT) FROM cidr_test ORDER BY id",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-30",
+      "sql": "SELECT cidr_val FROM cidr_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-31",
+      "sql": "CREATE TABLE inet_test (\n            id INTEGER PRIMARY KEY,\n            inet_val INET\n        )",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-32",
+      "sql": "INSERT INTO inet_test (id, inet_val) VALUES ($1, $2)",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-33",
+      "sql": "SELECT CAST(inet_val AS TEXT) FROM inet_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-34",
+      "sql": "SELECT id, CAST(inet_val AS TEXT) FROM inet_test ORDER BY id",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-36",
+      "sql": "SELECT inet_val FROM inet_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-37",
+      "sql": "CREATE TABLE macaddr_test (\n            id INTEGER PRIMARY KEY,\n            mac_val MACADDR\n        )",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-38",
+      "sql": "INSERT INTO macaddr_test (id, mac_val) VALUES ($1, $2)",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-39",
+      "sql": "SELECT CAST(mac_val AS TEXT) FROM macaddr_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-40",
+      "sql": "SELECT id, CAST(mac_val AS TEXT) FROM macaddr_test ORDER BY id",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-42",
+      "sql": "SELECT mac_val FROM macaddr_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-43",
+      "sql": "CREATE TABLE macaddr8_test (\n            id INTEGER PRIMARY KEY,\n            mac_val MACADDR8\n        )",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-44",
+      "sql": "INSERT INTO macaddr8_test (id, mac_val) VALUES ($1, $2)",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-45",
+      "sql": "SELECT mac_val FROM macaddr8_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-46",
+      "sql": "SELECT id, mac_val FROM macaddr8_test ORDER BY id",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-49",
+      "sql": "CREATE TABLE bit_test (\n            id INTEGER PRIMARY KEY,\n            bit_val BIT(8)\n        )",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-50",
+      "sql": "INSERT INTO bit_test (id, bit_val) VALUES ($1, $2)",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-51",
+      "sql": "SELECT bit_val FROM bit_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-52",
+      "sql": "SELECT bit_val::text FROM bit_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-53",
+      "sql": "SELECT id, bit_val::text FROM bit_test ORDER BY id",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-56",
+      "sql": "CREATE TABLE bit_varying_test (\n            id INTEGER PRIMARY KEY,\n            bit_val BIT VARYING(32)\n        )",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-57",
+      "sql": "INSERT INTO bit_varying_test (id, bit_val) VALUES ($1, $2)",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-58",
+      "sql": "SELECT bit_val FROM bit_varying_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-59",
+      "sql": "SELECT bit_val::text FROM bit_varying_test WHERE id = $1",
+      "source": "binary_protocol_types_test.rs"
+    },
+    {
+      "name": "binary_protocol_types_test-60",
+      "sql": "SELECT id, bit_val::text FROM bit_varying_test ORDER BY id",
+      "source": "binary_protocol_types_test.rs"
+    }
+  ]
+}
