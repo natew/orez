@@ -7,6 +7,7 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
@@ -60,6 +61,17 @@ import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
 
 type ZeroChildProcess = ChildProcess & { __orezTail?: string[] }
+
+function ensureDoBackendNamespace(dataDir: string): string {
+  const marker = resolve(dataDir, 'do-backend-namespace')
+  if (existsSync(marker)) {
+    const existing = readFileSync(marker, 'utf8').trim()
+    if (existing) return existing
+  }
+  const next = randomUUID()
+  writeFileSync(marker, `${next}\n`)
+  return next
+}
 
 function resolveNodeBinary(): string {
   const explicitNode = process.env.NODE
@@ -330,10 +342,11 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     isDoBackend = true
     log.orez(`using DO backend: ${config.doBackendUrl}`)
     const backendUrl = config.doBackendUrl.replace(/\/+$/, '')
+    const doNamespace = ensureDoBackendNamespace(config.dataDir)
     const doInstances = {
-      postgres: new DoBackend(backendUrl, 'postgres'),
-      cvr: new DoBackend(backendUrl, 'zero_cvr'),
-      cdb: new DoBackend(backendUrl, 'zero_cdb'),
+      postgres: new DoBackend(backendUrl, 'postgres', doNamespace),
+      cvr: new DoBackend(backendUrl, 'zero_cvr', doNamespace),
+      cdb: new DoBackend(backendUrl, 'zero_cdb', doNamespace),
       postgresReplicas: [],
     }
     await Promise.all([
@@ -417,6 +430,10 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       log.debug.orez('re-installing change tracking after on-db-ready')
       await installChangeTracking(db)
     }
+  }
+
+  if (isDoBackend) {
+    await installChangeTracking(db)
   }
 
   // write the ready marker so external orchestrators (e.g. CI scripts that

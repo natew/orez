@@ -11,3 +11,4 @@ dist
 test-chat/
 .orez-*
 perf/reports/
+.wrangler/

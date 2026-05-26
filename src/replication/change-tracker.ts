@@ -20,6 +20,16 @@ export interface ChangeTrackingDb {
   query<T>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>
 }
 
+// PGlite returns JSONB columns as parsed objects; the DO backend returns them
+// as JSON strings (it stores `row_data TEXT`). normalize once at the consumer
+// boundary so callers always get an object.
+function jsonRecord(value: unknown): Record<string, unknown> | null {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'object') return value as Record<string, unknown>
+  if (typeof value !== 'string' || value === '') return null
+  return JSON.parse(value) as Record<string, unknown>
+}
+
 export async function installChangeTracking(db: ChangeTrackingDb): Promise<void> {
   // use _orez schema for internal tables - survives pg_restore of public schema
   await db.exec(`CREATE SCHEMA IF NOT EXISTS _orez`)
@@ -241,7 +251,12 @@ export async function getChangesSince(
     'SELECT watermark, table_name, op, row_data, old_data FROM _orez._zero_changes WHERE watermark > $1 ORDER BY watermark LIMIT $2',
     [watermark, limit]
   )
-  return result.rows
+  return result.rows.map((row) => ({
+    ...row,
+    watermark: Number(row.watermark),
+    row_data: jsonRecord(row.row_data),
+    old_data: jsonRecord(row.old_data),
+  }))
 }
 
 export async function purgeConsumedChanges(

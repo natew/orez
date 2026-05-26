@@ -1,12 +1,15 @@
 // @ts-nocheck
+import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
+
+import { RETURNING_INTERNAL_PREFIX } from './do-sql-tracking.js'
+
 /**
  * DoBackend: a PGlite-compatible adapter that forwards SQL to Cloudflare Durable Objects.
  *
  * Translates PG wire protocol messages → SQL → DO HTTP API → PG wire protocol responses.
  *
  * Handles PG transactions transparently: BEGIN/COMMIT/ROLLBACK are intercepted
- * and managed with in-memory write buffering. Writes are flushed to the DO
- * atomically via ctx.storage.transaction() on COMMIT.
+ * and data writes are restored from table snapshots on ROLLBACK.
  */
 
 const textEncoder = new TextEncoder()
@@ -25,6 +28,7 @@ const FT_TERMINATE = 0x58
 const FT_FLUSH = 0x48
 
 const STATUS_IDLE = 0x49
+const STATUS_TRANSACTION = 0x54
 const PG_TYPE_TEXT = 25
 const PG_TYPE_INT4 = 23
 const PG_TYPE_INT8 = 20
@@ -32,10 +36,115 @@ const PG_TYPE_BOOL = 16
 const PG_TYPE_FLOAT8 = 701
 const PG_TYPE_VARCHAR = 1043
 const PG_TYPE_JSON = 114
+const PG_TYPE_JSONB = 3802
 const PG_TYPE_NUMERIC = 1700
 const PG_TYPE_TIMESTAMP = 1114
+const PG_TYPE_TIMESTAMPTZ = 1184
 const PG_TYPE_BYTEA = 17
 const PG_TYPE_INT2 = 21
+
+type SqliteRow = Record<string, unknown>
+interface ExecResult {
+  rows: SqliteRow[]
+  columns: string[]
+  affectedRows?: number
+}
+interface CatalogResult {
+  rows: Record<string, unknown>[]
+  fields: { name: string; oid?: number }[]
+}
+interface PreparedStatement {
+  sql: string
+  originalSql?: string
+  rewrittenStatements?: RewrittenStatement[]
+  paramOIDs: number[]
+  arrayParamNumbers?: Set<number>
+  jsonParamNumbers?: Set<number>
+  timestampParamNumbers?: Set<number>
+  booleanParamNumbers?: Set<number>
+  schemaColumns?: SchemaColumnMetadata[]
+  schemaMetadataChanges?: SchemaMetadataChange[]
+  publicationChanges?: PublicationChange[]
+  fields?: { name: string; oid?: number }[]
+  commandTag?: string
+}
+interface BoundPortal extends PreparedStatement {
+  statementName: string
+  params: any[]
+}
+interface SchemaColumnMetadata {
+  table: string
+  schema: string
+  tableName: string
+  column: string
+  oid?: number
+  typeOid?: number
+  dataType?: string
+  typtype?: string
+  typname?: string
+  elemTyptype?: string | null
+  elemTypname?: string | null
+  characterMaximumLength?: number | null
+  numericPrecision?: number | null
+  numericScale?: number | null
+  notNull?: boolean
+  primaryKey?: boolean
+  unique?: boolean
+}
+type SchemaMetadata = Map<string, Map<string, SchemaColumnMetadata>>
+interface PublicationTableRef {
+  table: string
+  schema: string
+  tableName: string
+}
+interface ChangeTrackingMetadata {
+  table: PublicationTableRef
+  operation: 'INSERT' | 'UPDATE' | 'DELETE'
+  returningSQL: string
+  returnRows: boolean
+  returningProjection?: ReturningProjection
+}
+interface ChangeTrackingRequest {
+  tableName: string
+  operation: ChangeTrackingMetadata['operation']
+  returnRows: boolean
+  rowColumns?: string[]
+}
+type ReturningProjectionItem =
+  | { kind: 'all' }
+  | { kind: 'column'; source: string; name: string }
+  | { kind: 'expression'; source: string; name: string }
+interface ReturningProjection {
+  items: ReturningProjectionItem[]
+}
+type SchemaMetadataChange =
+  | { action: 'renameTable'; from: PublicationTableRef; to: PublicationTableRef }
+  | { action: 'renameColumn'; table: PublicationTableRef; from: string; to: string }
+interface PublicationChange {
+  action: 'create' | 'drop' | 'add' | 'set' | 'remove'
+  name: string
+  allTables?: boolean
+  schemas?: string[]
+  tables?: PublicationTableRef[]
+}
+interface PublicationDefinition {
+  name: string
+  allTables: boolean
+  schemas: Set<string>
+  tables: Map<string, PublicationTableRef>
+}
+interface TriggerFunctionDefinition {
+  name: string
+  body: string
+}
+interface TransactionMetadataSnapshot {
+  schemaMetadata: SchemaMetadata
+  publications: Map<string, PublicationDefinition>
+  skippedFunctionNames: Set<string>
+  triggerFunctions: Map<string, TriggerFunctionDefinition>
+}
+
+const MAX_REWRITE_CACHE_ENTRIES = 2048
 
 // ── Utilities ─────────────────────────────────────────────────────────────
 
@@ -109,14 +218,35 @@ function buildRowDescription(fields: { name: string; oid?: number }[]): Uint8Arr
   return msg(0x54, concat(i16(fields.length), ...colParts))
 }
 
-function buildDataRow(row: Record<string, unknown>, fields: string[]): Uint8Array {
+function wireValue(
+  row: Record<string, unknown>,
+  field: { name: string; oid?: number }
+): string {
+  const val = row[field.name]
+  if (field.oid === PG_TYPE_BOOL) {
+    if (val === true || val === 1 || val === '1' || val === 't' || val === 'true')
+      return 't'
+    if (val === false || val === 0 || val === '0' || val === 'f' || val === 'false')
+      return 'f'
+  }
+  if (isTimestampOid(field.oid)) return postgresTimestampText(val)
+  if (field.oid === PG_TYPE_JSON || field.oid === PG_TYPE_JSONB) {
+    return typeof val === 'string' ? val : JSON.stringify(val)
+  }
+  return typeof val === 'object' ? JSON.stringify(val) : String(val)
+}
+
+function buildDataRow(
+  row: Record<string, unknown>,
+  fields: { name: string; oid?: number }[]
+): Uint8Array {
   const colParts: Uint8Array[] = []
-  for (const name of fields) {
-    const val = row[name]
+  for (const field of fields) {
+    const val = row[field.name]
     if (val === null || val === undefined) {
       colParts.push(int4(-1))
     } else {
-      const str = typeof val === 'object' ? JSON.stringify(val) : String(val)
+      const str = wireValue(row, field)
       const encoded = textEncoder.encode(str)
       colParts.push(concat(uint4(encoded.length), encoded))
     }
@@ -133,15 +263,15 @@ function buildReadyForQuery(status: number = STATUS_IDLE): Uint8Array {
 }
 
 function buildErrorResponse(message: string): Uint8Array {
+  const field = (code: string, value: string) =>
+    concat(textEncoder.encode(code), cstr(value))
   return msg(
     0x45,
     concat(
-      cstr('S'),
-      cstr('ERROR'),
-      cstr('C'),
-      cstr('XX000'),
-      cstr('M'),
-      cstr(message),
+      field('S', 'ERROR'),
+      field('V', 'ERROR'),
+      field('C', 'XX000'),
+      field('M', message),
       new Uint8Array([0])
     )
   )
@@ -160,7 +290,7 @@ function buildNoData(): Uint8Array {
   return msg(0x6e, zero4)
 }
 function buildParameterDescription(oids: number[]): Uint8Array {
-  return msg(0x74, concat(i16(oids.length), ...oids.map(uint4)))
+  return msg(0x74, concat(i16(oids.length), ...oids.map((oid) => uint4(oid))))
 }
 function buildParameterStatus(name: string, value: string): Uint8Array {
   return msg(0x53, concat(cstr(name), cstr(value)))
@@ -198,11 +328,35 @@ function extractParseStatementName(data: Uint8Array): string {
   return textDecoder.decode(data.subarray(start, offset))
 }
 
+function extractParseParamOIDs(data: Uint8Array): number[] {
+  let offset = 5
+  while (offset < data.length && data[offset] !== 0) offset++
+  offset++
+  while (offset < data.length && data[offset] !== 0) offset++
+  offset++
+  if (offset + 2 > data.length) return []
+  const count = new DataView(data.buffer, data.byteOffset + offset, 2).getInt16(0)
+  offset += 2
+  const oids: number[] = []
+  for (let i = 0; i < count && offset + 4 <= data.length; i++) {
+    oids.push(new DataView(data.buffer, data.byteOffset + offset, 4).getUint32(0))
+    offset += 4
+  }
+  return oids
+}
+
 function extractBindStatementName(data: Uint8Array): string {
   let offset = 5
   while (offset < data.length && data[offset] !== 0) offset++
   offset++
   const start = offset
+  while (offset < data.length && data[offset] !== 0) offset++
+  return textDecoder.decode(data.subarray(start, offset))
+}
+
+function extractBindPortalName(data: Uint8Array): string {
+  const start = 5
+  let offset = start
   while (offset < data.length && data[offset] !== 0) offset++
   return textDecoder.decode(data.subarray(start, offset))
 }
@@ -251,163 +405,4040 @@ function extractDescribeName(data: Uint8Array): string {
   return textDecoder.decode(data.subarray(start, off))
 }
 
+function extractExecutePortalName(data: Uint8Array): string {
+  const start = 5
+  let offset = start
+  while (offset < data.length && data[offset] !== 0) offset++
+  return textDecoder.decode(data.subarray(start, offset))
+}
+
+function extractCloseType(data: Uint8Array): 'S' | 'P' {
+  return data[5] === 0x53 ? 'S' : 'P'
+}
+
+function extractCloseName(data: Uint8Array): string {
+  const start = 6
+  let offset = start
+  while (offset < data.length && data[offset] !== 0) offset++
+  return textDecoder.decode(data.subarray(start, offset))
+}
+
+function stripTrailingSemicolon(sql: string): string {
+  return sql.trim().replace(/;+\s*$/, '')
+}
+
+function isSelectLike(sql: string): boolean {
+  return /^\s*(select|with)\b/i.test(sql)
+}
+
+function splitTopLevelComma(input: string): string[] {
+  const parts: string[] = []
+  let start = 0
+  let depth = 0
+  let quote: string | null = null
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]
+    if (quote) {
+      if (ch === quote) {
+        if (quote === "'" && input[i + 1] === "'") {
+          i++
+        } else if (quote === '"' && input[i + 1] === '"') {
+          i++
+        } else {
+          quote = null
+        }
+      }
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === '(') depth++
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    else if (ch === ',' && depth === 0) {
+      parts.push(input.slice(start, i).trim())
+      start = i + 1
+    }
+  }
+  const tail = input.slice(start).trim()
+  if (tail) parts.push(tail)
+  return parts
+}
+
+function topLevelKeywordIndex(input: string, keyword: string): number {
+  let depth = 0
+  let quote: string | null = null
+  const lower = input.toLowerCase()
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]
+    if (quote) {
+      if (ch === quote) {
+        if (quote === "'" && input[i + 1] === "'") {
+          i++
+        } else if (quote === '"' && input[i + 1] === '"') {
+          i++
+        } else {
+          quote = null
+        }
+      }
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === '(') depth++
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    else if (
+      depth === 0 &&
+      lower.startsWith(keyword, i) &&
+      (i === 0 || /\W/.test(lower[i - 1])) &&
+      (i + keyword.length >= lower.length || /\W/.test(lower[i + keyword.length]))
+    ) {
+      return i
+    }
+  }
+  return -1
+}
+
+function extractTopLevelSelectList(sql: string): string | null {
+  const normalized = stripTrailingSemicolon(sql)
+  const selectIndex = topLevelKeywordIndex(normalized, 'select')
+  if (selectIndex < 0) return null
+  const fromIndex = topLevelKeywordIndex(normalized.slice(selectIndex + 6), 'from')
+  if (fromIndex < 0) return normalized.slice(selectIndex + 6).trim()
+  return normalized.slice(selectIndex + 6, selectIndex + 6 + fromIndex).trim()
+}
+
+function inferFieldName(expression: string): string {
+  const trimmed = expression.trim()
+  const quotedAlias = /\bas\s+"([^"]+)"\s*$/i.exec(trimmed)
+  if (quotedAlias) return quotedAlias[1]
+  const bareAlias = /\bas\s+([a-z_][\w$]*)\s*$/i.exec(trimmed)
+  if (bareAlias) return bareAlias[1]
+  const quotedTail = /"([^"]+)"\s*$/.exec(trimmed)
+  if (quotedTail) return quotedTail[1]
+  const dottedTail = /(?:^|\.)([a-z_][\w$]*)\s*$/i.exec(trimmed)
+  if (dottedTail) return dottedTail[1]
+  const fn = /^([a-z_][\w$]*)\s*\(/i.exec(trimmed)
+  if (fn) return fn[1]
+  return '?column?'
+}
+
+function inferFieldsFromSQL(sql: string): { name: string; oid?: number }[] {
+  const returningIndex = topLevelKeywordIndex(sql, 'returning')
+  const list =
+    returningIndex >= 0
+      ? stripTrailingSemicolon(sql.slice(returningIndex + 'returning'.length))
+      : extractTopLevelSelectList(sql)
+  if (!list || list === '*') return []
+  return splitTopLevelComma(list).map((part) => ({ name: inferFieldName(part) }))
+}
+
+function columnRefTailName(value: any): string | null {
+  const fields = value?.ColumnRef?.fields
+  if (!Array.isArray(fields) || fields.length === 0) return null
+  return stringValue(fields[fields.length - 1]) ?? null
+}
+
+function expressionOid(value: any): number | undefined {
+  if (value?.TypeCast) {
+    return wireOidForTypeName(value.TypeCast.typeName) ?? expressionOid(value.TypeCast.arg)
+  }
+  const node = value
+  if (!node || typeof node !== 'object') return undefined
+  if (node.FuncCall) {
+    const name = functionName(node.FuncCall)
+    if (name && JSON_PRODUCING_FUNCTIONS.has(name)) return PG_TYPE_JSON
+  }
+  if (node.CoalesceExpr) {
+    for (const arg of node.CoalesceExpr.args ?? []) {
+      const oid = expressionOid(arg)
+      if (oid) return oid
+    }
+  }
+  return undefined
+}
+
+function selectResultColumnMetadata(
+  sql: string
+): Map<string, { source?: string; oid?: number }> {
+  const columns = new Map<string, { source?: string; oid?: number }>()
+  try {
+    const parsed = parseSync(stripTrailingSemicolon(sql.trim()))
+    const select = parsed.stmts[0]?.stmt?.SelectStmt
+    if (!select) return columns
+    for (const targetNode of select.targetList ?? []) {
+      const target = targetNode.ResTarget
+      if (!target) continue
+      const source = columnRefTailName(unwrapTypeCast(target.val))
+      const func = unwrapTypeCast(target.val)?.FuncCall
+      const funcSource = func ? functionDisplayName(func) : null
+      const output = target.name ?? source ?? funcSource
+      if (!output) continue
+      columns.set(output, {
+        ...(source ? { source } : null),
+        ...(expressionOid(target.val) ? { oid: expressionOid(target.val) } : null),
+      })
+    }
+  } catch {}
+  return columns
+}
+
+function firstSourceTableFromSQL(sql: string): string | null {
+  try {
+    const parsed = parseSync(stripTrailingSemicolon(sql.trim()))
+    return firstSourceTable(parsed.stmts[0]?.stmt)
+  } catch {
+    return null
+  }
+}
+
+function setInferredParamOid(oids: number[], paramNumber: number, oid?: number): void {
+  if (!oid || paramNumber <= 0) return
+  while (oids.length < paramNumber) oids.push(0)
+  if (!oids[paramNumber - 1]) oids[paramNumber - 1] = oid
+}
+
+function paramOidForTypeName(typeName: any): number | undefined {
+  const metadata = pgTypeMetadataForTypeName(typeName)
+  return metadata.typeOid ?? metadata.oid
+}
+
+function collectParamRefs(value: any, visit: (paramNumber: number) => void): void {
+  if (!value || typeof value !== 'object') return
+  if (Array.isArray(value)) {
+    for (const item of value) collectParamRefs(item, visit)
+    return
+  }
+  const paramNumber = value.ParamRef?.number
+  if (paramNumber) visit(paramNumber)
+  for (const child of Object.values(value)) collectParamRefs(child, visit)
+}
+
+function inferInsertParamOids(
+  stmt: any,
+  oids: number[],
+  schemaMetadata: SchemaMetadata
+): void {
+  const table = flattenedRangeVarName(stmt.relation)
+  const columns = stmt.cols
+    ?.map((column: any) => column?.ResTarget?.name)
+    .filter((name: unknown): name is string => typeof name === 'string')
+  const valuesLists = stmt.selectStmt?.SelectStmt?.valuesLists
+  if (!table || !columns?.length || !Array.isArray(valuesLists)) return
+
+  const metadata = schemaMetadata.get(table)
+  if (!metadata) return
+  for (const valuesList of valuesLists) {
+    const items = valuesList?.List?.items
+    if (!Array.isArray(items)) continue
+    for (let index = 0; index < Math.min(columns.length, items.length); index++) {
+      const column = metadata.get(columns[index])
+      collectParamRefs(items[index], (paramNumber) =>
+        setInferredParamOid(oids, paramNumber, column?.oid)
+      )
+    }
+  }
+
+  for (const targetNode of stmt.onConflictClause?.targetList ?? []) {
+    const target = targetNode.ResTarget
+    if (!target?.name) continue
+    const column = metadata.get(target.name)
+    collectParamRefs(target.val, (paramNumber) =>
+      setInferredParamOid(oids, paramNumber, column?.oid)
+    )
+  }
+}
+
+function inferUpdateParamOids(
+  stmt: any,
+  oids: number[],
+  schemaMetadata: SchemaMetadata
+): void {
+  const table = flattenedRangeVarName(stmt.relation)
+  if (!table) return
+  const metadata = schemaMetadata.get(table)
+  if (!metadata) return
+  for (const targetNode of stmt.targetList ?? []) {
+    const target = targetNode.ResTarget
+    if (!target?.name) continue
+    const column = metadata.get(target.name)
+    collectParamRefs(target.val, (paramNumber) =>
+      setInferredParamOid(oids, paramNumber, column?.oid)
+    )
+  }
+}
+
+function jsonInputParamOid(name: string | null, argIndex: number): number | undefined {
+  switch (name) {
+    case 'json_to_recordset':
+    case 'json_populate_recordset':
+    case 'json_each':
+    case 'json_each_text':
+    case 'json_array_elements':
+    case 'json_array_elements_text':
+    case 'json_array_length':
+    case 'json_extract':
+    case 'json_remove':
+    case 'json_replace':
+    case 'json_insert':
+    case 'json_set':
+    case 'json_patch':
+    case 'json_type':
+    case 'json_valid':
+    case 'json':
+      return argIndex === 0 ? PG_TYPE_JSON : undefined
+    case 'jsonb_to_recordset':
+    case 'jsonb_populate_recordset':
+    case 'jsonb_array_elements':
+    case 'jsonb_array_elements_text':
+    case 'jsonb_array_length':
+    case 'jsonb_set':
+      return argIndex === 0 || (name === 'jsonb_set' && argIndex === 2)
+        ? PG_TYPE_JSONB
+        : undefined
+    default:
+      return undefined
+  }
+}
+
+function columnOidForExpression(
+  value: any,
+  schemaMetadata: SchemaMetadata
+): number | undefined {
+  const fields = value?.ColumnRef?.fields
+  if (!Array.isArray(fields) || fields.length === 0) return undefined
+  const column = stringValue(fields[fields.length - 1])
+  if (!column) return undefined
+
+  if (fields.length >= 2) {
+    const table = stringValue(fields[fields.length - 2])
+    const metadata = table ? schemaMetadata.get(table)?.get(column) : undefined
+    if (metadata) return metadata.typeOid ?? metadata.oid
+  }
+
+  let found: number | undefined
+  for (const columns of schemaMetadata.values()) {
+    const metadata = columns.get(column)
+    if (!metadata) continue
+    const oid = metadata.typeOid ?? metadata.oid
+    if (found && found !== oid) return undefined
+    found = oid
+  }
+  return found
+}
+
+function inferAExprParamOids(
+  expr: any,
+  oids: number[],
+  schemaMetadata: SchemaMetadata,
+  expectedOid?: number
+): void {
+  if (expr?.kind === 'AEXPR_OP_ANY' || expr?.kind === 'AEXPR_OP_ALL') {
+    const elementOid = columnOidForExpression(expr.lexpr, schemaMetadata)
+    inferExpressionParamOids(expr.lexpr, oids, schemaMetadata)
+    inferExpressionParamOids(
+      expr.rexpr,
+      oids,
+      schemaMetadata,
+      elementOid ? arrayTypeOidForElementOid(elementOid) : undefined
+    )
+    return
+  }
+
+  const leftOid = columnOidForExpression(expr.lexpr, schemaMetadata)
+  const rightOid = columnOidForExpression(expr.rexpr, schemaMetadata)
+  inferExpressionParamOids(expr.lexpr, oids, schemaMetadata, rightOid ?? expectedOid)
+  inferExpressionParamOids(expr.rexpr, oids, schemaMetadata, leftOid ?? expectedOid)
+}
+
+function inferExpressionParamOids(
+  value: any,
+  oids: number[],
+  schemaMetadata: SchemaMetadata,
+  expectedOid?: number
+): void {
+  if (!value || typeof value !== 'object') return
+  if (Array.isArray(value)) {
+    for (const item of value) inferExpressionParamOids(item, oids, schemaMetadata)
+    return
+  }
+
+  const paramNumber = value.ParamRef?.number
+  if (paramNumber) {
+    setInferredParamOid(oids, paramNumber, expectedOid)
+    return
+  }
+
+  if (value.TypeCast) {
+    const castOid = paramOidForTypeName(value.TypeCast.typeName)
+    inferExpressionParamOids(
+      value.TypeCast.arg,
+      oids,
+      schemaMetadata,
+      castOid === PG_TYPE_TEXT && expectedOid ? expectedOid : (castOid ?? expectedOid)
+    )
+    return
+  }
+
+  if (value.FuncCall) {
+    const name = functionName(value.FuncCall)
+    const args = value.FuncCall.args ?? []
+    for (let index = 0; index < args.length; index++) {
+      inferExpressionParamOids(
+        args[index],
+        oids,
+        schemaMetadata,
+        jsonInputParamOid(name, index) ?? expectedOid
+      )
+    }
+    for (const [key, child] of Object.entries(value.FuncCall)) {
+      if (key === 'args' || key === 'funcname') continue
+      inferExpressionParamOids(child, oids, schemaMetadata)
+    }
+    return
+  }
+
+  if (value.A_Expr) {
+    inferAExprParamOids(value.A_Expr, oids, schemaMetadata, expectedOid)
+    return
+  }
+
+  if (value.CoalesceExpr) {
+    for (const arg of value.CoalesceExpr.args ?? [])
+      inferExpressionParamOids(arg, oids, schemaMetadata, expectedOid)
+    return
+  }
+
+  if (value.CaseExpr) {
+    inferExpressionParamOids(value.CaseExpr.arg, oids, schemaMetadata)
+    for (const caseWhenNode of value.CaseExpr.args ?? []) {
+      const caseWhen = caseWhenNode.CaseWhen
+      if (!caseWhen) continue
+      inferExpressionParamOids(caseWhen.expr, oids, schemaMetadata)
+      inferExpressionParamOids(caseWhen.result, oids, schemaMetadata, expectedOid)
+    }
+    inferExpressionParamOids(value.CaseExpr.defresult, oids, schemaMetadata, expectedOid)
+    return
+  }
+
+  for (const child of Object.values(value)) {
+    inferExpressionParamOids(child, oids, schemaMetadata)
+  }
+}
+
+function inferParamOidsForSQL(
+  sql: string,
+  paramOids: number[],
+  schemaMetadata: SchemaMetadata
+): number[] {
+  const inferred = [...paramOids]
+  try {
+    const parsed = parseSync(stripTrailingSemicolon(sql.trim()))
+    for (const rawStmt of parsed.stmts ?? []) {
+      const stmt = rawStmt.stmt
+      if (stmt?.InsertStmt)
+        inferInsertParamOids(stmt.InsertStmt, inferred, schemaMetadata)
+      else if (stmt?.UpdateStmt)
+        inferUpdateParamOids(stmt.UpdateStmt, inferred, schemaMetadata)
+      inferExpressionParamOids(stmt, inferred, schemaMetadata)
+    }
+  } catch {}
+  return inferred
+}
+
 // ── Catalog query interception ────────────────────────────────────────────
 
+function walkAst(node: any, visit: (node: any) => void): void {
+  if (!node || typeof node !== 'object') return
+  visit(node)
+  if (Array.isArray(node)) {
+    for (const item of node) walkAst(item, visit)
+    return
+  }
+  for (const value of Object.values(node)) walkAst(value, visit)
+}
+
+function isCatalogRelation(rangeVar: any): boolean {
+  const schema = String(rangeVar?.schemaname ?? '').toLowerCase()
+  const rel = String(rangeVar?.relname ?? '').toLowerCase()
+  if (schema === 'pg_catalog' || schema === 'information_schema') return true
+  return rel.startsWith('pg_')
+}
+
+function isCatalogFunction(funcCall: any): boolean {
+  const name = functionName(funcCall)
+  if (!name) return false
+  if (SQLITE_FUNCTION_BY_PG_FUNCTION.has(name)) return false
+  if (name === 'current_setting') return true
+  if (name.startsWith('pg_') || name.startsWith('has_')) return true
+  return name === 'obj_description' || name === 'format_type'
+}
+
+function isCatalogStatement(stmt: any): boolean {
+  let catalog = false
+  walkAst(stmt, (node) => {
+    if (catalog) return
+    if (node.RangeVar && isCatalogRelation(node.RangeVar)) catalog = true
+    else if (node.FuncCall && isCatalogFunction(node.FuncCall)) catalog = true
+  })
+  return catalog
+}
+
 function isCatalogQuery(sql: string): boolean {
-  const n = sql.replace(/\s+/g, ' ').trim().toLowerCase()
-  if (n.includes('current_setting(')) return true
-  if (n.includes('pg_advisory_xact_lock') || n.includes('pg_advisory_lock')) return true
-  if (
-    n.startsWith('select') &&
-    (n.includes('information_schema.') ||
-      n.includes('pg_catalog.') ||
-      n.includes('pg_tables') ||
-      n.includes('pg_namespace') ||
-      n.includes('pg_type') ||
-      n.includes('pg_class') ||
-      n.includes('pg_attribute') ||
-      n.includes('pg_stat_') ||
-      n.includes('pg_index') ||
-      n.includes('pg_depend') ||
-      n.includes('pg_database') ||
-      n.includes('pg_sequence') ||
-      n.includes('pg_description') ||
-      n.includes('pg_constraint') ||
-      n.includes('pg_inherits') ||
-      n.includes('pg_cast') ||
-      n.includes('pg_opfamily') ||
-      n.includes('pg_am ') ||
-      n.includes('pg_operator') ||
-      n.includes('pg_aggregate') ||
-      n.includes('pg_language') ||
-      n.includes('pg_extension') ||
-      n.includes('pg_foreign_data') ||
-      n.includes('pg_foreign_server') ||
-      n.includes('pg_range') ||
-      n.includes('pg_enum') ||
-      n.includes('pg_rewrite') ||
-      n.includes('pg_proc') ||
-      n.includes('pg_roles') ||
-      n.includes('pg_user ') ||
-      n.includes('pg_authid') ||
-      n.includes('pg_settings') ||
-      n.includes('pg_collation') ||
-      n.includes('pg_trigger') ||
-      n.includes('pg_get_expr') ||
-      n.includes('pg_get_functiondef') ||
-      n.includes('pg_get_constraintdef') ||
-      n.includes('pg_describe_object') ||
-      n.includes('has_') ||
-      n.includes('obj_description') ||
-      n.includes('format_type') ||
-      /\bfrom\s+pg_\w+/i.test(n))
-  )
-    return true
-  if (
-    n.includes('information_schema.') &&
-    (n.includes('schemata') ||
-      n.includes('views') ||
-      n.includes('view_') ||
-      n.includes('_pg_') ||
-      n.includes('table_privileges') ||
-      n.includes('column_udt_usage') ||
-      n.includes('routine_') ||
-      n.includes('parameters') ||
-      n.includes('check_constraints') ||
-      n.includes('referential_constraints') ||
-      n.includes('key_column_usage'))
-  )
-    return true
-  return false
+  try {
+    const parsed = parseSync(stripTrailingSemicolon(sql.trim()))
+    return parsed.stmts.some((statement: any) => isCatalogStatement(statement.stmt))
+  } catch {
+    return false
+  }
 }
 
 // ── SQL rewriting ─────────────────────────────────────────────────────────
 
-function rewriteSQL(sql: string): string {
-  let result = sql.trim()
+interface RewrittenStatement {
+  sql: string
+  isDDL?: boolean
+  isWrite?: boolean
+  writeTable?: PublicationTableRef
+  changeTracking?: ChangeTrackingMetadata
+  arrayParamNumbers?: Set<number>
+  jsonParamNumbers?: Set<number>
+  schemaColumns?: SchemaColumnMetadata[]
+  schemaMetadataChanges?: SchemaMetadataChange[]
+  publicationChanges?: PublicationChange[]
+  skipIfColumnExists?: { table: string; column: string }
+  skipIfColumnMissing?: { table: string; column: string }
+  skipIfTableEmpty?: { table: string }
+}
 
-  // Strip PG type casts
-  result = result.replace(/::\w+(\[\])?\b/g, '')
+interface RewriteContext {
+  skippedFunctionNames?: Set<string>
+  triggerFunctions?: Map<string, TriggerFunctionDefinition>
+  arrayParamNumbers?: Set<number>
+  jsonParamNumbers?: Set<number>
+}
 
-  // Schema-qualified names: "schema"."table" or schema.table → flat
-  result = result.replace(/"(\w+)"\s*\.\s*"(\w+)"/g, '"$1_$2"')
-  result = result.replace(/_orez\._zero_changes\b/g, '_zero_changes')
-  result = result.replace(
-    /_orez\._zero_replication_slots\b/g,
-    '_orez__zero_replication_slots'
+const SKIPPED_NODE_TYPES = new Set([
+  'AlterDefaultPrivilegesStmt',
+  'ClosePortalStmt',
+  'ClusterStmt',
+  'CommentStmt',
+  'CreateEventTrigStmt',
+  'CreateExtensionStmt',
+  'CreateFunctionStmt',
+  'CreatePublicationStmt',
+  'CreateSchemaStmt',
+  'CreateTrigStmt',
+  'CreatedbStmt',
+  'DeallocateStmt',
+  'DiscardStmt',
+  'DoStmt',
+  'GrantStmt',
+  'ListenStmt',
+  'LockStmt',
+  'NotifyStmt',
+  'UnlistenStmt',
+  'VariableSetStmt',
+  'VariableShowStmt',
+])
+
+const SKIPPED_DROP_OBJECTS = new Set([
+  'OBJECT_FUNCTION',
+  'OBJECT_EVENT_TRIGGER',
+  'OBJECT_PUBLICATION',
+  'OBJECT_TRIGGER',
+])
+const UNSUPPORTED_INDEX_METHODS = new Set(['gin', 'gist', 'ivfflat', 'hnsw'])
+const UNSUPPORTED_GENERATED_COLUMN_FUNCTIONS = new Set(['setweight', 'to_tsvector'])
+const skippedFunctionNamesByTarget = new Map<string, Set<string>>()
+const SQLITE_FUNCTION_BY_PG_FUNCTION = new Map([
+  ['json_agg', 'json_group_array'],
+  ['json_build_object', 'json_object'],
+  ['json_object_agg', 'json_group_object'],
+  ['jsonb_agg', 'json_group_array'],
+  ['jsonb_array_elements', 'json_each'],
+  ['jsonb_array_elements_text', 'json_each'],
+  ['jsonb_array_length', 'json_array_length'],
+  ['jsonb_build_object', 'json_object'],
+  ['jsonb_set', 'json_set'],
+  ['json_array_elements', 'json_each'],
+  ['json_array_elements_text', 'json_each'],
+  ['pg_column_size', 'length'],
+])
+const JSON_PRODUCING_FUNCTIONS = new Set([
+  'json_agg',
+  'json_build_object',
+  'json_group_array',
+  'json_group_object',
+  'json_object',
+  'json_object_agg',
+  'jsonb_agg',
+  'jsonb_build_object',
+  'jsonb_set',
+  'json_set',
+])
+const TRACKED_SHARD_TABLES = new Set(['clients', 'mutations'])
+const SQLITE_TYPE_BY_PG_TYPE = new Map([
+  ['bigint', 'integer'],
+  ['bigserial', 'integer'],
+  ['bool', 'integer'],
+  ['boolean', 'integer'],
+  ['bytea', 'blob'],
+  ['float4', 'real'],
+  ['float8', 'real'],
+  ['int2', 'integer'],
+  ['int4', 'integer'],
+  ['int8', 'integer'],
+  ['json', 'text'],
+  ['jsonb', 'text'],
+  ['numeric', 'real'],
+  ['serial', 'integer'],
+  ['serial4', 'integer'],
+  ['serial8', 'integer'],
+  ['timestamp', 'text'],
+  ['timestamptz', 'text'],
+  ['tsvector', 'text'],
+  ['vector', 'text'],
+])
+
+function stringNode(value: string): any {
+  return { String: { sval: value } }
+}
+
+function cloneAst<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+function stringValue(node: any): string | null {
+  return node?.String?.sval ?? null
+}
+
+function statementNodeType(stmt: any): string {
+  return Object.keys(stmt)[0]
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+function flattenSchemaName(schema: string, name: string): string {
+  if (schema === 'public' && name === 'migrations') return 'public_migrations'
+  if (schema === 'public') return name
+  if (schema === '_orez' && name === '_zero_changes') return '_zero_changes'
+  if (schema === '_orez' && name === '_zero_replication_slots')
+    return '_orez__zero_replication_slots'
+  if (schema === '_orez') return `_orez__${name}`
+  if (schema === '_zero') return `_zero_${name}`
+  return `${schema}_${name}`
+}
+
+function flattenRangeVar(rangeVar: any): string {
+  if (!rangeVar?.schemaname) return rangeVar?.relname
+  const flattened = flattenSchemaName(rangeVar.schemaname, rangeVar.relname)
+  rangeVar.relname = flattened
+  delete rangeVar.schemaname
+  return flattened
+}
+
+function flattenedRangeVarName(rangeVar: any): string | null {
+  if (!rangeVar?.relname) return null
+  return rangeVar.schemaname
+    ? flattenSchemaName(rangeVar.schemaname, rangeVar.relname)
+    : rangeVar.relname
+}
+
+function publicationTableRefForRangeVar(rangeVar: any): PublicationTableRef | null {
+  if (!rangeVar?.relname) return null
+  const schema = rangeVar.schemaname ?? 'public'
+  const tableName = rangeVar.relname
+  return {
+    table: flattenSchemaName(schema, tableName),
+    schema,
+    tableName,
+  }
+}
+
+function renamedPublicationTableRef(
+  from: PublicationTableRef,
+  tableName: string
+): PublicationTableRef {
+  return {
+    table: flattenSchemaName(from.schema, tableName),
+    schema: from.schema,
+    tableName,
+  }
+}
+
+function flattenColumnRef(columnRef: any): void {
+  const fields = columnRef?.fields
+  if (!Array.isArray(fields) || fields.length < 3) return
+  const schema = stringValue(fields[0])
+  const table = stringValue(fields[1])
+  if (!schema || !table) return
+  fields.splice(0, 2, stringNode(flattenSchemaName(schema, table)))
+}
+
+function rewriteColumnRefQualifier(node: any, from: string, to: string): void {
+  if (!node || typeof node !== 'object') return
+  if (Array.isArray(node)) {
+    for (const item of node) rewriteColumnRefQualifier(item, from, to)
+    return
+  }
+  const fields = node.ColumnRef?.fields
+  if (Array.isArray(fields) && stringValue(fields[0]) === from) {
+    fields[0] = stringNode(to)
+  }
+  for (const child of Object.values(node)) {
+    rewriteColumnRefQualifier(child, from, to)
+  }
+}
+
+function functionName(funcCall: any): string | null {
+  const parts = funcCall?.funcname
+  if (!Array.isArray(parts) || parts.length === 0) return null
+  return stringValue(parts[parts.length - 1])?.toLowerCase() ?? null
+}
+
+function functionDisplayName(funcCall: any): string | null {
+  const parts = funcCall?.funcname
+  if (!Array.isArray(parts) || parts.length === 0) return null
+  return stringValue(parts[parts.length - 1])
+}
+
+function createFunctionName(stmt: any): string | null {
+  return functionName({ funcname: stmt.funcname })
+}
+
+function createTriggerFunctionDefinition(stmt: any): TriggerFunctionDefinition | null {
+  const name = createFunctionName(stmt)
+  if (!name || typeNameBase(stmt.returnType) !== 'trigger') return null
+  let language = ''
+  let body = ''
+  for (const option of stmt.options ?? []) {
+    const def = option.DefElem
+    if (!def) continue
+    if (def.defname === 'language') language = stringValue(def.arg)?.toLowerCase() ?? ''
+    if (def.defname === 'as') {
+      const items = def.arg?.List?.items
+      if (Array.isArray(items) && items[0]) body = stringValue(items[0]) ?? ''
+    }
+  }
+  if (language !== 'plpgsql' || !body.trim()) return null
+  return { name, body }
+}
+
+function intConst(value: number): any {
+  return { A_Const: { ival: value === 0 ? {} : { ival: value } } }
+}
+
+function nullConst(): any {
+  return { A_Const: { isnull: true } }
+}
+
+function stringConst(value: string): any {
+  return { A_Const: { sval: { sval: value } } }
+}
+
+function columnRefNode(...names: string[]): any {
+  return {
+    ColumnRef: {
+      fields: names.map(stringNode),
+      location: -1,
+    },
+  }
+}
+
+function funcCallNode(name: string, args: any[] = []): any {
+  return {
+    FuncCall: {
+      funcname: [stringNode(name)],
+      args,
+      funcformat: 'COERCE_EXPLICIT_CALL',
+      location: -1,
+    },
+  }
+}
+
+function jsonPathForColumn(column: string): string {
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(column)) return `$.${column}`
+  return `$.${JSON.stringify(column)}`
+}
+
+function equalityExpr(left: any, right: any): any {
+  return {
+    A_Expr: {
+      kind: 'AEXPR_OP',
+      name: [stringNode('=')],
+      lexpr: left,
+      rexpr: right,
+      location: -1,
+    },
+  }
+}
+
+function startsWithExpr(func: any, context?: RewriteContext): any | null {
+  const args = func.args ?? []
+  if (args.length < 2) return null
+  return equalityExpr(
+    funcCallNode('instr', [rewriteNode(args[0], context), rewriteNode(args[1], context)]),
+    intConst(1)
   )
-  result = result.replace(/(\b)_orez\.(\w+)/g, '$1_orez__$2')
-  // _zero schema references (quoted and unquoted)
-  result = result.replace(/(\b)_zero\.(\w+)/g, '$1_zero_$2')
-  // Quoted schema.table identifiers: "_zero.tableMetadata" → "_zero_tableMetadata"
-  result = result.replace(/"(_zero|_orez)\.(\w+)"/g, '"$1_$2"')
+}
 
-  // nextval → 1
-  result = result.replace(/nextval\s*\([^)]*\)/gi, '1')
+function inExpr(left: any, values: any[]): any {
+  return {
+    A_Expr: {
+      kind: 'AEXPR_IN',
+      name: [stringNode('=')],
+      lexpr: left,
+      rexpr: { List: { items: values } },
+      location: -1,
+    },
+  }
+}
 
-  // CREATE SEQUENCE → CREATE TABLE IF NOT EXISTS
-  if (/^\s*create\s+sequence\s+/i.test(result)) {
-    const m = /create\s+sequence\s+(\S+)/i.exec(result)
-    if (m)
-      result = `CREATE TABLE IF NOT EXISTS _${m[1].replace(/"/g, '')}_seq (val INTEGER DEFAULT 1, dummy INTEGER PRIMARY KEY DEFAULT 1)`
+function operatorName(expr: any): string | null {
+  return stringValue(expr?.name?.[0])
+}
+
+function isAsciiAlpha(ch: string): boolean {
+  const code = ch.charCodeAt(0)
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+}
+
+function isAsciiDigit(ch: string): boolean {
+  const code = ch.charCodeAt(0)
+  return code >= 48 && code <= 57
+}
+
+function isDollarQuoteTagStart(ch: string): boolean {
+  return ch === '_' || isAsciiAlpha(ch)
+}
+
+function isDollarQuoteTagPart(ch: string): boolean {
+  return ch === '_' || isAsciiAlpha(ch) || isAsciiDigit(ch)
+}
+
+function currentTimestampNode(): any {
+  return { SQLValueFunction: { op: 'SVFOP_CURRENT_TIMESTAMP', typmod: -1 } }
+}
+
+function isTimestampOid(oid: number | undefined): boolean {
+  return oid === PG_TYPE_TIMESTAMP || oid === PG_TYPE_TIMESTAMPTZ
+}
+
+function isBooleanOid(oid: number | undefined): boolean {
+  return oid === PG_TYPE_BOOL
+}
+
+function isJsonOid(oid: number | undefined): boolean {
+  return oid === PG_TYPE_JSON || oid === PG_TYPE_JSONB
+}
+
+function finiteNumberFromPlainString(value: string): number | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  let start = 0
+  if (trimmed[0] === '-' || trimmed[0] === '+') start = 1
+  if (start === trimmed.length) return null
+
+  let sawDigit = false
+  let sawDot = false
+  for (let i = start; i < trimmed.length; i++) {
+    const ch = trimmed[i]
+    if (isAsciiDigit(ch)) {
+      sawDigit = true
+      continue
+    }
+    if (ch === '.' && !sawDot) {
+      sawDot = true
+      continue
+    }
+    return null
+  }
+  if (!sawDigit) return null
+  const number = Number(trimmed)
+  return Number.isFinite(number) ? number : null
+}
+
+function timestampMillisValue(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string') return finiteNumberFromPlainString(value)
+  return null
+}
+
+function postgresTimestampTextFromDate(value: Date): string {
+  const raw = value.toISOString()
+  const withSpace = raw.replace('T', ' ')
+  return withSpace.endsWith('Z') ? `${withSpace.slice(0, -1)}+00` : withSpace
+}
+
+function postgresTimestampText(value: unknown): string {
+  const millis = timestampMillisValue(value)
+  if (millis !== null) {
+    const date = new Date(millis)
+    if (Number.isFinite(date.getTime())) return postgresTimestampTextFromDate(date)
+  }
+  const raw = value instanceof Date ? value.toISOString() : String(value)
+  const withSpace = raw.replace('T', ' ')
+  return withSpace.endsWith('Z') ? `${withSpace.slice(0, -1)}+00` : withSpace
+}
+
+function paramNumbersForOids(
+  oids: number[],
+  matches: (oid: number | undefined) => boolean
+): Set<number> {
+  const numbers = new Set<number>()
+  for (let index = 0; index < oids.length; index++) {
+    if (matches(oids[index])) numbers.add(index + 1)
+  }
+  return numbers
+}
+
+function parsePgArrayLiteral(value: string): unknown[] | null {
+  if (value[0] !== '{' || value[value.length - 1] !== '}') return null
+  const items: unknown[] = []
+  let i = 1
+  while (i < value.length - 1) {
+    if (value[i] === ',') {
+      i++
+      continue
+    }
+
+    if (value[i] === '"') {
+      i++
+      let out = ''
+      while (i < value.length - 1) {
+        const ch = value[i]
+        if (ch === '\\') {
+          if (i + 1 < value.length - 1) out += value[i + 1]
+          i += 2
+          continue
+        }
+        if (ch === '"') {
+          i++
+          break
+        }
+        out += ch
+        i++
+      }
+      items.push(out)
+      continue
+    }
+
+    const start = i
+    while (i < value.length - 1 && value[i] !== ',') i++
+    const token = value.slice(start, i)
+    items.push(token === 'NULL' ? null : token)
+  }
+  return items
+}
+
+function pgArrayLiteralToJson(value: string): string | null {
+  const items = parsePgArrayLiteral(value)
+  return items ? JSON.stringify(items) : null
+}
+
+function tryParseJson(value: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(value) }
+  } catch {
+    return { ok: false }
+  }
+}
+
+function pgArrayLiteralToJsonDocument(value: string): string | null {
+  const items = parsePgArrayLiteral(value)
+  if (!items) return null
+  return JSON.stringify(
+    items.map((item) => {
+      if (typeof item !== 'string') return item
+      const parsed = tryParseJson(item)
+      return parsed.ok ? parsed.value : item
+    })
+  )
+}
+
+function sqliteJsonParamValue(value: unknown): unknown {
+  if (Array.isArray(value)) return JSON.stringify(value)
+  if (value && typeof value === 'object') return JSON.stringify(value)
+  if (typeof value !== 'string') return value
+  const parsed = tryParseJson(value)
+  if (parsed.ok) return value
+  return pgArrayLiteralToJsonDocument(value) ?? value
+}
+
+function sqliteJsonArrayExpr(value: any, context?: RewriteContext): any {
+  const paramNumber = value?.ParamRef?.number
+  if (paramNumber) context?.arrayParamNumbers?.add(paramNumber)
+
+  const literal = value?.A_Const?.sval?.sval
+  if (typeof literal === 'string') {
+    const json = pgArrayLiteralToJson(literal)
+    if (json) return { A_Const: { sval: { sval: json } } }
   }
 
-  // Skipped PG features
-  if (/^\s*create\s+(or\s+replace\s+)?(function|trigger)\s+/i.test(result)) return ''
-  if (/^\s*create\s+database\s/i.test(result)) return ''
-  if (/^\s*cluster\s+/i.test(result)) return ''
-  if (/^\s*(grant|revoke)\s+/i.test(result)) return ''
-  if (/^\s*alter\s+default\s+privileges/i.test(result)) return ''
-  if (/^\s*comment\s+on\s+/i.test(result)) return ''
-  if (/^\s*(create|alter|drop)\s+publication\s+/i.test(result)) return ''
-  if (/^\s*alter\s+table\s+.+replica\s+identity/i.test(result)) return ''
-  // PG-specific ALTER COLUMN (SQLite doesn't support)
-  if (/^\s*alter\s+table\s+.+alter\s+column\s+/i.test(result)) return ''
+  return value
+}
 
-  // Handle multi-statement SQL beginning with CREATE SCHEMA (remove that line)
-  result = result.replace(/^\s*create\s+schema\s+[^;]+;\s*/i, '')
-  // CLOSE cursor — pg-specific
-  if (/^\s*close\s+/i.test(result)) return ''
+const NON_LITERAL_ARRAY_VALUE = Symbol('non-literal-array-value')
 
-  // DDL schema flattening
-  if (/^\s*(create|alter|drop)\s+(table|index|view|schema|sequence)\s+/i.test(result)) {
-    result = result.replace(/(\w+)\.(\w+)/g, '$1_$2')
-  }
-  // PG type → SQLite type mapping for DDL
-  result = result.replace(/\bTIMESTAMPTZ\b/g, 'TEXT')
-  result = result.replace(/\bTIMESTAMP\b/ig, 'TEXT')
-  result = result.replace(/\bJSONB\b/g, 'TEXT')
-  result = result.replace(/\bDOUBLE\s+PRECISION\b/g, 'REAL')
-  result = result.replace(/\bBOOLEAN\b/gi, 'INTEGER')
-  result = result.replace(/\bBOOL\b/g, 'INTEGER')
-  result = result.replace(/\bBIGINT\b/g, 'INTEGER')
-  result = result.replace(/\bSMALLINT\b/g, 'INTEGER')
-  result = result.replace(/\bSERIAL\b/g, 'INTEGER')
-  result = result.replace(/\bBIGSERIAL\b/g, 'INTEGER')
-  result = result.replace(/\bBYTEA\b/g, 'BLOB')
-  // now() → CURRENT_TIMESTAMP (PG function not in SQLite)
-  result = result.replace(/\bnow\s*\(\s*\)/gi, "CURRENT_TIMESTAMP")
-  // true/false → 1/0 for DEFAULT and CHECK contexts
-  result = result.replace(/\bdefault\s+true\b/gi, 'DEFAULT 1')
-  result = result.replace(/\bdefault\s+false\b/gi, 'DEFAULT 0')
-  // Strip CONSTRAINT name prefix (PG syntax, SQLite wants bare constraint)
-  result = result.replace(/\bconstraint\s+"?\w+"?\s+(primary\s+key|unique|foreign\s+key|check)\b/gi, '$1')
-  // ON CONFLICT DO NOTHING → INSERT OR IGNORE (if no conflict target)
-  if (/\bon\s+conflict\s+do\s+nothing\b/i.test(result)) {
-    result = result.replace(/^\s*insert\s+into\s+/i, 'INSERT OR IGNORE INTO ')
-    result = result.replace(/\bon\s+conflict\s+do\s+nothing\b/gi, '')
+function astLiteralValue(value: any): unknown | typeof NON_LITERAL_ARRAY_VALUE {
+  const constValue = value?.A_Const
+  if (constValue) {
+    if (Object.hasOwn(constValue, 'isnull')) return null
+    if (Object.hasOwn(constValue, 'sval')) return constValue.sval?.sval ?? ''
+    if (Object.hasOwn(constValue, 'ival')) return constValue.ival?.ival ?? 0
+    if (Object.hasOwn(constValue, 'fval')) {
+      const raw = constValue.fval?.fval ?? ''
+      const number = Number(raw)
+      return Number.isFinite(number) ? number : raw
+    }
+    if (Object.hasOwn(constValue, 'boolval')) {
+      return constValue.boolval?.boolval === true
+    }
   }
 
-  // DEALLOCATE / DISCARD / RESET
-  if (/^(deallocate|discard|reset\s+all)/i.test(result)) return ''
-  // LISTEN / UNLISTEN
-  if (/^(listen|unlisten)/i.test(result)) return ''
-  // SHOW
-  if (/^show\s+/i.test(result)) return ''
-  // SET (LOCAL/SESSION/CONSTRAINTS/etc.) → skip (but allow SET that targets zero_0 tables)
-  if (/^set\s/i.test(result) && !/^set\s+"zero_0"\./i.test(result)) return ''
+  const arrayExpr = value?.A_ArrayExpr
+  if (arrayExpr) return arrayExpressionValue(arrayExpr)
 
+  return NON_LITERAL_ARRAY_VALUE
+}
+
+function arrayExpressionValue(
+  arrayExpr: any
+): unknown[] | typeof NON_LITERAL_ARRAY_VALUE {
+  const values: unknown[] = []
+  for (const element of arrayExpr.elements ?? []) {
+    const value = astLiteralValue(element)
+    if (value === NON_LITERAL_ARRAY_VALUE) return NON_LITERAL_ARRAY_VALUE
+    values.push(value)
+  }
+  return values
+}
+
+function rewriteArrayExpression(arrayExpr: any): any | null {
+  const value = arrayExpressionValue(arrayExpr)
+  if (value === NON_LITERAL_ARRAY_VALUE) return null
+  return stringConst(JSON.stringify(value))
+}
+
+function jsonEachArraySubquery(value: any): any {
+  return {
+    SelectStmt: {
+      targetList: [
+        {
+          ResTarget: {
+            val: columnRefNode('value'),
+            location: -1,
+          },
+        },
+      ],
+      fromClause: [
+        {
+          RangeFunction: {
+            functions: [
+              {
+                List: {
+                  items: [
+                    {
+                      FuncCall: {
+                        funcname: [stringNode('json_each')],
+                        args: [value],
+                        funcformat: 'COERCE_EXPLICIT_CALL',
+                        location: -1,
+                      },
+                    },
+                    {},
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      ],
+      limitOption: 'LIMIT_OPTION_DEFAULT',
+      op: 'SETOP_NONE',
+    },
+  }
+}
+
+function arrayAnySubLink(testexpr: any, arrayExpr: any): any {
+  return {
+    SubLink: {
+      subLinkType: 'ANY_SUBLINK',
+      testexpr,
+      subselect: jsonEachArraySubquery(arrayExpr),
+      location: -1,
+    },
+  }
+}
+
+function jsonEachRangeFunction(value: any, alias: string): any {
+  return {
+    RangeFunction: {
+      functions: [
+        {
+          List: {
+            items: [
+              {
+                FuncCall: {
+                  funcname: [stringNode('json_each')],
+                  args: [value],
+                  funcformat: 'COERCE_EXPLICIT_CALL',
+                  location: -1,
+                },
+              },
+              {},
+            ],
+          },
+        },
+      ],
+      alias: { aliasname: alias },
+    },
+  }
+}
+
+function jsonbExistsAnyKeySubLink(jsonExpr: any, arrayExpr: any): any {
+  return {
+    SubLink: {
+      subLinkType: 'EXISTS_SUBLINK',
+      subselect: {
+        SelectStmt: {
+          targetList: [
+            {
+              ResTarget: {
+                val: intConst(1),
+                location: -1,
+              },
+            },
+          ],
+          fromClause: [
+            jsonEachRangeFunction(jsonExpr, 'obj'),
+            jsonEachRangeFunction(arrayExpr, 'keys'),
+          ],
+          whereClause: equalityExpr(
+            columnRefNode('obj', 'key'),
+            columnRefNode('keys', 'value')
+          ),
+          limitOption: 'LIMIT_OPTION_DEFAULT',
+          op: 'SETOP_NONE',
+        },
+      },
+      location: -1,
+    },
+  }
+}
+
+function rewriteArrayComparisonExpr(expr: any, context?: RewriteContext): any | null {
+  const op = operatorName(expr)
+  if (expr?.kind === 'AEXPR_OP_ANY' && op === '=') {
+    return arrayAnySubLink(expr.lexpr, sqliteJsonArrayExpr(expr.rexpr, context))
+  }
+  if (expr?.kind === 'AEXPR_OP_ALL' && op === '<>') {
+    return {
+      BoolExpr: {
+        boolop: 'NOT_EXPR',
+        args: [arrayAnySubLink(expr.lexpr, sqliteJsonArrayExpr(expr.rexpr, context))],
+        location: -1,
+      },
+    }
+  }
+  return null
+}
+
+function rewriteJsonbExistenceExpr(expr: any, context?: RewriteContext): any | null {
+  if (expr?.kind !== 'AEXPR_OP' || operatorName(expr) !== '?|') return null
+  const jsonExpr = cloneAst(expr.lexpr)
+  const arrayExpr = sqliteJsonArrayExpr(rewriteNode(cloneAst(expr.rexpr), context), context)
+  return jsonbExistsAnyKeySubLink(jsonExpr, arrayExpr)
+}
+
+function rewriteLikeExpr(expr: any): any | null {
+  if (expr?.kind !== 'AEXPR_LIKE') return null
+  const op = operatorName(expr)
+  if (op !== '~~' && op !== '!~~') return null
+
+  const call = {
+    FuncCall: {
+      funcname: [stringNode('like')],
+      args: [expr.rexpr, expr.lexpr, funcCallNode('char', [intConst(92)])],
+      funcformat: 'COERCE_EXPLICIT_CALL',
+      location: expr.location ?? -1,
+    },
+  }
+
+  if (op !== '!~~') return call
+  return {
+    BoolExpr: {
+      boolop: 'NOT_EXPR',
+      args: [call],
+      location: expr.location ?? -1,
+    },
+  }
+}
+
+function jsonMaybeParsedExpr(value: any): any {
+  const probe = cloneAst(value)
+  return {
+    CaseExpr: {
+      args: [
+        {
+          CaseWhen: {
+            expr: {
+              BoolExpr: {
+                boolop: 'AND_EXPR',
+                args: [
+                  funcCallNode('json_valid', [cloneAst(value)]),
+                  inExpr(
+                    funcCallNode('substr', [
+                      funcCallNode('ltrim', [cloneAst(value)]),
+                      intConst(1),
+                      intConst(1),
+                    ]),
+                    [stringConst('{'), stringConst('[')]
+                  ),
+                ],
+                location: -1,
+              },
+            },
+            result: funcCallNode('json', [cloneAst(value)]),
+            location: -1,
+          },
+        },
+      ],
+      defresult: probe,
+      location: -1,
+    },
+  }
+}
+
+function rewriteJsonFunctionArguments(funcCall: any, name: string): void {
+  if (
+    name === 'json_build_object' ||
+    name === 'jsonb_build_object' ||
+    name === 'json_object'
+  ) {
+    for (let i = 1; i < (funcCall.args?.length ?? 0); i += 2) {
+      funcCall.args[i] = jsonMaybeParsedExpr(funcCall.args[i])
+    }
+  } else if (
+    (name === 'json_object_agg' || name === 'json_group_object') &&
+    funcCall.args?.[1]
+  ) {
+    funcCall.args[1] = jsonMaybeParsedExpr(funcCall.args[1])
+  }
+}
+
+function markJsonInputParams(
+  funcCall: any,
+  name: string | null,
+  context?: RewriteContext
+): void {
+  if (!context?.jsonParamNumbers) return
+  const args = funcCall.args ?? []
+  for (let index = 0; index < args.length; index++) {
+    if (!jsonInputParamOid(name, index)) continue
+    collectParamRefs(args[index], (paramNumber) =>
+      context.jsonParamNumbers?.add(paramNumber)
+    )
+  }
+}
+
+function unwrapJsonEachArraySubLinkArg(arg: any): any | null {
+  const subLink = arg?.SubLink
+  if (subLink?.subLinkType !== 'ARRAY_SUBLINK') return null
+  const select = subLink.subselect?.SelectStmt
+  const targetList = select?.targetList ?? []
+  const fromClause = select?.fromClause ?? []
+  if (targetList.length !== 1 || fromClause.length !== 1) return null
+  if (columnRefTailName(unwrapTypeCast(targetList[0]?.ResTarget?.val)) !== 'value')
+    return null
+
+  const func = fromClause[0]?.RangeFunction?.functions?.[0]?.List?.items?.[0]?.FuncCall
+  const name = functionName(func)
+  if (
+    name !== 'json_each' &&
+    name !== 'json_array_elements' &&
+    name !== 'json_array_elements_text' &&
+    name !== 'jsonb_array_elements' &&
+    name !== 'jsonb_array_elements_text'
+  ) {
+    return null
+  }
+  return func.args?.[0] ?? null
+}
+
+function isDistinctOnClause(clause: any): boolean {
+  return (
+    Array.isArray(clause) && clause.some((item) => item && Object.keys(item).length > 0)
+  )
+}
+
+function buildCopyOutResponse(columnCount: number): Uint8Array {
+  return msg(
+    0x48,
+    concat(
+      new Uint8Array([0]),
+      i16(columnCount),
+      ...Array.from({ length: columnCount }, () => i16(0))
+    )
+  )
+}
+
+function buildCopyData(data: string): Uint8Array {
+  return msg(0x64, textEncoder.encode(data))
+}
+
+function buildCopyDone(): Uint8Array {
+  return msg(0x63, new Uint8Array(0))
+}
+
+function sortByDefault(node: any): any {
+  return {
+    SortBy: {
+      node,
+      sortby_dir: 'SORTBY_DEFAULT',
+      sortby_nulls: 'SORTBY_NULLS_DEFAULT',
+      location: -1,
+    },
+  }
+}
+
+function outputNameForTarget(targetNode: any, index: number): string {
+  const target = targetNode?.ResTarget
+  if (target?.name) return target.name
+  const fields = target?.val?.ColumnRef?.fields
+  if (Array.isArray(fields)) {
+    const name = stringValue(fields[fields.length - 1])
+    if (name) return name
+  }
+  return `_orez_col_${index + 1}`
+}
+
+function rowToJsonObject(alias: string, columns: string[]): any {
+  return funcCallNode(
+    'json_object',
+    columns.flatMap((column) => [stringConst(column), columnRefNode(alias, column)])
+  )
+}
+
+function rowJsonShapesForSelect(stmt: any): Map<string, string[]> {
+  const shapes = new Map<string, string[]>()
+  for (const fromNode of stmt?.fromClause ?? []) {
+    const subselect = fromNode.RangeSubselect
+    const alias = subselect?.alias?.aliasname
+    const targets = subselect?.subquery?.SelectStmt?.targetList
+    if (!alias || !Array.isArray(targets)) continue
+    shapes.set(alias, targets.map(outputNameForTarget))
+  }
+  return shapes
+}
+
+function rewriteRowToJsonValue(value: any, shapes: Map<string, string[]>): any {
+  if (!value || typeof value !== 'object') return value
+  if (Array.isArray(value))
+    return value.map((item) => rewriteRowToJsonValue(item, shapes))
+
+  const func = value.FuncCall
+  if (func && functionName(func) === 'row_to_json') {
+    const alias = columnRefTailName(func.args?.[0])
+    const columns = alias ? shapes.get(alias) : null
+    if (alias && columns?.length) return rowToJsonObject(alias, columns)
+  }
+
+  for (const key of Object.keys(value)) {
+    value[key] = rewriteRowToJsonValue(value[key], shapes)
+  }
+  return value
+}
+
+function rewriteRowToJsonSelect(stmt: any): void {
+  const shapes = rowJsonShapesForSelect(stmt)
+  if (shapes.size === 0) return
+  stmt.targetList = rewriteRowToJsonValue(stmt.targetList ?? [], shapes)
+}
+
+function rowNumberTarget(partitionClause: any[], orderClause?: any[]): any {
+  return {
+    ResTarget: {
+      name: '_orez_rn',
+      val: {
+        FuncCall: {
+          funcname: [stringNode('row_number')],
+          over: {
+            partitionClause,
+            orderClause,
+            frameOptions: 1058,
+            location: -1,
+          },
+          funcformat: 'COERCE_EXPLICIT_CALL',
+          location: -1,
+        },
+      },
+      location: -1,
+    },
+  }
+}
+
+function rewriteDistinctOnSelect(stmt: any): any {
+  if (!isDistinctOnClause(stmt?.distinctClause)) return stmt
+
+  const alias = 'orez_distinct_on'
+  const innerTargets = cloneAst(stmt.targetList ?? [])
+  const outputNames = innerTargets.map(outputNameForTarget)
+  innerTargets.forEach((targetNode: any, index: number) => {
+    targetNode.ResTarget.name ??= outputNames[index]
+  })
+
+  const partitionClause = cloneAst(stmt.distinctClause)
+  const orderClause = stmt.sortClause
+    ? cloneAst(stmt.sortClause)
+    : partitionClause.map((node: any) => sortByDefault(cloneAst(node)))
+
+  const inner = {
+    ...cloneAst(stmt),
+    distinctClause: undefined,
+    sortClause: undefined,
+    targetList: [...innerTargets, rowNumberTarget(partitionClause, orderClause)],
+  }
+
+  return {
+    targetList: outputNames.map((name: string) => ({
+      ResTarget: {
+        name: name.startsWith('_orez_col_') ? name : undefined,
+        val: columnRefNode(alias, name),
+        location: -1,
+      },
+    })),
+    fromClause: [
+      {
+        RangeSubselect: {
+          subquery: { SelectStmt: inner },
+          alias: { aliasname: alias },
+        },
+      },
+    ],
+    whereClause: equalityExpr(columnRefNode('_orez_rn'), intConst(1)),
+    limitOption: 'LIMIT_OPTION_DEFAULT',
+    op: 'SETOP_NONE',
+  }
+}
+
+function normalizeSelectStmt(stmt: any): any {
+  const normalized = rewriteDistinctOnSelect(stmt)
+  rewriteRowToJsonSelect(normalized)
+  delete normalized.lockingClause
+  return normalized
+}
+
+function rewriteExtractFuncCall(func: any): any | null {
+  if (functionName(func) !== 'extract') return null
+  const part = String(func.args?.[0]?.A_Const?.sval?.sval ?? '').toLowerCase()
+  const source = func.args?.[1]
+  if (part !== 'epoch' || !source) return null
+  return funcCallNode('strftime', [stringConst('%s'), source])
+}
+
+function rewriteJsonToRecordsetRangeFunction(rangeFunction: any): any | null {
+  const functionList = rangeFunction?.functions?.[0]?.List?.items
+  const func = functionList?.[0]?.FuncCall
+  if (!func || functionName(func) !== 'json_to_recordset') return null
+  const jsonArg = func.args?.[0]
+  const columns = (rangeFunction.coldeflist ?? [])
+    .map((node: any) => node.ColumnDef)
+    .filter((node: any) => node?.colname)
+  if (!jsonArg || columns.length === 0) return null
+
+  return {
+    RangeSubselect: {
+      subquery: {
+        SelectStmt: {
+          targetList: columns.map((column: any) => ({
+            ResTarget: {
+              name: column.colname,
+              val: funcCallNode('json_extract', [
+                columnRefNode('value'),
+                stringConst(jsonPathForColumn(column.colname)),
+              ]),
+              location: -1,
+            },
+          })),
+          fromClause: [
+            {
+              RangeFunction: {
+                functions: [
+                  {
+                    List: {
+                      items: [funcCallNode('json_each', [cloneAst(jsonArg)]), {}],
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+          limitOption: 'LIMIT_OPTION_DEFAULT',
+          op: 'SETOP_NONE',
+        },
+      },
+      alias: rangeFunction.alias ?? { aliasname: 'json_to_recordset' },
+    },
+  }
+}
+
+function rewriteNode(value: any, context?: RewriteContext): any {
+  if (!value || typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map((item) => rewriteNode(item, context))
+
+  if (value.SelectStmt) {
+    value.SelectStmt = normalizeSelectStmt(value.SelectStmt)
+  }
+  if (value.A_ArrayExpr) {
+    const rewritten = rewriteArrayExpression(value.A_ArrayExpr)
+    if (rewritten) return rewritten
+  }
+  if (value.A_Expr) {
+    const like = rewriteLikeExpr(value.A_Expr)
+    if (like) return rewriteNode(like, context)
+    const jsonbExists = rewriteJsonbExistenceExpr(value.A_Expr, context)
+    if (jsonbExists) return rewriteNode(jsonbExists, context)
+    const rewritten = rewriteArrayComparisonExpr(value.A_Expr, context)
+    if (rewritten) return rewriteNode(rewritten, context)
+  }
+  if (value.RangeFunction) {
+    const rewritten = rewriteJsonToRecordsetRangeFunction(value.RangeFunction)
+    if (rewritten) return rewriteNode(rewritten, context)
+  }
+  if (value.RangeVar) {
+    flattenRangeVar(value.RangeVar)
+    return value
+  }
+  if (value.ColumnRef) {
+    flattenColumnRef(value.ColumnRef)
+    return value
+  }
+  if (value.TypeCast) {
+    return rewriteNode(value.TypeCast.arg, context)
+  }
+  if (value.MinMaxExpr) {
+    const name = value.MinMaxExpr.op === 'IS_LEAST' ? 'min' : 'max'
+    return {
+      FuncCall: {
+        funcname: [stringNode(name)],
+        args: rewriteNode(value.MinMaxExpr.args ?? [], context),
+        funcformat: 'COERCE_EXPLICIT_CALL',
+      },
+    }
+  }
+  if (value.FuncCall) {
+    const name = functionName(value.FuncCall)
+    markJsonInputParams(value.FuncCall, name, context)
+    if (
+      (name === 'json_each' ||
+        SQLITE_FUNCTION_BY_PG_FUNCTION.get(name ?? '') === 'json_each') &&
+      value.FuncCall.args?.[0]
+    ) {
+      const unwrapped = unwrapJsonEachArraySubLinkArg(value.FuncCall.args[0])
+      if (unwrapped) value.FuncCall.args[0] = unwrapped
+    }
+    if (name === 'extract') {
+      const rewritten = rewriteExtractFuncCall(value.FuncCall)
+      if (rewritten) return rewriteNode(rewritten, context)
+    }
+    if (name === 'md5' && value.FuncCall.args?.[0]) {
+      return rewriteNode(value.FuncCall.args[0], context)
+    }
+    if (name === 'to_timestamp' && value.FuncCall.args?.[0]) {
+      return funcCallNode('datetime', [
+        rewriteNode(value.FuncCall.args[0], context),
+        stringConst('unixepoch'),
+      ])
+    }
+    if (name === 'timezone' && value.FuncCall.args?.[1]) {
+      return rewriteNode(value.FuncCall.args[1], context)
+    }
+    if (name === 'starts_with') {
+      const rewritten = startsWithExpr(value.FuncCall, context)
+      if (rewritten) return rewritten
+    }
+    if (name) rewriteJsonFunctionArguments(value.FuncCall, name)
+    const sqliteName = SQLITE_FUNCTION_BY_PG_FUNCTION.get(name ?? '')
+    if (sqliteName) value.FuncCall.funcname = [stringNode(sqliteName)]
+    if (name === 'now') return currentTimestampNode()
+    if (name === 'nextval') return intConst(1)
+  }
+  if (value.A_Const && Object.hasOwn(value.A_Const, 'boolval')) {
+    return intConst(value.A_Const.boolval?.boolval ? 1 : 0)
+  }
+
+  for (const key of Object.keys(value)) {
+    value[key] = rewriteNode(value[key], context)
+  }
+  return value
+}
+
+function typeNameBase(typeName: any): string | null {
+  const names = typeName?.names
+  if (!Array.isArray(names) || names.length === 0) return null
+  return stringValue(names[names.length - 1])?.toLowerCase() ?? null
+}
+
+function typeNameTypmod(typeName: any, index: number): number | null {
+  const value = typeName?.typmods?.[index]?.A_Const?.ival?.ival
+  return typeof value === 'number' ? value : null
+}
+
+function arrayTypeOidForElementOid(oid: number): number {
+  return ARRAY_TYPE_ROWS.find((row) => row.oid === oid)?.typarray ?? PG_TYPE_JSON
+}
+
+function basePgTypeMetadata(
+  typeName: any
+): Omit<SchemaColumnMetadata, 'table' | 'schema' | 'tableName' | 'column'> {
+  const base = typeNameBase(typeName)
+  switch (base) {
+    case 'bool':
+    case 'boolean':
+      return {
+        oid: PG_TYPE_BOOL,
+        typeOid: PG_TYPE_BOOL,
+        dataType: 'boolean',
+        typtype: 'b',
+        typname: 'bool',
+      }
+    case 'bytea':
+      return {
+        oid: PG_TYPE_BYTEA,
+        typeOid: PG_TYPE_BYTEA,
+        dataType: 'bytea',
+        typtype: 'b',
+        typname: 'bytea',
+      }
+    case 'float4':
+      return {
+        oid: PG_TYPE_FLOAT8,
+        typeOid: 700,
+        dataType: 'real',
+        typtype: 'b',
+        typname: 'float4',
+      }
+    case 'float8':
+      return {
+        oid: PG_TYPE_FLOAT8,
+        typeOid: PG_TYPE_FLOAT8,
+        dataType: 'double precision',
+        typtype: 'b',
+        typname: 'float8',
+      }
+    case 'int2':
+      return {
+        oid: PG_TYPE_INT2,
+        typeOid: PG_TYPE_INT2,
+        dataType: 'smallint',
+        typtype: 'b',
+        typname: 'int2',
+      }
+    case 'int4':
+    case 'integer':
+    case 'serial':
+    case 'serial4':
+      return {
+        oid: PG_TYPE_INT4,
+        typeOid: PG_TYPE_INT4,
+        dataType: 'integer',
+        typtype: 'b',
+        typname: 'int4',
+      }
+    case 'bigint':
+    case 'bigserial':
+    case 'int8':
+    case 'serial8':
+      return {
+        oid: PG_TYPE_INT8,
+        typeOid: PG_TYPE_INT8,
+        dataType: 'bigint',
+        typtype: 'b',
+        typname: 'int8',
+      }
+    case 'json':
+      return {
+        oid: PG_TYPE_JSON,
+        typeOid: PG_TYPE_JSON,
+        dataType: 'json',
+        typtype: 'b',
+        typname: 'json',
+      }
+    case 'jsonb':
+      return {
+        oid: PG_TYPE_JSONB,
+        typeOid: PG_TYPE_JSONB,
+        dataType: 'jsonb',
+        typtype: 'b',
+        typname: 'jsonb',
+      }
+    case 'numeric':
+      return {
+        oid: PG_TYPE_NUMERIC,
+        typeOid: PG_TYPE_NUMERIC,
+        dataType: 'numeric',
+        typtype: 'b',
+        typname: 'numeric',
+        numericPrecision: typeNameTypmod(typeName, 0),
+        numericScale: typeNameTypmod(typeName, 1),
+      }
+    case 'timestamp':
+      return {
+        oid: PG_TYPE_TIMESTAMP,
+        typeOid: PG_TYPE_TIMESTAMP,
+        dataType: 'timestamp without time zone',
+        typtype: 'b',
+        typname: 'timestamp',
+      }
+    case 'timestamptz':
+      return {
+        oid: PG_TYPE_TIMESTAMPTZ,
+        typeOid: PG_TYPE_TIMESTAMPTZ,
+        dataType: 'timestamp with time zone',
+        typtype: 'b',
+        typname: 'timestamptz',
+      }
+    case 'varchar':
+    case 'character varying':
+      return {
+        oid: PG_TYPE_VARCHAR,
+        typeOid: PG_TYPE_VARCHAR,
+        dataType: 'character varying',
+        typtype: 'b',
+        typname: 'varchar',
+        characterMaximumLength: typeNameTypmod(typeName, 0),
+      }
+    case 'bpchar':
+    case 'char':
+    case 'character':
+      return {
+        oid: PG_TYPE_VARCHAR,
+        typeOid: 1042,
+        dataType: 'character',
+        typtype: 'b',
+        typname: 'bpchar',
+        characterMaximumLength: typeNameTypmod(typeName, 0),
+      }
+    case 'uuid':
+      return {
+        oid: PG_TYPE_TEXT,
+        typeOid: 2950,
+        dataType: 'uuid',
+        typtype: 'b',
+        typname: 'uuid',
+      }
+    case 'text':
+    default:
+      return {
+        oid: PG_TYPE_TEXT,
+        typeOid: PG_TYPE_TEXT,
+        dataType: 'text',
+        typtype: 'b',
+        typname: base ?? 'text',
+      }
+  }
+}
+
+function pgTypeMetadataForTypeName(
+  typeName: any
+): Omit<SchemaColumnMetadata, 'table' | 'schema' | 'tableName' | 'column'> {
+  const base = basePgTypeMetadata(typeName)
+  if (!Array.isArray(typeName?.arrayBounds)) {
+    return {
+      ...base,
+      elemTyptype: null,
+      elemTypname: null,
+    }
+  }
+  return {
+    ...base,
+    oid: PG_TYPE_JSON,
+    typeOid: arrayTypeOidForElementOid(base.typeOid ?? PG_TYPE_TEXT),
+    dataType: `${base.dataType ?? 'text'}[]`,
+    typname: `_${base.typname ?? 'text'}`,
+    elemTyptype: base.typtype ?? 'b',
+    elemTypname: base.typname ?? 'text',
+  }
+}
+
+function wireOidForTypeName(typeName: any): number | undefined {
+  return pgTypeMetadataForTypeName(typeName).oid
+}
+
+function columnConstraintMetadata(columnDef: any): {
+  notNull?: boolean
+  primaryKey?: boolean
+  unique?: boolean
+} {
+  const metadata: { notNull?: boolean; primaryKey?: boolean; unique?: boolean } = {}
+  for (const constraint of columnDef?.constraints ?? []) {
+    const type = constraint?.Constraint?.contype
+    if (type === 'CONSTR_NOTNULL') metadata.notNull = true
+    if (type === 'CONSTR_UNIQUE') metadata.unique = true
+    if (type === 'CONSTR_PRIMARY') {
+      metadata.notNull = true
+      metadata.primaryKey = true
+      metadata.unique = true
+    }
+  }
+  return metadata
+}
+
+function schemaColumnForColumnDef(
+  table: PublicationTableRef | null,
+  columnDef: any
+): SchemaColumnMetadata | null {
+  if (!table || !columnDef?.colname) return null
+  return {
+    ...table,
+    column: columnDef.colname,
+    ...pgTypeMetadataForTypeName(columnDef.typeName),
+    ...columnConstraintMetadata(columnDef),
+  }
+}
+
+function schemaColumnForAlterColumnType(
+  table: PublicationTableRef | null,
+  cmd: any
+): SchemaColumnMetadata | null {
+  const columnDef = cmd?.def?.ColumnDef
+  if (!table || !cmd?.name || !columnDef?.typeName) return null
+  return {
+    ...table,
+    column: cmd.name,
+    ...pgTypeMetadataForTypeName(columnDef.typeName),
+  }
+}
+
+function schemaColumnsForCreateTable(stmt: any): SchemaColumnMetadata[] {
+  const table = publicationTableRefForRangeVar(stmt.relation)
+  return (stmt.tableElts ?? [])
+    .map((tableElt: any) => schemaColumnForColumnDef(table, tableElt.ColumnDef))
+    .filter(Boolean)
+}
+
+function setTypeName(typeName: any, sqliteType: string): void {
+  typeName.names = [stringNode(sqliteType)]
+  delete typeName.typmods
+  delete typeName.arrayBounds
+  typeName.typemod = -1
+}
+
+function normalizeColumnType(columnDef: any): void {
+  const typeName = columnDef?.typeName
+  const sqliteType = Array.isArray(typeName?.arrayBounds)
+    ? 'text'
+    : SQLITE_TYPE_BY_PG_TYPE.get(typeNameBase(typeName) ?? '')
+  if (sqliteType) setTypeName(columnDef.typeName, sqliteType)
+}
+
+function isDefaultConstraint(constraint: any): boolean {
+  return constraint?.Constraint?.contype === 'CONSTR_DEFAULT'
+}
+
+function shouldDropAddColumnDefault(constraint: any): boolean {
+  if (!isDefaultConstraint(constraint)) return false
+  const raw = constraint.Constraint.raw_expr
+  if (!raw?.FuncCall) return false
+  const name = functionName(raw.FuncCall)
+  return name === 'md5' || name === 'gen_random_uuid'
+}
+
+function containsAnyFuncCall(value: any, names: Set<string>): boolean {
+  if (!value || typeof value !== 'object') return false
+  if (Array.isArray(value)) return value.some((item) => containsAnyFuncCall(item, names))
+  if (value.FuncCall) {
+    const name = functionName(value.FuncCall)
+    if (name && names.has(name)) return true
+  }
+  return Object.values(value).some((child) => containsAnyFuncCall(child, names))
+}
+
+function normalizeColumnDef(columnDef: any, options?: { addedColumn?: boolean }): void {
+  normalizeColumnType(columnDef)
+  if (Array.isArray(columnDef.constraints)) {
+    columnDef.constraints = columnDef.constraints.filter((constraint: any) => {
+      const type = constraint?.Constraint?.contype
+      if (type === 'CONSTR_FOREIGN') return false
+      if (
+        options?.addedColumn &&
+        (type === 'CONSTR_NOTNULL' || type === 'CONSTR_PRIMARY')
+      )
+        return false
+      if (options?.addedColumn && shouldDropAddColumnDefault(constraint)) return false
+      if (
+        type === 'CONSTR_GENERATED' &&
+        containsAnyFuncCall(
+          constraint.Constraint.raw_expr,
+          UNSUPPORTED_GENERATED_COLUMN_FUNCTIONS
+        )
+      )
+        return false
+      return true
+    })
+  }
+  rewriteNode(columnDef)
+}
+
+function isForeignKeyConstraint(tableElt: any): boolean {
+  return tableElt?.Constraint?.contype === 'CONSTR_FOREIGN'
+}
+
+function normalizeCreateTable(stmt: any): void {
+  flattenRangeVar(stmt.relation)
+  stmt.if_not_exists = true
+  stmt.relation.relpersistence = 'p'
+  stmt.tableElts = (stmt.tableElts ?? []).filter(
+    (tableElt: any) => !isForeignKeyConstraint(tableElt)
+  )
+  for (const tableElt of stmt.tableElts ?? []) {
+    if (tableElt.ColumnDef) normalizeColumnDef(tableElt.ColumnDef)
+  }
+}
+
+function normalizeCreateTableAs(stmt: any): void {
+  if (stmt.into?.rel) {
+    flattenRangeVar(stmt.into.rel)
+    stmt.into.rel.relpersistence = 'p'
+  }
+  rewriteNode(stmt.query)
+}
+
+function rewriteInsertDefaults(stmt: any): void {
+  const cols = stmt.cols
+  const valuesLists = stmt.selectStmt?.SelectStmt?.valuesLists
+  if (!Array.isArray(cols) || !Array.isArray(valuesLists) || cols.length === 0) return
+
+  const lists = valuesLists
+    .map((list: any) => list?.List?.items)
+    .filter((items: any) => Array.isArray(items))
+  if (lists.length !== valuesLists.length) return
+  if (lists.some((items: any[]) => items.length !== cols.length)) return
+
+  const dropIndexes = cols
+    .map((_: any, index: number) => index)
+    .filter((index: number) =>
+      lists.every((items: any[]) => Object.hasOwn(items[index] ?? {}, 'SetToDefault'))
+    )
+  if (dropIndexes.length === 0 || dropIndexes.length === cols.length) return
+
+  const drop = new Set(dropIndexes)
+  stmt.cols = cols.filter((_: any, index: number) => !drop.has(index))
+  for (const items of lists) {
+    for (let index = items.length - 1; index >= 0; index--) {
+      if (drop.has(index)) items.splice(index, 1)
+    }
+  }
+}
+
+function normalizeInsertSelectOnConflict(stmt: any): void {
+  const select = stmt.selectStmt?.SelectStmt
+  if (!stmt.onConflictClause || !select?.fromClause?.length || select.whereClause) return
+  select.whereClause = intConst(1)
+}
+
+function firstSourceTable(value: any, cteNames = new Set<string>()): string | null {
+  if (!value || typeof value !== 'object') return null
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const table = firstSourceTable(item, cteNames)
+      if (table) return table
+    }
+    return null
+  }
+
+  if (value.SelectStmt?.withClause?.ctes) {
+    const nextCtes = new Set(cteNames)
+    for (const cte of value.SelectStmt.withClause.ctes) {
+      const name = cte.CommonTableExpr?.ctename
+      if (name) nextCtes.add(name)
+    }
+    for (const cte of value.SelectStmt.withClause.ctes) {
+      const table = firstSourceTable(cte.CommonTableExpr?.ctequery, nextCtes)
+      if (table) return table
+    }
+    return firstSourceTable({ ...value.SelectStmt, withClause: undefined }, nextCtes)
+  }
+
+  if (value.RangeVar) {
+    const table = flattenedRangeVarName(value.RangeVar)
+    return table && !cteNames.has(table) ? table : null
+  }
+
+  for (const child of Object.values(value)) {
+    const table = firstSourceTable(child, cteNames)
+    if (table) return table
+  }
+  return null
+}
+
+function normalizeAlterTable(stmt: any): {
+  skipIfColumnExistsByCmd: Map<any, RewrittenStatement['skipIfColumnExists']>
+  skipIfColumnMissingByCmd: Map<any, RewrittenStatement['skipIfColumnMissing']>
+  schemaColumnsByCmd: Map<any, SchemaColumnMetadata[]>
+  metadataOnlySchemaColumns: SchemaColumnMetadata[]
+} {
+  const tableRef = publicationTableRefForRangeVar(stmt.relation)
+  const table = flattenRangeVar(stmt.relation)
+  const nextCmds: any[] = []
+  const skipIfColumnExistsByCmd = new Map<any, RewrittenStatement['skipIfColumnExists']>()
+  const skipIfColumnMissingByCmd = new Map<
+    any,
+    RewrittenStatement['skipIfColumnMissing']
+  >()
+  const schemaColumnsByCmd = new Map<any, SchemaColumnMetadata[]>()
+  const metadataOnlySchemaColumns: SchemaColumnMetadata[] = []
+
+  for (const cmdNode of stmt.cmds ?? []) {
+    const cmd = cmdNode.AlterTableCmd
+    if (!cmd) continue
+    if (cmd.subtype === 'AT_AlterColumnType') {
+      const schemaColumn = schemaColumnForAlterColumnType(tableRef, cmd)
+      if (schemaColumn) metadataOnlySchemaColumns.push(schemaColumn)
+      continue
+    }
+    if (
+      cmd.subtype === 'AT_AddConstraint' ||
+      cmd.subtype === 'AT_DropConstraint' ||
+      cmd.subtype === 'AT_ReplicaIdentity' ||
+      cmd.subtype?.startsWith('AT_AlterColumn') ||
+      cmd.subtype === 'AT_ColumnDefault' ||
+      cmd.subtype === 'AT_SetNotNull' ||
+      cmd.subtype === 'AT_DropNotNull'
+    ) {
+      continue
+    }
+    if (cmd.subtype === 'AT_AddColumn' && cmd.def?.ColumnDef) {
+      const column = cmd.def.ColumnDef.colname
+      if (table && column) skipIfColumnExistsByCmd.set(cmdNode, { table, column })
+      const schemaColumn = schemaColumnForColumnDef(tableRef, cmd.def.ColumnDef)
+      if (schemaColumn) schemaColumnsByCmd.set(cmdNode, [schemaColumn])
+      cmd.missing_ok = false
+      normalizeColumnDef(cmd.def.ColumnDef, { addedColumn: true })
+    }
+    if (cmd.subtype === 'AT_DropColumn') {
+      if (cmd.missing_ok && table && cmd.name)
+        skipIfColumnMissingByCmd.set(cmdNode, { table, column: cmd.name })
+      cmd.missing_ok = false
+      delete cmd.behavior
+    }
+    nextCmds.push(cmdNode)
+  }
+
+  stmt.cmds = nextCmds
+  return {
+    skipIfColumnExistsByCmd,
+    skipIfColumnMissingByCmd,
+    schemaColumnsByCmd,
+    metadataOnlySchemaColumns,
+  }
+}
+
+function normalizeRename(stmt: any): { schemaMetadataChanges?: SchemaMetadataChange[] } {
+  const relation = stmt.relation
+  const table = publicationTableRefForRangeVar(relation)
+  delete stmt.behavior
+  if (!table) return {}
+
+  if (stmt.renameType === 'OBJECT_TABLE' && stmt.newname) {
+    const to = renamedPublicationTableRef(table, stmt.newname)
+    flattenRangeVar(relation)
+    if (to.table !== stmt.newname) stmt.newname = to.table
+    return { schemaMetadataChanges: [{ action: 'renameTable', from: table, to }] }
+  }
+
+  if (stmt.renameType === 'OBJECT_COLUMN' && stmt.subname && stmt.newname) {
+    flattenRangeVar(relation)
+    return {
+      schemaMetadataChanges: [
+        {
+          action: 'renameColumn',
+          table,
+          from: stmt.subname,
+          to: stmt.newname,
+        },
+      ],
+    }
+  }
+
+  flattenRangeVar(relation)
+  return {}
+}
+
+function normalizeIndex(stmt: any): boolean {
+  flattenRangeVar(stmt.relation)
+  stmt.if_not_exists = true
+  const method = stmt.accessMethod?.toLowerCase()
+  if (method && UNSUPPORTED_INDEX_METHODS.has(method)) return false
+  if (method === 'btree') delete stmt.accessMethod
+  for (const param of stmt.indexParams ?? []) {
+    delete param.IndexElem?.opclass
+    delete param.IndexElem?.nulls_ordering
+  }
+  rewriteNode(stmt)
+  return true
+}
+
+function containsFuncCall(value: any, name: string): boolean {
+  if (!value || typeof value !== 'object') return false
+  if (Array.isArray(value)) return value.some((item) => containsFuncCall(item, name))
+  if (value.FuncCall && functionName(value.FuncCall) === name) return true
+  return Object.values(value).some((child) => containsFuncCall(child, name))
+}
+
+function normalizeUpdate(
+  stmt: any,
+  context?: RewriteContext
+): RewrittenStatement['skipIfTableEmpty'] | null {
+  const targetAlias = stmt.relation?.alias?.aliasname
+  const table = flattenRangeVar(stmt.relation)
+  if (targetAlias && table) {
+    delete stmt.relation.alias
+    rewriteColumnRefQualifier(stmt, targetAlias, table)
+  }
+  const hasUnsupportedRegexpReplace = containsFuncCall(stmt, 'regexp_replace')
+  rewriteNode(stmt, context)
+  return hasUnsupportedRegexpReplace && table ? { table } : null
+}
+
+function normalizeDelete(
+  stmt: any,
+  context?: RewriteContext
+): RewrittenStatement['skipIfTableEmpty'] | null {
+  const table = flattenRangeVar(stmt.relation)
+  const hasUnsupportedUsing =
+    Array.isArray(stmt.usingClause) && stmt.usingClause.length > 0
+  rewriteNode(stmt, context)
+  return hasUnsupportedUsing && table ? { table } : null
+}
+
+function createDeleteStatementsForTruncate(
+  version: number,
+  stmt: any
+): RewrittenStatement[] {
+  return (stmt.relations ?? []).map((relationNode: any) => {
+    const relation = cloneAst(relationNode.RangeVar)
+    const table = publicationTableRefForRangeVar(relation)
+    flattenRangeVar(relation)
+    const deleteStmt = {
+      DeleteStmt: { relation },
+    }
+    const changeTracking = changeTrackingForDML(
+      version,
+      deleteStmt,
+      'DeleteStmt',
+      table,
+      'DELETE'
+    )
+    return {
+      sql: deparseStatement(version, deleteStmt),
+      isWrite: true,
+      ...(changeTracking ? { changeTracking } : null),
+    }
+  })
+}
+
+function createSequenceTable(stmt: any): RewrittenStatement[] {
+  const sequence = stmt.sequence
+  const name = sequence.schemaname
+    ? flattenSchemaName(sequence.schemaname, sequence.relname)
+    : sequence.relname
+  const table = quoteIdentifier(name)
+  const schemaColumns: SchemaColumnMetadata[] = [
+    {
+      table: name,
+      schema: sequence.schemaname ?? 'public',
+      tableName: sequence.relname,
+      column: 'last_value',
+      oid: PG_TYPE_INT8,
+      typeOid: PG_TYPE_INT8,
+      dataType: 'bigint',
+      typtype: 'b',
+      typname: 'int8',
+      elemTyptype: null,
+      elemTypname: null,
+    },
+    {
+      table: name,
+      schema: sequence.schemaname ?? 'public',
+      tableName: sequence.relname,
+      column: 'is_called',
+      oid: PG_TYPE_BOOL,
+      typeOid: PG_TYPE_BOOL,
+      dataType: 'boolean',
+      typtype: 'b',
+      typname: 'bool',
+      elemTyptype: null,
+      elemTypname: null,
+    },
+  ]
+  return [
+    {
+      sql: `CREATE TABLE IF NOT EXISTS ${table} (dummy INTEGER PRIMARY KEY DEFAULT 1, last_value INTEGER NOT NULL DEFAULT 1, is_called INTEGER NOT NULL DEFAULT 0)`,
+      isDDL: true,
+      schemaColumns,
+    },
+    {
+      sql: `INSERT OR IGNORE INTO ${table} (dummy, last_value, is_called) VALUES (1, 1, 0)`,
+      isWrite: true,
+    },
+  ]
+}
+
+function publicationRefsFromObjects(objects: any[] | undefined): {
+  tables: PublicationTableRef[]
+  schemas: string[]
+} {
+  const tables: PublicationTableRef[] = []
+  const schemas: string[] = []
+  for (const object of objects ?? []) {
+    const spec = object.PublicationObjSpec
+    if (!spec) continue
+    if (spec.pubobjtype === 'PUBLICATIONOBJ_TABLE') {
+      const ref = publicationTableRefForRangeVar(spec.pubtable?.relation)
+      if (ref) tables.push(ref)
+    } else if (
+      spec.pubobjtype === 'PUBLICATIONOBJ_TABLES_IN_SCHEMA' &&
+      typeof spec.name === 'string'
+    ) {
+      schemas.push(spec.name)
+    }
+  }
+  return { tables, schemas }
+}
+
+function createPublicationChange(stmt: any): PublicationChange {
+  const refs = publicationRefsFromObjects(stmt.pubobjects)
+  return {
+    action: 'create',
+    name: stmt.pubname,
+    allTables: Boolean(stmt.for_all_tables),
+    ...(refs.schemas.length ? { schemas: refs.schemas } : null),
+    ...(refs.tables.length ? { tables: refs.tables } : null),
+  }
+}
+
+function alterPublicationChange(stmt: any): PublicationChange {
+  const refs = publicationRefsFromObjects(stmt.pubobjects)
+  const action =
+    stmt.action === 'AP_SetObjects'
+      ? 'set'
+      : stmt.action === 'AP_DropObjects'
+        ? 'remove'
+        : 'add'
+  return {
+    action,
+    name: stmt.pubname,
+    allTables: Boolean(stmt.for_all_tables),
+    ...(refs.schemas.length ? { schemas: refs.schemas } : null),
+    ...(refs.tables.length ? { tables: refs.tables } : null),
+  }
+}
+
+function dropPublicationChanges(stmt: any): PublicationChange[] {
+  return (stmt.objects ?? [])
+    .map((object: any) => stringValue(object))
+    .filter((name: unknown): name is string => typeof name === 'string')
+    .map((name: string) => ({ action: 'drop', name }))
+}
+
+function rewriteSkippedFunctionInvocationSelect(
+  stmt: any,
+  context?: RewriteContext
+): boolean {
+  const skippedFunctionNames = context?.skippedFunctionNames
+  if (!skippedFunctionNames?.size) return false
+  if (stmt.fromClause || stmt.whereClause || stmt.groupClause || stmt.havingClause)
+    return false
+  if (stmt.sortClause || stmt.limitCount || stmt.withClause) return false
+
+  const targetList = stmt.targetList
+  if (!Array.isArray(targetList) || targetList.length !== 1) return false
+
+  const target = targetList[0]?.ResTarget
+  const funcCall = target?.val?.FuncCall
+  if (!funcCall) return false
+
+  const name = functionName(funcCall)
+  if (!name || !skippedFunctionNames.has(name)) return false
+
+  target.name ??= functionDisplayName(funcCall) ?? name
+  target.val = nullConst()
+  return true
+}
+
+function deparseStatement(version: number, stmt: any): string {
+  return stripTrailingSemicolon(deparseSync({ version, stmts: [{ stmt }] }).trim())
+}
+
+function starTarget(): any {
+  return {
+    ResTarget: {
+      val: {
+        ColumnRef: {
+          fields: [{ A_Star: {} }],
+          location: -1,
+        },
+      },
+      location: -1,
+    },
+  }
+}
+
+function isStarTarget(target: any): boolean {
+  const fields = target?.val?.ColumnRef?.fields
+  if (!Array.isArray(fields) || fields.length === 0) return false
+  return !!fields[fields.length - 1]?.A_Star
+}
+
+function returningExpressionName(target: any): string {
+  if (target?.name) return target.name
+  const source = columnRefTailName(unwrapTypeCast(target?.val))
+  if (source) return source
+  const func = unwrapTypeCast(target?.val)?.FuncCall
+  const funcName = func ? functionDisplayName(func) : null
+  return funcName ?? '?column?'
+}
+
+function returningProjectionForList(returningList: any[]): {
+  projection: ReturningProjection
+  extraTargets: any[]
+} {
+  const items: ReturningProjectionItem[] = []
+  const extraTargets: any[] = []
+
+  for (let index = 0; index < returningList.length; index++) {
+    const targetNode = returningList[index]
+    const target = targetNode?.ResTarget
+    if (!target) continue
+    if (isStarTarget(target)) {
+      items.push({ kind: 'all' })
+      continue
+    }
+
+    const source = columnRefTailName(unwrapTypeCast(target.val))
+    const name = returningExpressionName(target)
+    if (source) {
+      items.push({ kind: 'column', source, name })
+      continue
+    }
+
+    const internalName = `${RETURNING_INTERNAL_PREFIX}${index}`
+    const extraTarget = cloneAst(targetNode)
+    extraTarget.ResTarget.name = internalName
+    items.push({ kind: 'expression', source: internalName, name })
+    extraTargets.push(extraTarget)
+  }
+
+  return { projection: { items }, extraTargets }
+}
+
+function changeTrackingForDML(
+  version: number,
+  stmt: any,
+  nodeType: string,
+  table: PublicationTableRef | null,
+  operation: ChangeTrackingMetadata['operation']
+): ChangeTrackingMetadata | undefined {
+  if (!table) return undefined
+  const trackedStmt = cloneAst(stmt)
+  const node = trackedStmt[nodeType]
+  const originalReturningList = Array.isArray(node.returningList)
+    ? node.returningList
+    : []
+  const returnRows = originalReturningList.length > 0
+  const returning = returnRows
+    ? returningProjectionForList(originalReturningList)
+    : undefined
+  node.returningList = returnRows
+    ? [starTarget(), ...(returning?.extraTargets ?? [])]
+    : [starTarget()]
+  return {
+    table,
+    operation,
+    returningSQL: deparseStatement(version, trackedStmt),
+    returnRows,
+    returningProjection: returning?.projection,
+  }
+}
+
+function resultColumnNames(result: ExecResult): string[] {
+  if (result.columns.length > 0) return result.columns
+  return result.rows.length > 0 ? Object.keys(result.rows[0]) : []
+}
+
+function projectReturningResult(
+  result: ExecResult,
+  projection: ReturningProjection
+): ExecResult {
+  const sourceColumns = resultColumnNames(result)
+  const visibleColumns: string[] = []
+
+  for (const item of projection.items) {
+    if (item.kind === 'all') {
+      for (const column of sourceColumns) {
+        if (!column.startsWith(RETURNING_INTERNAL_PREFIX))
+          visibleColumns.push(column)
+      }
+    } else {
+      visibleColumns.push(item.name)
+    }
+  }
+
+  const rows = result.rows.map((row) => {
+    const projected: SqliteRow = {}
+    for (const item of projection.items) {
+      if (item.kind === 'all') {
+        for (const column of sourceColumns) {
+          if (!column.startsWith(RETURNING_INTERNAL_PREFIX))
+            projected[column] = row[column]
+        }
+      } else {
+        projected[item.name] = row[item.source]
+      }
+    }
+    return projected
+  })
+
+  return { rows, columns: visibleColumns, affectedRows: result.affectedRows }
+}
+
+function isIdentifierChar(ch: string | undefined): boolean {
+  if (!ch) return false
+  return isAsciiAlpha(ch) || isAsciiDigit(ch) || ch === '_'
+}
+
+function stripLineComments(source: string): string {
+  let out = ''
+  let quote: "'" | '"' | null = null
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i]
+    const next = source[i + 1]
+    if (quote) {
+      out += ch
+      if (ch === quote) {
+        if (quote === "'" && next === "'") {
+          out += next
+          i++
+        } else {
+          quote = null
+        }
+      }
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      out += ch
+      continue
+    }
+    if (ch === '-' && next === '-') {
+      while (i < source.length && source[i] !== '\n') i++
+      if (i < source.length) out += '\n'
+      continue
+    }
+    out += ch
+  }
+  return out
+}
+
+function keywordMatchesAt(source: string, keyword: string, index: number): boolean {
+  if (index < 0 || index + keyword.length > source.length) return false
+  const before = source[index - 1]
+  const after = source[index + keyword.length]
+  if (isIdentifierChar(before) || isIdentifierChar(after)) return false
+  return source.slice(index, index + keyword.length).toUpperCase() === keyword
+}
+
+function findKeywordOutsideQuotes(
+  source: string,
+  keyword: string,
+  start = 0
+): number {
+  const upperKeyword = keyword.toUpperCase()
+  let quote: "'" | '"' | null = null
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i]
+    const next = source[i + 1]
+    if (quote) {
+      if (ch === quote) {
+        if (quote === "'" && next === "'") i++
+        else quote = null
+      }
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (keywordMatchesAt(source, upperKeyword, i)) return i
+  }
+  return -1
+}
+
+function splitSqlStatements(source: string): string[] {
+  const statements: string[] = []
+  let start = 0
+  let depth = 0
+  let quote: "'" | '"' | null = null
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i]
+    const next = source[i + 1]
+    if (quote) {
+      if (ch === quote) {
+        if (quote === "'" && next === "'") i++
+        else quote = null
+      }
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === '(') depth++
+    else if (ch === ')' && depth > 0) depth--
+    else if (ch === ';' && depth === 0) {
+      const statement = source.slice(start, i).trim()
+      if (statement) statements.push(statement)
+      start = i + 1
+    }
+  }
+  const last = source.slice(start).trim()
+  if (last) statements.push(last)
+  return statements
+}
+
+function selectWhereSQL(version: number, whereClause: any): string | null {
+  const stmt = {
+    SelectStmt: {
+      targetList: [{ ResTarget: { val: intConst(1), location: -1 } }],
+      whereClause: rewriteNode(cloneAst(whereClause)),
+      limitOption: 'LIMIT_OPTION_DEFAULT',
+      op: 'SETOP_NONE',
+    },
+  }
+  const sql = stripTrailingSemicolon(
+    deparseSync({ version, stmts: [{ stmt }] }).trim()
+  )
+  const whereIndex = findKeywordOutsideQuotes(sql, 'WHERE')
+  if (whereIndex < 0) return null
+  return sql.slice(whereIndex + 'WHERE'.length).trim()
+}
+
+function triggerConditionSQL(condition: string): string | null {
+  try {
+    const parsed = parseSync(`SELECT 1 WHERE ${condition}`)
+    const whereClause = parsed.stmts[0]?.stmt?.SelectStmt?.whereClause
+    if (!whereClause) return null
+    return selectWhereSQL(parsed.version, whereClause)
+  } catch {
+    return null
+  }
+}
+
+function compileSelectIntoNew(
+  version: number,
+  select: any,
+  triggerTable: string,
+  rowCondition?: string
+): string | null {
+  const rel = select.intoClause?.rel
+  if (rel?.schemaname?.toLowerCase?.() !== 'new' || !rel.relname) return null
+  const targetColumn = rel.relname
+  const cloned = cloneAst(select)
+  delete cloned.intoClause
+  const selectSQL = stripTrailingSemicolon(
+    deparseSync({
+      version,
+      stmts: [{ stmt: { SelectStmt: rewriteNode(cloned) } }],
+    }).trim()
+  )
+  return rowUpdateSQL(triggerTable, targetColumn, `(${selectSQL})`, rowCondition)
+}
+
+function deparseExpressionSQL(version: number, expr: any): string | null {
+  const sql = stripTrailingSemicolon(
+    deparseSync({
+      version,
+      stmts: [
+        {
+          stmt: {
+            SelectStmt: {
+              targetList: [{ ResTarget: { val: expr, location: -1 } }],
+              limitOption: 'LIMIT_OPTION_DEFAULT',
+              op: 'SETOP_NONE',
+            },
+          },
+        },
+      ],
+    }).trim()
+  )
+  const selectIndex = findKeywordOutsideQuotes(sql, 'SELECT')
+  if (selectIndex < 0) return null
+  return sql.slice(selectIndex + 'SELECT'.length).trim()
+}
+
+function parseExpressionTarget(source: string): { version: number; expr: any } | null {
+  try {
+    const parsed = parseSync(`SELECT ${source}`)
+    const select = parsed.stmts[0]?.stmt?.SelectStmt
+    const target = select?.targetList?.[0]?.ResTarget?.val
+    if (!target || parsed.stmts.length !== 1 || select.targetList.length !== 1) return null
+    return { version: parsed.version, expr: target }
+  } catch {
+    return null
+  }
+}
+
+function splitTopLevelAssignment(
+  statement: string
+): { left: string; right: string } | null {
+  let depth = 0
+  let quote: "'" | '"' | null = null
+  for (let i = 0; i < statement.length; i++) {
+    const ch = statement[i]
+    const next = statement[i + 1]
+    if (quote) {
+      if (ch === quote) {
+        if (quote === "'" && next === "'") i++
+        else quote = null
+      }
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (ch === '(') {
+      depth++
+      continue
+    }
+    if (ch === ')' && depth > 0) {
+      depth--
+      continue
+    }
+    if (depth !== 0) continue
+    if (ch === ':' && next === '=') {
+      return {
+        left: statement.slice(0, i).trim(),
+        right: statement.slice(i + 2).trim(),
+      }
+    }
+    if (ch === '=') {
+      return {
+        left: statement.slice(0, i).trim(),
+        right: statement.slice(i + 1).trim(),
+      }
+    }
+  }
+  return null
+}
+
+function newAssignmentColumn(left: string): string | null {
+  const parsed = parseExpressionTarget(left)
+  const fields = parsed?.expr?.ColumnRef?.fields
+  if (!Array.isArray(fields) || fields.length !== 2) return null
+  if (stringValue(fields[0])?.toLowerCase() !== 'new') return null
+  return stringValue(fields[1])
+}
+
+function rowUpdateSQL(
+  table: string,
+  column: string,
+  expressionSQL: string,
+  rowCondition?: string
+): string {
+  const condition = rowCondition ? ` AND (${rowCondition})` : ''
+  return `UPDATE ${quoteIdentifier(table)} SET ${quoteIdentifier(column)} = ${expressionSQL} WHERE rowid = NEW.rowid${condition}`
+}
+
+function compileNewAssignment(
+  statement: string,
+  triggerTable: string,
+  rowCondition?: string
+): { sql: string; forceAfter: true } | null {
+  const assignment = splitTopLevelAssignment(statement)
+  if (!assignment?.left || !assignment.right) return null
+  const column = newAssignmentColumn(assignment.left)
+  if (!column) return null
+  const parsed = parseExpressionTarget(assignment.right)
+  if (!parsed) return null
+  const expressionSQL = deparseExpressionSQL(
+    parsed.version,
+    rewriteNode(cloneAst(parsed.expr))
+  )
+  if (!expressionSQL) return null
+  return {
+    sql: rowUpdateSQL(triggerTable, column, expressionSQL, rowCondition),
+    forceAfter: true,
+  }
+}
+
+function compileTriggerBodyStatement(
+  statement: string,
+  triggerTable: string,
+  rowCondition?: string
+): { sql: string; forceAfter?: boolean } | null {
+  const assignment = compileNewAssignment(statement, triggerTable, rowCondition)
+  if (assignment) return assignment
+
+  let parsed: ReturnType<typeof parseSync>
+  try {
+    parsed = parseSync(statement)
+  } catch {
+    return null
+  }
+  if (parsed.stmts.length !== 1) return null
+  const stmt = parsed.stmts[0]?.stmt
+  if (!stmt) return null
+  if (stmt.SelectStmt?.intoClause) {
+    const sql = compileSelectIntoNew(
+      parsed.version,
+      stmt.SelectStmt,
+      triggerTable,
+      rowCondition
+    )
+    return sql ? { sql, forceAfter: true } : null
+  }
+  if (rowCondition) return null
+  const rewrittenStmt = cloneAst(stmt)
+  if (rewrittenStmt.UpdateStmt) normalizeUpdate(rewrittenStmt.UpdateStmt)
+  else rewriteNode(rewrittenStmt)
+  return {
+    sql: deparseStatement(parsed.version, rewrittenStmt),
+  }
+}
+
+function compileTriggerStatementBlock(
+  source: string,
+  triggerTable: string,
+  rowCondition?: string
+): { statements: string[]; forceAfter?: boolean } | null {
+  const statements: string[] = []
+  let forceAfter = false
+  for (const statement of splitSqlStatements(source)) {
+    const upper = statement.trim().toUpperCase()
+    if (!upper || upper === 'RETURN NEW' || upper === 'RETURN OLD') continue
+    const compiled = compileTriggerBodyStatement(statement, triggerTable, rowCondition)
+    if (!compiled) return null
+    statements.push(compiled.sql)
+    if (compiled.forceAfter) forceAfter = true
+  }
+  return statements.length ? { statements, forceAfter } : null
+}
+
+function compilePlpgsqlTriggerBody(
+  body: string,
+  triggerTable: string
+): { when?: string; statements: string[]; forceAfter?: boolean } | null {
+  const source = stripLineComments(body).trim()
+  const begin = findKeywordOutsideQuotes(source, 'BEGIN')
+  if (begin < 0) return null
+  const ifStart = findKeywordOutsideQuotes(source, 'IF', begin + 'BEGIN'.length)
+  let condition: string | undefined
+  let statementsSource = ''
+  if (ifStart >= 0) {
+    const thenIndex = findKeywordOutsideQuotes(source, 'THEN', ifStart + 'IF'.length)
+    const endIf = findKeywordOutsideQuotes(source, 'END IF', thenIndex + 'THEN'.length)
+    if (thenIndex < 0 || endIf < 0) return null
+    condition = source.slice(ifStart + 'IF'.length, thenIndex).trim()
+    const elseIndex = findKeywordOutsideQuotes(
+      source,
+      'ELSE',
+      thenIndex + 'THEN'.length
+    )
+    if (elseIndex >= 0 && elseIndex < endIf) {
+      const when = triggerConditionSQL(condition)
+      if (!when) return null
+      const thenBlock = compileTriggerStatementBlock(
+        source.slice(thenIndex + 'THEN'.length, elseIndex).trim(),
+        triggerTable,
+        when
+      )
+      const elseBlock = compileTriggerStatementBlock(
+        source.slice(elseIndex + 'ELSE'.length, endIf).trim(),
+        triggerTable,
+        `NOT (${when})`
+      )
+      if (!thenBlock || !elseBlock) return null
+      return {
+        statements: [...thenBlock.statements, ...elseBlock.statements],
+        forceAfter: Boolean(thenBlock.forceAfter || elseBlock.forceAfter),
+      }
+    }
+    statementsSource = source.slice(thenIndex + 'THEN'.length, endIf).trim()
+  } else {
+    const finalEnd = findKeywordOutsideQuotes(source, 'END', begin + 'BEGIN'.length)
+    if (finalEnd < 0) return null
+    statementsSource = source.slice(begin + 'BEGIN'.length, finalEnd).trim()
+  }
+
+  const when = condition ? triggerConditionSQL(condition) : undefined
+  if (condition && !when) return null
+  const block = compileTriggerStatementBlock(statementsSource, triggerTable)
+  return block ? { when, ...block } : null
+}
+
+function sqliteTriggerEvents(events: number): string[] {
+  const result: string[] = []
+  if (events & 4) result.push('INSERT')
+  if (events & 16) result.push('UPDATE')
+  if (events & 8) result.push('DELETE')
   return result
+}
+
+function sqliteTriggerName(base: string, event: string, eventCount: number): string {
+  return eventCount === 1 ? base : `${base}_${event.toLowerCase()}`
+}
+
+function createTriggerStatements(
+  node: any,
+  context?: RewriteContext
+): RewrittenStatement[] | null {
+  const fnName = functionName({ funcname: node.funcname })
+  const fn = fnName ? context?.triggerFunctions?.get(fnName) : undefined
+  if (!fn) return null
+  if (
+    findKeywordOutsideQuotes(fn.body, 'TG_OP') >= 0 ||
+    findKeywordOutsideQuotes(fn.body, 'TG_ARGV') >= 0 ||
+    findKeywordOutsideQuotes(fn.body, 'TG_NAME') >= 0 ||
+    findKeywordOutsideQuotes(fn.body, 'TG_TABLE_NAME') >= 0 ||
+    findKeywordOutsideQuotes(fn.body, 'TG_WHEN') >= 0
+  ) {
+    return null
+  }
+  const table = publicationTableRefForRangeVar(node.relation)
+  if (!table) return null
+  const body = compilePlpgsqlTriggerBody(fn.body, table.table)
+  if (!body) return null
+  const events = sqliteTriggerEvents(Number(node.events ?? 0))
+  if (events.length === 0) return null
+  const timing = body.forceAfter ? 'AFTER' : node.timing === 2 ? 'BEFORE' : 'AFTER'
+  return events.map((event) => {
+    const triggerName = sqliteTriggerName(node.trigname, event, events.length)
+    const when = body.when ? `\nWHEN ${body.when}` : ''
+    const statements = body.statements.map((sql) => `  ${sql};`).join('\n')
+    return {
+      sql: `CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(triggerName)}
+${timing} ${event} ON ${quoteIdentifier(table.table)}
+FOR EACH ROW${when}
+BEGIN
+${statements}
+END`,
+      isDDL: true,
+    }
+  })
+}
+
+function dropTriggerStatements(node: any): RewrittenStatement[] | null {
+  if (node.removeType !== 'OBJECT_TRIGGER') return null
+  const statements: RewrittenStatement[] = []
+  for (const object of node.objects ?? []) {
+    const items = object.List?.items ?? []
+    const trigger = stringValue(items[items.length - 1])
+    if (!trigger) continue
+    for (const name of [
+      trigger,
+      `${trigger}_insert`,
+      `${trigger}_update`,
+      `${trigger}_delete`,
+    ]) {
+      statements.push({
+        sql: `DROP TRIGGER IF EXISTS ${quoteIdentifier(name)}`,
+        isDDL: true,
+      })
+    }
+  }
+  return statements.length ? statements : null
+}
+
+function rewriteParsedStatement(
+  version: number,
+  rawStmt: any,
+  context?: RewriteContext
+): RewrittenStatement | RewrittenStatement[] | null {
+  const stmt = rawStmt.stmt
+  const nodeType = statementNodeType(stmt)
+  const node = stmt[nodeType]
+
+  if (nodeType === 'CreateFunctionStmt') {
+    const name = createFunctionName(node)
+    if (name) context?.skippedFunctionNames?.add(name)
+    const triggerFunction = createTriggerFunctionDefinition(node)
+    if (triggerFunction) context?.triggerFunctions?.set(name, triggerFunction)
+    return null
+  }
+  if (nodeType === 'CreateTrigStmt') {
+    return createTriggerStatements(node, context)
+  }
+  if (nodeType === 'CreatePublicationStmt') {
+    return {
+      sql: '',
+      isDDL: true,
+      publicationChanges: [createPublicationChange(node)],
+    }
+  }
+  if (nodeType === 'AlterPublicationStmt') {
+    return {
+      sql: '',
+      isDDL: true,
+      publicationChanges: [alterPublicationChange(node)],
+    }
+  }
+  if (nodeType === 'DropStmt' && node.removeType === 'OBJECT_PUBLICATION') {
+    return {
+      sql: '',
+      isDDL: true,
+      publicationChanges: dropPublicationChanges(node),
+    }
+  }
+  if (nodeType === 'DropStmt' && node.removeType === 'OBJECT_FUNCTION') {
+    for (const object of node.objects ?? []) {
+      const items = object.List?.items ?? []
+      const name = stringValue(items[items.length - 1])
+      if (name) context?.triggerFunctions?.delete(name.toLowerCase())
+    }
+    return null
+  }
+  if (nodeType === 'DropStmt' && node.removeType === 'OBJECT_TRIGGER') {
+    return dropTriggerStatements(node)
+  }
+  if (SKIPPED_NODE_TYPES.has(nodeType)) return null
+  if (nodeType === 'DropStmt' && SKIPPED_DROP_OBJECTS.has(node.removeType)) return null
+  if (nodeType === 'CreateSeqStmt') return createSequenceTable(node)
+  if (nodeType === 'TruncateStmt') return createDeleteStatementsForTruncate(version, node)
+  if (nodeType === 'IndexStmt' && !normalizeIndex(node)) return null
+
+  let alterMetadata: ReturnType<typeof normalizeAlterTable> | null = null
+  let schemaColumns: SchemaColumnMetadata[] = []
+  let schemaMetadataChanges: SchemaMetadataChange[] = []
+  let skipIfTableEmpty: RewrittenStatement['skipIfTableEmpty'] | null = null
+  let changeTracking: ChangeTrackingMetadata | undefined
+  let writeTable: PublicationTableRef | null = null
+  if (nodeType === 'AlterTableStmt') {
+    alterMetadata = normalizeAlterTable(node)
+    if (!node.cmds?.length) {
+      return alterMetadata.metadataOnlySchemaColumns.length
+        ? {
+            sql: '',
+            isDDL: true,
+            schemaColumns: alterMetadata.metadataOnlySchemaColumns,
+          }
+        : null
+    }
+  } else if (nodeType === 'CreateStmt') {
+    schemaColumns = schemaColumnsForCreateTable(node)
+    normalizeCreateTable(node)
+  } else if (nodeType === 'CreateTableAsStmt') {
+    normalizeCreateTableAs(node)
+  } else if (nodeType === 'RenameStmt') {
+    const normalized = normalizeRename(node)
+    schemaMetadataChanges = normalized.schemaMetadataChanges ?? []
+  } else if (nodeType === 'InsertStmt') {
+    const table = publicationTableRefForRangeVar(node.relation)
+    writeTable = table
+    flattenRangeVar(node.relation)
+    rewriteInsertDefaults(node)
+    normalizeInsertSelectOnConflict(node)
+    if (node.selectStmt?.SelectStmt?.withClause) {
+      const sourceTable = firstSourceTable(node.selectStmt)
+      if (sourceTable) skipIfTableEmpty = { table: sourceTable }
+    }
+    rewriteNode(node, context)
+    changeTracking = changeTrackingForDML(version, stmt, nodeType, table, 'INSERT')
+  } else if (nodeType === 'UpdateStmt') {
+    const table = publicationTableRefForRangeVar(node.relation)
+    writeTable = table
+    skipIfTableEmpty = normalizeUpdate(node, context)
+    changeTracking = changeTrackingForDML(version, stmt, nodeType, table, 'UPDATE')
+  } else if (nodeType === 'DeleteStmt') {
+    const table = publicationTableRefForRangeVar(node.relation)
+    writeTable = table
+    skipIfTableEmpty = normalizeDelete(node, context)
+    changeTracking = changeTrackingForDML(version, stmt, nodeType, table, 'DELETE')
+  } else if (nodeType === 'SelectStmt') {
+    rawStmt.stmt.SelectStmt = normalizeSelectStmt(node)
+    if (!rewriteSkippedFunctionInvocationSelect(rawStmt.stmt.SelectStmt, context))
+      rewriteNode(rawStmt.stmt.SelectStmt, context)
+  } else if (nodeType === 'DropStmt') {
+    delete node.behavior
+    rewriteNode(node, context)
+  } else {
+    rewriteNode(node, context)
+  }
+
+  if (nodeType === 'AlterTableStmt' && node.cmds.length > 1) {
+    const statements: RewrittenStatement[] = []
+    if (alterMetadata?.metadataOnlySchemaColumns.length) {
+      statements.push({
+        sql: '',
+        isDDL: true,
+        schemaColumns: alterMetadata.metadataOnlySchemaColumns,
+      })
+    }
+    statements.push(
+      ...node.cmds.map((cmdNode: any) => {
+        const singleStmt = {
+          [nodeType]: {
+            ...node,
+            cmds: [cmdNode],
+          },
+        }
+        const skipIfColumnExists = alterMetadata?.skipIfColumnExistsByCmd.get(cmdNode)
+        const skipIfColumnMissing = alterMetadata?.skipIfColumnMissingByCmd.get(cmdNode)
+        const cmdSchemaColumns = alterMetadata?.schemaColumnsByCmd.get(cmdNode)
+        return {
+          sql: deparseStatement(version, singleStmt),
+          isDDL: true,
+          ...(context?.arrayParamNumbers?.size
+            ? { arrayParamNumbers: new Set(context.arrayParamNumbers) }
+            : null),
+          ...(context?.jsonParamNumbers?.size
+            ? { jsonParamNumbers: new Set(context.jsonParamNumbers) }
+            : null),
+          ...(cmdSchemaColumns?.length ? { schemaColumns: cmdSchemaColumns } : null),
+          ...(skipIfColumnExists ? { skipIfColumnExists } : null),
+          ...(skipIfColumnMissing ? { skipIfColumnMissing } : null),
+        }
+      })
+    )
+    return statements
+  }
+
+  const skipIfColumnExists =
+    nodeType === 'AlterTableStmt'
+      ? alterMetadata?.skipIfColumnExistsByCmd.get(node.cmds[0])
+      : null
+  const skipIfColumnMissing =
+    nodeType === 'AlterTableStmt'
+      ? alterMetadata?.skipIfColumnMissingByCmd.get(node.cmds[0])
+      : null
+  if (nodeType === 'AlterTableStmt') {
+    schemaColumns = [
+      ...(alterMetadata?.metadataOnlySchemaColumns ?? []),
+      ...(alterMetadata?.schemaColumnsByCmd.get(node.cmds[0]) ?? []),
+    ]
+  }
+  const rewritten = deparseStatement(version, stmt)
+  const isDDL =
+    nodeType === 'AlterTableStmt' ||
+    nodeType === 'CreateStmt' ||
+    nodeType === 'CreateTableAsStmt' ||
+    nodeType === 'DropStmt' ||
+    nodeType === 'IndexStmt' ||
+    nodeType === 'RenameStmt'
+  const isWrite =
+    nodeType === 'DeleteStmt' || nodeType === 'InsertStmt' || nodeType === 'UpdateStmt'
+  return {
+    sql: rewritten,
+    ...(isDDL ? { isDDL } : null),
+    ...(isWrite ? { isWrite } : null),
+    ...(writeTable ? { writeTable } : null),
+    ...(changeTracking ? { changeTracking } : null),
+    ...(context?.arrayParamNumbers?.size
+      ? { arrayParamNumbers: new Set(context.arrayParamNumbers) }
+      : null),
+    ...(context?.jsonParamNumbers?.size
+      ? { jsonParamNumbers: new Set(context.jsonParamNumbers) }
+      : null),
+    ...(schemaColumns.length ? { schemaColumns } : null),
+    ...(schemaMetadataChanges.length ? { schemaMetadataChanges } : null),
+    ...(skipIfColumnExists ? { skipIfColumnExists } : null),
+    ...(skipIfColumnMissing ? { skipIfColumnMissing } : null),
+    ...(skipIfTableEmpty ? { skipIfTableEmpty } : null),
+  }
+}
+
+function rewriteSQLStatements(
+  sql: string,
+  context?: RewriteContext
+): RewrittenStatement[] {
+  const trimmed = sql.trim()
+  if (!trimmed) return []
+  if (isCatalogQuery(trimmed)) return [{ sql: trimmed }]
+  const parsed = parseSync(trimmed)
+  return parsed.stmts
+    .flatMap((stmt: any) => rewriteParsedStatement(parsed.version, stmt, context))
+    .filter(Boolean)
+}
+
+function rewrittenSQLText(statements: RewrittenStatement[]): string {
+  return statements
+    .map((statement) => statement.sql)
+    .filter((sql) => sql.trim())
+    .join(';\n')
+}
+
+function rewriteSQL(sql: string, context?: RewriteContext): string {
+  return rewrittenSQLText(rewriteSQLStatements(sql, context))
+}
+
+interface TransactionAction {
+  kind: 'begin' | 'commit' | 'rollback' | 'savepoint' | 'release' | 'rollback_to'
+  name?: string
+}
+
+function transactionKind(sql: string): TransactionAction['kind'] | null {
+  return transactionAction(sql)?.kind ?? null
+}
+
+function transactionAction(sql: string): TransactionAction | null {
+  try {
+    const parsed = parseSync(sql.trim())
+    if (parsed.stmts.length !== 1) return null
+    const stmt = parsed.stmts[0]?.stmt?.TransactionStmt
+    if (!stmt) return null
+    switch (stmt.kind) {
+      case 'TRANS_STMT_BEGIN':
+      case 'TRANS_STMT_START':
+        return { kind: 'begin' }
+      case 'TRANS_STMT_COMMIT':
+        return { kind: 'commit' }
+      case 'TRANS_STMT_ROLLBACK':
+        return { kind: 'rollback' }
+      case 'TRANS_STMT_SAVEPOINT':
+        return { kind: 'savepoint', name: stmt.savepoint_name }
+      case 'TRANS_STMT_RELEASE':
+        return { kind: 'release', name: stmt.savepoint_name }
+      case 'TRANS_STMT_ROLLBACK_TO':
+        return { kind: 'rollback_to', name: stmt.savepoint_name }
+      default:
+        return null
+    }
+  } catch {
+    return null
+  }
+}
+
+
+function commandTagForNodeType(nodeType: string, node: any): string {
+  switch (nodeType) {
+    case 'AlterDefaultPrivilegesStmt':
+      return 'ALTER DEFAULT PRIVILEGES'
+    case 'AlterTableStmt':
+      return 'ALTER TABLE'
+    case 'AlterPublicationStmt':
+      return 'ALTER PUBLICATION'
+    case 'ClosePortalStmt':
+      return 'CLOSE'
+    case 'ClusterStmt':
+      return 'CLUSTER'
+    case 'CommentStmt':
+      return 'COMMENT'
+    case 'CreateEventTrigStmt':
+      return 'CREATE EVENT TRIGGER'
+    case 'CreateExtensionStmt':
+      return 'CREATE EXTENSION'
+    case 'CreateFunctionStmt':
+      return 'CREATE FUNCTION'
+    case 'CreatePublicationStmt':
+      return 'CREATE PUBLICATION'
+    case 'CreateSchemaStmt':
+      return 'CREATE SCHEMA'
+    case 'CreateTrigStmt':
+      return 'CREATE TRIGGER'
+    case 'CreatedbStmt':
+      return 'CREATE DATABASE'
+    case 'DeallocateStmt':
+      return 'DEALLOCATE'
+    case 'DiscardStmt':
+      return 'DISCARD'
+    case 'DoStmt':
+      return 'DO'
+    case 'DropStmt':
+      switch (node?.removeType) {
+        case 'OBJECT_EVENT_TRIGGER':
+          return 'DROP EVENT TRIGGER'
+        case 'OBJECT_FUNCTION':
+          return 'DROP FUNCTION'
+        case 'OBJECT_PUBLICATION':
+          return 'DROP PUBLICATION'
+        case 'OBJECT_TRIGGER':
+          return 'DROP TRIGGER'
+        default:
+          return 'DROP'
+      }
+    case 'GrantStmt':
+      return 'GRANT'
+    case 'ListenStmt':
+      return 'LISTEN'
+    case 'LockStmt':
+      return 'LOCK TABLE'
+    case 'NotifyStmt':
+      return 'NOTIFY'
+    case 'RenameStmt':
+      return 'ALTER TABLE'
+    case 'UnlistenStmt':
+      return 'UNLISTEN'
+    case 'VariableSetStmt':
+      return 'SET'
+    case 'VariableShowStmt':
+      return 'SHOW'
+    default:
+      return 'OK'
+  }
+}
+
+function commandTagForSQL(sql: string): string {
+  const txKind = transactionKind(sql)
+  if (txKind === 'begin') return 'BEGIN'
+  if (txKind === 'commit') return 'COMMIT'
+  if (txKind === 'rollback') return 'ROLLBACK'
+  if (txKind === 'savepoint') return 'SAVEPOINT'
+  if (txKind === 'release') return 'RELEASE'
+  if (txKind === 'rollback_to') return 'ROLLBACK'
+
+  try {
+    const parsed = parseSync(stripTrailingSemicolon(sql.trim()))
+    const stmt = parsed.stmts[0]?.stmt
+    if (!stmt) return 'OK'
+    const nodeType = statementNodeType(stmt)
+    return commandTagForNodeType(nodeType, stmt[nodeType])
+  } catch {
+    return 'OK'
+  }
+}
+
+function copySelectSQL(sql: string): string | null {
+  try {
+    const parsed = parseSync(stripTrailingSemicolon(sql.trim()))
+    if (parsed.stmts.length !== 1) return null
+    const copy = parsed.stmts[0]?.stmt?.CopyStmt
+    if (!copy?.query?.SelectStmt) return null
+    return stripTrailingSemicolon(
+      deparseSync({
+        version: parsed.version,
+        stmts: [{ stmt: { SelectStmt: copy.query.SelectStmt } }],
+      }).trim()
+    )
+  } catch {
+    return null
+  }
+}
+
+function currentSettingValue(name: string): string {
+  const vals: Record<string, string> = {
+    client_encoding: 'UTF8',
+    datestyle: 'ISO, MDY',
+    integer_datetimes: 'on',
+    intervalstyle: 'postgres',
+    lc_messages: 'en_US.UTF-8',
+    lc_monetary: 'en_US.UTF-8',
+    lc_numeric: 'en_US.UTF-8',
+    lc_time: 'en_US.UTF-8',
+    max_replication_slots: '10',
+    max_wal_senders: '10',
+    server_encoding: 'UTF8',
+    server_version: '16.0',
+    server_version_num: '160000',
+    standard_conforming_strings: 'on',
+    timezone: 'UTC',
+    wal_level: 'logical',
+  }
+  return vals[name.toLowerCase()] ?? ''
+}
+
+function unwrapTypeCast(value: any): any {
+  let node = value
+  while (node?.TypeCast) node = node.TypeCast.arg
+  return node
+}
+
+function currentSettingArg(value: any): string | null {
+  const node = unwrapTypeCast(value)
+  if (!node?.FuncCall || functionName(node.FuncCall) !== 'current_setting') return null
+  return node.FuncCall.args?.[0]?.A_Const?.sval?.sval ?? null
+}
+
+function catalogConstantValue(value: any): unknown {
+  const constant = unwrapTypeCast(value)?.A_Const
+  if (!constant) return undefined
+  if (constant.isnull) return null
+  if (constant.sval) return constant.sval.sval ?? ''
+  if (constant.ival) return constant.ival.ival ?? 0
+  if (constant.fval) return constant.fval.fval ?? ''
+  if (Object.hasOwn(constant, 'boolval')) return constant.boolval?.boolval ? 't' : 'f'
+  return undefined
+}
+
+function catalogCurrentSettingResult(sql: string): {
+  rows: Record<string, unknown>[]
+  fields: { name: string; oid?: number }[]
+} | null {
+  try {
+    const parsed = parseSync(stripTrailingSemicolon(sql))
+    if (parsed.stmts.length !== 1) return null
+    const select = parsed.stmts[0]?.stmt?.SelectStmt
+    if (!select?.targetList?.length) return null
+
+    const row: Record<string, unknown> = {}
+    const fields: { name: string; oid?: number }[] = []
+    for (const targetNode of select.targetList) {
+      const target = targetNode.ResTarget
+      const setting = currentSettingArg(target?.val)
+      const name = target.name ?? 'current_setting'
+      if (setting) {
+        row[name] = currentSettingValue(setting)
+      } else if (target.name) {
+        const value = catalogConstantValue(target.val)
+        if (value === undefined) continue
+        row[name] = value
+      } else {
+        continue
+      }
+      fields.push({ name })
+    }
+    return fields.length ? { rows: [row], fields } : null
+  } catch {
+    return null
+  }
+}
+
+interface CatalogTargetField {
+  name: string
+  source: string | null
+  value?: unknown
+  oid?: number
+}
+interface SqliteTableInfo {
+  name: string
+  sql: string | null
+}
+interface SqliteColumnInfo {
+  cid: number
+  name: string
+  type: string
+  notnull: number
+  dflt_value: string | null
+  pk: number
+}
+interface PublicationTableInfo {
+  name: string
+  schema: string
+  tableName: string
+  columns: SqliteColumnInfo[]
+  primaryKey: string[]
+  indexes: PublicationIndexInfo[]
+}
+interface SqliteIndexInfo {
+  seq: number
+  name: string
+  unique: number
+  origin: string | null
+  partial: number
+}
+interface SqliteIndexColumnInfo {
+  seqno: number
+  cid: number
+  name: string | null
+  desc: number
+  key: number
+}
+interface PublicationIndexInfo {
+  schema: string
+  tableName: string
+  name: string
+  unique: boolean
+  isPrimaryKey: boolean
+  isReplicaIdentity: boolean
+  isImmediate: boolean
+  columns: Record<string, 'ASC' | 'DESC'>
+}
+
+function columnRefName(value: any): string | null {
+  const fields = unwrapTypeCast(value)?.ColumnRef?.fields
+  if (!Array.isArray(fields) || fields.length === 0) return null
+  return stringValue(fields[fields.length - 1])?.toLowerCase() ?? null
+}
+
+function selectTargetFields(select: any): CatalogTargetField[] {
+  const fields: CatalogTargetField[] = []
+  for (const targetNode of select?.targetList ?? []) {
+    const target = targetNode.ResTarget
+    if (!target) continue
+
+    const sourceName = columnRefTailName(unwrapTypeCast(target.val))
+    const source = sourceName?.toLowerCase() ?? null
+    const constant = catalogConstantValue(target.val)
+    const func = unwrapTypeCast(target.val)?.FuncCall
+    const funcSource = func ? functionDisplayName(func) : null
+    const name = target.name ?? sourceName ?? funcSource ?? '?column?'
+    const lowerSource = source ?? funcSource?.toLowerCase() ?? null
+    const field: CatalogTargetField = {
+      name,
+      source: lowerSource,
+      ...(constant !== undefined ? { value: constant } : null),
+    }
+    const oid = expressionOid(target.val)
+    if (oid) {
+      field.oid = oid
+    } else if (lowerSource && PUBLICATION_BOOLEAN_FIELDS.has(lowerSource)) {
+      field.oid = PG_TYPE_BOOL
+    } else if (lowerSource === 'oid') {
+      field.oid = PG_TYPE_INT8
+    }
+    fields.push(field)
+  }
+  return fields
+}
+
+function selectReferencesTable(select: any, tableName: string): boolean {
+  const lowerName = tableName.toLowerCase()
+  let found = false
+  walkAst(select, (node) => {
+    if (found) return
+    const rangeVar = node.RangeVar
+    if (!rangeVar) return
+    const schema = String(rangeVar.schemaname ?? '').toLowerCase()
+    const rel = String(rangeVar.relname ?? '').toLowerCase()
+    if (
+      (schema === 'pg_catalog' || schema === 'information_schema' || schema === '') &&
+      rel === lowerName
+    )
+      found = true
+  })
+  return found
+}
+
+function stringConstValue(node: any): string | null {
+  const value = unwrapTypeCast(node)?.A_Const?.sval?.sval
+  return typeof value === 'string' ? value : null
+}
+
+function expressionReferencesColumn(node: any, columnName: string): boolean {
+  return columnRefName(node) === columnName.toLowerCase()
+}
+
+function collectStringFilterValues(
+  node: any,
+  columnName: string,
+  values: string[]
+): void {
+  if (!node || typeof node !== 'object') return
+  const expr = node.A_Expr
+  if (expr) {
+    if (expr.kind === 'AEXPR_IN' && expressionReferencesColumn(expr.lexpr, columnName)) {
+      for (const item of expr.rexpr?.List?.items ?? []) {
+        const value = stringConstValue(item)
+        if (value !== null) values.push(value)
+      }
+      return
+    }
+
+    if (
+      expr.kind === 'AEXPR_OP' &&
+      operatorName(expr) === '=' &&
+      expressionReferencesColumn(expr.lexpr, columnName)
+    ) {
+      const value = stringConstValue(expr.rexpr)
+      if (value !== null) values.push(value)
+      return
+    }
+  }
+
+  if (Array.isArray(node)) {
+    for (const item of node) collectStringFilterValues(item, columnName, values)
+    return
+  }
+  for (const value of Object.values(node))
+    collectStringFilterValues(value, columnName, values)
+}
+
+function stringFilterValues(select: any, columnName: string): string[] {
+  const values: string[] = []
+  collectStringFilterValues(select, columnName, values)
+  return [...new Set(values)]
+}
+
+function catalogValueForColumn(row: Record<string, unknown>, column: string): unknown {
+  const lower = column.toLowerCase()
+  if (Object.hasOwn(row, column)) return row[column]
+  for (const [key, value] of Object.entries(row)) {
+    if (key.toLowerCase() === lower) return value
+  }
+  return undefined
+}
+
+function catalogExpressionValue(
+  node: any,
+  row: Record<string, unknown>
+): unknown | typeof NON_LITERAL_ARRAY_VALUE {
+  const unwrapped = unwrapTypeCast(node)
+  if (unwrapped?.ColumnRef) {
+    const name = columnRefName(unwrapped)
+    return name ? catalogValueForColumn(row, name) : undefined
+  }
+  if (unwrapped?.RowExpr) {
+    const values: unknown[] = []
+    for (const item of unwrapped.RowExpr.args ?? []) {
+      const value = catalogExpressionValue(item, row)
+      if (value === NON_LITERAL_ARRAY_VALUE) return value
+      values.push(value)
+    }
+    return values
+  }
+  const literal = astLiteralValue(unwrapped)
+  if (literal !== NON_LITERAL_ARRAY_VALUE) return literal
+  return NON_LITERAL_ARRAY_VALUE
+}
+
+function catalogValuesEqual(left: unknown, right: unknown): boolean {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right)) return false
+    if (left.length !== right.length) return false
+    return left.every((value, index) => catalogValuesEqual(value, right[index]))
+  }
+  return String(left) === String(right)
+}
+
+function sqlLike(value: string, pattern: string): boolean {
+  const memo = new Map<string, boolean>()
+  const match = (valueIndex: number, patternIndex: number): boolean => {
+    const key = `${valueIndex}:${patternIndex}`
+    const cached = memo.get(key)
+    if (cached !== undefined) return cached
+    let result: boolean
+    if (patternIndex === pattern.length) {
+      result = valueIndex === value.length
+    } else if (pattern[patternIndex] === '\\' && patternIndex + 1 < pattern.length) {
+      result =
+        valueIndex < value.length &&
+        value[valueIndex] === pattern[patternIndex + 1] &&
+        match(valueIndex + 1, patternIndex + 2)
+    } else if (pattern[patternIndex] === '%') {
+      result =
+        match(valueIndex, patternIndex + 1) ||
+        (valueIndex < value.length && match(valueIndex + 1, patternIndex))
+    } else if (pattern[patternIndex] === '_') {
+      result = valueIndex < value.length && match(valueIndex + 1, patternIndex + 1)
+    } else {
+      result =
+        valueIndex < value.length &&
+        value[valueIndex] === pattern[patternIndex] &&
+        match(valueIndex + 1, patternIndex + 1)
+    }
+    memo.set(key, result)
+    return result
+  }
+  return match(0, 0)
+}
+
+function arrayValuesFromExpression(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value
+  if (typeof value !== 'string') return []
+  return parsePgArrayLiteral(value) ?? []
+}
+
+function catalogWhereMatches(node: any, row: Record<string, unknown>): boolean {
+  if (!node) return true
+  const bool = node.BoolExpr
+  if (bool) {
+    const args = bool.args ?? []
+    if (bool.boolop === 'AND_EXPR')
+      return args.every((arg: any) => catalogWhereMatches(arg, row))
+    if (bool.boolop === 'OR_EXPR')
+      return args.some((arg: any) => catalogWhereMatches(arg, row))
+    if (bool.boolop === 'NOT_EXPR') return !catalogWhereMatches(args[0], row)
+  }
+
+  const expr = node.A_Expr
+  if (!expr) return true
+
+  const op = operatorName(expr)
+  const left = catalogExpressionValue(expr.lexpr, row)
+  if (left === NON_LITERAL_ARRAY_VALUE) return true
+
+  if (expr.kind === 'AEXPR_IN') {
+    const values = (expr.rexpr?.List?.items ?? [])
+      .map((item: any) => catalogExpressionValue(item, row))
+      .filter((value: unknown) => value !== NON_LITERAL_ARRAY_VALUE)
+    const found = values.some((value: unknown) => catalogValuesEqual(left, value))
+    return op === '<>' ? !found : found
+  }
+
+  const right = catalogExpressionValue(expr.rexpr, row)
+  if (right === NON_LITERAL_ARRAY_VALUE) return true
+
+  if (expr.kind === 'AEXPR_OP_ALL') {
+    const values = arrayValuesFromExpression(right)
+    if (op === '<>') return values.every((value) => !catalogValuesEqual(left, value))
+    if (op === '=') return values.every((value) => catalogValuesEqual(left, value))
+  }
+  if (expr.kind === 'AEXPR_OP_ANY') {
+    const values = arrayValuesFromExpression(right)
+    if (op === '=') return values.some((value) => catalogValuesEqual(left, value))
+    if (op === '<>') return values.some((value) => !catalogValuesEqual(left, value))
+  }
+  if (expr.kind === 'AEXPR_LIKE') {
+    const matches = sqlLike(String(left ?? ''), String(right ?? ''))
+    return op === '!~~' ? !matches : matches
+  }
+  if (expr.kind === 'AEXPR_OP') {
+    if (op === '=') return catalogValuesEqual(left, right)
+    if (op === '<>' || op === '!=') return !catalogValuesEqual(left, right)
+  }
+  return true
+}
+
+interface CatalogIntervalValue {
+  intervalSeconds: number
+}
+
+function isCatalogIntervalValue(value: unknown): value is CatalogIntervalValue {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    typeof (value as CatalogIntervalValue).intervalSeconds === 'number'
+  )
+}
+
+function parseIntervalSeconds(value: string): number | null {
+  const trimmed = value.trim()
+  const match = /^(-?\d+(?:\.\d+)?)\s*([a-z]*)$/i.exec(trimmed)
+  if (!match) return null
+  const amount = Number(match[1])
+  if (!Number.isFinite(amount)) return null
+  const unit = match[2].toLowerCase()
+  if (
+    unit === '' ||
+    unit === 's' ||
+    unit === 'sec' ||
+    unit === 'second' ||
+    unit === 'seconds'
+  )
+    return amount
+  if (
+    unit === 'ms' ||
+    unit === 'msec' ||
+    unit === 'millisecond' ||
+    unit === 'milliseconds'
+  )
+    return amount / 1000
+  if (unit === 'min' || unit === 'mins' || unit === 'minute' || unit === 'minutes')
+    return amount * 60
+  if (unit === 'h' || unit === 'hr' || unit === 'hour' || unit === 'hours')
+    return amount * 60 * 60
+  if (unit === 'd' || unit === 'day' || unit === 'days') return amount * 24 * 60 * 60
+  return null
+}
+
+function catalogScalarValue(
+  node: any,
+  row: Record<string, unknown>
+): unknown | typeof NON_LITERAL_ARRAY_VALUE {
+  if (!node || typeof node !== 'object') return NON_LITERAL_ARRAY_VALUE
+
+  if (node.TypeCast) {
+    const castType = typeNameBase(node.TypeCast.typeName)
+    const value = catalogScalarValue(node.TypeCast.arg, row)
+    if (value === NON_LITERAL_ARRAY_VALUE) return value
+    if (castType === 'interval') {
+      const seconds = parseIntervalSeconds(String(value ?? ''))
+      return seconds === null ? NON_LITERAL_ARRAY_VALUE : { intervalSeconds: seconds }
+    }
+    if (castType === 'int2' || castType === 'int4' || castType === 'int8') {
+      const number = Number(value)
+      return Number.isFinite(number) ? Math.trunc(number) : NON_LITERAL_ARRAY_VALUE
+    }
+    if (castType === 'float4' || castType === 'float8' || castType === 'numeric') {
+      const number = Number(value)
+      return Number.isFinite(number) ? number : NON_LITERAL_ARRAY_VALUE
+    }
+    if (castType === 'text' || castType === 'varchar' || castType === 'bpchar')
+      return String(value ?? '')
+    return value
+  }
+
+  if (node.ColumnRef) {
+    const name = columnRefName(node)
+    return name ? catalogValueForColumn(row, name) : NON_LITERAL_ARRAY_VALUE
+  }
+
+  const literal = astLiteralValue(node)
+  if (literal !== NON_LITERAL_ARRAY_VALUE) return literal
+
+  const expr = node.A_Expr
+  if (expr?.kind === 'AEXPR_OP') {
+    const op = operatorName(expr)
+    const left = catalogScalarValue(expr.lexpr, row)
+    const right = catalogScalarValue(expr.rexpr, row)
+    if (left === NON_LITERAL_ARRAY_VALUE || right === NON_LITERAL_ARRAY_VALUE)
+      return NON_LITERAL_ARRAY_VALUE
+    if (op === '||') return String(left ?? '') + String(right ?? '')
+    if (op === '*' || op === '+' || op === '-' || op === '/') {
+      const l = Number(left)
+      const r = Number(right)
+      if (!Number.isFinite(l) || !Number.isFinite(r)) return NON_LITERAL_ARRAY_VALUE
+      if (op === '*') return l * r
+      if (op === '+') return l + r
+      if (op === '-') return l - r
+      return r === 0 ? NON_LITERAL_ARRAY_VALUE : l / r
+    }
+  }
+
+  const func = node.FuncCall
+  if (func && functionName(func) === 'extract') {
+    const part = catalogScalarValue(func.args?.[0], row)
+    const source = catalogScalarValue(func.args?.[1], row)
+    if (String(part).toLowerCase() === 'epoch' && isCatalogIntervalValue(source)) {
+      return source.intervalSeconds
+    }
+  }
+
+  return NON_LITERAL_ARRAY_VALUE
+}
+
+function projectedCatalogResult(
+  select: any,
+  sourceRows: Record<string, unknown>[]
+): CatalogResult {
+  const fields = selectTargetFields(select)
+  const targets = select?.targetList ?? []
+  const rows = sourceRows
+    .filter((row) => catalogWhereMatches(select?.whereClause, row))
+    .map((row) =>
+      Object.fromEntries(
+        fields.map((field, index) => {
+          const target = targets[index]?.ResTarget
+          const value = target
+            ? catalogScalarValue(target.val, row)
+            : NON_LITERAL_ARRAY_VALUE
+          if (value !== NON_LITERAL_ARRAY_VALUE && !isCatalogIntervalValue(value))
+            return [field.name, value]
+          if (Object.hasOwn(field, 'value')) return [field.name, field.value]
+          if (field.source) return [field.name, catalogValueForColumn(row, field.source)]
+          return [field.name, null]
+        })
+      )
+    )
+
+  return {
+    rows,
+    fields: fields.map((field) => {
+      if (field.oid) return { name: field.name, oid: field.oid }
+      const sample = rows.find(
+        (row) => row[field.name] !== null && row[field.name] !== undefined
+      )
+      const value = sample?.[field.name]
+      if (typeof value === 'boolean') return { name: field.name, oid: PG_TYPE_BOOL }
+      if (typeof value === 'number')
+        return {
+          name: field.name,
+          oid: PG_TYPE_FLOAT8,
+        }
+      return { name: field.name }
+    }),
+  }
+}
+
+const PG_SETTINGS_ROWS: Record<string, unknown>[] = [
+  {
+    name: 'wal_sender_timeout',
+    setting: '60',
+    unit: 's',
+    vartype: 'integer',
+    context: 'sighup',
+    boot_val: '60',
+    reset_val: '60',
+    source: 'default',
+    pending_restart: 'f',
+  },
+  {
+    name: 'wal_level',
+    setting: 'logical',
+    unit: '',
+    vartype: 'enum',
+    context: 'postmaster',
+    boot_val: 'logical',
+    reset_val: 'logical',
+    source: 'default',
+    pending_restart: 'f',
+  },
+  {
+    name: 'server_version_num',
+    setting: '160000',
+    unit: '',
+    vartype: 'integer',
+    context: 'internal',
+    boot_val: '160000',
+    reset_val: '160000',
+    source: 'default',
+    pending_restart: 'f',
+  },
+]
+
+function pgSettingsResult(select: any): CatalogResult | null {
+  if (!selectReferencesTable(select, 'pg_settings')) return null
+  return projectedCatalogResult(select, PG_SETTINGS_ROWS)
+}
+
+const PUBLICATION_BOOLEAN_FIELDS = new Set([
+  'pubinsert',
+  'pubupdate',
+  'pubdelete',
+  'pubtruncate',
+])
+const ARRAY_TYPE_ROWS = [
+  { oid: 16, typarray: 1000 },
+  { oid: 20, typarray: 1016 },
+  { oid: 21, typarray: 1005 },
+  { oid: 23, typarray: 1007 },
+  { oid: 25, typarray: 1009 },
+  { oid: 114, typarray: 199 },
+  { oid: 700, typarray: 1021 },
+  { oid: 701, typarray: 1022 },
+  { oid: 1043, typarray: 1015 },
+  { oid: 1114, typarray: 1115 },
+  { oid: PG_TYPE_TIMESTAMPTZ, typarray: 1185 },
+  { oid: 1700, typarray: 1231 },
+  { oid: PG_TYPE_JSONB, typarray: 3807 },
+]
+
+function publicationOid(name: string): number {
+  let hash = 0
+  for (let i = 0; i < name.length; i++) hash = (hash * 33 + name.charCodeAt(i)) >>> 0
+  return 50_000 + (hash % 10_000_000)
+}
+
+function tableOid(name: string): number {
+  return publicationOid(`table:${name}`)
+}
+
+function isSystemSqliteTable(name: string): boolean {
+  return (
+    name === '__miniflare_do_name' ||
+    name.startsWith('sqlite_') ||
+    name.startsWith('_orez_')
+  )
+}
+
+function sqliteTypeBase(type: string): string {
+  const lower = type.trim().toLowerCase()
+  const paren = lower.indexOf('(')
+  return paren >= 0 ? lower.slice(0, paren) : lower
+}
+
+function isLikelyJsonColumn(column: SqliteColumnInfo): boolean {
+  const dflt = column.dflt_value?.trim()
+  if (!dflt) return false
+  return dflt.startsWith("'{}") || dflt.startsWith("'[]") || dflt.startsWith("'{")
+}
+
+function pgTypeForSqliteColumn(
+  column: SqliteColumnInfo,
+  metadata?: SchemaColumnMetadata
+): string {
+  if (metadata?.dataType) return metadata.dataType
+  const type = sqliteTypeBase(column.type)
+  if (isLikelyJsonColumn(column) && (type === 'text' || type === 'varchar'))
+    return 'jsonb'
+  if (type.includes('int')) return 'integer'
+  if (type === 'real' || type === 'double' || type === 'float') return 'double precision'
+  if (type === 'numeric' || type === 'decimal') return 'numeric'
+  if (type === 'json' || type === 'jsonb') return 'jsonb'
+  if (type === 'blob' || type === 'bytea') return 'bytea'
+  if (type === 'varchar' || type === 'character varying') return 'character varying'
+  if (type === 'timestamp' || type === 'timestamptz') return 'timestamp'
+  return 'text'
+}
+
+function pgTypeOid(dataType: string): number {
+  const lower = dataType.toLowerCase()
+  if (lower.endsWith('[]')) {
+    return arrayTypeOidForElementOid(pgTypeOid(lower.slice(0, -2)))
+  }
+  switch (lower) {
+    case 'boolean':
+      return PG_TYPE_BOOL
+    case 'integer':
+      return PG_TYPE_INT4
+    case 'double precision':
+      return PG_TYPE_FLOAT8
+    case 'numeric':
+      return PG_TYPE_NUMERIC
+    case 'jsonb':
+      return PG_TYPE_JSONB
+    case 'bytea':
+      return PG_TYPE_BYTEA
+    case 'character varying':
+      return PG_TYPE_VARCHAR
+    case 'timestamp with time zone':
+    case 'timestamptz':
+      return PG_TYPE_TIMESTAMPTZ
+    case 'timestamp without time zone':
+    case 'timestamp':
+      return PG_TYPE_TIMESTAMP
+    default:
+      return PG_TYPE_TEXT
+  }
+}
+
+function pgDataTypeForWireOid(oid: number | undefined): string | null {
+  switch (oid) {
+    case PG_TYPE_BOOL:
+      return 'boolean'
+    case PG_TYPE_INT2:
+    case PG_TYPE_INT4:
+      return 'integer'
+    case PG_TYPE_INT8:
+      return 'bigint'
+    case PG_TYPE_FLOAT8:
+      return 'double precision'
+    case PG_TYPE_NUMERIC:
+      return 'numeric'
+    case PG_TYPE_JSON:
+    case PG_TYPE_JSONB:
+      return 'jsonb'
+    case PG_TYPE_BYTEA:
+      return 'bytea'
+    case PG_TYPE_VARCHAR:
+      return 'character varying'
+    case PG_TYPE_TIMESTAMP:
+      return 'timestamp without time zone'
+    case PG_TYPE_TIMESTAMPTZ:
+      return 'timestamp with time zone'
+    case PG_TYPE_TEXT:
+      return 'text'
+    default:
+      return null
+  }
+}
+
+function publicationCatalogValue(name: string, field: CatalogTargetField): unknown {
+  if (Object.hasOwn(field, 'value')) return field.value
+  switch (field.source) {
+    case 'oid':
+      return publicationOid(name)
+    case 'pubname':
+      return name
+    case 'pubinsert':
+    case 'pubupdate':
+    case 'pubdelete':
+    case 'pubtruncate':
+      return 't'
+    default:
+      return null
+  }
+}
+
+function catalogCurrentSettingResultFromSelect(select: any): CatalogResult | null {
+  if (!select?.targetList?.length) return null
+
+  const row: Record<string, unknown> = {}
+  const fields: { name: string; oid?: number }[] = []
+  for (const targetNode of select.targetList) {
+    const target = targetNode.ResTarget
+    const setting = currentSettingArg(target?.val)
+    const name = target.name ?? 'current_setting'
+    if (setting) {
+      row[name] = currentSettingValue(setting)
+    } else if (target.name) {
+      const value = catalogConstantValue(target.val)
+      if (value === undefined) continue
+      row[name] = value
+    } else {
+      continue
+    }
+    fields.push({ name })
+  }
+  return fields.length ? { rows: [row], fields } : null
+}
+
+function pgPublicationResult(
+  select: any,
+  availablePublications: string[]
+): CatalogResult | null {
+  if (!selectReferencesTable(select, 'pg_publication')) return null
+  const fields = selectTargetFields(select)
+  if (fields.length === 0) return { rows: [], fields: [] }
+
+  const requested = stringFilterValues(select, 'pubname')
+  const names = requested.length
+    ? requested.filter((name) => availablePublications.includes(name))
+    : availablePublications
+  const sorted = select.sortClause?.length ? [...names].sort() : names
+  const rows = sorted.map((name) =>
+    Object.fromEntries(
+      fields.map((field) => [field.name, publicationCatalogValue(name, field)])
+    )
+  )
+  return {
+    rows,
+    fields: fields.map((field) => ({ name: field.name, oid: field.oid })),
+  }
+}
+
+function selectCallsFunction(select: any, name: string): boolean {
+  let found = false
+  walkAst(select, (node) => {
+    if (found) return
+    if (node.FuncCall && functionName(node.FuncCall) === name) found = true
+  })
+  return found
+}
+
+function advisoryLockResult(select: any): CatalogResult | null {
+  if (!selectCallsFunction(select, 'pg_advisory_xact_lock')) return null
+  const fields = selectTargetFields(select)
+  const projectedFields = fields.length
+    ? fields
+    : [{ name: 'pg_advisory_xact_lock', source: 'pg_advisory_xact_lock' }]
+  return {
+    rows: [Object.fromEntries(projectedFields.map((field) => [field.name, null]))],
+    fields: projectedFields.map((field) => ({ name: field.name, oid: field.oid })),
+  }
+}
+
+function logicalEmitMessageResult(select: any): CatalogResult | null {
+  if (!selectCallsFunction(select, 'pg_logical_emit_message')) return null
+  const fields = selectTargetFields(select)
+  const commitTimeMs = Date.now()
+  const isCommitTimeField = (field: CatalogTargetField) =>
+    field.name.toLowerCase() === 'committimems' || field.source === 'committimems'
+  const isLsnField = (field: CatalogTargetField) =>
+    field.name === 'lsn' || field.source === 'pg_logical_emit_message'
+  return {
+    rows: [
+      Object.fromEntries(
+        fields.map((field) => [
+          field.name,
+          isLsnField(field) ? '0/1' : isCommitTimeField(field) ? commitTimeMs : null,
+        ])
+      ),
+    ],
+    fields: fields.map((field) => ({
+      name: field.name,
+      oid: isCommitTimeField(field)
+        ? PG_TYPE_FLOAT8
+        : isLsnField(field)
+          ? PG_TYPE_TEXT
+          : field.oid,
+    })),
+  }
+}
+
+function emptyCatalogResultFromSelect(select: any): CatalogResult {
+  const fields = selectTargetFields(select)
+  return {
+    rows: [],
+    fields: fields.map((field) => ({ name: field.name, oid: field.oid })),
+  }
+}
+
+function getSkippedFunctionNames(dbName: string, namespace: string): Set<string> {
+  const key = `${namespace}\0${dbName}`
+  let names = skippedFunctionNamesByTarget.get(key)
+  if (!names) {
+    names = new Set()
+    skippedFunctionNamesByTarget.set(key, names)
+  }
+  return names
 }
 
 // ── DoBackend class ───────────────────────────────────────────────────────
@@ -419,44 +4450,186 @@ export class DoBackend {
   private doUrl: string
   private dbName: string
   private httpClient: HttpClient
-  private preparedStatements = new Map<string, { sql: string }>()
-  private sqlToExecute: { sql: string; params: any[] } | null = null
+  private namespace: string
+  private skippedFunctionNames: Set<string>
+  private triggerFunctions: Map<string, TriggerFunctionDefinition>
+  private schemaMetadata: SchemaMetadata
+  private publications: Map<string, PublicationDefinition>
+  private rewriteCache: Map<string, RewrittenStatement[]>
+  private preparedStatements = new Map<string, PreparedStatement>()
+  private portals = new Map<string, BoundPortal>()
 
-  // Transaction state
+  // Transaction state. The Durable Object refuses raw SQL BEGIN/COMMIT/SAVEPOINT
+  // (Cloudflare requires ctx.storage.transaction()), so PG-style multi-call
+  // transactions can't ride on SQLite's own transaction machinery. Instead we
+  // emulate rollback by snapshotting each table on its first in-tx write and
+  // restoring it atomically through /batch on ROLLBACK. Atomicity of the
+  // restore itself comes from the DO's /batch transaction.
   private inTransaction = false
-  private txnBuffer: string[] = []
-  private txnReadOnly = false
+  private txID: string | null = null
+  private txSnapshot: TransactionMetadataSnapshot | null = null
+  private txDataSnapshots = new Map<string, string | null>()
+  private txSnapshotCounter = 0
 
-  constructor(doUrl: string, dbName: string = 'postgres') {
+  constructor(doUrl: string, dbName: string = 'postgres', namespace = 'default') {
     this.doUrl = doUrl.replace(/\/+$/, '')
     this.dbName = dbName
+    this.namespace = namespace
     this.httpClient = new HttpClient()
+    this.skippedFunctionNames = getSkippedFunctionNames(dbName, namespace)
+    this.triggerFunctions = new Map()
+    this.schemaMetadata = new Map()
+    this.publications = new Map()
+    this.rewriteCache = new Map()
     this.waitReady = this.init()
   }
 
   private async init() {
+    await loadModule()
     try {
-      await this.httpClient.post(
-        `${this.doUrl}/exec?db=${encodeURIComponent(this.dbName)}`,
-        JSON.stringify({ sql: 'SELECT 1' })
-      )
+      await this.httpClient.post(this.url('/exec'), JSON.stringify({ sql: 'SELECT 1' }))
     } catch {}
     this.ready = true
   }
 
   async close(): Promise<void> {
+    if (this.inTransaction) {
+      try {
+        await this.rollbackTransaction()
+      } catch {
+        this.clearTransactionState()
+      }
+    }
     this.closed = true
+  }
+
+  private readyForQuery(): Uint8Array {
+    return buildReadyForQuery(this.inTransaction ? STATUS_TRANSACTION : STATUS_IDLE)
+  }
+
+  private cloneSchemaMetadata(source: SchemaMetadata): SchemaMetadata {
+    const cloned: SchemaMetadata = new Map()
+    for (const [table, columns] of source) {
+      const columnMap = new Map<string, SchemaColumnMetadata>()
+      for (const [column, metadata] of columns) {
+        columnMap.set(column, { ...metadata })
+      }
+      cloned.set(table, columnMap)
+    }
+    return cloned
+  }
+
+  private clonePublications(
+    source: Map<string, PublicationDefinition>
+  ): Map<string, PublicationDefinition> {
+    const cloned = new Map<string, PublicationDefinition>()
+    for (const [name, publication] of source) {
+      const tables = new Map<string, PublicationTableRef>()
+      for (const [key, table] of publication.tables) {
+        tables.set(key, { ...table })
+      }
+      cloned.set(name, {
+        name: publication.name,
+        allTables: publication.allTables,
+        schemas: new Set(publication.schemas),
+        tables,
+      })
+    }
+    return cloned
+  }
+
+  private cloneTriggerFunctions(
+    source: Map<string, TriggerFunctionDefinition>
+  ): Map<string, TriggerFunctionDefinition> {
+    const cloned = new Map<string, TriggerFunctionDefinition>()
+    for (const [name, fn] of source) cloned.set(name, { ...fn })
+    return cloned
+  }
+
+  private captureTransactionMetadataSnapshot(): TransactionMetadataSnapshot {
+    return {
+      schemaMetadata: this.cloneSchemaMetadata(this.schemaMetadata),
+      publications: this.clonePublications(this.publications),
+      skippedFunctionNames: new Set(this.skippedFunctionNames),
+      triggerFunctions: this.cloneTriggerFunctions(this.triggerFunctions),
+    }
+  }
+
+  private restoreTransactionMetadataSnapshot(
+    snapshot: TransactionMetadataSnapshot
+  ): void {
+    this.schemaMetadata.clear()
+    for (const [table, columns] of this.cloneSchemaMetadata(snapshot.schemaMetadata)) {
+      this.schemaMetadata.set(table, columns)
+    }
+    this.publications.clear()
+    for (const [name, publication] of this.clonePublications(snapshot.publications)) {
+      this.publications.set(name, publication)
+    }
+    this.skippedFunctionNames.clear()
+    for (const name of snapshot.skippedFunctionNames) this.skippedFunctionNames.add(name)
+    this.triggerFunctions.clear()
+    for (const [name, fn] of this.cloneTriggerFunctions(snapshot.triggerFunctions)) {
+      this.triggerFunctions.set(name, fn)
+    }
+    // Cached rewrites may reference metadata that the rollback just invalidated.
+    this.rewriteCache.clear()
+  }
+
+  private clearTransactionState(): void {
+    this.inTransaction = false
+    this.txID = null
+    this.txSnapshot = null
+    this.txDataSnapshots.clear()
+    this.txSnapshotCounter = 0
+  }
+
+  private newTransactionID(): string {
+    const uuid = globalThis.crypto?.randomUUID?.()
+    if (uuid) return uuid
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  }
+
+  private async beginTransaction(): Promise<void> {
+    if (this.inTransaction) return
+    this.txID = this.newTransactionID()
+    this.txSnapshot = this.captureTransactionMetadataSnapshot()
+    this.inTransaction = true
+  }
+
+  private async commitTransaction(): Promise<void> {
+    if (!this.inTransaction) {
+      this.clearTransactionState()
+      return
+    }
+    await this.dropTransactionSnapshots()
+    this.clearTransactionState()
+  }
+
+  private async rollbackTransaction(): Promise<void> {
+    if (!this.inTransaction) {
+      this.clearTransactionState()
+      return
+    }
+    const snapshot = this.txSnapshot
+    try {
+      await this.restoreTransactionDataSnapshots()
+    } finally {
+      if (snapshot) this.restoreTransactionMetadataSnapshot(snapshot)
+      this.clearTransactionState()
+    }
   }
 
   async execProtocolRaw(
     message: Uint8Array,
     options?: { syncToFs?: boolean; throwOnError?: boolean }
   ): Promise<Uint8Array> {
+    if (!this.ready) await this.waitReady
     const msgType = message[0]
     try {
       switch (msgType) {
         case FT_QUERY:
-          return await this.handleSimpleQuery(message)
+          return this.handleSimpleQuery(message)
         case FT_PARSE:
           return this.handleParse(message)
         case FT_BIND:
@@ -464,11 +4637,11 @@ export class DoBackend {
         case FT_DESCRIBE:
           return this.handleDescribe(message)
         case FT_EXECUTE:
-          return await this.handleExecute(message)
+          return this.handleExecute(message)
         case FT_SYNC:
           return this.handleSync()
         case FT_CLOSE:
-          return buildCloseComplete()
+          return this.handleClose(message)
         case FT_FLUSH:
           return new Uint8Array(0)
         case FT_TERMINATE:
@@ -486,137 +4659,237 @@ export class DoBackend {
 
   private async handleSimpleQuery(data: Uint8Array): Promise<Uint8Array> {
     const sql = extractQueryText(data)
-    if (!sql) return concat(buildCommandComplete('OK'), buildReadyForQuery())
+    if (!sql) return concat(buildCommandComplete('OK'), this.readyForQuery())
 
     const normalized = sql.trimStart().toLowerCase()
+    const txAction = transactionAction(sql)
 
-    // BEGIN / START TRANSACTION
-    if (
-      normalized === 'begin' ||
-      normalized === 'begin;' ||
-      normalized === 'begin work' ||
-      normalized === 'begin transaction' ||
-      normalized === 'start transaction'
-    ) {
-      this.inTransaction = true
-      this.txnBuffer = []
-      this.txnReadOnly = false
-      return concat(buildCommandComplete('BEGIN'), buildReadyForQuery())
-    }
-
-    // COMMIT / END
-    if (
-      normalized === 'commit' ||
-      normalized === 'commit;' ||
-      normalized === 'commit work' ||
-      normalized === 'end' ||
-      normalized === 'end;'
-    ) {
-      if (this.inTransaction && this.txnBuffer.length > 0) {
-        await this.flushTransactionBuffer()
+    if (txAction) {
+      try {
+        switch (txAction.kind) {
+          case 'begin':
+            await this.beginTransaction()
+            break
+          case 'commit':
+            await this.commitTransaction()
+            break
+          case 'rollback':
+            await this.rollbackTransaction()
+            break
+          // SAVEPOINT / RELEASE / ROLLBACK TO are no-ops: the DO refuses raw
+          // SQL transactions, and we can't emulate nested rollback without
+          // per-savepoint snapshots. ROLLBACK TO returning success when no
+          // savepoint exists is wrong, but chat e2e doesn't exercise it.
+          case 'savepoint':
+          case 'release':
+          case 'rollback_to':
+            break
+        }
+      } catch (err: any) {
+        return concat(buildErrorResponse(err.message), this.readyForQuery())
       }
-      this.inTransaction = false
-      this.txnBuffer = []
-      return concat(buildCommandComplete('COMMIT'), buildReadyForQuery())
-    }
-
-    // ROLLBACK / ABORT
-    if (
-      normalized === 'rollback' ||
-      normalized === 'rollback;' ||
-      normalized === 'rollback work' ||
-      normalized === 'abort' ||
-      normalized === 'abort;'
-    ) {
-      this.inTransaction = false
-      this.txnBuffer = []
-      return concat(buildCommandComplete('ROLLBACK'), buildReadyForQuery())
+      return concat(
+        buildCommandComplete(commandTagForSQL(sql)),
+        this.readyForQuery()
+      )
     }
 
     // SET (local) — skip
     if (normalized.startsWith('set '))
-      return concat(buildCommandComplete('SET'), buildReadyForQuery())
+      return concat(buildCommandComplete('SET'), this.readyForQuery())
     if (normalized.startsWith('show '))
-      return concat(buildCommandComplete('SHOW'), buildReadyForQuery())
+      return concat(buildCommandComplete('SHOW'), this.readyForQuery())
     if (normalized === 'show' || normalized === 'show;')
-      return concat(buildCommandComplete('SHOW'), buildReadyForQuery())
-
-    // SAVEPOINT — skip
-    if (
-      normalized.startsWith('savepoint ') ||
-      normalized.startsWith('release savepoint') ||
-      normalized.startsWith('release ') ||
-      normalized.startsWith('rollback to savepoint') ||
-      normalized.startsWith('rollback to ')
-    ) {
-      return concat(buildCommandComplete('SAVEPOINT'), buildReadyForQuery())
-    }
+      return concat(buildCommandComplete('SHOW'), this.readyForQuery())
 
     // DEALLOCATE, DISCARD, RESET → skip
     if (/^(deallocate|discard|reset)\b/.test(normalized)) {
-      return concat(buildCommandComplete('OK'), buildReadyForQuery())
+      return concat(buildCommandComplete('OK'), this.readyForQuery())
     }
 
     // LOCK TABLE → skip
     if (normalized.startsWith('lock table') || normalized.startsWith('lock ')) {
-      return concat(buildCommandComplete('LOCK TABLE'), buildReadyForQuery())
+      return concat(buildCommandComplete('LOCK TABLE'), this.readyForQuery())
+    }
+
+    const copySelect = copySelectSQL(sql)
+    if (copySelect) {
+      const rewrittenCopySelect = this.rewriteSQL(copySelect)
+      const result = await this.doExecResult(rewrittenCopySelect)
+      return this.buildCopyResponse(result, copySelect)
     }
 
     // Prepare query
-    const rewritten = rewriteSQL(sql)
-    if (rewritten === '' || rewritten.startsWith('--'))
-      return concat(buildCommandComplete('OK'), buildReadyForQuery())
+    const rewrittenStatements = this.rewriteSQLStatements(sql)
+    const rewritten = rewrittenSQLText(rewrittenStatements)
+    if (rewritten === '' || rewritten.startsWith('--')) {
+      this.applyStatementMetadata(rewrittenStatements)
+      return concat(buildCommandComplete(commandTagForSQL(sql)), this.readyForQuery())
+    }
 
     // Catalog queries — check before forwarding
     if (isCatalogQuery(rewritten)) {
-      const result = this.handleCatalogQuery(rewritten)
-      return this.buildSelectResponse(result.rows, result.fields)
-    }
-
-    // SELECT reads — execute immediately even in transaction
-    const isWrite = this.isWriteQuery(rewritten)
-    const isDDL = this.isDDLQuery(rewritten)
-
-    if (this.inTransaction && (isWrite || isDDL)) {
-      // Buffer writes until COMMIT
-      this.txnBuffer.push(rewritten)
-      if (isDDL) return concat(buildCommandComplete('CREATE TABLE'), buildReadyForQuery())
-      const isInsert = /^\s*insert\b/i.test(rewritten)
-      const isUpdate = /^\s*update\b/i.test(rewritten)
-      const isDelete = /^\s*delete\b/i.test(rewritten)
-      const tag = isInsert
-        ? 'INSERT 0 1'
-        : isUpdate
-          ? 'UPDATE 1'
-          : isDelete
-            ? 'DELETE 1'
-            : 'OK'
-      return concat(buildCommandComplete(tag), buildReadyForQuery())
+      const results = await this.handleCatalogQueries(rewritten)
+      return concat(
+        ...results.map((result) => this.buildSelectResult(result)),
+        this.readyForQuery()
+      )
     }
 
     // Execute SQL
     try {
-      const rows = await this.doExec(rewritten)
-      return this.buildSQLResponse(rewritten, rows)
+      const statement =
+        rewrittenStatements.length === 1 ? rewrittenStatements[0] : undefined
+      const result = statement
+        ? await this.executeRewrittenStatement(statement)
+        : this.inTransaction
+          ? await this.executeRewrittenStatements(rewrittenStatements)
+          : await this.doExecResult(rewritten)
+      this.applyStatementMetadata(rewrittenStatements)
+      const tracking = statement ? this.trackingForStatement(statement) : undefined
+      const visibleResult = this.visibleResultForTracking(result, tracking)
+      return this.buildSQLResponse(sql, visibleResult.rows, visibleResult.columns, {
+        affectedRows: visibleResult.affectedRows,
+      })
     } catch (err: any) {
-      return concat(buildErrorResponse(err.message), buildReadyForQuery())
+      return concat(buildErrorResponse(err.message), this.readyForQuery())
     }
   }
 
-  private async flushTransactionBuffer(): Promise<void> {
-    if (this.txnBuffer.length === 0) return
-    await this.doBatchExec(this.txnBuffer)
-    this.txnBuffer = []
+  private applyStatementMetadata(statements: RewrittenStatement[]): void {
+    for (const statement of statements) {
+      for (const column of statement.schemaColumns ?? []) {
+        let table = this.schemaMetadata.get(column.table)
+        if (!table) {
+          table = new Map()
+          this.schemaMetadata.set(column.table, table)
+        }
+        table.set(column.column, column)
+      }
+      for (const change of statement.schemaMetadataChanges ?? []) {
+        this.applySchemaMetadataChange(change)
+      }
+      for (const change of statement.publicationChanges ?? []) {
+        this.applyPublicationChange(change)
+      }
+    }
   }
 
-  private isWriteQuery(sql: string): boolean {
-    return /^\s*(insert|update|delete|upsert|merge|truncate|copy)\b/i.test(sql)
+  private applySchemaMetadataChange(change: SchemaMetadataChange): void {
+    if (change.action === 'renameTable') {
+      const columns = this.schemaMetadata.get(change.from.table)
+      if (columns) {
+        const renamed = new Map<string, SchemaColumnMetadata>()
+        for (const [name, column] of columns) {
+          renamed.set(name, {
+            ...column,
+            table: change.to.table,
+            schema: change.to.schema,
+            tableName: change.to.tableName,
+          })
+        }
+        this.schemaMetadata.delete(change.from.table)
+        this.schemaMetadata.set(change.to.table, renamed)
+      }
+      for (const publication of this.publications.values()) {
+        const ref = publication.tables.get(change.from.table)
+        if (!ref) continue
+        publication.tables.delete(change.from.table)
+        publication.tables.set(change.to.table, change.to)
+      }
+      return
+    }
+
+    const columns = this.schemaMetadata.get(change.table.table)
+    const column = columns?.get(change.from)
+    if (!columns || !column) return
+    columns.delete(change.from)
+    columns.set(change.to, { ...column, column: change.to })
   }
 
-  private isDDLQuery(sql: string): boolean {
-    return /^\s*(create|alter|drop|grant|revoke)\s+(table|index|view|schema|sequence|function|trigger|publication)/i.test(
-      sql
-    )
+  private applyPublicationChange(change: PublicationChange): void {
+    if (change.action === 'drop') {
+      this.publications.delete(change.name)
+      return
+    }
+
+    let publication = this.publications.get(change.name)
+    if (!publication || change.action === 'create' || change.action === 'set') {
+      publication = {
+        name: change.name,
+        allTables: false,
+        schemas: new Set(),
+        tables: new Map(),
+      }
+      this.publications.set(change.name, publication)
+    }
+
+    if (change.action === 'set') {
+      publication.allTables = false
+      publication.schemas.clear()
+      publication.tables.clear()
+    }
+
+    if (change.allTables) publication.allTables = true
+    for (const schema of change.schemas ?? []) {
+      if (change.action === 'remove') publication.schemas.delete(schema)
+      else publication.schemas.add(schema)
+    }
+    for (const table of change.tables ?? []) {
+      if (change.action === 'remove') publication.tables.delete(table.table)
+      else publication.tables.set(table.table, table)
+    }
+  }
+
+  publicationNames(): string[] {
+    return [...this.publications.keys()]
+  }
+
+  private trackingForStatement(
+    statement: RewrittenStatement
+  ): ChangeTrackingMetadata | undefined {
+    const tracking = statement.changeTracking
+    if (!tracking || this.dbName !== 'postgres') return undefined
+    const { table } = tracking
+    if (table.schema === 'public') {
+      const publications = this.publicationNames()
+      if (!publications.length) return undefined
+      return this.publicationsForTable(table, publications).length ? tracking : undefined
+    }
+    if (
+      table.schema !== 'pg_catalog' &&
+      table.schema !== 'information_schema' &&
+      !table.schema.startsWith('pg_') &&
+      !table.schema.startsWith('zero_') &&
+      !table.schema.startsWith('_zero') &&
+      !table.schema.includes('/') &&
+      TRACKED_SHARD_TABLES.has(table.tableName)
+    ) {
+      return tracking
+    }
+    return undefined
+  }
+
+  private trackingRequest(tracking: ChangeTrackingMetadata): ChangeTrackingRequest {
+    const rowColumns = this.schemaMetadata.get(tracking.table.table)
+    return {
+      tableName: `${tracking.table.schema}.${tracking.table.tableName}`,
+      operation: tracking.operation,
+      returnRows: tracking.returnRows,
+      ...(rowColumns ? { rowColumns: [...rowColumns.keys()] } : null),
+    }
+  }
+
+  private visibleResultForTracking(
+    result: ExecResult,
+    tracking: ChangeTrackingMetadata | undefined
+  ): ExecResult {
+    if (!tracking) return result
+    if (!tracking.returnRows)
+      return { rows: [], columns: [], affectedRows: result.affectedRows }
+    if (tracking.returningProjection)
+      return projectReturningResult(result, tracking.returningProjection)
+    return result
   }
 
   // ── Extended protocol handlers ──────────────────────────────────────────
@@ -625,238 +4898,1757 @@ export class DoBackend {
     const sql = extractParseQuery(data)
     const stmtName = extractParseStatementName(data)
     if (sql) {
-      const rewritten = rewriteSQL(sql)
-      if (rewritten && !rewritten.startsWith('--') && !isCatalogQuery(rewritten)) {
-        this.preparedStatements.set(stmtName, { sql: rewritten })
+      const rewrittenStatements = this.rewriteSQLStatements(sql)
+      const rewritten = rewrittenSQLText(rewrittenStatements)
+      const paramOIDs = inferParamOidsForSQL(
+        rewritten,
+        inferParamOidsForSQL(sql, extractParseParamOIDs(data), this.schemaMetadata),
+        this.schemaMetadata
+      )
+      const timestampParamNumbers = paramNumbersForOids(paramOIDs, isTimestampOid)
+      const booleanParamNumbers = paramNumbersForOids(paramOIDs, isBooleanOid)
+      const inferredJsonParamNumbers = paramNumbersForOids(paramOIDs, isJsonOid)
+      if (rewritten && !rewritten.startsWith('--')) {
+        const arrayParamNumbers = new Set<number>()
+        const jsonParamNumbers = new Set<number>(inferredJsonParamNumbers)
+        const schemaColumns: SchemaColumnMetadata[] = []
+        const schemaMetadataChanges: SchemaMetadataChange[] = []
+        const publicationChanges: PublicationChange[] = []
+        for (const statement of rewrittenStatements) {
+          for (const number of statement.arrayParamNumbers ?? []) {
+            arrayParamNumbers.add(number)
+          }
+          for (const number of statement.jsonParamNumbers ?? []) {
+            jsonParamNumbers.add(number)
+          }
+          schemaColumns.push(...(statement.schemaColumns ?? []))
+          schemaMetadataChanges.push(...(statement.schemaMetadataChanges ?? []))
+          publicationChanges.push(...(statement.publicationChanges ?? []))
+        }
+        this.preparedStatements.set(stmtName, {
+          sql: rewritten,
+          originalSql: sql,
+          rewrittenStatements,
+          paramOIDs,
+          ...(arrayParamNumbers.size ? { arrayParamNumbers } : null),
+          ...(jsonParamNumbers.size ? { jsonParamNumbers } : null),
+          ...(timestampParamNumbers.size ? { timestampParamNumbers } : null),
+          ...(booleanParamNumbers.size ? { booleanParamNumbers } : null),
+          ...(schemaColumns.length ? { schemaColumns } : null),
+          ...(schemaMetadataChanges.length ? { schemaMetadataChanges } : null),
+          ...(publicationChanges.length ? { publicationChanges } : null),
+        })
+      } else {
+        this.preparedStatements.set(stmtName, {
+          sql: '',
+          originalSql: sql,
+          rewrittenStatements,
+          paramOIDs,
+          ...(inferredJsonParamNumbers.size
+            ? { jsonParamNumbers: inferredJsonParamNumbers }
+            : null),
+          ...(timestampParamNumbers.size ? { timestampParamNumbers } : null),
+          ...(booleanParamNumbers.size ? { booleanParamNumbers } : null),
+          schemaColumns: rewrittenStatements.flatMap(
+            (statement) => statement.schemaColumns ?? []
+          ),
+          schemaMetadataChanges: rewrittenStatements.flatMap(
+            (statement) => statement.schemaMetadataChanges ?? []
+          ),
+          publicationChanges: rewrittenStatements.flatMap(
+            (statement) => statement.publicationChanges ?? []
+          ),
+          commandTag: commandTagForSQL(sql),
+        })
       }
     }
     return buildParseComplete()
   }
 
   private handleBind(data: Uint8Array): Uint8Array {
+    const portalName = extractBindPortalName(data)
     const stmtName = extractBindStatementName(data)
     const params = extractBindParams(data)
     const stmt = this.preparedStatements.get(stmtName)
-    if (stmt) (stmt as any)._params = params
+    if (!stmt)
+      return buildErrorResponse(`prepared statement "${stmtName}" does not exist`)
+    this.portals.set(portalName, { ...stmt, statementName: stmtName, params })
     return buildBindComplete()
   }
 
-  private async handleExecute(_data: Uint8Array): Promise<Uint8Array> {
-    let stmt: any
-    for (const [, s] of this.preparedStatements) {
-      if ((s as any)._params !== undefined) {
-        stmt = s
-        break
-      }
+  private async handleExecute(data: Uint8Array): Promise<Uint8Array> {
+    const portalName = extractExecutePortalName(data)
+    const portal = this.portals.get(portalName)
+    if (!portal) return buildErrorResponse(`portal "${portalName}" does not exist`)
+    if (!portal.sql?.trim()) {
+      this.applyStatementMetadata([
+        {
+          sql: '',
+          schemaColumns: portal.schemaColumns ?? [],
+          schemaMetadataChanges: portal.schemaMetadataChanges ?? [],
+          publicationChanges: portal.publicationChanges ?? [],
+        },
+      ])
+      return buildCommandComplete(portal.commandTag ?? 'OK')
     }
-    if (!stmt || !stmt.sql?.trim()) return new Uint8Array(0)
 
-    const params = stmt._params || []
-    delete stmt._params
-    const sql = this.inlineParams(stmt.sql, params)
+    const sql = portal.sql
 
     const normalized = sql.trimStart().toLowerCase()
+    const txAction = transactionAction(sql)
 
-    // Handle transaction markers in extended protocol
-    if (normalized === 'begin' || normalized.startsWith('begin ')) {
-      this.inTransaction = true
-      this.txnBuffer = []
-      this.txnReadOnly = false
-      return new Uint8Array(0)
+    if (txAction) {
+      try {
+        switch (txAction.kind) {
+          case 'begin':
+            await this.beginTransaction()
+            break
+          case 'commit':
+            await this.commitTransaction()
+            break
+          case 'rollback':
+            await this.rollbackTransaction()
+            break
+          case 'savepoint':
+          case 'release':
+          case 'rollback_to':
+            break
+        }
+      } catch (err: any) {
+        return buildErrorResponse(err.message)
+      }
+      return buildCommandComplete(commandTagForSQL(sql))
     }
-    if (normalized === 'commit' || normalized.startsWith('commit ')) {
-      if (this.inTransaction && this.txnBuffer.length > 0)
-        await this.flushTransactionBuffer()
-      this.inTransaction = false
-      this.txnBuffer = []
-      return buildCommandComplete('COMMIT')
-    }
-    if (
-      normalized === 'rollback' ||
-      normalized.startsWith('rollback ') ||
-      normalized === 'abort'
-    ) {
-      this.inTransaction = false
-      this.txnBuffer = []
-      return buildCommandComplete('ROLLBACK')
-    }
-
-    this.sqlToExecute = { sql, params }
+    if (normalized.startsWith('set ')) return buildCommandComplete('SET')
 
     try {
-      const rows = await this.doExec(sql)
-      if (rows.length > 0) {
-        const fns = Object.keys(rows[0])
+      if (isCatalogQuery(sql)) {
+        const catalogSql = this.inlineParams(
+          sql,
+          portal.params,
+          portal.arrayParamNumbers,
+          portal.jsonParamNumbers,
+          portal.timestampParamNumbers,
+          portal.booleanParamNumbers
+        )
+        const result = await this.handleCatalogQuery(catalogSql)
         return concat(
-          buildRowDescription(fns.map((n) => ({ name: n }))),
-          ...rows.map((r) => buildDataRow(r, fns)),
-          buildCommandComplete(`SELECT ${rows.length}`)
+          buildRowDescription(result.fields),
+          ...result.rows.map((r) => buildDataRow(r, result.fields)),
+          buildCommandComplete(`SELECT ${result.rows.length}`)
+        )
+      }
+
+      const statement =
+        portal.rewrittenStatements?.length === 1
+          ? portal.rewrittenStatements[0]
+          : undefined
+      if (statement) await this.snapshotTransactionWrite(statement)
+      const tracking = statement ? this.trackingForStatement(statement) : undefined
+      const execSql = tracking?.returningSQL ?? sql
+      const bound = this.sqliteBoundSQL(
+        execSql,
+        portal.params,
+        portal.arrayParamNumbers,
+        portal.jsonParamNumbers,
+        portal.timestampParamNumbers,
+        portal.booleanParamNumbers
+      )
+      const result = await this.doExecResult(
+        bound.sql,
+        bound.params,
+        tracking ? this.trackingRequest(tracking) : undefined
+      )
+      if (portal.schemaColumns?.length) {
+        this.applyStatementMetadata([{ sql, schemaColumns: portal.schemaColumns }])
+      }
+      const visibleResult = this.visibleResultForTracking(result, tracking)
+      const visibleRows = visibleResult.rows
+      const visibleColumns = visibleResult.columns
+      const fields = this.fieldsForResult(portal.originalSql ?? sql, {
+        rows: visibleRows,
+        columns: visibleColumns,
+      })
+      const affectedRows = visibleResult.affectedRows ?? result.rows.length
+      const commandTag = isSelectLike(sql)
+        ? `SELECT ${visibleRows.length}`
+        : /^\s*insert\b/i.test(sql)
+          ? `INSERT 0 ${affectedRows}`
+          : /^\s*update\b/i.test(sql)
+            ? `UPDATE ${affectedRows}`
+            : /^\s*delete\b/i.test(sql)
+              ? `DELETE ${affectedRows}`
+              : 'OK'
+      if (visibleRows.length > 0) {
+        return concat(
+          buildRowDescription(fields),
+          ...visibleRows.map((r) => buildDataRow(r, fields)),
+          buildCommandComplete(commandTag)
         )
       }
       const isSelect = /^\s*select\b/i.test(sql) || /^\s*with\b/i.test(sql)
-      return buildCommandComplete(isSelect ? 'SELECT 0' : 'OK')
+      return concat(
+        isSelect && fields.length > 0 ? buildRowDescription(fields) : new Uint8Array(0),
+        buildCommandComplete(commandTag)
+      )
     } catch (err: any) {
       return buildErrorResponse(err.message)
     }
   }
 
   private handleSync(): Uint8Array {
-    this.sqlToExecute = null
-    return buildReadyForQuery()
+    return this.readyForQuery()
   }
 
-  private handleDescribe(data: Uint8Array): Uint8Array {
-    const stmt = this.preparedStatements.get(extractDescribeName(data))
-    if (stmt && stmt.paramOIDs?.length) return buildParameterDescription(stmt.paramOIDs!)
-    return buildNoData()
+  private async handleDescribe(data: Uint8Array): Promise<Uint8Array> {
+    const describeType = extractDescribeType(data)
+    const name = extractDescribeName(data)
+    const target =
+      describeType === 'P' ? this.portals.get(name) : this.preparedStatements.get(name)
+    if (!target) return buildNoData()
+
+    if (describeType === 'P') {
+      const fields =
+        target.fields ??
+        (await this.describeFields(target.sql, target.originalSql ?? target.sql))
+      target.fields = fields
+      return fields.length > 0 ? buildRowDescription(fields) : buildNoData()
+    }
+
+    const fields = await this.describeFields(target.sql, target.originalSql ?? target.sql)
+    target.fields = fields
+    return concat(
+      buildParameterDescription(target.paramOIDs),
+      fields.length > 0 ? buildRowDescription(fields) : buildNoData()
+    )
+  }
+
+  private handleClose(data: Uint8Array): Uint8Array {
+    const closeType = extractCloseType(data)
+    const name = extractCloseName(data)
+    if (closeType === 'P') {
+      this.portals.delete(name)
+    } else {
+      this.preparedStatements.delete(name)
+      for (const [portalName, portal] of this.portals) {
+        if (portal.statementName === name) this.portals.delete(portalName)
+      }
+    }
+    return buildCloseComplete()
   }
 
   // ── High-level API ──────────────────────────────────────────────────────
 
   async exec(sql: string): Promise<any[]> {
-    const rewritten = rewriteSQL(sql)
-    if (!rewritten) return []
-    if (isCatalogQuery(rewritten)) return []
-    return this.doExec(rewritten)
+    if (!this.ready) await this.waitReady
+    if (await this.handleTransactionControl(sql)) return []
+    const statements = this.rewriteSQLStatements(sql)
+    const rewritten = rewrittenSQLText(statements)
+    if (!rewritten) {
+      this.applyStatementMetadata(statements)
+      return []
+    }
+    if (isCatalogQuery(rewritten)) return (await this.handleCatalogQuery(rewritten)).rows
+    const statement = statements.length === 1 ? statements[0] : undefined
+    if (statement) await this.snapshotTransactionWrite(statement)
+    const tracking = statement ? this.trackingForStatement(statement) : undefined
+    const result = await this.doExecResult(
+      tracking?.returningSQL ?? rewritten,
+      undefined,
+      tracking ? this.trackingRequest(tracking) : undefined
+    )
+    this.applyStatementMetadata(statements)
+    return this.visibleResultForTracking(result, tracking).rows
+  }
+
+  private async handleTransactionControl(sql: string): Promise<boolean> {
+    const action = transactionAction(sql)
+    if (!action) return false
+    switch (action.kind) {
+      case 'begin':
+        await this.beginTransaction()
+        break
+      case 'commit':
+        await this.commitTransaction()
+        break
+      case 'rollback':
+        await this.rollbackTransaction()
+        break
+      case 'savepoint':
+      case 'release':
+      case 'rollback_to':
+        break
+    }
+    return true
   }
 
   async query<T = Record<string, unknown>>(
     sql: string,
-    _params?: any[]
+    params?: any[]
   ): Promise<{ rows: T[] }> {
-    const rewritten = rewriteSQL(sql)
-    if (!rewritten) return { rows: [] }
-    if (isCatalogQuery(rewritten)) return { rows: [] }
-    const rows = await this.doExec(rewritten)
-    return { rows: rows as T[] }
+    if (!this.ready) await this.waitReady
+    if (await this.handleTransactionControl(sql)) return { rows: [] }
+    const statements = this.rewriteSQLStatements(sql)
+    const rewritten = rewrittenSQLText(statements)
+    const paramOIDs = inferParamOidsForSQL(
+      rewritten,
+      inferParamOidsForSQL(sql, [], this.schemaMetadata),
+      this.schemaMetadata
+    )
+    const timestampParamNumbers = paramNumbersForOids(paramOIDs, isTimestampOid)
+    const booleanParamNumbers = paramNumbersForOids(paramOIDs, isBooleanOid)
+    const inferredJsonParamNumbers = paramNumbersForOids(paramOIDs, isJsonOid)
+    if (!rewritten) {
+      this.applyStatementMetadata(statements)
+      return { rows: [] }
+    }
+    if (isCatalogQuery(rewritten)) {
+      const catalogSql = this.inlineStatementParams(
+        rewritten,
+        params,
+        statements,
+        inferredJsonParamNumbers,
+        timestampParamNumbers,
+        booleanParamNumbers
+      )
+      return { rows: (await this.handleCatalogQuery(catalogSql)).rows as T[] }
+    }
+    const arrayParamNumbers = new Set<number>()
+    const jsonParamNumbers = new Set<number>(inferredJsonParamNumbers)
+    for (const statement of statements) {
+      for (const number of statement.arrayParamNumbers ?? []) {
+        arrayParamNumbers.add(number)
+      }
+      for (const number of statement.jsonParamNumbers ?? []) {
+        jsonParamNumbers.add(number)
+      }
+    }
+    const bound = this.sqliteBoundSQL(
+      rewritten,
+      params,
+      arrayParamNumbers,
+      jsonParamNumbers,
+      timestampParamNumbers,
+      booleanParamNumbers
+    )
+    const statement = statements.length === 1 ? statements[0] : undefined
+    if (statement) await this.snapshotTransactionWrite(statement)
+    const tracking = statement ? this.trackingForStatement(statement) : undefined
+    const execBound = tracking
+      ? this.sqliteBoundSQL(
+          tracking.returningSQL,
+          params,
+          arrayParamNumbers,
+          jsonParamNumbers,
+          timestampParamNumbers,
+          booleanParamNumbers
+        )
+      : bound
+    const result = await this.doExecResult(
+      execBound.sql,
+      execBound.params,
+      tracking ? this.trackingRequest(tracking) : undefined
+    )
+    this.applyStatementMetadata(statements)
+    return { rows: this.visibleResultForTracking(result, tracking).rows as T[] }
   }
 
   // ── Internal helpers ─────────────────────────────────────────────────────
 
-  private async doExec(sql: string): Promise<Record<string, unknown>[]> {
-    if (!sql.trim()) return []
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const resp = await this.httpClient.post(
-          `${this.doUrl}/exec?db=${encodeURIComponent(this.dbName)}`,
-          JSON.stringify({ sql }),
-          { 'Content-Type': 'application/json' }
-        )
-        const result = JSON.parse(resp)
-        return result.rows ?? result ?? []
-      } catch {}
-    }
-
-    return []
+  private url(path: string): string {
+    const qs = new URLSearchParams({
+      db: this.dbName,
+      ns: this.namespace,
+    })
+    return `${this.doUrl}${path}?${qs}`
   }
 
-  private async doBatchExec(statements: string[]): Promise<void> {
-    await this.httpClient.post(
-      `${this.doUrl}/batch?db=${encodeURIComponent(this.dbName)}`,
-      JSON.stringify({ statements }),
-      { 'Content-Type': 'application/json' }
+  private rewriteSQLStatements(sql: string): RewrittenStatement[] {
+    const key = sql.trim()
+    const cached = this.rewriteCache.get(key)
+    if (cached) return cached
+
+    const arrayParamNumbers = new Set<number>()
+    const jsonParamNumbers = new Set<number>()
+    const statements = rewriteSQLStatements(sql, {
+      skippedFunctionNames: this.skippedFunctionNames,
+      triggerFunctions: this.triggerFunctions,
+      arrayParamNumbers,
+      jsonParamNumbers,
+    })
+    if (this.canCacheRewrite(statements)) {
+      this.rememberRewrite(key, statements)
+    } else if (this.rewriteCache.size) {
+      this.rewriteCache.clear()
+    }
+    return statements
+  }
+
+  private canCacheRewrite(statements: RewrittenStatement[]): boolean {
+    return (
+      statements.length > 0 &&
+      statements.every(
+        (statement) =>
+          statement.sql.trim() &&
+          !statement.isDDL &&
+          !statement.schemaColumns?.length &&
+          !statement.schemaMetadataChanges?.length &&
+          !statement.publicationChanges?.length
+      )
     )
   }
 
-  private inlineParams(sql: string, params: any[]): string {
-    let result = sql
-    for (let i = params.length; i >= 1; i--) {
-      const val = params[i - 1]
-      const esc =
-        val === null
-          ? 'NULL'
-          : typeof val === 'string'
-            ? `'${val.replace(/'/g, "''")}'`
-            : String(val)
-      result = result.replace(new RegExp(`\\$${i}\\b`, 'g'), esc)
+  private rememberRewrite(key: string, statements: RewrittenStatement[]): void {
+    if (!key) return
+    if (this.rewriteCache.size >= MAX_REWRITE_CACHE_ENTRIES) {
+      const firstKey = this.rewriteCache.keys().next().value
+      if (firstKey) this.rewriteCache.delete(firstKey)
+    }
+    this.rewriteCache.set(key, statements)
+  }
+
+  private rewriteSQL(sql: string): string {
+    const arrayParamNumbers = new Set<number>()
+    const jsonParamNumbers = new Set<number>()
+    return rewriteSQL(sql, {
+      skippedFunctionNames: this.skippedFunctionNames,
+      triggerFunctions: this.triggerFunctions,
+      arrayParamNumbers,
+      jsonParamNumbers,
+    })
+  }
+
+  private inlineStatementParams(
+    sql: string,
+    params: any[] | undefined,
+    statements: RewrittenStatement[],
+    inferredJsonParamNumbers = new Set<number>(),
+    timestampParamNumbers = new Set<number>(),
+    booleanParamNumbers = new Set<number>()
+  ): string {
+    if (!params?.length) return sql
+    const arrayParamNumbers = new Set<number>()
+    const jsonParamNumbers = new Set<number>(inferredJsonParamNumbers)
+    for (const statement of statements) {
+      for (const number of statement.arrayParamNumbers ?? []) {
+        arrayParamNumbers.add(number)
+      }
+      for (const number of statement.jsonParamNumbers ?? []) {
+        jsonParamNumbers.add(number)
+      }
+    }
+    return this.inlineParams(
+      sql,
+      params,
+      arrayParamNumbers,
+      jsonParamNumbers,
+      timestampParamNumbers,
+      booleanParamNumbers
+    )
+  }
+
+  private async doExec(sql: string, params?: any[]): Promise<SqliteRow[]> {
+    return (await this.doExecResult(sql, params)).rows
+  }
+
+  private async doExecResult(
+    sql: string,
+    params?: any[],
+    track?: ChangeTrackingRequest
+  ): Promise<ExecResult> {
+    if (!sql.trim()) return { rows: [], columns: [] }
+    let lastErr: unknown
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const resp = await this.httpClient.post(
+          this.url('/exec'),
+          JSON.stringify({
+            sql,
+            ...(params?.length ? { params } : null),
+            ...(track ? { track } : null),
+          }),
+          { 'Content-Type': 'application/json' }
+        )
+        const result = JSON.parse(resp)
+        const rows = (result.rows ?? result ?? []) as SqliteRow[]
+        const columns =
+          Array.isArray(result.columns) && result.columns.length > 0
+            ? result.columns.map(String)
+            : rows.length > 0
+              ? Object.keys(rows[0])
+              : []
+        return { rows, columns, affectedRows: result.affectedRows }
+      } catch (err) {
+        lastErr = err
+      }
+    }
+
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
+  }
+
+  private transactionSnapshotName(table: string): string {
+    const safeTable = table.replace(/[^A-Za-z0-9_]/g, '_')
+    return `_orez_tx_${this.txID}_${this.txSnapshotCounter++}_${safeTable}`
+  }
+
+  private async tableExistsInDo(table: string): Promise<boolean> {
+    const result = await this.doExecResult(
+      "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+      [table]
+    )
+    return result.rows.length > 0
+  }
+
+  private async triggerDefinitionsForTables(
+    tables: string[]
+  ): Promise<{ name: string; sql: string }[]> {
+    const uniqueTables = [...new Set(tables)].filter(Boolean)
+    if (uniqueTables.length === 0) return []
+    const placeholders = uniqueTables.map(() => '?').join(', ')
+    const result = await this.doExecResult(
+      `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name IN (${placeholders}) ORDER BY name`,
+      uniqueTables
+    )
+    return result.rows
+      .map((row) => ({
+        name: String(row.name ?? ''),
+        sql: String(row.sql ?? ''),
+      }))
+      .filter((trigger) => trigger.name && trigger.sql)
+  }
+
+  private async snapshotTransactionTable(table: string): Promise<void> {
+    if (!this.inTransaction || this.txDataSnapshots.has(table)) return
+    if (table.startsWith('_orez_tx_')) return
+    if (!(await this.tableExistsInDo(table))) {
+      this.txDataSnapshots.set(table, null)
+      return
+    }
+    const snapshot = this.transactionSnapshotName(table)
+    await this.doExecResult(
+      `CREATE TABLE ${quoteIdentifier(snapshot)} AS SELECT * FROM ${quoteIdentifier(table)}`
+    )
+    this.txDataSnapshots.set(table, snapshot)
+  }
+
+  private async snapshotTransactionChangeTables(): Promise<void> {
+    await this.snapshotTransactionTable('_zero_changes')
+    await this.snapshotTransactionTable('_zero_change_state')
+    const result = await this.doExecResult(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%zero_watermark%'"
+    )
+    for (const row of result.rows) {
+      const name = String(row.name || '')
+      if (name && !name.startsWith('_orez_tx_'))
+        await this.snapshotTransactionTable(name)
+    }
+  }
+
+  private async snapshotTransactionWrite(statement: RewrittenStatement): Promise<void> {
+    if (!this.inTransaction || !statement.isWrite) return
+    const table = statement.writeTable?.table
+    if (table) await this.snapshotTransactionTable(table)
+    if (this.trackingForStatement(statement)) await this.snapshotTransactionChangeTables()
+  }
+
+  private async dropTransactionSnapshots(): Promise<void> {
+    const drops: string[] = []
+    for (const snapshot of this.txDataSnapshots.values()) {
+      if (snapshot) drops.push(`DROP TABLE IF EXISTS ${quoteIdentifier(snapshot)}`)
+    }
+    if (drops.length > 0) await this.doRawBatch(drops)
+  }
+
+  private async restoreTransactionDataSnapshots(): Promise<void> {
+    const entries = [...this.txDataSnapshots.entries()].reverse()
+    const restoredTables = entries
+      .filter(([, snapshot]) => Boolean(snapshot))
+      .map(([table]) => table)
+    const triggers = await this.triggerDefinitionsForTables(restoredTables)
+    const statements: string[] = []
+    for (const trigger of triggers) {
+      statements.push(`DROP TRIGGER IF EXISTS ${quoteIdentifier(trigger.name)}`)
+    }
+    for (const [table, snapshot] of entries) {
+      const quotedTable = quoteIdentifier(table)
+      if (!snapshot) {
+        statements.push(`DROP TABLE IF EXISTS ${quotedTable}`)
+        continue
+      }
+      const quotedSnapshot = quoteIdentifier(snapshot)
+      statements.push(
+        `DELETE FROM ${quotedTable}`,
+        `INSERT OR REPLACE INTO ${quotedTable} SELECT * FROM ${quotedSnapshot}`,
+        `DROP TABLE IF EXISTS ${quotedSnapshot}`
+      )
+    }
+    for (const trigger of triggers) statements.push(trigger.sql)
+    await this.doRawBatch(statements)
+  }
+
+  private async doRawBatch(statements: string[]): Promise<void> {
+    const sqls = statements.filter((sql) => sql.trim())
+    if (sqls.length === 0) return
+    await this.httpClient.post(
+      this.url('/batch'),
+      JSON.stringify({ statements: sqls }),
+      {
+        'Content-Type': 'application/json',
+      }
+    )
+  }
+
+  private async shouldSkipStatement(statement: RewrittenStatement): Promise<boolean> {
+    if (
+      statement.skipIfColumnExists &&
+      (await this.columnExists(
+        statement.skipIfColumnExists.table,
+        statement.skipIfColumnExists.column
+      ))
+    ) {
+      return true
+    }
+    if (
+      statement.skipIfColumnMissing &&
+      !(await this.columnExists(
+        statement.skipIfColumnMissing.table,
+        statement.skipIfColumnMissing.column
+      ))
+    ) {
+      return true
+    }
+    if (
+      statement.skipIfTableEmpty &&
+      !(await this.tableHasRows(statement.skipIfTableEmpty.table))
+    ) {
+      return true
+    }
+    return false
+  }
+
+  private async executeRewrittenStatement(
+    statement: RewrittenStatement
+  ): Promise<ExecResult> {
+    if (!statement.sql.trim()) return { rows: [], columns: [] }
+    if (await this.shouldSkipStatement(statement)) return { rows: [], columns: [] }
+    await this.snapshotTransactionWrite(statement)
+    const tracking = this.trackingForStatement(statement)
+    return this.doExecResult(
+      tracking?.returningSQL ?? statement.sql,
+      undefined,
+      tracking ? this.trackingRequest(tracking) : undefined
+    )
+  }
+
+  private async executeRewrittenStatements(
+    statements: RewrittenStatement[]
+  ): Promise<ExecResult> {
+    let result: ExecResult = { rows: [], columns: [] }
+    for (const statement of statements) {
+      result = await this.executeRewrittenStatement(statement)
     }
     return result
   }
 
+  private async doBatchExec(statements: (RewrittenStatement | string)[]): Promise<void> {
+    let sqls: Array<string | { sql: string; track?: ChangeTrackingRequest }> = []
+    const flush = async () => {
+      if (sqls.length === 0) return
+      await this.httpClient.post(
+        this.url('/batch'),
+        JSON.stringify({ statements: sqls }),
+        {
+          'Content-Type': 'application/json',
+        }
+      )
+      sqls = []
+    }
+
+    for (const statement of statements) {
+      const item =
+        typeof statement === 'string'
+          ? ({ sql: statement } as RewrittenStatement)
+          : statement
+      if (!item.sql.trim()) continue
+      if (item.skipIfColumnExists || item.skipIfColumnMissing || item.skipIfTableEmpty) {
+        await flush()
+        if (
+          item.skipIfColumnExists &&
+          (await this.columnExists(
+            item.skipIfColumnExists.table,
+            item.skipIfColumnExists.column
+          ))
+        ) {
+          continue
+        }
+        if (
+          item.skipIfColumnMissing &&
+          !(await this.columnExists(
+            item.skipIfColumnMissing.table,
+            item.skipIfColumnMissing.column
+          ))
+        ) {
+          continue
+        }
+        if (
+          item.skipIfTableEmpty &&
+          !(await this.tableHasRows(item.skipIfTableEmpty.table))
+        ) {
+          continue
+        }
+      }
+      const tracking = this.trackingForStatement(item)
+      sqls.push(
+        tracking
+          ? {
+              sql: tracking.returningSQL,
+              track: this.trackingRequest(tracking),
+            }
+          : item.sql
+      )
+    }
+
+    await flush()
+  }
+
+  private async columnExists(table: string, column: string): Promise<boolean> {
+    const result = await this.doExecResult(`PRAGMA table_info(${quoteIdentifier(table)})`)
+    return result.rows.some((row) => row.name === column)
+  }
+
+  private async tableHasRows(table: string): Promise<boolean> {
+    const result = await this.doExecResult(
+      `SELECT 1 AS ok FROM ${quoteIdentifier(table)} LIMIT 1`
+    )
+    return result.rows.length > 0
+  }
+
+  private async listSqliteTables(): Promise<SqliteTableInfo[]> {
+    const result = await this.doExecResult(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name"
+    )
+    return result.rows
+      .map((row) => ({
+        name: String(row.name ?? ''),
+        sql: row.sql === null || row.sql === undefined ? null : String(row.sql),
+      }))
+      .filter((table) => table.name)
+  }
+
+  private tableRefForSqliteTable(name: string): PublicationTableRef {
+    const metadata = this.schemaMetadata.get(name)?.values().next().value
+    if (metadata) {
+      return {
+        table: name,
+        schema: metadata.schema,
+        tableName: metadata.tableName,
+      }
+    }
+    if (name === 'public_migrations') {
+      return {
+        table: name,
+        schema: 'public',
+        tableName: 'migrations',
+      }
+    }
+    return {
+      table: name,
+      schema: 'public',
+      tableName: name,
+    }
+  }
+
+  private generatedIndexName(
+    table: PublicationTableRef,
+    columns: string[],
+    kind: 'pkey' | 'key'
+  ): string {
+    return `${table.tableName}_${columns.join('_')}_${kind}`
+  }
+
+  private uniqueIndexName(name: string, usedNames: Set<string>): string {
+    if (!usedNames.has(name)) {
+      usedNames.add(name)
+      return name
+    }
+    let suffix = 2
+    while (usedNames.has(`${name}_${suffix}`)) suffix++
+    const unique = `${name}_${suffix}`
+    usedNames.add(unique)
+    return unique
+  }
+
+  private async sqliteIndexColumns(
+    indexName: string
+  ): Promise<Record<string, 'ASC' | 'DESC'>> {
+    const result = await this.doExecResult(
+      `PRAGMA index_xinfo(${quoteIdentifier(indexName)})`
+    )
+    const rows = result.rows
+      .map((row) => ({
+        seqno: Number(row.seqno ?? 0),
+        cid: Number(row.cid ?? -1),
+        name: row.name === null || row.name === undefined ? null : String(row.name),
+        desc: Number(row.desc ?? 0),
+        key: Number(row.key ?? 0),
+      }))
+      .filter((row): row is SqliteIndexColumnInfo => row.key === 1 && row.name !== null)
+      .sort((a, b) => a.seqno - b.seqno)
+
+    const columns: Record<string, 'ASC' | 'DESC'> = {}
+    for (const row of rows) columns[row.name] = row.desc === 1 ? 'DESC' : 'ASC'
+    return columns
+  }
+
+  private async tableIndexInfos(
+    table: PublicationTableRef,
+    columns: SqliteColumnInfo[],
+    primaryKey: string[]
+  ): Promise<PublicationIndexInfo[]> {
+    const usedNames = new Set<string>()
+    const seenSignatures = new Set<string>()
+    const indexes: PublicationIndexInfo[] = []
+    const addIndex = (
+      name: string,
+      indexColumns: Record<string, 'ASC' | 'DESC'>,
+      unique: boolean,
+      isPrimaryKey: boolean
+    ) => {
+      if (Object.keys(indexColumns).length === 0) return
+      const signature = [
+        isPrimaryKey ? 'primary' : 'index',
+        unique ? 'unique' : 'plain',
+        ...Object.entries(indexColumns).map(([column, direction]) => `${column}:${direction}`),
+      ].join('\0')
+      if (seenSignatures.has(signature)) return
+      seenSignatures.add(signature)
+      indexes.push({
+        schema: table.schema,
+        tableName: table.tableName,
+        name: this.uniqueIndexName(name, usedNames),
+        unique,
+        isPrimaryKey,
+        isReplicaIdentity: false,
+        isImmediate: true,
+        columns: indexColumns,
+      })
+    }
+
+    if (primaryKey.length > 0) {
+      addIndex(
+        this.generatedIndexName(table, primaryKey, 'pkey'),
+        Object.fromEntries(primaryKey.map((column) => [column, 'ASC'])),
+        true,
+        true
+      )
+    }
+
+    for (const column of columns) {
+      const metadata = this.schemaMetadata.get(table.table)?.get(column.name)
+      if (!metadata?.unique || primaryKey.includes(column.name)) continue
+      addIndex(
+        this.generatedIndexName(table, [column.name], 'key'),
+        { [column.name]: 'ASC' },
+        true,
+        false
+      )
+    }
+
+    const result = await this.doExecResult(
+      `PRAGMA index_list(${quoteIdentifier(table.table)})`
+    )
+    const rawIndexes = result.rows
+      .map((row) => ({
+        seq: Number(row.seq ?? 0),
+        name: String(row.name ?? ''),
+        unique: Number(row.unique ?? 0),
+        origin: row.origin === null || row.origin === undefined ? null : String(row.origin),
+        partial: Number(row.partial ?? 0),
+      }))
+      .filter((row): row is SqliteIndexInfo => Boolean(row.name))
+      .sort((a, b) => a.seq - b.seq)
+
+    for (const raw of rawIndexes) {
+      if (raw.partial) continue
+      const indexColumns = await this.sqliteIndexColumns(raw.name)
+      const names = Object.keys(indexColumns)
+      if (raw.origin === 'pk' && primaryKey.length > 0) continue
+      const isPrimaryKey = raw.origin === 'pk'
+      const name =
+        raw.name.startsWith('sqlite_autoindex_') || isPrimaryKey
+          ? this.generatedIndexName(table, names, isPrimaryKey ? 'pkey' : 'key')
+          : raw.name
+      addIndex(name, indexColumns, Boolean(raw.unique || isPrimaryKey), isPrimaryKey)
+    }
+
+    return indexes
+  }
+
+  private publicationContainsTable(
+    publication: PublicationDefinition,
+    table: PublicationTableInfo | PublicationTableRef
+  ): boolean {
+    const tableKey = 'table' in table ? table.table : table.name
+    return (
+      publication.allTables ||
+      publication.schemas.has(table.schema) ||
+      publication.tables.has(tableKey)
+    )
+  }
+
+  private publicationsForTable(
+    table: PublicationTableInfo | PublicationTableRef,
+    requested: string[]
+  ): string[] {
+    return requested.filter((publicationName) => {
+      const publication = this.publications.get(publicationName)
+      return publication ? this.publicationContainsTable(publication, table) : false
+    })
+  }
+
+  private async publicationTableInfos(
+    publications?: string[]
+  ): Promise<PublicationTableInfo[]> {
+    const allTables = await this.listSqliteTables()
+    const requested = publications?.filter((name) => this.publications.has(name)) ?? []
+    const infos: PublicationTableInfo[] = []
+    for (const table of allTables) {
+      if (isSystemSqliteTable(table.name)) continue
+      const ref = this.tableRefForSqliteTable(table.name)
+      const result = await this.doExecResult(
+        `PRAGMA table_info(${quoteIdentifier(table.name)})`
+      )
+      const columns = result.rows.map((row) => ({
+        cid: Number(row.cid ?? 0),
+        name: String(row.name ?? ''),
+        type: String(row.type ?? ''),
+        notnull: Number(row.notnull ?? 0),
+        dflt_value:
+          row.dflt_value === null || row.dflt_value === undefined
+            ? null
+            : String(row.dflt_value),
+        pk: Number(row.pk ?? 0),
+      }))
+      if (columns.length === 0) continue
+      const metadataPrimaryKey = columns
+        .filter((column) => this.schemaMetadata.get(table.name)?.get(column.name)?.primaryKey)
+        .map((column) => column.name)
+      const info = {
+        name: table.name,
+        schema: ref.schema,
+        tableName: ref.tableName,
+        columns,
+        primaryKey:
+          metadataPrimaryKey.length > 0
+            ? metadataPrimaryKey
+            : columns
+                .filter((column) => column.pk > 0)
+                .sort((a, b) => a.pk - b.pk)
+                .map((column) => column.name),
+        indexes: [],
+      }
+      info.indexes = await this.tableIndexInfos(ref, columns, info.primaryKey)
+      if (
+        requested.length > 0 &&
+        !requested.some((publicationName) =>
+          this.publicationContainsTable(this.publications.get(publicationName)!, info)
+        )
+      )
+        continue
+      if (requested.length === 0 && publications?.length) continue
+      infos.push(info)
+    }
+    return infos
+  }
+
+  private projectCatalogRow(
+    fields: CatalogTargetField[],
+    values: Record<string, unknown>
+  ): Record<string, unknown> {
+    return Object.fromEntries(
+      fields.map((field) => [
+        field.name,
+        Object.hasOwn(field, 'value')
+          ? field.value
+          : (values[field.source ?? field.name] ?? values[field.name] ?? null),
+      ])
+    )
+  }
+
+  private async pgTablesResult(select: any): Promise<CatalogResult | null> {
+    if (!selectReferencesTable(select, 'pg_tables')) return null
+    const fields = selectTargetFields(select)
+    const infos = await this.publicationTableInfos()
+    return {
+      rows: infos
+        .map((info) => ({
+          schemaname: info.schema,
+          tablename: info.tableName,
+          tableowner: 'user',
+        }))
+        .filter((row) => catalogWhereMatches(select.whereClause, row))
+        .map((row) => this.projectCatalogRow(fields, row)),
+      fields: fields.map((field) => ({ name: field.name, oid: field.oid })),
+    }
+  }
+
+  private async informationSchemaColumnsResult(
+    select: any
+  ): Promise<CatalogResult | null> {
+    if (!selectReferencesTable(select, 'columns')) return null
+    const fields = selectTargetFields(select)
+    const infos = await this.publicationTableInfos()
+    const rows: Record<string, unknown>[] = []
+    for (const info of infos) {
+      for (const column of info.columns) {
+        const metadata = this.schemaMetadata.get(info.name)?.get(column.name)
+        const dataType = pgTypeForSqliteColumn(column, metadata)
+        const baseDataType = dataType.endsWith('[]') ? dataType.slice(0, -2) : dataType
+        const row = {
+          table_schema: info.schema,
+          table_name: info.tableName,
+          column_name: column.name,
+          data_type: metadata?.elemTypname ? 'ARRAY' : baseDataType,
+          udt_name:
+            metadata?.typname ??
+            (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
+          character_maximum_length: metadata?.characterMaximumLength ?? null,
+          numeric_precision: metadata?.numericPrecision ?? null,
+          numeric_scale: metadata?.numericScale ?? null,
+          typtype: metadata?.typtype ?? 'b',
+          typname:
+            metadata?.typname ??
+            (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
+          elemTyptype: metadata?.elemTyptype ?? null,
+          elemTypname: metadata?.elemTypname ?? null,
+          schema: info.schema,
+          table: info.tableName,
+          column: column.name,
+          dataType: metadata?.elemTypname ? 'ARRAY' : baseDataType,
+          length: metadata?.characterMaximumLength ?? null,
+          precision: metadata?.numericPrecision ?? null,
+          scale: metadata?.numericScale ?? null,
+          typename:
+            metadata?.typname ??
+            (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
+        }
+        if (catalogWhereMatches(select.whereClause, row)) {
+          rows.push(this.projectCatalogRow(fields, row))
+        }
+      }
+    }
+    return {
+      rows,
+      fields: fields.map((field) => ({ name: field.name, oid: field.oid })),
+    }
+  }
+
+  private async informationSchemaKeyColumnsResult(
+    select: any
+  ): Promise<CatalogResult | null> {
+    const hasKeyCatalog =
+      selectReferencesTable(select, 'table_constraints') ||
+      selectReferencesTable(select, 'key_column_usage')
+    if (!hasKeyCatalog) return null
+
+    const selectedFields = selectTargetFields(select)
+    const fields =
+      selectedFields.length > 0
+        ? selectedFields
+        : [
+            { name: 'kind', source: 'kind' },
+            { name: 'table_schema', source: 'table_schema' },
+            { name: 'table_name', source: 'table_name' },
+            { name: 'column_name', source: 'column_name' },
+            { name: 'data_type', source: 'data_type' },
+            {
+              name: 'ordinal_position',
+              source: 'ordinal_position',
+              oid: PG_TYPE_INT4,
+            },
+          ]
+    const includeColumns = selectReferencesTable(select, 'columns')
+    const infos = await this.publicationTableInfos()
+    const rows: Record<string, unknown>[] = []
+
+    for (const info of infos) {
+      for (const columnName of info.primaryKey) {
+        const column = info.columns.find((candidate) => candidate.name === columnName)
+        const ordinal = column ? column.cid + 1 : info.primaryKey.indexOf(columnName) + 1
+        rows.push(
+          this.projectCatalogRow(fields, {
+            kind: 'pk',
+            table_schema: info.schema,
+            table_name: info.tableName,
+            column_name: columnName,
+            data_type: null,
+            ordinal_position: ordinal,
+            constraint_name: `${info.tableName}_pkey`,
+            constraint_type: 'PRIMARY KEY',
+          })
+        )
+      }
+
+      if (!includeColumns) continue
+      for (const column of info.columns) {
+        const metadata = this.schemaMetadata.get(info.name)?.get(column.name)
+        const dataType = pgTypeForSqliteColumn(column, metadata)
+        const baseDataType = dataType.endsWith('[]') ? dataType.slice(0, -2) : dataType
+        rows.push(
+          this.projectCatalogRow(fields, {
+            kind: 'col',
+            table_schema: info.schema,
+            table_name: info.tableName,
+            column_name: column.name,
+            data_type: metadata?.elemTypname ? 'ARRAY' : baseDataType,
+            ordinal_position: column.cid + 1,
+            constraint_name: null,
+            constraint_type: null,
+          })
+        )
+      }
+    }
+
+    return {
+      rows,
+      fields: fields.map((field) => ({ name: field.name, oid: field.oid })),
+    }
+  }
+
+  private async pgPublicationTablesResult(select: any): Promise<CatalogResult | null> {
+    if (!selectReferencesTable(select, 'pg_publication_tables')) return null
+    const fields = selectTargetFields(select)
+    const requested = stringFilterValues(select, 'pubname')
+    const publications = requested.length ? requested : [...this.publications.keys()]
+    const infos = await this.publicationTableInfos(publications)
+    const aggregatePublications = fields.some(
+      (field) =>
+        field.name === 'publications' ||
+        field.source === 'json_object_agg' ||
+        field.source === 'json_group_object'
+    )
+
+    if (aggregatePublications) {
+      return {
+        rows: infos.map((info) => {
+          const tablePublications = this.publicationsForTable(info, publications)
+          const publicationColumns = Object.fromEntries(
+            tablePublications.map((publication) => [
+              publication,
+              info.columns.map((column) => column.name),
+            ])
+          )
+          return this.projectCatalogRow(fields, {
+            schemaname: info.schema,
+            schema: info.schema,
+            tablename: info.tableName,
+            table: info.tableName,
+            publications: publicationColumns,
+            json_object_agg: publicationColumns,
+            json_group_object: publicationColumns,
+          })
+        }),
+        fields: fields.map((field) => ({ name: field.name, oid: field.oid })),
+      }
+    }
+
+    const rows: Record<string, unknown>[] = []
+    for (const publication of publications) {
+      for (const info of infos) {
+        if (!this.publicationsForTable(info, [publication]).length) continue
+        rows.push(
+          this.projectCatalogRow(fields, {
+            pubname: publication,
+            schemaname: info.schema,
+            tablename: info.tableName,
+            attnames: info.columns.map((column) => column.name),
+            rowfilter: null,
+          })
+        )
+      }
+    }
+    return {
+      rows,
+      fields: fields.map((field) => ({ name: field.name, oid: field.oid })),
+    }
+  }
+
+  private publicationTableSpec(
+    info: PublicationTableInfo,
+    publications: string[]
+  ): Record<string, unknown> {
+    return {
+      oid: tableOid(info.name),
+      schema: info.schema,
+      schemaOID: 2200,
+      name: info.tableName,
+      replicaIdentity: 'd',
+      columns: Object.fromEntries(
+        info.columns.map((column) => {
+          const metadata = this.schemaMetadata.get(info.name)?.get(column.name)
+          const dataType = pgTypeForSqliteColumn(column, metadata)
+          return [
+            column.name,
+            {
+              pos: column.cid + 1,
+              dataType,
+              pgTypeClass: metadata?.typtype ?? 'b',
+              elemPgTypeClass: metadata?.elemTyptype ?? null,
+              typeOID: metadata?.typeOid ?? pgTypeOid(dataType),
+              characterMaximumLength: metadata?.characterMaximumLength ?? null,
+              notNull: Boolean(metadata?.notNull || metadata?.primaryKey || column.notnull || column.pk),
+              dflt: null,
+            },
+          ]
+        })
+      ),
+      primaryKey: info.primaryKey,
+      publications: Object.fromEntries(
+        this.publicationsForTable(info, publications).map((publication) => [
+          publication,
+          { rowFilter: null },
+        ])
+      ),
+    }
+  }
+
+  private async publishedTablesResult(select: any): Promise<CatalogResult | null> {
+    const fields = selectTargetFields(select)
+    if (!fields.some((field) => field.name === 'tables')) return null
+    if (!selectReferencesTable(select, 'pg_attribute')) return null
+    const requested = stringFilterValues(select, 'pubname')
+    const publications = requested.length ? requested : [...this.publications.keys()]
+    const infos = await this.publicationTableInfos(publications)
+    return {
+      rows: [
+        {
+          tables: infos.map((info) => this.publicationTableSpec(info, publications)),
+        },
+      ],
+      fields: [{ name: 'tables', oid: PG_TYPE_JSON }],
+    }
+  }
+
+  private async publishedIndexesResult(select: any): Promise<CatalogResult | null> {
+    const fields = selectTargetFields(select)
+    if (!fields.some((field) => field.name === 'indexes')) return null
+    if (!selectReferencesTable(select, 'pg_index')) return null
+    const requested = stringFilterValues(select, 'pubname')
+    const publications = requested.length ? requested : [...this.publications.keys()]
+    const infos = await this.publicationTableInfos(publications)
+    return {
+      rows: [{ indexes: infos.flatMap((info) => info.indexes) }],
+      fields: [{ name: 'indexes', oid: PG_TYPE_JSON }],
+    }
+  }
+
+  private pgTypeArrayResult(select: any): CatalogResult | null {
+    if (!selectReferencesTable(select, 'pg_type')) return null
+    const fields = selectTargetFields(select)
+    if (
+      !fields.some((field) => field.name === 'oid') ||
+      !fields.some((field) => field.name === 'typarray')
+    ) {
+      return null
+    }
+    return {
+      rows: ARRAY_TYPE_ROWS.map((row) => this.projectCatalogRow(fields, row)),
+      fields: fields.map((field) => ({ name: field.name, oid: PG_TYPE_INT4 })),
+    }
+  }
+
+  private sqlLiteral(
+    val: unknown,
+    options?: {
+      pgArrayAsJson?: boolean
+      pgJsonAsJson?: boolean
+      pgTimestampAsText?: boolean
+      pgBooleanAsInteger?: boolean
+    }
+  ): string {
+    if (val === null || val === undefined) return 'NULL'
+    if (options?.pgTimestampAsText)
+      return `'${postgresTimestampText(val).replace(/'/g, "''")}'`
+    if (options?.pgJsonAsJson) {
+      const json = sqliteJsonParamValue(val)
+      if (typeof json === 'string') return `'${json.replace(/'/g, "''")}'`
+      return String(json)
+    }
+    if (options?.pgBooleanAsInteger) {
+      if (typeof val === 'boolean') return val ? '1' : '0'
+      if (typeof val === 'string') {
+        const lower = val.toLowerCase()
+        if (lower === 'true' || lower === 't') return '1'
+        if (lower === 'false' || lower === 'f') return '0'
+      }
+    }
+    if (options?.pgArrayAsJson) {
+      const json = Array.isArray(val)
+        ? JSON.stringify(val)
+        : typeof val === 'string'
+          ? (pgArrayLiteralToJson(val) ?? val)
+          : val && typeof val === 'object'
+            ? JSON.stringify(val)
+            : String(val)
+      return `'${json.replace(/'/g, "''")}'`
+    }
+    if (val && typeof val === 'object')
+      return `'${JSON.stringify(val).replace(/'/g, "''")}'`
+    if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`
+    return String(val)
+  }
+
+  private inlineParams(
+    sql: string,
+    params: any[],
+    arrayParamNumbers = new Set<number>(),
+    jsonParamNumbers = new Set<number>(),
+    timestampParamNumbers = new Set<number>(),
+    booleanParamNumbers = new Set<number>()
+  ): string {
+    let out = ''
+    for (let i = 0; i < sql.length; ) {
+      const ch = sql[i]
+      const next = sql[i + 1]
+
+      if (ch === "'") {
+        const start = i
+        i++
+        while (i < sql.length) {
+          if (sql[i] === "'" && sql[i + 1] === "'") {
+            i += 2
+            continue
+          }
+          if (sql[i++] === "'") break
+        }
+        out += sql.slice(start, i)
+        continue
+      }
+
+      if (ch === '"') {
+        const start = i
+        i++
+        while (i < sql.length) {
+          if (sql[i] === '"' && sql[i + 1] === '"') {
+            i += 2
+            continue
+          }
+          if (sql[i++] === '"') break
+        }
+        out += sql.slice(start, i)
+        continue
+      }
+
+      if (ch === '-' && next === '-') {
+        const start = i
+        i += 2
+        while (i < sql.length && sql[i] !== '\n') i++
+        out += sql.slice(start, i)
+        continue
+      }
+
+      if (ch === '/' && next === '*') {
+        const start = i
+        i += 2
+        while (i < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) i++
+        i = Math.min(sql.length, i + 2)
+        out += sql.slice(start, i)
+        continue
+      }
+
+      if (ch === '$' && next && isDollarQuoteTagStart(next)) {
+        const start = i
+        i += 1
+        while (i < sql.length && isDollarQuoteTagPart(sql[i])) i++
+        if (sql[i] === '$') {
+          const tag = sql.slice(start, i + 1)
+          const end = sql.indexOf(tag, i + 1)
+          if (end >= 0) {
+            out += sql.slice(start, end + tag.length)
+            i = end + tag.length
+            continue
+          }
+        }
+        out += sql.slice(start, i)
+        continue
+      }
+
+      if (ch === '$' && next && next >= '1' && next <= '9') {
+        let end = i + 2
+        while (end < sql.length && sql[end] >= '0' && sql[end] <= '9') end++
+        const number = Number(sql.slice(i + 1, end))
+        const index = number - 1
+        out +=
+          index >= 0 && index < params.length
+              ? this.sqlLiteral(params[index], {
+                  pgArrayAsJson: arrayParamNumbers.has(number),
+                  pgJsonAsJson: jsonParamNumbers.has(number),
+                  pgTimestampAsText: timestampParamNumbers.has(number),
+                  pgBooleanAsInteger: booleanParamNumbers.has(number),
+                })
+            : sql.slice(i, end)
+        i = end
+        continue
+      }
+
+      out += ch
+      i++
+    }
+    return out
+  }
+
+  private sqliteParamValue(
+    value: unknown,
+    options?: {
+      pgArrayAsJson?: boolean
+      pgJsonAsJson?: boolean
+      pgTimestampAsText?: boolean
+      pgBooleanAsInteger?: boolean
+    }
+  ): unknown {
+    if (value === null || value === undefined) return null
+    if (options?.pgTimestampAsText) return postgresTimestampText(value)
+    if (options?.pgJsonAsJson) return sqliteJsonParamValue(value)
+    if (typeof value === 'boolean') return value ? 1 : 0
+    if (options?.pgBooleanAsInteger && typeof value === 'string') {
+      const lower = value.toLowerCase()
+      if (lower === 'true' || lower === 't') return 1
+      if (lower === 'false' || lower === 'f') return 0
+    }
+    if (!options?.pgArrayAsJson) {
+      if (value && typeof value === 'object') return JSON.stringify(value)
+      return value
+    }
+    if (Array.isArray(value)) return JSON.stringify(value)
+    if (typeof value === 'string') return pgArrayLiteralToJson(value) ?? value
+    if (value && typeof value === 'object') return JSON.stringify(value)
+    return value
+  }
+
+  private sqliteBoundSQL(
+    sql: string,
+    params: any[] | undefined,
+    arrayParamNumbers = new Set<number>(),
+    jsonParamNumbers = new Set<number>(),
+    timestampParamNumbers = new Set<number>(),
+    booleanParamNumbers = new Set<number>()
+  ): { sql: string; params: any[] } {
+    if (!params?.length) return { sql, params: [] }
+    let out = ''
+    const bound: any[] = []
+    for (let i = 0; i < sql.length; ) {
+      const ch = sql[i]
+      const next = sql[i + 1]
+
+      if (ch === "'") {
+        const start = i
+        i++
+        while (i < sql.length) {
+          if (sql[i] === "'" && sql[i + 1] === "'") {
+            i += 2
+            continue
+          }
+          if (sql[i++] === "'") break
+        }
+        out += sql.slice(start, i)
+        continue
+      }
+
+      if (ch === '"') {
+        const start = i
+        i++
+        while (i < sql.length) {
+          if (sql[i] === '"' && sql[i + 1] === '"') {
+            i += 2
+            continue
+          }
+          if (sql[i++] === '"') break
+        }
+        out += sql.slice(start, i)
+        continue
+      }
+
+      if (ch === '-' && next === '-') {
+        const start = i
+        i += 2
+        while (i < sql.length && sql[i] !== '\n') i++
+        out += sql.slice(start, i)
+        continue
+      }
+
+      if (ch === '/' && next === '*') {
+        const start = i
+        i += 2
+        while (i < sql.length && !(sql[i] === '*' && sql[i + 1] === '/')) i++
+        i = Math.min(sql.length, i + 2)
+        out += sql.slice(start, i)
+        continue
+      }
+
+      if (ch === '$' && next && isDollarQuoteTagStart(next)) {
+        const start = i
+        i += 1
+        while (i < sql.length && isDollarQuoteTagPart(sql[i])) i++
+        if (sql[i] === '$') {
+          const tag = sql.slice(start, i + 1)
+          const end = sql.indexOf(tag, i + 1)
+          if (end >= 0) {
+            out += sql.slice(start, end + tag.length)
+            i = end + tag.length
+            continue
+          }
+        }
+        out += sql.slice(start, i)
+        continue
+      }
+
+      if (ch === '$' && next && next >= '1' && next <= '9') {
+        let end = i + 2
+        while (end < sql.length && sql[end] >= '0' && sql[end] <= '9') end++
+        const number = Number(sql.slice(i + 1, end))
+        const index = number - 1
+        if (index >= 0 && index < params.length) {
+          out += '?'
+          bound.push(
+            this.sqliteParamValue(params[index], {
+              pgArrayAsJson: arrayParamNumbers.has(number),
+              pgJsonAsJson: jsonParamNumbers.has(number),
+              pgTimestampAsText: timestampParamNumbers.has(number),
+              pgBooleanAsInteger: booleanParamNumbers.has(number),
+            })
+          )
+        } else {
+          out += sql.slice(i, end)
+        }
+        i = end
+        continue
+      }
+
+      out += ch
+      i++
+    }
+    return { sql: out, params: bound }
+  }
+
   private buildSQLResponse(
     originalSql: string,
-    rows: Record<string, unknown>[]
+    rows: Record<string, unknown>[],
+    columns: string[] = [],
+    options: { affectedRows?: number } = {}
   ): Uint8Array {
     const isSelect = /^\s*select\b/i.test(originalSql) || /^\s*with\b/i.test(originalSql)
+    const fields = this.fieldsForResult(originalSql, { rows, columns })
+    const affectedRows = options.affectedRows ?? rows.length
     if (rows.length > 0) {
-      const fns = Object.keys(rows[0])
       const tag = isSelect
         ? `SELECT ${rows.length}`
         : /^\s*insert\b/i.test(originalSql)
-          ? 'INSERT 0 1'
+          ? `INSERT 0 ${affectedRows}`
           : /^\s*update\b/i.test(originalSql)
-            ? 'UPDATE 1'
+            ? `UPDATE ${affectedRows}`
             : /^\s*delete\b/i.test(originalSql)
-              ? 'DELETE 1'
+              ? `DELETE ${affectedRows}`
               : 'OK'
       return concat(
-        buildRowDescription(fns.map((n) => ({ name: n }))),
-        ...rows.map((r) => buildDataRow(r, fns)),
+        buildRowDescription(fields),
+        ...rows.map((r) => buildDataRow(r, fields)),
         buildCommandComplete(tag),
-        buildReadyForQuery()
+        this.readyForQuery()
       )
     }
     const tag = isSelect
       ? 'SELECT 0'
       : /^\s*insert\b/i.test(originalSql)
-        ? 'INSERT 0 0'
+        ? `INSERT 0 ${affectedRows}`
         : /^\s*update\b/i.test(originalSql)
-          ? 'UPDATE 0'
+          ? `UPDATE ${affectedRows}`
           : /^\s*delete\b/i.test(originalSql)
-            ? 'DELETE 0'
+            ? `DELETE ${affectedRows}`
             : 'OK'
-    return concat(buildCommandComplete(tag), buildReadyForQuery())
+    return concat(
+      isSelect && fields.length > 0 ? buildRowDescription(fields) : new Uint8Array(0),
+      buildCommandComplete(tag),
+      this.readyForQuery()
+    )
+  }
+
+  private copyTextValue(
+    column: string,
+    val: unknown,
+    field?: { name: string; oid?: number }
+  ): string {
+    if (val === null || val === undefined) return '\\N'
+    if (field?.oid === PG_TYPE_BOOL) {
+      if (val === true || val === 1 || val === '1' || val === 't' || val === 'true')
+        return 't'
+      if (val === false || val === 0 || val === '0' || val === 'f' || val === 'false')
+        return 'f'
+    }
+    const formatted = isTimestampOid(field?.oid) ? postgresTimestampText(val) : val
+    const str =
+      typeof formatted === 'object' ? JSON.stringify(formatted) : String(formatted)
+    let out = ''
+    for (const ch of str) {
+      switch (ch) {
+        case '\\':
+          out += '\\\\'
+          break
+        case '\t':
+          out += '\\t'
+          break
+        case '\n':
+          out += '\\n'
+          break
+        case '\r':
+          out += '\\r'
+          break
+        default:
+          out += ch
+      }
+    }
+    return out
+  }
+
+  private buildCopyResponse(result: ExecResult, sql = ''): Uint8Array {
+    const columns =
+      result.columns.length > 0
+        ? result.columns
+        : result.rows.length > 0
+          ? Object.keys(result.rows[0])
+          : []
+    const fields = columns.map((name) => ({
+      name,
+      oid: sql ? this.fieldMetadataForResultColumn(sql, name)?.oid : undefined,
+    }))
+    return concat(
+      buildCopyOutResponse(columns.length),
+      ...result.rows.map((row) =>
+        buildCopyData(
+          `${columns.map((column, index) => this.copyTextValue(column, row[column], fields[index])).join('\t')}\n`
+        )
+      ),
+      buildCopyDone(),
+      buildCommandComplete(`COPY ${result.rows.length}`),
+      this.readyForQuery()
+    )
+  }
+
+  private fieldMetadataForResultColumn(
+    sql: string,
+    column: string
+  ): SchemaColumnMetadata | undefined {
+    const table = firstSourceTableFromSQL(sql)
+    const resultColumn = selectResultColumnMetadata(sql).get(column)
+    if (resultColumn?.oid) {
+      return {
+        table: '',
+        schema: 'public',
+        tableName: '',
+        column,
+        oid: resultColumn.oid,
+      }
+    }
+    const source = resultColumn?.source ?? column
+    if (table) {
+      const metadata = this.schemaMetadata.get(table)?.get(source)
+      if (metadata) return metadata
+    }
+
+    let found: SchemaColumnMetadata | undefined
+    for (const columns of this.schemaMetadata.values()) {
+      const metadata = columns.get(source)
+      if (!metadata) continue
+      if (found) return undefined
+      found = metadata
+    }
+    return found
+  }
+
+  private fieldsForResult(
+    sql: string,
+    result: ExecResult
+  ): { name: string; oid?: number }[] {
+    if (result.columns.length > 0)
+      return result.columns.map((name) => ({
+        name,
+        oid: this.fieldMetadataForResultColumn(sql, name)?.oid,
+      }))
+    if (result.rows.length > 0)
+      return Object.keys(result.rows[0]).map((name) => ({
+        name,
+        oid: this.fieldMetadataForResultColumn(sql, name)?.oid,
+      }))
+    return inferFieldsFromSQL(sql)
+  }
+
+  private async describeFields(
+    sql: string,
+    metadataSql = sql
+  ): Promise<{ name: string; oid?: number }[]> {
+    if (isCatalogQuery(sql)) return (await this.handleCatalogQuery(sql)).fields
+    if (isSelectLike(sql)) {
+      try {
+        const result = await this.doExecResult(
+          `SELECT * FROM (${stripTrailingSemicolon(sql)}) AS _orez_describe LIMIT 0`
+        )
+        const fields = this.fieldsForResult(metadataSql, result)
+        if (fields.length > 0) return fields
+      } catch {}
+    }
+    return inferFieldsFromSQL(metadataSql)
+  }
+
+  private buildSelectResult(result: CatalogResult): Uint8Array {
+    return concat(
+      buildRowDescription(result.fields),
+      ...result.rows.map((r) => buildDataRow(r, result.fields)),
+      buildCommandComplete(`SELECT ${result.rows.length}`)
+    )
   }
 
   private buildSelectResponse(
     rows: Record<string, unknown>[],
     fields: { name: string; oid?: number }[]
   ): Uint8Array {
-    const fns = fields.map((f) => f.name)
-    if (rows.length === 0)
-      return concat(
-        buildRowDescription(fields),
-        buildCommandComplete('SELECT 0'),
-        buildReadyForQuery()
-      )
-    return concat(
-      buildRowDescription(fields),
-      ...rows.map((r) => buildDataRow(r, fns)),
-      buildCommandComplete(`SELECT ${rows.length}`),
-      buildReadyForQuery()
-    )
+    return concat(this.buildSelectResult({ rows, fields }), this.readyForQuery())
   }
 
-  private handleCatalogQuery(sql: string): {
-    rows: Record<string, unknown>[]
-    fields: { name: string; oid?: number }[]
-  } {
-    const n = sql.replace(/\s+/g, ' ').trim().toLowerCase()
-
-    // current_setting('server_version') etc.
-    const csMatch = /current_setting\s*\(\s*['"]([^'"]+)['"]\s*\)/.exec(n)
-    if (csMatch) {
-      const vals: Record<string, string> = {
-        server_version: '16.0',
-        server_encoding: 'UTF8',
-        client_encoding: 'UTF8',
-        standard_conforming_strings: 'on',
-        TimeZone: 'UTC',
-        integer_datetimes: 'on',
-        IntervalStyle: 'postgres',
-        DateStyle: 'ISO, MDY',
-        lc_messages: 'en_US.UTF-8',
-        lc_monetary: 'en_US.UTF-8',
-        lc_numeric: 'en_US.UTF-8',
-        lc_time: 'en_US.UTF-8',
+  private async handleCatalogQueries(sql: string): Promise<CatalogResult[]> {
+    try {
+      const parsed = parseSync(stripTrailingSemicolon(sql.trim()))
+      const results: CatalogResult[] = []
+      for (const statement of parsed.stmts) {
+        const select = statement.stmt?.SelectStmt
+        if (!select) continue
+        results.push(await this.handleCatalogSelect(select))
       }
-      return {
-        rows: [{ current_setting: vals[csMatch[1]] ?? '' }],
-        fields: [{ name: 'current_setting' }],
-      }
+      return results.length ? results : [{ rows: [], fields: [] }]
+    } catch {
+      const currentSettings = catalogCurrentSettingResult(sql)
+      return [currentSettings ?? { rows: [], fields: [] }]
     }
+  }
 
-    return { rows: [], fields: [] }
+  private async handleCatalogQuery(sql: string): Promise<CatalogResult> {
+    return (await this.handleCatalogQueries(sql))[0] ?? { rows: [], fields: [] }
+  }
+
+  private async handleCatalogSelect(select: any): Promise<CatalogResult> {
+    return (
+      catalogCurrentSettingResultFromSelect(select) ??
+      (await this.informationSchemaKeyColumnsResult(select)) ??
+      (await this.informationSchemaColumnsResult(select)) ??
+      this.pgTypeArrayResult(select) ??
+      (await this.publishedTablesResult(select)) ??
+      (await this.publishedIndexesResult(select)) ??
+      (await this.pgPublicationTablesResult(select)) ??
+      pgPublicationResult(select, this.publicationNames()) ??
+      (await this.pgTablesResult(select)) ??
+      pgSettingsResult(select) ??
+      logicalEmitMessageResult(select) ??
+      advisoryLockResult(select) ??
+      emptyCatalogResultFromSelect(select)
+    )
   }
 }
 
@@ -873,7 +6665,7 @@ class HttpClient {
     })
     if (!resp.ok) {
       const text = await resp.text().catch(() => '')
-      throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`)
+      throw new Error(`HTTP ${resp.status}: ${text.slice(0, 5000)}`)
     }
     return resp.text()
   }
