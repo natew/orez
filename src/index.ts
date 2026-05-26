@@ -394,10 +394,10 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     log.debug.orez(`using managed publication: ${managedPub.names.join(', ')}`)
   }
 
-  // PGlite-only: sync publications
-  if (!isDoBackend) {
-    await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
-  }
+  // sync publications. for DO backend this goes through the TCP proxy, which
+  // rewrites the catalog queries and forwards CREATE PUBLICATION / ALTER PUBLICATION
+  // as no-ops or DO-native equivalents (PGlite still owns the real path).
+  await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
 
   // start tcp proxy (routes connections to correct instance by database name)
   const pgServer = await startPgProxy(instances, config)
@@ -423,13 +423,11 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       OREZ_PG_PORT: String(config.pgPort),
     })
 
-    // re-sync publication membership (PGlite-only)
-    if (!isDoBackend) {
-      await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
-      await ensurePublicationHasTables(db, managedPub.names)
-      log.debug.orez('re-installing change tracking after on-db-ready')
-      await installChangeTracking(db)
-    }
+    // re-sync publication membership
+    await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
+    await ensurePublicationHasTables(db, managedPub.names)
+    log.debug.orez('re-installing change tracking after on-db-ready')
+    await installChangeTracking(db)
   }
 
   if (isDoBackend) {
