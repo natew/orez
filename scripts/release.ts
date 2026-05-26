@@ -29,9 +29,10 @@ const major = args.includes('--major')
 const canary = args.includes('--canary')
 const skipTest = args.includes('--skip-test') || args.includes('--skip-all')
 const packOnly = args.includes('--pack-only')
+const ci = args.includes('--ci')
 const intoIdx = args.indexOf('--into')
 const into = intoIdx !== -1 ? args[intoIdx + 1] : null
-const canPromptForNpmOtp = Boolean(input.isTTY && output.isTTY && !process.env.CI)
+const canPromptForNpmOtp = Boolean(input.isTTY && output.isTTY && !process.env.CI && !ci)
 
 if (!patch && !minor && !major && !canary && !packOnly && !into) {
   console.info(
