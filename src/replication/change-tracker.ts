@@ -56,8 +56,12 @@ export async function installChangeTracking(db: ChangeTrackingDb): Promise<void>
       slot_type TEXT NOT NULL DEFAULT 'logical',
       active BOOLEAN NOT NULL DEFAULT false,
       active_pid INTEGER DEFAULT NULL,
-      created_at TIMESTAMPTZ DEFAULT NOW()
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      last_streamed_watermark BIGINT NOT NULL DEFAULT 0
     );
+    -- additive for slot tables created before last_streamed_watermark existed
+    ALTER TABLE _orez._zero_replication_slots
+      ADD COLUMN IF NOT EXISTS last_streamed_watermark BIGINT NOT NULL DEFAULT 0;
   `)
 
   // create trigger functions (writes to _orez schema)

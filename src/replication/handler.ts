@@ -428,27 +428,36 @@ export async function handleStartReplication(
   new DataView(copyBoth.buffer).setInt16(6, 0) // 0 columns
   writer.write(copyBoth)
 
-  // resume from where the previous handler left off to avoid
-  // replaying already-streamed changes after reconnect.
-  // when client supplied a NON-ZERO LSN (i.e. this is a reconnect to an
-  // existing slot with prior progress), also bump lastStreamedWatermark to
-  // the current sequence value — anything before that has already been
-  // written to changeLog, so re-streaming would just produce duplicate-key
-  // errors. `0/0` indicates "fresh slot" and must NOT trigger this jump,
-  // otherwise we'd skip rows that legitimately need to be streamed for the
-  // initial sync.
-  if (clientStartLsn !== null && clientStartLsn > 0n) {
+  // resume from where the previous handler left off to avoid replaying
+  // already-streamed changes after reconnect. previously this bumped
+  // lastStreamedWatermark to the current sequence value whenever the client
+  // passed a non-zero LSN, but zero-cache always passes the non-zero
+  // consistent_point even on first subscribe — which incorrectly skipped
+  // rows added between CREATE_REPLICATION_SLOT and START_REPLICATION.
+  //
+  // instead, persist last_streamed_watermark per-slot in the slots table
+  // and restore it on reconnect. on fresh subscribe the column defaults to
+  // 0 so no rows are skipped; on reconnect after a worker restart the
+  // column holds the watermark of the last batch we successfully streamed,
+  // which is the actual point we should resume from.
+  const slotMatch = query.match(/SLOT\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i)
+  const slotName = slotMatch?.[1] || slotMatch?.[2] || slotMatch?.[3]
+  if (slotName) {
     try {
-      const currentWm = await getCurrentWatermark(db)
-      if (currentWm > lastStreamedWatermark) {
+      const row = await db.query<{ last_streamed_watermark: string | number }>(
+        `SELECT last_streamed_watermark FROM _orez._zero_replication_slots WHERE slot_name = $1`,
+        [slotName]
+      )
+      const persisted = Number(row.rows[0]?.last_streamed_watermark ?? 0)
+      if (Number.isFinite(persisted) && persisted > lastStreamedWatermark) {
         log.debug.repl(
-          `advancing lastStreamedWatermark ${lastStreamedWatermark} → ${currentWm} on reconnect`
+          `restoring lastStreamedWatermark ${lastStreamedWatermark} → ${persisted} from slot=${slotName}`
         )
-        lastStreamedWatermark = currentWm
+        lastStreamedWatermark = persisted
       }
     } catch (err) {
       log.repl(
-        `getCurrentWatermark failed on reconnect: ${(err as Error)?.message || err}`
+        `slot watermark restore failed: ${(err as Error)?.message || err}`
       )
     }
   }
@@ -889,6 +898,23 @@ export async function handleStartReplication(
           lastStreamedWatermark = batchEnd
           log.debug.repl(`streamed ok, watermark=${batchEnd}`)
           hasStreamedOnce = true
+
+          // persist watermark so a worker restart can resume past it
+          // instead of re-streaming and tripping changeLog_pkey violations
+          if (slotName) {
+            try {
+              await db.query(
+                `UPDATE _orez._zero_replication_slots
+                  SET last_streamed_watermark = $1
+                  WHERE slot_name = $2 AND last_streamed_watermark < $1`,
+                [batchEnd, slotName]
+              )
+            } catch (err) {
+              log.repl(
+                `slot watermark persist failed: ${(err as Error)?.message || err}`
+              )
+            }
+          }
 
           // purge consumed changes periodically to free wasm memory
           pollsSincePurge++

@@ -160,8 +160,10 @@ const ZERO_START_PARAMS = [
   'work_mem=64kB',
   '-c',
   'maintenance_work_mem=512kB',
+  // postgres requires temp_buffers >= 100 blocks (800kB at the 8kB block
+  // size). lower values fail initdb with no helpful error.
   '-c',
-  'temp_buffers=400kB',
+  'temp_buffers=800kB',
   '-c',
   'max_connections=1',
 ]
