@@ -1,23 +1,24 @@
 import { datetimePass } from './datetime.js'
+import { typesPass } from './types.js'
 
 /**
  * Pass pipeline.
  *
  * Each pass is a focused visitor over the PG AST that mutates nodes in place
- * to make the tree SQLite-emittable. Order matters: cast/type passes run
- * before passes that depend on type info; catalog rewrites run last (after
- * any pg_catalog references would already be rewritten by earlier passes).
+ * to make the tree SQLite-emittable. Order matters: type normalization runs
+ * first (so other passes see SQLite-native type names), datetime runs after
+ * (function-form → SQLValueFunction), catalog rewrites last (after every
+ * other pass has stabilized).
  */
 import type { Pass, PassContext } from '../types.js'
 
 export const DEFAULT_PASSES: Pass[] = [
+  typesPass,
   datetimePass,
   // future:
   //   castPass,
-  //   typeMapPass,
   //   arrayPass,
   //   jsonPass,
-  //   createTablePass,
   //   insertPass,
   //   catalogPass,
 ]
