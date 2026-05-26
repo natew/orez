@@ -412,9 +412,17 @@ export class ZeroDO extends DurableObject {
       }
       sql = body.sql
       const params = Array.isArray(body.params) ? body.params : []
-      const result = await this.ctx.storage.transaction(() =>
-        this.executeSQL(sql, params, body.track)
-      )
+      // Only wrap in ctx.storage.transaction() when the call has change-tracking
+      // side effects (executeSQL writes BOTH the user table AND _zero_changes,
+      // which must commit together to keep source-tab sync flicker-free). A
+      // bare /exec is single-statement and ctx.storage.sql already serializes;
+      // the transaction wrap was adding ~2-5ms × every call, which on chat's
+      // 27k-stmt boot pushed orez backend startup past chat's 60s wait-for-port.
+      const result = body.track
+        ? await this.ctx.storage.transaction(() =>
+            this.executeSQL(sql, params, body.track)
+          )
+        : this.executeSQL(sql, params)
       return Response.json(result)
     } catch (err: any) {
       const suffix = sql ? ` while executing: ${sqlErrorSnippet(sql, err.message)}` : ''
