@@ -58,6 +58,10 @@
     "test:wasm": "vitest run src/wasm-sqlite.test.ts",
     "test:all": "vitest run",
     "test:watch": "vitest",
+    "test:compiler": "vitest run src/pg-sqlite-compiler/",
+    "test:compiler:oracle": "bun scripts/pgsqlite/ensure.ts && vitest run src/pg-sqlite-compiler/test/",
+    "compiler:harvest-fixtures": "bun scripts/pgsqlite/harvest-fixtures.ts",
+    "compiler:ensure-pgsqlite": "bun scripts/pgsqlite/ensure.ts",
     "lint": "oxlint --import-plugin --ignore-pattern sqlite-wasm/",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
@@ -83,6 +87,7 @@
   "dependencies": {
     "@electric-sql/pglite": "0.4.1",
     "@electric-sql/pglite-tools": "^0.3.1",
+    "@pgsql/traverse": "17.2.6",
     "bedrock-sqlite": "workspace:*",
     "citty": "^0.2.0",
     "pg-gateway": "0.3.0-beta.4",

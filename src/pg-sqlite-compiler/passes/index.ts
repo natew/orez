@@ -1,0 +1,45 @@
+import { datetimePass } from './datetime.js'
+
+/**
+ * Pass pipeline.
+ *
+ * Each pass is a focused visitor over the PG AST that mutates nodes in place
+ * to make the tree SQLite-emittable. Order matters: cast/type passes run
+ * before passes that depend on type info; catalog rewrites run last (after
+ * any pg_catalog references would already be rewritten by earlier passes).
+ */
+import type { Pass, PassContext } from '../types.js'
+
+export const DEFAULT_PASSES: Pass[] = [
+  datetimePass,
+  // future:
+  //   castPass,
+  //   typeMapPass,
+  //   arrayPass,
+  //   jsonPass,
+  //   createTablePass,
+  //   insertPass,
+  //   catalogPass,
+]
+
+/**
+ * Run all passes on a single top-level RawStmt entry.
+ *
+ * Input shape: `{ stmt: { TagName: data } }` (a libpg_query RawStmt).
+ * Passes use `visit()` which expects a tagged node — so we hand them `rawStmt.stmt`.
+ */
+export function runPasses(rawStmt: any, ctx: PassContext): void {
+  const stmt = rawStmt?.stmt ?? rawStmt
+  if (!stmt || typeof stmt !== 'object') return
+  const passes = ctx.passes ?? DEFAULT_PASSES
+  for (const pass of passes) {
+    try {
+      pass.run(stmt, ctx)
+    } catch (err: any) {
+      ctx.warnings.push({
+        kind: 'pass-error',
+        message: `pass ${pass.name} threw: ${err.message}`,
+      })
+    }
+  }
+}
