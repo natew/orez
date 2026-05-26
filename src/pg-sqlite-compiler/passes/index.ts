@@ -1,3 +1,4 @@
+import { catalogPass } from './catalog.js'
 import { datetimePass } from './datetime.js'
 import { typesPass } from './types.js'
 
@@ -15,12 +16,12 @@ import type { Pass, PassContext } from '../types.js'
 export const DEFAULT_PASSES: Pass[] = [
   typesPass,
   datetimePass,
+  catalogPass,
   // future:
   //   castPass,
   //   arrayPass,
   //   jsonPass,
   //   insertPass,
-  //   catalogPass,
 ]
 
 /**

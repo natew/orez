@@ -45,6 +45,9 @@ export interface VisitorMap {
 const UNWRAPPED_FIELDS: Record<string, string> = {
   // ColumnDef.typeName, TypeCast.typeName, etc. are TypeName nodes, not wrapped
   typeName: 'TypeName',
+  // SelectStmt.fromClause[i] is sometimes a wrapped RangeVar but in some
+  // sub-positions (FROM-list with single table) it appears unwrapped.
+  relation: 'RangeVar',
 }
 
 function fireForChild(
