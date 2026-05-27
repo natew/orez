@@ -2865,9 +2865,7 @@ describe('DoBackend', () => {
     const backend = new DoBackend(http.url, 'postgres', 'drop-constraint-test')
     await backend.waitReady
 
-    await backend.exec(
-      'ALTER TABLE "serverApp" DROP CONSTRAINT "serverApp_appId_pk";'
-    )
+    await backend.exec('ALTER TABLE "serverApp" DROP CONSTRAINT "serverApp_appId_pk";')
 
     const sent = compactSQL(
       sqlContaining(http.sqls, 'DROP INDEX IF EXISTS "serverApp_appId_pk"')
@@ -3800,7 +3798,11 @@ describe('DoBackend', () => {
 
   test('translates chat thread reply count TG_OP triggers', async () => {
     const http = await startDoHttp(() => ({ rows: [], columns: [] }))
-    const backend = new DoBackend(http.url, 'postgres', 'sqlite-thread-reply-trigger-test')
+    const backend = new DoBackend(
+      http.url,
+      'postgres',
+      'sqlite-thread-reply-trigger-test'
+    )
     await backend.waitReady
 
     await backend.exec(`

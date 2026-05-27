@@ -588,12 +588,7 @@ export class ZeroDO extends DurableObject {
   }
 
   private messageRowUpdatesThreadReplyCount(row: Record<string, unknown>): boolean {
-    return (
-      !!row.threadId &&
-      row.type !== 'draft' &&
-      !row.deleted &&
-      row.isThreadReply
-    )
+    return !!row.threadId && row.type !== 'draft' && !row.deleted && row.isThreadReply
   }
 
   // ── CRUD operations ──────────────────────────────────────────────────────

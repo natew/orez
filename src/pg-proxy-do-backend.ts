@@ -3522,9 +3522,9 @@ function rewriteParsedStatement(
       const statements: RewrittenStatement[] = []
       if (alterMetadata.metadataOnlySchemaColumns.length) {
         statements.push({
-            sql: '',
-            isDDL: true,
-            schemaColumns: alterMetadata.metadataOnlySchemaColumns,
+          sql: '',
+          isDDL: true,
+          schemaColumns: alterMetadata.metadataOnlySchemaColumns,
         })
       }
       statements.push(...alterMetadata.syntheticStatements)
@@ -3606,9 +3606,7 @@ function rewriteParsedStatement(
             : null),
           ...(context?.epochMillisParamNumbers?.size
             ? {
-                epochMillisParamNumbers: new Set(
-                  context.epochMillisParamNumbers
-                ),
+                epochMillisParamNumbers: new Set(context.epochMillisParamNumbers),
               }
             : null),
           ...(cmdSchemaColumns?.length ? { schemaColumns: cmdSchemaColumns } : null),
