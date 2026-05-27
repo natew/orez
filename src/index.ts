@@ -8,8 +8,16 @@
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, resolve } from 'node:path'
 
 import {
   createHttpLogStore,
@@ -940,6 +948,11 @@ function cleanupStaleReplica(config: ZeroLiteConfig): void {
   }
 }
 
+function ensureZeroReplicaFile(replicaFile: string): void {
+  mkdirSync(dirname(replicaFile), { recursive: true })
+  closeSync(openSync(replicaFile, 'a'))
+}
+
 async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   // check if we already have data
   try {
@@ -992,6 +1005,8 @@ async function startZeroCache(
   const upstreamUrl = getConnectionString(config, 'postgres')
   const cvrUrl = getConnectionString(config, 'zero_cvr')
   const cdbUrl = getConnectionString(config, 'zero_cdb')
+  const replicaFile = resolve(config.dataDir, 'zero-replica.db')
+  ensureZeroReplicaFile(replicaFile)
 
   // defaults that can be overridden by user env
   // when admin is enabled and user hasn't set ZERO_LOG_LEVEL, use 'info'
@@ -1022,7 +1037,7 @@ async function startZeroCache(
     ZERO_UPSTREAM_DB: upstreamUrl,
     ZERO_CVR_DB: cvrUrl,
     ZERO_CHANGE_DB: cdbUrl,
-    ZERO_REPLICA_FILE: resolve(config.dataDir, 'zero-replica.db'),
+    ZERO_REPLICA_FILE: replicaFile,
     ZERO_PORT: String(config.zeroPort),
     ...(config.zeroMutateUrl ? { ZERO_MUTATE_URL: config.zeroMutateUrl } : {}),
     ...(config.zeroQueryUrl ? { ZERO_QUERY_URL: config.zeroQueryUrl } : {}),

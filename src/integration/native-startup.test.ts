@@ -1,4 +1,5 @@
-import { rmSync } from 'node:fs'
+import { existsSync, rmSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
@@ -40,5 +41,9 @@ describe('native sqlite startup integration', { timeout: 120_000 }, () => {
   test('zero-cache responds in native mode', async () => {
     const response = await fetch(`http://127.0.0.1:${zeroPort}/`)
     expect([200, 404]).toContain(response.status)
+  })
+
+  test('creates the replica file before sync workers open it', () => {
+    expect(existsSync(resolve(dataDir, 'zero-replica.db'))).toBe(true)
   })
 })
