@@ -1,0 +1,15 @@
+# belt-and-suspenders: even if `files` is widened, these never publish
+.wrangler/
+**/.wrangler/
+.env
+.env.*
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.orez/
+.orez-*
+node_modules/
+test-chat/
+perf/reports/
+*.tgz
+.DS_Store

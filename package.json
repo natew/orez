@@ -1,6 +1,6 @@
 {
   "name": "orez",
-  "version": "0.2.27",
+  "version": "0.2.29",
   "description": "PGlite-powered zero-sync development backend. No Docker required.",
   "type": "module",
   "license": "MIT",
@@ -44,8 +44,7 @@
     "orez": "dist/cli-entry.js"
   },
   "files": [
-    "dist",
-    "src"
+    "dist"
   ],
   "scripts": {
     "build": "tsc && chmod +x dist/cli-entry.js",
