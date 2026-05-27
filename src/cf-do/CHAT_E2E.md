@@ -35,8 +35,8 @@ chat lite mode (one process tree)
 
 ```ts
 await waitForPort(ports.postgres, { timeoutMs: 60_000 })
-await waitForPort(ports.zero,     { timeoutMs: 60_000 })
-await waitForPort(ports.web,      { timeoutMs: 120_000 })
+await waitForPort(ports.zero, { timeoutMs: 60_000 })
+await waitForPort(ports.web, { timeoutMs: 120_000 })
 ```
 
 Postgres opens almost immediately (orez TCP server). Web opens after Vite. The
@@ -53,15 +53,14 @@ patching the file — and document why.
 ## 3. Where boot HTTP calls go (measured 2026-05-26)
 
 A 15s window of chat e2e boot, captured by adding
-`console.log(\`[exec] ${sql.slice(0, 80)}\`)` at the top of `handleExec` in
-`src/cf-do/worker.ts`, produced ~3,120 /exec calls per 15s, split roughly:
+`console.log(\`[exec] ${sql.slice(0, 80)}\`)`at the top of`handleExec`in`src/cf-do/worker.ts`, produced ~3,120 /exec calls per 15s, split roughly:
 
-| count | shape                                                                | source              |
-|-------|----------------------------------------------------------------------|---------------------|
-| 1858  | `INSERT INTO reaction(...) ON CONFLICT DO NOTHING`                   | chat seed data      |
-| 665   | `UPDATE reaction SET keywords=?,category=? WHERE value=?`            | chat metadata fill  |
-| 550   | `INSERT OR REPLACE INTO "_orez_pg_metadata" ...`                     | orez (was per-row)  |
-| ~40   | misc DDL / catalog probes                                            | migrations          |
+| count | shape                                                     | source             |
+| ----- | --------------------------------------------------------- | ------------------ |
+| 1858  | `INSERT INTO reaction(...) ON CONFLICT DO NOTHING`        | chat seed data     |
+| 665   | `UPDATE reaction SET keywords=?,category=? WHERE value=?` | chat metadata fill |
+| 550   | `INSERT OR REPLACE INTO "_orez_pg_metadata" ...`          | orez (was per-row) |
+| ~40   | misc DDL / catalog probes                                 | migrations         |
 
 The first two are chat seed loops — you cannot reduce them without changing
 chat. The third is **pure orez overhead** and was the obvious target.
@@ -82,7 +81,7 @@ All in `src/pg-proxy-do-backend.ts`. Before/after:
 
 It iterated `schemaMetadata` (all tables × all columns) and `publications` and
 issued one `await doExecResult` per row. A migration that added five columns
-to a table with already-known columns re-persisted *every* metadata row, every
+to a table with already-known columns re-persisted _every_ metadata row, every
 time. Fix: build one multi-row `INSERT OR REPLACE INTO ... VALUES (?,?,?,?),
 (?,?,?,?),...` chunked at 200 rows (SQLite ~999 param cap / 4 cols).
 
@@ -172,14 +171,14 @@ first-write-per-tx path will likely regress this test.
 
 ## 6. Common failure modes and what they mean
 
-| symptom                                                            | likely cause                                                          |
-|--------------------------------------------------------------------|-----------------------------------------------------------------------|
-| `task: backend failed after 1m 1s`                                 | zero port didn't open within 60s — orez boot too slow                 |
-| `task: backend failed` with no time                                | wrangler not running or `DO_BACKEND_URL` not set                      |
-| `ECONNREFUSED 127.0.0.1:8799`                                      | wrangler dev died or never started                                    |
-| `TG_OP is not defined` or trigger errors                           | chat trigger function uses Postgres `TG_OP`; orez skips these on DO   |
-| "Ignoring mutation from X with ID N as it was already processed"   | chat-side mutation dedup, not orez — non-fatal                        |
-| First test passes, second hangs                                    | leftover state from previous run; reset `.wrangler/state/v3/do/`      |
+| symptom                                                          | likely cause                                                        |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `task: backend failed after 1m 1s`                               | zero port didn't open within 60s — orez boot too slow               |
+| `task: backend failed` with no time                              | wrangler not running or `DO_BACKEND_URL` not set                    |
+| `ECONNREFUSED 127.0.0.1:8799`                                    | wrangler dev died or never started                                  |
+| `TG_OP is not defined` or trigger errors                         | chat trigger function uses Postgres `TG_OP`; orez skips these on DO |
+| "Ignoring mutation from X with ID N as it was already processed" | chat-side mutation dedup, not orez — non-fatal                      |
+| First test passes, second hangs                                  | leftover state from previous run; reset `.wrangler/state/v3/do/`    |
 
 ## 7. What never to touch
 
@@ -210,5 +209,5 @@ look like:
   wrangler. A small queue + single in-flight HTTP/2 socket would amortize
   the per-call overhead.
 
-Do *not* attempt these speculatively. Re-measure boot HTTP distribution first
+Do _not_ attempt these speculatively. Re-measure boot HTTP distribution first
 (see §3), then target the largest bucket.
