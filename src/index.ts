@@ -74,11 +74,12 @@ function ensureDoBackendNamespace(dataDir: string): string {
 }
 
 function resolveNodeBinary(): string {
-  const explicitNode = process.env.NODE
+  const explicitNode = process.env.OREZ_NODE
   if (explicitNode && existsSync(explicitNode)) {
     return explicitNode
   }
 
+  // bad agentic code, should make this configurable
   const miseResult = spawnSync('mise', ['which', 'node'], {
     encoding: 'utf8',
     env: process.env,
@@ -92,6 +93,11 @@ function resolveNodeBinary(): string {
     return process.execPath
   }
 
+  const inheritedNode = process.env.NODE
+  if (inheritedNode && existsSync(inheritedNode)) {
+    return inheritedNode
+  }
+
   const whichResult = spawnSync('which', ['node'], {
     encoding: 'utf8',
     env: process.env,
@@ -102,7 +108,7 @@ function resolveNodeBinary(): string {
   }
 
   throw new Error(
-    'could not resolve a node binary for zero-cache; set process.env.NODE or ensure node is in PATH'
+    'could not resolve a node binary for zero-cache; set OREZ_NODE or ensure node is in PATH'
   )
 }
 
