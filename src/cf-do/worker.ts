@@ -89,6 +89,17 @@ function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`
 }
 
+function sqliteTypeForSchemaColumn(type: string): string {
+  const types: Record<string, string> = {
+    string: 'TEXT',
+    number: 'REAL',
+    boolean: 'INTEGER',
+    json: 'TEXT',
+    bigint: 'TEXT',
+  }
+  return types[type] || 'TEXT'
+}
+
 function sqliteErrorOffset(message: string): number | null {
   const marker = 'offset '
   const start = message.indexOf(marker)
@@ -683,28 +694,48 @@ export class ZeroDO extends DurableObject {
     this.ensureSchemaMetadataTable()
     for (const [name, def] of Object.entries(clientSchema.tables)) {
       this.tableSchemas.set(name, def)
+      this.createSchemaTable(name, def)
+      this.ensureSchemaColumns(name, def)
       this.sql.exec(
         'INSERT OR REPLACE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
         name,
         JSON.stringify(def)
       )
-      if (this.schemaTables.has(name)) continue
-      const pk = def.primaryKey.map((c) => quoteIdent(c))
-      const pkClause = pk.length ? `, PRIMARY KEY (${pk.join(', ')})` : ''
-      const colDefs = Object.entries(def.columns).map(([cn, cd]) => {
-        const t: Record<string, string> = {
-          string: 'TEXT',
-          number: 'REAL',
-          boolean: 'INTEGER',
-          json: 'TEXT',
-          bigint: 'TEXT',
-        }
-        return `${quoteIdent(cn)} ${t[cd.type] || 'TEXT'}`
-      })
-      this.sql.exec(
-        `CREATE TABLE IF NOT EXISTS ${quoteIdent(name)} (${colDefs.join(', ')}${pkClause})`
-      )
       this.schemaTables.add(name)
+    }
+  }
+
+  private createSchemaTable(name: string, def: SchemaTable) {
+    const pk = def.primaryKey.map((c) => quoteIdent(c))
+    const pkClause = pk.length ? `, PRIMARY KEY (${pk.join(', ')})` : ''
+    const colDefs = Object.entries(def.columns).map(
+      ([cn, cd]) => `${quoteIdent(cn)} ${sqliteTypeForSchemaColumn(cd.type)}`
+    )
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS ${quoteIdent(name)} (${colDefs.join(', ')}${pkClause})`
+    )
+  }
+
+  private ensureSchemaColumns(name: string, def: SchemaTable) {
+    const existing = this.columnNamesForTable(name)
+    for (const [columnName, column] of Object.entries(def.columns)) {
+      if (existing.has(columnName)) continue
+      this.sql.exec(
+        `ALTER TABLE ${quoteIdent(name)} ADD COLUMN ${quoteIdent(columnName)} ${sqliteTypeForSchemaColumn(column.type)}`
+      )
+    }
+  }
+
+  private columnNamesForTable(name: string): Set<string> {
+    try {
+      return new Set(
+        this.sql
+          .exec(`PRAGMA table_info(${quoteIdent(name)})`)
+          .toArray()
+          .map((row: any) => String(row.name))
+      )
+    } catch {
+      return new Set()
     }
   }
 
