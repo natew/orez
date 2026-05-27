@@ -17,6 +17,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 
 import {
@@ -68,7 +69,10 @@ import {
 import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
 
-type ZeroChildProcess = ChildProcess & { __orezTail?: string[] }
+type ZeroChildProcess = ChildProcess & {
+  __orezPreloadPath?: string
+  __orezTail?: string[]
+}
 
 function ensureDoBackendNamespace(dataDir: string): string {
   const marker = resolve(dataDir, 'do-backend-namespace')
@@ -494,6 +498,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // start zero-cache
   let zeroCacheProcess: ChildProcess | null = null
   let zeroEnv: Record<string, string> = {}
+  let zeroStopExpected = false
   if (!config.skipZeroCache) {
     // use internal port when http proxy is enabled
     const zeroConfig = httpLog ? { ...config, zeroPort: zeroInternalPort } : config
@@ -581,16 +586,21 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const killZeroCache = async () => {
     const child = zeroCacheProcess
     if (!isChildProcessRunning(child)) return
+    zeroStopExpected = true
 
     try {
       child.kill('SIGTERM')
     } catch (err: any) {
+      zeroStopExpected = false
       if (err?.code !== 'ESRCH') throw err
       return
     }
 
     const exitedGracefully = await waitForChildProcessExit(child, 5000)
-    if (exitedGracefully) return
+    if (exitedGracefully) {
+      zeroStopExpected = false
+      return
+    }
 
     log.debug.orez(
       `zero-cache pid ${child.pid} did not exit after SIGTERM, force killing`
@@ -598,6 +608,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     if (child.pid) killProcessTree(child.pid, 'SIGKILL')
     else child.kill('SIGKILL')
     await waitForChildProcessExit(child, 1000)
+    zeroStopExpected = false
   }
 
   // simple restart without any state cleanup
@@ -814,7 +825,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const installCrashWatcher = () => {
     if (!zeroCacheProcess || config.skipZeroCache) return
     zeroCacheProcess.on('exit', (code) => {
-      if (shuttingDown || resetInProgress || code === 0 || code === null) return
+      if (shuttingDown || resetInProgress || zeroStopExpected || code === null) return
       const tail = (zeroCacheProcess as ZeroChildProcess)?.__orezTail
       const details = tail?.length ? tail.join('\n') : ''
       if (hasCdcCorruptionSignature(details)) {
@@ -953,6 +964,33 @@ function ensureZeroReplicaFile(replicaFile: string): void {
   closeSync(openSync(replicaFile, 'a'))
 }
 
+function cleanupZeroCachePreload(preloadPath: string | undefined): void {
+  if (!preloadPath) return
+  try {
+    unlinkSync(preloadPath)
+  } catch {}
+}
+
+function writeZeroCachePreload(parentPid: number, zeroTitle: string): string {
+  const preloadDir = resolve(tmpdir(), 'orez-zero-cache-preload')
+  mkdirSync(preloadDir, { recursive: true })
+  const preloadPath = resolve(preloadDir, `parent-${parentPid}.cjs`)
+  writeFileSync(
+    preloadPath,
+    `const fs = require('node:fs');\n` +
+      `process.title = ${JSON.stringify(zeroTitle)};\n` +
+      `const __orezPid = ${parentPid};\n` +
+      `const __orezExit = () => {\n` +
+      `  try { fs.unlinkSync(__filename); } catch {}\n` +
+      `  process.exit(0);\n` +
+      `};\n` +
+      `setInterval(() => {\n` +
+      `  try { process.kill(__orezPid, 0); } catch { __orezExit(); }\n` +
+      `}, 1000).unref();\n`
+  )
+  return preloadPath
+}
+
 async function seedIfNeeded(db: PGlite, config: ZeroLiteConfig): Promise<void> {
   // check if we already have data
   try {
@@ -1077,16 +1115,8 @@ async function startZeroCache(
   // at 100% CPU indefinitely. every forked zero-cache worker inherits
   // NODE_OPTIONS, so the --require below runs in each one; they independently
   // poll the captured orez pid and exit when it disappears.
-  const preloadPath = resolve(config.dataDir, '.orez-zero-title.cjs')
   const zeroTitle = orezTitle('orez [zero]')
-  writeFileSync(
-    preloadPath,
-    `process.title = ${JSON.stringify(zeroTitle)};\n` +
-      `const __orezPid = ${process.pid};\n` +
-      `setInterval(() => {\n` +
-      `  try { process.kill(__orezPid, 0); } catch { process.exit(0); }\n` +
-      `}, 1000).unref();\n`
-  )
+  const preloadPath = writeZeroCachePreload(process.pid, zeroTitle)
 
   const nodeOptions = [
     sqliteMode === 'wasm' ? '--max-old-space-size=16384' : '',
@@ -1105,6 +1135,7 @@ async function startZeroCache(
     // in the --require preload above.
     stdio: ['pipe', 'pipe', 'pipe'],
   }) as ZeroChildProcess
+  child.__orezPreloadPath = preloadPath
   child.__orezTail = []
 
   const pushTail = (line: string) => {
@@ -1176,9 +1207,10 @@ async function startZeroCache(
     }
   })
 
-  child.on('exit', (code) => {
+  child.on('exit', (code, signal) => {
+    cleanupZeroCachePreload(child.__orezPreloadPath)
+    pushTail(code === null ? `exit: signal ${signal}` : `exit: code ${code}`)
     if (code !== 0 && code !== null) {
-      pushTail(`exit: code ${code}`)
       log.zero(`exited with code ${code}`)
       logStore?.push('zero', 'error', `exited with code ${code}`)
     }
