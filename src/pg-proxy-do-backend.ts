@@ -62,6 +62,7 @@ interface PreparedStatement {
   arrayParamNumbers?: Set<number>
   jsonParamNumbers?: Set<number>
   timestampParamNumbers?: Set<number>
+  epochMillisParamNumbers?: Set<number>
   booleanParamNumbers?: Set<number>
   schemaColumns?: SchemaColumnMetadata[]
   schemaMetadataChanges?: SchemaMetadataChange[]
@@ -911,6 +912,7 @@ interface RewrittenStatement {
   changeTracking?: ChangeTrackingMetadata
   arrayParamNumbers?: Set<number>
   jsonParamNumbers?: Set<number>
+  epochMillisParamNumbers?: Set<number>
   schemaColumns?: SchemaColumnMetadata[]
   schemaMetadataChanges?: SchemaMetadataChange[]
   publicationChanges?: PublicationChange[]
@@ -924,6 +926,7 @@ interface RewriteContext {
   triggerFunctions?: Map<string, TriggerFunctionDefinition>
   arrayParamNumbers?: Set<number>
   jsonParamNumbers?: Set<number>
+  epochMillisParamNumbers?: Set<number>
 }
 
 const SKIPPED_NODE_TYPES = new Set([
@@ -1241,6 +1244,18 @@ function equalityExpr(left: any, right: any): any {
   }
 }
 
+function numericLiteralValue(value: any): number | null {
+  const literal = astLiteralValue(unwrapTypeCast(value))
+  if (typeof literal !== 'number') return null
+  return Number.isFinite(literal) ? literal : null
+}
+
+function isDivisionByMillis(value: any): boolean {
+  const expr = unwrapTypeCast(value)?.A_Expr
+  if (expr?.kind !== 'AEXPR_OP' || operatorName(expr) !== '/') return false
+  return numericLiteralValue(expr.rexpr) === 1000
+}
+
 function startsWithExpr(func: any, context?: RewriteContext): any | null {
   const args = func.args ?? []
   if (args.length < 2) return null
@@ -1347,6 +1362,14 @@ function postgresTimestampText(value: unknown): string {
   const raw = value instanceof Date ? value.toISOString() : String(value)
   const withSpace = raw.replace('T', ' ')
   return withSpace.endsWith('Z') ? `${withSpace.slice(0, -1)}+00` : withSpace
+}
+
+function epochMillisParamValue(value: unknown): unknown {
+  const millis = timestampMillisValue(value)
+  if (millis !== null) return millis
+  const raw = value instanceof Date ? value.toISOString() : String(value)
+  const date = new Date(raw)
+  return Number.isFinite(date.getTime()) ? date.getTime() : value
 }
 
 function paramNumbersForOids(
@@ -2017,8 +2040,14 @@ function rewriteNode(value: any, context?: RewriteContext): any {
       return rewriteNode(value.FuncCall.args[0], context)
     }
     if (name === 'to_timestamp' && value.FuncCall.args?.[0]) {
+      const arg = value.FuncCall.args[0]
+      if (isDivisionByMillis(arg)) {
+        collectParamRefs(arg, (paramNumber) =>
+          context?.epochMillisParamNumbers?.add(paramNumber)
+        )
+      }
       return funcCallNode('datetime', [
-        rewriteNode(value.FuncCall.args[0], context),
+        rewriteNode(arg, context),
         stringConst('unixepoch'),
       ])
     }
@@ -2493,6 +2522,7 @@ function normalizeAlterTable(stmt: any): {
   skipIfColumnMissingByCmd: Map<any, RewrittenStatement['skipIfColumnMissing']>
   schemaColumnsByCmd: Map<any, SchemaColumnMetadata[]>
   metadataOnlySchemaColumns: SchemaColumnMetadata[]
+  syntheticStatements: RewrittenStatement[]
 } {
   const tableRef = publicationTableRefForRangeVar(stmt.relation)
   const table = flattenRangeVar(stmt.relation)
@@ -2504,18 +2534,47 @@ function normalizeAlterTable(stmt: any): {
   >()
   const schemaColumnsByCmd = new Map<any, SchemaColumnMetadata[]>()
   const metadataOnlySchemaColumns: SchemaColumnMetadata[] = []
+  const syntheticStatements: RewrittenStatement[] = []
 
   for (const cmdNode of stmt.cmds ?? []) {
     const cmd = cmdNode.AlterTableCmd
     if (!cmd) continue
+    if (cmd.subtype === 'AT_AddConstraint') {
+      const constraint = cmd.def?.Constraint
+      const contype = constraint?.contype
+      if (
+        table &&
+        (contype === 'CONSTR_UNIQUE' || contype === 'CONSTR_PRIMARY') &&
+        Array.isArray(constraint.keys)
+      ) {
+        const columns = constraint.keys.map(stringValue).filter(Boolean)
+        if (columns.length) {
+          const name =
+            constraint.conname ||
+            `${table}_${columns.join('_')}_${contype === 'CONSTR_PRIMARY' ? 'pkey' : 'key'}`
+          syntheticStatements.push({
+            sql: `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdentifier(name)} ON ${quoteIdentifier(table)} (${columns.map(quoteIdentifier).join(', ')})`,
+            isDDL: true,
+          })
+        }
+      }
+      continue
+    }
+    if (cmd.subtype === 'AT_DropConstraint') {
+      if (cmd.name) {
+        syntheticStatements.push({
+          sql: `DROP INDEX IF EXISTS ${quoteIdentifier(cmd.name)}`,
+          isDDL: true,
+        })
+      }
+      continue
+    }
     if (cmd.subtype === 'AT_AlterColumnType') {
       const schemaColumn = schemaColumnForAlterColumnType(tableRef, cmd)
       if (schemaColumn) metadataOnlySchemaColumns.push(schemaColumn)
       continue
     }
     if (
-      cmd.subtype === 'AT_AddConstraint' ||
-      cmd.subtype === 'AT_DropConstraint' ||
       cmd.subtype === 'AT_ReplicaIdentity' ||
       cmd.subtype?.startsWith('AT_AlterColumn') ||
       cmd.subtype === 'AT_ColumnDefault' ||
@@ -2547,6 +2606,7 @@ function normalizeAlterTable(stmt: any): {
     skipIfColumnMissingByCmd,
     schemaColumnsByCmd,
     metadataOnlySchemaColumns,
+    syntheticStatements,
   }
 }
 
@@ -3296,6 +3356,39 @@ function sqliteTriggerName(base: string, event: string, eventCount: number): str
   return eventCount === 1 ? base : `${base}_${event.toLowerCase()}`
 }
 
+function threadReplyCountTriggerStatements(node: any): RewrittenStatement[] | null {
+  const table = publicationTableRefForRangeVar(node.relation)
+  if (!table || table.table !== 'message') return null
+  const events = sqliteTriggerEvents(Number(node.events ?? 0))
+  if (events.length === 0) return null
+
+  return events.map((event) => {
+    const row = event === 'DELETE' ? 'OLD' : 'NEW'
+    const triggerName = sqliteTriggerName(node.trigname, event, events.length)
+    return {
+      sql: `CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(triggerName)}
+AFTER ${event} ON ${quoteIdentifier(table.table)}
+FOR EACH ROW
+WHEN ${row}."threadId" IS NOT NULL
+BEGIN
+  UPDATE "thread"
+  SET "replyCount" = min(11, (
+    SELECT COUNT(*)
+    FROM "message"
+    WHERE "threadId" = ${row}."threadId"
+      AND "deleted" = 0
+      AND "type" IS DISTINCT FROM 'draft'
+      AND "id" IS DISTINCT FROM (
+        SELECT "messageId" FROM "thread" WHERE "id" = ${row}."threadId"
+      )
+  ))
+  WHERE "id" = ${row}."threadId";
+END`,
+      isDDL: true,
+    }
+  })
+}
+
 function createTriggerStatements(
   node: any,
   context?: RewriteContext
@@ -3303,6 +3396,9 @@ function createTriggerStatements(
   const fnName = functionName({ funcname: node.funcname })
   const fn = fnName ? context?.triggerFunctions?.get(fnName) : undefined
   if (!fn) return null
+  if (fnName === 'updatethreadreplycount') {
+    return threadReplyCountTriggerStatements(node)
+  }
   if (
     findKeywordOutsideQuotes(fn.body, 'TG_OP') >= 0 ||
     findKeywordOutsideQuotes(fn.body, 'TG_ARGV') >= 0 ||
@@ -3423,13 +3519,16 @@ function rewriteParsedStatement(
   if (nodeType === 'AlterTableStmt') {
     alterMetadata = normalizeAlterTable(node)
     if (!node.cmds?.length) {
-      return alterMetadata.metadataOnlySchemaColumns.length
-        ? {
+      const statements: RewrittenStatement[] = []
+      if (alterMetadata.metadataOnlySchemaColumns.length) {
+        statements.push({
             sql: '',
             isDDL: true,
             schemaColumns: alterMetadata.metadataOnlySchemaColumns,
-          }
-        : null
+        })
+      }
+      statements.push(...alterMetadata.syntheticStatements)
+      return statements.length ? statements : null
     }
   } else if (nodeType === 'CreateStmt') {
     schemaColumns = schemaColumnsForCreateTable(node)
@@ -3472,7 +3571,10 @@ function rewriteParsedStatement(
     rewriteNode(node, context)
   }
 
-  if (nodeType === 'AlterTableStmt' && node.cmds.length > 1) {
+  if (
+    nodeType === 'AlterTableStmt' &&
+    (node.cmds.length > 1 || alterMetadata?.syntheticStatements.length)
+  ) {
     const statements: RewrittenStatement[] = []
     if (alterMetadata?.metadataOnlySchemaColumns.length) {
       statements.push({
@@ -3481,6 +3583,7 @@ function rewriteParsedStatement(
         schemaColumns: alterMetadata.metadataOnlySchemaColumns,
       })
     }
+    statements.push(...(alterMetadata?.syntheticStatements ?? []))
     statements.push(
       ...node.cmds.map((cmdNode: any) => {
         const singleStmt = {
@@ -3500,6 +3603,13 @@ function rewriteParsedStatement(
             : null),
           ...(context?.jsonParamNumbers?.size
             ? { jsonParamNumbers: new Set(context.jsonParamNumbers) }
+            : null),
+          ...(context?.epochMillisParamNumbers?.size
+            ? {
+                epochMillisParamNumbers: new Set(
+                  context.epochMillisParamNumbers
+                ),
+              }
             : null),
           ...(cmdSchemaColumns?.length ? { schemaColumns: cmdSchemaColumns } : null),
           ...(skipIfColumnExists ? { skipIfColumnExists } : null),
@@ -3545,6 +3655,9 @@ function rewriteParsedStatement(
       : null),
     ...(context?.jsonParamNumbers?.size
       ? { jsonParamNumbers: new Set(context.jsonParamNumbers) }
+      : null),
+    ...(context?.epochMillisParamNumbers?.size
+      ? { epochMillisParamNumbers: new Set(context.epochMillisParamNumbers) }
       : null),
     ...(schemaColumns.length ? { schemaColumns } : null),
     ...(schemaMetadataChanges.length ? { schemaMetadataChanges } : null),
@@ -5324,6 +5437,7 @@ export class DoBackend {
       if (rewritten && !rewritten.startsWith('--')) {
         const arrayParamNumbers = new Set<number>()
         const jsonParamNumbers = new Set<number>(inferredJsonParamNumbers)
+        const epochMillisParamNumbers = new Set<number>()
         const schemaColumns: SchemaColumnMetadata[] = []
         const schemaMetadataChanges: SchemaMetadataChange[] = []
         const publicationChanges: PublicationChange[] = []
@@ -5333,6 +5447,9 @@ export class DoBackend {
           }
           for (const number of statement.jsonParamNumbers ?? []) {
             jsonParamNumbers.add(number)
+          }
+          for (const number of statement.epochMillisParamNumbers ?? []) {
+            epochMillisParamNumbers.add(number)
           }
           schemaColumns.push(...(statement.schemaColumns ?? []))
           schemaMetadataChanges.push(...(statement.schemaMetadataChanges ?? []))
@@ -5346,6 +5463,7 @@ export class DoBackend {
           ...(arrayParamNumbers.size ? { arrayParamNumbers } : null),
           ...(jsonParamNumbers.size ? { jsonParamNumbers } : null),
           ...(timestampParamNumbers.size ? { timestampParamNumbers } : null),
+          ...(epochMillisParamNumbers.size ? { epochMillisParamNumbers } : null),
           ...(booleanParamNumbers.size ? { booleanParamNumbers } : null),
           ...(schemaColumns.length ? { schemaColumns } : null),
           ...(schemaMetadataChanges.length ? { schemaMetadataChanges } : null),
@@ -5361,6 +5479,17 @@ export class DoBackend {
             ? { jsonParamNumbers: inferredJsonParamNumbers }
             : null),
           ...(timestampParamNumbers.size ? { timestampParamNumbers } : null),
+          ...(rewrittenStatements.some(
+            (statement) => statement.epochMillisParamNumbers?.size
+          )
+            ? {
+                epochMillisParamNumbers: new Set(
+                  rewrittenStatements.flatMap((statement) => [
+                    ...(statement.epochMillisParamNumbers ?? []),
+                  ])
+                ),
+              }
+            : null),
           ...(booleanParamNumbers.size ? { booleanParamNumbers } : null),
           schemaColumns: rewrittenStatements.flatMap(
             (statement) => statement.schemaColumns ?? []
@@ -5442,6 +5571,7 @@ export class DoBackend {
           portal.arrayParamNumbers,
           portal.jsonParamNumbers,
           portal.timestampParamNumbers,
+          portal.epochMillisParamNumbers,
           portal.booleanParamNumbers
         )
         const result = await this.handleCatalogQuery(catalogSql)
@@ -5465,6 +5595,7 @@ export class DoBackend {
         portal.arrayParamNumbers,
         portal.jsonParamNumbers,
         portal.timestampParamNumbers,
+        portal.epochMillisParamNumbers,
         portal.booleanParamNumbers
       )
       const result = await this.doExecResult(
@@ -5622,18 +5753,23 @@ export class DoBackend {
         statements,
         inferredJsonParamNumbers,
         timestampParamNumbers,
+        new Set<number>(),
         booleanParamNumbers
       )
       return { rows: (await this.handleCatalogQuery(catalogSql)).rows as T[] }
     }
     const arrayParamNumbers = new Set<number>()
     const jsonParamNumbers = new Set<number>(inferredJsonParamNumbers)
+    const epochMillisParamNumbers = new Set<number>()
     for (const statement of statements) {
       for (const number of statement.arrayParamNumbers ?? []) {
         arrayParamNumbers.add(number)
       }
       for (const number of statement.jsonParamNumbers ?? []) {
         jsonParamNumbers.add(number)
+      }
+      for (const number of statement.epochMillisParamNumbers ?? []) {
+        epochMillisParamNumbers.add(number)
       }
     }
     const bound = this.sqliteBoundSQL(
@@ -5642,6 +5778,7 @@ export class DoBackend {
       arrayParamNumbers,
       jsonParamNumbers,
       timestampParamNumbers,
+      epochMillisParamNumbers,
       booleanParamNumbers
     )
     const statement = statements.length === 1 ? statements[0] : undefined
@@ -5654,6 +5791,7 @@ export class DoBackend {
           arrayParamNumbers,
           jsonParamNumbers,
           timestampParamNumbers,
+          epochMillisParamNumbers,
           booleanParamNumbers
         )
       : bound
@@ -5683,11 +5821,13 @@ export class DoBackend {
 
     const arrayParamNumbers = new Set<number>()
     const jsonParamNumbers = new Set<number>()
+    const epochMillisParamNumbers = new Set<number>()
     const statements = rewriteSQLStatements(sql, {
       skippedFunctionNames: this.skippedFunctionNames,
       triggerFunctions: this.triggerFunctions,
       arrayParamNumbers,
       jsonParamNumbers,
+      epochMillisParamNumbers,
     })
     if (this.canCacheRewrite(statements)) {
       this.rememberRewrite(key, statements)
@@ -5723,11 +5863,13 @@ export class DoBackend {
   private rewriteSQL(sql: string): string {
     const arrayParamNumbers = new Set<number>()
     const jsonParamNumbers = new Set<number>()
+    const epochMillisParamNumbers = new Set<number>()
     return rewriteSQL(sql, {
       skippedFunctionNames: this.skippedFunctionNames,
       triggerFunctions: this.triggerFunctions,
       arrayParamNumbers,
       jsonParamNumbers,
+      epochMillisParamNumbers,
     })
   }
 
@@ -5737,6 +5879,7 @@ export class DoBackend {
     statements: RewrittenStatement[],
     inferredJsonParamNumbers = new Set<number>(),
     timestampParamNumbers = new Set<number>(),
+    epochMillisParamNumbers = new Set<number>(),
     booleanParamNumbers = new Set<number>()
   ): string {
     if (!params?.length) return sql
@@ -5749,6 +5892,9 @@ export class DoBackend {
       for (const number of statement.jsonParamNumbers ?? []) {
         jsonParamNumbers.add(number)
       }
+      for (const number of statement.epochMillisParamNumbers ?? []) {
+        epochMillisParamNumbers.add(number)
+      }
     }
     return this.inlineParams(
       sql,
@@ -5756,6 +5902,7 @@ export class DoBackend {
       arrayParamNumbers,
       jsonParamNumbers,
       timestampParamNumbers,
+      epochMillisParamNumbers,
       booleanParamNumbers
     )
   }
@@ -6626,10 +6773,16 @@ export class DoBackend {
       pgArrayAsJson?: boolean
       pgJsonAsJson?: boolean
       pgTimestampAsText?: boolean
+      pgEpochMillisAsNumber?: boolean
       pgBooleanAsInteger?: boolean
     }
   ): string {
     if (val === null || val === undefined) return 'NULL'
+    if (options?.pgEpochMillisAsNumber) {
+      const millis = epochMillisParamValue(val)
+      if (typeof millis === 'number') return String(millis)
+      val = millis
+    }
     if (options?.pgTimestampAsText)
       return `'${postgresTimestampText(val).replace(/'/g, "''")}'`
     if (options?.pgJsonAsJson) {
@@ -6667,6 +6820,7 @@ export class DoBackend {
     arrayParamNumbers = new Set<number>(),
     jsonParamNumbers = new Set<number>(),
     timestampParamNumbers = new Set<number>(),
+    epochMillisParamNumbers = new Set<number>(),
     booleanParamNumbers = new Set<number>()
   ): string {
     let out = ''
@@ -6747,6 +6901,7 @@ export class DoBackend {
                 pgArrayAsJson: arrayParamNumbers.has(number),
                 pgJsonAsJson: jsonParamNumbers.has(number),
                 pgTimestampAsText: timestampParamNumbers.has(number),
+                pgEpochMillisAsNumber: epochMillisParamNumbers.has(number),
                 pgBooleanAsInteger: booleanParamNumbers.has(number),
               })
             : sql.slice(i, end)
@@ -6766,10 +6921,12 @@ export class DoBackend {
       pgArrayAsJson?: boolean
       pgJsonAsJson?: boolean
       pgTimestampAsText?: boolean
+      pgEpochMillisAsNumber?: boolean
       pgBooleanAsInteger?: boolean
     }
   ): unknown {
     if (value === null || value === undefined) return null
+    if (options?.pgEpochMillisAsNumber) return epochMillisParamValue(value)
     if (options?.pgTimestampAsText) return postgresTimestampText(value)
     if (options?.pgJsonAsJson) return sqliteJsonParamValue(value)
     if (typeof value === 'boolean') return value ? 1 : 0
@@ -6794,6 +6951,7 @@ export class DoBackend {
     arrayParamNumbers = new Set<number>(),
     jsonParamNumbers = new Set<number>(),
     timestampParamNumbers = new Set<number>(),
+    epochMillisParamNumbers = new Set<number>(),
     booleanParamNumbers = new Set<number>()
   ): { sql: string; params: any[] } {
     if (!params?.length) return { sql, params: [] }
@@ -6877,6 +7035,7 @@ export class DoBackend {
               pgArrayAsJson: arrayParamNumbers.has(number),
               pgJsonAsJson: jsonParamNumbers.has(number),
               pgTimestampAsText: timestampParamNumbers.has(number),
+              pgEpochMillisAsNumber: epochMillisParamNumbers.has(number),
               pgBooleanAsInteger: booleanParamNumbers.has(number),
             })
           )

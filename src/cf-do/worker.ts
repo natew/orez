@@ -517,6 +517,7 @@ export class ZeroDO extends DurableObject {
         this.appendTrackedChange(track.tableName, 'DELETE', null, trackedRow)
       else this.appendTrackedChange(track.tableName, track.operation, trackedRow, null)
     }
+    this.appendDerivedTrackedChanges(track, rows)
 
     return {
       rows: track.returnRows ? rows : [],
@@ -531,6 +532,68 @@ export class ZeroDO extends DurableObject {
       for (const k of Object.keys(row)) obj[k] = row[k]
       return obj
     })
+  }
+
+  private appendDerivedTrackedChanges(track: SqlTrack, rows: Record<string, unknown>[]) {
+    if (!rows.length) return
+    const table = track.tableName.replace(/^public\./, '')
+    if (table !== 'message') return
+
+    const channelIds = new Set<string>()
+    const threadIds = new Set<string>()
+    for (const row of rows) {
+      const channelId = String(row.channelId || '')
+      const threadId = String(row.threadId || '')
+      if (this.messageRowUpdatesChannelLatestOrder(row) && channelId) {
+        channelIds.add(channelId)
+      }
+      if (this.messageRowUpdatesThreadReplyCount(row) && threadId) {
+        threadIds.add(threadId)
+      }
+    }
+
+    this.appendRowsAsUpdates('public.channel', 'channel', 'id', channelIds)
+    this.appendRowsAsUpdates('public.thread', 'thread', 'id', threadIds)
+  }
+
+  private appendRowsAsUpdates(
+    publicTableName: string,
+    sqliteTableName: string,
+    keyColumn: string,
+    keys: Set<string>
+  ) {
+    if (keys.size === 0) return
+    const values = [...keys]
+    const placeholders = values.map(() => '?').join(', ')
+    const rows = this.sql
+      .exec(
+        `SELECT * FROM ${quoteIdent(sqliteTableName)} WHERE ${quoteIdent(keyColumn)} IN (${placeholders})`,
+        ...values
+      )
+      .toArray()
+    for (const row of rows) {
+      this.appendTrackedChange(publicTableName, 'UPDATE', row, null)
+    }
+  }
+
+  private messageRowUpdatesChannelLatestOrder(row: Record<string, unknown>): boolean {
+    return (
+      row.type !== 'draft' &&
+      row.type !== 'hidden' &&
+      !row.deleted &&
+      !row.isThreadReply &&
+      row.order !== null &&
+      row.order !== undefined
+    )
+  }
+
+  private messageRowUpdatesThreadReplyCount(row: Record<string, unknown>): boolean {
+    return (
+      !!row.threadId &&
+      row.type !== 'draft' &&
+      !row.deleted &&
+      row.isThreadReply
+    )
   }
 
   // ── CRUD operations ──────────────────────────────────────────────────────

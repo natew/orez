@@ -1969,8 +1969,22 @@ describe('DoBackend', () => {
 
     const insert = compactSQL(http.sqls.at(-1) || '')
     expect(insert).toContain(`datetime(? / 1000.0, 'unixepoch')`)
+    expect(http.params.at(-1)).toEqual([123000])
     expect(insert).not.toContain('to_timestamp')
     expect(insert).not.toContain('AT TIME ZONE')
+
+    await backend.query(
+      `
+        INSERT INTO "userPublic" ("joinedAt")
+        VALUES (to_timestamp($1::text::numeric / 1000.0) AT TIME ZONE 'UTC')
+      `,
+      ['2026-05-25T22:07:53.949Z']
+    )
+
+    expect(compactSQL(http.sqls.at(-1) || '')).toContain(
+      `datetime(? / 1000.0, 'unixepoch')`
+    )
+    expect(http.params.at(-1)).toEqual([1779746873949])
   })
 
   test('respects explicit text casts on JSON result expressions', async () => {
@@ -2823,6 +2837,43 @@ describe('DoBackend', () => {
     )
     expect(sent).not.toContain('NULLS FIRST')
     expect(sent).not.toContain('"chat_0/cvr".')
+  })
+
+  test('materializes ALTER TABLE ADD UNIQUE CONSTRAINT as a SQLite index', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'alter-unique-constraint-test')
+    await backend.waitReady
+
+    await backend.exec(
+      'ALTER TABLE "userState" ADD CONSTRAINT "userState_userId_unique" UNIQUE("userId");'
+    )
+
+    const sent = compactSQL(
+      sqlContaining(
+        http.sqls,
+        'CREATE UNIQUE INDEX IF NOT EXISTS "userState_userId_unique"'
+      )
+    )
+    expect(sent).toContain(
+      'CREATE UNIQUE INDEX IF NOT EXISTS "userState_userId_unique" ON "userState" ("userId")'
+    )
+    expect(sent).not.toContain('ALTER TABLE')
+  })
+
+  test('materializes ALTER TABLE DROP CONSTRAINT as a SQLite index drop', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'drop-constraint-test')
+    await backend.waitReady
+
+    await backend.exec(
+      'ALTER TABLE "serverApp" DROP CONSTRAINT "serverApp_appId_pk";'
+    )
+
+    const sent = compactSQL(
+      sqlContaining(http.sqls, 'DROP INDEX IF EXISTS "serverApp_appId_pk"')
+    )
+    expect(sent).toBe('DROP INDEX IF EXISTS "serverApp_appId_pk"')
+    expect(sent).not.toContain('ALTER TABLE')
   })
 
   test('normalizes unsupported ALTER TABLE ADD COLUMN constraints', async () => {
@@ -3745,6 +3796,39 @@ describe('DoBackend', () => {
       'UPDATE "chat_permissions" SET "hash" = new.permissions WHERE rowid = NEW.rowid'
     )
     expect(sent).not.toContain('md5(')
+  })
+
+  test('translates chat thread reply count TG_OP triggers', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'sqlite-thread-reply-trigger-test')
+    await backend.waitReady
+
+    await backend.exec(`
+      CREATE OR REPLACE FUNCTION "updateThreadReplyCount"()
+      RETURNS trigger AS $$
+      BEGIN
+        IF TG_OP = 'INSERT' THEN
+          RETURN NEW;
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      CREATE TRIGGER "threadReplyCountInsertTrigger"
+        AFTER INSERT ON "message"
+        FOR EACH ROW
+        WHEN (NEW."threadId" IS NOT NULL)
+        EXECUTE FUNCTION "updateThreadReplyCount"();
+    `)
+
+    const sent = http.sqls.map(compactSQL).join('\n')
+    expect(sent).toContain(
+      'CREATE TRIGGER IF NOT EXISTS "threadReplyCountInsertTrigger" AFTER INSERT ON "message"'
+    )
+    expect(sent).toContain('UPDATE "thread" SET "replyCount" = min(11')
+    expect(sent).toContain('WHERE "threadId" = NEW."threadId"')
+    expect(sent).toContain('AND "type" IS DISTINCT FROM')
+    expect(sent).not.toContain('TG_OP')
   })
 
   test('skips unsupported plpgsql trigger statements instead of throwing', async () => {
