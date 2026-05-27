@@ -79,6 +79,15 @@ function resolveNodeBinary(): string {
     return explicitNode
   }
 
+  const miseResult = spawnSync('mise', ['which', 'node'], {
+    encoding: 'utf8',
+    env: process.env,
+  })
+  const miseCandidate = miseResult.stdout?.trim()
+  if (miseResult.status === 0 && miseCandidate && existsSync(miseCandidate)) {
+    return miseCandidate
+  }
+
   if (process.execPath.endsWith('/node')) {
     return process.execPath
   }
