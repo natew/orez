@@ -81,3 +81,13 @@ same zero-cache process and durable SQLite state.
 If a future change needs more Postgres behavior, implement it in
 `DoBackend`/the SQL translator or the DO SQL backend. Do not put PGlite back in
 the request path.
+
+## Running the chat e2e harness against this backend
+
+See `src/cf-do/CHAT_E2E.md`. The DO path is exercised end-to-end by chat's
+`--lite` mode harness, which has a hard 60-second `waitForPort(zero)` budget
+during boot. Three amplification bugs in `DoBackend` were fixed
+2026-05-26 (snapshot fan-out, metadata persist per-row HTTP, metadata persist
+per-statement-in-tx); boot now completes in ~13s on a developer laptop. If
+boot regresses past the budget again, re-capture the /exec distribution as
+described in `CHAT_E2E.md` §3 before guessing at fixes.

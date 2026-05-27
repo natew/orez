@@ -4678,6 +4678,15 @@ export class DoBackend {
   private txSnapshot: TransactionMetadataSnapshot | null = null
   private txDataSnapshots = new Map<string, string | null>()
   private txSnapshotCounter = 0
+  // once the change-feed tables (_zero_changes, _zero_change_state, *watermark*)
+  // are snapshotted for this tx, every subsequent tracked write would otherwise
+  // re-run a sqlite_master scan + 3 table-exists probes. cache the "done" flag
+  // for the duration of the tx — chat seed loops do thousands of tracked
+  // writes per migration and this lookup dominated boot.
+  private txChangeTablesSnapshotted = false
+  // pending persist while inside a transaction. flushed on commit so we don't
+  // round-trip to durable storage after every DDL statement in a migration.
+  private txMetadataDirty = false
 
   constructor(
     doUrl: string,
@@ -4815,20 +4824,29 @@ export class DoBackend {
   private async persistDurableMetadata(): Promise<void> {
     try {
       await this.ensureMetadataTable()
+      const rows: Array<[string, string, string, string]> = []
       for (const [tableName, columns] of this.schemaMetadata) {
         for (const [columnName, metadata] of columns) {
-          await this.doExecResult(
-            `INSERT OR REPLACE INTO ${quoteIdentifier(METADATA_TABLE)}
-              (kind, key, subkey, value) VALUES (?, ?, ?, ?)`,
-            ['schema-column', tableName, columnName, JSON.stringify(metadata)]
-          )
+          rows.push(['schema-column', tableName, columnName, JSON.stringify(metadata)])
         }
       }
       for (const [name, publication] of this.publications) {
+        rows.push(['publication', name, '', this.publicationToJSON(publication)])
+      }
+      if (rows.length === 0) return
+      // single multi-row INSERT OR REPLACE per chunk. previously this was one
+      // HTTP roundtrip per row, which dominated boot when migrations touched
+      // many columns. SQLite caps host params near 999; 4 cols × 200 rows
+      // leaves comfortable headroom.
+      const CHUNK = 200
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const chunk = rows.slice(i, i + CHUNK)
+        const placeholders = chunk.map(() => '(?, ?, ?, ?)').join(', ')
+        const params: string[] = []
+        for (const row of chunk) params.push(...row)
         await this.doExecResult(
-          `INSERT OR REPLACE INTO ${quoteIdentifier(METADATA_TABLE)}
-            (kind, key, subkey, value) VALUES (?, ?, '', ?)`,
-          ['publication', name, this.publicationToJSON(publication)]
+          `INSERT OR REPLACE INTO ${quoteIdentifier(METADATA_TABLE)} (kind, key, subkey, value) VALUES ${placeholders}`,
+          params
         )
       }
     } catch {}
@@ -4924,6 +4942,8 @@ export class DoBackend {
     this.txSnapshot = null
     this.txDataSnapshots.clear()
     this.txSnapshotCounter = 0
+    this.txChangeTablesSnapshotted = false
+    this.txMetadataDirty = false
   }
 
   private newTransactionID(): string {
@@ -4945,7 +4965,9 @@ export class DoBackend {
       return
     }
     await this.dropTransactionSnapshots()
+    const shouldPersist = this.txMetadataDirty
     this.clearTransactionState()
+    if (shouldPersist) await this.persistDurableMetadata()
   }
 
   private async rollbackTransaction(): Promise<void> {
@@ -5157,7 +5179,13 @@ export class DoBackend {
         changed = true
       }
     }
-    if (changed) await this.persistDurableMetadata()
+    if (changed) {
+      // inside an explicit tx we batch the persist to commit time. chat's
+      // migrations open one tx and run dozens of DDL statements; persisting
+      // after every one was the hot path.
+      if (this.inTransaction) this.txMetadataDirty = true
+      else await this.persistDurableMetadata()
+    }
   }
 
   private applySchemaMetadataChange(change: SchemaMetadataChange): void {
@@ -5815,7 +5843,11 @@ export class DoBackend {
   private async snapshotTransactionTable(table: string): Promise<void> {
     if (!this.inTransaction || this.txDataSnapshots.has(table)) return
     if (table.startsWith('_orez_tx_')) return
-    if (!(await this.tableExistsInDo(table))) {
+    // skip the sqlite_master probe when we already have schema metadata for
+    // the table — registration only happens after a successful CREATE, so its
+    // presence is proof the table exists. saves one /exec on the first write
+    // to each table per tx, which on chat's hot mutation paths matters.
+    if (!this.schemaMetadata.has(table) && !(await this.tableExistsInDo(table))) {
       this.txDataSnapshots.set(table, null)
       return
     }
@@ -5827,6 +5859,8 @@ export class DoBackend {
   }
 
   private async snapshotTransactionChangeTables(): Promise<void> {
+    if (this.txChangeTablesSnapshotted) return
+    this.txChangeTablesSnapshotted = true
     await this.snapshotTransactionTable('_zero_changes')
     await this.snapshotTransactionTable('_zero_change_state')
     const result = await this.doExecResult(
