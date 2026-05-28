@@ -66,6 +66,8 @@ import {
   type SqliteModeConfig,
 } from './sqlite-mode/index.js'
 
+import { disableZeroLitestreamRestore } from './zero-litestream-patch.js'
+
 import type { ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
 
@@ -1016,6 +1018,10 @@ async function startZeroCache(
   if (!zeroEntry) {
     throw new Error('zero-cache not found. install @rocicorp/zero')
   }
+
+  // orez owns the replica on disk and has no litestream backup; stop zero 1.5's
+  // change-streamer from erroring + resyncing on every restart (see the patch).
+  disableZeroLitestreamRestore()
 
   if (sqliteMode === 'native') {
     log.debug.orez('wasm sqlite disabled, using native @rocicorp/zero-sqlite3')

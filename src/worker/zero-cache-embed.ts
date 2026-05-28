@@ -25,6 +25,8 @@
 import EventEmitter from 'node:events'
 import { resolve } from 'node:path'
 
+import { disableZeroLitestreamRestore } from '../zero-litestream-patch.js'
+
 import type { PGlite } from '@electric-sql/pglite'
 
 export interface ZeroCacheEmbedOptions {
@@ -169,6 +171,11 @@ export async function startZeroCacheEmbed(
       return Reflect.get(target, prop, receiver)
     },
   })
+
+  // orez owns the replica on disk and has no litestream backup; stop zero 1.5's
+  // change-streamer from erroring + resyncing on every restart. must run before
+  // the dynamic import below pulls in the litestream commands module.
+  disableZeroLitestreamRestore()
 
   // import and start zero-cache's runner
   let runWorkerFn: (parent: unknown, env: Record<string, string>) => Promise<void>
