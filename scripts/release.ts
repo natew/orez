@@ -237,13 +237,12 @@ const sqlitePkgPath = resolve(sqliteWasmDir, 'package.json')
 const sqliteDistExists = existsSync(resolve(sqliteWasmDir, 'dist', 'sqlite3.wasm'))
 if (existsSync(sqlitePkgPath) && sqliteDistExists) {
   const sqlitePkg = JSON.parse(readFileSync(sqlitePkgPath, 'utf-8'))
-  const sqliteNext = bumpVersion(sqlitePkg.version)
   packages.push({
     dir: sqliteWasmDir,
     originalVersion: sqlitePkg.version,
     pkgPath: sqlitePkgPath,
     pkg: sqlitePkg,
-    next: sqliteNext,
+    next: orezNext,
   })
 } else if (existsSync(sqlitePkgPath) && !sqliteDistExists) {
   console.info('skipping bedrock-sqlite (no wasm dist built)')
