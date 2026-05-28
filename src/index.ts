@@ -65,7 +65,6 @@ import {
   type SqliteMode,
   type SqliteModeConfig,
 } from './sqlite-mode/index.js'
-
 import { disableZeroLitestreamRestore } from './zero-litestream-patch.js'
 
 import type { ZeroLiteConfig } from './config.js'
