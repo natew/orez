@@ -161,7 +161,7 @@ const ZERO_START_PARAMS = [
   '-c',
   'maintenance_work_mem=512kB',
   '-c',
-  'temp_buffers=400kB',
+  'temp_buffers=800kB',
   '-c',
   'max_connections=1',
 ]

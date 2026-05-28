@@ -21,7 +21,7 @@ import {
 
 import type { PGlite } from '@electric-sql/pglite'
 
-const SYNC_PROTOCOL_VERSION = 49
+const SYNC_PROTOCOL_VERSION = 50
 
 function encodeSecProtocols(
   initConnectionMessage: unknown,

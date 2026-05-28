@@ -31,7 +31,7 @@ import { installChangeTracking } from '../../src/replication/change-tracker.js'
 
 import type { PGlite } from '@electric-sql/pglite'
 
-const SYNC_PROTOCOL_VERSION = 49
+const SYNC_PROTOCOL_VERSION = 50
 const useSingleDb = process.argv.includes('--single-db')
 const forceNative = process.env.FORCE_NATIVE === '1'
 

@@ -30,7 +30,7 @@ import { startZeroCacheEmbed, type ZeroCacheEmbed } from './zero-cache-embed.js'
 
 import type { PGlite } from '@electric-sql/pglite'
 
-const SYNC_PROTOCOL_VERSION = 49
+const SYNC_PROTOCOL_VERSION = 50
 
 function encodeSecProtocols(
   initConnectionMessage: unknown,
@@ -38,6 +38,44 @@ function encodeSecProtocols(
 ): string {
   const payload = JSON.stringify({ initConnectionMessage, authToken })
   return encodeURIComponent(Buffer.from(payload, 'utf-8').toString('base64'))
+}
+
+class Queue<T> {
+  private items: T[] = []
+  private waiters: Array<{
+    resolve: (value: T) => void
+    timer?: ReturnType<typeof setTimeout>
+  }> = []
+
+  enqueue(item: T) {
+    const waiter = this.waiters.shift()
+    if (waiter) {
+      if (waiter.timer) clearTimeout(waiter.timer)
+      waiter.resolve(item)
+    } else {
+      this.items.push(item)
+    }
+  }
+
+  dequeue(fallback?: T, timeoutMs = 10000): Promise<T> {
+    if (this.items.length > 0) {
+      return Promise.resolve(this.items.shift()!)
+    }
+    return new Promise<T>((resolve) => {
+      const waiter = { resolve } as {
+        resolve: (value: T) => void
+        timer?: ReturnType<typeof setTimeout>
+      }
+      if (fallback !== undefined) {
+        waiter.timer = setTimeout(() => {
+          const index = this.waiters.indexOf(waiter)
+          if (index >= 0) this.waiters.splice(index, 1)
+          resolve(fallback)
+        }, timeoutMs)
+      }
+      this.waiters.push(waiter)
+    })
+  }
 }
 
 describe('zero-cache embed integration', { timeout: 120000 }, () => {
@@ -207,48 +245,36 @@ describe('zero-cache embed integration', { timeout: 120000 }, () => {
   })
 
   test('live replication: insert triggers poke', async () => {
-    // insert data
+    const downstream = new Queue<unknown>()
+    const ws = connectAndSubscribe(zeroPort, downstream)
+
+    await drainInitialPokes(downstream)
+
     await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
       'embed-row',
       'hello-embed',
       42,
     ])
 
-    // wait for replication to deliver
-    await waitForReplicationCatchup(db)
-    await new Promise((r) => setTimeout(r, 1000))
-
-    // connect and subscribe
-    const downstream: unknown[] = []
-    const ws = connectAndSubscribe(zeroPort, downstream)
-
-    // wait for poke with our data
-    const deadline = Date.now() + 30000
-    let found = false
-    while (Date.now() < deadline && !found) {
-      await new Promise((r) => setTimeout(r, 500))
-      for (const msg of downstream) {
-        if (Array.isArray(msg) && msg[0] === 'pokePart' && msg[1]?.rowsPatch) {
-          for (const patch of msg[1].rowsPatch) {
-            if (
-              patch.op === 'put' &&
-              patch.tableName === 'foo' &&
-              patch.value?.id === 'embed-row'
-            ) {
-              found = true
-              break
-            }
-          }
-        }
-      }
-    }
+    const poke = await waitForPokePart(downstream, 30000)
+    expect(poke.rowsPatch).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: 'put',
+          tableName: 'foo',
+          value: expect.objectContaining({
+            id: 'embed-row',
+            value: 'hello-embed',
+          }),
+        }),
+      ])
+    )
 
     ws.close()
-    expect(found).toBe(true)
   })
 })
 
-function connectAndSubscribe(port: number, downstream: unknown[]): WebSocket {
+function connectAndSubscribe(port: number, downstream: Queue<unknown>): WebSocket {
   const cg = `test-cg-${Date.now()}`
   const cid = `test-client-${Date.now()}`
   const secProtocol = encodeSecProtocols(
@@ -288,24 +314,43 @@ function connectAndSubscribe(port: number, downstream: unknown[]): WebSocket {
   )
 
   ws.on('message', (data) => {
-    downstream.push(JSON.parse(data.toString()))
+    downstream.enqueue(JSON.parse(data.toString()))
   })
 
   return ws
 }
 
-async function waitForReplicationCatchup(
-  pglite: PGlite,
-  timeoutMs = 15000
-): Promise<void> {
+async function drainInitialPokes(downstream: Queue<unknown>) {
+  let settled = false
+  const timeout = Date.now() + 30000
+
+  while (!settled && Date.now() < timeout) {
+    const msg = (await downstream.dequeue('timeout' as any, 3000)) as any
+    if (msg === 'timeout') {
+      settled = true
+    } else if (Array.isArray(msg) && msg[0] === 'pokeEnd') {
+      const next = (await downstream.dequeue('timeout' as any, 2000)) as any
+      if (next === 'timeout') {
+        settled = true
+      }
+    }
+  }
+}
+
+async function waitForPokePart(
+  downstream: Queue<unknown>,
+  timeoutMs = 10000
+): Promise<Record<string, any>> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const result = await pglite.query<{ count: string }>(
-      `SELECT count(*)::text as count FROM _orez._zero_changes`
-    )
-    if (Number(result.rows[0]?.count) === 0) return
-    await new Promise((r) => setTimeout(r, 100))
+    const remaining = Math.max(1000, deadline - Date.now())
+    const msg = (await downstream.dequeue('timeout' as any, remaining)) as any
+    if (msg === 'timeout') throw new Error('timed out waiting for pokePart')
+    if (Array.isArray(msg) && msg[0] === 'pokePart' && msg[1]?.rowsPatch) {
+      return msg[1]
+    }
   }
+  throw new Error('timed out waiting for pokePart')
 }
 
 async function waitForZero(port: number, timeoutMs = 30000) {

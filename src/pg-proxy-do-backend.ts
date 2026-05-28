@@ -173,6 +173,11 @@ function i32(v: number, buf = new ArrayBuffer(4)): Uint8Array {
   return new Uint8Array(buf)
 }
 
+function i64(v: bigint, buf = new ArrayBuffer(8)): Uint8Array {
+  new DataView(buf).setBigInt64(0, v)
+  return new Uint8Array(buf)
+}
+
 function int4(v: number, buf = new ArrayBuffer(4)): Uint8Array {
   new DataView(buf).setInt32(0, v)
   return new Uint8Array(buf)
@@ -910,6 +915,7 @@ interface RewrittenStatement {
   isWrite?: boolean
   writeTable?: PublicationTableRef
   changeTracking?: ChangeTrackingMetadata
+  usesPublishedSchemaFunction?: boolean
   arrayParamNumbers?: Set<number>
   jsonParamNumbers?: Set<number>
   epochMillisParamNumbers?: Set<number>
@@ -1153,7 +1159,7 @@ function rewriteColumnRefQualifier(node: any, from: string, to: string): void {
     return
   }
   const fields = node.ColumnRef?.fields
-  if (Array.isArray(fields) && stringValue(fields[0]) === from) {
+  if (Array.isArray(fields) && fields.length > 1 && stringValue(fields[0]) === from) {
     fields[0] = stringNode(to)
   }
   for (const child of Object.values(node)) {
@@ -1766,19 +1772,23 @@ function isDistinctOnClause(clause: any): boolean {
   )
 }
 
-function buildCopyOutResponse(columnCount: number): Uint8Array {
+function buildCopyOutResponse(columnCount: number, binary = false): Uint8Array {
   return msg(
     0x48,
     concat(
-      new Uint8Array([0]),
+      new Uint8Array([binary ? 1 : 0]),
       i16(columnCount),
-      ...Array.from({ length: columnCount }, () => i16(0))
+      ...Array.from({ length: columnCount }, () => i16(binary ? 1 : 0))
     )
   )
 }
 
 function buildCopyData(data: string): Uint8Array {
   return msg(0x64, textEncoder.encode(data))
+}
+
+function buildCopyDataBytes(data: Uint8Array): Uint8Array {
+  return msg(0x64, data)
 }
 
 function buildCopyDone(): Uint8Array {
@@ -1916,8 +1926,72 @@ function rewriteDistinctOnSelect(stmt: any): any {
   }
 }
 
+function flattenSelectRangeVarQualifiers(stmt: any): void {
+  const visitFromNode = (node: any) => {
+    if (!node || typeof node !== 'object') return
+    const rangeVar = node.RangeVar
+    if (rangeVar?.schemaname && rangeVar.relname) {
+      const from = rangeVar.alias?.aliasname ? null : rangeVar.relname
+      const to = flattenRangeVar(rangeVar)
+      if (from && to) rewriteColumnRefQualifier(stmt, from, to)
+      return
+    }
+    const join = node.JoinExpr
+    if (join) {
+      visitFromNode(join.larg)
+      visitFromNode(join.rarg)
+    }
+  }
+  for (const fromNode of stmt?.fromClause ?? []) visitFromNode(fromNode)
+}
+
+function selectRangeVarNames(stmt: any): Set<string> {
+  const names = new Set<string>()
+  const visitFromNode = (node: any) => {
+    if (!node || typeof node !== 'object') return
+    const rangeVar = node.RangeVar
+    if (rangeVar?.relname) {
+      names.add(rangeVar.relname)
+      if (rangeVar.alias?.aliasname) names.add(rangeVar.alias.aliasname)
+      return
+    }
+    const join = node.JoinExpr
+    if (join) {
+      visitFromNode(join.larg)
+      visitFromNode(join.rarg)
+    }
+  }
+  for (const fromNode of stmt?.fromClause ?? []) visitFromNode(fromNode)
+  return names
+}
+
+function rewritePgColumnSizeCompositeArgs(value: any, sourceNames: Set<string>): any {
+  if (!value || typeof value !== 'object') return value
+  if (Array.isArray(value))
+    return value.map((item) => rewritePgColumnSizeCompositeArgs(item, sourceNames))
+  if (value.FuncCall && functionName(value.FuncCall) === 'pg_column_size') {
+    const arg = value.FuncCall.args?.[0]
+    const fields = arg?.ColumnRef?.fields
+    if (Array.isArray(fields) && fields.length === 1) {
+      const name = stringValue(fields[0])
+      if (name && sourceNames.has(name)) return intConst(0)
+    } else if (Array.isArray(fields) && fields.length === 2) {
+      const schema = stringValue(fields[0])
+      const table = stringValue(fields[1])
+      if (schema && table && sourceNames.has(flattenSchemaName(schema, table)))
+        return intConst(0)
+    }
+  }
+  for (const [key, child] of Object.entries(value)) {
+    value[key] = rewritePgColumnSizeCompositeArgs(child, sourceNames)
+  }
+  return value
+}
+
 function normalizeSelectStmt(stmt: any): any {
   const normalized = rewriteDistinctOnSelect(stmt)
+  flattenSelectRangeVarQualifiers(normalized)
+  rewritePgColumnSizeCompositeArgs(normalized, selectRangeVarNames(normalized))
   rewriteRowToJsonSelect(normalized)
   delete normalized.lockingClause
   return normalized
@@ -2837,10 +2911,23 @@ function rewriteSkippedFunctionInvocationSelect(
 
   const name = functionName(funcCall)
   if (!name || !skippedFunctionNames.has(name)) return false
+  if (name === 'schema_specs') return false
 
   target.name ??= functionDisplayName(funcCall) ?? name
   target.val = nullConst()
   return true
+}
+
+function replaceSchemaSpecsFunctionCalls(sql: string): { sql: string; count: number } {
+  let count = 0
+  const replaced = sql.replace(
+    /(?:(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*)?schema_specs\s*\(\s*\)/gi,
+    () => {
+      count++
+      return '?'
+    }
+  )
+  return { sql: replaced, count }
 }
 
 function deparseStatement(version: number, stmt: any): string {
@@ -3497,7 +3584,10 @@ function rewriteParsedStatement(
     for (const object of node.objects ?? []) {
       const items = object.List?.items ?? []
       const name = stringValue(items[items.length - 1])
-      if (name) context?.triggerFunctions?.delete(name.toLowerCase())
+      if (name) {
+        context?.skippedFunctionNames?.delete(name.toLowerCase())
+        context?.triggerFunctions?.delete(name.toLowerCase())
+      }
     }
     return null
   }
@@ -3642,12 +3732,16 @@ function rewriteParsedStatement(
     nodeType === 'RenameStmt'
   const isWrite =
     nodeType === 'DeleteStmt' || nodeType === 'InsertStmt' || nodeType === 'UpdateStmt'
+  const usesPublishedSchemaFunction =
+    context?.skippedFunctionNames?.has('schema_specs') &&
+    containsFuncCall(stmt, 'schema_specs')
   return {
     sql: rewritten,
     ...(isDDL ? { isDDL } : null),
     ...(isWrite ? { isWrite } : null),
     ...(writeTable ? { writeTable } : null),
     ...(changeTracking ? { changeTracking } : null),
+    ...(usesPublishedSchemaFunction ? { usesPublishedSchemaFunction } : null),
     ...(context?.arrayParamNumbers?.size
       ? { arrayParamNumbers: new Set(context.arrayParamNumbers) }
       : null),
@@ -3814,18 +3908,28 @@ function commandTagForSQL(sql: string): string {
   }
 }
 
-function copySelectSQL(sql: string): string | null {
+function copySelectSQL(sql: string): { sql: string; binary: boolean } | null {
   try {
     const parsed = parseSync(stripTrailingSemicolon(sql.trim()))
     if (parsed.stmts.length !== 1) return null
     const copy = parsed.stmts[0]?.stmt?.CopyStmt
     if (!copy?.query?.SelectStmt) return null
-    return stripTrailingSemicolon(
-      deparseSync({
-        version: parsed.version,
-        stmts: [{ stmt: { SelectStmt: copy.query.SelectStmt } }],
-      }).trim()
-    )
+    const binary = (copy.options ?? []).some((option: any) => {
+      const def = option.DefElem
+      return (
+        def?.defname?.toLowerCase?.() === 'format' &&
+        stringValue(def.arg)?.toLowerCase() === 'binary'
+      )
+    })
+    return {
+      sql: stripTrailingSemicolon(
+        deparseSync({
+          version: parsed.version,
+          stmts: [{ stmt: { SelectStmt: copy.query.SelectStmt } }],
+        }).trim()
+      ),
+      binary,
+    }
   } catch {
     return null
   }
@@ -4947,9 +5051,10 @@ export class DoBackend {
       if (rows.length === 0) return
       // single multi-row INSERT OR REPLACE per chunk. previously this was one
       // HTTP roundtrip per row, which dominated boot when migrations touched
-      // many columns. SQLite caps host params near 999; 4 cols × 200 rows
-      // leaves comfortable headroom.
-      const CHUNK = 200
+      // many columns. Cloudflare DO SQLite has a lower host-param cap than
+      // stock SQLite; 4 cols × 20 rows keeps metadata persistence comfortably
+      // below that limit.
+      const CHUNK = 20
       for (let i = 0; i < rows.length; i += CHUNK) {
         const chunk = rows.slice(i, i + CHUNK)
         const placeholders = chunk.map(() => '(?, ?, ?, ?)').join(', ')
@@ -5227,9 +5332,9 @@ export class DoBackend {
 
     const copySelect = copySelectSQL(sql)
     if (copySelect) {
-      const rewrittenCopySelect = this.rewriteSQL(copySelect)
+      const rewrittenCopySelect = this.rewriteSQL(copySelect.sql)
       const result = await this.doExecResult(rewrittenCopySelect)
-      return this.buildCopyResponse(result, copySelect)
+      return this.buildCopyResponse(result, copySelect.sql, copySelect.binary)
     }
 
     // Prepare query
@@ -5416,6 +5521,30 @@ export class DoBackend {
     return result
   }
 
+  private async currentPublishedSchema(publications = [...this.publications.keys()]) {
+    const infos = await this.publicationTableInfos(publications)
+    return {
+      tables: infos.map((info) => this.publicationTableSpec(info, publications)),
+      indexes: infos.flatMap((info) => info.indexes),
+    }
+  }
+
+  private async materializePublishedSchemaFunctions(
+    sql: string,
+    statement?: RewrittenStatement,
+    params: any[] = []
+  ): Promise<{ sql: string; params: any[] }> {
+    if (!statement?.usesPublishedSchemaFunction) return { sql, params }
+    const replaced = replaceSchemaSpecsFunctionCalls(sql)
+    if (replaced.count === 0) return { sql, params }
+    const schema = await this.currentPublishedSchema()
+    const value = JSON.stringify(schema)
+    return {
+      sql: replaced.sql,
+      params: [...params, ...Array.from({ length: replaced.count }, () => value)],
+    }
+  }
+
   // ── Extended protocol handlers ──────────────────────────────────────────
 
   private handleParse(data: Uint8Array): Uint8Array {
@@ -5586,9 +5715,8 @@ export class DoBackend {
           : undefined
       if (statement) await this.snapshotTransactionWrite(statement)
       const tracking = statement ? this.trackingForStatement(statement) : undefined
-      const execSql = tracking?.returningSQL ?? sql
       const bound = this.sqliteBoundSQL(
-        execSql,
+        tracking?.returningSQL ?? sql,
         portal.params,
         portal.arrayParamNumbers,
         portal.jsonParamNumbers,
@@ -5596,9 +5724,14 @@ export class DoBackend {
         portal.epochMillisParamNumbers,
         portal.booleanParamNumbers
       )
-      const result = await this.doExecResult(
+      const exec = await this.materializePublishedSchemaFunctions(
         bound.sql,
-        bound.params,
+        statement,
+        bound.params
+      )
+      const result = await this.doExecResult(
+        exec.sql,
+        exec.params,
         tracking ? this.trackingRequest(tracking) : undefined
       )
       if (portal.schemaColumns?.length) {
@@ -5692,6 +5825,12 @@ export class DoBackend {
     }
     if (isCatalogQuery(rewritten)) return (await this.handleCatalogQuery(rewritten)).rows
     const statement = statements.length === 1 ? statements[0] : undefined
+    if (statements.some((item) => item.usesPublishedSchemaFunction)) {
+      const result = await this.executeRewrittenStatements(statements)
+      await this.applyStatementMetadata(statements)
+      const tracking = statement ? this.trackingForStatement(statement) : undefined
+      return this.visibleResultForTracking(result, tracking).rows
+    }
     if (statement) await this.snapshotTransactionWrite(statement)
     const tracking = statement ? this.trackingForStatement(statement) : undefined
     const result = await this.doExecResult(
@@ -5793,9 +5932,14 @@ export class DoBackend {
           booleanParamNumbers
         )
       : bound
-    const result = await this.doExecResult(
+    const exec = await this.materializePublishedSchemaFunctions(
       execBound.sql,
-      execBound.params,
+      statement,
+      execBound.params
+    )
+    const result = await this.doExecResult(
+      exec.sql,
+      exec.params,
       tracking ? this.trackingRequest(tracking) : undefined
     )
     await this.applyStatementMetadata(statements)
@@ -5842,6 +5986,7 @@ export class DoBackend {
         (statement) =>
           statement.sql.trim() &&
           !statement.isDDL &&
+          !statement.usesPublishedSchemaFunction &&
           !statement.schemaColumns?.length &&
           !statement.schemaMetadataChanges?.length &&
           !statement.publicationChanges?.length
@@ -6102,9 +6247,13 @@ export class DoBackend {
     if (await this.shouldSkipStatement(statement)) return { rows: [], columns: [] }
     await this.snapshotTransactionWrite(statement)
     const tracking = this.trackingForStatement(statement)
-    return this.doExecResult(
+    const exec = await this.materializePublishedSchemaFunctions(
       tracking?.returningSQL ?? statement.sql,
-      undefined,
+      statement
+    )
+    return this.doExecResult(
+      exec.sql,
+      exec.params,
       tracking ? this.trackingRequest(tracking) : undefined
     )
   }
@@ -6120,7 +6269,9 @@ export class DoBackend {
   }
 
   private async doBatchExec(statements: (RewrittenStatement | string)[]): Promise<void> {
-    let sqls: Array<string | { sql: string; track?: ChangeTrackingRequest }> = []
+    let sqls: Array<
+      string | { sql: string; params?: any[]; track?: ChangeTrackingRequest }
+    > = []
     const flush = async () => {
       if (sqls.length === 0) return
       const hasTrackedWrite = sqls.some(
@@ -6171,13 +6322,20 @@ export class DoBackend {
         }
       }
       const tracking = this.trackingForStatement(item)
+      const exec = await this.materializePublishedSchemaFunctions(
+        tracking?.returningSQL ?? item.sql,
+        item
+      )
       sqls.push(
         tracking
           ? {
-              sql: tracking.returningSQL,
+              sql: exec.sql,
+              ...(exec.params.length ? { params: exec.params } : null),
               track: this.trackingRequest(tracking),
             }
-          : item.sql
+          : exec.params.length
+            ? { sql: exec.sql, params: exec.params }
+            : exec.sql
       )
     }
 
@@ -6750,6 +6908,26 @@ export class DoBackend {
     }
   }
 
+  private async publishedSchemaResult(select: any): Promise<CatalogResult | null> {
+    const fields = selectTargetFields(select)
+    if (!fields.some((field) => field.name === 'publishedSchema')) return null
+    if (!selectReferencesTable(select, 'pg_publication_tables')) return null
+    const requested = stringFilterValues(select, 'pubname')
+    const publications = requested.length ? requested : [...this.publications.keys()]
+    const infos = await this.publicationTableInfos(publications)
+    return {
+      rows: [
+        {
+          publishedSchema: {
+            tables: infos.map((info) => this.publicationTableSpec(info, publications)),
+            indexes: infos.flatMap((info) => info.indexes),
+          },
+        },
+      ],
+      fields: [{ name: 'publishedSchema', oid: PG_TYPE_JSON }],
+    }
+  }
+
   private pgTypeArrayResult(select: any): CatalogResult | null {
     if (!selectReferencesTable(select, 'pg_type')) return null
     const fields = selectTargetFields(select)
@@ -7129,7 +7307,83 @@ export class DoBackend {
     return out
   }
 
-  private buildCopyResponse(result: ExecResult, sql = ''): Uint8Array {
+  private copyBinaryValue(
+    column: string,
+    value: unknown,
+    field?: { name: string; oid?: number }
+  ): Uint8Array | null {
+    if (value === null || value === undefined) return null
+    const oid = field?.oid
+    if (oid === PG_TYPE_BOOL)
+      return new Uint8Array([value === true || value === 1 ? 1 : 0])
+    if (oid === PG_TYPE_INT2) return i16(Number(value))
+    if (oid === PG_TYPE_INT4) return i32(Number(value))
+    if (oid === PG_TYPE_INT8) return i64(BigInt(value as any))
+    if (oid === PG_TYPE_FLOAT8) {
+      const buf = new ArrayBuffer(8)
+      new DataView(buf).setFloat64(0, Number(value))
+      return new Uint8Array(buf)
+    }
+    if (oid === PG_TYPE_TIMESTAMP || oid === PG_TYPE_TIMESTAMPTZ) {
+      const millis = timestampMillisValue(value)
+      const finite = typeof millis === 'number' && Number.isFinite(millis) ? millis : 0
+      return i64(BigInt(Math.round((finite - 946684800000) * 1000)))
+    }
+    if (oid === PG_TYPE_JSONB) {
+      const json =
+        typeof value === 'string' ? value : JSON.stringify(sqliteJsonParamValue(value))
+      return concat(new Uint8Array([1]), textEncoder.encode(json))
+    }
+    if (oid === PG_TYPE_BYTEA && value instanceof Uint8Array) return value
+    if (oid === PG_TYPE_JSON) {
+      const json =
+        typeof value === 'string' ? value : JSON.stringify(sqliteJsonParamValue(value))
+      return textEncoder.encode(json)
+    }
+    return textEncoder.encode(this.copyTextValue(column, value, field))
+  }
+
+  private copyBinaryRow(
+    columns: string[],
+    row: SqliteRow,
+    fields: { name: string; oid?: number }[]
+  ): Uint8Array {
+    const parts: Uint8Array[] = [i16(columns.length)]
+    for (const [index, column] of columns.entries()) {
+      const value = this.copyBinaryValue(column, row[column], fields[index])
+      if (value === null) {
+        parts.push(i32(-1))
+      } else {
+        parts.push(i32(value.length), value)
+      }
+    }
+    return concat(...parts)
+  }
+
+  private buildBinaryCopyResponse(
+    result: ExecResult,
+    columns: string[],
+    fields: { name: string; oid?: number }[]
+  ): Uint8Array {
+    const header = concat(
+      new Uint8Array([80, 71, 67, 79, 80, 89, 10, 255, 13, 10, 0]),
+      i32(0),
+      i32(0)
+    )
+    return concat(
+      buildCopyOutResponse(columns.length, true),
+      buildCopyDataBytes(header),
+      ...result.rows.map((row) =>
+        buildCopyDataBytes(this.copyBinaryRow(columns, row, fields))
+      ),
+      buildCopyDataBytes(i16(-1)),
+      buildCopyDone(),
+      buildCommandComplete(`COPY ${result.rows.length}`),
+      this.readyForQuery()
+    )
+  }
+
+  private buildCopyResponse(result: ExecResult, sql = '', binary = false): Uint8Array {
     const columns =
       result.columns.length > 0
         ? result.columns
@@ -7140,6 +7394,7 @@ export class DoBackend {
       name,
       oid: sql ? this.fieldMetadataForResultColumn(sql, name)?.oid : undefined,
     }))
+    if (binary) return this.buildBinaryCopyResponse(result, columns, fields)
     return concat(
       buildCopyOutResponse(columns.length),
       ...result.rows.map((row) =>
@@ -7309,6 +7564,7 @@ export class DoBackend {
       (await this.informationSchemaKeyColumnsResult(select)) ??
       (await this.informationSchemaColumnsResult(select)) ??
       this.pgTypeArrayResult(select) ??
+      (await this.publishedSchemaResult(select)) ??
       (await this.publishedTablesResult(select)) ??
       (await this.publishedIndexesResult(select)) ??
       (await this.pgPublicationTablesResult(select)) ??

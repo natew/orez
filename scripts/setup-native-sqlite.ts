@@ -18,6 +18,25 @@ function runReinstall(): void {
   }
 }
 
+function runPackageInstall(): void {
+  const check = inspectNativeSqliteBinary()
+  if (!check.packageRoot) {
+    throw new Error(
+      `[native:bootstrap] cannot locate @rocicorp/zero-sqlite3 package root\n${formatNativeBootstrapInstructions(check)}`
+    )
+  }
+
+  const result = spawnSync('npm', ['run', 'install'], {
+    cwd: check.packageRoot,
+    stdio: 'inherit',
+    env: process.env,
+  })
+
+  if (result.status !== 0) {
+    throw new Error('failed to build @rocicorp/zero-sqlite3 native binding')
+  }
+}
+
 function verifyOrThrow(context: string): void {
   const check = inspectNativeSqliteBinary()
   if (check.found) {
@@ -44,6 +63,7 @@ function main(): void {
     '[native:bootstrap] native binary missing, reinstalling @rocicorp/zero-sqlite3'
   )
   runReinstall()
+  runPackageInstall()
   verifyOrThrow('post-reinstall check')
 }
 

@@ -20,7 +20,7 @@ import {
 
 import type { PGlite } from '@electric-sql/pglite'
 
-const SYNC_PROTOCOL_VERSION = 49
+const SYNC_PROTOCOL_VERSION = 50
 const CLIENT_SCHEMA = {
   tables: {
     foo: {
@@ -257,19 +257,15 @@ describe('orez integration', { timeout: 120000 }, () => {
       orderBy: [['id', 'asc']],
     })
 
-    // drain until we get a pokePart with rowsPatch containing our data
-    const poke = await waitForPokePart(downstream, 30000)
-    expect(poke.rowsPatch).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          op: 'put',
-          tableName: 'foo',
-          value: expect.objectContaining({
-            id: 'row1',
-            value: 'hello',
-          }),
-        }),
-      ])
+    await waitForRowPatch(
+      downstream,
+      (row) =>
+        row.op === 'put' &&
+        row.tableName === 'foo' &&
+        row.value?.id === 'row1' &&
+        row.value?.value === 'hello',
+      30000,
+      'initial row1 put'
     )
 
     ws.close()
@@ -292,32 +288,21 @@ describe('orez integration', { timeout: 120000 }, () => {
       99,
     ])
 
-    // wait for the replication poke
-    const poke = await waitForPokePart(downstream, 30000)
-    expect(poke.rowsPatch).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          op: 'put',
-          tableName: 'foo',
-          value: expect.objectContaining({
-            id: 'live-row',
-            value: 'live-value',
-          }),
-        }),
-      ])
+    await waitForRowPatch(
+      downstream,
+      (row) =>
+        row.op === 'put' &&
+        row.tableName === 'foo' &&
+        row.value?.id === 'live-row' &&
+        row.value?.value === 'live-value',
+      30000,
+      'live-row put'
     )
 
     ws.close()
   })
 
   test('live replication: update triggers poke', async () => {
-    // insert initial data
-    await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
-      'upd-row',
-      'original',
-      1,
-    ])
-
     const downstream = new Queue<unknown>()
     const ws = connectAndSubscribe(zeroPort, downstream, {
       table: 'foo',
@@ -325,6 +310,23 @@ describe('orez integration', { timeout: 120000 }, () => {
     })
 
     await drainInitialPokes(downstream)
+
+    await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+      'upd-row',
+      'original',
+      1,
+    ])
+
+    await waitForRowPatch(
+      downstream,
+      (row) =>
+        row.op === 'put' &&
+        row.tableName === 'foo' &&
+        row.value?.id === 'upd-row' &&
+        row.value?.value === 'original',
+      30000,
+      'initial upd-row put'
+    )
 
     // update the row
     await db.query(`UPDATE foo SET value = $1, num = $2 WHERE id = $3`, [
@@ -333,30 +335,21 @@ describe('orez integration', { timeout: 120000 }, () => {
       'upd-row',
     ])
 
-    const poke = await waitForPokePart(downstream, 30000)
-    expect(poke.rowsPatch).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          op: 'put',
-          tableName: 'foo',
-          value: expect.objectContaining({
-            id: 'upd-row',
-            value: 'updated',
-          }),
-        }),
-      ])
+    await waitForRowPatch(
+      downstream,
+      (row) =>
+        row.op === 'put' &&
+        row.tableName === 'foo' &&
+        row.value?.id === 'upd-row' &&
+        row.value?.value === 'updated',
+      30000,
+      'updated upd-row put'
     )
 
     ws.close()
   })
 
   test('live replication: delete triggers poke', async () => {
-    await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
-      'del-row',
-      'to-delete',
-      1,
-    ])
-
     const downstream = new Queue<unknown>()
     const ws = connectAndSubscribe(zeroPort, downstream, {
       table: 'foo',
@@ -365,17 +358,31 @@ describe('orez integration', { timeout: 120000 }, () => {
 
     await drainInitialPokes(downstream)
 
+    await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+      'del-row',
+      'to-delete',
+      1,
+    ])
+
+    await waitForRowPatch(
+      downstream,
+      (row) =>
+        row.op === 'put' &&
+        row.tableName === 'foo' &&
+        row.value?.id === 'del-row' &&
+        row.value?.value === 'to-delete',
+      30000,
+      'initial del-row put'
+    )
+
     // delete the row
     await db.query(`DELETE FROM foo WHERE id = $1`, ['del-row'])
 
-    const poke = await waitForPokePart(downstream, 30000)
-    expect(poke.rowsPatch).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          op: 'del',
-          tableName: 'foo',
-        }),
-      ])
+    await waitForRowPatch(
+      downstream,
+      (row) => row.op === 'del' && row.tableName === 'foo',
+      30000,
+      'del-row delete'
     )
 
     ws.close()
@@ -469,20 +476,29 @@ describe('orez integration', { timeout: 120000 }, () => {
     }
   }
 
-  async function waitForPokePart(
+  async function waitForRowPatch(
     downstream: Queue<unknown>,
-    timeoutMs = 10000
-  ): Promise<Record<string, any>> {
+    predicate: (row: any) => boolean,
+    timeoutMs = 10000,
+    label = 'row patch'
+  ): Promise<any> {
+    const seen: any[] = []
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       const remaining = Math.max(1000, deadline - Date.now())
       const msg = (await downstream.dequeue('timeout' as any, remaining)) as any
-      if (msg === 'timeout') throw new Error('timed out waiting for pokePart')
-      if (Array.isArray(msg) && msg[0] === 'pokePart' && msg[1]?.rowsPatch) {
-        return msg[1]
+      if (msg === 'timeout') break
+      if (!Array.isArray(msg) || msg[0] !== 'pokePart' || !msg[1]?.rowsPatch) {
+        continue
+      }
+      for (const row of msg[1].rowsPatch) {
+        seen.push(row)
+        if (predicate(row)) return row
       }
     }
-    throw new Error('timed out waiting for pokePart')
+    throw new Error(
+      `timed out waiting for ${label}; recent rows: ${JSON.stringify(seen.slice(-8))}`
+    )
   }
 
   async function collectPokeRows(

@@ -67,11 +67,11 @@ function syncChatWorkingTree() {
       execSync(`rsync -a --delete "${src}/" "${dst}/"`, { stdio: 'inherit' })
     }
   }
-  // also re-sync root config files that we later mutate (playwright config,
-  // package.json scripts). without this, a past RETRY=1 run's patches — e.g.
-  // the old `retries: 0` override — survive across reruns and silently turn
-  // flaky tests into hard fails in the next run.
-  for (const file of ['package.json', 'playwright.config.ts']) {
+  // also re-sync root config files that affect dependency resolution and files
+  // we later mutate. without this, a past RETRY=1 run's patches — e.g. the old
+  // `retries: 0` override — survive across reruns and silently turn flaky
+  // tests into hard fails in the next run.
+  for (const file of ['package.json', 'bun.lock', 'playwright.config.ts']) {
     const src = resolve(CHAT_SOURCE, file)
     const dst = resolve(TEST_DIR, file)
     if (existsSync(src)) {
@@ -154,6 +154,10 @@ function main() {
     if (existsSync(envSrc)) {
       cpSync(envSrc, resolve(TEST_DIR, '.env'))
     }
+
+    // local chat package changes must be present before install; local clones
+    // copy HEAD, not uncommitted dependency upgrades from the working tree.
+    syncChatWorkingTree()
 
     // install deps
     log('installing dependencies...')

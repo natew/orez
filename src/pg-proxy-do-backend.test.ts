@@ -108,6 +108,17 @@ function messageTypes(data: Uint8Array): string[] {
   return types
 }
 
+function copyDataPayloads(data: Uint8Array): Uint8Array[] {
+  const payloads: Uint8Array[] = []
+  for (let offset = 0; offset < data.length; ) {
+    const type = data[offset]
+    const len = new DataView(data.buffer, data.byteOffset + offset + 1, 4).getInt32(0)
+    if (type === 0x64) payloads.push(data.subarray(offset + 5, offset + 1 + len))
+    offset += 1 + len
+  }
+  return payloads
+}
+
 function readyForQueryStatuses(data: Uint8Array): string[] {
   const statuses: string[] = []
   for (let offset = 0; offset < data.length; ) {
@@ -216,6 +227,21 @@ function dataRowValues(data: Uint8Array): (string | null)[][] {
 
 function compactSQL(sql: string): string {
   return sql.replace(/\s+/g, ' ').trim()
+}
+
+function appendMetadataParamRows(
+  rows: Record<string, unknown>[],
+  params: unknown[]
+): void {
+  if (params.length === 3) {
+    const [kind, key, value] = params
+    rows.push({ kind, key, subkey: '', value })
+    return
+  }
+  for (let i = 0; i + 3 < params.length; i += 4) {
+    const [kind, key, subkey, value] = params.slice(i, i + 4)
+    rows.push({ kind, key, subkey, value })
+  }
 }
 
 function sqlContaining(sqls: string[], needle: string): string {
@@ -387,6 +413,29 @@ describe('DoBackend', () => {
     expect(sent).not.toContain('public.message')
   })
 
+  test('rewrites pg_column_size table-row estimates without treating table names as columns', async () => {
+    const http = await startDoHttp(() => ({
+      rows: [{ totalBytes: 5 }],
+      columns: ['totalBytes'],
+    }))
+    const backend = new DoBackend(http.url, 'postgres', 'pg-column-size-row-test')
+    await backend.waitReady
+
+    await backend.query(`
+      SELECT
+        SUM(COALESCE(pg_column_size(chat.permissions), 0)) +
+        SUM(COALESCE(pg_column_size(hash), 0)) AS "totalBytes"
+      FROM chat.permissions
+    `)
+
+    const sent = compactSQL(http.sqls.at(-1) || '')
+    expect(sent).toContain('COALESCE(0, 0)')
+    expect(sent).toContain('length(hash)')
+    expect(sent).toContain('FROM chat_permissions')
+    expect(sent).not.toMatch(/length\(chat_permissions\)/)
+    expect(sent).not.toContain('pg_column_size')
+  })
+
   test('streams COPY TO STDOUT from a parsed select query', async () => {
     const http = await startDoHttp(() => ({
       rows: [{ id: 'm1', deleted: 0 }],
@@ -408,6 +457,38 @@ describe('DoBackend', () => {
     expect(messageTypes(result)).toEqual(['H', 'd', 'c', 'C', 'Z'])
     expect(new TextDecoder().decode(result)).toContain('m1\tf\n')
     expect(http.sqls.some((sql) => compactSQL(sql).includes('FROM message'))).toBe(true)
+  })
+
+  test('streams binary COPY TO STDOUT with a PostgreSQL binary header', async () => {
+    const http = await startDoHttp(() => ({
+      rows: [{ id: 'm1', deleted: 0 }],
+      columns: ['id', 'deleted'],
+    }))
+    const backend = new DoBackend(http.url, 'postgres', 'binary-copy-test')
+    await backend.waitReady
+    await backend.exec(`
+      CREATE TABLE public.message (
+        id text PRIMARY KEY,
+        deleted boolean NOT NULL DEFAULT false
+      )
+    `)
+
+    const result = await backend.execProtocolRaw(
+      msg(
+        0x51,
+        cstr(
+          'COPY (SELECT id, deleted FROM public.message) TO STDOUT WITH (FORMAT BINARY)'
+        )
+      )
+    )
+
+    expect(messageTypes(result)).toEqual(['H', 'd', 'd', 'd', 'c', 'C', 'Z'])
+    const payloads = copyDataPayloads(result)
+    expect([...payloads[0].slice(0, 11)]).toEqual([
+      80, 71, 67, 79, 80, 89, 10, 255, 13, 10, 0,
+    ])
+    expect(new TextDecoder().decode(payloads[1])).toContain('m1')
+    expect(payloads.at(-1)).toEqual(new Uint8Array([255, 255]))
   })
 
   test('formats timestamp typed rows as postgres text for DataRow and COPY', async () => {
@@ -1093,6 +1174,117 @@ describe('DoBackend', () => {
       ],
       fields: [{ name: 'indexes', oid: 114 }],
     })
+
+    const zero15 = await (backend as any).handleCatalogQueries(`
+      WITH published_columns AS (
+        SELECT attname FROM pg_attribute
+        JOIN pg_publication_tables pb ON attname = ANY(pb.attnames)
+        WHERE pb.pubname IN ('zero_chat')
+      ),
+      indexed_columns AS (
+        SELECT pg_indexes.indexname FROM pg_indexes
+        JOIN pg_publication_tables pb ON true
+        JOIN pg_index ON true
+        WHERE pb.pubname IN ('zero_chat')
+      )
+      SELECT json_build_object(
+        'tables', COALESCE((SELECT json_agg("table") FROM published_columns), '[]'::json),
+        'indexes', COALESCE((SELECT json_agg("index") FROM indexed_columns), '[]'::json)
+      ) as "publishedSchema";
+    `)
+
+    expect(zero15[0]).toEqual({
+      rows: [
+        {
+          publishedSchema: {
+            tables: [
+              expect.objectContaining({
+                name: 'message',
+                primaryKey: ['id'],
+              }),
+            ],
+            indexes: [
+              expect.objectContaining({
+                tableName: 'message',
+                name: 'message_id_pkey',
+              }),
+            ],
+          },
+        },
+      ],
+      fields: [{ name: 'publishedSchema', oid: 114 }],
+    })
+  })
+
+  test('materializes zero-cache schema_specs function calls in writes', async () => {
+    const http = await startDoHttp((sql) => {
+      if (sql.includes('sqlite_master')) {
+        return {
+          rows: [
+            { name: 'message', sql: 'CREATE TABLE message (id varchar PRIMARY KEY)' },
+          ],
+          columns: ['name', 'sql'],
+        }
+      }
+      if (sql.includes('PRAGMA table_info("message")')) {
+        return {
+          rows: [
+            { cid: 0, name: 'id', type: 'varchar', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 1,
+              name: 'deleted',
+              type: 'INTEGER',
+              notnull: 1,
+              dflt_value: '0',
+              pk: 0,
+            },
+          ],
+          columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'schema-specs-write-test')
+    await backend.waitReady
+    await backend.exec(`
+      CREATE TABLE message (
+        id varchar PRIMARY KEY,
+        deleted boolean NOT NULL DEFAULT false
+      );
+      CREATE PUBLICATION zero_chat FOR TABLE message;
+    `)
+    await backend.exec(`
+      DROP FUNCTION IF EXISTS chat_0.schema_specs();
+      CREATE FUNCTION chat_0.schema_specs()
+      RETURNS JSON
+      STABLE
+      AS $$
+        SELECT json_build_object(
+          'tables', '[]'::json,
+          'indexes', '[]'::json
+        ) AS "publishedSchema"
+      $$ LANGUAGE sql;
+    `)
+
+    await backend.query(`
+      INSERT INTO chat_0."publishedSchema" (current) VALUES (chat_0.schema_specs())
+        ON CONFLICT (exists) DO UPDATE SET current = excluded.current
+    `)
+
+    const insert = sqlContaining(
+      http.sqls,
+      'INSERT INTO "chat_0_publishedSchema" ( current ) VALUES'
+    )
+    expect(insert).not.toContain('schema_specs')
+    expect(compactSQL(insert)).toContain('VALUES ( ? )')
+    const schemaParam = http.params.at(-1)?.[0]
+    expect(typeof schemaParam).toBe('string')
+    expect(schemaParam).toContain('"tables":[{')
+    expect(schemaParam).toContain('"name":"message"')
+    expect(schemaParam).toContain('"indexes":[{')
+    expect(compactSQL(insert)).toContain(
+      'ON CONFLICT ("exists") DO UPDATE SET current = excluded.current'
+    )
   })
 
   test('tracks published table writes with parser-derived returning SQL', async () => {
@@ -1512,6 +1704,37 @@ describe('DoBackend', () => {
     expect(
       http.sqls.some((sql) => compactSQL(sql).includes('FROM public.migrations'))
     ).toBe(false)
+  })
+
+  test('rewrites implicit qualifiers for schema-qualified select joins', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'schema-join-flatten-test')
+    await backend.waitReady
+
+    await backend.query(
+      'SELECT replicas.slot, "shardConfig".publications FROM chat_0.replicas JOIN chat_0."shardConfig" ON 1 WHERE version = $1',
+      ['v1']
+    )
+
+    const sent = compactSQL(http.sqls.at(-1) || '')
+    expect(sent).toContain('chat_0_replicas.slot')
+    expect(sent).toContain('"chat_0_shardConfig".publications')
+    expect(sent).toContain('FROM chat_0_replicas')
+    expect(sent).toContain('JOIN "chat_0_shardConfig"')
+    expect(sent).not.toMatch(/(^|[^_])replicas\.slot/)
+    expect(sent).not.toMatch(/(^|[^_])"shardConfig"\.publications/)
+  })
+
+  test('does not rewrite unqualified columns that match schema-qualified table names', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'schema-column-flatten-test')
+    await backend.waitReady
+
+    await backend.query('SELECT permissions, hash, lock FROM chat.permissions')
+
+    const sent = compactSQL(http.sqls.at(-1) || '')
+    expect(sent).toContain('SELECT permissions, hash, lock FROM chat_permissions')
+    expect(sent).not.toContain('SELECT chat_permissions, hash, lock')
   })
 
   test('flushes transactional writes before reads so migrations can see DDL', async () => {
@@ -2413,8 +2636,7 @@ describe('DoBackend', () => {
         typeof body.sql === 'string' &&
         compactSQL(body.sql).startsWith('INSERT OR REPLACE INTO "_orez_pg_metadata"')
       ) {
-        const [kind, key, subkey, value] = body.params
-        metadataRows.push({ kind, key, subkey, value })
+        appendMetadataParamRows(metadataRows, body.params)
       }
     }
 
@@ -2439,6 +2661,63 @@ describe('DoBackend', () => {
       publications: 114,
       ddlDetection: 16,
     })
+  })
+
+  test('persists durable metadata below DO SQLite variable limits', async () => {
+    const http = await startDoHttp((sql) => {
+      const compact = compactSQL(sql)
+      if (compact.startsWith('CREATE TABLE IF NOT EXISTS "_orez_pg_metadata"')) {
+        return { rows: [], columns: [] }
+      }
+      if (compact.startsWith('SELECT kind, key, subkey, value FROM')) {
+        return { rows: [], columns: ['kind', 'key', 'subkey', 'value'] }
+      }
+      return { rows: [], columns: [] }
+    })
+
+    const backend = new DoBackend(http.url, 'postgres', 'metadata-chunk-test')
+    await backend.waitReady
+    await backend.exec(`
+      CREATE TABLE public.big_metadata_table (
+        id text PRIMARY KEY,
+        c01 text,
+        c02 text,
+        c03 text,
+        c04 text,
+        c05 text,
+        c06 text,
+        c07 text,
+        c08 text,
+        c09 text,
+        c10 text,
+        c11 text,
+        c12 text,
+        c13 text,
+        c14 text,
+        c15 text,
+        c16 text,
+        c17 text,
+        c18 text,
+        c19 text,
+        c20 text,
+        c21 text,
+        c22 text,
+        c23 text,
+        c24 text,
+        c25 text
+      );
+    `)
+
+    const inserts = http.bodies.filter(
+      (body) =>
+        typeof body.sql === 'string' &&
+        compactSQL(body.sql).startsWith('INSERT OR REPLACE INTO "_orez_pg_metadata"')
+    )
+
+    expect(inserts.length).toBeGreaterThan(1)
+    expect(
+      Math.max(...inserts.map((body) => body.params?.length ?? 0))
+    ).toBeLessThanOrEqual(80)
   })
 
   test('repairs internal metadata publication from shardConfig rows', async () => {
@@ -2584,15 +2863,18 @@ describe('DoBackend', () => {
         }
       }
       if (compact.startsWith('INSERT OR REPLACE INTO "_orez_pg_metadata"')) {
-        const params = http.bodies.at(-1)?.params ?? []
-        const [kind, key, subkey, value] =
-          params.length === 3 ? [params[0], params[1], '', params[2]] : params
-        const existing = metadataRows.findIndex(
-          (row) => row.kind === kind && row.key === key && row.subkey === subkey
-        )
-        const row = { kind, key, subkey, value }
-        if (existing >= 0) metadataRows[existing] = row
-        else metadataRows.push(row)
+        const rows: Record<string, unknown>[] = []
+        appendMetadataParamRows(rows, http.bodies.at(-1)?.params ?? [])
+        for (const row of rows) {
+          const existing = metadataRows.findIndex(
+            (existingRow) =>
+              existingRow.kind === row.kind &&
+              existingRow.key === row.key &&
+              existingRow.subkey === row.subkey
+          )
+          if (existing >= 0) metadataRows[existing] = row
+          else metadataRows.push(row)
+        }
         return { rows: [], columns: [] }
       }
       if (compact.includes('sqlite_master')) {
