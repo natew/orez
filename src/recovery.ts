@@ -46,13 +46,40 @@ export function hasCdcCorruptionSignature(details: string): boolean {
 }
 
 /**
- * recover from CDC corruption by resetting CVR/CDB state.
- * this is called when zero-cache fails to start due to duplicate changeLog entries.
+ * detect zero-cache state mismatches between the replica, CVR DB, and change DB.
+ * these are not application-level Zero errors; they mean orez's local dev cache
+ * state must be rebuilt as one consistency domain.
  */
-export async function recoverFromCdcCorruption(ctx: RecoveryContext): Promise<void> {
+export function hasZeroStateInconsistencySignature(details: string): boolean {
+  if (!details) return false
+
+  if (details.includes('RowsVersionBehindError')) return true
+  if (details.includes('max attempts exceeded waiting for CVR')) return true
+  if (details.includes('replica db must be in wal2 mode')) return true
+  if (
+    details.includes('Unable to read watermark from replica') &&
+    details.includes('_zero.replicationState')
+  ) {
+    return true
+  }
+  if (
+    details.includes('SqliteError: unable to open database file') ||
+    details.includes('SQLITE_CANTOPEN')
+  ) {
+    return true
+  }
+
+  return false
+}
+
+/**
+ * recover from zero-cache state corruption by resetting the CVR DB, change DB,
+ * local replica, and upstream zero bookkeeping together.
+ */
+export async function recoverZeroState(ctx: RecoveryContext): Promise<void> {
   const { config, instances, zeroCacheProcess } = ctx
 
-  log.orez('detected CDC state corruption, auto-recovering...')
+  log.orez('detected zero-cache state corruption, auto-recovering...')
 
   // kill the failed zero-cache process
   if (isChildProcessRunning(zeroCacheProcess)) {
@@ -121,35 +148,5 @@ export async function recoverFromCdcCorruption(ctx: RecoveryContext): Promise<vo
     await db.exec(`DROP SCHEMA IF EXISTS "${schemaname.replace(/"/g, '""')}" CASCADE`)
   }
 
-  log.orez('CDC corruption recovery complete')
-}
-
-/**
- * proactively clean CDC state on startup to prevent duplicate key errors.
- * this handles cases where orez was killed (SIGKILL) mid-transaction,
- * leaving stale watermarks in the changeLog table.
- *
- * in dev mode, it's safe to drop all CDC schemas - zero-cache will recreate them.
- */
-export async function cleanCdcStateOnStartup(cdb: PGlite): Promise<void> {
-  try {
-    // find all CDC schemas (e.g. chat_0/cdc, startchat_0/cdc)
-    const result = await cdb.query<{ nspname: string }>(
-      `SELECT nspname FROM pg_namespace WHERE nspname LIKE '%/cdc'`
-    )
-
-    if (result.rows.length === 0) {
-      return // no CDC schemas to clean
-    }
-
-    for (const { nspname } of result.rows) {
-      const quoted = '"' + nspname.replace(/"/g, '""') + '"'
-      await cdb.exec(`DROP SCHEMA IF EXISTS ${quoted} CASCADE`)
-    }
-
-    log.debug.orez(`cleaned ${result.rows.length} CDC schema(s) on startup`)
-  } catch (err: any) {
-    // non-fatal - zero-cache might still work
-    log.debug.orez(`CDC cleanup warning: ${err?.message || err}`)
-  }
+  log.orez('zero-cache state recovery complete')
 }

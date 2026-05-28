@@ -48,9 +48,9 @@ import {
 import { findPort } from './port.js'
 import { orezTitle } from './process-title.js'
 import {
-  cleanCdcStateOnStartup,
   hasCdcCorruptionSignature,
-  recoverFromCdcCorruption,
+  hasZeroStateInconsistencySignature,
+  recoverZeroState,
 } from './recovery.js'
 import { installChangeTracking } from './replication/change-tracker.js'
 import { resetReplicationState } from './replication/handler.js'
@@ -476,15 +476,17 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     instances.postgresReplicas = await createReadReplicas(db, config.readReplicas, config)
   }
 
-  // clean up stale lock files from previous crash (keep replica for fast restart).
-  // if lock files were present, it means the previous shutdown was unclean (SIGKILL)
-  // and CDC state may be corrupt — clean it along with the replica to avoid
-  // duplicate watermark errors when zero-cache tries to replay changes.
+  // clean up stale lock files from previous crash. if lock files were present,
+  // the previous shutdown was unclean and the replica, change DB, and CVR DB can
+  // disagree about the same client/version history, so rebuild all zero state.
   const hadStaleLocks = cleanupStaleLockFiles(config)
   if (hadStaleLocks) {
-    log.debug.orez('unclean shutdown detected, cleaning CDC state and replica')
-    cleanupStaleReplica(config)
-    await cleanCdcStateOnStartup(instances.cdb)
+    log.debug.orez('unclean shutdown detected, resetting zero state')
+    await recoverZeroState({
+      config,
+      instances,
+      zeroCacheProcess: null,
+    })
   }
 
   // when admin is enabled, zero-cache runs on internal port with http proxy in front
@@ -529,16 +531,20 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       await tryStartZeroCache()
     } catch (err: any) {
       const errMsg = err?.message || String(err)
-      // check for CDC corruption (duplicate key in changeLog)
-      if (hasCdcCorruptionSignature(errMsg)) {
-        await recoverFromCdcCorruption({
+      // check for persisted zero-cache state mismatches before falling back to
+      // binary-mode handling; these require rebuilding the whole local zero domain.
+      if (
+        hasCdcCorruptionSignature(errMsg) ||
+        hasZeroStateInconsistencySignature(errMsg)
+      ) {
+        await recoverZeroState({
           config,
           instances,
           zeroCacheProcess,
         })
         log.orez('retrying zero-cache startup...')
         await tryStartZeroCache()
-        log.orez('CDC corruption auto-recovery successful')
+        log.orez('zero-cache state auto-recovery successful')
       } else if (
         // native sqlite failed to load at runtime - fallback to wasm
         sqliteMode === 'native' &&
@@ -611,7 +617,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     zeroStopExpected = false
   }
 
-  // simple restart without any state cleanup
+  // explicit process restart for admin use. unexpected crashes use full state
+  // reset below because zero-cache's CVR/change/replica state is coupled.
   const restartZeroCache = async () => {
     await killZeroCache()
     // use internal port when http proxy is enabled
@@ -811,72 +818,46 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     })
   }
 
-  // auto-recover when zero-cache exits unexpectedly. two failure modes:
-  //   - CDC corruption (recognizable signature) — needs a full state reset.
-  //   - any other crash (e.g. a change-streamer statement timeout) — orez
-  //     used to do nothing here, leaving the dead child so the proxy returned
-  //     502 on every /sync until a manual restart. now: restart it, and if
-  //     the crashes keep coming, escalate to one full reset before giving up.
+  // auto-recover when zero-cache exits unexpectedly. a crashed cache may leave
+  // the replica, change DB, and CVR DB at incompatible versions. rebuild that
+  // local zero state together instead of restarting against stale pieces.
   let shuttingDown = false
   const ZERO_CRASH_WINDOW_MS = 5 * 60_000
-  const ZERO_CRASH_RESTART_BUDGET = 5
+  const ZERO_CRASH_RESET_BUDGET = 5
   let zeroCrashTimes: number[] = []
-  let zeroFullResetTried = false
   const installCrashWatcher = () => {
     if (!zeroCacheProcess || config.skipZeroCache) return
     zeroCacheProcess.on('exit', (code) => {
       if (shuttingDown || resetInProgress || zeroStopExpected || code === null) return
       const tail = (zeroCacheProcess as ZeroChildProcess)?.__orezTail
       const details = tail?.length ? tail.join('\n') : ''
-      if (hasCdcCorruptionSignature(details)) {
-        log.orez('zero-cache crashed with CDC corruption, auto-recovering...')
-        resetZeroState('full')
-          .then(() => {
-            log.orez('CDC auto-recovery successful')
-            installCrashWatcher()
-          })
-          .catch((err) => {
-            log.orez(`CDC auto-recovery failed: ${err?.message || err}`)
-          })
-        return
-      }
 
-      // non-CDC unexpected crash — restart, bounded by a sliding-window
-      // budget so a genuinely broken instance can't restart-loop forever.
+      // bounded by a sliding-window budget so a genuinely broken instance
+      // cannot reset-loop forever.
       zeroCrashTimes = zeroCrashTimes.filter((t) => Date.now() - t < ZERO_CRASH_WINDOW_MS)
-      if (zeroCrashTimes.length === 0) zeroFullResetTried = false
       zeroCrashTimes.push(Date.now())
 
-      if (zeroCrashTimes.length > ZERO_CRASH_RESTART_BUDGET) {
-        if (zeroFullResetTried) {
-          log.orez('zero-cache kept crashing after a full reset — giving up auto-restart')
-          return
-        }
-        zeroFullResetTried = true
-        log.orez('zero-cache crash-looping — escalating to a full state reset')
-        resetZeroState('full')
-          .then(() => {
-            log.orez('zero-cache full-reset recovery successful')
-            zeroCrashTimes = []
-            installCrashWatcher()
-          })
-          .catch((err) => {
-            log.orez(`zero-cache full-reset recovery failed: ${err?.message || err}`)
-          })
+      if (zeroCrashTimes.length > ZERO_CRASH_RESET_BUDGET) {
+        log.orez('zero-cache kept crashing after repeated state resets — giving up')
         return
       }
 
+      const reason = hasCdcCorruptionSignature(details)
+        ? 'CDC corruption'
+        : hasZeroStateInconsistencySignature(details)
+          ? 'state inconsistency'
+          : 'unexpected exit'
       log.orez(
-        `zero-cache exited unexpectedly (code ${code}) — restarting ` +
-          `(${zeroCrashTimes.length}/${ZERO_CRASH_RESTART_BUDGET})`
+        `zero-cache ${reason} (code ${code}) — resetting zero state ` +
+          `(${zeroCrashTimes.length}/${ZERO_CRASH_RESET_BUDGET})`
       )
-      restartZeroCache()
+      resetZeroState('full')
         .then(() => {
-          log.orez('zero-cache restart successful')
+          log.orez('zero-cache full-reset recovery successful')
           installCrashWatcher()
         })
         .catch((err) => {
-          log.orez(`zero-cache restart failed: ${err?.message || err}`)
+          log.orez(`zero-cache full-reset recovery failed: ${err?.message || err}`)
         })
     })
   }
