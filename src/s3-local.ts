@@ -155,7 +155,11 @@ export function startS3Local(config: S3LocalConfig): Promise<Server> {
         }
 
         case 'DELETE': {
-          if (existsSync(filePath)) {
+          // a directory key is not an S3 object — deleting one is a no-op (204),
+          // matching real S3 and the HEAD case above. unlinkSync on a directory
+          // throws EISDIR/EPERM → the outer catch returns 500, which breaks fs
+          // deletes that remove a tree's files and then the now-empty prefix.
+          if (existsSync(filePath) && !statSync(filePath).isDirectory()) {
             unlinkSync(filePath)
           }
           res.writeHead(204, headers)
