@@ -8,17 +8,9 @@
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, resolve } from 'node:path'
+import { resolve } from 'node:path'
 
 import {
   createHttpLogStore,
@@ -49,7 +41,9 @@ import { findPort } from './port.js'
 import { orezTitle } from './process-title.js'
 import {
   hasCdcCorruptionSignature,
+  hasRecoverableZeroStateSignature,
   hasZeroStateInconsistencySignature,
+  getZeroReplicaStartupResetReason,
   recoverZeroState,
 } from './recovery.js'
 import { installChangeTracking } from './replication/change-tracker.js'
@@ -489,6 +483,19 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       zeroCacheProcess: null,
     })
   }
+  if (!config.skipZeroCache) {
+    const replicaResetReason = getZeroReplicaStartupResetReason(config.dataDir)
+    if (replicaResetReason) {
+      log.orez(
+        `detected invalid zero replica (${replicaResetReason}), resetting zero state`
+      )
+      await recoverZeroState({
+        config,
+        instances,
+        zeroCacheProcess: null,
+      })
+    }
+  }
 
   // when admin is enabled, zero-cache runs on internal port with http proxy in front
   let zeroInternalPort = config.zeroPort
@@ -502,6 +509,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   let zeroCacheProcess: ChildProcess | null = null
   let zeroEnv: Record<string, string> = {}
   let zeroStopExpected = false
+  let requestZeroStateRecovery:
+    | ((details: string, source: 'startup' | 'live-log') => void)
+    | undefined
   if (!config.skipZeroCache) {
     // use internal port when http proxy is enabled
     const zeroConfig = httpLog ? { ...config, zeroPort: zeroInternalPort } : config
@@ -512,7 +522,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         zeroConfig,
         logStore,
         sqliteMode,
-        sqliteModeConfig
+        sqliteModeConfig,
+        (details) => requestZeroStateRecovery?.(details, 'live-log')
       )
       zeroCacheProcess = result.process
       zeroEnv = result.env
@@ -628,7 +639,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       zeroConfig,
       logStore,
       sqliteMode,
-      sqliteModeConfig
+      sqliteModeConfig,
+      (details) => requestZeroStateRecovery?.(details, 'live-log')
     )
     zeroCacheProcess = result.process
     zeroEnv = result.env
@@ -639,7 +651,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // modes:
   //   'cache-only' - deletes replica file only (fast, for minor sync issues)
   //   'full' - deletes CVR/CDB + replica and recreates instances (for schema changes)
+  let shuttingDown = false
   let resetInProgress = false
+  let liveLogRecoveryQueued = false
   const resetFile = resolve(config.dataDir, 'orez.resetting')
   const resetZeroState = async (mode: 'cache-only' | 'full'): Promise<void> => {
     if (resetInProgress) {
@@ -781,7 +795,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         zeroConfig,
         logStore,
         sqliteMode,
-        sqliteModeConfig
+        sqliteModeConfig,
+        (details) => requestZeroStateRecovery?.(details, 'live-log')
       )
       zeroCacheProcess = result.process
       zeroEnv = result.env
@@ -799,6 +814,26 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         unlinkSync(resetFile)
       } catch {}
     }
+  }
+
+  requestZeroStateRecovery = (details, source) => {
+    if (shuttingDown || resetInProgress || liveLogRecoveryQueued) return
+    liveLogRecoveryQueued = true
+    log.orez(
+      `zero-cache state inconsistency detected from ${source}, resetting zero state`
+    )
+    queueMicrotask(() => {
+      resetZeroState('full')
+        .then(() => {
+          log.orez('zero-cache live state recovery successful')
+        })
+        .catch((err) => {
+          log.orez(`zero-cache live state recovery failed: ${err?.message || err}`)
+        })
+        .finally(() => {
+          liveLogRecoveryQueued = false
+        })
+    })
   }
 
   // handle SIGUSR1 to reset zero state (sent by pg_restore after restore completes)
@@ -822,7 +857,6 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // auto-recover when zero-cache exits unexpectedly. a crashed cache may leave
   // the replica, change DB, and CVR DB at incompatible versions. rebuild that
   // local zero state together instead of restarting against stale pieces.
-  let shuttingDown = false
   const ZERO_CRASH_WINDOW_MS = 5 * 60_000
   const ZERO_CRASH_RESET_BUDGET = 5
   let zeroCrashTimes: number[] = []
@@ -941,11 +975,6 @@ function cleanupStaleReplica(config: ZeroLiteConfig): void {
   }
 }
 
-function ensureZeroReplicaFile(replicaFile: string): void {
-  mkdirSync(dirname(replicaFile), { recursive: true })
-  closeSync(openSync(replicaFile, 'a'))
-}
-
 function cleanupZeroCachePreload(preloadPath: string | undefined): void {
   if (!preloadPath) return
   try {
@@ -1009,7 +1038,8 @@ async function startZeroCache(
   config: ZeroLiteConfig,
   logStore?: LogStore,
   sqliteMode: SqliteMode = resolveSqliteMode(config.disableWasmSqlite),
-  sqliteModeConfig?: SqliteModeConfig | null
+  sqliteModeConfig?: SqliteModeConfig | null,
+  onRecoverableZeroState?: (details: string) => void
 ): Promise<{ process: ChildProcess; env: Record<string, string> }> {
   // resolve @rocicorp/zero entry for finding zero-cache modules
   const zeroEntry = resolvePackage('@rocicorp/zero')
@@ -1030,7 +1060,6 @@ async function startZeroCache(
   const cvrUrl = getConnectionString(config, 'zero_cvr')
   const cdbUrl = getConnectionString(config, 'zero_cdb')
   const replicaFile = resolve(config.dataDir, 'zero-replica.db')
-  ensureZeroReplicaFile(replicaFile)
 
   // defaults that can be overridden by user env
   // when admin is enabled and user hasn't set ZERO_LOG_LEVEL, use 'info'
@@ -1128,6 +1157,9 @@ async function startZeroCache(
     const tail = child.__orezTail!
     tail.push(line)
     if (tail.length > 80) tail.splice(0, tail.length - 80)
+    if (hasRecoverableZeroStateSignature(line)) {
+      onRecoverableZeroState?.(line)
+    }
   }
 
   // known transient errors during zero-cache startup — demote to debug

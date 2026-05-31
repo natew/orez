@@ -1,7 +1,13 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import {
+  getZeroReplicaStartupResetReason,
   hasCdcCorruptionSignature,
+  hasRecoverableZeroStateSignature,
   hasZeroStateInconsistencySignature,
 } from './recovery.js'
 
@@ -49,5 +55,32 @@ describe('zero recovery signatures', () => {
         'Unable to read watermark from upstream: transient timeout'
       )
     ).toBe(false)
+  })
+
+  it('combines recoverable zero state signatures', () => {
+    expect(
+      hasRecoverableZeroStateSignature(
+        'Unable to read watermark from replica: SqliteError: no such table: _zero.replicationState'
+      )
+    ).toBe(true)
+    expect(
+      hasRecoverableZeroStateSignature(
+        'duplicate key value violates unique constraint "changeLog_pkey"'
+      )
+    ).toBe(true)
+    expect(hasRecoverableZeroStateSignature('WebSocket connection closed')).toBe(false)
+  })
+
+  it('requires startup reset for an empty replica file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orez-recovery-'))
+    try {
+      expect(getZeroReplicaStartupResetReason(dir)).toBe(null)
+      writeFileSync(join(dir, 'zero-replica.db'), '')
+      expect(getZeroReplicaStartupResetReason(dir)).toContain('empty replica file')
+      writeFileSync(join(dir, 'zero-replica.db'), 'not empty')
+      expect(getZeroReplicaStartupResetReason(dir)).toBe(null)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

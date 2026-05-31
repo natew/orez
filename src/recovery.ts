@@ -3,7 +3,7 @@
  * centralizes error detection and recovery logic to avoid scattering it throughout the codebase.
  */
 
-import { mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import {
@@ -70,6 +70,29 @@ export function hasZeroStateInconsistencySignature(details: string): boolean {
   }
 
   return false
+}
+
+export function hasRecoverableZeroStateSignature(details: string): boolean {
+  return hasCdcCorruptionSignature(details) || hasZeroStateInconsistencySignature(details)
+}
+
+/**
+ * detect replica files that cannot possibly be a valid already-synced Zero
+ * replica. zero-cache can create the file itself during initial sync; an empty
+ * file here is a leftover local-state artifact, not useful cache state.
+ */
+export function getZeroReplicaStartupResetReason(dataDir: string): string | null {
+  const replicaPath = resolve(dataDir, 'zero-replica.db')
+  if (!existsSync(replicaPath)) return null
+
+  try {
+    const stat = statSync(replicaPath)
+    if (stat.size === 0) return `empty replica file at ${replicaPath}`
+  } catch {
+    return null
+  }
+
+  return null
 }
 
 /**
