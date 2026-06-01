@@ -335,6 +335,24 @@ afterEach(async () => {
 })
 
 describe('DoBackend', () => {
+  test('defers durable object IO until readiness is awaited', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const warm = new DoBackend(http.url, 'postgres', 'lazy-startup-warm')
+    await warm.waitReady
+    http.requests.length = 0
+    http.sqls.length = 0
+
+    const backend = new DoBackend(http.url, 'postgres', 'lazy-startup')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(http.requests).toEqual([])
+    expect(http.sqls).toEqual([])
+
+    await backend.waitReady
+    expect(http.requests.length).toBeGreaterThan(0)
+    expect(http.sqls.length).toBeGreaterThan(0)
+  })
+
   test('bootstraps zero-cache change tracking tables for postgres backends', async () => {
     const http = await startDoHttp(() => ({ rows: [], columns: [] }))
     const backend = new DoBackend(http.url, 'postgres', 'change-tracking-bootstrap')

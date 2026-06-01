@@ -4867,7 +4867,6 @@ function getSkippedFunctionNames(dbName: string, namespace: string): Set<string>
 // ── DoBackend class ───────────────────────────────────────────────────────
 
 export class DoBackend {
-  readonly waitReady: Promise<void>
   ready = false
   closed = false
   private doUrl: string
@@ -4881,6 +4880,7 @@ export class DoBackend {
   private rewriteCache: Map<string, RewrittenStatement[]>
   private preparedStatements = new Map<string, PreparedStatement>()
   private portals = new Map<string, BoundPortal>()
+  private readyPromise: Promise<void> | null = null
 
   // Transaction state. The Durable Object refuses raw SQL BEGIN/COMMIT/SAVEPOINT
   // (Cloudflare requires ctx.storage.transaction()), so PG-style multi-call
@@ -4918,7 +4918,21 @@ export class DoBackend {
     this.schemaMetadata = new Map()
     this.publications = new Map()
     this.rewriteCache = new Map()
-    this.waitReady = this.init()
+  }
+
+  get waitReady(): Promise<void> {
+    return this.ensureReady()
+  }
+
+  private ensureReady(): Promise<void> {
+    if (this.ready) return Promise.resolve()
+    if (!this.readyPromise) {
+      this.readyPromise = this.init().catch((err) => {
+        this.readyPromise = null
+        throw err
+      })
+    }
+    return this.readyPromise
   }
 
   private async init() {
