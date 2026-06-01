@@ -56,8 +56,8 @@ export function getBrowserAliases(
     // -- Node.js built-in polyfills --
     // these are needed because zero-cache imports node: modules.
     // the bundler replaces them with browser-compatible packages.
-    'node:events': 'orez/worker/shims/node-stub',
-    events: 'orez/worker/shims/node-stub',
+    'node:events': 'orez/worker/shims/events',
+    events: 'orez/worker/shims/events',
     'node:buffer': 'orez/worker/shims/node-stub',
     buffer: 'orez/worker/shims/node-stub',
     'node:process': 'orez/worker/shims/node-stub',

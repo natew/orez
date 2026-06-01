@@ -5,6 +5,7 @@ import {
   getBrowserDefine,
   getBrowserBuildConfig,
 } from './browser-build-config.js'
+import DefaultEventEmitter, { EventEmitter } from './shims/events.js'
 import { getHeapStatistics } from './shims/node-stub.js'
 
 describe('browser build config', () => {
@@ -25,8 +26,8 @@ describe('browser build config', () => {
 
     it('includes Node.js polyfills', () => {
       const aliases = getBrowserAliases()
-      expect(aliases['node:events']).toBe('orez/worker/shims/node-stub')
-      expect(aliases.events).toBe('orez/worker/shims/node-stub')
+      expect(aliases['node:events']).toBe('orez/worker/shims/events')
+      expect(aliases.events).toBe('orez/worker/shims/events')
       expect(aliases['node:stream']).toBe('orez/worker/shims/stream-browser')
       expect(aliases.stream).toBe('orez/worker/shims/stream-browser')
       expect(aliases['node:stream/promises']).toBe('orez/worker/shims/node-stub')
@@ -91,6 +92,17 @@ describe('browser build config', () => {
       const stats = getHeapStatistics()
       expect(stats.heap_size_limit).toBe(128 * 1024 * 1024)
       expect(stats.heap_size_limit - stats.used_heap_size).toBeGreaterThan(0)
+    })
+  })
+
+  describe('node:events shim', () => {
+    it('matches Node default and named EventEmitter import shapes', () => {
+      expect(DefaultEventEmitter).toBe(EventEmitter)
+      const emitter = new DefaultEventEmitter()
+      const seen: string[] = []
+      emitter.on('message', (value) => seen.push(String(value)))
+      emitter.emit('message', 'ok')
+      expect(seen).toEqual(['ok'])
     })
   })
 })
