@@ -367,7 +367,9 @@ export class Statement<T = Record<string, SqlStorageValue>> {
       upper.startsWith('COMMIT') ||
       upper.startsWith('ROLLBACK') ||
       upper === 'END' ||
-      upper.startsWith('END ')
+      upper.startsWith('END ') ||
+      upper.startsWith('SAVEPOINT') ||
+      upper.startsWith('RELEASE ')
     const resolved = this.#resolveParams(params)
     const sql = this.#db._rewriteForSnapshot(resolved.sql)
     const values = resolved.values
@@ -539,6 +541,9 @@ export class Database {
 
     // CF DO: all transaction control is no-op (DO coalesces writes automatically)
     if (sqlStorage.transactionSync) {
+      if (upper.startsWith('SAVEPOINT') || upper.startsWith('RELEASE ')) {
+        return noopCursor
+      }
       if (upper.startsWith('BEGIN CONCURRENT')) {
         if (this.#connectionRole === 'replica-writer') {
           shared.__txDepth = (shared.__txDepth || 0) + 1

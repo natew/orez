@@ -695,6 +695,26 @@ describe('DO snapshot transactions', () => {
         .all()
     ).toEqual([])
   })
+
+  it('does not send raw transaction control SQL to DO storage', () => {
+    const originalExec = mock.exec.bind(mock)
+    const rawTransactionStatements: string[] = []
+    mock.exec = (query: string, ...bindings: SqlStorageValue[]) => {
+      if (/^(BEGIN|COMMIT|ROLLBACK|END|SAVEPOINT|RELEASE)\b/i.test(query.trim())) {
+        rawTransactionStatements.push(query)
+        throw new Error(`raw transaction statement reached DO storage: ${query}`)
+      }
+      return originalExec(query, ...bindings)
+    }
+
+    live.prepare('BEGIN').run()
+    live.prepare('SAVEPOINT zero_schema_migration').run()
+    live.prepare('RELEASE zero_schema_migration').run()
+    live.prepare('COMMIT').run()
+    live.exec('SAVEPOINT zero_exec_migration; RELEASE zero_exec_migration')
+
+    expect(rawTransactionStatements).toEqual([])
+  })
 })
 
 describe('StatementRunner: zero-cache replicator pattern', () => {
