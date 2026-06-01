@@ -278,10 +278,11 @@ export async function startZeroCacheEmbedCF(
   // capture the Fastify shim instance from zero-cache's HttpService.
   // the fastify shim stores itself on globalThis when created.
   let fastifyInstance: any = null
+  let readyTimer: ReturnType<typeof setTimeout> | undefined
 
   // wait for "ready" message
   const readyPromise = new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
+    readyTimer = setTimeout(() => {
       reject(
         new Error(
           `zero-cache CF embed: timed out waiting for ready after ${readyTimeout}ms`
@@ -292,7 +293,7 @@ export async function startZeroCacheEmbedCF(
     parentEmitter.on('message', (msg: unknown) => {
       if (debugEmbed) console.debug('[orez-zero-cache-cf] parent message', msg)
       if (Array.isArray(msg) && msg[0] === 'ready') {
-        clearTimeout(timeout)
+        if (readyTimer) clearTimeout(readyTimer)
         isReady = true
         resolve()
       }
@@ -307,9 +308,19 @@ export async function startZeroCacheEmbedCF(
     }
     // after ready, errors during shutdown are expected
   })
+  const workerStartupPromise = runWorkerPromise.then(() => {
+    if (!isReady) {
+      throw new Error('zero-cache CF embed: runWorker exited before ready')
+    }
+  })
 
   // wait for ready
-  await readyPromise
+  try {
+    await Promise.race([readyPromise, workerStartupPromise])
+  } catch (err) {
+    if (readyTimer) clearTimeout(readyTimer)
+    throw err
+  }
 
   // get the fastify instance (set by our shim during init)
   fastifyInstance = (globalThis as any).__orez_fastify_instance
