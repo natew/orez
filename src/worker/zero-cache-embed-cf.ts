@@ -231,6 +231,10 @@ export async function startZeroCacheEmbedCF(
     ZERO_NUM_SYNC_WORKERS: opts.env?.ZERO_NUM_SYNC_WORKERS || '1',
     ZERO_ENABLE_QUERY_PLANNER: 'false',
     ...opts.env,
+    // shadow sync is an optional upstream canary that imports the initial-sync
+    // copy path. keep it disabled in the CF embed to avoid bundling unused
+    // worker code and storage paths into Durable Objects.
+    ZERO_SHADOW_SYNC_ENABLED: 'false',
   }
   Object.assign((globalThis as any).process.env, env)
 

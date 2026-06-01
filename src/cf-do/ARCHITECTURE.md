@@ -58,8 +58,9 @@ same zero-cache process and durable SQLite state.
 
 - `src/worker/zero-cache-embed-cf.ts` - starts real zero-cache inside a Durable
   Object and wires its storage/network dependencies to CF-safe shims.
-- `src/worker/cf-patches.ts` - patches zero-cache internals so its worker
-  graph and writer run in the Workers runtime.
+- `src/worker/cf-patches.ts` - prepares an isolated zero-cache overlay whose
+  worker graph and writer run in the Workers runtime without mutating
+  `node_modules`.
 - `src/pg-proxy-do-backend.ts` - translates Postgres protocol operations from
   zero-cache into DO SQL endpoint requests.
 - `src/cf-do/worker.ts` - `ZeroDO`, the generic DO SQL backend. It also still

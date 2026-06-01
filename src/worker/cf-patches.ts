@@ -1,9 +1,9 @@
 /**
- * zero-cache CF Workers patches.
+ * zero-cache CF Workers overlay.
  *
- * applies patches to @rocicorp/zero's internal files so zero-cache
- * can run in SINGLE_PROCESS mode on CF Workers where dynamic import()
- * doesn't work.
+ * copies @rocicorp/zero's compiled `out/` tree into a generated overlay and
+ * applies CF Worker patches there. the installed package in node_modules is
+ * never modified.
  *
  * five patches:
  * 1. worker-urls.js — replace file:// URLs with zero-worker:// identifiers
@@ -12,25 +12,117 @@
  * 4. write-worker-client.js — run zero-cache's replica writer in-process
  * 5. pgsql-parser — embed libpg-query wasm bytes for Workers
  *
- * usage in a post-build script:
+ * usage in a worker build script:
  *
- *   import { patchZeroCacheForCF } from 'orez/worker/cf-patches'
- *   patchZeroCacheForCF('./node_modules')
+ *   import { prepareZeroCacheForCF } from 'orez/worker/cf-patches'
+ *   import { getBrowserAliases } from 'orez/worker/browser-build-config'
  *
- * idempotent: safe to run multiple times.
+ *   const zero = prepareZeroCacheForCF({ nodeModulesPath: './node_modules' })
+ *   const alias = getBrowserAliases(zero)
+ *
+ * idempotent: safe to run multiple times. the overlay directory is recreated.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, resolve } from 'node:path'
 
-export function patchZeroCacheForCF(nodeModulesPath: string): void {
-  const zcBase = resolve(nodeModulesPath, '@rocicorp', 'zero', 'out', 'zero-cache', 'src')
+const ZERO_CACHE_WORKERS = [
+  'main',
+  'change-streamer',
+  'reaper',
+  'replicator',
+  'syncer',
+] as const
+
+export interface ZeroCacheCFPrepareOptions {
+  nodeModulesPath: string
+  outDir?: string
+}
+
+export interface ZeroCacheCFPrepareResult {
+  nodeModulesPath: string
+  outDir: string
+  zeroOutDir: string
+  zeroCacheSrcDir: string
+  aliases: Record<string, string>
+}
+
+export function prepareZeroCacheForCF(
+  input: string | ZeroCacheCFPrepareOptions
+): ZeroCacheCFPrepareResult {
+  const options = typeof input === 'string' ? { nodeModulesPath: input } : input
+  const nodeModulesPath = resolve(options.nodeModulesPath)
+  const outDir = resolve(
+    options.outDir ?? resolve(nodeModulesPath, '..', '.orez', 'zero-cache-cf')
+  )
+  const sourceZeroPackage = resolve(nodeModulesPath, '@rocicorp', 'zero')
+  const sourceZeroOut = resolve(nodeModulesPath, '@rocicorp', 'zero', 'out')
+  const sourceZeroPackageJson = resolve(sourceZeroPackage, 'package.json')
+  const zeroOutDir = resolve(outDir, '@rocicorp', 'zero', 'out')
+  const zcBase = resolve(zeroOutDir, 'zero-cache', 'src')
+
+  if (!existsSync(sourceZeroOut)) {
+    throw new Error(
+      `@rocicorp/zero compiled out/ directory not found at ${sourceZeroOut}`
+    )
+  }
+
+  rmSync(outDir, { recursive: true, force: true })
+  mkdirSync(dirname(zeroOutDir), { recursive: true })
+  cpSync(sourceZeroOut, zeroOutDir, { recursive: true, dereference: true })
+  if (existsSync(sourceZeroPackageJson)) {
+    cpSync(sourceZeroPackageJson, resolve(outDir, '@rocicorp', 'zero', 'package.json'))
+  }
+  const overlayNodeModules = resolve(outDir, 'node_modules')
+  linkPackageDependencies(
+    dirname(dirname(realpathSync(sourceZeroPackage))),
+    overlayNodeModules,
+    {
+      '@rocicorp/zero': resolve(outDir, '@rocicorp', 'zero'),
+    }
+  )
+  linkPackageDependencies(
+    resolve(nodeModulesPath, '.bun', 'node_modules'),
+    overlayNodeModules,
+    {}
+  )
 
   patchWorkerUrls(zcBase)
   patchWorkerEntrypoints(zcBase)
   patchProcesses(zcBase)
   patchWriteWorkerClient(zcBase)
-  patchPgsqlParserWasm(nodeModulesPath)
+  const parserAliases = patchPgsqlParserWasm(nodeModulesPath, outDir)
+  const packageAliases = getPackageAliases(nodeModulesPath)
+
+  return {
+    nodeModulesPath,
+    outDir,
+    zeroOutDir,
+    zeroCacheSrcDir: zcBase,
+    aliases: {
+      '@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js': resolve(
+        zeroOutDir,
+        'zero-cache',
+        'src',
+        'server',
+        'runner',
+        'run-worker.js'
+      ),
+      ...packageAliases,
+      ...parserAliases,
+    },
+  }
 }
 
 function patchWorkerUrls(zcBase: string): void {
@@ -42,8 +134,8 @@ function patchWorkerUrls(zcBase: string): void {
 
   const content = readFileSync(workerUrlsPath, 'utf-8')
 
-  // skip if already patched
-  if (content.includes('zero-worker://')) {
+  // skip only when the current Zero 1.5 worker graph is already present.
+  if (content.includes('zero-worker://') && content.includes('SHADOW_SYNCER_URL')) {
     return
   }
 
@@ -55,6 +147,7 @@ export const MAIN_URL = u("main");
 export const CHANGE_STREAMER_URL = u("change-streamer");
 export const REAPER_URL = u("reaper");
 export const REPLICATOR_URL = u("replicator");
+export const SHADOW_SYNCER_URL = u("shadow-syncer");
 export const SYNCER_URL = u("syncer");
 // write-worker is spawned via 'new Worker()' (node:worker_threads), not via
 // childWorker() — it uses its own URL → worker resolution path. we still expose
@@ -66,9 +159,7 @@ export const WRITE_WORKER_URL = u("write-worker");
 }
 
 function patchWorkerEntrypoints(zcBase: string): void {
-  const entrypoints = ['main', 'change-streamer', 'reaper', 'replicator', 'syncer']
-
-  for (const entrypoint of entrypoints) {
+  for (const entrypoint of ZERO_CACHE_WORKERS) {
     const entrypointPath = resolve(zcBase, 'server', `${entrypoint}.js`)
     if (!existsSync(entrypointPath)) {
       console.warn('[orez] zero-cache worker entrypoint not found at', entrypointPath)
@@ -108,7 +199,6 @@ function patchProcesses(zcBase: string): void {
 
   let code = readFileSync(processesPath, 'utf-8')
 
-  // skip if already patched
   if (code.includes('__zc_workers')) {
     return
   }
@@ -315,13 +405,24 @@ export { ThreadWriteWorkerClient, applyPragmas };
   console.log('[orez] patched zero-cache write-worker-client.js (inline writer)')
 }
 
-function patchPgsqlParserWasm(nodeModulesPath: string): void {
-  const parserIndexPath = resolve(nodeModulesPath, 'libpg-query', 'wasm', 'index.js')
-  const wasmPath = resolve(nodeModulesPath, 'libpg-query', 'wasm', 'libpg-query.wasm')
+function patchPgsqlParserWasm(
+  nodeModulesPath: string,
+  outDir: string
+): Record<string, string> {
+  const sourcePackagePath = findPackageRoot(nodeModulesPath, 'libpg-query')
+  if (!sourcePackagePath) {
+    return {}
+  }
+  const targetPackagePath = resolve(outDir, 'node_modules', 'libpg-query')
+  const parserIndexPath = resolve(targetPackagePath, 'wasm', 'index.js')
+  const wasmPath = resolve(targetPackagePath, 'wasm', 'libpg-query.wasm')
+
+  rmSync(targetPackagePath, { recursive: true, force: true })
+  mkdirSync(dirname(targetPackagePath), { recursive: true })
+  cpSync(sourcePackagePath, targetPackagePath, { recursive: true, dereference: true })
 
   if (!existsSync(parserIndexPath) || !existsSync(wasmPath)) {
-    console.warn('[orez] libpg-query wasm files not found under', nodeModulesPath)
-    return
+    return {}
   }
 
   let code = readFileSync(parserIndexPath, 'utf-8')
@@ -329,14 +430,18 @@ function patchPgsqlParserWasm(nodeModulesPath: string): void {
     code.includes('orez-libpg-query-wasm-binary') &&
     code.includes('__orezLibPgQueryInit')
   ) {
-    return
+    return {
+      'libpg-query': targetPackagePath,
+      'libpg-query/wasm': parserIndexPath,
+      'libpg-query/wasm/index.js': parserIndexPath,
+    }
   }
   if (code.includes('orez-libpg-query-wasm-binary')) {
     console.warn(
       '[orez] libpg-query wasm loader already patched with an older shape. ' +
-        'Reinstall libpg-query or restore node_modules before re-patching.'
+        'Regenerate the overlay from an unpatched libpg-query install.'
     )
-    return
+    return {}
   }
 
   const pattern = 'const initPromise = PgQueryModule().then((module) => {'
@@ -345,7 +450,7 @@ function patchPgsqlParserWasm(nodeModulesPath: string): void {
       '[orez] could not find PgQueryModule init in libpg-query wasm index. ' +
         'pgsql-parser version may have changed — check compatibility.'
     )
-    return
+    return {}
   }
 
   const wasmBase64 = readFileSync(wasmPath).toString('base64')
@@ -381,4 +486,106 @@ const initPromise = __orezLibPgQueryInit.then((module) => {`
   code = code.replace(pattern, replacement)
   writeFileSync(parserIndexPath, code)
   console.log('[orez] patched libpg-query wasm loader (embedded wasm bytes)')
+  return {
+    'libpg-query': targetPackagePath,
+    'libpg-query/wasm': parserIndexPath,
+    'libpg-query/wasm/index.js': parserIndexPath,
+  }
+}
+
+function findPackageRoot(nodeModulesPath: string, packageName: string): string | null {
+  const candidates = [
+    resolve(nodeModulesPath, packageName),
+    resolve(nodeModulesPath, '.bun', 'node_modules', packageName),
+    ...findBunPackageCandidates(nodeModulesPath, packageName),
+  ]
+
+  for (const candidate of candidates) {
+    if (existsSync(resolve(candidate, 'package.json'))) {
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function findBunPackageCandidates(
+  nodeModulesPath: string,
+  packageName: string
+): string[] {
+  const bunDir = resolve(nodeModulesPath, '.bun')
+  if (!existsSync(bunDir)) return []
+
+  const packageKey = packageName.replace('/', '+')
+  return readdirSync(bunDir)
+    .filter((entry) => entry === packageKey || entry.startsWith(`${packageKey}@`))
+    .map((entry) => resolve(bunDir, entry, 'node_modules', packageName))
+}
+
+function getPackageAliases(nodeModulesPath: string): Record<string, string> {
+  const aliases: Record<string, string> = {}
+  const packageAliases: Record<string, string> = {
+    'postgres-real': 'postgres',
+    'readable-stream': 'readable-stream',
+    '@pgsql/types': '@pgsql/types',
+    '@opentelemetry/semantic-conventions': '@opentelemetry/semantic-conventions',
+  }
+
+  for (const [alias, packageName] of Object.entries(packageAliases)) {
+    const packageRoot = findPackageRoot(nodeModulesPath, packageName)
+    if (packageRoot) aliases[alias] = packageRoot
+  }
+
+  return aliases
+}
+
+function linkPackageDependencies(
+  sourceRoot: string,
+  targetRoot: string,
+  overrides: Record<string, string>
+): void {
+  if (!existsSync(sourceRoot)) return
+  mkdirSync(targetRoot, { recursive: true })
+
+  for (const entry of readdirSync(sourceRoot)) {
+    if (entry.startsWith('.')) continue
+    const sourceEntry = resolve(sourceRoot, entry)
+    const sourceEntryStat = lstatSync(sourceEntry)
+    if (!sourceEntryStat.isDirectory() && !sourceEntryStat.isSymbolicLink()) {
+      continue
+    }
+
+    if (entry.startsWith('@')) {
+      const targetScope = resolve(targetRoot, entry)
+      mkdirSync(targetScope, { recursive: true })
+      for (const scopedEntry of readdirSync(sourceEntry)) {
+        const packageName = `${entry}/${scopedEntry}`
+        const sourcePackage = resolve(sourceEntry, scopedEntry)
+        const targetPackage = resolve(targetScope, scopedEntry)
+        linkPackage(
+          overrides[packageName] ?? sourcePackage,
+          targetPackage,
+          Boolean(overrides[packageName])
+        )
+      }
+      continue
+    }
+
+    linkPackage(overrides[entry] ?? sourceEntry, resolve(targetRoot, entry), false)
+  }
+
+  for (const [packageName, target] of Object.entries(overrides)) {
+    const targetPackage = resolve(targetRoot, ...packageName.split('/'))
+    linkPackage(target, targetPackage, true)
+  }
+}
+
+function linkPackage(source: string, target: string, replace: boolean): void {
+  if (replace) {
+    rmSync(target, { recursive: true, force: true })
+  } else if (existsSync(target)) {
+    return
+  }
+  mkdirSync(dirname(target), { recursive: true })
+  symlinkSync(source, target, 'dir')
 }

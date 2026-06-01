@@ -13,6 +13,74 @@
 // stub for node:http (Server class used in instanceof check)
 export class Server {}
 
+type Listener = (...args: unknown[]) => void
+
+// stub for node:events
+export class EventEmitter {
+  #listeners = new Map<string | symbol, Listener[]>()
+
+  on(event: string | symbol, listener: Listener) {
+    const listeners = this.#listeners.get(event) ?? []
+    listeners.push(listener)
+    this.#listeners.set(event, listeners)
+    return this
+  }
+
+  once(event: string | symbol, listener: Listener) {
+    const wrapped: Listener = (...args) => {
+      this.off(event, wrapped)
+      listener(...args)
+    }
+    return this.on(event, wrapped)
+  }
+
+  off(event: string | symbol, listener: Listener) {
+    const listeners = this.#listeners.get(event)
+    if (!listeners) return this
+    this.#listeners.set(
+      event,
+      listeners.filter((candidate) => candidate !== listener)
+    )
+    return this
+  }
+
+  removeListener(event: string | symbol, listener: Listener) {
+    return this.off(event, listener)
+  }
+
+  emit(event: string | symbol, ...args: unknown[]) {
+    for (const listener of this.#listeners.get(event) ?? []) listener(...args)
+    return true
+  }
+
+  removeAllListeners(event?: string | symbol) {
+    if (event === undefined) this.#listeners.clear()
+    else this.#listeners.delete(event)
+    return this
+  }
+}
+
+// stub for node:buffer
+export const Buffer = globalThis.Buffer
+
+// stub for node:process
+const globalProcess = ((globalThis as any).process ??= {})
+globalProcess.env ??= {}
+globalProcess.pid ??= 1
+globalProcess.argv ??= []
+globalProcess.versions ??= { node: '20.0.0' }
+globalProcess.kill ??= () => true
+export const env = globalProcess.env
+export const pid = globalProcess.pid
+export const argv = globalProcess.argv
+export const versions = globalProcess.versions
+export function kill() {
+  return true
+}
+export function cwd() {
+  return '/'
+}
+
 // stub for node:fs
 export function existsSync() {
   return false
@@ -36,6 +104,18 @@ export function readFile() {
 }
 export function stat() {
   return Promise.resolve({ size: 0, isFile: () => false, isDirectory: () => false })
+}
+export function mkdir() {
+  return Promise.resolve()
+}
+export function mkdtemp(prefix = '') {
+  return Promise.resolve(`${prefix}stub`)
+}
+export function rm() {
+  return Promise.resolve()
+}
+export function access() {
+  return Promise.reject(new Error('not available'))
 }
 
 // stub for node:child_process
@@ -97,6 +177,47 @@ export function networkInterfaces() {
   }
 }
 
+// stub for node:path
+export const sep = '/'
+export function normalizePath(path: string): string {
+  const absolute = path.startsWith('/')
+  const parts: string[] = []
+  for (const part of path.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  const normalized = parts.join('/')
+  return `${absolute ? '/' : ''}${normalized}` || (absolute ? '/' : '.')
+}
+export const normalize = normalizePath
+export function join(...parts: string[]) {
+  return normalizePath(parts.filter(Boolean).join('/'))
+}
+export function resolve(...parts: string[]) {
+  const joined = parts.filter(Boolean).join('/')
+  return normalizePath(joined.startsWith('/') ? joined : `/${joined}`)
+}
+export function basename(path: string) {
+  const normalized = normalizePath(path)
+  return normalized === '/' ? '' : normalized.split('/').pop() || ''
+}
+export function dirname(path: string) {
+  const normalized = normalizePath(path)
+  if (normalized === '/') return '/'
+  const parts = normalized.split('/')
+  parts.pop()
+  return parts.join('/') || (normalized.startsWith('/') ? '/' : '.')
+}
+export function relative(_from: string, to: string) {
+  return normalizePath(to)
+}
+export function extname(path: string) {
+  const base = basename(path)
+  const dot = base.lastIndexOf('.')
+  return dot > 0 ? base.slice(dot) : ''
+}
+
 // stub for node:crypto
 export function timingSafeEqual(a: unknown, b: unknown) {
   return a === b
@@ -110,6 +231,12 @@ export function randomBytes(n: number) {
 // stub for node:url
 export function fileURLToPath(url: string) {
   return url.replace('file://', '')
+}
+export function pathToFileURL(path: string) {
+  return new URL(`file://${path.startsWith('/') ? path : `/${path}`}`)
+}
+export function format(value: unknown) {
+  return String(value)
 }
 
 // stub for node:inspector/promises
@@ -157,6 +284,9 @@ export function inspect(obj: unknown) {
 export function stripVTControlCharacters(str: string) {
   return str
 }
+export function styleText(_format: unknown, text: string) {
+  return text
+}
 export function inherits(ctor: any, superCtor: any) {
   ctor.prototype = Object.create(superCtor.prototype)
   ctor.prototype.constructor = ctor
@@ -172,6 +302,10 @@ export const types = {
 // stub for node:assert
 export function strict() {}
 export function ok() {}
+export function equal() {}
+export function deepEqual() {}
+export function strictEqual() {}
+export function deepStrictEqual() {}
 
 // stub for node:module
 export function createRequire() {
@@ -206,6 +340,78 @@ export class Worker {
 export const isMainThread = true
 export const parentPort = null
 
+// stub for node:async_hooks
+export class AsyncLocalStorage<T = unknown> {
+  run<R>(store: T, callback: (...args: unknown[]) => R, ...args: unknown[]): R {
+    void store
+    return callback(...args)
+  }
+  getStore(): T | undefined {
+    return undefined
+  }
+  enterWith(_store: T) {}
+  disable() {}
+}
+export function createHook() {
+  return {
+    enable() {
+      return this
+    },
+    disable() {
+      return this
+    },
+  }
+}
+export function executionAsyncId() {
+  return 0
+}
+export function triggerAsyncId() {
+  return 0
+}
+
+// stub for node:diagnostics_channel
+export function channel() {
+  return {
+    name: 'orez-stub',
+    hasSubscribers: false,
+    publish() {},
+    subscribe() {},
+    unsubscribe() {},
+  }
+}
+export function hasSubscribers() {
+  return false
+}
+export function subscribe() {}
+export function unsubscribe() {}
+export function tracingChannel() {
+  return channel()
+}
+
+// stub for node:dns
+export function lookup(_hostname: string, cb?: (err: null, address: string) => void) {
+  if (cb) cb(null, '127.0.0.1')
+  return Promise.resolve({ address: '127.0.0.1', family: 4 })
+}
+export function resolve4() {
+  return Promise.resolve(['127.0.0.1'])
+}
+export function resolve6() {
+  return Promise.resolve(['::1'])
+}
+
+// stub for node:querystring
+export function stringify(value: Record<string, unknown>) {
+  return new URLSearchParams(
+    Object.entries(value).map(([key, val]) => [key, String(val)])
+  ).toString()
+}
+export function parse(value: string) {
+  return Object.fromEntries(new URLSearchParams(value))
+}
+export const escape = encodeURIComponent
+export const unescape = decodeURIComponent
+
 // stub for node:stream/promises
 export function pipeline(..._args: unknown[]) {
   return Promise.resolve()
@@ -216,9 +422,10 @@ export const promises = {
   readFile: () => Promise.resolve(''),
   writeFile: () => Promise.resolve(),
   stat: () => Promise.resolve({ size: 0 }),
-  mkdir: () => Promise.resolve(),
-  rm: () => Promise.resolve(),
-  access: () => Promise.reject(new Error('not available')),
+  mkdir,
+  mkdtemp,
+  rm,
+  access,
 }
 
 // stub for node:crypto (additional)
@@ -252,6 +459,14 @@ export default {
   arch,
   release,
   networkInterfaces,
+  sep,
+  normalize,
+  join,
+  resolve,
+  basename,
+  dirname,
+  relative,
+  extname,
   existsSync,
   readFileSync,
   writeFileSync,
@@ -260,6 +475,10 @@ export default {
   statSync,
   writeFile,
   readFile,
+  mkdir,
+  mkdtemp,
+  rm,
+  access,
   promises,
   fork,
   spawn,
@@ -267,9 +486,12 @@ export default {
   createServer,
   createConnection,
   fileURLToPath,
+  pathToFileURL,
+  format,
   promisify,
   inspect,
   stripVTControlCharacters,
+  styleText,
   inherits,
   deprecate,
   types,
@@ -280,11 +502,39 @@ export default {
   gzip,
   strict,
   ok,
+  equal,
+  deepEqual,
+  strictEqual,
+  deepStrictEqual,
   createRequire,
   pipeline,
   Server,
+  EventEmitter,
+  Buffer,
+  env,
+  pid,
+  argv,
+  versions,
+  kill,
+  cwd,
   Session,
   Worker,
   isMainThread,
   parentPort,
+  AsyncLocalStorage,
+  createHook,
+  executionAsyncId,
+  triggerAsyncId,
+  channel,
+  hasSubscribers,
+  subscribe,
+  unsubscribe,
+  tracingChannel,
+  lookup,
+  resolve4,
+  resolve6,
+  stringify,
+  parse,
+  escape,
+  unescape,
 }

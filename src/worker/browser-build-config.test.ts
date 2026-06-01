@@ -25,20 +25,45 @@ describe('browser build config', () => {
 
     it('includes Node.js polyfills', () => {
       const aliases = getBrowserAliases()
-      expect(aliases['node:events']).toBe('events')
+      expect(aliases['node:events']).toBe('orez/worker/shims/node-stub')
+      expect(aliases.events).toBe('orez/worker/shims/node-stub')
       expect(aliases['node:stream']).toBe('orez/worker/shims/stream-browser')
-      expect(aliases['node:path']).toBe('path-browserify')
+      expect(aliases.stream).toBe('orez/worker/shims/stream-browser')
+      expect(aliases['node:stream/promises']).toBe('orez/worker/shims/node-stub')
+      expect(aliases['node:path']).toBe('orez/worker/shims/node-stub')
+      expect(aliases.path).toBe('orez/worker/shims/node-stub')
       expect(aliases['node:os']).toBe('orez/worker/shims/node-stub')
+      expect(aliases.os).toBe('orez/worker/shims/node-stub')
     })
 
     it('includes Node.js stubs', () => {
       const aliases = getBrowserAliases()
       expect(aliases['node:fs']).toBe('orez/worker/shims/node-stub')
+      expect(aliases['fs/promises']).toBe('orez/worker/shims/node-stub')
       expect(aliases['node:net']).toBe('orez/worker/shims/node-stub')
       expect(aliases['node:child_process']).toBe('orez/worker/shims/node-stub')
       expect(aliases['node:http']).toBe('orez/worker/shims/node-stub')
+      expect(aliases.https).toBe('orez/worker/shims/node-stub')
+      expect(aliases.http2).toBe('orez/worker/shims/node-stub')
+      expect(aliases.async_hooks).toBe('orez/worker/shims/node-stub')
+      expect(aliases.diagnostics_channel).toBe('orez/worker/shims/node-stub')
+      expect(aliases.dns).toBe('orez/worker/shims/node-stub')
+      expect(aliases.querystring).toBe('orez/worker/shims/node-stub')
       expect(aliases['node:crypto']).toBe('orez/worker/shims/node-stub')
       expect(aliases['node:v8']).toBe('orez/worker/shims/node-stub')
+    })
+
+    it('aliases zero-cache internals to a generated overlay', () => {
+      const aliases = getBrowserAliases({
+        zeroCacheSrcDir: '/tmp/zero-cache-cf/@rocicorp/zero/out/zero-cache/src',
+        aliases: { 'libpg-query': '/tmp/zero-cache-cf/node_modules/libpg-query' },
+      })
+      expect(
+        aliases['@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js']
+      ).toBe(
+        '/tmp/zero-cache-cf/@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js'
+      )
+      expect(aliases['libpg-query']).toBe('/tmp/zero-cache-cf/node_modules/libpg-query')
     })
   })
 
