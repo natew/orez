@@ -6,6 +6,7 @@ import {
   isChildProcessRunning,
   isPidRunning,
   killProcessTree,
+  terminateChildProcessTree,
   waitForChildProcessExit,
 } from './child-process.js'
 
@@ -142,6 +143,51 @@ describe('child process helpers', () => {
     killProcessTree(parent.pid!, 'SIGKILL')
 
     await expect(waitForChildProcessExit(parent, 2000)).resolves.toBe(true)
+    await expect(waitForPidExit(childPid, 2000)).resolves.toBe(true)
+  })
+
+  it('does not leave descendants alive when the parent exits first', async () => {
+    const parent = track(
+      spawn(
+        process.execPath,
+        [
+          '-e',
+          [
+            "const { spawn } = require('node:child_process')",
+            "const child = spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)\"], { stdio: 'ignore' })",
+            'console.log(child.pid)',
+            "process.on('SIGTERM', () => process.exit(0))",
+            'setInterval(() => {}, 1000)',
+          ].join('; '),
+        ],
+        { stdio: ['ignore', 'pipe', 'ignore'] }
+      )
+    )
+
+    const childPid = await new Promise<number>((resolve, reject) => {
+      let output = ''
+
+      const onData = (chunk: Buffer) => {
+        output += chunk.toString()
+        if (!output.includes('\n')) return
+
+        const value = Number.parseInt(output.split(/\r?\n/, 1)[0]!.trim(), 10)
+        if (Number.isInteger(value) && value > 0) {
+          parent.stdout?.off('data', onData)
+          resolve(value)
+        }
+      }
+
+      parent.stdout?.on('data', onData)
+      parent.once('error', reject)
+      parent.once('close', () =>
+        reject(new Error('parent exited before reporting child pid'))
+      )
+    })
+
+    await expect(
+      terminateChildProcessTree(parent, { graceMs: 100, forceGraceMs: 2000 })
+    ).resolves.toBe(true)
     await expect(waitForPidExit(childPid, 2000)).resolves.toBe(true)
   })
 })

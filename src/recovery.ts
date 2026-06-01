@@ -6,11 +6,7 @@
 import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import {
-  isChildProcessRunning,
-  killProcessTree,
-  waitForChildProcessExit,
-} from './child-process.js'
+import { isChildProcessRunning, terminateChildProcessTree } from './child-process.js'
 import { log } from './log.js'
 import { createPGliteWorker } from './pglite-manager.js'
 
@@ -46,6 +42,18 @@ export function hasCdcCorruptionSignature(details: string): boolean {
 }
 
 /**
+ * zero's replica monitor starts before the serving replica necessarily has a
+ * completed initial sync. until that sync creates the replica metadata tables,
+ * the monitor can log this while zero-cache is otherwise healthy.
+ */
+export function hasZeroReplicaMonitorWarmupSignature(details: string): boolean {
+  return (
+    details.includes('Unable to read watermark from replica') &&
+    details.includes('_zero.replicationState')
+  )
+}
+
+/**
  * detect zero-cache state mismatches between the replica, CVR DB, and change DB.
  * these are not application-level Zero errors; they mean orez's local dev cache
  * state must be rebuilt as one consistency domain.
@@ -56,12 +64,6 @@ export function hasZeroStateInconsistencySignature(details: string): boolean {
   if (details.includes('RowsVersionBehindError')) return true
   if (details.includes('max attempts exceeded waiting for CVR')) return true
   if (details.includes('replica db must be in wal2 mode')) return true
-  if (
-    details.includes('Unable to read watermark from replica') &&
-    details.includes('_zero.replicationState')
-  ) {
-    return true
-  }
   if (
     details.includes('SqliteError: unable to open database file') ||
     details.includes('SQLITE_CANTOPEN')
@@ -106,9 +108,12 @@ export async function recoverZeroState(ctx: RecoveryContext): Promise<void> {
 
   // kill the failed zero-cache process
   if (isChildProcessRunning(zeroCacheProcess)) {
-    if (zeroCacheProcess.pid) killProcessTree(zeroCacheProcess.pid, 'SIGKILL')
-    else zeroCacheProcess.kill('SIGKILL')
-    await waitForChildProcessExit(zeroCacheProcess, 1000)
+    await terminateChildProcessTree(zeroCacheProcess, {
+      gracefulSignal: 'SIGKILL',
+      forceSignal: 'SIGKILL',
+      graceMs: 1000,
+      forceGraceMs: 1000,
+    })
   }
 
   // close and delete CVR/CDB instances

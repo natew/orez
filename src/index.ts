@@ -22,7 +22,8 @@ import {
   isChildProcessRunning,
   isPidRunning,
   killProcessTree,
-  waitForChildProcessExit,
+  terminateChildProcessTree,
+  terminateProcessTree,
 } from './child-process.js'
 import { getConfig, getConnectionString } from './config.js'
 import { log, port, setLogLevel, setLogStore } from './log.js'
@@ -42,6 +43,7 @@ import { orezTitle } from './process-title.js'
 import {
   hasCdcCorruptionSignature,
   hasRecoverableZeroStateSignature,
+  hasZeroReplicaMonitorWarmupSignature,
   hasZeroStateInconsistencySignature,
   getZeroReplicaStartupResetReason,
   recoverZeroState,
@@ -312,10 +314,30 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // the in-process watchdog could notice). sweep anything still holding
   // the zero port so the new run can bind.
   const pidFile = resolve(config.dataDir, 'orez.pid')
-  if (!config.skipZeroCache && process.platform !== 'win32') {
-    try {
-      const priorPid = Number(readFileSync(pidFile, 'utf8').trim())
-      if (priorPid > 0 && priorPid !== process.pid && !isPidRunning(priorPid)) {
+  let priorPid = 0
+  try {
+    priorPid = Number(readFileSync(pidFile, 'utf8').trim())
+  } catch {}
+  if (priorPid > 0 && priorPid !== process.pid) {
+    if (isPidRunning(priorPid)) {
+      log.orez(
+        `stopping prior orez pid ${priorPid} for data dir ${resolve(config.dataDir)}`
+      )
+      const stopped = await terminateProcessTree(priorPid, {
+        gracefulSignal: 'SIGTERM',
+        forceSignal: 'SIGKILL',
+        graceMs: 5000,
+        forceGraceMs: 1000,
+      })
+      if (!stopped) {
+        throw new Error(
+          `could not stop prior orez pid ${priorPid} for data dir ${resolve(
+            config.dataDir
+          )}`
+        )
+      }
+    } else if (!config.skipZeroCache && process.platform !== 'win32') {
+      try {
         const result = spawnSync('lsof', ['-ti', `:${config.zeroPort}`], {
           encoding: 'utf8',
         })
@@ -331,8 +353,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
             killProcessTree(pid, 'SIGKILL')
           } catch {}
         }
-      }
-    } catch {}
+      } catch {}
+    }
   }
   writeFileSync(pidFile, String(process.pid))
 
@@ -607,26 +629,18 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     zeroStopExpected = true
 
     try {
-      child.kill('SIGTERM')
-    } catch (err: any) {
+      const exited = await terminateChildProcessTree(child, {
+        gracefulSignal: 'SIGTERM',
+        forceSignal: 'SIGKILL',
+        graceMs: 5000,
+        forceGraceMs: 1000,
+      })
+      if (!exited) {
+        log.debug.orez(`zero-cache pid ${child.pid} did not exit after SIGKILL`)
+      }
+    } finally {
       zeroStopExpected = false
-      if (err?.code !== 'ESRCH') throw err
-      return
     }
-
-    const exitedGracefully = await waitForChildProcessExit(child, 5000)
-    if (exitedGracefully) {
-      zeroStopExpected = false
-      return
-    }
-
-    log.debug.orez(
-      `zero-cache pid ${child.pid} did not exit after SIGTERM, force killing`
-    )
-    if (child.pid) killProcessTree(child.pid, 'SIGKILL')
-    else child.kill('SIGKILL')
-    await waitForChildProcessExit(child, 1000)
-    zeroStopExpected = false
   }
 
   // explicit process restart for admin use. unexpected crashes use full state
@@ -1185,6 +1199,7 @@ async function startZeroCache(
 
   // detect log level from zero-cache output
   const detectLevel = (line: string, fallback: string): string => {
+    if (hasZeroReplicaMonitorWarmupSignature(line)) return 'debug'
     if (isStartupNoise(line)) return 'debug'
     const lower = line.toLowerCase()
     if (

@@ -48,6 +48,10 @@ export async function waitForChildProcessExit(
   })
 }
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 function listChildPids(pid: number): number[] {
   if (process.platform === 'win32') return []
 
@@ -64,7 +68,9 @@ function listChildPids(pid: number): number[] {
     .filter((value) => Number.isInteger(value) && value > 0)
 }
 
-export function killProcessTree(pid: number, signal: NodeJS.Signals | number): void {
+export function listProcessTreePids(pid: number): number[] {
+  if (!isPidRunning(pid)) return []
+
   const seen = new Set<number>()
   const stack = [pid]
   const order: number[] = []
@@ -80,6 +86,12 @@ export function killProcessTree(pid: number, signal: NodeJS.Signals | number): v
     }
   }
 
+  return order
+}
+
+export function killProcessTree(pid: number, signal: NodeJS.Signals | number): void {
+  const order = listProcessTreePids(pid)
+
   for (const current of order.reverse()) {
     try {
       process.kill(current, signal)
@@ -87,4 +99,95 @@ export function killProcessTree(pid: number, signal: NodeJS.Signals | number): v
       if (err?.code !== 'ESRCH') throw err
     }
   }
+}
+
+export async function waitForPidsExit(
+  pids: Iterable<number>,
+  timeoutMs: number
+): Promise<boolean> {
+  const uniquePids = [
+    ...new Set([...pids].filter((pid) => Number.isInteger(pid) && pid > 0)),
+  ]
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    if (uniquePids.every((pid) => !isPidRunning(pid))) return true
+    await sleep(25)
+  }
+
+  return uniquePids.every((pid) => !isPidRunning(pid))
+}
+
+export interface TerminateProcessTreeOptions {
+  gracefulSignal?: NodeJS.Signals
+  forceSignal?: NodeJS.Signals
+  graceMs?: number
+  forceGraceMs?: number
+}
+
+export async function terminateProcessTree(
+  pid: number,
+  options: TerminateProcessTreeOptions = {}
+): Promise<boolean> {
+  const {
+    gracefulSignal = 'SIGTERM',
+    forceSignal = 'SIGKILL',
+    graceMs = 5000,
+    forceGraceMs = 1000,
+  } = options
+  const knownPids = new Set(listProcessTreePids(pid))
+
+  if (knownPids.size === 0) return true
+
+  try {
+    process.kill(pid, gracefulSignal)
+  } catch (err: any) {
+    if (err?.code !== 'ESRCH') throw err
+  }
+
+  const deadline = Date.now() + graceMs
+  while (Date.now() < deadline) {
+    for (const knownPid of [...knownPids]) {
+      for (const childPid of listChildPids(knownPid)) {
+        knownPids.add(childPid)
+      }
+    }
+
+    if ([...knownPids].every((knownPid) => !isPidRunning(knownPid))) {
+      return true
+    }
+
+    await sleep(50)
+  }
+
+  const remaining = [...knownPids].filter((knownPid) => isPidRunning(knownPid))
+  for (const remainingPid of remaining.reverse()) {
+    try {
+      process.kill(remainingPid, forceSignal)
+    } catch (err: any) {
+      if (err?.code !== 'ESRCH') throw err
+    }
+  }
+
+  return waitForPidsExit(remaining, forceGraceMs)
+}
+
+export async function terminateChildProcessTree(
+  child: ChildProcess,
+  options: TerminateProcessTreeOptions = {}
+): Promise<boolean> {
+  if (!isChildProcessRunning(child)) return true
+  if (child.pid) return terminateProcessTree(child.pid, options)
+
+  try {
+    child.kill(options.gracefulSignal ?? 'SIGTERM')
+  } catch (err: any) {
+    if (err?.code !== 'ESRCH') throw err
+  }
+
+  const exited = await waitForChildProcessExit(child, options.graceMs ?? 5000)
+  if (exited) return true
+
+  child.kill(options.forceSignal ?? 'SIGKILL')
+  return waitForChildProcessExit(child, options.forceGraceMs ?? 1000)
 }

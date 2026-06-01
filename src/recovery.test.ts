@@ -8,6 +8,7 @@ import {
   getZeroReplicaStartupResetReason,
   hasCdcCorruptionSignature,
   hasRecoverableZeroStateSignature,
+  hasZeroReplicaMonitorWarmupSignature,
   hasZeroStateInconsistencySignature,
 } from './recovery.js'
 
@@ -39,13 +40,16 @@ describe('zero recovery signatures', () => {
       )
     ).toBe(true)
     expect(
-      hasZeroStateInconsistencySignature(
-        'Unable to read watermark from replica: SqliteError: no such table: _zero.replicationState'
-      )
-    ).toBe(true)
-    expect(
       hasZeroStateInconsistencySignature('SqliteError: unable to open database file')
     ).toBe(true)
+  })
+
+  it('treats replica monitor missing metadata as warmup noise', () => {
+    const details =
+      'Unable to read watermark from replica: SqliteError: no such table: _zero.replicationState'
+
+    expect(hasZeroReplicaMonitorWarmupSignature(details)).toBe(true)
+    expect(hasZeroStateInconsistencySignature(details)).toBe(false)
   })
 
   it('does not classify unrelated transient connection output as state drift', () => {
@@ -60,7 +64,7 @@ describe('zero recovery signatures', () => {
   it('combines recoverable zero state signatures', () => {
     expect(
       hasRecoverableZeroStateSignature(
-        'Unable to read watermark from replica: SqliteError: no such table: _zero.replicationState'
+        'RowsVersionBehindError: rowsVersion (a1) is behind CVR a2'
       )
     ).toBe(true)
     expect(
