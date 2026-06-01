@@ -775,6 +775,48 @@ export interface BrowserProxyExternalSession {
   close(): Promise<void>
 }
 
+type ProtocolSessionDb = PGlite & {
+  close?: () => Promise<void> | void
+}
+
+interface ProtocolSessionFactory {
+  createProtocolSession(): ProtocolSessionDb
+}
+
+function hasProtocolSessionFactory(db: PGlite): db is PGlite & ProtocolSessionFactory {
+  return (
+    typeof (db as Partial<ProtocolSessionFactory>).createProtocolSession === 'function'
+  )
+}
+
+function createConnectionContext(ctx: {
+  db: PGlite
+  mutex: Mutex
+  txState: PgLiteTxState
+}): {
+  db: PGlite
+  mutex: Mutex
+  txState: PgLiteTxState
+  close: () => Promise<void>
+} {
+  if (!hasProtocolSessionFactory(ctx.db)) {
+    return {
+      ...ctx,
+      close: async () => {},
+    }
+  }
+
+  const db = ctx.db.createProtocolSession()
+  return {
+    db,
+    mutex: new Mutex(),
+    txState: { status: 0x49, owner: null },
+    close: async () => {
+      await db.close?.()
+    },
+  }
+}
+
 export async function createBrowserProxy(
   dbInput: PGlite | PGliteInstances,
   config: {
@@ -924,6 +966,7 @@ export async function createBrowserProxy(
   }
 
   let closed = false
+  const activeConnectionClosers = new Set<() => Promise<void>>()
 
   function handleConnection(port: MessagePort) {
     if (closed) {
@@ -1009,10 +1052,22 @@ export async function createBrowserProxy(
     ctx: { db: PGlite; mutex: Mutex; txState: PgLiteTxState },
     isReplicationConnection: boolean
   ) {
-    const { db, mutex, txState } = ctx
+    const scopedContext = createConnectionContext(ctx)
+    const { db, mutex, txState } = scopedContext
     const connId = {}
     const dbName = params.database || 'postgres'
     let connClosed = false
+    let sessionClosed = false
+
+    const closeSession = async () => {
+      if (sessionClosed) return
+      sessionClosed = true
+      activeConnectionClosers.delete(closeSession)
+      try {
+        await scopedContext.close()
+      } catch {}
+    }
+    activeConnectionClosers.add(closeSession)
 
     const write = (data: Uint8Array) => {
       if (connClosed) return
@@ -1187,6 +1242,7 @@ export async function createBrowserProxy(
               aborted = true
               connClosed = true
               port.close()
+              void closeSession()
             }
             port.onmessage = () => {}
             handleStartReplication(
@@ -1225,6 +1281,7 @@ export async function createBrowserProxy(
           }
           connClosed = true
           port.close()
+          void closeSession()
           return
         }
 
@@ -1903,6 +1960,9 @@ export async function createBrowserProxy(
     close() {
       closed = true
       signalPending = false
+      for (const closeConnection of activeConnectionClosers) {
+        void closeConnection()
+      }
     },
     createExternalSession,
     query: externalQuery,

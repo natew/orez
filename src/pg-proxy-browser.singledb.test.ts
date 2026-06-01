@@ -46,6 +46,16 @@ function makeFacade(real: PGlite, label: string) {
   return facade as PGlite
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(label)), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
 function createSql(
   proxy: ReturnType<typeof createBrowserProxy> extends Promise<infer T> ? T : never
 ) {
@@ -203,6 +213,62 @@ describe('createBrowserProxy singleDb mutex coalescing', () => {
     await sql1.end({ timeout: 1 }).catch(() => {})
     await sql2.end({ timeout: 1 }).catch(() => {})
     proxy.close()
+  }, 10_000)
+
+  test('protocol session factories isolate each wire connection transaction state', async () => {
+    const sessions = [new PGlite(), new PGlite()]
+    await Promise.all(sessions.map((session) => session.waitReady))
+
+    let created = 0
+    const basePg = makeFacade(pg, 'postgres') as PGlite & {
+      createProtocolSession(): PGlite
+    }
+    basePg.createProtocolSession = () => {
+      const session = sessions[created]
+      if (!session) throw new Error(`missing protocol session ${created}`)
+      created++
+      return makeFacade(session, `postgres-session-${created}`)
+    }
+
+    const proxy = await createBrowserProxy(
+      {
+        postgres: basePg,
+        cvr: makeFacade(pg, 'cvr'),
+        cdb: makeFacade(pg, 'cdb'),
+        postgresReplicas: [],
+      },
+      { pgPassword: '', pgUser: 'u' }
+    )
+    const sql1 = createSql(proxy)
+    const sql2 = createSql(proxy)
+    const releaseTx = deferred<void>()
+    const txStarted = deferred<void>()
+    let tx: Promise<unknown> | null = null
+
+    try {
+      tx = sql1.begin(async (sql) => {
+        await sql`SELECT 1 AS ok`
+        txStarted.resolve()
+        await releaseTx.promise
+      })
+      await txStarted.promise
+
+      await expect(
+        withTimeout(
+          sql2`SELECT 1 AS ok`.then((rows) => rows[0]?.ok),
+          1000,
+          'second protocol session was blocked by first session transaction'
+        )
+      ).resolves.toBe(1)
+      expect(created).toBeGreaterThanOrEqual(2)
+    } finally {
+      releaseTx.resolve()
+      if (tx) await tx.catch(() => {})
+      await sql1.end({ timeout: 1 }).catch(() => {})
+      await sql2.end({ timeout: 1 }).catch(() => {})
+      proxy.close()
+      await Promise.all(sessions.map((session) => session.close().catch(() => {})))
+    }
   }, 10_000)
 
   test('explicit singleDb=false on distinct façades preserves split mutexes', async () => {

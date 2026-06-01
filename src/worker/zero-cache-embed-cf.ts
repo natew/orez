@@ -100,6 +100,17 @@ export interface ZeroCacheEmbedCF {
   stop(): Promise<void>
 }
 
+type DoBackendProtocolSessionFactory = {
+  createProtocolSession(): DoBackend
+}
+
+function addProtocolSessionFactory(
+  backend: DoBackend,
+  createProtocolSession: () => DoBackend
+): DoBackend & DoBackendProtocolSessionFactory {
+  return Object.assign(backend, { createProtocolSession })
+}
+
 /**
  * start zero-cache in embedded CF Workers mode.
  *
@@ -117,19 +128,28 @@ export async function startZeroCacheEmbedCF(
   const backendUrl = opts.backendUrl || 'https://orez-do-backend.local'
   const backendNamespace = opts.backendNamespace || appId
 
+  const createBackend = (dbName: string) =>
+    new DoBackend(backendUrl, dbName, backendNamespace, {
+      fetch: opts.backendFetch,
+    })
+
   const backends =
     opts.backends ??
     ({
-      postgres: new DoBackend(backendUrl, 'postgres', backendNamespace, {
-        fetch: opts.backendFetch,
-      }),
-      cvr: new DoBackend(backendUrl, 'zero_cvr', backendNamespace, {
-        fetch: opts.backendFetch,
-      }),
-      cdb: new DoBackend(backendUrl, 'zero_cdb', backendNamespace, {
-        fetch: opts.backendFetch,
-      }),
+      postgres: createBackend('postgres'),
+      cvr: createBackend('zero_cvr'),
+      cdb: createBackend('zero_cdb'),
     } satisfies NonNullable<ZeroCacheEmbedCFOptions['backends']>)
+
+  const proxyBackends = opts.backends
+    ? backends
+    : {
+        postgres: addProtocolSessionFactory(backends.postgres, () =>
+          createBackend('postgres')
+        ),
+        cvr: addProtocolSessionFactory(backends.cvr, () => createBackend('zero_cvr')),
+        cdb: addProtocolSessionFactory(backends.cdb, () => createBackend('zero_cdb')),
+      }
 
   await Promise.all([
     backends.postgres.waitReady,
@@ -139,9 +159,9 @@ export async function startZeroCacheEmbedCF(
 
   const proxy: BrowserProxy = await createBrowserProxy(
     {
-      postgres: backends.postgres as any,
-      cvr: backends.cvr as any,
-      cdb: backends.cdb as any,
+      postgres: proxyBackends.postgres as any,
+      cvr: proxyBackends.cvr as any,
+      cdb: proxyBackends.cdb as any,
       postgresReplicas: [],
     } as any,
     {
