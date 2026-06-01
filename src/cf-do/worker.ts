@@ -61,6 +61,7 @@ interface SqlTrack {
   operation: 'INSERT' | 'UPDATE' | 'DELETE'
   returnRows?: boolean
   rowColumns?: string[]
+  transactionID?: string
 }
 interface SqlExecStatement {
   sql: string
@@ -162,6 +163,10 @@ export class ZeroDO extends DurableObject {
       return this.handleExec(request)
     if (url.pathname === '/batch' && request.method === 'POST')
       return this.handleBatch(request)
+    if (url.pathname === '/commit-tracked-tx' && request.method === 'POST')
+      return this.handleCommitTrackedTransaction(request)
+    if (url.pathname === '/rollback-tracked-tx' && request.method === 'POST')
+      return this.handleRollbackTrackedTransaction(request)
     if (
       url.pathname === '/changes' &&
       (request.method === 'GET' || request.method === 'POST')
@@ -475,6 +480,34 @@ export class ZeroDO extends DurableObject {
     }
   }
 
+  private async handleCommitTrackedTransaction(request: Request): Promise<Response> {
+    try {
+      const body = (await request.json()) as { transactionID?: unknown }
+      const transactionID = String(body.transactionID || '')
+      if (!transactionID) throw new Error('missing transactionID')
+      const count = await this.ctx.storage.transaction(() =>
+        this.commitPendingTrackedChanges(transactionID)
+      )
+      return Response.json({ ok: true, count })
+    } catch (err: any) {
+      return Response.json({ error: err.message }, { status: 500 })
+    }
+  }
+
+  private async handleRollbackTrackedTransaction(request: Request): Promise<Response> {
+    try {
+      const body = (await request.json()) as { transactionID?: unknown }
+      const transactionID = String(body.transactionID || '')
+      if (!transactionID) throw new Error('missing transactionID')
+      const count = await this.ctx.storage.transaction(() =>
+        this.deletePendingTrackedChanges(transactionID)
+      )
+      return Response.json({ ok: true, count })
+    } catch (err: any) {
+      return Response.json({ error: err.message }, { status: 500 })
+    }
+  }
+
   private async handleChanges(request: Request, url: URL): Promise<Response> {
     try {
       let watermark = Number(
@@ -514,8 +547,21 @@ export class ZeroDO extends DurableObject {
     for (const row of rows) {
       const trackedRow = trackedChangeRow(row, track)
       if (track.operation === 'DELETE')
-        this.appendTrackedChange(track.tableName, 'DELETE', null, trackedRow)
-      else this.appendTrackedChange(track.tableName, track.operation, trackedRow, null)
+        this.appendTrackedChange(
+          track.tableName,
+          'DELETE',
+          null,
+          trackedRow,
+          track.transactionID
+        )
+      else
+        this.appendTrackedChange(
+          track.tableName,
+          track.operation,
+          trackedRow,
+          null,
+          track.transactionID
+        )
     }
     this.appendDerivedTrackedChanges(track, rows)
 
@@ -572,7 +618,7 @@ export class ZeroDO extends DurableObject {
       )
       .toArray()
     for (const row of rows) {
-      this.appendTrackedChange(publicTableName, 'UPDATE', row, null)
+      this.appendTrackedChange(publicTableName, 'UPDATE', row, null, track.transactionID)
     }
   }
 
@@ -712,6 +758,20 @@ export class ZeroDO extends DurableObject {
     tableName: string,
     op: 'INSERT' | 'UPDATE' | 'DELETE',
     rowData: Record<string, unknown> | null,
+    oldData: Record<string, unknown> | null,
+    transactionID?: string
+  ) {
+    if (transactionID) {
+      this.appendPendingTrackedChange(tableName, op, rowData, oldData, transactionID)
+      return
+    }
+    this.appendCommittedTrackedChange(tableName, op, rowData, oldData)
+  }
+
+  private appendCommittedTrackedChange(
+    tableName: string,
+    op: 'INSERT' | 'UPDATE' | 'DELETE',
+    rowData: Record<string, unknown> | null,
     oldData: Record<string, unknown> | null
   ) {
     this.watermarks.ensureTables()
@@ -725,6 +785,61 @@ export class ZeroDO extends DurableObject {
       oldData ? JSON.stringify(oldData) : null
     )
     this.watermarks.mark(watermark)
+  }
+
+  private ensurePendingTrackedChangesTable() {
+    this.sql.exec(
+      "CREATE TABLE IF NOT EXISTS _zero_pending_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, transaction_id TEXT NOT NULL, table_name TEXT NOT NULL, op TEXT NOT NULL CHECK (op IN ('INSERT', 'UPDATE', 'DELETE')), row_data TEXT, old_data TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()))"
+    )
+  }
+
+  private appendPendingTrackedChange(
+    tableName: string,
+    op: 'INSERT' | 'UPDATE' | 'DELETE',
+    rowData: Record<string, unknown> | null,
+    oldData: Record<string, unknown> | null,
+    transactionID: string
+  ) {
+    this.ensurePendingTrackedChangesTable()
+    this.sql.exec(
+      'INSERT INTO _zero_pending_changes (transaction_id, table_name, op, row_data, old_data) VALUES (?, ?, ?, ?, ?)',
+      transactionID,
+      tableName,
+      op,
+      rowData ? JSON.stringify(rowData) : null,
+      oldData ? JSON.stringify(oldData) : null
+    )
+  }
+
+  private commitPendingTrackedChanges(transactionID: string): number {
+    this.ensurePendingTrackedChangesTable()
+    const rows = this.sql
+      .exec(
+        'SELECT id, table_name, op, row_data, old_data FROM _zero_pending_changes WHERE transaction_id = ? ORDER BY id',
+        transactionID
+      )
+      .toArray()
+    for (const row of rows) {
+      this.appendCommittedTrackedChange(
+        String(row.table_name),
+        row.op as 'INSERT' | 'UPDATE' | 'DELETE',
+        row.row_data ? JSON.parse(String(row.row_data)) : null,
+        row.old_data ? JSON.parse(String(row.old_data)) : null
+      )
+    }
+    this.deletePendingTrackedChanges(transactionID)
+    return rows.length
+  }
+
+  private deletePendingTrackedChanges(transactionID: string): number {
+    this.ensurePendingTrackedChangesTable()
+    const result = this.sql
+      .exec(
+        'DELETE FROM _zero_pending_changes WHERE transaction_id = ? RETURNING 1 AS deleted',
+        transactionID
+      )
+      .toArray()
+    return result.length
   }
 
   private readChangesSince(watermark: number) {
@@ -1084,6 +1199,12 @@ export default {
       return env.ZERO_DO.get(id).fetch(request)
     }
     if (url.pathname === '/batch' && request.method === 'POST') {
+      return env.ZERO_DO.get(id).fetch(request)
+    }
+    if (url.pathname === '/commit-tracked-tx' && request.method === 'POST') {
+      return env.ZERO_DO.get(id).fetch(request)
+    }
+    if (url.pathname === '/rollback-tracked-tx' && request.method === 'POST') {
       return env.ZERO_DO.get(id).fetch(request)
     }
     if (

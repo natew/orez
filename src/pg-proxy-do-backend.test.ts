@@ -1370,6 +1370,95 @@ describe('DoBackend', () => {
     }
 
     expect(wakeups).toBe(1)
+    const trackedBodies = http.bodies.filter((body) => body.track)
+    expect(trackedBodies.every((body) => body.track.transactionID === undefined)).toBe(
+      true
+    )
+  })
+
+  test('defers tracked replication signals until transaction commit', async () => {
+    const http = await startDoHttp((sql) => {
+      if (compactSQL(sql).includes('RETURNING *')) {
+        return { rows: [{ id: 't1', body: 'hello' }], columns: ['id', 'body'] }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'tx-write-signal-test')
+    await backend.waitReady
+    await backend.exec('CREATE PUBLICATION zero_chat FOR TABLE task_item')
+
+    const globalObject = globalThis as any
+    const previousWakeup = globalObject.__orez_signal_replication
+    let wakeups = 0
+    globalObject.__orez_signal_replication = () => {
+      wakeups++
+    }
+    try {
+      await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
+      await backend.query("INSERT INTO task_item (id, body) VALUES ('t1', 'hello')")
+      await backend.query("UPDATE task_item SET body = 'world' WHERE id = 't1'")
+
+      expect(wakeups).toBe(0)
+
+      await backend.execProtocolRaw(msg(0x51, cstr('COMMIT')))
+    } finally {
+      if (previousWakeup === undefined) {
+        delete globalObject.__orez_signal_replication
+      } else {
+        globalObject.__orez_signal_replication = previousWakeup
+      }
+    }
+
+    expect(wakeups).toBe(1)
+    const trackedBodies = http.bodies.filter((body) => body.track)
+    expect(trackedBodies).toHaveLength(2)
+    const transactionIDs = new Set(
+      trackedBodies.map((body) => body.track.transactionID).filter(Boolean)
+    )
+    expect(transactionIDs.size).toBe(1)
+    expect(http.requests.some((url) => url.pathname === '/commit-tracked-tx')).toBe(true)
+    expect(http.requests.some((url) => url.pathname === '/rollback-tracked-tx')).toBe(
+      false
+    )
+  })
+
+  test('drops deferred tracked replication signals on transaction rollback', async () => {
+    const http = await startDoHttp((sql) => {
+      if (compactSQL(sql).includes('RETURNING *')) {
+        return { rows: [{ id: 't1', body: 'hello' }], columns: ['id', 'body'] }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'tx-rollback-signal-test')
+    await backend.waitReady
+    await backend.exec('CREATE PUBLICATION zero_chat FOR TABLE task_item')
+
+    const globalObject = globalThis as any
+    const previousWakeup = globalObject.__orez_signal_replication
+    let wakeups = 0
+    globalObject.__orez_signal_replication = () => {
+      wakeups++
+    }
+    try {
+      await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
+      await backend.query("INSERT INTO task_item (id, body) VALUES ('t1', 'hello')")
+      await backend.execProtocolRaw(msg(0x51, cstr('ROLLBACK')))
+    } finally {
+      if (previousWakeup === undefined) {
+        delete globalObject.__orez_signal_replication
+      } else {
+        globalObject.__orez_signal_replication = previousWakeup
+      }
+    }
+
+    expect(wakeups).toBe(0)
+    const trackedBodies = http.bodies.filter((body) => body.track)
+    expect(trackedBodies).toHaveLength(1)
+    expect(typeof trackedBodies[0].track.transactionID).toBe('string')
+    expect(http.requests.some((url) => url.pathname === '/commit-tracked-tx')).toBe(false)
+    expect(http.requests.some((url) => url.pathname === '/rollback-tracked-tx')).toBe(
+      true
+    )
   })
 
   test('tracks full published rows while preserving client RETURNING projection', async () => {

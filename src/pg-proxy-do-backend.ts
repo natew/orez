@@ -111,6 +111,7 @@ interface ChangeTrackingRequest {
   operation: ChangeTrackingMetadata['operation']
   returnRows: boolean
   rowColumns?: string[]
+  transactionID?: string
 }
 type ReturningProjectionItem =
   | { kind: 'all' }
@@ -4902,6 +4903,7 @@ export class DoBackend {
   // pending persist while inside a transaction. flushed on commit so we don't
   // round-trip to durable storage after every DDL statement in a migration.
   private txMetadataDirty = false
+  private txHasTrackedWrite = false
 
   constructor(
     doUrl: string,
@@ -5196,6 +5198,15 @@ export class DoBackend {
     this.txSnapshotCounter = 0
     this.txChangeTablesSnapshotted = false
     this.txMetadataDirty = false
+    this.txHasTrackedWrite = false
+  }
+
+  private signalTrackedWrite(): void {
+    if (this.inTransaction) {
+      this.txHasTrackedWrite = true
+      return
+    }
+    signalReplicationChange()
   }
 
   private newTransactionID(): string {
@@ -5216,10 +5227,14 @@ export class DoBackend {
       this.clearTransactionState()
       return
     }
-    await this.dropTransactionSnapshots()
     const shouldPersist = this.txMetadataDirty
+    const shouldSignal = this.txHasTrackedWrite
+    const txID = this.txID
+    if (shouldSignal && txID) await this.commitTrackedTransaction(txID)
+    await this.dropTransactionSnapshots()
     this.clearTransactionState()
     if (shouldPersist) await this.persistDurableMetadata()
+    if (shouldSignal) signalReplicationChange()
   }
 
   private async rollbackTransaction(): Promise<void> {
@@ -5228,13 +5243,31 @@ export class DoBackend {
       return
     }
     const snapshot = this.txSnapshot
+    const txID = this.txID
     try {
       await this.restoreTransactionDataSnapshots()
     } finally {
+      if (txID) await this.rollbackTrackedTransaction(txID)
       if (snapshot) this.restoreTransactionMetadataSnapshot(snapshot)
       await this.persistDurableMetadata()
       this.clearTransactionState()
     }
+  }
+
+  private async commitTrackedTransaction(transactionID: string): Promise<void> {
+    await this.httpClient.post(
+      this.url('/commit-tracked-tx'),
+      JSON.stringify({ transactionID }),
+      { 'Content-Type': 'application/json' }
+    )
+  }
+
+  private async rollbackTrackedTransaction(transactionID: string): Promise<void> {
+    await this.httpClient.post(
+      this.url('/rollback-tracked-tx'),
+      JSON.stringify({ transactionID }),
+      { 'Content-Type': 'application/json' }
+    )
   }
 
   async execProtocolRaw(
@@ -5542,6 +5575,7 @@ export class DoBackend {
       operation: tracking.operation,
       returnRows: tracking.returnRows,
       ...(rowColumns ? { rowColumns: [...rowColumns.keys()] } : null),
+      ...(this.inTransaction && this.txID ? { transactionID: this.txID } : null),
     }
   }
 
@@ -6125,7 +6159,7 @@ export class DoBackend {
             affectedRows: rows.length,
           }
         }
-        if (track) signalReplicationChange()
+        if (track) this.signalTrackedWrite()
         return { rows, columns, affectedRows: result.affectedRows }
       } catch (err) {
         lastErr = err
@@ -6320,7 +6354,7 @@ export class DoBackend {
           'Content-Type': 'application/json',
         }
       )
-      if (hasTrackedWrite) signalReplicationChange()
+      if (hasTrackedWrite) this.signalTrackedWrite()
       sqls = []
     }
 
