@@ -335,6 +335,18 @@ afterEach(async () => {
 })
 
 describe('DoBackend', () => {
+  test('bootstraps zero-cache change tracking tables for postgres backends', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'change-tracking-bootstrap')
+    await backend.waitReady
+
+    const sent = compactSQL(http.sqls.join('; '))
+    expect(sent).toContain('CREATE TABLE IF NOT EXISTS "_zero_changes"')
+    expect(sent).toContain('CREATE TABLE IF NOT EXISTS "_zero_change_state"')
+    expect(sent).toContain('CREATE TABLE IF NOT EXISTS "_orez___zero_watermark"')
+    expect(sent).toContain('CREATE TABLE IF NOT EXISTS "_orez__zero_replication_slots"')
+  })
+
   test('sends the configured Durable Object namespace on every SQL request', async () => {
     const http = await startDoHttp(() => ({ rows: [{ ok: 1 }], columns: ['ok'] }))
     const backend = new DoBackend(http.url, 'postgres', 'chat-test-namespace')
@@ -1684,7 +1696,11 @@ describe('DoBackend', () => {
   })
 
   test('does not convert backend SQL errors into empty result sets', async () => {
-    const http = await startDoHttp(() => new Response('boom', { status: 500 }))
+    const http = await startDoHttp((sql) =>
+      sql.includes('SELECT broken')
+        ? new Response('boom', { status: 500 })
+        : { rows: [], columns: [] }
+    )
     const backend = new DoBackend(http.url, 'postgres', 'error-test')
     await backend.waitReady
 

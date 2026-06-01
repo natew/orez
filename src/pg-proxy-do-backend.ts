@@ -4926,8 +4926,30 @@ export class DoBackend {
     try {
       await this.httpClient.post(this.url('/exec'), JSON.stringify({ sql: 'SELECT 1' }))
     } catch {}
+    if (this.dbName === 'postgres') await this.ensureChangeTrackingTables()
     await this.loadDurableMetadata()
     this.ready = true
+  }
+
+  private async ensureChangeTrackingTables(): Promise<void> {
+    await this.doExecResult(
+      "CREATE TABLE IF NOT EXISTS \"_zero_changes\" (watermark INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, op TEXT NOT NULL CHECK (op IN ('INSERT', 'UPDATE', 'DELETE')), row_data TEXT, old_data TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()))"
+    )
+    await this.doExecResult(
+      'CREATE TABLE IF NOT EXISTS "_zero_change_state" (id INTEGER PRIMARY KEY CHECK (id = 1), last_value INTEGER NOT NULL DEFAULT 0)'
+    )
+    await this.doExecResult(
+      'INSERT OR IGNORE INTO "_zero_change_state" (id, last_value) VALUES (1, 0)'
+    )
+    await this.doExecResult(
+      'CREATE TABLE IF NOT EXISTS "_orez___zero_watermark" (dummy INTEGER PRIMARY KEY DEFAULT 1, last_value INTEGER NOT NULL DEFAULT 1, is_called INTEGER NOT NULL DEFAULT 0)'
+    )
+    await this.doExecResult(
+      'INSERT OR IGNORE INTO "_orez___zero_watermark" (dummy, last_value, is_called) VALUES (1, 1, 0)'
+    )
+    await this.doExecResult(
+      "CREATE TABLE IF NOT EXISTS \"_orez__zero_replication_slots\" (slot_name TEXT PRIMARY KEY, restart_lsn TEXT NOT NULL DEFAULT '0/1000000', confirmed_flush_lsn TEXT NOT NULL DEFAULT '0/1000000', wal_status TEXT NOT NULL DEFAULT 'reserved', plugin TEXT NOT NULL DEFAULT 'pgoutput', slot_type TEXT NOT NULL DEFAULT 'logical', active INTEGER NOT NULL DEFAULT 0, active_pid INTEGER DEFAULT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()))"
+    )
   }
 
   private async ensureMetadataTable(): Promise<void> {
