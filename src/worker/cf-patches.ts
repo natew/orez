@@ -232,7 +232,13 @@ const __zc_workers = {
   const staticLookup =
     '((async () => { ' +
     'const _name = moduleUrl.hostname || moduleUrl.pathname.split("/").pop()?.replace(".js",""); ' +
-    'if (process.env.OREZ_DEBUG_WIRE === "1" || globalThis.__OREZ_DEBUG_WIRE__ === true) console.debug("[orez-zc-worker] start", _name, args); ' +
+    'const _debug = process.env.OREZ_DEBUG_WIRE === "1" || globalThis.__OREZ_DEBUG_WIRE__ === true; ' +
+    'if (_debug) { ' +
+    'console.debug("[orez-zc-worker] start", _name, args); ' +
+    'child.on("message", (msg) => console.debug("[orez-zc-worker] message", _name, msg)); ' +
+    'child.on("error", (err) => console.error("[orez-zc-worker] error", _name, err)); ' +
+    'child.on("close", (code, signal) => console.debug("[orez-zc-worker] close", _name, code, signal)); ' +
+    '} ' +
     'const runWorker = __zc_workers[_name]; ' +
     'if (!runWorker) throw new Error("orez: unknown zero-cache worker: " + _name + " (available: " + Object.keys(__zc_workers).join(", ") + ")"); ' +
     'return { default: runWorker, name: _name }; ' +
