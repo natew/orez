@@ -16,7 +16,7 @@
  *   alias: { 'fastify': './src/worker/shims/fastify.js' }
  */
 
-import EventEmitter from 'node:events'
+import { EventEmitter } from 'node:events'
 
 import { WebSocket as WsShim, WebSocketServer as WsServerShim } from './ws.js'
 

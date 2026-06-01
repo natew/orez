@@ -30,7 +30,7 @@
  *   const result = await zc.handleHttp({ method: 'GET', url: '/' })
  */
 
-import EventEmitter from 'node:events'
+import { EventEmitter } from 'node:events'
 
 // static import so the bundler can follow the dependency tree.
 // @ts-expect-error — internal zero-cache module, no type declarations

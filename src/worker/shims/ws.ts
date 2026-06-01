@@ -12,7 +12,7 @@
  *   alias: { 'ws': './src/worker/shims/ws.js' }
  */
 
-import EventEmitter from 'node:events'
+import { EventEmitter } from 'node:events'
 import { Duplex } from 'node:stream'
 
 // -- readyState constants --

@@ -27,7 +27,7 @@
 
 import './shims/zero-process-env.js'
 
-import EventEmitter from 'node:events'
+import { EventEmitter } from 'node:events'
 
 // static import so wrangler can follow the dependency tree and bundle
 // zero-cache with all its transitive deps + our shim aliases.

@@ -22,7 +22,7 @@
  *   ZERO_PORT              — HTTP port for zero-cache dispatcher
  */
 
-import EventEmitter from 'node:events'
+import { EventEmitter } from 'node:events'
 import { resolve } from 'node:path'
 
 import { disableZeroLitestreamRestore } from '../zero-litestream-patch.js'
