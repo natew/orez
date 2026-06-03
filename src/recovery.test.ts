@@ -108,7 +108,9 @@ describe('zero recovery signatures', () => {
   it('does not treat a state-inconsistency crash as transient', () => {
     // these need the heavier full reset; the transient classifier must defer.
     expect(
-      hasTransientCrashSignature('RowsVersionBehindError: rowsVersion (a1) is behind CVR a2')
+      hasTransientCrashSignature(
+        'RowsVersionBehindError: rowsVersion (a1) is behind CVR a2'
+      )
     ).toBe(false)
     expect(
       hasTransientCrashSignature('max attempts exceeded waiting for CVR@a2 to catch up')
@@ -177,10 +179,13 @@ describe('zero recovery signatures', () => {
 
     it('still full-resets on CVR/replica state inconsistency', () => {
       expect(
-        classifyZeroCrashRecovery('RowsVersionBehindError: rowsVersion (a1) is behind CVR a2')
+        classifyZeroCrashRecovery(
+          'RowsVersionBehindError: rowsVersion (a1) is behind CVR a2'
+        )
       ).toEqual({ action: 'full-reset', reason: 'state inconsistency' })
       expect(
-        classifyZeroCrashRecovery('max attempts exceeded waiting for CVR@a2 to catch up').action
+        classifyZeroCrashRecovery('max attempts exceeded waiting for CVR@a2 to catch up')
+          .action
       ).toBe('full-reset')
     })
   })

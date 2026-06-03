@@ -126,9 +126,10 @@ export function hasTransientCrashSignature(details: string): boolean {
  * conservative, non-destructive choice. only an explicit corruption/inconsistency
  * signature escalates to 'full-reset'.
  */
-export function classifyZeroCrashRecovery(
-  details: string
-): { action: 'full-reset' | 'restart'; reason: string } {
+export function classifyZeroCrashRecovery(details: string): {
+  action: 'full-reset' | 'restart'
+  reason: string
+} {
   if (hasCdcCorruptionSignature(details)) {
     return { action: 'full-reset', reason: 'CDC corruption' }
   }
