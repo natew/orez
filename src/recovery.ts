@@ -79,6 +79,69 @@ export function hasRecoverableZeroStateSignature(details: string): boolean {
 }
 
 /**
+ * detect a transient zero-cache crash that does NOT imply the local zero state
+ * (replica / CVR DB / change DB) is inconsistent or corrupt. these are runtime
+ * faults — a query timeout, an unhandled rejection in a worker, an OOM kill —
+ * where the on-disk state is still valid and a plain process restart recovers.
+ *
+ * this matters because a `full` reset deletes the CVR DB, which holds the
+ * per-client registry and the CVR version every connected client presents as
+ * its baseCookie. wiping it mid-session makes the recreated CVR start at the
+ * empty "00" version, so every still-connected client's baseCookie is now
+ * ahead of the CVR and the view-syncer rejects it with `ClientNotFound`
+ * (see checkClientAndCVRVersions). a restart-only recovery keeps the CVR
+ * intact, so clients reconnect against their existing baseCookie with no error.
+ */
+export function hasTransientCrashSignature(details: string): boolean {
+  if (!details) return false
+  // a corruption / state-drift crash is NOT transient — let the caller take
+  // the heavier full-reset path for those.
+  if (hasRecoverableZeroStateSignature(details)) return false
+
+  // change-streamer / transaction-pool query timeout against pglite under load.
+  if (details.includes('response for statement timed out')) return true
+  // generic statement / query timeout phrasing.
+  if (details.includes('statement timed out') || details.includes('query timed out')) {
+    return true
+  }
+  // node process pressure that kills the worker without touching the db files.
+  if (details.includes('JavaScript heap out of memory')) return true
+  if (details.includes('FATAL ERROR') && details.includes('heap')) return true
+
+  return false
+}
+
+/**
+ * the recovery action the crash watcher should take after zero-cache exits
+ * unexpectedly, derived purely from the crash output tail.
+ *
+ *  - 'full-reset' deletes + recreates the CVR/CDB and replica. only correct when
+ *    local zero state is actually corrupt/desynced, because it evicts every
+ *    connected client (the recreated CVR starts at "00", so each client's
+ *    persisted baseCookie is ahead of it → ClientNotFound on reconnect).
+ *  - 'restart' relaunches the zero-cache process against the existing, valid
+ *    on-disk state. clients reconnect transparently against their baseCookie.
+ *
+ * a plain unexpected exit with no recognizable tail defaults to 'restart' — the
+ * conservative, non-destructive choice. only an explicit corruption/inconsistency
+ * signature escalates to 'full-reset'.
+ */
+export function classifyZeroCrashRecovery(
+  details: string
+): { action: 'full-reset' | 'restart'; reason: string } {
+  if (hasCdcCorruptionSignature(details)) {
+    return { action: 'full-reset', reason: 'CDC corruption' }
+  }
+  if (hasZeroStateInconsistencySignature(details)) {
+    return { action: 'full-reset', reason: 'state inconsistency' }
+  }
+  if (hasTransientCrashSignature(details)) {
+    return { action: 'restart', reason: 'transient crash' }
+  }
+  return { action: 'restart', reason: 'unexpected exit' }
+}
+
+/**
  * detect replica files that cannot possibly be a valid already-synced Zero
  * replica. zero-cache can create the file itself during initial sync; an empty
  * file here is a leftover local-state artifact, not useful cache state.

@@ -41,6 +41,7 @@ import {
 import { findPort } from './port.js'
 import { orezTitle } from './process-title.js'
 import {
+  classifyZeroCrashRecovery,
   hasCdcCorruptionSignature,
   hasRecoverableZeroStateSignature,
   hasZeroReplicaMonitorWarmupSignature,
@@ -868,9 +869,16 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     })
   }
 
-  // auto-recover when zero-cache exits unexpectedly. a crashed cache may leave
-  // the replica, change DB, and CVR DB at incompatible versions. rebuild that
-  // local zero state together instead of restarting against stale pieces.
+  // auto-recover when zero-cache exits unexpectedly. only a crash that actually
+  // corrupts or desyncs local zero state (replica / CVR DB / change DB) warrants
+  // a `full` reset, which deletes the CVR DB and so severs every connected
+  // client: the recreated CVR starts at the empty "00" version, the client's
+  // persisted baseCookie is now ahead of it, and the view-syncer rejects the
+  // reconnect with `ClientNotFound` (checkClientAndCVRVersions). a transient
+  // crash — a change-streamer query timeout, an OOM kill, a stray unhandled
+  // rejection — leaves the on-disk state valid, so a plain process restart
+  // recovers and live clients reconnect against their existing baseCookie
+  // with no error. wiping the CVR for those is the more damaging action.
   const ZERO_CRASH_WINDOW_MS = 5 * 60_000
   const ZERO_CRASH_RESET_BUDGET = 5
   let zeroCrashTimes: number[] = []
@@ -882,31 +890,62 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       const details = tail?.length ? tail.join('\n') : ''
 
       // bounded by a sliding-window budget so a genuinely broken instance
-      // cannot reset-loop forever.
+      // cannot reset/restart-loop forever.
       zeroCrashTimes = zeroCrashTimes.filter((t) => Date.now() - t < ZERO_CRASH_WINDOW_MS)
       zeroCrashTimes.push(Date.now())
 
       if (zeroCrashTimes.length > ZERO_CRASH_RESET_BUDGET) {
-        log.orez('zero-cache kept crashing after repeated state resets — giving up')
+        log.orez('zero-cache kept crashing after repeated recoveries — giving up')
         return
       }
 
-      const reason = hasCdcCorruptionSignature(details)
-        ? 'CDC corruption'
-        : hasZeroStateInconsistencySignature(details)
-          ? 'state inconsistency'
-          : 'unexpected exit'
+      // a full reset is only correct for crashes that leave local zero state
+      // inconsistent/corrupt. everything else (transient faults AND plain
+      // unexpected exits) gets a restart that preserves the CVR, so connected
+      // clients are not force-evicted with ClientNotFound.
+      const { action, reason } = classifyZeroCrashRecovery(details)
+
+      if (action === 'full-reset') {
+        log.orez(
+          `zero-cache ${reason} (code ${code}) — resetting zero state ` +
+            `(${zeroCrashTimes.length}/${ZERO_CRASH_RESET_BUDGET})`
+        )
+        resetZeroState('full')
+          .then(() => {
+            log.orez('zero-cache full-reset recovery successful')
+            installCrashWatcher()
+          })
+          .catch((err) => {
+            log.orez(`zero-cache full-reset recovery failed: ${err?.message || err}`)
+          })
+        return
+      }
+
       log.orez(
-        `zero-cache ${reason} (code ${code}) — resetting zero state ` +
-          `(${zeroCrashTimes.length}/${ZERO_CRASH_RESET_BUDGET})`
+        `zero-cache ${reason} (code ${code}) — restarting zero-cache ` +
+          `(${zeroCrashTimes.length}/${ZERO_CRASH_RESET_BUDGET}, CVR preserved)`
       )
-      resetZeroState('full')
+      restartZeroCache()
         .then(() => {
-          log.orez('zero-cache full-reset recovery successful')
+          log.orez('zero-cache restart recovery successful')
           installCrashWatcher()
         })
         .catch((err) => {
-          log.orez(`zero-cache full-reset recovery failed: ${err?.message || err}`)
+          // if a plain restart can't bring it back, the local state may be
+          // worse than the tail suggested — fall back to a full reset once.
+          log.orez(
+            `zero-cache restart recovery failed (${err?.message || err}) — falling back to full reset`
+          )
+          resetZeroState('full')
+            .then(() => {
+              log.orez('zero-cache full-reset recovery successful')
+              installCrashWatcher()
+            })
+            .catch((resetErr) => {
+              log.orez(
+                `zero-cache full-reset recovery failed: ${resetErr?.message || resetErr}`
+              )
+            })
         })
     })
   }
