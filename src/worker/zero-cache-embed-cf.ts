@@ -19,10 +19,13 @@
  *   import { startZeroCacheEmbedCF } from 'orez/worker'
  *
  *   // in ensureInitialized():
- *   const zc = await startZeroCacheEmbedCF({ ... })
+ *   const zc = await startZeroCacheEmbedCF({ durableObjectState: this.ctx, ... })
  *
  *   // in DO fetch():
  *   return zc.handleRequest(request)
+ *
+ *   // hibernated websocket lifecycle:
+ *   webSocketMessage(socket, data) { return zc.handleWebSocketMessage(socket, data) }
  */
 
 import './shims/zero-process-env.js'
@@ -36,6 +39,12 @@ import { runWorker as _runWorker } from '@rocicorp/zero/out/zero-cache/src/serve
 
 import { createBrowserProxy, type BrowserProxy } from '../pg-proxy-browser.js'
 import { DoBackend } from '../pg-proxy-do-backend.js'
+import {
+  HibernatedWebSocketHandoff,
+  type DurableObjectStateLike,
+  type HandoffRequestMessage,
+  type HibernatableWebSocket,
+} from './hibernated-websocket-handoff.js'
 
 const runWorkerFn = _runWorker as (
   parent: unknown,
@@ -43,6 +52,9 @@ const runWorkerFn = _runWorker as (
 ) => Promise<void>
 
 export interface ZeroCacheEmbedCFOptions {
+  /** durable object state; used to accept hibernatable websockets. */
+  durableObjectState: DurableObjectStateLike
+
   /** DO SQLite storage (also registered on globalThis.__orez_do_sqlite) */
   doSqlite: unknown
 
@@ -95,6 +107,23 @@ export interface ZeroCacheEmbedCF {
    * upgrades through the zero-cache handoff mechanism.
    */
   handleRequest(request: Request): Promise<Response>
+
+  /** route hibernated durable object websocket messages back into zero-cache. */
+  handleWebSocketMessage(
+    socket: HibernatableWebSocket,
+    messageData: string | ArrayBuffer
+  ): void
+
+  /** route hibernated durable object websocket closes back into zero-cache. */
+  handleWebSocketClose(
+    socket: HibernatableWebSocket,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): void
+
+  /** route hibernated durable object websocket errors back into zero-cache. */
+  handleWebSocketError(socket: HibernatableWebSocket, error: unknown): void
 
   /** stop zero-cache */
   stop(): Promise<void>
@@ -299,6 +328,7 @@ export async function startZeroCacheEmbedCF(
   // the fastify shim stores itself on globalThis when created.
   let fastifyInstance: any = null
   let readyTimer: ReturnType<typeof setTimeout> | undefined
+  const webSocketHandoff = new HibernatedWebSocketHandoff(() => fastifyInstance)
 
   // wait for "ready" message
   const readyPromise = new Promise<void>((resolve, reject) => {
@@ -361,10 +391,27 @@ export async function startZeroCacheEmbedCF(
         request.headers.get('x-soot-ws-upgrade') === 'true'
 
       if (isUpgrade) {
-        return handleWebSocketUpgrade(request, url, fastifyInstance)
+        return handleWebSocketUpgrade(
+          request,
+          url,
+          opts.durableObjectState,
+          webSocketHandoff
+        )
       }
 
       return handleHttpRequest(request, url, fastifyInstance)
+    },
+
+    handleWebSocketMessage(socket, messageData) {
+      webSocketHandoff.handleMessage(socket, messageData)
+    },
+
+    handleWebSocketClose(socket, code, reason, wasClean) {
+      webSocketHandoff.handleClose(socket, code, reason, wasClean)
+    },
+
+    handleWebSocketError(socket, error) {
+      webSocketHandoff.handleError(socket, error)
     },
 
     async stop() {
@@ -437,20 +484,22 @@ async function handleHttpRequest(
 }
 
 // -- WebSocket upgrade handling --
-// creates WebSocketPair and feeds the server socket into zero-cache's
-// handoff mechanism via the Fastify shim's server EventEmitter.
+// creates WebSocketPair, hibernates the server socket with the durable object,
+// and feeds zero-cache a process-lived proxy socket.
 
-function handleWebSocketUpgrade(request: Request, url: URL, fastify: any): Response {
+function handleWebSocketUpgrade(
+  request: Request,
+  url: URL,
+  durableObjectState: DurableObjectStateLike,
+  webSocketHandoff: HibernatedWebSocketHandoff
+): Response {
   const WsPair = (globalThis as any).WebSocketPair
   if (!WsPair) {
     return new Response('WebSocketPair not available', { status: 500 })
   }
 
   const pair = new WsPair()
-  const [client, server] = Object.values(pair) as [any, any]
-
-  // accept the server side (CF Workers requirement)
-  server.accept()
+  const [client, server] = Object.values(pair) as [WebSocket, HibernatableWebSocket]
 
   // build a serializable request object for the handoff
   const headers: Record<string, string> = {}
@@ -458,21 +507,15 @@ function handleWebSocketUpgrade(request: Request, url: URL, fastify: any): Respo
     headers[key] = value
   })
 
-  const message = {
+  const message: HandoffRequestMessage = {
     url: url.pathname + url.search,
     headers,
     method: 'GET',
   }
 
-  // emit handoff on the Fastify server's EventEmitter.
-  // installWebSocketHandoff (non-Server branch) listens for this:
-  //   source.onMessageType("handoff", (msg, socket) => { ... })
-  if (fastify?.server) {
-    fastify.server.emit(
-      'message',
-      ['handoff', { message, head: new Uint8Array(0) }],
-      server // the CF WebSocket as sendHandle
-    )
+  if (!webSocketHandoff.accept(durableObjectState, server, message)) {
+    server.close(1011, 'zero-cache websocket route unavailable')
+    return new Response('zero-cache websocket route unavailable', { status: 404 })
   }
 
   // return 101 with client socket
