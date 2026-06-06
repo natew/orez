@@ -272,7 +272,9 @@ export class HibernatedWebSocketHandoff {
   #handoff(bridge: Bridge): boolean {
     const handoffMsg = { message: bridge.message, head: new Uint8Array(0) }
     const g = globalThis as unknown as {
-      __orez_fastify_instances?: Array<FastifyHandoffTarget & { server?: { emit?: Function } }>
+      __orez_fastify_instances?: Array<
+        FastifyHandoffTarget & { server?: { emit?: Function } }
+      >
       __orez_fastify_instance?: FastifyHandoffTarget & { server?: { emit?: Function } }
     }
     const instances = g.__orez_fastify_instances ?? []
@@ -282,8 +284,7 @@ export class HibernatedWebSocketHandoff {
     for (const inst of instances) {
       if (inst?.tryHandoff?.(handoffMsg, bridge.socket)) return true
     }
-    const fallback = (this.getFastify() ??
-      g.__orez_fastify_instance) as
+    const fallback = (this.getFastify() ?? g.__orez_fastify_instance) as
       | (FastifyHandoffTarget & { server?: { emit?: Function } })
       | null
       | undefined
