@@ -177,7 +177,13 @@ export class HibernatedWebSocketHandoff {
     this.#socketIds.set(server, id)
 
     const bridge = this.#createBridge(id, server, message)
-    if (!this.#handoff(bridge)) {
+    const handed = this.#handoff(bridge)
+    // durable diagnostic: a `handoff=false` here means no fastify instance
+    // consumed the upgrade (the CF-DO sync-dead class — see the /sync emit
+    // fallback in #handoff). one cheap line per connection, greppable in
+    // `wrangler tail`.
+    console.log(`[orez-ws] accept handoff=${handed} url=${message.url}`)
+    if (!handed) {
       bridge.close(1011, 'zero-cache websocket route unavailable', false)
       return false
     }
@@ -264,11 +270,39 @@ export class HibernatedWebSocketHandoff {
   }
 
   #handoff(bridge: Bridge): boolean {
-    const fastify = this.getFastify()
-    if (!fastify?.tryHandoff) return false
-    return fastify.tryHandoff(
-      { message: bridge.message, head: new Uint8Array(0) },
-      bridge.socket
-    )
+    const handoffMsg = { message: bridge.message, head: new Uint8Array(0) }
+    const g = globalThis as unknown as {
+      __orez_fastify_instances?: Array<FastifyHandoffTarget & { server?: { emit?: Function } }>
+      __orez_fastify_instance?: FastifyHandoffTarget & { server?: { emit?: Function } }
+    }
+    const instances = g.__orez_fastify_instances ?? []
+
+    // 1. {websocket:true} routes (e.g. /replication/*/changes) are matched by
+    //    the fastify shim's tryHandoff. iterate every instance, stop at first.
+    for (const inst of instances) {
+      if (inst?.tryHandoff?.(handoffMsg, bridge.socket)) return true
+    }
+    const fallback = (this.getFastify() ??
+      g.__orez_fastify_instance) as
+      | (FastifyHandoffTarget & { server?: { emit?: Function } })
+      | null
+      | undefined
+    if (!instances.length && fallback?.tryHandoff?.(handoffMsg, bridge.socket)) {
+      return true
+    }
+
+    // 2. the /sync/v*/connect path is served by the ZeroDispatcher's
+    //    server.onMessageType('handoff') listener, NOT a {websocket:true} route,
+    //    so tryHandoff never matches it. emit the handoff on the dispatcher's
+    //    server — mirroring the in-process ws shim (shims/ws.ts:187-189). WITHOUT
+    //    this, the DO acceptWebSocket()s the server half, tryHandoff returns
+    //    false, the upgrade returns a 404 with no paired client socket, and the
+    //    browser sees an abnormal close (1006) → deployed-app sync is dead.
+    const server = fallback?.server
+    if (server?.emit) {
+      server.emit('message', ['handoff', handoffMsg], bridge.socket)
+      return true
+    }
+    return false
   }
 }

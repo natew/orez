@@ -64,6 +64,33 @@ describe('HibernatedWebSocketHandoff', () => {
     expect(cfSocket.send).toHaveBeenCalledWith('first poke')
   })
 
+  it('routes the /sync handoff via server.emit when no {websocket:true} route matches', () => {
+    // regression: the /sync/v*/connect path is served by the ZeroDispatcher's
+    // server.onMessageType('handoff') listener, NOT a fastify {websocket:true}
+    // route — so tryHandoff returns false for it. without the server.emit
+    // fallback the DO accepts the socket then 404s the upgrade → the client
+    // sees an abnormal close (1006) and deployed-app sync is dead. (the other
+    // tests stub tryHandoff=true, so they never covered this.)
+    delete (globalThis as any).__orez_fastify_instances
+    const cfSocket = createMockSocket()
+    const durableObjectState = { acceptWebSocket: vi.fn() }
+    const dispatcher = {
+      tryHandoff: vi.fn(() => false), // dispatcher has no ws route for /sync
+      server: { emit: vi.fn() },
+    }
+    const handoff = new HibernatedWebSocketHandoff(() => dispatcher)
+
+    expect(handoff.accept(durableObjectState, cfSocket, requestMessage)).toBe(true)
+
+    expect(dispatcher.server.emit).toHaveBeenCalledWith(
+      'message',
+      ['handoff', { message: requestMessage, head: expect.any(Uint8Array) }],
+      expect.any(Object)
+    )
+    // must NOT close with 1011 (the old broken path)
+    expect(cfSocket.closedWith).toBeUndefined()
+  })
+
   it('routes hibernated messages into the local zero-cache socket', () => {
     const cfSocket = createMockSocket()
     const durableObjectState = { acceptWebSocket: vi.fn() }
