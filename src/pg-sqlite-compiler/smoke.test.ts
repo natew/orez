@@ -66,4 +66,23 @@ describe('pg-sqlite-compiler smoke', () => {
     expect(sql).toMatch(/"createdAt"/)
     expect(sql).toMatch(/public\.message/i)
   })
+
+  it('quotes sqlite keyword relation identifiers', () => {
+    const cases = [
+      [
+        'CREATE TABLE IF NOT EXISTS "transaction" (id text PRIMARY KEY)',
+        /CREATE TABLE IF NOT EXISTS "transaction"/i,
+      ],
+      ['SELECT id FROM "transaction" WHERE id = $1', /FROM "transaction"/i],
+      ['INSERT INTO "transaction" (id) VALUES ($1)', /INSERT INTO "transaction"/i],
+      ['UPDATE "transaction" SET id = $1', /UPDATE "transaction"/i],
+      ['DELETE FROM "transaction" WHERE id = $1', /DELETE FROM "transaction"/i],
+      ['CREATE INDEX "transaction_id_idx" ON "transaction" (id)', /ON "transaction"/i],
+    ] as const
+
+    for (const [input, expected] of cases) {
+      const { sql } = compile(input)
+      expect(sql).toMatch(expected)
+    }
+  })
 })

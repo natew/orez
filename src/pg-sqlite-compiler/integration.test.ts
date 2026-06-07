@@ -133,4 +133,40 @@ describe('full compiler pipeline against chat-app workload', () => {
     expect(String(row.updatedAt)).toMatch(/^\d{4}-\d{2}-\d{2}/)
     db.close()
   })
+
+  it('round-trips a sqlite keyword table name', () => {
+    const db = new Database(':memory:')
+    const { sql: ddl } = compile(
+      'CREATE TABLE IF NOT EXISTS "transaction" (id text PRIMARY KEY, amount integer NOT NULL)'
+    )
+    db.exec(ddl)
+
+    const { sql: indexSql } = compile(
+      'CREATE INDEX "transaction_amount_idx" ON "transaction" (amount)'
+    )
+    db.exec(indexSql)
+
+    const { sql: insertSql } = compile(
+      'INSERT INTO "transaction" (id, amount) VALUES ($1, $2)'
+    )
+    db.prepare(rewriteParams(insertSql)).run('tx1', 42)
+
+    const { sql: updateSql } = compile(
+      'UPDATE "transaction" SET amount = $1 WHERE id = $2'
+    )
+    db.prepare(rewriteParams(updateSql)).run(64, 'tx1')
+
+    const { sql: selectSql } = compile(
+      'SELECT "transaction".id, amount FROM "transaction" WHERE id = $1'
+    )
+    const rows = db.prepare(rewriteParams(selectSql)).all('tx1') as any[]
+    expect(rows).toEqual([{ id: 'tx1', amount: 64 }])
+
+    const { sql: deleteSql } = compile('DELETE FROM "transaction" WHERE id = $1')
+    db.prepare(rewriteParams(deleteSql)).run('tx1')
+
+    const emptyRows = db.prepare(rewriteParams(selectSql)).all('tx1') as any[]
+    expect(emptyRows).toEqual([])
+    db.close()
+  })
 })
