@@ -121,7 +121,7 @@ function extractName(names: any[] | undefined): string | undefined {
 }
 
 function setTypeName(typeName: any, sqliteName: string): void {
-  typeName.names = [{ String: { sval: sqliteName } }]
+  typeName.names = [{ String: { sval: sqliteName.toLowerCase() } }]
   // drop length/precision typmods
   delete typeName.typmods
   // drop array bounds (SQLite has no array type; we store as JSON text)
