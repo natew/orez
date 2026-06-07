@@ -344,6 +344,24 @@ describe('Database.pragma', () => {
     expect(Array.isArray(result)).toBe(true)
   })
 
+  it('no-ops DO-unsupported setup pragma sets', () => {
+    const originalExec = mock.exec.bind(mock)
+    const forbiddenPragmas: string[] = []
+    mock.exec = (query: string, ...bindings: SqlStorageValue[]) => {
+      if (/^PRAGMA\s+(synchronous|busy_timeout|analysis_limit)\s*=/i.test(query.trim())) {
+        forbiddenPragmas.push(query)
+        throw new Error(`not authorized: SQLITE_AUTH: ${query}`)
+      }
+      return originalExec(query, ...bindings)
+    }
+
+    expect(db.pragma('synchronous = NORMAL')).toEqual([])
+    expect(db.pragma('busy_timeout = 5000')).toEqual([])
+    expect(db.pragma('analysis_limit = 400')).toEqual([])
+    expect(db.pragma('synchronous = NORMAL', { simple: true })).toBeUndefined()
+    expect(forbiddenPragmas).toEqual([])
+  })
+
   it('skips optimize pragma', () => {
     const result = db.pragma('optimize')
     expect(result).toEqual([])
@@ -611,6 +629,21 @@ describe('DO snapshot transactions', () => {
     ).toEqual([{ name: 'todo' }])
   })
 
+  it('does not snapshot sqlite internal tables', () => {
+    live.exec('CREATE TABLE seq (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT)')
+    live.prepare('INSERT INTO seq (title) VALUES (?)').run('row')
+    live.exec('CREATE TABLE _cf_KV (key TEXT PRIMARY KEY, value TEXT)')
+
+    snapshot.prepare('BEGIN CONCURRENT').run()
+
+    const snapshotTables = mock
+      .exec("SELECT name FROM sqlite_master WHERE name LIKE '_orez_snapshot_%'")
+      .toArray()
+      .map((row) => String(row.name))
+    expect(snapshotTables.some((name) => name.endsWith('_sqlite_sequence'))).toBe(false)
+    expect(snapshotTables.some((name) => name.endsWith('__cf_KV'))).toBe(false)
+  })
+
   it('does not rewrite table names inside string literals during snapshots', () => {
     live.exec('CREATE TABLE log (id TEXT PRIMARY KEY, table_name TEXT, _0_version TEXT)')
     live.prepare('INSERT INTO log VALUES (?, ?, ?)').run('1', 'todo', '01')
@@ -714,6 +747,133 @@ describe('DO snapshot transactions', () => {
     live.exec('SAVEPOINT zero_exec_migration; RELEASE zero_exec_migration')
 
     expect(rawTransactionStatements).toEqual([])
+  })
+
+  it('answers Zero schema introspection without dynamic pragma joins', () => {
+    live.exec(`
+      CREATE TABLE user_items (
+        id TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        title TEXT DEFAULT 'Untitled'
+      );
+      CREATE TABLE _cf_KV (key TEXT PRIMARY KEY, value TEXT);
+      CREATE UNIQUE INDEX user_items_owner_title_idx ON user_items (owner, title);
+    `)
+
+    const originalExec = mock.exec.bind(mock)
+    mock.exec = (query: string, ...bindings: SqlStorageValue[]) => {
+      if (
+        query.includes('pragma_table_info(m.name)') ||
+        query.includes('pragma_index_list(idx.tbl_name)') ||
+        query.includes('pragma_index_info(idx.name)') ||
+        query.includes('pragma_index_xinfo(idx.name)') ||
+        query.includes('"_cf_KV"')
+      ) {
+        throw new Error(`not authorized: SQLITE_AUTH: ${query}`)
+      }
+      return originalExec(query, ...bindings)
+    }
+
+    const tableInfoQuery = `
+      SELECT
+        m.name as "table",
+        p.name as name,
+        p.type as type,
+        p."notnull" as "notNull",
+        p.dflt_value as "dflt",
+        p.pk as keyPos
+      FROM sqlite_master as m
+      LEFT JOIN pragma_table_info(m.name) as p
+      WHERE m.type = 'table'
+      AND m.name NOT LIKE 'sqlite_%'
+      AND m.name NOT LIKE '_zero.%'
+      AND m.name NOT LIKE '_litestream_%'
+      `
+    const columns = live.prepare(tableInfoQuery).all()
+    const schemaColumns = live
+      .prepare(
+        tableInfoQuery.replace('FROM sqlite_master as m', 'FROM sqlite_schema as m')
+      )
+      .all()
+
+    for (const result of [columns, schemaColumns]) {
+      expect(result).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ table: 'todo', name: 'id', keyPos: 1 }),
+          expect.objectContaining({
+            table: 'user_items',
+            name: 'owner',
+            type: 'TEXT',
+            notNull: 1,
+          }),
+        ])
+      )
+      expect(result.some((row) => row.table === '_cf_KV')).toBe(false)
+    }
+
+    const indexInfoQuery = `SELECT
+         idx.name as indexName,
+         idx.tbl_name as tableName,
+         info."unique" as "unique",
+         col.name as column,
+         CASE WHEN col.desc = 0 THEN 'ASC' ELSE 'DESC' END as dir
+      FROM sqlite_master as idx
+       JOIN pragma_index_list(idx.tbl_name) AS info ON info.name = idx.name
+       JOIN pragma_index_xinfo(idx.name) as col
+       WHERE idx.type = 'index' AND
+             col.key = 1 AND
+             idx.tbl_name NOT LIKE '_zero.%'
+       ORDER BY idx.name, col.seqno ASC`
+    const indexes = live.prepare(indexInfoQuery).all()
+    const schemaIndexes = live
+      .prepare(
+        indexInfoQuery.replace('FROM sqlite_master as idx', 'FROM sqlite_schema as idx')
+      )
+      .all()
+
+    for (const result of [indexes, schemaIndexes]) {
+      expect(result).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            indexName: 'user_items_owner_title_idx',
+            tableName: 'user_items',
+            unique: 1,
+            column: 'owner',
+            dir: 'ASC',
+          }),
+          expect.objectContaining({
+            indexName: 'user_items_owner_title_idx',
+            tableName: 'user_items',
+            unique: 1,
+            column: 'title',
+            dir: 'ASC',
+          }),
+        ])
+      )
+    }
+
+    const uniqueIndexes = live
+      .prepare(
+        `SELECT idx.name, json_group_array(col.name) as columnsJSON
+      FROM sqlite_master as idx
+      JOIN pragma_index_list(idx.tbl_name) AS info ON info.name = idx.name
+      JOIN pragma_index_info(idx.name) as col
+      WHERE idx.tbl_name = ? AND
+            idx.type = 'index' AND
+            info."unique" != 0
+      GROUP BY idx.name
+      ORDER BY idx.name`
+      )
+      .all('user_items')
+
+    expect(uniqueIndexes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'user_items_owner_title_idx',
+          columnsJSON: JSON.stringify(['owner', 'title']),
+        }),
+      ])
+    )
   })
 })
 

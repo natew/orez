@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   DurableObjectWebSocketHandoff,
@@ -42,6 +42,10 @@ const requestMessage: HandoffRequestMessage = {
 }
 
 describe('DurableObjectWebSocketHandoff', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('accepts the CF socket through the standard WebSocket API', () => {
     const cfSocket = createMockSocket()
     const localSockets: any[] = []
@@ -55,13 +59,62 @@ describe('DurableObjectWebSocketHandoff', () => {
     expect(handoff.accept(cfSocket, requestMessage)).toBe(true)
 
     expect(cfSocket.accept).toHaveBeenCalledTimes(1)
-    expect(cfSocket.addEventListener).toHaveBeenCalledWith('message', expect.any(Function))
+    expect(cfSocket.addEventListener).toHaveBeenCalledWith(
+      'message',
+      expect.any(Function)
+    )
     expect(cfSocket.addEventListener).toHaveBeenCalledWith('close', expect.any(Function))
     expect(cfSocket.addEventListener).toHaveBeenCalledWith('error', expect.any(Function))
     expect((cfSocket as any).serializeAttachment).toBeUndefined()
 
     localSockets[0].send('first poke')
     expect(cfSocket.send).toHaveBeenCalledWith('first poke')
+  })
+
+  it('keeps the request context alive until the first server frame', async () => {
+    const cfSocket = createMockSocket()
+    const localSockets: any[] = []
+    const waitUntilPromises: Promise<unknown>[] = []
+    const ctx = {
+      waitUntil: vi.fn((promise: Promise<unknown>) => waitUntilPromises.push(promise)),
+    }
+    const handoff = new DurableObjectWebSocketHandoff(() => ({
+      tryHandoff: vi.fn((_msg, socket) => {
+        localSockets.push(socket)
+        return true
+      }),
+    }))
+
+    expect(handoff.accept(cfSocket, requestMessage, ctx)).toBe(true)
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(1)
+
+    localSockets[0].send('connected')
+    await expect(waitUntilPromises[0]).resolves.toBeUndefined()
+  })
+
+  it('releases the request context if zero-cache does not send promptly', async () => {
+    vi.useFakeTimers()
+    const cfSocket = createMockSocket()
+    const waitUntilPromises: Promise<unknown>[] = []
+    const ctx = {
+      waitUntil: vi.fn((promise: Promise<unknown>) => waitUntilPromises.push(promise)),
+    }
+    const handoff = new DurableObjectWebSocketHandoff(() => ({
+      tryHandoff: vi.fn(() => true),
+    }))
+
+    expect(handoff.accept(cfSocket, requestMessage, ctx)).toBe(true)
+
+    let resolved = false
+    waitUntilPromises[0].then(() => {
+      resolved = true
+    })
+    vi.advanceTimersByTime(9_999)
+    await Promise.resolve()
+    expect(resolved).toBe(false)
+    vi.advanceTimersByTime(1)
+    await Promise.resolve()
+    expect(resolved).toBe(true)
   })
 
   it('routes the /sync handoff via server.emit when no {websocket:true} route matches', () => {
@@ -73,7 +126,7 @@ describe('DurableObjectWebSocketHandoff', () => {
     const cfSocket = createMockSocket()
     const dispatcher = {
       tryHandoff: vi.fn(() => false),
-      server: { emit: vi.fn() },
+      server: { emit: vi.fn(() => true) },
     }
     const handoff = new DurableObjectWebSocketHandoff(() => dispatcher)
 
@@ -85,6 +138,74 @@ describe('DurableObjectWebSocketHandoff', () => {
       expect.any(Object)
     )
     expect(cfSocket.closedWith).toBeUndefined()
+  })
+
+  it('does not claim /sync handoff success before the dispatcher server exists', () => {
+    // Zero's runner can expose a stale Fastify server before ZeroDispatcher
+    // attaches its handoff listener. that server has only the shim's route
+    // listener, so emitting there would accept the browser socket without ever
+    // delivering it to zero-cache.
+    const previousInstances = (globalThis as any).__orez_fastify_instances
+    const cfSocket = createMockSocket()
+    const staleServer = {
+      emit: vi.fn(() => false),
+      listenerCount: vi.fn(() => 1),
+    }
+    const stale = {
+      tryHandoff: vi.fn(() => false),
+      server: staleServer,
+    }
+    ;(globalThis as any).__orez_fastify_instances = [stale]
+    const handoff = new DurableObjectWebSocketHandoff(() => stale)
+
+    try {
+      expect(handoff.accept(cfSocket, requestMessage)).toBe(false)
+      expect(staleServer.emit).not.toHaveBeenCalled()
+      expect(cfSocket.closedWith).toBeUndefined()
+    } finally {
+      ;(globalThis as any).__orez_fastify_instances = previousInstances
+    }
+  })
+
+  it('routes /sync through the dispatcher server when the captured fallback is stale', () => {
+    // Zero's runner sends "ready" before constructing ZeroDispatcher, so the
+    // embed can capture a Fastify instance that is not the dispatcher. The
+    // dispatcher server is distinguishable because installWebSocketHandoff adds
+    // a second handoff message listener beyond the shim's route listener.
+    const previousInstances = (globalThis as any).__orez_fastify_instances
+    const cfSocket = createMockSocket()
+    const staleServer = {
+      emit: vi.fn(),
+      listenerCount: vi.fn(() => 1),
+    }
+    const dispatcherServer = {
+      emit: vi.fn(() => true),
+      listenerCount: vi.fn(() => 2),
+    }
+    const stale = {
+      tryHandoff: vi.fn(() => false),
+      server: staleServer,
+    }
+    const dispatcher = {
+      tryHandoff: vi.fn(() => false),
+      server: dispatcherServer,
+    }
+    ;(globalThis as any).__orez_fastify_instances = [stale, dispatcher]
+    const handoff = new DurableObjectWebSocketHandoff(() => stale)
+
+    try {
+      expect(handoff.accept(cfSocket, requestMessage)).toBe(true)
+
+      expect(staleServer.emit).not.toHaveBeenCalled()
+      expect(dispatcherServer.emit).toHaveBeenCalledWith(
+        'message',
+        ['handoff', { message: requestMessage, head: expect.any(Uint8Array) }],
+        expect.any(Object)
+      )
+      expect(cfSocket.closedWith).toBeUndefined()
+    } finally {
+      ;(globalThis as any).__orez_fastify_instances = previousInstances
+    }
   })
 
   it('routes peer messages into the local zero-cache socket', () => {

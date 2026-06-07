@@ -43,6 +43,7 @@ import { DoBackend } from '../pg-proxy-do-backend.js'
 import {
   DurableObjectWebSocketHandoff,
   type DurableObjectWebSocket,
+  type DurableObjectWebSocketHandoffContext,
   type HandoffRequestMessage,
 } from './durable-object-websocket-handoff.js'
 
@@ -103,7 +104,10 @@ export interface ZeroCacheEmbedCF {
    * routes HTTP to zero-cache's Fastify handlers, WebSocket
    * upgrades through the zero-cache handoff mechanism.
    */
-  handleRequest(request: Request): Promise<Response>
+  handleRequest(
+    request: Request,
+    ctx?: DurableObjectWebSocketHandoffContext
+  ): Promise<Response>
 
   /** stop zero-cache */
   stop(): Promise<void>
@@ -360,7 +364,10 @@ export async function startZeroCacheEmbedCF(
       return isReady
     },
 
-    async handleRequest(request: Request): Promise<Response> {
+    async handleRequest(
+      request: Request,
+      ctx?: DurableObjectWebSocketHandoffContext
+    ): Promise<Response> {
       if (!isReady) {
         return new Response('zero-cache not ready', { status: 503 })
       }
@@ -371,7 +378,7 @@ export async function startZeroCacheEmbedCF(
         request.headers.get('x-soot-ws-upgrade') === 'true'
 
       if (isUpgrade) {
-        return handleWebSocketUpgrade(request, url, webSocketHandoff)
+        return handleWebSocketUpgrade(request, url, webSocketHandoff, ctx)
       }
 
       return handleHttpRequest(request, url, fastifyInstance)
@@ -453,7 +460,8 @@ async function handleHttpRequest(
 function handleWebSocketUpgrade(
   request: Request,
   url: URL,
-  webSocketHandoff: DurableObjectWebSocketHandoff
+  webSocketHandoff: DurableObjectWebSocketHandoff,
+  ctx: DurableObjectWebSocketHandoffContext | undefined
 ): Response {
   const WsPair = (globalThis as any).WebSocketPair
   if (!WsPair) {
@@ -475,7 +483,7 @@ function handleWebSocketUpgrade(
     method: 'GET',
   }
 
-  if (!webSocketHandoff.accept(server, message)) {
+  if (!webSocketHandoff.accept(server, message, ctx)) {
     server.close(1011, 'zero-cache websocket route unavailable')
     return new Response('zero-cache websocket route unavailable', { status: 404 })
   }

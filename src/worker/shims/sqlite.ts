@@ -116,6 +116,305 @@ function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
 
+function sqlErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function logSqlStorageError(
+  error: unknown,
+  label: string,
+  sql: string,
+  bindings: readonly SqlStorageValue[]
+): void {
+  const message = sqlErrorMessage(error)
+  if (!message.includes('SQLITE_AUTH') && !message.includes('not authorized')) return
+  console.log(
+    `[orez-sqlite] ${label} auth error sql=${sql.replace(/\s+/g, ' ').slice(0, 800)} bindings=${bindings.length}`
+  )
+}
+
+function wrapSqlCursor(
+  cursor: SqlStorageCursor,
+  sql: string,
+  bindings: readonly SqlStorageValue[],
+  label: string
+): SqlStorageCursor {
+  return {
+    toArray() {
+      try {
+        return cursor.toArray()
+      } catch (error) {
+        logSqlStorageError(error, `${label}.toArray`, sql, bindings)
+        throw error
+      }
+    },
+    get rowsRead() {
+      try {
+        return cursor.rowsRead
+      } catch (error) {
+        logSqlStorageError(error, `${label}.rowsRead`, sql, bindings)
+        throw error
+      }
+    },
+    get rowsWritten() {
+      try {
+        return cursor.rowsWritten
+      } catch (error) {
+        logSqlStorageError(error, `${label}.rowsWritten`, sql, bindings)
+        throw error
+      }
+    },
+    get columnNames() {
+      try {
+        return cursor.columnNames
+      } catch (error) {
+        logSqlStorageError(error, `${label}.columnNames`, sql, bindings)
+        throw error
+      }
+    },
+  }
+}
+
+function execSql(
+  sqlStorage: SqlStorageLike,
+  sql: string,
+  bindings: readonly SqlStorageValue[] = [],
+  label = 'exec'
+): SqlStorageCursor {
+  try {
+    return wrapSqlCursor(sqlStorage.exec(sql, ...bindings), sql, bindings, label)
+  } catch (error) {
+    logSqlStorageError(error, label, sql, bindings)
+    throw error
+  }
+}
+
+function arrayCursor(
+  rows: Record<string, SqlStorageValue>[],
+  columnNames: string[]
+): SqlStorageCursor {
+  return {
+    toArray: () => rows,
+    rowsRead: rows.length,
+    rowsWritten: 0,
+    columnNames,
+  }
+}
+
+function normalizeSql(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim().toLowerCase()
+}
+
+function usesSqliteCatalogAlias(sql: string, alias: string): boolean {
+  return (
+    sql.includes(`from sqlite_master as ${alias}`) ||
+    sql.includes(`from sqlite_schema as ${alias}`)
+  )
+}
+
+function shouldExposeZeroUserTable(name: string): boolean {
+  return (
+    !name.startsWith('sqlite_') &&
+    !name.startsWith('_zero.') &&
+    !name.startsWith('_litestream_') &&
+    !name.startsWith('_cf_') &&
+    !isSnapshotInternalTable(name)
+  )
+}
+
+function isZeroTableInfoQuery(sql: string): boolean {
+  const normalized = normalizeSql(sql)
+  return (
+    usesSqliteCatalogAlias(normalized, 'm') &&
+    normalized.includes('left join pragma_table_info(m.name) as p')
+  )
+}
+
+function isZeroIndexInfoQuery(sql: string): boolean {
+  const normalized = normalizeSql(sql)
+  return (
+    usesSqliteCatalogAlias(normalized, 'idx') &&
+    normalized.includes('join pragma_index_list(idx.tbl_name) as info') &&
+    normalized.includes('join pragma_index_xinfo(idx.name) as col')
+  )
+}
+
+function isZeroUniqueIndexInfoQuery(sql: string): boolean {
+  const normalized = normalizeSql(sql)
+  return (
+    usesSqliteCatalogAlias(normalized, 'idx') &&
+    normalized.includes('join pragma_index_list(idx.tbl_name) as info') &&
+    normalized.includes('join pragma_index_info(idx.name) as col') &&
+    normalized.includes('where idx.tbl_name = ?')
+  )
+}
+
+function zeroTableInfoRows(
+  sqlStorage: SqlStorageLike
+): Record<string, SqlStorageValue>[] {
+  const tables = execSql(
+    sqlStorage,
+    `SELECT name FROM sqlite_master WHERE type = 'table'`,
+    [],
+    'zero.table-info.tables'
+  )
+    .toArray()
+    .map((row) => String(row.name ?? ''))
+    .filter(shouldExposeZeroUserTable)
+
+  const rows: Record<string, SqlStorageValue>[] = []
+  for (const table of tables) {
+    const columns = execSql(
+      sqlStorage,
+      `PRAGMA table_info(${quoteIdentifier(table)})`,
+      [],
+      'zero.table-info.columns'
+    ).toArray()
+    for (const column of columns) {
+      rows.push({
+        table,
+        name: column.name ?? null,
+        type: column.type ?? null,
+        notNull: column.notnull ?? 0,
+        dflt: column.dflt_value ?? null,
+        keyPos: column.pk ?? 0,
+      })
+    }
+  }
+  return rows
+}
+
+function zeroIndexInfoRows(
+  sqlStorage: SqlStorageLike
+): Record<string, SqlStorageValue>[] {
+  const indexes = execSql(
+    sqlStorage,
+    `SELECT name, tbl_name FROM sqlite_master WHERE type = 'index'`,
+    [],
+    'zero.index-info.indexes'
+  )
+    .toArray()
+    .map((row) => ({
+      indexName: String(row.name ?? ''),
+      tableName: String(row.tbl_name ?? ''),
+    }))
+    .filter(
+      ({ indexName, tableName }) => indexName && shouldExposeZeroUserTable(tableName)
+    )
+
+  const rows: Array<Record<string, SqlStorageValue> & { seqno: number }> = []
+  for (const { indexName, tableName } of indexes) {
+    const indexInfo = execSql(
+      sqlStorage,
+      `PRAGMA index_list(${quoteIdentifier(tableName)})`,
+      [],
+      'zero.index-info.list'
+    )
+      .toArray()
+      .find((row) => row.name === indexName)
+    if (!indexInfo) continue
+
+    const columns = execSql(
+      sqlStorage,
+      `PRAGMA index_xinfo(${quoteIdentifier(indexName)})`,
+      [],
+      'zero.index-info.columns'
+    ).toArray()
+    for (const column of columns) {
+      if (Number(column.key ?? 0) !== 1) continue
+      rows.push({
+        indexName,
+        tableName,
+        unique: indexInfo.unique ?? 0,
+        column: column.name ?? null,
+        dir: Number(column.desc ?? 0) === 0 ? 'ASC' : 'DESC',
+        seqno: Number(column.seqno ?? 0),
+      })
+    }
+  }
+
+  rows.sort((a, b) => {
+    const byIndex = String(a.indexName).localeCompare(String(b.indexName))
+    return byIndex === 0 ? a.seqno - b.seqno : byIndex
+  })
+  return rows.map(({ seqno: _seqno, ...row }) => row)
+}
+
+function zeroUniqueIndexInfoRows(
+  sqlStorage: SqlStorageLike,
+  values: readonly SqlStorageValue[]
+): Record<string, SqlStorageValue>[] {
+  const tableName = values[0]
+  if (typeof tableName !== 'string' || !shouldExposeZeroUserTable(tableName)) {
+    return []
+  }
+
+  const indexes = execSql(
+    sqlStorage,
+    `PRAGMA index_list(${quoteIdentifier(tableName)})`,
+    [],
+    'zero.unique-index-info.list'
+  )
+    .toArray()
+    .map((row) => ({
+      name: String(row.name ?? ''),
+      unique: Number(row.unique ?? 0),
+    }))
+    .filter((row) => row.name && row.unique !== 0)
+
+  const rows: Record<string, SqlStorageValue>[] = []
+  for (const index of indexes.sort((a, b) => a.name.localeCompare(b.name))) {
+    const columns = execSql(
+      sqlStorage,
+      `PRAGMA index_info(${quoteIdentifier(index.name)})`,
+      [],
+      'zero.unique-index-info.columns'
+    )
+      .toArray()
+      .sort((a, b) => Number(a.seqno ?? 0) - Number(b.seqno ?? 0))
+      .map((row) => row.name)
+      .filter((name): name is string => typeof name === 'string')
+    rows.push({
+      name: index.name,
+      columnsJSON: JSON.stringify(columns),
+    })
+  }
+  return rows
+}
+
+function maybeZeroIntrospectionCursor(
+  sqlStorage: SqlStorageLike,
+  sql: string,
+  values: readonly SqlStorageValue[]
+): SqlStorageCursor | undefined {
+  if (isZeroTableInfoQuery(sql)) {
+    return arrayCursor(zeroTableInfoRows(sqlStorage), [
+      'table',
+      'name',
+      'type',
+      'notNull',
+      'dflt',
+      'keyPos',
+    ])
+  }
+  if (isZeroIndexInfoQuery(sql)) {
+    return arrayCursor(zeroIndexInfoRows(sqlStorage), [
+      'indexName',
+      'tableName',
+      'unique',
+      'column',
+      'dir',
+    ])
+  }
+  if (isZeroUniqueIndexInfoQuery(sql)) {
+    return arrayCursor(zeroUniqueIndexInfoRows(sqlStorage, values), [
+      'name',
+      'columnsJSON',
+    ])
+  }
+  return undefined
+}
+
 function snapshotTableName(prefix: string, table: string): string {
   return `${prefix}_${table.replace(/[^A-Za-z0-9_]/g, '_')}`
 }
@@ -141,18 +440,24 @@ function isActiveSnapshotTable(name: string): boolean {
 
 function cleanupInactiveSnapshotTables(sql: SqlStorageLike): void {
   try {
-    const rows = sql
-      .exec(
-        `SELECT name FROM sqlite_master
+    const rows = execSql(
+      sql,
+      `SELECT name FROM sqlite_master
          WHERE type = 'table'
-           AND name LIKE '_orez_snapshot_%'`
-      )
-      .toArray()
+           AND name LIKE '_orez_snapshot_%'`,
+      [],
+      'cleanup.snapshot-list'
+    ).toArray()
     for (const row of rows) {
       const name = String(row.name ?? '')
       if (!isSnapshotInternalTable(name) || isActiveSnapshotTable(name)) continue
       try {
-        sql.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(name)}`)
+        execSql(
+          sql,
+          `DROP TABLE IF EXISTS ${quoteIdentifier(name)}`,
+          [],
+          'cleanup.snapshot-drop'
+        )
       } catch {}
     }
   } catch {}
@@ -162,7 +467,8 @@ function shouldSnapshotTable(name: string): boolean {
   return (
     name !== '__miniflare_do_name' &&
     name !== 'storage' &&
-    name !== 'sqlite_stat1' &&
+    !name.startsWith('sqlite_') &&
+    !name.startsWith('_cf_') &&
     !isSnapshotInternalTable(name)
   )
 }
@@ -376,7 +682,7 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     const cursor =
       isTxCmd && values.length === 0
         ? this.#db._execTransactionAware(sql, this.#sql)
-        : this.#sql.exec(sql, ...values)
+        : execSql(this.#sql, sql, values, 'statement.run')
     return {
       changes: cursor.rowsWritten,
       lastInsertRowid: 0,
@@ -395,7 +701,9 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     const resolved = this.#resolveParams(params)
     const sql = this.#db._rewriteForSnapshot(resolved.sql)
     const values = resolved.values
-    const cursor = this.#sql.exec(sql, ...values)
+    const cursor =
+      maybeZeroIntrospectionCursor(this.#sql, sql, values) ??
+      execSql(this.#sql, sql, values, 'statement.get')
     const rows = filterSnapshotCatalogRows(sql, cursor.toArray())
     return (rows[0] as T) ?? undefined
   }
@@ -412,7 +720,9 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     const resolved = this.#resolveParams(params)
     const sql = this.#db._rewriteForSnapshot(resolved.sql)
     const values = resolved.values
-    const cursor = this.#sql.exec(sql, ...values)
+    const cursor =
+      maybeZeroIntrospectionCursor(this.#sql, sql, values) ??
+      execSql(this.#sql, sql, values, 'statement.all')
     return filterSnapshotCatalogRows(sql, cursor.toArray()) as T[]
   }
 
@@ -454,7 +764,12 @@ export class Statement<T = Record<string, SqlStorageValue>> {
   /** columns() returns column name metadata */
   columns(): Array<{ name: string; column: string | null; table: string | null }> {
     // execute a dummy query to get column names
-    const cursor = this.#sql.exec(this.#db._rewriteForSnapshot(this.source))
+    const cursor = execSql(
+      this.#sql,
+      this.#db._rewriteForSnapshot(this.source),
+      [],
+      'statement.columns'
+    )
     return cursor.columnNames.map((name) => ({
       name,
       column: null,
@@ -570,64 +885,81 @@ export class Database {
         return noopCursor
       }
       // non-tx statement inside a "transaction" — just execute normally
-      return sqlStorage.exec(sql)
+      return execSql(sqlStorage, sql, [], 'transaction.do-statement')
     }
 
     // non-DO path: real BEGIN/COMMIT/ROLLBACK with SAVEPOINT nesting
     if (upper.startsWith('BEGIN')) {
       shared.__txDepth = (shared.__txDepth || 0) + 1
       if (shared.__txDepth > 1) {
-        return sqlStorage.exec(`SAVEPOINT _nested_${shared.__txDepth}`)
+        return execSql(
+          sqlStorage,
+          `SAVEPOINT _nested_${shared.__txDepth}`,
+          [],
+          'transaction.savepoint'
+        )
       }
       this.#inTransaction = true
-      return sqlStorage.exec(sql)
+      return execSql(sqlStorage, sql, [], 'transaction.begin')
     }
 
     if (upper.startsWith('COMMIT') || upper === 'END' || upper.startsWith('END ')) {
       if ((shared.__txDepth || 0) > 1) {
-        const result = sqlStorage.exec(`RELEASE SAVEPOINT _nested_${shared.__txDepth}`)
-        shared.__txDepth--
-        return result
-      }
-      shared.__txDepth = 0
-      this.#inTransaction = false
-      return sqlStorage.exec(sql)
-    }
-
-    if (upper.startsWith('ROLLBACK')) {
-      if ((shared.__txDepth || 0) > 1) {
-        const result = sqlStorage.exec(
-          `ROLLBACK TO SAVEPOINT _nested_${shared.__txDepth}`
+        const result = execSql(
+          sqlStorage,
+          `RELEASE SAVEPOINT _nested_${shared.__txDepth}`,
+          [],
+          'transaction.release'
         )
         shared.__txDepth--
         return result
       }
       shared.__txDepth = 0
       this.#inTransaction = false
-      return sqlStorage.exec(sql)
+      return execSql(sqlStorage, sql, [], 'transaction.commit')
     }
 
-    return sqlStorage.exec(sql)
+    if (upper.startsWith('ROLLBACK')) {
+      if ((shared.__txDepth || 0) > 1) {
+        const result = execSql(
+          sqlStorage,
+          `ROLLBACK TO SAVEPOINT _nested_${shared.__txDepth}`,
+          [],
+          'transaction.rollback-savepoint'
+        )
+        shared.__txDepth--
+        return result
+      }
+      shared.__txDepth = 0
+      this.#inTransaction = false
+      return execSql(sqlStorage, sql, [], 'transaction.rollback')
+    }
+
+    return execSql(sqlStorage, sql, [], 'transaction.statement')
   }
 
   #beginSnapshot(): void {
     this.#dropSnapshot()
     const prefix = `${this.#snapshotPrefix}_${++this.#snapshotCounter}`
     const tables = new Map<string, string>()
-    const rows = this.#sql
-      .exec(
-        `SELECT name FROM sqlite_master
+    const rows = execSql(
+      this.#sql,
+      `SELECT name FROM sqlite_master
          WHERE type = 'table'
-         ORDER BY name`
-      )
-      .toArray()
+         ORDER BY name`,
+      [],
+      'snapshot.table-list'
+    ).toArray()
 
     for (const row of rows) {
       const name = String(row.name ?? '')
       if (!shouldSnapshotTable(name)) continue
       const snapshot = snapshotTableName(prefix, name)
-      this.#sql.exec(
-        `CREATE TABLE ${quoteIdentifier(snapshot)} AS SELECT * FROM ${quoteIdentifier(name)}`
+      execSql(
+        this.#sql,
+        `CREATE TABLE ${quoteIdentifier(snapshot)} AS SELECT * FROM ${quoteIdentifier(name)}`,
+        [],
+        'snapshot.create'
       )
       tables.set(name, snapshot)
     }
@@ -641,7 +973,12 @@ export class Database {
     this.#snapshotTables = null
     for (const snapshot of tables.values()) {
       try {
-        this.#sql.exec(`DROP TABLE IF EXISTS ${quoteIdentifier(snapshot)}`)
+        execSql(
+          this.#sql,
+          `DROP TABLE IF EXISTS ${quoteIdentifier(snapshot)}`,
+          [],
+          'snapshot.drop'
+        )
       } catch {}
     }
   }
@@ -703,10 +1040,17 @@ export class Database {
       if (pragmaName === 'journal_mode') {
         return options?.simple ? pragmaValue : [{ journal_mode: pragmaValue }]
       }
+      if (
+        pragmaName === 'synchronous' ||
+        pragmaName === 'busy_timeout' ||
+        pragmaName === 'analysis_limit'
+      ) {
+        return options?.simple ? undefined : []
+      }
 
       // setting a pragma - execute it and return result
       try {
-        const cursor = this.#sql.exec(`PRAGMA ${source}`)
+        const cursor = execSql(this.#sql, `PRAGMA ${source}`, [], 'pragma.set')
         const rows = cursor.toArray()
         return options?.simple ? rows[0]?.[Object.keys(rows[0] ?? {})[0]] : rows
       } catch {
@@ -728,7 +1072,7 @@ export class Database {
 
     // try real execution for unknown pragmas
     try {
-      const cursor = this.#sql.exec(`PRAGMA ${source}`)
+      const cursor = execSql(this.#sql, `PRAGMA ${source}`, [], 'pragma.get')
       const rows = cursor.toArray()
       if (rows.length > 0) {
         if (options?.simple) {
@@ -782,7 +1126,7 @@ export class Database {
       if (isTxCmd) {
         this._execTransactionAware(stmt, this.#sql)
       } else {
-        this.#sql.exec(this._rewriteForSnapshot(stmt))
+        execSql(this.#sql, this._rewriteForSnapshot(stmt), [], 'database.exec')
       }
     }
 
@@ -821,16 +1165,16 @@ export class Database {
       }
 
       // fallback for non-DO environments (tests with bedrock-sqlite)
-      self.#sql.exec('BEGIN')
+      execSql(self.#sql, 'BEGIN', [], 'database.transaction.begin')
       self.#inTransaction = true
       try {
         const result = fn(...args)
-        self.#sql.exec('COMMIT')
+        execSql(self.#sql, 'COMMIT', [], 'database.transaction.commit')
         self.#inTransaction = false
         return result
       } catch (err) {
         try {
-          self.#sql.exec('ROLLBACK')
+          execSql(self.#sql, 'ROLLBACK', [], 'database.transaction.rollback')
         } catch {
           // swallow rollback errors
         }

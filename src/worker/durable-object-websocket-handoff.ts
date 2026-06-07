@@ -1,11 +1,16 @@
 const OPEN = 1
 const CLOSING = 2
 const CLOSED = 3
+const FIRST_SEND_CONTEXT_TIMEOUT_MS = 10_000
 
 export interface HandoffRequestMessage {
   url: string
   headers: Record<string, string>
   method: string
+}
+
+export interface DurableObjectWebSocketHandoffContext {
+  waitUntil(promise: Promise<unknown>): void
 }
 
 export interface DurableObjectWebSocket {
@@ -40,6 +45,14 @@ interface FastifyHandoffTarget {
     msg: { message: HandoffRequestMessage; head: Uint8Array },
     socket: LocalWebSocket
   ): boolean
+  server?: {
+    emit?: Function
+    listenerCount?: (event: string) => number
+  }
+}
+
+type HandoffServer = NonNullable<FastifyHandoffTarget['server']> & {
+  emit: Function
 }
 
 function errorMessage(error: unknown): string {
@@ -50,16 +63,16 @@ function websocketEventData(event: any): string | ArrayBuffer {
   const data = event?.data ?? event
   if (typeof data === 'string' || data instanceof ArrayBuffer) return data
   if (ArrayBuffer.isView(data)) {
-    return Uint8Array.from(
-      new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-    ).buffer
+    return Uint8Array.from(new Uint8Array(data.buffer, data.byteOffset, data.byteLength))
+      .buffer
   }
   return String(data)
 }
 
 function createLocalSocketBridge(
   cfSocket: DurableObjectWebSocket,
-  onClose: () => void
+  onClose: () => void,
+  onFirstSend: () => void
 ): Bridge['socket'] & {
   receive(data: string | ArrayBuffer): void
   closeFromPeer(code: number, reason: string, wasClean: boolean): void
@@ -68,6 +81,7 @@ function createLocalSocketBridge(
   const listeners = new Map<string, Set<(event: any) => void>>()
   let readyState = OPEN
   let removePeerListeners = () => {}
+  let firstSendObserved = false
 
   function addEventListener(type: string, handler: (event: any) => void) {
     let handlers = listeners.get(type)
@@ -108,7 +122,19 @@ function createLocalSocketBridge(
       if (readyState !== OPEN || cfSocket.readyState !== OPEN) {
         throw new Error('WebSocket is closed')
       }
-      cfSocket.send(data)
+      try {
+        cfSocket.send(data)
+      } catch (err) {
+        console.log(`[orez-ws] send error ${errorMessage(err)}`)
+        throw err
+      }
+      if (!firstSendObserved) {
+        firstSendObserved = true
+        console.log(
+          `[orez-ws] first send localReady=${readyState} cfReady=${cfSocket.readyState}`
+        )
+        onFirstSend()
+      }
     },
 
     close(code?: number, reason?: string) {
@@ -144,7 +170,11 @@ function createLocalSocketBridge(
     localSocket.receive(websocketEventData(event))
   }
   const onPeerClose = (event: any) => {
-    localSocket.closeFromPeer(event?.code ?? 1005, event?.reason ?? '', event?.wasClean ?? false)
+    localSocket.closeFromPeer(
+      event?.code ?? 1005,
+      event?.reason ?? '',
+      event?.wasClean ?? false
+    )
   }
   const onPeerError = (event: any) => {
     localSocket.errorFromPeer(event?.error ?? event)
@@ -168,11 +198,16 @@ export class DurableObjectWebSocketHandoff {
 
   constructor(private getFastify: () => FastifyHandoffTarget | null | undefined) {}
 
-  accept(server: DurableObjectWebSocket, message: HandoffRequestMessage): boolean {
+  accept(
+    server: DurableObjectWebSocket,
+    message: HandoffRequestMessage,
+    ctx?: DurableObjectWebSocketHandoffContext
+  ): boolean {
     const id = crypto.randomUUID()
     server.accept()
 
-    const bridge = this.#createBridge(id, server, message)
+    const releaseContext = this.#keepContextUntilFirstSend(ctx)
+    const bridge = this.#createBridge(id, server, message, releaseContext)
     const handed = this.#handoff(bridge)
     // durable diagnostic: a `handoff=false` here means no fastify instance
     // consumed the upgrade (the CF-DO sync-dead class — see the /sync emit
@@ -180,20 +215,26 @@ export class DurableObjectWebSocketHandoff {
     // `wrangler tail`.
     console.log(`[orez-ws] accept handoff=${handed} url=${message.url}`)
     if (!handed) {
+      releaseContext('no-handoff')
       bridge.close(1011, 'zero-cache websocket route unavailable', false)
     }
 
-    return true
+    return handed
   }
 
   #createBridge(
     id: string,
     cfSocket: DurableObjectWebSocket,
-    message: HandoffRequestMessage
+    message: HandoffRequestMessage,
+    onFirstSend: () => void
   ): Bridge {
-    const localSocket = createLocalSocketBridge(cfSocket, () => {
-      this.#bridges.delete(id)
-    })
+    const localSocket = createLocalSocketBridge(
+      cfSocket,
+      () => {
+        this.#bridges.delete(id)
+      },
+      onFirstSend
+    )
 
     const bridge: Bridge = {
       id,
@@ -207,39 +248,87 @@ export class DurableObjectWebSocketHandoff {
     return bridge
   }
 
+  #keepContextUntilFirstSend(
+    ctx: DurableObjectWebSocketHandoffContext | undefined
+  ): (reason?: string) => void {
+    if (!ctx?.waitUntil) {
+      console.log(`[orez-ws] waitUntil missing`)
+      return () => {}
+    }
+
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    let finished = false
+    let finish: (reason?: string) => void = () => {}
+    const promise = new Promise<void>((resolve) => {
+      finish = (reason = 'first-send') => {
+        if (finished) return
+        finished = true
+        if (timeout) clearTimeout(timeout)
+        console.log(`[orez-ws] waitUntil release reason=${reason}`)
+        resolve()
+      }
+      timeout = setTimeout(() => finish('timeout'), FIRST_SEND_CONTEXT_TIMEOUT_MS)
+    })
+    ctx.waitUntil(promise)
+    console.log(
+      `[orez-ws] waitUntil registered timeoutMs=${FIRST_SEND_CONTEXT_TIMEOUT_MS}`
+    )
+    return finish
+  }
+
   #handoff(bridge: Bridge): boolean {
     const handoffMsg = { message: bridge.message, head: new Uint8Array(0) }
     const g = globalThis as unknown as {
-      __orez_fastify_instances?: Array<
-        FastifyHandoffTarget & { server?: { emit?: Function } }
-      >
-      __orez_fastify_instance?: FastifyHandoffTarget & { server?: { emit?: Function } }
+      __orez_fastify_instances?: FastifyHandoffTarget[]
+      __orez_fastify_instance?: FastifyHandoffTarget
     }
-    const instances = g.__orez_fastify_instances ?? []
+    const fallback = this.getFastify() ?? g.__orez_fastify_instance
+    const instances = [
+      ...(g.__orez_fastify_instances ?? []),
+      ...(fallback ? [fallback] : []),
+      ...(g.__orez_fastify_instance ? [g.__orez_fastify_instance] : []),
+    ]
 
     // 1. {websocket:true} routes (e.g. /replication/*/changes) are matched by
     //    the fastify shim's tryHandoff. iterate every instance, stop at first.
     for (const inst of instances) {
       if (inst?.tryHandoff?.(handoffMsg, bridge.socket)) return true
     }
-    const fallback = (this.getFastify() ?? g.__orez_fastify_instance) as
-      | (FastifyHandoffTarget & { server?: { emit?: Function } })
-      | null
-      | undefined
-    if (!instances.length && fallback?.tryHandoff?.(handoffMsg, bridge.socket)) {
-      return true
-    }
 
     // 2. the /sync/v*/connect path is served by the ZeroDispatcher's
     //    server.onMessageType('handoff') listener, NOT a {websocket:true} route,
     //    so tryHandoff never matches it. emit the handoff on the dispatcher's
-    //    server — mirroring the in-process ws shim (shims/ws.ts). without this,
-    //    the sync upgrade is accepted but never delivered to zero-cache.
-    const server = fallback?.server
-    if (server?.emit) {
-      server.emit('message', ['handoff', handoffMsg], bridge.socket)
-      return true
+    //    server — mirroring the in-process ws shim (shims/ws.ts). Zero's runner
+    //    sends "ready" before constructing the dispatcher, so the captured
+    //    fallback instance can be stale; use the registered Fastify servers and
+    //    pick those with an extra handoff listener beyond the shim's own
+    //    websocket-route listener.
+    const servers = new Set<HandoffServer>()
+    for (const inst of instances) {
+      const server = inst?.server
+      const handoffListeners = server?.listenerCount?.('message') ?? 0
+      if (typeof server?.emit === 'function' && handoffListeners > 1) {
+        servers.add(server as HandoffServer)
+      }
     }
-    return false
+    if (!servers.size && typeof fallback?.server?.emit === 'function') {
+      const handoffListeners = fallback.server.listenerCount?.('message')
+      if (handoffListeners === undefined || handoffListeners > 1) {
+        servers.add(fallback.server as HandoffServer)
+      }
+    }
+
+    let emittedAny = false
+    let maxListeners = -1
+    for (const server of servers) {
+      const listeners = server.listenerCount?.('message') ?? -1
+      const emitted = server.emit('message', ['handoff', handoffMsg], bridge.socket)
+      emittedAny ||= Boolean(emitted)
+      maxListeners = Math.max(maxListeners, listeners)
+    }
+    console.log(
+      `[orez-ws] dispatcher emit candidates=${servers.size} emitted=${emittedAny} listeners=${maxListeners}`
+    )
+    return emittedAny
   }
 }
