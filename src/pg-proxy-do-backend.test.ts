@@ -381,6 +381,38 @@ describe('DoBackend', () => {
     ).toBe(true)
   })
 
+  test('quotes sqlite keyword table identifiers in DO-bound SQL', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'sqlite-keyword-table-test')
+    await backend.waitReady
+    http.sqls.length = 0
+
+    await backend.query(`
+      CREATE TABLE IF NOT EXISTS "transaction" (
+        id text PRIMARY KEY,
+        amount integer NOT NULL
+      )
+    `)
+    await backend.query('CREATE INDEX "transaction_amount_idx" ON "transaction" (amount)')
+    await backend.query('INSERT INTO "transaction" (id, amount) VALUES ($1, $2)', [
+      'tx1',
+      42,
+    ])
+    await backend.query('UPDATE "transaction" SET amount = $1 WHERE id = $2', [64, 'tx1'])
+    await backend.query('SELECT "transaction".id FROM "transaction" WHERE id = $1', [
+      'tx1',
+    ])
+    await backend.query('DELETE FROM "transaction" WHERE id = $1', ['tx1'])
+
+    const sent = compactSQL(http.sqls.join('; '))
+    expect(sent).toContain('CREATE TABLE IF NOT EXISTS "transaction"')
+    expect(sent).toContain('ON "transaction"')
+    expect(sent).toContain('INSERT INTO "transaction"')
+    expect(sent).toContain('UPDATE "transaction"')
+    expect(sent).toContain('FROM "transaction"')
+    expect(sent).toContain('DELETE FROM "transaction"')
+  })
+
   test('describes prepared statements with parameter and row metadata', async () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('_orez_describe')) return { rows: [], columns: ['value'] }

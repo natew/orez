@@ -3,6 +3,10 @@ import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
 import { RETURNING_INTERNAL_PREFIX } from './do-sql-tracking.js'
 import { signalReplicationChange } from './replication/handler.js'
+import {
+  markSQLiteKeywordIdentifiers,
+  restoreSQLiteKeywordIdentifierMarkers,
+} from './sqlite-keyword-identifiers.js'
 
 /**
  * DoBackend: a PGlite-compatible adapter that forwards SQL to Cloudflare Durable Objects.
@@ -2932,7 +2936,13 @@ function replaceSchemaSpecsFunctionCalls(sql: string): { sql: string; count: num
 }
 
 function deparseStatement(version: number, stmt: any): string {
-  return stripTrailingSemicolon(deparseSync({ version, stmts: [{ stmt }] }).trim())
+  const quotedByMarker = markSQLiteKeywordIdentifiers(stmt)
+  return stripTrailingSemicolon(
+    restoreSQLiteKeywordIdentifierMarkers(
+      deparseSync({ version, stmts: [{ stmt }] }),
+      quotedByMarker
+    ).trim()
+  )
 }
 
 function starTarget(): any {
@@ -3175,7 +3185,7 @@ function selectWhereSQL(version: number, whereClause: any): string | null {
       op: 'SETOP_NONE',
     },
   }
-  const sql = stripTrailingSemicolon(deparseSync({ version, stmts: [{ stmt }] }).trim())
+  const sql = deparseStatement(version, stmt)
   const whereIndex = findKeywordOutsideQuotes(sql, 'WHERE')
   if (whereIndex < 0) return null
   return sql.slice(whereIndex + 'WHERE'.length).trim()
@@ -3203,32 +3213,18 @@ function compileSelectIntoNew(
   const targetColumn = rel.relname
   const cloned = cloneAst(select)
   delete cloned.intoClause
-  const selectSQL = stripTrailingSemicolon(
-    deparseSync({
-      version,
-      stmts: [{ stmt: { SelectStmt: rewriteNode(cloned) } }],
-    }).trim()
-  )
+  const selectSQL = deparseStatement(version, { SelectStmt: rewriteNode(cloned) })
   return rowUpdateSQL(triggerTable, targetColumn, `(${selectSQL})`, rowCondition)
 }
 
 function deparseExpressionSQL(version: number, expr: any): string | null {
-  const sql = stripTrailingSemicolon(
-    deparseSync({
-      version,
-      stmts: [
-        {
-          stmt: {
-            SelectStmt: {
-              targetList: [{ ResTarget: { val: expr, location: -1 } }],
-              limitOption: 'LIMIT_OPTION_DEFAULT',
-              op: 'SETOP_NONE',
-            },
-          },
-        },
-      ],
-    }).trim()
-  )
+  const sql = deparseStatement(version, {
+    SelectStmt: {
+      targetList: [{ ResTarget: { val: expr, location: -1 } }],
+      limitOption: 'LIMIT_OPTION_DEFAULT',
+      op: 'SETOP_NONE',
+    },
+  })
   const selectIndex = findKeywordOutsideQuotes(sql, 'SELECT')
   if (selectIndex < 0) return null
   return sql.slice(selectIndex + 'SELECT'.length).trim()
@@ -3923,12 +3919,7 @@ function copySelectSQL(sql: string): { sql: string; binary: boolean } | null {
       )
     })
     return {
-      sql: stripTrailingSemicolon(
-        deparseSync({
-          version: parsed.version,
-          stmts: [{ stmt: { SelectStmt: copy.query.SelectStmt } }],
-        }).trim()
-      ),
+      sql: deparseStatement(parsed.version, { SelectStmt: copy.query.SelectStmt }),
       binary,
     }
   } catch {
