@@ -9,7 +9,6 @@ import { execSync } from 'node:child_process'
 import {
   cpSync,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -88,6 +87,10 @@ function redactNpmOtp(command: string) {
   return command.replace(/--otp(?:=|\s+)\S+/g, '--otp=******')
 }
 
+function cleanRootDist() {
+  rmSync(resolve(root, 'dist'), { recursive: true, force: true })
+}
+
 let cachedNpmOtp = process.env.npm_config_otp || process.env.NPM_CONFIG_OTP
 let otpPromptInFlight: Promise<string> | undefined
 
@@ -157,10 +160,10 @@ if (into) {
   const targetDir = resolve(into.replace(/^~/, process.env.HOME!))
 
   console.info('building...')
+  cleanRootDist()
   run('bun run build')
 
-  const tmpDir = '/tmp/orez-release-into'
-  mkdirSync(tmpDir, { recursive: true })
+  const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
 
   // gather packages the same way the normal flow does
   const pkgDirs: { name: string; dir: string }[] = []
@@ -175,33 +178,38 @@ if (into) {
   }
 
   let released = 0
-  for (const { name, dir } of pkgDirs) {
-    const destDir = join(targetDir, 'node_modules', name)
-    if (!existsSync(destDir)) {
-      console.info(`  skip ${name} (not in target node_modules)`)
-      continue
-    }
-
-    try {
-      run(`npm pack --pack-destination ${tmpDir}`, { cwd: dir, silent: true })
-
-      const files = readdirSync(tmpDir)
-      const prefix = name.replace('@', '').replace('/', '-')
-      const packed = files.find((f) => f.startsWith(prefix) && f.endsWith('.tgz'))
-
-      if (!packed) {
-        console.warn(`  skip ${name}: pack produced no tgz`)
+  try {
+    for (const { name, dir } of pkgDirs) {
+      const destDir = join(targetDir, 'node_modules', name)
+      if (!existsSync(destDir)) {
+        console.info(`  skip ${name} (not in target node_modules)`)
         continue
       }
 
-      const tgzPath = join(tmpDir, packed)
-      run(`tar -xzf ${tgzPath} -C ${destDir} --strip-components=1`, { silent: true })
-      rmSync(tgzPath)
-      released++
-      console.info(`  ✓ ${name}`)
-    } catch (err) {
-      console.warn(`  ✗ ${name}: ${err}`)
+      try {
+        run(`npm pack --pack-destination ${tmpDir}`, { cwd: dir, silent: true })
+
+        const files = readdirSync(tmpDir)
+        const prefix = name.replace('@', '').replace('/', '-')
+        const packed = files.find((f) => f.startsWith(prefix) && f.endsWith('.tgz'))
+
+        if (!packed) {
+          console.warn(`  skip ${name}: pack produced no tgz`)
+          continue
+        }
+
+        const tgzPath = join(tmpDir, packed)
+        rmSync(join(destDir, 'dist'), { recursive: true, force: true })
+        run(`tar -xzf ${tgzPath} -C ${destDir} --strip-components=1`, { silent: true })
+        rmSync(tgzPath)
+        released++
+        console.info(`  ✓ ${name}`)
+      } catch (err) {
+        console.warn(`  ✗ ${name}: ${err}`)
+      }
     }
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
   }
 
   console.info(`\nreleased ${released} package(s) into ${targetDir}`)
@@ -284,6 +292,7 @@ if (!packOnly) {
 
 // build orez
 console.info('\nbuilding...')
+cleanRootDist()
 run('bun run build')
 
 // bump versions in source (skip for --pack-only and --canary)

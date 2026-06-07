@@ -2,32 +2,19 @@ const OPEN = 1
 const CLOSING = 2
 const CLOSED = 3
 
-const ZERO_CACHE_SOCKET_ATTACHMENT_TYPE = 'orez-zero-cache-handoff-v1'
-
-export interface DurableObjectStateLike {
-  acceptWebSocket(socket: HibernatableWebSocket, tags?: string[]): void
-}
-
 export interface HandoffRequestMessage {
   url: string
   headers: Record<string, string>
   method: string
 }
 
-export interface HandoffAttachment {
-  type: typeof ZERO_CACHE_SOCKET_ATTACHMENT_TYPE
-  id: string
-  message: HandoffRequestMessage
-}
-
-export interface HibernatableWebSocket {
+export interface DurableObjectWebSocket {
+  accept(): void
   send(data: string | ArrayBuffer | ArrayBufferView): void
   close(code?: number, reason?: string): void
   addEventListener(type: string, handler: (event: any) => void): void
   removeEventListener(type: string, handler: (event: any) => void): void
   readyState: number
-  serializeAttachment(value: HandoffAttachment): void
-  deserializeAttachment(): HandoffAttachment | undefined
 }
 
 interface LocalWebSocket {
@@ -55,23 +42,23 @@ interface FastifyHandoffTarget {
   ): boolean
 }
 
-function isHandoffAttachment(value: unknown): value is HandoffAttachment {
-  if (!value || typeof value !== 'object') return false
-  const record = value as Record<string, unknown>
-  return (
-    record.type === ZERO_CACHE_SOCKET_ATTACHMENT_TYPE &&
-    typeof record.id === 'string' &&
-    Boolean(record.message) &&
-    typeof record.message === 'object'
-  )
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function websocketEventData(event: any): string | ArrayBuffer {
+  const data = event?.data ?? event
+  if (typeof data === 'string' || data instanceof ArrayBuffer) return data
+  if (ArrayBuffer.isView(data)) {
+    return Uint8Array.from(
+      new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+    ).buffer
+  }
+  return String(data)
+}
+
 function createLocalSocketBridge(
-  cfSocket: HibernatableWebSocket,
+  cfSocket: DurableObjectWebSocket,
   onClose: () => void
 ): Bridge['socket'] & {
   receive(data: string | ArrayBuffer): void
@@ -80,6 +67,7 @@ function createLocalSocketBridge(
 } {
   const listeners = new Map<string, Set<(event: any) => void>>()
   let readyState = OPEN
+  let removePeerListeners = () => {}
 
   function addEventListener(type: string, handler: (event: any) => void) {
     let handlers = listeners.get(type)
@@ -103,6 +91,7 @@ function createLocalSocketBridge(
   function markClosed(code: number, reason: string, wasClean: boolean) {
     if (readyState === CLOSED) return
     readyState = CLOSED
+    removePeerListeners()
     emit('close', { code, reason, wasClean })
     listeners.clear()
     onClose()
@@ -116,7 +105,7 @@ function createLocalSocketBridge(
     },
 
     send(data: string | ArrayBuffer | ArrayBufferView) {
-      if (readyState !== OPEN || cfSocket.readyState === CLOSED) {
+      if (readyState !== OPEN || cfSocket.readyState !== OPEN) {
         throw new Error('WebSocket is closed')
       }
       cfSocket.send(data)
@@ -151,30 +140,37 @@ function createLocalSocketBridge(
     },
   }
 
+  const onPeerMessage = (event: any) => {
+    localSocket.receive(websocketEventData(event))
+  }
+  const onPeerClose = (event: any) => {
+    localSocket.closeFromPeer(event?.code ?? 1005, event?.reason ?? '', event?.wasClean ?? false)
+  }
+  const onPeerError = (event: any) => {
+    localSocket.errorFromPeer(event?.error ?? event)
+  }
+
+  cfSocket.addEventListener('message', onPeerMessage)
+  cfSocket.addEventListener('close', onPeerClose)
+  cfSocket.addEventListener('error', onPeerError)
+  removePeerListeners = () => {
+    cfSocket.removeEventListener('message', onPeerMessage)
+    cfSocket.removeEventListener('close', onPeerClose)
+    cfSocket.removeEventListener('error', onPeerError)
+    removePeerListeners = () => {}
+  }
+
   return localSocket
 }
 
-export class HibernatedWebSocketHandoff {
+export class DurableObjectWebSocketHandoff {
   #bridges = new Map<string, Bridge>()
-  #socketIds = new WeakMap<object, string>()
 
   constructor(private getFastify: () => FastifyHandoffTarget | null | undefined) {}
 
-  accept(
-    durableObjectState: DurableObjectStateLike,
-    server: HibernatableWebSocket,
-    message: HandoffRequestMessage
-  ): boolean {
+  accept(server: DurableObjectWebSocket, message: HandoffRequestMessage): boolean {
     const id = crypto.randomUUID()
-    const attachment: HandoffAttachment = {
-      type: ZERO_CACHE_SOCKET_ATTACHMENT_TYPE,
-      id,
-      message,
-    }
-
-    durableObjectState.acceptWebSocket(server)
-    server.serializeAttachment(attachment)
-    this.#socketIds.set(server, id)
+    server.accept()
 
     const bridge = this.#createBridge(id, server, message)
     const handed = this.#handoff(bridge)
@@ -185,75 +181,18 @@ export class HibernatedWebSocketHandoff {
     console.log(`[orez-ws] accept handoff=${handed} url=${message.url}`)
     if (!handed) {
       bridge.close(1011, 'zero-cache websocket route unavailable', false)
-      return false
     }
+
     return true
-  }
-
-  handleMessage(socket: HibernatableWebSocket, messageData: string | ArrayBuffer): void {
-    const bridge = this.#bridgeForSocket(socket)
-    if (!bridge) {
-      socket.close(1011, 'missing zero-cache websocket attachment')
-      return
-    }
-    bridge.receive(messageData)
-  }
-
-  handleClose(
-    socket: HibernatableWebSocket,
-    code: number,
-    reason: string,
-    wasClean: boolean
-  ): void {
-    const bridge = this.#bridgeForSocket(socket)
-    if (!bridge) return
-    bridge.close(code, reason, wasClean)
-  }
-
-  handleError(socket: HibernatableWebSocket, error: unknown): void {
-    const bridge = this.#bridgeForSocket(socket)
-    if (!bridge) return
-    bridge.error(error)
-  }
-
-  #bridgeForSocket(socket: HibernatableWebSocket): Bridge | undefined {
-    const attachment = this.#attachmentForSocket(socket)
-    if (!attachment) return undefined
-
-    const existing = this.#bridges.get(attachment.id)
-    if (existing) return existing
-
-    const bridge = this.#createBridge(attachment.id, socket, attachment.message)
-    if (!this.#handoff(bridge)) {
-      bridge.close(1011, 'zero-cache websocket route unavailable', false)
-      return undefined
-    }
-    return bridge
-  }
-
-  #attachmentForSocket(socket: HibernatableWebSocket): HandoffAttachment | undefined {
-    const attachment = socket.deserializeAttachment()
-    if (isHandoffAttachment(attachment)) return attachment
-
-    const id = this.#socketIds.get(socket)
-    if (!id) return undefined
-    const bridge = this.#bridges.get(id)
-    if (!bridge) return undefined
-    return {
-      type: ZERO_CACHE_SOCKET_ATTACHMENT_TYPE,
-      id,
-      message: bridge.message,
-    }
   }
 
   #createBridge(
     id: string,
-    cfSocket: HibernatableWebSocket,
+    cfSocket: DurableObjectWebSocket,
     message: HandoffRequestMessage
   ): Bridge {
     const localSocket = createLocalSocketBridge(cfSocket, () => {
       this.#bridges.delete(id)
-      this.#socketIds.delete(cfSocket)
     })
 
     const bridge: Bridge = {
@@ -265,7 +204,6 @@ export class HibernatedWebSocketHandoff {
       error: localSocket.errorFromPeer,
     }
     this.#bridges.set(id, bridge)
-    this.#socketIds.set(cfSocket, id)
     return bridge
   }
 
@@ -295,10 +233,8 @@ export class HibernatedWebSocketHandoff {
     // 2. the /sync/v*/connect path is served by the ZeroDispatcher's
     //    server.onMessageType('handoff') listener, NOT a {websocket:true} route,
     //    so tryHandoff never matches it. emit the handoff on the dispatcher's
-    //    server — mirroring the in-process ws shim (shims/ws.ts:187-189). WITHOUT
-    //    this, the DO acceptWebSocket()s the server half, tryHandoff returns
-    //    false, the upgrade returns a 404 with no paired client socket, and the
-    //    browser sees an abnormal close (1006) → deployed-app sync is dead.
+    //    server — mirroring the in-process ws shim (shims/ws.ts). without this,
+    //    the sync upgrade is accepted but never delivered to zero-cache.
     const server = fallback?.server
     if (server?.emit) {
       server.emit('message', ['handoff', handoffMsg], bridge.socket)
