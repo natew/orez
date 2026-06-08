@@ -428,22 +428,93 @@ Before doing anything that binds ports, mutates the working tree, or deploys:
 - soot needs **explicit commit permission** — same rule as ~/chat. Leave the
   dep bumps uncommitted and flag them.
 
-### 7.3 Stage 4 — orez-web validation
+### 7.3 Stage 4 — orez-web validation — ✅ DONE for 1.6 (2026-06-08)
 
-1. Bump soot Zero deps to 1.6.1 (§7.1); install with the release-age workaround;
-   rebuild native `@rocicorp/zero-sqlite3` (watch the §5 bare-`bun i` footgun).
-2. Ship orez: from `~/orez`, `bun release --into ~/soot` (build + unpack 1.6.1
-   into `node_modules/orez`).
-3. Rebuild the browser workers: `cd ~/soot && bun run build:orez` (regenerates
-   `soot/public/orez-web-*.worker.js`). Confirm the bundle pulls protocol
-   **v51** (grep the emitted worker for `/sync/v51/` or the protocol constant).
-4. Drive the tests cheapest→broadest, fixing as you go:
-   `test:orez:smoke` → `test:orez:quick` → `test:orez` (full) → `test:orez:robust`.
-   Logs land in `/tmp/orez-sync-logs/`.
-5. Watch-items: protocol-version handshake, SAB→MessagePort handoff (the test
-   file documents a known IPC reload-sync bug if SAB is disabled), reload
-   persistence, multi-surface (web/native) convergence.
-   ➜ Green here = **orez-web ready.**
+Validated in an isolated worktree `~/.worktrees/soot-zero-16` (branch
+`chore/upgrade-zero-1.6`) on `PORT_OFFSET=500`. **Result: `test:orez` full
+(11/11), `:smoke` (3/3), `:robust` (5/5) all green; warmup ready ~4–8s
+(faster than the 60s budget → parity with 1.5, no timeouts loosened).**
+
+Steps (the real ones — they diverged from the original plan above):
+
+1. Bump Zero deps to 1.6.1. `bun update --latest @rocicorp/zero @rocicorp/zero-sqlite3`
+   only bumps **root**; the workspace members (`packages/orez-web`, `templates/*`)
+   keep `1.5.0` and bun's filtered update won't move exact pins — **hand-align**
+   those manifests to `1.6.1` and `bun install` so the lockfile + frozen-install
+   gate stay clean. soot's committed `bunfig.toml` already sets
+   `minimumReleaseAge = 0`, so **no temp bunfig is needed** (the §2/§7.1 workaround
+   does not apply to soot).
+2. **Native `@rocicorp/zero-sqlite3` 1.1.2 is prebuilt-only.** Its npm tarball
+   omits the generated `unicode_case_data.h`, so `bun tko run ensure-zero-sqlite`
+   (node-gyp source rebuild) **fails** (`fatal error: 'unicode_case_data.h' file
+   not found`) and silently falls back to wasm — but the soot **node backend**
+   hard-requires the native binding (`assertNativeNodeRuntime`), so the stack
+   won't boot on wasm. Fix: use the prebuilt binary (what a plain `bun install`
+   fetches via `prebuild-install`). Pragmatic unblock used here: copy the
+   resolved binary from another checkout that has it, e.g.
+   `cp ~/orez/node_modules/.bun/@rocicorp+zero-sqlite3@1.1.2/node_modules/@rocicorp/zero-sqlite3/build/Release/better_sqlite3.node`
+   `   ~/soot/node_modules/@rocicorp/zero-sqlite3/build/Release/`. **TODO (soot):**
+   make `ensure-zero-sqlite` prefer `prebuild-install` over node-gyp for 1.1.2+.
+3. Ship orez: `bun release --into <soot-worktree>` (build + unpack 1.6 dist).
+4. Apply vxrn's built-in dep patches **before first dev boot**:
+   `bun -e "const m=await import('./node_modules/vxrn/dist/utils/patches.mjs'); await m.applyBuiltInPatches({root:process.cwd()})"`.
+   On a fresh checkout the `one dev` optimizer races vxrn's
+   `applyBuiltInPatchesPlugin`, so the `@react-navigation/core` exports patch
+   (`./lib/module/EnsureSingleNavigator` etc.) isn't applied yet →
+   `"… is not exported under conditions ['vxrn-web','import']"` and no hydration.
+   Pre-applying (idempotent, persists in node_modules) avoids it. Pre-existing
+   soot/vxrn cold-start race; not a Zero issue.
+5. Build the test prereqs (`ci-dev` skips them): `bun run build:prereqs:validate`
+   (generate + `build:sootsim:cli` → `build:sootsim` (`sootsim/sdk`) + `build:deps`
+   + `build:tool-runtime`). Without `sootsim/sdk` built, the project route 500s
+   on SSR (`Cannot find module 'sootsim/sdk'`).
+6. Rebuild browser workers: `bun run build:orez`. Confirm protocol **v51**
+   (`grep -o 'protocolVersion: [0-9]*' public/orez-web-zc.worker.js` → 51).
+7. Boot the stack the **CI way** — `bun scripts/test-stack.ts start` (NOT bare
+   `ci-dev start`): test-stack forces `NODE_ENV=development`, without which One's
+   `DevHead` skips injecting `/@one/dev.js` → no hydration → warmup never ready.
+8. Run `test:orez:smoke` → `test:orez` (full) → `test:orez:robust`, all on the
+   same `PORT_OFFSET`. Logs in `/tmp/orez-sync-logs/`. `bun scripts/test-stack.ts stop`
+   when done.
+
+**Two real zero-1.6 orez-web bugs found + fixed** (both surfaced only via a
+playwright probe capturing the in-page worker console — the test's truncated
+warmup dump hid them):
+
+1. **Worker auto-start guard not neutralized** → in-browser zero-cache crashes
+   at startup with `Error: Unexpected undefined value` (`must(parentWorker)` in
+   `orez-web-zc.worker.js`). soot's `packages/orez-web/scripts/build-zero-cache.ts`
+   `zcPatchPlugin` strips zero's `if (!singleProcessMode()) exitAfter(...)`
+   self-start, but its two regexes only matched the single-line `;`-terminated
+   form and the older brace form. Zero 1.6 made it **multi-line, no braces**
+   (`exitAfter(lc, () => runWorker(must(parentWorker), …).catch(…))`), so neither
+   matched and the guard shipped (same class as §3.C-2 for the CF overlay).
+   Fix: anchor on the stable prefix `if (!singleProcessMode()) exitAfter(` →
+   `if (false) exitAfter(` (variadic/multiline-safe), plus a **fail-loud
+   post-build assertion** that the bundle no longer contains
+   `!singleProcessMode()) exitAfter`.
+2. **Initial-sync deadlock on the faked replication session** → after "opening
+   replication session" the change-streamer hangs forever (no `ready`). Zero 1.6's
+   `createReplicaAndSlot` (`change-source/pg/replication-slots.js`) creates the
+   slot from a **separate replication session opened inside the main connection's
+   advisory-lock transaction** (`runTx(sql, … createReplicationSlot(session) …)`),
+   and that session issues `SET lock_timeout = <n>` then
+   `CREATE_REPLICATION_SLOT … (FAILOVER)` (new in 1.6, gated on `pgVersion>=17e4`
+   — orez reports PG 17.0.4). orez-web's pg-proxy uses a **transaction-aware
+   mutex** (`acquireForOwner`, owner=null), so the faked repl session waits for
+   the main transaction to commit — which can't, until slot creation returns.
+   Deadlock. orez-node avoids it with a plain per-statement mutex. Fix (orez):
+   - `src/pg-proxy-browser.ts` — the repl protocol-command branch uses the **raw**
+     `mutex.acquire()` (statement-level, like orez-node), not `acquireForOwner`,
+     so the slot row lands in the main connection's open tx and commits with it.
+   - `src/replication/handler.ts` — `handleReplicationQuery` answers **any
+     `SET …`** (not just `SET TRANSACTION/SESSION`) with a synthetic `SET`
+     CommandComplete, so `SET lock_timeout` never round-trips through pglite.
+
+Watch-items still valid: protocol-version handshake, SAB→MessagePort handoff
+(known IPC reload-sync bug if SAB disabled), reload persistence, multi-surface
+(web/native) convergence.
+   ➜ Green here = **orez-web ready. ✅**
 
 ### 7.4 Stage 5 — orez-cf / cf-do validation (the big one)
 
