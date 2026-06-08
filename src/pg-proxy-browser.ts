@@ -1254,8 +1254,20 @@ export async function createBrowserProxy(
             return
           }
 
-          // replication queries (IDENTIFY_SYSTEM, CREATE/DROP SLOT)
-          await acquireForOwner(db, mutex, txState, null)
+          // replication queries (IDENTIFY_SYSTEM, SET ..., CREATE/DROP SLOT).
+          // use the RAW mutex here, NOT acquireForOwner. zero 1.6 creates the
+          // replication slot from this SEPARATE replication session *inside* the
+          // main connection's advisory-lock transaction
+          // (createReplicaAndSlot → runTx → createReplicationSlot, which issues
+          // `SET lock_timeout = <n>` then `CREATE_REPLICATION_SLOT … (FAILOVER)`).
+          // the transaction-aware gate would make this faked session (owner=null)
+          // wait for that transaction to commit — but it can't commit until slot
+          // creation returns, so initial sync deadlocks and hangs forever. these
+          // are single faked-protocol statements against a dedicated fake slot
+          // table, so plain statement-level serialization (matching orez-node's
+          // pg-proxy) is correct: the slot row lands in the main connection's
+          // open tx and commits with it.
+          await mutex.acquire()
           try {
             const response = await handleReplicationQuery(query, db)
             if (response) {

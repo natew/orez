@@ -382,9 +382,14 @@ export async function handleReplicationQuery(
     return buildCommandComplete('ALTER ROLE')
   }
 
-  // SET TRANSACTION - pglite rejects this if any query ran first (e.g. SET search_path).
-  // return synthetic response since pglite is single-connection and doesn't need isolation levels.
-  if (upper.startsWith('SET TRANSACTION') || upper.startsWith('SET SESSION')) {
+  // SET commands on the replication session. pglite is single-connection and
+  // the faked replication doesn't need real session settings, so answer every
+  // SET with a synthetic CommandComplete instead of touching pglite. covers
+  // SET TRANSACTION / SET SESSION (pglite rejects these if any query ran first,
+  // e.g. SET search_path) and — new in zero 1.6's failover-slot path —
+  // `SET lock_timeout = <n>`, which createReplicationSlot issues as the FIRST
+  // command on the replication session before CREATE_REPLICATION_SLOT.
+  if (upper.startsWith('SET ')) {
     return buildCommandComplete('SET')
   }
 
