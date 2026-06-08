@@ -30,7 +30,7 @@ import { startZeroCacheEmbed, type ZeroCacheEmbed } from './zero-cache-embed.js'
 
 import type { PGlite } from '@electric-sql/pglite'
 
-const SYNC_PROTOCOL_VERSION = 50
+const SYNC_PROTOCOL_VERSION = 51
 
 function encodeSecProtocols(
   initConnectionMessage: unknown,

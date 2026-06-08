@@ -45,6 +45,12 @@ const ZERO_CACHE_WORKERS = [
   'syncer',
 ] as const
 
+// the stable prefix of every zero-cache worker's import-time auto-start guard.
+// flipping the condition to `false` neutralizes the call without depending on
+// the (version-volatile) runWorker(...) arguments that follow it.
+const WORKER_AUTOSTART_PREFIX = 'if (!singleProcessMode()) exitAfter('
+const WORKER_AUTOSTART_DISABLED = 'if (false) /* orez-disable-autostart */ exitAfter('
+
 export interface ZeroCacheCFPrepareOptions {
   nodeModulesPath: string
   outDir?: string
@@ -166,17 +172,21 @@ function patchWorkerEntrypoints(zcBase: string): void {
       continue
     }
 
-    let code = readFileSync(entrypointPath, 'utf-8')
+    const code = readFileSync(entrypointPath, 'utf-8')
     if (code.includes('orez-disable-autostart')) {
       continue
     }
 
-    const next = code.replace(
-      /if \(!singleProcessMode\(\)\) exitAfter\(\(\) => runWorker\(must\(parentWorker\), process\.env(?:, \.\.\.process\.argv\.slice\(2\))?\)\);/g,
-      '// orez-disable-autostart: childWorker invokes runWorker explicitly in CF embeds.'
-    )
-
-    if (next === code) {
+    // every entrypoint auto-starts itself at import time via
+    //   if (!singleProcessMode()) exitAfter(lc, () => runWorker(...))
+    // the runWorker(...) call shape varies per worker and across zero versions
+    // (1.6 added the `lc` arg to exitAfter, kept `...process.argv.slice(2)` on
+    // some workers, and wrapped change-streamer's runWorker in a `.catch()` that
+    // publishes startup errors). matching the whole call is brittle, so we only
+    // touch the stable guard prefix: flipping the condition to `false` turns the
+    // entire statement into dead code regardless of its arguments. CF embeds run
+    // runWorker explicitly via childWorker, so nothing is lost.
+    if (!code.includes(WORKER_AUTOSTART_PREFIX)) {
       console.warn(
         `[orez] could not find auto-start guard in ${entrypoint}.js. ` +
           'zero-cache version may have changed — check compatibility.'
@@ -184,8 +194,8 @@ function patchWorkerEntrypoints(zcBase: string): void {
       continue
     }
 
-    code = next
-    writeFileSync(entrypointPath, code)
+    const next = code.split(WORKER_AUTOSTART_PREFIX).join(WORKER_AUTOSTART_DISABLED)
+    writeFileSync(entrypointPath, next)
     console.log(`[orez] patched zero-cache ${entrypoint}.js (disabled auto-start)`)
   }
 }
@@ -301,6 +311,32 @@ function applyPragmas(db, pragmas) {
   }
 }
 
+// re-exported to keep this module's surface identical to upstream
+// write-worker-client.js (write-worker.js imports it). orez runs the writer
+// inline so the thread boundary that uses it is gone, but a complete export
+// surface keeps the bundler from choking if it pulls write-worker.js in.
+function serializeError(err) {
+  if (!(err instanceof Error)) return {
+    name: "Error",
+    message: String(err),
+    details: err && typeof err === "object" ? { ...err } : void 0
+  };
+  const details = Object.fromEntries(Object.getOwnPropertyNames(err).filter((key) => ![
+    "name",
+    "message",
+    "stack",
+    "cause"
+  ].includes(key)).map((key) => [key, err[key]]));
+  const cause = err.cause instanceof Error ? serializeError(err.cause) : err.cause === void 0 ? void 0 : String(err.cause);
+  return {
+    name: err.name,
+    message: err.message,
+    stack: err.stack,
+    cause,
+    details: Object.keys(details).length ? details : void 0
+  };
+}
+
 function createAPI(onWriteError) {
   let db;
   let runner;
@@ -316,7 +352,7 @@ function createAPI(onWriteError) {
 
   return {
     init(dbPath, cpMode, pragmas, logConfig) {
-      lc = createLogContext({ log: logConfig }, { worker: "write-worker" });
+      lc = createLogContext({ log: logConfig }, "write-worker");
       const previousRole = globalThis.__orez_zero_sqlite_role;
       globalThis.__orez_zero_sqlite_role = "replica-writer";
       try {
@@ -405,7 +441,7 @@ class ThreadWriteWorkerClient {
   }
 }
 
-export { ThreadWriteWorkerClient, applyPragmas };
+export { ThreadWriteWorkerClient, applyPragmas, serializeError };
 `
   )
   console.log('[orez] patched zero-cache write-worker-client.js (inline writer)')

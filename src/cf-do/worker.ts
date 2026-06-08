@@ -14,7 +14,7 @@ import { DurableWatermarkState } from './watermark.js'
  * for zero-cache.
  *
  * Modes:
- *   WS /sync/v50/connect — bespoke Zero sync protocol (dev/protocol testing)
+ *   WS /sync/v51/connect — bespoke Zero sync protocol (dev/protocol testing)
  *   POST /exec — raw SQL execution (from DoBackend adapter)
  *   POST /batch — atomic batch execution via ctx.storage.transaction()
  */

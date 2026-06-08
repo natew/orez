@@ -36,7 +36,7 @@ function createMockSocket() {
 }
 
 const requestMessage: HandoffRequestMessage = {
-  url: '/sync/v50/connect?clientID=a',
+  url: '/sync/v51/connect?clientID=a',
   headers: { upgrade: 'websocket' },
   method: 'GET',
 }

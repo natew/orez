@@ -103,8 +103,8 @@
     }
   },
   "devDependencies": {
-    "@rocicorp/zero": "1.5.0",
-    "@rocicorp/zero-sqlite3": "1.0.18",
+    "@rocicorp/zero": "1.6.1",
+    "@rocicorp/zero-sqlite3": "1.1.2",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
     "oxfmt": "latest",

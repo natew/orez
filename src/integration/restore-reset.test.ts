@@ -25,7 +25,7 @@ import {
 } from './test-permissions.js'
 
 // zero-cache protocol version (from @rocicorp/zero/out/zero-protocol/src/protocol-version.js)
-const PROTOCOL_VERSION = 45
+const PROTOCOL_VERSION = 51
 const RESET_CLIENT_SCHEMA = {
   tables: {
     reset_probe: {

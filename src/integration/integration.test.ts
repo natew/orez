@@ -20,7 +20,7 @@ import {
 
 import type { PGlite } from '@electric-sql/pglite'
 
-const SYNC_PROTOCOL_VERSION = 50
+const SYNC_PROTOCOL_VERSION = 51
 const CLIENT_SCHEMA = {
   tables: {
     foo: {
