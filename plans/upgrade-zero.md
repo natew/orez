@@ -263,9 +263,10 @@ Verify the binary exists for the resolved version:
 
 #### Validation status after the bump
 
-- `bun run test` (unit): **656/657** (see embed-integration note below).
-  tsc/lint/format/`cf-patches.test.ts` green.
-- `bun run test:integration`: **21/21** after the two reset fixes below.
+- `bun run test` (unit): **654/654** (embed-integration moved to the integration
+  suite — see below). build / lint / format / tsc all green.
+- `bun run test:integration`: **24/24** (incl. embed + the two reset fixes below).
+- `bun run test:wasm`: **22/22**. `bun run test:compiler`: **49/49**.
 
 #### `restore-live-stress.test.ts` — FIXED (two distinct reset bugs)
 
@@ -295,18 +296,17 @@ Two independent causes, both fixed:
    proxy exposes `resetDbState(dbName)` which swaps in a **fresh mutex +
    txState** for the recreated instance (abandoning the stuck one); the reset
    calls it for `zero_cvr`/`zero_cdb` right after recreating them. Independent
-   of data size (tiny stress data reproduced it too). **Not CI-gated** (CI runs
-   `test:integration:native` — native-startup guard only, not this file), but
-   now passes locally 3/3 with the default stress config.
+   of data size (tiny stress data reproduced it too). Now passes 3/3 with the
+   default stress config and is **CI-gated**: the `native-integration` job now
+   runs the full `test:integration` (`native:bootstrap && test:integration`),
+   not just the native-startup guard.
 
-#### Open follow-on (1.6)
+#### Resolved: `embed-integration` "insert triggers poke" load flake
 
-1. **`embed-integration.test.ts` "insert triggers poke" — full-suite-only
-   flake.** Passes in isolation, in the `src/worker/` group, and with the
-   `src/replication/` group; only times out (poke >30s) in the full 39-file
-   `bun run test`. `fileParallelism:false` reuses one vitest worker; the
-   in-process change-streamer is hosted in that worker, which is bloated by
-   ~file 35 (note the `MaxListeners: 11 uncaughtException listeners` warning —
-   zero's `createLogContext` adds one per embed). CI was green here on 1.5
-   (`13b685b`), so this is load-sensitive, likely green on a fresh CI runner.
-   A real fix would isolate embed-integration in its own vitest pool.
+Was a full-39-file-`bun run test` flake: the in-process change-streamer is
+CPU-starved late in the heavy unit suite (and worse on a loaded machine), so
+the poke drifts past 30s. It is an integration test, not a unit test. Fix:
+**moved `embed-integration.test.ts` → `src/integration/`** (8-file suite, light
+load) where it passes reliably (poke ~2s), and CI now runs the full
+`test:integration` (see above) so it stays covered. unit suite is now 654/654;
+integration 24/24.
