@@ -195,12 +195,16 @@ sync works end-to-end.
    3. Confirm **~/chat's own integration tests pass against real
       zero/docker** — i.e. chat is properly upgraded on its own terms.
    4. _Only then_ run this repo's chat e2e: `bun run test:chat:e2e`.
-      ➜ Passing this is **orez-node ready.**
-4. **orez-web** — the browser/in-process embed path (`browser-embed.ts`, the
-   wasm sqlite shim). Validate after orez-node.
+      ➜ Passing this is **orez-node ready.** ✅ done for 1.6 (incl. the cf-do
+      DO-backend e2e — see §6). Note: that e2e drives chat through orez's cf-do
+      _translation layer_ against a local `wrangler dev`; it is a strong lower
+      bound but **not** the authoritative orez-cf validation (§7, stage 5).
+4. **orez-web** — soot bundles orez into browser workers and tests cross-surface
+   sync (`test/orez-web-sync.test.ts`). Validate in `~/soot`. **See §7, stage 4.**
 5. **orez-cf** — the Cloudflare Durable Object backend (`src/cf-do/`,
    `src/worker/` overlay). **Requires coordination with `~/soot`** (soot is the
    downstream CF consumer). Validate the overlay build + a real DO deploy.
+   **See §7, stage 5.** ⬅ both legs still OPEN for 1.6.
 
 ---
 
@@ -354,3 +358,138 @@ soot, start orez's worker on a dedicated port and point the e2e at it:
 `cd src/cf-do && bunx wrangler dev --port 8798 --local --no-show-interactive-dev-session`,
 then `DO_BACKEND_URL=http://127.0.0.1:8798 RETRY=1 bun run test:chat:e2e`.
 Reset DO state between runs by trashing `src/cf-do/.wrangler/state/v3/do`.
+
+---
+
+## 7. Stages 4 & 5 — `~/soot` validation plan (orez-web + orez-cf)
+
+> Status: **PLAN ONLY — not yet executed.** These are the last two legs of the
+> 1.6 upgrade and both are significant. Authored 2026-06-07.
+
+### 7.0 How soot consumes orez (the coupling, verified)
+
+Everything soot runs resolves orez from **`~/soot/node_modules/orez/dist`** —
+both legs share one installed copy:
+
+- **orez-web** (`packages/orez-web/`): bundles browser workers from
+  `orez/dist`. `scripts/build-zero-cache.ts` resolves
+  `orez/dist/worker/shims/*` and `orez/dist/worker/browser-embed.js`; the
+  worker sources import `orez/worker/browser-embed`,
+  `orez/worker/shims/ws-browser`, `orez/change-tracking`,
+  `orez/pg-proxy-browser`. Built via soot's `build:orez`
+  (`scripts/build-orez.ts` → emits `orez-web-zc/pg-proxy/pglite.worker.js`
+  into `soot/public/`). Tested by `test/orez-web-sync.test.ts` (npm scripts
+  `test:orez`, `:quick`, `:smoke`, `:robust`, `:prod`).
+- **orez-cf / cf-do** (`src/deploy/cloudflareDoDeploy.ts`): imports
+  `ZeroDO from 'orez/cf-do'` and `prepareZeroCacheForCF from 'orez/worker/cf-patches'`,
+  esbuild-bundled **at deploy time** (`bundleCloudflareDoWorker`), then
+  `wrangler deploy`. There is **no** `packages/orez-cf` — the entire DO backend
+  comes from the npm `orez` package.
+
+**The no-publish ship path:** from `~/orez`, `bun release --into ~/soot`
+runs `bun run build`, packs `orez` + `bedrock-sqlite`, and unpacks them into
+`~/soot/node_modules/<name>` — **but only replaces packages already present**
+(orez 0.3.9 is present → its `dist` becomes the 1.6.1-based build). It does
+**not** touch soot's `package.json` pin. Good enough for testing; a real ship
+needs publishing orez to npm + bumping soot's pin (user's call).
+
+### 7.1 The blocking prerequisite — soot's own Zero is still 1.5
+
+This is the heart of "coordination with ~/soot". soot's **client** Zero is
+pinned to **1.5.0 / protocol 50**, orez is now **1.6.1 / protocol 51**. A 1.5
+client against a 1.6-embedded zero-cache is a **protocol mismatch** — sync will
+not connect. Every Zero surface must move to 1.6.1 together:
+
+| site | file | current | →    |
+| ---- | ---- | ------- | ---- |
+| client dep        | `~/soot/package.json:234` `@rocicorp/zero`           | `1.5.0`    | `1.6.1`   |
+| native dep        | `~/soot/package.json:235` `@rocicorp/zero-sqlite3`  | `^1.0.18`  | `^1.1.2`  |
+| orez-web dep      | `~/soot/packages/orez-web/package.json:18` `@rocicorp/zero` | `1.5.0` | `1.6.1` |
+
+(soot's `overrides` block does **not** pin zero — only RN packages — so nothing
+to change there. `@rocicorp/zero-sqlite3` is in `trustedDependencies`; leave it.)
+
+Reinstall under the 1.6.1 release-age cooldown (clears ~2026-06-09): drop a
+**temporary** `~/soot/bunfig.toml` with
+`minimumReleaseAgeExcludes = ["@rocicorp/zero", "@rocicorp/zero-sqlite3"]`
+(see §2), `bun install`, rebuild the native binding, then **delete the
+bunfig.toml**. After 06-09 the exclude is unnecessary.
+
+### 7.2 Coordination & safety (soot is a live multi-agent repo)
+
+`~/soot` has **many** concurrent agent sessions (seen via `agentbus list`).
+Before doing anything that binds ports, mutates the working tree, or deploys:
+
+- Announce intent via `agentbus mail` to the soot manager session; check the
+  roster first.
+- Pick a non-default `PORT_OFFSET` for the playwright tests; orez's own cf-do
+  `wrangler dev` must avoid soot's `:8799` (use `:8798`).
+- **Never** kill another session's processes or stash their uncommitted work.
+- soot needs **explicit commit permission** — same rule as ~/chat. Leave the
+  dep bumps uncommitted and flag them.
+
+### 7.3 Stage 4 — orez-web validation
+
+1. Bump soot Zero deps to 1.6.1 (§7.1); install with the release-age workaround;
+   rebuild native `@rocicorp/zero-sqlite3` (watch the §5 bare-`bun i` footgun).
+2. Ship orez: from `~/orez`, `bun release --into ~/soot` (build + unpack 1.6.1
+   into `node_modules/orez`).
+3. Rebuild the browser workers: `cd ~/soot && bun run build:orez` (regenerates
+   `soot/public/orez-web-*.worker.js`). Confirm the bundle pulls protocol
+   **v51** (grep the emitted worker for `/sync/v51/` or the protocol constant).
+4. Drive the tests cheapest→broadest, fixing as you go:
+   `test:orez:smoke` → `test:orez:quick` → `test:orez` (full) → `test:orez:robust`.
+   Logs land in `/tmp/orez-sync-logs/`.
+5. Watch-items: protocol-version handshake, SAB→MessagePort handoff (the test
+   file documents a known IPC reload-sync bug if SAB is disabled), reload
+   persistence, multi-surface (web/native) convergence.
+   ➜ Green here = **orez-web ready.**
+
+### 7.4 Stage 5 — orez-cf / cf-do validation (the big one)
+
+Run cheapest→most-authoritative; each gates the next:
+
+1. **Bundle check (no deploy):** `bun scripts/dev/test-cf-do-bundle.ts` — proves
+   esbuild can bundle the Zero CF overlay + orez 1.6 cf-do shim for workerd.
+   Fastest signal that 1.6 doesn't break the overlay (`cf-patches.ts` — re-verify
+   the §3.C patch anchors held for 1.6).
+2. **Deploy-infra unit guard:** `bun test test/cloudflare-do-deploy.test.ts` —
+   asserts the **installed** `node_modules/orez/dist` still carries the
+   transaction barrier (`_zero_pending_changes`, `/commit-tracked-tx`,
+   `/rollback-tracked-tx`, `transactionID` forwarding) + wrangler-config
+   normalization + replica-reset logic. Must pass against the shipped 1.6 orez.
+3. **Live deploy + runtime (authoritative):**
+   `bun scripts/dev/test-cf-do-deploy.ts <template> <slug> --runtime` for
+   `todo`, `app`, and `flights`. Stages the template, builds, `wrangler deploy`s
+   to real Cloudflare, then `validate-cf-do-runtime.ts` drives two isolated
+   browser contexts to check realtime sync, reload persistence, and
+   optimistic-add flicker. Requires `CLOUDFLARE_ACCOUNT_ID` +
+   `CLOUDFLARE_API_TOKEN` (soot CF account `aa20b480cc813f2131bc005e2b7fd140`).
+   Tear down after (omit `--keep`).
+4. **Expect a compiler-gap tail.** The chat-e2e cf-do run surfaced two
+   zero-1.6-specific pg→sqlite gaps (BIGSERIAL `rank`, the `track` scope bug,
+   §6). soot's templates (todo/app/flights) use **different schemas**, so budget
+   for new gaps the chat schema didn't exercise — e.g. other SERIAL columns,
+   window functions for replica cleanup, default-expression functions. Fix them
+   in `~/orez/src/pg-proxy-do-backend.ts` / `src/cf-do/worker.ts`, re-`--into`,
+   redeploy. This is open-ended like the chat-e2e tail was.
+   ➜ Green here = **orez-cf ready.**
+
+### 7.5 Definition of done (both legs)
+
+- `test:orez` full + `:robust` green on 1.6; orez-web bundle on protocol v51.
+- cf-do bundle + unit guard green; **live deploy+runtime green for todo/app/flights**.
+- soot `bun check` / typecheck clean.
+- Then the upgrade is shippable: publish orez (+ bedrock-sqlite) to npm
+  (`bun release --patch --ci`, user permission), bump soot's `orez` pin off
+  0.3.9, commit soot's Zero-1.6 dep bumps (user permission), delete both temp
+  `bunfig.toml`s.
+
+### 7.6 References in soot
+
+- `docs/cloudflare-do-deploy.md` — cf-do deploy operational reference + validation cmds.
+- `docs/orez-architecture.md` — the three runtimes (orez-node / orez-web / orez-cloudflare).
+- `AGENTS.md` — points to both; notes the orez ≥0.3.5 transaction-barrier requirement.
+- Tests: `test/orez-web-sync.test.ts` (web), `test/cloudflare-do-deploy.test.ts`
+  (cf unit), `scripts/dev/test-cf-do-{bundle,deploy}.ts` +
+  `scripts/dev/validate-cf-do-runtime.ts` (cf bundle/deploy/runtime).
