@@ -263,10 +263,14 @@ Verify the binary exists for the resolved version:
 
 #### Validation status after the bump
 
-- `bun run test` (unit): **654/654** (embed-integration moved to the integration
-  suite — see below). build / lint / format / tsc all green.
+- `bun run test` (unit): **655/655** (embed-integration moved to the integration
+  suite — see below; +1 for the cf-do BIGSERIAL test). build / lint / format /
+  tsc all green.
 - `bun run test:integration`: **24/24** (incl. embed + the two reset fixes below).
 - `bun run test:wasm`: **22/22**. `bun run test:compiler`: **49/49**.
+- **orez-cf chat e2e** (stage 3, `test:chat:e2e` against the cf-do DO backend):
+  **48 passed / 1 flaky / 2 skipped**, all channel-unseen tests green — after
+  the two cf-do fixes below.
 
 #### `restore-live-stress.test.ts` — FIXED (two distinct reset bugs)
 
@@ -310,3 +314,43 @@ the poke drifts past 30s. It is an integration test, not a unit test. Fix:
 load) where it passes reliably (poke ~2s), and CI now runs the full
 `test:integration` (see above) so it stays covered. unit suite is now 654/654;
 integration 24/24.
+
+#### orez-cf (cf-do) chat-e2e follow-ons — both FIXED
+
+Stage 3 runs ~/chat's playwright e2e in `E2E_LITE` mode but routed at the
+PG-protocol layer to the Cloudflare Durable Object backend
+(`src/pg-proxy-do-backend.ts` → `src/cf-do/worker.ts` over HTTP `/exec`).
+Two zero-1.6-exposed cf-do bugs blocked it; both fixed:
+
+1. **`replicas.rank BIGSERIAL` left NULL → "Expected bigint at rank. Got null"**
+   (`src/pg-proxy-do-backend.ts`). Zero 1.6 changed the shard `replicas` table
+   to `"rank" BIGSERIAL` (a **non-PK** auto-increment;
+   `node_modules/@rocicorp/zero/out/.../change-source/pg/schema/shard.js`).
+   SQLite only auto-increments an `INTEGER PRIMARY KEY`, so the DO backend's
+   pg→sqlite type map turns `bigserial` into a plain nullable `integer` and
+   `createReplica` (which omits `rank`) leaves it NULL; zero's change-streamer
+   then reads `rank` expecting a bigint and the cache exits 255 (port never
+   binds). Fix: in the `CreateStmt` rewrite path, detect serial/bigserial
+   columns **before** `normalizeCreateTable` rewrites the type, and emit a
+   sequence-emulating companion statement —
+   `CREATE TRIGGER … AFTER INSERT … WHEN NEW.<col> IS NULL
+   BEGIN UPDATE … SET <col> = (SELECT coalesce(max(<col>),0)+1 FROM …) … END`.
+   Inline-PK serials are skipped (they become `INTEGER PRIMARY KEY` = rowid,
+   already auto-incrementing). Covered by a new unit test.
+
+2. **`track is not defined` on `INSERT INTO message … RETURNING *`**
+   (`src/cf-do/worker.ts`). Latent ReferenceError introduced 11 days earlier in
+   `d2dbb0b fix(cf-do): track chat trigger side effects`:
+   `appendRowsAsUpdates(...)` referenced `track.transactionID` but `track` was
+   never in its scope. The derived-tracking path (a `message` insert that bumps
+   a channel's latest-order or a thread's reply-count) is exactly what the
+   channel-unseen / thread-lifecycle e2e exercise, so it surfaced now. Fix:
+   thread `transactionID` through `appendRowsAsUpdates` as a parameter. No test
+   previously covered this method.
+
+**Port-coordination note:** orez's cf-do `wrangler dev` defaults to `:8799`,
+which **collides with ~/soot's** dev DO worker. When other agents are running
+soot, start orez's worker on a dedicated port and point the e2e at it:
+`cd src/cf-do && bunx wrangler dev --port 8798 --local --no-show-interactive-dev-session`,
+then `DO_BACKEND_URL=http://127.0.0.1:8798 RETRY=1 bun run test:chat:e2e`.
+Reset DO state between runs by trashing `src/cf-do/.wrangler/state/v3/do`.
