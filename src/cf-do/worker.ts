@@ -598,15 +598,16 @@ export class ZeroDO extends DurableObject {
       }
     }
 
-    this.appendRowsAsUpdates('public.channel', 'channel', 'id', channelIds)
-    this.appendRowsAsUpdates('public.thread', 'thread', 'id', threadIds)
+    this.appendRowsAsUpdates('public.channel', 'channel', 'id', channelIds, track.transactionID)
+    this.appendRowsAsUpdates('public.thread', 'thread', 'id', threadIds, track.transactionID)
   }
 
   private appendRowsAsUpdates(
     publicTableName: string,
     sqliteTableName: string,
     keyColumn: string,
-    keys: Set<string>
+    keys: Set<string>,
+    transactionID?: string
   ) {
     if (keys.size === 0) return
     const values = [...keys]
@@ -618,7 +619,7 @@ export class ZeroDO extends DurableObject {
       )
       .toArray()
     for (const row of rows) {
-      this.appendTrackedChange(publicTableName, 'UPDATE', row, null, track.transactionID)
+      this.appendTrackedChange(publicTableName, 'UPDATE', row, null, transactionID)
     }
   }
 
