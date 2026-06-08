@@ -598,8 +598,20 @@ export class ZeroDO extends DurableObject {
       }
     }
 
-    this.appendRowsAsUpdates('public.channel', 'channel', 'id', channelIds, track.transactionID)
-    this.appendRowsAsUpdates('public.thread', 'thread', 'id', threadIds, track.transactionID)
+    this.appendRowsAsUpdates(
+      'public.channel',
+      'channel',
+      'id',
+      channelIds,
+      track.transactionID
+    )
+    this.appendRowsAsUpdates(
+      'public.thread',
+      'thread',
+      'id',
+      threadIds,
+      track.transactionID
+    )
   }
 
   private appendRowsAsUpdates(

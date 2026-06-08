@@ -339,7 +339,7 @@ Two zero-1.6-exposed cf-do bugs blocked it; both fixed:
    columns **before** `normalizeCreateTable` rewrites the type, and emit a
    sequence-emulating companion statement —
    `CREATE TRIGGER … AFTER INSERT … WHEN NEW.<col> IS NULL
-   BEGIN UPDATE … SET <col> = (SELECT coalesce(max(<col>),0)+1 FROM …) … END`.
+BEGIN UPDATE … SET <col> = (SELECT coalesce(max(<col>),0)+1 FROM …) … END`.
    Inline-PK serials are skipped (they become `INTEGER PRIMARY KEY` = rowid,
    already auto-incrementing). Covered by a new unit test.
 
@@ -401,11 +401,11 @@ pinned to **1.5.0 / protocol 50**, orez is now **1.6.1 / protocol 51**. A 1.5
 client against a 1.6-embedded zero-cache is a **protocol mismatch** — sync will
 not connect. Every Zero surface must move to 1.6.1 together:
 
-| site | file | current | →    |
-| ---- | ---- | ------- | ---- |
-| client dep        | `~/soot/package.json:234` `@rocicorp/zero`           | `1.5.0`    | `1.6.1`   |
-| native dep        | `~/soot/package.json:235` `@rocicorp/zero-sqlite3`  | `^1.0.18`  | `^1.1.2`  |
-| orez-web dep      | `~/soot/packages/orez-web/package.json:18` `@rocicorp/zero` | `1.5.0` | `1.6.1` |
+| site         | file                                                        | current   | →        |
+| ------------ | ----------------------------------------------------------- | --------- | -------- |
+| client dep   | `~/soot/package.json:234` `@rocicorp/zero`                  | `1.5.0`   | `1.6.1`  |
+| native dep   | `~/soot/package.json:235` `@rocicorp/zero-sqlite3`          | `^1.0.18` | `^1.1.2` |
+| orez-web dep | `~/soot/packages/orez-web/package.json:18` `@rocicorp/zero` | `1.5.0`   | `1.6.1`  |
 
 (soot's `overrides` block does **not** pin zero — only RN packages — so nothing
 to change there. `@rocicorp/zero-sqlite3` is in `trustedDependencies`; leave it.)
@@ -448,7 +448,7 @@ Steps (the real ones — they diverged from the original plan above):
 2. **Native `@rocicorp/zero-sqlite3` 1.1.2 is prebuilt-only.** Its npm tarball
    omits the generated `unicode_case_data.h`, so `bun tko run ensure-zero-sqlite`
    (node-gyp source rebuild) **fails** (`fatal error: 'unicode_case_data.h' file
-   not found`) and silently falls back to wasm — but the soot **node backend**
+not found`) and silently falls back to wasm — but the soot **node backend**
    hard-requires the native binding (`assertNativeNodeRuntime`), so the stack
    won't boot on wasm. Fix: use the prebuilt binary (what a plain `bun install`
    fetches via `prebuild-install`). Pragmatic unblock used here: copy the
@@ -467,8 +467,8 @@ Steps (the real ones — they diverged from the original plan above):
    soot/vxrn cold-start race; not a Zero issue.
 5. Build the test prereqs (`ci-dev` skips them): `bun run build:prereqs:validate`
    (generate + `build:sootsim:cli` → `build:sootsim` (`sootsim/sdk`) + `build:deps`
-   + `build:tool-runtime`). Without `sootsim/sdk` built, the project route 500s
-   on SSR (`Cannot find module 'sootsim/sdk'`).
+   - `build:tool-runtime`). Without `sootsim/sdk` built, the project route 500s
+     on SSR (`Cannot find module 'sootsim/sdk'`).
 6. Rebuild browser workers: `bun run build:orez`. Confirm protocol **v51**
    (`grep -o 'protocolVersion: [0-9]*' public/orez-web-zc.worker.js` → 51).
 7. Boot the stack the **CI way** — `bun scripts/test-stack.ts start` (NOT bare
@@ -515,7 +515,7 @@ warmup dump hid them):
 Watch-items still valid: protocol-version handshake, SAB→MessagePort handoff
 (known IPC reload-sync bug if SAB disabled), reload persistence, multi-surface
 (web/native) convergence.
-   ➜ Green here = **orez-web ready. ✅**
+➜ Green here = **orez-web ready. ✅**
 
 ### 7.4 Stage 5 — orez-cf / cf-do validation (the big one) — ✅ DONE for 1.6 (2026-06-08)
 
@@ -538,7 +538,7 @@ auto-torn-down (verified zero orphan workers/D1 via the CF REST API afterwards):
   (in-DO zero-cache accepts sync)**, `/exec` 404. (app hit a one-off transient
   `ECONNRESET` on the trailing `/exec` probe; clean on re-run — not schema.)
 - **Live deploy + browser runtime** (`--runtime`, todo): **`[runtime] ✓ todo
-  runtime validated`** — anonymous realtime + durable sync across two isolated
+runtime validated`** — anonymous realtime + durable sync across two isolated
   browser contexts against the deployed worker.
 
 CF creds: `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` are NOT in env nor in
@@ -548,7 +548,7 @@ gitignored) to run the deploys. The deploy genuinely needs the API **token**
 (not just wrangler's stored OAuth): it makes direct `api.cloudflare.com` REST
 calls for D1 create/delete + workers subdomain, and passes the token to wrangler.
 
-   ➜ Green here = **orez-cf ready. ✅**
+➜ Green here = **orez-cf ready. ✅**
 
 #### original plan (for reference)
 

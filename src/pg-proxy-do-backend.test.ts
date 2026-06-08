@@ -1955,7 +1955,9 @@ describe('DoBackend', () => {
     const compact = compactSQL(trigger || '')
     expect(compact).toContain('AFTER INSERT ON "chat_0_replicas"')
     expect(compact).toContain('WHEN NEW."rank" IS NULL')
-    expect(compact).toContain('SET "rank" = (SELECT coalesce(max("rank"), 0) + 1 FROM "chat_0_replicas")')
+    expect(compact).toContain(
+      'SET "rank" = (SELECT coalesce(max("rank"), 0) + 1 FROM "chat_0_replicas")'
+    )
     // the BIGSERIAL type itself must be rewritten to a plain integer column
     const create = http.sqls.find((sql) => /CREATE TABLE/i.test(sql)) || ''
     expect(create).not.toMatch(/BIGSERIAL/i)
