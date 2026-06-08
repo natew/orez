@@ -201,10 +201,11 @@ sync works end-to-end.
       bound but **not** the authoritative orez-cf validation (§7, stage 5).
 4. **orez-web** — soot bundles orez into browser workers and tests cross-surface
    sync (`test/orez-web-sync.test.ts`). Validate in `~/soot`. **See §7, stage 4.**
+   ✅ done for 1.6.
 5. **orez-cf** — the Cloudflare Durable Object backend (`src/cf-do/`,
    `src/worker/` overlay). **Requires coordination with `~/soot`** (soot is the
    downstream CF consumer). Validate the overlay build + a real DO deploy.
-   **See §7, stage 5.** ⬅ both legs still OPEN for 1.6.
+   **See §7, stage 5.** ✅ done for 1.6 — both legs validated.
 
 ---
 
@@ -516,7 +517,40 @@ Watch-items still valid: protocol-version handshake, SAB→MessagePort handoff
 (web/native) convergence.
    ➜ Green here = **orez-web ready. ✅**
 
-### 7.4 Stage 5 — orez-cf / cf-do validation (the big one)
+### 7.4 Stage 5 — orez-cf / cf-do validation (the big one) — ✅ DONE for 1.6 (2026-06-08)
+
+**Result: all gates green on zero 1.6 — no compiler-gap tail materialized.**
+Validated from `~/.worktrees/soot-zero-16` against the real soot CF account
+(`natewienert.workers.dev`), unique slug prefix `zero16-cfdo`, every deploy
+auto-torn-down (verified zero orphan workers/D1 via the CF REST API afterwards):
+
+- **Bundle check** (`test-cf-do-bundle.ts`): ok, 4.57 MB — all 9 cf-patches
+  applied (worker-urls, auto-start disabled on main/change-streamer/reaper/
+  replicator/syncer, static processes imports, inline write-worker, embedded
+  libpg-query wasm). The §3.C anchors held for 1.6. (Note: the CF overlay
+  **correctly** neutralizes the worker auto-start — the §7.3 bug-1 guard
+  regression was orez-web's separate copy in `build-zero-cache.ts`, not here.)
+- **Unit guard** (`cloudflare-do-deploy.test.ts`): **23/23** against the
+  shipped 1.6 `node_modules/orez/dist`.
+- **Live deploy + smoke** (`test-cf-do-deploy.ts <t> zero16-cfdo`): **todo /
+  app / flights all PASS** — home 200, push endpoint parses (200, expected
+  `Missing clientGroupID` on the empty probe body), **sync websocket 101
+  (in-DO zero-cache accepts sync)**, `/exec` 404. (app hit a one-off transient
+  `ECONNRESET` on the trailing `/exec` probe; clean on re-run — not schema.)
+- **Live deploy + browser runtime** (`--runtime`, todo): **`[runtime] ✓ todo
+  runtime validated`** — anonymous realtime + durable sync across two isolated
+  browser contexts against the deployed worker.
+
+CF creds: `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` are NOT in env nor in
+the repo — they live in soot **main's** untracked `.env`/`.env.development`,
+which a fresh worktree does not inherit. Copy both into the worktree (they're
+gitignored) to run the deploys. The deploy genuinely needs the API **token**
+(not just wrangler's stored OAuth): it makes direct `api.cloudflare.com` REST
+calls for D1 create/delete + workers subdomain, and passes the token to wrangler.
+
+   ➜ Green here = **orez-cf ready. ✅**
+
+#### original plan (for reference)
 
 Run cheapest→most-authoritative; each gates the next:
 
@@ -548,13 +582,21 @@ Run cheapest→most-authoritative; each gates the next:
 
 ### 7.5 Definition of done (both legs)
 
-- `test:orez` full + `:robust` green on 1.6; orez-web bundle on protocol v51.
-- cf-do bundle + unit guard green; **live deploy+runtime green for todo/app/flights**.
-- soot `bun check` / typecheck clean.
-- Then the upgrade is shippable: publish orez (+ bedrock-sqlite) to npm
-  (`bun release --patch --ci`, user permission), bump soot's `orez` pin off
-  0.3.9, commit soot's Zero-1.6 dep bumps (user permission), delete both temp
-  `bunfig.toml`s.
+- ✅ `test:orez` full (11/11) + `:robust` (5/5) green on 1.6; orez-web bundle on
+  protocol v51; `test:ultimate:quick` 28/0.
+- ✅ cf-do bundle + unit guard (23/23) green; live deploy+smoke green for
+  todo/app/flights; browser runtime sync green (todo).
+- soot `bun check` / typecheck: run before merging to main (deploy gate).
+- **Committed on `chore/upgrade-zero-1.6` (worktree, not pushed):** orez
+  `bef95f8` (browser repl fix), `d2d17e2` + the §7.4 doc; soot `49d50e544`
+  (zero 1.6.1 dep bumps + `build-zero-cache.ts` guard fix +
+  `scripts/ensure-zero-sqlite.ts` prebuild override).
+- **Remaining to ship (user permission):** publish orez (+ bedrock-sqlite) to
+  npm (`bun release --patch --ci`), bump soot's `orez` pin off 0.3.9, push the
+  branches / open PRs, delete `~/chat`'s temp `bunfig.toml` (post-cooldown).
+  Upstream the `ensure-zero-sqlite` prebuild-install fix into `@take-out/scripts`
+  so the soot-local override can be removed. (soot needs no temp bunfig — its
+  committed `bunfig.toml` already sets `minimumReleaseAge = 0`.)
 
 ### 7.6 References in soot
 
