@@ -1927,6 +1927,40 @@ describe('DoBackend', () => {
     await backend.execProtocolRaw(msg(0x51, cstr('ROLLBACK')))
   })
 
+  test('emulates a non-PK BIGSERIAL column with an AFTER INSERT trigger', async () => {
+    // zero 1.6's replicas table declares `rank BIGSERIAL` (not the PK). SQLite
+    // only auto-increments an INTEGER PRIMARY KEY, so the column would stay NULL
+    // and zero throws "Expected bigint at rank. Got null". the backend must emit
+    // a sequence-emulating trigger.
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'bigserial-trigger-test')
+    await backend.waitReady
+
+    http.sqls.length = 0
+    await backend.execProtocolRaw(
+      msg(
+        0x51,
+        cstr(`
+          CREATE TABLE IF NOT EXISTS chat_0.replicas (
+            "id" TEXT PRIMARY KEY,
+            "rank" BIGSERIAL,
+            "slot" TEXT NOT NULL
+          )
+        `)
+      )
+    )
+
+    const trigger = http.sqls.find((sql) => /CREATE TRIGGER/i.test(sql))
+    expect(trigger).toBeDefined()
+    const compact = compactSQL(trigger || '')
+    expect(compact).toContain('AFTER INSERT ON "chat_0_replicas"')
+    expect(compact).toContain('WHEN NEW."rank" IS NULL')
+    expect(compact).toContain('SET "rank" = (SELECT coalesce(max("rank"), 0) + 1 FROM "chat_0_replicas")')
+    // the BIGSERIAL type itself must be rewritten to a plain integer column
+    const create = http.sqls.find((sql) => /CREATE TABLE/i.test(sql)) || ''
+    expect(create).not.toMatch(/BIGSERIAL/i)
+  })
+
   test('intercepts parser-recognized transaction variants before DO execution', async () => {
     // The Durable Object refuses raw BEGIN/SAVEPOINT (it requires the JS-side
     // transaction API). All PG transaction control statements must be handled

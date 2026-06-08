@@ -2438,6 +2438,53 @@ function normalizeColumnType(columnDef: any): void {
   if (sqliteType) setTypeName(columnDef.typeName, sqliteType)
 }
 
+// pg SERIAL types auto-assign from a sequence. SQLite only auto-increments an
+// INTEGER PRIMARY KEY, so a non-PK serial column (e.g. zero 1.6's replicas.rank
+// BIGSERIAL) becomes a plain nullable integer and stays NULL on inserts that
+// don't supply it — zero then reads it and throws "Expected bigint at rank.
+// Got null". emulate the sequence with an AFTER INSERT trigger that fills the
+// column with max()+1 when it's left NULL.
+const SERIAL_TYPES = new Set([
+  'serial',
+  'serial2',
+  'serial4',
+  'serial8',
+  'smallserial',
+  'bigserial',
+])
+
+function serialColumnNames(createStmt: any): string[] {
+  const names: string[] = []
+  for (const elt of createStmt?.tableElts ?? []) {
+    const col = elt?.ColumnDef
+    if (!col?.colname) continue
+    const base = typeNameBase(col.typeName)
+    if (!base || !SERIAL_TYPES.has(base)) continue
+    // an inline PRIMARY KEY serial becomes INTEGER PRIMARY KEY (rowid alias),
+    // which SQLite already auto-increments — no trigger needed.
+    const isPrimaryKey = (col.constraints ?? []).some(
+      (c: any) => c?.Constraint?.contype === 'CONSTR_PRIMARY'
+    )
+    if (isPrimaryKey) continue
+    names.push(col.colname)
+  }
+  return names
+}
+
+function serialTriggerStatements(table: string, columns: string[]): RewrittenStatement[] {
+  return columns.map((col) => ({
+    sql: `CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(`${table}_${col}_serial`)}
+AFTER INSERT ON ${quoteIdentifier(table)}
+FOR EACH ROW WHEN NEW.${quoteIdentifier(col)} IS NULL
+BEGIN
+  UPDATE ${quoteIdentifier(table)}
+  SET ${quoteIdentifier(col)} = (SELECT coalesce(max(${quoteIdentifier(col)}), 0) + 1 FROM ${quoteIdentifier(table)})
+  WHERE rowid = NEW.rowid;
+END`,
+    isDDL: true,
+  }))
+}
+
 function isDefaultConstraint(constraint: any): boolean {
   return constraint?.Constraint?.contype === 'CONSTR_DEFAULT'
 }
@@ -3641,6 +3688,7 @@ function rewriteParsedStatement(
   let skipIfTableEmpty: RewrittenStatement['skipIfTableEmpty'] | null = null
   let changeTracking: ChangeTrackingMetadata | undefined
   let writeTable: PublicationTableRef | null = null
+  let serialTriggers: RewrittenStatement[] = []
   if (nodeType === 'AlterTableStmt') {
     alterMetadata = normalizeAlterTable(node)
     if (!node.cmds?.length) {
@@ -3657,7 +3705,12 @@ function rewriteParsedStatement(
     }
   } else if (nodeType === 'CreateStmt') {
     schemaColumns = schemaColumnsForCreateTable(node)
+    // capture serial columns before normalizeCreateTable rewrites the type to integer
+    const serialCols = serialColumnNames(node)
     normalizeCreateTable(node)
+    if (serialCols.length && node.relation?.relname) {
+      serialTriggers = serialTriggerStatements(node.relation.relname, serialCols)
+    }
   } else if (nodeType === 'CreateTableAsStmt') {
     normalizeCreateTableAs(node)
   } else if (nodeType === 'RenameStmt') {
@@ -3770,7 +3823,7 @@ function rewriteParsedStatement(
   const usesPublishedSchemaFunction =
     context?.skippedFunctionNames?.has('schema_specs') &&
     containsFuncCall(stmt, 'schema_specs')
-  return {
+  const mainStatement: RewrittenStatement = {
     sql: rewritten,
     ...(isDDL ? { isDDL } : null),
     ...(isWrite ? { isWrite } : null),
@@ -3792,6 +3845,7 @@ function rewriteParsedStatement(
     ...(skipIfColumnMissing ? { skipIfColumnMissing } : null),
     ...(skipIfTableEmpty ? { skipIfTableEmpty } : null),
   }
+  return serialTriggers.length ? [mainStatement, ...serialTriggers] : mainStatement
 }
 
 function rewriteSQLStatements(
