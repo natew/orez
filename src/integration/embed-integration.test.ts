@@ -19,14 +19,14 @@ import { describe, test, expect, beforeAll, afterAll } from 'vitest'
 import WebSocket from 'ws'
 
 import { getConfig, getConnectionString } from '../config.js'
-import {
-  ensureTablesInPublications,
-  installAllowAllPermissions,
-} from '../integration/test-permissions.js'
 import { startPgProxy } from '../pg-proxy.js'
 import { createPGliteInstances, type PGliteInstances } from '../pglite-manager.js'
 import { installChangeTracking } from '../replication/change-tracker.js'
-import { startZeroCacheEmbed, type ZeroCacheEmbed } from './zero-cache-embed.js'
+import { startZeroCacheEmbed, type ZeroCacheEmbed } from '../worker/zero-cache-embed.js'
+import {
+  ensureTablesInPublications,
+  installAllowAllPermissions,
+} from './test-permissions.js'
 
 import type { PGlite } from '@electric-sql/pglite'
 

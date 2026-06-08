@@ -88,4 +88,9 @@ jobs:
         run: bun run build
 
       - name: native integration
-        run: bun run test:integration:native
+        # build the native sqlite binding, then run the full integration suite
+        # (native-startup guard + restore/reset/live-stress + embed-integration).
+        # these spawn real zero-cache and are the authoritative end-to-end checks;
+        # the heavier embed/live-frontend tests live here, not in the unit suite,
+        # so a loaded unit-suite run can't starve their in-process change-streamer.
+        run: bun run native:bootstrap && bun run test:integration
