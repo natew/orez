@@ -1335,7 +1335,7 @@ describe('DoBackend', () => {
 
     const insert = sqlContaining(
       http.sqls,
-      'INSERT INTO "chat_0_publishedSchema" ( current ) VALUES'
+      'INSERT INTO "chat_0_publishedSchema" ( "current" ) VALUES'
     )
     expect(insert).not.toContain('schema_specs')
     expect(compactSQL(insert)).toContain('VALUES ( ? )')
@@ -1345,7 +1345,7 @@ describe('DoBackend', () => {
     expect(schemaParam).toContain('"name":"message"')
     expect(schemaParam).toContain('"indexes":[{')
     expect(compactSQL(insert)).toContain(
-      'ON CONFLICT ("exists") DO UPDATE SET current = excluded.current'
+      'ON CONFLICT ("exists") DO UPDATE SET "current" = excluded."current"'
     )
   })
 
@@ -3833,7 +3833,7 @@ describe('DoBackend', () => {
     const sent = compactSQL(http.sqls.at(-1) || '')
     expect(sent).toContain('json_each("refCounts")')
     expect(sent).toContain('json_each(?)')
-    expect(sent).toContain('obj.key = keys.value')
+    expect(sent).toContain('obj."key" = keys.value')
     expect(sent).not.toContain('?|')
     expect(http.params.at(-1)).toEqual(['cg1', '00:01', '00:02', '["q1","q2"]'])
   })
