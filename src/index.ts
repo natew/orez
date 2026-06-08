@@ -741,6 +741,15 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         }
         log.orez('CVR/CDB recreated')
 
+        // give the proxy fresh per-instance state for the recreated CVR/CDB.
+        // a client connection (e.g. a connected frontend's syncer) can be
+        // mid-query on the old instance when it's closed here, hanging while it
+        // holds that instance's proxy mutex; without this the next zero-cache's
+        // CVR/CDB connections would block on the stuck mutex and never become
+        // ready (the SIGUSR1 reset would then fail with "exited with code 0").
+        pgServer.resetDbState('zero_cvr')
+        pgServer.resetDbState('zero_cdb')
+
         // remove stale zero shard schemas from upstream; these can outlive CVR/CDB
         // and cause dispatcher errors after full reset.
         const shardSchemas = await db.query(

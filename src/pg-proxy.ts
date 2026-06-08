@@ -566,10 +566,26 @@ function stripResponseMessages(data: Uint8Array, stripRfq: boolean): Uint8Array 
   return result
 }
 
+/**
+ * the net.Server returned by startPgProxy, plus a hook for the reset path to
+ * swap in fresh per-instance proxy state when a pglite instance is recreated.
+ */
+export interface PgProxyServer extends Server {
+  /**
+   * give the named db ('zero_cvr' | 'zero_cdb') a fresh mutex + transaction
+   * state. call this AFTER recreating that pglite instance during a reset: a
+   * connection that was mid-query on the old (now-closed) instance can hang
+   * holding the old mutex forever, which would block every new connection.
+   * swapping in a fresh mutex abandons the stuck one so new connections proceed.
+   * no-op in shared-instance (singleDb) mode, where one mutex guards all dbs.
+   */
+  resetDbState(dbName: string): void
+}
+
 export async function startPgProxy(
   dbInput: PGlite | PGliteInstances,
   config: ZeroLiteConfig
-): Promise<Server> {
+): Promise<PgProxyServer> {
   // normalize input: single PGlite instance = use it for all databases (backwards compat for tests)
   const instances: PGliteInstances =
     'postgres' in dbInput
@@ -988,10 +1004,25 @@ export async function startPgProxy(
     process.removeListener('unhandledRejection', suppressSocketErrors)
   })
 
+  const proxyServer = server as PgProxyServer
+  proxyServer.resetDbState = (dbName: string) => {
+    // shared mutex/txState (singleDb) guards every db at once — recreating it
+    // would desync the postgres instance, which the reset does not touch.
+    if (sharedInstance) return
+    const fresh: PgLiteTxState = { status: 0x49, owner: null }
+    if (dbName === 'zero_cvr') {
+      mutexes.cvr = new Mutex()
+      txStates.cvr = fresh
+    } else if (dbName === 'zero_cdb') {
+      mutexes.cdb = new Mutex()
+      txStates.cdb = fresh
+    }
+  }
+
   return new Promise((resolve, reject) => {
     server.listen(config.pgPort, '127.0.0.1', () => {
       log.debug.proxy(`listening on port ${config.pgPort}`)
-      resolve(server)
+      resolve(proxyServer)
     })
     server.on('error', reject)
   })

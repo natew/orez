@@ -249,10 +249,9 @@ Verify the binary exists for the resolved version:
     and `write-worker-client.js` now exports **`serializeError`**. Mirrored both.
   - Native binding rebuilt for 1.1.2 (`native:bootstrap`); hit the §5 downgrade
     footgun and corrected the pin back to 1.1.2.
-  - Crash-watcher misfire fixed (`installCrashWatcher`) — 1.6's slower graceful
-    drain delays the old process's `exit` event past the reset's process swap,
-    so the watcher killed the freshly spawned process. See the
-    `restore-live-stress` follow-on below for the full trace.
+  - Two reset bugs surfaced by `restore-live-stress` (full reset + live
+    frontend): the crash-watcher misfire and a stuck proxy mutex on CVR/CDB
+    recreation. Both fixed — see the `restore-live-stress` section below.
 - **Validated OK without change:** litestream `restoreReplica` anchor (§3.B),
   `worker-urls.js` export set, `processes.js` dynamic-import anchor,
   `run-worker.js` import path, `lib/index.js` location for the sqlite shim.
@@ -264,38 +263,43 @@ Verify the binary exists for the resolved version:
 
 #### Validation status after the bump
 
-- `bun run test` (unit): **656/657**. tsc/lint/format/`cf-patches.test.ts` green.
-- `bun run test:integration`: **20/21**.
+- `bun run test` (unit): **656/657** (see embed-integration note below).
+  tsc/lint/format/`cf-patches.test.ts` green.
+- `bun run test:integration`: **21/21** after the two reset fixes below.
 
-#### `restore-live-stress.test.ts` — partially fixed
+#### `restore-live-stress.test.ts` — FIXED (two distinct reset bugs)
 
 Symptom: a SIGUSR1 full reset _while a WS sync client is connected_ fails;
-the client's reconnect gets `ECONNREFUSED`. Two distinct causes, found by
-runtime probing (life-cycle `runUntilKilled`/`exitAfter`, `terminateProcessTree`
-caller stacks, new-pid tracking):
+the client's reconnect gets `ECONNREFUSED` and orez logs
+"reset failed: zero-cache exited with code 0". Found by runtime probing
+(life-cycle `runUntilKilled`/`exitAfter`/`#startDrain`, `terminateProcessTree`
+caller stacks, the proxy mutex hold-time watchdog, and a frontend-close A/B).
+Two independent causes, both fixed:
 
-1. **Crash-watcher misfire cascade — FIXED** (`src/index.ts`
-   `installCrashWatcher`). The watcher's `zeroCacheProcess.on('exit')` handler
-   read the _current_ `zeroCacheProcess` var. A reset/restart swaps in a new
-   process, but the OLD process's `exit` event can be delivered _after_ the
-   swap (1.6's graceful drain is slower, esp. with a connected frontend, and
+1. **Crash-watcher misfire** — `src/index.ts` `installCrashWatcher`. The
+   watcher's `zeroCacheProcess.on('exit')` handler read the _current_
+   `zeroCacheProcess`. A reset swaps in a new process, but the OLD process's
+   `exit` event can arrive _after_ the swap (1.6's graceful drain is slower, and
    `zeroStopExpected` is cleared the moment `killZeroCache` returns — before the
-   late event fires). The handler then ran recovery against the **new** process,
-   killing the freshly spawned one (`terminateProcessTree(<new pid>)`) →
-   "reset failed: zero-cache exited with code 0", cascading across resets. Fix:
-   capture the watched process and bail if `watched !== zeroCacheProcess`.
-2. **pglite single-session contention during reset — STILL OPEN.** With the
-   cascade gone, the SIGUSR1-reset's new process now starts but **never reaches
-   HTTP-healthy** for the test's 35 s reconnect window (no bind error, no crash —
-   just stuck in initial sync), so teardown's `stop()` kills the in-flight reset.
-   Root cause is orez's documented hard area (`plans/debug-zero-lock.md`):
-   pglite is single-session, and the frontend reconnecting + writing _through the
-   proxy_ during the reset contends with the new zero-cache's initial sync. 1.6's
-   slower drain widens the window. Needs a focused session on the proxy's
-   handling of a live frontend during reset. **Not CI-gated** (CI runs
-   `test:integration:native` — native-startup guard only, not this file).
+   late event fires), so the handler ran recovery against the **new** process.
+   Fix: capture the watched process; bail if `watched !== zeroCacheProcess`.
+2. **Stuck proxy mutex on instance recreation** — `src/pg-proxy.ts` +
+   `src/index.ts`. orez's pg-proxy serializes each pglite instance behind a
+   `Mutex`. A connected frontend's syncer is mid-query on the CVR instance
+   (holding that mutex) when the full reset `close()`s + recreates CVR/CDB; the
+   in-flight query on the now-closed instance never returns, so its mutex is
+   **never released**. The next zero-cache's CVR/CDB connections then block on
+   the stuck mutex forever → it never becomes healthy → "exited with code 0".
+   Confirmed by: closing the frontend _before_ the reset makes the test pass,
+   and the mutex watchdog showing one instance held until teardown. Fix: the
+   proxy exposes `resetDbState(dbName)` which swaps in a **fresh mutex +
+   txState** for the recreated instance (abandoning the stuck one); the reset
+   calls it for `zero_cvr`/`zero_cdb` right after recreating them. Independent
+   of data size (tiny stress data reproduced it too). **Not CI-gated** (CI runs
+   `test:integration:native` — native-startup guard only, not this file), but
+   now passes locally 3/3 with the default stress config.
 
-#### Other open follow-on (1.6)
+#### Open follow-on (1.6)
 
 1. **`embed-integration.test.ts` "insert triggers poke" — full-suite-only
    flake.** Passes in isolation, in the `src/worker/` group, and with the
