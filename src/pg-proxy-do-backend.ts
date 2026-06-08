@@ -275,7 +275,33 @@ function buildReadyForQuery(status: number = STATUS_IDLE): Uint8Array {
   return msg(0x5a, new Uint8Array([status]))
 }
 
-function buildErrorResponse(message: string): Uint8Array {
+/**
+ * map a SQLite error message to the closest PostgreSQL SQLSTATE. zero-cache and
+ * pg clients (e.g. @take-out/database's migrate) branch on the SQLSTATE code,
+ * not the message — notably to treat "already exists" / "does not exist" DDL as
+ * idempotent during migration replay. without this the DO backend reported
+ * everything as XX000 (internal_error), so a re-applied `ADD COLUMN` aborted the
+ * whole migration instead of being recorded as applied. codes mirror the ones
+ * postgres returns for the equivalent failures.
+ */
+function sqlstateForSqliteError(message: string): string {
+  const m = message.toLowerCase()
+  // duplicate-object DDL (idempotent on replay)
+  if (m.includes('duplicate column name')) return '42701' // duplicate_column
+  if (/\btable\b[^]*already exists/.test(m)) return '42P07' // duplicate_table
+  if (/already exists/.test(m)) return '42710' // duplicate_object (index/trigger/view/etc)
+  // missing-object DDL (idempotent for DROP ... without IF EXISTS)
+  if (m.includes('no such column')) return '42703' // undefined_column
+  if (m.includes('no such table')) return '42P01' // undefined_table
+  if (m.includes('no such index') || m.includes('no such trigger')) return '42704' // undefined_object
+  if (m.includes('syntax error')) return '42601' // syntax_error
+  if (m.includes('unique constraint failed')) return '23505' // unique_violation
+  if (m.includes('not null constraint failed')) return '23502' // not_null_violation
+  if (m.includes('foreign key constraint failed')) return '23503' // foreign_key_violation
+  return 'XX000' // internal_error
+}
+
+function buildErrorResponse(message: string, sqlstate?: string): Uint8Array {
   const field = (code: string, value: string) =>
     concat(textEncoder.encode(code), cstr(value))
   return msg(
@@ -283,7 +309,7 @@ function buildErrorResponse(message: string): Uint8Array {
     concat(
       field('S', 'ERROR'),
       field('V', 'ERROR'),
-      field('C', 'XX000'),
+      field('C', sqlstate ?? sqlstateForSqliteError(message)),
       field('M', message),
       new Uint8Array([0])
     )
@@ -2416,12 +2442,24 @@ function isDefaultConstraint(constraint: any): boolean {
   return constraint?.Constraint?.contype === 'CONSTR_DEFAULT'
 }
 
-function shouldDropAddColumnDefault(constraint: any): boolean {
+// functions that produce a fresh non-constant value and have no usable SQLite
+// column-default form. on the DO replica these defaults are never exercised:
+// zero-cache replicates full row values (every column is supplied), and zero's
+// own replicas.id default is explicitly "for backwards compatibility" with each
+// insert providing id. so we drop the default rather than translate it. checked
+// recursively because zero wraps it, e.g. replace(gen_random_uuid()::text,…).
+const NON_CONSTANT_DEFAULT_FUNCTIONS = new Set([
+  'gen_random_uuid',
+  'uuid_generate_v4',
+  'md5',
+])
+
+function shouldDropFunctionDefault(constraint: any): boolean {
   if (!isDefaultConstraint(constraint)) return false
-  const raw = constraint.Constraint.raw_expr
-  if (!raw?.FuncCall) return false
-  const name = functionName(raw.FuncCall)
-  return name === 'md5' || name === 'gen_random_uuid'
+  return containsAnyFuncCall(
+    constraint.Constraint.raw_expr,
+    NON_CONSTANT_DEFAULT_FUNCTIONS
+  )
 }
 
 function containsAnyFuncCall(value: any, names: Set<string>): boolean {
@@ -2445,7 +2483,7 @@ function normalizeColumnDef(columnDef: any, options?: { addedColumn?: boolean })
         (type === 'CONSTR_NOTNULL' || type === 'CONSTR_PRIMARY')
       )
         return false
-      if (options?.addedColumn && shouldDropAddColumnDefault(constraint)) return false
+      if (shouldDropFunctionDefault(constraint)) return false
       if (
         type === 'CONSTR_GENERATED' &&
         containsAnyFuncCall(
