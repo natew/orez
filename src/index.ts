@@ -883,8 +883,19 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const ZERO_CRASH_RESET_BUDGET = 5
   let zeroCrashTimes: number[] = []
   const installCrashWatcher = () => {
-    if (!zeroCacheProcess || config.skipZeroCache) return
-    zeroCacheProcess.on('exit', (code) => {
+    const watched = zeroCacheProcess
+    if (!watched || config.skipZeroCache) return
+    watched.on('exit', (code) => {
+      // only react to the exit of the process we're *currently* managing. a
+      // reset/restart may have already swapped in a replacement, and the old
+      // process's 'exit' event can be delivered after that swap — zero 1.6's
+      // graceful drain (slower while a frontend is connected) widens this
+      // window. acting on a stale exit here would kill/restart the freshly
+      // spawned process mid-startup (manifests as "reset failed: zero-cache
+      // exited with code 0"). zeroStopExpected is cleared as soon as the kill
+      // call returns, i.e. before this late event fires, so it can't be relied
+      // on alone.
+      if (watched !== zeroCacheProcess) return
       if (shuttingDown || resetInProgress || zeroStopExpected || code === null) return
       const tail = (zeroCacheProcess as ZeroChildProcess)?.__orezTail
       const details = tail?.length ? tail.join('\n') : ''

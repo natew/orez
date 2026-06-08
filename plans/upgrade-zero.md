@@ -249,6 +249,10 @@ Verify the binary exists for the resolved version:
     and `write-worker-client.js` now exports **`serializeError`**. Mirrored both.
   - Native binding rebuilt for 1.1.2 (`native:bootstrap`); hit the §5 downgrade
     footgun and corrected the pin back to 1.1.2.
+  - Crash-watcher misfire fixed (`installCrashWatcher`) — 1.6's slower graceful
+    drain delays the old process's `exit` event past the reset's process swap,
+    so the watcher killed the freshly spawned process. See the
+    `restore-live-stress` follow-on below for the full trace.
 - **Validated OK without change:** litestream `restoreReplica` anchor (§3.B),
   `worker-urls.js` export set, `processes.js` dynamic-import anchor,
   `run-worker.js` import path, `lib/index.js` location for the sqlite shim.
@@ -263,24 +267,37 @@ Verify the binary exists for the resolved version:
 - `bun run test` (unit): **656/657**. tsc/lint/format/`cf-patches.test.ts` green.
 - `bun run test:integration`: **20/21**.
 
-#### Open follow-ons (1.6) — root-caused, not yet fixed
+#### `restore-live-stress.test.ts` — partially fixed
 
-1. **`restore-live-stress.test.ts` — full reset + live frontend fails.**
-   Reproduces in isolation (so NOT load). After a SIGUSR1 full reset _while a
-   WS sync client is connected_, the freshly restarted change-streamer
-   **self-shuts-down via `AutoResetSignal`** ("ChangeStreamer stopped" →
-   "exiting normally" → whole tree exits code 0), so orez's restart sees
-   `zero-cache exited with code 0` and the client's reconnect gets
-   `ECONNREFUSED`. 1.6's pg change-source (`change-source/pg/change-source.js`
-   ~L59-78) throws `AutoResetSignal` on **stricter** checks ("No replication
-   slot for replica at version X", publication mismatch, "slot missing"). orez
-   wipes `_orez._zero_replication_slots` + the replica on full reset; with a
-   client reconnecting + concurrent writes, the new change-streamer trips one
-   of these checks. `restore.test.ts` (reset, **no** frontend) passes, so the
-   basic reset path is fine. Fix lives in orez's custom replication-slot proxy
-   vs 1.6's auto-reset — needs a focused session. **Not CI-gated** (CI runs
-   `test:integration:native`, only the native-startup guard, not this file).
-2. **`embed-integration.test.ts` "insert triggers poke" — full-suite-only
+Symptom: a SIGUSR1 full reset _while a WS sync client is connected_ fails;
+the client's reconnect gets `ECONNREFUSED`. Two distinct causes, found by
+runtime probing (life-cycle `runUntilKilled`/`exitAfter`, `terminateProcessTree`
+caller stacks, new-pid tracking):
+
+1. **Crash-watcher misfire cascade — FIXED** (`src/index.ts`
+   `installCrashWatcher`). The watcher's `zeroCacheProcess.on('exit')` handler
+   read the _current_ `zeroCacheProcess` var. A reset/restart swaps in a new
+   process, but the OLD process's `exit` event can be delivered _after_ the
+   swap (1.6's graceful drain is slower, esp. with a connected frontend, and
+   `zeroStopExpected` is cleared the moment `killZeroCache` returns — before the
+   late event fires). The handler then ran recovery against the **new** process,
+   killing the freshly spawned one (`terminateProcessTree(<new pid>)`) →
+   "reset failed: zero-cache exited with code 0", cascading across resets. Fix:
+   capture the watched process and bail if `watched !== zeroCacheProcess`.
+2. **pglite single-session contention during reset — STILL OPEN.** With the
+   cascade gone, the SIGUSR1-reset's new process now starts but **never reaches
+   HTTP-healthy** for the test's 35 s reconnect window (no bind error, no crash —
+   just stuck in initial sync), so teardown's `stop()` kills the in-flight reset.
+   Root cause is orez's documented hard area (`plans/debug-zero-lock.md`):
+   pglite is single-session, and the frontend reconnecting + writing _through the
+   proxy_ during the reset contends with the new zero-cache's initial sync. 1.6's
+   slower drain widens the window. Needs a focused session on the proxy's
+   handling of a live frontend during reset. **Not CI-gated** (CI runs
+   `test:integration:native` — native-startup guard only, not this file).
+
+#### Other open follow-on (1.6)
+
+1. **`embed-integration.test.ts` "insert triggers poke" — full-suite-only
    flake.** Passes in isolation, in the `src/worker/` group, and with the
    `src/replication/` group; only times out (poke >30s) in the full 39-file
    `bun run test`. `fileParallelism:false` reuses one vitest worker; the
