@@ -497,7 +497,9 @@ function patchInitialSyncBatchParams(zcBase: string): void {
     code = code.replaceAll(from, to)
   }
   writeFileSync(initialSyncPath, code)
-  console.log('[orez] patched zero-cache initial-sync.js (DO bound-parameter cap batches)')
+  console.log(
+    '[orez] patched zero-cache initial-sync.js (DO bound-parameter cap batches)'
+  )
 }
 
 function patchPgsqlParserWasm(
