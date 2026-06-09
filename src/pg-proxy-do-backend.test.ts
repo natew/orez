@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http'
 
 import { afterEach, describe, expect, test } from 'vitest'
 
-import { DoBackend } from './pg-proxy-do-backend.js'
+import { DoBackend, deployTimeSchemaBatchStatements } from './pg-proxy-do-backend.js'
 
 const encoder = new TextEncoder()
 let servers: Server[] = []
@@ -106,6 +106,29 @@ function messageTypes(data: Uint8Array): string[] {
     offset += 1 + len
   }
   return types
+}
+
+// asserts a binary COPY row of (id text 'f1', readOnly bool false, size int4 847)
+// is encoded field-by-field at the pg wire sizes a typed consumer decodes with.
+function expectBinaryCopyRow(row: Uint8Array): void {
+  const view = new DataView(row.buffer, row.byteOffset, row.byteLength)
+  let offset = 0
+  expect(view.getInt16(offset)).toBe(3)
+  offset += 2
+  // id text
+  const idLen = view.getInt32(offset)
+  offset += 4
+  expect(new TextDecoder().decode(row.subarray(offset, offset + idLen))).toBe('f1')
+  offset += idLen
+  // readOnly bool: exactly 1 byte
+  expect(view.getInt32(offset)).toBe(1)
+  offset += 4
+  expect(row[offset]).toBe(0)
+  offset += 1
+  // size int4: exactly 4 bytes big-endian
+  expect(view.getInt32(offset)).toBe(4)
+  offset += 4
+  expect(view.getInt32(offset)).toBe(847)
 }
 
 function copyDataPayloads(data: Uint8Array): Uint8Array[] {
@@ -551,6 +574,110 @@ describe('DoBackend', () => {
     ])
     expect(new TextDecoder().decode(payloads[1])).toContain('m1')
     expect(payloads.at(-1)).toEqual(new Uint8Array([255, 255]))
+  })
+
+  test('binary COPY encodes int4/bool fields by column type for quoted qualified tables', async () => {
+    // mirrors zero-cache initial sync: COPY (SELECT "col",... FROM "public"."tbl")
+    // TO STDOUT WITH (FORMAT binary). the consumer decodes each field by the
+    // table schema's declared type, so an int4 field MUST be 4 bytes big-endian —
+    // a text fallback ("847" = 3 bytes) crashes readInt32BE on the other side.
+    const http = await startDoHttp(() => ({
+      rows: [{ id: 'f1', readOnly: 0, size: 847 }],
+      columns: ['id', 'readOnly', 'size'],
+    }))
+    const backend = new DoBackend(http.url, 'postgres', 'binary-copy-int4-test')
+    await backend.waitReady
+    await backend.exec(`
+      CREATE TABLE public.file (
+        id text PRIMARY KEY,
+        "readOnly" boolean NOT NULL DEFAULT false,
+        size integer NOT NULL
+      )
+    `)
+
+    const result = await backend.execProtocolRaw(
+      msg(
+        0x51,
+        cstr(
+          'COPY (SELECT "id","readOnly","size" FROM "public"."file") TO STDOUT WITH (FORMAT binary)'
+        )
+      )
+    )
+
+    const payloads = copyDataPayloads(result)
+    expectBinaryCopyRow(payloads[1])
+  })
+
+  test('deploy-time schema batch hydrates pg types for binary COPY (out-of-band DDL)', async () => {
+    // mirrors the Cloudflare deploy: DDL is applied straight to the SQL DO at
+    // deploy time (no statement ever flows through a DoBackend), so the only
+    // way a fresh backend learns the pg column types is the _orez_pg_metadata
+    // rows emitted by deployTimeSchemaBatchStatements. without them, binary
+    // COPY falls back to text encoding ("847" = 3 bytes) and the consumer's
+    // int4 readInt32BE crashes — the zero-cache initial-sync failure.
+    const initSql = `
+      CREATE TABLE IF NOT EXISTS "file" (
+        "id" text PRIMARY KEY,
+        "readOnly" boolean DEFAULT false NOT NULL,
+        "size" integer NOT NULL,
+        "createdAt" timestamp DEFAULT now() NOT NULL
+      );
+      --> statement-breakpoint
+      CREATE INDEX IF NOT EXISTS "file_id_idx" ON "file" ("id");
+    `
+    const batch = await deployTimeSchemaBatchStatements(initSql)
+    const ddl = batch.filter((statement) => !statement.params)
+    expect(ddl.some((statement) => /CREATE TABLE/i.test(statement.sql))).toBe(true)
+    // translated to SQLite types, defaults rewritten
+    const createTable = ddl.find((statement) => /CREATE TABLE/i.test(statement.sql))!
+    expect(createTable.sql).toContain('integer')
+    expect(createTable.sql).not.toMatch(/\bboolean\b/i)
+    expect(createTable.sql).not.toContain('now()')
+
+    const metadataInserts = batch.filter(
+      (statement) => statement.params && statement.sql.includes('_orez_pg_metadata')
+    )
+    expect(metadataInserts.length).toBeGreaterThan(0)
+    const metadataRows: { kind: string; key: string; subkey: string; value: string }[] =
+      []
+    for (const statement of metadataInserts) {
+      for (let i = 0; i < statement.params!.length; i += 4) {
+        const [kind, key, subkey, value] = statement.params!.slice(i, i + 4)
+        metadataRows.push({ kind, key, subkey, value })
+      }
+    }
+    expect(metadataRows.some((row) => row.key === 'file' && row.subkey === 'size')).toBe(
+      true
+    )
+
+    // fresh backend: no DDL through it, metadata served from the durable table
+    const http = await startDoHttp((sql) => {
+      if (sql.includes('_orez_pg_metadata') && compactSQL(sql).startsWith('SELECT')) {
+        return {
+          rows: metadataRows,
+          columns: ['kind', 'key', 'subkey', 'value'],
+        }
+      }
+      if (compactSQL(sql).startsWith('SELECT')) {
+        return {
+          rows: [{ id: 'f1', readOnly: 0, size: 847 }],
+          columns: ['id', 'readOnly', 'size'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'deploy-batch-metadata-test')
+    await backend.waitReady
+
+    const result = await backend.execProtocolRaw(
+      msg(
+        0x51,
+        cstr(
+          'COPY (SELECT "id","readOnly","size" FROM "public"."file") TO STDOUT WITH (FORMAT binary)'
+        )
+      )
+    )
+    expectBinaryCopyRow(copyDataPayloads(result)[1])
   })
 
   test('formats timestamp typed rows as postgres text for DataRow and COPY', async () => {

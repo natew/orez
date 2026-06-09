@@ -3868,6 +3868,63 @@ function rewrittenSQLText(statements: RewrittenStatement[]): string {
     .join(';\n')
 }
 
+// pg DDL (e.g. a generated init.sql) → the exact /batch statements a SQL DO
+// needs to have the schema "already applied" with full pg type metadata: the
+// SQLite-native DDL plus the _orez_pg_metadata upserts that
+// loadDurableMetadata() hydrates schemaMetadata from on boot. callers that
+// apply DDL out-of-band at deploy time (no runtime parse) MUST apply both —
+// DDL alone loses the pg column types, which silently downgrades binary COPY
+// encoding to text (crashing typed consumers like zero-cache initial sync)
+// and breaks typed result formatting.
+export async function deployTimeSchemaBatchStatements(
+  ddl: string
+): Promise<Array<{ sql: string; params?: string[] }>> {
+  await loadModule()
+  const statements: Array<{ sql: string; params?: string[] }> = []
+  const metadataRows: Array<[string, string, string, string]> = []
+  for (const chunk of ddl.split('--> statement-breakpoint')) {
+    const sql = chunk.trim()
+    if (!sql) continue
+    for (const statement of rewriteSQLStatements(sql)) {
+      if (statement.sql.trim()) statements.push({ sql: statement.sql })
+      for (const column of statement.schemaColumns ?? []) {
+        metadataRows.push([
+          'schema-column',
+          column.table,
+          column.column,
+          JSON.stringify(column),
+        ])
+      }
+    }
+  }
+  if (metadataRows.length) {
+    statements.push({ sql: metadataTableDDL() })
+    // mirrors persistDurableMetadata: chunked multi-row upserts under the
+    // Cloudflare DO SQLite host-param cap (4 cols × 20 rows).
+    const CHUNK = 20
+    for (let i = 0; i < metadataRows.length; i += CHUNK) {
+      const rows = metadataRows.slice(i, i + CHUNK)
+      statements.push({
+        sql: `INSERT OR REPLACE INTO ${quoteIdentifier(METADATA_TABLE)} (kind, key, subkey, value) VALUES ${rows.map(() => '(?, ?, ?, ?)').join(', ')}`,
+        params: rows.flat(),
+      })
+    }
+  }
+  return statements
+}
+
+function metadataTableDDL(): string {
+  return `
+      CREATE TABLE IF NOT EXISTS ${quoteIdentifier(METADATA_TABLE)} (
+        kind TEXT NOT NULL,
+        key TEXT NOT NULL,
+        subkey TEXT NOT NULL DEFAULT '',
+        value TEXT NOT NULL,
+        PRIMARY KEY (kind, key, subkey)
+      )
+    `
+}
+
 function rewriteSQL(sql: string, context?: RewriteContext): string {
   return rewrittenSQLText(rewriteSQLStatements(sql, context))
 }
@@ -5052,15 +5109,7 @@ export class DoBackend {
   }
 
   private async ensureMetadataTable(): Promise<void> {
-    await this.doExecResult(`
-      CREATE TABLE IF NOT EXISTS ${quoteIdentifier(METADATA_TABLE)} (
-        kind TEXT NOT NULL,
-        key TEXT NOT NULL,
-        subkey TEXT NOT NULL DEFAULT '',
-        value TEXT NOT NULL,
-        PRIMARY KEY (kind, key, subkey)
-      )
-    `)
+    await this.doExecResult(metadataTableDDL())
   }
 
   private publicationToJSON(publication: PublicationDefinition): string {
@@ -7493,8 +7542,20 @@ export class DoBackend {
         typeof value === 'string' ? value : JSON.stringify(sqliteJsonParamValue(value))
       return textEncoder.encode(json)
     }
+    // unknown type in a BINARY copy means schemaMetadata never learned this
+    // column (real pg always knows its types). the text bytes emitted here
+    // will crash any consumer decoding by declared type (e.g. int4
+    // readInt32BE on "847"), so make the downgrade loud.
+    if (oid === undefined && !this.warnedBinaryCopyTextFallback.has(column)) {
+      this.warnedBinaryCopyTextFallback.add(column)
+      console.warn(
+        `[orez] binary COPY falling back to text encoding for column "${column}" — no pg type metadata; apply schema via deployTimeSchemaBatchStatements or through the backend`
+      )
+    }
     return textEncoder.encode(this.copyTextValue(column, value, field))
   }
+
+  private warnedBinaryCopyTextFallback = new Set<string>()
 
   private copyBinaryRow(
     columns: string[],

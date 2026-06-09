@@ -124,6 +124,7 @@ function resolveNodeBinary(): string {
 
 export { defineConfig, getConfig, getConnectionString } from './config.js'
 export type { Hook, LogLevel, OrezConfig, ZeroLiteConfig } from './config.js'
+export { deployTimeSchemaBatchStatements } from './pg-proxy-do-backend.js'
 export { installChangeTracking } from './replication/change-tracker.js'
 
 // helper to run a hook (string command or callback function)
