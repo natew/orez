@@ -1197,39 +1197,11 @@ export class ZeroDO extends DurableObject {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url)
+    // every endpoint is served by the one singleton ZeroDO (its fetch() does the
+    // routing, CORS preflight, and 404s). forward unconditionally rather than
+    // re-listing each path here — a second route table only drifts from the DO's.
     const id = env.ZERO_DO.idFromName('singleton')
-    if (url.pathname.startsWith('/sync/v') && url.pathname.endsWith('/connect')) {
-      return env.ZERO_DO.get(id).fetch(request)
-    }
-    if (
-      (url.pathname === '/zero/push' || url.pathname === '/api/zero/push') &&
-      request.method === 'POST'
-    ) {
-      return env.ZERO_DO.get(id).fetch(request)
-    }
-    if (url.pathname === '/exec' && request.method === 'POST') {
-      return env.ZERO_DO.get(id).fetch(request)
-    }
-    if (url.pathname === '/batch' && request.method === 'POST') {
-      return env.ZERO_DO.get(id).fetch(request)
-    }
-    if (url.pathname === '/commit-tracked-tx' && request.method === 'POST') {
-      return env.ZERO_DO.get(id).fetch(request)
-    }
-    if (url.pathname === '/rollback-tracked-tx' && request.method === 'POST') {
-      return env.ZERO_DO.get(id).fetch(request)
-    }
-    if (
-      url.pathname === '/changes' &&
-      (request.method === 'GET' || request.method === 'POST')
-    ) {
-      return env.ZERO_DO.get(id).fetch(request)
-    }
-    if (url.pathname === '/notify' && request.method === 'POST') {
-      return env.ZERO_DO.get(id).fetch(request)
-    }
-    return new Response('not found', { status: 404 })
+    return env.ZERO_DO.get(id).fetch(request)
   },
 }
 
