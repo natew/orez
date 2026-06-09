@@ -44,9 +44,12 @@ function browserPostgres(urlOrOptions?: any, options?: any) {
   opts.username = (globalThis as any).__orez_proxy_user || 'user'
   // disable auto-subscribe
   if (opts.no_subscribe === undefined) opts.no_subscribe = true
-  // limit pool size — too many concurrent connections overwhelm the MessagePort proxy
-  // limit pool size for browser — too many concurrent connections can overwhelm
-  if (!opts.max || opts.max > 2) opts.max = 2
+  // default pool size 2 — many concurrent connections can overwhelm the
+  // MessagePort proxy. an EXPLICIT max passes through: zero-cache's initial-sync
+  // copy pool sizes itself one-connection-per-table to work around the
+  // unresponsive-connection-after-COPY stream bug (same workaround zero ships
+  // for win32 node), and silently clamping it re-introduces the hang.
+  if (!opts.max) opts.max = 2
 
   console.debug(
     `[postgres-browser] creating client db=${opts.database} repl=${!!opts.connection?.replication} fetch_types=${opts.fetch_types} max=${opts.max} keys=${Object.keys(opts).sort().join(',')}`

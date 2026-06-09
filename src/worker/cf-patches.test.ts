@@ -57,6 +57,8 @@ describe('prepareZeroCacheForCF', () => {
     expect(initialSync).not.toContain('pendingRows > 50')
     expect(initialSync.match(/orezRowsPerBatch - 1/g)).toHaveLength(2)
     expect(initialSync.match(/pendingRows > orezRowsPerBatch/g)).toHaveLength(2)
+    expect(initialSync).toContain('const numWorkers = numTables;')
+    expect(initialSync).not.toContain('Math.min(tableCopyWorkers, numTables)')
     expect(readText(sourceBase, 'services/change-source/pg/initial-sync.js')).toContain(
       '.repeat(49)'
     )
@@ -225,6 +227,8 @@ export class ThreadWriteWorkerClient {}
   )
 
   mkdirSync(resolve(zcBase, 'services', 'change-source', 'pg'), { recursive: true })
+  const numWorkersLine =
+    '\tconst numWorkers = platform() === "win32" ? numTables : Math.min(tableCopyWorkers, numTables);\n'
   const copyVariant = `	const insertStmt = to.prepare(insertSql);
 	const insertBatchStmt = to.prepare(insertSql + \`,\${valuesSql}\`.repeat(49));
 	const valuesPerRow = columnSpecs.length;
@@ -238,7 +242,9 @@ export class ThreadWriteWorkerClient {}
   writeText(
     zcBase,
     'services/change-source/pg/initial-sync.js',
-    `async function copyBinary() {
+    `async function initialSync() {
+${numWorkersLine}}
+async function copyBinary() {
 ${copyVariant}}
 async function copyText() {
 ${copyVariant}}
