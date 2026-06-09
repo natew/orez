@@ -143,6 +143,94 @@ export function classifyZeroCrashRecovery(details: string): {
 }
 
 /**
+ * the action orez should take after zero-cache fails its INITIAL startup
+ * (the first `startZeroCache` + health/stability wait), derived from the crash
+ * tail plus how much recovery has already been attempted this startup.
+ *
+ * the common case is a transient crash: the change-streamer worker dies mid
+ * initial-sync (a dropped proxy connection or a query timeout under load),
+ * exits 255, and cascades zero-cache to a graceful "exited with code 0". the
+ * on-disk state is NOT corrupt, so re-spawning re-runs the sync and almost
+ * always succeeds — the same thing a user does by hand ("it works if I restart
+ * it once") and the same call the post-startup crash watcher makes
+ * (see {@link classifyZeroCrashRecovery}). this used to be fatal only because
+ * the initial start wasn't wired into that restart path.
+ *
+ *  - 'recover-state' — a genuine corruption/inconsistency signature: rebuild
+ *    local zero state, then retry. tried at most once; if it survives the
+ *    reset the state is beyond automatic repair.
+ *  - 'wasm-fallback' — native sqlite couldn't load: switch to wasm, then retry.
+ *  - 'restart' — transient/unexpected crash: plain relaunch, within budget.
+ *  - 'full-reset' — plain restarts exhausted: one heavier reset as a last
+ *    resort, then retry.
+ *  - 'give-up' — nothing left to try: surface the original error.
+ */
+export type ZeroStartupRecoveryAction =
+  | 'recover-state'
+  | 'wasm-fallback'
+  | 'restart'
+  | 'full-reset'
+  | 'give-up'
+
+export interface ZeroStartupRetryState {
+  /** plain relaunches already attempted (not counting the first start). */
+  plainRestarts: number
+  /** budget for plain relaunches before escalating to a full reset. */
+  maxRestarts: number
+  /** a corruption/inconsistency reset has already been tried this startup. */
+  didRecoverState: boolean
+  /** the last-resort full reset has already been tried this startup. */
+  didFullReset: boolean
+  /** native sqlite is in use and a wasm fallback is permitted. */
+  canWasmFallback: boolean
+  /** the wasm fallback has already been applied this startup. */
+  didWasmFallback: boolean
+  /** the crash tail matches a missing-native-binary signature. */
+  nativeBinaryMissing: boolean
+}
+
+export function classifyZeroStartupRecovery(
+  details: string,
+  state: ZeroStartupRetryState
+): { action: ZeroStartupRecoveryAction; reason: string } {
+  // a genuine persisted-state corruption/inconsistency must be reset, not just
+  // restarted into the same crash — but only once. if it survives the reset the
+  // state is beyond what orez can repair automatically.
+  if (hasCdcCorruptionSignature(details) || hasZeroStateInconsistencySignature(details)) {
+    return state.didRecoverState
+      ? { action: 'give-up', reason: 'state corruption persists after reset' }
+      : { action: 'recover-state', reason: 'state corruption' }
+  }
+
+  // a missing native sqlite binary is DETERMINISTIC, never transient: either
+  // fall back to wasm (once, when permitted) or fail fast. it must NOT enter
+  // the restart/full-reset path below — retrying would just loop into the same
+  // missing-binary error, and the user explicitly wants `bun dev` to exit fast
+  // when native zero sqlite isn't there rather than churn.
+  if (state.nativeBinaryMissing) {
+    if (state.canWasmFallback && !state.didWasmFallback) {
+      return { action: 'wasm-fallback', reason: 'native sqlite unavailable' }
+    }
+    return {
+      action: 'give-up',
+      reason: 'native sqlite unavailable and wasm fallback unavailable',
+    }
+  }
+
+  // transient / unexpected crash (the common case). plain relaunch within budget.
+  if (state.plainRestarts < state.maxRestarts) {
+    return { action: 'restart', reason: 'transient startup crash' }
+  }
+
+  // budget spent — one heavier full reset as a last resort.
+  if (!state.didFullReset) {
+    return { action: 'full-reset', reason: 'still crashing after restarts' }
+  }
+
+  return { action: 'give-up', reason: 'unrecoverable startup crash' }
+}
+
+/**
  * detect replica files that cannot possibly be a valid already-synced Zero
  * replica. zero-cache can create the file itself during initial sync; an empty
  * file here is a leftover local-state artifact, not useful cache state.

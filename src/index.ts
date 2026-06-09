@@ -42,12 +42,12 @@ import { findPort } from './port.js'
 import { orezTitle } from './process-title.js'
 import {
   classifyZeroCrashRecovery,
-  hasCdcCorruptionSignature,
+  classifyZeroStartupRecovery,
   hasRecoverableZeroStateSignature,
   hasZeroReplicaMonitorWarmupSignature,
-  hasZeroStateInconsistencySignature,
   getZeroReplicaStartupResetReason,
   recoverZeroState,
+  type ZeroStartupRetryState,
 } from './recovery.js'
 import { installChangeTracking } from './replication/change-tracker.js'
 import { resetReplicationState } from './replication/handler.js'
@@ -562,39 +562,97 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       }
     }
 
-    try {
-      await tryStartZeroCache()
-    } catch (err: any) {
-      const errMsg = err?.message || String(err)
-      // check for persisted zero-cache state mismatches before falling back to
-      // binary-mode handling; these require rebuilding the whole local zero domain.
-      if (
-        hasCdcCorruptionSignature(errMsg) ||
-        hasZeroStateInconsistencySignature(errMsg)
-      ) {
-        await recoverZeroState({
-          config,
-          instances,
-          zeroCacheProcess,
-        })
-        log.orez('retrying zero-cache startup...')
+    // zero-cache can die during startup for a few distinct reasons; the policy
+    // for each lives in classifyZeroStartupRecovery (pure + unit-tested) and
+    // this loop just executes the chosen action. the common case is a transient
+    // crash: the change-streamer worker dies mid initial-sync (a dropped proxy
+    // connection or a query timeout under load), exits 255, and cascades
+    // zero-cache to a graceful "exited with code 0". the on-disk state is NOT
+    // corrupt, so a plain relaunch re-runs the sync and almost always succeeds —
+    // exactly what a user means by "it works if I just restart it once", and
+    // the same call the post-startup crash watcher already makes
+    // (classifyZeroCrashRecovery → 'restart'). this used to be fatal only
+    // because the initial start wasn't wired into that restart path.
+    const startupRetry: ZeroStartupRetryState = {
+      plainRestarts: 0,
+      maxRestarts: 3,
+      didRecoverState: false,
+      didFullReset: false,
+      canWasmFallback: sqliteMode === 'native' && !config.disableWasmSqlite,
+      didWasmFallback: false,
+      nativeBinaryMissing: false,
+    }
+    for (;;) {
+      try {
         await tryStartZeroCache()
-        log.orez('zero-cache state auto-recovery successful')
-      } else if (
-        // native sqlite failed to load at runtime - fallback to wasm
-        sqliteMode === 'native' &&
-        !config.disableWasmSqlite &&
-        hasMissingNativeBinarySignature(errMsg)
-      ) {
-        log.orez('native sqlite failed to load, falling back to wasm...')
-        sqliteMode = 'wasm'
-        sqliteModeConfig = resolveSqliteModeConfig(false, true) // force wasm
-        await tryStartZeroCache()
-        log.orez('wasm fallback successful')
-      } else {
-        // unrecoverable error, rethrow
-        throw err
+        break
+      } catch (err: any) {
+        const errMsg = err?.message || String(err)
+        const firstLine = errMsg.split('\n')[0]
+
+        // make sure the crashed (or, on a health-check timeout, still-hung)
+        // zero-cache tree is fully gone before relaunching so the next process
+        // can't collide on the replica file or zeroPort. no-op when the tree
+        // already exited (the usual crash-cascade case).
+        if (isChildProcessRunning(zeroCacheProcess)) {
+          await terminateChildProcessTree(zeroCacheProcess, {
+            gracefulSignal: 'SIGKILL',
+            forceSignal: 'SIGKILL',
+            graceMs: 1000,
+            forceGraceMs: 1000,
+          }).catch(() => {})
+        }
+
+        startupRetry.nativeBinaryMissing = hasMissingNativeBinarySignature(errMsg)
+        const { action, reason } = classifyZeroStartupRecovery(errMsg, startupRetry)
+
+        // give up on deterministic failures (corruption that survived a reset,
+        // a missing native binary with no wasm fallback). surface the original
+        // error so `bun dev` exits fast instead of churning through retries.
+        if (action === 'give-up') throw err
+
+        if (action === 'recover-state') {
+          startupRetry.didRecoverState = true
+          log.orez(`zero-cache startup failed (${reason}) — resetting zero state...`)
+          await recoverZeroState({ config, instances, zeroCacheProcess })
+          continue
+        }
+
+        if (action === 'wasm-fallback') {
+          startupRetry.didWasmFallback = true
+          startupRetry.canWasmFallback = false
+          log.orez('native sqlite failed to load, falling back to wasm...')
+          sqliteMode = 'wasm'
+          sqliteModeConfig = resolveSqliteModeConfig(false, true) // force wasm
+          continue
+        }
+
+        if (action === 'full-reset') {
+          startupRetry.didFullReset = true
+          log.orez(
+            'zero-cache still crashing after restarts — resetting zero state and retrying once more...'
+          )
+          await recoverZeroState({ config, instances, zeroCacheProcess })
+          continue
+        }
+
+        // action === 'restart': transient / unexpected crash, plain relaunch.
+        startupRetry.plainRestarts++
+        log.orez(
+          `zero-cache crashed during startup (restart ${startupRetry.plainRestarts}/${startupRetry.maxRestarts}): ${firstLine}`
+        )
       }
+    }
+
+    // surface that a retry was needed (and worked) so a flaky startup is
+    // visible in logs rather than silently swallowed.
+    if (
+      startupRetry.plainRestarts > 0 ||
+      startupRetry.didRecoverState ||
+      startupRetry.didFullReset ||
+      startupRetry.didWasmFallback
+    ) {
+      log.orez('zero-cache started after recovery')
     }
 
     // start http proxy in front of zero-cache when admin is enabled

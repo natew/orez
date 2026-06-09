@@ -6,13 +6,30 @@ import { describe, expect, it } from 'vitest'
 
 import {
   classifyZeroCrashRecovery,
+  classifyZeroStartupRecovery,
   getZeroReplicaStartupResetReason,
   hasCdcCorruptionSignature,
   hasRecoverableZeroStateSignature,
   hasTransientCrashSignature,
   hasZeroReplicaMonitorWarmupSignature,
   hasZeroStateInconsistencySignature,
+  type ZeroStartupRetryState,
 } from './recovery.js'
+
+// default startup-retry state: first failure, native mode with wasm allowed,
+// nothing tried yet. tests override only the fields they exercise.
+function startupState(overrides: Partial<ZeroStartupRetryState> = {}): ZeroStartupRetryState {
+  return {
+    plainRestarts: 0,
+    maxRestarts: 3,
+    didRecoverState: false,
+    didFullReset: false,
+    canWasmFallback: true,
+    didWasmFallback: false,
+    nativeBinaryMissing: false,
+    ...overrides,
+  }
+}
 
 describe('zero recovery signatures', () => {
   it('detects cdc duplicate watermark corruption', () => {
@@ -187,6 +204,120 @@ describe('zero recovery signatures', () => {
         classifyZeroCrashRecovery('max attempts exceeded waiting for CVR@a2 to catch up')
           .action
       ).toBe('full-reset')
+    })
+  })
+
+  describe('classifyZeroStartupRecovery (initial-start retry policy)', () => {
+    // the reported bug: zero-cache's change-streamer worker dies mid initial
+    // sync, exits 255, and cascades the runner to a graceful exit. orez's
+    // waitForZeroCache then throws "zero-cache exited with code 0". the on-disk
+    // state isn't corrupt — a plain relaunch re-runs the sync — but the initial
+    // start used to rethrow this instead of restarting (post-startup crashes
+    // were already auto-restarted; the initial start wasn't).
+    const userCrashTail = [
+      'zero-cache exited with code 0',
+      'change-streamer.js (59865) exited with code (255)',
+      'all user-facing workers exited',
+    ].join('\n')
+
+    it('restarts the change-streamer cold-sync crash that triggered this bug', () => {
+      expect(classifyZeroStartupRecovery(userCrashTail, startupState())).toEqual({
+        action: 'restart',
+        reason: 'transient startup crash',
+      })
+    })
+
+    it('restarts an opaque startup crash with no recognizable tail', () => {
+      expect(classifyZeroStartupRecovery('', startupState())).toEqual({
+        action: 'restart',
+        reason: 'transient startup crash',
+      })
+      expect(
+        classifyZeroStartupRecovery(
+          'zero-cache crashed during startup stability check',
+          startupState()
+        ).action
+      ).toBe('restart')
+    })
+
+    it('keeps restarting until the plain-restart budget is spent', () => {
+      expect(classifyZeroStartupRecovery('boom', startupState({ plainRestarts: 2 })).action).toBe(
+        'restart'
+      )
+      // budget spent → escalate to one full reset
+      expect(classifyZeroStartupRecovery('boom', startupState({ plainRestarts: 3 }))).toEqual({
+        action: 'full-reset',
+        reason: 'still crashing after restarts',
+      })
+      // full reset already tried → give up and surface the error
+      expect(
+        classifyZeroStartupRecovery('boom', startupState({ plainRestarts: 3, didFullReset: true }))
+      ).toEqual({ action: 'give-up', reason: 'unrecoverable startup crash' })
+    })
+
+    it('resets local state once on genuine corruption, then gives up if it persists', () => {
+      const corruption = 'duplicate key value violates unique constraint "changeLog_pkey"'
+      expect(classifyZeroStartupRecovery(corruption, startupState())).toEqual({
+        action: 'recover-state',
+        reason: 'state corruption',
+      })
+      // corruption survived the reset → don't loop on it
+      expect(
+        classifyZeroStartupRecovery(corruption, startupState({ didRecoverState: true }))
+      ).toEqual({ action: 'give-up', reason: 'state corruption persists after reset' })
+    })
+
+    it('resets local state on CVR/replica inconsistency (not a plain restart)', () => {
+      expect(
+        classifyZeroStartupRecovery(
+          'RowsVersionBehindError: rowsVersion (a1) is behind CVR a2',
+          startupState()
+        ).action
+      ).toBe('recover-state')
+    })
+
+    it('falls back to wasm once when native sqlite is missing and wasm is allowed', () => {
+      expect(
+        classifyZeroStartupRecovery('Could not locate the bindings file', startupState({
+          nativeBinaryMissing: true,
+          canWasmFallback: true,
+        }))
+      ).toEqual({ action: 'wasm-fallback', reason: 'native sqlite unavailable' })
+    })
+
+    it('FAILS FAST (does not restart) when native sqlite is missing and wasm is disabled', () => {
+      // this is the "exit 1 instantly if zero-native isn't there" behavior:
+      // a missing native binary is deterministic, so when wasm fallback is off
+      // (interactive `bun dev` sets disableWasmSqlite) it must give up, NOT
+      // churn through restarts + a full state reset into the same error.
+      const result = classifyZeroStartupRecovery(
+        'Could not locate the bindings file',
+        startupState({ nativeBinaryMissing: true, canWasmFallback: false })
+      )
+      expect(result).toEqual({
+        action: 'give-up',
+        reason: 'native sqlite unavailable and wasm fallback unavailable',
+      })
+    })
+
+    it('does not loop the wasm fallback once it has already been applied', () => {
+      expect(
+        classifyZeroStartupRecovery(
+          'Could not locate the bindings file',
+          startupState({ nativeBinaryMissing: true, canWasmFallback: false, didWasmFallback: true })
+        ).action
+      ).toBe('give-up')
+    })
+
+    it('prioritizes corruption over the native and restart paths', () => {
+      // a tail that is both corruption AND somehow native-flagged must take the
+      // state-reset path, never a plain restart into the same corrupt state.
+      expect(
+        classifyZeroStartupRecovery(
+          'duplicate key value violates unique constraint "changeLog_pkey"',
+          startupState({ nativeBinaryMissing: true })
+        ).action
+      ).toBe('recover-state')
     })
   })
 
