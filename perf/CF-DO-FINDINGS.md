@@ -17,11 +17,11 @@ JSON reports land in `perf/reports/` (gitignored).
 
 ## baseline (2026-06-08, wrangler dev --local, M-series laptop, CONC=4, N=1000)
 
-| scenario                    |  ops/s | mean | p50  | p95   | p99   |
-| --------------------------- | -----: | ---: | ---: | ----: | ----: |
-| exec INSERT (tracked)       |  1,541 | 2.59 | 2.62 | 4.07  | 5.15  |
-| exec SELECT (point)         |  1,756 | 2.28 | 2.05 | 3.89  | 7.36  |
-| batch x20 INSERT (per-stmt) | 15,233 | 5.13*| 4.95*| 11.04*| 11.56*|
+| scenario                    |  ops/s |   mean |    p50 |     p95 |     p99 |
+| --------------------------- | -----: | -----: | -----: | ------: | ------: |
+| exec INSERT (tracked)       |  1,541 |   2.59 |   2.62 |    4.07 |    5.15 |
+| exec SELECT (point)         |  1,756 |   2.28 |   2.05 |    3.89 |    7.36 |
+| batch x20 INSERT (per-stmt) | 15,233 | 5.13\* | 4.95\* | 11.04\* | 11.56\* |
 
 \* batch latency is per-batch (20 statements); the ops/s column is per-statement.
 
@@ -45,10 +45,10 @@ are already fixed — the remaining boot cost is the seed-insert round-trip coun
 ## next perf lever (NOT done here — flagged risky)
 
 Have `DoBackend` (src/pg-proxy-do-backend.ts) coalesce a run of same-shape inserts
-inside one transaction into a single `/batch` instead of N `/exec`. CHAT_E2E.md §8
+inside one transaction into a single `/batch` instead of N `/exec`. CHAT*E2E.md §8
 flags this risky (prepared-statement / bind-param tracking). This harness is the
 gate for it: it proves `/batch` is atomic + conformant and measures the win, so a
-DoBackend batching change can be validated for speed *and* correctness here before
+DoBackend batching change can be validated for speed \_and* correctness here before
 the full chat e2e run. Not attempted in this pass to keep the hot path stable
 (chat e2e must-pass + shared-machine CPU budget).
 

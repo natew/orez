@@ -57,7 +57,11 @@ interface SqlTrack {
   returnRows?: boolean
 }
 
-async function exec(sql: string, params: unknown[] = [], track?: SqlTrack): Promise<ExecResult> {
+async function exec(
+  sql: string,
+  params: unknown[] = [],
+  track?: SqlTrack
+): Promise<ExecResult> {
   const res = await fetch(`${BASE}/exec`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -92,9 +96,10 @@ async function batch(
   return { status: res.status, body: (await res.json()) as any }
 }
 
-async function changesSince(
+async function changesSince(watermark: number): Promise<{
   watermark: number
-): Promise<{ watermark: number; changes: Array<{ watermark: number; tableName: string; op: string }> }> {
+  changes: Array<{ watermark: number; tableName: string; op: string }>
+}> {
   const res = await fetch(`${BASE}/changes?watermark=${watermark}&limit=100000`)
   const body = (await res.json()) as any
   if (!res.ok) throw new Error(`changes ${res.status}: ${body?.error ?? 'unknown'}`)
@@ -142,7 +147,12 @@ interface ScenarioResult {
   maxMs: number
 }
 
-function summarize(name: string, ops: number, wallMs: number, latencies: number[]): ScenarioResult {
+function summarize(
+  name: string,
+  ops: number,
+  wallMs: number,
+  latencies: number[]
+): ScenarioResult {
   const sorted = [...latencies].sort((a, b) => a - b)
   const mean = sorted.reduce((a, b) => a + b, 0) / (sorted.length || 1)
   const round = (n: number) => Math.round(n * 100) / 100
@@ -215,17 +225,26 @@ async function conformance() {
 
   // 1. roundtrip: count matches the inserts done in the insert scenario.
   const count = await exec(`SELECT count(*) AS c FROM ${TABLE} WHERE id LIKE 'item-%'`)
-  assert(Number(count.rows[0]?.c) === N, `roundtrip: expected ${N} rows, got ${count.rows[0]?.c}`)
+  assert(
+    Number(count.rows[0]?.c) === N,
+    `roundtrip: expected ${N} rows, got ${count.rows[0]?.c}`
+  )
 
   // 2. change capture + monotonic watermark for the insert scenario's writes.
   const base = await changesSince(0)
   const itemChanges = base.changes.filter(
     (c) => c.tableName === TABLE && c.op === 'INSERT'
   )
-  assert(itemChanges.length >= N, `change capture: expected >=${N} INSERT changes, got ${itemChanges.length}`)
+  assert(
+    itemChanges.length >= N,
+    `change capture: expected >=${N} INSERT changes, got ${itemChanges.length}`
+  )
   let prev = -1
   for (const c of base.changes) {
-    assert(c.watermark > prev, `watermark not strictly increasing at ${c.watermark} (prev ${prev})`)
+    assert(
+      c.watermark > prev,
+      `watermark not strictly increasing at ${c.watermark} (prev ${prev})`
+    )
     prev = c.watermark
   }
 
@@ -250,7 +269,11 @@ async function conformance() {
 
   // 4. delete emits a DELETE change.
   const wmBeforeDelete = (await changesSince(0)).watermark
-  await exec(`INSERT INTO ${TABLE} (id, val, num) VALUES (?, ?, ?) RETURNING *`, ['del-me', 'z', 0], trackInsert)
+  await exec(
+    `INSERT INTO ${TABLE} (id, val, num) VALUES (?, ?, ?) RETURNING *`,
+    ['del-me', 'z', 0],
+    trackInsert
+  )
   await exec(`DELETE FROM ${TABLE} WHERE id = ? RETURNING *`, ['del-me'], {
     tableName: TABLE,
     operation: 'DELETE',

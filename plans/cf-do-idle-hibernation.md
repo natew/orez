@@ -25,7 +25,7 @@ drops that toward $0.
 - **No "avoid websocket / HTTP-only transport".** That's a client-transport
   rewrite — the ball of yarn. Keep Zero's WS unchanged.
 - **No ping-auto-response / hibernation-WS-API on the embed (yet).** That tries
-  to hibernate *while a client is connected* — harder, fights the live bridge.
+  to hibernate _while a client is connected_ — harder, fights the live bridge.
   Out of scope for this pass; revisit only if "idle-but-connected" cost matters.
 
 ## the design (one path)
@@ -47,7 +47,7 @@ cheaper than first boot).
    `src/worker/zero-cache-embed-cf.ts`.)
 
 2. **orez — idle decision (pure, unit-tested).** `shouldHibernate({
-   connectionCount, msSinceActive, graceMs })` → boolean. No I/O, deterministic.
+connectionCount, msSinceActive, graceMs })` → boolean. No I/O, deterministic.
 
 3. **soot shim — alarm-driven teardown.** `ZeroCacheDO`
    (`src/deploy/cloudflareDoDeploy.ts` CLOUDFLARE_DO_SHIM_SOURCE):
@@ -55,10 +55,10 @@ cheaper than first boot).
    - `ensureReady()` schedules the first idle-check alarm after start.
    - `alarm()`: if no embed → return. If `connectionCount > 0` OR within grace
      of `lastActiveAt` → reschedule alarm, return. Else `await
-     zeroCache.stop(); zeroCache = undefined; ready = undefined` and DON'T
+zeroCache.stop(); zeroCache = undefined; ready = undefined` and DON'T
      reschedule → DO goes idle → evicted.
-   Alarm cadence `IDLE_CHECK_MS` (≈30s) + `IDLE_GRACE_MS` (≈30s). Single alarm,
-   no other timers; after teardown there is no pending alarm.
+     Alarm cadence `IDLE_CHECK_MS` (≈30s) + `IDLE_GRACE_MS` (≈30s). Single alarm,
+     no other timers; after teardown there is no pending alarm.
 
    Alarm chosen over reacting to the sync close callback: the callback fires
    outside a request context (risky for storage writes); the periodic alarm is
@@ -88,10 +88,11 @@ leaks, fix the embed shutdown — that fix IS the feature.
 ## progress (2026-06-08)
 
 done + green:
+
 - orez `DurableObjectWebSocketHandoff.activeConnections` getter + 2 unit tests.
 - orez `ZeroCacheEmbedCF.connectionCount` getter on the embed handle.
 - orez `src/worker/zero-cache-do-idle.ts`: pure `shouldHibernateIdleZeroCache`
-  + `ZERO_CACHE_IDLE_CHECK_MS`/`GRACE_MS` constants + 3 unit tests.
+  - `ZERO_CACHE_IDLE_CHECK_MS`/`GRACE_MS` constants + 3 unit tests.
 - orez `bun run build` clean; new module exported via `./worker/*`.
 - soot shim (`cloudflareDoDeploy.ts` CLOUDFLARE_DO_SHIM_SOURCE): `lastActiveAt`
   stamp in fetch, arm idle alarm after start, `alarm()` that tears the embed
@@ -105,6 +106,7 @@ done + green:
   to clear timers.
 
 shipping dependency (NEEDS USER OK):
+
 - deploy bundles orez from `node_modules/orez` (currently published 0.4.1).
   the embed `connectionCount` + the new idle module aren't in 0.4.1, so this
   ships only after an **orez 0.4.2 release + soot `orez` dep bump**. publishing
@@ -112,15 +114,17 @@ shipping dependency (NEEDS USER OK):
   testing only — not a publish.)
 
 also done:
+
 - soot shim idle timing is env-tunable: `idleCheckMs`/`idleGraceMs` read
   `ZERO_CACHE_IDLE_CHECK_MS` / `ZERO_CACHE_IDLE_GRACE_MS` from env (default to the
   orez constants). lets a throwaway deploy set both low and observe teardown fast.
 
 runtime proof — local Miniflare path is BLOCKED (pre-existing, orthogonal):
+
 - wrote `soot/scripts/dev/test-cf-do-hibernation.ts` (Miniflare boot→cycle). it
   gets past config but the cf-do worker bundle won't boot under Miniflare:
   `node_modules/pg/lib/index.js` evals at init and does `class BoundPool extends
-  Pool4` where `Pool4 = __toCommonJS(pg-pool esm)` — an ESM namespace object, not
+Pool4` where `Pool4 = __toCommonJS(pg-pool esm)` — an ESM namespace object, not
   the class → workerd "Class extends value #<Object>". On real CF the top-level
   `pg` specifier is aliased to a virtual module (orezCfAliasPlugin,
   'orez-cf-virtual') so prod never evals it; Miniflare does. This is a
@@ -148,10 +152,10 @@ runtime proof — local Miniflare path is BLOCKED (pre-existing, orthogonal):
     full writeup: `perf/CF-DO-FINDINGS.md`.
   - baseline (wrangler dev --local, CONC=4, N=1000, 2026-06-08):
 
-    | scenario                    |  ops/s | mean | p50  | p95   | p99   |
+    | scenario                    |  ops/s | mean |  p50 |   p95 |   p99 |
     | --------------------------- | -----: | ---: | ---: | ----: | ----: |
-    | exec INSERT (tracked)       |  1,541 | 2.59 | 2.62 | 4.07  | 5.15  |
-    | exec SELECT (point)         |  1,756 | 2.28 | 2.05 | 3.89  | 7.36  |
+    | exec INSERT (tracked)       |  1,541 | 2.59 | 2.62 |  4.07 |  5.15 |
+    | exec SELECT (point)         |  1,756 | 2.28 | 2.05 |  3.89 |  7.36 |
     | batch x20 INSERT (per-stmt) | 15,233 | 5.13 | 4.95 | 11.04 | 11.56 |
 
   - finding: the DO SQL path is HTTP-round-trip-bound (~2.5ms/call, read or write
