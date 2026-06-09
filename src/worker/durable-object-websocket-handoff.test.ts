@@ -227,6 +227,37 @@ describe('DurableObjectWebSocketHandoff', () => {
     localSocket.close(1000, 'test complete')
   })
 
+  it('tracks activeConnections across accept and close', () => {
+    const handoff = new DurableObjectWebSocketHandoff(() => ({
+      tryHandoff: vi.fn(() => true),
+    }))
+    expect(handoff.activeConnections).toBe(0)
+
+    const a = createMockSocket()
+    const b = createMockSocket()
+    handoff.accept(a, requestMessage)
+    expect(handoff.activeConnections).toBe(1)
+    handoff.accept(b, requestMessage)
+    expect(handoff.activeConnections).toBe(2)
+
+    a.fire('close', { code: 1001, reason: 'gone', wasClean: true })
+    expect(handoff.activeConnections).toBe(1)
+    b.fire('close', { code: 1001, reason: 'gone', wasClean: true })
+    expect(handoff.activeConnections).toBe(0)
+  })
+
+  it('does not retain a connection when the handoff is not consumed', () => {
+    // a socket that no fastify instance claims is closed immediately, so it must
+    // not leave a phantom live connection that would block idle hibernation.
+    delete (globalThis as any).__orez_fastify_instances
+    const handoff = new DurableObjectWebSocketHandoff(() => ({
+      tryHandoff: vi.fn(() => false),
+    }))
+    const cfSocket = createMockSocket()
+    expect(handoff.accept(cfSocket, requestMessage)).toBe(false)
+    expect(handoff.activeConnections).toBe(0)
+  })
+
   it('routes peer close and zero-cache close through the bridge', () => {
     const cfSocket = createMockSocket()
     let localSocket: any

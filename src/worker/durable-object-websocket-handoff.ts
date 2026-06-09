@@ -198,6 +198,11 @@ export class DurableObjectWebSocketHandoff {
 
   constructor(private getFastify: () => FastifyHandoffTarget | null | undefined) {}
 
+  /** number of live zero-cache sync bridges (open WebSocket sync sessions). */
+  get activeConnections(): number {
+    return this.#bridges.size
+  }
+
   accept(
     server: DurableObjectWebSocket,
     message: HandoffRequestMessage,

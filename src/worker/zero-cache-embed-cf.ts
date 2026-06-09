@@ -27,6 +27,13 @@
  * the embed uses standard-accepted WebSockets. do not route these sockets
  * through Durable Object hibernation APIs; the in-process zero-cache proxy must
  * keep its live bridge for the connection lifetime.
+ *
+ * idle hibernation is achieved at a coarser grain instead: the DO watches
+ * `connectionCount` and, once it hits 0 past a grace window, calls stop() to
+ * tear the whole embed down. with no live bridge and no zero-cache timers left,
+ * the DO is evicted and stops accruing GB-s; the next request cold-starts it
+ * again from durable DO SQLite. see plans/cf-do-idle-hibernation.md and
+ * `shouldHibernateIdleZeroCache` in ./zero-cache-do-idle.ts.
  */
 
 import './shims/zero-process-env.js'
@@ -98,6 +105,14 @@ export interface ZeroCacheEmbedCFOptions {
 export interface ZeroCacheEmbedCF {
   /** whether zero-cache is ready */
   readonly ready: boolean
+
+  /**
+   * number of live sync WebSocket sessions. zero means no client is
+   * connected, so the DO can be torn down + hibernated (see
+   * plans/cf-do-idle-hibernation.md). HTTP push/pull requests are stateless
+   * and not counted.
+   */
+  readonly connectionCount: number
 
   /**
    * handle an incoming request from the DO's fetch() handler.
@@ -362,6 +377,10 @@ export async function startZeroCacheEmbedCF(
   return {
     get ready() {
       return isReady
+    },
+
+    get connectionCount() {
+      return webSocketHandoff.activeConnections
     },
 
     async handleRequest(
