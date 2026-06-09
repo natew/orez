@@ -51,6 +51,16 @@ describe('prepareZeroCacheForCF', () => {
       'import { Worker } from "node:worker_threads";'
     )
 
+    const initialSync = readText(overlayBase, 'services/change-source/pg/initial-sync.js')
+    expect(initialSync).not.toContain('.repeat(49)')
+    expect(initialSync).not.toContain('valuesPerRow * 50')
+    expect(initialSync).not.toContain('pendingRows > 50')
+    expect(initialSync.match(/orezRowsPerBatch - 1/g)).toHaveLength(2)
+    expect(initialSync.match(/pendingRows > orezRowsPerBatch/g)).toHaveLength(2)
+    expect(readText(sourceBase, 'services/change-source/pg/initial-sync.js')).toContain(
+      '.repeat(49)'
+    )
+
     const sourceParser = readFileSync(
       resolve(nodeModules, 'libpg-query', 'wasm', 'index.js'),
       'utf-8'
@@ -211,6 +221,27 @@ export { runWorker as default };
     'services/replicator/write-worker-client.js',
     `import { Worker } from "node:worker_threads";
 export class ThreadWriteWorkerClient {}
+`
+  )
+
+  mkdirSync(resolve(zcBase, 'services', 'change-source', 'pg'), { recursive: true })
+  const copyVariant = `	const insertStmt = to.prepare(insertSql);
+	const insertBatchStmt = to.prepare(insertSql + \`,\${valuesSql}\`.repeat(49));
+	const valuesPerRow = columnSpecs.length;
+	const valuesPerBatch = valuesPerRow * 50;
+	function flush() {
+		let l = 0;
+		for (; pendingRows > 50; pendingRows -= 50) insertBatchStmt.run(pendingValues.slice(l, l += valuesPerBatch));
+		for (; pendingRows > 0; pendingRows--) insertStmt.run(pendingValues.slice(l, l += valuesPerRow));
+	}
+`
+  writeText(
+    zcBase,
+    'services/change-source/pg/initial-sync.js',
+    `async function copyBinary() {
+${copyVariant}}
+async function copyText() {
+${copyVariant}}
 `
   )
 

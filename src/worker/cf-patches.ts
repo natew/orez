@@ -108,6 +108,7 @@ export function prepareZeroCacheForCF(
   patchWorkerEntrypoints(zcBase)
   patchProcesses(zcBase)
   patchWriteWorkerClient(zcBase)
+  patchInitialSyncBatchParams(zcBase)
   const parserAliases = patchPgsqlParserWasm(nodeModulesPath, outDir)
   const packageAliases = getPackageAliases(nodeModulesPath)
 
@@ -445,6 +446,58 @@ export { ThreadWriteWorkerClient, applyPragmas, serializeError };
 `
   )
   console.log('[orez] patched zero-cache write-worker-client.js (inline writer)')
+}
+
+// zero-cache's initial sync prepares a fixed 50-row multi-row INSERT per
+// copied table (insertSql + `,${valuesSql}`.repeat(49)). better-sqlite3
+// accepts thousands of bound parameters, but Cloudflare DO SQLite caps a
+// statement at 100 — the prepare alone throws "too many SQL variables" for
+// any table wider than 2 columns, killing initial sync before the first row.
+// derive the batch row count from the column count under a 96-param budget:
+// identical inserts, smaller batches.
+function patchInitialSyncBatchParams(zcBase: string): void {
+  const initialSyncPath = resolve(
+    zcBase,
+    'services',
+    'change-source',
+    'pg',
+    'initial-sync.js'
+  )
+  if (!existsSync(initialSyncPath)) {
+    console.warn('[orez] initial-sync.js not found at', initialSyncPath)
+    return
+  }
+  let code = readFileSync(initialSyncPath, 'utf-8')
+  if (code.includes('orezRowsPerBatch')) return
+  // each pattern appears once in copyBinary and once in copyText
+  const replacements: Array<[string, string]> = [
+    [
+      'const insertBatchStmt = to.prepare(insertSql + `,${valuesSql}`.repeat(49));',
+      'const orezRowsPerBatch = Math.max(1, Math.floor(96 / Math.max(1, columnNames.length)));\n\tconst insertBatchStmt = to.prepare(insertSql + `,${valuesSql}`.repeat(orezRowsPerBatch - 1));',
+    ],
+    [
+      'const valuesPerBatch = valuesPerRow * 50;',
+      'const valuesPerBatch = valuesPerRow * orezRowsPerBatch;',
+    ],
+    [
+      'for (; pendingRows > 50; pendingRows -= 50) insertBatchStmt.run(pendingValues.slice(l, l += valuesPerBatch));',
+      'for (; pendingRows > orezRowsPerBatch; pendingRows -= orezRowsPerBatch) insertBatchStmt.run(pendingValues.slice(l, l += valuesPerBatch));',
+    ],
+  ]
+  for (const [from, to] of replacements) {
+    const count = code.split(from).length - 1
+    if (count !== 2) {
+      console.warn(
+        `[orez] expected 2 occurrences of initial-sync batch pattern, found ${count} — ` +
+          'zero-cache version may have changed; skipping the DO bound-parameter batch patch. ' +
+          'initial sync of tables with rows WILL fail on Cloudflare DOs until this is fixed.'
+      )
+      return
+    }
+    code = code.replaceAll(from, to)
+  }
+  writeFileSync(initialSyncPath, code)
+  console.log('[orez] patched zero-cache initial-sync.js (DO bound-parameter cap batches)')
 }
 
 function patchPgsqlParserWasm(
