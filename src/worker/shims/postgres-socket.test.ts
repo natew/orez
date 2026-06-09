@@ -222,7 +222,11 @@ describe('MessagePortSocket', () => {
   })
 
   describe('pause/resume', () => {
-    it('buffers data while paused', async () => {
+    // pause/resume are deliberate no-ops on this transport — gating delivery
+    // strands COPY tail messages (CopyDone/ReadyForQuery) after the copy
+    // stream EOFs and wedges the connection. see the comment in
+    // postgres-socket.ts and pg-proxy-browser.copy-stream.test.ts.
+    it('delivers data immediately even while paused', async () => {
       const { socket, proxyPort } = createTestSocket()
       await tick()
 
@@ -235,48 +239,10 @@ describe('MessagePortSocket', () => {
       proxyPort.postMessage(new Uint8Array([3]))
 
       await nextTick(10)
-      expect(chunks.length).toBe(0)
-
-      socket.resume()
       expect(chunks.length).toBe(3)
       expect(chunks[0][0]).toBe(1)
       expect(chunks[1][0]).toBe(2)
       expect(chunks[2][0]).toBe(3)
-    })
-
-    it('handles re-entrant pause during resume flush', async () => {
-      const { socket, proxyPort } = createTestSocket()
-      await tick()
-
-      const chunks: Buffer[] = []
-      let pauseAfter = 2
-      socket.on('data', (buf: Buffer) => {
-        chunks.push(buf)
-        if (chunks.length === pauseAfter) {
-          socket.pause()
-        }
-      })
-
-      socket.pause()
-      proxyPort.postMessage(new Uint8Array([1]))
-      proxyPort.postMessage(new Uint8Array([2]))
-      proxyPort.postMessage(new Uint8Array([3]))
-      proxyPort.postMessage(new Uint8Array([4]))
-
-      await nextTick(10)
-
-      // resume flushes first 2, then re-pauses
-      socket.resume()
-      expect(chunks.length).toBe(2)
-      expect(chunks[0][0]).toBe(1)
-      expect(chunks[1][0]).toBe(2)
-
-      // resume again to get remaining
-      pauseAfter = 999
-      socket.resume()
-      expect(chunks.length).toBe(4)
-      expect(chunks[2][0]).toBe(3)
-      expect(chunks[3][0]).toBe(4)
     })
 
     it('resume returns this for chaining', async () => {
@@ -406,7 +372,7 @@ describe('MessagePortSocket', () => {
       expect(socket.readable).toBe(false)
     })
 
-    it('clears pause buffer', async () => {
+    it('does not emit data after destroy even when paused before it', async () => {
       const { socket, proxyPort } = createTestSocket()
       await tick()
 
@@ -414,12 +380,10 @@ describe('MessagePortSocket', () => {
       socket.on('data', (buf: Buffer) => chunks.push(buf))
 
       socket.pause()
+      socket.destroy()
       proxyPort.postMessage(new Uint8Array([1, 2, 3]))
       await nextTick(10)
 
-      socket.destroy()
-
-      // resume after destroy should not emit buffered data
       socket.resume()
       expect(chunks.length).toBe(0)
     })
