@@ -469,21 +469,6 @@ function patchInitialSyncBatchParams(zcBase: string): void {
   }
   let code = readFileSync(initialSyncPath, 'utf-8')
   if (code.includes('orezRowsPerBatch')) return
-  // one copy connection per table: a connection that has served a multi-chunk
-  // COPY TO STDOUT wedges for its NEXT query on workerd (the same
-  // unresponsive-connection-after-COPY bug zero works around on win32 by
-  // setting numWorkers = numTables). never reuse a connection after a COPY.
-  const numWorkersFrom =
-    'const numWorkers = platform() === "win32" ? numTables : Math.min(tableCopyWorkers, numTables);'
-  if (code.split(numWorkersFrom).length - 1 !== 1) {
-    console.warn(
-      '[orez] expected 1 occurrence of the initial-sync numWorkers pattern — ' +
-        'zero-cache version may have changed; skipping the one-connection-per-table patch. ' +
-        'initial sync of tables with rows WILL hang on Cloudflare DOs until this is fixed.'
-    )
-    return
-  }
-  code = code.replace(numWorkersFrom, 'const numWorkers = numTables;')
   // each pattern appears once in copyBinary and once in copyText
   const replacements: Array<[string, string]> = [
     [

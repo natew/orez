@@ -44,10 +44,6 @@ class MessagePortSocket extends EventEmitter {
   private _ended = false
   private _readyState: 'opening' | 'open' | 'closed' = 'opening'
 
-  // pause/resume buffering for COPY protocol backpressure
-  private _paused = false
-  private _pauseBuffer: Buffer[] = []
-
   // timeout tracking
   private _timeoutMs = 0
   private _timeoutTimer: ReturnType<typeof setTimeout> | null = null
@@ -88,11 +84,6 @@ class MessagePortSocket extends EventEmitter {
 
       this.bytesRead += buf.length
       this._resetTimeout()
-
-      if (this._paused) {
-        this._pauseBuffer.push(buf)
-        return
-      }
 
       this.emit('data', buf)
     }
@@ -205,9 +196,6 @@ class MessagePortSocket extends EventEmitter {
       this._timeoutTimer = null
     }
 
-    // clear pause buffer
-    this._pauseBuffer.length = 0
-
     if (this.port) {
       // delay port.close() to allow pending messages (like Terminate/X)
       // to be delivered. closing immediately after postMessage loses
@@ -225,21 +213,24 @@ class MessagePortSocket extends EventEmitter {
     return this
   }
 
-  // flow control — MessagePort doesn't natively support pause/resume,
-  // so we buffer incoming messages when paused and flush on resume.
-  // the postgres COPY protocol relies on this (CopyData calls socket.pause()
-  // when stream.push() returns false).
+  // flow control — pause/resume are NO-OPS on this transport, deliberately.
+  // postgres pauses the socket on COPY backpressure (CopyData push() === false)
+  // and only resumes from the copy readable's read(). when the copy response's
+  // trailing protocol messages (CopyDone / CommandComplete / ReadyForQuery)
+  // arrive as separate port messages after a pause, the stream EOFs without
+  // ever calling read() again — nothing resumes, the tail stays gated, and the
+  // connection wedges for its next query (zero-cache initial sync hung on
+  // whichever table followed a large copy). on TCP the tail almost always
+  // shares a segment with copy data, so postgres parses it even while paused;
+  // a MessagePort has no segment coalescing, making the wedge deterministic.
+  // gating delivery also buys nothing here: an in-memory pipe has no transport
+  // buffer to relieve — the bytes occupy this isolate's heap whether they wait
+  // in the port queue or in the stream's buffer. so deliver everything.
   pause() {
-    this._paused = true
     return this
   }
 
   resume() {
-    this._paused = false
-    // flush buffered messages — exit if data handler re-pauses
-    while (this._pauseBuffer.length && !this._paused) {
-      this.emit('data', this._pauseBuffer.shift()!)
-    }
     return this
   }
 
