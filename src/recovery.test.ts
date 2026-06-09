@@ -18,7 +18,9 @@ import {
 
 // default startup-retry state: first failure, native mode with wasm allowed,
 // nothing tried yet. tests override only the fields they exercise.
-function startupState(overrides: Partial<ZeroStartupRetryState> = {}): ZeroStartupRetryState {
+function startupState(
+  overrides: Partial<ZeroStartupRetryState> = {}
+): ZeroStartupRetryState {
   return {
     plainRestarts: 0,
     maxRestarts: 3,
@@ -241,17 +243,22 @@ describe('zero recovery signatures', () => {
     })
 
     it('keeps restarting until the plain-restart budget is spent', () => {
-      expect(classifyZeroStartupRecovery('boom', startupState({ plainRestarts: 2 })).action).toBe(
-        'restart'
-      )
+      expect(
+        classifyZeroStartupRecovery('boom', startupState({ plainRestarts: 2 })).action
+      ).toBe('restart')
       // budget spent → escalate to one full reset
-      expect(classifyZeroStartupRecovery('boom', startupState({ plainRestarts: 3 }))).toEqual({
+      expect(
+        classifyZeroStartupRecovery('boom', startupState({ plainRestarts: 3 }))
+      ).toEqual({
         action: 'full-reset',
         reason: 'still crashing after restarts',
       })
       // full reset already tried → give up and surface the error
       expect(
-        classifyZeroStartupRecovery('boom', startupState({ plainRestarts: 3, didFullReset: true }))
+        classifyZeroStartupRecovery(
+          'boom',
+          startupState({ plainRestarts: 3, didFullReset: true })
+        )
       ).toEqual({ action: 'give-up', reason: 'unrecoverable startup crash' })
     })
 
@@ -278,10 +285,13 @@ describe('zero recovery signatures', () => {
 
     it('falls back to wasm once when native sqlite is missing and wasm is allowed', () => {
       expect(
-        classifyZeroStartupRecovery('Could not locate the bindings file', startupState({
-          nativeBinaryMissing: true,
-          canWasmFallback: true,
-        }))
+        classifyZeroStartupRecovery(
+          'Could not locate the bindings file',
+          startupState({
+            nativeBinaryMissing: true,
+            canWasmFallback: true,
+          })
+        )
       ).toEqual({ action: 'wasm-fallback', reason: 'native sqlite unavailable' })
     })
 
@@ -304,7 +314,11 @@ describe('zero recovery signatures', () => {
       expect(
         classifyZeroStartupRecovery(
           'Could not locate the bindings file',
-          startupState({ nativeBinaryMissing: true, canWasmFallback: false, didWasmFallback: true })
+          startupState({
+            nativeBinaryMissing: true,
+            canWasmFallback: false,
+            didWasmFallback: true,
+          })
         ).action
       ).toBe('give-up')
     })
