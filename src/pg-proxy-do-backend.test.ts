@@ -1604,10 +1604,8 @@ describe('DoBackend', () => {
       trackedBodies.map((body) => body.track.transactionID).filter(Boolean)
     )
     expect(transactionIDs.size).toBe(1)
-    expect(http.requests.some((url) => url.pathname === '/commit-tracked-tx')).toBe(true)
-    expect(http.requests.some((url) => url.pathname === '/rollback-tracked-tx')).toBe(
-      false
-    )
+    expect(http.requests.some((url) => url.pathname === '/commit-tx')).toBe(true)
+    expect(http.requests.some((url) => url.pathname === '/rollback-tx')).toBe(false)
   })
 
   test('drops deferred tracked replication signals on transaction rollback', async () => {
@@ -1643,10 +1641,8 @@ describe('DoBackend', () => {
     const trackedBodies = http.bodies.filter((body) => body.track)
     expect(trackedBodies).toHaveLength(1)
     expect(typeof trackedBodies[0].track.transactionID).toBe('string')
-    expect(http.requests.some((url) => url.pathname === '/commit-tracked-tx')).toBe(false)
-    expect(http.requests.some((url) => url.pathname === '/rollback-tracked-tx')).toBe(
-      true
-    )
+    expect(http.requests.some((url) => url.pathname === '/commit-tx')).toBe(false)
+    expect(http.requests.some((url) => url.pathname === '/rollback-tx')).toBe(true)
   })
 
   test('tracks full published rows while preserving client RETURNING projection', async () => {
@@ -2249,6 +2245,7 @@ describe('DoBackend', () => {
     await backend.execProtocolRaw(bindStatement())
     await backend.execProtocolRaw(executePortal())
 
+    // the snapshot and its journal manifest row land in one atomic /batch
     expect(
       http.sqls.some((sql) =>
         /CREATE TABLE "_orez_tx_.*_chat_0_clients" AS SELECT \* FROM "chat_0_clients"/.test(
@@ -2256,87 +2253,26 @@ describe('DoBackend', () => {
         )
       )
     ).toBe(true)
-    expect(http.requests.some((url) => url.pathname === '/batch')).toBe(true)
-    expect(
-      http.bodies.some(
-        (body) =>
-          Array.isArray(body.statements) &&
-          body.statements.some((sql: string) =>
-            /INSERT OR REPLACE INTO "chat_0_clients" SELECT \* FROM "_orez_tx_.*_chat_0_clients"/.test(
-              sql
-            )
-          )
-      )
-    ).toBe(true)
-  })
-
-  test('restores rollback snapshots without firing table triggers', async () => {
-    const triggerSQL =
-      'CREATE TRIGGER "clients_hash" AFTER INSERT ON "chat_0_clients" BEGIN SELECT md5(new."clientID"); END'
-    const http = await startDoHttp((sql) => {
-      const compact = compactSQL(sql)
-      if (compact.includes("WHERE type = 'trigger'")) {
-        return {
-          rows: [{ name: 'clients_hash', sql: triggerSQL }],
-          columns: ['name', 'sql'],
-        }
-      }
-      if (sql.includes('sqlite_master')) {
-        return { rows: [{ ok: 1 }], columns: ['ok'] }
-      }
-      if (compact.includes('RETURNING *')) {
-        return {
-          rows: [{ clientGroupID: 'cg', clientID: 'client-a', lastMutationID: 1 }],
-          columns: ['clientGroupID', 'clientID', 'lastMutationID'],
-        }
-      }
-      return { rows: [], columns: [] }
-    })
-    const backend = new DoBackend(
-      http.url,
-      'postgres',
-      'extended-tx-trigger-restore-test'
-    )
-    await backend.waitReady
-
-    await backend.execProtocolRaw(parseMessage('BEGIN'))
-    await backend.execProtocolRaw(bindStatement())
-    await backend.execProtocolRaw(executePortal())
-
-    await backend.execProtocolRaw(
-      parseMessage(`
-        INSERT INTO "chat_0"."clients" AS current
-          ("clientGroupID", "clientID", "lastMutationID")
-        VALUES ('cg', 'client-a', 1)
-        ON CONFLICT ("clientGroupID", "clientID")
-        DO UPDATE SET "lastMutationID" = current."lastMutationID" + 1
-        RETURNING "lastMutationID"
-      `)
-    )
-    await backend.execProtocolRaw(bindStatement())
-    await backend.execProtocolRaw(executePortal())
-
-    await backend.execProtocolRaw(parseMessage('ROLLBACK'))
-    await backend.execProtocolRaw(bindStatement())
-    await backend.execProtocolRaw(executePortal())
-
-    const batch = http.bodies.find(
+    const manifestBatch = http.bodies.find(
       (body) =>
         Array.isArray(body.statements) &&
-        body.statements.some((sql: string) =>
-          sql.includes('INSERT OR REPLACE INTO "chat_0_clients"')
+        body.statements.some(
+          (statement: any) =>
+            typeof statement === 'object' &&
+            statement.sql?.includes('INSERT INTO "_orez_tx_manifest"')
         )
     )
-    expect(batch).toBeTruthy()
-    const statements = batch.statements.map(compactSQL)
-    const dropIndex = statements.indexOf('DROP TRIGGER IF EXISTS "clients_hash"')
-    const insertIndex = statements.findIndex((sql: string) =>
-      sql.includes('INSERT OR REPLACE INTO "chat_0_clients"')
+    expect(manifestBatch).toBeTruthy()
+    const manifestInsert = manifestBatch.statements.find(
+      (statement: any) =>
+        typeof statement === 'object' &&
+        statement.sql?.includes('INSERT INTO "_orez_tx_manifest"')
     )
-    const recreateIndex = statements.indexOf(triggerSQL)
-    expect(dropIndex).toBeGreaterThanOrEqual(0)
-    expect(insertIndex).toBeGreaterThan(dropIndex)
-    expect(recreateIndex).toBeGreaterThan(insertIndex)
+    expect(manifestInsert.params?.[2]).toBe('chat_0_clients')
+    // rollback is ONE atomic server-side call carrying the journaled tx id
+    expect(http.requests.some((url) => url.pathname === '/rollback-tx')).toBe(true)
+    const rollbackBody = http.bodies.find((body) => body.transactionID)
+    expect(rollbackBody?.transactionID).toBe(manifestInsert.params?.[0])
   })
 
   test('returns command completion for parser-skipped extended statements', async () => {

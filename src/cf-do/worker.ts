@@ -2,6 +2,7 @@
 import { DurableObject } from 'cloudflare:workers'
 
 import { trackedChangeRow } from '../do-sql-tracking.js'
+import { commitTxJournal, recoverTxJournal, rollbackTxJournal } from './tx-journal.js'
 import { DurableWatermarkState } from './watermark.js'
 
 /**
@@ -163,10 +164,12 @@ export class ZeroDO extends DurableObject {
       return this.handleExec(request)
     if (url.pathname === '/batch' && request.method === 'POST')
       return this.handleBatch(request)
-    if (url.pathname === '/commit-tracked-tx' && request.method === 'POST')
-      return this.handleCommitTrackedTransaction(request)
-    if (url.pathname === '/rollback-tracked-tx' && request.method === 'POST')
-      return this.handleRollbackTrackedTransaction(request)
+    if (url.pathname === '/commit-tx' && request.method === 'POST')
+      return this.handleCommitTransaction(request)
+    if (url.pathname === '/rollback-tx' && request.method === 'POST')
+      return this.handleRollbackTransaction(request)
+    if (url.pathname === '/recover-txs' && request.method === 'POST')
+      return this.handleRecoverTransactions(request)
     if (
       url.pathname === '/changes' &&
       (request.method === 'GET' || request.method === 'POST')
@@ -480,29 +483,59 @@ export class ZeroDO extends DurableObject {
     }
   }
 
-  private async handleCommitTrackedTransaction(request: Request): Promise<Response> {
+  /**
+   * atomic commit point for a DoBackend-emulated pg transaction. promotes the
+   * tx's pending tracked changes into _zero_changes (allocating watermarks)
+   * and clears its journal (drops snapshots + manifest rows) in ONE storage
+   * transaction, so a DO kill can never leave a tx half-committed: either the
+   * manifest rows are gone (committed) or recovery rolls the tx back.
+   */
+  private async handleCommitTransaction(request: Request): Promise<Response> {
     try {
       const body = (await request.json()) as { transactionID?: unknown }
       const transactionID = String(body.transactionID || '')
       if (!transactionID) throw new Error('missing transactionID')
-      const count = await this.ctx.storage.transaction(() =>
-        this.commitPendingTrackedChanges(transactionID)
-      )
+      const count = await this.ctx.storage.transaction(() => {
+        const committed = this.commitPendingTrackedChanges(transactionID)
+        commitTxJournal(this.sql, transactionID)
+        return committed
+      })
       return Response.json({ ok: true, count })
     } catch (err: any) {
       return Response.json({ error: err.message }, { status: 500 })
     }
   }
 
-  private async handleRollbackTrackedTransaction(request: Request): Promise<Response> {
+  private async handleRollbackTransaction(request: Request): Promise<Response> {
     try {
       const body = (await request.json()) as { transactionID?: unknown }
       const transactionID = String(body.transactionID || '')
       if (!transactionID) throw new Error('missing transactionID')
-      const count = await this.ctx.storage.transaction(() =>
-        this.deletePendingTrackedChanges(transactionID)
-      )
+      const count = await this.ctx.storage.transaction(() => {
+        rollbackTxJournal(this.sql, transactionID)
+        return this.deletePendingTrackedChanges(transactionID)
+      })
       return Response.json({ ok: true, count })
+    } catch (err: any) {
+      return Response.json({ error: err.message }, { status: 500 })
+    }
+  }
+
+  /**
+   * roll back orphaned transactions for a dead process generation. callers
+   * (e.g. the zero-cache embed at boot, before opening pg sessions) own the
+   * liveness guarantee: every journaled tx for `owner` is dead.
+   */
+  private async handleRecoverTransactions(request: Request): Promise<Response> {
+    try {
+      const body = (await request.json().catch(() => ({}))) as { owner?: unknown }
+      const owner = body.owner === undefined ? undefined : String(body.owner)
+      const transactionIDs = await this.ctx.storage.transaction(() => {
+        const recovered = recoverTxJournal(this.sql, owner)
+        for (const txID of recovered) this.deletePendingTrackedChanges(txID)
+        return recovered
+      })
+      return Response.json({ ok: true, transactionIDs })
     } catch (err: any) {
       return Response.json({ error: err.message }, { status: 500 })
     }

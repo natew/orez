@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
+import { TX_MANIFEST_DDL, TX_MANIFEST_TABLE } from './cf-do/tx-journal.js'
 import { RETURNING_INTERNAL_PREFIX } from './do-sql-tracking.js'
 import { signalReplicationChange } from './replication/handler.js'
 import {
@@ -5063,15 +5064,23 @@ export class DoBackend {
   private txMetadataDirty = false
   private txHasTrackedWrite = false
 
+  // identifies the client process generation owning this backend's
+  // transactions in the durable tx journal. a process that knows its previous
+  // generation is dead (e.g. the zero-cache embed at boot) recovers orphaned
+  // transactions for its own owner id only, so it can never roll back another
+  // live client's in-flight transaction.
+  private txOwner: string
+
   constructor(
     doUrl: string,
     dbName: string = 'postgres',
     namespace = 'default',
-    opts?: { fetch?: typeof fetch }
+    opts?: { fetch?: typeof fetch; txOwner?: string }
   ) {
     this.doUrl = doUrl.replace(/\/+$/, '')
     this.dbName = dbName
     this.namespace = namespace
+    this.txOwner = opts?.txOwner || 'default'
     this.httpClient = new HttpClient(opts?.fetch)
     this.skippedFunctionNames = getSkippedFunctionNames(dbName, namespace)
     this.triggerFunctions = new Map()
@@ -5123,6 +5132,9 @@ export class DoBackend {
     )
     await this.doExecResult(
       "CREATE TABLE IF NOT EXISTS \"_orez__zero_replication_slots\" (slot_name TEXT PRIMARY KEY, restart_lsn TEXT NOT NULL DEFAULT '0/1000000', confirmed_flush_lsn TEXT NOT NULL DEFAULT '0/1000000', wal_status TEXT NOT NULL DEFAULT 'reserved', plugin TEXT NOT NULL DEFAULT 'pgoutput', slot_type TEXT NOT NULL DEFAULT 'logical', active INTEGER NOT NULL DEFAULT 0, active_pid INTEGER DEFAULT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()))"
+    )
+    await this.doExecResult(
+      'CREATE TABLE IF NOT EXISTS "_orez___zero_streamed_batches" (batch_lsn INTEGER PRIMARY KEY, batch_end INTEGER NOT NULL)'
     )
   }
 
@@ -5381,8 +5393,16 @@ export class DoBackend {
     const shouldPersist = this.txMetadataDirty
     const shouldSignal = this.txHasTrackedWrite
     const txID = this.txID
-    if (shouldSignal && txID) await this.commitTrackedTransaction(txID)
-    await this.dropTransactionSnapshots()
+    // ONE atomic commit point on the backend: promotes pending tracked
+    // changes and clears the tx journal (snapshots + manifest) in a single
+    // storage transaction. read-only transactions skip the round-trip.
+    if (txID && (shouldSignal || this.txDataSnapshots.size > 0)) {
+      await this.httpClient.post(
+        this.url('/commit-tx'),
+        JSON.stringify({ transactionID: txID }),
+        { 'Content-Type': 'application/json' }
+      )
+    }
     this.clearTransactionState()
     if (shouldPersist) await this.persistDurableMetadata()
     if (shouldSignal) signalReplicationChange()
@@ -5396,29 +5416,20 @@ export class DoBackend {
     const snapshot = this.txSnapshot
     const txID = this.txID
     try {
-      await this.restoreTransactionDataSnapshots()
+      // ONE atomic rollback on the backend: restores snapshotted tables from
+      // the durable tx journal and discards pending tracked changes.
+      if (txID && (this.txHasTrackedWrite || this.txDataSnapshots.size > 0)) {
+        await this.httpClient.post(
+          this.url('/rollback-tx'),
+          JSON.stringify({ transactionID: txID }),
+          { 'Content-Type': 'application/json' }
+        )
+      }
     } finally {
-      if (txID) await this.rollbackTrackedTransaction(txID)
       if (snapshot) this.restoreTransactionMetadataSnapshot(snapshot)
       await this.persistDurableMetadata()
       this.clearTransactionState()
     }
-  }
-
-  private async commitTrackedTransaction(transactionID: string): Promise<void> {
-    await this.httpClient.post(
-      this.url('/commit-tracked-tx'),
-      JSON.stringify({ transactionID }),
-      { 'Content-Type': 'application/json' }
-    )
-  }
-
-  private async rollbackTrackedTransaction(transactionID: string): Promise<void> {
-    await this.httpClient.post(
-      this.url('/rollback-tracked-tx'),
-      JSON.stringify({ transactionID }),
-      { 'Content-Type': 'application/json' }
-    )
   }
 
   async execProtocolRaw(
@@ -6334,24 +6345,6 @@ export class DoBackend {
     return result.rows.length > 0
   }
 
-  private async triggerDefinitionsForTables(
-    tables: string[]
-  ): Promise<{ name: string; sql: string }[]> {
-    const uniqueTables = [...new Set(tables)].filter(Boolean)
-    if (uniqueTables.length === 0) return []
-    const placeholders = uniqueTables.map(() => '?').join(', ')
-    const result = await this.doExecResult(
-      `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name IN (${placeholders}) ORDER BY name`,
-      uniqueTables
-    )
-    return result.rows
-      .map((row) => ({
-        name: String(row.name ?? ''),
-        sql: String(row.sql ?? ''),
-      }))
-      .filter((trigger) => trigger.name && trigger.sql)
-  }
-
   private async snapshotTransactionTable(table: string): Promise<void> {
     if (!this.inTransaction || this.txDataSnapshots.has(table)) return
     if (table.startsWith('_orez_tx_')) return
@@ -6359,14 +6352,22 @@ export class DoBackend {
     // the table — registration only happens after a successful CREATE, so its
     // presence is proof the table exists. saves one /exec on the first write
     // to each table per tx, which on chat's hot mutation paths matters.
-    if (!this.schemaMetadata.has(table) && !(await this.tableExistsInDo(table))) {
-      this.txDataSnapshots.set(table, null)
-      return
+    const exists = this.schemaMetadata.has(table) || (await this.tableExistsInDo(table))
+    // snapshot + manifest row land in one atomic /batch, so a DO kill at any
+    // point leaves either no trace or a journal entry recovery can roll back.
+    // the DDL is idempotent and rides the same batch (no extra round-trip).
+    const snapshot = exists ? this.transactionSnapshotName(table) : null
+    const statements: Array<{ sql: string; params?: any[] }> = [{ sql: TX_MANIFEST_DDL }]
+    if (snapshot) {
+      statements.push({
+        sql: `CREATE TABLE ${quoteIdentifier(snapshot)} AS SELECT * FROM ${quoteIdentifier(table)}`,
+      })
     }
-    const snapshot = this.transactionSnapshotName(table)
-    await this.doExecResult(
-      `CREATE TABLE ${quoteIdentifier(snapshot)} AS SELECT * FROM ${quoteIdentifier(table)}`
-    )
+    statements.push({
+      sql: `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, ?, ?, ?)`,
+      params: [this.txID, this.txOwner, table, snapshot],
+    })
+    await this.doRawBatch(statements)
     this.txDataSnapshots.set(table, snapshot)
   }
 
@@ -6391,43 +6392,12 @@ export class DoBackend {
     if (this.trackingForStatement(statement)) await this.snapshotTransactionChangeTables()
   }
 
-  private async dropTransactionSnapshots(): Promise<void> {
-    const drops: string[] = []
-    for (const snapshot of this.txDataSnapshots.values()) {
-      if (snapshot) drops.push(`DROP TABLE IF EXISTS ${quoteIdentifier(snapshot)}`)
-    }
-    if (drops.length > 0) await this.doRawBatch(drops)
-  }
-
-  private async restoreTransactionDataSnapshots(): Promise<void> {
-    const entries = [...this.txDataSnapshots.entries()].reverse()
-    const restoredTables = entries
-      .filter(([, snapshot]) => Boolean(snapshot))
-      .map(([table]) => table)
-    const triggers = await this.triggerDefinitionsForTables(restoredTables)
-    const statements: string[] = []
-    for (const trigger of triggers) {
-      statements.push(`DROP TRIGGER IF EXISTS ${quoteIdentifier(trigger.name)}`)
-    }
-    for (const [table, snapshot] of entries) {
-      const quotedTable = quoteIdentifier(table)
-      if (!snapshot) {
-        statements.push(`DROP TABLE IF EXISTS ${quotedTable}`)
-        continue
-      }
-      const quotedSnapshot = quoteIdentifier(snapshot)
-      statements.push(
-        `DELETE FROM ${quotedTable}`,
-        `INSERT OR REPLACE INTO ${quotedTable} SELECT * FROM ${quotedSnapshot}`,
-        `DROP TABLE IF EXISTS ${quotedSnapshot}`
-      )
-    }
-    for (const trigger of triggers) statements.push(trigger.sql)
-    await this.doRawBatch(statements)
-  }
-
-  private async doRawBatch(statements: string[]): Promise<void> {
-    const sqls = statements.filter((sql) => sql.trim())
+  private async doRawBatch(
+    statements: Array<string | { sql: string; params?: any[] }>
+  ): Promise<void> {
+    const sqls = statements.filter((statement) =>
+      (typeof statement === 'string' ? statement : statement.sql).trim()
+    )
     if (sqls.length === 0) return
     await this.httpClient.post(this.url('/batch'), JSON.stringify({ statements: sqls }), {
       'Content-Type': 'application/json',
