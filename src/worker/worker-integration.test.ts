@@ -82,6 +82,9 @@ describe('orez/worker integration', { timeout: 30000 }, () => {
     expect(changes[2].old_data).toMatchObject({ id: 'row1', value: 'updated' })
   })
 
+  // explicit trailing timeout: bun test ignores the describe-level vitest
+  // timeout options object and would kill these >5s streaming tests at its
+  // 5s default. the trailing number form is honored by vitest AND bun.
   it('InProcessWriter receives pgoutput stream from replication', async () => {
     const received: Uint8Array[] = []
     const writer = new InProcessWriter((data) => received.push(new Uint8Array(data)))
@@ -119,7 +122,7 @@ describe('orez/worker integration', { timeout: 30000 }, () => {
     expect(allTypes).toContain(0x52) // RELATION
     expect(allTypes).toContain(0x49) // INSERT
     expect(allTypes).toContain(0x43) // COMMIT
-  })
+  }, 15000)
 
   it('watermarks advance monotonically', async () => {
     const watermarks: number[] = []
@@ -222,5 +225,5 @@ describe('orez/worker integration', { timeout: 30000 }, () => {
     const commits = allTypes.filter((t) => t === 0x43).length
     expect(begins).toBe(commits)
     expect(begins).toBeGreaterThanOrEqual(1)
-  })
+  }, 15000)
 })
