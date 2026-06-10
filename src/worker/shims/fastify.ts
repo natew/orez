@@ -302,5 +302,18 @@ function Fastify(_opts?: unknown): FastifyShim {
   return instance
 }
 
+/**
+ * drop every registered fastify instance. called at embed generation begin
+ * (the embed restart contract — see ../embed-generation.ts): a dead
+ * generation's instances otherwise stay in the registry, and the ws shim's
+ * handoff loop matches the dead change-streamer's routes first — the new
+ * generation's replicator then subscribes to a server that never answers
+ * and boot hangs silently.
+ */
+export function resetFastifyRegistry(): void {
+  delete (globalThis as any).__orez_fastify_instance
+  ;(globalThis as any).__orez_fastify_instances = []
+}
+
 export default Fastify
 export type { FastifyRequest, FastifyReply, FastifyShim }

@@ -11,6 +11,10 @@ const BetterSqlite3 = BedrockSqlite.Database
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import {
+  openSqliteHandleRegistry,
+  sweepLeakedSqliteHandles,
+} from '../embed-generation.js'
+import {
   Database,
   Statement,
   StatementRunner,
@@ -177,6 +181,47 @@ describe('Database', () => {
 
   it('defaultSafeIntegers is a no-op that returns this', () => {
     expect(db.defaultSafeIntegers(true)).toBe(db)
+  })
+})
+
+// embed restart contract: string-path construction (the zero-cache alias
+// path) registers the handle so a later embed generation can reclaim it.
+// object construction (app DOs) must never be registered or swept.
+describe('Database embed handle registry', () => {
+  let mock: SqlStorageLike & { _nativeDb: any }
+
+  beforeEach(() => {
+    mock = createMockSqlStorage() as SqlStorageLike & { _nativeDb: any }
+    ;(globalThis as any).__orez_do_sqlite = mock
+    sweepLeakedSqliteHandles() // start each test from an empty registry
+  })
+
+  afterEach(() => {
+    sweepLeakedSqliteHandles()
+    delete (globalThis as any).__orez_do_sqlite
+    mock._nativeDb.close()
+  })
+
+  it('registers string-path handles and deregisters on close', () => {
+    const db = new Database(':do-sqlite:' as unknown as SqlStorageLike)
+    expect(openSqliteHandleRegistry().has(db)).toBe(true)
+    db.close()
+    expect(openSqliteHandleRegistry().has(db)).toBe(false)
+    expect(openSqliteHandleRegistry().size).toBe(0)
+  })
+
+  it('does not register object-storage handles (app DO usage)', () => {
+    const db = new Database(mock)
+    expect(openSqliteHandleRegistry().size).toBe(0)
+    db.close()
+  })
+
+  it('sweep closes leaked handles from a dead generation', () => {
+    const leaked = new Database(':do-sqlite:' as unknown as SqlStorageLike)
+    expect(leaked.open).toBe(true)
+    expect(sweepLeakedSqliteHandles()).toBe(1)
+    expect(leaked.open).toBe(false)
+    expect(openSqliteHandleRegistry().size).toBe(0)
   })
 })
 

@@ -1,6 +1,49 @@
 # CF DO idle hibernation — sleep the zero-cache embed once no one is connected
 
-status: in progress (2026-06-08)
+status: in progress (2026-06-08) · embed restart contract landed (2026-06-10)
+
+## embed restart contract (2026-06-10)
+
+The gen-2 wedge that forced hibernation off on the SootBean demo is RCA'd and
+fixed. A second embed generation in one isolate inherited everything the dead
+generation never released — zero-cache is designed for process-per-worker
+lifecycles and relies on **process death** for final cleanup, which an embed
+teardown never provides. Two concrete leak classes, both reproduced in node
+(`src/integration/embed-restart.test.ts`, the CF data plane wired exactly like
+`startZeroCacheEmbedCF`):
+
+1. **sqlite handles zero-cache never closes on drain.** The syncer worker's
+   `MutagenService` keeps the **replica** open, its two `DatabaseStorage` tmp
+   dbs are never closed, and `runUntilKilled` fires service `stop()`s without
+   awaiting them. Gen-2's replicator then dies on `journal_mode = delete` with
+   SQLITE_BUSY (node), and on CF the leaked shim handles pin stale
+   copy-on-write reader snapshots.
+2. **the fastify/ws shim instance registry.** `__orez_fastify_instances` only
+   ever grew; the ws shim's handoff loop matches the **dead** generation's
+   change-streamer routes first, so gen-2's replicator subscribes to a server
+   that never answers — boot hangs silently right after pg-client creation
+   (the live-observed stall signature).
+
+The contract: **starting a new embed generation proves the previous one is
+dead, so the embed reclaims at START exactly what process death would have**
+(`src/worker/embed-generation.ts`). Every sqlite handle zero-cache opens is
+registered in `globalThis.__orez_open_sqlite_dbs` at the platform's native
+seam — node: pure-tracking on-disk patch of zqlite's `Database`
+(`src/zero-sqlite-handle-patch.ts`, same pattern as the litestream patch);
+CF: the DO sqlite shim registers its string-path constructions (app DOs pass
+storage objects and are never swept). Both embeds sweep leftovers at start and
+the CF embed also resets the fastify registry (`resetFastifyRegistry()`).
+Start-time (not stop-time) reclamation also covers generations that crashed
+without running stop(), like a process supervisor restarting a dead worker.
+No zero-cache runtime semantics change — only the lifecycle boundary a fresh
+process would naturally give.
+
+Validation: `embed-restart.test.ts` runs gen-1 cold start → hydrate → live
+insert → teardown → gen-2 warm start **in the same process** → re-hydrate +
+live replication resumes (green; was a 45s ready-timeout before the fix).
+Workerd-level validation is still gated by the documented Miniflare pg
+CJS-interop blocker below; the authoritative CF proof remains a real deploy
+with low idle timings.
 
 ## goal
 

@@ -22,6 +22,8 @@
  *   }
  */
 
+import { openSqliteHandleRegistry } from '../embed-generation.js'
+
 // -- abstract interface for DO SqlStorage --
 
 export type SqlStorageValue = string | number | null | ArrayBuffer
@@ -911,6 +913,12 @@ export class Database {
       }
       this.#sql = storage
       this.name = sqlOrFilename
+      // string-path construction only happens through zero-cache (the alias
+      // for @rocicorp/zero-sqlite3); register the handle so the next embed
+      // generation can reclaim it if this generation dies without closing
+      // (the embed restart contract — see ../embed-generation.ts). app DOs
+      // construct with a storage object and are never swept.
+      openSqliteHandleRegistry().add(this)
     } else {
       this.#sql = sqlOrFilename
       this.name = ':do-storage:'
@@ -1307,6 +1315,7 @@ export class Database {
 
   /** close the database connection */
   close(): this {
+    openSqliteHandleRegistry().delete(this)
     this.#dropSnapshot()
     activeSnapshotPrefixes.delete(this.#snapshotPrefix)
     this.#open = false

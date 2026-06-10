@@ -55,7 +55,9 @@ import {
   type DurableObjectWebSocketHandoffContext,
   type HandoffRequestMessage,
 } from './durable-object-websocket-handoff.js'
+import { sweepLeakedSqliteHandles } from './embed-generation.js'
 import { createLocalSqlBackend } from './local-sql-backend.js'
+import { resetFastifyRegistry } from './shims/fastify.js'
 
 const runWorkerFn = _runWorker as (
   parent: unknown,
@@ -179,6 +181,19 @@ export async function startZeroCacheEmbedCF(
   // the reconnect reconciliation in handleStartReplication is designed to
   // resume from durable state, not from a prior generation's module vars.
   resetReplicationState()
+
+  // embed restart contract (see ./embed-generation.ts): reclaim what process
+  // death would have — sqlite handles the dead generation never closed
+  // (zero-cache relies on process-per-worker exit for these), and the
+  // fastify/ws shim instance registry (a dead change-streamer otherwise
+  // captures the new generation's replicator subscription and boot hangs).
+  const leakedHandles = sweepLeakedSqliteHandles()
+  if (leakedHandles > 0) {
+    console.warn(
+      `[orez-zero-cache-cf] closed ${leakedHandles} sqlite handles leaked by the previous embed generation`
+    )
+  }
+  resetFastifyRegistry()
 
   const appId = opts.appId || 'zero'
   const publications = opts.publications?.join(',') || `orez_${appId}_public`

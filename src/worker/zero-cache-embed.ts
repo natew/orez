@@ -26,6 +26,8 @@ import { EventEmitter } from 'node:events'
 import { resolve } from 'node:path'
 
 import { disableZeroLitestreamRestore } from '../zero-litestream-patch.js'
+import { installZeroSqliteHandleRegistry } from '../zero-sqlite-handle-patch.js'
+import { sweepLeakedSqliteHandles } from './embed-generation.js'
 
 import type { PGlite } from '@electric-sql/pglite'
 
@@ -176,6 +178,21 @@ export async function startZeroCacheEmbed(
   // change-streamer from erroring + resyncing on every restart. must run before
   // the dynamic import below pulls in the litestream commands module.
   disableZeroLitestreamRestore()
+
+  // embed restart contract (see ./embed-generation.ts): track every sqlite
+  // handle zero-cache opens (pure-tracking patch, must land before the
+  // dynamic import below loads zqlite), then reclaim whatever a dead prior
+  // generation in this process left open — zero-cache relies on
+  // process-per-worker death for that cleanup (e.g. the syncer's
+  // MutagenService keeps the replica open; a leftover handle wedges the next
+  // generation's `journal_mode` switch with SQLITE_BUSY).
+  installZeroSqliteHandleRegistry()
+  const leakedHandles = sweepLeakedSqliteHandles()
+  if (leakedHandles > 0) {
+    console.warn(
+      `[orez-zero-cache-embed] closed ${leakedHandles} sqlite handles leaked by the previous embed generation`
+    )
+  }
 
   // import and start zero-cache's runner
   let runWorkerFn: (parent: unknown, env: Record<string, string>) => Promise<void>

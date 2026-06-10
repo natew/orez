@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
-import Fastify, { type FastifyShim } from './fastify.js'
+import Fastify, { resetFastifyRegistry, type FastifyShim } from './fastify.js'
 
 describe('Fastify shim', () => {
   let app: FastifyShim
@@ -27,6 +27,29 @@ describe('Fastify shim', () => {
 
     it('registers itself on globalThis', () => {
       expect((globalThis as any).__orez_fastify_instance).toBe(app)
+      expect((globalThis as any).__orez_fastify_instances).toContain(app)
+    })
+  })
+
+  // embed restart contract: a new embed generation drops the dead
+  // generation's instances so the ws shim's handoff loop can't route a
+  // fresh replicator subscription to a dead change-streamer.
+  describe('resetFastifyRegistry', () => {
+    it('clears all registered instances', () => {
+      const second = Fastify()
+      expect((globalThis as any).__orez_fastify_instances.length).toBeGreaterThanOrEqual(
+        2
+      )
+
+      resetFastifyRegistry()
+      expect((globalThis as any).__orez_fastify_instance).toBeUndefined()
+      expect((globalThis as any).__orez_fastify_instances).toEqual([])
+
+      // the next generation registers fresh
+      const next = Fastify()
+      expect((globalThis as any).__orez_fastify_instance).toBe(next)
+      expect((globalThis as any).__orez_fastify_instances).toEqual([next])
+      expect((globalThis as any).__orez_fastify_instances).not.toContain(second)
     })
   })
 
