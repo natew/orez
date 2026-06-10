@@ -46,6 +46,7 @@ import { EventEmitter } from 'node:events'
 import { runWorker as _runWorker } from '@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js'
 
 import { createBrowserProxy, type BrowserProxy } from '../pg-proxy-browser.js'
+import { setLogLevel } from '../log.js'
 import { DoBackend } from '../pg-proxy-do-backend.js'
 import {
   DurableObjectWebSocketHandoff,
@@ -148,6 +149,10 @@ function addProtocolSessionFactory(
 export async function startZeroCacheEmbedCF(
   opts: ZeroCacheEmbedCFOptions
 ): Promise<ZeroCacheEmbedCF> {
+  // wire orez's own logger from env, mirroring the node path's setLogLevel
+  // (index.ts). without this, OREZ_LOG_LEVEL=debug on a CF deploy is silently
+  // ignored and the replication poll loop is undebuggable in tails.
+  setLogLevel((opts.env?.OREZ_LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'warn')
   const appId = opts.appId || 'zero'
   const publications = opts.publications?.join(',') || `orez_${appId}_public`
   const readyTimeout = opts.readyTimeout ?? 30000
