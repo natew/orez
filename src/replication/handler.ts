@@ -12,6 +12,7 @@ const textEncoder = new TextEncoder()
 import {
   getChangesSince,
   getCurrentWatermark,
+  getStreamResumeWatermark,
   purgeConsumedChanges,
   installTriggersOnShardTables,
   type ChangeRecord,
@@ -436,24 +437,27 @@ export async function handleStartReplication(
   // resume from where the previous handler left off to avoid
   // replaying already-streamed changes after reconnect.
   // when client supplied a NON-ZERO LSN (i.e. this is a reconnect to an
-  // existing slot with prior progress), also bump lastStreamedWatermark to
-  // the current sequence value — anything before that has already been
-  // written to changeLog, so re-streaming would just produce duplicate-key
-  // errors. `0/0` indicates "fresh slot" and must NOT trigger this jump,
-  // otherwise we'd skip rows that legitimately need to be streamed for the
-  // initial sync.
+  // existing slot with prior progress), bump lastStreamedWatermark to the
+  // stream-resume floor: one below the oldest still-pending _zero_changes
+  // row. purge-on-stream deletes delivered rows, so remaining rows were NOT
+  // streamed — jumping to the current sequence value instead (the old
+  // behavior) silently skipped every row written while the streaming process
+  // was down (DO teardown/eviction, page reload) and those writes never
+  // reached the replica. `0/0` indicates "fresh slot" and must NOT trigger
+  // this jump, otherwise we'd skip rows that legitimately need to be
+  // streamed for the initial sync.
   if (clientStartLsn !== null && clientStartLsn > 0n) {
     try {
-      const currentWm = await getCurrentWatermark(db)
-      if (currentWm > lastStreamedWatermark) {
+      const resumeWm = await getStreamResumeWatermark(db)
+      if (resumeWm > lastStreamedWatermark) {
         log.debug.repl(
-          `advancing lastStreamedWatermark ${lastStreamedWatermark} → ${currentWm} on reconnect`
+          `advancing lastStreamedWatermark ${lastStreamedWatermark} → ${resumeWm} on reconnect`
         )
-        lastStreamedWatermark = currentWm
+        lastStreamedWatermark = resumeWm
       }
     } catch (err) {
       log.repl(
-        `getCurrentWatermark failed on reconnect: ${(err as Error)?.message || err}`
+        `getStreamResumeWatermark failed on reconnect: ${(err as Error)?.message || err}`
       )
     }
   }

@@ -8,6 +8,7 @@ import {
   purgeConsumedChanges,
   getChangesSince,
   getCurrentWatermark,
+  getStreamResumeWatermark,
 } from './change-tracker'
 
 describe('change-tracker', () => {
@@ -202,6 +203,31 @@ describe('change-tracker', () => {
     expect(special).toHaveLength(1)
     expect(special[0].op).toBe('INSERT')
     expect(special[0].row_data).toMatchObject({ val: 'works' })
+  })
+
+  it('stream-resume floor covers rows written while the streamer was down', async () => {
+    // streamed + purged: rows 1-2 delivered by a previous streamer life
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('a', 1)`)
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('b', 2)`)
+    const streamed = await getChangesSince(db, 0)
+    await purgeConsumedChanges(db, streamed[streamed.length - 1].watermark)
+
+    // written while no streamer was alive (DO teardown / page reload gap)
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('c', 3)`)
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('d', 4)`)
+
+    const resume = await getStreamResumeWatermark(db)
+    const pending = await getChangesSince(db, resume)
+    expect(pending.map((c) => c.row_data?.name)).toEqual(['c', 'd'])
+  })
+
+  it('stream-resume floor equals current watermark when nothing is pending', async () => {
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('a', 1)`)
+    const streamed = await getChangesSince(db, 0)
+    await purgeConsumedChanges(db, streamed[streamed.length - 1].watermark)
+
+    expect(await getStreamResumeWatermark(db)).toBe(await getCurrentWatermark(db))
+    expect(await getChangesSince(db, await getStreamResumeWatermark(db))).toHaveLength(0)
   })
 })
 

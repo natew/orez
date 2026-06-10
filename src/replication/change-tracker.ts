@@ -277,3 +277,20 @@ export async function getCurrentWatermark(db: ChangeTrackingDb): Promise<number>
   if (!is_called) return 0
   return Number(last_value)
 }
+
+/**
+ * resume floor for a reconnecting streamer: one below the oldest still-pending
+ * change row. purge-on-stream deletes delivered rows, so the table itself is
+ * the durable record — anything remaining was NOT yet streamed, even when the
+ * streaming process died (DO teardown/eviction, page reload) while writers
+ * kept appending. an empty table means nothing is pending: resume from the
+ * current watermark.
+ */
+export async function getStreamResumeWatermark(db: ChangeTrackingDb): Promise<number> {
+  const result = await db.query<{ lo: string | number | null }>(
+    'SELECT MIN(watermark) AS lo FROM _orez._zero_changes'
+  )
+  const lo = result.rows[0]?.lo
+  if (lo === null || lo === undefined) return getCurrentWatermark(db)
+  return Number(lo) - 1
+}
