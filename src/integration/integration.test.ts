@@ -99,7 +99,7 @@ describe('orez integration', { timeout: 120000 }, () => {
       pgPort: testPgPort,
       zeroPort: testZeroPort,
       dataDir,
-      logLevel: 'info',
+      logLevel: (process.env.OREZ_TEST_LOG_LEVEL as 'info' | 'debug') || 'info',
       skipZeroCache: false,
       ...(process.env.FORCE_WASM === '1' ? { forceWasmSqlite: true } : {}),
     })
@@ -425,6 +425,74 @@ describe('orez integration', { timeout: 120000 }, () => {
 
     ws.close()
   })
+
+  // warm restart: zero-cache reconnects to an EXISTING slot (non-zero resume
+  // LSN through handleStartReplication's reconnect reconciliation) and serves
+  // an existing CVR. this is the CF idle-hibernation cycle — the embed is
+  // torn down once clients disconnect and the next connection cold-starts
+  // zero-cache against the durable replica + cvr. a regression here hangs
+  // every warm reconnect while the first connection works.
+  test(
+    'warm zero-cache restart: reconnect resumes sync',
+    { timeout: 90000 },
+    async () => {
+      expect(restartZero).toBeDefined()
+
+      // first generation: sync a row so the slot has confirmed progress
+      {
+        const downstream = new Queue<unknown>()
+        const ws = connectAndSubscribe(zeroPort, downstream, {
+          table: 'foo',
+          orderBy: [['id', 'asc']],
+        })
+        await drainInitialPokes(downstream)
+        await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+          'warm-gen1',
+          'before-restart',
+          1,
+        ])
+        await waitForRowPatch(
+          downstream,
+          (row) => row.op === 'put' && row.value?.id === 'warm-gen1',
+          30000,
+          'warm-gen1 put'
+        )
+        ws.close()
+      }
+
+      // restart zero-cache, keeping the replica (warm reconnect path)
+      await restartZero!()
+      await waitForZero(zeroPort, 60000)
+
+      // second generation: an existing client group must hydrate again and
+      // live replication must resume
+      const downstream = new Queue<unknown>()
+      const ws = connectAndSubscribe(zeroPort, downstream, {
+        table: 'foo',
+        orderBy: [['id', 'asc']],
+      })
+      await waitForRowPatch(
+        downstream,
+        (row) => row.op === 'put' && row.value?.id === 'warm-gen1',
+        30000,
+        'warm-gen1 re-hydrate after restart'
+      )
+
+      await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+        'warm-gen2',
+        'after-restart',
+        2,
+      ])
+      await waitForRowPatch(
+        downstream,
+        (row) => row.op === 'put' && row.value?.id === 'warm-gen2',
+        30000,
+        'warm-gen2 put after restart'
+      )
+
+      ws.close()
+    }
+  )
 
   // --- helpers ---
 
