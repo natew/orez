@@ -31,9 +31,16 @@ The orez Cloudflare path is therefore:
 │                                                                │
 │ startZeroCacheEmbedCF() runs real zero-cache in-process        │
 │   │                                                            │
-│   ├─ zero-cache replica/CVR/CDB SQLite                         │
+│   ├─ zero-cache replica SQLite                                 │
 │   │    @rocicorp/zero-sqlite3 -> orez worker SQLite shim       │
 │   │    backed by ctx.storage.sql                               │
+│   │                                                            │
+│   ├─ zero-cache CVR + change-DB Postgres connections           │
+│   │    postgres -> orez postgres browser shim                  │
+│   │    DoBackend -> embed-LOCAL SQL backend (this DO's         │
+│   │    ctx.storage.sql, zero cross-DO hops — CVR statements    │
+│   │    are private view-syncer state; see                      │
+│   │    src/worker/local-sql-backend.ts)                        │
 │   │                                                            │
 │   └─ zero-cache upstream Postgres connections                  │
 │        postgres -> orez postgres browser shim                  │
@@ -44,7 +51,8 @@ The orez Cloudflare path is therefore:
 │ ZERO_SQL_DO Durable Object                                     │
 │                                                                │
 │ ZeroDO raw SQL endpoints                                       │
-│   /exec, /batch, /changes, /notify, /__orez/*                  │
+│   /exec, /batch, /commit-tx, /rollback-tx, /recover-txs,       │
+│   /changes, /notify, /__orez/*                                 │
 │   ctx.storage.sql                                              │
 │   _orez.changes populated by SQL tracking triggers             │
 └────────────────────────────────────────────────────────────────┘
@@ -69,6 +77,27 @@ same zero-cache process and durable SQLite state.
   zero-cache through `startZeroCacheEmbedCF()`.
 - `src/do-sql-tracking.ts` and `src/replication/*` - change tracking and
   logical replication support over `_orez.changes`.
+- `src/worker/local-sql-backend.ts` - serves the DoBackend HTTP protocol
+  against the embed DO's own storage for the CVR/change DBs (no cross-DO hop).
+- `src/cf-do/tx-journal.ts` - durable journal for DoBackend's emulated pg
+  transactions: snapshots are recorded atomically with creation, COMMIT is one
+  atomic storage transaction, and recovery at embed boot rolls back any
+  transaction a dead DO generation left mid-flight (otherwise a deploy
+  upgrade-kill mid-storer-write persists a partial cdc changeLog tx and wedges
+  replication permanently).
+
+## Crash-safety + flow control invariants
+
+- A DoBackend pg transaction is committed if and only if its
+  `_orez_tx_manifest` rows are gone. Anything else is rolled back by
+  `recoverTxJournal` on the next embed boot (owner-scoped, so the app
+  worker's live pg sessions are never touched).
+- `_zero_changes` rows are purged only when the consumer CONFIRMS them
+  (standby status updates / the resume LSN of a reconnect), mirroring how
+  real postgres retains WAL until the slot's confirmed_flush_lsn passes it.
+  A consumer killed between stream and store re-streams the transaction
+  instead of silently losing it; the lsn→watermark batch mapping lives in
+  `_orez._zero_streamed_batches`.
 
 ## What not to do
 

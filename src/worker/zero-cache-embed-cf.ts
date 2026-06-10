@@ -45,8 +45,8 @@ import { EventEmitter } from 'node:events'
 // @ts-expect-error — internal zero-cache module, no type declarations
 import { runWorker as _runWorker } from '@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js'
 
-import { createBrowserProxy, type BrowserProxy } from '../pg-proxy-browser.js'
 import { setLogLevel } from '../log.js'
+import { createBrowserProxy, type BrowserProxy } from '../pg-proxy-browser.js'
 import { DoBackend } from '../pg-proxy-do-backend.js'
 import {
   DurableObjectWebSocketHandoff,
@@ -54,6 +54,7 @@ import {
   type DurableObjectWebSocketHandoffContext,
   type HandoffRequestMessage,
 } from './durable-object-websocket-handoff.js'
+import { createLocalSqlBackend } from './local-sql-backend.js'
 
 const runWorkerFn = _runWorker as (
   parent: unknown,
@@ -64,10 +65,7 @@ export interface ZeroCacheEmbedCFOptions {
   /** DO SQLite storage (also registered on globalThis.__orez_do_sqlite) */
   doSqlite: unknown
 
-  /**
-   * base URL for the DO SQL execution endpoints (`/exec`, `/batch`).
-   * ignored when `backends` is supplied.
-   */
+  /** base URL for the DO SQL execution endpoints (`/exec`, `/batch`). */
   backendUrl?: string
 
   /** custom fetch used by DoBackend; lets a DO route directly to another DO stub. */
@@ -75,13 +73,6 @@ export interface ZeroCacheEmbedCFOptions {
 
   /** namespace sent to the DO SQL endpoints. */
   backendNamespace?: string
-
-  /** pre-created DoBackend instances. mainly useful for tests. */
-  backends?: {
-    postgres: DoBackend
-    cvr: DoBackend
-    cdb: DoBackend
-  }
 
   /** postgres username/password expected by the in-process proxy. */
   pgUser?: string
@@ -129,6 +120,32 @@ export interface ZeroCacheEmbedCF {
   stop(): Promise<void>
 }
 
+// tx-journal owner id for every pg session this embed opens. recovery at
+// embed boot targets exactly this owner, so it can never roll back another
+// client's live transaction on the shared upstream db (e.g. the app worker's
+// in-DO pg session).
+const EMBED_TX_OWNER = 'orez-embed'
+
+// roll back journaled transactions a dead embed generation left on the
+// remote SQL DO (upstream db sessions killed mid-transaction).
+async function recoverRemoteTransactions(
+  url: string,
+  backendFetch?: typeof fetch
+): Promise<void> {
+  const fetcher = backendFetch ?? fetch
+  const resp = await fetcher(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ owner: EMBED_TX_OWNER }),
+  })
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '')
+    throw new Error(
+      `zero-cache CF embed: tx recovery failed: HTTP ${resp.status} ${text.slice(0, 500)}`
+    )
+  }
+}
+
 type DoBackendProtocolSessionFactory = {
   createProtocolSession(): DoBackend
 }
@@ -161,28 +178,41 @@ export async function startZeroCacheEmbedCF(
   const backendUrl = opts.backendUrl || 'https://orez-do-backend.local'
   const backendNamespace = opts.backendNamespace || appId
 
+  // zero-cache's CVR and change DBs are embed-private state; they live in
+  // THIS Durable Object's SQLite so their pg sessions never pay a cross-DO
+  // round-trip. only the shared upstream `postgres` db routes to ZeroSqlDO.
+  const localSql = createLocalSqlBackend(opts.doSqlite)
+
   const createBackend = (dbName: string) =>
     new DoBackend(backendUrl, dbName, backendNamespace, {
-      fetch: opts.backendFetch,
+      fetch: dbName === 'postgres' ? opts.backendFetch : localSql.fetch,
+      txOwner: EMBED_TX_OWNER,
     })
 
-  const backends =
-    opts.backends ??
-    ({
-      postgres: createBackend('postgres'),
-      cvr: createBackend('zero_cvr'),
-      cdb: createBackend('zero_cdb'),
-    } satisfies NonNullable<ZeroCacheEmbedCFOptions['backends']>)
+  // crash recovery: this embed boot proves the previous embed generation is
+  // dead, so any journaled transaction it left mid-flight (DO eviction,
+  // deploy upgrade-kill) is rolled back BEFORE any pg session opens. without
+  // this, a partially-persisted tx (e.g. the change-streamer's cdc changeLog
+  // write) wedges replication on every subsequent boot.
+  localSql.recoverOrphanedTransactions()
+  await recoverRemoteTransactions(
+    `${backendUrl.replace(/\/+$/, '')}/recover-txs?db=postgres&ns=${encodeURIComponent(backendNamespace)}`,
+    opts.backendFetch
+  )
 
-  const proxyBackends = opts.backends
-    ? backends
-    : {
-        postgres: addProtocolSessionFactory(backends.postgres, () =>
-          createBackend('postgres')
-        ),
-        cvr: addProtocolSessionFactory(backends.cvr, () => createBackend('zero_cvr')),
-        cdb: addProtocolSessionFactory(backends.cdb, () => createBackend('zero_cdb')),
-      }
+  const backends = {
+    postgres: createBackend('postgres'),
+    cvr: createBackend('zero_cvr'),
+    cdb: createBackend('zero_cdb'),
+  }
+
+  const proxyBackends = {
+    postgres: addProtocolSessionFactory(backends.postgres, () =>
+      createBackend('postgres')
+    ),
+    cvr: addProtocolSessionFactory(backends.cvr, () => createBackend('zero_cvr')),
+    cdb: addProtocolSessionFactory(backends.cdb, () => createBackend('zero_cdb')),
+  }
 
   await Promise.all([
     backends.postgres.waitReady,
