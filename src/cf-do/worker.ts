@@ -68,6 +68,13 @@ interface SqlExecStatement {
   sql: string
   params?: unknown[]
   track?: SqlTrack
+  // runtime-conditional DDL: the deploy-time rewriter can't know a target
+  // namespace's current shape, so ALTER TABLE ... ADD/DROP COLUMN IF [NOT]
+  // EXISTS ships as an unconditional statement plus a skip condition the DO
+  // evaluates against pragma_table_info at apply time (mirrors DoBackend's
+  // client-side handling for the embedded path).
+  skipIfColumnExists?: { table: string; column: string }
+  skipIfColumnMissing?: { table: string; column: string }
 }
 interface SocketAttachment {
   clientID: string
@@ -461,6 +468,24 @@ export class ZeroDO extends DurableObject {
         for (const statement of statements) {
           const item = typeof statement === 'string' ? { sql: statement } : statement
           if (!item?.sql?.trim()) continue
+          if (
+            item.skipIfColumnExists &&
+            this.tableHasColumn(
+              item.skipIfColumnExists.table,
+              item.skipIfColumnExists.column
+            )
+          ) {
+            continue
+          }
+          if (
+            item.skipIfColumnMissing &&
+            !this.tableHasColumn(
+              item.skipIfColumnMissing.table,
+              item.skipIfColumnMissing.column
+            )
+          ) {
+            continue
+          }
           try {
             results.push(
               this.executeSQL(
@@ -564,6 +589,23 @@ export class ZeroDO extends DurableObject {
       })
     } catch (err: any) {
       return Response.json({ error: err.message }, { status: 500 })
+    }
+  }
+
+  // sync (storage.transaction-safe) column presence check for the /batch
+  // skipIfColumnExists/skipIfColumnMissing conditions. a missing table reads
+  // as "no columns", which makes ADD COLUMN skips behave like pg's
+  // IF NOT EXISTS on a table the same batch is about to create.
+  private tableHasColumn(table: string, column: string): boolean {
+    try {
+      const cursor = this.sql.exec(
+        'SELECT 1 FROM pragma_table_info(?) WHERE name = ? LIMIT 1',
+        table,
+        column
+      )
+      return this.cursorRows(cursor).length > 0
+    } catch {
+      return false
     }
   }
 

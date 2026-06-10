@@ -3890,15 +3890,39 @@ function rewrittenSQLText(statements: RewrittenStatement[]): string {
 // and breaks typed result formatting.
 export async function deployTimeSchemaBatchStatements(
   ddl: string
-): Promise<Array<{ sql: string; params?: string[] }>> {
+): Promise<
+  Array<{
+    sql: string
+    params?: string[]
+    skipIfColumnExists?: { table: string; column: string }
+    skipIfColumnMissing?: { table: string; column: string }
+  }>
+> {
   await loadModule()
-  const statements: Array<{ sql: string; params?: string[] }> = []
+  const statements: Array<{
+    sql: string
+    params?: string[]
+    skipIfColumnExists?: { table: string; column: string }
+    skipIfColumnMissing?: { table: string; column: string }
+  }> = []
   const metadataRows: Array<[string, string, string, string]> = []
   for (const chunk of ddl.split('--> statement-breakpoint')) {
     const sql = chunk.trim()
     if (!sql) continue
     for (const statement of rewriteSQLStatements(sql)) {
-      if (statement.sql.trim()) statements.push({ sql: statement.sql })
+      // carry the runtime-conditional DDL skips (ALTER TABLE ... ADD/DROP
+      // COLUMN IF [NOT] EXISTS) — the /batch executor evaluates them against
+      // the target's actual shape, which deploy time cannot know.
+      if (statement.sql.trim())
+        statements.push({
+          sql: statement.sql,
+          ...(statement.skipIfColumnExists
+            ? { skipIfColumnExists: statement.skipIfColumnExists }
+            : null),
+          ...(statement.skipIfColumnMissing
+            ? { skipIfColumnMissing: statement.skipIfColumnMissing }
+            : null),
+        })
       for (const column of statement.schemaColumns ?? []) {
         metadataRows.push([
           'schema-column',

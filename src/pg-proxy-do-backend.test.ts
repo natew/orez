@@ -709,6 +709,35 @@ describe('DoBackend', () => {
     expectBinaryCopyRow(copyDataPayloads(result)[1])
   })
 
+  test('deploy-time schema batch carries ADD COLUMN IF NOT EXISTS skip conditions', async () => {
+    // forward-migration of an EXISTING table: CREATE IF NOT EXISTS is a no-op,
+    // so schema-evolved columns ship as ALTER ... ADD COLUMN IF NOT EXISTS.
+    // deploy time can't know a target namespace's shape, so the batch item
+    // must carry the skip condition for the DO /batch executor to evaluate
+    // (dropping it makes the re-applied ALTER abort the whole batch).
+    const ddl = `
+      CREATE TABLE IF NOT EXISTS "file" ("id" text PRIMARY KEY, "path" text NOT NULL);
+      --> statement-breakpoint
+      ALTER TABLE "file" ADD COLUMN IF NOT EXISTS "title" text;
+      --> statement-breakpoint
+      ALTER TABLE "file" ADD COLUMN IF NOT EXISTS "size" integer NOT NULL DEFAULT 0;
+    `
+    const batch = await deployTimeSchemaBatchStatements(ddl)
+    const adds = batch.filter((statement) => /ADD COLUMN/i.test(statement.sql))
+    expect(adds.map((statement) => statement.skipIfColumnExists)).toEqual([
+      { table: 'file', column: 'title' },
+      { table: 'file', column: 'size' },
+    ])
+    // the pg type metadata for the added columns must flow too — without it
+    // binary COPY downgrades to text for those columns after a forward
+    // migration.
+    const metadataParams = batch
+      .filter((statement) => statement.params)
+      .flatMap((statement) => statement.params!)
+    expect(metadataParams).toContain('title')
+    expect(metadataParams).toContain('size')
+  })
+
   test('formats timestamp typed rows as postgres text for DataRow and COPY', async () => {
     const http = await startDoHttp((sql) => {
       if (compactSQL(sql).startsWith('SELECT')) {
