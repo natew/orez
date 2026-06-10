@@ -3888,9 +3888,7 @@ function rewrittenSQLText(statements: RewrittenStatement[]): string {
 // DDL alone loses the pg column types, which silently downgrades binary COPY
 // encoding to text (crashing typed consumers like zero-cache initial sync)
 // and breaks typed result formatting.
-export async function deployTimeSchemaBatchStatements(
-  ddl: string
-): Promise<
+export async function deployTimeSchemaBatchStatements(ddl: string): Promise<
   Array<{
     sql: string
     params?: string[]
