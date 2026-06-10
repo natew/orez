@@ -599,6 +599,17 @@ function expressionOid(value: any): number | undefined {
       if (oid) return oid
     }
   }
+  // json access operators `->` and `#>` return a json/jsonb VALUE in postgres
+  // (vs `->>`/`#>>` which return text). sqlite's `->` returns the json text
+  // representation (e.g. `"begin"` with quotes), so the column must carry a
+  // json oid for the driver to JSON.parse it back into a value — otherwise
+  // zero-cache's changeLog catchup reads `change->'tag'` as the literal
+  // string `"begin"` and its `case "begin"` switch never matches, mis-tagging
+  // every begin/commit as a `data` change and poisoning the change stream.
+  if (node.A_Expr?.kind === 'AEXPR_OP') {
+    const op = operatorName(node.A_Expr)
+    if (op === '->' || op === '#>') return PG_TYPE_JSON
+  }
   return undefined
 }
 

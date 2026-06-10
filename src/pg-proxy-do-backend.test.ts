@@ -467,6 +467,34 @@ describe('DoBackend', () => {
     expect(messageTypes(result)).toEqual(['T', 'C', 'Z'])
   })
 
+  test('tags json `->`/`#>` access columns with a json oid so the driver parses them', async () => {
+    // zero-cache's changeLog catchup reads `change->'tag' as tag`. sqlite's
+    // `->` returns the json TEXT representation (`"begin"` with quotes), so the
+    // column must carry a json oid for the driver to JSON.parse it back into the
+    // bare string `begin` — otherwise the `case "begin"` switch never matches
+    // and every begin/commit is mis-emitted as a `data` change.
+    const http = await startDoHttp(() => ({
+      rows: [{ tag: '"begin"', deep: '"x"', t2: 'begin' }],
+      columns: ['tag', 'deep', 't2'],
+    }))
+    const backend = new DoBackend(http.url, 'postgres', 'json-access-oid-test')
+    await backend.waitReady
+
+    const described = await backend.execProtocolRaw(
+      msg(
+        0x51,
+        cstr(
+          `SELECT change->'tag' AS tag, change#>'{a,b}' AS deep, change->>'tag' AS t2 FROM "soot/cdc"."changeLog"`
+        )
+      )
+    )
+    const oids = rowDescriptionOids(described)
+    expect(oids.tag).toBe(114) // PG_TYPE_JSON
+    expect(oids.deep).toBe(114)
+    // `->>` returns text, must NOT be tagged json
+    expect(oids.t2).not.toBe(114)
+  })
+
   test('rewrites pg_column_size totals as ordinary SQL instead of catalog probes', async () => {
     const http = await startDoHttp((sql) => {
       if (compactSQL(sql).includes('length')) {
