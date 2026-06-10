@@ -35,12 +35,14 @@ const textDecoder = new TextDecoder()
 
 // schema query cache: identical information_schema/catalog queries from multiple
 // zero-cache clients are deduplicated. first query executes, all others get cached result.
+// the maps are PER-PROXY (created in startPgProxy), never module-level: a dead
+// proxy generation's in-flight promise can be permanently unsettled (its mutex
+// died with its connections), and a later generation joining it via a shared
+// map hangs forever on queries a fresh process would simply run.
 interface CachedQueryResult {
   result: Uint8Array
   expiresAt: number
 }
-const schemaQueryCache = new Map<string, CachedQueryResult>()
-const schemaQueryInFlight = new Map<string, Promise<Uint8Array>>()
 const SCHEMA_CACHE_TTL_MS = 30_000
 
 // performance tracking
@@ -135,11 +137,6 @@ function extractQueryText(data: Uint8Array): string | null {
     return extractParseQuery(data)
   }
   return null
-}
-
-function invalidateSchemaCache() {
-  schemaQueryCache.clear()
-  queryClassCache.clear()
 }
 
 // abort previous replication handler when a new one starts
@@ -598,6 +595,15 @@ export async function startPgProxy(
           postgresReplicas: [],
         }
 
+  // schema query dedup cache, scoped to THIS proxy generation (see the
+  // CachedQueryResult comment at the top of the file)
+  const schemaQueryCache = new Map<string, CachedQueryResult>()
+  const schemaQueryInFlight = new Map<string, Promise<Uint8Array>>()
+  function invalidateSchemaCache() {
+    schemaQueryCache.clear()
+    queryClassCache.clear()
+  }
+
   // per-instance mutexes for serializing pglite access.
   // when all instances are the same object (single-db mode), share one mutex
   // to prevent concurrent protocol messages on the same pglite instance.
@@ -692,6 +698,26 @@ export async function startPgProxy(
     // prevents other connections from interleaving and corrupting PGlite's
     // unnamed portal/statement state during the pipeline.
     let pipelineMutexHeld = false
+    // statement currently executing inside the held pipeline. the close
+    // handler must not release the mutex (or ROLLBACK) under a statement
+    // that is still running — the pipeline continuation does the cleanup
+    // after the statement settles (see the extended-protocol branch).
+    let pipelineExecInFlight = false
+    let socketClosed = false
+
+    // roll back this socket's open transaction. caller must hold the mutex.
+    const rollbackOwnTransaction = async (db: PGlite, txState: PgLiteTxState) => {
+      if (txState.owner === socket && txState.status !== 0x49) {
+        try {
+          await db.exec('ROLLBACK')
+        } catch {
+          // db is closed or rollback failed — ignore
+        }
+        txState.status = 0x49
+        txState.owner = null
+      }
+    }
+
     // clean up pglite transaction state when a client disconnects.
     // CRITICAL: only ROLLBACK if this socket owns the current pglite
     // transaction. pglite is single-session, so an unconditional ROLLBACK
@@ -700,21 +726,34 @@ export async function startPgProxy(
     // ran ROLLBACK while zero-cache had just sent BEGIN, and zero-cache's
     // next SAVEPOINT failed with "25P01: not in a transaction block".
     socket.on('close', async () => {
+      socketClosed = true
       // replication sockets don't own a transaction — skip ROLLBACK
       if (isReplicationConnection) return
       try {
         const { db, mutex, txState } = getDbContext(dbName)
+        if (pipelineMutexHeld) {
+          // this socket died mid-pipeline and still OWNS the mutex. a dead
+          // pipeline can never send its Sync, so without this release the
+          // mutex is leaked forever and every later connection on this db
+          // (including the next zero-cache generation after a restart)
+          // blocks in mutex.acquire() before its first statement. when a
+          // statement is still in flight, the pipeline continuation performs
+          // this exact cleanup after it settles.
+          if (!pipelineExecInFlight) {
+            pipelineMutexHeld = false
+            try {
+              await rollbackOwnTransaction(db, txState)
+            } finally {
+              mutex.release()
+            }
+          }
+          return
+        }
         await mutex.acquire()
         try {
           // only rollback OUR transaction. if idle (owner=null) there's
           // nothing to do; if another socket owns it, leave theirs alone.
-          if (txState.owner === socket && txState.status !== 0x49) {
-            await db.exec('ROLLBACK')
-            txState.status = 0x49
-            txState.owner = null
-          }
-        } catch {
-          // db is closed or rollback failed — ignore
+          await rollbackOwnTransaction(db, txState)
         } finally {
           mutex.release()
         }
@@ -833,12 +872,15 @@ export async function startPgProxy(
 
             const t1 = performance.now()
             let result: Uint8Array
+            pipelineExecInFlight = true
             try {
               result = await db.execProtocolRaw(data, { syncToFs: false })
             } catch (err) {
               mutex.release()
               pipelineMutexHeld = false
               throw err
+            } finally {
+              pipelineExecInFlight = false
             }
             const t2 = performance.now()
             proxyStats.totalExecMs += t2 - t1
@@ -861,6 +903,16 @@ export async function startPgProxy(
               if (dbName === 'postgres' && extWritePending) {
                 extWritePending = false
                 signalWrite()
+              }
+            } else if (socketClosed) {
+              // the socket died while this statement was executing, so the
+              // close handler skipped its cleanup (pipelineExecInFlight). no
+              // Sync can ever arrive — roll back and release here instead.
+              pipelineMutexHeld = false
+              try {
+                await rollbackOwnTransaction(db, txState)
+              } finally {
+                mutex.release()
               }
             } else {
               // strip ReadyForQuery from non-Sync pipeline messages

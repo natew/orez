@@ -67,12 +67,16 @@ const PG_MSG_TYPE_NAMES: Record<number, string> = {
 
 // schema query cache: identical information_schema/catalog queries from multiple
 // zero-cache clients are deduplicated. first query executes, all others get cached result.
+// the maps are PER-PROXY (created in createBrowserProxy), never module-level: a
+// dead proxy generation's in-flight promise can be permanently unsettled (its
+// mutex died with its connections), and a later generation joining it via a
+// shared map hangs forever on queries a fresh isolate would simply run. this
+// was the CF embed hibernation-reboot hang: gen-2 zero-cache's first schema
+// queries joined gen-1's frozen in-flight entries right after client creation.
 interface CachedQueryResult {
   result: Uint8Array
   expiresAt: number
 }
-const schemaQueryCache = new Map<string, CachedQueryResult>()
-const schemaQueryInFlight = new Map<string, Promise<Uint8Array>>()
 const SCHEMA_CACHE_TTL_MS = 30_000
 
 // performance tracking
@@ -129,10 +133,6 @@ function extractQueryText(data: Uint8Array): string | null {
     return extractParseQuery(data)
   }
   return null
-}
-
-function invalidateSchemaCache() {
-  schemaQueryCache.clear()
 }
 
 // abort previous replication handler when a new one starts
@@ -848,6 +848,14 @@ export async function createBrowserProxy(
           postgresReplicas: [],
         }
 
+  // schema query dedup cache, scoped to THIS proxy generation (see the
+  // CachedQueryResult comment at the top of the file)
+  const schemaQueryCache = new Map<string, CachedQueryResult>()
+  const schemaQueryInFlight = new Map<string, Promise<Uint8Array>>()
+  function invalidateSchemaCache() {
+    schemaQueryCache.clear()
+  }
+
   // per-instance mutexes for serializing pglite access.
   // when all instances are the same object (single-db mode), share one mutex
   // to prevent concurrent protocol messages on the same pglite instance.
@@ -1064,11 +1072,39 @@ export async function createBrowserProxy(
       if (sessionClosed) return
       sessionClosed = true
       activeConnectionClosers.delete(closeSession)
+      // a connection torn down mid-pipeline still OWNS the db mutex. a dead
+      // pipeline can never send its Sync, so without this release the mutex
+      // is leaked forever and every later connection on this db (including
+      // the next embed generation after an idle-hibernation teardown) blocks
+      // in mutex.acquire() before its first statement. when a statement is
+      // still executing, the pipeline continuation performs this cleanup
+      // after it settles instead (pipelineExecInFlight).
+      if (pipelineMutexHeld && !pipelineExecInFlight) {
+        pipelineMutexHeld = false
+        try {
+          await rollbackOwnTransaction()
+        } finally {
+          mutex.release()
+        }
+      }
       try {
         await scopedContext.close()
       } catch {}
     }
     activeConnectionClosers.add(closeSession)
+
+    // roll back this connection's open transaction. caller must hold the mutex.
+    const rollbackOwnTransaction = async () => {
+      if (txState.owner === connId && txState.status !== 0x49) {
+        try {
+          await db.exec('ROLLBACK')
+        } catch {
+          // db is closed or rollback failed — ignore
+        }
+        txState.status = 0x49
+        txState.owner = null
+      }
+    }
 
     const write = (data: Uint8Array) => {
       if (connClosed) return
@@ -1145,6 +1181,9 @@ export async function createBrowserProxy(
     }
 
     let pipelineMutexHeld = false
+    // statement currently executing inside the held pipeline — closeSession
+    // must not release the mutex under it (see closeSession above)
+    let pipelineExecInFlight = false
     let extWritePending = false
     let pipelineBuffer: Uint8Array[] = []
     // remember the most recent Parse / SimpleQuery for diagnostic logging when
@@ -1362,6 +1401,7 @@ export async function createBrowserProxy(
               const combined = concatUint8Arrays(pipelineBuffer)
               pipelineBuffer = []
               let flushResult: Uint8Array
+              pipelineExecInFlight = true
               try {
                 flushResult = await db.execProtocolRaw(combined, { syncToFs: false })
               } catch (err) {
@@ -1370,6 +1410,19 @@ export async function createBrowserProxy(
                 )
                 mutex.release()
                 pipelineMutexHeld = false
+                return
+              } finally {
+                pipelineExecInFlight = false
+              }
+              if (sessionClosed && pipelineMutexHeld) {
+                // session torn down while this statement was executing —
+                // closeSession skipped its cleanup, finish it here
+                pipelineMutexHeld = false
+                try {
+                  await rollbackOwnTransaction()
+                } finally {
+                  mutex.release()
+                }
                 return
               }
               flushResult = stripResponseMessages(flushResult, true)
@@ -1385,6 +1438,7 @@ export async function createBrowserProxy(
 
           let result: Uint8Array
           const t0 = performance.now()
+          pipelineExecInFlight = true
           try {
             result = await db.execProtocolRaw(combined, { syncToFs: false })
           } catch (err) {
@@ -1394,6 +1448,8 @@ export async function createBrowserProxy(
             mutex.release()
             pipelineMutexHeld = false
             return
+          } finally {
+            pipelineExecInFlight = false
           }
           const dt = performance.now() - t0
           if (isDebugWire() && dt > 100)
@@ -1513,8 +1569,25 @@ export async function createBrowserProxy(
     // prevents other connections from interleaving and corrupting PGlite's
     // unnamed portal/statement state during the pipeline.
     let pipelineMutexHeld = false
+    // statement currently executing inside the held pipeline — cleanup must
+    // not release the mutex under it; the pipeline continuation finishes the
+    // cleanup after the statement settles.
+    let pipelineExecInFlight = false
     // connection closed flag
     let connClosed = false
+
+    // roll back this connection's open transaction. caller must hold the mutex.
+    const rollbackOwnTransaction = async (db: PGlite, txState: PgLiteTxState) => {
+      if (txState.owner === connId && txState.status !== 0x49) {
+        try {
+          await db.exec('ROLLBACK')
+        } catch {
+          // db is closed or rollback failed — ignore
+        }
+        txState.status = 0x49
+        txState.owner = null
+      }
+    }
 
     // clean up pglite transaction state when the connection ends.
     // CRITICAL: only ROLLBACK if THIS connection owns the current pglite
@@ -1527,19 +1600,32 @@ export async function createBrowserProxy(
     const cleanup = async () => {
       if (connClosed) return
       connClosed = true
+      activeConnectionClosers.delete(cleanup)
       // replication connections don't own a transaction — skip ROLLBACK
       if (isReplicationConnection) return
       try {
         const { db, mutex, txState } = getDbContext(dbName)
+        if (pipelineMutexHeld) {
+          // this connection died mid-pipeline and still OWNS the mutex. a
+          // dead pipeline can never send its Sync, so without this release
+          // the mutex is leaked forever and every later connection on this
+          // db (including the next embed generation after idle-hibernation
+          // teardown) blocks in mutex.acquire() before its first statement.
+          // when a statement is in flight, the pipeline continuation does
+          // this exact cleanup after it settles.
+          if (!pipelineExecInFlight) {
+            pipelineMutexHeld = false
+            try {
+              await rollbackOwnTransaction(db, txState)
+            } finally {
+              mutex.release()
+            }
+          }
+          return
+        }
         await mutex.acquire()
         try {
-          if (txState.owner === connId && txState.status !== 0x49) {
-            await db.exec('ROLLBACK')
-            txState.status = 0x49
-            txState.owner = null
-          }
-        } catch {
-          // db is closed or rollback failed — ignore
+          await rollbackOwnTransaction(db, txState)
         } finally {
           mutex.release()
         }
@@ -1547,6 +1633,7 @@ export async function createBrowserProxy(
         // instance may have been replaced during reset, ignore
       }
     }
+    activeConnectionClosers.add(cleanup)
 
     try {
       let connection!: PostgresConnection
@@ -1672,12 +1759,15 @@ export async function createBrowserProxy(
 
             const t1 = performance.now()
             let result: Uint8Array
+            pipelineExecInFlight = true
             try {
               result = await db.execProtocolRaw(data, { syncToFs: false })
             } catch (err) {
               mutex.release()
               pipelineMutexHeld = false
               throw err
+            } finally {
+              pipelineExecInFlight = false
             }
             const t2 = performance.now()
             proxyStats.totalExecMs += t2 - t1
@@ -1700,6 +1790,16 @@ export async function createBrowserProxy(
               if (dbName === 'postgres' && extWritePending) {
                 extWritePending = false
                 signalWrite()
+              }
+            } else if (connClosed) {
+              // the connection died while this statement was executing, so
+              // cleanup skipped its release (pipelineExecInFlight). no Sync
+              // can ever arrive — roll back and release here instead.
+              pipelineMutexHeld = false
+              try {
+                await rollbackOwnTransaction(db, txState)
+              } finally {
+                mutex.release()
               }
             } else {
               // strip ReadyForQuery from non-Sync pipeline messages
