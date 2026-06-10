@@ -70,14 +70,11 @@ function findLitestreamCommands(): string | null {
 }
 
 /**
- * patch zero-cache so the change-streamer's replica restore is a no-op when
- * no litestream backup is configured. idempotent and safe to call on every
- * startup.
+ * apply the restore-guard to a specific compiled litestream commands.js —
+ * shared by the in-place node path and the CF overlay (cf-patches.ts).
+ * idempotent.
  */
-export function disableZeroLitestreamRestore(): void {
-  const commandsPath = findLitestreamCommands()
-  if (!commandsPath) return
-
+export function applyLitestreamRestoreGuard(commandsPath: string): void {
   const content = readFileSync(commandsPath, 'utf-8')
   if (content.includes(OREZ_MARKER)) return // already patched
 
@@ -93,4 +90,15 @@ export function disableZeroLitestreamRestore(): void {
 
   const patched = content.replace(anchor, `${anchor}\n\t${GUARD}`)
   writeFileSync(commandsPath, patched)
+}
+
+/**
+ * patch zero-cache so the change-streamer's replica restore is a no-op when
+ * no litestream backup is configured. idempotent and safe to call on every
+ * startup.
+ */
+export function disableZeroLitestreamRestore(): void {
+  const commandsPath = findLitestreamCommands()
+  if (!commandsPath) return
+  applyLitestreamRestoreGuard(commandsPath)
 }

@@ -37,6 +37,8 @@ import {
 } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 
+import { applyLitestreamRestoreGuard } from '../zero-litestream-patch.js'
+
 const ZERO_CACHE_WORKERS = [
   'main',
   'change-streamer',
@@ -109,6 +111,7 @@ export function prepareZeroCacheForCF(
   patchProcesses(zcBase)
   patchWriteWorkerClient(zcBase)
   patchInitialSyncBatchParams(zcBase)
+  patchLitestreamRestore(zcBase)
   const parserAliases = patchPgsqlParserWasm(nodeModulesPath, outDir)
   const packageAliases = getPackageAliases(nodeModulesPath)
 
@@ -500,6 +503,22 @@ function patchInitialSyncBatchParams(zcBase: string): void {
   console.log(
     '[orez] patched zero-cache initial-sync.js (DO bound-parameter cap batches)'
   )
+}
+
+// the dedicated change-streamer calls restoreReplica() on every start; with no
+// litestream backup configured it throws ("Missing --litestream-executable")
+// and "recovers" by wiping + fully resyncing the replica — on workerd that
+// discards the durable DO-sqlite replica on EVERY embed cold boot, turning each
+// idle-teardown wake into a full resync. the node path patches this in-place
+// via disableZeroLitestreamRestore(); the CF overlay needs the same guard here.
+function patchLitestreamRestore(zcBase: string): void {
+  const commandsPath = resolve(zcBase, 'services', 'litestream', 'commands.js')
+  if (!existsSync(commandsPath)) {
+    console.warn('[orez] litestream commands.js not found at', commandsPath)
+    return
+  }
+  applyLitestreamRestoreGuard(commandsPath)
+  console.log('[orez] patched zero-cache litestream commands.js (no-op restore)')
 }
 
 function patchPgsqlParserWasm(
