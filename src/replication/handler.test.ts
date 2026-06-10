@@ -2,6 +2,7 @@ import { PGlite } from '@electric-sql/pglite'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import { Mutex } from '../mutex'
+import { usePublicationsEnv } from '../test-env'
 import { installChangeTracking } from './change-tracker'
 import {
   createReplicationFeedbackParser,
@@ -13,6 +14,8 @@ import {
   signalReplicationChange,
   type ReplicationWriter,
 } from './handler'
+
+usePublicationsEnv(undefined)
 
 // parse wire protocol RowDescription+DataRow response into columns/values
 function parseResponse(buf: Uint8Array): { columns: string[]; values: string[] } | null {

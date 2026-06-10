@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import { getConfig } from '../config'
 import { startPgProxy } from '../pg-proxy'
+import { usePublicationsEnv } from '../test-env'
 import {
   installChangeTracking,
   installTriggersOnShardTables,
@@ -25,6 +26,8 @@ import {
 import { signalReplicationChange, resetReplicationState } from './handler'
 
 import type { Server, AddressInfo } from 'node:net'
+
+usePublicationsEnv(undefined)
 
 // --- async queue (matches zero-cache's Queue pattern) ---
 

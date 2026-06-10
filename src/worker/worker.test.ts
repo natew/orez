@@ -1,9 +1,12 @@
 import { PGlite } from '@electric-sql/pglite'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
+import { usePublicationsEnv } from '../test-env'
 import { createOrezWorker } from './index'
 
 import type { OrezWorker } from './types'
+
+usePublicationsEnv(undefined)
 
 describe('orez/worker', () => {
   let worker: OrezWorker

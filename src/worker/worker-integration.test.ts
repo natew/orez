@@ -13,9 +13,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import { InProcessWriter } from '../replication/handler.js'
 import { resetReplicationState, signalReplicationChange } from '../replication/handler.js'
+import { usePublicationsEnv } from '../test-env'
 import { createOrezWorker } from './index'
 
 import type { OrezWorker } from './types'
+
+usePublicationsEnv(undefined)
 
 // extract pgoutput message types from CopyData(XLogData(...)) buffers
 function extractPayloadTypes(buf: Uint8Array): number[] {

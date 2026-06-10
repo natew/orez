@@ -22,6 +22,7 @@ import { getConfig, getConnectionString } from '../config.js'
 import { startPgProxy } from '../pg-proxy.js'
 import { createPGliteInstances, type PGliteInstances } from '../pglite-manager.js'
 import { installChangeTracking } from '../replication/change-tracker.js'
+import { usePublicationsEnv } from '../test-env.js'
 import { startZeroCacheEmbed, type ZeroCacheEmbed } from '../worker/zero-cache-embed.js'
 import {
   ensureTablesInPublications,
@@ -29,6 +30,11 @@ import {
 } from './test-permissions.js'
 
 import type { PGlite } from '@electric-sql/pglite'
+
+// pinned for the whole file (and restored after): installChangeTracking and
+// the embedded zero-cache read this env, and leaving it set would leak into
+// later test files in `bun test`'s shared process.
+usePublicationsEnv('orez_zero_public')
 
 const SYNC_PROTOCOL_VERSION = 51
 
@@ -118,9 +124,8 @@ describe('zero-cache embed integration', { timeout: 120000 }, () => {
         )
       `)
 
-    // set up publications
+    // set up publications (env pinned by usePublicationsEnv above)
     const pubName = `orez_zero_public`
-    process.env.ZERO_APP_PUBLICATIONS = pubName
     await db.exec(`CREATE PUBLICATION "${pubName}"`).catch(() => {})
     await db
       .exec(`ALTER PUBLICATION "${pubName}" ADD TABLE "public"."foo"`)

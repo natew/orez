@@ -16,10 +16,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import { getConfig } from '../config'
 import { startPgProxy } from '../pg-proxy'
+import { usePublicationsEnv } from '../test-env'
 import { installChangeTracking } from './change-tracker'
 import { signalReplicationChange, resetReplicationState } from './handler'
 
 import type { Server, AddressInfo } from 'node:net'
+
+usePublicationsEnv(undefined)
 
 // --- pgoutput decoder (validates against pg protocol spec) ---
 

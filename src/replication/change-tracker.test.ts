@@ -1,6 +1,7 @@
 import { PGlite } from '@electric-sql/pglite'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
+import { usePublicationsEnv } from '../test-env'
 import {
   clearStreamedBatches,
   confirmStreamedBatches,
@@ -13,6 +14,8 @@ import {
   getStreamResumeWatermark,
   recordStreamedBatch,
 } from './change-tracker'
+
+usePublicationsEnv(undefined)
 
 describe('change-tracker', () => {
   let db: PGlite
