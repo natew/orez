@@ -1,0 +1,4 @@
+# keep `bun test` behavior aligned with vitest.config.ts: the streaming /
+# replication tests legitimately run past bun's 5s default timeout.
+[test]
+timeout = 15000
