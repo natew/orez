@@ -419,6 +419,61 @@ function snapshotTableName(prefix: string, table: string): string {
   return `${prefix}_${table.replace(/[^A-Za-z0-9_]/g, '_')}`
 }
 
+// copy one table's current rows into a snapshot table, recreating the original
+// table's columns + indexes so reads against the copy use the same query plan
+// (an index-less `CREATE TABLE AS SELECT` forces full scans on every read).
+function copyTableToSnapshot(
+  sql: SqlStorageLike,
+  source: string,
+  snapshot: string
+): void {
+  const createRow = execSql(
+    sql,
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`,
+    [source],
+    'snapshot.schema'
+  ).toArray()[0]
+  const createSql = createRow ? String(createRow.sql ?? '') : ''
+  // rewrite the source table name in its own CREATE statement to the snapshot
+  // name, preserving column types/constraints, then copy rows + indexes.
+  const snapCreate = createSql
+    ? replaceIdentifierOutsideLiterals(createSql, source, snapshot)
+    : `CREATE TABLE ${quoteIdentifier(snapshot)} AS SELECT * FROM ${quoteIdentifier(source)}`
+  execSql(sql, snapCreate, [], 'snapshot.create')
+  if (createSql) {
+    execSql(
+      sql,
+      `INSERT INTO ${quoteIdentifier(snapshot)} SELECT * FROM ${quoteIdentifier(source)}`,
+      [],
+      'snapshot.fill'
+    )
+    const indexes = execSql(
+      sql,
+      `SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL`,
+      [source],
+      'snapshot.index-list'
+    ).toArray()
+    for (const idx of indexes) {
+      const idxSql = String(idx.sql ?? '')
+      if (!idxSql) continue
+      // index names must be unique; prefix them into the snapshot namespace too.
+      const rewritten = replaceIdentifierOutsideLiterals(idxSql, source, snapshot)
+      try {
+        execSql(
+          sql,
+          rewritten.replace(
+            /CREATE\s+(UNIQUE\s+)?INDEX\s+("?)([A-Za-z_][\w.]*)\2/i,
+            (_m, uniq = '', _q, name) =>
+              `CREATE ${uniq || ''}INDEX ${quoteIdentifier(`${snapshot}__${name}`)}`
+          ),
+          [],
+          'snapshot.index'
+        )
+      } catch {}
+    }
+  }
+}
+
 function isSnapshotInternalTable(name: string): boolean {
   return name.startsWith('_orez_snapshot_')
 }
@@ -471,6 +526,48 @@ function shouldSnapshotTable(name: string): boolean {
     !name.startsWith('_cf_') &&
     !isSnapshotInternalTable(name)
   )
+}
+
+// -- copy-on-write snapshot registry --
+//
+// zero's view-syncer reader opens `BEGIN CONCURRENT` to hold a stable read view
+// of the replica while the inline replica-writer applies changes concurrently
+// (both run in the same DO isolate, the writer only at await boundaries). DO
+// SQLite has no `BEGIN CONCURRENT` / read-snapshot primitive, so we emulate one.
+//
+// the original emulation eagerly copied EVERY table on snapshot open
+// (`CREATE TABLE _snap AS SELECT * FROM t`) — O(replica) per reader per advance,
+// and the copies had no indexes so every hydration read full-scanned them
+// (measured: ~50x row-read amplification, minutes to hydrate a ~2400-row replica).
+//
+// instead we copy-on-write: a reader's snapshot starts EMPTY and reads live,
+// fully-indexed tables. only when the replica-writer is about to mutate table X
+// do we copy X (with its schema + indexes) into each open reader's snapshot so
+// that reader keeps seeing X's pre-write rows. since writes are rare during a
+// hydration, readers almost always hit the live indexed tables.
+const openReaderSnapshots = new Set<Database>()
+
+// parse the target table of a writer DML/DDL statement so the writer can
+// copy-on-write that table for open readers before mutating it. matches the
+// statement shapes zero's change-processor emits (INSERT OR REPLACE INTO,
+// UPDATE, DELETE FROM, ALTER TABLE, DROP TABLE, CREATE TABLE/INDEX).
+// only writes that mutate an EXISTING table need copy-on-write. CREATE TABLE
+// makes a brand-new table no open reader snapshot ever referenced, so it is
+// intentionally excluded (and copying a not-yet-existing table would throw).
+const WRITE_TABLE_RE =
+  /^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM|ALTER\s+TABLE|DROP\s+TABLE(?:\s+IF\s+EXISTS)?)\s+("?)([A-Za-z_][\w.]*)\1/i
+function writeTargetTable(sql: string): string | undefined {
+  const m = WRITE_TABLE_RE.exec(sql)
+  if (!m) return undefined
+  const name = m[2]
+  return shouldSnapshotTable(name) ? name : undefined
+}
+
+// before the writer mutates `table`, freeze its current rows for every open
+// reader snapshot that hasn't already copied it.
+function cowOpenReadersBeforeWrite(table: string): void {
+  if (openReaderSnapshots.size === 0) return
+  for (const reader of openReaderSnapshots) reader._cowTable(table)
 }
 
 function currentConnectionRole(): SqliteConnectionRole {
@@ -679,6 +776,7 @@ export class Statement<T = Record<string, SqlStorageValue>> {
     const resolved = this.#resolveParams(params)
     const sql = this.#db._rewriteForSnapshot(resolved.sql)
     const values = resolved.values
+    if (!isTxCmd) this.#db._cowForWrite(sql)
     const cursor =
       isTxCmd && values.length === 0
         ? this.#db._execTransactionAware(sql, this.#sql)
@@ -795,6 +893,7 @@ export class Database {
   #inTransaction: boolean
   #snapshotTables: Map<string, string> | null
   #snapshotPrefix: string
+  #snapshotPrefixActive: string
   #snapshotCounter: number
   #connectionRole: SqliteConnectionRole
 
@@ -820,6 +919,7 @@ export class Database {
     this.#inTransaction = false
     this.#snapshotTables = null
     this.#snapshotPrefix = createSnapshotPrefix()
+    this.#snapshotPrefixActive = this.#snapshotPrefix
     this.#snapshotCounter = 0
     this.#connectionRole = currentConnectionRole()
     activeSnapshotPrefixes.add(this.#snapshotPrefix)
@@ -938,36 +1038,36 @@ export class Database {
     return execSql(sqlStorage, sql, [], 'transaction.statement')
   }
 
+  // open a copy-on-write snapshot: start with NO copies (reads hit the live,
+  // indexed tables) and register so the replica-writer can freeze a table for
+  // this reader right before mutating it. see openReaderSnapshots above.
   #beginSnapshot(): void {
     this.#dropSnapshot()
-    const prefix = `${this.#snapshotPrefix}_${++this.#snapshotCounter}`
-    const tables = new Map<string, string>()
-    const rows = execSql(
+    this.#snapshotPrefixActive = `${this.#snapshotPrefix}_${++this.#snapshotCounter}`
+    this.#snapshotTables = new Map<string, string>()
+    openReaderSnapshots.add(this)
+  }
+
+  // copy `table`'s current rows into this reader's snapshot the first time the
+  // writer touches it while the snapshot is open. called by the writer via
+  // cowOpenReadersBeforeWrite() BEFORE the mutation is applied.
+  _cowTable(table: string): void {
+    const tables = this.#snapshotTables
+    if (!tables || tables.has(table) || !shouldSnapshotTable(table)) return
+    const exists = execSql(
       this.#sql,
-      `SELECT name FROM sqlite_master
-         WHERE type = 'table'
-         ORDER BY name`,
-      [],
-      'snapshot.table-list'
+      `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`,
+      [table],
+      'snapshot.exists'
     ).toArray()
-
-    for (const row of rows) {
-      const name = String(row.name ?? '')
-      if (!shouldSnapshotTable(name)) continue
-      const snapshot = snapshotTableName(prefix, name)
-      execSql(
-        this.#sql,
-        `CREATE TABLE ${quoteIdentifier(snapshot)} AS SELECT * FROM ${quoteIdentifier(name)}`,
-        [],
-        'snapshot.create'
-      )
-      tables.set(name, snapshot)
-    }
-
-    this.#snapshotTables = tables
+    if (exists.length === 0) return
+    const snapshot = snapshotTableName(this.#snapshotPrefixActive, table)
+    copyTableToSnapshot(this.#sql, table, snapshot)
+    tables.set(table, snapshot)
   }
 
   #dropSnapshot(): void {
+    openReaderSnapshots.delete(this)
     const tables = this.#snapshotTables
     if (!tables) return
     this.#snapshotTables = null
@@ -986,6 +1086,17 @@ export class Database {
   _rewriteForSnapshot(sql: string): string {
     if (!this.#snapshotTables) return sql
     return rewriteSQLTables(sql, this.#snapshotTables)
+  }
+
+  // when the replica-writer is about to mutate a table, freeze it for any open
+  // reader snapshot first (copy-on-write). reader connections never mutate live
+  // tables, so this only fires from the writer's connection.
+  _cowForWrite(sql: string): void {
+    if (this.#connectionRole !== 'replica-writer' || openReaderSnapshots.size === 0) {
+      return
+    }
+    const table = writeTargetTable(sql)
+    if (table) cowOpenReadersBeforeWrite(table)
   }
 
   /** prepare a statement */
@@ -1126,7 +1237,9 @@ export class Database {
       if (isTxCmd) {
         this._execTransactionAware(stmt, this.#sql)
       } else {
-        execSql(this.#sql, this._rewriteForSnapshot(stmt), [], 'database.exec')
+        const rewritten = this._rewriteForSnapshot(stmt)
+        this._cowForWrite(rewritten)
+        execSql(this.#sql, rewritten, [], 'database.exec')
       }
     }
 

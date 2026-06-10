@@ -584,7 +584,18 @@ describe('DO snapshot transactions', () => {
       transactionSync: <T>(fn: () => T) => T
     }
     mock.transactionSync = (fn) => fn()
-    live = new Database(mock)
+    // `live` models the replica-writer — in production it is the only connection
+    // that mutates the live replica tables, and copy-on-write snapshots only
+    // freeze a table when the replica-writer is about to write to it.
+    const globalObject = globalThis as any
+    const previousRole = globalObject.__orez_zero_sqlite_role
+    globalObject.__orez_zero_sqlite_role = 'replica-writer'
+    try {
+      live = new Database(mock)
+    } finally {
+      if (previousRole === undefined) delete globalObject.__orez_zero_sqlite_role
+      else globalObject.__orez_zero_sqlite_role = previousRole
+    }
     snapshot = new Database(mock)
     live.exec('CREATE TABLE todo (id TEXT PRIMARY KEY, title TEXT, _0_version TEXT)')
     live.prepare('INSERT INTO todo VALUES (?, ?, ?)').run('1', 'old', '01')
@@ -619,8 +630,56 @@ describe('DO snapshot transactions', () => {
     })
   })
 
+  it('does not copy any table until the writer mutates it (copy-on-write)', () => {
+    // the whole point of COW: opening a reader snapshot and reading tables that
+    // the writer never touches must NOT create any physical copies. the prior
+    // eager-copy emulation copied every table here, scanning index-less copies
+    // and amplifying replica reads ~50x. reads must hit the live indexed table.
+    snapshot.prepare('BEGIN CONCURRENT').run()
+    expect(snapshot.prepare('SELECT title FROM todo WHERE id = ?').get('1')).toEqual({
+      title: 'old',
+    })
+    expect(
+      mock.exec("SELECT count(*) c FROM sqlite_master WHERE name LIKE '_orez_snapshot_%'").toArray()
+    ).toEqual([{ c: 0 }])
+
+    // an UNRELATED writer write (different table) still triggers no copy of todo.
+    live.exec('CREATE TABLE other (id TEXT PRIMARY KEY, v TEXT)')
+    live.prepare('INSERT INTO other VALUES (?, ?)').run('1', 'x')
+    expect(
+      mock.exec("SELECT count(*) c FROM sqlite_master WHERE name LIKE '%_todo'").toArray()
+    ).toEqual([{ c: 0 }])
+
+    snapshot.prepare('ROLLBACK').run()
+  })
+
+  it('copies indexes onto the snapshot so frozen reads stay indexed', () => {
+    live.exec('CREATE INDEX todo_title_idx ON todo (title)')
+    snapshot.prepare('BEGIN CONCURRENT').run()
+    live.prepare('UPDATE todo SET title = ? WHERE id = ?').run('new', '1')
+
+    const snap = mock
+      .exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%_todo'")
+      .toArray()
+      .map((r) => String(r.name))
+    expect(snap).toHaveLength(1)
+    const idxCount = mock
+      .exec(
+        `SELECT count(*) c FROM sqlite_master WHERE type = 'index' AND tbl_name = ?`,
+        snap[0]
+      )
+      .toArray()
+    // copy carries both the pk index and the secondary index of the source.
+    expect(Number((idxCount[0] as { c: number }).c)).toBeGreaterThanOrEqual(1)
+    expect(snapshot.prepare('SELECT title FROM todo WHERE id = ?').get('1')).toEqual({
+      title: 'old',
+    })
+    snapshot.prepare('ROLLBACK').run()
+  })
+
   it('hides snapshot tables from sqlite catalog queries', () => {
     snapshot.prepare('BEGIN CONCURRENT').run()
+    live.prepare('UPDATE todo SET title = ? WHERE id = ?').run('new', '1')
 
     expect(
       live
@@ -629,12 +688,15 @@ describe('DO snapshot transactions', () => {
     ).toEqual([{ name: 'todo' }])
   })
 
-  it('does not snapshot sqlite internal tables', () => {
+  it('does not copy-on-write sqlite internal tables', () => {
     live.exec('CREATE TABLE seq (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT)')
-    live.prepare('INSERT INTO seq (title) VALUES (?)').run('row')
     live.exec('CREATE TABLE _cf_KV (key TEXT PRIMARY KEY, value TEXT)')
 
     snapshot.prepare('BEGIN CONCURRENT').run()
+    // writer mutates internal tables while a reader snapshot is open — these are
+    // managed by the engine and must never be frozen into a snapshot copy.
+    live.prepare('INSERT INTO seq (title) VALUES (?)').run('row')
+    live.prepare('INSERT INTO _cf_KV (key, value) VALUES (?, ?)').run('k', 'v')
 
     const snapshotTables = mock
       .exec("SELECT name FROM sqlite_master WHERE name LIKE '_orez_snapshot_%'")
@@ -650,6 +712,10 @@ describe('DO snapshot transactions', () => {
     live.prepare('INSERT INTO log VALUES (?, ?, ?)').run('2', '"todo"', '02')
 
     snapshot.prepare('BEGIN CONCURRENT').run()
+    // force a copy-on-write of `log` (writer deletes a later-id row) so the
+    // reader's subsequent SELECTs route to the snapshot copy and exercise the
+    // literal-aware table-name rewrite.
+    live.prepare('DELETE FROM log WHERE id = ?').run('1')
 
     expect(
       snapshot.prepare("SELECT table_name FROM log WHERE table_name = 'todo'").get()
@@ -681,17 +747,16 @@ describe('DO snapshot transactions', () => {
 
   it('does not remove another open connection snapshot', () => {
     snapshot.prepare('BEGIN CONCURRENT').run()
+    // first writer touch on todo copies it into snapshot's namespace (lazy COW).
+    live.prepare('UPDATE todo SET title = ?, _0_version = ? WHERE id = ?').run('new', '02', '1')
     const snapshotTables = mock
       .exec("SELECT name FROM sqlite_master WHERE name LIKE '_orez_snapshot_%'")
       .toArray()
     expect(snapshotTables).toHaveLength(1)
 
+    // opening another connection must not drop the still-open snapshot's copy.
     const other = new Database(mock)
     try {
-      live
-        .prepare('UPDATE todo SET title = ?, _0_version = ? WHERE id = ?')
-        .run('new', '02', '1')
-
       expect(snapshot.prepare('SELECT title FROM todo WHERE id = ?').get('1')).toEqual({
         title: 'old',
       })
