@@ -4,6 +4,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { Mutex } from '../mutex'
 import { installChangeTracking } from './change-tracker'
 import {
+  createReplicationFeedbackParser,
   extractStartLsn,
   handleReplicationQuery,
   handleStartReplication,
@@ -507,5 +508,57 @@ describe('extractStartLsn', () => {
   it('returns null when no LSN is present', () => {
     expect(extractStartLsn('START_REPLICATION SLOT "z"')).toBeNull()
     expect(extractStartLsn('IDENTIFY_SYSTEM')).toBeNull()
+  })
+})
+
+describe('createReplicationFeedbackParser', () => {
+  // build a CopyData frame wrapping a standby status update ('r' message:
+  // written(8) + flushed(8) + applied(8) + clock(8) + replyRequested(1))
+  function standbyStatusFrame(flushedLsn: bigint): Uint8Array {
+    const payload = new Uint8Array(34)
+    const view = new DataView(payload.buffer)
+    payload[0] = 0x72 // 'r'
+    view.setBigUint64(1, flushedLsn)
+    view.setBigUint64(9, flushedLsn)
+    view.setBigUint64(17, flushedLsn)
+    view.setBigUint64(25, 0n)
+    payload[33] = 0
+    const frame = new Uint8Array(1 + 4 + payload.length)
+    frame[0] = 0x64 // CopyData
+    new DataView(frame.buffer).setInt32(1, 4 + payload.length)
+    frame.set(payload, 5)
+    return frame
+  }
+
+  it('extracts the flushed lsn from a standby status update', () => {
+    const seen: bigint[] = []
+    const parse = createReplicationFeedbackParser((lsn) => seen.push(lsn))
+    parse(standbyStatusFrame(0x1000300n))
+    expect(seen).toEqual([0x1000300n])
+  })
+
+  it('handles coalesced and fragmented frames', () => {
+    const seen: bigint[] = []
+    const parse = createReplicationFeedbackParser((lsn) => seen.push(lsn))
+    const a = standbyStatusFrame(100n)
+    const b = standbyStatusFrame(200n)
+    const coalesced = new Uint8Array(a.length + b.length)
+    coalesced.set(a)
+    coalesced.set(b, a.length)
+    // split mid-frame
+    parse(coalesced.subarray(0, a.length + 7))
+    expect(seen).toEqual([100n])
+    parse(coalesced.subarray(a.length + 7))
+    expect(seen).toEqual([100n, 200n])
+  })
+
+  it('ignores keepalive zero lsns and non-CopyData frames', () => {
+    const seen: bigint[] = []
+    const parse = createReplicationFeedbackParser((lsn) => seen.push(lsn))
+    parse(standbyStatusFrame(0n))
+    // CopyDone frame
+    const copyDone = new Uint8Array([0x63, 0, 0, 0, 4])
+    parse(copyDone)
+    expect(seen).toEqual([])
   })
 })

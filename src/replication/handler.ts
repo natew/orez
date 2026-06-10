@@ -10,10 +10,13 @@ import { log } from '../log.js'
 
 const textEncoder = new TextEncoder()
 import {
+  clearStreamedBatches,
+  confirmStreamedBatches,
   getChangesSince,
   getCurrentWatermark,
   getStreamResumeWatermark,
   purgeConsumedChanges,
+  recordStreamedBatch,
   installTriggersOnShardTables,
   type ChangeRecord,
 } from './change-tracker.js'
@@ -111,6 +114,68 @@ let currentLsn = lsnFloorFromTime()
 // don't replay already-streamed changes
 let lastStreamedWatermark = 0
 
+// confirmed-flush feedback from the consumer (standby status updates).
+// the poll loop purges _zero_changes for confirmed batches; until then the
+// table is the durable record so a consumer death mid-store re-streams the
+// transaction instead of silently losing it.
+let pendingConfirmLsn = 0n
+let processedConfirmLsn = 0n
+
+/**
+ * note a confirmed-flush LSN from the consumer's standby status update and
+ * wake the replication loop so it purges the confirmed batches.
+ */
+export function noteConfirmedFlushLsn(lsn: bigint): void {
+  if (lsn <= pendingConfirmLsn) return
+  pendingConfirmLsn = lsn
+  _replicationWakeup?.()
+}
+
+/**
+ * incremental parser for client→server traffic on a replication connection.
+ * extracts the flushed LSN from CopyData-wrapped standby status updates
+ * ('d' frame wrapping 'r' + written(8) + flushed(8) + applied(8) + clock(8)
+ * + replyRequested(1)) and ignores every other frame. handles fragmented and
+ * coalesced chunks.
+ */
+export function createReplicationFeedbackParser(
+  onFlushedLsn: (lsn: bigint) => void = noteConfirmedFlushLsn
+): (chunk: Uint8Array) => void {
+  let pending: Uint8Array | null = null
+  return (chunk: Uint8Array) => {
+    let buf: Uint8Array
+    if (pending && pending.length > 0) {
+      buf = new Uint8Array(pending.length + chunk.length)
+      buf.set(pending)
+      buf.set(chunk, pending.length)
+    } else {
+      buf = chunk
+    }
+    let offset = 0
+    while (buf.length - offset >= 5) {
+      const view = new DataView(buf.buffer, buf.byteOffset + offset, 5)
+      const len = view.getInt32(1)
+      if (len < 4) {
+        // corrupt frame — drop the buffer rather than spin
+        offset = buf.length
+        break
+      }
+      const total = 1 + len
+      if (offset + total > buf.length) break
+      if (buf[offset] === 0x64 && len >= 4 + 26 && buf[offset + 5] === 0x72) {
+        const flushed = new DataView(
+          buf.buffer,
+          buf.byteOffset + offset + 5 + 1 + 8,
+          8
+        ).getBigUint64(0)
+        if (flushed > 0n) onFlushedLsn(flushed)
+      }
+      offset += total
+    }
+    pending = offset < buf.length ? buf.slice(offset) : null
+  }
+}
+
 // direct wakeup from proxy — bypasses pg_notify for instant replication
 let _replicationWakeup: (() => void) | null = null
 
@@ -136,6 +201,8 @@ let cachedColumnTypeOids: Map<string, Map<string, number>> | null = null
 export function resetReplicationState(): void {
   currentLsn = lsnFloorFromTime()
   lastStreamedWatermark = 0
+  pendingConfirmLsn = 0n
+  processedConfirmLsn = 0n
   cachedTableKeyColumns = null
   cachedExcludedColumns = null
   cachedColumnTypeOids = null
@@ -347,6 +414,11 @@ export async function handleReplicationQuery(
     if (currentWm > lastStreamedWatermark) {
       lastStreamedWatermark = currentWm
     }
+    // a new slot means the consumer re-initializes from a fresh snapshot:
+    // rows up to the snapshot point are covered by the initial copy, and any
+    // prior streamed-batch state belongs to a slot that no longer exists.
+    await purgeConsumedChanges(db, currentWm)
+    await clearStreamedBatches(db)
 
     // persist slot so pg_replication_slots queries find it
     await db.query(
@@ -434,31 +506,42 @@ export async function handleStartReplication(
   new DataView(copyBoth.buffer).setInt16(6, 0) // 0 columns
   writer.write(copyBoth)
 
-  // resume from where the previous handler left off to avoid
-  // replaying already-streamed changes after reconnect.
-  // when client supplied a NON-ZERO LSN (i.e. this is a reconnect to an
-  // existing slot with prior progress), bump lastStreamedWatermark to the
-  // stream-resume floor: one below the oldest still-pending _zero_changes
-  // row. purge-on-stream deletes delivered rows, so remaining rows were NOT
-  // streamed — jumping to the current sequence value instead (the old
-  // behavior) silently skipped every row written while the streaming process
-  // was down (DO teardown/eviction, page reload) and those writes never
-  // reached the replica. `0/0` indicates "fresh slot" and must NOT trigger
-  // this jump, otherwise we'd skip rows that legitimately need to be
-  // streamed for the initial sync.
+  // reconcile against the consumer's DURABLE position on reconnect.
+  // when the client supplied a NON-ZERO LSN (a reconnect to an existing slot
+  // with prior progress), that LSN is one past the commit LSN of the last
+  // transaction it durably committed:
+  //
+  //   - every streamed batch with batch_lsn < clientStartLsn was committed
+  //     by the consumer → purge its change rows now (this also covers acks
+  //     lost to a process death).
+  //   - every remaining streamed-batch mapping belongs to a batch the
+  //     consumer never committed → discard the mapping; its change rows are
+  //     still pending and re-stream below under fresh LSNs.
+  //
+  // then resume one below the oldest still-pending _zero_changes row. rows
+  // are only purged on confirmation, so the table is the durable record —
+  // anything remaining was not durably consumed, even when the streaming
+  // process died (DO teardown/eviction, page reload) while writers kept
+  // appending, or when the consumer was killed mid-store. `0/0` indicates
+  // "fresh slot" and must NOT trigger this: initial sync covers the rows.
   if (clientStartLsn !== null && clientStartLsn > 0n) {
+    await mutex.acquire()
     try {
+      await confirmStreamedBatches(db, clientStartLsn - 1n)
+      await clearStreamedBatches(db)
       const resumeWm = await getStreamResumeWatermark(db)
-      if (resumeWm > lastStreamedWatermark) {
+      if (resumeWm !== lastStreamedWatermark) {
         log.debug.repl(
-          `advancing lastStreamedWatermark ${lastStreamedWatermark} → ${resumeWm} on reconnect`
+          `moving lastStreamedWatermark ${lastStreamedWatermark} → ${resumeWm} on reconnect`
         )
         lastStreamedWatermark = resumeWm
       }
     } catch (err) {
       log.repl(
-        `getStreamResumeWatermark failed on reconnect: ${(err as Error)?.message || err}`
+        `stream resume reconciliation failed on reconnect: ${(err as Error)?.message || err}`
       )
+    } finally {
+      mutex.release()
     }
   }
   let lastWatermark = lastStreamedWatermark
@@ -664,10 +747,8 @@ export async function handleStartReplication(
   // pg_notify as secondary signal, polling as final fallback.
   const pollIntervalIdle = 5000
   const batchSize = 50000
-  const purgeEveryN = 1
   const shardRescanIntervalMs = 10_000
   let running = true
-  let pollsSincePurge = 0
   let tryAcquireFailures = 0
   let lastShardRescan = -shardRescanIntervalMs
   let hasStreamedOnce = false
@@ -840,6 +921,23 @@ export async function handleStartReplication(
           mutex.release()
         }
 
+        // purge batches the consumer has confirmed since the last pass.
+        // confirmation arrives as a standby status update right after the
+        // consumer durably commits a batch, so this runs on the wakeup that
+        // ack triggers (or with the next batch under sustained write load).
+        if (pendingConfirmLsn > processedConfirmLsn && mutex.tryAcquire()) {
+          const target = pendingConfirmLsn
+          try {
+            const purged = await confirmStreamedBatches(db, target)
+            processedConfirmLsn = target
+            if (purged > 0) {
+              log.debug.proxy(`purged ${purged} confirmed changes`)
+            }
+          } finally {
+            mutex.release()
+          }
+        }
+
         if (changes.length > 0) {
           const queryMs = performance.now() - queryStart
           const signalToQueryMs =
@@ -869,6 +967,15 @@ export async function handleStartReplication(
             lastWatermark = batchEnd
             lastStreamedWatermark = batchEnd
             // all changes were filtered out (e.g. shard internal tables).
+            // they never reach the consumer by design, so no confirmation
+            // will ever cover them — purge directly.
+            if (mutex.tryAcquire()) {
+              try {
+                await purgeConsumedChanges(db, batchEnd)
+              } finally {
+                mutex.release()
+              }
+            }
             // brief wait to avoid tight loop, then recheck.
             await waitForWakeup(200)
             queryPending = true
@@ -884,12 +991,28 @@ export async function handleStartReplication(
             columnTypeOids
           )
 
+          // allocate the batch's commit LSN and durably record the
+          // lsn → batch-end mapping BEFORE the rows hit the wire: if the
+          // consumer commits the batch and this process dies before
+          // persisting the mapping, the reconnect reconciliation would
+          // re-stream an already-committed transaction (duplicate apply).
+          const batchLsn = nextLsn()
+          const batchEndLsn = nextLsn()
+          await mutex.acquire()
+          try {
+            await recordStreamedBatch(db, batchLsn, batchEnd)
+          } finally {
+            mutex.release()
+          }
+
           log.debug.repl(`streaming ${changes.length} changes to writer`)
           await streamChanges(
             changes,
             writer,
             sentRelations,
             txCounter++,
+            batchLsn,
+            batchEndLsn,
             tableKeyColumns,
             excludedColumns,
             columnTypeOids
@@ -898,20 +1021,6 @@ export async function handleStartReplication(
           lastStreamedWatermark = batchEnd
           log.debug.repl(`streamed ok, watermark=${batchEnd}`)
           hasStreamedOnce = true
-
-          // purge consumed changes periodically to free wasm memory
-          pollsSincePurge++
-          if (pollsSincePurge >= purgeEveryN && mutex.tryAcquire()) {
-            pollsSincePurge = 0
-            try {
-              const purged = await purgeConsumedChanges(db, lastWatermark)
-              if (purged > 0) {
-                log.debug.proxy(`purged ${purged} consumed changes`)
-              }
-            } finally {
-              mutex.release()
-            }
-          }
 
           // got changes - continue immediately to check for more
           queryPending = true
@@ -1063,12 +1172,15 @@ async function streamChanges(
   writer: ReplicationWriter,
   sentRelations: Set<string>,
   txId: number,
+  // the batch's commit LSN and commit-end LSN are allocated by the caller so
+  // the lsn → batch-end mapping can be durably recorded before streaming.
+  lsn: bigint,
+  endLsn: bigint,
   tableKeyColumns: Map<string, Set<string>>,
   excludedColumns: Map<string, Set<string>>,
   columnTypeOids: Map<string, Map<string, number>>
 ): Promise<void> {
   const ts = nowMicros()
-  const lsn = nextLsn()
 
   // collect all encoded messages into a list, then batch-write
   // to minimize syscalls (each writer.write → socket.write is a syscall)
@@ -1156,7 +1268,6 @@ async function streamChanges(
   }
 
   // COMMIT
-  const endLsn = nextLsn()
   messages.push(encodeWrappedChange(endLsn, endLsn, ts, encodeCommit(0, lsn, endLsn, ts)))
 
   // The MessagePort-backed socket delivers each write as one readable chunk.

@@ -17,6 +17,7 @@ import { PostgresConnection, type DuplexStream } from 'pg-gateway'
 import { log } from './log.js'
 import { Mutex } from './mutex.js'
 import {
+  createReplicationFeedbackParser,
   handleReplicationQuery,
   handleStartReplication,
   signalReplicationChange,
@@ -1244,7 +1245,18 @@ export async function createBrowserProxy(
               port.close()
               void closeSession()
             }
-            port.onmessage = () => {}
+            // client→server traffic on a replication connection carries
+            // standby status updates: the consumer's confirmed-flush LSN
+            // drives purging of _zero_changes (rows are retained until the
+            // consumer durably commits them, like real pg WAL retention).
+            const feedbackParser = createReplicationFeedbackParser()
+            port.onmessage = (ev: MessageEvent) => {
+              const incoming =
+                ev.data instanceof ArrayBuffer
+                  ? new Uint8Array(ev.data)
+                  : (ev.data as Uint8Array)
+              if (incoming instanceof Uint8Array) feedbackParser(incoming)
+            }
             handleStartReplication(
               query,
               writer,

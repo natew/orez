@@ -19,6 +19,7 @@ import { fromNodeSocket } from 'pg-gateway/node'
 import { log } from './log.js'
 import { Mutex } from './mutex.js'
 import {
+  createReplicationFeedbackParser,
   handleReplicationQuery,
   handleStartReplication,
   signalReplicationChange,
@@ -1082,8 +1083,14 @@ async function handleReplicationMessage(
     }
     abortPreviousReplication = abort
 
-    // drain incoming standby status updates
-    socket.on('data', (_chunk: Buffer) => {})
+    // client→server traffic on a replication connection carries standby
+    // status updates: the consumer's confirmed-flush LSN drives purging of
+    // _zero_changes (rows are retained until the consumer durably commits
+    // them, like real pg WAL retention).
+    const feedbackParser = createReplicationFeedbackParser()
+    socket.on('data', (chunk: Buffer) => {
+      feedbackParser(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength))
+    })
 
     // suppress socket errors (EPIPE/ECONNRESET) during shutdown
     socket.on('error', () => {

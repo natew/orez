@@ -2,6 +2,8 @@ import { PGlite } from '@electric-sql/pglite'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import {
+  clearStreamedBatches,
+  confirmStreamedBatches,
   installChangeTracking,
   installTriggersOnShardTables,
   resetShardSchemaCache,
@@ -9,6 +11,7 @@ import {
   getChangesSince,
   getCurrentWatermark,
   getStreamResumeWatermark,
+  recordStreamedBatch,
 } from './change-tracker'
 
 describe('change-tracker', () => {
@@ -228,6 +231,64 @@ describe('change-tracker', () => {
 
     expect(await getStreamResumeWatermark(db)).toBe(await getCurrentWatermark(db))
     expect(await getChangesSince(db, await getStreamResumeWatermark(db))).toHaveLength(0)
+  })
+
+  it('streamed rows are retained until the consumer confirms the batch', async () => {
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('a', 1)`)
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('b', 2)`)
+    const changes = await getChangesSince(db, 0)
+    const batchEnd = changes[changes.length - 1].watermark
+
+    // streamed but not confirmed: a consumer death mid-store must re-stream
+    await recordStreamedBatch(db, 1000n, batchEnd)
+    expect(await getChangesSince(db, 0)).toHaveLength(2)
+    expect(await getStreamResumeWatermark(db)).toBe(changes[0].watermark - 1)
+
+    // a confirmation below the batch lsn purges nothing
+    expect(await confirmStreamedBatches(db, 999n)).toBe(0)
+    expect(await getChangesSince(db, 0)).toHaveLength(2)
+
+    // confirming the batch purges exactly its rows + mapping
+    expect(await confirmStreamedBatches(db, 1000n)).toBe(2)
+    expect(await getChangesSince(db, 0)).toHaveLength(0)
+    expect(await getStreamResumeWatermark(db)).toBe(await getCurrentWatermark(db))
+  })
+
+  it('confirmation purges every batch at or below the confirmed lsn', async () => {
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('a', 1)`)
+    const first = await getChangesSince(db, 0)
+    await recordStreamedBatch(db, 1000n, first[first.length - 1].watermark)
+
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('b', 2)`)
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('c', 3)`)
+    const rest = await getChangesSince(db, first[first.length - 1].watermark)
+    await recordStreamedBatch(db, 2000n, rest[rest.length - 1].watermark)
+
+    // an ack for the second batch (storer commits in order) covers the first
+    expect(await confirmStreamedBatches(db, 2000n)).toBe(3)
+    expect(await getChangesSince(db, 0)).toHaveLength(0)
+  })
+
+  it('reconnect: confirmed batches purge from the resume lsn, unconfirmed rows re-stream', async () => {
+    // batch 1 streamed + committed by the consumer (it resumes past it)
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('a', 1)`)
+    const committed = await getChangesSince(db, 0)
+    await recordStreamedBatch(db, 1000n, committed[committed.length - 1].watermark)
+
+    // batch 2 streamed but the consumer died before storing it
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('b', 2)`)
+    const lost = await getChangesSince(db, committed[committed.length - 1].watermark)
+    await recordStreamedBatch(db, 2000n, lost[lost.length - 1].watermark)
+
+    // reconnect arrives with START_REPLICATION at lsn 1001 (= 1000 + 1):
+    // the reconciliation confirms batch 1 and clears the stale mapping so
+    // batch 2's rows re-stream under fresh lsns.
+    await confirmStreamedBatches(db, 1001n - 1n)
+    await clearStreamedBatches(db)
+
+    const resume = await getStreamResumeWatermark(db)
+    const pending = await getChangesSince(db, resume)
+    expect(pending.map((c) => c.row_data?.name)).toEqual(['b'])
   })
 })
 

@@ -58,6 +58,16 @@ export async function installChangeTracking(db: ChangeTrackingDb): Promise<void>
       active_pid INTEGER DEFAULT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    -- streamed-but-unconfirmed batches: commit LSN -> last _zero_changes
+    -- watermark in the batch. change rows are purged only once the consumer
+    -- confirms the batch (standby status update, or the resume LSN of a
+    -- reconnect), mirroring how real postgres retains WAL until the slot's
+    -- confirmed_flush_lsn passes it.
+    CREATE TABLE IF NOT EXISTS _orez._zero_streamed_batches (
+      batch_lsn BIGINT PRIMARY KEY,
+      batch_end BIGINT NOT NULL
+    );
   `)
 
   // create trigger functions (writes to _orez schema)
@@ -267,6 +277,64 @@ export async function purgeConsumedChanges(
     `DELETE FROM _orez._zero_changes WHERE watermark <= ${Number(watermark)}`
   )
   return result[0]?.affectedRows ?? 0
+}
+
+/**
+ * durably record a streamed batch BEFORE its rows go out on the wire:
+ * batch_lsn is the commit LSN the consumer will use in standby status
+ * updates (and, +1, in the resume LSN of a reconnect), batch_end is the last
+ * _zero_changes watermark the batch covers. recording first closes the race
+ * where the consumer commits a batch but the streaming process dies before
+ * persisting the mapping — an unmapped committed batch would be re-streamed
+ * and applied twice.
+ *
+ * LSNs fit in a double until far beyond any realistic deployment lifetime
+ * (lsn ≈ Date.now() << 12 ≈ 2^53 around year 2109), so they are bound as
+ * numbers for pg/sqlite compatibility.
+ */
+export async function recordStreamedBatch(
+  db: ChangeTrackingDb,
+  batchLsn: bigint,
+  batchEnd: number
+): Promise<void> {
+  await db.query(
+    `INSERT INTO _orez._zero_streamed_batches (batch_lsn, batch_end) VALUES ($1, $2)
+     ON CONFLICT (batch_lsn) DO UPDATE SET batch_end = $2`,
+    [Number(batchLsn), Number(batchEnd)]
+  )
+}
+
+/**
+ * the consumer durably committed every batch whose commit LSN is <= the
+ * confirmed LSN: purge their change rows and mapping entries. this is the
+ * ONLY place streamed rows are deleted — exactly postgres's contract that
+ * WAL is retained until the slot's confirmed_flush_lsn passes it.
+ */
+export async function confirmStreamedBatches(
+  db: ChangeTrackingDb,
+  confirmedLsn: bigint
+): Promise<number> {
+  const result = await db.query<{ hi: string | number | null }>(
+    `SELECT MAX(batch_end) AS hi FROM _orez._zero_streamed_batches WHERE batch_lsn <= $1`,
+    [Number(confirmedLsn)]
+  )
+  const hi = result.rows[0]?.hi
+  if (hi === null || hi === undefined) return 0
+  const purged = await purgeConsumedChanges(db, Number(hi))
+  await db.query(`DELETE FROM _orez._zero_streamed_batches WHERE batch_lsn <= $1`, [
+    Number(confirmedLsn),
+  ])
+  return purged
+}
+
+/**
+ * drop every streamed-batch mapping. used when the consumer's durable
+ * position says it never committed the remaining batches (reconnect with a
+ * lower resume LSN — the rows must re-stream under new LSNs) and when a new
+ * replication slot is created (prior stream state is meaningless).
+ */
+export async function clearStreamedBatches(db: ChangeTrackingDb): Promise<void> {
+  await db.exec(`DELETE FROM _orez._zero_streamed_batches`)
 }
 
 export async function getCurrentWatermark(db: ChangeTrackingDb): Promise<number> {
