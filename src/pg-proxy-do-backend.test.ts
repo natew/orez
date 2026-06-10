@@ -297,18 +297,19 @@ function startDoHttp(
       const parsed = body ? JSON.parse(body) : {}
       bodies.push(parsed)
       if (url.pathname === '/batch') {
+        // mirror the real ZeroDO /batch: execute each statement through the
+        // same handler and return its rows, not empty stubs.
         const statements = Array.isArray(parsed.statements) ? parsed.statements : []
-        sqls.push(
-          ...statements.map((statement: any) =>
-            typeof statement === 'string' ? statement : statement.sql
-          )
-        )
+        const results = statements.map((statement: any) => {
+          const sql = typeof statement === 'string' ? statement : statement.sql
+          sqls.push(sql)
+          params.push(Array.isArray(statement?.params) ? statement.params : [])
+          const result = handler(sql, url)
+          if (result instanceof Response) return { rows: [], columns: [] }
+          return { rows: result.rows ?? [], columns: result.columns ?? [] }
+        })
         res.setHeader('content-type', 'application/json')
-        res.end(
-          JSON.stringify({
-            results: statements.map(() => ({ rows: [], columns: [] })),
-          })
-        )
+        res.end(JSON.stringify({ results }))
         return
       }
       const sql = parsed.sql || ''

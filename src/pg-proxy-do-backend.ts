@@ -5032,6 +5032,13 @@ export class DoBackend {
   private rewriteCache: Map<string, RewrittenStatement[]>
   private preparedStatements = new Map<string, PreparedStatement>()
   private portals = new Map<string, BoundPortal>()
+  // catalog-query answers (pg_tables, information_schema, published-schema)
+  // introspect every sqlite table via PRAGMAs. on a remote DO each PRAGMA is a
+  // round-trip, and zero-cache fires several catalog queries per pg session —
+  // uncached this serialized ~200 round-trips per query and starved /sync
+  // connects past the client's connect budget. cache per instance, invalidated
+  // on DDL / metadata / publication changes and on rollback.
+  private publicationTableInfoCache: PublicationTableInfo[] | null = null
   private readyPromise: Promise<void> | null = null
 
   // Transaction state. The Durable Object refuses raw SQL BEGIN/COMMIT/SAVEPOINT
@@ -5331,6 +5338,7 @@ export class DoBackend {
     }
     // Cached rewrites may reference metadata that the rollback just invalidated.
     this.rewriteCache.clear()
+    this.publicationTableInfoCache = null
   }
 
   private clearTransactionState(): void {
@@ -5608,6 +5616,7 @@ export class DoBackend {
       }
     }
     if (changed) {
+      this.publicationTableInfoCache = null
       // inside an explicit tx we batch the persist to commit time. chat's
       // migrations open one tx and run dozens of DDL statements; persisting
       // after every one was the hot path.
@@ -6425,6 +6434,29 @@ export class DoBackend {
     })
   }
 
+  /** run read statements in one /batch round-trip and return per-statement results. */
+  private async doBatchResults(statements: string[]): Promise<ExecResult[]> {
+    if (statements.length === 0) return []
+    const resp = await this.httpClient.post(
+      this.url('/batch'),
+      JSON.stringify({ statements }),
+      { 'Content-Type': 'application/json' }
+    )
+    const parsed = JSON.parse(resp)
+    const results = Array.isArray(parsed.results) ? parsed.results : []
+    return statements.map((_, index) => {
+      const result = results[index] ?? {}
+      const rows = (result.rows ?? []) as SqliteRow[]
+      const columns =
+        Array.isArray(result.columns) && result.columns.length > 0
+          ? result.columns.map(String)
+          : rows.length > 0
+            ? Object.keys(rows[0])
+            : []
+      return { rows, columns, affectedRows: result.affectedRows }
+    })
+  }
+
   private async shouldSkipStatement(statement: RewrittenStatement): Promise<boolean> {
     if (
       statement.skipIfColumnExists &&
@@ -6458,6 +6490,7 @@ export class DoBackend {
   ): Promise<ExecResult> {
     if (!statement.sql.trim()) return { rows: [], columns: [] }
     if (await this.shouldSkipStatement(statement)) return { rows: [], columns: [] }
+    if (statement.isDDL) this.publicationTableInfoCache = null
     await this.snapshotTransactionWrite(statement)
     const tracking = this.trackingForStatement(statement)
     const exec = await this.materializePublishedSchemaFunctions(
@@ -6507,6 +6540,7 @@ export class DoBackend {
           ? ({ sql: statement } as RewrittenStatement)
           : statement
       if (!item.sql.trim()) continue
+      if (item.isDDL) this.publicationTableInfoCache = null
       if (item.skipIfColumnExists || item.skipIfColumnMissing || item.skipIfTableEmpty) {
         await flush()
         if (
@@ -6650,13 +6684,10 @@ export class DoBackend {
     return unique
   }
 
-  private async sqliteIndexColumns(
-    indexName: string
-  ): Promise<Record<string, 'ASC' | 'DESC'>> {
-    const result = await this.doExecResult(
-      `PRAGMA index_xinfo(${quoteIdentifier(indexName)})`
-    )
-    const rows = result.rows
+  private sqliteIndexColumnsFromRows(
+    xinfoRows: SqliteRow[]
+  ): Record<string, 'ASC' | 'DESC'> {
+    const rows = xinfoRows
       .map((row) => ({
         seqno: Number(row.seqno ?? 0),
         cid: Number(row.cid ?? -1),
@@ -6672,11 +6703,13 @@ export class DoBackend {
     return columns
   }
 
-  private async tableIndexInfos(
+  private tableIndexInfos(
     table: PublicationTableRef,
     columns: SqliteColumnInfo[],
-    primaryKey: string[]
-  ): Promise<PublicationIndexInfo[]> {
+    primaryKey: string[],
+    indexListRows: SqliteRow[],
+    indexColumnsByName: Map<string, Record<string, 'ASC' | 'DESC'>>
+  ): PublicationIndexInfo[] {
     const usedNames = new Set<string>()
     const seenSignatures = new Set<string>()
     const indexes: PublicationIndexInfo[] = []
@@ -6728,10 +6761,7 @@ export class DoBackend {
       )
     }
 
-    const result = await this.doExecResult(
-      `PRAGMA index_list(${quoteIdentifier(table.table)})`
-    )
-    const rawIndexes = result.rows
+    const rawIndexes = indexListRows
       .map((row) => ({
         seq: Number(row.seq ?? 0),
         name: String(row.name ?? ''),
@@ -6745,7 +6775,7 @@ export class DoBackend {
 
     for (const raw of rawIndexes) {
       if (raw.partial) continue
-      const indexColumns = await this.sqliteIndexColumns(raw.name)
+      const indexColumns = indexColumnsByName.get(raw.name) ?? {}
       const names = Object.keys(indexColumns)
       if (raw.origin === 'pk' && primaryKey.length > 0) continue
       const isPrimaryKey = raw.origin === 'pk'
@@ -6784,16 +6814,56 @@ export class DoBackend {
   private async publicationTableInfos(
     publications?: string[]
   ): Promise<PublicationTableInfo[]> {
-    const allTables = await this.listSqliteTables()
+    if (!this.publicationTableInfoCache) {
+      this.publicationTableInfoCache = await this.loadPublicationTableInfos()
+    }
     const requested = publications?.filter((name) => this.publications.has(name)) ?? []
-    const infos: PublicationTableInfo[] = []
-    for (const table of allTables) {
-      if (isSystemSqliteTable(table.name)) continue
-      const ref = this.tableRefForSqliteTable(table.name)
-      const result = await this.doExecResult(
-        `PRAGMA table_info(${quoteIdentifier(table.name)})`
+    return this.publicationTableInfoCache.filter((info) => {
+      if (requested.length > 0) {
+        return requested.some((publicationName) =>
+          this.publicationContainsTable(this.publications.get(publicationName)!, info)
+        )
+      }
+      return !publications?.length
+    })
+  }
+
+  private async loadPublicationTableInfos(): Promise<PublicationTableInfo[]> {
+    const allTables = (await this.listSqliteTables()).filter(
+      (table) => !isSystemSqliteTable(table.name)
+    )
+    // batch table_info + index_list for every table into ONE round-trip, then
+    // every index_xinfo into a second — per-PRAGMA round-trips to the SQL DO
+    // made each full scan cost seconds and starve concurrent sessions.
+    const pragmaResults = await this.doBatchResults(
+      allTables.flatMap((table) => [
+        `PRAGMA table_info(${quoteIdentifier(table.name)})`,
+        `PRAGMA index_list(${quoteIdentifier(table.name)})`,
+      ])
+    )
+    const indexNames: string[] = []
+    for (let i = 0; i < allTables.length; i++) {
+      for (const row of pragmaResults[i * 2 + 1]?.rows ?? []) {
+        const name = String(row.name ?? '')
+        if (name && !Number(row.partial ?? 0)) indexNames.push(name)
+      }
+    }
+    const xinfoResults = await this.doBatchResults(
+      indexNames.map((name) => `PRAGMA index_xinfo(${quoteIdentifier(name)})`)
+    )
+    const indexColumnsByName = new Map<string, Record<string, 'ASC' | 'DESC'>>()
+    for (let i = 0; i < indexNames.length; i++) {
+      indexColumnsByName.set(
+        indexNames[i],
+        this.sqliteIndexColumnsFromRows(xinfoResults[i]?.rows ?? [])
       )
-      const columns = result.rows.map((row) => ({
+    }
+
+    const infos: PublicationTableInfo[] = []
+    for (let i = 0; i < allTables.length; i++) {
+      const table = allTables[i]
+      const ref = this.tableRefForSqliteTable(table.name)
+      const columns = (pragmaResults[i * 2]?.rows ?? []).map((row) => ({
         cid: Number(row.cid ?? 0),
         name: String(row.name ?? ''),
         type: String(row.type ?? ''),
@@ -6824,15 +6894,13 @@ export class DoBackend {
                 .map((column) => column.name),
         indexes: [],
       }
-      info.indexes = await this.tableIndexInfos(ref, columns, info.primaryKey)
-      if (
-        requested.length > 0 &&
-        !requested.some((publicationName) =>
-          this.publicationContainsTable(this.publications.get(publicationName)!, info)
-        )
+      info.indexes = this.tableIndexInfos(
+        ref,
+        columns,
+        info.primaryKey,
+        pragmaResults[i * 2 + 1]?.rows ?? [],
+        indexColumnsByName
       )
-        continue
-      if (requested.length === 0 && publications?.length) continue
       infos.push(info)
     }
     return infos
