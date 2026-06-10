@@ -525,6 +525,13 @@ export async function handleStartReplication(
   // appending, or when the consumer was killed mid-store. `0/0` indicates
   // "fresh slot" and must NOT trigger this: initial sync covers the rows.
   if (clientStartLsn !== null && clientStartLsn > 0n) {
+    // NOTE: in the browser proxy this is the transaction-aware mutex, so the
+    // acquire waits until no OTHER connection has an open transaction (the
+    // reconcile's deletes must not join a foreign tx that could roll back).
+    // safe because CopyBothResponse was already written above — the consumer
+    // is never blocked waiting on it mid-handshake — and connection cleanup
+    // rolls back dead connections' transactions, so the wait is bounded by
+    // live, well-behaved transactions only.
     await mutex.acquire()
     try {
       await confirmStreamedBatches(db, clientStartLsn - 1n)

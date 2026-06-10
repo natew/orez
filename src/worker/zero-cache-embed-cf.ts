@@ -48,6 +48,7 @@ import { runWorker as _runWorker } from '@rocicorp/zero/out/zero-cache/src/serve
 import { setLogLevel } from '../log.js'
 import { createBrowserProxy, type BrowserProxy } from '../pg-proxy-browser.js'
 import { DoBackend } from '../pg-proxy-do-backend.js'
+import { resetReplicationState } from '../replication/handler.js'
 import {
   DurableObjectWebSocketHandoff,
   type DurableObjectWebSocket,
@@ -170,6 +171,15 @@ export async function startZeroCacheEmbedCF(
   // (index.ts). without this, OREZ_LOG_LEVEL=debug on a CF deploy is silently
   // ignored and the replication poll loop is undebuggable in tails.
   setLogLevel((opts.env?.OREZ_LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'warn')
+
+  // generation hermeticity: the isolate (module state) outlives a stop() —
+  // CF reuses it across DO instance recreation after idle-hibernation
+  // teardown. a fresh embed must start from the replication-handler state a
+  // fresh isolate would have (lsn floor, stream watermark, schema caches);
+  // the reconnect reconciliation in handleStartReplication is designed to
+  // resume from durable state, not from a prior generation's module vars.
+  resetReplicationState()
+
   const appId = opts.appId || 'zero'
   const publications = opts.publications?.join(',') || `orez_${appId}_public`
   const readyTimeout = opts.readyTimeout ?? 30000
