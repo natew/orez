@@ -640,7 +640,9 @@ describe('DO snapshot transactions', () => {
       title: 'old',
     })
     expect(
-      mock.exec("SELECT count(*) c FROM sqlite_master WHERE name LIKE '_orez_snapshot_%'").toArray()
+      mock
+        .exec("SELECT count(*) c FROM sqlite_master WHERE name LIKE '_orez_snapshot_%'")
+        .toArray()
     ).toEqual([{ c: 0 }])
 
     // an UNRELATED writer write (different table) still triggers no copy of todo.
@@ -748,7 +750,9 @@ describe('DO snapshot transactions', () => {
   it('does not remove another open connection snapshot', () => {
     snapshot.prepare('BEGIN CONCURRENT').run()
     // first writer touch on todo copies it into snapshot's namespace (lazy COW).
-    live.prepare('UPDATE todo SET title = ?, _0_version = ? WHERE id = ?').run('new', '02', '1')
+    live
+      .prepare('UPDATE todo SET title = ?, _0_version = ? WHERE id = ?')
+      .run('new', '02', '1')
     const snapshotTables = mock
       .exec("SELECT name FROM sqlite_master WHERE name LIKE '_orez_snapshot_%'")
       .toArray()
