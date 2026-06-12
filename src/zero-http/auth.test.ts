@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'vitest'
 
 import {
+  eventually,
   sleep,
   startZeroHttpHarness,
   waitForComplete,
@@ -131,11 +132,31 @@ describe('zero-http auth parity', () => {
     }
   })
 
-  // skipped: the current transport starts its initial pull with `void this.pull()`,
-  // so an unknown-token 401 becomes a Vitest-level unhandled rejection before
-  // this segment can assert on the empty view without editing transport.ts.
-  test.skip('unknown token 401 never materializes data', async () => {
-    throw new Error('transport 401 containment is owned by the transport segment')
+  test('unknown token 401 reaches needs-auth without materializing data', async () => {
+    harness = await startZeroHttpHarness({
+      seed: {
+        user: [{ id: 'u1', name: 'ada' }],
+        project: [{ id: 'p-u1', ownerId: 'u1', name: 'u1 private' }],
+        member: [{ id: 'm-u1-owner', projectId: 'p-u1', userId: 'u1' }],
+      },
+    })
+    const unknown = harness.createZero('missing')
+    const projects = unknown.query.project.related('members').materialize()
+    const emissions: ProjectWithMembers[][] = []
+    const stop = captureRows(projects, emissions, normalizeProjects)
+
+    try {
+      await eventually(() =>
+        expect(unknown.connection.state.current.name).toBe('needs-auth')
+      )
+      await sleep(50)
+
+      expect(projects.data).toEqual([])
+      expect(emissions.every((emission) => emission.length === 0)).toBe(true)
+    } finally {
+      stop()
+      projects.destroy()
+    }
   })
 })
 
