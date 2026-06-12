@@ -79,6 +79,10 @@ custom mutators (names are `namespace|name` on the wire):
   mutator.
 - `member|add` args `{ id, projectId, userId }` — app error if project
   missing or authed user is not the project owner.
+- `member|remove` args `{ id }` (added segment 2) — app error `'not-found'`
+  if member missing, `'forbidden'` if authed user is not the project owner.
+  drives the visibility-revocation test: removing a member must make the
+  project AND its member rows vanish from the removed user's next snapshot.
 
 ## file ownership (segment 1 — do not touch the other agent's files)
 
