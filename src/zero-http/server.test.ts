@@ -318,4 +318,67 @@ describe('zero-http fixture server', () => {
       { tableName: 'user', value: { id: 'u1', name: 'ada' } },
     ])
   })
+
+  it('handles member removal app errors and success', async () => {
+    const server = await start({
+      user: [
+        { id: 'u1', name: 'ada' },
+        { id: 'u2', name: 'ben' },
+      ],
+      project: [{ id: 'p2', ownerId: 'u2', name: 'u2 shared' }],
+      member: [{ id: 'm1', projectId: 'p2', userId: 'u1' }],
+    })
+
+    const missing = await push(server, 'token-u2', {
+      clientID: 'c-u2',
+      id: 1,
+      name: 'member|remove',
+      args: { id: 'missing' },
+    })
+    expect(missing.res.status).toBe(200)
+    expect(missing.body).toEqual({
+      pushResponse: {
+        mutations: [
+          {
+            id: { clientID: 'c-u2', id: 1 },
+            result: { error: 'app', details: 'not-found' },
+          },
+        ],
+      },
+    })
+    expect(server.rows('member')).toEqual([{ id: 'm1', projectId: 'p2', userId: 'u1' }])
+
+    const forbidden = await push(server, 'token-u1', {
+      clientID: 'c-u1',
+      id: 1,
+      name: 'member|remove',
+      args: { id: 'm1' },
+    })
+    expect(forbidden.res.status).toBe(200)
+    expect(forbidden.body).toEqual({
+      pushResponse: {
+        mutations: [
+          {
+            id: { clientID: 'c-u1', id: 1 },
+            result: { error: 'app', details: 'forbidden' },
+          },
+        ],
+      },
+    })
+    expect(server.rows('member')).toEqual([{ id: 'm1', projectId: 'p2', userId: 'u1' }])
+
+    const removed = await push(server, 'token-u2', {
+      clientID: 'c-u2',
+      id: 2,
+      name: 'member|remove',
+      args: { id: 'm1' },
+    })
+    expect(removed.res.status).toBe(200)
+    expect(removed.body).toEqual({
+      pushResponse: {
+        mutations: [{ id: { clientID: 'c-u2', id: 2 }, result: {} }],
+      },
+    })
+    expect(server.rows('member')).toEqual([])
+  })
 })

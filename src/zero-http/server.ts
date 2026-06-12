@@ -271,6 +271,16 @@ function applyMutation(
     return {}
   }
 
+  if (mutation.name === 'member|remove') {
+    const member = tables.member.get(args.id)
+    if (!member) return appError('not-found')
+    const project = tables.project.get(member.projectId)
+    if (!project) return appError('not-found')
+    if (project.ownerId !== userID) return appError('forbidden')
+    tables.member.delete(args.id)
+    return {}
+  }
+
   return appError('unsupported')
 }
 

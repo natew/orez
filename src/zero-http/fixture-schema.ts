@@ -58,6 +58,10 @@ export type MemberAddArgs = {
   userId: string
 }
 
+export type MemberRemoveArgs = {
+  id: string
+}
+
 export const zeroHttpFixtureMutators = {
   project: {
     create: async (tx: FixtureTransaction, args: ProjectCreateArgs) => {
@@ -70,6 +74,9 @@ export const zeroHttpFixtureMutators = {
   member: {
     add: async (tx: FixtureTransaction, args: MemberAddArgs) => {
       await tx.mutate.member.insert(args)
+    },
+    remove: async (tx: FixtureTransaction, args: MemberRemoveArgs) => {
+      await tx.mutate.member.delete({ id: args.id })
     },
   },
 }
