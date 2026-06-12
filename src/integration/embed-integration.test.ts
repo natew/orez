@@ -277,9 +277,50 @@ describe('zero-cache embed integration', { timeout: 120000 }, () => {
 
     ws.close()
   })
+
+  // sootbean points zero clients at `https://host/p-<projectId>` — the zero
+  // client appends its sync path after that single base component, producing
+  // `/p-<id>/sync/v51/connect`. on node the prefix is inert and the server
+  // must sync exactly like an unprefixed client. zero supports this natively:
+  // the client's getServer() permits exactly one path component and the
+  // server's WorkerDispatcher matches `(/:base)/:worker/v:version/:action`,
+  // ignoring `base`. this test pins that tolerance so a zero upgrade that
+  // drops it fails here instead of in downstream prefixed deployments.
+  test('syncs through a p-<id> server path prefix', async () => {
+    const downstream = new Queue<unknown>()
+    const ws = connectAndSubscribe(zeroPort, downstream, '/p-abc123')
+
+    await drainInitialPokes(downstream)
+
+    await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+      'embed-row-prefixed',
+      'hello-prefixed',
+      43,
+    ])
+
+    const poke = await waitForPokePart(downstream, 30000)
+    expect(poke.rowsPatch).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          op: 'put',
+          tableName: 'foo',
+          value: expect.objectContaining({
+            id: 'embed-row-prefixed',
+            value: 'hello-prefixed',
+          }),
+        }),
+      ])
+    )
+
+    ws.close()
+  })
 })
 
-function connectAndSubscribe(port: number, downstream: Queue<unknown>): WebSocket {
+function connectAndSubscribe(
+  port: number,
+  downstream: Queue<unknown>,
+  basePath = ''
+): WebSocket {
   const cg = `test-cg-${Date.now()}`
   const cid = `test-client-${Date.now()}`
   const secProtocol = encodeSecProtocols(
@@ -313,7 +354,7 @@ function connectAndSubscribe(port: number, downstream: Queue<unknown>): WebSocke
     undefined
   )
   const ws = new WebSocket(
-    `ws://localhost:${port}/sync/v${SYNC_PROTOCOL_VERSION}/connect` +
+    `ws://localhost:${port}${basePath}/sync/v${SYNC_PROTOCOL_VERSION}/connect` +
       `?clientGroupID=${cg}&clientID=${cid}&wsid=ws1&schemaVersion=1&baseCookie=&ts=${Date.now()}&lmid=0`,
     secProtocol
   )
