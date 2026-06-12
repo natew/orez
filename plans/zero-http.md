@@ -32,8 +32,11 @@ plane only. replace it with react-query-shaped HTTP:
   from orez storage. no CVR, no view-syncer, no per-client server state.
   client-configurable triggers: refetch-after-mutation, refetch-on-focus,
   poll-while-active (token meter during chat).
-- **push**: zero's push protocol is already HTTP POST with lastMutationID
-  bookkeeping. mutators and their optimistic-apply semantics stay as-is.
+- **push**: replicache has HTTP push semantics, but zero's normal client
+  routes push through its socket — `#pusher` asserts a connected socket and
+  sends one `["push", ...]` frame per mutation (zero.js:981). the transport
+  bridges this without forking: push frames leave the fake socket as HTTP
+  POSTs. mutators and their optimistic-apply semantics stay as-is.
 
 precedent: this is replicache semantics (http pull/push + rebase) with zql
 relations on top — the lineage zero descends from. soot's pre-embed
@@ -50,8 +53,9 @@ it lacked exactly the client discipline the real zero client keeps.
   public surface; the control instance flips, the project instance is
   untouched. on-zero source: `~/takeout` (package `on-zero`).
 - **zero client internals**: `@rocicorp/zero` 1.6.1,
-  `node_modules/@rocicorp/zero/out/zero/` (+ `replicache/` — the rebase
-  machinery is right there). protocol v51.
+  `node_modules/@rocicorp/zero/out/zero-client/` (+ `replicache/` — the
+  rebase machinery is right there, and `zero-protocol/` for the v51
+  message schemas). protocol v51.
 - **orez server side**: DoBackend + query routing already serve SQL over
   HTTP inside the data worker (`ZeroSqlDO`); the snapshot pull endpoint is
   a thin authenticated read on top. the push endpoint already exists
@@ -63,32 +67,97 @@ it lacked exactly the client discipline the real zero client keeps.
 
 ## the spike — proof obligations
 
-half-day to ~2 days. build the smallest thing that answers these four,
+half-day to ~2 days. build the smallest thing that answers these five,
 in order; stop and report the moment one fails hard.
 
-1. **transport seam (the gating unknown).** can the 1.6.1 zero client run
-   with no socket, fed by snapshot writes, WITHOUT forking @rocicorp/zero?
-   candidate seams, cheapest first:
-   a. drive the client-side store directly from on-zero — bypass zero's
-      ConnectionManager entirely; zql + materialized views read the local
-      store, on-zero writes pulled snapshots into it, mutations go through
-      zero's existing push path with on-zero tracking lastMutationID.
-   b. a fake in-process WebSocket/transport object satisfying zero's
-      connection contract, replaying pull snapshots as poke messages
-      (v51 wire shape) — heavier, but zero's machinery does the rebase
-      bookkeeping for free.
-   pick by reading, not guessing — document why the loser loses.
+1. **transport seam — RESOLVED BY READING (2026-06-12), validate at runtime.**
+   the seam question was answered by reading 1.6.1 source; the spike's job
+   is to prove the contract below works live, not to re-run the bake-off.
+
+   **the only non-fork seam is the WebSocket global.** direct store writes
+   (the old seam "a") are impossible without forking: `#rep` and
+   `#pokeHandler` are hard-private class fields on `Zero`, and bypassing
+   them means rebuilding LMID/rebase bookkeeping by hand. eliminated.
+
+   **chosen path: an HTTP-backed fake WebSocket that emits real v51 poke
+   messages.** verified mechanics (all refs `@rocicorp/zero@1.6.1`
+   `out/zero-client/src/client/` unless noted):
+   - the client reads the constructor via `mustGetBrowserGlobal("WebSocket")`
+     on EVERY (re)connect (zero.js:1363). the shipped bundle tree-shakes
+     `overrideBrowserGlobal` out, so the seam is a `globalThis.WebSocket`
+     shim installed once at boot that intercepts only the fake control
+     origin and passes every other URL to the native WebSocket (soot's
+     project-plane socket must pass through untouched).
+   - `server` must be `http(s)://` with at most one path component
+     (server-option.js) — a sentinel like `https://zero-http.local` passes
+     validation; the client appends `/sync/v51/connect` with clientID,
+     clientGroupID, userID, baseCookie, lmid, wsid in the query and auth +
+     initConnection (desiredQueriesPatch) in the sec-protocol header —
+     everything the transport needs arrives in the constructor args.
+   - socket surface actually used: `addEventListener('message'|'open'|'close')`,
+     `send`, `close` (zero.js:863-865). no binary frames; JSON text only.
+   - poke ingestion is the rebase path for free: `#onMessage` →
+     `PokeHandler` buffers/merges → `rep.poke` → `handlePullResponseV1` →
+     `maybeEndPull` replays pending mutations (zero-poke-handler.js:100,
+     replicache/src/sync/pull.js). same-clientGroup `#puller` is a no-op
+     (zero.js:1178) — ALL downstream data flows as pokes, never HTTP pull
+     on replicache's side.
+
+   **transport contract checklist** (each is an observable the runtime test
+   must hit; miss one and the client hangs or silently drops data):
+   - emit `open`, then `["connected", {wsid, timestamp}]` — this resolves
+     `#connectResolver`; pushes await it forever otherwise (zero.js:983).
+   - after `connected` the client sends `initConnection` or
+     `changeDesiredQueries` upstream (zero.js:789-810). the transport must
+     ack desired queries via a poke carrying `gotQueriesPatch`, or
+     materialized views never reach `resultType: 'complete'` and
+     `run(…, 'complete')` hangs.
+   - answer `ping` with `pong` locally within 5s (`DEFAULT_PING_TIMEOUT_MS`,
+     no HTTP round trip) or the client tears the connection down.
+   - `push` frames → HTTP POST; emit `["pushResponse", …]` from the result
+     so `MutationTracker` resolves `.server` promises and surfaces
+     app-level mutator errors.
+   - **cookie rules** (enforced by handlePullResponseV1 + mergePokes):
+     `pokeStart.baseCookie` must equal the client's current cookie
+     (transport tracks it: seeded from the connect URL's `baseCookie`,
+     advanced on each emitted pokeEnd); mismatch = poke silently ignored,
+     gap between buffered pokes = thrown. non-empty patch REQUIRES a
+     strictly newer `pokeEnd.cookie`; unchanged snapshot = emit no poke at
+     all, never same-cookie-plus-patch. serialize pulls so cookies chain.
+   - full-snapshot pokes are `[{op:'clear'}, ...puts]` row patches +
+     `lastMutationIDChanges` — idempotent by construction, which is what
+     makes stateless HTTP pull safe.
+   - `deleteClients` upstream may be ignored in the spike; hidden-tab
+     disconnect + reconnect-on-visible comes from zero's own machinery and
+     IS refetch-on-focus (fresh transport → fresh pull).
+
+   wire-shape fixture: `~/orez/src/cf-do/worker.ts` (`applyDesiredQueries`,
+   `sendSyncPoke`, `handlePush`) already speaks this exact dialect over real
+   DO sockets — lift the poke-building shapes from it, but treat it as a
+   fixture, not finished semantics: the stateless HTTP pull endpoint still
+   needs to be real.
 2. **optimistic mutation + rebase.** with a mutation in flight (pushed,
    not yet acked), a pull lands. the optimistic state must not flicker or
    be clobbered; after ack + next pull, client state equals server state.
    this is THE correctness question. cover: ack-then-pull, pull-then-ack,
-   push failure → rollback.
+   and a focused rollback test — optimistic mutation applies, server
+   returns an app-level mutator error, the next poke advances LMID with no
+   row patch for it, and the optimistic row disappears.
 3. **relations.** one `.related()` query over the snapshot store (e.g.
    project → members shape) materializes and updates when a pull replaces
    rows.
 4. **interleave under churn.** rapid mutation bursts (10+ queued) while
    pulls arrive on a timer. no lost updates, no stuck lastMutationID, no
-   unbounded store growth.
+   unbounded store growth. stretch (cheap if the fixture allows): two zero
+   instances in one client group (two tabs), each on its own transport —
+   no cookie fights, both converge.
+
+5. **auth/permission parity.** the snapshot endpoint derives identity from
+   the request's auth, not client-supplied params, and two different users
+   pulling get disjoint per-user snapshots. in the spike this is a fixture
+   schema with a user-scoped filter; full parity with soot's control
+   named-query visibility rules (especially the project directory rows) is
+   a named acceptance item of the follow-on integration, not the spike.
 
 acceptance per obligation = a vitest/integration test in ~/orez (or
 on-zero's suite in ~/takeout where the code lands) that fails before the
@@ -101,7 +170,8 @@ implementation and passes after — not a manual demo.
 - no soot integration in the spike — a fixture schema mirroring the
   control tables is enough. soot wiring is the follow-on once the verdict
   is in.
-- one path: if seam (a) wins, no remnants of (b) survive, and vice versa.
+- one path: the fake-socket transport is the only transport. no direct
+  store-write experiments, no dual-mode toggles left behind.
 - do not touch zero-cache, the embed, or the project plane.
 
 ## verdict + follow-on
