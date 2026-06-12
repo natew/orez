@@ -47,9 +47,11 @@ test('e2e smoke: stock zero client syncs over http against the fixture server', 
     const names = view.data.map((project: any) => project.name).sort()
     expect(names).toEqual(['first', 'second'])
   })
-  expect(harness.server.rows('project').map((row) => row.id).sort()).toEqual([
-    'p1',
-    'p2',
-  ])
+  expect(
+    harness.server
+      .rows('project')
+      .map((row) => row.id)
+      .sort()
+  ).toEqual(['p1', 'p2'])
   view.destroy()
 })

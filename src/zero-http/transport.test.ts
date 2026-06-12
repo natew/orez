@@ -194,7 +194,7 @@ describe('zero-http transport', () => {
     )
     expect(requests[0].body.cookie).toBeNull()
     expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBeNull()
-    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('1')
+    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('00000000000000000001')
     messages.length = 0
 
     await transport.pull()
@@ -202,14 +202,14 @@ describe('zero-http transport', () => {
     expect(requests[1].body.cookie).toBe(1)
 
     await transport.pull()
-    expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBe('1')
-    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('2')
+    expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBe('00000000000000000001')
+    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('00000000000000000002')
     expect(requests[2].body.cookie).toBe(1)
     messages.length = 0
 
     await transport.pull()
-    expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBe('2')
-    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('3')
+    expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBe('00000000000000000002')
+    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('00000000000000000003')
     expect(requests[3].body.cookie).toBe(2)
     messages.length = 0
 
@@ -225,8 +225,8 @@ describe('zero-http transport', () => {
 
     expect(requests.length).toBe(5)
     expect(maxInFlight).toBe(1)
-    expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBe('3')
-    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('4')
+    expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBe('00000000000000000003')
+    expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('00000000000000000004')
   })
 
   test('ping is answered locally and the stock Zero connection survives idle ping', async () => {

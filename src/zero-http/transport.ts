@@ -37,6 +37,8 @@ type TransportState = {
   nextPokeID: number
 }
 
+const COOKIE_WIDTH = 20
+
 export function installZeroHttpTransport(opts: {
   origin: string
   fetch?: typeof fetch
@@ -244,9 +246,7 @@ class ZeroHttpSocket {
     requestID: string
   }) {
     const response = await this.fetchPull(body.clientGroupID, body.cookie)
-    const cookie = response.unchanged
-      ? toWebSocketCookie(response.cookie)
-      : toWebSocketCookie(response.cookie)
+    const cookie = toWebSocketCookie(response.cookie)
     this.emitMessage([
       'pull',
       {
@@ -404,7 +404,7 @@ function toHttpCookie(cookie: string | null): number | null {
 }
 
 function toWebSocketCookie(cookie: number | null): string | null {
-  return cookie === null ? null : String(cookie)
+  return cookie === null ? null : String(cookie).padStart(COOKIE_WIDTH, '0')
 }
 
 function isStaleCookie(current: string | null, next: number) {

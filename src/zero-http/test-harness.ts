@@ -15,28 +15,39 @@ export type ZeroHttpHarness = Awaited<ReturnType<typeof startZeroHttpHarness>>
 
 export async function startZeroHttpHarness(opts?: {
   seed?: { user?: Row[]; project?: Row[]; member?: Row[] }
+  interceptFetch?: (next: typeof fetch) => typeof fetch
 }) {
   const server = await startZeroHttpServer({ seed: opts?.seed })
-  const transport = installZeroHttpTransport({ origin: server.url })
+  const baseFetch: typeof fetch = (input, init) => globalThis.fetch(input, init)
+  const transportFetch = opts?.interceptFetch ? opts.interceptFetch(baseFetch) : baseFetch
+  const transport = installZeroHttpTransport({
+    origin: server.url,
+    fetch: transportFetch,
+  })
   const clients: Array<{ close(): Promise<unknown> }> = []
 
   return {
     server,
     transport,
-    createZero(userID: string): FixtureZero {
+    createZero(
+      userID: string,
+      createOpts?: { storageKey?: string; pingTimeoutMs?: number }
+    ): FixtureZero {
       const zero = new Zero({
         server: server.url,
         userID,
         auth: `token-${userID}`,
         schema: zeroHttpFixtureSchema,
         kvStore: 'mem' as const,
-        storageKey: `zero-http-harness-${++storageID}`,
+        storageKey: createOpts?.storageKey ?? `zero-http-harness-${++storageID}`,
         mutators: zeroHttpFixtureMutators,
+        pingTimeoutMs: createOpts?.pingTimeoutMs,
       })
       clients.push(zero)
       return zero
     },
     async close() {
+      await transport.pull().catch(() => {})
       while (clients.length) await clients.pop()?.close()
       transport.uninstall()
       await server.close()
@@ -62,10 +73,7 @@ export function waitForComplete<T>(view: {
   })
 }
 
-export async function eventually(
-  assertion: () => void | Promise<void>,
-  timeout = 3_000
-) {
+export async function eventually(assertion: () => void | Promise<void>, timeout = 3_000) {
   const started = Date.now()
   let lastError: unknown
   while (Date.now() - started < timeout) {
