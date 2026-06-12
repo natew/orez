@@ -101,7 +101,7 @@ describe('zero-http fixture server', () => {
       member: [{ id: 'm1', projectId: 'p2', userId: 'u1' }],
     })
 
-    const u1 = await pull(server, 'token-u1')
+    const u1 = await pull(server, 'token-u1', { clientGroupID: 'cg-u1' })
     expect(u1.res.status).toBe(200)
     expect(puts(u1.body)).toEqual([
       {
@@ -119,7 +119,7 @@ describe('zero-http fixture server', () => {
       { tableName: 'user', value: { id: 'u1', name: 'ada' } },
     ])
 
-    const u2 = await pull(server, 'token-u2')
+    const u2 = await pull(server, 'token-u2', { clientGroupID: 'cg-u2' })
     expect(u2.res.status).toBe(200)
     expect(puts(u2.body)).toEqual([
       {
@@ -133,8 +133,12 @@ describe('zero-http fixture server', () => {
       { tableName: 'user', value: { id: 'u2', name: 'ben' } },
     ])
 
-    expect((await pull(server, null)).res.status).toBe(401)
-    expect((await pull(server, 'token-nope')).res.status).toBe(401)
+    expect((await pull(server, null, { clientGroupID: 'cg-missing' })).res.status).toBe(
+      401
+    )
+    expect(
+      (await pull(server, 'token-nope', { clientGroupID: 'cg-nope' })).res.status
+    ).toBe(401)
   })
 
   it('returns unchanged pulls by cookie and full snapshots after a push', async () => {
@@ -213,6 +217,57 @@ describe('zero-http fixture server', () => {
 
     const afterReplay = await pull(server, 'token-u1')
     expect(afterReplay.body.lastMutationIDChanges).toEqual({ c1: 1 })
+  })
+
+  it('binds client groups to the first authenticated user', async () => {
+    const server = await start({
+      user: [
+        { id: 'u1', name: 'ada' },
+        { id: 'u2', name: 'ben' },
+      ],
+      project: [],
+      member: [],
+    })
+
+    const created = await push(
+      server,
+      'token-u1',
+      {
+        id: 1,
+        name: 'project|create',
+        args: { id: 'p1', ownerId: 'u1', name: 'u1 project' },
+      },
+      'cg-u1'
+    )
+    expect(created.res.status).toBe(200)
+
+    const u2Pull = await pull(server, 'token-u2', {
+      clientGroupID: 'cg-u1',
+    })
+    expect(u2Pull.res.status).toBe(403)
+    expect(u2Pull.body.error).toContain('client group belongs to a different user')
+
+    const u2Push = await push(
+      server,
+      'token-u2',
+      {
+        id: 1,
+        name: 'project|create',
+        args: { id: 'p2', ownerId: 'u2', name: 'u2 project' },
+      },
+      'cg-u1'
+    )
+    expect(u2Push.res.status).toBe(403)
+    expect(u2Push.body.error).toContain('client group belongs to a different user')
+    expect(server.rows('project')).toEqual([
+      { id: 'p1', ownerId: 'u1', name: 'u1 project' },
+    ])
+
+    const u1Pull = await pull(server, 'token-u1', {
+      clientGroupID: 'cg-u1',
+    })
+    expect(u1Pull.res.status).toBe(200)
+    expect(u1Pull.body.lastMutationIDChanges).toEqual({ c1: 1 })
   })
 
   it('advances LMID and cookie for app-error mutations without changing rows', async () => {
@@ -348,12 +403,17 @@ describe('zero-http fixture server', () => {
     })
     expect(server.rows('member')).toEqual([{ id: 'm1', projectId: 'p2', userId: 'u1' }])
 
-    const forbidden = await push(server, 'token-u1', {
-      clientID: 'c-u1',
-      id: 1,
-      name: 'member|remove',
-      args: { id: 'm1' },
-    })
+    const forbidden = await push(
+      server,
+      'token-u1',
+      {
+        clientID: 'c-u1',
+        id: 1,
+        name: 'member|remove',
+        args: { id: 'm1' },
+      },
+      'cg-u1'
+    )
     expect(forbidden.res.status).toBe(200)
     expect(forbidden.body).toEqual({
       pushResponse: {

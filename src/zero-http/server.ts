@@ -42,6 +42,7 @@ export async function startZeroHttpServer(opts?: {
   const tables = seedTables(opts?.seed)
   const lmids = new Map<string, Map<string, number>>()
   const mutationResults: ClientMutationResults = new Map()
+  const clientGroupUsers = new Map<string, string>()
   let cookie = 1
 
   const server = createServer(async (req, res) => {
@@ -60,6 +61,10 @@ export async function startZeroHttpServer(opts?: {
 
       if (path === '/pull') {
         const body = (await readJSON(req)) as PullBody
+        if (!bindClientGroup(clientGroupUsers, body.clientGroupID, userID)) {
+          sendJSON(res, 403, { error: 'client group belongs to a different user' })
+          return
+        }
         if (body.cookie === cookie) {
           sendJSON(res, 200, { cookie, unchanged: true })
           return
@@ -81,6 +86,10 @@ export async function startZeroHttpServer(opts?: {
 
       if (path === '/push') {
         const body = (await readJSON(req)) as PushBody
+        if (!bindClientGroup(clientGroupUsers, body.clientGroupID, userID)) {
+          sendJSON(res, 403, { error: 'client group belongs to a different user' })
+          return
+        }
         const mutations = Array.isArray(body.mutations) ? body.mutations : []
         const gap = findMutationGap(lmids, body.clientGroupID, mutations)
         if (gap) {
@@ -176,6 +185,17 @@ function authenticate(req: IncomingMessage, tables: Tables) {
   if (!header?.startsWith('Bearer token-')) return null
   const userID = header.slice('Bearer token-'.length)
   return tables.user.has(userID) ? userID : null
+}
+
+function bindClientGroup(
+  clientGroupUsers: Map<string, string>,
+  clientGroupID: string,
+  userID: string
+) {
+  const owner = clientGroupUsers.get(clientGroupID)
+  if (owner) return owner === userID
+  clientGroupUsers.set(clientGroupID, userID)
+  return true
 }
 
 function visibleRowsPatch(tables: Tables, userID: string) {
