@@ -134,6 +134,76 @@ describe('zero-http transport', () => {
     )
   })
 
+  test('updateAuth frame updates bearer headers for later requests', async () => {
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      expect(request.path).toBe('/pull')
+      return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+    })
+    const transport = install(fetch)
+    const { socket } = openRawSocketWithMessages({ authToken: 'token-old' })
+
+    await eventually(() => expect(requests.length).toBe(1))
+    expect(requests[0].headers.authorization).toBe('Bearer token-old')
+
+    socket.send(JSON.stringify(['updateAuth', { auth: 'token-new' }]))
+    await transport.pull()
+
+    expect(requests.at(-1)?.headers.authorization).toBe('Bearer token-new')
+  })
+
+  test('push frames are serialized per socket', async () => {
+    const firstPushStarted = defer<void>()
+    const releaseFirstPush = defer<void>()
+    const pushIDs: number[] = []
+    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+
+      expect(request.path).toBe('/push')
+      const mutationID = request.body.mutations[0].id
+      pushIDs.push(mutationID)
+      if (mutationID === 1) {
+        firstPushStarted.resolve()
+        await releaseFirstPush.promise
+      }
+      return jsonResponse({
+        pushResponse: {
+          mutations: request.body.mutations.map((mutation: any) => ({
+            id: { clientID: mutation.clientID, id: mutation.id },
+            result: {},
+          })),
+        },
+      })
+    })
+    install(fetch)
+    const { messages, socket } = openRawSocketWithMessages()
+
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true)
+    )
+    socket.send(JSON.stringify(['push', pushBody(1)]))
+    await firstPushStarted.promise
+    socket.send(JSON.stringify(['push', pushBody(2)]))
+    await sleep(25)
+
+    expect(pushIDs).toEqual([1])
+    releaseFirstPush.resolve()
+    await eventually(() => expect(pushIDs).toEqual([1, 2]))
+    await eventually(() =>
+      expect(messages.filter((message) => message[0] === 'pushResponse')).toHaveLength(2)
+    )
+    expect(
+      messages
+        .filter((message) => message[0] === 'pushResponse')
+        .map((message) => message[1].mutations[0].id.id)
+    ).toEqual([1, 2])
+  })
+
   test('cookie discipline skips unchanged pokes, chains changed pokes, and coalesces concurrent pulls', async () => {
     const requests: RequestRecord[] = []
     const responses: Array<any | Promise<any>> = [
@@ -227,6 +297,46 @@ describe('zero-http transport', () => {
     expect(maxInFlight).toBe(1)
     expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBe('00000000000000000003')
     expect(findMessage(messages, 'pokeEnd')[1].cookie).toBe('00000000000000000004')
+  })
+
+  test('unchanged pull flushes late query registration to complete', async () => {
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      expect(request.path).toBe('/pull')
+
+      if (request.body.cookie === null) {
+        return jsonResponse({
+          cookie: 1,
+          lastMutationIDChanges: {},
+          rowsPatch: [
+            { op: 'clear' },
+            { op: 'put', tableName: 'user', value: { id: 'u1', name: 'ada' } },
+            {
+              op: 'put',
+              tableName: 'project',
+              value: { id: 'p1', ownerId: 'u1', name: 'first' },
+            },
+          ],
+        })
+      }
+
+      return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+    })
+    install(fetch)
+    const zero = createZero()
+
+    const projectView = zero.query.project.materialize()
+    await waitForComplete(projectView)
+
+    const userView = zero.query.user.materialize()
+    const users = await waitForComplete<any[]>(userView)
+
+    expect(users).toEqual([{ id: 'u1', name: 'ada' }])
+    expect(requests.at(-1)?.body.cookie).toBe(1)
+    projectView.destroy()
+    userView.destroy()
   })
 
   test('ping is answered locally and the stock Zero connection survives idle ping', async () => {
@@ -385,6 +495,13 @@ function sleep(ms: number) {
 }
 
 function openRawSocket() {
+  return openRawSocketWithMessages().messages
+}
+
+function openRawSocketWithMessages(opts?: {
+  authToken?: string
+  desiredQueriesPatch?: unknown[]
+}) {
   const url = new URL(`${ORIGIN}/sync/v51/connect`)
   url.protocol = 'wss:'
   url.searchParams.set('clientID', 'c1')
@@ -396,12 +513,33 @@ function openRawSocket() {
   const messages: Array<[string, any]> = []
   const socket = new WebSocket(
     url,
-    encodeSecProtocol(['initConnection', { desiredQueriesPatch: [] }], 'token-u1')
+    encodeSecProtocol(
+      ['initConnection', { desiredQueriesPatch: opts?.desiredQueriesPatch ?? [] }],
+      opts?.authToken ?? 'token-u1'
+    )
   )
   socket.addEventListener('message', (event) => {
     messages.push(JSON.parse(String(event.data)))
   })
-  return messages
+  return { messages, socket }
+}
+
+function pushBody(id: number) {
+  return {
+    clientGroupID: 'cg1',
+    pushVersion: 1,
+    requestID: `push-${id}`,
+    timestamp: Date.now(),
+    mutations: [
+      {
+        type: 'custom',
+        name: 'project|create',
+        id,
+        clientID: 'c1',
+        args: [{ id: `p${id}`, ownerId: 'u1', name: `project ${id}` }],
+      },
+    ],
+  }
 }
 
 function findMessage(messages: Array<[string, any]>, type: string) {

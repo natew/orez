@@ -106,7 +106,7 @@ class ZeroHttpSocket {
   readyState = this.CONNECTING
 
   private readonly connectURL: URL
-  private readonly authToken: string | undefined
+  private authToken: string | undefined
   private readonly listeners: Record<SocketEventType, Set<SocketListener>> = {
     open: new Set(),
     message: new Set(),
@@ -120,6 +120,8 @@ class ZeroHttpSocket {
   private pendingGotQueriesPatch: GotQueryPatchOp[] = []
   private pullInFlight: Promise<void> | undefined
   private pullAfterCurrent = false
+  private pushChain: Promise<void> = Promise.resolve()
+  private nextLocalCookieID = 0
   private openTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
@@ -167,8 +169,11 @@ class ZeroHttpSocket {
         this.queueDesiredQueries(message[1])
         this.requestPullAfterCurrent()
         return
+      case 'updateAuth':
+        this.authToken = (message[1] as { auth?: string }).auth
+        return
       case 'push':
-        this.run(this.push(message[1]))
+        this.enqueuePush(message[1])
         return
       case 'ping':
         this.emitMessage(['pong', {}])
@@ -197,7 +202,10 @@ class ZeroHttpSocket {
     if (this.pullInFlight) return this.pullInFlight
     this.pullInFlight = this.fetchPull(this.clientGroupID, this.cookie)
       .then((response) => {
-        if (response.unchanged) return
+        if (response.unchanged) {
+          this.emitGotQueriesPatch(response.cookie)
+          return
+        }
         this.emitPoke(response)
       })
       .catch((error) => {
@@ -234,6 +242,15 @@ class ZeroHttpSocket {
     }
     this.emitMessage(['pushResponse', response.pushResponse])
     this.requestPullAfterCurrent()
+  }
+
+  private enqueuePush(body: unknown) {
+    const nextPush = this.pushChain.then(async () => {
+      if (this.readyState === this.CLOSED) return
+      await this.push(body)
+    })
+    this.pushChain = nextPush.catch(() => {})
+    this.run(nextPush)
   }
 
   private requestPullAfterCurrent() {
@@ -351,6 +368,39 @@ class ZeroHttpSocket {
     this.cookie = nextCookie
   }
 
+  private emitGotQueriesPatch(cookie: number | null) {
+    if (this.pendingGotQueriesPatch.length === 0) return
+
+    const serverCookie = cookie ?? toHttpCookie(this.cookie)
+    if (serverCookie === null) return
+    const nextCookie = toLocalWebSocketCookie(serverCookie, ++this.nextLocalCookieID)
+    const pokeID = `zero-http-${++this.state.nextPokeID}`
+    const gotQueries = this.pendingGotQueriesPatch
+    this.pendingGotQueriesPatch = []
+
+    this.emitMessage([
+      'pokeStart',
+      {
+        pokeID,
+        baseCookie: this.cookie,
+        schemaVersions: {
+          minSupportedVersion: 1,
+          maxSupportedVersion: 1,
+        },
+        timestamp: Date.now(),
+      },
+    ])
+    this.emitMessage([
+      'pokePart',
+      {
+        pokeID,
+        gotQueriesPatch: gotQueries,
+      },
+    ])
+    this.emitMessage(['pokeEnd', { pokeID, cookie: nextCookie }])
+    this.cookie = nextCookie
+  }
+
   private emitMessage(message: unknown) {
     if (this.readyState !== this.OPEN) return
     this.emit('message', { data: JSON.stringify(message) })
@@ -422,7 +472,7 @@ function gotQueriesPatch(patch: DesiredQueryPatchOp[]) {
 
 function toHttpCookie(cookie: string | null): number | null {
   if (cookie === null || cookie === '') return null
-  const parsed = Number(cookie)
+  const parsed = Number(cookie.slice(0, COOKIE_WIDTH))
   if (!Number.isFinite(parsed)) {
     throw new Error(`zero-http cookie is not numeric: ${cookie}`)
   }
@@ -431,6 +481,13 @@ function toHttpCookie(cookie: string | null): number | null {
 
 function toWebSocketCookie(cookie: number | null): string | null {
   return cookie === null ? null : String(cookie).padStart(COOKIE_WIDTH, '0')
+}
+
+function toLocalWebSocketCookie(cookie: number, localID: number): string {
+  return `${String(cookie).padStart(COOKIE_WIDTH, '0')}#${String(localID).padStart(
+    6,
+    '0'
+  )}`
 }
 
 function isStaleCookie(current: string | null, next: number) {

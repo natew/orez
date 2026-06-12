@@ -203,6 +203,68 @@ test('app-error rollback advances LMID and reverts optimistic state after pull',
   view.destroy()
 })
 
+test('app-error rollback removes phantom optimistic create after pull', async () => {
+  const pushGate = deferred<void>()
+  const pushStarted = deferred<void>()
+  let clientGroupID = ''
+
+  harness = await startZeroHttpHarness({
+    seed: {
+      user: [
+        { id: 'u1', name: 'ada' },
+        { id: 'u2', name: 'ben' },
+      ],
+      project: [],
+      member: [],
+    },
+    interceptFetch: (next) => async (input, init) => {
+      if (new URL(String(input)).pathname === '/push') {
+        const body = JSON.parse(String(init?.body))
+        clientGroupID = body.clientGroupID
+        pushStarted.resolve()
+        await pushGate.promise
+      }
+      return next(input, init)
+    },
+  })
+  const zero = harness.createZero('u1')
+  const view = zero.query.project.materialize()
+  await waitForComplete<any[]>(view)
+  const emissions = recordEmissions(view)
+
+  const mutation = zero.mutate.project.create({
+    id: 'p-phantom',
+    ownerId: 'u2',
+    name: 'forbidden',
+  })
+  await mutation.client
+  await pushStarted.promise
+  await eventually(() => expect(projectIDs(view.data)).toContain('p-phantom'))
+  expect(harness.server.rows('project')).toEqual([])
+
+  pushGate.resolve()
+  await expect(mutation.server).resolves.toMatchObject({
+    type: 'error',
+    error: {
+      type: 'app',
+      details: 'forbidden',
+    },
+  })
+
+  await harness.transport.pull()
+  await eventually(() => expect(projectIDs(view.data)).not.toContain('p-phantom'))
+  expect(emissions.values.some((rows) => projectIDs(rows).includes('p-phantom'))).toBe(
+    true
+  )
+  expect(emissions.values.at(-1)).toEqual([])
+  expect(harness.server.rows('project')).toEqual([])
+
+  const pull = await rawPull(harness, 'u1', { clientGroupID })
+  expect(Object.values(pull.lastMutationIDChanges)).toContain(1)
+  emissions.cleanup()
+  view.destroy()
+})
+
 async function rawPush(
   harness: ZeroHttpHarness,
   mutation: {
