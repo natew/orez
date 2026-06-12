@@ -33,16 +33,17 @@ installZeroHttpTransport(opts: {
 
 `src/zero-http/fixture-schema.ts` — zero client schema for the pinned
 fixture tables (user/project/member, with a `project.members` relationship)
-+ client-side custom mutators (`project|create`, `project|rename`,
-`member|add`) that do the optimistic apply. this file is shared with later
-segments — keep it dependency-free.
+
+- client-side custom mutators (`project|create`, `project|rename`,
+  `member|add`) that do the optimistic apply. this file is shared with later
+  segments — keep it dependency-free.
 
 `src/zero-http/transport.test.ts` — vitest, colocated like the rest of
 src/. canned-fetch tests proving:
 
 1. **connect + complete (plan obligation 1, the gate).** a real
    `new Zero({ server: origin, userID: 'u1', auth: 'token-u1', schema,
-   kvStore: 'mem', mutators })` reaches connected state; a materialized
+kvStore: 'mem', mutators })` reaches connected state; a materialized
    query reaches `resultType: 'complete'` after the transport acks desired
    queries via `gotQueriesPatch` and a snapshot poke lands. assert actual
    row data from the canned pull is readable via the query.
@@ -86,8 +87,8 @@ src/. canned-fetch tests proving:
   `send`, `close`, `readyState`, `url`. JSON text frames only. emit events
   as `{ data: string }` message events; zero reads `e.data`.
 - pokes: `["pokeStart", { pokeID, baseCookie }]`, `["pokePart", { pokeID,
-  lastMutationIDChanges, rowsPatch, gotQueriesPatch? }]`, `["pokeEnd",
-  { pokeID, cookie }]`. baseCookie mismatches are SILENTLY dropped by the
+lastMutationIDChanges, rowsPatch, gotQueriesPatch? }]`, `["pokeEnd",
+{ pokeID, cookie }]`. baseCookie mismatches are SILENTLY dropped by the
   client (handlePullResponseV1 returns early) — your tests must assert on
   query RESULTS, not just absence of errors.
 - keep auth: forward the token from the sec-protocol header as

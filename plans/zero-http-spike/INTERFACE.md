@@ -14,6 +14,7 @@ stop, don't invent a variant.
 - headers: `authorization: Bearer <token>`, `content-type: application/json`
 - body: `{ clientID: string, clientGroupID: string, cookie: number | null }`
 - 200 changed:
+
   ```json
   {
     "cookie": 7,
@@ -24,11 +25,13 @@ stop, don't invent a variant.
     ]
   }
   ```
+
   - `rowsPatch` is ALWAYS `clear` followed by puts of every row visible to
     the authed user — full snapshot, idempotent by construction.
   - `lastMutationIDChanges` includes every client in the requesting
     clientGroupID that the server has seen.
   - `cookie` strictly greater than the request cookie when changed.
+
 - 200 unchanged: `{ "cookie": <same as request cookie>, "unchanged": true }`
 - 401 on missing/unknown token.
 
@@ -37,13 +40,13 @@ stop, don't invent a variant.
 - headers: same auth.
 - body: the v51 push frame body verbatim — exactly what the zero client put
   in `["push", body]` (see `#pusher`, zero.js:981: `{ timestamp,
-  clientGroupID, mutations: [...], pushVersion, requestID }`, one mutation
+clientGroupID, mutations: [...], pushVersion, requestID }`, one mutation
   per frame; custom mutations have `type: 'custom'`, `name`, `id`,
   `clientID`, `args: [argsObject]`).
 - 200: `{ "pushResponse": <v51 pushResponse body> }` — the exact body the
   transport will emit as `["pushResponse", body]` so `MutationTracker`
   resolves. shape: `{ mutations: [{ id: { clientID, id }, result: {} | {
-  error: 'app', details?: string } }] }`.
+error: 'app', details?: string } }] }`.
 - LMID bookkeeping per (clientGroupID, clientID). replayed mutation ids
   (id <= stored lmid) are acked idempotently without re-executing.
 - an app-error mutation STILL advances the LMID and makes no row change —

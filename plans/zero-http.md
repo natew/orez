@@ -1,7 +1,9 @@
 # zero-http spike — socketless zero for the soot control plane
 
-status: planned 2026-06-12, ready for a dedicated agent. owner repo: ~/orez
-(with on-zero work in ~/takeout and the consumer in ~/soot).
+status: **SPIKE PASSED 2026-06-12** — all five proof obligations green, see
+the verdict section below. spike code: `src/zero-http/` in ~/orez (26
+tests, commits b241bc2..e637f88). owner repo: ~/orez (with on-zero work in
+~/takeout and the consumer in ~/soot).
 
 ## why (measured, not speculative)
 
@@ -47,11 +49,11 @@ it lacked exactly the client discipline the real zero client keeps.
 
 - **on-zero owns the client creation seam**: soot builds its two instances
   via `createZeroClient({ models, schema, groupedQueries, instanceName })`
-  + `combineZeroClients(control, project)` — see
-  `~/soot/src/zero/core.ts` (`createSootZeroClients`). a
-  `transport: 'http-pull'`-style mode on `createZeroClient` is the natural
-  public surface; the control instance flips, the project instance is
-  untouched. on-zero source: `~/takeout` (package `on-zero`).
+  - `combineZeroClients(control, project)` — see
+    `~/soot/src/zero/core.ts` (`createSootZeroClients`). a
+    `transport: 'http-pull'`-style mode on `createZeroClient` is the natural
+    public surface; the control instance flips, the project instance is
+    untouched. on-zero source: `~/takeout` (package `on-zero`).
 - **zero client internals**: `@rocicorp/zero` 1.6.1,
   `node_modules/@rocicorp/zero/out/zero-client/` (+ `replicache/` — the
   rebase machinery is right there, and `zero-protocol/` for the v51
@@ -136,6 +138,7 @@ in order; stop and report the moment one fails hard.
    DO sockets — lift the poke-building shapes from it, but treat it as a
    fixture, not finished semantics: the stateless HTTP pull endpoint still
    needs to be real.
+
 2. **optimistic mutation + rebase.** with a mutation in flight (pushed,
    not yet acked), a pull lands. the optimistic state must not flicker or
    be clobbered; after ack + next pull, client state equals server state.
@@ -174,22 +177,86 @@ implementation and passes after — not a manual demo.
   store-write experiments, no dual-mode toggles left behind.
 - do not touch zero-cache, the embed, or the project plane.
 
-## verdict + follow-on
+## VERDICT (2026-06-12): PASSED
 
-- **spike passes** → write the verdict + chosen seam into
-  `~/soot/plans/sootbean/zero-compatible-sync-engine.md`, then the
-  integration plan: on-zero release (`bun release --into /Users/n8/soot`
-  from ~/takeout for local testing, npm publish for the frozen-lockfile
-  gate), soot control instance flips transport, control namespace stops
-  accepting `/sync` sockets, dual-instance workarounds
-  (`useControlConnectionState`, the `run(…, 'complete')` reads in
-  `useAccessDeniedCheck` / `useAnonProjectRedirectOnLogin`) get deleted,
-  validated by the access-denied playwright suite + a 50-user
-  `cf-load-longevity` run showing zero control-DO memory events.
-- **spike fails** → name the exact obligation that killed it and fall back
-  to plain-API (~2k lines, scoped in
-  `~/soot/plans/sootbean/deploy/cf-launch-lay-of-the-land.md` §7). a
-  failed spike with a precise reason is a successful spike.
+all five obligations hold with a STOCK `@rocicorp/zero@1.6.1` client — no
+fork, no patch. proof: `src/zero-http/` (transport, stateless fixture
+server, harness, 26 tests), produced by two codex gpt-5.5 xhigh agents in
+reviewed segments plus a fresh-eyes adversarial review round.
+
+1. transport seam — fake WebSocket over HTTP works end-to-end; queries
+   reach `resultType: 'complete'`; full e2e mutation round trip ~33ms
+   in-process (`integration.test.ts`).
+2. optimistic mutation + rebase — ack-then-pull, pull-then-ack (optimistic
+   row survives rebase over a newer snapshot), app-error rollback for both
+   the revert case and the phantom-create case, LMID advance verified
+   (`rebase.test.ts`).
+3. relations — `.related()` views appear/update/vanish across users,
+   including visibility revocation with no post-revocation thrash
+   (`relations.test.ts`).
+4. churn — 15-mutation burst against a 2ms pull timer converges, LMID=15;
+   two clients sharing one client group over two sockets converge with no
+   cookie fights (`churn.test.ts`).
+5. auth parity — per-user snapshots disjoint under listener capture; 401
+   maps onto zero's downstream `Unauthorized` frame → client reaches
+   `needs-auth` through its own machinery; clientGroupID is bound to the
+   first authed user, 403 otherwise (`auth.test.ts`, `server.test.ts`).
+
+wire discoveries pinned by failing runtime (NOT speculation — each one
+broke a test first; future integrations must preserve all of these,
+they live in `src/zero-http/transport.ts`):
+
+- socket cookies are STRINGS compared lexicographically by replicache:
+  numeric HTTP cookies must be emitted fixed-width zero-padded
+  (`COOKIE_WIDTH = 20`) or ordering corrupts at digit boundaries.
+- `gotQueriesPatch` must ride its own pokePart AFTER the rowsPatch part —
+  combined with a `clear` op, replicache's patch optimizer drops it.
+- replicache ignores same-cookie pokes carrying only `gotQueriesPatch`;
+  late query acks on `unchanged` pulls need a locally minted,
+  lexicographically greater socket cookie (server-cookie prefix +
+  `#NNNNNN` suffix; the HTTP side parses the prefix only). suffixed
+  cookies crossing tabs in a shared client group self-heal via zero's
+  cookie-mismatch recovery; refine if it ever shows up in telemetry.
+- zero's `#pusher` emits one socket frame per mutation IN ORDER — the
+  transport must serialize push POSTs (FIFO chain) or mutation N+1 can
+  overtake N over HTTP and the server rejects the LMID gap.
+- the `updateAuth` upstream frame (auth refresh) must be handled.
+- HTTP 401/403 → emit zero's downstream `["error", {kind: 'Unauthorized'}]`
+  then close; the stock client transitions to needs-auth on its own.
+- the server must bind clientGroupID→userID explicitly (zero-cache gets
+  this from connection auth; stateless HTTP must enforce it per request).
+- production note: replay-idempotency memoizes per-mutation results,
+  which grows unboundedly; zero's `ackMutationResponses` upstream message
+  (currently ignored by design) is the protocol's pruning signal — wire it
+  when building the real orez-backed endpoint.
+- teardown: drain in-flight post-push pulls before closing or shutdown
+  hangs on the pending fetch (~3s).
+
+statelessness thesis confirmed: the only per-client server state is
+durable LMID/result bookkeeping — no resident views, no CVR, nothing
+alive between requests. memory scales with in-flight requests.
+
+## follow-on (next session's work, in order)
+
+verdict recorded in `~/soot/plans/sootbean/zero-compatible-sync-engine.md`.
+the integration sequence:
+
+1. lift the transport into on-zero as a `transport: 'http-pull'`-style
+   mode on `createZeroClient` (~/takeout), preserving every wire
+   discovery above; the spike transport in `src/zero-http/` is the
+   reference implementation and its tests are the contract.
+2. real pull/push endpoints in soot's data worker backed by orez storage
+   (the spike's fixture server pins the semantics: full clear+puts
+   snapshots, monotonic version cookie, LMID bookkeeping, group→user
+   binding, app-error-still-advances-LMID).
+3. on-zero release (`bun release --into /Users/n8/soot` from ~/takeout
+   for local testing, npm publish for the frozen-lockfile gate), soot
+   control instance flips transport, control namespace stops accepting
+   `/sync` sockets, dual-instance workarounds
+   (`useControlConnectionState`, the `run(…, 'complete')` reads in
+   `useAccessDeniedCheck` / `useAnonProjectRedirectOnLogin`) get deleted.
+4. validated by the access-denied playwright suite + a 50-user
+   `cf-load-longevity` run showing zero control-DO memory events.
 
 ## known next ceiling (out of scope, recorded so nobody re-derives it)
 
