@@ -121,6 +121,19 @@ implementation and passes after — not a manual demo.
   `~/soot/plans/sootbean/deploy/cf-launch-lay-of-the-land.md` §7). a
   failed spike with a precise reason is a successful spike.
 
+## known next ceiling (out of scope, recorded so nobody re-derives it)
+
+the socket is not the cost — the per-client RESIDENT state its contract
+requires is (hydrated IVM views + CVR per connected client, alive for the
+session). stateless pull makes memory scale with in-flight requests, not
+connected users. the next structural ceiling after that is the data tier:
+10GB DO-SQLite per DO on the control `ZeroSqlDO` (KB-scale rows/user →
+~100k+ registered users; `tokenUsage` append growth and single-DO write
+serialization likely pinch first). zero-http makes that wall cheap to
+handle later: a stateless pull can fan out reads across N storage shards
+and compose the snapshot server-side — no change-stream fanout, no client
+changes. do not build any of that now.
+
 ## step 2 (future, not this work)
 
 cursor-diff pulls: client sends a watermark, server computes the delta
