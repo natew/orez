@@ -6,6 +6,11 @@ import { installZeroHttpTransport } from './transport.js'
 
 let storageID = 0
 
+export type FixtureZero = Zero<
+  typeof zeroHttpFixtureSchema,
+  typeof zeroHttpFixtureMutators
+>
+
 export type ZeroHttpHarness = Awaited<ReturnType<typeof startZeroHttpHarness>>
 
 export async function startZeroHttpHarness(opts?: {
@@ -18,7 +23,7 @@ export async function startZeroHttpHarness(opts?: {
   return {
     server,
     transport,
-    createZero(userID: string) {
+    createZero(userID: string): FixtureZero {
       const zero = new Zero({
         server: server.url,
         userID,
