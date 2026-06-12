@@ -168,13 +168,13 @@ class ZeroHttpSocket {
         this.requestPullAfterCurrent()
         return
       case 'push':
-        void this.push(message[1])
+        this.run(this.push(message[1]))
         return
       case 'ping':
         this.emitMessage(['pong', {}])
         return
       case 'pull':
-        void this.answerMutationRecoveryPull(message[1])
+        this.run(this.answerMutationRecoveryPull(message[1]))
         return
       case 'deleteClients':
       case 'ackMutationResponses':
@@ -200,6 +200,10 @@ class ZeroHttpSocket {
         if (response.unchanged) return
         this.emitPoke(response)
       })
+      .catch((error) => {
+        this.fail(error)
+        throw error
+      })
       .finally(async () => {
         const pullAgain = this.pullAfterCurrent
         this.pullAfterCurrent = false
@@ -214,7 +218,7 @@ class ZeroHttpSocket {
     this.readyState = this.OPEN
     this.emit('open', {})
     this.emitMessage(['connected', { wsid: this.wsid, timestamp: Date.now() }])
-    setTimeout(() => void this.pull(), 0)
+    setTimeout(() => this.run(this.pull()), 0)
   }
 
   private queueDesiredQueries(body: unknown) {
@@ -237,7 +241,7 @@ class ZeroHttpSocket {
       this.pullAfterCurrent = true
       return
     }
-    void this.pull()
+    this.run(this.pull())
   }
 
   private async answerMutationRecoveryPull(body: {
@@ -275,9 +279,31 @@ class ZeroHttpSocket {
       body: JSON.stringify(body),
     })
     if (!response.ok) {
-      throw new Error(`zero-http ${path} failed with ${response.status}`)
+      throw new ZeroHttpResponseError(path, response.status)
     }
     return response.json()
+  }
+
+  private run(promise: Promise<void>) {
+    void promise.catch((error) => this.fail(error))
+  }
+
+  private fail(error: unknown) {
+    if (this.readyState === this.CLOSED) return
+    if (isAuthHTTPError(error)) {
+      this.emitMessage([
+        'error',
+        {
+          kind: 'Unauthorized',
+          message: error.message,
+          origin: 'server',
+        },
+      ])
+      if (this.readyState !== this.CLOSED) this.close(1000, error.message)
+      return
+    }
+    this.emit('error', { error })
+    this.close(1011, errorMessage(error))
   }
 
   private emitPoke(response: Exclude<PullResponse, { unchanged: true }>) {
@@ -410,4 +436,24 @@ function toWebSocketCookie(cookie: number | null): string | null {
 function isStaleCookie(current: string | null, next: number) {
   const currentNumber = toHttpCookie(current)
   return currentNumber !== null && next <= currentNumber
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+class ZeroHttpResponseError extends Error {
+  constructor(
+    readonly path: '/pull' | '/push',
+    readonly status: number
+  ) {
+    super(`zero-http ${path} failed with ${status}`)
+  }
+}
+
+function isAuthHTTPError(error: unknown): error is ZeroHttpResponseError {
+  return (
+    error instanceof ZeroHttpResponseError &&
+    (error.status === 401 || error.status === 403)
+  )
 }

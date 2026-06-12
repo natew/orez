@@ -245,6 +245,33 @@ describe('zero-http transport', () => {
     expect(transport.connections).toBe(1)
   })
 
+  test('401 pull failure closes the fake socket without materializing data', async () => {
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      expect(request.path).toBe('/pull')
+      return jsonResponse({ error: 'unauthorized' }, { status: 401 })
+    })
+    const transport = install(fetch)
+    const zero = createZero()
+    const view = zero.query.project.materialize()
+    const emissions: Array<{ data: any[]; resultType: string }> = []
+    const cleanup = view.addListener((data: any[], resultType) => {
+      emissions.push({ data: JSON.parse(JSON.stringify(data)), resultType })
+    })
+
+    await eventually(() => expect(requests.length).toBeGreaterThan(0))
+    await eventually(() => expect(zero.connection.state.current.name).toBe('needs-auth'))
+    await sleep(25)
+
+    expect(transport.connections).toBe(0)
+    expect(emissions.flatMap((emission) => emission.data)).toEqual([])
+    expect(view.data).toEqual([])
+    cleanup()
+    view.destroy()
+  })
+
   test('non-origin WebSockets pass through to the native implementation', () => {
     const previous = globalThis.WebSocket
     class NativeWebSocket {
@@ -309,10 +336,14 @@ function recordRequest(input: string | URL, init?: RequestInit): RequestRecord {
   }
 }
 
-function jsonResponse(body: unknown) {
+function jsonResponse(body: unknown, init?: ResponseInit) {
   return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { 'content-type': 'application/json' },
+    status: init?.status ?? 200,
+    statusText: init?.statusText,
+    headers: {
+      'content-type': 'application/json',
+      ...(init?.headers as Record<string, string> | undefined),
+    },
   })
 }
 
