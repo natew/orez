@@ -154,6 +154,11 @@ interface TransactionMetadataSnapshot {
 
 const MAX_REWRITE_CACHE_ENTRIES = 2048
 const METADATA_TABLE = '_orez_pg_metadata'
+// how long reloadPublicationsIfEmpty waits between re-reads while publications
+// stay empty — short enough that the first write after a concurrently-created
+// publication picks it up quickly, long enough that a genuinely
+// publication-less db doesn't re-query on every write.
+const EMPTY_PUBLICATION_RELOAD_THROTTLE_MS = 1000
 
 // ── Utilities ─────────────────────────────────────────────────────────────
 
@@ -5052,6 +5057,9 @@ export class DoBackend {
   private triggerFunctions: Map<string, TriggerFunctionDefinition>
   private schemaMetadata: SchemaMetadata
   private publications: Map<string, PublicationDefinition>
+  // throttle for reloadPublicationsIfEmpty (self-heal of a stale-empty
+  // publication cache). undefined until the first empty-publication write.
+  private lastEmptyPublicationReloadAt: number | undefined
   private rewriteCache: Map<string, RewrittenStatement[]>
   private preparedStatements = new Map<string, PreparedStatement>()
   private portals = new Map<string, BoundPortal>()
@@ -5224,6 +5232,41 @@ export class DoBackend {
       }
       if (await this.repairShardMetadataPublications()) {
         await this.persistDurableMetadata()
+      }
+    } catch {}
+  }
+
+  // self-heal a stale-empty publication cache. publications are durable
+  // (_orez_pg_metadata) and SHARED across every DoBackend instance pointed at
+  // one DO, but each instance only loads them once at init(). when this
+  // backend's init() ran BEFORE another instance (e.g. the schema-migration pg
+  // pool) created the publication, this.publications is empty and stays empty —
+  // so a public write's change-capture is skipped (trackingForStatement) and the
+  // row never reaches _zero_changes / the replica / a client. on CF this is the
+  // per-project namespace's empty-fileTree bug: the project's /__soot_pg write
+  // backend is constructed by a read/write that races provisioning's CREATE
+  // PUBLICATION, caches zero publications, and never recovers. re-read just the
+  // publication rows when empty so the first write after the publication exists
+  // picks it up. throttled (a genuinely publication-less db must not re-query on
+  // every write); cleared whenever a publication appears.
+  private async reloadPublicationsIfEmpty(): Promise<void> {
+    if (this.dbName !== 'postgres' || this.publications.size > 0) return
+    const now = Date.now()
+    if (
+      this.lastEmptyPublicationReloadAt &&
+      now - this.lastEmptyPublicationReloadAt < EMPTY_PUBLICATION_RELOAD_THROTTLE_MS
+    ) {
+      return
+    }
+    this.lastEmptyPublicationReloadAt = now
+    try {
+      await this.ensureMetadataTable()
+      const result = await this.doExecResult(
+        `SELECT key, value FROM ${quoteIdentifier(METADATA_TABLE)} WHERE kind = 'publication'`
+      )
+      for (const row of result.rows) {
+        const publication = this.publicationFromJSON(String(row.value ?? ''))
+        if (publication) this.publications.set(String(row.key ?? ''), publication)
       }
     } catch {}
   }
@@ -6175,6 +6218,12 @@ export class DoBackend {
     )
     const statement = statements.length === 1 ? statements[0] : undefined
     if (statement) await this.snapshotTransactionWrite(statement)
+    // a public DML write whose publication cache is empty may have been built
+    // before another backend instance created the publication — self-heal the
+    // stale-empty cache so its change-capture isn't silently skipped.
+    if (statement?.changeTracking?.table.schema === 'public') {
+      await this.reloadPublicationsIfEmpty()
+    }
     const tracking = statement ? this.trackingForStatement(statement) : undefined
     const execBound = tracking
       ? this.sqliteBoundSQL(
