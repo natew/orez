@@ -7640,7 +7640,22 @@ export class DoBackend {
       return new Uint8Array([value === true || value === 1 ? 1 : 0])
     if (oid === PG_TYPE_INT2) return i16(Number(value))
     if (oid === PG_TYPE_INT4) return i32(Number(value))
-    if (oid === PG_TYPE_INT8) return i64(BigInt(value as any))
+    if (oid === PG_TYPE_INT8) {
+      try {
+        return i64(typeof value === 'bigint' ? value : BigInt(value as any))
+      } catch {
+        // value is not a valid integer for this int8 column — e.g. a timestamp
+        // string written into a bigint column, which sqlite's dynamic typing
+        // accepts but real pg would reject. encode a best-effort int rather than
+        // throw: a thrown error mid binary-COPY emits an ErrorResponse into the
+        // copy-out stream, which the consumer's COPY parser cannot recover from
+        // and hangs on — wedging zero-cache's entire initial sync (the embed
+        // never reaches ready, every /sync gets 0 frames). 0 keeps the stream
+        // well-formed so the rest of the snapshot completes.
+        const n = Number(value)
+        return i64(Number.isFinite(n) ? BigInt(Math.trunc(n)) : 0n)
+      }
+    }
     if (oid === PG_TYPE_FLOAT8) {
       const buf = new ArrayBuffer(8)
       new DataView(buf).setFloat64(0, Number(value))
@@ -7893,6 +7908,22 @@ export class DoBackend {
   }
 
   private async handleCatalogSelect(select: any): Promise<CatalogResult> {
+    // zero-cache's initial sync validates the publication via pg_publication /
+    // pg_publication_tables. those answers come from in-memory this.publications,
+    // loaded once at backend init. a backend instance constructed during early
+    // embed boot (migrateOnly, before CREATE PUBLICATION persisted) caches an
+    // empty set, so the catalog query reports "Found: []" → setupTablesAndReplication
+    // throws "Unknown or invalid publications" → initial sync aborts → the embed
+    // never reaches ready (120s timeout, /sync sends 0 frames). the write path
+    // already self-heals (reloadPublicationsIfEmpty); the catalog-read path the
+    // change-streamer uses did not. reload from durable _orez_pg_metadata before
+    // answering so the publication created concurrently on another instance is seen.
+    if (
+      selectReferencesTable(select, 'pg_publication') ||
+      selectReferencesTable(select, 'pg_publication_tables')
+    ) {
+      await this.reloadPublicationsIfEmpty()
+    }
     return (
       catalogCurrentSettingResultFromSelect(select) ??
       (await this.informationSchemaKeyColumnsResult(select)) ??
