@@ -2061,6 +2061,30 @@ describe('DoBackend', () => {
     expect(sent).not.toMatch(/(^|[^_])"shardConfig"\.publications/)
   })
 
+  test('neutralizes the _orez._drop_zero_slot cleanup call so the slot-drop SELECT parses on sqlite', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'drop-zero-slot-test')
+    await backend.waitReady
+
+    // the form zero-cache's dropUnclaimedSlots emits after orez's browser-proxy
+    // rewrite of pg_drop_replication_slot -> _orez._drop_zero_slot. left intact
+    // on the DO sqlite backend the schema-qualified function call makes sqlite
+    // throw `near "(": syntax error`; because zero-cache AWAITS this orphan-slot
+    // cleanup on the initial-sync path it wedged the embed before it could
+    // signal ready (120s timeout, dead /sync). see soot incident 2026-06-14.
+    await backend.query(
+      'SELECT slot_name AS slot, _orez._drop_zero_slot(slot_name) FROM _orez._zero_replication_slots LEFT JOIN soot_0.replicas AS replica ON slot_name = slot WHERE slot_name LIKE $1 AND NOT active AND replica.id IS NULL',
+      ['soot_%']
+    )
+
+    const sent = compactSQL(http.sqls.at(-1) || '')
+    // the schema-qualified call (sqlite can't parse) must be gone, neutralized
+    // to its slot-name arg so the projection still returns the matched slots.
+    expect(sent).not.toContain('_drop_zero_slot')
+    expect(sent).not.toContain('_orez.')
+    expect(sent).toContain('slot_name AS slot')
+  })
+
   test('does not rewrite unqualified columns that match schema-qualified table names', async () => {
     const http = await startDoHttp(() => ({ rows: [], columns: [] }))
     const backend = new DoBackend(http.url, 'postgres', 'schema-column-flatten-test')

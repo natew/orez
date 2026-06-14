@@ -2185,6 +2185,20 @@ function rewriteNode(value: any, context?: RewriteContext): any {
     if (sqliteName) value.FuncCall.funcname = [stringNode(sqliteName)]
     if (name === 'now') return currentTimestampNode()
     if (name === 'nextval') return intConst(1)
+    if (name === '_drop_zero_slot' || name === 'pg_drop_replication_slot') {
+      // DO SQLite can't host orez's `_orez._drop_zero_slot` plpgsql stub (no
+      // schema-qualified functions, no CREATE FUNCTION), so a call left intact
+      // makes sqlite throw `near "(": syntax error`. zero-cache AWAITS this
+      // orphan-slot cleanup on the initial-sync path (createReplicaAndSlot), so
+      // the throw wedges the embed before it can signal `ready` (120s timeout →
+      // every /sync dies). neutralize the call to its slot-name arg so the
+      // cleanup SELECT parses; leftover orphan slot rows are harmless (a fresh
+      // active slot is created separately; the pglite/node paths still run the
+      // real DELETE the schema-qualified stub performs). this mirrors the
+      // now/nextval neutralization above. see soot incident 2026-06-14.
+      const slotArg = value.FuncCall.args?.[0]
+      return slotArg ? rewriteNode(slotArg, context) : intConst(0)
+    }
   }
   if (value.A_Const && Object.hasOwn(value.A_Const, 'boolval')) {
     return intConst(value.A_Const.boolval?.boolval ? 1 : 0)
