@@ -444,4 +444,43 @@ describe('shard table tracking', () => {
       'chat_0.mutations',
     ])
   })
+
+  // regression: zero-cache's startup slot cleanup runs
+  //   SELECT slot, pg_drop_replication_slot(slot) FROM <slots> JOIN replicas WHERE <stale>
+  // inside ensureSchemaMigrated's transaction. PGlite's real pg_drop builtin
+  // errors on our fake slots ("replication slot does not exist"), aborting the
+  // migration and crashing the change-streamer (exit 255). proxy rewrites route
+  // that call to _orez._drop_zero_slot — a side-effecting DELETE that drops only
+  // the selected (stale) rows and never errors on a missing slot.
+  it('drops only stale slots via _orez._drop_zero_slot without erroring', async () => {
+    await db.exec(`CREATE SCHEMA IF NOT EXISTS chat_0`)
+    await db.exec(`CREATE TABLE chat_0.replicas (id TEXT PRIMARY KEY, slot TEXT)`)
+    await db.exec(`INSERT INTO _orez._zero_replication_slots (slot_name, active) VALUES
+      ('chat_0_a', false),  -- stale: inactive, no replica  -> dropped
+      ('chat_0_b', false),  -- inactive but owned by a replica -> kept
+      ('chat_0_c', true)    -- active -> kept
+    `)
+    await db.exec(`INSERT INTO chat_0.replicas (id, slot) VALUES ('r1', 'chat_0_b')`)
+
+    // exact shape zero-cache sends, post-rewrite (pg_drop_replication_slot -> _orez._drop_zero_slot)
+    const dropped = await db.query<{ slot: string }>(
+      `SELECT slot_name as slot, _orez._drop_zero_slot(slot_name)
+         FROM _orez._zero_replication_slots
+         LEFT JOIN chat_0.replicas replica on slot_name = replica.slot
+        WHERE slot_name LIKE $1 AND NOT active AND replica.id IS NULL`,
+      ['chat_0_%']
+    )
+    expect(dropped.rows.map((r) => r.slot)).toEqual(['chat_0_a'])
+
+    const remaining = await db.query<{ slot_name: string }>(
+      `SELECT slot_name FROM _orez._zero_replication_slots ORDER BY slot_name`
+    )
+    expect(remaining.rows.map((r) => r.slot_name)).toEqual(['chat_0_b', 'chat_0_c'])
+
+    // dropping an already-gone slot is a no-op, never an error
+    const again = await db.query<{ dropped: string }>(
+      `SELECT _orez._drop_zero_slot('chat_0_a') as dropped`
+    )
+    expect(again.rows[0].dropped).toBe('chat_0_a')
+  })
 })

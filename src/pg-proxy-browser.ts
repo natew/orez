@@ -176,13 +176,16 @@ const QUERY_REWRITES: Array<{ match: RegExp; replace: string }> = [
     match: /\bpg_replication_slots\b/g,
     replace: '_orez._zero_replication_slots',
   },
-  // rewrite pg_drop_replication_slot() calls to DELETE from the fake table.
-  // PGlite doesn't have real replication slots, so the built-in function errors.
-  // this runs AFTER the table rewrite above, so the table name is already replaced.
+  // route pg_drop_replication_slot(x) to our side-effecting _orez stub.
+  // PGlite has the real built-in, which errors ("replication slot does not
+  // exist") for the fake slots we track in _orez._zero_replication_slots; that
+  // error aborts zero-cache's ensureSchemaMigrated transaction and crashes the
+  // change-streamer (exit 255). matching the call rather than a whole statement
+  // shape is robust to zero changing the surrounding query (it now wraps the
+  // drop in `SELECT slot, pg_drop_replication_slot(slot) FROM ... JOIN ... WHERE`).
   {
-    match:
-      /SELECT\s+pg_drop_replication_slot\(slot_name\)\s+FROM\s+_orez\._zero_replication_slots/gi,
-    replace: 'DELETE FROM _orez._zero_replication_slots',
+    match: /\bpg_drop_replication_slot\s*\(/gi,
+    replace: '_orez._drop_zero_slot(',
   },
   // pg_terminate_backend on replication slots — PGlite is single-process, there are
   // no backends to terminate. rewrite to a plain SELECT so zero-cache sees the slots

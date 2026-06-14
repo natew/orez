@@ -70,6 +70,24 @@ export async function installChangeTracking(db: ChangeTrackingDb): Promise<void>
     );
   `)
 
+  // emulate pg_drop_replication_slot(): PGlite has the real built-in, which
+  // errors with "replication slot does not exist" for any name we track in the
+  // fake _orez._zero_replication_slots table. zero-cache's startup slot-cleanup
+  // runs that drop INSIDE ensureSchemaMigrated's transaction, so the error
+  // aborts the whole migration and the change-streamer exits 255. proxy query
+  // rewrites route pg_drop_replication_slot(x) here instead: a side-effecting
+  // DELETE that mirrors the intent (forget the slot) and never errors on a
+  // missing one. used in zero's `SELECT slot, pg_drop_replication_slot(slot)
+  // FROM ... WHERE <stale>` form, so it deletes only the rows the query selects.
+  await db.exec(`
+    CREATE OR REPLACE FUNCTION _orez._drop_zero_slot(p_slot text) RETURNS text AS $$
+    BEGIN
+      DELETE FROM _orez._zero_replication_slots WHERE slot_name = p_slot;
+      RETURN p_slot;
+    END;
+    $$ LANGUAGE plpgsql VOLATILE;
+  `)
+
   // create trigger functions (writes to _orez schema)
   // uses to_jsonb() directly instead of row_to_json()::jsonb to avoid double conversion.
   // per-row trigger for single-row operations
