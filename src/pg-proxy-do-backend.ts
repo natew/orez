@@ -1930,6 +1930,45 @@ function rowNumberTarget(partitionClause: any[], orderClause?: any[]): any {
   }
 }
 
+// maps an explicit select-list alias to the expression that defines it, but
+// only when the alias is NOT just that same base column under its own name
+// (e.g. `p.id AS id` stays a real column for sqlite to resolve). computed
+// targets (`CASE … END AS match_rank`) and renames (`u.name AS authorName`)
+// produce a name that exists ONLY as an output column.
+function selectListAliasExpressions(targetList: any[]): Map<string, any> {
+  const aliases = new Map<string, any>()
+  for (const targetNode of targetList) {
+    const target = targetNode?.ResTarget
+    const name = target?.name
+    if (!name || target.val == null) continue
+    if (columnRefTailName(target.val) === name) continue
+    aliases.set(name, target.val)
+  }
+  return aliases
+}
+
+// postgres lets DISTINCT ON / ORDER BY reference select-list aliases; sqlite
+// cannot resolve a select-list alias inside that same select's window-function
+// ORDER BY/PARTITION BY (the alias isn't a real column there). so before the
+// window clauses move into the inner select, replace any single-field ColumnRef
+// that names an alias with the alias's underlying expression.
+function substituteSelectAliasesInClause(node: any, aliases: Map<string, any>): any {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node))
+    return node.map((item) => substituteSelectAliasesInClause(item, aliases))
+
+  const fields = node.ColumnRef?.fields
+  if (Array.isArray(fields) && fields.length === 1) {
+    const name = stringValue(fields[0])
+    if (name && aliases.has(name)) return cloneAst(aliases.get(name))
+  }
+
+  for (const key of Object.keys(node)) {
+    node[key] = substituteSelectAliasesInClause(node[key], aliases)
+  }
+  return node
+}
+
 function rewriteDistinctOnSelect(stmt: any): any {
   if (!isDistinctOnClause(stmt?.distinctClause)) return stmt
 
@@ -1940,10 +1979,17 @@ function rewriteDistinctOnSelect(stmt: any): any {
     targetNode.ResTarget.name ??= outputNames[index]
   })
 
-  const partitionClause = cloneAst(stmt.distinctClause)
-  const orderClause = stmt.sortClause
-    ? cloneAst(stmt.sortClause)
-    : partitionClause.map((node: any) => sortByDefault(cloneAst(node)))
+  const aliasExpressions = selectListAliasExpressions(innerTargets)
+  const partitionClause = substituteSelectAliasesInClause(
+    cloneAst(stmt.distinctClause),
+    aliasExpressions
+  )
+  const orderClause = substituteSelectAliasesInClause(
+    stmt.sortClause
+      ? cloneAst(stmt.sortClause)
+      : partitionClause.map((node: any) => sortByDefault(cloneAst(node))),
+    aliasExpressions
+  )
 
   const inner = {
     ...cloneAst(stmt),

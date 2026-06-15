@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http'
 
+import Database from '@rocicorp/zero-sqlite3'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import { DoBackend, deployTimeSchemaBatchStatements } from './pg-proxy-do-backend.js'
@@ -3932,6 +3933,69 @@ describe('DoBackend', () => {
     expect(sent).toContain('ORDER BY c."serverId", c."updatedAt" DESC')
     expect(sent).toContain('_orez_rn = 1')
     expect(sent).not.toContain('DISTINCT ON')
+  })
+
+  test('executes a DISTINCT ON whose ORDER BY references a CASE select-list alias against real sqlite', async () => {
+    // runtime proof: the rewritten window ORDER BY must NOT reference the
+    // select-list alias `match_rank` — sqlite cannot resolve a select-list
+    // alias inside that same select's window function and throws
+    // `no such column: match_rank`. mirrors app/api/site/landing/recent+api.ts.
+    const db = new Database(':memory:')
+    db.exec(`
+      CREATE TABLE "previewShare" (
+        id TEXT, kind TEXT, "createdAt" TEXT, "repoId" TEXT, visibility TEXT
+      );
+      CREATE TABLE "projectGithubLink" ( owner TEXT, repo TEXT );
+      INSERT INTO "previewShare" VALUES
+        ('p1','flow','2026-01-01','acme/widget','unlisted'),
+        ('p1','flow','2026-02-01','acme/other','unlisted'),
+        ('p2','flow','2026-02-01','x/y','unlisted'),
+        ('p2','flow','2026-03-01','x/z','unlisted');
+      INSERT INTO "projectGithubLink" VALUES ('acme','widget');
+    `)
+
+    const http = await startDoHttp((sql, _url) => {
+      // execute only the DISTINCT-ON-derived select against real sqlite; the
+      // bootstrap/metadata chatter the backend emits stays a no-op stub.
+      if (!sql.includes('row_number') && !sql.includes('_orez_rn')) {
+        return { rows: [], columns: [] }
+      }
+      const rows = db.prepare(sql.replace(/\$\d+/g, '?')).all('acme') as Record<
+        string,
+        unknown
+      >[]
+      return { rows, columns: rows.length ? Object.keys(rows[0]) : [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'distinct-on-alias-runtime-test')
+    await backend.waitReady
+
+    const result = await backend.query(
+      `SELECT DISTINCT ON (p.id)
+              p.id, p."createdAt",
+              CASE
+                WHEN LOWER(p."repoId") = LOWER(l.owner || '/' || l.repo) THEN 0
+                ELSE 1
+              END AS match_rank
+       FROM "previewShare" p
+       JOIN "projectGithubLink" l ON LOWER(l.owner) = LOWER($1)
+       WHERE p.visibility = 'unlisted' AND p.kind = 'flow'
+       ORDER BY p.id, match_rank, p."createdAt" DESC`,
+      ['acme']
+    )
+
+    // one row per id: p1 picks the repo-match (rank 0), p2 has no match so both
+    // rows are rank 1 and the createdAt DESC tiebreak selects the newest.
+    expect(result.rows).toEqual([
+      { id: 'p1', createdAt: '2026-01-01', match_rank: 0 },
+      { id: 'p2', createdAt: '2026-03-01', match_rank: 1 },
+    ])
+
+    const sent = compactSQL(http.sqls.find((s) => s.includes('row_number')) ?? '')
+    // the window ORDER BY carries the inlined CASE, not the unresolvable alias.
+    expect(sent).toContain('row_number() OVER')
+    expect(sent).toMatch(/ORDER BY p\.id, CASE/)
+    expect(sent).not.toMatch(/ORDER BY p\.id, match_rank/)
+    db.close()
   })
 
   test('strips PostgreSQL row-locking clauses from SELECTs for SQLite', async () => {
