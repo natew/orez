@@ -64,7 +64,34 @@ describe('pg-sqlite-compiler smoke', () => {
   it('preserves quoted identifiers', () => {
     const { sql } = compile('SELECT id, "createdAt" FROM public.message')
     expect(sql).toMatch(/"createdAt"/)
-    expect(sql).toMatch(/public\.message/i)
+    expect(sql).toMatch(/FROM\s+message/i)
+    expect(sql).not.toMatch(/public\.message/i)
+  })
+
+  it('flattens schema-qualified tables and matching two-part column refs', () => {
+    const { sql } = compile(`
+      SELECT replicas.slot, "shardConfig".publications
+      FROM chat_0.replicas
+      JOIN chat_0."shardConfig" ON replicas.slot = "shardConfig".slot
+    `)
+
+    expect(sql).toMatch(/chat_0_replicas\.slot/)
+    expect(sql).toMatch(/"chat_0_shardConfig"\.publications/)
+    expect(sql).toMatch(/FROM\s+chat_0_replicas/i)
+    expect(sql).toMatch(/JOIN\s+"chat_0_shardConfig"/i)
+    expect(sql).not.toMatch(/chat_0\.replicas/i)
+    expect(sql).not.toMatch(/(^|[^_])replicas\.slot/)
+  })
+
+  it('rejects known PG-only functions in strict mode', () => {
+    for (const sql of [
+      'SELECT RIGHT(id, 8) AS short_id FROM deployment',
+      "SELECT date_trunc('month', created_at) AS month FROM event",
+      'SELECT gen_random_uuid() AS id',
+      'SELECT value FROM unnest($1::text[]) AS value',
+    ]) {
+      expect(() => compile(sql, { strict: true })).toThrow(CompileError)
+    }
   })
 
   it('quotes sqlite keyword relation identifiers', () => {

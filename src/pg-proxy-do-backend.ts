@@ -595,6 +595,7 @@ function expressionOid(value: any): number | undefined {
   }
   const node = value
   if (!node || typeof node !== 'object') return undefined
+  if (node.SubLink?.subLinkType === 'EXISTS_SUBLINK') return PG_TYPE_BOOL
   if (node.FuncCall) {
     const name = functionName(node.FuncCall)
     if (name && JSON_PRODUCING_FUNCTIONS.has(name)) return PG_TYPE_JSON
@@ -1416,6 +1417,44 @@ function postgresTimestampText(value: unknown): string {
   const raw = value instanceof Date ? value.toISOString() : String(value)
   const withSpace = raw.replace('T', ' ')
   return withSpace.endsWith('Z') ? `${withSpace.slice(0, -1)}+00` : withSpace
+}
+
+function postgresQueryBoolean(value: unknown): unknown {
+  if (value === true || value === 1 || value === '1' || value === 't' || value === 'true')
+    return true
+  if (
+    value === false ||
+    value === 0 ||
+    value === '0' ||
+    value === 'f' ||
+    value === 'false'
+  )
+    return false
+  return value
+}
+
+function postgresQueryJson(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  try {
+    return JSON.parse(value)
+  } catch {
+    return value
+  }
+}
+
+function postgresQueryTimestamp(value: unknown): unknown {
+  if (value instanceof Date) return value
+  const millis = timestampMillisValue(value)
+  const date = millis !== null ? new Date(millis) : new Date(String(value))
+  return Number.isFinite(date.getTime()) ? date : value
+}
+
+function postgresQueryValue(value: unknown, oid: number | undefined): unknown {
+  if (value === null || value === undefined) return value
+  if (oid === PG_TYPE_BOOL) return postgresQueryBoolean(value)
+  if (oid === PG_TYPE_JSON || oid === PG_TYPE_JSONB) return postgresQueryJson(value)
+  if (isTimestampOid(oid)) return postgresQueryTimestamp(value)
+  return value
 }
 
 function epochMillisParamValue(value: unknown): unknown {
@@ -2679,6 +2718,20 @@ function normalizeInsertSelectOnConflict(stmt: any): void {
   select.whereClause = intConst(1)
 }
 
+function normalizeInsert(stmt: any, context?: RewriteContext): void {
+  const from =
+    stmt.relation?.alias?.aliasname ??
+    (stmt.relation?.schemaname ? stmt.relation.relname : null)
+  const table = flattenRangeVar(stmt.relation)
+  if (from && table) {
+    if (stmt.relation?.alias?.aliasname) delete stmt.relation.alias
+    rewriteColumnRefQualifier(stmt, from, table)
+  }
+  rewriteInsertDefaults(stmt)
+  normalizeInsertSelectOnConflict(stmt)
+  rewriteNode(stmt, context)
+}
+
 function firstSourceTable(value: any, cteNames = new Set<string>()): string | null {
   if (!value || typeof value !== 'object') return null
   if (Array.isArray(value)) {
@@ -3796,14 +3849,11 @@ function rewriteParsedStatement(
   } else if (nodeType === 'InsertStmt') {
     const table = publicationTableRefForRangeVar(node.relation)
     writeTable = table
-    flattenRangeVar(node.relation)
-    rewriteInsertDefaults(node)
-    normalizeInsertSelectOnConflict(node)
+    normalizeInsert(node, context)
     if (node.selectStmt?.SelectStmt?.withClause) {
       const sourceTable = firstSourceTable(node.selectStmt)
       if (sourceTable) skipIfTableEmpty = { table: sourceTable }
     }
-    rewriteNode(node, context)
     changeTracking = changeTrackingForDML(version, stmt, nodeType, table, 'INSERT')
   } else if (nodeType === 'UpdateStmt') {
     const table = publicationTableRefForRangeVar(node.relation)
@@ -6187,7 +6237,10 @@ export class DoBackend {
       const result = await this.executeRewrittenStatements(statements)
       await this.applyStatementMetadata(statements)
       const tracking = statement ? this.trackingForStatement(statement) : undefined
-      return this.visibleResultForTracking(result, tracking).rows
+      return this.normalizedHighLevelResult(
+        rewritten,
+        this.visibleResultForTracking(result, tracking)
+      ).rows
     }
     if (statement) await this.snapshotTransactionWrite(statement)
     const tracking = statement ? this.trackingForStatement(statement) : undefined
@@ -6197,7 +6250,10 @@ export class DoBackend {
       tracking ? this.trackingRequest(tracking) : undefined
     )
     await this.applyStatementMetadata(statements)
-    return this.visibleResultForTracking(result, tracking).rows
+    return this.normalizedHighLevelResult(
+      rewritten,
+      this.visibleResultForTracking(result, tracking)
+    ).rows
   }
 
   private async handleTransactionControl(sql: string): Promise<boolean> {
@@ -6307,7 +6363,12 @@ export class DoBackend {
       tracking ? this.trackingRequest(tracking) : undefined
     )
     await this.applyStatementMetadata(statements)
-    return { rows: this.visibleResultForTracking(result, tracking).rows as T[] }
+    return {
+      rows: this.normalizedHighLevelResult(
+        rewritten,
+        this.visibleResultForTracking(result, tracking)
+      ).rows as T[],
+    }
   }
 
   // ── Internal helpers ─────────────────────────────────────────────────────
@@ -6378,6 +6439,24 @@ export class DoBackend {
       jsonParamNumbers,
       epochMillisParamNumbers,
     })
+  }
+
+  private normalizedHighLevelResult(sql: string, result: ExecResult): ExecResult {
+    if (result.rows.length === 0) return result
+    const fields = this.fieldsForResult(sql, result)
+    if (fields.length === 0 || fields.every((field) => !field.oid)) return result
+    const fieldByName = new Map(fields.map((field) => [field.name, field]))
+    return {
+      ...result,
+      rows: result.rows.map((row) =>
+        Object.fromEntries(
+          Object.entries(row).map(([name, value]) => [
+            name,
+            postgresQueryValue(value, fieldByName.get(name)?.oid),
+          ])
+        )
+      ),
+    }
   }
 
   private inlineStatementParams(

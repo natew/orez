@@ -2062,6 +2062,28 @@ describe('DoBackend', () => {
     expect(sent).not.toMatch(/(^|[^_])"shardConfig"\.publications/)
   })
 
+  test('rewrites implicit qualifiers in schema-qualified upsert conflict clauses', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'schema-upsert-flatten-test')
+    await backend.waitReady
+
+    await backend.query(
+      `
+      INSERT INTO chat_0.replicas ("slot", "version")
+      VALUES ($1, $2)
+      ON CONFLICT ("slot") DO UPDATE SET "version" = excluded."version"
+      WHERE replicas."version" IS DISTINCT FROM excluded."version"
+    `,
+      ['slot_1', 'v2']
+    )
+
+    const sent = compactSQL(http.sqls.at(-1) || '')
+    expect(sent).toContain('INSERT INTO chat_0_replicas')
+    expect(sent).toContain('WHERE chat_0_replicas.version IS DISTINCT FROM')
+    expect(sent).toContain('excluded.version')
+    expect(sent).not.toMatch(/(^|[^_])replicas\.version/)
+  })
+
   test('neutralizes the _orez._drop_zero_slot cleanup call so the slot-drop SELECT parses on sqlite', async () => {
     const http = await startDoHttp(() => ({ rows: [], columns: [] }))
     const backend = new DoBackend(http.url, 'postgres', 'drop-zero-slot-test')
@@ -2809,6 +2831,50 @@ describe('DoBackend', () => {
       ddlDetection: 16,
     })
     expect(dataRowValues(result)).toEqual([['["_chat_metadata_0","zero_chat"]', 'f']])
+  })
+
+  test('normalizes high-level query rows using PG metadata', async () => {
+    const http = await startDoHttp((sql) => {
+      if (compactSQL(sql).startsWith('SELECT')) {
+        return {
+          rows: [
+            {
+              hasRows: 1,
+              config: '{"enabled":true,"limit":3}',
+              createdAt: 1781568000000,
+            },
+          ],
+          columns: ['hasRows', 'config', 'createdAt'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'query-row-normalize-test')
+    await backend.waitReady
+
+    await backend.exec(`
+      CREATE TABLE "job" (
+        "id" TEXT PRIMARY KEY,
+        "config" jsonb NOT NULL,
+        "createdAt" timestamptz NOT NULL
+      );
+    `)
+
+    const result = await backend.query<{
+      hasRows: boolean
+      config: { enabled: boolean; limit: number }
+      createdAt: Date
+    }>(
+      'SELECT EXISTS(SELECT 1 FROM "job") AS "hasRows", "config", "createdAt" FROM "job"'
+    )
+
+    expect(result.rows).toEqual([
+      {
+        hasRows: true,
+        config: { enabled: true, limit: 3 },
+        createdAt: new Date('2026-06-16T00:00:00.000Z'),
+      },
+    ])
   })
 
   test('falls back to zero-cache metadata column types when durable metadata is absent', async () => {

@@ -1,6 +1,8 @@
 import { catalogPass } from './catalog.js'
 import { datetimePass } from './datetime.js'
+import { schemaPass } from './schema.js'
 import { typesPass } from './types.js'
+import { unsupportedPass } from './unsupported.js'
 
 /**
  * Pass pipeline.
@@ -17,6 +19,8 @@ export const DEFAULT_PASSES: Pass[] = [
   typesPass,
   datetimePass,
   catalogPass,
+  schemaPass,
+  unsupportedPass,
   // future:
   //   castPass,
   //   arrayPass,
