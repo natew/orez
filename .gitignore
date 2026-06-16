@@ -1,5 +1,6 @@
 node_modules
 dist
+pg-to-sqlite/dist
 .orez
 .orez-test
 *.tgz

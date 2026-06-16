@@ -33,9 +33,16 @@
         "vite",
       ],
     },
+    "pg-to-sqlite": {
+      "name": "pg-to-sqlite",
+      "version": "0.4.15",
+      "dependencies": {
+        "pgsql-parser": "^17.9.11",
+      },
+    },
     "sqlite-wasm": {
       "name": "bedrock-sqlite",
-      "version": "0.3.10",
+      "version": "0.4.15",
       "devDependencies": {
         "typescript": "^5.7.0",
         "vitest": "^3.0.0",
@@ -871,6 +878,8 @@
     "pg-proto-parser": ["pg-proto-parser@1.30.6", "", { "dependencies": { "@babel/generator": "^7.23.6", "@babel/parser": "^7.23.6", "@babel/traverse": "7.28.5", "@babel/types": "7.28.5", "@launchql/protobufjs": "7.2.6", "case": "1.6.3", "deepmerge": "4.3.1", "nested-obj": "^0.2.2", "strfy-js": "^3.1.5" } }, "sha512-2XwPyl9oz5Pest4ebaovRTTJN8MXaa/XvqMQzKq127fFcl4I1POUgV/FtzHzg/p8FjtO5yHsipeW/kAumzNxxw=="],
 
     "pg-protocol": ["pg-protocol@1.11.0", "", {}, "sha512-pfsxk2M9M3BuGgDOfuy37VNRRX3jmKgMjcvAcWqNDpZSf4cUmv8HSOl5ViRQFsfARFn0KuUQTgLxVMbNq5NW3g=="],
+
+    "pg-to-sqlite": ["pg-to-sqlite@workspace:pg-to-sqlite"],
 
     "pg-types": ["pg-types@2.2.0", "", { "dependencies": { "pg-int8": "1.0.1", "postgres-array": "~2.0.0", "postgres-bytea": "~1.0.0", "postgres-date": "~1.0.4", "postgres-interval": "^1.1.0" } }, "sha512-qTAAlrEsl8s4OiEQY69wDvcMIdQN6wdz5ojQiOy6YRMuynxenON0O5oCpJI6lshc6scgAY8qvJ2On/p+CXY0GA=="],
 

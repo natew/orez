@@ -41,6 +41,8 @@ export interface CompileResult {
 export interface CompileOptions {
   schema?: SchemaInfo
   pgVersion?: number
+  /** Throw instead of returning SQL when compilation produces warnings. */
+  strict?: boolean
   /** Override pass list (mainly for testing individual passes). */
   passes?: Pass[]
 }

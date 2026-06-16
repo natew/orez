@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { compile } from './index.js'
+import { CompileError, compile } from './index.js'
 
 describe('pg-sqlite-compiler smoke', () => {
   it('passes through trivial select', () => {
@@ -84,5 +84,21 @@ describe('pg-sqlite-compiler smoke', () => {
       const { sql } = compile(input)
       expect(sql).toMatch(expected)
     }
+  })
+
+  it('throws on warnings in strict mode', () => {
+    expect(() =>
+      compile('SELECT 1', {
+        strict: true,
+        passes: [
+          {
+            name: 'test-warning-pass',
+            run() {
+              throw new Error('forced warning')
+            },
+          },
+        ],
+      })
+    ).toThrow(CompileError)
   })
 })

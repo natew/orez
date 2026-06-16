@@ -7,7 +7,7 @@
  *   compile(pgSql, opts?) → { sql, warnings }
  *   compileMany(pgSqls, opts?) → results[]
  */
-import { deparseSync, parseSync } from 'pgsql-parser'
+import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
 import {
   markSQLiteKeywordIdentifiers,
@@ -16,6 +16,8 @@ import {
 import { runPasses } from './passes/index.js'
 
 import type { CompileOptions, CompileResult, SchemaInfo } from './types.js'
+
+await loadModule()
 
 const DEFAULT_VERSION = 170004
 
@@ -30,6 +32,26 @@ function stripTrailingSemicolon(s: string): string {
   let i = s.length
   while (i > 0 && (s[i - 1] === ';' || s[i - 1] === ' ' || s[i - 1] === '\n')) i--
   return s.slice(0, i)
+}
+
+export class CompileError extends Error {
+  constructor(
+    readonly warnings: CompileResult['warnings'],
+    readonly sql: string
+  ) {
+    super(`pg-to-sqlite compile failed with ${warnings.length} warning(s)`)
+    this.name = 'CompileError'
+  }
+}
+
+function throwIfStrict(
+  opts: CompileOptions,
+  warnings: CompileResult['warnings'],
+  sql: string
+): void {
+  if (opts.strict && warnings.length > 0) {
+    throw new CompileError(warnings, sql)
+  }
 }
 
 /**
@@ -52,23 +74,28 @@ export function compile(pgSql: string, opts: CompileOptions = {}): CompileResult
   const parsed = parseSync(trimmed) as { version?: number; stmts?: any[] } | any
   const stmts: any[] = Array.isArray(parsed?.stmts) ? parsed.stmts : []
   if (stmts.length === 0) {
-    return {
+    const result = {
       sql: trimmed,
       warnings: [{ kind: 'parse-empty', message: 'no statements parsed' }],
     }
+    throwIfStrict(opts, result.warnings, result.sql)
+    return result
   }
 
   // Run all passes on each top-level RawStmt entry (so passes can walk from root).
   for (let i = 0; i < stmts.length; i++) {
     runPasses(stmts[i], { schema, warnings, passes })
   }
+  throwIfStrict(opts, warnings, trimmed)
 
   const quotedByMarker = markSQLiteKeywordIdentifiers(stmts)
   const emitted = restoreSQLiteKeywordIdentifierMarkers(
     deparseSync({ version: parsed.version ?? version, stmts } as any),
     quotedByMarker
   )
-  return { sql: stripTrailingSemicolon(emitted.trim()), warnings }
+  const sql = stripTrailingSemicolon(emitted.trim())
+  throwIfStrict(opts, warnings, sql)
+  return { sql, warnings }
 }
 
 export function compileMany(
@@ -78,4 +105,9 @@ export function compileMany(
   return pgSqls.map((s) => compile(s, opts))
 }
 
-export type { CompileOptions, CompileResult, SchemaInfo } from './types.js'
+export type {
+  CompileOptions,
+  CompileResult,
+  CompileWarning,
+  SchemaInfo,
+} from './types.js'

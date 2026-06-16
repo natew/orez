@@ -118,6 +118,7 @@
     "url": "git+https://github.com/natew/orez.git"
   },
   "workspaces": [
+    "pg-to-sqlite",
     "sqlite-wasm"
   ],
   "trustedDependencies": [

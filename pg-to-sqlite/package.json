@@ -1,0 +1,34 @@
+{
+  "name": "pg-to-sqlite",
+  "version": "0.4.15",
+  "description": "PostgreSQL SQL to SQLite SQL compiler.",
+  "type": "module",
+  "license": "MIT",
+  "main": "dist/pg-sqlite-compiler/index.js",
+  "types": "dist/pg-sqlite-compiler/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/pg-sqlite-compiler/index.d.ts",
+      "import": "./dist/pg-sqlite-compiler/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "pgsql-parser": "^17.9.11"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/natew/orez.git",
+    "directory": "pg-to-sqlite"
+  },
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "sqlite",
+    "sql",
+    "compiler",
+    "cloudflare"
+  ]
+}

@@ -9,6 +9,7 @@ import { execSync } from 'node:child_process'
 import {
   cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -91,6 +92,26 @@ function cleanRootDist() {
   rmSync(resolve(root, 'dist'), { recursive: true, force: true })
 }
 
+function preparePgToSqliteDist() {
+  const packageDir = resolve(root, 'pg-to-sqlite')
+  const dest = resolve(packageDir, 'dist')
+  rmSync(dest, { recursive: true, force: true })
+  mkdirSync(dest, { recursive: true })
+  cpSync(resolve(root, 'dist', 'pg-sqlite-compiler'), join(dest, 'pg-sqlite-compiler'), {
+    recursive: true,
+  })
+  rmSync(join(dest, 'pg-sqlite-compiler', 'test'), { recursive: true, force: true })
+  for (const file of [
+    'sqlite-keyword-identifiers.js',
+    'sqlite-keyword-identifiers.js.map',
+    'sqlite-keyword-identifiers.d.ts',
+    'sqlite-keyword-identifiers.d.ts.map',
+  ]) {
+    const src = resolve(root, 'dist', file)
+    if (existsSync(src)) cpSync(src, join(dest, file))
+  }
+}
+
 let cachedNpmOtp = process.env.npm_config_otp || process.env.NPM_CONFIG_OTP
 let otpPromptInFlight: Promise<string> | undefined
 
@@ -162,6 +183,7 @@ if (into) {
   console.info('building...')
   cleanRootDist()
   run('bun run build')
+  preparePgToSqliteDist()
 
   const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
 
@@ -169,6 +191,12 @@ if (into) {
   const pkgDirs: { name: string; dir: string }[] = []
   const rootPkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf-8'))
   pkgDirs.push({ name: rootPkg.name, dir: root })
+  const compilerDir = resolve(root, 'pg-to-sqlite')
+  const compilerPkgPath = resolve(compilerDir, 'package.json')
+  if (existsSync(compilerPkgPath)) {
+    const compilerPkg = JSON.parse(readFileSync(compilerPkgPath, 'utf-8'))
+    pkgDirs.push({ name: compilerPkg.name, dir: compilerDir })
+  }
 
   const sqlDir = resolve(root, 'sqlite-wasm')
   const sqlPkgPath = resolve(sqlDir, 'package.json')
@@ -256,6 +284,20 @@ if (existsSync(sqlitePkgPath) && sqliteDistExists) {
   console.info('skipping bedrock-sqlite (no wasm dist built)')
 }
 
+// pg-to-sqlite — standalone compiler package sourced from src/pg-sqlite-compiler.
+const compilerDir = resolve(root, 'pg-to-sqlite')
+const compilerPkgPath = resolve(compilerDir, 'package.json')
+if (existsSync(compilerPkgPath)) {
+  const compilerPkg = JSON.parse(readFileSync(compilerPkgPath, 'utf-8'))
+  packages.push({
+    dir: compilerDir,
+    originalVersion: compilerPkg.version,
+    pkgPath: compilerPkgPath,
+    pkg: compilerPkg,
+    next: orezNext,
+  })
+}
+
 // for --pack-only, use current versions instead of bumping
 if (packOnly) {
   for (const p of packages) {
@@ -294,6 +336,7 @@ if (!packOnly) {
 console.info('\nbuilding...')
 cleanRootDist()
 run('bun run build')
+preparePgToSqliteDist()
 
 // bump versions in source (skip for --pack-only and --canary)
 if (!packOnly && !canary) {
