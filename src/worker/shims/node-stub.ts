@@ -227,6 +227,35 @@ export function randomBytes(n: number) {
   crypto.getRandomValues(arr)
   return arr
 }
+// undici subresource-integrity calls crypto.getHashes() at module-load time
+// to decide which SRI algorithms it'll accept (sha256/sha384/sha512). without
+// it the worker throws and zero-cache never registers. WebCrypto supports
+// all three, so advertise them; SRI itself isn't exercised in our paths.
+export function getHashes() {
+  return ['sha1', 'sha256', 'sha384', 'sha512']
+}
+// undici/web modules destructure these from node:crypto at module load.
+// real createHash returns a stream-like hasher; we return a no-op shape
+// that satisfies the `update().digest()` chain without throwing — actual
+// hashing in our paths goes through globalThis.crypto.subtle.
+type NoopHasher = {
+  update(data?: unknown): NoopHasher
+  digest(enc?: string): string
+}
+export function createHash(_algorithm: string): NoopHasher {
+  const noop: NoopHasher = {
+    update(_data?: unknown) {
+      return noop
+    },
+    digest(_enc?: string) {
+      return ''
+    },
+  }
+  return noop
+}
+export function createHmac(_algorithm: string, _key: unknown): NoopHasher {
+  return createHash('hmac')
+}
 
 // stub for node:url
 export function fileURLToPath(url: string) {
@@ -294,6 +323,19 @@ export function inherits(ctor: any, superCtor: any) {
 export function deprecate(fn: any) {
   return fn
 }
+// undici / fetch / websocket diagnostics call util.debuglog('undici') etc. at
+// module load time to capture a debug emit hook. without this the worker
+// throws "util.debuglog is not a function" before zero-cache can register —
+// the IDE then never marks the runtime ready and the preview iframes never
+// mount. real Node uses NODE_DEBUG to gate the returned fn; in the worker
+// we always no-op (returned fn also exposes the matching `.enabled` flag for
+// callers that check it).
+const noopDebuglogFn: ((...args: unknown[]) => void) & { enabled: boolean } =
+  Object.assign(() => {}, { enabled: false })
+export function debuglog(_section?: string, _cb?: (fn: typeof noopDebuglogFn) => void) {
+  return noopDebuglogFn
+}
+export const debug = debuglog
 export const types = {
   isProxy: () => false,
   isRegExp: (v: unknown) => v instanceof RegExp,
@@ -341,6 +383,38 @@ export const isMainThread = true
 export const parentPort = null
 
 // stub for node:async_hooks
+// undici/api-request destructures AsyncResource and `class RequestHandler
+// extends AsyncResource` at module load — without it the worker throws
+// "Class extends value undefined" before zero-cache registers. real
+// AsyncResource binds an emit + async store; in the worker we don't have a
+// hook tree, so the no-op constructor + minimal surface is enough to keep
+// the extends chain valid.
+export class AsyncResource {
+  constructor(_type?: string, _opts?: unknown) {}
+  runInAsyncScope<R>(
+    fn: (...args: unknown[]) => R,
+    thisArg?: unknown,
+    ...args: unknown[]
+  ): R {
+    return fn.apply(thisArg as object, args)
+  }
+  emitDestroy() {
+    return this
+  }
+  asyncId() {
+    return 0
+  }
+  triggerAsyncId() {
+    return 0
+  }
+  bind<T extends (...args: unknown[]) => unknown>(fn: T): T {
+    return fn
+  }
+  static bind<T extends (...args: unknown[]) => unknown>(fn: T): T {
+    return fn
+  }
+}
+
 export class AsyncLocalStorage<T = unknown> {
   run<R>(store: T, callback: (...args: unknown[]) => R, ...args: unknown[]): R {
     void store
@@ -446,6 +520,9 @@ export default {
   randomUUID,
   randomBytes,
   timingSafeEqual,
+  getHashes,
+  createHash,
+  createHmac,
   hostname,
   platform,
   tmpdir,
@@ -494,6 +571,8 @@ export default {
   styleText,
   inherits,
   deprecate,
+  debuglog,
+  debug,
   types,
   performance,
   constants,
@@ -521,6 +600,7 @@ export default {
   Worker,
   isMainThread,
   parentPort,
+  AsyncResource,
   AsyncLocalStorage,
   createHook,
   executionAsyncId,
