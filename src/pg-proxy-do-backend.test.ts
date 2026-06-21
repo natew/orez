@@ -2593,6 +2593,33 @@ describe('DoBackend', () => {
     expect(dataRowValues(result)).toEqual([[`[{"id":"u1"}]`]])
   })
 
+  test('high-level query() returns a string for explicit ::text casts over JSON expressions', async () => {
+    // rewriteNode() strips every TypeCast from the rewritten SQL it ships to
+    // SQLite. when normalizedHighLevelResult() previously read its column
+    // metadata from that REWRITTEN sql, the outer `::text` cast was gone and
+    // `expressionOid` saw only `json_agg(row_to_json(...))` → PG_TYPE_JSON →
+    // postgresQueryJson auto-JSON.parse()d the SQLite-returned JSON text into
+    // a JS object. zero's apex-side `parse$1(...)` then String()s the object
+    // to `[object Object]` and every server-side `tx.run(zql.<table>.where().one())`
+    // inside a custom mutator threw "Unexpected 'o', expecting JSON value".
+    // metadata must be derived from the ORIGINAL pg sql so the cast is honored
+    // and the column comes back as the raw text the apex caller expects.
+    const http = await startDoHttp(() => ({
+      rows: [{ zql_result: '[{"id":"u1"}]' }],
+      columns: ['zql_result'],
+    }))
+    const backend = new DoBackend(http.url, 'postgres', 'zql-text-result-query-test')
+    await backend.waitReady
+
+    const result = await backend.query<{ zql_result: unknown }>(
+      `SELECT COALESCE(json_agg(row_to_json(zql_root)), '[]'::json)::text AS zql_result
+       FROM (SELECT id FROM "userPublic") zql_root`
+    )
+
+    expect(typeof result.rows[0]?.zql_result).toBe('string')
+    expect(result.rows[0]?.zql_result).toBe('[{"id":"u1"}]')
+  })
+
   test('flushes simple-protocol transaction writes before extended statements', async () => {
     const http = await startDoHttp(() => ({ rows: [], columns: [] }))
     const backend = new DoBackend(http.url, 'postgres', 'mixed-protocol-test')

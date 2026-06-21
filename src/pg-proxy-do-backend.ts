@@ -6237,8 +6237,9 @@ export class DoBackend {
       const result = await this.executeRewrittenStatements(statements)
       await this.applyStatementMetadata(statements)
       const tracking = statement ? this.trackingForStatement(statement) : undefined
+      // metadata: original SQL only — see normalizedHighLevelResult comment in query().
       return this.normalizedHighLevelResult(
-        rewritten,
+        sql,
         this.visibleResultForTracking(result, tracking)
       ).rows
     }
@@ -6251,7 +6252,7 @@ export class DoBackend {
     )
     await this.applyStatementMetadata(statements)
     return this.normalizedHighLevelResult(
-      rewritten,
+      sql,
       this.visibleResultForTracking(result, tracking)
     ).rows
   }
@@ -6363,9 +6364,19 @@ export class DoBackend {
       tracking ? this.trackingRequest(tracking) : undefined
     )
     await this.applyStatementMetadata(statements)
+    // metadata for the returned columns must be derived from the ORIGINAL SQL,
+    // not the rewritten one: rewriteNode() strips every TypeCast node (so the
+    // SQLite executor sees expressions in their PG-equivalent form), which
+    // means `(row_to_json(t))::text AS zql_result` loses its `::text` cast in
+    // the rewritten SQL and `expressionOid` then sees only `row_to_json(...)`
+    // and reports the column as PG_TYPE_JSON. that triggers postgresQueryJson
+    // → JSON.parse on the value, returning a JS object where the apex caller
+    // expected a JSON-text string — zero's json-custom-numbers parser then
+    // String()s the object to `[object Object]` and the permission read on a
+    // server-side custom mutator throws "Unexpected 'o', expecting JSON value".
     return {
       rows: this.normalizedHighLevelResult(
-        rewritten,
+        sql,
         this.visibleResultForTracking(result, tracking)
       ).rows as T[],
     }
