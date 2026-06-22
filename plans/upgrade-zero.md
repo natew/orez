@@ -262,7 +262,7 @@ Verify the binary exists for the resolved version:
     all unchanged.
 - **What DID break (the real work):**
   - **HTTP transport ordering race** (`src/zero-http/transport.ts`) — only
-    1.7-specific change requiring a code fix. Zero 1.7's client-side
+    1.7-specific runtime change requiring a code fix. Zero 1.7's client-side
     query-change throttle (~10ms) means `initConnection` / `changeDesiredQueries`
     messages arrive on the wire **after** the `'connected'` frame, while the
     shim was kicking off its first `pull()` synchronously on connect. The first
@@ -277,6 +277,12 @@ Verify the binary exists for the resolved version:
     `gotQueriesPatch` in. If no query message arrives in 25ms, the timer fires
     and the pull proceeds (preserving the no-queries connect path). Found by
     Codex agent `ab-mqokjnye-60287` via repeat-runs.
+  - **Full-suite setup budget** (`src/replication/zero-compat.test.ts`) —
+    the compatibility describe already carried `{ timeout: 30000 }`, but Vitest
+    still used the default 10s budget for the async `beforeEach` hook during
+    the whole-suite run. The direct file passed; the full `bun run test` hit
+    the hook timeout once under load. Added the explicit hook timeout so the
+    PGlite + schema + proxy setup budget matches the describe-level intent.
 - **Validated OK:** unit suite **734/734** (`bun run test`); integration
   **30/30** (`bun run test:integration`, the authoritative orez-node gate —
   embed-integration occasionally flakes on a loaded machine per §6/1.6 notes
