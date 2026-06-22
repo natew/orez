@@ -365,10 +365,10 @@ Two orez source fixes were needed and are committed on
     posts/comments **plus** `userPublic.upsert`) into the embedded
     zero-cache running inside the **128MB Durable Object**. Two runs, two
     failure modes from the same pressure: run 1 → `HTTP 500: Durable
-    Object's isolate exceeded its memory limit and was reset` on the upsert,
+Object's isolate exceeded its memory limit and was reset` on the upsert,
     then a downstream `Expected CVR version to have been bumped above
-    original` invariant on ctx B; run 2 → `Client sent mutation ID 2 but
-    expected 1` on `seedDemo`/`upsert` (the heavy seed mutation never acks,
+original` invariant on ctx B; run 2 → `Client sent mutation ID 2 but
+expected 1` on `seedDemo`/`upsert` (the heavy seed mutation never acks,
     so the next mutation is rejected out-of-sequence). `flights` shows the
     same as an A→B realtime timeout. This is a **cf-do platform/template-
     weight limitation** (the DO 128MB budget — see the orez perf notes), not
