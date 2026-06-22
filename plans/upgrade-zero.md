@@ -295,6 +295,87 @@ Verify the binary exists for the resolved version:
   1.7-embedded zero-cache, but mixing client + server minor versions is not
   a tested configuration — bump together.
 
+#### Stage 3 — chat (consumer e2e gate)
+
+- `@rocicorp/zero` bumped in chat `package.json` + `bun.lock`; CI
+  `ZERO_VERSION` default `'1.6.1'` → `'1.7.0-canary.3'` (`.github/workflows/ci.yml`),
+  plus the `docker-compose.yml` / `src/uncloud/docker-compose.yml` defaults.
+- One real regression surfaced by the canary backend: HUD menu close didn't
+  restore editor focus (`MessageInputEditor.tsx` — added an Escape path that
+  closes the menu and re-focuses). Caught by `channels.test.ts` focus-flow.
+- **Validated:** `bun check` clean; `bun run test e2e --unit` 304/304; docker
+  Zero e2e on `rocicorp/zero:1.7.0-canary.3` 49 passed / 2 skipped; orez
+  DO-backed `bun run test:chat:e2e` 48 passed / 1 flaky-passed-on-retry / 2
+  skipped.
+
+#### Stages 4-5 — orez core fixes surfaced by the soot consumer
+
+Two orez source fixes were needed and are committed on
+`chore/upgrade-zero-1.7-canary` (`d20bd72`, `89c32f2`):
+
+- **`src/worker/shims/node-stub.ts` (+60)** — Zero 1.7 reaches for a wider
+  node-API surface in the browser/worker bundle. Added stubs for
+  `fs.createReadStream`, `net.isIP`, `http`/`https` `Agent`,
+  `module.isBuiltin` + `module.builtinModules`, and bumped
+  `process.version` → `v22.0.0` / `process.versions.node` → `22.0.0` (1.7
+  warns on older reported node versions). soot keeps its **own** worker
+  node-stub (memfs-backed) and needed only the `createReadStream` stub
+  there — committed separately in the soot worktree.
+- **`src/pg-proxy-do-backend.ts` (+48/-9) + test** — Zero 1.7 drives
+  concurrent operations against a single `DoBackend` connection, letting
+  `BEGIN`/write/`COMMIT` interleave and corrupt `inTransaction`/`txID`
+  state. Added a per-connection `Mutex` (`runExclusive`) wrapping the public
+  `close`/`execProtocolRaw`/`exec`/`query` methods (each split into a locked
+  wrapper + internal `*Locked` body so helpers don't re-acquire), and a
+  `currentTransactionID()` invariant that throws instead of writing a
+  null-tx-id manifest row. `pg-proxy-do-backend.test.ts` 132/132.
+
+#### Stage 4 — soot orez-web (browser worker)
+
+- Manifests bumped to 1.7.0-canary.3 across root + `packages/orez-web` + 5
+  templates; `bun.lock` regenerated. Committed in the soot worktree
+  (`chore/upgrade-zero-1.7-canary`).
+- `protocolVersion: 51` confirmed in the built `orez-web-zc.worker.js`. The
+  1.6-era `build-zero-cache.ts` auto-start regex regression did **not**
+  recur (no `!singleProcessMode()) exitAfter` leak).
+- **Validated:** `build:prereqs:validate` + `build:orez` pass;
+  `test:orez:smoke` 3/3, `test:orez` 11/11, `test:orez:robust` 5/5; app
+  template typecheck clean.
+
+#### Stage 5 — soot orez-cf (Cloudflare DO) — partial; one new finding
+
+- **Bundle check** (`test-cf-do-bundle.ts`): ok, all 11 overlay patches
+  applied (incl. the 1.6 `initial-sync.js` DO bound-parameter-cap patch).
+- **Unit guard** (`cloudflare-do-deploy.test.ts`): **49/49**.
+- **Live deploy + `--runtime` browser validation** (to natewienert CF
+  account, `zero17-cfdo-*` prefix, auto-teardown — all workers + D1 deleted,
+  status 200, no orphans):
+  - **`todo`: ✓ PASS** — anonymous realtime + durable sync validated across
+    two browser contexts on the deployed worker. This matches the only
+    `--runtime` template that was ever validated on 1.6.
+  - **`app` / `flights`: FAIL at browser runtime** (smoke probes still
+    PASS). **These two `--runtime` validators are NEW** — codex added
+    `validateApp` (demo login → edit profile in ctx A → assert A→B
+    `userPublic` sync) and `validateFlights` (demo login → flight mutation →
+    A→B sync) to `validate-cf-do-runtime.ts` this stage. On 1.6 only `todo`
+    got `--runtime`, so **there is no 1.6 baseline for app/flights and this
+    is NOT a proven 1.7 regression.**
+  - **Root cause of the app/flights failure:** the heavier templates fire a
+    mount-time burst of mutations (`seed.seedDemo` inserting demo
+    posts/comments **plus** `userPublic.upsert`) into the embedded
+    zero-cache running inside the **128MB Durable Object**. Two runs, two
+    failure modes from the same pressure: run 1 → `HTTP 500: Durable
+    Object's isolate exceeded its memory limit and was reset` on the upsert,
+    then a downstream `Expected CVR version to have been bumped above
+    original` invariant on ctx B; run 2 → `Client sent mutation ID 2 but
+    expected 1` on `seedDemo`/`upsert` (the heavy seed mutation never acks,
+    so the next mutation is rejected out-of-sequence). `flights` shows the
+    same as an A→B realtime timeout. This is a **cf-do platform/template-
+    weight limitation** (the DO 128MB budget — see the orez perf notes), not
+    a Zero-version issue. **Open follow-up, tracked separately from the
+    version bump:** lighten/chunk `seedDemo`, or serialize the mount-time
+    mutation burst, or raise the DO memory headroom.
+
 ### 1.5 → 1.6 (June 2026)
 
 - **Versions:** `@rocicorp/zero` 1.5.0 → **1.6.1**; `@rocicorp/zero-sqlite3`
