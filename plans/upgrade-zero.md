@@ -233,6 +233,62 @@ Verify the binary exists for the resolved version:
 
 ## 6. Worked examples
 
+### 1.6 → 1.7.0-canary.3 (June 2026)
+
+- **Versions:** `@rocicorp/zero` 1.6.1 → **1.7.0-canary.3**; `@rocicorp/zero-sqlite3`
+  unchanged at **1.1.2** (`npm view @rocicorp/zero@1.7.0-canary.3 dependencies.@rocicorp/zero-sqlite3`
+  → `^1.1.2`). **Protocol unchanged at 51** (the version field in `protocol-version.d.ts`
+  still reads `51`, history comment: "51 changes inspector metrics fields"). Headline:
+  React 19 peer (already on R19 everywhere downstream — non-blocker).
+- **Release-age:** 1.7.0-canary.3 was <3 days old at upgrade time → used the
+  temporary `bunfig.toml` exclude (§2), deleted after install. Native binding
+  was already on the resolved 1.1.2 → `native:bootstrap` was a no-op.
+- **What did NOT need to change (key finding):**
+  - Every coupling point in §3.A–§3.F **held without edits.** Because protocol
+    stayed at 51, **none of the 8 sync-protocol string sites needed updating.**
+  - All five `patchWorker*` anchors in `src/worker/cf-patches.ts` still matched
+    upstream's compiled shape (verified by `bunx vitest run src/worker/cf-patches.test.ts` — 4/4 green).
+    The `WORKER_AUTOSTART_PREFIX` stable-prefix approach from the 1.5→1.6 rewrite
+    paid off: change-streamer.js still wraps in `.catch()`, the others still take
+    `...process.argv.slice(2)`, and the prefix `if (!singleProcessMode()) exitAfter(`
+    is identical in all 5 entrypoints (`main`, `change-streamer`, `reaper`,
+    `replicator`, `syncer`).
+  - `patchWriteWorkerClient` inline body still mirrors upstream `write-worker.js`:
+    `createLogContext({ log }, "write-worker")` (string form, preserved from 1.6),
+    `applyPragmas` + `serializeError` still imported by upstream from
+    `write-worker-client.js`. No drift.
+  - litestream `restoreReplica` anchor (§3.B), `worker-urls.js` export set,
+    `processes.js` dynamic-import anchor, `run-worker.js` import path —
+    all unchanged.
+- **What DID break (the real work):**
+  - **HTTP transport ordering race** (`src/zero-http/transport.ts`) — only
+    1.7-specific change requiring a code fix. Zero 1.7's client-side
+    query-change throttle (~10ms) means `initConnection` / `changeDesiredQueries`
+    messages arrive on the wire **after** the `'connected'` frame, while the
+    shim was kicking off its first `pull()` synchronously on connect. The first
+    pull then returned a snapshot **without** `gotQueriesPatch` for the just-
+    registered queries → stock Zero client materialized views never completed
+    hydration (the `connect + complete hydrates a stock Zero materialized query`
+    test in `transport.test.ts` failed intermittently — 1/5 reps).
+    **Fix:** schedule the initial pull on a 25ms timer
+    (`CONNECTED_QUERY_FLUSH_MS`). If the `initConnection` /
+    `changeDesiredQueries` message arrives first, it cancels the timer and
+    triggers `requestPullAfterCurrent()` itself, so the first snapshot folds
+    `gotQueriesPatch` in. If no query message arrives in 25ms, the timer fires
+    and the pull proceeds (preserving the no-queries connect path). Found by
+    Codex agent `ab-mqokjnye-60287` via repeat-runs.
+- **Validated OK:** unit suite **734/734** (`bun run test`); integration
+  **30/30** (`bun run test:integration`, the authoritative orez-node gate —
+  embed-integration occasionally flakes on a loaded machine per §6/1.6 notes
+  but passes reliably on retry); wasm **22/22** (`bun run test:wasm`);
+  compiler **52/52** (`bun run test:compiler`); typecheck clean (`bun run check`).
+- **Downstream implication:** orez stays on `1.7.0-canary.3` until upstream
+  releases the matching stable; downstream consumers (chat, soot) still on
+  `1.6.x` will need the client/protocol bump done together when orez ships.
+  Protocol is unchanged so a 1.6 client can technically still sync with the
+  1.7-embedded zero-cache, but mixing client + server minor versions is not
+  a tested configuration — bump together.
+
 ### 1.5 → 1.6 (June 2026)
 
 - **Versions:** `@rocicorp/zero` 1.5.0 → **1.6.1**; `@rocicorp/zero-sqlite3`
