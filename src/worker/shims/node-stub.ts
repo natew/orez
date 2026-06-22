@@ -68,11 +68,13 @@ const globalProcess = ((globalThis as any).process ??= {})
 globalProcess.env ??= {}
 globalProcess.pid ??= 1
 globalProcess.argv ??= []
-globalProcess.versions ??= { node: '20.0.0' }
+globalProcess.version ??= 'v22.0.0'
+globalProcess.versions ??= { node: '22.0.0' }
 globalProcess.kill ??= () => true
 export const env = globalProcess.env
 export const pid = globalProcess.pid
 export const argv = globalProcess.argv
+export const version = globalProcess.version
 export const versions = globalProcess.versions
 export function kill() {
   return true
@@ -89,6 +91,9 @@ export function readFileSync() {
   return ''
 }
 export function writeFileSync() {}
+export function createReadStream() {
+  throw new Error('createReadStream() not available in browser')
+}
 export function rmSync() {}
 export function mkdirSync() {}
 export function statSync() {
@@ -132,6 +137,16 @@ export function createServer() {
 }
 export function createConnection() {
   throw new Error('createConnection() not available in browser')
+}
+export function isIP() {
+  return 0
+}
+
+// stub for node:http/node:https
+export class Agent {
+  constructor(_options?: unknown) {}
+  addRequest() {}
+  destroy() {}
 }
 
 // stub for node:os
@@ -350,6 +365,44 @@ export function strictEqual() {}
 export function deepStrictEqual() {}
 
 // stub for node:module
+export const builtinModules = [
+  'assert',
+  'async_hooks',
+  'buffer',
+  'child_process',
+  'crypto',
+  'diagnostics_channel',
+  'dns',
+  'events',
+  'fs',
+  'http',
+  'http2',
+  'https',
+  'module',
+  'net',
+  'os',
+  'path',
+  'perf_hooks',
+  'process',
+  'querystring',
+  'readline',
+  'stream',
+  'stream/promises',
+  'timers',
+  'tls',
+  'tty',
+  'url',
+  'util',
+  'util/types',
+  'v8',
+  'worker_threads',
+  'zlib',
+]
+const builtinModuleSet = new Set(builtinModules)
+export function isBuiltin(name: string) {
+  const normalized = name.startsWith('node:') ? name.slice(5) : name
+  return builtinModuleSet.has(normalized)
+}
 export function createRequire() {
   return () => ({})
 }
@@ -547,6 +600,7 @@ export default {
   existsSync,
   readFileSync,
   writeFileSync,
+  createReadStream,
   rmSync,
   mkdirSync,
   statSync,
@@ -562,6 +616,8 @@ export default {
   execSync,
   createServer,
   createConnection,
+  isIP,
+  Agent,
   fileURLToPath,
   pathToFileURL,
   format,
@@ -585,6 +641,8 @@ export default {
   deepEqual,
   strictEqual,
   deepStrictEqual,
+  builtinModules,
+  isBuiltin,
   createRequire,
   pipeline,
   Server,
@@ -593,6 +651,7 @@ export default {
   env,
   pid,
   argv,
+  version,
   versions,
   kill,
   cwd,
