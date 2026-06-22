@@ -3,6 +3,7 @@ import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
 import { TX_MANIFEST_DDL, TX_MANIFEST_TABLE } from './cf-do/tx-journal.js'
 import { RETURNING_INTERNAL_PREFIX } from './do-sql-tracking.js'
+import { Mutex } from './mutex.js'
 import { signalReplicationChange } from './replication/handler.js'
 import {
   markSQLiteKeywordIdentifiers,
@@ -5181,6 +5182,7 @@ export class DoBackend {
   // on DDL / metadata / publication changes and on rollback.
   private publicationTableInfoCache: PublicationTableInfo[] | null = null
   private readyPromise: Promise<void> | null = null
+  private operationMutex = new Mutex()
 
   // Transaction state. The Durable Object refuses raw SQL BEGIN/COMMIT/SAVEPOINT
   // (Cloudflare requires ctx.storage.transaction()), so PG-style multi-call
@@ -5443,15 +5445,26 @@ export class DoBackend {
     } catch {}
   }
 
-  async close(): Promise<void> {
-    if (this.inTransaction) {
-      try {
-        await this.rollbackTransaction()
-      } catch {
-        this.clearTransactionState()
-      }
+  private async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    await this.operationMutex.acquire()
+    try {
+      return await fn()
+    } finally {
+      this.operationMutex.release()
     }
-    this.closed = true
+  }
+
+  async close(): Promise<void> {
+    return this.runExclusive(async () => {
+      if (this.inTransaction) {
+        try {
+          await this.rollbackTransaction()
+        } catch {
+          this.clearTransactionState()
+        }
+      }
+      this.closed = true
+    })
   }
 
   private readyForQuery(): Uint8Array {
@@ -5608,6 +5621,13 @@ export class DoBackend {
   }
 
   async execProtocolRaw(
+    message: Uint8Array,
+    options?: { syncToFs?: boolean; throwOnError?: boolean }
+  ): Promise<Uint8Array> {
+    return this.runExclusive(() => this.execProtocolRawLocked(message, options))
+  }
+
+  private async execProtocolRawLocked(
     message: Uint8Array,
     options?: { syncToFs?: boolean; throwOnError?: boolean }
   ): Promise<Uint8Array> {
@@ -5913,7 +5933,7 @@ export class DoBackend {
       operation: tracking.operation,
       returnRows: tracking.returnRows,
       ...(rowColumns ? { rowColumns: [...rowColumns.keys()] } : null),
-      ...(this.inTransaction && this.txID ? { transactionID: this.txID } : null),
+      ...(this.inTransaction ? { transactionID: this.currentTransactionID() } : null),
     }
   }
 
@@ -6223,6 +6243,10 @@ export class DoBackend {
   // ── High-level API ──────────────────────────────────────────────────────
 
   async exec(sql: string): Promise<any[]> {
+    return this.runExclusive(() => this.execLocked(sql))
+  }
+
+  private async execLocked(sql: string): Promise<any[]> {
     if (!this.ready) await this.waitReady
     if (await this.handleTransactionControl(sql)) return []
     const statements = this.rewriteSQLStatements(sql)
@@ -6279,6 +6303,13 @@ export class DoBackend {
   }
 
   async query<T = Record<string, unknown>>(
+    sql: string,
+    params?: any[]
+  ): Promise<{ rows: T[] }> {
+    return this.runExclusive(() => this.queryLocked(sql, params))
+  }
+
+  private async queryLocked<T = Record<string, unknown>>(
     sql: string,
     params?: any[]
   ): Promise<{ rows: T[] }> {
@@ -6553,9 +6584,16 @@ export class DoBackend {
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
   }
 
-  private transactionSnapshotName(table: string): string {
+  private currentTransactionID(): string {
+    if (!this.inTransaction || !this.txID) {
+      throw new Error('internal transaction state is missing a transaction id')
+    }
+    return this.txID
+  }
+
+  private transactionSnapshotName(txID: string, table: string): string {
     const safeTable = table.replace(/[^A-Za-z0-9_]/g, '_')
-    return `_orez_tx_${this.txID}_${this.txSnapshotCounter++}_${safeTable}`
+    return `_orez_tx_${txID}_${this.txSnapshotCounter++}_${safeTable}`
   }
 
   private async tableExistsInDo(table: string): Promise<boolean> {
@@ -6569,6 +6607,7 @@ export class DoBackend {
   private async snapshotTransactionTable(table: string): Promise<void> {
     if (!this.inTransaction || this.txDataSnapshots.has(table)) return
     if (table.startsWith('_orez_tx_')) return
+    const txID = this.currentTransactionID()
     // skip the sqlite_master probe when we already have schema metadata for
     // the table — registration only happens after a successful CREATE, so its
     // presence is proof the table exists. saves one /exec on the first write
@@ -6577,7 +6616,7 @@ export class DoBackend {
     // snapshot + manifest row land in one atomic /batch, so a DO kill at any
     // point leaves either no trace or a journal entry recovery can roll back.
     // the DDL is idempotent and rides the same batch (no extra round-trip).
-    const snapshot = exists ? this.transactionSnapshotName(table) : null
+    const snapshot = exists ? this.transactionSnapshotName(txID, table) : null
     const statements: Array<{ sql: string; params?: any[] }> = [{ sql: TX_MANIFEST_DDL }]
     if (snapshot) {
       statements.push({
@@ -6586,7 +6625,7 @@ export class DoBackend {
     }
     statements.push({
       sql: `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, ?, ?, ?)`,
-      params: [this.txID, this.txOwner, table, snapshot],
+      params: [txID, this.txOwner, table, snapshot],
     })
     await this.doRawBatch(statements)
     this.txDataSnapshots.set(table, snapshot)

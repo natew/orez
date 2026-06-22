@@ -2351,6 +2351,70 @@ describe('DoBackend', () => {
     expect(rollbackBody?.transactionID).toBe(manifestInsert.params?.[0])
   })
 
+  test('serializes concurrent public operations on one backend', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'operation-queue-test')
+    await backend.waitReady
+
+    const events: string[] = []
+    let releaseFirst!: () => void
+    let firstStarted!: () => void
+    const firstStartedPromise = new Promise<void>((resolve) => {
+      firstStarted = resolve
+    })
+    const releaseFirstPromise = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    ;(backend as any).handleTransactionControl = async (sql: string) => {
+      events.push(`start:${sql}`)
+      if (sql === 'SELECT first') {
+        firstStarted()
+        await releaseFirstPromise
+      }
+      events.push(`end:${sql}`)
+      return true
+    }
+
+    const first = backend.query('SELECT first')
+    await firstStartedPromise
+    const second = backend.query('SELECT second')
+    await Promise.resolve()
+
+    expect(events).toEqual(['start:SELECT first'])
+    releaseFirst()
+    await Promise.all([first, second])
+    expect(events).toEqual([
+      'start:SELECT first',
+      'end:SELECT first',
+      'start:SELECT second',
+      'end:SELECT second',
+    ])
+  })
+
+  test('rejects transaction snapshots before writing a null manifest tx id', async () => {
+    const http = await startDoHttp((sql) => {
+      if (sql.includes('sqlite_master')) {
+        return { rows: [{ ok: 1 }], columns: ['ok'] }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'tx-id-invariant-test')
+    await backend.waitReady
+    ;(backend as any).inTransaction = true
+    ;(backend as any).txID = null
+
+    await expect(
+      backend.query(`INSERT INTO task_item (id, body) VALUES ('t1', 'hello')`)
+    ).rejects.toThrow('internal transaction state is missing a transaction id')
+    expect(
+      http.bodies.some((body) =>
+        body.statements?.some((statement: any) =>
+          statement.sql?.includes('INSERT INTO "_orez_tx_manifest"')
+        )
+      )
+    ).toBe(false)
+  })
+
   test('returns command completion for parser-skipped extended statements', async () => {
     const http = await startDoHttp(() => ({ rows: [], columns: [] }))
     const backend = new DoBackend(http.url, 'postgres', 'extended-noop-test')
