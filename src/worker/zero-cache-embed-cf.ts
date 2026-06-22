@@ -335,9 +335,23 @@ export async function startZeroCacheEmbedCF(
     ZERO_APP_ID: appId,
     ZERO_APP_PUBLICATIONS: publications,
     ZERO_ADMIN_PASSWORD: opts.env?.ZERO_ADMIN_PASSWORD || crypto.randomUUID(),
-    ZERO_LOG_LEVEL: opts.env?.ZERO_LOG_LEVEL || 'info',
     ZERO_NUM_SYNC_WORKERS: opts.env?.ZERO_NUM_SYNC_WORKERS || '1',
     ZERO_ENABLE_QUERY_PLANNER: 'false',
+    // one isolate, one sync worker — zero-cache's default pg pools (upstream 20,
+    // cvr 30, change 5) would let ~50 DoBackend protocol sessions accumulate
+    // inside the single 128MB DO isolate, each carrying its own rewrite cache +
+    // protocol/schema state. cap all three hard: with SINGLE_PROCESS + one sync
+    // worker a couple connections per db is plenty, and the freed heap is what
+    // keeps cold-boot view-syncer hydration from tipping the isolate over its
+    // memory limit. (these are the max=N pools; zero also opens fixed max=1/max=2
+    // pools per db for the replication stream + initial-sync that we can't cap.)
+    ZERO_UPSTREAM_MAX_CONNS: opts.env?.ZERO_UPSTREAM_MAX_CONNS || '2',
+    ZERO_CVR_MAX_CONNS: opts.env?.ZERO_CVR_MAX_CONNS || '2',
+    ZERO_CHANGE_MAX_CONNS: opts.env?.ZERO_CHANGE_MAX_CONNS || '2',
+    // 'info' dumps the full table schema as JSON on every replication-status
+    // event; during cold-boot hydration + the reconnect loop that string churn
+    // is pure heap pressure in the 128MB isolate. 'warn' keeps errors visible.
+    ZERO_LOG_LEVEL: opts.env?.ZERO_LOG_LEVEL || 'warn',
     ...opts.env,
     // shadow sync is an optional upstream canary that imports the initial-sync
     // copy path. keep it disabled in the CF embed to avoid bundling unused

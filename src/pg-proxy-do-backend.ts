@@ -153,7 +153,11 @@ interface TransactionMetadataSnapshot {
   triggerFunctions: Map<string, TriggerFunctionDefinition>
 }
 
-const MAX_REWRITE_CACHE_ENTRIES = 2048
+// per-DoBackend cache. with ~20 concurrent DoBackend sessions sharing one 128MB
+// DO isolate, 2048 entries each (each holding rewritten SQL + schema metadata)
+// is needless heap — the distinct-statement working set per session during sync
+// is small. 256 keeps the hot path cached while bounding aggregate footprint.
+const MAX_REWRITE_CACHE_ENTRIES = 256
 const METADATA_TABLE = '_orez_pg_metadata'
 // how long reloadPublicationsIfEmpty waits between re-reads while publications
 // stay empty — short enough that the first write after a concurrently-created
