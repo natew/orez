@@ -38,6 +38,7 @@ type TransportState = {
 }
 
 const COOKIE_WIDTH = 20
+const CONNECTED_QUERY_FLUSH_MS = 25
 
 export function installZeroHttpTransport(opts: {
   origin: string
@@ -123,6 +124,7 @@ class ZeroHttpSocket {
   private pushChain: Promise<void> = Promise.resolve()
   private nextLocalCookieID = 0
   private openTimer: ReturnType<typeof setTimeout> | undefined
+  private initialPullTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
     private readonly state: TransportState,
@@ -166,8 +168,7 @@ class ZeroHttpSocket {
     switch (message[0]) {
       case 'initConnection':
       case 'changeDesiredQueries':
-        this.queueDesiredQueries(message[1])
-        this.requestPullAfterCurrent()
+        this.receivedDesiredQueries(message[1])
         return
       case 'updateAuth':
         this.authToken = (message[1] as { auth?: string }).auth
@@ -192,6 +193,7 @@ class ZeroHttpSocket {
   close(code = 1000, reason = '') {
     if (this.readyState === this.CLOSED) return
     if (this.openTimer) clearTimeout(this.openTimer)
+    if (this.initialPullTimer) clearTimeout(this.initialPullTimer)
     this.readyState = this.CLOSED
     this.state.sockets.delete(this)
     this.emit('close', { code, reason, wasClean: code <= 1001 })
@@ -226,7 +228,13 @@ class ZeroHttpSocket {
     this.readyState = this.OPEN
     this.emit('open', {})
     this.emitMessage(['connected', { wsid: this.wsid, timestamp: Date.now() }])
-    setTimeout(() => this.run(this.pull()), 0)
+    // zero may diff desired queries asynchronously after the connected frame.
+    // give that upstream init/change message first chance to drive the pull so
+    // the first snapshot can carry gotQueriesPatch for newly materialized views.
+    this.initialPullTimer = setTimeout(() => {
+      this.initialPullTimer = undefined
+      this.run(this.pull())
+    }, CONNECTED_QUERY_FLUSH_MS)
   }
 
   private queueDesiredQueries(body: unknown) {
@@ -234,6 +242,15 @@ class ZeroHttpSocket {
       ?.desiredQueriesPatch
     if (!Array.isArray(desiredQueriesPatch)) return
     this.pendingGotQueriesPatch.push(...gotQueriesPatch(desiredQueriesPatch))
+  }
+
+  private receivedDesiredQueries(body: unknown) {
+    this.queueDesiredQueries(body)
+    if (this.initialPullTimer) {
+      clearTimeout(this.initialPullTimer)
+      this.initialPullTimer = undefined
+    }
+    this.requestPullAfterCurrent()
   }
 
   private async push(body: unknown) {

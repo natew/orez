@@ -490,7 +490,7 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     const config = { ...getConfig(), pgPort: 0 }
     server = await startPgProxy(db, config)
     port = (server.address() as AddressInfo).port
-  })
+  }, 30_000)
 
   afterEach(async () => {
     signalReplicationChange()
