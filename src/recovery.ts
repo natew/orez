@@ -64,6 +64,22 @@ export function hasZeroStateInconsistencySignature(details: string): boolean {
   if (details.includes('RowsVersionBehindError')) return true
   if (details.includes('max attempts exceeded waiting for CVR')) return true
   if (details.includes('replica db must be in wal2 mode')) return true
+  // zero-cache's ChangeProcessor only throws this when its replica writer is
+  // still inside one pgoutput transaction and then receives a second BEGIN.
+  // restarting into the same local replica/cvr/cdb state just replays the bad
+  // stream; reset the zero state as one consistency domain.
+  //
+  // `details` is the child's captured log tail, where zero-cache's logger has
+  // JSON.stringify'd the Error — so the inner `{"tag":"begin"}` arrives ESCAPED
+  // as `\"tag\":\"begin\"`. matching the unescaped token would silently miss in
+  // production (the crash log is escaped) while passing a unit test fed the
+  // unescaped form — so normalize backslashes before matching the begin token.
+  if (
+    details.includes('Already in a transaction') &&
+    details.replace(/\\/g, '').includes('"tag":"begin"')
+  ) {
+    return true
+  }
   if (
     details.includes('SqliteError: unable to open database file') ||
     details.includes('SQLITE_CANTOPEN')

@@ -63,6 +63,20 @@ describe('zero recovery signatures', () => {
     expect(
       hasZeroStateInconsistencySignature('SqliteError: unable to open database file')
     ).toBe(true)
+    expect(
+      hasZeroStateInconsistencySignature(
+        'Message Processing failed: Error: Already in a transaction {"tag":"begin","commitLsn":"001E44E7/FFBA2006","xid":1}'
+      )
+    ).toBe(true)
+    // the REAL captured form: orez's tail holds zero-cache's logger output,
+    // where the Error was JSON.stringify'd so the inner object is ESCAPED.
+    // this is the exact shape that previously slipped past detection and cost
+    // 3×60s of doomed restarts before the give-up reset finally fired.
+    expect(
+      hasZeroStateInconsistencySignature(
+        '[orez:zero] pid=94245,worker=write-worker Message Processing failed: {"name":"Error","errorMsg":"Already in a transaction {\\"tag\\":\\"begin\\",\\"commitLsn\\":\\"001E44E7/FFBA2006\\",\\"xid\\":1}"}'
+      )
+    ).toBe(true)
   })
 
   it('treats replica monitor missing metadata as warmup noise', () => {
@@ -78,6 +92,11 @@ describe('zero recovery signatures', () => {
     expect(
       hasZeroStateInconsistencySignature(
         'Unable to read watermark from upstream: transient timeout'
+      )
+    ).toBe(false)
+    expect(
+      hasZeroStateInconsistencySignature(
+        'SQLSTATE 25001: there is already a transaction in progress'
       )
     ).toBe(false)
   })
@@ -206,6 +225,11 @@ describe('zero recovery signatures', () => {
         classifyZeroCrashRecovery('max attempts exceeded waiting for CVR@a2 to catch up')
           .action
       ).toBe('full-reset')
+      expect(
+        classifyZeroCrashRecovery(
+          'Message Processing failed: Error: Already in a transaction {"tag":"begin","commitLsn":"001E44E7/FFBA2006","xid":1}'
+        )
+      ).toEqual({ action: 'full-reset', reason: 'state inconsistency' })
     })
   })
 
@@ -278,6 +302,12 @@ describe('zero recovery signatures', () => {
       expect(
         classifyZeroStartupRecovery(
           'RowsVersionBehindError: rowsVersion (a1) is behind CVR a2',
+          startupState()
+        ).action
+      ).toBe('recover-state')
+      expect(
+        classifyZeroStartupRecovery(
+          'Message Processing failed: Error: Already in a transaction {"tag":"begin","commitLsn":"001E44E7/FFBA2006","xid":1}',
           startupState()
         ).action
       ).toBe('recover-state')

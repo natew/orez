@@ -388,11 +388,11 @@ class ReplicationStream {
     }
   }
 
-  async startReplication(slot: string, pubs: string[]): Promise<void> {
+  async startReplication(slot: string, pubs: string[], startLsn = '0/0'): Promise<void> {
     this.streaming = true
     this.socket.write(
       query(
-        `START_REPLICATION SLOT "${slot}" LOGICAL 0/0 (proto_version '1', publication_names '${pubs.join(',')}')`
+        `START_REPLICATION SLOT "${slot}" LOGICAL ${startLsn} (proto_version '1', publication_names '${pubs.join(',')}')`
       )
     )
     await new Promise((r) => setTimeout(r, 150))
@@ -753,6 +753,85 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     expect(ids).toContain('t3')
 
     s.close()
+  })
+
+  // regression: a rehome / resubscribe that aborts the streaming handler mid-
+  // transaction must not leave the consumer wedged. zero-cache keeps ONE change-
+  // processor across an orez handler swap, so if handler A streams a `begin`
+  // whose `commit` never lands and handler B (txCounter reset to 1) then streams
+  // a fresh `begin`, the processor throws "Already in a transaction" and crashes
+  // — deterministically replaying the same commitLsn on every restart until a
+  // full state reset. the invariant: across the COMBINED stream the consumer
+  // sees (handler A then handler B), begins and commits stay balanced and a
+  // begin never arrives while a transaction is open.
+  it('reconnect after mid-transaction abort does not strand an open transaction', async () => {
+    // handler A: stream one committed batch, capture the consumer's resume LSN.
+    const a = await stream()
+    await db.exec(`INSERT INTO public.foo (id) VALUES ('r1')`)
+    let resumeLsn = '0/0'
+    const received: ZcMessage[] = []
+    while (true) {
+      const m = await nextData(a.messages)
+      received.push(m)
+      if (m.tag === 'commit') {
+        resumeLsn = (m as ZcCommit).commitEndLsn
+        break
+      }
+    }
+
+    // queue more changes so handler A has work mid-flight, then — WITHOUT
+    // closing A — connect handler B and START_REPLICATION. B's start is what
+    // aborts A (abortPreviousReplication), so the two handlers briefly coexist
+    // and share orez's module-level LSN/watermark state: the real rehome race.
+    await db.exec(`INSERT INTO public.foo (id) VALUES ('r2')`)
+    await db.exec(`INSERT INTO public.foo (id) VALUES ('r3')`)
+
+    const b = new ReplicationStream(port)
+    await b.connect()
+    await b.createSlot('compat_slot_2')
+    // no delay: race B's START_REPLICATION against A's in-flight stream.
+    await b.startReplication('compat_slot_2', ['zero_pub'], resumeLsn)
+
+    // keep writing while the swap happens to widen the race window.
+    await db.exec(`INSERT INTO public.foo (id) VALUES ('r4')`)
+
+    // drain conn A (everything it delivered before its abort) THEN conn B —
+    // the order the single persistent consumer would have processed them.
+    for (;;) {
+      const m = await a.messages.dequeue(200).catch(() => null)
+      if (!m) break
+      if (m.tag !== 'keepalive') received.push(m)
+    }
+    a.close()
+    for (;;) {
+      const m = await b.messages.dequeue(400).catch(() => null)
+      if (!m) break
+      if (m.tag !== 'keepalive') received.push(m)
+    }
+    b.close()
+
+    // sanity: the poison window was actually exercised (more than just r1's tx).
+    const begins = received.filter((m) => m.tag === 'begin')
+    expect(begins.length, 'expected more than one transaction in the run').toBeGreaterThan(1)
+
+    // replay the combined stream through zero-cache's change-processor rule:
+    // a begin while a transaction is open is exactly the crash we are guarding.
+    let open = false
+    let nBegin = 0
+    let nCommit = 0
+    for (const m of received) {
+      if (m.tag === 'begin') {
+        expect(open, 'begin arrived while a transaction was already open').toBe(false)
+        open = true
+        nBegin++
+      } else if (m.tag === 'commit') {
+        expect(open, 'commit arrived with no open transaction').toBe(true)
+        open = false
+        nCommit++
+      }
+    }
+    expect(nBegin).toBe(nCommit)
+    expect(open, 'stream ended with a transaction still open').toBe(false)
   })
 
   it('commit LSNs increase monotonically', async () => {
