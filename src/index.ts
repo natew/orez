@@ -62,6 +62,7 @@ import {
   type SqliteMode,
   type SqliteModeConfig,
 } from './sqlite-mode/index.js'
+import { enableZeroReplicaCheckpoint } from './zero-checkpoint-patch.js'
 import { disableZeroLitestreamRestore } from './zero-litestream-patch.js'
 
 import type { ZeroLiteConfig } from './config.js'
@@ -1183,6 +1184,13 @@ async function startZeroCache(
   // orez owns the replica on disk and has no litestream backup; stop zero 1.5's
   // change-streamer from erroring + resyncing on every restart (see the patch).
   disableZeroLitestreamRestore()
+
+  // litestream also checkpointed the replica WAL in stock zero-cache; with it gone,
+  // nothing reclaims the wal2 (PASSIVE autocheckpoint can't pass the view-syncer's
+  // held readers), so it grows unbounded and reads slow down. Inject a periodic
+  // TRUNCATE checkpoint into the write worker's writable replica connection. This is
+  // the NATIVE path; the sqlite shim (shim-template.ts) covers wasm mode.
+  enableZeroReplicaCheckpoint()
 
   if (sqliteMode === 'native') {
     log.debug.orez('wasm sqlite disabled, using native @rocicorp/zero-sqlite3')
