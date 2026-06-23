@@ -33,6 +33,29 @@ function Database() {
     db.pragma('temp_store = memory');
     db.pragma('busy_timeout = ${busy_timeout}');
   } catch(e) {}
+  // orez owns the replica on disk and disables litestream — which in stock
+  // zero-cache is what reclaims the replica WAL. SQLite's PASSIVE autocheckpoint
+  // can't advance past the view-syncer's held read snapshots, so the wal2 file
+  // grows without bound and every read scans it (slow queries). A periodic
+  // TRUNCATE checkpoint on the writable, file-backed replica connection bounds it
+  // (validated: bounded vs unbounded growth under cycling readers + live writes).
+  // Only the writer connection runs it; readonly connections can't checkpoint and
+  // are skipped to avoid useless timers on the view-syncer's short-lived readers.
+  try {
+    var _orezFile = (arguments.length && typeof arguments[0] === 'string') ? arguments[0] : '';
+    var _orezOpts = (arguments.length > 1 && arguments[1] && typeof arguments[1] === 'object') ? arguments[1] : null;
+    var _orezReadonly = !!(_orezOpts && _orezOpts.readonly);
+    var _orezEnv = (typeof process !== 'undefined' && process.env) ? process.env.OREZ_REPLICA_CHECKPOINT_MS : undefined;
+    var _orezMs = parseInt(_orezEnv || '', 10);
+    if (!(_orezMs > 0)) _orezMs = 10000;
+    if (_orezFile && _orezFile.charAt(0) !== ':' && !_orezReadonly && _orezEnv !== '0') {
+      var _orezTimer = setInterval(function() {
+        try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (e) {}
+      }, _orezMs);
+      if (_orezTimer && _orezTimer.unref) _orezTimer.unref();
+      db.__orezCheckpointTimer = _orezTimer;
+    }
+  } catch (e) {}
   return db;
 }
 
@@ -63,6 +86,7 @@ Database.prototype.pragma = function(str, opts) {
 // wrap close to swallow wasm errors during shutdown
 var origClose = OrigDatabase.prototype.close;
 Database.prototype.close = function() {
+  try { if (this.__orezCheckpointTimer) { clearInterval(this.__orezCheckpointTimer); this.__orezCheckpointTimer = null; } } catch(e) {}
   try { return origClose.call(this); }
   catch(e) { console.error('[orez-shim] close error (swallowed):', e?.message || e); }
 };
