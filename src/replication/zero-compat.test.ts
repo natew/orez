@@ -812,7 +812,10 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
 
     // sanity: the poison window was actually exercised (more than just r1's tx).
     const begins = received.filter((m) => m.tag === 'begin')
-    expect(begins.length, 'expected more than one transaction in the run').toBeGreaterThan(1)
+    expect(
+      begins.length,
+      'expected more than one transaction in the run'
+    ).toBeGreaterThan(1)
 
     // replay the combined stream through zero-cache's change-processor rule:
     // a begin while a transaction is open is exactly the crash we are guarding.
