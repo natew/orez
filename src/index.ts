@@ -37,6 +37,7 @@ import {
   createPGliteWorker,
   runMigrations,
   startPeriodicCheckpoint,
+  startPeriodicVacuum,
 } from './pglite-manager.js'
 import { findPort } from './port.js'
 import { orezTitle } from './process-title.js'
@@ -306,7 +307,10 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // worker threads for non-blocking WASM execution.
 
   // ── DO backend path (replaces PGlite) ──────────────────────────────
-  let instances: any, db: any, stopCheckpoint: any
+  let instances: any,
+    db: any,
+    stopCheckpoint: any,
+    stopVacuum: any = () => {}
   let migrationsApplied = 0
   let isDoBackend = false
 
@@ -345,6 +349,13 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       config.checkpointIntervalMs > 0
         ? startPeriodicCheckpoint(instances, config.checkpointIntervalMs)
         : () => {}
+
+    // periodic VACUUM of the change-tracking churn tables — PGlite has no
+    // effective autovacuum, so without this the change buffer bloats until the
+    // change-streamer scan times out and Zero stops sending live updates. Interval
+    // via OREZ_VACUUM_MS (default 10min, 0 disables).
+    const vacuumMs = Number(process.env.OREZ_VACUUM_MS ?? 10 * 60 * 1000)
+    stopVacuum = vacuumMs > 0 ? startPeriodicVacuum(instances, vacuumMs) : () => {}
 
     // config-based publications
     if (config.zeroPublications && !process.env.ZERO_APP_PUBLICATIONS) {
@@ -960,6 +971,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     log.debug.orez('shutting down')
     shuttingDown = true
     stopCheckpoint()
+    stopVacuum()
     httpProxyServer?.close()
     await killZeroCache()
     pgServer.close()

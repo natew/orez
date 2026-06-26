@@ -555,3 +555,54 @@ export function startPeriodicCheckpoint(
   checkpoint()
   return () => clearInterval(timer)
 }
+
+/**
+ * orez's own change-tracking tables (`_orez._zero_changes` and the streamed-batch
+ * mapping) are insert-then-purge churn: every write appends a change row, and
+ * `confirmStreamedBatches` deletes them once the consumer durably commits. PGlite
+ * runs with no effective autovacuum, so those deletes leave dead tuples that
+ * accumulate without bound — `_orez._zero_changes` was measured at 86MB for a few
+ * thousand live rows. Once the table is bloated, zero-cache's change-streamer scan
+ * blows past its 25s statement timeout and crash-loops into a full state reset, so
+ * Zero clients get the initial snapshot but no live updates (the classic "data
+ * loads once and never refreshes again" symptom).
+ *
+ * VACUUM the churn tables periodically to reclaim the dead tuples. We use
+ * `VACUUM FULL`, not plain VACUUM: PGlite's lazy (non-FULL) VACUUM wedges its
+ * single WASM worker thread indefinitely (measured: plain vacuum hangs >2min; the
+ * FULL rewrite of the same small table finishes <150ms). VACUUM FULL takes a brief
+ * ACCESS EXCLUSIVE lock and rewrites the file, so a `lock_timeout` caps how long it
+ * waits if the change-streamer momentarily holds the table — the vacuum fails this
+ * cycle and retries next, rather than wait-blocking the live streamer. Keeping the
+ * tables small (purge-on-stream already does) keeps the rewrite sub-150ms.
+ *
+ * returns a cleanup function to stop the timer.
+ */
+export function startPeriodicVacuum(
+  instances: PGliteInstances,
+  intervalMs = 10 * 60 * 1000
+): () => void {
+  const churnTables = ['_orez._zero_changes', '_orez._zero_streamed_batches']
+  const vacuum = async () => {
+    const db = instances.postgres
+    if (!db) return
+    try {
+      await db.exec(`SET lock_timeout = '5s'`)
+      for (const table of churnTables) {
+        try {
+          await db.exec(`VACUUM (FULL, ANALYZE) ${table}`)
+        } catch {}
+      }
+    } catch {
+    } finally {
+      try {
+        await db.exec(`SET lock_timeout = 0`)
+      } catch {}
+    }
+  }
+  const timer = setInterval(vacuum, intervalMs)
+  if (timer.unref) timer.unref()
+  // run one immediately on startup to reclaim bloat left by previous runs
+  vacuum()
+  return () => clearInterval(timer)
+}
