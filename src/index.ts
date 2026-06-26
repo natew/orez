@@ -40,6 +40,7 @@ import {
 } from './pglite-manager.js'
 import { findPort } from './port.js'
 import { orezTitle } from './process-title.js'
+import { ensurePublicationHasTables, syncManagedPublications } from './publications.js'
 import {
   classifyZeroCrashRecovery,
   classifyZeroStartupRecovery,
@@ -177,82 +178,6 @@ function getManagedPublicationConfig(): { names: string[]; managedByOrez: boolea
   const fallback = `orez_${appId}_public`
   process.env.ZERO_APP_PUBLICATIONS = fallback
   return { names: [fallback], managedByOrez: true }
-}
-
-async function syncManagedPublications(
-  db: PGlite,
-  names: string[],
-  managedByOrez: boolean
-): Promise<void> {
-  if (!managedByOrez || names.length === 0) return
-
-  const tables = await db.query<{ tablename: string }>(
-    `SELECT tablename
-     FROM pg_tables
-     WHERE schemaname = 'public'
-       AND tablename NOT LIKE '_zero_%'`
-  )
-  const publicTables = tables.rows
-    .map((r) => r.tablename)
-    .filter((t) => !t.startsWith('_'))
-
-  for (const pub of names) {
-    const quotedPub = '"' + pub.replace(/"/g, '""') + '"'
-    await db.exec(`CREATE PUBLICATION ${quotedPub}`).catch(() => {})
-
-    if (publicTables.length === 0) continue
-    const inPub = await db.query<{ tablename: string }>(
-      `SELECT tablename
-       FROM pg_publication_tables
-       WHERE pubname = $1
-         AND schemaname = 'public'`,
-      [pub]
-    )
-    const inPubSet = new Set(inPub.rows.map((r) => r.tablename))
-    const toAdd = publicTables.filter((t) => !inPubSet.has(t))
-    if (toAdd.length === 0) continue
-    const tableList = toAdd.map((t) => `"public"."${t.replace(/"/g, '""')}"`).join(', ')
-    await db.exec(`ALTER PUBLICATION ${quotedPub} ADD TABLE ${tableList}`)
-    log.debug.orez(`added ${toAdd.length} table(s) to publication "${pub}"`)
-  }
-}
-
-/**
- * ensure publications have table membership after on-db-ready.
- * handles the case where orez pre-created an empty publication and the app's
- * migration skipped adding tables because the publication already existed.
- */
-async function ensurePublicationHasTables(db: PGlite, names: string[]): Promise<void> {
-  for (const pub of names) {
-    const inPub = await db.query<{ count: string }>(
-      `SELECT count(*)::text as count FROM pg_publication_tables
-       WHERE pubname = $1 AND schemaname = 'public'`,
-      [pub]
-    )
-    if (Number(inPub.rows[0]?.count) > 0) continue
-
-    // publication exists but has no tables — add all public tables
-    const pubExists = await db.query<{ count: string }>(
-      `SELECT count(*)::text as count FROM pg_publication WHERE pubname = $1`,
-      [pub]
-    )
-    if (Number(pubExists.rows[0]?.count) === 0) continue
-
-    const tables = await db.query<{ tablename: string }>(
-      `SELECT tablename FROM pg_tables
-       WHERE schemaname = 'public'
-         AND tablename NOT LIKE '_zero_%'
-         AND tablename NOT LIKE '\\_%'`
-    )
-    if (tables.rows.length === 0) continue
-
-    const tableList = tables.rows
-      .map((t) => `"public"."${t.tablename.replace(/"/g, '""')}"`)
-      .join(', ')
-    const quotedPub = '"' + pub.replace(/"/g, '""') + '"'
-    await db.exec(`ALTER PUBLICATION ${quotedPub} ADD TABLE ${tableList}`)
-    log.orez(`publication "${pub}" was empty, added ${tables.rows.length} table(s)`)
-  }
 }
 
 // resolvePackage moved to sqlite-mode/resolve-mode.ts
