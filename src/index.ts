@@ -65,6 +65,7 @@ import {
   type SqliteModeConfig,
 } from './sqlite-mode/index.js'
 import { enableZeroReplicaCheckpoint } from './zero-checkpoint-patch.js'
+import { probeZeroCacheHttp } from './zero-health.js'
 import { disableZeroLitestreamRestore } from './zero-litestream-patch.js'
 
 import type { ZeroLiteConfig } from './config.js'
@@ -665,6 +666,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   let shuttingDown = false
   let resetInProgress = false
   let liveLogRecoveryQueued = false
+  let zeroHttpHealthRecovering = false
   const resetFile = resolve(config.dataDir, 'orez.resetting')
   const resetZeroState = async (mode: 'cache-only' | 'full'): Promise<void> => {
     if (resetInProgress) {
@@ -901,7 +903,14 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       // call returns, i.e. before this late event fires, so it can't be relied
       // on alone.
       if (watched !== zeroCacheProcess) return
-      if (shuttingDown || resetInProgress || zeroStopExpected || code === null) return
+      if (
+        shuttingDown ||
+        resetInProgress ||
+        zeroStopExpected ||
+        zeroHttpHealthRecovering ||
+        code === null
+      )
+        return
       const tail = (zeroCacheProcess as ZeroChildProcess)?.__orezTail
       const details = tail?.length ? tail.join('\n') : ''
 
@@ -967,9 +976,116 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   }
   installCrashWatcher()
 
+  const ZERO_HTTP_HEALTH_INTERVAL_MS = 5000
+  const ZERO_HTTP_HEALTH_TIMEOUT_MS = 1000
+  const ZERO_HTTP_HEALTH_FAILURES_BEFORE_RECOVERY = 3
+  const ZERO_HTTP_HEALTH_WINDOW_MS = 5 * 60_000
+  const ZERO_HTTP_HEALTH_RECOVERY_BUDGET = 5
+  let zeroHttpHealthFailures = 0
+  let zeroHttpHealthProbeInFlight = false
+  let zeroHttpHealthRecoveryTimes: number[] = []
+  let zeroHttpHealthTimer: ReturnType<typeof setInterval> | undefined
+
+  const runZeroHttpHealthProbe = async () => {
+    if (
+      config.skipZeroCache ||
+      zeroHttpHealthProbeInFlight ||
+      zeroHttpHealthRecovering ||
+      shuttingDown ||
+      resetInProgress ||
+      zeroStopExpected ||
+      liveLogRecoveryQueued
+    )
+      return
+
+    const watched = zeroCacheProcess
+    if (!isChildProcessRunning(watched)) {
+      zeroHttpHealthFailures = 0
+      return
+    }
+
+    zeroHttpHealthProbeInFlight = true
+    try {
+      const result = await probeZeroCacheHttp(
+        zeroInternalPort,
+        ZERO_HTTP_HEALTH_TIMEOUT_MS
+      )
+      if (watched !== zeroCacheProcess) return
+      if (shuttingDown || resetInProgress || zeroStopExpected || liveLogRecoveryQueued)
+        return
+
+      if (result.ok) {
+        zeroHttpHealthFailures = 0
+        return
+      }
+
+      zeroHttpHealthFailures++
+      log.debug.orez(
+        `zero-cache HTTP health probe failed ` +
+          `(${zeroHttpHealthFailures}/${ZERO_HTTP_HEALTH_FAILURES_BEFORE_RECOVERY}): ` +
+          result.reason
+      )
+      if (zeroHttpHealthFailures < ZERO_HTTP_HEALTH_FAILURES_BEFORE_RECOVERY) {
+        return
+      }
+      zeroHttpHealthFailures = 0
+
+      const now = Date.now()
+      zeroHttpHealthRecoveryTimes = zeroHttpHealthRecoveryTimes.filter(
+        (t) => now - t < ZERO_HTTP_HEALTH_WINDOW_MS
+      )
+      zeroHttpHealthRecoveryTimes.push(now)
+      if (zeroHttpHealthRecoveryTimes.length > ZERO_HTTP_HEALTH_RECOVERY_BUDGET) {
+        log.orez(
+          'zero-cache HTTP liveness kept failing after repeated recoveries — giving up'
+        )
+        return
+      }
+
+      zeroHttpHealthRecovering = true
+      const attempt = zeroHttpHealthRecoveryTimes.length
+      log.orez(
+        `zero-cache HTTP liveness failed (${result.reason}) — restarting zero-cache ` +
+          `(${attempt}/${ZERO_HTTP_HEALTH_RECOVERY_BUDGET}, CVR preserved)`
+      )
+      try {
+        await restartZeroCache()
+        log.orez('zero-cache HTTP liveness recovery successful')
+        installCrashWatcher()
+      } catch (err: any) {
+        log.orez(
+          `zero-cache HTTP liveness restart failed (${err?.message || err}) — falling back to full reset`
+        )
+        try {
+          await resetZeroState('full')
+          log.orez('zero-cache HTTP liveness full-reset recovery successful')
+          installCrashWatcher()
+        } catch (resetErr: any) {
+          log.orez(
+            `zero-cache HTTP liveness full-reset recovery failed: ${
+              resetErr?.message || resetErr
+            }`
+          )
+        }
+      } finally {
+        zeroHttpHealthRecovering = false
+      }
+    } finally {
+      zeroHttpHealthProbeInFlight = false
+    }
+  }
+
+  if (!config.skipZeroCache) {
+    zeroHttpHealthTimer = setInterval(() => {
+      void runZeroHttpHealthProbe()
+    }, ZERO_HTTP_HEALTH_INTERVAL_MS)
+    zeroHttpHealthTimer.unref?.()
+  }
+
   const stop = async () => {
     log.debug.orez('shutting down')
     shuttingDown = true
+    if (zeroHttpHealthTimer) clearInterval(zeroHttpHealthTimer)
     stopCheckpoint()
     stopVacuum()
     httpProxyServer?.close()
@@ -1322,7 +1438,6 @@ async function waitForZeroCache(
   sqliteMode: SqliteMode = resolveSqliteMode(config.disableWasmSqlite)
 ): Promise<void> {
   const start = Date.now()
-  const url = `http://127.0.0.1:${config.zeroPort}/`
 
   const checkProcessAlive = () => {
     if (zeroProcess && zeroProcess.exitCode !== null) {
@@ -1337,16 +1452,8 @@ async function waitForZeroCache(
   // phase 1: wait for HTTP health check
   while (Date.now() - start < timeoutMs) {
     checkProcessAlive()
-    try {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 1000)
-      const res = await fetch(url, { signal: controller.signal })
-      clearTimeout(timer)
-      // zero may return 404 on "/" while still being healthy.
-      if (res.ok || res.status === 404) break
-    } catch {
-      // not ready yet
-    }
+    const result = await probeZeroCacheHttp(config.zeroPort, 1000)
+    if (result.ok) break
     await new Promise((r) => setTimeout(r, 500))
   }
 
