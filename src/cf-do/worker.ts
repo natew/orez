@@ -616,7 +616,7 @@ export class ZeroDO extends DurableObject {
   ): { rows: Record<string, unknown>[]; columns: string[]; affectedRows?: number } {
     const cursor = this.sql.exec(sql, ...params)
     const columns = Array.isArray(cursor.columnNames) ? cursor.columnNames : []
-    const rows = this.cursorRows(cursor)
+    const rows = this.cursorRows(cursor, columns)
     if (!track) return { rows, columns }
 
     for (const row of rows) {
@@ -647,10 +647,19 @@ export class ZeroDO extends DurableObject {
     }
   }
 
-  private cursorRows(cursor: any): Record<string, unknown>[] {
+  private cursorRows(cursor: any, columns?: string[]): Record<string, unknown>[] {
+    const cols = Array.isArray(columns) && columns.length > 0 ? columns : null
     return cursor.toArray().map((row: any) => {
       const obj: Record<string, unknown> = {}
-      for (const k of Object.keys(row)) obj[k] = row[k]
+      if (cols) {
+        // include EVERY selected column, even SQL NULLs the DO cursor omits from
+        // the row object — pg/drizzle consumers index results positionally, so a
+        // dropped null column shifts every later value (e.g. trailing nullable
+        // timestamps read back undefined and crash the type decoder).
+        for (const k of cols) obj[k] = k in row ? row[k] : null
+      } else {
+        for (const k of Object.keys(row)) obj[k] = row[k]
+      }
       return obj
     })
   }

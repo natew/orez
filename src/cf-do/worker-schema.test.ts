@@ -5,7 +5,10 @@ vi.mock('cloudflare:workers', () => ({
 }))
 
 class FakeResult {
-  constructor(private readonly rows: Array<Record<string, unknown>> = []) {}
+  constructor(
+    private readonly rows: Array<Record<string, unknown>> = [],
+    readonly columnNames: string[] = []
+  ) {}
 
   one() {
     return this.rows[0]
@@ -180,6 +183,24 @@ class FakeChangeSql {
 }
 
 describe('ZeroDO schema table maintenance', () => {
+  it('preserves selected null columns omitted by SqlStorage rows', async () => {
+    const { ZeroDO } = await import('./worker.js')
+    const zero = Object.create(ZeroDO.prototype) as any
+    const cursor = new FakeResult(
+      [{ id: 'msg-1', body: 'hello' }],
+      ['id', 'deletedAt', 'body', 'editedAt']
+    )
+
+    expect(zero.cursorRows(cursor, cursor.columnNames)).toEqual([
+      {
+        id: 'msg-1',
+        deletedAt: null,
+        body: 'hello',
+        editedAt: null,
+      },
+    ])
+  })
+
   it('adds newly declared columns to existing tables', async () => {
     const { ZeroDO } = await import('./worker.js')
     const sql = new FakeSql()
