@@ -95,6 +95,41 @@ export function hasRecoverableZeroStateSignature(details: string): boolean {
 }
 
 /**
+ * Choose the reset MODE for a recoverable zero-state inconsistency from the crash
+ * / log tail.
+ *
+ *  - 'full' deletes the CVR DB + change DB + replica together. Required when the
+ *    change DB itself is corrupt (CDC duplicate-key), because the replica is
+ *    rebuilt FROM the change DB — keeping a corrupt CDB would just replay the bad
+ *    stream. But it also wipes the CVR, so the recreated CVR starts at the empty
+ *    "00" version and EVERY connected client is evicted with ClientNotFound (its
+ *    persisted baseCookie is now ahead of the CVR). It is the heavy hammer.
+ *  - 'cache-only' deletes ONLY the replica and preserves the CVR/CDB. This fixes
+ *    the common replica-vs-CVR desync — RowsVersionBehindError, "max attempts
+ *    waiting for CVR", a bad replica change stream, wal2-mode/cantopen — because
+ *    the replica re-syncs from upstream to a version >= the preserved CVR. The
+ *    CVR survives, so clients reconnect against their existing baseCookie with no
+ *    ClientNotFound, and the rebuild also reclaims a bloated replica wal2.
+ *
+ * The desync class is by far the most common cause of resets in practice (a
+ * transient change-streamer timeout crashes zero-cache, and on restart the
+ * replica comes back behind the preserved CVR). Sending those through 'cache-only'
+ * instead of 'full' is what stops the mass client eviction.
+ *
+ * `cacheResetExhausted` escalates a replica-only inconsistency to a full reset
+ * when a cache-only reset was already tried for it recently and didn't stick — so
+ * we never loop on cache-only, but we also never reach for the client-evicting
+ * full reset until the gentle path has had its one shot.
+ */
+export function zeroInconsistencyResetMode(
+  details: string,
+  opts: { cacheResetExhausted: boolean }
+): 'cache-only' | 'full' {
+  if (hasCdcCorruptionSignature(details)) return 'full'
+  return opts.cacheResetExhausted ? 'full' : 'cache-only'
+}
+
+/**
  * detect a transient zero-cache crash that does NOT imply the local zero state
  * (replica / CVR DB / change DB) is inconsistent or corrupt. these are runtime
  * faults — a query timeout, an unhandled rejection in a worker, an OOM kill —

@@ -49,6 +49,7 @@ import {
   hasZeroReplicaMonitorWarmupSignature,
   getZeroReplicaStartupResetReason,
   recoverZeroState,
+  zeroInconsistencyResetMode,
   type ZeroStartupRetryState,
 } from './recovery.js'
 import { installChangeTracking } from './replication/change-tracker.js'
@@ -667,6 +668,11 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   let resetInProgress = false
   let liveLogRecoveryQueued = false
   let zeroHttpHealthRecovering = false
+  // when we last took the gentle (CVR-preserving) 'cache-only' path for a
+  // recoverable inconsistency. a repeat within the window means cache-only didn't
+  // resolve it, so escalate to a full reset (see chooseInconsistencyResetMode).
+  let lastCacheOnlyResetAt = 0
+  const ZERO_INCONSISTENCY_ESCALATE_WINDOW_MS = 5 * 60_000
   const resetFile = resolve(config.dataDir, 'orez.resetting')
   const resetZeroState = async (mode: 'cache-only' | 'full'): Promise<void> => {
     if (resetInProgress) {
@@ -838,14 +844,29 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     }
   }
 
+  // pick the reset mode for a recoverable inconsistency and remember when we last
+  // used the gentle (CVR-preserving) cache-only path, so a repeat within the
+  // window escalates to a full reset instead of looping on cache-only.
+  const chooseInconsistencyResetMode = (details: string): 'cache-only' | 'full' => {
+    const cacheResetExhausted =
+      Date.now() - lastCacheOnlyResetAt < ZERO_INCONSISTENCY_ESCALATE_WINDOW_MS
+    const mode = zeroInconsistencyResetMode(details, { cacheResetExhausted })
+    if (mode === 'cache-only') lastCacheOnlyResetAt = Date.now()
+    return mode
+  }
+
   requestZeroStateRecovery = (details, source) => {
     if (shuttingDown || resetInProgress || liveLogRecoveryQueued) return
     liveLogRecoveryQueued = true
+    const mode = chooseInconsistencyResetMode(details)
     log.orez(
-      `zero-cache state inconsistency detected from ${source}, resetting zero state`
+      `zero-cache state inconsistency detected from ${source}, ` +
+        (mode === 'cache-only'
+          ? 'rebuilding replica (CVR preserved)'
+          : 'resetting zero state (full)')
     )
     queueMicrotask(() => {
-      resetZeroState('full')
+      resetZeroState(mode)
         .then(() => {
           log.orez('zero-cache live state recovery successful')
         })
@@ -931,17 +952,25 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       const { action, reason } = classifyZeroCrashRecovery(details)
 
       if (action === 'full-reset') {
+        // a replica-vs-CVR desync (the common case) rebuilds only the replica and
+        // keeps the CVR, so connected clients are not evicted; only true CDC
+        // corruption — or a desync that a prior cache-only didn't fix — escalates
+        // to the client-evicting full reset. See zeroInconsistencyResetMode.
+        const mode = chooseInconsistencyResetMode(details)
         log.orez(
-          `zero-cache ${reason} (code ${code}) — resetting zero state ` +
-            `(${zeroCrashTimes.length}/${ZERO_CRASH_RESET_BUDGET})`
+          `zero-cache ${reason} (code ${code}) — ` +
+            (mode === 'cache-only'
+              ? 'rebuilding replica (CVR preserved)'
+              : 'resetting zero state (full)') +
+            ` (${zeroCrashTimes.length}/${ZERO_CRASH_RESET_BUDGET})`
         )
-        resetZeroState('full')
+        resetZeroState(mode)
           .then(() => {
-            log.orez('zero-cache full-reset recovery successful')
+            log.orez(`zero-cache ${mode} recovery successful`)
             installCrashWatcher()
           })
           .catch((err) => {
-            log.orez(`zero-cache full-reset recovery failed: ${err?.message || err}`)
+            log.orez(`zero-cache ${mode} recovery failed: ${err?.message || err}`)
           })
         return
       }
@@ -1264,6 +1293,14 @@ async function startZeroCache(
     NODE_ENV: 'development',
     ZERO_LOG_LEVEL: zeroLogLevel,
     ZERO_NUM_SYNC_WORKERS: '1',
+    // raise the change-streamer's change-log statement timeout well above its 20s
+    // default (zero-config change.statementTimeoutMs). orez runs on single-threaded
+    // WASM PGlite: under write load a change-log query can momentarily exceed 20s,
+    // which aborts the change-streamer (exit 13) and cascades — restart → the
+    // replica returns behind the preserved CVR (RowsVersionBehindError) → reset.
+    // Letting the slow query finish instead of crashing avoids the whole cascade.
+    // User-overridable via the real env var below.
+    ZERO_CHANGE_STATEMENT_TIMEOUT_MS: '90000',
     // disable query planner — it relies on scanStatus which causes infinite
     // loops with wasm sqlite and has caused freezes with native too.
     // planner is an optimization, not required for correctness.

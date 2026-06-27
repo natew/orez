@@ -13,6 +13,7 @@ import {
   hasTransientCrashSignature,
   hasZeroReplicaMonitorWarmupSignature,
   hasZeroStateInconsistencySignature,
+  zeroInconsistencyResetMode,
   type ZeroStartupRetryState,
 } from './recovery.js'
 
@@ -376,5 +377,41 @@ describe('zero recovery signatures', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  describe('zeroInconsistencyResetMode (cache-only vs full)', () => {
+    const rowsBehind = 'RowsVersionBehindError: rowsVersion (a1) is behind CVR a2'
+    const cvrCatchup =
+      'ProtocolError: max attempts exceeded waiting for CVR@a2 to catch up from a1'
+    const cdcCorrupt =
+      'duplicate key value violates unique constraint "changeLog_pkey"'
+
+    it('rebuilds only the replica (cache-only) for a replica-vs-CVR desync', () => {
+      // the common case: gentle path first so connected clients are NOT evicted.
+      expect(
+        zeroInconsistencyResetMode(rowsBehind, { cacheResetExhausted: false })
+      ).toBe('cache-only')
+      expect(
+        zeroInconsistencyResetMode(cvrCatchup, { cacheResetExhausted: false })
+      ).toBe('cache-only')
+    })
+
+    it('escalates a desync to full once a cache-only reset has been tried', () => {
+      // never loop on cache-only: a repeat within the window takes the heavy hammer.
+      expect(
+        zeroInconsistencyResetMode(rowsBehind, { cacheResetExhausted: true })
+      ).toBe('full')
+    })
+
+    it('always full-resets CDC corruption — the change DB itself is bad', () => {
+      // the replica is rebuilt FROM the change DB, so a corrupt CDB needs the full
+      // reset regardless of how many cache-only attempts came before.
+      expect(
+        zeroInconsistencyResetMode(cdcCorrupt, { cacheResetExhausted: false })
+      ).toBe('full')
+      expect(
+        zeroInconsistencyResetMode(cdcCorrupt, { cacheResetExhausted: true })
+      ).toBe('full')
+    })
   })
 })
