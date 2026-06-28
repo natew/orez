@@ -47,7 +47,7 @@ import {
   startPeriodicVacuum,
   vacuumPGliteChurnTables,
 } from './pglite-manager.js'
-import { findPort } from './port.js'
+import { findPort, findPortBlock } from './port.js'
 import { orezTitle } from './process-title.js'
 import { ensurePublicationHasTables, syncManagedPublications } from './publications.js'
 import {
@@ -224,7 +224,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const pgPort = await findPort(config.pgPort)
   const zeroPort = config.skipZeroCache
     ? config.zeroPort
-    : await findPort(config.zeroPort)
+    : await findPortBlock(config.zeroPort, 2, { host: '::' })
   const adminPort = config.adminPort > 0 ? await findPort(config.adminPort) : 0
   if (pgPort !== config.pgPort)
     log.debug.orez(`port ${config.pgPort} in use, using ${pgPort}`)
