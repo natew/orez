@@ -39,6 +39,8 @@ import type { PGlite } from '@electric-sql/pglite'
 // types pglite can't replicate — excluded from change tracking columns
 const UNSUPPORTED_TYPES = new Set(['tsvector', 'tsquery', 'USER-DEFINED'])
 
+export const REPLICATION_BATCH_SIZE = 1000
+
 // pg data_type string → wire protocol oid mapping
 const PG_DATA_TYPE_OIDS: Record<string, number> = {
   boolean: 16,
@@ -753,7 +755,6 @@ export async function handleStartReplication(
   // event-driven replication: proxy signals changes directly via signalReplicationChange(),
   // pg_notify as secondary signal, polling as final fallback.
   const pollIntervalIdle = 5000
-  const batchSize = 50000
   const shardRescanIntervalMs = 10_000
   let running = true
   let tryAcquireFailures = 0
@@ -906,7 +907,7 @@ export async function handleStartReplication(
         const queryStart = performance.now()
         try {
           try {
-            changes = await getChangesSince(db, lastWatermark, batchSize)
+            changes = await getChangesSince(db, lastWatermark, REPLICATION_BATCH_SIZE)
           } catch (queryErr: unknown) {
             // pglite is single-connection — if we acquire the mutex between
             // extended protocol messages and the previous query left an aborted
@@ -919,7 +920,7 @@ export async function handleStartReplication(
               try {
                 await db.exec('ROLLBACK')
               } catch {}
-              changes = await getChangesSince(db, lastWatermark, batchSize)
+              changes = await getChangesSince(db, lastWatermark, REPLICATION_BATCH_SIZE)
             } else {
               throw queryErr
             }

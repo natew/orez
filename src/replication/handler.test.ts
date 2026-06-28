@@ -10,6 +10,7 @@ import {
   handleReplicationQuery,
   handleStartReplication,
   lsnFromString,
+  REPLICATION_BATCH_SIZE,
   resetReplicationState,
   signalReplicationChange,
   type ReplicationWriter,
@@ -189,6 +190,95 @@ describe('handleStartReplication', () => {
       count++
     }
     return count
+  }
+
+  function readCString(buf: Uint8Array, start: number): [string, number] {
+    let end = start
+    while (buf[end] !== 0) end++
+    return [new TextDecoder().decode(buf.subarray(start, end)), end + 1]
+  }
+
+  function decodeTupleTexts(payload: Uint8Array, start: number): string[] {
+    const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
+    let pos = start
+    const count = dv.getInt16(pos)
+    pos += 2
+    const values: string[] = []
+    for (let i = 0; i < count; i++) {
+      const tag = payload[pos++]
+      if (tag === 0x6e) {
+        values.push('')
+        continue
+      }
+      expect(tag).toBe(0x74)
+      const len = dv.getInt32(pos)
+      pos += 4
+      values.push(new TextDecoder().decode(payload.subarray(pos, pos + len)))
+      pos += len
+    }
+    return values
+  }
+
+  function decodeInsertTransactions(chunks: Uint8Array[]): string[][] {
+    const relations = new Map<number, string[]>()
+    const transactions: string[][] = []
+    let current: string[] | null = null
+
+    for (const chunk of chunks) {
+      if (chunk[0] !== 0x64) continue
+      const dv = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+      let pos = 0
+      while (pos < chunk.length && chunk[pos] === 0x64) {
+        const len = dv.getInt32(pos + 1)
+        const frameEnd = pos + 1 + len
+        if (chunk[pos + 5] !== 0x77) {
+          pos = frameEnd
+          continue
+        }
+        const payload = chunk.subarray(pos + 30, frameEnd)
+        const tag = payload[0]
+        const payloadView = new DataView(
+          payload.buffer,
+          payload.byteOffset,
+          payload.byteLength
+        )
+
+        if (tag === 0x42) {
+          current = []
+        } else if (tag === 0x43) {
+          if (current) transactions.push(current)
+          current = null
+        } else if (tag === 0x52) {
+          const tableOid = payloadView.getInt32(1)
+          let p = 5
+          const [, afterSchema] = readCString(payload, p)
+          p = afterSchema
+          const [, afterTable] = readCString(payload, p)
+          p = afterTable
+          p++ // replica identity
+          const colCount = payloadView.getInt16(p)
+          p += 2
+          const columns: string[] = []
+          for (let i = 0; i < colCount; i++) {
+            p++ // flags
+            const [name, next] = readCString(payload, p)
+            columns.push(name)
+            p = next + 8 // type oid + type mod
+          }
+          relations.set(tableOid, columns)
+        } else if (tag === 0x49) {
+          const tableOid = payloadView.getInt32(1)
+          const columns = relations.get(tableOid) ?? []
+          const values = decodeTupleTexts(payload, 6)
+          const name = values[columns.indexOf('name')]
+          if (name && current) current.push(name)
+        }
+
+        pos = frameEnd
+      }
+    }
+
+    return transactions.filter((tx) => tx.length > 0)
   }
 
   it('sends CopyBothResponse first', async () => {
@@ -380,6 +470,45 @@ describe('handleStartReplication', () => {
     const inserts = written.flatMap(extractPayloadTypes).filter((t) => t === 0x49)
     expect(inserts.length).toBe(20)
   }, 10_000)
+
+  it('streams large change bursts as bounded transactions', async () => {
+    const { written, writer } = createWriter()
+    const total = REPLICATION_BATCH_SIZE + 5
+
+    replicationPromise = handleStartReplication(
+      'START_REPLICATION SLOT "s" LOGICAL 0/0',
+      writer,
+      db,
+      testMutex
+    )
+
+    await new Promise((r) => setTimeout(r, 100))
+    await db.exec(`
+      INSERT INTO public.items (name, value)
+      SELECT 'bulk-' || n::text, n
+      FROM generate_series(1, ${total}) AS g(n)
+    `)
+    signalReplicationChange()
+
+    let types: number[] = []
+    const deadline = Date.now() + 15_000
+    while (Date.now() < deadline) {
+      types = written.flatMap(extractPayloadTypes)
+      const inserts = types.filter((t) => t === 0x49).length
+      const begins = types.filter((t) => t === 0x42).length
+      if (inserts === total && begins >= 2) break
+      await new Promise((r) => setTimeout(r, 100))
+    }
+
+    const insertTransactions = decodeInsertTransactions(written)
+    const orderedNames = insertTransactions.flat()
+
+    expect(orderedNames).toEqual(Array.from({ length: total }, (_, i) => `bulk-${i + 1}`))
+    expect(insertTransactions.map((tx) => tx.length)).toEqual([REPLICATION_BATCH_SIZE, 5])
+    expect(types.filter((t) => t === 0x43).length).toBe(
+      types.filter((t) => t === 0x42).length
+    )
+  }, 20_000)
 
   it('each transaction has matching BEGIN and COMMIT', async () => {
     const { written, writer } = createWriter()
