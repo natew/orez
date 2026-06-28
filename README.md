@@ -61,6 +61,7 @@ bunx orez
 --s3-port=9200            s3 server port
 --force-wasm-sqlite       force wasm sqlite even if native is available
 --disable-wasm-sqlite     force native sqlite (fail if not available)
+--ephemeral               keep PGlite in memory and use a per-run replica cache
 --on-db-ready=CMD         command to run after db+proxy ready, before zero-cache
 --on-healthy=CMD          command to run once all services healthy
 --disable-admin           disable admin dashboard
@@ -109,6 +110,7 @@ All options mirror the CLI flags in camelCase. CLI flags override config file va
 | `forceWasmSqlite`   | `--force-wasm-sqlite`   | `false`    |
 | `noWorkerThreads`   | `--no-worker-threads`   | `false`    |
 | `singleDb`          | `--single-db`           | `false`    |
+| `ephemeral`         | `--ephemeral`           | `false`    |
 | `logLevel`          | `--log-level`           | `warn`     |
 | `onDbReady`         | `--on-db-ready`         | —          |
 | `onHealthy`         | `--on-healthy`          | —          |

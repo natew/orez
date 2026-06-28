@@ -21,6 +21,8 @@ export interface ZeroLiteConfig {
   forceWasmSqlite: boolean
   useWorkerThreads: boolean
   singleDb: boolean
+  ephemeral: boolean
+  ephemeralDir?: string
   readReplicas: number
   logLevel: LogLevel
   pgliteOptions: Partial<PGliteOptions>
@@ -83,6 +85,8 @@ export interface OrezConfig {
   useWorkerThreads?: boolean
   /** single pglite instance for all databases */
   singleDb?: boolean
+  /** keep PGlite state in memory and zero-cache replica state in a per-run temp dir */
+  ephemeral?: boolean
   /** log level: error, warn, info, debug (default: "warn") */
   logLevel?: LogLevel
   /** command to run after db+proxy ready, before zero-cache */
@@ -129,6 +133,8 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     forceWasmSqlite: overrides.forceWasmSqlite ?? false,
     useWorkerThreads: overrides.useWorkerThreads ?? true,
     singleDb: overrides.singleDb ?? false,
+    ephemeral: overrides.ephemeral ?? false,
+    ephemeralDir: overrides.ephemeralDir,
     // singleDb shares one pglite instance for all databases — replicas make no sense
     readReplicas: overrides.readReplicas ?? 0,
     logLevel: overrides.logLevel || (process.env.OREZ_LOG_LEVEL as LogLevel) || 'warn',

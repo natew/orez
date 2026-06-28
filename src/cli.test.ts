@@ -29,6 +29,7 @@ describe('cli', () => {
     expect(output).toContain('--pg-port')
     expect(output).toContain('--zero-port')
     expect(output).toContain('--skip-zero-cache')
+    expect(output).toContain('--ephemeral')
   })
 
   it('s3 subcommand shows help', async () => {

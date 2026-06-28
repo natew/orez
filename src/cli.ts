@@ -975,6 +975,11 @@ export const main = defineCommand({
         'use a single pglite instance for all databases (lighter for constrained environments)',
       default: false,
     },
+    ephemeral: {
+      type: 'boolean',
+      description: 'keep pglite in memory and use a per-run zero replica cache',
+      default: false,
+    },
     'read-replicas': {
       type: 'string',
       description:
@@ -1045,6 +1050,7 @@ export const main = defineCommand({
       'force-wasm-sqlite': false,
       'no-worker-threads': false,
       'single-db': false,
+      ephemeral: false,
       'read-replicas': '',
       'on-db-ready': '',
       'on-healthy': '',
@@ -1081,6 +1087,7 @@ export const main = defineCommand({
       ...(wasSet('force-wasm-sqlite') && { forceWasmSqlite: args['force-wasm-sqlite'] }),
       ...(wasSet('no-worker-threads') && { noWorkerThreads: args['no-worker-threads'] }),
       ...(wasSet('single-db') && { singleDb: args['single-db'] }),
+      ...(wasSet('ephemeral') && { ephemeral: args.ephemeral }),
       ...(wasSet('read-replicas') && { readReplicas: Number(args['read-replicas']) }),
       ...(wasSet('on-db-ready') && { onDbReady: args['on-db-ready'] }),
       ...(wasSet('on-healthy') && { onHealthy: args['on-healthy'] }),
@@ -1129,6 +1136,7 @@ export const main = defineCommand({
       forceWasmSqlite: cliOverrides.forceWasmSqlite,
       useWorkerThreads: resolvedUseWorkerThreads,
       singleDb: cliOverrides.singleDb,
+      ephemeral: cliOverrides.ephemeral,
       readReplicas: cliOverrides.readReplicas,
       logLevel: cliOverrides.logLevel,
       onDbReady: cliOverrides.onDbReady || undefined,

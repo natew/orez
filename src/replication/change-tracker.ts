@@ -1,5 +1,7 @@
 import { log } from '../log.js'
 
+const PURGE_BATCH_SIZE = 5000
+
 export interface ChangeRecord {
   watermark: number
   table_name: string
@@ -291,10 +293,26 @@ export async function purgeConsumedChanges(
   db: ChangeTrackingDb,
   watermark: number
 ): Promise<number> {
-  const result = await db.exec(
-    `DELETE FROM _orez._zero_changes WHERE watermark <= ${Number(watermark)}`
-  )
-  return result[0]?.affectedRows ?? 0
+  const hi = Number(watermark)
+  let total = 0
+
+  for (let i = 0; i < 10_000; i++) {
+    const result = await db.exec(`
+      DELETE FROM _orez._zero_changes
+      WHERE watermark IN (
+        SELECT watermark
+        FROM _orez._zero_changes
+        WHERE watermark <= ${hi}
+        ORDER BY watermark
+        LIMIT ${PURGE_BATCH_SIZE}
+      )
+    `)
+    const affected = result[0]?.affectedRows ?? 0
+    total += affected
+    if (affected < PURGE_BATCH_SIZE) break
+  }
+
+  return total
 }
 
 /**
@@ -339,9 +357,21 @@ export async function confirmStreamedBatches(
   const hi = result.rows[0]?.hi
   if (hi === null || hi === undefined) return 0
   const purged = await purgeConsumedChanges(db, Number(hi))
-  await db.query(`DELETE FROM _orez._zero_streamed_batches WHERE batch_lsn <= $1`, [
-    Number(confirmedLsn),
-  ])
+  const target = Number(confirmedLsn)
+  for (let i = 0; i < 10_000; i++) {
+    const result = await db.exec(`
+      DELETE FROM _orez._zero_streamed_batches
+      WHERE batch_lsn IN (
+        SELECT batch_lsn
+        FROM _orez._zero_streamed_batches
+        WHERE batch_lsn <= ${target}
+        ORDER BY batch_lsn
+        LIMIT ${PURGE_BATCH_SIZE}
+      )
+    `)
+    const affected = result[0]?.affectedRows ?? 0
+    if (affected < PURGE_BATCH_SIZE) break
+  }
   return purged
 }
 

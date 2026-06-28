@@ -8,7 +8,14 @@
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
@@ -183,12 +190,33 @@ function getManagedPublicationConfig(): { names: string[]; managedByOrez: boolea
   return { names: [fallback], managedByOrez: true }
 }
 
+function getReplicaDir(config: ZeroLiteConfig): string {
+  return config.ephemeralDir ?? config.dataDir
+}
+
+function zeroReplicaPath(config: ZeroLiteConfig): string {
+  return resolve(getReplicaDir(config), 'zero-replica.db')
+}
+
+function pgliteDataDirFor(config: ZeroLiteConfig, name: string): string {
+  return config.ephemeral ? 'memory://' : resolve(config.dataDir, `pgdata-${name}`)
+}
+
 // resolvePackage moved to sqlite-mode/resolve-mode.ts
 import { resolvePackage } from './sqlite-mode/resolve-mode.js'
 
 export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const config = getConfig(overrides)
   setLogLevel(config.logLevel)
+
+  if (config.ephemeral && !config.doBackendUrl) {
+    config.pgliteOptions = { ...config.pgliteOptions, dataDir: 'memory://' }
+    config.ephemeralDir = resolve(
+      tmpdir(),
+      `orez-ephemeral-${process.pid}-${randomUUID()}`
+    )
+    mkdirSync(config.ephemeralDir, { recursive: true })
+  }
 
   // find available ports
   const pgPort = await findPort(config.pgPort)
@@ -220,6 +248,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     adminPort > 0 ? createHttpLogStore() : undefined
 
   log.debug.orez(`data dir: ${resolve(config.dataDir)}`)
+  if (config.ephemeralDir) {
+    log.debug.orez(`ephemeral cache dir: ${config.ephemeralDir}`)
+  }
 
   // resolve sqlite mode config early (used for shim application and cleanup)
   // auto-detects native if available, falls back to wasm
@@ -447,7 +478,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     })
   }
   if (!config.skipZeroCache) {
-    const replicaResetReason = getZeroReplicaStartupResetReason(config.dataDir)
+    const replicaResetReason = getZeroReplicaStartupResetReason(getReplicaDir(config))
     if (replicaResetReason) {
       log.orez(
         `detected invalid zero replica (${replicaResetReason}), resetting zero state`
@@ -707,7 +738,6 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
         // delete CVR/CDB data directories
         log.orez('deleting CVR/CDB data...')
-        const { rmSync } = await import('node:fs')
         for (const dir of ['pgdata-cvr', 'pgdata-cdb']) {
           try {
             rmSync(resolve(config.dataDir, dir), { recursive: true, force: true })
@@ -716,28 +746,26 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
         // recreate CVR/CDB instances
         log.orez('recreating CVR/CDB...')
+        const cvrDataDir = pgliteDataDirFor(config, 'cvr')
+        const cdbDataDir = pgliteDataDirFor(config, 'cdb')
         if (config.useWorkerThreads) {
-          const cvrProxy = createPGliteWorker(
-            resolve(config.dataDir, 'pgdata-cvr'),
-            'cvr'
-          )
-          const cdbProxy = createPGliteWorker(
-            resolve(config.dataDir, 'pgdata-cdb'),
-            'cdb'
-          )
+          const cvrProxy = createPGliteWorker(cvrDataDir, 'cvr')
+          const cdbProxy = createPGliteWorker(cdbDataDir, 'cdb')
           await Promise.all([cvrProxy.waitReady, cdbProxy.waitReady])
           instances.cvr = cvrProxy as unknown as PGlite
           instances.cdb = cdbProxy as unknown as PGlite
         } else {
           const { PGlite: PGliteCtor } = await import('@electric-sql/pglite')
-          mkdirSync(resolve(config.dataDir, 'pgdata-cvr'), { recursive: true })
-          mkdirSync(resolve(config.dataDir, 'pgdata-cdb'), { recursive: true })
+          if (!config.ephemeral) {
+            mkdirSync(cvrDataDir, { recursive: true })
+            mkdirSync(cdbDataDir, { recursive: true })
+          }
           instances.cvr = new PGliteCtor({
-            dataDir: resolve(config.dataDir, 'pgdata-cvr'),
+            dataDir: cvrDataDir,
             relaxedDurability: true,
           })
           instances.cdb = new PGliteCtor({
-            dataDir: resolve(config.dataDir, 'pgdata-cdb'),
+            dataDir: cdbDataDir,
             relaxedDurability: true,
           })
           await instances.cvr.waitReady
@@ -1134,6 +1162,11 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     try {
       unlinkSync(readyFile)
     } catch {}
+    if (config.ephemeralDir) {
+      try {
+        rmSync(config.ephemeralDir, { recursive: true, force: true })
+      } catch {}
+    }
     log.debug.orez('stopped')
   }
 
@@ -1160,7 +1193,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 /** clean lock files only — keeps replica intact for fast incremental sync on restart.
  *  returns true if any stale lock files were found (indicates unclean shutdown). */
 function cleanupStaleLockFiles(config: ZeroLiteConfig): boolean {
-  const replicaPath = resolve(config.dataDir, 'zero-replica.db')
+  const replicaPath = zeroReplicaPath(config)
   let found = false
   for (const suffix of ['-wal', '-shm', '-wal2']) {
     const file = replicaPath + suffix
@@ -1177,7 +1210,7 @@ function cleanupStaleLockFiles(config: ZeroLiteConfig): boolean {
 
 /** delete replica + all lock/wal files — forces zero-cache to do a full resync */
 function cleanupStaleReplica(config: ZeroLiteConfig): void {
-  const replicaPath = resolve(config.dataDir, 'zero-replica.db')
+  const replicaPath = zeroReplicaPath(config)
   for (const suffix of ['', '-wal', '-shm', '-wal2']) {
     const file = replicaPath + suffix
     try {
@@ -1281,7 +1314,7 @@ async function startZeroCache(
   const upstreamUrl = getConnectionString(config, 'postgres')
   const cvrUrl = getConnectionString(config, 'zero_cvr')
   const cdbUrl = getConnectionString(config, 'zero_cdb')
-  const replicaFile = resolve(config.dataDir, 'zero-replica.db')
+  const replicaFile = zeroReplicaPath(config)
 
   // defaults that can be overridden by user env
   // when admin is enabled and user hasn't set ZERO_LOG_LEVEL, use 'info'

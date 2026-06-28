@@ -788,6 +788,20 @@ export async function handleStartReplication(
       }
     })
   }
+  const flushConfirmedBatches = async () => {
+    if (pendingConfirmLsn <= processedConfirmLsn) return
+    await mutex.acquire()
+    const target = pendingConfirmLsn
+    try {
+      const purged = await confirmStreamedBatches(db, target)
+      processedConfirmLsn = target
+      if (purged > 0) {
+        log.debug.proxy(`purged ${purged} confirmed changes`)
+      }
+    } finally {
+      mutex.release()
+    }
+  }
 
   // register direct wakeup so the proxy can signal us immediately
   _replicationWakeup = wakeup
@@ -877,6 +891,8 @@ export async function handleStartReplication(
           }
         }
 
+        await flushConfirmedBatches()
+
         // try to acquire mutex without blocking proxy connections.
         // post-sync: short backoff since writes signal us directly.
         // pre-sync: yield more generously so zero-cache initial copy can finish.
@@ -928,26 +944,14 @@ export async function handleStartReplication(
         } finally {
           mutex.release()
         }
-
-        // purge batches the consumer has confirmed since the last pass.
-        // confirmation arrives as a standby status update right after the
-        // consumer durably commits a batch, so this runs on the wakeup that
-        // ack triggers (or with the next batch under sustained write load).
-        if (pendingConfirmLsn > processedConfirmLsn && mutex.tryAcquire()) {
-          const target = pendingConfirmLsn
-          try {
-            const purged = await confirmStreamedBatches(db, target)
-            processedConfirmLsn = target
-            if (purged > 0) {
-              log.debug.proxy(`purged ${purged} confirmed changes`)
-            }
-          } finally {
-            mutex.release()
-          }
+        const queryMs = performance.now() - queryStart
+        if (queryMs > 1000) {
+          log.proxy(
+            `slow change-log query: ${queryMs.toFixed(1)}ms (wm=${lastWatermark}, rows=${changes.length})`
+          )
         }
 
         if (changes.length > 0) {
-          const queryMs = performance.now() - queryStart
           const signalToQueryMs =
             lastWakeupTime > 0 ? (performance.now() - lastWakeupTime).toFixed(1) : '?'
           // summarize which tables changed

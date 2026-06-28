@@ -14,7 +14,12 @@ import type { PGlite } from '@electric-sql/pglite'
 import type { ChildProcess } from 'node:child_process'
 
 export interface RecoveryContext {
-  config: { dataDir: string; useWorkerThreads?: boolean }
+  config: {
+    dataDir: string
+    useWorkerThreads?: boolean
+    ephemeral?: boolean
+    ephemeralDir?: string
+  }
   instances: {
     postgres: PGlite
     cvr: PGlite
@@ -286,8 +291,19 @@ export function classifyZeroStartupRecovery(
  * replica. zero-cache can create the file itself during initial sync; an empty
  * file here is a leftover local-state artifact, not useful cache state.
  */
-export function getZeroReplicaStartupResetReason(dataDir: string): string | null {
-  const replicaPath = resolve(dataDir, 'zero-replica.db')
+function pgliteDataDirFor(
+  config: RecoveryContext['config'],
+  name: 'cvr' | 'cdb'
+): string {
+  return config.ephemeral ? 'memory://' : resolve(config.dataDir, `pgdata-${name}`)
+}
+
+function zeroReplicaPath(config: RecoveryContext['config']): string {
+  return resolve(config.ephemeralDir ?? config.dataDir, 'zero-replica.db')
+}
+
+export function getZeroReplicaStartupResetReason(replicaDir: string): string | null {
+  const replicaPath = resolve(replicaDir, 'zero-replica.db')
   if (!existsSync(replicaPath)) return null
 
   try {
@@ -331,7 +347,7 @@ export async function recoverZeroState(ctx: RecoveryContext): Promise<void> {
   log.orez('deleted corrupted CVR/CDB data')
 
   // delete replica file
-  const replicaPath = resolve(config.dataDir, 'zero-replica.db')
+  const replicaPath = zeroReplicaPath(config)
   for (const suffix of ['', '-shm', '-wal', '-wal2']) {
     try {
       rmSync(replicaPath + suffix, { force: true })
@@ -339,22 +355,26 @@ export async function recoverZeroState(ctx: RecoveryContext): Promise<void> {
   }
 
   // recreate CVR/CDB instances
+  const cvrDataDir = pgliteDataDirFor(config, 'cvr')
+  const cdbDataDir = pgliteDataDirFor(config, 'cdb')
   if (config.useWorkerThreads) {
-    const cvrProxy = createPGliteWorker(resolve(config.dataDir, 'pgdata-cvr'), 'cvr')
-    const cdbProxy = createPGliteWorker(resolve(config.dataDir, 'pgdata-cdb'), 'cdb')
+    const cvrProxy = createPGliteWorker(cvrDataDir, 'cvr')
+    const cdbProxy = createPGliteWorker(cdbDataDir, 'cdb')
     await Promise.all([cvrProxy.waitReady, cdbProxy.waitReady])
     instances.cvr = cvrProxy as unknown as PGlite
     instances.cdb = cdbProxy as unknown as PGlite
   } else {
     const { PGlite: PGliteCtor } = await import('@electric-sql/pglite')
-    mkdirSync(resolve(config.dataDir, 'pgdata-cvr'), { recursive: true })
-    mkdirSync(resolve(config.dataDir, 'pgdata-cdb'), { recursive: true })
+    if (!config.ephemeral) {
+      mkdirSync(cvrDataDir, { recursive: true })
+      mkdirSync(cdbDataDir, { recursive: true })
+    }
     instances.cvr = new PGliteCtor({
-      dataDir: resolve(config.dataDir, 'pgdata-cvr'),
+      dataDir: cvrDataDir,
       relaxedDurability: true,
     })
     instances.cdb = new PGliteCtor({
-      dataDir: resolve(config.dataDir, 'pgdata-cdb'),
+      dataDir: cdbDataDir,
       relaxedDurability: true,
     })
     await instances.cvr.waitReady
