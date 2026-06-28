@@ -121,9 +121,9 @@ export function defineConfig(config: OrezConfig): OrezConfig {
 export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConfig {
   return {
     dataDir: overrides.dataDir || '.orez',
-    pgPort: overrides.pgPort || 6434,
-    zeroPort: overrides.zeroPort || 5849,
-    adminPort: overrides.adminPort || 0,
+    pgPort: overrides.pgPort ?? 6434,
+    zeroPort: overrides.zeroPort ?? 5849,
+    adminPort: overrides.adminPort ?? 0,
     pgUser: overrides.pgUser || 'user',
     pgPassword: overrides.pgPassword || 'password',
     migrationsDir: overrides.migrationsDir || '',
