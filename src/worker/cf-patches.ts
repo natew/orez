@@ -5,12 +5,14 @@
  * applies CF Worker patches there. the installed package in node_modules is
  * never modified.
  *
- * five patches:
+ * seven patches:
  * 1. worker-urls.js — replace file:// URLs with zero-worker:// identifiers
  * 2. server worker entrypoints — disable CLI auto-start blocks
  * 3. processes.js — replace dynamic import() with static worker module lookup
  * 4. write-worker-client.js — run zero-cache's replica writer in-process
- * 5. pgsql-parser — embed libpg-query wasm bytes for Workers
+ * 5. initial-sync.js — cap DO batch parameter counts
+ * 6. change-streamer-service.js — keep cleanup alive after no-subscriber ticks
+ * 7. pgsql-parser — embed libpg-query wasm bytes for Workers
  *
  * usage in a worker build script:
  *
@@ -37,6 +39,7 @@ import {
 } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 
+import { applyChangeLogCleanupRetryPatch } from '../zero-changelog-cleanup-patch.js'
 import { applyLitestreamRestoreGuard } from '../zero-litestream-patch.js'
 
 const ZERO_CACHE_WORKERS = [
@@ -112,6 +115,7 @@ export function prepareZeroCacheForCF(
   patchWriteWorkerClient(zcBase)
   patchInitialSyncBatchParams(zcBase)
   patchLitestreamRestore(zcBase)
+  patchChangeLogCleanupRetry(zcBase)
   const parserAliases = patchPgsqlParserWasm(nodeModulesPath, outDir)
   const packageAliases = getPackageAliases(nodeModulesPath)
 
@@ -519,6 +523,21 @@ function patchLitestreamRestore(zcBase: string): void {
   }
   applyLitestreamRestoreGuard(commandsPath)
   console.log('[orez] patched zero-cache litestream commands.js (no-op restore)')
+}
+
+function patchChangeLogCleanupRetry(zcBase: string): void {
+  const servicePath = resolve(
+    zcBase,
+    'services',
+    'change-streamer',
+    'change-streamer-service.js'
+  )
+  if (!existsSync(servicePath)) {
+    console.warn('[orez] change-streamer-service.js not found at', servicePath)
+    return
+  }
+  applyChangeLogCleanupRetryPatch(servicePath)
+  console.log('[orez] patched zero-cache changeLog cleanup retry')
 }
 
 function patchPgsqlParserWasm(

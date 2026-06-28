@@ -73,6 +73,7 @@ import {
   type SqliteMode,
   type SqliteModeConfig,
 } from './sqlite-mode/index.js'
+import { enableZeroChangeLogCleanupRetry } from './zero-changelog-cleanup-patch.js'
 import { enableZeroReplicaCheckpoint } from './zero-checkpoint-patch.js'
 import { probeZeroCacheHttp } from './zero-health.js'
 import { disableZeroLitestreamRestore } from './zero-litestream-patch.js'
@@ -1319,6 +1320,11 @@ async function startZeroCache(
   // orez owns the replica on disk and has no litestream backup; stop zero 1.5's
   // change-streamer from erroring + resyncing on every restart (see the patch).
   disableZeroLitestreamRestore()
+
+  // zero-cache's changeLog cleanup can strand pending cleanup watermarks when
+  // it runs before any subscriber is connected. Keep the cleanup timer alive so
+  // local/ephemeral Orez instances do not accumulate a huge CDB catchup log.
+  enableZeroChangeLogCleanupRetry()
 
   // litestream also checkpointed the replica WAL in stock zero-cache; with it gone,
   // nothing reclaims the wal2 (PASSIVE autocheckpoint can't pass the view-syncer's

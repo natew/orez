@@ -61,6 +61,17 @@ describe('prepareZeroCacheForCF', () => {
       '.repeat(49)'
     )
 
+    const changeStreamerService = readText(
+      overlayBase,
+      'services/change-streamer/change-streamer-service.js'
+    )
+    expect(changeStreamerService).toContain(
+      'orez: retry changeLog cleanup when subscribers are absent'
+    )
+    expect(
+      readText(sourceBase, 'services/change-streamer/change-streamer-service.js')
+    ).not.toContain('orez: retry changeLog cleanup when subscribers are absent')
+
     const sourceParser = readFileSync(
       resolve(nodeModules, 'libpg-query', 'wasm', 'index.js'),
       'utf-8'
@@ -170,6 +181,7 @@ function makeFakeNodeModules(
 
   mkdirSync(resolve(zcBase, 'server'), { recursive: true })
   mkdirSync(resolve(zcBase, 'types'), { recursive: true })
+  mkdirSync(resolve(zcBase, 'services', 'change-streamer'), { recursive: true })
   mkdirSync(resolve(zcBase, 'services', 'replicator'), { recursive: true })
   mkdirSync(resolve(libPgQueryRoot, 'wasm'), { recursive: true })
 
@@ -212,6 +224,25 @@ export { runWorker as default };
   import(moduleUrl.href).then(async ({ default: runWorker }) => {
     await runWorker();
   });
+}
+`
+  )
+
+  writeText(
+    zcBase,
+    'services/change-streamer/change-streamer-service.js',
+    `
+async function purgeOldChanges() {
+\t\tconst current = [...this.#forwarder.getAcks()];
+\t\tif (current.length === 0) {
+\t\t\tthis.#lc.warn?.("No subscribers to confirm cleanup");
+\t\t\treturn;
+\t\t}
+\t\ttry {
+\t\t\tthis.#lc.info?.("Purging changes");
+\t\t} finally {
+\t\t\tif (this.#initialWatermarks.size) this.#state.setTimeout(() => this.#purgeOldChanges(), CLEANUP_DELAY_MS);
+\t\t}
 }
 `
   )

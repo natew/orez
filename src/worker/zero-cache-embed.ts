@@ -25,6 +25,7 @@
 import { EventEmitter } from 'node:events'
 import { resolve } from 'node:path'
 
+import { enableZeroChangeLogCleanupRetry } from '../zero-changelog-cleanup-patch.js'
 import { disableZeroLitestreamRestore } from '../zero-litestream-patch.js'
 import { installZeroSqliteHandleRegistry } from '../zero-sqlite-handle-patch.js'
 import { sweepLeakedSqliteHandles } from './embed-generation.js'
@@ -178,6 +179,10 @@ export async function startZeroCacheEmbed(
   // change-streamer from erroring + resyncing on every restart. must run before
   // the dynamic import below pulls in the litestream commands module.
   disableZeroLitestreamRestore()
+
+  // keep zero-cache's changeLog cleanup retrying if its first cleanup tick runs
+  // before any subscriber ACK exists. must run before the dynamic import below.
+  enableZeroChangeLogCleanupRetry()
 
   // embed restart contract (see ./embed-generation.ts): track every sqlite
   // handle zero-cache opens (pure-tracking patch, must land before the
