@@ -495,8 +495,19 @@ if (packOnly) {
 // git commit + tag + push (skip for canary releases)
 if (!canary) {
   const gitTag = `v${orezNext}`
-  run('git add -A')
-  run(`git commit -m "${gitTag}"`)
+  // stage ONLY the files this release legitimately changed: the bumped
+  // package.json of each workspace package plus the regenerated lockfile.
+  // never `git add -A` — this checkout hosts concurrent agent sessions, and a
+  // blanket add sweeps a co-tenant's uncommitted WIP into the version commit
+  // (and any dirty source compiled into the just-published dist). real
+  // incident: v0.4.31 swept an in-flight src/config.ts edit.
+  const versionPaths = [
+    ...packages.map((p) => p.pkgPath),
+    resolve(root, 'bun.lock'),
+  ].filter((p) => existsSync(p))
+  const pathspec = versionPaths.map((p) => `'${p}'`).join(' ')
+  run(`git add ${pathspec}`)
+  run(`git commit -m "${gitTag}" -- ${pathspec}`)
   run(`git tag ${gitTag}`)
   run('git push origin HEAD')
   run(`git push origin ${gitTag}`)
