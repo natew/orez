@@ -348,6 +348,17 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   let migrationsApplied = 0
   let isDoBackend = false
   let pgliteVacuumMs = 0
+  let delayedVacuumTimer: ReturnType<typeof setTimeout> | undefined
+
+  const queuePgliteVacuum = (delayMs = 15_000) => {
+    if (isDoBackend || pgliteVacuumMs <= 0) return
+    if (delayedVacuumTimer) clearTimeout(delayedVacuumTimer)
+    delayedVacuumTimer = setTimeout(() => {
+      delayedVacuumTimer = undefined
+      void vacuumPGliteChurnTables(instances)
+    }, delayMs)
+    delayedVacuumTimer.unref?.()
+  }
 
   if (config.doBackendUrl) {
     isDoBackend = true
@@ -400,7 +411,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     // change-streamer scan times out and Zero stops sending live updates. Start it
     // only after Orez's own tracking tables exist; zero-cache's CDB changeLog is
     // vacuumed once more after zero-cache has started.
-    pgliteVacuumMs = Number(process.env.OREZ_VACUUM_MS ?? 10 * 60 * 1000)
+    pgliteVacuumMs = Number(process.env.OREZ_VACUUM_MS ?? 60 * 1000)
     if (pgliteVacuumMs > 0) {
       await vacuumPGliteChurnTables(instances)
       stopVacuum = startPeriodicVacuum(instances, pgliteVacuumMs)
@@ -538,6 +549,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       }
       if (!isDoBackend && pgliteVacuumMs > 0) {
         await vacuumPGliteChurnTables(instances)
+        queuePgliteVacuum()
       }
     }
 
@@ -1150,6 +1162,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     log.debug.orez('shutting down')
     shuttingDown = true
     if (zeroHttpHealthTimer) clearInterval(zeroHttpHealthTimer)
+    if (delayedVacuumTimer) clearTimeout(delayedVacuumTimer)
     stopCheckpoint()
     stopVacuum()
     httpProxyServer?.close()

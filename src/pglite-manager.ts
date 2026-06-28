@@ -636,7 +636,7 @@ export async function vacuumPGliteChurnTables(instances: PGliteInstances): Promi
  */
 export function startPeriodicVacuum(
   instances: PGliteInstances,
-  intervalMs = 10 * 60 * 1000
+  intervalMs = 60 * 1000
 ): () => void {
   const vacuum = async () => {
     await vacuumPGliteChurnTables(instances)
