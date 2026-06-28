@@ -151,6 +151,80 @@ describe('DoBackend PG/SQLite parity corpus', () => {
     expectSameRows((await backend.query(query)).rows, (await pg.query(query)).rows)
   })
 
+  // the DO/local-sql store has no FK enforcement (the pipeline strips every FK),
+  // so a bare DELETE would orphan children. the fk-cascade wiring restores ON
+  // DELETE CASCADE/SET NULL by expansion — assert it matches PG, which cascades
+  // natively here (raw PGlite keeps its FKs). exercises both the parameterized
+  // (query) and non-parameterized (exec) execute paths, plus a grandchild chain.
+  const CASCADE_SCHEMA = [
+    `CREATE TABLE thread (id text PRIMARY KEY, title text)`,
+    `CREATE TABLE message (id text PRIMARY KEY, "threadId" text REFERENCES thread(id) ON DELETE CASCADE, body text)`,
+    `CREATE TABLE reaction (id text PRIMARY KEY, "messageId" text REFERENCES message(id) ON DELETE CASCADE, emoji text)`,
+    `CREATE TABLE bookmark (id text PRIMARY KEY, "threadId" text REFERENCES thread(id) ON DELETE SET NULL, note text)`,
+  ]
+  const CASCADE_SEED = [
+    `INSERT INTO thread VALUES ('t1', 'keep'), ('t2', 'doomed')`,
+    `INSERT INTO message VALUES ('m1', 't2', 'a'), ('m2', 't2', 'b'), ('m3', 't1', 'c')`,
+    `INSERT INTO reaction VALUES ('r1', 'm1', 'x'), ('r2', 'm1', 'y'), ('r3', 'm2', 'z')`,
+    `INSERT INTO bookmark VALUES ('b1', 't2', 'doomed'), ('b2', 't1', 'kept')`,
+  ]
+  const CASCADE_READS = [
+    'SELECT id FROM thread ORDER BY id',
+    'SELECT id, "threadId" FROM message ORDER BY id',
+    'SELECT id FROM reaction ORDER BY id',
+    'SELECT id, "threadId" FROM bookmark ORDER BY id',
+  ]
+
+  async function seedCascade(): Promise<void> {
+    for (const ddl of CASCADE_SCHEMA) {
+      await pg.query(ddl)
+      await backend.exec(ddl)
+    }
+    for (const sql of CASCADE_SEED) {
+      await pg.query(sql)
+      await backend.exec(sql)
+    }
+  }
+
+  async function expectCascadeParity(): Promise<void> {
+    for (const q of CASCADE_READS) {
+      expectSameRows((await backend.query(q)).rows, (await pg.query(q)).rows)
+    }
+  }
+
+  test('ON DELETE CASCADE/SET NULL parity (parameterized delete) matches PG native cascade', async () => {
+    await seedCascade()
+    await pg.query('DELETE FROM thread WHERE id = $1', ['t2'])
+    await backend.query('DELETE FROM thread WHERE id = $1', ['t2'])
+    await expectCascadeParity()
+    // grandchildren (reaction → message → thread) are gone, m3/b2 (on t1) survive,
+    // and b1's link is nulled rather than the row deleted.
+    expect((await backend.query('SELECT id FROM reaction')).rows).toHaveLength(0)
+    expect((await backend.query('SELECT id FROM message ORDER BY id')).rows).toEqual([
+      { id: 'm3' },
+    ])
+    expect(
+      (await backend.query(`SELECT "threadId" FROM bookmark WHERE id = 'b1'`)).rows[0]
+        .threadId
+    ).toBeNull()
+  })
+
+  test('ON DELETE CASCADE/SET NULL parity (non-parameterized delete) matches PG native cascade', async () => {
+    await seedCascade()
+    await pg.query(`DELETE FROM thread WHERE id = 't2'`)
+    await backend.exec(`DELETE FROM thread WHERE id = 't2'`)
+    await expectCascadeParity()
+  })
+
+  // NOTE: cascade-child CHANGE CAPTURE (so deletions replicate to clients) is
+  // not assertable here — the local-sql test backend rejects tracked writes by
+  // design (tracking "belongs to the shared upstream db / ZeroSqlDO"). it IS
+  // validated two ways: fk-cascade.test.ts proves expanded deletes flow through
+  // real change-tracking (PGlite triggers), and the mock-http DO test
+  // ("cascade DELETE sends change-tracked child statements …") asserts each
+  // cascade child reaches the DO as a RETURNING-tracked write, identical to a
+  // normal delete.
+
   test('FOR UPDATE clauses preserve row results while sqlite strips the lock syntax', async () => {
     const ddl = 'CREATE TABLE lock_probe (id text PRIMARY KEY, rank integer NOT NULL)'
     const insert = "INSERT INTO lock_probe VALUES ('a', 1), ('b', 2)"

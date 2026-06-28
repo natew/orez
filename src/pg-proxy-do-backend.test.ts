@@ -1328,6 +1328,37 @@ describe('DoBackend', () => {
     ])
   })
 
+  test('cascade DELETE sends change-tracked child statements (RETURNING) to the DO', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'fk-cascade-tracking-test')
+    await backend.waitReady
+    await backend.exec(`
+      CREATE TABLE thread (id text PRIMARY KEY);
+      CREATE TABLE message (id text PRIMARY KEY, "threadId" text REFERENCES thread(id) ON DELETE CASCADE);
+      CREATE TABLE reaction (id text PRIMARY KEY, "messageId" text REFERENCES message(id) ON DELETE CASCADE);
+      CREATE TABLE bookmark (id text PRIMARY KEY, "threadId" text REFERENCES thread(id) ON DELETE SET NULL);
+      CREATE PUBLICATION zero_all FOR ALL TABLES;
+    `)
+    http.sqls.length = 0
+
+    await backend.query('DELETE FROM thread WHERE id = $1', ['t1'])
+
+    const sent = http.sqls.map((sql) => compactSQL(sql))
+    const tracked = (re: RegExp) =>
+      sent.some((sql) => re.test(sql) && /RETURNING/i.test(sql))
+    // each cascade child reaches the DO as its own RETURNING-tracked write —
+    // identical to a normal delete, so the deletion replicates. leaves-first:
+    // reaction (grandchild) and message (child) deleted, bookmark link nulled.
+    expect(tracked(/DELETE FROM "?reaction"?/i)).toBe(true)
+    expect(tracked(/DELETE FROM "?message"?/i)).toBe(true)
+    expect(tracked(/UPDATE "?bookmark"? SET/i)).toBe(true)
+    expect(tracked(/DELETE FROM "?thread"?/i)).toBe(true)
+    // and the child deletes are ordered before the parent thread delete
+    const idx = (re: RegExp) => sent.findIndex((sql) => re.test(sql))
+    expect(idx(/DELETE FROM "?reaction"?/i)).toBeLessThan(idx(/DELETE FROM "?message"?/i))
+    expect(idx(/DELETE FROM "?message"?/i)).toBeLessThan(idx(/DELETE FROM "?thread"?/i))
+  })
+
   test('synthesizes zero-cache publication metadata result sets', async () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('sqlite_master')) {

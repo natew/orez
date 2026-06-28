@@ -19,6 +19,7 @@
 
 import { PassThrough } from 'stream'
 
+import { expandDelete, FkCascadeRegistry, type FkDeleteAction } from '../../fk-cascade.js'
 import { Mutex } from '../../mutex.js'
 import {
   handleStartReplication,
@@ -686,6 +687,106 @@ function fakeResult(
   return result
 }
 
+// ── FK cascade (pg→sqlite compat) ──────────────────────────────────────────
+// the shim strips every FK from DDL (PGlite rejects orez's cross-schema FKs),
+// so a bare DELETE would orphan children. capture the cascade/set-null edges
+// from CREATE TABLE (regex, to keep a SQL parser out of the browser bundle) and
+// expand each parent DELETE into leaves-first child statements. PGlite is real
+// postgres, so the child DELETE/UPDATEs fire the real change-tracking triggers
+// and replicate exactly like any other write. shares fk-cascade's expandDelete
+// with the DO backend; only edge capture differs (regex here, AST there).
+const fkRegistries = new WeakMap<object, FkCascadeRegistry>()
+
+function fkRegistryFor(pglite: object): FkCascadeRegistry {
+  let registry = fkRegistries.get(pglite)
+  if (!registry) {
+    registry = new FkCascadeRegistry()
+    fkRegistries.set(pglite, registry)
+  }
+  return registry
+}
+
+const FK_DELETE_ACTIONS: Record<string, FkDeleteAction | undefined> = {
+  cascade: 'cascade',
+  'set null': 'set-null',
+}
+
+// table-level FK: [CONSTRAINT name] FOREIGN KEY (cols) REFERENCES tbl (cols) [ON DELETE action]
+const FK_CONSTRAINT_RE =
+  /(?:CONSTRAINT\s+(?:"[^"]+"|\w+)\s+)?FOREIGN\s+KEY\s*\(([^)]*)\)\s*REFERENCES\s+("[^"]+"(?:\s*\.\s*"[^"]+")?|[\w.]+)\s*\(([^)]*)\)(?:\s+ON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))?/gi
+
+const CREATE_TABLE_NAME_RE =
+  /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?("[^"]+"(?:\s*\.\s*"[^"]+")?|[\w.]+)/i
+
+const ALTER_TABLE_NAME_RE =
+  /ALTER\s+TABLE\s+(?:ONLY\s+)?("[^"]+"(?:\s*\.\s*"[^"]+")?|[\w.]+)/i
+
+const DELETE_TARGET_RE =
+  /^\s*DELETE\s+FROM\s+("[^"]+"(?:\s*\.\s*"[^"]+")?|[\w.]+)\s*(?:WHERE\s+([\s\S]+?))?\s*(?:RETURNING\b[\s\S]*)?;?\s*$/i
+
+// normalize `"public"."t"`, `public.t`, `"t"`, or `t` to one canonical quoted
+// key (schema defaults to public) — used as both the registry key and the
+// emitted SQL identifier, so capture and lookup always agree.
+function canonicalTable(raw: string): string {
+  const parts = raw.split('.').map((p) => p.trim().replace(/^"|"$/g, ''))
+  const [schema, table] = parts.length >= 2 ? parts : ['public', parts[0]]
+  return `"${schema}"."${table}"`
+}
+
+function canonicalColumns(raw: string): string[] {
+  return raw
+    .split(',')
+    .map((c) => c.trim().replace(/^"|"$/g, ''))
+    .filter(Boolean)
+    .map((c) => `"${c}"`)
+}
+
+// capture FK edges from CREATE TABLE / ALTER TABLE ADD CONSTRAINT statements
+// BEFORE the strip removes them. splits first so a multi-statement migration
+// batch associates each FK with its own table (drizzle emits FKs as a separate
+// `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY …`, not inline in CREATE TABLE).
+function captureForeignKeys(sql: string, registry: FkCascadeRegistry): void {
+  for (const stmt of splitStatements(sql)) {
+    if (!/FOREIGN\s+KEY/i.test(stmt)) continue
+    // the child (referencing) table is the CREATE TABLE / ALTER TABLE target.
+    const tableMatch = /ALTER\s+TABLE/i.test(stmt)
+      ? ALTER_TABLE_NAME_RE.exec(stmt)
+      : CREATE_TABLE_NAME_RE.exec(stmt)
+    if (!tableMatch) continue
+    const childTable = canonicalTable(tableMatch[1])
+    FK_CONSTRAINT_RE.lastIndex = 0
+    let fk: RegExpExecArray | null
+    while ((fk = FK_CONSTRAINT_RE.exec(stmt))) {
+      const action =
+        FK_DELETE_ACTIONS[(fk[4] ?? 'no action').toLowerCase().replace(/\s+/g, ' ')]
+      if (!action) continue
+      const columns = canonicalColumns(fk[1])
+      const refColumns = canonicalColumns(fk[3])
+      if (!columns.length || columns.length !== refColumns.length) continue
+      registry.add(canonicalTable(fk[2]), {
+        table: childTable,
+        columns,
+        refColumns,
+        onDelete: action,
+      })
+    }
+  }
+}
+
+// if `sql` is a single DELETE on a table with cascade/set-null children, return
+// the leaves-first child statements to run before it; otherwise null.
+function expandForeignKeyDelete(
+  sql: string,
+  registry: FkCascadeRegistry
+): string[] | null {
+  if (!registry.hasEdges) return null
+  const match = DELETE_TARGET_RE.exec(sql)
+  if (!match) return null
+  const target = canonicalTable(match[1])
+  if (!registry.childrenOf(target).length) return null
+  return expandDelete(target, match[2]?.trim() ?? null, registry)
+}
+
 async function executeQuery(
   executor: {
     query<T>(sql: string, params?: unknown[]): Promise<Results<T>>
@@ -705,6 +806,11 @@ async function executeQuery(
   // and browser single-process mode doesn't need FK enforcement.
   // covers CREATE TABLE inline FKs and ALTER TABLE ADD CONSTRAINT FKs.
   if (/FOREIGN\s+KEY/i.test(text)) {
+    // capture the cascade/set-null edges before the strip discards them
+    // (both CREATE TABLE inline FKs and ALTER TABLE ADD CONSTRAINT FKs).
+    if (pglite) {
+      captureForeignKeys(text, fkRegistryFor(pglite))
+    }
     if (/CREATE\s+TABLE/i.test(text)) {
       text = text.replace(
         /,?\s*(?:CONSTRAINT\s+\w+\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+[^,(]+(?:\s*\([^)]*\))?(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))*(?:\s+DEFERRABLE[^,)]*)?/gi,
@@ -722,6 +828,19 @@ async function executeQuery(
   const isMulti = hasMultipleStatements(text)
 
   if (!isMulti) {
+    // restore ON DELETE CASCADE/SET NULL: run the leaves-first child statements
+    // before the parent delete, sharing its params (each child embeds the full
+    // parent WHERE). real PG triggers capture them, so they replicate.
+    if (pglite) {
+      const children = expandForeignKeyDelete(text, fkRegistryFor(pglite))
+      if (children) {
+        for (const child of children) {
+          await (params.length > 0
+            ? executor.query(child, params)
+            : executor.query(child))
+        }
+      }
+    }
     // use normal PGlite query — rawQuery breaks transaction state
     const r = await (params.length > 0
       ? executor.query(text, params)
@@ -1156,6 +1275,11 @@ export function createPostgresShim(pglite: PGlite, opts?: PostgresShimOptions) {
 
     // strip FK constraints (see executeQuery for why)
     if (/FOREIGN\s+KEY/i.test(queryString)) {
+      // capture cascade/set-null edges before the strip; single-statement DML
+      // delegates to executeQuery below (which also captures + expands), but a
+      // multi-statement DDL batch runs split here, so capture its FKs now
+      // (covers both CREATE TABLE inline FKs and ALTER TABLE ADD CONSTRAINT FKs).
+      captureForeignKeys(queryString, fkRegistryFor(pglite))
       if (/CREATE\s+TABLE/i.test(queryString)) {
         queryString = queryString.replace(
           /,?\s*(?:CONSTRAINT\s+\w+\s+)?FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+[^,(]+(?:\s*\([^)]*\))?(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION))*(?:\s+DEFERRABLE[^,)]*)?/gi,

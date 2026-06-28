@@ -3,6 +3,13 @@ import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
 import { TX_MANIFEST_DDL, TX_MANIFEST_TABLE } from './cf-do/tx-journal.js'
 import { RETURNING_INTERNAL_PREFIX } from './do-sql-tracking.js'
+import {
+  expandDelete,
+  FkCascadeRegistry,
+  recordAlterTableForeignKeys,
+  recordCreateTableForeignKeys,
+  type FkChild,
+} from './fk-cascade.js'
 import { Mutex } from './mutex.js'
 import { signalReplicationChange } from './replication/handler.js'
 import {
@@ -979,6 +986,15 @@ interface RewrittenStatement {
   skipIfColumnExists?: { table: string; column: string }
   skipIfColumnMissing?: { table: string; column: string }
   skipIfTableEmpty?: { table: string }
+  // FK cascade: child DELETE/UPDATE statements to execute (leaves-first) BEFORE
+  // this parent DELETE, restoring ON DELETE CASCADE/SET NULL semantics the store
+  // lost when FKs were stripped. each is a normal RewrittenStatement (already
+  // flattened + change-tracked) run as its own bound exec, so the shared params
+  // bind correctly and the deletion replicates like any other write.
+  cascadeStatements?: RewrittenStatement[]
+  // set when a CREATE TABLE contributed FK edges — triggers metadata persist +
+  // rewrite-cache invalidation so later DELETEs pick up the cascade.
+  fkEdges?: boolean
 }
 
 interface RewriteContext {
@@ -987,6 +1003,9 @@ interface RewriteContext {
   arrayParamNumbers?: Set<number>
   jsonParamNumbers?: Set<number>
   epochMillisParamNumbers?: Set<number>
+  fkRegistry?: FkCascadeRegistry
+  // set while rewriting expanded cascade children, so they don't re-expand.
+  suppressFkCascade?: boolean
 }
 
 const SKIPPED_NODE_TYPES = new Set([
@@ -1135,6 +1154,15 @@ function flattenSchemaName(schema: string, name: string): string {
   if (schema === '_orez') return `_orez__${name}`
   if (schema === '_zero') return `_zero_${name}`
   return `${schema}_${name}`
+}
+
+// canonical FK-registry key for a table: schema-qualified PG name (un-flattened),
+// quoted. used for BOTH capture (CREATE TABLE child + parent) and lookup (DELETE
+// target), so they always agree. expansion emits PG SQL under these names and
+// each child re-enters rewriteParsedStatement, which flattens + tracks it exactly
+// like a normal delete — so cascade tracking is identical to hand-written deletes.
+function fkTableKey(ref: { schemaname?: string; relname: string }): string {
+  return `${quoteIdentifier(ref.schemaname ?? 'public')}.${quoteIdentifier(ref.relname)}`
 }
 
 function flattenRangeVar(rangeVar: any): string {
@@ -3450,6 +3478,33 @@ function deparseExpressionSQL(version: number, expr: any): string | null {
   return sql.slice(selectIndex + 'SELECT'.length).trim()
 }
 
+// expand a DELETE on `target` into its cascade child statements (leaves-first).
+// expansion emits PG SQL under un-flattened names, then each child re-enters
+// rewriteParsedStatement (suppressFkCascade so it doesn't re-expand) — so each
+// returns a normal RewrittenStatement, flattened + change-tracked identically to
+// a hand-written delete. `whereClause` is the parent's already-normalized clause
+// (deparsed back to SQL, $N params intact); its $N bind to the parent's params
+// at execute time. unconditional deletes (no WHERE) cascade every child row.
+function buildCascadeStatements(
+  version: number,
+  target: string,
+  whereClause: any,
+  context: RewriteContext
+): RewrittenStatement[] {
+  const whereSql = whereClause ? deparseExpressionSQL(version, whereClause) : null
+  const childContext: RewriteContext = { ...context, suppressFkCascade: true }
+  const out: RewrittenStatement[] = []
+  for (const childSql of expandDelete(target, whereSql, context.fkRegistry!)) {
+    for (const raw of parseSync(childSql).stmts) {
+      const rewritten = rewriteParsedStatement(version, raw, childContext)
+      if (Array.isArray(rewritten))
+        out.push(...rewritten.filter((s): s is RewrittenStatement => !!s))
+      else if (rewritten) out.push(rewritten)
+    }
+  }
+  return out
+}
+
 function parseExpressionTarget(source: string): { version: number; expr: any } | null {
   try {
     const parsed = parseSync(`SELECT ${source}`)
@@ -3824,7 +3879,14 @@ function rewriteParsedStatement(
   let changeTracking: ChangeTrackingMetadata | undefined
   let writeTable: PublicationTableRef | null = null
   let serialTriggers: RewrittenStatement[] = []
+  let cascadeStatements: RewrittenStatement[] | undefined
+  let fkEdgesAdded = false
   if (nodeType === 'AlterTableStmt') {
+    // capture FK cascade/set-null edges before normalizeAlterTable drops the
+    // ADD CONSTRAINT — drizzle emits FKs as a separate ALTER, not inline.
+    if (context?.fkRegistry && !context.suppressFkCascade) {
+      fkEdgesAdded = recordAlterTableForeignKeys(node, context.fkRegistry, fkTableKey) > 0
+    }
     alterMetadata = normalizeAlterTable(node)
     if (!node.cmds?.length) {
       const statements: RewrittenStatement[] = []
@@ -3840,6 +3902,12 @@ function rewriteParsedStatement(
     }
   } else if (nodeType === 'CreateStmt') {
     schemaColumns = schemaColumnsForCreateTable(node)
+    // capture FK cascade/set-null edges BEFORE normalizeCreateTable drops the
+    // CONSTR_FOREIGN nodes. flattened keys (fkTableKey) match the DELETE lookup.
+    if (context?.fkRegistry) {
+      fkEdgesAdded =
+        recordCreateTableForeignKeys(node, context.fkRegistry, fkTableKey) > 0
+    }
     // capture serial columns before normalizeCreateTable rewrites the type to integer
     const serialCols = serialColumnNames(node)
     normalizeCreateTable(node)
@@ -3868,6 +3936,20 @@ function rewriteParsedStatement(
   } else if (nodeType === 'DeleteStmt') {
     const table = publicationTableRefForRangeVar(node.relation)
     writeTable = table
+    // build the cascade from the ORIGINAL delete (before normalizeDelete mutates
+    // node), so each child re-enters the rewrite and is flattened + translated
+    // uniformly. suppressFkCascade guards against re-expanding the children.
+    if (context?.fkRegistry?.hasEdges && !context.suppressFkCascade && node.relation) {
+      const cascadeTarget = fkTableKey(node.relation)
+      if (context.fkRegistry.childrenOf(cascadeTarget).length) {
+        cascadeStatements = buildCascadeStatements(
+          version,
+          cascadeTarget,
+          node.whereClause,
+          context
+        )
+      }
+    }
     skipIfTableEmpty = normalizeDelete(node, context)
     changeTracking = changeTrackingForDML(version, stmt, nodeType, table, 'DELETE')
   } else if (nodeType === 'SelectStmt') {
@@ -3976,6 +4058,8 @@ function rewriteParsedStatement(
     ...(skipIfColumnExists ? { skipIfColumnExists } : null),
     ...(skipIfColumnMissing ? { skipIfColumnMissing } : null),
     ...(skipIfTableEmpty ? { skipIfTableEmpty } : null),
+    ...(cascadeStatements?.length ? { cascadeStatements } : null),
+    ...(fkEdgesAdded ? { fkEdges: true } : null),
   }
   return serialTriggers.length ? [mainStatement, ...serialTriggers] : mainStatement
 }
@@ -5233,6 +5317,7 @@ export class DoBackend {
     this.schemaMetadata = new Map()
     this.publications = new Map()
     this.rewriteCache = new Map()
+    this.fkRegistry = new FkCascadeRegistry()
   }
 
   get waitReady(): Promise<void> {
@@ -5344,6 +5429,8 @@ export class DoBackend {
         } else if (kind === 'publication') {
           const publication = this.publicationFromJSON(value)
           if (publication) this.publications.set(key, publication)
+        } else if (kind === 'fk_edge') {
+          this.fkRegistry.add(key, JSON.parse(value) as FkChild)
         }
       }
       if (await this.repairShardMetadataPublications()) {
@@ -5428,6 +5515,16 @@ export class DoBackend {
       }
       for (const [name, publication] of this.publications) {
         rows.push(['publication', name, '', this.publicationToJSON(publication)])
+      }
+      // FK cascade edges — durable so the registry survives DO eviction (the
+      // app tables persist and CREATE TABLE never re-runs to repopulate it).
+      for (const [parentKey, child] of this.fkRegistry.entries()) {
+        rows.push([
+          'fk_edge',
+          parentKey,
+          `${child.table}|${child.columns.join(',')}`,
+          JSON.stringify(child),
+        ])
       }
       if (rows.length === 0) return
       // single multi-row INSERT OR REPLACE per chunk. previously this was one
@@ -5824,6 +5921,13 @@ export class DoBackend {
         this.applyPublicationChange(change)
         changed = true
       }
+      if (statement.fkEdges) {
+        // edges were already added to this.fkRegistry at rewrite time; persist
+        // them and drop cached rewrites so DELETEs issued before this CREATE
+        // TABLE now expand their cascade.
+        changed = true
+        this.rewriteCache.clear()
+      }
     }
     if (changed) {
       this.publicationTableInfoCache = null
@@ -6161,6 +6265,9 @@ export class DoBackend {
         statement,
         bound.params
       )
+      if (statement?.cascadeStatements?.length) {
+        await this.runCascadeStatements(statement.cascadeStatements, portal)
+      }
       const result = await this.doExecResult(
         exec.sql,
         exec.params,
@@ -6272,6 +6379,9 @@ export class DoBackend {
       ).rows
     }
     if (statement) await this.snapshotTransactionWrite(statement)
+    if (statement?.cascadeStatements?.length) {
+      await this.runCascadeStatements(statement.cascadeStatements, {})
+    }
     const tracking = statement ? this.trackingForStatement(statement) : undefined
     const result = await this.doExecResult(
       tracking?.returningSQL ?? rewritten,
@@ -6393,6 +6503,16 @@ export class DoBackend {
       statement,
       execBound.params
     )
+    if (statement?.cascadeStatements?.length) {
+      await this.runCascadeStatements(statement.cascadeStatements, {
+        params,
+        arrayParamNumbers,
+        jsonParamNumbers,
+        timestampParamNumbers,
+        epochMillisParamNumbers,
+        booleanParamNumbers,
+      })
+    }
     const result = await this.doExecResult(
       exec.sql,
       exec.params,
@@ -6441,6 +6561,7 @@ export class DoBackend {
       arrayParamNumbers,
       jsonParamNumbers,
       epochMillisParamNumbers,
+      fkRegistry: this.fkRegistry,
     })
     if (this.canCacheRewrite(statements)) {
       this.rememberRewrite(key, statements)
@@ -6484,6 +6605,7 @@ export class DoBackend {
       arrayParamNumbers,
       jsonParamNumbers,
       epochMillisParamNumbers,
+      fkRegistry: this.fkRegistry,
     })
   }
 
@@ -6726,6 +6848,9 @@ export class DoBackend {
     if (await this.shouldSkipStatement(statement)) return { rows: [], columns: [] }
     if (statement.isDDL) this.publicationTableInfoCache = null
     await this.snapshotTransactionWrite(statement)
+    if (statement.cascadeStatements?.length) {
+      await this.runCascadeStatements(statement.cascadeStatements, {})
+    }
     const tracking = this.trackingForStatement(statement)
     const exec = await this.materializePublishedSchemaFunctions(
       tracking?.returningSQL ?? statement.sql,
@@ -6746,6 +6871,45 @@ export class DoBackend {
       result = await this.executeRewrittenStatement(statement)
     }
     return result
+  }
+
+  // run a parent DELETE's cascade children (leaves-first) as their own bound
+  // execs BEFORE the parent. each child's returningSQL embeds the full parent
+  // WHERE, so the SAME params bind unchanged (sqliteBoundSQL maps $N
+  // positionally); the tracking request captures every deletion so it
+  // replicates like any other write. publication gating matches the parent:
+  // unpublished (e.g. private) child tables cascade in the store but don't
+  // stream — correct, since clients don't see those rows anyway.
+  private async runCascadeStatements(
+    cascades: RewrittenStatement[],
+    bind: {
+      params?: any[]
+      arrayParamNumbers?: Set<number>
+      jsonParamNumbers?: Set<number>
+      timestampParamNumbers?: Set<number>
+      epochMillisParamNumbers?: Set<number>
+      booleanParamNumbers?: Set<number>
+    }
+  ): Promise<void> {
+    for (const child of cascades) {
+      if (await this.shouldSkipStatement(child)) continue
+      await this.snapshotTransactionWrite(child)
+      const gated = this.trackingForStatement(child)
+      const bound = this.sqliteBoundSQL(
+        gated?.returningSQL ?? child.sql,
+        bind.params,
+        bind.arrayParamNumbers,
+        bind.jsonParamNumbers,
+        bind.timestampParamNumbers,
+        bind.epochMillisParamNumbers,
+        bind.booleanParamNumbers
+      )
+      await this.doExecResult(
+        bound.sql,
+        bound.params,
+        gated ? this.trackingRequest(gated) : undefined
+      )
+    }
   }
 
   private async doBatchExec(statements: (RewrittenStatement | string)[]): Promise<void> {

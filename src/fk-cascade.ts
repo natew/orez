@@ -23,9 +23,10 @@
  * this module is pure: it operates on already-parsed libpg_query CREATE TABLE
  * AST nodes (for edge capture) and plain SQL strings (for expansion). the
  * caller owns naming — it passes a `resolveTable` that produces the canonical
- * SQL identifier for a table in its namespace (schema-qualified for PGlite,
- * flattened for the DO backend). that identifier doubles as the registry key,
- * so capture and expansion stay consistent within a backend.
+ * SQL identifier for a table (schema-qualified PG name). that identifier doubles
+ * as the registry key, so capture and expansion stay consistent. the expansion
+ * emits PG SQL under those names; the DO backend re-runs each child through its
+ * normal rewrite (flatten + change-track), while PGlite runs them directly.
  */
 
 /** the ON DELETE actions we can faithfully expand. restrict/no-action/set-default are left alone (no enforcement, matching today). */
@@ -50,12 +51,25 @@ export class FkCascadeRegistry {
 
   add(parentKey: string, child: FkChild): void {
     const list = this.byParent.get(parentKey)
-    if (list) list.push(child)
-    else this.byParent.set(parentKey, [child])
+    if (!list) {
+      this.byParent.set(parentKey, [child])
+      return
+    }
+    // dedupe: the same DDL can be re-applied (CREATE TABLE IF NOT EXISTS, a boot
+    // load followed by a re-sent migration) — a duplicate edge doubles the cascade.
+    if (list.some((existing) => sameEdge(existing, child))) return
+    list.push(child)
   }
 
   childrenOf(parentKey: string): readonly FkChild[] {
     return this.byParent.get(parentKey) ?? EMPTY
+  }
+
+  /** every (parentKey, child) edge — for persisting the registry to durable storage. */
+  *entries(): IterableIterator<readonly [string, FkChild]> {
+    for (const [parentKey, children] of this.byParent) {
+      for (const child of children) yield [parentKey, child]
+    }
   }
 
   /** true once any cascade/set-null edge has been captured — lets backends skip the DELETE parse on FK-free schemas. */
@@ -69,6 +83,16 @@ export class FkCascadeRegistry {
 }
 
 const EMPTY: readonly FkChild[] = Object.freeze([])
+
+function sameEdge(a: FkChild, b: FkChild): boolean {
+  return (
+    a.table === b.table &&
+    a.onDelete === b.onDelete &&
+    a.columns.length === b.columns.length &&
+    a.columns.every((c, i) => c === b.columns[i]) &&
+    a.refColumns.every((c, i) => c === b.refColumns[i])
+  )
+}
 
 export interface TableRef {
   schemaname?: string
@@ -109,10 +133,11 @@ export function recordCreateTableForeignKeys(
   createStmt: { relation?: TableRef; tableElts?: unknown[] } | undefined,
   registry: FkCascadeRegistry,
   resolveTable: ResolveTable
-): void {
+): number {
   const relation = createStmt?.relation
-  if (!relation?.relname) return
+  if (!relation?.relname) return 0
   const childTable = resolveTable(relation)
+  let recorded = 0
   for (const elt of createStmt?.tableElts ?? []) {
     const node = elt as {
       Constraint?: ForeignKeyConstraint
@@ -120,13 +145,17 @@ export function recordCreateTableForeignKeys(
     }
     // table-level: FOREIGN KEY (a, b) REFERENCES parent (x, y)
     if (node.Constraint?.contype === 'CONSTR_FOREIGN') {
-      addForeignKey(
-        registry,
-        childTable,
-        node.Constraint,
-        stringValues(node.Constraint.fk_attrs),
-        resolveTable
-      )
+      if (
+        addForeignKey(
+          registry,
+          childTable,
+          node.Constraint,
+          stringValues(node.Constraint.fk_attrs),
+          resolveTable
+        )
+      ) {
+        recorded++
+      }
       continue
     }
     // inline column: col … REFERENCES parent (x)
@@ -135,11 +164,52 @@ export function recordCreateTableForeignKeys(
       for (const c of col.constraints) {
         const constraint = (c as { Constraint?: ForeignKeyConstraint }).Constraint
         if (constraint?.contype === 'CONSTR_FOREIGN') {
-          addForeignKey(registry, childTable, constraint, [col.colname], resolveTable)
+          if (
+            addForeignKey(registry, childTable, constraint, [col.colname], resolveTable)
+          ) {
+            recorded++
+          }
         }
       }
     }
   }
+  return recorded
+}
+
+/**
+ * capture cascade/set-null FK edges from an `ALTER TABLE … ADD CONSTRAINT …
+ * FOREIGN KEY …` statement (drizzle's standard FK form — it emits FKs as a
+ * separate ALTER, not inline in CREATE TABLE). call at the site the backend
+ * drops the constraint. returns the number of edges recorded.
+ */
+export function recordAlterTableForeignKeys(
+  alterStmt: { relation?: TableRef; cmds?: unknown[] } | undefined,
+  registry: FkCascadeRegistry,
+  resolveTable: ResolveTable
+): number {
+  const relation = alterStmt?.relation
+  if (!relation?.relname) return 0
+  const childTable = resolveTable(relation)
+  let recorded = 0
+  for (const cmd of alterStmt?.cmds ?? []) {
+    const command = (cmd as { AlterTableCmd?: { subtype?: string; def?: unknown } })
+      ?.AlterTableCmd
+    if (command?.subtype !== 'AT_AddConstraint') continue
+    const constraint = (command.def as { Constraint?: ForeignKeyConstraint })?.Constraint
+    if (constraint?.contype !== 'CONSTR_FOREIGN') continue
+    if (
+      addForeignKey(
+        registry,
+        childTable,
+        constraint,
+        stringValues(constraint.fk_attrs),
+        resolveTable
+      )
+    ) {
+      recorded++
+    }
+  }
+  return recorded
 }
 
 interface ForeignKeyConstraint {
@@ -156,21 +226,22 @@ function addForeignKey(
   constraint: ForeignKeyConstraint,
   childColumns: string[],
   resolveTable: ResolveTable
-): void {
+): boolean {
   const onDelete = DELETE_ACTION[constraint.fk_del_action ?? 'a']
-  if (!onDelete) return // restrict / no-action / set-default: nothing to expand
+  if (!onDelete) return false // restrict / no-action / set-default: nothing to expand
   const parent = constraint.pktable
-  if (!parent?.relname) return
+  if (!parent?.relname) return false
   const refColumns = stringValues(constraint.pk_attrs)
   // need an explicit referenced column to build the IN-subquery; drizzle always
   // emits one. without it we can't faithfully expand, so skip rather than guess.
-  if (childColumns.length === 0 || refColumns.length !== childColumns.length) return
+  if (childColumns.length === 0 || refColumns.length !== childColumns.length) return false
   registry.add(resolveTable(parent), {
     table: childTable,
     columns: childColumns.map(quoteIdent),
     refColumns: refColumns.map(quoteIdent),
     onDelete,
   })
+  return true
 }
 
 function columnTuple(columns: string[]): string {
