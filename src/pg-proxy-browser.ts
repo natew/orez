@@ -1280,6 +1280,9 @@ export async function createBrowserProxy(
               get closed() {
                 return connClosed || aborted
               },
+              close() {
+                abortPreviousReplication?.()
+              },
             }
             abortPreviousReplication = () => {
               aborted = true
@@ -2160,6 +2163,9 @@ async function handleReplicationMessageBrowser(
       },
       get closed() {
         return isClosed() || aborted
+      },
+      close() {
+        abort()
       },
     }
 

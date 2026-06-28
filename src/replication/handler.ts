@@ -40,6 +40,7 @@ import type { PGlite } from '@electric-sql/pglite'
 const UNSUPPORTED_TYPES = new Set(['tsvector', 'tsquery', 'USER-DEFINED'])
 
 export const REPLICATION_BATCH_SIZE = 1000
+export const DEFAULT_UNCONFIRMED_RECONNECT_MS = 60_000
 
 // pg data_type string → wire protocol oid mapping
 const PG_DATA_TYPE_OIDS: Record<string, number> = {
@@ -67,6 +68,7 @@ const PG_DATA_TYPE_OIDS: Record<string, number> = {
 export interface ReplicationWriter {
   write(data: Uint8Array): void
   readonly closed?: boolean
+  close?(): void
 }
 
 /**
@@ -198,6 +200,13 @@ export function signalReplicationChange() {
 let cachedTableKeyColumns: Map<string, Set<string>> | null = null
 let cachedExcludedColumns: Map<string, Set<string>> | null = null
 let cachedColumnTypeOids: Map<string, Map<string, number>> | null = null
+
+function unconfirmedReconnectMs(): number {
+  const raw = process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS
+  if (!raw) return DEFAULT_UNCONFIRMED_RECONNECT_MS
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_UNCONFIRMED_RECONNECT_MS
+}
 
 /** reset module state (for tests) */
 export function resetReplicationState(): void {
@@ -760,6 +769,9 @@ export async function handleStartReplication(
   let tryAcquireFailures = 0
   let lastShardRescan = -shardRescanIntervalMs
   let hasStreamedOnce = false
+  let oldestUnconfirmedAt = 0
+  let oldestUnconfirmedLsn = 0n
+  let newestUnconfirmedLsn = 0n
 
   // promise-based wakeup mechanism.
   // signalPending captures signals that arrive while the handler is
@@ -795,12 +807,42 @@ export async function handleStartReplication(
     try {
       const purged = await confirmStreamedBatches(db, target)
       processedConfirmLsn = target
+      if (newestUnconfirmedLsn > 0n && target >= newestUnconfirmedLsn) {
+        oldestUnconfirmedAt = 0
+        oldestUnconfirmedLsn = 0n
+        newestUnconfirmedLsn = 0n
+      } else if (oldestUnconfirmedLsn > 0n && target >= oldestUnconfirmedLsn) {
+        oldestUnconfirmedAt = performance.now()
+        oldestUnconfirmedLsn = target + 1n
+      }
       if (purged > 0) {
         log.debug.proxy(`purged ${purged} confirmed changes`)
       }
     } finally {
       mutex.release()
     }
+  }
+  const markBatchAwaitingConfirmation = (batchLsn: bigint) => {
+    if (oldestUnconfirmedAt === 0) {
+      oldestUnconfirmedAt = performance.now()
+      oldestUnconfirmedLsn = batchLsn
+    }
+    if (batchLsn > newestUnconfirmedLsn) {
+      newestUnconfirmedLsn = batchLsn
+    }
+  }
+  const staleUnconfirmedBatchTimedOut = () => {
+    if (oldestUnconfirmedAt === 0) return false
+    const ageMs = performance.now() - oldestUnconfirmedAt
+    const timeoutMs = unconfirmedReconnectMs()
+    if (ageMs < timeoutMs) return false
+
+    log.repl(
+      `unconfirmed streamed batch stale for ${ageMs.toFixed(0)}ms; closing replication stream for reconnect`
+    )
+    running = false
+    writer.close?.()
+    return true
   }
 
   // register direct wakeup so the proxy can signal us immediately
@@ -892,6 +934,9 @@ export async function handleStartReplication(
         }
 
         await flushConfirmedBatches()
+        if (staleUnconfirmedBatchTimedOut()) {
+          break
+        }
 
         // try to acquire mutex without blocking proxy connections.
         // post-sync: short backoff since writes signal us directly.
@@ -1029,6 +1074,7 @@ export async function handleStartReplication(
             excludedColumns,
             columnTypeOids
           )
+          markBatchAwaitingConfirmation(batchLsn)
           lastWatermark = batchEnd
           lastStreamedWatermark = batchEnd
           log.debug.repl(`streamed ok, watermark=${batchEnd}`)

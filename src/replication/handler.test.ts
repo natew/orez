@@ -345,6 +345,60 @@ describe('handleStartReplication', () => {
     expect(insIdx).toBeLessThan(comIdx)
   })
 
+  it('closes a stale unconfirmed stream so zero-cache can reconnect', async () => {
+    const prevTimeout = process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS
+    process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS = '100'
+    const written: Uint8Array[] = []
+    let closed = false
+    const writer: ReplicationWriter = {
+      write(data: Uint8Array) {
+        if (!closed) written.push(new Uint8Array(data))
+      },
+      get closed() {
+        return closed
+      },
+      close() {
+        closed = true
+      },
+    }
+
+    try {
+      replicationPromise = handleStartReplication(
+        'START_REPLICATION SLOT "s" LOGICAL 0/0',
+        writer,
+        db,
+        testMutex
+      )
+
+      await new Promise((r) => setTimeout(r, 100))
+      await db.exec(`INSERT INTO public.items (name, value) VALUES ('stale', 123)`)
+      signalReplicationChange()
+
+      const streamedDeadline = Date.now() + 3000
+      while (Date.now() < streamedDeadline) {
+        const types = written.flatMap(extractPayloadTypes)
+        if (types.includes(0x43)) break
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      expect(written.flatMap(extractPayloadTypes)).toContain(0x43)
+
+      const closeDeadline = Date.now() + 3000
+      while (!closed && Date.now() < closeDeadline) {
+        signalReplicationChange()
+        await new Promise((r) => setTimeout(r, 25))
+      }
+
+      expect(closed).toBe(true)
+      await replicationPromise
+    } finally {
+      if (prevTimeout === undefined) {
+        delete process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS
+      } else {
+        process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS = prevTimeout
+      }
+    }
+  })
+
   it('writes one CopyData frame per socket chunk', async () => {
     const { written, writer } = createWriter()
 

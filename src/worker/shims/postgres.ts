@@ -1111,6 +1111,11 @@ function createReplicationPendingQuery(
         get closed() {
           return destroyed || writable.destroyed || !!db.closed
         },
+        close() {
+          destroyed = true
+          readable.end()
+          writable.end()
+        },
       },
       db as PGlite,
       mutex

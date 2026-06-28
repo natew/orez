@@ -1123,6 +1123,9 @@ async function handleReplicationMessage(
       get closed() {
         return socket.destroyed || socket.writableEnded || aborted
       },
+      close() {
+        abort()
+      },
     }
 
     const abort = () => {
