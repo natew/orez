@@ -466,28 +466,24 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   }
 
   // clean up stale lock files from previous crash. if lock files were present,
-  // the previous shutdown was unclean and the replica, change DB, and CVR DB can
-  // disagree about the same client/version history, so rebuild all zero state.
+  // the previous shutdown was unclean and the replica file may not be safe to
+  // reuse, but wiping CVR/CDB here evicts every persisted client with
+  // ClientNotFound. rebuild only the replica; true CDC/CVR corruption is handled
+  // by the crash classifiers below.
   const hadStaleLocks = cleanupStaleLockFiles(config)
   if (hadStaleLocks) {
-    log.debug.orez('unclean shutdown detected, resetting zero state')
-    await recoverZeroState({
-      config,
-      instances,
-      zeroCacheProcess: null,
-    })
+    log.debug.orez('unclean shutdown detected, rebuilding replica (CVR preserved)')
+    cleanupStaleReplica(config)
+    resetReplicationState()
   }
   if (!config.skipZeroCache) {
     const replicaResetReason = getZeroReplicaStartupResetReason(getReplicaDir(config))
     if (replicaResetReason) {
       log.orez(
-        `detected invalid zero replica (${replicaResetReason}), resetting zero state`
+        `detected invalid zero replica (${replicaResetReason}), rebuilding replica (CVR preserved)`
       )
-      await recoverZeroState({
-        config,
-        instances,
-        zeroCacheProcess: null,
-      })
+      cleanupStaleReplica(config)
+      resetReplicationState()
     }
   }
 
@@ -548,7 +544,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       plainRestarts: 0,
       maxRestarts: 3,
       didRecoverState: false,
-      didFullReset: false,
+      didCacheReset: false,
       canWasmFallback: sqliteMode === 'native' && !config.disableWasmSqlite,
       didWasmFallback: false,
       nativeBinaryMissing: false,
@@ -598,12 +594,13 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
           continue
         }
 
-        if (action === 'full-reset') {
-          startupRetry.didFullReset = true
+        if (action === 'cache-reset') {
+          startupRetry.didCacheReset = true
           log.orez(
-            'zero-cache still crashing after restarts — resetting zero state and retrying once more...'
+            'zero-cache still crashing after restarts — rebuilding replica and retrying once more (CVR preserved)...'
           )
-          await recoverZeroState({ config, instances, zeroCacheProcess })
+          cleanupStaleReplica(config)
+          resetReplicationState()
           continue
         }
 
@@ -620,7 +617,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     if (
       startupRetry.plainRestarts > 0 ||
       startupRetry.didRecoverState ||
-      startupRetry.didFullReset ||
+      startupRetry.didCacheReset ||
       startupRetry.didWasmFallback
     ) {
       log.orez('zero-cache started after recovery')
@@ -1013,19 +1010,17 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
           installCrashWatcher()
         })
         .catch((err) => {
-          // if a plain restart can't bring it back, the local state may be
-          // worse than the tail suggested — fall back to a full reset once.
           log.orez(
-            `zero-cache restart recovery failed (${err?.message || err}) — falling back to full reset`
+            `zero-cache restart recovery failed (${err?.message || err}) — rebuilding replica (CVR preserved)`
           )
-          resetZeroState('full')
+          resetZeroState('cache-only')
             .then(() => {
-              log.orez('zero-cache full-reset recovery successful')
+              log.orez('zero-cache replica rebuild recovery successful')
               installCrashWatcher()
             })
             .catch((resetErr) => {
               log.orez(
-                `zero-cache full-reset recovery failed: ${resetErr?.message || resetErr}`
+                `zero-cache replica rebuild recovery failed: ${resetErr?.message || resetErr}`
               )
             })
         })
@@ -1111,15 +1106,15 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         installCrashWatcher()
       } catch (err: any) {
         log.orez(
-          `zero-cache HTTP liveness restart failed (${err?.message || err}) — falling back to full reset`
+          `zero-cache HTTP liveness restart failed (${err?.message || err}) — rebuilding replica (CVR preserved)`
         )
         try {
-          await resetZeroState('full')
-          log.orez('zero-cache HTTP liveness full-reset recovery successful')
+          await resetZeroState('cache-only')
+          log.orez('zero-cache HTTP liveness replica rebuild recovery successful')
           installCrashWatcher()
         } catch (resetErr: any) {
           log.orez(
-            `zero-cache HTTP liveness full-reset recovery failed: ${
+            `zero-cache HTTP liveness replica rebuild recovery failed: ${
               resetErr?.message || resetErr
             }`
           )

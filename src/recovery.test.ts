@@ -26,7 +26,7 @@ function startupState(
     plainRestarts: 0,
     maxRestarts: 3,
     didRecoverState: false,
-    didFullReset: false,
+    didCacheReset: false,
     canWasmFallback: true,
     didWasmFallback: false,
     nativeBinaryMissing: false,
@@ -271,18 +271,18 @@ describe('zero recovery signatures', () => {
       expect(
         classifyZeroStartupRecovery('boom', startupState({ plainRestarts: 2 })).action
       ).toBe('restart')
-      // budget spent → escalate to one full reset
+      // budget spent → rebuild the replica once, preserving CVR/CDB.
       expect(
         classifyZeroStartupRecovery('boom', startupState({ plainRestarts: 3 }))
       ).toEqual({
-        action: 'full-reset',
+        action: 'cache-reset',
         reason: 'still crashing after restarts',
       })
-      // full reset already tried → give up and surface the error
+      // replica rebuild already tried → give up and surface the error
       expect(
         classifyZeroStartupRecovery(
           'boom',
-          startupState({ plainRestarts: 3, didFullReset: true })
+          startupState({ plainRestarts: 3, didCacheReset: true })
         )
       ).toEqual({ action: 'give-up', reason: 'unrecoverable startup crash' })
     })

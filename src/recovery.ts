@@ -217,26 +217,27 @@ export function classifyZeroCrashRecovery(details: string): {
  *    reset the state is beyond automatic repair.
  *  - 'wasm-fallback' — native sqlite couldn't load: switch to wasm, then retry.
  *  - 'restart' — transient/unexpected crash: plain relaunch, within budget.
- *  - 'full-reset' — plain restarts exhausted: one heavier reset as a last
- *    resort, then retry.
+ *  - 'cache-reset' — plain restarts exhausted: rebuild the local replica as a
+ *    last resort, preserving CVR/CDB so returning clients are not evicted with
+ *    ClientNotFound.
  *  - 'give-up' — nothing left to try: surface the original error.
  */
 export type ZeroStartupRecoveryAction =
   | 'recover-state'
   | 'wasm-fallback'
   | 'restart'
-  | 'full-reset'
+  | 'cache-reset'
   | 'give-up'
 
 export interface ZeroStartupRetryState {
   /** plain relaunches already attempted (not counting the first start). */
   plainRestarts: number
-  /** budget for plain relaunches before escalating to a full reset. */
+  /** budget for plain relaunches before rebuilding the local replica. */
   maxRestarts: number
   /** a corruption/inconsistency reset has already been tried this startup. */
   didRecoverState: boolean
-  /** the last-resort full reset has already been tried this startup. */
-  didFullReset: boolean
+  /** the last-resort replica rebuild has already been tried this startup. */
+  didCacheReset: boolean
   /** native sqlite is in use and a wasm fallback is permitted. */
   canWasmFallback: boolean
   /** the wasm fallback has already been applied this startup. */
@@ -260,7 +261,7 @@ export function classifyZeroStartupRecovery(
 
   // a missing native sqlite binary is DETERMINISTIC, never transient: either
   // fall back to wasm (once, when permitted) or fail fast. it must NOT enter
-  // the restart/full-reset path below — retrying would just loop into the same
+  // the restart/cache-reset path below — retrying would just loop into the same
   // missing-binary error, and the user explicitly wants `bun dev` to exit fast
   // when native zero sqlite isn't there rather than churn.
   if (state.nativeBinaryMissing) {
@@ -278,9 +279,10 @@ export function classifyZeroStartupRecovery(
     return { action: 'restart', reason: 'transient startup crash' }
   }
 
-  // budget spent — one heavier full reset as a last resort.
-  if (!state.didFullReset) {
-    return { action: 'full-reset', reason: 'still crashing after restarts' }
+  // budget spent — rebuild the replica as a last resort, but preserve CVR/CDB
+  // so persisted clients can reconnect without ClientNotFound.
+  if (!state.didCacheReset) {
+    return { action: 'cache-reset', reason: 'still crashing after restarts' }
   }
 
   return { action: 'give-up', reason: 'unrecoverable startup crash' }
