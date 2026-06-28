@@ -1,7 +1,7 @@
 import { PGlite } from '@electric-sql/pglite'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
-import { startPeriodicVacuum } from './pglite-manager'
+import { startPeriodicVacuum, vacuumPGliteChurnTables } from './pglite-manager'
 import { installChangeTracking } from './replication/change-tracker'
 
 // proves the periodic vacuum actually reclaims PGlite dead-tuple bloat from the
@@ -85,5 +85,32 @@ describe('startPeriodicVacuum', () => {
     expect(statements).toContain('VACUUM (FULL, ANALYZE) _orez._zero_changes')
     expect(statements).toContain('VACUUM (FULL, ANALYZE) _orez._zero_streamed_batches')
     expect(statements).toContain('SET lock_timeout = 0')
+  })
+
+  it('vacuums zero cdb changeLog tables', async () => {
+    const postgresStatements: string[] = []
+    const cdbStatements: string[] = []
+    const fakePostgres = {
+      exec: async (sql: string) => {
+        postgresStatements.push(sql)
+        return []
+      },
+    }
+    const fakeCdb = {
+      query: async () => ({
+        rows: [{ schemaname: 'zero_0/cdc', tablename: 'changeLog' }],
+      }),
+      exec: async (sql: string) => {
+        cdbStatements.push(sql)
+        return []
+      },
+    }
+
+    await vacuumPGliteChurnTables({ postgres: fakePostgres, cdb: fakeCdb } as any)
+
+    expect(postgresStatements).toContain('VACUUM (FULL, ANALYZE) _orez._zero_changes')
+    expect(cdbStatements).toContain('SET lock_timeout = 5000')
+    expect(cdbStatements).toContain('VACUUM (FULL, ANALYZE) "zero_0/cdc"."changeLog"')
+    expect(cdbStatements).toContain('SET lock_timeout = 0')
   })
 })

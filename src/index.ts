@@ -45,6 +45,7 @@ import {
   runMigrations,
   startPeriodicCheckpoint,
   startPeriodicVacuum,
+  vacuumPGliteChurnTables,
 } from './pglite-manager.js'
 import { findPort } from './port.js'
 import { orezTitle } from './process-title.js'
@@ -346,6 +347,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     stopVacuum: any = () => {}
   let migrationsApplied = 0
   let isDoBackend = false
+  let pgliteVacuumMs = 0
 
   if (config.doBackendUrl) {
     isDoBackend = true
@@ -383,13 +385,6 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         ? startPeriodicCheckpoint(instances, config.checkpointIntervalMs)
         : () => {}
 
-    // periodic VACUUM of the change-tracking churn tables — PGlite has no
-    // effective autovacuum, so without this the change buffer bloats until the
-    // change-streamer scan times out and Zero stops sending live updates. Interval
-    // via OREZ_VACUUM_MS (default 10min, 0 disables).
-    const vacuumMs = Number(process.env.OREZ_VACUUM_MS ?? 10 * 60 * 1000)
-    stopVacuum = vacuumMs > 0 ? startPeriodicVacuum(instances, vacuumMs) : () => {}
-
     // config-based publications
     if (config.zeroPublications && !process.env.ZERO_APP_PUBLICATIONS) {
       process.env.ZERO_APP_PUBLICATIONS = config.zeroPublications
@@ -399,6 +394,17 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     migrationsApplied = await runMigrations(db, config)
     log.debug.orez('installing change tracking')
     await installChangeTracking(db)
+
+    // periodic VACUUM of the change-tracking churn tables — PGlite has no
+    // effective autovacuum, so without this the change buffers bloat until the
+    // change-streamer scan times out and Zero stops sending live updates. Start it
+    // only after Orez's own tracking tables exist; zero-cache's CDB changeLog is
+    // vacuumed once more after zero-cache has started.
+    pgliteVacuumMs = Number(process.env.OREZ_VACUUM_MS ?? 10 * 60 * 1000)
+    if (pgliteVacuumMs > 0) {
+      await vacuumPGliteChurnTables(instances)
+      stopVacuum = startPeriodicVacuum(instances, pgliteVacuumMs)
+    }
   }
 
   // shared: publications config
@@ -444,6 +450,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     await ensurePublicationHasTables(db, managedPub.names)
     log.debug.orez('re-installing change tracking after on-db-ready')
     await installChangeTracking(db)
+    if (!isDoBackend && pgliteVacuumMs > 0) {
+      await vacuumPGliteChurnTables(instances)
+    }
   }
 
   if (isDoBackend) {
@@ -526,6 +535,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         const tail = (zeroCacheProcess as ZeroChildProcess).__orezTail
         const details = tail?.length ? tail.slice(-20).join('\n') : ''
         throw new Error(`zero-cache crashed during startup stability check\n${details}`)
+      }
+      if (!isDoBackend && pgliteVacuumMs > 0) {
+        await vacuumPGliteChurnTables(instances)
       }
     }
 

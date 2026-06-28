@@ -556,16 +556,72 @@ export function startPeriodicCheckpoint(
   return () => clearInterval(timer)
 }
 
+type VacuumDb = Pick<PGlite, 'exec' | 'query'>
+
+const UPSTREAM_CHURN_TABLES = ['_orez._zero_changes', '_orez._zero_streamed_batches']
+
+function quoteIdent(name: string): string {
+  return '"' + name.replace(/"/g, '""') + '"'
+}
+
+async function zeroChangeLogTables(db: VacuumDb): Promise<string[]> {
+  try {
+    const result = await db.query<{ schemaname: string; tablename: string }>(
+      `SELECT schemaname, tablename
+       FROM pg_tables
+       WHERE schemaname LIKE $1
+         AND tablename = 'changeLog'`,
+      ['%/cdc']
+    )
+    return result.rows.map(
+      ({ schemaname, tablename }) => `${quoteIdent(schemaname)}.${quoteIdent(tablename)}`
+    )
+  } catch (err) {
+    log.debug.pglite(`zero change-log table scan failed: ${err}`)
+    return []
+  }
+}
+
+async function vacuumTables(db: VacuumDb, tables: string[]): Promise<void> {
+  if (tables.length === 0) return
+  try {
+    await db.exec(`SET lock_timeout = 5000`)
+    for (const table of tables) {
+      try {
+        await db.exec(`VACUUM (FULL, ANALYZE) ${table}`)
+      } catch (err) {
+        log.debug.pglite(`vacuum skipped for ${table}: ${err}`)
+      }
+    }
+  } catch (err) {
+    log.debug.pglite(`periodic vacuum setup failed: ${err}`)
+  } finally {
+    try {
+      await db.exec(`SET lock_timeout = 0`)
+    } catch {}
+  }
+}
+
 /**
- * orez's own change-tracking tables (`_orez._zero_changes` and the streamed-batch
- * mapping) are insert-then-purge churn: every write appends a change row, and
- * `confirmStreamedBatches` deletes them once the consumer durably commits. PGlite
- * runs with no effective autovacuum, so those deletes leave dead tuples that
- * accumulate without bound — `_orez._zero_changes` was measured at 86MB for a few
- * thousand live rows. Once the table is bloated, zero-cache's change-streamer scan
- * blows past its 25s statement timeout and crash-loops into a full state reset, so
- * Zero clients get the initial snapshot but no live updates (the classic "data
- * loads once and never refreshes again" symptom).
+ * Reclaim PGlite dead tuples from the two hot insert/delete buffers:
+ * orez's upstream logical-replication queue and zero-cache's own cdc changeLog.
+ */
+export async function vacuumPGliteChurnTables(instances: PGliteInstances): Promise<void> {
+  await vacuumTables(instances.postgres, UPSTREAM_CHURN_TABLES)
+
+  const cdb = instances.cdb as VacuumDb | undefined
+  if (!cdb?.query) return
+  await vacuumTables(cdb, await zeroChangeLogTables(cdb))
+}
+
+/**
+ * orez's change queues are insert-then-purge churn: every write appends a change
+ * row, and consumers delete rows once durably committed. PGlite runs with no
+ * effective autovacuum, so those deletes leave dead tuples that accumulate without
+ * bound. Once the tables are bloated, zero-cache's change-streamer scan blows past
+ * its statement timeout and crash-loops, so Zero clients get the initial snapshot
+ * but no live updates (the classic "data loads once and never refreshes again"
+ * symptom).
  *
  * VACUUM the churn tables periodically to reclaim the dead tuples. We use
  * `VACUUM FULL`, not plain VACUUM: PGlite's lazy (non-FULL) VACUUM wedges its
@@ -582,26 +638,8 @@ export function startPeriodicVacuum(
   instances: PGliteInstances,
   intervalMs = 10 * 60 * 1000
 ): () => void {
-  const churnTables = ['_orez._zero_changes', '_orez._zero_streamed_batches']
   const vacuum = async () => {
-    const db = instances.postgres
-    if (!db) return
-    try {
-      await db.exec(`SET lock_timeout = 5000`)
-      for (const table of churnTables) {
-        try {
-          await db.exec(`VACUUM (FULL, ANALYZE) ${table}`)
-        } catch (err) {
-          log.debug.pglite(`vacuum skipped for ${table}: ${err}`)
-        }
-      }
-    } catch (err) {
-      log.debug.pglite(`periodic vacuum setup failed: ${err}`)
-    } finally {
-      try {
-        await db.exec(`SET lock_timeout = 0`)
-      } catch {}
-    }
+    await vacuumPGliteChurnTables(instances)
   }
   const timer = setInterval(vacuum, intervalMs)
   if (timer.unref) timer.unref()
