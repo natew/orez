@@ -62,4 +62,28 @@ describe('startPeriodicVacuum', () => {
       stop()
     }
   })
+
+  it('uses pg-proxy-compatible numeric lock_timeout syntax', async () => {
+    const statements: string[] = []
+    const fakeDb = {
+      exec: async (sql: string) => {
+        statements.push(sql)
+        return []
+      },
+    }
+
+    const stop = startPeriodicVacuum({ postgres: fakeDb } as any, 60 * 60 * 1000)
+    try {
+      for (let i = 0; i < 10 && !statements.includes('SET lock_timeout = 0'); i++) {
+        await new Promise((r) => setTimeout(r, 0))
+      }
+    } finally {
+      stop()
+    }
+
+    expect(statements[0]).toBe('SET lock_timeout = 5000')
+    expect(statements).toContain('VACUUM (FULL, ANALYZE) _orez._zero_changes')
+    expect(statements).toContain('VACUUM (FULL, ANALYZE) _orez._zero_streamed_batches')
+    expect(statements).toContain('SET lock_timeout = 0')
+  })
 })

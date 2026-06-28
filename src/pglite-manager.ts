@@ -587,13 +587,16 @@ export function startPeriodicVacuum(
     const db = instances.postgres
     if (!db) return
     try {
-      await db.exec(`SET lock_timeout = '5s'`)
+      await db.exec(`SET lock_timeout = 5000`)
       for (const table of churnTables) {
         try {
           await db.exec(`VACUUM (FULL, ANALYZE) ${table}`)
-        } catch {}
+        } catch (err) {
+          log.debug.pglite(`vacuum skipped for ${table}: ${err}`)
+        }
       }
-    } catch {
+    } catch (err) {
+      log.debug.pglite(`periodic vacuum setup failed: ${err}`)
     } finally {
       try {
         await db.exec(`SET lock_timeout = 0`)
