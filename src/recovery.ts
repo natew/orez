@@ -13,6 +13,51 @@ import { createPGliteWorker } from './pglite-manager.js'
 import type { PGlite } from '@electric-sql/pglite'
 import type { ChildProcess } from 'node:child_process'
 
+/**
+ * bankruptcy verdict for the replication pipeline: writes keep flowing and a
+ * consumer keeps trying, but no durable confirm progress has happened for the
+ * whole stall window. past that point the change log only grows and replay
+ * gets strictly slower each attempt (the 2026-07-03 118k-row wedge), so the
+ * only converging recovery is a full reset: truncate the log and let
+ * zero-cache re-snapshot the (tiny) base tables. pure function so the policy
+ * is unit-testable; timestamps come from getReplicationHealth() gauges.
+ *
+ * `baselineAt` is when progress was last externally known-good (monitor
+ * start / last completed reset) — it stands in for gauges that are still 0.
+ */
+export function isReplicationBankrupt(
+  health: {
+    lastWriteSignalAt: number
+    lastConfirmProgressAt: number
+    lastStreamActivityAt: number
+  },
+  now: number,
+  stallMs: number,
+  baselineAt: number
+): { bankrupt: boolean; reason: string } {
+  if (stallMs <= 0) return { bankrupt: false, reason: 'disabled' }
+  const confirmAt = Math.max(health.lastConfirmProgressAt, baselineAt)
+  const confirmAge = now - confirmAt
+  if (confirmAge < stallMs) return { bankrupt: false, reason: 'confirm progress recent' }
+  // writes must have happened since the last confirm — an idle system with an
+  // empty log has nothing to confirm and is not stuck.
+  if (health.lastWriteSignalAt <= confirmAt) {
+    return { bankrupt: false, reason: 'no writes since last confirm' }
+  }
+  // a consumer must be attempting within the window — if zero-cache is not
+  // even connecting, that is a crash/startup problem for the crash watcher,
+  // and a reset while nothing consumes would loop.
+  if (now - health.lastStreamActivityAt >= stallMs) {
+    return { bankrupt: false, reason: 'no consumer attempts in window' }
+  }
+  return {
+    bankrupt: true,
+    reason:
+      `no confirm progress for ${Math.round(confirmAge / 1000)}s ` +
+      `while writes flow and the consumer keeps reconnecting`,
+  }
+}
+
 export interface RecoveryContext {
   config: {
     dataDir: string

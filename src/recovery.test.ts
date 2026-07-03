@@ -13,6 +13,7 @@ import {
   hasTransientCrashSignature,
   hasZeroReplicaMonitorWarmupSignature,
   hasZeroStateInconsistencySignature,
+  isReplicationBankrupt,
   zeroInconsistencyResetMode,
   type ZeroStartupRetryState,
 } from './recovery.js'
@@ -412,5 +413,104 @@ describe('zero recovery signatures', () => {
         'full'
       )
     })
+  })
+})
+
+describe('isReplicationBankrupt', () => {
+  const STALL = 5 * 60_000
+  const NOW = 10_000_000
+  // healthy default: everything recent
+  function health(overrides: Partial<ReturnType<typeof base>> = {}) {
+    return { ...base(), ...overrides }
+  }
+  function base() {
+    return {
+      lastWriteSignalAt: NOW - 1_000,
+      lastConfirmProgressAt: NOW - 2_000,
+      lastStreamActivityAt: NOW - 1_500,
+    }
+  }
+
+  it('is disabled when stallMs is 0', () => {
+    expect(isReplicationBankrupt(health(), NOW, 0, 0).bankrupt).toBe(false)
+  })
+
+  it('healthy pipeline is not bankrupt', () => {
+    expect(isReplicationBankrupt(health(), NOW, STALL, 0).bankrupt).toBe(false)
+  })
+
+  it('the 2026-07-03 wedge shape is bankrupt: writes flow, consumer reconnects, no confirms', () => {
+    const verdict = isReplicationBankrupt(
+      health({
+        lastWriteSignalAt: NOW - 1_000,
+        lastConfirmProgressAt: NOW - 2 * STALL,
+        lastStreamActivityAt: NOW - 30_000,
+      }),
+      NOW,
+      STALL,
+      NOW - 2 * STALL
+    )
+    expect(verdict.bankrupt).toBe(true)
+    expect(verdict.reason).toContain('no confirm progress')
+  })
+
+  it('idle system (no writes since last confirm) is not bankrupt', () => {
+    expect(
+      isReplicationBankrupt(
+        health({
+          lastWriteSignalAt: NOW - 3 * STALL,
+          lastConfirmProgressAt: NOW - 2 * STALL,
+          lastStreamActivityAt: NOW - 30_000,
+        }),
+        NOW,
+        STALL,
+        0
+      ).bankrupt
+    ).toBe(false)
+  })
+
+  it('dead consumer (no stream attempts) is the crash watcher problem, not bankruptcy', () => {
+    expect(
+      isReplicationBankrupt(
+        health({
+          lastWriteSignalAt: NOW - 1_000,
+          lastConfirmProgressAt: NOW - 2 * STALL,
+          lastStreamActivityAt: NOW - 2 * STALL,
+        }),
+        NOW,
+        STALL,
+        0
+      ).bankrupt
+    ).toBe(false)
+  })
+
+  it('baseline stands in for zeroed gauges right after startup', () => {
+    expect(
+      isReplicationBankrupt(
+        {
+          lastWriteSignalAt: NOW - 1_000,
+          lastConfirmProgressAt: 0,
+          lastStreamActivityAt: NOW - 1_000,
+        },
+        NOW,
+        STALL,
+        NOW - 10_000 // monitor started recently — inside the stall window
+      ).bankrupt
+    ).toBe(false)
+  })
+
+  it('stale baseline with zeroed confirm gauge goes bankrupt once writes and attempts flow', () => {
+    expect(
+      isReplicationBankrupt(
+        {
+          lastWriteSignalAt: NOW - 1_000,
+          lastConfirmProgressAt: 0,
+          lastStreamActivityAt: NOW - 1_000,
+        },
+        NOW,
+        STALL,
+        NOW - 2 * STALL
+      ).bankrupt
+    ).toBe(true)
   })
 })

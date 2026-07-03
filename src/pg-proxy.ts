@@ -849,7 +849,16 @@ export async function startPgProxy(
             if (!pipelineMutexHeld) {
               const t0 = performance.now()
               await mutex.acquire()
-              proxyStats.totalWaitMs += performance.now() - t0
+              const waitMs = performance.now() - t0
+              proxyStats.totalWaitMs += waitMs
+              // pglite cannot bound a running statement (statement_timeout is
+              // a no-op in single-threaded wasm), so a long mutex wait is the
+              // only visible symptom of a saturating statement. surface it.
+              if (waitMs > 10_000) {
+                log.proxy(
+                  `mutex wait ${(waitMs / 1000).toFixed(1)}s for ${dbName} — a long statement is starving the shared pglite session`
+                )
+              }
               pipelineMutexHeld = true
               // auto-rollback stale transactions from other connections
               if (txState.status === 0x45 && txState.owner !== socket) {

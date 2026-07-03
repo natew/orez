@@ -125,6 +125,31 @@ let lastStreamedWatermark = 0
 let pendingConfirmLsn = 0n
 let processedConfirmLsn = 0n
 
+// ── replication pipeline health gauges ──────────────────────────────────────
+// plain module state read by the supervisor's bankruptcy monitor
+// (isReplicationBankrupt in recovery.ts). deliberately no db access: the
+// monitor must be able to see a wedged pipeline without queueing on the very
+// mutex that is wedged. timestamps are Date.now() ms; 0 = never.
+let lastWriteSignalAt = 0 // a proxy write signaled new changes
+let lastConfirmProgressAt = 0 // consumer durably confirmed (or a fresh slot reset the log)
+let lastStreamActivityAt = 0 // a replication stream started or streamed a batch
+
+export interface ReplicationHealth {
+  lastWriteSignalAt: number
+  lastConfirmProgressAt: number
+  lastStreamActivityAt: number
+}
+
+export function getReplicationHealth(): ReplicationHealth {
+  return { lastWriteSignalAt, lastConfirmProgressAt, lastStreamActivityAt }
+}
+
+/** record durable consumer progress (confirm purge, fresh slot, or a
+ *  completed zero reset — all mean the backlog is not stuck). */
+export function markReplicationProgress(): void {
+  lastConfirmProgressAt = Date.now()
+}
+
 /**
  * note a confirmed-flush LSN from the consumer's standby status update and
  * wake the replication loop so it purges the confirmed batches.
@@ -186,6 +211,7 @@ let _replicationWakeup: (() => void) | null = null
 /** signal the replication handler that changes may be available.
  *  called by the proxy after executing writes on the postgres instance. */
 export function signalReplicationChange() {
+  lastWriteSignalAt = Date.now()
   _replicationWakeup?.()
   const globalWakeup = (globalThis as any).__orez_signal_replication
   if (typeof globalWakeup === 'function' && globalWakeup !== _replicationWakeup) {
@@ -214,6 +240,9 @@ export function resetReplicationState(): void {
   lastStreamedWatermark = 0
   pendingConfirmLsn = 0n
   processedConfirmLsn = 0n
+  lastWriteSignalAt = 0
+  lastConfirmProgressAt = 0
+  lastStreamActivityAt = 0
   cachedTableKeyColumns = null
   cachedExcludedColumns = null
   cachedColumnTypeOids = null
@@ -430,6 +459,8 @@ export async function handleReplicationQuery(
     // prior streamed-batch state belongs to a slot that no longer exists.
     await purgeConsumedChanges(db, currentWm)
     await clearStreamedBatches(db)
+    // the log was just cut to the snapshot point — the backlog is not stuck.
+    markReplicationProgress()
 
     // persist slot so pg_replication_slots queries find it
     await db.query(
@@ -491,6 +522,7 @@ export async function handleStartReplication(
   mutex: Mutex
 ): Promise<void> {
   log.debug.repl('entering streaming mode')
+  lastStreamActivityAt = Date.now()
 
   // honor zero-cache's resume LSN. without this, after a page reload the
   // in-memory currentLsn / lastStreamedWatermark are reset to defaults but
@@ -546,6 +578,7 @@ export async function handleStartReplication(
     await mutex.acquire()
     try {
       await confirmStreamedBatches(db, clientStartLsn - 1n)
+      markReplicationProgress()
       await clearStreamedBatches(db)
       const resumeWm = await getStreamResumeWatermark(db)
       if (resumeWm !== lastStreamedWatermark) {
@@ -807,6 +840,7 @@ export async function handleStartReplication(
     try {
       const purged = await confirmStreamedBatches(db, target)
       processedConfirmLsn = target
+      markReplicationProgress()
       if (newestUnconfirmedLsn > 0n && target >= newestUnconfirmedLsn) {
         oldestUnconfirmedAt = 0
         oldestUnconfirmedLsn = 0n
@@ -1075,6 +1109,7 @@ export async function handleStartReplication(
             columnTypeOids
           )
           markBatchAwaitingConfirmation(batchLsn)
+          lastStreamActivityAt = Date.now()
           lastWatermark = batchEnd
           lastStreamedWatermark = batchEnd
           log.debug.repl(`streamed ok, watermark=${batchEnd}`)

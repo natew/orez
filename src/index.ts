@@ -56,12 +56,17 @@ import {
   hasRecoverableZeroStateSignature,
   hasZeroReplicaMonitorWarmupSignature,
   getZeroReplicaStartupResetReason,
+  isReplicationBankrupt,
   recoverZeroState,
   zeroInconsistencyResetMode,
   type ZeroStartupRetryState,
 } from './recovery.js'
 import { installChangeTracking } from './replication/change-tracker.js'
-import { resetReplicationState } from './replication/handler.js'
+import {
+  getReplicationHealth,
+  markReplicationProgress,
+  resetReplicationState,
+} from './replication/handler.js'
 import {
   applySqliteMode,
   cleanupShim,
@@ -744,6 +749,12 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       await killZeroCache()
       log.orez('zero-cache stopped')
 
+      // pglite is one shared session: a consumer killed mid-transaction leaves
+      // it in the aborted (25P02) state, where every later statement — the
+      // TRUNCATEs below, or the fresh zero-cache's own schema migration — fails
+      // with "current transaction is aborted". clear it before recovery work.
+      await db.exec('ROLLBACK').catch(() => {})
+
       if (mode === 'full') {
         // give connections time to drain before closing instances
         await new Promise((r) => setTimeout(r, 500))
@@ -880,6 +891,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       zeroEnv = result.env
 
       await waitForZeroCache(zeroConfig, zeroCacheProcess, 60000, sqliteMode)
+      // a completed reset is durable progress — the change log was cut, so the
+      // bankruptcy monitor must not re-fire on the pre-reset stall window.
+      markReplicationProgress()
       log.orez(`zero state reset complete (${mode})`)
       log.zero(`ready ${port(config.zeroPort, 'magenta')}`)
     } catch (err: any) {
@@ -1159,10 +1173,50 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     zeroHttpHealthTimer.unref?.()
   }
 
+  // ── replication bankruptcy monitor ─────────────────────────────────────────
+  // past a point, a change-log backlog can NEVER be drained by replay: the
+  // catch-up work gets slower as the log grows, the consumer dies before
+  // confirming, nothing is purged, and the next attempt faces a bigger log
+  // (2026-07-03: 118k rows, hours of restart-looping). detect that state from
+  // in-memory gauges only — no db access, so a wedged mutex can't blind the
+  // monitor — and take the one converging action: a full reset, which
+  // truncates the log and re-snapshots the base tables in seconds.
+  const bankruptcyStallMs = (() => {
+    const raw = process.env.OREZ_REPLICATION_BANKRUPTCY_STALL_MS
+    if (!raw) return 5 * 60_000
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 5 * 60_000
+  })()
+  let bankruptcyBaselineAt = Date.now()
+  let bankruptcyTimer: ReturnType<typeof setInterval> | undefined
+  if (!config.skipZeroCache && bankruptcyStallMs > 0) {
+    bankruptcyTimer = setInterval(() => {
+      if (shuttingDown || resetInProgress || zeroStopExpected || liveLogRecoveryQueued)
+        return
+      const verdict = isReplicationBankrupt(
+        getReplicationHealth(),
+        Date.now(),
+        bankruptcyStallMs,
+        bankruptcyBaselineAt
+      )
+      if (!verdict.bankrupt) return
+      bankruptcyBaselineAt = Date.now()
+      log.orez(
+        `replication pipeline bankrupt: ${verdict.reason} — ` +
+          `resetting zero state (full) to re-snapshot instead of replaying`
+      )
+      resetZeroState('full').catch((err) => {
+        log.orez(`bankruptcy reset failed: ${err?.message || err}`)
+      })
+    }, 30_000)
+    bankruptcyTimer.unref?.()
+  }
+
   const stop = async () => {
     log.debug.orez('shutting down')
     shuttingDown = true
     if (zeroHttpHealthTimer) clearInterval(zeroHttpHealthTimer)
+    if (bankruptcyTimer) clearInterval(bankruptcyTimer)
     if (delayedVacuumTimer) clearTimeout(delayedVacuumTimer)
     stopCheckpoint()
     stopVacuum()
