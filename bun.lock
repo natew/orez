@@ -28,9 +28,11 @@
       },
       "peerDependencies": {
         "@rocicorp/zero": ">=1.0.0",
+        "embedded-postgres": ">=16.0.0-beta.1",
         "vite": ">=5",
       },
       "optionalPeers": [
+        "embedded-postgres",
         "vite",
       ],
     },
