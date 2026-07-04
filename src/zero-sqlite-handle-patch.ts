@@ -25,8 +25,13 @@ import { resolvePackage } from './sqlite-mode/package-resolve.js'
 
 const OREZ_MARKER = '__orez_open_sqlite_dbs'
 
-const OPEN_ANCHOR = 'this.#db = new SQLite3Database(path, options);'
-const OPEN_HOOK = `${OPEN_ANCHOR}
+// the constructor's default-import binding for @rocicorp/zero-sqlite3 is chosen
+// by zero's bundler and has flipped between `SQLite3Database` and
+// `Sqlite3Database` across releases from identical source (rolldown re-picks the
+// canonical name for the shared default import whenever a co-bundled module's
+// imports change). match either spelling so the anchor survives that reshuffle.
+const OPEN_ANCHOR = /this\.#db = new S[qQ][lL]ite3Database\(path, options\);/
+const OPEN_HOOK_SUFFIX = `
 			globalThis.__orez_open_sqlite_dbs?.add(this); /* orez: embed handle registry */`
 
 const CLOSE_ANCHOR = '\tclose() {'
@@ -50,18 +55,15 @@ function findZqliteDb(): string | null {
 }
 
 /**
- * patch zero-cache's sqlite Database wrapper to register open handles in
- * `globalThis.__orez_open_sqlite_dbs`. idempotent and safe to call on
- * every startup.
+ * apply the handle-registry hooks to a specific compiled zqlite db.js.
+ * idempotent. shared entrypoint so it can be tested against real bundled
+ * output without resolving the installed package.
  */
-export function installZeroSqliteHandleRegistry(): void {
-  const dbPath = findZqliteDb()
-  if (!dbPath) return
-
+export function applyZqliteHandleRegistry(dbPath: string): void {
   const content = readFileSync(dbPath, 'utf-8')
   if (content.includes(OREZ_MARKER)) return // already patched
 
-  if (!content.includes(OPEN_ANCHOR) || !content.includes(CLOSE_ANCHOR)) {
+  if (!OPEN_ANCHOR.test(content) || !content.includes(CLOSE_ANCHOR)) {
     // upstream shape changed — fail loudly so the embed restart contract
     // never silently loses handle tracking.
     throw new Error(
@@ -71,7 +73,18 @@ export function installZeroSqliteHandleRegistry(): void {
   }
 
   const patched = content
-    .replace(OPEN_ANCHOR, OPEN_HOOK)
+    .replace(OPEN_ANCHOR, (match) => `${match}${OPEN_HOOK_SUFFIX}`)
     .replace(CLOSE_ANCHOR, CLOSE_HOOK)
   writeFileSync(dbPath, patched)
+}
+
+/**
+ * patch zero-cache's sqlite Database wrapper to register open handles in
+ * `globalThis.__orez_open_sqlite_dbs`. idempotent and safe to call on
+ * every startup.
+ */
+export function installZeroSqliteHandleRegistry(): void {
+  const dbPath = findZqliteDb()
+  if (!dbPath) return
+  applyZqliteHandleRegistry(dbPath)
 }
