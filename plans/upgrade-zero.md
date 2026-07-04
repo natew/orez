@@ -233,6 +233,59 @@ Verify the binary exists for the resolved version:
 
 ## 6. Worked examples
 
+### 1.7.0-canary.3 → 1.7.0 (July 2026)
+
+- **Versions:** `@rocicorp/zero` 1.7.0-canary.3 → **1.7.0** (stable);
+  `@rocicorp/zero-sqlite3` unchanged at **1.1.2** (`^1.1.2`). **Protocol
+  unchanged at 51.** Released 1.7.0 was ~5 days old at upgrade time → **past the
+  3-day cooldown, no temp bunfig needed** (the global `~/.bunfig.toml` no longer
+  sets `minimumReleaseAge` either).
+- **Trivial delta — only 4 commits over the pinned canary:** a `@rocicorp/logger`
+  6.0.0 → 6.1.0 bump (#6150), a release-workflow hardening (CI-only), the version
+  bump, and the single functional change #6149 — a pure `this`-binding refactor of
+  the catch-up wait log (`(cond ? this.#lc.info : this.#lc.debug)?.()` →
+  `this.#lc[cond ? 'info' : 'debug']?.()`), **identical log output**. orez's §3.E
+  recovery matcher keys on `max attempts exceeded waiting for CVR` (untouched), so
+  **no orez accounting was needed** for the log change.
+- **All coupling points held without edits.** Protocol stayed 51 → none of the 8
+  §3.A string sites changed. All four in-place patch anchors matched the freshly
+  installed 1.7.0 compiled output (litestream `restoreReplica`, changeLog-cleanup
+  `No subscribers to confirm cleanup`, checkpoint `applyPragmas(db, pragmas);`,
+  sqlite-handle). `cf-patches.test.ts` 4/4.
+- **⚠️ Forward-looking finding (the real value of this entry): the 1.8.x line
+  breaks the sqlite-handle anchor via a bundler rename, from IDENTICAL source.**
+  At **1.8.0-canary.2** zero's bundler (rolldown) renamed the
+  `@rocicorp/zero-sqlite3` default import binding `SQLite3Database` →
+  `Sqlite3Database` in the compiled `out/zqlite/src/db.js` — `db.ts` never
+  changed; the co-bundled `query-builder.ts` did (the #6184 `take start` fix),
+  and rolldown re-picks the canonical name for a shared default import across the
+  chunk whenever a co-bundled module's imports shift. This silently invalidated
+  `zero-sqlite-handle-patch.ts`'s fixed `OPEN_ANCHOR` (verified by packing every
+  tarball 1.7.0-canary.3 … 1.8.0-canary.4). **Fixed proactively** (commit
+  `a5dfaf1`): `OPEN_ANCHOR` is now a regex `S[qQ][lL]ite3Database` that matches
+  either spelling and preserves whichever the bundle used, plus
+  `applyZqliteHandleRegistry(path)` was extracted and a regression test added
+  (`zero-sqlite-handle-patch.test.ts`, both spellings). **Lesson for the next
+  bump: bundled-identifier string anchors can drift with no source change — when
+  upgrading to 1.8.x, re-pack and re-grep every anchor, and prefer bundler-name-
+  agnostic matching.**
+- **Validated OK:** unit **825/825** (`bun run test`); typecheck/lint/format
+  clean; native `restoreReplica` + all four anchors present in the packed 1.8.x
+  tarballs too (so the hardened handle patch is forward-compatible). Integration
+  is green in isolation — the lone `embed-integration` "insert triggers poke"
+  red was the documented cold-start flake (first poke > 30s under a
+  self-inflicted loadavg 5-9 from back-to-back suites; passes in ~2s alone and
+  the 2nd identical prefixed test in the same file passes, proving poke delivery
+  works). Not a regression; nothing in the 4-commit delta touches replication.
+- **Shipped + propagated (July 4):** published `orez@0.4.37` (+ `bedrock-sqlite`
+  + `pg-to-sqlite`) via `bun release --patch --ci --skip-test`; orez `main` at
+  `a461542` (tag `v0.4.37`). Downstream dep bumps pushed to `main` in isolated
+  worktrees (zero disruption to co-tenant sessions): **chat** `952308370` (npm +
+  CI `ZERO_VERSION` + docker-compose defaults → 1.7.0, orez 0.4.26→0.4.37),
+  **soot** `adaf36086` (root + orez-web + 5 templates + 4 examples + 2 orez-*
+  packages), **agentbus** `bb827ea9` (`gui` only). soot had 3 live agents and
+  agentbus one mid-RCA on an orez doom loop — coordinated, none disrupted.
+
 ### 1.6 → 1.7.0-canary.3 (June 2026)
 
 - **Versions:** `@rocicorp/zero` 1.6.1 → **1.7.0-canary.3**; `@rocicorp/zero-sqlite3`
