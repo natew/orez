@@ -179,7 +179,19 @@ export async function startNativePostgres(
 ): Promise<NativePostgres> {
   let EmbeddedPostgres: typeof import('embedded-postgres').default
   try {
-    EmbeddedPostgres = (await import('embedded-postgres')).default
+    // createRequire, not `await import` — a static dynamic import lets consumer
+    // bundlers (vite/rolldown, esbuild) follow the specifier into
+    // embedded-postgres/dist/binary.js, whose literal
+    // `import('@embedded-postgres/<platform>')` calls for all eight platforms
+    // then fail to resolve the seven not installed on the current host, breaking
+    // the consumer's build. this backend is node-only and never bundled (only
+    // this backend PROCESS loads it, when backend === 'postgres'); createRequire
+    // keeps it opaque to bundlers, matching how `pg` and the symlink hydration
+    // above already load it. embedded-postgres is ESM with no top-level await, so
+    // require() of it is fine on the supported Node versions.
+    const require = createRequire(import.meta.url)
+    const mod = require('embedded-postgres')
+    EmbeddedPostgres = mod.default ?? mod
   } catch {
     throw new Error(
       `backend 'postgres' requires the optional dependency "embedded-postgres".\n` +
