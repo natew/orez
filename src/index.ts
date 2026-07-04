@@ -353,6 +353,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     stopVacuum: any = () => {}
   let migrationsApplied = 0
   let isDoBackend = false
+  let nativePg: import('./native-postgres.js').NativePostgres | undefined
   let pgliteVacuumMs = 0
   let delayedVacuumTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -385,6 +386,20 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     instances = doInstances
     db = doInstances.postgres
     stopCheckpoint = () => {}
+  } else if (config.backend === 'postgres') {
+    // ── native postgres backend (real postgres, real logical replication) ──
+    const { startNativePostgres } = await import('./native-postgres.js')
+    nativePg = await startNativePostgres(config)
+    instances = nativePg.instances
+    db = instances.postgres
+    stopCheckpoint = () => {}
+    log.pg(`using native postgres backend`)
+
+    if (config.zeroPublications && !process.env.ZERO_APP_PUBLICATIONS) {
+      process.env.ZERO_APP_PUBLICATIONS = config.zeroPublications
+    }
+
+    migrationsApplied = await runMigrations(db, config)
   } else {
     // ── PGlite backend (default) ────────────────────────────────────────────
     instances = config.singleDb
@@ -438,8 +453,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // as no-ops or DO-native equivalents (PGlite still owns the real path).
   await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
 
-  // start tcp proxy (routes connections to correct instance by database name)
-  const pgServer = await startPgProxy(instances, config)
+  // start tcp proxy (routes connections to correct instance by database name).
+  // the native backend needs none: real postgres listens on pgPort itself.
+  const pgServer = nativePg ? null : await startPgProxy(instances, config)
 
   if (migrationsApplied > 0)
     log.orez(
@@ -465,8 +481,10 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     // re-sync publication membership
     await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
     await ensurePublicationHasTables(db, managedPub.names)
-    log.debug.orez('re-installing change tracking after on-db-ready')
-    await installChangeTracking(db)
+    if (!nativePg) {
+      log.debug.orez('re-installing change tracking after on-db-ready')
+      await installChangeTracking(db)
+    }
     if (!isDoBackend && pgliteVacuumMs > 0) {
       await vacuumPGliteChurnTables(instances)
     }
@@ -486,7 +504,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
   // create read replicas after the primary is fully initialized
   // (migrations, seed, change tracking, publications all set up)
-  if (config.readReplicas > 0 && config.useWorkerThreads) {
+  if (!nativePg && config.readReplicas > 0 && config.useWorkerThreads) {
     const { createReadReplicas } = await import('./pglite-manager.js')
     instances.postgresReplicas = await createReadReplicas(db, config.readReplicas, config)
   }
@@ -611,7 +629,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         if (action === 'recover-state') {
           startupRetry.didRecoverState = true
           log.orez(`zero-cache startup failed (${reason}) — resetting zero state...`)
-          await recoverZeroState({ config, instances, zeroCacheProcess })
+          await recoverZeroState({ config, instances, zeroCacheProcess, nativePg })
           continue
         }
 
@@ -753,9 +771,13 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       // it in the aborted (25P02) state, where every later statement — the
       // TRUNCATEs below, or the fresh zero-cache's own schema migration — fails
       // with "current transaction is aborted". clear it before recovery work.
-      await db.exec('ROLLBACK').catch(() => {})
+      if (!nativePg) {
+        await db.exec('ROLLBACK').catch(() => {})
+      }
 
-      if (mode === 'full') {
+      if (mode === 'full' && nativePg) {
+        await nativePg.resetZeroDatabases()
+      } else if (mode === 'full') {
         // give connections time to drain before closing instances
         await new Promise((r) => setTimeout(r, 500))
 
@@ -812,8 +834,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         // holds that instance's proxy mutex; without this the next zero-cache's
         // CVR/CDB connections would block on the stuck mutex and never become
         // ready (the SIGUSR1 reset would then fail with "exited with code 0").
-        pgServer.resetDbState('zero_cvr')
-        pgServer.resetDbState('zero_cdb')
+        pgServer?.resetDbState('zero_cvr')
+        pgServer?.resetDbState('zero_cdb')
 
         // remove stale zero shard schemas from upstream; these can outlive CVR/CDB
         // and cause dispatcher errors after full reset.
@@ -873,8 +895,10 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       // always re-install change tracking after a full reset so public table
       // triggers reflect any schema changes introduced by restore.
       await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
-      log.debug.orez('re-installing change tracking after full reset')
-      await installChangeTracking(db)
+      if (!nativePg) {
+        log.debug.orez('re-installing change tracking after full reset')
+        await installChangeTracking(db)
+      }
 
       // restart zero-cache
       log.orez('starting zero-cache...')
@@ -1189,7 +1213,9 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   })()
   let bankruptcyBaselineAt = Date.now()
   let bankruptcyTimer: ReturnType<typeof setInterval> | undefined
-  if (!config.skipZeroCache && bankruptcyStallMs > 0) {
+  // native backend uses zero-cache's real change source — orez's replication
+  // gauges never move there, and there is no replay doom loop to detect.
+  if (!config.skipZeroCache && bankruptcyStallMs > 0 && !nativePg) {
     bankruptcyTimer = setInterval(() => {
       if (shuttingDown || resetInProgress || zeroStopExpected || liveLogRecoveryQueued)
         return
@@ -1222,12 +1248,15 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     stopVacuum()
     httpProxyServer?.close()
     await killZeroCache()
-    pgServer.close()
+    pgServer?.close()
     await Promise.all([
       instances.postgres.close(),
       instances.cvr.close(),
       instances.cdb.close(),
     ])
+    if (nativePg) {
+      await nativePg.stop()
+    }
     try {
       unlinkSync(pidFile)
     } catch {}

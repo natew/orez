@@ -940,6 +940,12 @@ export const main = defineCommand({
       description: 'run pglite + proxy only, skip zero-cache',
       default: false,
     },
+    backend: {
+      type: 'string',
+      description:
+        "database backend: 'pglite' (default) or 'postgres' (real postgres via the optional embedded-postgres package)",
+      default: '',
+    },
     'log-level': {
       type: 'string',
       description: 'log level: error, warn, info, debug (default: warn)',
@@ -1043,6 +1049,7 @@ export const main = defineCommand({
       'pg-user': 'user',
       'pg-password': 'password',
       'skip-zero-cache': false,
+      backend: '',
       'log-level': undefined,
       s3: false,
       's3-port': '9200',
@@ -1076,6 +1083,9 @@ export const main = defineCommand({
       ...(wasSet('pg-user') && { pgUser: args['pg-user'] }),
       ...(wasSet('pg-password') && { pgPassword: args['pg-password'] }),
       ...(wasSet('skip-zero-cache') && { skipZeroCache: args['skip-zero-cache'] }),
+      ...(wasSet('backend') && {
+        backend: args.backend as 'pglite' | 'postgres',
+      }),
       ...(wasSet('log-level') && {
         logLevel: args['log-level'] as 'error' | 'warn' | 'info' | 'debug',
       }),
@@ -1123,6 +1133,7 @@ export const main = defineCommand({
       resetZero,
       resetZeroFull,
     } = await startZeroLite({
+      backend: cliOverrides.backend,
       pgPort: cliOverrides.pgPort,
       zeroPort: cliOverrides.zeroPort,
       adminPort: resolvedAdminPort,

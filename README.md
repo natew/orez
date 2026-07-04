@@ -20,9 +20,28 @@ oreZ makes Zero work on [PGlite](https://pglite.dev) (Postgres in WASM) and [bed
 
 This is a **development tool only**. Not suitable for production.
 
-- **Single-session per database** — queries are serialized through a mutex. Fine for development, would bottleneck under load.
-- **Trigger overhead** — every write fires change-tracking triggers.
+- **Single-session per database** (pglite backend) — queries are serialized through a mutex. Fine for development, would bottleneck under load. The `postgres` backend has no such limit.
+- **Trigger overhead** (pglite backend) — every write fires change-tracking triggers.
 - **Local filesystem** — no replication, no HA. Use `orez pg_dump` for backups.
+
+## Backends
+
+orez picks how the upstream database runs via `backend`:
+
+- **`pglite`** (default) — Postgres compiled to WASM. Zero native deps, works everywhere, but single-session: every query serializes through one mutex over one WASM thread, and logical replication is emulated (change-tracking triggers + a change-log table + a fake replication protocol).
+- **`postgres`** — real Postgres via the optional [`embedded-postgres`](https://github.com/leinelissen/embedded-postgres) package (per-platform server binaries shipped as npm optional deps, no Docker/brew). zero-cache connects directly and runs its production logical-replication path: no proxy, no mutex, no CDC emulation, real `statement_timeout`. Multi-process, multi-connection.
+
+```sh
+bun add -D embedded-postgres
+bunx orez --backend=postgres    # or backend: 'postgres' in orez.config.ts, or OREZ_BACKEND=postgres
+```
+
+Note for bun users: the `@embedded-postgres/*` platform packages hydrate their
+shared-library symlinks in a postinstall script that bun blocks by default.
+orez recreates missing symlinks automatically at startup, so no
+`trustedDependencies` entry is needed.
+
+Pick `postgres` when the stack runs long-lived under real load (background daemons, many agents writing); pick `pglite` when you want zero native dependencies.
 
 ## Features
 

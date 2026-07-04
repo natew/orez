@@ -8,6 +8,13 @@ export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
 export type Hook = string | (() => void | Promise<void>)
 
 export interface ZeroLiteConfig {
+  /**
+   * database backend:
+   * - 'pglite' (default): embedded WASM postgres, no native deps
+   * - 'postgres': real postgres via the optional `embedded-postgres` package —
+   *   zero-cache runs its native logical-replication path, no proxy/emulation
+   */
+  backend: 'pglite' | 'postgres'
   dataDir: string
   pgPort: number
   zeroPort: number
@@ -47,6 +54,11 @@ export interface ZeroLiteConfig {
  * match the CLI defaults.
  */
 export interface OrezConfig {
+  /**
+   * database backend (default: "pglite").
+   * "postgres" runs real postgres via the optional `embedded-postgres` package.
+   */
+  backend?: 'pglite' | 'postgres'
   /** data directory (default: ".orez") */
   dataDir?: string
   /** postgresql proxy port (default: 6434) */
@@ -120,6 +132,9 @@ export function defineConfig(config: OrezConfig): OrezConfig {
 
 export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConfig {
   return {
+    backend:
+      overrides.backend ??
+      (process.env.OREZ_BACKEND === 'postgres' ? 'postgres' : 'pglite'),
     dataDir: overrides.dataDir || '.orez',
     pgPort: overrides.pgPort ?? 6434,
     zeroPort: overrides.zeroPort ?? 5849,

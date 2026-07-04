@@ -71,6 +71,8 @@ export interface RecoveryContext {
     cdb: PGlite
   }
   zeroCacheProcess: ChildProcess | null
+  /** set when running the native postgres backend — reset via database drops */
+  nativePg?: { resetZeroDatabases(): Promise<void> }
 }
 
 /**
@@ -380,6 +382,20 @@ export async function recoverZeroState(ctx: RecoveryContext): Promise<void> {
       graceMs: 1000,
       forceGraceMs: 1000,
     })
+  }
+
+  // native backend: reset is database drops on the real server, plus the
+  // replica file — none of the pglite instance surgery below applies
+  if (ctx.nativePg) {
+    const replicaPath = zeroReplicaPath(config)
+    for (const suffix of ['', '-shm', '-wal', '-wal2']) {
+      try {
+        rmSync(replicaPath + suffix, { force: true })
+      } catch {}
+    }
+    await ctx.nativePg.resetZeroDatabases()
+    log.orez('zero-cache state recovery complete')
+    return
   }
 
   // close and delete CVR/CDB instances
