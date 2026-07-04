@@ -107,7 +107,7 @@
     }
   },
   "devDependencies": {
-    "@rocicorp/zero": "1.7.0-canary.3",
+    "@rocicorp/zero": "1.7.0",
     "@rocicorp/zero-sqlite3": "1.1.2",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
