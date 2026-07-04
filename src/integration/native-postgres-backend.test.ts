@@ -93,7 +93,9 @@ describe('orez native postgres backend', { timeout: 180000 }, () => {
     const testZeroPort = testPgPort + 100
 
     dataDir = `.orez-native-pg-test-${Date.now()}`
-    console.log(`[test] starting orez (native pg) on pg:${testPgPort} zero:${testZeroPort}`)
+    console.log(
+      `[test] starting orez (native pg) on pg:${testPgPort} zero:${testZeroPort}`
+    )
     const result = await startZeroLite({
       backend: 'postgres',
       pgPort: testPgPort,
@@ -235,7 +237,9 @@ describe('orez native postgres backend', { timeout: 180000 }, () => {
     await waitForRowPatch(
       downstream,
       (row) =>
-        row.op === 'put' && row.value?.id === 'live-row' && row.value?.value === 'live-value',
+        row.op === 'put' &&
+        row.value?.id === 'live-row' &&
+        row.value?.value === 'live-value',
       30000,
       'live-row put'
     )
@@ -244,7 +248,9 @@ describe('orez native postgres backend', { timeout: 180000 }, () => {
     await waitForRowPatch(
       downstream,
       (row) =>
-        row.op === 'put' && row.value?.id === 'live-row' && row.value?.value === 'updated',
+        row.op === 'put' &&
+        row.value?.id === 'live-row' &&
+        row.value?.value === 'updated',
       30000,
       'live-row update'
     )
@@ -292,58 +298,62 @@ describe('orez native postgres backend', { timeout: 180000 }, () => {
     ws.close()
   })
 
-  test('warm zero-cache restart: reconnect resumes sync', { timeout: 90000 }, async () => {
-    expect(restartZero).toBeDefined()
+  test(
+    'warm zero-cache restart: reconnect resumes sync',
+    { timeout: 90000 },
+    async () => {
+      expect(restartZero).toBeDefined()
 
-    {
+      {
+        const downstream = new Queue<unknown>()
+        const ws = connectAndSubscribe(zeroPort, downstream, {
+          table: 'foo',
+          orderBy: [['id', 'asc']],
+        })
+        await drainInitialPokes(downstream)
+        await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+          'warm-gen1',
+          'before-restart',
+          1,
+        ])
+        await waitForRowPatch(
+          downstream,
+          (row) => row.op === 'put' && row.value?.id === 'warm-gen1',
+          30000,
+          'warm-gen1 put'
+        )
+        ws.close()
+      }
+
+      await restartZero!()
+      await waitForZero(zeroPort, 60000)
+
       const downstream = new Queue<unknown>()
       const ws = connectAndSubscribe(zeroPort, downstream, {
         table: 'foo',
         orderBy: [['id', 'asc']],
       })
-      await drainInitialPokes(downstream)
-      await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
-        'warm-gen1',
-        'before-restart',
-        1,
-      ])
       await waitForRowPatch(
         downstream,
         (row) => row.op === 'put' && row.value?.id === 'warm-gen1',
         30000,
-        'warm-gen1 put'
+        'warm-gen1 re-hydrate after restart'
+      )
+
+      await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+        'warm-gen2',
+        'after-restart',
+        2,
+      ])
+      await waitForRowPatch(
+        downstream,
+        (row) => row.op === 'put' && row.value?.id === 'warm-gen2',
+        30000,
+        'warm-gen2 put after restart'
       )
       ws.close()
     }
-
-    await restartZero!()
-    await waitForZero(zeroPort, 60000)
-
-    const downstream = new Queue<unknown>()
-    const ws = connectAndSubscribe(zeroPort, downstream, {
-      table: 'foo',
-      orderBy: [['id', 'asc']],
-    })
-    await waitForRowPatch(
-      downstream,
-      (row) => row.op === 'put' && row.value?.id === 'warm-gen1',
-      30000,
-      'warm-gen1 re-hydrate after restart'
-    )
-
-    await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
-      'warm-gen2',
-      'after-restart',
-      2,
-    ])
-    await waitForRowPatch(
-      downstream,
-      (row) => row.op === 'put' && row.value?.id === 'warm-gen2',
-      30000,
-      'warm-gen2 put after restart'
-    )
-    ws.close()
-  })
+  )
 
   // --- helpers ---
 
