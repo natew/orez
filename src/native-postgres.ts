@@ -40,6 +40,11 @@ export interface NativePostgres {
    * zero_cvr/zero_cdb databases. the upstream data is untouched.
    */
   resetZeroDatabases(): Promise<void>
+  /**
+   * terminate orphaned zero-cache postgres backends left behind by a previous
+   * (crashed or killed) zero-cache generation. returns the number terminated.
+   */
+  terminateZeroBackends(): Promise<number>
 }
 
 const ZERO_DATABASES = ['zero_cvr', 'zero_cdb']
@@ -267,22 +272,63 @@ export async function startNativePostgres(
     postgresReplicas: [],
   }
 
+  // when zero-cache is killed or crashes, its postgres backends don't always
+  // exit with it: a logical walsender parked in WalSenderWaitForWal only notices
+  // the dropped client after wal_sender_timeout (~60s), and a backend blocked
+  // building a replication-slot snapshot never reads its socket to see the
+  // disconnect at all. those orphans keep the replication slot ACTIVE and hold
+  // open transactions, so the NEXT zero-cache's initial sync stalls in
+  // CREATE_REPLICATION_SLOT and is canceled by its own `SET lock_timeout`
+  // (PostgresError 55P03), crashing the change-streamer and feeding orez's
+  // restart loop. sweep them so every (re)start begins from a clean slate. zero
+  // prefixes every connection's application_name with `zero-` (see @rocicorp/zero
+  // pgClient); orez's own node-pg pools set none, so this filter never touches
+  // them. pg_stat_activity is cluster-wide, so one query covers postgres +
+  // zero_cvr + zero_cdb.
+  const ORPHAN_FILTER = `pid <> pg_backend_pid() AND application_name LIKE 'zero-%'`
+  const terminateZeroBackends = async (): Promise<number> => {
+    const listOrphans = async () =>
+      (
+        await upstream.query<{ pid: number }>(
+          `SELECT pid FROM pg_stat_activity WHERE ${ORPHAN_FILTER}`
+        )
+      ).rows
+    try {
+      const orphans = await listOrphans()
+      if (orphans.length === 0) return 0
+      await upstream.exec(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE ${ORPHAN_FILTER}`
+      )
+      // pg_terminate_backend only signals; the backend exits and releases its
+      // slot/locks a moment later. wait for the orphans to actually clear so the
+      // next zero-cache doesn't race a still-active walsender (up to ~2s).
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 100))
+        if ((await listOrphans()).length === 0) break
+      }
+      log.orez(`terminated ${orphans.length} orphaned zero-cache backend(s)`)
+      return orphans.length
+    } catch (err) {
+      log.debug.pg(`terminateZeroBackends failed: ${err}`)
+      return 0
+    }
+  }
+
   return {
     instances,
+    terminateZeroBackends,
 
     async stop() {
       await server.stop()
     },
 
     async resetZeroDatabases() {
-      // zero-cache is stopped by the caller; end any lingering walsenders,
-      // then drop its replication slots so the next run starts clean
-      await upstream
-        .exec(
-          `SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots
-           WHERE active AND active_pid IS NOT NULL`
-        )
-        .catch(() => {})
+      // zero-cache is stopped by the caller; sweep any orphaned zero backends
+      // (walsenders, initial-sync connections holding the slot-management
+      // advisory lock or an open txn) so the drops below aren't blocked and the
+      // next run starts clean. this is called on the recovery path too, which
+      // bypasses killZeroCache, so the sweep must live here as well.
+      await terminateZeroBackends()
       const slots = await upstream.query<{ slot_name: string }>(
         `SELECT slot_name FROM pg_replication_slots`
       )

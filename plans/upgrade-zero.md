@@ -802,3 +802,34 @@ Run cheapest→most-authoritative; each gates the next:
 - Tests: `test/orez-web-sync.test.ts` (web), `test/cloudflare-do-deploy.test.ts`
   (cf unit), `scripts/dev/test-cf-do-{bundle,deploy}.ts` +
   `scripts/dev/validate-cf-do-runtime.ts` (cf bundle/deploy/runtime).
+
+## Native-postgres gotcha: `55P03` "canceling statement due to lock timeout" restart loop
+
+Symptom (native backend, `backend: 'postgres'`): on a zero-cache restart the
+change-streamer crashes with `PostgresError: canceling statement due to lock
+timeout` (code `55P03`) inside `ensureSchemaMigrated`, and orez's restart loop
+(`restart 1/3`) keeps hitting the same error ~30s apart, sometimes never
+recovering. First seen downstream in `~/soot`.
+
+Root cause: the error is the initial sync's `CREATE_REPLICATION_SLOT`, which zero
+runs with `SET lock_timeout = 29000` (`replication-slots.ts`,
+`SERVER_LOCK_TIMEOUT_MS`). When the *previous* zero-cache generation is killed or
+crashes, its postgres backends don't all exit with it: a logical walsender parked
+in `WalSenderWaitForWal` only notices the dropped client after `wal_sender_timeout`
+(~60s), and a backend blocked building a slot snapshot never reads its socket to
+see the disconnect at all. Those orphans keep the replication slot ACTIVE / hold
+open transactions, so the *next* generation's slot creation can't reach a
+consistent snapshot and is canceled after 29s. (Confirmable live: the walsender's
+`backend_start` in `pg_stat_activity` is older than the change-streamer that
+"owns" it — it survived a restart.) The cluster's own `lock_timeout` is `0`; the
+29s value only ever lives on that one replication session, which is why grepping
+the config for it finds nothing.
+
+Fix (in orez, `src/native-postgres.ts` + `src/index.ts`): `NativePostgres`
+exposes `terminateZeroBackends()`, which `pg_terminate_backend`s every
+`application_name LIKE 'zero-%'` connection (zero prefixes all its connections
+with `zero-`; orez's own node-pg pools set none, so they're untouched) and waits
+for them to clear. It runs before every zero-cache (re)start: in `killZeroCache`
+(covers `restartZeroCache` + `resetZeroState`), in the startup-retry catch (the
+`restart N/3` path), and at the top of `resetZeroDatabases` (the recovery path,
+which bypasses `killZeroCache`). Tests: `src/integration/native-postgres-terminate.test.ts`.

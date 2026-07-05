@@ -617,6 +617,12 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
             forceGraceMs: 1000,
           }).catch(() => {})
         }
+        // even when the tree already exited (the usual crash cascade), its
+        // postgres backends can linger and hold the replication slot / open
+        // txns that make the next initial sync's CREATE_REPLICATION_SLOT stall
+        // and hit its lock_timeout (55P03). sweep them before relaunching so a
+        // transient crash doesn't turn into a self-perpetuating restart loop.
+        if (nativePg) await nativePg.terminateZeroBackends().catch(() => {})
 
         startupRetry.nativeBinaryMissing = hasMissingNativeBinarySignature(errMsg)
         const { action, reason } = classifyZeroStartupRecovery(errMsg, startupRetry)
@@ -700,22 +706,28 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
   const killZeroCache = async () => {
     const child = zeroCacheProcess
-    if (!isChildProcessRunning(child)) return
-    zeroStopExpected = true
-
-    try {
-      const exited = await terminateChildProcessTree(child, {
-        gracefulSignal: 'SIGTERM',
-        forceSignal: 'SIGKILL',
-        graceMs: 5000,
-        forceGraceMs: 1000,
-      })
-      if (!exited) {
-        log.debug.orez(`zero-cache pid ${child.pid} did not exit after SIGKILL`)
+    if (isChildProcessRunning(child)) {
+      zeroStopExpected = true
+      try {
+        const exited = await terminateChildProcessTree(child, {
+          gracefulSignal: 'SIGTERM',
+          forceSignal: 'SIGKILL',
+          graceMs: 5000,
+          forceGraceMs: 1000,
+        })
+        if (!exited) {
+          log.debug.orez(`zero-cache pid ${child.pid} did not exit after SIGKILL`)
+        }
+      } finally {
+        zeroStopExpected = false
       }
-    } finally {
-      zeroStopExpected = false
     }
+    // the process tree is gone now, but on the native backend its postgres
+    // backends can linger (a walsender waiting out wal_sender_timeout, a backend
+    // blocked mid slot-snapshot) and hold the replication slot / open txns that
+    // stall the next zero-cache's initial sync. always sweep them — the crash
+    // path arrives here with the child already exited but the orphans still up.
+    if (nativePg) await nativePg.terminateZeroBackends()
   }
 
   // explicit process restart for admin use. unexpected crashes use full state
