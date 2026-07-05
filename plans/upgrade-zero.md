@@ -278,13 +278,13 @@ Verify the binary exists for the resolved version:
   the 2nd identical prefixed test in the same file passes, proving poke delivery
   works). Not a regression; nothing in the 4-commit delta touches replication.
 - **Shipped + propagated (July 4):** published `orez@0.4.37` (+ `bedrock-sqlite`
-  + `pg-to-sqlite`) via `bun release --patch --ci --skip-test`; orez `main` at
-  `a461542` (tag `v0.4.37`). Downstream dep bumps pushed to `main` in isolated
-  worktrees (zero disruption to co-tenant sessions): **chat** `952308370` (npm +
-  CI `ZERO_VERSION` + docker-compose defaults → 1.7.0, orez 0.4.26→0.4.37),
-  **soot** `adaf36086` (root + orez-web + 5 templates + 4 examples + 2 orez-*
-  packages), **agentbus** `bb827ea9` (`gui` only). soot had 3 live agents and
-  agentbus one mid-RCA on an orez doom loop — coordinated, none disrupted.
+  - `pg-to-sqlite`) via `bun release --patch --ci --skip-test`; orez `main` at
+    `a461542` (tag `v0.4.37`). Downstream dep bumps pushed to `main` in isolated
+    worktrees (zero disruption to co-tenant sessions): **chat** `952308370` (npm +
+    CI `ZERO_VERSION` + docker-compose defaults → 1.7.0, orez 0.4.26→0.4.37),
+    **soot** `adaf36086` (root + orez-web + 5 templates + 4 examples + 2 orez-\*
+    packages), **agentbus** `bb827ea9` (`gui` only). soot had 3 live agents and
+    agentbus one mid-RCA on an orez doom loop — coordinated, none disrupted.
 
 ### 1.6 → 1.7.0-canary.3 (June 2026)
 
@@ -813,12 +813,12 @@ recovering. First seen downstream in `~/soot`.
 
 Root cause: the error is the initial sync's `CREATE_REPLICATION_SLOT`, which zero
 runs with `SET lock_timeout = 29000` (`replication-slots.ts`,
-`SERVER_LOCK_TIMEOUT_MS`). When the *previous* zero-cache generation is killed or
+`SERVER_LOCK_TIMEOUT_MS`). When the _previous_ zero-cache generation is killed or
 crashes, its postgres backends don't all exit with it: a logical walsender parked
 in `WalSenderWaitForWal` only notices the dropped client after `wal_sender_timeout`
 (~60s), and a backend blocked building a slot snapshot never reads its socket to
 see the disconnect at all. Those orphans keep the replication slot ACTIVE / hold
-open transactions, so the *next* generation's slot creation can't reach a
+open transactions, so the _next_ generation's slot creation can't reach a
 consistent snapshot and is canceled after 29s. (Confirmable live: the walsender's
 `backend_start` in `pg_stat_activity` is older than the change-streamer that
 "owns" it — it survived a restart.) The cluster's own `lock_timeout` is `0`; the
