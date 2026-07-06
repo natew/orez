@@ -552,6 +552,13 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
 
     // helper to start zero-cache and wait for it (including stability check)
     const tryStartZeroCache = async () => {
+      // A previous orez generation can leave zero-cache postgres backends alive
+      // even though no zero-cache process tree remains. Sweep before the first
+      // launch too; otherwise the first change-streamer can spend its entire
+      // schema-migration attempt blocked behind stale zero-* sessions and hit
+      // Postgres lock_timeout before the retry path gets a chance to clean up.
+      if (nativePg) await nativePg.terminateZeroBackends()
+
       const result = await startZeroCache(
         zeroConfig,
         logStore,
