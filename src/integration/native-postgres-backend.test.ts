@@ -82,10 +82,12 @@ class Queue<T> {
 
 describe('orez native postgres backend', { timeout: 180000 }, () => {
   let db: Db
+  let cdb: Db
   let zeroPort: number
   let shutdown: () => Promise<void>
   let restartZero: (() => Promise<void>) | undefined
   let resetZeroFull: (() => Promise<void>) | undefined
+  let stopZero: (() => Promise<void>) | undefined
   let dataDir: string
 
   beforeAll(async () => {
@@ -106,10 +108,12 @@ describe('orez native postgres backend', { timeout: 180000 }, () => {
     })
 
     db = result.db
+    cdb = result.instances.cdb
     zeroPort = result.zeroPort
     shutdown = result.stop
     restartZero = result.restartZero
     resetZeroFull = result.resetZeroFull
+    stopZero = result.stopZero
 
     // real logical replication artifacts must exist (proves this is not the
     // emulated pipeline): wal_level=logical and a real publication
@@ -350,6 +354,81 @@ describe('orez native postgres backend', { timeout: 180000 }, () => {
         (row) => row.op === 'put' && row.value?.id === 'warm-gen2',
         30000,
         'warm-gen2 put after restart'
+      )
+      ws.close()
+    }
+  )
+
+  // the purge-lock self-deadlock (2026-07-06 incident): with rows in the cdc
+  // changeLog, the change-streamer takes a purge lock on boot — an open
+  // SELECT ... FOR SHARE transaction holding a real xid. if the replica file
+  // is gone (unclean shutdown, cache-only reset), initial sync then runs while
+  // that lock is held, and CREATE_REPLICATION_SLOT waits on the lock's own
+  // xid: a deterministic self-deadlock that crash-loops zero-cache on 55P03
+  // lock timeouts. the litestream-patch guard must surface not-found so the
+  // caller releases the lock before initial sync.
+  test(
+    'replica lost with non-empty changeLog: restart resyncs without purge-lock deadlock',
+    { timeout: 150000 },
+    async () => {
+      expect(stopZero).toBeDefined()
+      expect(restartZero).toBeDefined()
+
+      // arm: ensure replicated rows exist so the changeLog is non-empty
+      await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+        'deadlock-arm',
+        'pre-crash',
+        7,
+      ])
+      await waitForReplicationCatchup(db)
+
+      const [{ table_schema }] = (
+        await cdb.query<{ table_schema: string }>(
+          `SELECT table_schema FROM information_schema.tables WHERE table_name = 'changeLog'`
+        )
+      ).rows
+      const changeRows = await cdb.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM "${table_schema}"."changeLog"`
+      )
+      expect(changeRows.rows[0].n).toBeGreaterThan(0)
+
+      // crash-equivalent: zero-cache gone, replica file gone, changeLog kept
+      await stopZero!()
+      const { rmSync } = await import('node:fs')
+      const { resolve } = await import('node:path')
+      for (const suffix of ['', '-wal', '-shm', '-wal2']) {
+        try {
+          rmSync(resolve(dataDir, `zero-replica.db${suffix}`), { force: true })
+        } catch {}
+      }
+
+      // without the fix this rejects (zero-cache exits 255 on the slot-create
+      // lock timeout ~30s in); with it, initial sync runs lock-free and boots.
+      await restartZero!()
+      await waitForZero(zeroPort, 60000)
+
+      // resync is real: pre-crash row hydrates and live replication works
+      const downstream = new Queue<unknown>()
+      const ws = connectAndSubscribe(zeroPort, downstream, {
+        table: 'foo',
+        orderBy: [['id', 'asc']],
+      })
+      await waitForRowPatch(
+        downstream,
+        (row) => row.op === 'put' && row.value?.id === 'deadlock-arm',
+        30000,
+        'deadlock-arm re-hydrate after resync'
+      )
+      await db.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+        'deadlock-live',
+        'post-resync',
+        8,
+      ])
+      await waitForRowPatch(
+        downstream,
+        (row) => row.op === 'put' && row.value?.id === 'deadlock-live',
+        30000,
+        'deadlock-live put after resync'
       )
       ws.close()
     }
