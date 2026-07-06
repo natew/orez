@@ -53,6 +53,18 @@ const ZERO_DATABASES = ['zero_cvr', 'zero_cdb']
 // synchronous_commit=off matches the durability posture of the pglite
 // backend (relaxedDurability): fast writes, no corruption risk, at most the
 // last moments of commits lost on a hard crash.
+//
+// the timeout + keepalive flags make the cluster self-healing against the
+// backends a SIGKILL'd zero-cache generation leaves behind. those clients die
+// without closing their sockets, so their backends sit TCP-half-open — an
+// idle-in-transaction change-streamer holding the migrate-schema advisory
+// lock, or a session mid slot-snapshot holding an open xid — and every later
+// zero-cache boot deadlocks on them (ensureSchemaMigrated lock_timeout,
+// CREATE_REPLICATION_SLOT 55P03) until something reaps them. orez's
+// terminateZeroBackends sweep is the fast path; these flags are the backstop
+// postgres applies even when the sweep can't run (e.g. under OOM/swap
+// thrash). sessions that legitimately idle in a transaction opt out with
+// SET LOCAL, which zero-cache's shadow-sync snapshot holder already does.
 const SERVER_FLAGS = [
   '-c',
   'wal_level=logical',
@@ -62,6 +74,14 @@ const SERVER_FLAGS = [
   'synchronous_commit=off',
   '-c',
   'unix_socket_directories=',
+  '-c',
+  'idle_in_transaction_session_timeout=120000',
+  '-c',
+  'tcp_keepalives_idle=15',
+  '-c',
+  'tcp_keepalives_interval=5',
+  '-c',
+  'tcp_keepalives_count=3',
 ]
 
 /**
@@ -287,29 +307,52 @@ export async function startNativePostgres(
   // zero_cvr + zero_cdb.
   const ORPHAN_FILTER = `pid <> pg_backend_pid() AND application_name LIKE 'zero-%'`
   const terminateZeroBackends = async (): Promise<number> => {
+    type Orphan = { pid: number; state: string | null; query: string | null }
     const listOrphans = async () =>
       (
-        await upstream.query<{ pid: number }>(
-          `SELECT pid FROM pg_stat_activity WHERE ${ORPHAN_FILTER}`
+        await upstream.query<Orphan>(
+          `SELECT pid, state, left(query, 120) AS query
+             FROM pg_stat_activity WHERE ${ORPHAN_FILTER}`
         )
       ).rows
     try {
       const orphans = await listOrphans()
       if (orphans.length === 0) return 0
-      await upstream.exec(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE ${ORPHAN_FILTER}`
-      )
       // pg_terminate_backend only signals; the backend exits and releases its
-      // slot/locks a moment later. wait for the orphans to actually clear so the
-      // next zero-cache doesn't race a still-active walsender (up to ~2s).
-      for (let i = 0; i < 20; i++) {
+      // slot/locks a moment later. re-signal on every check: a single signal
+      // can be swallowed by a backend stuck in an uninterruptible wait (disk
+      // I/O under swap thrash — the exact conditions these orphans appear in),
+      // and launching zero-cache while a survivor still holds the
+      // migrate-schema advisory lock or an open xid guarantees a doomed
+      // 30s+crash cycle.
+      let remaining = orphans
+      for (let i = 0; i < 50 && remaining.length > 0; i++) {
+        await upstream.exec(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE ${ORPHAN_FILTER}`
+        )
         await new Promise((r) => setTimeout(r, 100))
-        if ((await listOrphans()).length === 0) break
+        remaining = await listOrphans()
       }
-      log.orez(`terminated ${orphans.length} orphaned zero-cache backend(s)`)
-      return orphans.length
+      if (remaining.length > 0) {
+        // loud on purpose: a surviving orphan means the next zero-cache boot
+        // will very likely wedge on it. this must be visible in the log next
+        // to the crash it causes, not buried at debug level.
+        log.orez(
+          `WARNING: ${remaining.length} zero-cache backend(s) survived termination: ` +
+            remaining
+              .map((o) => `pid ${o.pid} (${o.state ?? '?'}) ${o.query ?? ''}`.trim())
+              .join('; ')
+        )
+      }
+      log.orez(
+        `terminated ${orphans.length - remaining.length} orphaned zero-cache backend(s)`
+      )
+      return orphans.length - remaining.length
     } catch (err) {
-      log.debug.pg(`terminateZeroBackends failed: ${err}`)
+      // not debug: if the sweep itself fails (connection refused, pool
+      // saturated), the launch that follows starts against a dirty cluster
+      // and the resulting lock_timeout crash needs this line to explain it.
+      log.orez(`WARNING: zero backend sweep failed: ${err}`)
       return 0
     }
   }

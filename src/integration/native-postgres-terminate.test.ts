@@ -113,4 +113,33 @@ describe('terminateZeroBackends orphan sweep', { timeout: 180000 }, () => {
     const terminated = await np.terminateZeroBackends()
     expect(terminated).toBe(0)
   })
+
+  // postgres-level backstop for the same orphan class: a SIGKILL'd zero-cache
+  // leaves TCP-half-open backends (idle-in-transaction holding the
+  // migrate-schema advisory lock, or mid slot-snapshot) that the sweep can
+  // miss when it can't run at all (OOM/swap thrash). these flags make the
+  // server reap them on its own.
+  test('server self-heals: idle-in-tx timeout + tcp keepalives are live', async () => {
+    const upstream = np.instances.postgres
+    const show = async (name: string) =>
+      (await upstream.query<Record<string, string>>(`SHOW ${name}`)).rows[0][name]
+    expect(await show('idle_in_transaction_session_timeout')).toBe('2min')
+    expect(await show('tcp_keepalives_idle')).toBe('15')
+    expect(await show('tcp_keepalives_interval')).toBe('5')
+    expect(await show('tcp_keepalives_count')).toBe('3')
+
+    // a stale idle-in-transaction session is reaped by the server without any
+    // sweep — prove the mechanism end-to-end with a session-local 1s timeout
+    // (the production value is 2min; only the mechanism differs by duration).
+    const stale = await connect('zero-stale-tx')
+    await stale.query('BEGIN')
+    await stale.query(`SET idle_in_transaction_session_timeout = 1000`)
+    await stale.query('SELECT txid_current()') // assign a real xid, like DDL would
+    await new Promise((r) => setTimeout(r, 2500))
+    const gone = await upstream.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE application_name = 'zero-stale-tx' AND state = 'idle in transaction'`
+    )
+    expect(gone.rows[0].n).toBe(0)
+  })
 })
