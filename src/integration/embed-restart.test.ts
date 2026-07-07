@@ -489,4 +489,86 @@ describe('embed restart contract (gen-2 boot in one process)', () => {
       }
     }
   )
+
+  test(
+    'a replica reset does not orphan retained _zero_changes (2026-07 CF cost incident)',
+    { timeout: 240000 },
+    async () => {
+      const replicaFile = resolve(dataDir, 'zero-replica.db')
+
+      // ── the poisoning sequence from prod (soot-cf-orez-data-demo, Jul 3-7):
+      // 1. writes land while no embed generation is up → rows accumulate in
+      //    _zero_changes with no consumer to stream to.
+      await seed.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+        'row-orphan-1',
+        'accumulated-while-down',
+        10,
+      ])
+      await seed.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+        'row-orphan-2',
+        'accumulated-while-down',
+        11,
+      ])
+
+      // 2. the replica is reset (resetReplicaIfTableSetChanged / a restore's
+      //    reset_derived) — for the node-file replica that is deleting the file.
+      //    the next generation must re-run a full initial sync, whose snapshot
+      //    ALREADY CONTAINS the accumulated rows.
+      rmSync(replicaFile, { force: true })
+      rmSync(`${replicaFile}-wal`, { force: true })
+      rmSync(`${replicaFile}-shm`, { force: true })
+
+      // 3. next generation boots: fresh slot + initial sync over current state.
+      const gen3 = await startGeneration({
+        remoteFetch: remote.fetch,
+        localSql,
+        zeroPort: basePort + 2,
+        replicaFile,
+      })
+      try {
+        const downstream = new Queue<unknown>()
+        const ws = connectAndSubscribe(gen3.zeroPort, `cg-gen3-${Date.now()}`, downstream)
+        try {
+          // snapshot hydration includes the accumulated rows
+          await waitForRowPuts(downstream, ['row-orphan-1', 'row-orphan-2'], 45000)
+          // live replication works for post-snapshot writes
+          await seed.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+            'row-gen3',
+            'live-gen3',
+            12,
+          ])
+          await waitForRowPuts(downstream, ['row-gen3'], 45000)
+
+          // the incident assertion: nothing may retain the pre-snapshot
+          // changes forever. in prod they were re-streamed on EVERY embed
+          // boot (never confirmable — the consumer's snapshot already covered
+          // them), burning ~47k DO rows-written per boot, $50-65/day under
+          // active traffic. once the consumer confirms any post-snapshot
+          // batch, or the initial sync completes, the backlog must purge.
+          const deadline = Date.now() + 30000
+          let retained = -1
+          while (Date.now() < deadline) {
+            const res = await seed.query<{ n: string | number }>(
+              `SELECT COUNT(*) AS n FROM _orez._zero_changes`
+            )
+            retained = Number(res.rows[0]?.n)
+            if (retained === 0) break
+            await new Promise((r) => setTimeout(r, 1000))
+          }
+          if (retained !== 0) {
+            throw new Error(
+              `replica reset orphaned the change log: _zero_changes still ` +
+                `retains ${retained} row(s) 30s after a fresh initial sync + a ` +
+                `confirmed post-snapshot batch — every future embed boot will ` +
+                `re-stream this backlog forever`
+            )
+          }
+        } finally {
+          ws.close()
+        }
+      } finally {
+        await gen3.stop()
+      }
+    }
+  )
 })

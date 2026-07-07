@@ -518,4 +518,51 @@ describe('zero-cache embed on the CF data plane (ZeroDO upstream, local cvr/cdb)
       }
     }
   )
+
+  test(
+    'consumed changes are confirmed and purged from _zero_changes',
+    { timeout: 120000 },
+    async () => {
+      // a live consumer: hydrate a client group and KEEP it connected so the
+      // change-streamer stays on the replication stream and can ack.
+      const downstream = new Queue<unknown>()
+      const ws = connectAndSubscribe(zeroPort, `cg-purge-${Date.now()}`, downstream)
+      try {
+        await waitForRowPut(downstream, 'row-1', 45000)
+
+        // app-origin write → change-capture row → streamed → consumer commits
+        // (proved by the poke arriving at the client)
+        await seed.query(`INSERT INTO foo (id, value, num) VALUES ($1, $2, $3)`, [
+          'row-purge',
+          'purge-me',
+          2,
+        ])
+        await waitForRowPut(downstream, 'row-purge', 45000)
+
+        // the consumer durably committed the change (the poke can only come
+        // from a committed changeLog entry), so its standby status update must
+        // confirm the batch and the producer must purge the retained rows —
+        // real pg's WAL-retention contract. the 2026-07 CF incident: this
+        // never happened, _zero_changes retained everything forever, and every
+        // embed boot re-streamed the whole set (~$60/day of DO rows-written).
+        const deadline = Date.now() + 30000
+        let retained = -1
+        while (Date.now() < deadline) {
+          const res = await seed.query<{ n: string | number }>(
+            `SELECT COUNT(*) AS n FROM _orez._zero_changes`
+          )
+          retained = Number(res.rows[0]?.n)
+          if (retained === 0) return
+          await new Promise((r) => setTimeout(r, 1000))
+        }
+        throw new Error(
+          `consumer committed the change but _zero_changes still retains ` +
+            `${retained} row(s) after 30s — standby-feedback confirmation is not ` +
+            `reaching the producer, so retention can never trim\n${diagnostics()}`
+        )
+      } finally {
+        ws.close()
+      }
+    }
+  )
 })

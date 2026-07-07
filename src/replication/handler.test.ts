@@ -10,6 +10,7 @@ import {
   handleReplicationQuery,
   handleStartReplication,
   lsnFromString,
+  noteConfirmedFlushLsn,
   REPLICATION_BATCH_SIZE,
   resetReplicationState,
   signalReplicationChange,
@@ -397,6 +398,115 @@ describe('handleStartReplication', () => {
         process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS = prevTimeout
       }
     }
+  })
+
+  it('consumer feedback defers the stale-unconfirmed close; silence still closes', async () => {
+    const prevTimeout = process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS
+    process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS = '250'
+    let closed = false
+    const writer: ReplicationWriter = {
+      write() {},
+      get closed() {
+        return closed
+      },
+      close() {
+        closed = true
+      },
+    }
+
+    try {
+      replicationPromise = handleStartReplication(
+        'START_REPLICATION SLOT "s" LOGICAL 0/0',
+        writer,
+        db,
+        testMutex
+      )
+      await new Promise((r) => setTimeout(r, 100))
+      await db.exec(`INSERT INTO public.items (name, value) VALUES ('slow', 1)`)
+      signalReplicationChange()
+      await new Promise((r) => setTimeout(r, 100))
+
+      // a live-but-slow consumer: standby status updates keep arriving but
+      // never advance far enough to confirm the batch. the stream must stay
+      // open well past the reconnect window (the 2026-07 CF livelock closed
+      // it here, wiping the batch mappings on every cycle).
+      const feedUntil = Date.now() + 700
+      while (Date.now() < feedUntil) {
+        noteConfirmedFlushLsn(1n)
+        signalReplicationChange()
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      expect(closed).toBe(false)
+
+      // consumer goes silent → the close fires after the window
+      const closeDeadline = Date.now() + 3000
+      while (!closed && Date.now() < closeDeadline) {
+        signalReplicationChange()
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      expect(closed).toBe(true)
+      await replicationPromise
+    } finally {
+      if (prevTimeout === undefined) {
+        delete process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS
+      } else {
+        process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS = prevTimeout
+      }
+    }
+  })
+
+  it('keepalives request a reply only while streamed batches are unconfirmed', async () => {
+    const { written, writer } = createWriter()
+    replicationPromise = handleStartReplication(
+      'START_REPLICATION SLOT "s" LOGICAL 0/0',
+      writer,
+      db,
+      testMutex
+    )
+    await new Promise((r) => setTimeout(r, 100))
+
+    // keepalive frame: CopyData 0x64 + int32 len + 'k'(0x6b) + walEnd(8) +
+    // ts(8) + replyRequested(1)
+    const keepaliveReplies = () => {
+      const replies: number[] = []
+      for (const buf of written) {
+        let pos = 0
+        const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+        while (pos + 5 <= buf.length) {
+          if (buf[pos] !== 0x64) break
+          const len = dv.getInt32(pos + 1)
+          if (buf[pos + 5] === 0x6b && pos + 5 + 18 <= buf.length) {
+            replies.push(buf[pos + 5 + 17])
+          }
+          pos += 1 + len
+        }
+      }
+      return replies
+    }
+
+    // no unconfirmed batches yet → keepalives must not request a reply
+    signalReplicationChange()
+    await new Promise((r) => setTimeout(r, 150))
+    expect(keepaliveReplies()).not.toContain(1)
+
+    // stream a batch, leave it unconfirmed → keepalives request a reply so
+    // the consumer acks as soon as it commits instead of on its own cadence
+    await db.exec(`INSERT INTO public.items (name, value) VALUES ('ka', 2)`)
+    signalReplicationChange()
+    await new Promise((r) => setTimeout(r, 150))
+    written.length = 0
+    signalReplicationChange()
+    await new Promise((r) => setTimeout(r, 150))
+    expect(keepaliveReplies()).toContain(1)
+
+    // confirm the batch → keepalives stop requesting replies
+    noteConfirmedFlushLsn(1n << 60n)
+    signalReplicationChange()
+    await new Promise((r) => setTimeout(r, 200))
+    written.length = 0
+    signalReplicationChange()
+    await new Promise((r) => setTimeout(r, 150))
+    expect(keepaliveReplies()).not.toContain(1)
   })
 
   it('writes one CopyData frame per socket chunk', async () => {

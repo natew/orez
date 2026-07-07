@@ -124,6 +124,9 @@ let lastStreamedWatermark = 0
 // transaction instead of silently losing it.
 let pendingConfirmLsn = 0n
 let processedConfirmLsn = 0n
+// performance.now() of the last standby status update received from the
+// consumer (0 = never). liveness signal for the stale-unconfirmed reconnect.
+let lastFeedbackAtPerf = 0
 
 // ── replication pipeline health gauges ──────────────────────────────────────
 // plain module state read by the supervisor's bankruptcy monitor
@@ -155,6 +158,12 @@ export function markReplicationProgress(): void {
  * wake the replication loop so it purges the confirmed batches.
  */
 export function noteConfirmedFlushLsn(lsn: bigint): void {
+  // any standby status update — even one that doesn't advance the LSN — is
+  // proof the consumer is alive on the wire. the stale-unconfirmed reconnect
+  // must not kill a stream whose consumer is still chewing a large backlog
+  // (2026-07 CF incident: the 60s reconnect kept beating the consumer's first
+  // ack, so a 10k-row backlog re-streamed on every cycle, forever).
+  lastFeedbackAtPerf = performance.now()
   if (lsn <= pendingConfirmLsn) return
   pendingConfirmLsn = lsn
   _replicationWakeup?.()
@@ -240,6 +249,7 @@ export function resetReplicationState(): void {
   lastStreamedWatermark = 0
   pendingConfirmLsn = 0n
   processedConfirmLsn = 0n
+  lastFeedbackAtPerf = 0
   lastWriteSignalAt = 0
   lastConfirmProgressAt = 0
   lastStreamActivityAt = 0
@@ -577,8 +587,11 @@ export async function handleStartReplication(
     // live, well-behaved transactions only.
     await mutex.acquire()
     try {
-      await confirmStreamedBatches(db, clientStartLsn - 1n)
-      markReplicationProgress()
+      const purged = await confirmStreamedBatches(db, clientStartLsn - 1n)
+      // only real progress counts: a reconnect that purges nothing must not
+      // feed the bankruptcy monitor's confirm gauge, or a reconnect livelock
+      // (stream → no confirm → reconnect → repeat) looks healthy forever.
+      if (purged > 0) markReplicationProgress()
       await clearStreamedBatches(db)
       const resumeWm = await getStreamResumeWatermark(db)
       if (resumeWm !== lastStreamedWatermark) {
@@ -867,12 +880,19 @@ export async function handleStartReplication(
   }
   const staleUnconfirmedBatchTimedOut = () => {
     if (oldestUnconfirmedAt === 0) return false
-    const ageMs = performance.now() - oldestUnconfirmedAt
+    // an unconfirmed batch is only "stale" when the CONSUMER has gone silent.
+    // standby status updates reset the clock even when their LSN hasn't
+    // advanced yet: a live consumer chewing through a large re-streamed
+    // backlog acks slower than the window, and closing the stream on it
+    // discards the batch mappings and restarts the chew from zero — the
+    // reconnect livelock that burned $50-65/day of DO rows-written on the
+    // 2026-07 CF incident. reconnect is for a dead wire, not a slow consumer.
+    const sinceSignal = performance.now() - Math.max(oldestUnconfirmedAt, lastFeedbackAtPerf)
     const timeoutMs = unconfirmedReconnectMs()
-    if (ageMs < timeoutMs) return false
+    if (sinceSignal < timeoutMs) return false
 
     log.repl(
-      `unconfirmed streamed batch stale for ${ageMs.toFixed(0)}ms; closing replication stream for reconnect`
+      `unconfirmed streamed batch stale for ${sinceSignal.toFixed(0)}ms with no consumer feedback; closing replication stream for reconnect`
     )
     running = false
     writer.close?.()
@@ -924,8 +944,15 @@ export async function handleStartReplication(
             }
             if (!wasSignaled) {
               idleTimeoutCount++
-              // send keepalive on every timeout
-              writer.write(encodeKeepalive(currentLsn, nowMicros(), false))
+              // send keepalive on every timeout. while streamed batches await
+              // confirmation, request a reply: zero-cache answers a
+              // reply-requested keepalive with a standby status update as soon
+              // as its downstream commits, instead of at its own leisurely
+              // cadence — without this the first ack routinely lost the race
+              // against the stale-unconfirmed reconnect (2026-07 CF incident).
+              writer.write(
+                encodeKeepalive(currentLsn, nowMicros(), newestUnconfirmedLsn > 0n)
+              )
               log.debug.repl(`idle keepalive (lastWatermark=${lastWatermark})`)
               // re-scan for new shard schemas during idle
               if (performance.now() - lastShardRescan > shardRescanIntervalMs) {
@@ -1120,9 +1147,10 @@ export async function handleStartReplication(
           continue
         }
 
-        // no changes: send keepalive
+        // no changes: send keepalive (reply requested while batches await
+        // confirmation — see the idle-timeout keepalive above)
         const ts = nowMicros()
-        writer.write(encodeKeepalive(currentLsn, ts, false))
+        writer.write(encodeKeepalive(currentLsn, ts, newestUnconfirmedLsn > 0n))
         log.debug.repl(`idle (lastWatermark=${lastWatermark})`)
         // next iteration will wait for signal at the top
       } catch (err: unknown) {
