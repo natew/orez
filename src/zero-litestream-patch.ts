@@ -98,11 +98,20 @@ function findLitestreamCommands(): string | null {
  */
 export function applyLitestreamRestoreGuard(commandsPath: string): void {
   let content = readFileSync(commandsPath, 'utf-8')
-  if (content.includes(OREZ_MARKER)) return // already patched
 
-  // upgrade path: strip the v1 guard so the fixed guard replaces it.
-  if (content.includes(GUARD_V1)) {
+  // strip the v1 guard BEFORE the already-patched check: a v1-era orez run
+  // against an already-v2-patched file re-injects v1 above the v2 guard
+  // (its marker check doesn't recognize v2), and v1's early `return` then
+  // shadows the fix. checking the v2 marker first would return early here
+  // and leave that stacked v1 in place. observed live on 2026-07-07.
+  const hadV1 = content.includes(GUARD_V1)
+  if (hadV1) {
     content = content.replace(`\n\t${GUARD_V1}`, '')
+  }
+
+  if (content.includes(OREZ_MARKER)) {
+    if (hadV1) writeFileSync(commandsPath, content)
+    return // already patched
   }
 
   const anchor = 'async function restoreReplica(lc, config, replicaConstraints) {'
