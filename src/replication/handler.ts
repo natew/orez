@@ -887,7 +887,8 @@ export async function handleStartReplication(
     // discards the batch mappings and restarts the chew from zero — the
     // reconnect livelock that burned $50-65/day of DO rows-written on the
     // 2026-07 CF incident. reconnect is for a dead wire, not a slow consumer.
-    const sinceSignal = performance.now() - Math.max(oldestUnconfirmedAt, lastFeedbackAtPerf)
+    const sinceSignal =
+      performance.now() - Math.max(oldestUnconfirmedAt, lastFeedbackAtPerf)
     const timeoutMs = unconfirmedReconnectMs()
     if (sinceSignal < timeoutMs) return false
 

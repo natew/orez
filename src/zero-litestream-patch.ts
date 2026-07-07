@@ -46,8 +46,7 @@ import { dirname, resolve } from 'node:path'
 
 import { resolvePackage } from './sqlite-mode/package-resolve.js'
 
-const OREZ_MARKER =
-  '/* orez: litestream restore disabled (no backup configured) — v2 */'
+const OREZ_MARKER = '/* orez: litestream restore disabled (no backup configured) — v2 */'
 
 // the previous guard generation: silenced the error but swallowed the throw
 // the caller relies on to release the changeLog purge lock (see header).
