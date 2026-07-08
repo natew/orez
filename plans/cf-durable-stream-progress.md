@@ -32,6 +32,11 @@ not mean "Zero stored them durably". Zero sends Orez a standby ack only after
 the change streamer storer commits the change log transaction and advances its
 durable `replicationState.lastWatermark`.
 
+The non-zero reconnect leg has the same proof: Zero starts replication from a
+non-zero resume LSN only after its change streamer reads the committed
+`replicationState.lastWatermark`, so that LSN represents durable Zero-store
+progress rather than an in-memory cursor.
+
 Therefore, a persisted stream watermark must never be used as an unconditional
 skip cursor. If a worker dies after Orez streams rows but before Zero's storer
 commit, those rows must re-stream on the next boot. Skipping them would lose
@@ -108,6 +113,9 @@ Use rules:
   `_zero_streamed_batches`.
 - Advance confirmed progress only from Zero's standby ack or from a non-zero
   reconnect LSN.
+- On boot, idempotently purge retained `_zero_changes` rows whose watermark is
+  `<= last_confirmed_watermark`; this closes the death window between receiving
+  a durable ack and completing the purge.
 - On boot, initialize module state from confirmed progress and the oldest
   pending row, never from `last_streamed_watermark` alone.
 - Keep `_zero_streamed_batches` as the LSN-to-watermark bridge for ack recovery.
@@ -118,6 +126,9 @@ Minimum test coverage for the upstream fix:
 
 - `change-tracker` unit tests for any new durable progress table and monotonic
   update helpers.
+- DO-backend tests that run the new durable-progress table DDL and monotonic
+  update statements under `DoBackend`, not only through PGlite or the CF embed
+  integration harness.
 - `handler` tests for:
   - non-zero reconnect purges consumed rows after a simulated process reset,
   - `0/0` fresh start does not skip unconfirmed rows,
