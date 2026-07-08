@@ -259,8 +259,6 @@ describe('healNullReplicaRank', () => {
 
   it('surfaces list errors without updating', async () => {
     const exec: BackendExec = async () => ({ error: 'boom' })
-    await expect(
-      healNullReplicaRank(exec, { appId: 'soot' })
-    ).resolves.toBeUndefined()
+    await expect(healNullReplicaRank(exec, { appId: 'soot' })).resolves.toBeUndefined()
   })
 })
