@@ -98,7 +98,11 @@ export function transformCountedDeleteCte(stmt: any): { countColumn: string } | 
   // the delete CTE must not be read anywhere else (another CTE consuming its
   // RETURNING rows cannot be preserved once the DELETE moves to the top level)
   const others = ctes.filter((_, index) => index !== dmlIndex)
-  if (others.some((cte) => referencesRelation(cte.CommonTableExpr?.ctequery, dmlCte.ctename))) {
+  if (
+    others.some((cte) =>
+      referencesRelation(cte.CommonTableExpr?.ctequery, dmlCte.ctename)
+    )
+  ) {
     return null
   }
 

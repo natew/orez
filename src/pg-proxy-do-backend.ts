@@ -1,11 +1,6 @@
 // @ts-nocheck
 import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
-import {
-  foldCountMarkerResult,
-  transformCountedDeleteCte,
-} from './pg-sqlite-compiler/passes/dml-cte.js'
-
 import { TX_MANIFEST_DDL, TX_MANIFEST_TABLE } from './cf-do/tx-journal.js'
 import { RETURNING_INTERNAL_PREFIX } from './do-sql-tracking.js'
 import {
@@ -16,6 +11,10 @@ import {
   type FkChild,
 } from './fk-cascade.js'
 import { Mutex } from './mutex.js'
+import {
+  foldCountMarkerResult,
+  transformCountedDeleteCte,
+} from './pg-sqlite-compiler/passes/dml-cte.js'
 import { signalReplicationChange } from './replication/handler.js'
 import {
   markSQLiteKeywordIdentifiers,
