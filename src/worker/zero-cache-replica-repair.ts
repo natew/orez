@@ -248,3 +248,50 @@ export async function clearChangeStreamerStateIfReplicaUninitialized(
     )
   }
 }
+
+// zero 1.6's replicaSchema (valita) requires replicas.rank to be a bigint;
+// getReplicaAtVersion parses every boot. rank is BIGSERIAL on real pg, so a
+// NULL can never exist there — but on the DO backend a replicas row written
+// before the serial-column emulation kept NULL, and the parse TypeError kills
+// the change-streamer worker in a restart loop. every restart re-streams the
+// retained change set (the 2026-07 rows-written burn). backfill rank with
+// distinct Date.now()-based values — the same scheme zero's own createReplica
+// uses — preserving ORDER BY rank DESC picking the newest replica.
+export async function healNullReplicaRank(
+  backendExec: BackendExec,
+  opts: { appId: string; nowMs?: number; logPrefix?: string }
+): Promise<void> {
+  const logPrefix = opts.logPrefix ?? '[orez]'
+  const list = await backendExec(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE $1",
+    [opts.appId + '_%replicas']
+  )
+  if (list.error) {
+    console.error(logPrefix + ' replicas rank heal failed (list): ' + list.error)
+    return
+  }
+  for (const row of list.rows || []) {
+    const name = String(row.name)
+    const table = name.replaceAll('"', '""')
+    const bad = await backendExec('SELECT id FROM "' + table + '" WHERE rank IS NULL')
+    if (bad.error) {
+      console.error(logPrefix + ' replicas rank heal failed (scan): ' + bad.error)
+      continue
+    }
+    const ids = (bad.rows || []).map((r) => String(r.id))
+    let rank = opts.nowMs ?? Date.now()
+    for (const id of ids) {
+      const updated = await backendExec(
+        'UPDATE "' + table + '" SET rank = $1 WHERE id = $2 AND rank IS NULL',
+        [rank++, id]
+      )
+      if (updated.error) {
+        console.error(logPrefix + ' replicas rank heal failed (update): ' + updated.error)
+        return
+      }
+    }
+    if (ids.length) {
+      console.log(logPrefix + ' healed ' + ids.length + ' NULL rank row(s) in ' + name)
+    }
+  }
+}

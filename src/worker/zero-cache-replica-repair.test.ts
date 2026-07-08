@@ -7,6 +7,7 @@ import {
   type ReplicaSqlStorage,
   clearChangeStreamerStateIfReplicaUninitialized,
   dropReplicaTables,
+  healNullReplicaRank,
   repairPartialReplicaInit,
   resetReplicaIfChangeLogPoisoned,
   resetReplicaIfTableSetChanged,
@@ -212,5 +213,54 @@ describe('clearChangeStreamerStateIfReplicaUninitialized', () => {
       'DROP TABLE IF EXISTS "zero_0/cdc_changeLog"',
       'DROP TABLE IF EXISTS "zero_0/cdc_replicationState"',
     ])
+  })
+})
+
+describe('healNullReplicaRank', () => {
+  function backendWithReplicas(rows: Array<{ id: string; rank: number | null }>) {
+    const updates: Array<{ rank: unknown; id: unknown }> = []
+    const exec: BackendExec = async (sql, params) => {
+      if (sql.includes('sqlite_master')) {
+        return { rows: [{ name: 'soot_0_replicas' }] }
+      }
+      if (sql.startsWith('SELECT id FROM')) {
+        return { rows: rows.filter((r) => r.rank === null).map((r) => ({ id: r.id })) }
+      }
+      if (sql.startsWith('UPDATE')) {
+        updates.push({ rank: params?.[0], id: params?.[1] })
+        const row = rows.find((r) => r.id === params?.[1])
+        if (row) row.rank = Number(params?.[0])
+        return { rows: [] }
+      }
+      return { rows: [] }
+    }
+    return { exec, updates, rows }
+  }
+
+  it('backfills distinct Date.now()-based ranks onto NULL-rank rows only', async () => {
+    const backend = backendWithReplicas([
+      { id: 'a', rank: null },
+      { id: 'b', rank: 42 },
+      { id: 'c', rank: null },
+    ])
+    await healNullReplicaRank(backend.exec, { appId: 'soot', nowMs: 1_000_000 })
+    expect(backend.updates).toEqual([
+      { rank: 1_000_000, id: 'a' },
+      { rank: 1_000_001, id: 'c' },
+    ])
+    expect(backend.rows.find((r) => r.id === 'b')?.rank).toBe(42)
+  })
+
+  it('is a no-op when every rank is set', async () => {
+    const backend = backendWithReplicas([{ id: 'a', rank: 7 }])
+    await healNullReplicaRank(backend.exec, { appId: 'soot' })
+    expect(backend.updates).toEqual([])
+  })
+
+  it('surfaces list errors without updating', async () => {
+    const exec: BackendExec = async () => ({ error: 'boom' })
+    await expect(
+      healNullReplicaRank(exec, { appId: 'soot' })
+    ).resolves.toBeUndefined()
   })
 })
