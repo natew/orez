@@ -1,6 +1,11 @@
 // @ts-nocheck
 import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
+import {
+  foldCountMarkerResult,
+  transformCountedDeleteCte,
+} from './pg-sqlite-compiler/passes/dml-cte.js'
+
 import { TX_MANIFEST_DDL, TX_MANIFEST_TABLE } from './cf-do/tx-journal.js'
 import { RETURNING_INTERNAL_PREFIX } from './do-sql-tracking.js'
 import {
@@ -1184,23 +1189,6 @@ function flattenSQLIdentifier(value: string): string {
   const parts = splitQualifiedIdentifier(value).map(unquoteIdentifier)
   if (parts.length >= 2) return quoteIdentifier(flattenSchemaName(parts[0], parts[1]))
   return quoteIdentifier(parts[0] ?? value)
-}
-
-function deleteReturningCountCTE(
-  sql: string
-): { sql: string; countColumn: string } | null {
-  const match = sql.match(
-    /^\s*WITH\s+("[^"]+"|[A-Za-z_][\w]*)\s+AS\s*\(\s*DELETE\s+FROM\s+((?:"[^"]+"|[A-Za-z_][\w/]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w/]*))?)\s+WHERE\s+([\s\S]*?)\s+RETURNING\s+[\s\S]*?\)\s*SELECT\s+COUNT\s*\(\s*\*\s*\)\s*(?:AS\s+("[^"]+"|[A-Za-z_][\w]*))?\s+FROM\s+("[^"]+"|[A-Za-z_][\w]*)\s*;?\s*$/i
-  )
-  if (!match) return null
-  if (unquoteIdentifier(match[1]) !== unquoteIdentifier(match[5])) return null
-  const table = flattenSQLIdentifier(match[2])
-  const where = match[3].trim()
-  const countColumn = match[4] ? unquoteIdentifier(match[4]) : 'count'
-  return {
-    sql: `DELETE FROM ${table} WHERE ${where} RETURNING 1 AS ${quoteIdentifier('__orez_deleted')}`,
-    countColumn,
-  }
 }
 
 function publicationTableRefForRangeVar(rangeVar: any): PublicationTableRef | null {
@@ -3818,6 +3806,10 @@ function rewriteParsedStatement(
   context?: RewriteContext
 ): RewrittenStatement | RewrittenStatement[] | null {
   const stmt = rawStmt.stmt
+  // counted-delete CTEs (zero's changeLog purge) restructure into a plain
+  // DELETE before dispatch, so flattening/tracking/deparse treat them like
+  // any other delete; doExecResult folds the marker rows back into a count.
+  transformCountedDeleteCte(stmt)
   const nodeType = statementNodeType(stmt)
   const node = stmt[nodeType]
 
@@ -6671,8 +6663,7 @@ export class DoBackend {
     track?: ChangeTrackingRequest
   ): Promise<ExecResult> {
     if (!sql.trim()) return { rows: [], columns: [] }
-    const deleteCountCTE = track ? null : deleteReturningCountCTE(sql)
-    const execSQL = deleteCountCTE?.sql ?? sql
+    const execSQL = sql
     let lastErr: unknown
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -6693,12 +6684,12 @@ export class DoBackend {
             : rows.length > 0
               ? Object.keys(rows[0])
               : []
-        if (deleteCountCTE) {
-          return {
-            rows: [{ [deleteCountCTE.countColumn]: rows.length }],
-            columns: [deleteCountCTE.countColumn],
-            affectedRows: rows.length,
-          }
+        // counted-delete CTEs (zero's changeLog purge) rewrite to a DELETE
+        // whose RETURNING alias is a self-describing count marker; fold the
+        // marker rows back into the original single-count-row shape.
+        const counted = track ? null : foldCountMarkerResult(rows.length, execSQL)
+        if (counted) {
+          return { ...counted, affectedRows: rows.length }
         }
         if (track) this.signalTrackedWrite()
         return { rows, columns, affectedRows: result.affectedRows }

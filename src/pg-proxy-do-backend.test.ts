@@ -4394,8 +4394,8 @@ describe('DoBackend', () => {
     const http = await startDoHttp((sql) => {
       if (compactSQL(sql).startsWith('DELETE FROM "todo_0/cdc_changeLog"')) {
         return {
-          rows: [{ __orez_deleted: 1 }, { __orez_deleted: 1 }],
-          columns: ['__orez_deleted'],
+          rows: [{ __orez_count__deleted: 1 }, { __orez_count__deleted: 1 }],
+          columns: ['__orez_count__deleted'],
         }
       }
       return { rows: [], columns: [] }
@@ -4419,7 +4419,7 @@ describe('DoBackend', () => {
 
     expect(dataRowValues(result)).toEqual([['2']])
     expect(compactSQL(http.sqls.at(-1) || '')).toBe(
-      'DELETE FROM "todo_0/cdc_changeLog" WHERE watermark < ? RETURNING 1 AS "__orez_deleted"'
+      'DELETE FROM "todo_0/cdc_changeLog" WHERE watermark < ? RETURNING 1 AS __orez_count__deleted'
     )
     expect(http.params.at(-1)).toEqual(['a1zs3dw2usxs'])
   })

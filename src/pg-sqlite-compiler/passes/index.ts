@@ -1,5 +1,6 @@
 import { catalogPass } from './catalog.js'
 import { datetimePass } from './datetime.js'
+import { dmlCtePass } from './dml-cte.js'
 import { schemaPass } from './schema.js'
 import { typesPass } from './types.js'
 import { unsupportedPass } from './unsupported.js'
@@ -16,6 +17,8 @@ import { unsupportedPass } from './unsupported.js'
 import type { Pass, PassContext } from '../types.js'
 
 export const DEFAULT_PASSES: Pass[] = [
+  // structural rewrites first so later passes see the final statement shape
+  dmlCtePass,
   typesPass,
   datetimePass,
   catalogPass,
