@@ -1,0 +1,19 @@
+{
+  "name": "zharness",
+  "private": true,
+  "type": "module",
+  "description": "zero sync-engine conformance + load harness — see ../plans/zero-conformance-harness.md",
+  "scripts": {
+    "smoke": "bun src/smoke.ts"
+  },
+  "dependencies": {
+    "@rocicorp/zero": "1.6.1",
+    "embedded-postgres": "17.10.0-beta.17",
+    "postgres": "^3.4.5"
+  },
+  "trustedDependencies": [
+    "@embedded-postgres/darwin-arm64",
+    "@rocicorp/zero-sqlite3",
+    "protobufjs"
+  ]
+}
