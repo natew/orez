@@ -16,7 +16,7 @@ import {
   createSyncServer,
   tablesFromZeroSchema,
 } from '../../../src/sync-server/sync-server'
-import { DDL, SEED, mutators, schema } from '../fixture.js'
+import { DDL, SEED, jsonColumns, mutators, schema } from '../fixture.js'
 import type { Rows, SyncTarget } from '../target.js'
 
 function bunSqliteDb(db: Database): SyncDb {
@@ -35,33 +35,85 @@ function bunSqliteDb(db: Database): SyncDb {
 
 // server-side custom mutator execution against sqlite. same names/semantics
 // as the client registry in fixture.ts; plain SQL like soot's server side.
+// semantics must MATCH the client impls exactly (e.g. project.delete does not
+// cascade, because the client mutator doesn't).
 function executeMutator(
   tx: SyncDb,
   name: string,
   args: unknown,
   _ctx: { userID: string }
 ) {
-  if (name === 'project.create') {
-    const a = args as { id: string; ownerId: string; name: string }
-    const exists = tx.all(`SELECT 1 FROM project WHERE id = ?`, [a.id])
-    if (exists.length > 0) throw new MutationAppError('exists')
-    tx.exec(`INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)`, [
-      a.id,
-      a.ownerId,
-      a.name,
-    ])
-    return
+  switch (name) {
+    case 'project.create': {
+      const a = args as { id: string; ownerId: string; name: string }
+      const exists = tx.all(`SELECT 1 FROM project WHERE id = ?`, [a.id])
+      if (exists.length > 0) throw new MutationAppError('exists')
+      tx.exec(`INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)`, [
+        a.id,
+        a.ownerId,
+        a.name,
+      ])
+      return
+    }
+    case 'project.rename': {
+      const a = args as { id: string; name: string }
+      tx.exec(`UPDATE project SET name = ? WHERE id = ?`, [a.name, a.id])
+      return
+    }
+    case 'project.delete': {
+      const a = args as { id: string }
+      tx.exec(`DELETE FROM project WHERE id = ?`, [a.id])
+      return
+    }
+    case 'member.add': {
+      const a = args as { id: string; projectId: string; userId: string }
+      tx.exec(`INSERT INTO member (id, "projectId", "userId") VALUES (?, ?, ?)`, [
+        a.id,
+        a.projectId,
+        a.userId,
+      ])
+      return
+    }
+    case 'member.remove': {
+      const a = args as { id: string }
+      tx.exec(`DELETE FROM member WHERE id = ?`, [a.id])
+      return
+    }
+    case 'task.create': {
+      const a = args as {
+        id: string
+        projectId: string
+        title: string
+        rank: number
+        done: boolean
+        meta?: unknown
+        dueAt?: number
+      }
+      tx.exec(
+        `INSERT INTO task (id, "projectId", title, rank, done, meta, "dueAt")
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          a.id,
+          a.projectId,
+          a.title,
+          a.rank,
+          a.done ? 1 : 0,
+          a.meta === undefined || a.meta === null ? null : JSON.stringify(a.meta),
+          a.dueAt ?? null,
+        ]
+      )
+      return
+    }
+    case 'task.toggle': {
+      const a = args as { id: string }
+      const existing = tx.all(`SELECT done FROM task WHERE id = ?`, [a.id])
+      if (existing.length === 0) throw new MutationAppError('not-found')
+      tx.exec(`UPDATE task SET done = ? WHERE id = ?`, [existing[0]!.done ? 0 : 1, a.id])
+      return
+    }
+    default:
+      throw new Error(`unknown mutator: ${name}`)
   }
-  if (name === 'member.add') {
-    const a = args as { id: string; projectId: string; userId: string }
-    tx.exec(`INSERT INTO member (id, "projectId", "userId") VALUES (?, ?, ?)`, [
-      a.id,
-      a.projectId,
-      a.userId,
-    ])
-    return
-  }
-  throw new Error(`unknown mutator: ${name}`)
 }
 
 function userIDFromAuth(header: string | undefined): string | null {
@@ -72,18 +124,31 @@ export async function startOrezLocal(opts?: {
   port?: number
   pullIntervalMs?: number
 }): Promise<SyncTarget> {
-  const port = opts?.port ?? 26_450
+  // random per run — see stock-zero.ts port note
+  const port = opts?.port ?? 59_000 + Math.floor(Math.random() * 4_000)
   const sqlite = new Database(':memory:')
   const db = bunSqliteDb(sqlite)
 
   for (const stmt of DDL) db.exec(stmt)
   for (const [tableName, rows] of Object.entries(SEED)) {
+    const jsonCols = jsonColumns(tableName)
     for (const row of rows) {
       const cols = Object.keys(row)
+      // sqlite json storage = the JSON-ENCODED text of the value (matches
+      // zero's replica model), so scalar json values round-trip too
+      const values = Object.entries(row).map(([k, v]) =>
+        jsonCols.has(k) && v !== null
+          ? JSON.stringify(v)
+          : typeof v === 'boolean'
+            ? v
+              ? 1
+              : 0
+            : v
+      )
       db.exec(
         `INSERT INTO "${tableName}" (${cols.map((c) => `"${c}"`).join(', ')})
          VALUES (${cols.map(() => '?').join(', ')})`,
-        Object.values(row)
+        values
       )
     }
   }

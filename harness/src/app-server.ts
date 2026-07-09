@@ -10,19 +10,15 @@ import {
   handleQueryRequest,
   zeroPostgresJS,
 } from '@rocicorp/zero/pg'
-import { mutators, schema, zql } from './fixture.js'
+import { mutators, queryBuilders, schema } from './fixture.js'
 
-// server-side transform: query name + args -> zql AST. explicit switch, no
-// registry lookup, so permission filters per query have an obvious home.
+// server-side transform: query name + args -> zql AST via the SAME builder
+// map the client registry uses, so both sides always produce the same query.
+// per-query permission filters would compose here.
 function transformQuery(name: string, args: ReadonlyJSONValue | undefined) {
-  switch (name) {
-    case 'allProjects':
-      return zql.project.related('members')
-    case 'projectById':
-      return zql.project.where('id', (args as { id: string }).id).one()
-    default:
-      throw new Error(`unknown query: ${name}`)
-  }
+  const build = queryBuilders[name as keyof typeof queryBuilders]
+  if (!build) throw new Error(`unknown query: ${name}`)
+  return build(args as never)
 }
 
 // walk the mutator registry defs by dotted name -> MutatorDefinition

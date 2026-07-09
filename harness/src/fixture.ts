@@ -1,13 +1,14 @@
-// shared fixture: one zero schema + named queries + custom mutators + pg DDL
-// + seed, used by every target. mirrors the zero-http spike fixture
-// (user/project/member) so results stay comparable across targets.
+// shared fixture: one zero schema + named queries + custom mutators + DDL +
+// deterministic seed, used by every target. modeled on the shapes found in
+// ~/chat's query layer (the canonical large zero app): related() fan-out with
+// nested one(), per-relation orderBy/limit windows, exists, and/or trees, IN,
+// LIKE, nullable compares, junction hops. plus a types-exercising task table
+// (number/boolean/json/nullable) because rowsPatch value conversion is a
+// per-target responsibility the shapes lane must catch.
 //
-// modern zero API only (no enableLegacyQueries/enableLegacyMutators): queries
-// are named `defineQuery` definitions transformed server-side via
-// ZERO_QUERY_URL; writes are custom mutators executed optimistically on the
-// client and authoritatively via ZERO_MUTATE_URL. ad-hoc zql built from
-// `createBuilder` still works client-side but only READS THE LOCAL CACHE, it
-// never syncs more data — the smoke exercises that distinction explicitly.
+// modern zero API only: queries are named `defineQuery` definitions
+// transformed server-side; writes are custom mutators. ad-hoc zql from
+// `createBuilder` reads the local cache only and never syncs more data.
 import {
   ANYONE_CAN_DO_ANYTHING,
   createBuilder,
@@ -17,6 +18,9 @@ import {
   definePermissions,
   defineQueries,
   defineQuery,
+  boolean,
+  json,
+  number,
   relationships,
   string,
   table,
@@ -46,17 +50,55 @@ const member = table('member')
   })
   .primaryKey('id')
 
+const task = table('task')
+  .columns({
+    id: string(),
+    projectId: string(),
+    title: string(),
+    rank: number(),
+    done: boolean(),
+    meta: json().optional(),
+    dueAt: number().optional(),
+  })
+  .primaryKey('id')
+
 const projectRelationships = relationships(project, ({ many }) => ({
   members: many({
     sourceField: ['id'],
     destSchema: member,
     destField: ['projectId'],
   }),
+  tasks: many({
+    sourceField: ['id'],
+    destSchema: task,
+    destField: ['projectId'],
+  }),
+}))
+
+const memberRelationships = relationships(member, ({ one }) => ({
+  user: one({
+    sourceField: ['userId'],
+    destSchema: user,
+    destField: ['id'],
+  }),
+  project: one({
+    sourceField: ['projectId'],
+    destSchema: project,
+    destField: ['id'],
+  }),
+}))
+
+const taskRelationships = relationships(task, ({ one }) => ({
+  project: one({
+    sourceField: ['projectId'],
+    destSchema: project,
+    destField: ['id'],
+  }),
 }))
 
 export const schema = createSchema({
-  tables: [user, project, member],
-  relationships: [projectRelationships],
+  tables: [user, project, member, task],
+  relationships: [projectRelationships, memberRelationships, taskRelationships],
 })
 
 export type Schema = typeof schema
@@ -64,12 +106,120 @@ export type Schema = typeof schema
 // ad-hoc zql builder: local-cache-only on clients, AST builder on the server
 export const zql = createBuilder(schema)
 
+// ---------------------------------------------------------------------------
+// query corpus: ONE builder map shared by the client registry and the server
+// transform endpoint, so both sides always produce the same AST. shapes
+// modeled on the chat census (plans/zero-conformance-harness.md M3).
+// ---------------------------------------------------------------------------
+
+export const queryBuilders = {
+  allProjects: () => zql.project.related('members'),
+  projectById: (args: { id: string }) =>
+    zql.project
+      .where('id', args.id)
+      .one()
+      .related('members', (q) => q.related('user', (q) => q.one()))
+      .related('tasks', (q) => q.orderBy('rank', 'desc')),
+  projectsOwnedBy: (args: { ownerId: string }) =>
+    zql.project.where('ownerId', args.ownerId).orderBy('name', 'asc'),
+  projectsWithRecentTasks: () =>
+    zql.project.related('tasks', (q) => q.orderBy('rank', 'desc').limit(3)),
+  projectMemberUsers: () =>
+    zql.project
+      .orderBy('id', 'asc')
+      .related('members', (q) => q.related('user', (q) => q.one())),
+  tasksDone: () => zql.task.where('done', true).orderBy('id', 'asc'),
+  tasksNotDoneByDue: () =>
+    zql.task.where('done', '!=', true).orderBy('dueAt', 'asc').orderBy('id', 'asc'),
+  tasksInProjects: (args: { projectIds: string[] }) =>
+    zql.task.where('projectId', 'IN', args.projectIds).orderBy('id', 'asc'),
+  tasksTitleLike: (args: { pattern: string }) =>
+    zql.task.where('title', 'LIKE', args.pattern).orderBy('id', 'asc'),
+  tasksRankRange: (args: { min: number; max: number }) =>
+    zql.task.where('rank', '>', args.min).where('rank', '<=', args.max).orderBy('id', 'asc'),
+  tasksAndOr: () =>
+    zql.task.where(({ and, or, cmp }) =>
+      and(cmp('done', '=', false), or(cmp('rank', '>', 5), cmp('title', 'LIKE', '%x%')))
+    ),
+  projectsWithAnyDoneTask: () =>
+    zql.project.whereExists('tasks', (q) => q.where('done', true)).orderBy('id', 'asc'),
+  // not(exists()) is unsupported on the zero client (bugs.rocicorp.dev/3438,
+  // found by this lane 2026-07-09) — junction-scoped exists instead
+  projectsWithUserMember: (args: { userId: string }) =>
+    zql.project.whereExists('members', (q) => q.where('userId', args.userId)).orderBy('id', 'asc'),
+  taskById: (args: { id: string }) => zql.task.where('id', args.id).one(),
+  projectsOrderMulti: () =>
+    zql.project.orderBy('ownerId', 'asc').orderBy('name', 'desc').limit(5),
+  firstProjectAlphabetical: () => zql.project.orderBy('name', 'asc').one(),
+  membersOfProject: (args: { projectId: string }) =>
+    zql.member
+      .where('projectId', args.projectId)
+      .orderBy('id', 'asc')
+      .related('user', (q) => q.one()),
+} as const
+
+export type QueryName = keyof typeof queryBuilders
+
 export const queries = defineQueries({
-  allProjects: defineQuery(() => zql.project.related('members')),
+  allProjects: defineQuery(() => queryBuilders.allProjects()),
   projectById: defineQuery(({ args }: { args: { id: string } }) =>
-    zql.project.where('id', args.id).one()
+    queryBuilders.projectById(args)
+  ),
+  projectsOwnedBy: defineQuery(({ args }: { args: { ownerId: string } }) =>
+    queryBuilders.projectsOwnedBy(args)
+  ),
+  projectsWithRecentTasks: defineQuery(() => queryBuilders.projectsWithRecentTasks()),
+  projectMemberUsers: defineQuery(() => queryBuilders.projectMemberUsers()),
+  tasksDone: defineQuery(() => queryBuilders.tasksDone()),
+  tasksNotDoneByDue: defineQuery(() => queryBuilders.tasksNotDoneByDue()),
+  tasksInProjects: defineQuery(({ args }: { args: { projectIds: string[] } }) =>
+    queryBuilders.tasksInProjects(args)
+  ),
+  tasksTitleLike: defineQuery(({ args }: { args: { pattern: string } }) =>
+    queryBuilders.tasksTitleLike(args)
+  ),
+  tasksRankRange: defineQuery(({ args }: { args: { min: number; max: number } }) =>
+    queryBuilders.tasksRankRange(args)
+  ),
+  tasksAndOr: defineQuery(() => queryBuilders.tasksAndOr()),
+  projectsWithAnyDoneTask: defineQuery(() => queryBuilders.projectsWithAnyDoneTask()),
+  projectsWithUserMember: defineQuery(({ args }: { args: { userId: string } }) =>
+    queryBuilders.projectsWithUserMember(args)
+  ),
+  taskById: defineQuery(({ args }: { args: { id: string } }) =>
+    queryBuilders.taskById(args)
+  ),
+  projectsOrderMulti: defineQuery(() => queryBuilders.projectsOrderMulti()),
+  firstProjectAlphabetical: defineQuery(() => queryBuilders.firstProjectAlphabetical()),
+  membersOfProject: defineQuery(({ args }: { args: { projectId: string } }) =>
+    queryBuilders.membersOfProject(args)
   ),
 })
+
+// the shapes lane materializes each of these on every target and compares
+export const queryCorpus: Array<{ name: QueryName; args?: unknown }> = [
+  { name: 'allProjects' },
+  { name: 'projectById', args: { id: 'p3' } },
+  { name: 'projectsOwnedBy', args: { ownerId: 'u2' } },
+  { name: 'projectsWithRecentTasks' },
+  { name: 'projectMemberUsers' },
+  { name: 'tasksDone' },
+  { name: 'tasksNotDoneByDue' },
+  { name: 'tasksInProjects', args: { projectIds: ['p1', 'p4', 'p9'] } },
+  { name: 'tasksTitleLike', args: { pattern: '%fix%' } },
+  { name: 'tasksRankRange', args: { min: 2, max: 8 } },
+  { name: 'tasksAndOr' },
+  { name: 'projectsWithAnyDoneTask' },
+  { name: 'projectsWithUserMember', args: { userId: 'u3' } },
+  { name: 'taskById', args: { id: 't17' } },
+  { name: 'projectsOrderMulti' },
+  { name: 'firstProjectAlphabetical' },
+  { name: 'membersOfProject', args: { projectId: 'p2' } },
+]
+
+// ---------------------------------------------------------------------------
+// mutators
+// ---------------------------------------------------------------------------
 
 type Tx = Transaction<Schema>
 
@@ -80,6 +230,14 @@ export const mutators = defineMutators({
         await tx.mutate.project.insert(args)
       }
     ),
+    rename: defineMutator(
+      async ({ tx, args }: { tx: Tx; args: { id: string; name: string } }) => {
+        await tx.mutate.project.update({ id: args.id, name: args.name })
+      }
+    ),
+    delete: defineMutator(async ({ tx, args }: { tx: Tx; args: { id: string } }) => {
+      await tx.mutate.project.delete({ id: args.id })
+    }),
   },
   member: {
     add: defineMutator(
@@ -87,6 +245,35 @@ export const mutators = defineMutators({
         await tx.mutate.member.insert(args)
       }
     ),
+    remove: defineMutator(async ({ tx, args }: { tx: Tx; args: { id: string } }) => {
+      await tx.mutate.member.delete({ id: args.id })
+    }),
+  },
+  task: {
+    create: defineMutator(
+      async ({
+        tx,
+        args,
+      }: {
+        tx: Tx
+        args: {
+          id: string
+          projectId: string
+          title: string
+          rank: number
+          done: boolean
+          meta?: unknown
+          dueAt?: number
+        }
+      }) => {
+        await tx.mutate.task.insert(args as never)
+      }
+    ),
+    toggle: defineMutator(async ({ tx, args }: { tx: Tx; args: { id: string } }) => {
+      const existing = await tx.query.task.where('id', args.id).one()
+      if (!existing) throw new Error('not-found')
+      await tx.mutate.task.update({ id: args.id, done: !existing.done })
+    }),
   },
 })
 
@@ -96,7 +283,12 @@ export const permissions = definePermissions<unknown, Schema>(schema, () => ({
   user: ANYONE_CAN_DO_ANYTHING,
   project: ANYONE_CAN_DO_ANYTHING,
   member: ANYONE_CAN_DO_ANYTHING,
+  task: ANYONE_CAN_DO_ANYTHING,
 }))
+
+// ---------------------------------------------------------------------------
+// storage
+// ---------------------------------------------------------------------------
 
 // column names are unmapped, so store columns must match the zero schema
 // exactly. this DDL is valid in BOTH postgres and sqlite — every target runs
@@ -105,10 +297,88 @@ export const DDL = [
   `CREATE TABLE "user" (id text PRIMARY KEY, name text NOT NULL)`,
   `CREATE TABLE project (id text PRIMARY KEY, "ownerId" text NOT NULL, name text NOT NULL)`,
   `CREATE TABLE member (id text PRIMARY KEY, "projectId" text NOT NULL, "userId" text NOT NULL)`,
+  // rank is double precision, NOT real: pg float4 would round-trip with
+  // float32 noise while sqlite REAL is always 8-byte, a phantom divergence
+  `CREATE TABLE task (id text PRIMARY KEY, "projectId" text NOT NULL, title text NOT NULL,
+    rank double precision NOT NULL, done boolean NOT NULL, meta jsonb, "dueAt" bigint)`,
 ]
 
-export const SEED = {
-  user: [{ id: 'u-seed', name: 'seed user' }],
-  project: [{ id: 'p-seed', ownerId: 'u-seed', name: 'seed project' }],
-  member: [{ id: 'm-seed', projectId: 'p-seed', userId: 'u-seed' }],
+// deterministic dataset: same rows on every target, every run. exercises
+// unicode, LIKE-able substrings, float/negative ranks, null json/dueAt,
+// nested json values.
+function mulberry32(seed: number) {
+  let a = seed
+  return () => {
+    a |= 0
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+export function generateSeed(seed = 1) {
+  const rng = mulberry32(seed)
+  const pick = <T>(arr: T[]) => arr[Math.floor(rng() * arr.length)]!
+
+  const users = Array.from({ length: 8 }, (_, i) => ({
+    id: `u${i}`,
+    name: pick(['ann', 'bob 🌵', 'çelik', 'dee', 'evan fix', 'frida', 'gus', 'hana']) + ` ${i}`,
+  }))
+
+  const projects = Array.from({ length: 12 }, (_, i) => ({
+    id: `p${i}`,
+    ownerId: `u${i % users.length}`,
+    name: pick(['alpha', 'fixup', 'Zenith', 'delta x', 'ütopia', 'omega']) + ` ${i}`,
+  }))
+
+  const members: { id: string; projectId: string; userId: string }[] = []
+  let m = 0
+  for (const p of projects) {
+    const count = 1 + Math.floor(rng() * 3)
+    for (let j = 0; j < count; j++) {
+      members.push({ id: `m${m++}`, projectId: p.id, userId: `u${Math.floor(rng() * users.length)}` })
+    }
+  }
+
+  // includes SCALAR json values (string/number/bool): jsonb holds any json
+  // type and both stacks must round-trip them identically. writer discipline
+  // matters — postgres.js stores a js string param into jsonb as a json
+  // string (double-encoded), so seeds go through schema-driven json encoding.
+  const metas = [
+    null,
+    { tags: ['a', 'b'], depth: { n: 1 } },
+    { emoji: '✅', list: [1, 2.5, -3] },
+    { s: 'plain' },
+    [1, 'two', null],
+    'scalar string',
+    42.5,
+    true,
+  ]
+  const tasks = Array.from({ length: 48 }, (_, i) => ({
+    id: `t${i}`,
+    projectId: `p${Math.floor(rng() * 10)}`, // p10/p11 stay task-less for projectsWithoutTasks
+    title: pick(['fix login', 'polish ux', 'refactor sync', 'fix flaky test', 'ship it 🚀', 'triage']) + ` ${i}`,
+    rank: Math.round((rng() * 20 - 4) * 100) / 100,
+    done: rng() > 0.6,
+    meta: pick(metas),
+    dueAt: rng() > 0.3 ? 1750000000000 + Math.floor(rng() * 10_000_000_000) : null,
+  }))
+
+  return { user: users, project: projects, member: members, task: tasks }
+}
+
+export const SEED = generateSeed()
+
+// columns typed json in the zero schema — seed/write paths need these to
+// encode values correctly per store (pg: sql.json; sqlite: JSON.stringify)
+export function jsonColumns(tableName: string): Set<string> {
+  const columns = (schema.tables as Record<string, { columns: Record<string, { type: string }> }>)[
+    tableName
+  ]?.columns
+  return new Set(
+    Object.entries(columns ?? {})
+      .filter(([, spec]) => spec.type === 'json')
+      .map(([name]) => name)
+  )
 }

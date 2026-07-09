@@ -8,7 +8,7 @@
 //
 //   bun src/smoke.ts --target stock-zero --clients 10
 import { parseArgs } from 'node:util'
-import { mutators, queries, zql } from './fixture.js'
+import { SEED, mutators, queries, zql } from './fixture.js'
 import type { FixtureZero, SyncTarget } from './target.js'
 import { startStockZero } from './targets/stock-zero.js'
 
@@ -130,13 +130,21 @@ try {
   await Promise.all(serverAcks)
   console.log(`[smoke] all ${serverAcks.length} mutations server-acked at +${Date.now() - tWrites}ms`)
 
-  const expectedProjects = 1 + 1 + CLIENTS * PROJECTS_PER_CLIENT // seed + upstream + mutated
+  const expectedProjects = SEED.project.length + 1 + CLIENTS * PROJECTS_PER_CLIENT // seed + upstream + mutated
+  const expectedMembers = SEED.member.length + 1 + CLIENTS * PROJECTS_PER_CLIENT
 
+  // gate on the FULL expected state (projects AND members): with a poll-based
+  // transport, comparing right after the project count races other clients'
+  // member writes against the next poll
   const tConverge = await eventually(
     () => {
       for (const [i, w] of watchers.entries()) {
         if (w.rows.length !== expectedProjects) {
           throw new Error(`client ${i} sees ${w.rows.length}/${expectedProjects} projects`)
+        }
+        const memberCount = w.rows.reduce((n, r) => n + r.members.length, 0)
+        if (memberCount !== expectedMembers) {
+          throw new Error(`client ${i} sees ${memberCount}/${expectedMembers} members`)
         }
       }
     },

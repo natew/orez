@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path'
 import { Zero } from '@rocicorp/zero'
 import postgres from 'postgres'
 import { startAppServer } from '../app-server.js'
-import { DDL, SEED, mutators, permissions, schema } from '../fixture.js'
+import { DDL, SEED, jsonColumns, mutators, permissions, schema } from '../fixture.js'
 import type { Rows, SyncTarget } from '../target.js'
 
 const require = createRequire(import.meta.url)
@@ -74,9 +74,14 @@ export async function startStockZero(opts?: {
   appPort?: number
   logLevel?: string
 }): Promise<SyncTarget> {
-  const pgPort = opts?.pgPort ?? 26_432
-  const zeroPort = opts?.zeroPort ?? 26_448
-  const appPort = opts?.appPort ?? 26_449
+  // random port block per run: a crashed/timed-out previous run can leave an
+  // orphaned zero-cache holding fixed ports (EADDRINUSE crash-loop). NOTE:
+  // zero-cache binds ZERO_PORT+1 (change-streamer) and +2 internally — the
+  // app server must stay clear of that range.
+  const base = 27_000 + Math.floor(Math.random() * 2_000) * 16
+  const pgPort = opts?.pgPort ?? base
+  const zeroPort = opts?.zeroPort ?? base + 4
+  const appPort = opts?.appPort ?? base + 12
   const dataDir = mkdtempSync(join(tmpdir(), 'zharness-stock-'))
 
   // embedded-postgres default export is the class
@@ -98,7 +103,19 @@ export async function startStockZero(opts?: {
 
   for (const stmt of DDL) await sql.unsafe(stmt)
   for (const [tableName, rows] of Object.entries(SEED)) {
-    for (const row of rows) await sql`INSERT INTO ${sql(tableName)} ${sql(row)}`
+    const jsonCols = jsonColumns(tableName)
+    for (const row of rows) {
+      // schema-driven json encoding: sql.json makes pg store the intended
+      // json VALUE. a plain string param into jsonb double-encodes (stores a
+      // json string) — the shapes lane caught exactly that.
+      const insert = Object.fromEntries(
+        Object.entries(row).map(([k, v]) => [
+          k,
+          jsonCols.has(k) && v !== null ? sql.json(v as never) : v,
+        ])
+      )
+      await sql`INSERT INTO ${sql(tableName)} ${sql(insert)}`
+    }
   }
 
   // deploy ANYONE_CAN_DO_ANYTHING permissions the way zero-deploy-permissions does
