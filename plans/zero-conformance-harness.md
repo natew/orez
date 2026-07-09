@@ -291,21 +291,32 @@ without syncing more. wire facts pinned in harness/README.md (auth-echo
 userID pinning, callable-form registry mutate, node-not-bun spawn).
 still open in M1 scope: a 1.7-canary lane, chinook fixture.
 
-**M2, orez-local pure-sqlite target:** the minimal generic sync server core
-(config = zero schema + mutator map; snapshot pull with per-user filter
-hooks; push via PushProcessor-equivalent LMID bookkeeping in sqlite; the
-fixed-width cookie + wire rules from the spike). same smoke green:
-`bun harness smoke --target orez-local`. no cf anywhere in this milestone;
-it must run on a bare machine with zero deps beyond bun.
+**M2, orez-local pure-sqlite target [DONE 2026-07-09]:** the sync server
+core landed in orez proper (`src/sync-server/sync-server.ts`, commit
+db05f1c): snapshot pulls with schema-driven value conversion + per-user
+visibility hook, v51 custom-mutator push with LMID bookkeeping (replay
+idempotent, app-error advances LMID via savepoint rollback), soot's
+group→user claim in sqlite dialect, monotonic version cookie, 409
+future-cookie. host-agnostic `SyncDb` interface (bun:sqlite now,
+`ctx.storage.sql` next). the harness target runs it over bun:sqlite +
+node:http with on-zero's PRODUCTION httpPullTransport (checkout source;
+the module is self-contained). smoke green first run; 50 clients/400
+mutations in 5.5s, no postgres, no docker.
 
-**M3, query-shape lanes (the bulk of value):** port upstream's generator
-(skeleton enumeration, decoration axes, pairwise coverage, literals/scalar
-axes) from `packages/zql-integration-tests/src/chinook/fuzz/`; hydrate
-differential vs oracle per target; then write-sequences with the
-incremental == fresh-hydrate invariant; shrink + replay artifacts in their
-json shape; committed regression corpus. lanes: `backbone` (per-PR, minutes)
-and `sweep` (seeded, hours, mini). divergences on stock-zero = upstream bug
-reports; divergences on orez targets = our bugs, fix before proceeding.
+**M3, query-shape lanes [FIRST LANE DONE 2026-07-09, generator port still
+open]:** shipped `harness/src/shapes.ts` (commit d21277d): a 17-query
+CROSS-IMPLEMENTATION differential — identical deterministic dataset + write
+script on stock-zero and orez-local, every corpus query compared at hydrate
++ post-writes + incremental==fresh, with a no-vacuous-greens gate (every
+query must return data). this reframing matters: stock evaluates queries
+server-side (IVM row selection), orez-local ships snapshots and evaluates
+client-side; equal results IS the conformance property the rewrite must
+hold. found immediately: client not(exists()) unsupported (upstream bug
+3438), postgres.js jsonb double-encoding writer discipline, pg-jsonb key
+order normalization policy, 1.6.1 registry raw-args invocation. still open:
+port upstream's generator for randomized sweep lanes + replay artifacts +
+regression corpus; grow the corpus toward chat's full census (start/cursor
+pagination, deeper junction shapes).
 
 query-shape corpus: model on ~/chat (nate 2026-07-09), the canonical large
 zero app. census of its query layer (`src/data/queries/` 37 files +

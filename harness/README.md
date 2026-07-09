@@ -13,9 +13,16 @@ state against a fresh oracle read of the authoritative store.
 
 ```sh
 bun install
-bun run smoke                       # 10 clients vs real zero-cache + embedded postgres
-bun src/smoke.ts --clients 50 --projects 4
+bun run smoke                                      # 10 clients vs real zero-cache
+bun src/smoke.ts --target orez-local --clients 50  # same vs the sqlite sync-server core
+bun src/shapes.ts                                  # 17-query cross-implementation differential
+bun src/bench.ts --target orez-local --clients 20 --writers 5 --rate 10 --duration 15
 ```
+
+targets: `stock-zero` (real zero-cache + embedded postgres + fixture app
+server) and `orez-local` (orez `src/sync-server` core over pure bun:sqlite,
+clients on on-zero's production http-pull transport). `orez-cf` is next
+(same core hosted in a DO).
 
 `stock-zero` boots embedded postgres (wal_level=logical), the fixture app
 server (`src/app-server.ts`: named-query transform on /query + custom-mutator
