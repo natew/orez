@@ -98,8 +98,10 @@ export const permissions = definePermissions<unknown, Schema>(schema, () => ({
   member: ANYONE_CAN_DO_ANYTHING,
 }))
 
-// column names are unmapped, so pg columns must match the zero schema exactly
-export const PG_DDL = [
+// column names are unmapped, so store columns must match the zero schema
+// exactly. this DDL is valid in BOTH postgres and sqlite — every target runs
+// the same statements.
+export const DDL = [
   `CREATE TABLE "user" (id text PRIMARY KEY, name text NOT NULL)`,
   `CREATE TABLE project (id text PRIMARY KEY, "ownerId" text NOT NULL, name text NOT NULL)`,
   `CREATE TABLE member (id text PRIMARY KEY, "projectId" text NOT NULL, "userId" text NOT NULL)`,

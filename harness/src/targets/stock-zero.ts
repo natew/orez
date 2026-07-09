@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path'
 import { Zero } from '@rocicorp/zero'
 import postgres from 'postgres'
 import { startAppServer } from '../app-server.js'
-import { PG_DDL, SEED, mutators, permissions, schema } from '../fixture.js'
+import { DDL, SEED, mutators, permissions, schema } from '../fixture.js'
 import type { Rows, SyncTarget } from '../target.js'
 
 const require = createRequire(import.meta.url)
@@ -96,7 +96,7 @@ export async function startStockZero(opts?: {
   const dbUrl = `postgres://postgres:password@127.0.0.1:${pgPort}/zharness`
   const sql = postgres(dbUrl, { max: 4, onnotice: () => {} })
 
-  for (const stmt of PG_DDL) await sql.unsafe(stmt)
+  for (const stmt of DDL) await sql.unsafe(stmt)
   for (const [tableName, rows] of Object.entries(SEED)) {
     for (const row of rows) await sql`INSERT INTO ${sql(tableName)} ${sql(row)}`
   }
