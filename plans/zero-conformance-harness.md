@@ -380,10 +380,20 @@ core, 250ms poll):
 | stock-zero | 50      | 222/264ms   | 253/272ms           | 101ms        | —                                   |
 
 orez-local is flat to 50 clients (ack is a local sqlite tx; propagation
-pinned at poll-interval/2 + rtt). remaining: bigger grids + hours-long
-longevity on the mini, per-client memory, and the CF grid at width.
-if TS tops out below the client counts we need, THAT is the trigger to
-revisit rust for the load generator only.
+pinned at poll-interval/2 + rtt).
+
+30-minute longevity soaks (2026-07-09, both PASS, zero mutation errors, no
+latency drift): orez-local 20 clients 3x2/s → 10,719 writes, ack p50/p95
+2/9ms, propagation p50 161ms, post-soak late client hydrated 10,731
+projects in 119ms, oracle equal (738MB rss = the ONE bun process holding
+all 20 stock zero clients + views + the 10k-row dataset — client-side
+cost, not server). orez-cf 10 clients 2x2/s → 7,175 writes against the
+deployed DO, ack p50/p95 174/542ms stable across the full 30min,
+propagation p50 615ms, late hydrate 412ms at 7k rows.
+
+remaining: hours-long longevity + bigger grids on the mini, per-client
+memory isolation. if TS tops out below the client counts we need, THAT is
+the trigger to revisit rust for the load generator only.
 
 **M5, orez-cf target [DONE 2026-07-09]:** the M2 core hosted in a DO over
 `ctx.storage.sql` — `harness/cf/worker.ts`, deployed as `zharness-sync` on
