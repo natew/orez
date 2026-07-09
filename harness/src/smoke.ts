@@ -1,13 +1,15 @@
-// M1 smoke: N concurrent stock zero clients against a SyncTarget. each client
-// writes through sync (CRUD mutators), upstream rows are written behind zero's
-// back (replication path), everything must converge, and the converged client
-// views must equal a fresh oracle read. exit 0 = pass.
+// M1 smoke: N concurrent stock zero clients against a SyncTarget, modern API
+// only. each client materializes a NAMED query (server-transformed via
+// ZERO_QUERY_URL), writes through CUSTOM mutators (optimistic + authoritative
+// via ZERO_MUTATE_URL), upstream rows are written behind zero's back
+// (replication path), everything must converge, and converged client views
+// must equal a fresh oracle read. also asserts the ad-hoc-zql nuance: local
+// queries read the synced cache without syncing anything new. exit 0 = pass.
 //
 //   bun src/smoke.ts --target stock-zero --clients 10
 import { parseArgs } from 'node:util'
-import type { Zero } from '@rocicorp/zero'
-import type { Schema } from './fixture.js'
-import type { Rows, SyncTarget } from './target.js'
+import { mutators, queries, zql } from './fixture.js'
+import type { FixtureZero, SyncTarget } from './target.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 const { values: args } = parseArgs({
@@ -28,8 +30,8 @@ async function startTarget(name: string): Promise<SyncTarget> {
 
 type ProjectRow = { id: string; ownerId: string; name: string; members: unknown[] }
 
-function watchProjects(zero: Zero<Schema>) {
-  const view = zero.query.project.related('members').materialize()
+function watchProjects(zero: FixtureZero) {
+  const view = zero.materialize(queries.allProjects())
   let rows: ProjectRow[] = []
   let complete = false
   view.addListener((data, resultType) => {
@@ -73,7 +75,7 @@ console.log(`[smoke] target '${target.name}' up in ${Date.now() - t0}ms`)
 let failed = false
 try {
   const watchers: ReturnType<typeof watchProjects>[] = []
-  const zeros: Zero<Schema>[] = []
+  const zeros: FixtureZero[] = []
   for (let i = 0; i < CLIENTS; i++) {
     const zero = target.createClient(`user-${i}`)
     zeros.push(zero)
@@ -93,22 +95,28 @@ try {
   )
   console.log(`[smoke] ${CLIENTS} clients hydrated in ${tHydrate}ms`)
 
-  // concurrent writes through sync from every client
+  // concurrent custom-mutator writes from every client; collect the server
+  // (authoritative) promises so the oracle compare waits for real commits
   const tWrites = Date.now()
+  const serverAcks: Promise<unknown>[] = []
   await Promise.all(
     zeros.map(async (zero, i) => {
       for (let p = 0; p < PROJECTS_PER_CLIENT; p++) {
         const id = `p-${i}-${p}`
-        await zero.mutate.project.insert({ id, ownerId: `user-${i}`, name: `proj ${i}.${p}` })
-        await zero.mutate.member.insert({
-          id: `m-${i}-${p}`,
-          projectId: id,
-          userId: `user-${i}`,
-        })
+        const created = zero.mutate(
+          mutators.project.create({ id, ownerId: `user-${i}`, name: `proj ${i}.${p}` })
+        )
+        serverAcks.push(created.server)
+        await created.client
+        const added = zero.mutate(
+          mutators.member.add({ id: `m-${i}-${p}`, projectId: id, userId: `user-${i}` })
+        )
+        serverAcks.push(added.server)
+        await added.client
       }
     })
   )
-  console.log(`[smoke] client mutations issued in ${Date.now() - tWrites}ms`)
+  console.log(`[smoke] custom mutations issued (optimistic) in ${Date.now() - tWrites}ms`)
 
   // upstream writes behind zero's back: must arrive via replication
   await target.sql(
@@ -117,6 +125,9 @@ try {
   await target.sql(
     `INSERT INTO member (id, "projectId", "userId") VALUES ('m-upstream', 'p-upstream', 'u-seed')`
   )
+
+  await Promise.all(serverAcks)
+  console.log(`[smoke] all ${serverAcks.length} mutations server-acked at +${Date.now() - tWrites}ms`)
 
   const expectedProjects = 1 + 1 + CLIENTS * PROJECTS_PER_CLIENT // seed + upstream + mutated
 
@@ -159,6 +170,24 @@ try {
     }
   }
   console.log(`[smoke] oracle compare: ${CLIENTS} clients x ${oracleProjects.length} projects + ${oracleMembers.length} members all equal`)
+
+  // ad-hoc local zql: reads the already-synced cache only (never syncs more).
+  // the member table synced via allProjects' related(); a local query over it
+  // must see exactly the oracle's member rows without registering anything.
+  const localView = zeros[0]!.materialize(zql.member.orderBy('id', 'asc'))
+  const localRows = await new Promise<{ id: string }[]>((resolve) => {
+    const cleanup = localView.addListener((data) => {
+      resolve(JSON.parse(JSON.stringify(data)) as { id: string }[])
+      queueMicrotask(() => cleanup())
+    })
+  })
+  if (localRows.length !== oracleMembers.length) {
+    throw new Error(
+      `ad-hoc local zql saw ${localRows.length} members, cache should hold ${oracleMembers.length}`
+    )
+  }
+  localView.destroy()
+  console.log(`[smoke] ad-hoc local zql over synced cache: ${localRows.length} members, no extra sync`)
 
   for (const w of watchers) w.destroy()
   console.log(`[smoke] PASS target=${target.name} clients=${CLIENTS} total=${Date.now() - t0}ms`)

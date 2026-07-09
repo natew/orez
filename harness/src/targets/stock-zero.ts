@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { Zero } from '@rocicorp/zero'
 import postgres from 'postgres'
-import { PG_DDL, SEED, permissions, schema } from '../fixture.js'
+import { startAppServer } from '../app-server.js'
+import { PG_DDL, SEED, mutators, permissions, schema } from '../fixture.js'
 import type { Rows, SyncTarget } from '../target.js'
 
 const require = createRequire(import.meta.url)
@@ -70,10 +71,12 @@ async function waitForHttp(url: string, timeoutMs: number) {
 export async function startStockZero(opts?: {
   pgPort?: number
   zeroPort?: number
+  appPort?: number
   logLevel?: string
 }): Promise<SyncTarget> {
   const pgPort = opts?.pgPort ?? 26_432
   const zeroPort = opts?.zeroPort ?? 26_448
+  const appPort = opts?.appPort ?? 26_449
   const dataDir = mkdtempSync(join(tmpdir(), 'zharness-stock-'))
 
   // embedded-postgres default export is the class
@@ -103,6 +106,9 @@ export async function startStockZero(opts?: {
   const perms = await permissions
   await sql`UPDATE zero.permissions SET permissions = ${sql.json(perms as never)}`
 
+  // the fixture app server: named-query transform + custom-mutator execution
+  const app = await startAppServer({ dbUrl, port: appPort })
+
   // spawn real zero-cache from node_modules
   const zeroEntry = require.resolve('@rocicorp/zero')
   const cli = resolve(zeroEntry, '../../..', 'zero/src/cli.js')
@@ -121,6 +127,12 @@ export async function startStockZero(opts?: {
       ZERO_LOG_LEVEL: opts?.logLevel ?? 'warn',
       ZERO_NUM_SYNC_WORKERS: '1',
       OTEL_SDK_DISABLED: 'true',
+      // modern surface only: custom mutators + named queries through the app
+      // server; setting both URLs also enables them without JWT config. CRUD
+      // is disabled so nothing can silently fall back to the legacy path.
+      ZERO_MUTATE_URL: `${app.url}/mutate`,
+      ZERO_QUERY_URL: `${app.url}/query`,
+      ZERO_ENABLE_CRUD_MUTATIONS: 'false',
     },
     stdio: ['ignore', 'inherit', 'inherit'],
   })
@@ -141,7 +153,9 @@ export async function startStockZero(opts?: {
       const zero = new Zero({
         server: `http://127.0.0.1:${zeroPort}`,
         userID,
+        auth: `token-${userID}`,
         schema,
+        mutators,
         kvStore: 'mem' as const,
         storageKey: `zharness-${++clientN}`,
       })
@@ -166,6 +180,7 @@ export async function startStockZero(opts?: {
       child.kill('SIGTERM')
       await Promise.race([childExit, new Promise((r) => setTimeout(r, 5_000))])
       if (child.exitCode === null) child.kill('SIGKILL')
+      await app.close()
       await sql.end({ timeout: 2 })
       await pg.stop()
       rmSync(dataDir, { recursive: true, force: true })

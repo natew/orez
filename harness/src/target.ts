@@ -3,16 +3,18 @@
 // directly, and read fresh oracle answers from. three implementations planned
 // (stock-zero, orez-local sqlite, orez-cf); see plans/zero-conformance-harness.md.
 import type { Zero } from '@rocicorp/zero'
-import type { Schema } from './fixture.js'
+import type { Schema, mutators } from './fixture.js'
 
 export type Rows = Record<string, unknown>[]
+
+export type FixtureZero = Zero<Schema, typeof mutators>
 
 export type SyncTarget = {
   readonly name: string
 
   // a stock @rocicorp/zero client wired for this target (server url +
   // transport differ per target; the client code never does)
-  createClient(userID: string): Zero<Schema>
+  createClient(userID: string): FixtureZero
 
   // upstream write straight to the authoritative store, bypassing sync —
   // exercises the replication path

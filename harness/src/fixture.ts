@@ -1,13 +1,26 @@
-// shared fixture: one zero schema + pg DDL + seed used by every target.
-// mirrors the proven zero-http spike fixture (user/project/member) so results
-// are comparable across stock zero, orez-local sqlite, and orez-cf.
+// shared fixture: one zero schema + named queries + custom mutators + pg DDL
+// + seed, used by every target. mirrors the zero-http spike fixture
+// (user/project/member) so results stay comparable across targets.
+//
+// modern zero API only (no enableLegacyQueries/enableLegacyMutators): queries
+// are named `defineQuery` definitions transformed server-side via
+// ZERO_QUERY_URL; writes are custom mutators executed optimistically on the
+// client and authoritatively via ZERO_MUTATE_URL. ad-hoc zql built from
+// `createBuilder` still works client-side but only READS THE LOCAL CACHE, it
+// never syncs more data — the smoke exercises that distinction explicitly.
 import {
   ANYONE_CAN_DO_ANYTHING,
+  createBuilder,
   createSchema,
+  defineMutator,
+  defineMutators,
   definePermissions,
+  defineQueries,
+  defineQuery,
   relationships,
   string,
   table,
+  type Transaction,
 } from '@rocicorp/zero'
 
 const user = table('user')
@@ -44,15 +57,41 @@ const projectRelationships = relationships(project, ({ many }) => ({
 export const schema = createSchema({
   tables: [user, project, member],
   relationships: [projectRelationships],
-  // zero 1.6 gates zero.query.<table> and zero.mutate.<table> CRUD behind
-  // these; the smoke uses both (custom mutators need a push server — M2)
-  enableLegacyQueries: true,
-  enableLegacyMutators: true,
 })
 
 export type Schema = typeof schema
 
-// zero-deploy-permissions loads this export by name from this file
+// ad-hoc zql builder: local-cache-only on clients, AST builder on the server
+export const zql = createBuilder(schema)
+
+export const queries = defineQueries({
+  allProjects: defineQuery(() => zql.project.related('members')),
+  projectById: defineQuery(({ args }: { args: { id: string } }) =>
+    zql.project.where('id', args.id).one()
+  ),
+})
+
+type Tx = Transaction<Schema>
+
+export const mutators = defineMutators({
+  project: {
+    create: defineMutator(
+      async ({ tx, args }: { tx: Tx; args: { id: string; ownerId: string; name: string } }) => {
+        await tx.mutate.project.insert(args)
+      }
+    ),
+  },
+  member: {
+    add: defineMutator(
+      async ({ tx, args }: { tx: Tx; args: { id: string; projectId: string; userId: string } }) => {
+        await tx.mutate.member.insert(args)
+      }
+    ),
+  },
+})
+
+// zero-cache requires a deployed permissions row; named queries carry their
+// own server-side filtering so the row itself is permissive
 export const permissions = definePermissions<unknown, Schema>(schema, () => ({
   user: ANYONE_CAN_DO_ANYTHING,
   project: ANYONE_CAN_DO_ANYTHING,
@@ -67,13 +106,7 @@ export const PG_DDL = [
 ]
 
 export const SEED = {
-  user: [
-    { id: 'u-seed', name: 'seed user' },
-  ],
-  project: [
-    { id: 'p-seed', ownerId: 'u-seed', name: 'seed project' },
-  ],
-  member: [
-    { id: 'm-seed', projectId: 'p-seed', userId: 'u-seed' },
-  ],
+  user: [{ id: 'u-seed', name: 'seed user' }],
+  project: [{ id: 'p-seed', ownerId: 'u-seed', name: 'seed project' }],
+  member: [{ id: 'm-seed', projectId: 'p-seed', userId: 'u-seed' }],
 }

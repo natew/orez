@@ -17,12 +17,28 @@ bun run smoke                       # 10 clients vs real zero-cache + embedded p
 bun src/smoke.ts --clients 50 --projects 4
 ```
 
-`stock-zero` boots embedded postgres (wal_level=logical) and spawns real
+`stock-zero` boots embedded postgres (wal_level=logical), the fixture app
+server (`src/app-server.ts`: named-query transform on /query + custom-mutator
+execution on /mutate, the role soot's app worker plays in prod), and real
 zero-cache from node_modules (spawned with `node`, never bun). no docker
-needed. zero pinned at 1.6.1 to match orez/soot; the fixture schema sets
-`enableLegacyQueries`/`enableLegacyMutators` (zero 1.6 gates
-`zero.query.<table>` and CRUD mutators behind them; custom mutators need a
-push server, which arrives with the orez-local target).
+needed. zero pinned at 1.6.1 to match orez/soot.
+
+modern zero surface ONLY, no legacy: queries are `defineQueries` named
+queries transformed server-side via `ZERO_QUERY_URL`; writes are
+`defineMutators` custom mutators via `ZERO_MUTATE_URL`;
+`ZERO_ENABLE_CRUD_MUTATIONS=false` so nothing can fall back to CRUD. wire
+facts pinned by this setup:
+
+- with both URLs set and no JWT config, zero-cache forwards the client's raw
+  `auth` token as a bearer header; the app server authenticates it and the
+  userID it passes to `handleQueryRequest`/`handleMutateRequest` is echoed
+  back and pinned server-side ("Connection userID does not match validated
+  server userID" when they disagree). fixture tokens: `token-<userID>`.
+- a `defineMutators` REGISTRY on the client is invoked callable-style:
+  `zero.mutate(mutators.project.create(args))` (property-style
+  `zero.mutate.project.create` exists only for plain def objects).
+- ad-hoc zql from `createBuilder` reads the local synced cache only and
+  never syncs more data; the smoke asserts this explicitly.
 
 ## upstream (mono) fuzz lanes runbook
 
