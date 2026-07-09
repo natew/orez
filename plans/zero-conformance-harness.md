@@ -361,13 +361,26 @@ client sync) and (b) a fresh client that connects after the writes and
 hydrates purely from the server. the smoke already enforces both; keep them
 mandatory in every future lane.
 
-**M4, load lanes:** N clients × M queries × write-rate grid, plus longevity
-(hours). measures: poke/pull lag percentiles, convergence time after write
-bursts, server rss/cpu over time, per-client memory. client driver runs many
-stock zero clients per node process, multi-process fanout on the mini; if TS
-tops out below the client counts we need, THAT is the trigger to revisit
-rust for the load generator only. deliverable: scaling curves committed to
-plans/, including the stock-zero baseline curve the rewrite must beat.
+**M4, load lanes [FIRST GRID 2026-07-09]:** N clients × M queries ×
+write-rate grid, plus longevity (hours). measures: poke/pull lag
+percentiles, convergence time after write bursts, server rss/cpu over time,
+per-client memory. first grid on `work` (5 writers x 5/s x 15s, cursor-diff
+core, 250ms poll):
+
+| target     | clients | ack p50/p95 | propagation p50/p95 | late hydrate | rss                                 |
+| ---------- | ------- | ----------- | ------------------- | ------------ | ----------------------------------- |
+| orez-local | 10      | 2/4ms       | 146/253ms           | 101ms        | 180MB (whole bun proc incl clients) |
+| orez-local | 25      | 2/5ms       | 142/257ms           | 103ms        | 207MB                               |
+| orez-local | 50      | 2/17ms      | 145/277ms           | 103ms        | 274MB                               |
+| stock-zero | 10      | 258/306ms   | 261/312ms           | 105ms        | —                                   |
+| stock-zero | 25      | 295/314ms   | 306/330ms           | 100ms        | —                                   |
+| stock-zero | 50      | 222/264ms   | 253/272ms           | 101ms        | —                                   |
+
+orez-local is flat to 50 clients (ack is a local sqlite tx; propagation
+pinned at poll-interval/2 + rtt). remaining: bigger grids + hours-long
+longevity on the mini, per-client memory, and the CF grid at width.
+if TS tops out below the client counts we need, THAT is the trigger to
+revisit rust for the load generator only.
 
 **M5, orez-cf target [DONE 2026-07-09]:** the M2 core hosted in a DO over
 `ctx.storage.sql` — `harness/cf/worker.ts`, deployed as `zharness-sync` on
@@ -399,10 +412,22 @@ findings pinned:
   cf containers (credits) still available for sweep width later; faults/
   kill-restart lanes stay local where we have process control.
 
-**M6, make it a gate:** nightly backbone+sweep+load on `mini-16` (agentbus
-scheduled), results posted; wire `bun harness backbone --target orez-local`
-into orez CI; the rewrite plan's phase 2 acceptance references these lanes
-byte-for-byte.
+**M6, make it a gate [CI DONE 2026-07-09, nightly pending peer fix]:**
+
+- CI: `.github/workflows/ci.yml` harness job runs orez-local smoke +
+  stock-vs-orez shapes differential + a 10-round fresh-seed sweep on every
+  push/PR, uploading regression artifacts on failure. the transport is
+  vendored (`harness/src/vendor/httpPullTransport.ts`) so CI needs no
+  takeout checkout.
+- nightly on `mini-16`: `harness/scripts/nightly.sh` (bigger sweep + bench
+  grid + stock baseline) committed; bun 1.3.14 installed on the mini
+  (user nathanwienert, 10 cores/16GB, node+git present, ~/orez + ~/takeout
+  checkouts fetch fine over ssh). BLOCKED mid-setup 2026-07-09: the
+  coordinator's agentbus machine identity regenerated (machine.json
+  corruption) and peers now reject spawns ("no connected peer"), so the
+  crontab install is unverified — re-run the crontab install once
+  federation is re-paired, and note the nightly only becomes live after
+  these commits are pushed to main (the mini pulls origin/main).
 
 ### runners (nate 2026-07-09: dev + initial validation happen on `work`;
 
