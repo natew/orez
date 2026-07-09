@@ -155,9 +155,47 @@ orez-local/orez-cf server). what's proven there:
   interval now dominates propagation).
 
 remaining for phase 2 proper: compose the same protocol over soot's
-production `_zero_changes` (per-(project,user) epochs for membership
-revocation, per-table window policy, prod DO size measurements below), then
-the soot validators + transport flip.
+production `_zero_changes`, then the soot validators + transport flip.
+the window-policy question is CLOSED by measurement (see decision gate
+below): no windows needed at today's sizes.
+
+**build plan for the production composition (written 2026-07-09, grounded
+in the reference core + the measured fleet):**
+
+1. **orez `src/cf-do/cursor-pull.ts`**: the delta primitive, next to
+   `watermark.ts`/`tx-journal.ts` per the placement agreement. maps
+   production `_zero_changes` (watermark autoincrement, op
+   INSERT/UPDATE/DELETE, row_data/old_data JSON — see
+   `DurableWatermarkState.ensureTables`) since a cookie into put/del
+   rowsPatch ops. use the reference core's approach: collect touched pks
+   (from row_data, old_data for DELETE/pk-updates), then LIVE-READ current
+   rows in the pull transaction — exists→put, gone→del. row images exist in
+   prod but live-read sidesteps op-coalescing and serializer-fidelity
+   questions entirely (the sqlite json_object 15-digit float trap doesn't
+   apply to row_data — it's JS-serialized — but live-read makes fidelity a
+   non-question). cookie = `DurableWatermarkState.current()`. floor: while
+   zero-cache still consumes `_zero_changes` (the durable-stream-progress
+   retention contract), the floor is the pruning point that contract
+   already maintains — cursor pulls below it snapshot; after phase 3 the
+   retention flips to size/time-bounded like the reference core.
+2. **epoch hook**: soot's membership-changing mutators (member add/remove,
+   visibility grants) call the invalidate() equivalent — one marker row +
+   floor bump forces a fleet snapshot of that project DO. global-per-DO is
+   the whole mechanism: measured project snapshots are sub-MB.
+3. **soot project pull endpoint**: `/p-<projectId>` single-component base →
+   data worker → project ZeroSqlDO. handlePull semantics verbatim from the
+   reference core (claim, unchanged, 409, snapshot fallback), value
+   conversion via the existing `toZeroRow` in `httpPull.server.ts`. LMIDs
+   read the same `soot_0_clients` rows the on-zero PushProcessor already
+   maintains in that DO (census: present in 56 project DOs today).
+4. **gates before flip**: harness lanes green (already CI), delta suite
+   green, then soot `validate-cf-do-runtime.ts` + factory-wave load +
+   chat e2e; flip `client.tsx` project instance to http-pull; project
+   namespaces stop accepting `/sync` sockets.
+
+the reference implementation of ALL pull semantics is
+`src/sync-server/sync-server.ts` + its 19-test delta suite — the
+production composition should stay line-for-line comparable to it.
 
 ### protocol
 
