@@ -171,6 +171,29 @@ try {
   }
   console.log(`[smoke] oracle compare: ${CLIENTS} clients x ${oracleProjects.length} projects + ${oracleMembers.length} members all equal`)
 
+  // fresh-client hydration: a client that connects AFTER all writes has no
+  // local cache to answer from — everything it sees must come from the
+  // server. this is the check that proves server-side state; same-client
+  // read-back proves nothing (zero answers from the local cache).
+  const late = target.createClient('late-joiner')
+  const lateWatch = watchProjects(late)
+  const tLate = await eventually(
+    () => {
+      if (!lateWatch.complete) throw new Error('late client not complete')
+      if (lateWatch.rows.length !== expectedProjects) {
+        throw new Error(`late client sees ${lateWatch.rows.length}/${expectedProjects}`)
+      }
+    },
+    30_000,
+    'fresh-client hydration'
+  )
+  const lateProjects = sortById(lateWatch.rows).map(({ id, ownerId, name }) => ({ id, ownerId, name }))
+  if (JSON.stringify(lateProjects) !== JSON.stringify(oracleProjects)) {
+    throw new Error('fresh client hydration diverged from oracle')
+  }
+  lateWatch.destroy()
+  console.log(`[smoke] fresh late-joining client hydrated ${expectedProjects} projects from server in ${tLate}ms, equals oracle`)
+
   // ad-hoc local zql: reads the already-synced cache only (never syncs more).
   // the member table synced via allProjects' related(); a local query over it
   // must see exactly the oracle's member rows without registering anything.

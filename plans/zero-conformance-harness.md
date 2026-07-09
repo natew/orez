@@ -274,19 +274,22 @@ the package's `TEST_PG_MODE` env is a root-CI concept, use
 fuzzer file runs under packages/zero-cache's vitest config, not
 zql-integration-tests'. runbook in `harness/README.md`.
 
-**M1, harness skeleton + stock-zero target [DONE 2026-07-09]:**
-`~/orez/harness/` (zharness, commit d0315e0). SyncTarget interface;
-stock-zero target = embedded postgres (wal_level=logical, no docker) + real
-zero-cache 1.6.1 spawned from node_modules; permissions deployed by
-replicating zero-deploy-permissions' SQL in-process. smoke green: 10 and 50
-stock clients hydrate, CRUD-mutate through sync, receive
-upstream-behind-zero's-back writes via logical replication, converge (50
-clients / 202 projects in 1.1s), and oracle-compare equal.
-`cd harness && bun run smoke`. gotchas pinned in code comments: spawn
-zero-cache with `node` (never bun's execPath), zero 1.6 gates
-`zero.query`/CRUD behind schema `enableLegacyQueries`/`enableLegacyMutators`.
-still M1-scope to add: a 1.7-canary lane, chinook fixture, custom-mutator
-push server (needed for the orez targets anyway).
+**M1, harness skeleton + stock-zero target [DONE 2026-07-09, modern API]:**
+`~/orez/harness/` (zharness, commits d0315e0 + 96d284b). SyncTarget
+interface; stock-zero target = embedded postgres (wal_level=logical, no
+docker) + real zero-cache 1.6.1 spawned from node_modules + the fixture app
+server (`harness/src/app-server.ts`) serving named-query transform
+(ZERO_QUERY_URL) and custom-mutator execution (ZERO_MUTATE_URL); permissions
+deployed by replicating zero-deploy-permissions' SQL in-process. legacy
+CRUD/queries are OFF (`ZERO_ENABLE_CRUD_MUTATIONS=false`, no
+enableLegacy* schema flags) per nate: the harness exercises the modern
+surface the orez server must serve. smoke green: 50 clients hydrate named
+queries, push 400 custom mutations (server-acked in 1.16s), receive
+upstream-behind-zero's-back writes via replication, converge, oracle-compare
+equal, and an ad-hoc local zql query is asserted to read the synced cache
+without syncing more. wire facts pinned in harness/README.md (auth-echo
+userID pinning, callable-form registry mutate, node-not-bun spawn).
+still open in M1 scope: a 1.7-canary lane, chinook fixture.
 
 **M2, orez-local pure-sqlite target:** the minimal generic sync server core
 (config = zero schema + mutator map; snapshot pull with per-user filter
@@ -303,6 +306,26 @@ incremental == fresh-hydrate invariant; shrink + replay artifacts in their
 json shape; committed regression corpus. lanes: `backbone` (per-PR, minutes)
 and `sweep` (seeded, hours, mini). divergences on stock-zero = upstream bug
 reports; divergences on orez targets = our bugs, fix before proceeding.
+
+query-shape corpus: model on ~/chat (nate 2026-07-09), the canonical large
+zero app. census of its query layer (`src/data/queries/` 37 files +
+`src/data/generated/syncedQueries.ts`, 125 synced queries): 127 `.related()`
+calls (deepest shape `queryMessageItemRelations`: 9 relations off message,
+3 levels deep, nested `one()` + per-relation where/orderBy/limit windows),
+132 `.one()`, 75 exists-style permission fragments (`src/data/where/`:
+auth-dependent `serverWhere` transforms composed into every query), and/or
+trees (36), `IN` lists, `LIKE/ILIKE` (14), junction relationships with
+filters (where upstream zql still has gaps: "order by not supported in
+junction relationships yet" is a live comment there). the generator's axes
+must cover these shapes, and chat's own query files can be lifted almost
+verbatim as a fixture schema + named-query corpus for a "real app" lane.
+
+harness invariant (nate 2026-07-09): zero answers reads from the CLIENT
+cache, so a single client round-tripping its own writes verifies nothing.
+every lane must verify on (a) clients that did NOT write the data (cross-
+client sync) and (b) a fresh client that connects after the writes and
+hydrates purely from the server. the smoke already enforces both; keep them
+mandatory in every future lane.
 
 **M4, load lanes:** N clients × M queries × write-rate grid, plus longevity
 (hours). measures: poke/pull lag percentiles, convergence time after write
