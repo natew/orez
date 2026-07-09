@@ -9,6 +9,17 @@ server half on cloudflare with a native DO-sqlite sync server, one plane at a
 time. no embedded zero-cache, no pg wire, no fake replication on the CF path
 when this is done.
 
+**where we actually are (verified 2026-07-09):** phase 1 (control plane on
+http-pull) is SHIPPED and validated in prod. on-zero ships
+`transport: 'http-pull'` (`~/takeout/packages/on-zero/src/httpPullTransport.ts`
+plus the ported spike suite in `src/httpPull/`), soot serves
+`/zero-http/pull|push` (`~/soot/src/zero/httpPull.server.ts`), the control
+instance is flipped (`~/soot/src/zero/client.tsx`), and the flip's five launch
+gates were proven (soot commit 70fb7efd26; the shipped integration design was
+pruned from soot plans as done, recover it via
+`git show fe4b345577~1:plans/sootbean/zero/zero-http-integration.md`).
+**phase 2 (project plane) is the active work.**
+
 ## prior art this consolidates (read these before changing course)
 
 - `~/soot/plans/sootbean/zero-compatible-sync-engine.md`: option taxonomy +
@@ -64,11 +75,14 @@ requirement plane by plane, which is why the rewrite is small enough to own.
 ```
 client (stock @rocicorp/zero, zql, optimistic mutations, rebase: unchanged)
   │  on-zero transport: 'http-pull' (fake-WebSocket seam, v51 pokes)
+  │  note: base must be ONE path component (zero server-option validation),
+  │  so soot uses /zero-http, project routes get their own single-component
+  │  base (e.g. /p-<projectId> prefix routing already exists)
   ▼
 app worker
-  ├── /api/zero/pull-control ──► per-user full snapshot from control storage
-  ├── /api/zero/pull-project ──► cursor-diff from project DO change log
-  └── /api/zero/push ─────────► on-zero server mutators (already HTTP)
+  ├── /zero-http/pull (control) ──► per-user full snapshot   [SHIPPED]
+  ├── project pull ───────────────► cursor-diff from project DO change log
+  └── /zero-http/push ────────────► on-zero PushProcessor (LMID in soot_0.clients)
   ▼
 ZeroSqlDO (per project + control): DO sqlite, _zero_changes + watermark +
 tx-journal. the authoritative store. no ZeroCacheDO, no replica, no CVR/CDB,
@@ -78,39 +92,40 @@ no pgoutput stream, no pg-wire upstream connection on the CF path.
 per-client server state: durable LMID bookkeeping only. memory scales with
 in-flight requests, not connected users.
 
-## phase 1: control plane (the zero-http follow-on, already sequenced)
+## phase 1: control plane on http-pull [SHIPPED]
 
-this is `plans/zero-http.md` "follow-on" verbatim; the spike code in
-`src/zero-http/` is the reference implementation and its tests are the
-contract.
+done and validated in prod. what shipped (evidence, not aspiration):
 
-1. lift the transport into on-zero (`~/takeout`) as a
-   `transport: 'http-pull'` mode on `createZeroClient`, preserving all nine
-   wire discoveries (fixed-width lexicographic cookies, gotQueriesPatch
-   ordering, push FIFO serialization, updateAuth, 401→Unauthorized frame,
-   group→user binding, ackMutationResponses pruning, teardown drain).
-2. real pull/push endpoints in soot's data worker backed by orez storage.
-   the fixture server pins semantics: clear+puts snapshots, monotonic
-   version cookie, LMID bookkeeping, app-error-still-advances-LMID.
-3. release on-zero (local iteration via `bun release --into ~/soot`; npm
-   publish only with explicit approval), flip the control instance, stop
-   accepting `/sync` sockets on the control namespace, delete the
-   dual-instance workarounds (`useControlConnectionState`, the
-   `run(…, 'complete')` reads in `useAccessDeniedCheck` /
-   `useAnonProjectRedirectOnLogin`).
-4. acceptance: access-denied playwright suite green + a 50-user
-   `cf-load-longevity` run with zero control-DO memory events.
+- on-zero `transport: 'http-pull'` mode with the full spike test suite
+  ported (`packages/on-zero/src/httpPullTransport.ts` + `src/httpPull/`),
+  plus production hardening the spike didn't have: transient-reconnect
+  backoff, 409 → InvalidConnectionRequestBaseCookie reset, per-client push
+  result filtering, rehydrated baseCookie suffix resume, bound fetch.
+- soot endpoints at `/zero-http/pull|push` (`src/zero/httpPull.server.ts`):
+  full per-user snapshot with schema-typed value conversion, cookie derived
+  from control-row change clocks + client-group max LMID, group→user
+  binding via a nullable `userID` column on `soot_0.clients`, push through
+  zero's own `PushProcessor`.
+- control instance flipped in `src/zero/client.tsx`
+  (`transport: 'http-pull'`, server `${APP_ORIGIN}/zero-http`).
+- launch gates proven (soot 70bd/70b commit chain, `zero-http-flip` handoff);
+  the shipped design doc was pruned as done, recover via
+  `git show fe4b345577~1:plans/sootbean/zero/zero-http-integration.md`.
 
-side effect worth naming: control-plane pushes stop routing through
-`ZeroCacheDO` re-entry, so the `Subrequest depth limit exceeded` class
-(`~/soot/plans/sootbean/zero/custom-mutator-depth-seam-2026-07-09.md`) is
-deleted for the control plane rather than worked around. the project plane
-keeps the embed until phase 2, so that seam spec stays relevant short-term;
-coordinate with whoever owns it before either side ships.
+known caveats recorded at ship time: admin cross-user control queries are
+not in the snapshot; tokenUsage snapshot is newest-200 per user. extend the
+snapshot when a control UI needs more, not before.
 
-## phase 2: project plane (cursor-diff pulls)
+consequence already banked: control-plane pushes no longer route through
+`ZeroCacheDO` re-entry. the `Subrequest depth limit exceeded` class
+(`~/soot/plans/sootbean/zero/custom-mutator-depth-seam-2026-07-09.md`)
+survives only on the project plane, which still rides the embed. that seam
+spec is the interim fire fix; phase 2 is the structural fix. coordinate with
+its owner so effort isn't duplicated.
 
-the new work. design first, then measure, then build.
+## phase 2: project plane (cursor-diff pulls) [THE ACTIVE WORK]
+
+design first, then measure, then build.
 
 ### protocol
 
@@ -206,9 +221,14 @@ this yet.
 
 ## working agreements
 
-- server code lives in orez (`src/zero-http/` graduates from spike to the
-  real module); transport lives in on-zero (`~/takeout`); soot wires
-  endpoints and flips instances.
+- code placement follows the phase 1 precedent: transport in on-zero
+  (`~/takeout`), endpoints + app wiring in soot, reusable primitives in
+  orez. for phase 2 that means the delta machinery (change-log → row-patch
+  mapping, epoch bookkeeping, retention/compaction over `_zero_changes`)
+  belongs in orez next to `cf-do/watermark.ts` + `cf-do/tx-journal.ts`;
+  soot's data worker composes it into the project pull endpoint. the orez
+  spike dir `src/zero-http/` stays as the frozen wire-contract reference
+  (its port now lives in on-zero `src/httpPull/`).
 - releases beyond the local tree need explicit approval, per repo rules.
 - ~/soot is a shared multi-agent checkout: explicit-pathspec commits only,
   and coordinate with the depth-seam spec owner (phase 1 changes that
