@@ -2,25 +2,41 @@
 // see plans/zero-server-rewrite.md + plans/zero-conformance-harness.md M2).
 //
 // serves the on-zero `transport: 'http-pull'` dialect to STOCK @rocicorp/zero
-// clients: full per-user snapshot pulls (clear + puts) and v51 custom-mutator
-// pushes with LMID bookkeeping, over any sqlite handle. no zero-cache, no
-// CVR, no per-client resident state — the only durable per-client state is
-// the clients table (lastMutationID + group→user binding).
+// clients: cursor-diff pulls over a trigger-fed change log (with full
+// snapshot as the single recovery path) and v51 custom-mutator pushes with
+// LMID bookkeeping, over any sqlite handle. no zero-cache, no CVR, no
+// per-client resident state — durable per-client state is the clients table
+// (lastMutationID + group→user binding) only.
 //
 // wire contract (pinned by ~/orez/plans/zero-http.md VERDICT +
 // ~/orez/src/zero-http/server.test.ts, prod-proven by soot's
 // src/zero/httpPull.server.ts):
 //   POST /pull {clientID, clientGroupID, cookie:number|null}
-//     -> {cookie, lastMutationIDChanges, rowsPatch:[{op:'clear'},...puts]}
-//     -> {cookie, unchanged:true} when cookie === version
-//     -> 409 when cookie > version (client rebuilds via
+//     -> {cookie, lastMutationIDChanges, rowsPatch}
+//        rowsPatch is put/del diffs when the cookie is within the retained
+//        change window, else [{op:'clear'},...puts] (fresh client, cookie
+//        below the retention floor, or per-user visibility filtering)
+//     -> {cookie, unchanged:true} when cookie === watermark
+//     -> 409 when cookie > watermark (client rebuilds via
 //        InvalidConnectionRequestBaseCookie)
 //   POST /push <v51 push body> -> {pushResponse}
 //     replayed ids ack idempotently; app errors advance the LMID and make no
-//     row change; every processed push bumps the version cookie.
+//     row change. every LMID advance appends a change-log marker so pulls
+//     never report `unchanged` past it (mutation RECOVERY settles via
+//     lastMutationIDChanges in a non-unchanged pull, so an LMID-only push —
+//     e.g. an app error — must still advance the cookie).
+//
+// the cookie is the change log's high watermark (rewrite phase 2, see
+// plans/zero-server-rewrite.md). sqlite triggers installed per table feed
+// _zsync_changes for EVERY write path — mutators and upstream/admin sql
+// alike — a watermark-autoincrement log like orez's production
+// `_zero_changes`, but storing touched pks only (diffs re-read live rows).
+// retention is size-bounded: pruned changes raise the floor and clients
+// below it get a snapshot.
 //
 // hosting: the caller provides the sqlite handle and the http layer. bun/node
-// pass bun:sqlite / better-sqlite3 adapters; a DO passes ctx.storage.sql.
+// pass bun:sqlite / better-sqlite3 adapters; a DO passes ctx.storage.sql
+// (which supports CREATE TRIGGER; probed 2026-07-09).
 
 // minimal sqlite surface the core needs — deliberately tiny so every host
 // (bun:sqlite, better-sqlite3, DO ctx.storage.sql) adapts in a few lines
@@ -33,7 +49,10 @@ export type SyncDb = {
 
 export type ZeroColumnType = 'string' | 'number' | 'boolean' | 'json' | 'null'
 
-export type SyncTables = Record<string, { columns: Record<string, ZeroColumnType> }>
+export type SyncTables = Record<
+  string,
+  { columns: Record<string, ZeroColumnType>; primaryKey: string[] }
+>
 
 export class SyncHttpError extends Error {
   constructor(
@@ -70,6 +89,9 @@ export type SyncServerConfig = {
     args: unknown,
     ctx: { userID: string }
   ) => void
+  // change-log rows kept below the high watermark; clients whose cookie
+  // falls below the pruned floor get a full snapshot. default 4096.
+  retainChanges?: number
 }
 
 type PullBody = { clientID: string; clientGroupID: string; cookie: number | null }
@@ -92,7 +114,10 @@ type PushBody = {
 
 // derive the tables spec from a zero createSchema() result
 export function tablesFromZeroSchema(schema: {
-  tables: Record<string, { columns: Record<string, { type: string }> }>
+  tables: Record<
+    string,
+    { columns: Record<string, { type: string }>; primaryKey: readonly string[] }
+  >
 }): SyncTables {
   const tables: SyncTables = {}
   for (const [name, table] of Object.entries(schema.tables)) {
@@ -100,7 +125,7 @@ export function tablesFromZeroSchema(schema: {
     for (const [col, spec] of Object.entries(table.columns)) {
       columns[col] = spec.type as ZeroColumnType
     }
-    tables[name] = { columns }
+    tables[name] = { columns, primaryKey: [...table.primaryKey] }
   }
   return tables
 }
@@ -126,6 +151,7 @@ function toZeroValue(type: ZeroColumnType, raw: unknown): unknown {
 
 export function createSyncServer(config: SyncServerConfig) {
   const { db, tables } = config
+  const retainChanges = config.retainChanges ?? 4096
 
   db.exec(`CREATE TABLE IF NOT EXISTS _zsync_clients (
     clientGroupID TEXT NOT NULL,
@@ -136,20 +162,55 @@ export function createSyncServer(config: SyncServerConfig) {
   )`)
   db.exec(`CREATE TABLE IF NOT EXISTS _zsync_meta (
     lock INTEGER PRIMARY KEY CHECK (lock = 1),
-    version INTEGER NOT NULL
+    floor INTEGER NOT NULL
   )`)
-  db.exec(`INSERT INTO _zsync_meta (lock, version) VALUES (1, 1)
+  db.exec(`INSERT INTO _zsync_meta (lock, floor) VALUES (1, 0)
            ON CONFLICT (lock) DO NOTHING`)
+  // the change log records WHICH pks were touched, never row values: sqlite's
+  // json functions format REAL at 15 significant digits (probed: 0.1+0.2 →
+  // 0.3), so row images through json_object would corrupt float columns. the
+  // diff pull re-reads live rows in its own transaction instead — exists=put,
+  // gone=del — which is also trivially consistent with pull-time state.
+  // op 'lmid' rows carry no pk; they only advance the watermark for
+  // LMID-only pushes. (pk values themselves do pass through json_object:
+  // TEXT/INTEGER are exact, so don't use REAL primary keys.)
+  db.exec(`CREATE TABLE IF NOT EXISTS _zsync_changes (
+    watermark INTEGER PRIMARY KEY AUTOINCREMENT,
+    tableName TEXT NOT NULL,
+    op TEXT NOT NULL CHECK (op IN ('row', 'lmid')),
+    pk TEXT
+  )`)
 
-  function version(): number {
-    return Number(db.all(`SELECT version FROM _zsync_meta`)[0]!.version)
+  // triggers capture EVERY write path into the change log — mutators inside
+  // handlePush and upstream/admin sql alike. installed AFTER any seed so the
+  // initial dataset stays out of the log (fresh clients snapshot anyway).
+  // updates log OLD and NEW pks so a pk-changing UPDATE dels the old row.
+  for (const [table, spec] of Object.entries(tables)) {
+    const pkObject = (ref: 'NEW' | 'OLD') =>
+      `json_object(${spec.primaryKey.map((col) => `'${col}', ${ref}."${col}"`).join(', ')})`
+    db.exec(`CREATE TRIGGER IF NOT EXISTS "_zsync_tr_${table}_i" AFTER INSERT ON "${table}" BEGIN
+      INSERT INTO _zsync_changes (tableName, op, pk)
+      VALUES ('${table}', 'row', ${pkObject('NEW')});
+    END`)
+    db.exec(`CREATE TRIGGER IF NOT EXISTS "_zsync_tr_${table}_u" AFTER UPDATE ON "${table}" BEGIN
+      INSERT INTO _zsync_changes (tableName, op, pk)
+      VALUES ('${table}', 'row', ${pkObject('OLD')});
+      INSERT INTO _zsync_changes (tableName, op, pk)
+      VALUES ('${table}', 'row', ${pkObject('NEW')});
+    END`)
+    db.exec(`CREATE TRIGGER IF NOT EXISTS "_zsync_tr_${table}_d" AFTER DELETE ON "${table}" BEGIN
+      INSERT INTO _zsync_changes (tableName, op, pk)
+      VALUES ('${table}', 'row', ${pkObject('OLD')});
+    END`)
   }
 
-  // any upstream write outside handlePush must bump the version so pulls see
-  // it (the DO host replaces this with its change-tracking watermark)
-  function bumpVersion(): number {
-    db.exec(`UPDATE _zsync_meta SET version = version + 1`)
-    return version()
+  // the cookie: high watermark of the change log (0 = pristine/seed-only)
+  function watermark(): number {
+    return Number(db.all(`SELECT COALESCE(MAX(watermark), 0) AS w FROM _zsync_changes`)[0]!.w)
+  }
+
+  function floorValue(): number {
+    return Number(db.all(`SELECT floor FROM _zsync_meta`)[0]!.floor)
   }
 
   // guarded claim (soot's claimStatement, sqlite dialect): bind the group to
@@ -196,9 +257,9 @@ export function createSyncServer(config: SyncServerConfig) {
     // repeatable-read gymnastics on pg; sqlite gives it for free)
     return db.transaction(() => {
       claimClient(clientGroupID, clientID, userID)
-      const current = version()
+      const current = watermark()
       if (cookie !== null && cookie > current) {
-        throw new SyncHttpError(409, `future cookie ${cookie} is ahead of server ${current}`)
+        throw new SyncHttpError(409, `future cookie ${cookie} is ahead of watermark ${current}`)
       }
       if (cookie === current) {
         return { cookie: current, unchanged: true as const }
@@ -212,19 +273,66 @@ export function createSyncServer(config: SyncServerConfig) {
         lastMutationIDChanges[row.clientID as string] = Number(row.lastMutationID)
       }
 
-      const rowsPatch: unknown[] = [{ op: 'clear' }]
-      for (const [table, spec] of Object.entries(tables)) {
-        for (const row of visibleRows(table, userID)) {
-          const value: Record<string, unknown> = {}
-          for (const [col, type] of Object.entries(spec.columns)) {
-            value[col] = toZeroValue(type, row[col])
-          }
-          rowsPatch.push({ op: 'put', tableName: table, value })
-        }
-      }
+      // diff pulls need uniform visibility (the project-plane assumption):
+      // a per-user visible() filter can revoke rows without any row change,
+      // which no diff can express — those configs always snapshot
+      const canDiff = cookie !== null && cookie >= floorValue() && config.visible === undefined
+      const rowsPatch: unknown[] = canDiff
+        ? diffPatch(cookie)
+        : snapshotPatch(userID)
 
       return { cookie: current, lastMutationIDChanges, rowsPatch }
     })
+  }
+
+  function snapshotPatch(userID: string): unknown[] {
+    const rowsPatch: unknown[] = [{ op: 'clear' }]
+    for (const [table, spec] of Object.entries(tables)) {
+      for (const row of visibleRows(table, userID)) {
+        const value: Record<string, unknown> = {}
+        for (const [col, type] of Object.entries(spec.columns)) {
+          value[col] = toZeroValue(type, row[col])
+        }
+        rowsPatch.push({ op: 'put', tableName: table, value })
+      }
+    }
+    return rowsPatch
+  }
+
+  // pks touched since the cookie, deduped, then resolved against LIVE table
+  // state inside the pull transaction: row exists -> put (current values),
+  // row gone -> del. no row images in the log, no op coalescing to get wrong.
+  function diffPatch(cookie: number): unknown[] {
+    const touched = new Map<string, { table: string; pk: Record<string, unknown> }>()
+    for (const change of db.all(
+      `SELECT DISTINCT tableName, pk FROM _zsync_changes
+       WHERE watermark > ? AND op = 'row'`,
+      [cookie]
+    )) {
+      const table = change.tableName as string
+      const pkText = change.pk as string
+      touched.set(`${table} ${pkText}`, { table, pk: JSON.parse(pkText) })
+    }
+
+    const rowsPatch: unknown[] = []
+    for (const { table, pk } of touched.values()) {
+      const spec = tables[table]!
+      const where = spec.primaryKey.map((col) => `"${col}" = ?`).join(' AND ')
+      const params = spec.primaryKey.map((col) => pk[col])
+      const row = db.all(`SELECT * FROM "${table}" WHERE ${where}`, params)[0]
+      if (!row) {
+        const id: Record<string, unknown> = {}
+        for (const col of spec.primaryKey) id[col] = toZeroValue(spec.columns[col]!, pk[col])
+        rowsPatch.push({ op: 'del', tableName: table, id })
+      } else {
+        const value: Record<string, unknown> = {}
+        for (const [col, type] of Object.entries(spec.columns)) {
+          value[col] = toZeroValue(type, row[col])
+        }
+        rowsPatch.push({ op: 'put', tableName: table, value })
+      }
+    }
+    return rowsPatch
   }
 
   function handlePush(body: PushBody, userID: string) {
@@ -273,6 +381,13 @@ export function createSyncServer(config: SyncServerConfig) {
              WHERE clientGroupID = ? AND clientID = ?`,
             [mutation.id, clientGroupID, mutation.clientID]
           )
+          // watermark marker: an LMID-only mutation (app error) must still
+          // advance the cookie or group peers' pulls stay `unchanged` and
+          // mutation recovery never settles
+          db.exec(
+            `INSERT INTO _zsync_changes (tableName, op, pk)
+             VALUES ('_zsync_clients', 'lmid', NULL)`
+          )
           return 'applied'
         })
 
@@ -290,11 +405,22 @@ export function createSyncServer(config: SyncServerConfig) {
       }
     }
 
-    if (mutations.length > 0) bumpVersion()
+    // size-bounded retention: pruned changes raise the floor; clients whose
+    // cookie fell below it get one snapshot on their next pull
+    if (mutations.length > 0) {
+      db.transaction(() => {
+        const cutoff = watermark() - retainChanges
+        if (cutoff > floorValue()) {
+          db.exec(`DELETE FROM _zsync_changes WHERE watermark <= ?`, [cutoff])
+          db.exec(`UPDATE _zsync_meta SET floor = ?`, [cutoff])
+        }
+      })
+    }
+
     return { pushResponse: { mutations: results } }
   }
 
-  return { handlePull, handlePush, version, bumpVersion }
+  return { handlePull, handlePush, watermark }
 }
 
 export type SyncServer = ReturnType<typeof createSyncServer>

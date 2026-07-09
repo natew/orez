@@ -127,6 +127,38 @@ its owner so effort isn't duplicated.
 
 design first, then measure, then build.
 
+**progress 2026-07-09: the cursor-diff protocol is implemented and green in
+the reference core** (`src/sync-server/sync-server.ts`, the harness's
+orez-local/orez-cf server). what's proven there:
+
+- change log `_zsync_changes` (watermark autoincrement) fed by per-table
+  sqlite triggers — captures mutator AND upstream/admin sql writes; stores
+  touched pks ONLY, and the diff pull re-reads live rows in its transaction.
+  row images through sqlite's json functions are a trap: json_object formats
+  REAL at 15 significant digits (0.1+0.2 → 0.3), which corrupts float
+  columns. live-read sidesteps float mangling and op-coalescing entirely.
+- cookie = change-log high watermark. unchanged/409 semantics as phase 1.
+- LMID-only pushes (app errors) append an 'lmid' marker row: mutation
+  RECOVERY settles via lastMutationIDChanges in a NON-unchanged pull, so an
+  LMID advance must move the cookie even with zero row changes.
+- retention is size-bounded (`retainChanges`, default 4096): pruning raises
+  a floor; cookie below floor → full snapshot (clear+puts), the single
+  recovery path. per-user `visible()` configs always snapshot (a visibility
+  filter can revoke rows without a row change, which no diff can express —
+  the project plane's uniform-visibility assumption is what enables diffs).
+- pk-changing UPDATEs log OLD and NEW pks (del old, put new).
+- validated: 18-test delta suite (`src/sync-server/sync-server.test.ts`:
+  churn convergence, floor fallback, recreate/ephemeral collapse, two tabs
+  one group, float exactness), harness smoke/shapes/bench on bun:sqlite and
+  the real CF DO. measured on the DO at 10 clients 3 writers x 5/s: ack p50
+  1169→173ms, propagation p50 1538→551ms vs full-snapshot pulls (500ms poll
+  interval now dominates propagation).
+
+remaining for phase 2 proper: compose the same protocol over soot's
+production `_zero_changes` (per-(project,user) epochs for membership
+revocation, per-table window policy, prod DO size measurements below), then
+the soot validators + transport flip.
+
 ### protocol
 
 - pull request carries the client cookie = last-seen watermark + epoch.

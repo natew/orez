@@ -111,9 +111,9 @@ export async function startOrezLocal(opts?: {
     },
 
     async sql(query: string): Promise<Rows> {
-      const rows = db.all(query)
-      sync.bumpVersion()
-      return rows
+      // the core's table triggers feed the change log, so upstream writes
+      // advance the watermark on their own
+      return db.all(query)
     },
 
     async oracle(query: string): Promise<Rows> {

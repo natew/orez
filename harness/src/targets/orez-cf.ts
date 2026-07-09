@@ -27,11 +27,11 @@ export async function startOrezCf(opts?: {
   // is that component
   const origin = `${WORKER}/${ns}`
 
-  async function adminSql(query: string, write: boolean): Promise<Rows> {
+  async function adminSql(query: string): Promise<Rows> {
     const response = await fetch(`${origin}/admin/sql`, {
       method: 'POST',
       headers: { 'x-admin-key': adminKey, 'content-type': 'application/json' },
-      body: JSON.stringify({ query, write }),
+      body: JSON.stringify({ query }),
     })
     if (!response.ok) {
       throw new Error(`admin/sql ${response.status}: ${await response.text()}`)
@@ -40,7 +40,7 @@ export async function startOrezCf(opts?: {
   }
 
   // first touch seeds the DO; verify reachability before handing out clients
-  const probe = await adminSql(`SELECT count(*) AS n FROM project`, false)
+  const probe = await adminSql(`SELECT count(*) AS n FROM project`)
   if (Number(probe[0]?.n) < 1) throw new Error('cf DO seed missing')
 
   const transport = ensureHttpPullTransport({
@@ -69,11 +69,11 @@ export async function startOrezCf(opts?: {
     },
 
     async sql(query: string): Promise<Rows> {
-      return adminSql(query, true)
+      return adminSql(query)
     },
 
     async oracle(query: string): Promise<Rows> {
-      return adminSql(query, false)
+      return adminSql(query)
     },
 
     async metrics() {

@@ -11,9 +11,15 @@ import {
 
 // mirror of the zero schema's tables (guarded against drift in fixture.ts)
 export const TABLES: SyncTables = {
-  user: { columns: { id: 'string', name: 'string' } },
-  project: { columns: { id: 'string', ownerId: 'string', name: 'string' } },
-  member: { columns: { id: 'string', projectId: 'string', userId: 'string' } },
+  user: { columns: { id: 'string', name: 'string' }, primaryKey: ['id'] },
+  project: {
+    columns: { id: 'string', ownerId: 'string', name: 'string' },
+    primaryKey: ['id'],
+  },
+  member: {
+    columns: { id: 'string', projectId: 'string', userId: 'string' },
+    primaryKey: ['id'],
+  },
   task: {
     columns: {
       id: 'string',
@@ -24,6 +30,7 @@ export const TABLES: SyncTables = {
       meta: 'json',
       dueAt: 'number',
     },
+    primaryKey: ['id'],
   },
 }
 

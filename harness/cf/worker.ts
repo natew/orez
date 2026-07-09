@@ -76,10 +76,10 @@ export class SyncServerDO {
 
     try {
       if (route === '/admin/sql') {
-        const body = (await request.json()) as { query: string; write?: boolean }
-        const rows = this.#db.all(body.query)
-        if (body.write) sync.bumpVersion()
-        return json({ rows })
+        // the core's table triggers feed the change log, so admin writes
+        // advance the watermark on their own
+        const body = (await request.json()) as { query: string }
+        return json({ rows: this.#db.all(body.query) })
       }
 
       const userID = userIDFromAuth(request.headers.get('authorization'))

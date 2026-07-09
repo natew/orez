@@ -355,9 +355,12 @@ own DO; admin oracle endpoint gated by the ADMIN_KEY secret (key in
 server-side. green: smoke (5 clients), shapes differential
 `--against orez-cf` (17/17 shapes equal vs stock-zero through hydrate +
 write script + incremental==fresh), bench 10 clients 3x5/s: ack p50/p95
-1169/1924ms, propagation p50/p95 1538/2304ms, late hydrate 305ms (remote
-edge + 500ms pull interval; compare orez-local ack p50 3ms — the gap is
-network + full-snapshot pulls, which phase 2 cursor-diffs attack).
+1169/1924ms, propagation p50/p95 1538/2304ms with full-snapshot pulls.
+SAME DAY: rewrite phase 2 cursor-diff pulls landed in the core
+(src/sync-server + 18-test delta suite) and re-ran this grid: ack p50/p95
+173/1079ms, propagation p50/p95 551/1333ms — the 500ms poll interval now
+dominates propagation. orez-local same grid: ack p50 2ms, propagation p50
+144ms (250ms poll).
 findings pinned:
 - DO SqlStorage REJECTS raw `BEGIN`/`SAVEPOINT` SQL. the core's app-error
   path originally used `SAVEPOINT zsync_mutation` to keep the LMID advance
