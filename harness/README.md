@@ -16,7 +16,7 @@ bun install
 bun run smoke                                      # 10 clients vs real zero-cache
 bun src/smoke.ts --target orez-local --clients 50  # same vs the sqlite sync-server core
 bun src/smoke.ts --target orez-cf --clients 5      # same vs the deployed CF DO
-bun src/shapes.ts                                  # 17-query differential: stock-zero vs orez-local
+bun src/shapes.ts                                  # 22-query differential: stock-zero vs orez-local
 bun src/shapes.ts --against orez-cf                # same differential vs the CF DO
 bun src/bench.ts --target orez-local --clients 20 --writers 5 --rate 10 --duration 15
 ```

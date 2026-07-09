@@ -313,10 +313,17 @@ server-side (IVM row selection), orez-local ships snapshots and evaluates
 client-side; equal results IS the conformance property the rewrite must
 hold. found immediately: client not(exists()) unsupported (upstream bug
 3438), postgres.js jsonb double-encoding writer discipline, pg-jsonb key
-order normalization policy, 1.6.1 registry raw-args invocation. still open:
-port upstream's generator for randomized sweep lanes + replay artifacts +
-regression corpus; grow the corpus toward chat's full census (start/cursor
-pagination, deeper junction shapes).
+order normalization policy, 1.6.1 registry raw-args invocation.
+EXPANDED 2026-07-09 (same day, after cursor-diff pulls landed): corpus is
+now 22 shapes — added tasksTopByRank (top-level limit window),
+tasksAfterCursor (.start() pagination with a real seed row as cursor),
+projectTasksPage (top-level window + per-relation windows + nested one()),
+tasksDueNull (IS null), tasksDueBefore (nullable compare) — plus write
+script churn that forces rows ACROSS the windows (task.setRank mutator,
+dueAt null flips via upstream sql). all 22 green on stock-zero vs
+orez-local AND vs orez-cf. still open: port upstream's generator for
+randomized sweep lanes + replay artifacts + regression corpus; deeper
+junction shapes from the chat census.
 
 query-shape corpus: model on ~/chat (nate 2026-07-09), the canonical large
 zero app. census of its query layer (`src/data/queries/` 37 files +

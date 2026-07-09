@@ -156,6 +156,25 @@ export const queryBuilders = {
       .where('projectId', args.projectId)
       .orderBy('id', 'asc')
       .related('user', (q) => q.one()),
+  // window shapes: rows enter/leave these via rank/dueAt churn in the write
+  // script — the incremental (diff-poke) maintenance path must match a fresh
+  // server evaluation exactly
+  tasksTopByRank: () => zql.task.orderBy('rank', 'desc').orderBy('id', 'asc').limit(5),
+  tasksAfterCursor: (args: { cursor: { rank: number; id: string } }) =>
+    zql.task
+      .orderBy('rank', 'asc')
+      .orderBy('id', 'asc')
+      .start(args.cursor)
+      .limit(6),
+  projectTasksPage: () =>
+    zql.project
+      .orderBy('name', 'asc')
+      .limit(4)
+      .related('tasks', (q) => q.orderBy('rank', 'desc').limit(2))
+      .related('members', (q) => q.related('user', (q) => q.one())),
+  tasksDueNull: () => zql.task.where('dueAt', 'IS', null).orderBy('id', 'asc'),
+  tasksDueBefore: (args: { before: number }) =>
+    zql.task.where('dueAt', '<', args.before).orderBy('dueAt', 'asc').orderBy('id', 'asc'),
 } as const
 
 export type QueryName = keyof typeof queryBuilders
@@ -194,6 +213,16 @@ export const queries = defineQueries({
   membersOfProject: defineQuery(({ args }: { args: { projectId: string } }) =>
     queryBuilders.membersOfProject(args)
   ),
+  tasksTopByRank: defineQuery(() => queryBuilders.tasksTopByRank()),
+  tasksAfterCursor: defineQuery(
+    ({ args }: { args: { cursor: { rank: number; id: string } } }) =>
+      queryBuilders.tasksAfterCursor(args)
+  ),
+  projectTasksPage: defineQuery(() => queryBuilders.projectTasksPage()),
+  tasksDueNull: defineQuery(() => queryBuilders.tasksDueNull()),
+  tasksDueBefore: defineQuery(({ args }: { args: { before: number } }) =>
+    queryBuilders.tasksDueBefore(args)
+  ),
 })
 
 // the shapes lane materializes each of these on every target and compares
@@ -215,7 +244,22 @@ export const queryCorpus: Array<{ name: QueryName; args?: unknown }> = [
   { name: 'projectsOrderMulti' },
   { name: 'firstProjectAlphabetical' },
   { name: 'membersOfProject', args: { projectId: 'p2' } },
+  { name: 'tasksTopByRank' },
+  { name: 'tasksAfterCursor', args: { cursor: seedCursor() } },
+  { name: 'projectTasksPage' },
+  { name: 'tasksDueNull' },
+  { name: 'tasksDueBefore', args: { before: 1755000000000 } },
 ]
+
+// a real seed row as the pagination cursor (deterministic: same SEED on
+// every target), mid-way through the (rank, id) order
+function seedCursor() {
+  const ordered = [...SEED.task].sort(
+    (a, b) => a.rank - b.rank || a.id.localeCompare(b.id)
+  )
+  const row = ordered[Math.floor(ordered.length / 2)]!
+  return { rank: row.rank, id: row.id }
+}
 
 // ---------------------------------------------------------------------------
 // mutators
@@ -274,6 +318,11 @@ export const mutators = defineMutators({
       if (!existing) throw new Error('not-found')
       await tx.mutate.task.update({ id: args.id, done: !existing.done })
     }),
+    setRank: defineMutator(
+      async ({ tx, args }: { tx: Tx; args: { id: string; rank: number } }) => {
+        await tx.mutate.task.update({ id: args.id, rank: args.rank })
+      }
+    ),
   },
 })
 
@@ -293,7 +342,7 @@ export const permissions = definePermissions<unknown, Schema>(schema, () => ({
 // ---------------------------------------------------------------------------
 
 import { tablesFromZeroSchema } from '../../src/sync-server/sync-server'
-import { TABLES, jsonColumnsOf } from './fixture-data.js'
+import { SEED, TABLES, jsonColumnsOf } from './fixture-data.js'
 
 export { DDL, SEED, generateSeed, jsonColumnsOf as jsonColumns } from './fixture-data.js'
 

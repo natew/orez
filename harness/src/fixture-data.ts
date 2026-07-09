@@ -227,6 +227,11 @@ export function executeMutator(tx: SyncDb, name: string, args: unknown, _ctx: { 
       tx.exec(`UPDATE task SET done = ? WHERE id = ?`, [existing[0]!.done ? 0 : 1, a.id])
       return
     }
+    case 'task.setRank': {
+      const a = args as { id: string; rank: number }
+      tx.exec(`UPDATE task SET rank = ? WHERE id = ?`, [a.rank, a.id])
+      return
+    }
     default:
       throw new Error(`unknown mutator: ${name}`)
   }

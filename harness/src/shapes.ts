@@ -120,6 +120,11 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
   await mutate(zero.mutate(mutators.member.add({ id: 'mw1', projectId: 'p2', userId: 'u7' })))
   await mutate(zero.mutate(mutators.member.remove({ id: 'm2' })))
   await mutate(zero.mutate(mutators.project.delete({ id: 'p9' })))
+  // window churn: shove rows across the tasksTopByRank/tasksAfterCursor
+  // boundaries so the incremental maintenance path has to add AND evict
+  await mutate(zero.mutate(mutators.task.setRank({ id: 't11', rank: 99.5 })))
+  await mutate(zero.mutate(mutators.task.setRank({ id: 't13', rank: 98.25 })))
+  await mutate(zero.mutate(mutators.task.setRank({ id: 't20', rank: -99 })))
   // app-error path: duplicate create must reject server-side + roll back
   await mutate(zero.mutate(mutators.project.create({ id: 'pw1', ownerId: 'u1', name: 'dupe' })))
 
@@ -132,6 +137,9 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
   )
   await target.sql(`UPDATE task SET rank = 9.75 WHERE id = 't5'`)
   await target.sql(`DELETE FROM task WHERE id = 't7'`)
+  // null-semantics churn: rows must cross tasksDueNull/tasksDueBefore
+  await target.sql(`UPDATE task SET "dueAt" = NULL WHERE id = 't2'`)
+  await target.sql(`UPDATE task SET "dueAt" = 1750000005000 WHERE id = 't6'`)
 
   await Promise.allSettled(acks) // the dupe create rejects; the rest must resolve
 }
