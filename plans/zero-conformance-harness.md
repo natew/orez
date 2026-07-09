@@ -337,9 +337,12 @@ script on stock-zero and orez-local, every corpus query compared at hydrate
   orez-local (~85% shapes non-vacuous), seed 4242 vs orez-cf. sabotage-
   validated (breaking diff dels makes it fail; that run also exposed that a
   corrupted target wedges zero's ack promises forever — every ack await in
-  the lane is now timeboxed). still open: chat-census junction depth in the
-  generator (only depth-1 related subs now), start() cursors in generated
-  shapes, upstream-mono-style pairwise coverage accounting.
+  the lane is now timeboxed). grammar extended same day: recursive related
+  (depth 2, e.g. task→project one()→members) and start() cursor pagination
+  over (rank, id) with real seed rows as cursors; `--dry` prints axis
+  coverage (seed 42, 200 specs: 149 where, 48 exists, 88 related, 35
+  nested-related, 13 start, 84 limit, 14 one). green vs orez-local and
+  orez-cf. still open: upstream-mono-style pairwise coverage accounting.
 
 query-shape corpus: model on ~/chat (nate 2026-07-09), the canonical large
 zero app. census of its query layer (`src/data/queries/` 37 files +

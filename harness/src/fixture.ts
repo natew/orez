@@ -130,12 +130,15 @@ export type GenSubSpec = {
   orderBy?: [string, 'asc' | 'desc'][]
   limit?: number
   one?: boolean
+  // recursive: related-of-related, e.g. project→members→user one()
+  related?: { rel: string; sub?: GenSubSpec }[]
 }
 
 export type GenSpec = GenSubSpec & {
   table: 'user' | 'project' | 'member' | 'task'
   exists?: { rel: string; where?: GenWhere }[]
-  related?: { rel: string; sub?: GenSubSpec }[]
+  // cursor pagination: seek past `row` in the spec's orderBy order
+  start?: { row: Record<string, unknown>; inclusive?: boolean }
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: dynamic zql chain by design
@@ -156,6 +159,11 @@ function applySub(q: AnyQuery, sub: GenSubSpec): AnyQuery {
   if (sub.where) q = applyWhere(q, sub.where)
   for (const [col, dir] of sub.orderBy ?? []) q = q.orderBy(col, dir)
   if (sub.limit !== undefined) q = q.limit(sub.limit)
+  for (const r of sub.related ?? []) {
+    q = r.sub
+      ? q.related(r.rel, (sq: AnyQuery) => applySub(sq, r.sub!))
+      : q.related(r.rel)
+  }
   if (sub.one) q = q.one()
   return q
 }
@@ -169,6 +177,9 @@ export function buildGenerated(spec: GenSpec): AnyQuery {
       : q.whereExists(e.rel)
   }
   for (const [col, dir] of spec.orderBy ?? []) q = q.orderBy(col, dir)
+  if (spec.start) {
+    q = q.start(spec.start.row, spec.start.inclusive ? { inclusive: true } : undefined)
+  }
   if (spec.limit !== undefined) q = q.limit(spec.limit)
   for (const r of spec.related ?? []) {
     q = r.sub

@@ -38,6 +38,9 @@ const { values: args } = parseArgs({
     seed: { type: 'string', default: String(Math.floor(Math.random() * 2 ** 31)) },
     rounds: { type: 'string', default: '12' },
     queriesPerRound: { type: 'string', default: '4' },
+    // generate the specs and print grammar-axis coverage without booting
+    // targets — for verifying generator changes actually produce the axes
+    dry: { type: 'boolean', default: false },
   },
 })
 
@@ -203,13 +206,30 @@ function genOrderBy(table: TableName): [string, 'asc' | 'desc'][] {
   return order
 }
 
-function genSub(to: TableName, kind: 'one' | 'many'): GenSubSpec | undefined {
-  if (kind === 'one') return { one: true }
+function genSub(
+  to: TableName,
+  kind: 'one' | 'many',
+  depth: number
+): GenSubSpec | undefined {
+  const nestedRels = RELS[to]
+  const nest = (): GenSubSpec['related'] => {
+    if (depth >= 2 || nestedRels.length === 0 || !chance(0.5)) return undefined
+    const r = pick(nestedRels)
+    return [{ rel: r.rel, sub: genSub(r.to, r.kind, depth + 1) }]
+  }
+  if (kind === 'one') {
+    const sub: GenSubSpec = { one: true }
+    const related = nest()
+    if (related) sub.related = related
+    return sub
+  }
   if (chance(0.3)) return undefined
   const sub: GenSubSpec = {}
   if (chance(0.5)) sub.where = genWhere(to, 1)
   sub.orderBy = genOrderBy(to)
   if (chance(0.5)) sub.limit = int(1, 4)
+  const related = nest()
+  if (related) sub.related = related
   return sub
 }
 
@@ -223,11 +243,25 @@ function genSpec(): GenSpec {
     spec.exists = [{ rel: e.rel, where: chance(0.7) ? genWhere(e.to, 1) : undefined }]
   }
   spec.orderBy = genOrderBy(table)
+  // start() cursor: seek past a real seed row in (rank, id) order — the
+  // pagination shape chat leans on; churned/deleted cursors are still valid
+  // seek values
+  if (table === 'task' && chance(0.25)) {
+    const cursor = pick(SEED.task)
+    spec.orderBy = [
+      ['rank', pick(['asc', 'desc'] as const)],
+      ['id', 'asc'],
+    ]
+    spec.start = {
+      row: { rank: cursor.rank, id: cursor.id },
+      inclusive: chance(0.3) || undefined,
+    }
+  }
   if (chance(0.4)) spec.limit = int(1, 8)
   if (rels.length > 0 && chance(0.6)) {
     const count = chance(0.3) && rels.length > 1 ? 2 : 1
     const chosen = [...rels].sort(() => rng() - 0.5).slice(0, count)
-    spec.related = chosen.map((r) => ({ rel: r.rel, sub: genSub(r.to, r.kind) }))
+    spec.related = chosen.map((r) => ({ rel: r.rel, sub: genSub(r.to, r.kind, 1) }))
   }
   if (spec.limit === undefined && chance(0.15)) spec.one = true
   return spec
@@ -457,6 +491,32 @@ function recordDivergence(entry: {
 // ---------------------------------------------------------------------------
 // run
 // ---------------------------------------------------------------------------
+
+if (args.dry) {
+  const specs = Array.from({ length: ROUNDS * QUERIES_PER_ROUND }, () => genSpec())
+  const has = (test: (s: GenSpec) => boolean) => specs.filter(test).length
+  const hasNested = (s: GenSpec) =>
+    (s.related ?? []).some((r) => (r.sub?.related ?? []).length > 0)
+  console.log(
+    JSON.stringify(
+      {
+        seed: SWEEP_SEED,
+        specs: specs.length,
+        where: has((s) => !!s.where),
+        exists: has((s) => !!s.exists),
+        limit: has((s) => s.limit !== undefined),
+        one: has((s) => !!s.one),
+        related: has((s) => !!s.related),
+        nestedRelated: has(hasNested),
+        start: has((s) => !!s.start),
+      },
+      null,
+      2
+    )
+  )
+  for (const s of specs.slice(0, 3)) console.log(JSON.stringify(s))
+  process.exit(0)
+}
 
 const t0 = Date.now()
 console.log(
