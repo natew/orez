@@ -3245,6 +3245,69 @@ describe('DoBackend', () => {
     ).toBeLessThanOrEqual(80)
   })
 
+  test('does not rewrite unchanged durable metadata on commit/rollback churn', async () => {
+    // every persisted row is a real DO rows-written cost even when identical
+    // (INSERT OR REPLACE always rewrites), and persistDurableMetadata fires on
+    // every dirty commit AND every rollback. a crash-looping zero-cache embed
+    // boot used to rewrite the full set (~700 rows on a real schema) several
+    // times per cycle until the SQL DO write circuit tripped and blocked auth
+    // (2026-07-09 prod incident). unchanged metadata must persist zero rows.
+    const http = await startDoHttp((sql) => {
+      const compact = compactSQL(sql)
+      if (compact.startsWith('SELECT kind, key, subkey, value FROM')) {
+        return { rows: [], columns: ['kind', 'key', 'subkey', 'value'] }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'metadata-diff-test')
+    await backend.waitReady
+    await backend.exec(`
+      CREATE TABLE public.diff_table (
+        id text PRIMARY KEY,
+        body text
+      );
+    `)
+
+    const metadataInserts = () =>
+      http.bodies.filter(
+        (body) =>
+          typeof body.sql === 'string' &&
+          compactSQL(body.sql).startsWith('INSERT OR REPLACE INTO "_orez_pg_metadata"')
+      )
+    const rowCount = (bodies: Array<{ params?: unknown[] }>) =>
+      bodies.reduce((total, body) => total + (body.params?.length ?? 0) / 4, 0)
+    const afterCreate = metadataInserts().length
+    expect(afterCreate).toBeGreaterThan(0)
+
+    // a read-only transaction rolled back: the rollback path re-persists
+    // unconditionally; with nothing changed it must write zero rows.
+    await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
+    await backend.execProtocolRaw(msg(0x51, cstr('SELECT 1')))
+    await backend.execProtocolRaw(msg(0x51, cstr('ROLLBACK')))
+    expect(metadataInserts().length).toBe(afterCreate)
+
+    // DDL inside a rolled-back tx: the snapshot restore returns metadata to
+    // its pre-tx state, so the rollback persist must also write zero rows.
+    await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
+    await backend.execProtocolRaw(
+      msg(0x51, cstr('CREATE TABLE public.rolled_back (id text PRIMARY KEY)'))
+    )
+    await backend.execProtocolRaw(msg(0x51, cstr('ROLLBACK')))
+    expect(metadataInserts().length).toBe(afterCreate)
+
+    // committed DDL persists only the new table's rows, never the full set.
+    const before = metadataInserts()
+    const beforeRows = rowCount(before)
+    await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
+    await backend.execProtocolRaw(
+      msg(0x51, cstr('CREATE TABLE public.diff_extra (id text PRIMARY KEY)'))
+    )
+    await backend.execProtocolRaw(msg(0x51, cstr('COMMIT')))
+    const committedRows = rowCount(metadataInserts()) - beforeRows
+    expect(committedRows).toBeGreaterThan(0)
+    expect(committedRows).toBeLessThanOrEqual(3)
+  })
+
   test('repairs internal metadata publication from shardConfig rows', async () => {
     const http = await startDoHttp((sql) => {
       const compact = compactSQL(sql)

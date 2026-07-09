@@ -5284,6 +5284,14 @@ export class DoBackend {
   // round-trip to durable storage after every DDL statement in a migration.
   private txMetadataDirty = false
   private txHasTrackedWrite = false
+  // durable-metadata rows as last read/written (kind\0key\0subkey -> value).
+  // persistDurableMetadata diffs against this and writes only changed rows —
+  // a full INSERT OR REPLACE of the whole set on every dirty commit/rollback
+  // is what let a crash-looping embed boot re-write ~700 identical
+  // _orez_pg_metadata rows per cycle into the SQL DO until the write circuit
+  // tripped (2026-07-09 prod incident). null until the first load/persist,
+  // which falls back to a full write.
+  private lastPersistedMetadata: Map<string, string> | null = null
 
   // identifies the client process generation owning this backend's
   // transactions in the durable tx journal. a process that knows its previous
@@ -5404,11 +5412,13 @@ export class DoBackend {
       const result = await this.doExecResult(
         `SELECT kind, key, subkey, value FROM ${quoteIdentifier(METADATA_TABLE)}`
       )
+      this.lastPersistedMetadata = new Map()
       for (const row of result.rows) {
         const kind = String(row.kind ?? '')
         const key = String(row.key ?? '')
         const subkey = String(row.subkey ?? '')
         const value = String(row.value ?? '')
+        this.lastPersistedMetadata.set(`${kind}\u0000${key}\u0000${subkey}`, value)
         if (kind === 'schema-column') {
           const metadata = JSON.parse(value) as SchemaColumnMetadata
           let table = this.schemaMetadata.get(key)
@@ -5497,7 +5507,6 @@ export class DoBackend {
 
   private async persistDurableMetadata(): Promise<void> {
     try {
-      await this.ensureMetadataTable()
       const rows: Array<[string, string, string, string]> = []
       for (const [tableName, columns] of this.schemaMetadata) {
         for (const [columnName, metadata] of columns) {
@@ -5517,15 +5526,34 @@ export class DoBackend {
           JSON.stringify(child),
         ])
       }
-      if (rows.length === 0) return
+      // write only rows that differ from what durable storage already holds
+      // (seeded by loadDurableMetadata, maintained below). every persisted row
+      // is a real DO rows-written cost even when the value is identical —
+      // INSERT OR REPLACE always rewrites — and this method fires on every
+      // dirty commit AND every rollback, so a crash-looping embed boot used to
+      // rewrite the entire set (~700 rows on a real app schema) several times
+      // per ~4s cycle into the SQL DO until the write circuit tripped and
+      // blocked auth (2026-07-09 prod incident).
+      const known = this.lastPersistedMetadata
+      const changed =
+        known === null
+          ? rows
+          : rows.filter(
+              ([kind, key, subkey, value]) =>
+                known.get(`${kind}\u0000${key}\u0000${subkey}`) !== value
+            )
+      if (changed.length === 0) return
+      await this.ensureMetadataTable()
       // single multi-row INSERT OR REPLACE per chunk. previously this was one
       // HTTP roundtrip per row, which dominated boot when migrations touched
       // many columns. Cloudflare DO SQLite has a lower host-param cap than
       // stock SQLite; 4 cols × 20 rows keeps metadata persistence comfortably
       // below that limit.
       const CHUNK = 20
-      for (let i = 0; i < rows.length; i += CHUNK) {
-        const chunk = rows.slice(i, i + CHUNK)
+      const persisted = this.lastPersistedMetadata ?? new Map<string, string>()
+      this.lastPersistedMetadata = persisted
+      for (let i = 0; i < changed.length; i += CHUNK) {
+        const chunk = changed.slice(i, i + CHUNK)
         const placeholders = chunk.map(() => '(?, ?, ?, ?)').join(', ')
         const params: string[] = []
         for (const row of chunk) params.push(...row)
@@ -5533,6 +5561,10 @@ export class DoBackend {
           `INSERT OR REPLACE INTO ${quoteIdentifier(METADATA_TABLE)} (kind, key, subkey, value) VALUES ${placeholders}`,
           params
         )
+        // per-chunk so a mid-persist failure never marks unwritten rows as done
+        for (const [kind, key, subkey, value] of chunk) {
+          persisted.set(`${kind}\u0000${key}\u0000${subkey}`, value)
+        }
       }
     } catch {}
   }
