@@ -287,98 +287,30 @@ export const permissions = definePermissions<unknown, Schema>(schema, () => ({
 }))
 
 // ---------------------------------------------------------------------------
-// storage
+// storage: DDL, seed, table spec, and the server-side mutator executor live
+// in fixture-data.ts (zero-import-free so the cloudflare worker can bundle
+// them without dragging in @rocicorp/zero)
 // ---------------------------------------------------------------------------
 
-// column names are unmapped, so store columns must match the zero schema
-// exactly. this DDL is valid in BOTH postgres and sqlite — every target runs
-// the same statements.
-export const DDL = [
-  `CREATE TABLE "user" (id text PRIMARY KEY, name text NOT NULL)`,
-  `CREATE TABLE project (id text PRIMARY KEY, "ownerId" text NOT NULL, name text NOT NULL)`,
-  `CREATE TABLE member (id text PRIMARY KEY, "projectId" text NOT NULL, "userId" text NOT NULL)`,
-  // rank is double precision, NOT real: pg float4 would round-trip with
-  // float32 noise while sqlite REAL is always 8-byte, a phantom divergence
-  `CREATE TABLE task (id text PRIMARY KEY, "projectId" text NOT NULL, title text NOT NULL,
-    rank double precision NOT NULL, done boolean NOT NULL, meta jsonb, "dueAt" bigint)`,
-]
+import { tablesFromZeroSchema } from '../../src/sync-server/sync-server'
+import { TABLES, jsonColumnsOf } from './fixture-data.js'
 
-// deterministic dataset: same rows on every target, every run. exercises
-// unicode, LIKE-able substrings, float/negative ranks, null json/dueAt,
-// nested json values.
-function mulberry32(seed: number) {
-  let a = seed
-  return () => {
-    a |= 0
-    a = (a + 0x6d2b79f5) | 0
-    let t = Math.imul(a ^ (a >>> 15), 1 | a)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+export { DDL, SEED, generateSeed, jsonColumnsOf as jsonColumns } from './fixture-data.js'
+
+// fail loud at module eval if the hand-mirrored TABLES spec drifts from the
+// zero schema (the worker bundle depends on the mirror being right)
+{
+  const sortKeys = (v: unknown): string =>
+    JSON.stringify(v, (_k, val) =>
+      val !== null && typeof val === 'object' && !Array.isArray(val)
+        ? Object.fromEntries(
+            Object.entries(val as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
+          )
+        : val
+    )
+  const want = sortKeys(tablesFromZeroSchema(schema))
+  const got = sortKeys(TABLES)
+  if (want !== got) {
+    throw new Error(`fixture-data TABLES drifted from zero schema:\n got ${got}\nwant ${want}`)
   }
-}
-
-export function generateSeed(seed = 1) {
-  const rng = mulberry32(seed)
-  const pick = <T>(arr: T[]) => arr[Math.floor(rng() * arr.length)]!
-
-  const users = Array.from({ length: 8 }, (_, i) => ({
-    id: `u${i}`,
-    name: pick(['ann', 'bob 🌵', 'çelik', 'dee', 'evan fix', 'frida', 'gus', 'hana']) + ` ${i}`,
-  }))
-
-  const projects = Array.from({ length: 12 }, (_, i) => ({
-    id: `p${i}`,
-    ownerId: `u${i % users.length}`,
-    name: pick(['alpha', 'fixup', 'Zenith', 'delta x', 'ütopia', 'omega']) + ` ${i}`,
-  }))
-
-  const members: { id: string; projectId: string; userId: string }[] = []
-  let m = 0
-  for (const p of projects) {
-    const count = 1 + Math.floor(rng() * 3)
-    for (let j = 0; j < count; j++) {
-      members.push({ id: `m${m++}`, projectId: p.id, userId: `u${Math.floor(rng() * users.length)}` })
-    }
-  }
-
-  // includes SCALAR json values (string/number/bool): jsonb holds any json
-  // type and both stacks must round-trip them identically. writer discipline
-  // matters — postgres.js stores a js string param into jsonb as a json
-  // string (double-encoded), so seeds go through schema-driven json encoding.
-  const metas = [
-    null,
-    { tags: ['a', 'b'], depth: { n: 1 } },
-    { emoji: '✅', list: [1, 2.5, -3] },
-    { s: 'plain' },
-    [1, 'two', null],
-    'scalar string',
-    42.5,
-    true,
-  ]
-  const tasks = Array.from({ length: 48 }, (_, i) => ({
-    id: `t${i}`,
-    projectId: `p${Math.floor(rng() * 10)}`, // p10/p11 stay task-less for projectsWithoutTasks
-    title: pick(['fix login', 'polish ux', 'refactor sync', 'fix flaky test', 'ship it 🚀', 'triage']) + ` ${i}`,
-    rank: Math.round((rng() * 20 - 4) * 100) / 100,
-    done: rng() > 0.6,
-    meta: pick(metas),
-    dueAt: rng() > 0.3 ? 1750000000000 + Math.floor(rng() * 10_000_000_000) : null,
-  }))
-
-  return { user: users, project: projects, member: members, task: tasks }
-}
-
-export const SEED = generateSeed()
-
-// columns typed json in the zero schema — seed/write paths need these to
-// encode values correctly per store (pg: sql.json; sqlite: JSON.stringify)
-export function jsonColumns(tableName: string): Set<string> {
-  const columns = (schema.tables as Record<string, { columns: Record<string, { type: string }> }>)[
-    tableName
-  ]?.columns
-  return new Set(
-    Object.entries(columns ?? {})
-      .filter(([, spec]) => spec.type === 'json')
-      .map(([name]) => name)
-  )
 }

@@ -26,6 +26,7 @@ const PROJECTS_PER_CLIENT = Number(args.projects)
 async function startTarget(name: string): Promise<SyncTarget> {
   if (name === 'stock-zero') return startStockZero()
   if (name === 'orez-local') return (await import('./targets/orez-local.js')).startOrezLocal()
+  if (name === 'orez-cf') return (await import('./targets/orez-cf.js')).startOrezCf()
   throw new Error(`unknown target '${name}' (orez-cf is M5)`)
 }
 

@@ -155,16 +155,18 @@ export function createSyncServer(config: SyncServerConfig) {
   // guarded claim (soot's claimStatement, sqlite dialect): bind the group to
   // this user unless another user already owns it; adopt userID-less rows
   function claimClient(clientGroupID: string, clientID: string, userID: string) {
+    // plain positional ? only (repeated params passed twice): DO SqlStorage
+    // does not support ?N numbered bindings
     db.exec(
       `INSERT INTO _zsync_clients (clientGroupID, clientID, lastMutationID, userID)
-       SELECT ?1, ?2, 0, ?3
+       SELECT ?, ?, 0, ?
        WHERE NOT EXISTS (
          SELECT 1 FROM _zsync_clients
-         WHERE clientGroupID = ?1 AND userID IS NOT NULL AND userID <> ?3
+         WHERE clientGroupID = ? AND userID IS NOT NULL AND userID <> ?
        )
        ON CONFLICT (clientGroupID, clientID)
        DO UPDATE SET userID = excluded.userID WHERE userID IS NULL`,
-      [clientGroupID, clientID, userID]
+      [clientGroupID, clientID, userID, clientGroupID, userID]
     )
     const owners = db.all(
       `SELECT DISTINCT userID FROM _zsync_clients
