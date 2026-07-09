@@ -262,18 +262,31 @@ server grow up together, which is exactly the leverage we want.
 
 ### milestones (each ends runnable with one command)
 
-**M0, baseline upstream (start immediately, on `work`):** ~/github/mono at
-main, pnpm install, run the zql-integration-tests no-pg lane and the
-chinook fuzz backbone + zero-cache fuzzer pg lanes (testcontainers, needs
-docker). deliverable: green/red report + wall-clock cost of each lane, so we
-know exactly what we inherit and what it costs to run continuously.
+**M0, baseline upstream [RAN 2026-07-09 on `work`, needs a clean re-run on
+the mini]:** full zql-integration-tests matrix (pg 15/16/17/18 via
+testcontainers + no-pg): 1094 passed / 7 failed / 54 skipped in 613s on a
+loaded 16-core box. the 7 failures: ~5 are fuzz push-parity tests hitting
+their 120s budget under machine load (rerun clean on the mini before calling
+them real), plus text-semantics.pg failures on pg-15/16 worth triaging
+(possible collation/ICU environment sensitivity). invocation gotchas learned:
+the package's `TEST_PG_MODE` env is a root-CI concept, use
+`pnpm exec vitest run --project='*17*'` to scope; the zero-cache protocol
+fuzzer file runs under packages/zero-cache's vitest config, not
+zql-integration-tests'. runbook in `harness/README.md`.
 
-**M1, harness skeleton + stock-zero target:** `harness/` package; SyncTarget
-interface; stock-zero via docker compose (pg + zero-cache, one 1.6.x lane,
-one 1.7-canary lane); chinook schema/fixture vendored from mono
-(apache-2.0, attribution header); smoke: 10 concurrent stock clients,
-overlapping queries, concurrent writes, barrier, converge, oracle-compare.
-`bun harness smoke --target stock-zero`.
+**M1, harness skeleton + stock-zero target [DONE 2026-07-09]:**
+`~/orez/harness/` (zharness, commit d0315e0). SyncTarget interface;
+stock-zero target = embedded postgres (wal_level=logical, no docker) + real
+zero-cache 1.6.1 spawned from node_modules; permissions deployed by
+replicating zero-deploy-permissions' SQL in-process. smoke green: 10 and 50
+stock clients hydrate, CRUD-mutate through sync, receive
+upstream-behind-zero's-back writes via logical replication, converge (50
+clients / 202 projects in 1.1s), and oracle-compare equal.
+`cd harness && bun run smoke`. gotchas pinned in code comments: spawn
+zero-cache with `node` (never bun's execPath), zero 1.6 gates
+`zero.query`/CRUD behind schema `enableLegacyQueries`/`enableLegacyMutators`.
+still M1-scope to add: a 1.7-canary lane, chinook fixture, custom-mutator
+push server (needed for the orez targets anyway).
 
 **M2, orez-local pure-sqlite target:** the minimal generic sync server core
 (config = zero schema + mutator map; snapshot pull with per-user filter
