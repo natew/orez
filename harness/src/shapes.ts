@@ -7,14 +7,21 @@
 // hydrate to the same answers (incremental == fresh).
 //
 // stock-zero evaluates queries server-side (view-syncer IVM row selection);
-// orez-local ships full snapshots and evaluates client-side. equal results is
-// exactly the conformance property the rewrite must hold.
+// the orez targets ship full snapshots and evaluate client-side. equal
+// results is exactly the conformance property the rewrite must hold.
 //
-//   bun src/shapes.ts
-import { SEED, mutators, queries, queryCorpus } from './fixture.js'
+//   bun src/shapes.ts                      # stock-zero vs orez-local
+//   bun src/shapes.ts --against orez-cf    # stock-zero vs the CF DO host
+import { parseArgs } from 'node:util'
+import { mutators, queries, queryCorpus } from './fixture.js'
 import type { FixtureZero, SyncTarget } from './target.js'
-import { startOrezLocal } from './targets/orez-local.js'
 import { startStockZero } from './targets/stock-zero.js'
+
+const { values: args } = parseArgs({
+  options: {
+    against: { type: 'string', default: 'orez-local' },
+  },
+})
 
 // registry entries take the RAW args value in 1.6.1 (the {args, ctx} options
 // object is the DEFINITION-side signature; wrapping here double-wraps and
@@ -70,14 +77,14 @@ async function eventually(check: () => void, timeoutMs: number, label: string) {
   throw new Error(`timeout (${timeoutMs}ms): ${label}: ${lastError}`)
 }
 
-function diffCorpus(phase: string, a: CorpusViews, b: CorpusViews): string[] {
+function diffCorpus(phase: string, a: CorpusViews, b: CorpusViews, bName: string): string[] {
   const failures: string[] = []
   for (const { name } of queryCorpus) {
     const left = canonical(a.get(name)!.rows())
     const right = canonical(b.get(name)!.rows())
     if (left !== right) {
       failures.push(
-        `[${phase}] ${name} diverged:\n  stock-zero: ${left?.slice(0, 400)}\n  orez-local: ${right?.slice(0, 400)}`
+        `[${phase}] ${name} diverged:\n  stock-zero: ${left?.slice(0, 400)}\n  ${bName}: ${right?.slice(0, 400)}`
       )
     }
   }
@@ -129,13 +136,22 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
   await Promise.allSettled(acks) // the dupe create rejects; the rest must resolve
 }
 
+async function startAgainst(name: string): Promise<SyncTarget> {
+  if (name === 'orez-local') {
+    return (await import('./targets/orez-local.js')).startOrezLocal({ pullIntervalMs: 150 })
+  }
+  if (name === 'orez-cf') {
+    return (await import('./targets/orez-cf.js')).startOrezCf({ pullIntervalMs: 150 })
+  }
+  throw new Error(`unknown --against target '${name}'`)
+}
+
 const t0 = Date.now()
-console.log('[shapes] booting both targets...')
-const stock = await startStockZero()
-const local = await startOrezLocal({ pullIntervalMs: 150 })
+console.log(`[shapes] booting stock-zero and ${args.against}...`)
+const [stock, other] = await Promise.all([startStockZero(), startAgainst(args.against!)])
 const targets: Array<{ target: SyncTarget; zero: FixtureZero }> = [
   { target: stock, zero: stock.createClient('user-1') },
-  { target: local, zero: local.createClient('user-1') },
+  { target: other, zero: other.createClient('user-1') },
 ]
 
 let failures: string[] = []
@@ -153,7 +169,7 @@ try {
     60_000,
     'corpus hydration on both targets'
   )
-  failures.push(...diffCorpus('hydrate', stockViews!.views, localViews!.views))
+  failures.push(...diffCorpus('hydrate', stockViews!.views, localViews!.views, other.name))
   console.log(
     `[shapes] hydrate: ${queryCorpus.length} queries on both targets, ${failures.length} divergences`
   )
@@ -189,7 +205,7 @@ try {
     60_000,
     'post-script convergence'
   )
-  failures.push(...diffCorpus('post-writes', stockViews!.views, localViews!.views))
+  failures.push(...diffCorpus('post-writes', stockViews!.views, localViews!.views, other.name))
   console.log(`[shapes] post-writes: compared, total ${failures.length} divergences`)
 
   // incremental == fresh: a late client per target must match the long-lived
@@ -234,6 +250,6 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  `[shapes] PASS: ${queryCorpus.length} query shapes x (hydrate + writes + incremental==fresh) equal across stock-zero and orez-local in ${Date.now() - t0}ms`
+  `[shapes] PASS: ${queryCorpus.length} query shapes x (hydrate + writes + incremental==fresh) equal across stock-zero and ${other.name} in ${Date.now() - t0}ms`
 )
 process.exit(0)

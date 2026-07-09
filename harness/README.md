@@ -3,8 +3,8 @@
 zero sync-engine conformance + load harness. plan and status:
 `../plans/zero-conformance-harness.md`. never published; private tooling.
 
-one harness, multiple targets (`src/target.ts`): stock zero-cache today,
-orez-local pure-sqlite and orez-cf next. every lane points stock
+one harness, multiple targets (`src/target.ts`): stock zero-cache,
+orez-local pure-sqlite, and orez-cf (cloudflare DO). every lane points stock
 `@rocicorp/zero` clients at a target, writes both through sync and straight
 to the upstream store, requires convergence, and compares converged client
 state against a fresh oracle read of the authoritative store.
@@ -15,14 +15,22 @@ state against a fresh oracle read of the authoritative store.
 bun install
 bun run smoke                                      # 10 clients vs real zero-cache
 bun src/smoke.ts --target orez-local --clients 50  # same vs the sqlite sync-server core
-bun src/shapes.ts                                  # 17-query cross-implementation differential
+bun src/smoke.ts --target orez-cf --clients 5      # same vs the deployed CF DO
+bun src/shapes.ts                                  # 17-query differential: stock-zero vs orez-local
+bun src/shapes.ts --against orez-cf                # same differential vs the CF DO
 bun src/bench.ts --target orez-local --clients 20 --writers 5 --rate 10 --duration 15
 ```
 
 targets: `stock-zero` (real zero-cache + embedded postgres + fixture app
-server) and `orez-local` (orez `src/sync-server` core over pure bun:sqlite,
-clients on on-zero's production http-pull transport). `orez-cf` is next
-(same core hosted in a DO).
+server), `orez-local` (orez `src/sync-server` core over pure bun:sqlite,
+clients on on-zero's production http-pull transport), and `orez-cf` (the
+SAME core hosted in a durable object over `ctx.storage.sql` — `cf/worker.ts`
+deployed as `zharness-sync` on lslcf; fresh namespace per run; admin oracle
+gated by the ADMIN_KEY secret, key file `~/.zharness-cf-admin-key`; deploy
+with `cd cf && bunx wrangler deploy`, then wait ~1min for propagation before
+probing). DO sqlite gotchas the core is written around: no raw
+`BEGIN`/`SAVEPOINT` SQL (only `storage.transactionSync`), no `?N` numbered
+bindings.
 
 `stock-zero` boots embedded postgres (wal_level=logical), the fixture app
 server (`src/app-server.ts`: named-query transform on /query + custom-mutator

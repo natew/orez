@@ -242,62 +242,52 @@ export function createSyncServer(config: SyncServerConfig) {
       if (mutation.type !== 'custom') {
         throw new SyncHttpError(400, `unsupported mutation type: ${mutation.type}`)
       }
-      // each mutation is its own transaction: row changes + LMID advance
-      // commit atomically; app errors keep the LMID advance, drop the rows
-      db.transaction(() => {
-        claimClient(clientGroupID, mutation.clientID, userID)
-        const lmid = Number(
-          db.all(
-            `SELECT lastMutationID FROM _zsync_clients
-             WHERE clientGroupID = ? AND clientID = ?`,
-            [clientGroupID, mutation.clientID]
-          )[0]!.lastMutationID
-        )
-        if (mutation.id <= lmid) {
-          // replay: ack idempotently without re-executing
-          results.push({ id: { clientID: mutation.clientID, id: mutation.id }, result: {} })
-          return
-        }
-        if (mutation.id > lmid + 1) {
-          throw new SyncHttpError(
-            400,
-            `mutation id ${mutation.id} skips lmid ${lmid} (out of order)`
+      // each mutation commits atomically (rows + LMID advance in one tx). an
+      // app error aborts that whole tx, then a SECOND tx advances the LMID
+      // and records the error — same net semantics as a savepoint rollback,
+      // but with NO savepoint: DO sqlite forbids raw SAVEPOINT/BEGIN (only
+      // storage.transactionSync). crash between the two txs is safe: nothing
+      // committed, replay re-executes and hits the same app error.
+      const applyMutation = (executeMutator: boolean): 'applied' | 'replay' =>
+        db.transaction(() => {
+          claimClient(clientGroupID, mutation.clientID, userID)
+          const lmid = Number(
+            db.all(
+              `SELECT lastMutationID FROM _zsync_clients
+               WHERE clientGroupID = ? AND clientID = ?`,
+              [clientGroupID, mutation.clientID]
+            )[0]!.lastMutationID
           )
-        }
-
-        const advance = () =>
+          if (mutation.id <= lmid) return 'replay'
+          if (mutation.id > lmid + 1) {
+            throw new SyncHttpError(
+              400,
+              `mutation id ${mutation.id} skips lmid ${lmid} (out of order)`
+            )
+          }
+          if (executeMutator) {
+            config.mutate(db, mutation.name, mutation.args[0], { userID })
+          }
           db.exec(
             `UPDATE _zsync_clients SET lastMutationID = ?
              WHERE clientGroupID = ? AND clientID = ?`,
             [mutation.id, clientGroupID, mutation.clientID]
           )
+          return 'applied'
+        })
 
-        try {
-          // nested savepoint so an app error rolls back the mutator's rows
-          // while the outer tx still commits the LMID advance
-          db.exec(`SAVEPOINT zsync_mutation`)
-          try {
-            config.mutate(db, mutation.name, mutation.args[0], { userID })
-            db.exec(`RELEASE zsync_mutation`)
-          } catch (error) {
-            db.exec(`ROLLBACK TO zsync_mutation`)
-            db.exec(`RELEASE zsync_mutation`)
-            throw error
-          }
-          advance()
-          results.push({ id: { clientID: mutation.clientID, id: mutation.id }, result: {} })
-        } catch (error) {
-          if (error instanceof MutationAppError) {
-            advance()
-            results.push({
-              id: { clientID: mutation.clientID, id: mutation.id },
-              result: { error: 'app', details: error.details },
-            })
-          } else {
-            throw error
-          }
+      const id = { clientID: mutation.clientID, id: mutation.id }
+      try {
+        applyMutation(true)
+        results.push({ id, result: {} })
+      } catch (error) {
+        if (error instanceof MutationAppError) {
+          applyMutation(false)
+          results.push({ id, result: { error: 'app', details: error.details } })
+        } else {
+          throw error
         }
-      })
+      }
     }
 
     if (mutations.length > 0) bumpVersion()

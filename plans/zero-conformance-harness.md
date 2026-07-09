@@ -346,13 +346,31 @@ tops out below the client counts we need, THAT is the trigger to revisit
 rust for the load generator only. deliverable: scaling curves committed to
 plans/, including the stock-zero baseline curve the rewrite must beat.
 
-**M5, orez-cf target:** host the M2 core in a DO on the lslcf account
-(extend the orez-cf-todo-experiment wiring), sealed admin oracle endpoint,
-run smoke + backbone + a load lane from the mini against it. cf containers
-(credits) come in here for sweep width: each container runs one
-self-contained harness case; workers-ai-free parallelism for the
-embarrassingly parallel lanes only. faults/kill-restart lanes stay local
-where we have process control.
+**M5, orez-cf target [DONE 2026-07-09]:** the M2 core hosted in a DO over
+`ctx.storage.sql` — `harness/cf/worker.ts`, deployed as `zharness-sync` on
+lslcf (https://zharness-sync.lslcf.workers.dev). each harness run gets a
+fresh namespace (one path segment, zero's server-option limit) routed to its
+own DO; admin oracle endpoint gated by the ADMIN_KEY secret (key in
+`~/.zharness-cf-admin-key`, never committed). 15KB bundle, no @rocicorp/zero
+server-side. green: smoke (5 clients), shapes differential
+`--against orez-cf` (17/17 shapes equal vs stock-zero through hydrate +
+write script + incremental==fresh), bench 10 clients 3x5/s: ack p50/p95
+1169/1924ms, propagation p50/p95 1538/2304ms, late hydrate 305ms (remote
+edge + 500ms pull interval; compare orez-local ack p50 3ms — the gap is
+network + full-snapshot pulls, which phase 2 cursor-diffs attack).
+findings pinned:
+- DO SqlStorage REJECTS raw `BEGIN`/`SAVEPOINT` SQL. the core's app-error
+  path originally used `SAVEPOINT zsync_mutation` to keep the LMID advance
+  while dropping the mutator's rows — restructured to be host-portable:
+  each mutation is one `db.transaction` (rows + LMID atomically); on
+  MutationAppError that tx aborts entirely and a SECOND tx advances the
+  LMID + records the error. crash between the two txs is safe (nothing
+  committed → replay re-executes → same app error).
+- only plain positional `?` bindings on DO (no `?N`), already handled.
+- deploys take ~30-60s to propagate; a probe right after `wrangler deploy`
+  can hit the previous version. re-probe before diagnosing.
+cf containers (credits) still available for sweep width later; faults/
+kill-restart lanes stay local where we have process control.
 
 **M6, make it a gate:** nightly backbone+sweep+load on `mini-16` (agentbus
 scheduled), results posted; wire `bun harness backbone --target orez-local`
