@@ -171,6 +171,11 @@ option 1 with generous windows wins.
 
 ### acceptance
 
+- the conformance harness lanes (`plans/zero-conformance-harness.md`
+  EXECUTION PLAN) run green against the new server: query-shape backbone +
+  sweep, load lanes, on both the pure-sqlite local host and the DO host.
+  the harness's `orez-local` target IS this server core; they are built
+  together.
 - delta correctness suite in orez mirroring the spike style: interleaved
   push/pull churn, visibility revocation via epoch, cursor-below-floor
   snapshot fallback, two tabs one client group, multi-client convergence.

@@ -1,9 +1,19 @@
-# zero conformance + consistency harness (research, 2026-07-09)
+# zero conformance + consistency harness (research + execution plan)
 
 companion to `plans/zero-server-rewrite.md`. question asked: does a serious
 zero test suite (lots of query shapes, many clients, jepsen-level consistency
 checking) already exist upstream, and if not, how do we build one, validate it
 against real zero first, and scale it?
+
+**DECIDED (nate, 2026-07-09):** jepsen/elle is overkill; dropped. rust is
+deferred (revisit only if the load generator hits client-count ceilings in
+TS). we start from upstream's just-landed fuzzer assets (apache-2.0, portable
+with attribution), add heavy query-shape lanes and load lanes, and the
+harness MUST run against a pure-sqlite local target as well as cloudflare.
+runners: nate's mac mini (already an agentbus peer, `mini-16`, isolated and
+ownable) plus cloudflare (api key + credits available; lslcf account already
+wired for orez experiments). see EXECUTION PLAN below; the jepsen and rust
+sections that follow are kept as research context only.
 
 ## finding 1: upstream has half of it, and it is 3 weeks old and moving fast
 
@@ -215,17 +225,108 @@ right fit; keep seeds + full histories so every failure replays.
 4. scale lanes + metrics; OVH box provisioned; nightly runs.
 5. point it at chat-CF, then orez planes; wire into rewrite phase 2 gates.
 
-## open questions
+## EXECUTION PLAN (2026-07-09, the decided path)
 
-- how much of upstream's fuzz generator to port vs call out to (their
-  generator is TS; porting the DESIGN is cheap, sharing regression corpora
-  needs a common ast/json format, which their replay-artifact spec already
-  sketches).
-- custom mutators require an app server (push endpoint executes them). the
-  harness needs a minimal generic push server for stock-zero lanes (zero's
-  `zero-pg` PushProcessor makes this ~small) mirroring the orez fixture
-  server semantics.
-- permissions axes: worth designing early (upstream punts to L4); soot's
-  named-query visibility rules are the real-world shape to model.
-- name/home: separate repo (`~/zbench`?) vs `~/orez/harness`. leaning
-  separate repo: it tests four different systems, none of which own it.
+goal: a WORKING harness fast, not a framework. TS throughout (reuse the
+stock zero client as the driver; reuse upstream's generator design). home:
+`~/orez/harness/` with its own package.json, never published with the orez
+package; extract to its own repo later only if it earns it.
+
+### the design constraint that shapes everything: three targets, one harness
+
+```
+SyncTarget interface
+  setup(schema, seedData)          create/reset the authoritative store
+  client(n, opts) -> ZeroClient[]  stock @rocicorp/zero clients, transport per target
+  write(sql | mutation[])          upstream writes (sql) and client mutations
+  oracle(query) -> rows            FRESH query against the authoritative store
+  barrier()                        wait: writes visible to server, pokes observed
+  metrics()                        rss/cpu (local), DO analytics (cf), poke lag
+  teardown()
+```
+
+| target | server | store | client transport | oracle |
+| --- | --- | --- | --- | --- |
+| `stock-zero` | real zero-cache (docker) | postgres (testcontainers) | stock websocket | fresh pg query |
+| `orez-local` | orez sync server core, plain bun/node process | **pure sqlite file** | on-zero `http-pull` | fresh sqlite query |
+| `orez-cf` | same core hosted in a DO | DO sqlite | on-zero `http-pull` | sealed admin sql read on the DO |
+
+the `orez-local` target does not exist yet and building it IS the point: a
+generic, schema-driven sync server core (snapshot pull + push/LMID, later
+cursor-diff) written as a plain TS module over a sqlite handle (bun:sqlite
+locally, `ctx.storage.sql` on the DO). one core, two hosts. this seeds
+rewrite phase 2/3 (`plans/zero-server-rewrite.md`): the generalization of
+soot's `httpPull.server.ts` semantics plus the spike fixture server, backed
+by real sqlite instead of in-memory maps. the harness and the rewritten
+server grow up together, which is exactly the leverage we want.
+
+### milestones (each ends runnable with one command)
+
+**M0, baseline upstream (start immediately, mac mini):** clone mono on
+`mini-16`, pnpm install, run the zql-integration-tests no-pg lane and the
+chinook fuzz backbone + zero-cache fuzzer pg lanes (testcontainers, needs
+docker). deliverable: green/red report + wall-clock cost of each lane, so we
+know exactly what we inherit and what it costs to run continuously.
+
+**M1, harness skeleton + stock-zero target:** `harness/` package; SyncTarget
+interface; stock-zero via docker compose (pg + zero-cache, one 1.6.x lane,
+one 1.7-canary lane); chinook schema/fixture vendored from mono
+(apache-2.0, attribution header); smoke: 10 concurrent stock clients,
+overlapping queries, concurrent writes, barrier, converge, oracle-compare.
+`bun harness smoke --target stock-zero`.
+
+**M2, orez-local pure-sqlite target:** the minimal generic sync server core
+(config = zero schema + mutator map; snapshot pull with per-user filter
+hooks; push via PushProcessor-equivalent LMID bookkeeping in sqlite; the
+fixed-width cookie + wire rules from the spike). same smoke green:
+`bun harness smoke --target orez-local`. no cf anywhere in this milestone;
+it must run on a bare machine with zero deps beyond bun.
+
+**M3, query-shape lanes (the bulk of value):** port upstream's generator
+(skeleton enumeration, decoration axes, pairwise coverage, literals/scalar
+axes) from `packages/zql-integration-tests/src/chinook/fuzz/`; hydrate
+differential vs oracle per target; then write-sequences with the
+incremental == fresh-hydrate invariant; shrink + replay artifacts in their
+json shape; committed regression corpus. lanes: `backbone` (per-PR, minutes)
+and `sweep` (seeded, hours, mini). divergences on stock-zero = upstream bug
+reports; divergences on orez targets = our bugs, fix before proceeding.
+
+**M4, load lanes:** N clients × M queries × write-rate grid, plus longevity
+(hours). measures: poke/pull lag percentiles, convergence time after write
+bursts, server rss/cpu over time, per-client memory. client driver runs many
+stock zero clients per node process, multi-process fanout on the mini; if TS
+tops out below the client counts we need, THAT is the trigger to revisit
+rust for the load generator only. deliverable: scaling curves committed to
+plans/, including the stock-zero baseline curve the rewrite must beat.
+
+**M5, orez-cf target:** host the M2 core in a DO on the lslcf account
+(extend the orez-cf-todo-experiment wiring), sealed admin oracle endpoint,
+run smoke + backbone + a load lane from the mini against it. cf containers
+(credits) come in here for sweep width: each container runs one
+self-contained harness case; workers-ai-free parallelism for the
+embarrassingly parallel lanes only. faults/kill-restart lanes stay local
+where we have process control.
+
+**M6, make it a gate:** nightly backbone+sweep+load on `mini-16` (agentbus
+scheduled), results posted; wire `bun harness backbone --target orez-local`
+into orez CI; the rewrite plan's phase 2 acceptance references these lanes
+byte-for-byte.
+
+### runners
+
+- `mini-16` (mac mini, agentbus peer, online): the owned always-on runner.
+  needs: bun, docker (for stock-zero + testcontainers), a checkout of
+  ~/orez + ~/github/mono. M0 verifies the environment.
+- `ci-64` peer exists too if a sweep needs more cores.
+- cloudflare: lslcf account for the orez-cf target deploys + containers for
+  sweep width (GA, active-cpu billing, thousands of lite instances).
+
+### open questions (narrowed)
+
+- custom mutators need a push executor per target; M2's core provides it
+  for orez targets, and stock-zero lanes use zero's own push endpoint with
+  a tiny fixture app server (zero-pg PushProcessor).
+- permissions axes: model soot's named-query visibility shapes once M3 is
+  stable; upstream punts these to their L4 so this is greenfield.
+- how much generator code ports cleanly vs needs rewrite: answered in M3 by
+  doing it; the design doc + apache license make either path fine.
