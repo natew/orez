@@ -112,7 +112,73 @@ export const zql = createBuilder(schema)
 // modeled on the chat census (plans/zero-conformance-harness.md M3).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// generated queries (sweep lane): ONE named query whose args ARE a shape
+// spec, interpreted into zql by this builder on the client registry AND the
+// server transform (both share queryBuilders), so randomized shapes need no
+// per-shape registration. grammar intentionally mirrors what the corpus and
+// the chat census use: cmp/and/or trees, exists, orderBy, limit, related
+// (with sub-where/order/limit/one), one().
+// ---------------------------------------------------------------------------
+
+export type GenWhere =
+  | { op: 'cmp'; col: string; cmp: string; value: unknown }
+  | { op: 'and' | 'or'; children: GenWhere[] }
+
+export type GenSubSpec = {
+  where?: GenWhere
+  orderBy?: [string, 'asc' | 'desc'][]
+  limit?: number
+  one?: boolean
+}
+
+export type GenSpec = GenSubSpec & {
+  table: 'user' | 'project' | 'member' | 'task'
+  exists?: { rel: string; where?: GenWhere }[]
+  related?: { rel: string; sub?: GenSubSpec }[]
+}
+
+// biome-ignore lint/suspicious/noExplicitAny: dynamic zql chain by design
+type AnyQuery = any
+
+function applyWhere(q: AnyQuery, where: GenWhere): AnyQuery {
+  if (where.op === 'cmp') return q.where(where.col, where.cmp, where.value)
+  return q.where(({ and, or, cmp }: AnyQuery) => {
+    const build = (node: GenWhere): AnyQuery =>
+      node.op === 'cmp'
+        ? cmp(node.col, node.cmp, node.value)
+        : (node.op === 'and' ? and : or)(...node.children.map(build))
+    return build(where)
+  })
+}
+
+function applySub(q: AnyQuery, sub: GenSubSpec): AnyQuery {
+  if (sub.where) q = applyWhere(q, sub.where)
+  for (const [col, dir] of sub.orderBy ?? []) q = q.orderBy(col, dir)
+  if (sub.limit !== undefined) q = q.limit(sub.limit)
+  if (sub.one) q = q.one()
+  return q
+}
+
+export function buildGenerated(spec: GenSpec): AnyQuery {
+  let q: AnyQuery = zql[spec.table]
+  if (spec.where) q = applyWhere(q, spec.where)
+  for (const e of spec.exists ?? []) {
+    q = e.where
+      ? q.whereExists(e.rel, (sq: AnyQuery) => applyWhere(sq, e.where!))
+      : q.whereExists(e.rel)
+  }
+  for (const [col, dir] of spec.orderBy ?? []) q = q.orderBy(col, dir)
+  if (spec.limit !== undefined) q = q.limit(spec.limit)
+  for (const r of spec.related ?? []) {
+    q = r.sub ? q.related(r.rel, (sq: AnyQuery) => applySub(sq, r.sub!)) : q.related(r.rel)
+  }
+  if (spec.one) q = q.one()
+  return q
+}
+
 export const queryBuilders = {
+  generated: (args: GenSpec) => buildGenerated(args),
   allProjects: () => zql.project.related('members'),
   projectById: (args: { id: string }) =>
     zql.project
@@ -180,6 +246,7 @@ export const queryBuilders = {
 export type QueryName = keyof typeof queryBuilders
 
 export const queries = defineQueries({
+  generated: defineQuery(({ args }: { args: GenSpec }) => buildGenerated(args)),
   allProjects: defineQuery(() => queryBuilders.allProjects()),
   projectById: defineQuery(({ args }: { args: { id: string } }) =>
     queryBuilders.projectById(args)

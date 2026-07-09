@@ -13,6 +13,7 @@
 //   bun src/shapes.ts                      # stock-zero vs orez-local
 //   bun src/shapes.ts --against orez-cf    # stock-zero vs the CF DO host
 import { parseArgs } from 'node:util'
+import { canonical } from './canonical.js'
 import { mutators, queries, queryCorpus } from './fixture.js'
 import type { FixtureZero, SyncTarget } from './target.js'
 import { startStockZero } from './targets/stock-zero.js'
@@ -30,17 +31,6 @@ const { values: args } = parseArgs({
 function invokeQuery(name: string, args: unknown) {
   const def = (queries as unknown as Record<string, (args?: unknown) => unknown>)[name]!
   return args === undefined ? def() : def(args)
-}
-
-// canonical stringify: json column values pass through pg jsonb on one target
-// (normalizes object key order) and sqlite text on the other (preserves it) —
-// key order is not app-meaningful, so compare with sorted keys
-function canonical(value: unknown): string {
-  return JSON.stringify(value, (_k, v) =>
-    v !== null && typeof v === 'object' && !Array.isArray(v)
-      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)))
-      : v
-  )
 }
 
 type CorpusViews = Map<string, { rows: () => unknown; complete: () => boolean }>

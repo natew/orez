@@ -18,8 +18,13 @@ bun src/smoke.ts --target orez-local --clients 50  # same vs the sqlite sync-ser
 bun src/smoke.ts --target orez-cf --clients 5      # same vs the deployed CF DO
 bun src/shapes.ts                                  # 22-query differential: stock-zero vs orez-local
 bun src/shapes.ts --against orez-cf                # same differential vs the CF DO
+bun src/sweep.ts --rounds 15                       # seeded randomized differential (prints seed)
+bun src/sweep.ts --seed 12345 --against orez-cf    # deterministic replay / CF host
 bun src/bench.ts --target orez-local --clients 20 --writers 5 --rate 10 --duration 15
 ```
+
+sweep divergences write replay artifacts to `regressions/` (seed + spec +
+both sides); re-run with the printed `--seed` to reproduce exactly.
 
 targets: `stock-zero` (real zero-cache + embedded postgres + fixture app
 server), `orez-local` (orez `src/sync-server` core over pure bun:sqlite,

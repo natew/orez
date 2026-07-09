@@ -321,9 +321,24 @@ projectTasksPage (top-level window + per-relation windows + nested one()),
 tasksDueNull (IS null), tasksDueBefore (nullable compare) — plus write
 script churn that forces rows ACROSS the windows (task.setRank mutator,
 dueAt null flips via upstream sql). all 22 green on stock-zero vs
-orez-local AND vs orez-cf. still open: port upstream's generator for
-randomized sweep lanes + replay artifacts + regression corpus; deeper
-junction shapes from the chat census.
+orez-local AND vs orez-cf.
+SWEEP LANE SHIPPED (same day, `harness/src/sweep.ts`): seeded randomized
+differential — one `generated` named query whose ARGS are a shape spec
+(cmp/and-or trees, exists, orderBy+tiebreak, limit, related windows,
+one()), interpreted into zql by a builder shared by the client registry and
+the server transform, so random shapes need no per-shape registration.
+each round adds shapes (views accumulate → old shapes keep being
+incrementally maintained under later churn), runs mirrored random writes
+(mutators + upstream sql, live id pools), sentinel-barriers, compares all
+live views canonically; ends with incremental==fresh late clients over
+every spec. deterministic per seed; divergences write replay artifacts to
+harness/regressions/. green: seeds 42/7/1337/999983 x 15 rounds vs
+orez-local (~85% shapes non-vacuous), seed 4242 vs orez-cf. sabotage-
+validated (breaking diff dels makes it fail; that run also exposed that a
+corrupted target wedges zero's ack promises forever — every ack await in
+the lane is now timeboxed). still open: chat-census junction depth in the
+generator (only depth-1 related subs now), start() cursors in generated
+shapes, upstream-mono-style pairwise coverage accounting.
 
 query-shape corpus: model on ~/chat (nate 2026-07-09), the canonical large
 zero app. census of its query layer (`src/data/queries/` 37 files +
