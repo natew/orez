@@ -6,10 +6,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+
 import { Zero } from '@rocicorp/zero'
 import postgres from 'postgres'
+
 import { startAppServer } from '../app-server.js'
 import { DDL, SEED, jsonColumns, mutators, permissions, schema } from '../fixture.js'
+
 import type { Rows, SyncTarget } from '../target.js'
 
 const require = createRequire(import.meta.url)
@@ -155,7 +158,8 @@ export async function startStockZero(opts?: {
   })
   const childExit = new Promise<number | null>((res) => child.on('exit', res))
   childExit.then((code) => {
-    if (code !== null && code !== 0) console.error(`[stock-zero] zero-cache exited ${code}`)
+    if (code !== null && code !== 0)
+      console.error(`[stock-zero] zero-cache exited ${code}`)
   })
 
   await waitForHttp(`http://127.0.0.1:${zeroPort}/`, 60_000)

@@ -5,7 +5,9 @@
 // the zero-client integration lives in the harness lanes
 // (harness/src/{smoke,shapes,bench}.ts).
 import { DatabaseSync } from 'node:sqlite'
+
 import { beforeEach, describe, expect, test } from 'vitest'
+
 import {
   MutationAppError,
   type SyncDb,
@@ -38,7 +40,13 @@ function nodeSqliteDb(sqlite: DatabaseSync): SyncDb {
 
 const TABLES: SyncTables = {
   item: {
-    columns: { id: 'string', label: 'string', rank: 'number', done: 'boolean', meta: 'json' },
+    columns: {
+      id: 'string',
+      label: 'string',
+      rank: 'number',
+      done: 'boolean',
+      meta: 'json',
+    },
     primaryKey: ['id'],
   },
 }
@@ -51,7 +59,13 @@ function mutate(tx: SyncDb, name: string, args: unknown, _ctx: { userID: string 
       `INSERT INTO item (id, label, rank, done, meta) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET label = excluded.label, rank = excluded.rank,
        done = excluded.done, meta = excluded.meta`,
-      [a.id, a.label, a.rank, a.done ? 1 : 0, a.meta === null ? null : JSON.stringify(a.meta)]
+      [
+        a.id,
+        a.label,
+        a.rank,
+        a.done ? 1 : 0,
+        a.meta === null ? null : JSON.stringify(a.meta),
+      ]
     )
     return
   }
@@ -126,7 +140,12 @@ function pull(
   )
 }
 
-type Patch = { op: string; tableName?: string; value?: Record<string, unknown>; id?: Record<string, unknown> }
+type Patch = {
+  op: string
+  tableName?: string
+  value?: Record<string, unknown>
+  id?: Record<string, unknown>
+}
 
 function patchOf(response: unknown): Patch[] {
   const rowsPatch = (response as { rowsPatch?: Patch[] }).rowsPatch
@@ -175,7 +194,13 @@ describe('cursor diffs', () => {
     const patch = patchOf(response)
     expect(patch.some((op) => op.op === 'clear')).toBe(false)
     const put = patch.find((op) => op.op === 'put')!
-    expect(put.value).toEqual({ id: 'i2', label: 'two', rank, done: true, meta: [1, 'x'] })
+    expect(put.value).toEqual({
+      id: 'i2',
+      label: 'two',
+      rank,
+      done: true,
+      meta: [1, 'x'],
+    })
     expect(put.value!.rank).toBe(rank) // exact, not sqlite json's 15-digit form
   })
 
@@ -183,7 +208,13 @@ describe('cursor diffs', () => {
     const { sync } = setup()
     push(sync, 'item.put', { id: 'i2', label: 'two', rank: 2, done: false, meta: null })
     const { cookie } = pull(sync, null) as { cookie: number }
-    push(sync, 'item.put', { id: 'i2', label: 'renamed', rank: 2, done: false, meta: null })
+    push(sync, 'item.put', {
+      id: 'i2',
+      label: 'renamed',
+      rank: 2,
+      done: false,
+      meta: null,
+    })
     const patch = patchOf(pull(sync, cookie))
     const puts = patch.filter((op) => op.op === 'put')
     expect(puts).toHaveLength(1)
@@ -203,7 +234,13 @@ describe('cursor diffs', () => {
     const { sync } = setup()
     const { cookie } = pull(sync, null) as { cookie: number }
     push(sync, 'item.del', { id: 'seed1' })
-    push(sync, 'item.put', { id: 'seed1', label: 'reborn', rank: 9, done: false, meta: null })
+    push(sync, 'item.put', {
+      id: 'seed1',
+      label: 'reborn',
+      rank: 9,
+      done: false,
+      meta: null,
+    })
     const patch = patchOf(pull(sync, cookie))
     expect(patch).toEqual([
       {
@@ -217,7 +254,13 @@ describe('cursor diffs', () => {
   test('insert then delete between pulls collapses to a del', () => {
     const { sync } = setup()
     const { cookie } = pull(sync, null) as { cookie: number }
-    push(sync, 'item.put', { id: 'ephemeral', label: 'x', rank: 0, done: false, meta: null })
+    push(sync, 'item.put', {
+      id: 'ephemeral',
+      label: 'x',
+      rank: 0,
+      done: false,
+      meta: null,
+    })
     push(sync, 'item.del', { id: 'ephemeral' })
     const patch = patchOf(pull(sync, cookie))
     expect(patch).toEqual([{ op: 'del', tableName: 'item', id: { id: 'ephemeral' } }])
@@ -234,7 +277,13 @@ describe('cursor diffs', () => {
       {
         op: 'put',
         tableName: 'item',
-        value: { id: 'seed1', label: 'edited behind zero', rank: 1.5, done: false, meta: { tag: 'a' } },
+        value: {
+          id: 'seed1',
+          label: 'edited behind zero',
+          rank: 1.5,
+          done: false,
+          meta: { tag: 'a' },
+        },
       },
     ])
   })
@@ -248,7 +297,13 @@ describe('cursor diffs', () => {
     expect(patch).toContainEqual({
       op: 'put',
       tableName: 'item',
-      value: { id: 'seed1-renamed', label: 'first', rank: 1.5, done: false, meta: { tag: 'a' } },
+      value: {
+        id: 'seed1-renamed',
+        label: 'first',
+        rank: 1.5,
+        done: false,
+        meta: { tag: 'a' },
+      },
     })
   })
 })
@@ -258,7 +313,10 @@ describe('push semantics', () => {
     const { db, sync } = setup()
     const { cookie } = pull(sync, null) as { cookie: number }
     const response = push(sync, 'item.reject', {})
-    expect(response.pushResponse.mutations[0]!.result).toEqual({ error: 'app', details: 'nope' })
+    expect(response.pushResponse.mutations[0]!.result).toEqual({
+      error: 'app',
+      details: 'nope',
+    })
     expect(db.all(`SELECT * FROM item WHERE id = 'rejected'`)).toHaveLength(0)
     // the lmid marker makes the next pull non-unchanged so recovery settles
     const next = pull(sync, cookie) as {
@@ -272,20 +330,42 @@ describe('push semantics', () => {
 
   test('replayed mutation acks idempotently without re-executing', () => {
     const { db, sync } = setup()
-    push(sync, 'item.put', { id: 'i2', label: 'once', rank: 1, done: false, meta: null }, { id: 1 })
-    push(sync, 'item.put', { id: 'i2', label: 'twice?', rank: 1, done: false, meta: null }, { id: 1 })
+    push(
+      sync,
+      'item.put',
+      { id: 'i2', label: 'once', rank: 1, done: false, meta: null },
+      { id: 1 }
+    )
+    push(
+      sync,
+      'item.put',
+      { id: 'i2', label: 'twice?', rank: 1, done: false, meta: null },
+      { id: 1 }
+    )
     expect(db.all(`SELECT label FROM item WHERE id = 'i2'`)).toEqual([{ label: 'once' }])
   })
 
   test('out-of-order mutation id is a 400', () => {
     const { sync } = setup()
-    expect(() => push(sync, 'item.put', { id: 'x' }, { id: 5 })).toThrowError(/skips lmid/)
+    expect(() => push(sync, 'item.put', { id: 'x' }, { id: 5 })).toThrowError(
+      /skips lmid/
+    )
   })
 
   test('two tabs in one client group settle through lastMutationIDChanges', () => {
     const { sync } = setup()
-    push(sync, 'item.put', { id: 'a', label: 'a', rank: 0, done: false, meta: null }, { clientID: 'tab1' })
-    push(sync, 'item.put', { id: 'b', label: 'b', rank: 0, done: false, meta: null }, { clientID: 'tab2' })
+    push(
+      sync,
+      'item.put',
+      { id: 'a', label: 'a', rank: 0, done: false, meta: null },
+      { clientID: 'tab1' }
+    )
+    push(
+      sync,
+      'item.put',
+      { id: 'b', label: 'b', rank: 0, done: false, meta: null },
+      { clientID: 'tab2' }
+    )
     const response = pull(sync, null, { clientID: 'tab1' }) as {
       lastMutationIDChanges: Record<string, number>
     }
@@ -304,10 +384,22 @@ describe('retention floor', () => {
     const { sync } = setup({ retainChanges: 2 })
     const ancient = (pull(sync, null) as { cookie: number }).cookie
     for (let i = 0; i < 6; i++) {
-      push(sync, 'item.put', { id: `i${i}`, label: `l${i}`, rank: i, done: false, meta: null })
+      push(sync, 'item.put', {
+        id: `i${i}`,
+        label: `l${i}`,
+        rank: i,
+        done: false,
+        meta: null,
+      })
     }
     const recent = (pull(sync, null, { clientID: 'c2' }) as { cookie: number }).cookie
-    push(sync, 'item.put', { id: 'last', label: 'last', rank: 99, done: false, meta: null })
+    push(sync, 'item.put', {
+      id: 'last',
+      label: 'last',
+      rank: 99,
+      done: false,
+      meta: null,
+    })
 
     const stale = patchOf(pull(sync, ancient))
     expect(stale[0]).toEqual({ op: 'clear' }) // snapshot fallback
@@ -328,9 +420,21 @@ describe('retention floor', () => {
 describe('per-user visibility', () => {
   test('visible() configs always snapshot, filtered per user', () => {
     const { sync } = setup({ visible: true })
-    push(sync, 'item.put', { id: 'hidden', label: 'done item', rank: 0, done: true, meta: null })
+    push(sync, 'item.put', {
+      id: 'hidden',
+      label: 'done item',
+      rank: 0,
+      done: true,
+      meta: null,
+    })
     const { cookie } = pull(sync, null) as { cookie: number }
-    push(sync, 'item.put', { id: 'shown', label: 'open item', rank: 0, done: false, meta: null })
+    push(sync, 'item.put', {
+      id: 'shown',
+      label: 'open item',
+      rank: 0,
+      done: false,
+      meta: null,
+    })
     const patch = patchOf(pull(sync, cookie))
     expect(patch[0]).toEqual({ op: 'clear' }) // never a diff with visibility filtering
     const ids = patch.filter((op) => op.op === 'put').map((op) => op.value!.id)
@@ -378,9 +482,7 @@ describe('interleaved churn converges', () => {
     applyPull('c2')
 
     const oracle = new Map(
-      (
-        pull(sync, null, { clientID: 'c3' }) as { rowsPatch: Patch[] }
-      ).rowsPatch
+      (pull(sync, null, { clientID: 'c3' }) as { rowsPatch: Patch[] }).rowsPatch
         .filter((op) => op.op === 'put')
         .map((op) => [String(op.value!.id), op.value!] as const)
     )

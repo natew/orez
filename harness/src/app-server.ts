@@ -4,13 +4,16 @@
 // plays in prod. kept endpoint-shaped (name/args in, AST/results out) so the
 // orez targets can reuse it unchanged.
 import { createServer, type Server } from 'node:http'
-import type { ReadonlyJSONValue } from '@rocicorp/zero'
+
 import {
   handleMutateRequest,
   handleQueryRequest,
   zeroPostgresJS,
 } from '@rocicorp/zero/pg'
+
 import { mutators, queryBuilders, schema } from './fixture.js'
+
+import type { ReadonlyJSONValue } from '@rocicorp/zero'
 
 // server-side transform: query name + args -> zql AST via the SAME builder
 // map the client registry uses, so both sides always produce the same query.
@@ -28,7 +31,9 @@ function mustGetMutatorDef(name: string) {
     node = (node as Record<string, unknown>)[part]
     if (!node) throw new Error(`unknown mutator: ${name}`)
   }
-  return node as { fn: (opts: { tx: unknown; args: unknown; ctx: unknown }) => Promise<void> }
+  return node as {
+    fn: (opts: { tx: unknown; args: unknown; ctx: unknown }) => Promise<void>
+  }
 }
 
 // fixture auth: zero-cache forwards the client's raw token as a bearer
@@ -47,7 +52,9 @@ export async function startAppServer(opts: { dbUrl: string; port: number }) {
       const url = new URL(req.url ?? '/', 'http://localhost')
       const chunks: Buffer[] = []
       for await (const chunk of req) chunks.push(chunk as Buffer)
-      const body = JSON.parse(Buffer.concat(chunks).toString() || 'null') as ReadonlyJSONValue
+      const body = JSON.parse(
+        Buffer.concat(chunks).toString() || 'null'
+      ) as ReadonlyJSONValue
       const query = Object.fromEntries(url.searchParams)
       const userID = userIDFromAuth(req.headers.authorization)
 

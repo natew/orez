@@ -5,14 +5,17 @@
 // core under test (plans/zero-server-rewrite.md phase 2).
 import { Database } from 'bun:sqlite'
 import { createServer, type Server } from 'node:http'
+
 import { Zero } from '@rocicorp/zero'
-// the production transport source, verbatim (self-contained module, no
-// imports). the npm package does not expose a transport subpath export yet;
-// running the checkout source keeps the harness on the exact code soot ships.
-import { ensureHttpPullTransport } from '../../../../takeout/packages/on-zero/src/httpPullTransport'
+
 import { type SyncDb, createSyncServer } from '../../../src/sync-server/sync-server'
 import { TABLES, executeMutator, seedSqlite, userIDFromAuth } from '../fixture-data.js'
 import { mutators, schema } from '../fixture.js'
+// the production transport source, vendored verbatim (self-contained module,
+// no imports) so CI runs without the takeout checkout — provenance + refresh
+// instructions in the vendor file header
+import { ensureHttpPullTransport } from '../vendor/httpPullTransport.js'
+
 import type { Rows, SyncTarget } from '../target.js'
 
 function bunSqliteDb(db: Database): SyncDb {
@@ -28,7 +31,6 @@ function bunSqliteDb(db: Database): SyncDb {
     },
   }
 }
-
 
 export async function startOrezLocal(opts?: {
   port?: number

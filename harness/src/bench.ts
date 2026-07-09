@@ -6,9 +6,11 @@
 //
 //   bun src/bench.ts --target orez-local --clients 20 --writers 5 --rate 10 --duration 15
 import { parseArgs } from 'node:util'
+
 import { mutators, queries } from './fixture.js'
-import type { FixtureZero, SyncTarget } from './target.js'
 import { startStockZero } from './targets/stock-zero.js'
+
+import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: {
@@ -28,7 +30,8 @@ const DURATION_S = Number(args.duration)
 
 async function startTarget(name: string): Promise<SyncTarget> {
   if (name === 'stock-zero') return startStockZero()
-  if (name === 'orez-local') return (await import('./targets/orez-local.js')).startOrezLocal()
+  if (name === 'orez-local')
+    return (await import('./targets/orez-local.js')).startOrezLocal()
   if (name === 'orez-cf') return (await import('./targets/orez-cf.js')).startOrezCf()
   throw new Error(`unknown target '${name}'`)
 }
@@ -124,7 +127,8 @@ try {
         )
         await req.client
         const elapsed = Date.now() - issued
-        if (elapsed < intervalMs) await new Promise((r) => setTimeout(r, intervalMs - elapsed))
+        if (elapsed < intervalMs)
+          await new Promise((r) => setTimeout(r, intervalMs - elapsed))
       }
     })
   )
@@ -160,7 +164,9 @@ try {
     (await target.oracle(`SELECT count(*) AS n FROM project`))[0]!.n
   )
   if (watchers[0]!.count !== oracleCount) {
-    throw new Error(`client 0 sees ${watchers[0]!.count} projects, oracle has ${oracleCount}`)
+    throw new Error(
+      `client 0 sees ${watchers[0]!.count} projects, oracle has ${oracleCount}`
+    )
   }
   const late = target.createClient('late-bench')
   const lateWatch = watchFirstSeen(late, [])

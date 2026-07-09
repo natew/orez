@@ -83,12 +83,7 @@ export type SyncServerConfig = {
   visible?: (table: string, userID: string) => { sql: string; params: unknown[] }
   // executes one custom mutation inside the push transaction. throw
   // MutationAppError for app-level rejection (LMID still advances).
-  mutate: (
-    tx: SyncDb,
-    name: string,
-    args: unknown,
-    ctx: { userID: string }
-  ) => void
+  mutate: (tx: SyncDb, name: string, args: unknown, ctx: { userID: string }) => void
   // change-log rows kept below the high watermark; clients whose cookie
   // falls below the pruned floor get a full snapshot. default 4096.
   retainChanges?: number
@@ -206,7 +201,9 @@ export function createSyncServer(config: SyncServerConfig) {
 
   // the cookie: high watermark of the change log (0 = pristine/seed-only)
   function watermark(): number {
-    return Number(db.all(`SELECT COALESCE(MAX(watermark), 0) AS w FROM _zsync_changes`)[0]!.w)
+    return Number(
+      db.all(`SELECT COALESCE(MAX(watermark), 0) AS w FROM _zsync_changes`)[0]!.w
+    )
   }
 
   function floorValue(): number {
@@ -259,7 +256,10 @@ export function createSyncServer(config: SyncServerConfig) {
       claimClient(clientGroupID, clientID, userID)
       const current = watermark()
       if (cookie !== null && cookie > current) {
-        throw new SyncHttpError(409, `future cookie ${cookie} is ahead of watermark ${current}`)
+        throw new SyncHttpError(
+          409,
+          `future cookie ${cookie} is ahead of watermark ${current}`
+        )
       }
       if (cookie === current) {
         return { cookie: current, unchanged: true as const }
@@ -276,10 +276,9 @@ export function createSyncServer(config: SyncServerConfig) {
       // diff pulls need uniform visibility (the project-plane assumption):
       // a per-user visible() filter can revoke rows without any row change,
       // which no diff can express — those configs always snapshot
-      const canDiff = cookie !== null && cookie >= floorValue() && config.visible === undefined
-      const rowsPatch: unknown[] = canDiff
-        ? diffPatch(cookie)
-        : snapshotPatch(userID)
+      const canDiff =
+        cookie !== null && cookie >= floorValue() && config.visible === undefined
+      const rowsPatch: unknown[] = canDiff ? diffPatch(cookie) : snapshotPatch(userID)
 
       return { cookie: current, lastMutationIDChanges, rowsPatch }
     })
@@ -322,7 +321,8 @@ export function createSyncServer(config: SyncServerConfig) {
       const row = db.all(`SELECT * FROM "${table}" WHERE ${where}`, params)[0]
       if (!row) {
         const id: Record<string, unknown> = {}
-        for (const col of spec.primaryKey) id[col] = toZeroValue(spec.columns[col]!, pk[col])
+        for (const col of spec.primaryKey)
+          id[col] = toZeroValue(spec.columns[col]!, pk[col])
         rowsPatch.push({ op: 'del', tableName: table, id })
       } else {
         const value: Record<string, unknown> = {}

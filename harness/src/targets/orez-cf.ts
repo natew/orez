@@ -10,9 +10,12 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+
 import { Zero } from '@rocicorp/zero'
-import { ensureHttpPullTransport } from '../../../../takeout/packages/on-zero/src/httpPullTransport'
+
 import { mutators, schema } from '../fixture.js'
+import { ensureHttpPullTransport } from '../vendor/httpPullTransport.js'
+
 import type { Rows, SyncTarget } from '../target.js'
 
 const WORKER = 'https://zharness-sync.lslcf.workers.dev'
@@ -21,7 +24,9 @@ export async function startOrezCf(opts?: {
   namespace?: string
   pullIntervalMs?: number
 }): Promise<SyncTarget> {
-  const ns = opts?.namespace ?? `run-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
+  const ns =
+    opts?.namespace ??
+    `run-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
   const adminKey = readFileSync(join(homedir(), '.zharness-cf-admin-key'), 'utf8').trim()
   // zero's server option allows at most ONE path component — the namespace
   // is that component

@@ -18,6 +18,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
+
 import { canonical } from './canonical.js'
 import {
   type GenSpec,
@@ -27,8 +28,9 @@ import {
   mutators,
   queries,
 } from './fixture.js'
-import type { FixtureZero, SyncTarget } from './target.js'
 import { startStockZero } from './targets/stock-zero.js'
+
+import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: {
@@ -77,7 +79,10 @@ const NAME_PATTERNS = ['%a%', '%fix%', '%Zen%', '%ütopia%', '%x %']
 type TableName = keyof typeof pools
 
 // column pools per table: [col, kind]
-const COLUMNS: Record<TableName, [string, 'id' | 'string' | 'number' | 'boolean' | 'nullableNumber' | 'json'][]> = {
+const COLUMNS: Record<
+  TableName,
+  [string, 'id' | 'string' | 'number' | 'boolean' | 'nullableNumber' | 'json'][]
+> = {
   user: [
     ['id', 'id'],
     ['name', 'string'],
@@ -166,7 +171,12 @@ function genCmp(table: TableName): GenWhere {
     case 'nullableNumber':
       return chance(0.4)
         ? { op: 'cmp', col, cmp: pick(['IS', 'IS NOT'] as const), value: null }
-        : { op: 'cmp', col, cmp: pick(['<', '>'] as const), value: 1750000000000 + Math.floor(rng() * 10_000_000_000) }
+        : {
+            op: 'cmp',
+            col,
+            cmp: pick(['<', '>'] as const),
+            value: 1750000000000 + Math.floor(rng() * 10_000_000_000),
+          }
     case 'json':
       return { op: 'cmp', col, cmp: pick(['IS', 'IS NOT'] as const), value: null }
   }
@@ -228,7 +238,11 @@ function genSpec(): GenSpec {
 // ---------------------------------------------------------------------------
 
 type Write =
-  | { kind: 'mutate'; label: string; make: (z: FixtureZero) => { client: Promise<unknown>; server: Promise<unknown> } }
+  | {
+      kind: 'mutate'
+      label: string
+      make: (z: FixtureZero) => { client: Promise<unknown>; server: Promise<unknown> }
+    }
   | { kind: 'sql'; label: string; sql: string }
 
 let writeSeq = 0
@@ -245,7 +259,8 @@ function genWrites(round: number): Write[] {
       writes.push({
         kind: 'mutate',
         label: `project.create ${id}`,
-        make: (z) => z.mutate(mutators.project.create({ id, ownerId, name: `sweep ${id}` })),
+        make: (z) =>
+          z.mutate(mutators.project.create({ id, ownerId, name: `sweep ${id}` })),
       })
     } else if (roll < 0.4) {
       const id = `wt-${round}-${writeSeq++}`
@@ -254,13 +269,23 @@ function genWrites(round: number): Write[] {
       const rank = Math.round((rng() * 24 - 4) * 100) / 100
       const done = chance(0.4)
       const meta = chance(0.5) ? { round, tag: pick(['a', 'b', '✅']) } : undefined
-      const dueAt = chance(0.6) ? 1750000000000 + Math.floor(rng() * 10_000_000_000) : undefined
+      const dueAt = chance(0.6)
+        ? 1750000000000 + Math.floor(rng() * 10_000_000_000)
+        : undefined
       writes.push({
         kind: 'mutate',
         label: `task.create ${id}`,
         make: (z) =>
           z.mutate(
-            mutators.task.create({ id, projectId, title: `sweep fix ${id}`, rank, done, meta, dueAt })
+            mutators.task.create({
+              id,
+              projectId,
+              title: `sweep fix ${id}`,
+              rank,
+              done,
+              meta,
+              dueAt,
+            })
           ),
       })
     } else if (roll < 0.55) {
@@ -299,7 +324,11 @@ function genWrites(round: number): Write[] {
     } else if (roll < 0.94 && pools.task.length > 10) {
       const idx = int(0, pools.task.length - 1)
       const id = pools.task.splice(idx, 1)[0]!
-      writes.push({ kind: 'sql', label: `sql delete task ${id}`, sql: `DELETE FROM task WHERE id = '${id}'` })
+      writes.push({
+        kind: 'sql',
+        label: `sql delete task ${id}`,
+        sql: `DELETE FROM task WHERE id = '${id}'`,
+      })
     } else {
       const id = pick(pools.task)
       const flip = chance(0.5)
@@ -321,7 +350,9 @@ function genWrites(round: number): Write[] {
 
 async function startAgainst(name: string): Promise<SyncTarget> {
   if (name === 'orez-local') {
-    return (await import('./targets/orez-local.js')).startOrezLocal({ pullIntervalMs: 150 })
+    return (await import('./targets/orez-local.js')).startOrezLocal({
+      pullIntervalMs: 150,
+    })
   }
   if (name === 'orez-cf') {
     return (await import('./targets/orez-cf.js')).startOrezCf({ pullIntervalMs: 150 })
@@ -332,7 +363,11 @@ async function startAgainst(name: string): Promise<SyncTarget> {
 // a corrupted target can wedge zero's push pipeline so client/server ack
 // promises never settle (found via a sabotage run) — every await on them
 // must be timeboxed or the lane hangs instead of failing
-async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
@@ -551,7 +586,8 @@ try {
     const lateViews = allSpecs.map((spec, i) => materializeSpec(late, spec, i))
     await eventually(
       () => {
-        for (const v of lateViews) if (!v.complete()) throw new Error(`late spec ${v.specIndex}`)
+        for (const v of lateViews)
+          if (!v.complete()) throw new Error(`late spec ${v.specIndex}`)
       },
       120_000,
       `${target.name} late hydration`
@@ -593,7 +629,9 @@ try {
 if (failures.length > 0) {
   console.error(`[sweep] FAIL seed=${SWEEP_SEED} — ${failures.length} failures:`)
   for (const f of failures) console.error(f)
-  console.error(`[sweep] replay: bun src/sweep.ts --seed ${SWEEP_SEED} --rounds ${ROUNDS} --queriesPerRound ${QUERIES_PER_ROUND} --against ${args.against}`)
+  console.error(
+    `[sweep] replay: bun src/sweep.ts --seed ${SWEEP_SEED} --rounds ${ROUNDS} --queriesPerRound ${QUERIES_PER_ROUND} --against ${args.against}`
+  )
   process.exit(1)
 }
 console.log(

@@ -13,10 +13,12 @@
 //   bun src/shapes.ts                      # stock-zero vs orez-local
 //   bun src/shapes.ts --against orez-cf    # stock-zero vs the CF DO host
 import { parseArgs } from 'node:util'
+
 import { canonical } from './canonical.js'
 import { mutators, queries, queryCorpus } from './fixture.js'
-import type { FixtureZero, SyncTarget } from './target.js'
 import { startStockZero } from './targets/stock-zero.js'
+
+import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: {
@@ -35,7 +37,10 @@ function invokeQuery(name: string, args: unknown) {
 
 type CorpusViews = Map<string, { rows: () => unknown; complete: () => boolean }>
 
-function materializeCorpus(zero: FixtureZero): { views: CorpusViews; destroy: () => void } {
+function materializeCorpus(zero: FixtureZero): {
+  views: CorpusViews
+  destroy: () => void
+} {
   const views: CorpusViews = new Map()
   const destroys: Array<() => void> = []
   for (const { name, args } of queryCorpus) {
@@ -67,7 +72,12 @@ async function eventually(check: () => void, timeoutMs: number, label: string) {
   throw new Error(`timeout (${timeoutMs}ms): ${label}: ${lastError}`)
 }
 
-function diffCorpus(phase: string, a: CorpusViews, b: CorpusViews, bName: string): string[] {
+function diffCorpus(
+  phase: string,
+  a: CorpusViews,
+  b: CorpusViews,
+  bName: string
+): string[] {
   const failures: string[] = []
   for (const { name } of queryCorpus) {
     const left = canonical(a.get(name)!.rows())
@@ -90,7 +100,9 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
     return req.client
   }
 
-  await mutate(zero.mutate(mutators.project.create({ id: 'pw1', ownerId: 'u1', name: 'written α' })))
+  await mutate(
+    zero.mutate(mutators.project.create({ id: 'pw1', ownerId: 'u1', name: 'written α' }))
+  )
   await mutate(
     zero.mutate(
       mutators.task.create({
@@ -107,7 +119,9 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
   await mutate(zero.mutate(mutators.task.toggle({ id: 'tw1' })))
   await mutate(zero.mutate(mutators.task.toggle({ id: 't3' })))
   await mutate(zero.mutate(mutators.project.rename({ id: 'p3', name: 'renamed ζ' })))
-  await mutate(zero.mutate(mutators.member.add({ id: 'mw1', projectId: 'p2', userId: 'u7' })))
+  await mutate(
+    zero.mutate(mutators.member.add({ id: 'mw1', projectId: 'p2', userId: 'u7' }))
+  )
   await mutate(zero.mutate(mutators.member.remove({ id: 'm2' })))
   await mutate(zero.mutate(mutators.project.delete({ id: 'p9' })))
   // window churn: shove rows across the tasksTopByRank/tasksAfterCursor
@@ -116,11 +130,15 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
   await mutate(zero.mutate(mutators.task.setRank({ id: 't13', rank: 98.25 })))
   await mutate(zero.mutate(mutators.task.setRank({ id: 't20', rank: -99 })))
   // app-error path: duplicate create must reject server-side + roll back
-  await mutate(zero.mutate(mutators.project.create({ id: 'pw1', ownerId: 'u1', name: 'dupe' })))
+  await mutate(
+    zero.mutate(mutators.project.create({ id: 'pw1', ownerId: 'u1', name: 'dupe' }))
+  )
 
   // upstream writes behind zero's back (replication path on stock, version
   // bump on orez-local)
-  await target.sql(`INSERT INTO project (id, "ownerId", name) VALUES ('pu1', 'u2', 'upstream β')`)
+  await target.sql(
+    `INSERT INTO project (id, "ownerId", name) VALUES ('pu1', 'u2', 'upstream β')`
+  )
   await target.sql(
     `INSERT INTO task (id, "projectId", title, rank, done, meta, "dueAt")
      VALUES ('tu1', 'pu1', 'upstream fix task', 3.5, true, '{"src":"sql"}', NULL)`
@@ -136,7 +154,9 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
 
 async function startAgainst(name: string): Promise<SyncTarget> {
   if (name === 'orez-local') {
-    return (await import('./targets/orez-local.js')).startOrezLocal({ pullIntervalMs: 150 })
+    return (await import('./targets/orez-local.js')).startOrezLocal({
+      pullIntervalMs: 150,
+    })
   }
   if (name === 'orez-cf') {
     return (await import('./targets/orez-cf.js')).startOrezCf({ pullIntervalMs: 150 })
@@ -167,7 +187,9 @@ try {
     60_000,
     'corpus hydration on both targets'
   )
-  failures.push(...diffCorpus('hydrate', stockViews!.views, localViews!.views, other.name))
+  failures.push(
+    ...diffCorpus('hydrate', stockViews!.views, localViews!.views, other.name)
+  )
   console.log(
     `[shapes] hydrate: ${queryCorpus.length} queries on both targets, ${failures.length} divergences`
   )
@@ -182,7 +204,9 @@ try {
       (empty.length ? ` (empty: ${empty.map((e) => e.name).join(', ')})` : '')
   )
   if (empty.length > 0) {
-    failures.push(`empty corpus queries (dataset must exercise every shape): ${empty.map((e) => e.name).join(', ')}`)
+    failures.push(
+      `empty corpus queries (dataset must exercise every shape): ${empty.map((e) => e.name).join(', ')}`
+    )
   }
 
   console.log('[shapes] running write script on both targets...')
@@ -203,7 +227,9 @@ try {
     60_000,
     'post-script convergence'
   )
-  failures.push(...diffCorpus('post-writes', stockViews!.views, localViews!.views, other.name))
+  failures.push(
+    ...diffCorpus('post-writes', stockViews!.views, localViews!.views, other.name)
+  )
   console.log(`[shapes] post-writes: compared, total ${failures.length} divergences`)
 
   // incremental == fresh: a late client per target must match the long-lived
@@ -214,7 +240,8 @@ try {
     await eventually(
       () => {
         for (const { name } of queryCorpus) {
-          if (!lateViews.views.get(name)!.complete()) throw new Error(`${name} late not complete`)
+          if (!lateViews.views.get(name)!.complete())
+            throw new Error(`${name} late not complete`)
         }
       },
       60_000,

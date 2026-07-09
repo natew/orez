@@ -171,7 +171,9 @@ export function buildGenerated(spec: GenSpec): AnyQuery {
   for (const [col, dir] of spec.orderBy ?? []) q = q.orderBy(col, dir)
   if (spec.limit !== undefined) q = q.limit(spec.limit)
   for (const r of spec.related ?? []) {
-    q = r.sub ? q.related(r.rel, (sq: AnyQuery) => applySub(sq, r.sub!)) : q.related(r.rel)
+    q = r.sub
+      ? q.related(r.rel, (sq: AnyQuery) => applySub(sq, r.sub!))
+      : q.related(r.rel)
   }
   if (spec.one) q = q.one()
   return q
@@ -202,7 +204,10 @@ export const queryBuilders = {
   tasksTitleLike: (args: { pattern: string }) =>
     zql.task.where('title', 'LIKE', args.pattern).orderBy('id', 'asc'),
   tasksRankRange: (args: { min: number; max: number }) =>
-    zql.task.where('rank', '>', args.min).where('rank', '<=', args.max).orderBy('id', 'asc'),
+    zql.task
+      .where('rank', '>', args.min)
+      .where('rank', '<=', args.max)
+      .orderBy('id', 'asc'),
   tasksAndOr: () =>
     zql.task.where(({ and, or, cmp }) =>
       and(cmp('done', '=', false), or(cmp('rank', '>', 5), cmp('title', 'LIKE', '%x%')))
@@ -212,7 +217,9 @@ export const queryBuilders = {
   // not(exists()) is unsupported on the zero client (bugs.rocicorp.dev/3438,
   // found by this lane 2026-07-09) — junction-scoped exists instead
   projectsWithUserMember: (args: { userId: string }) =>
-    zql.project.whereExists('members', (q) => q.where('userId', args.userId)).orderBy('id', 'asc'),
+    zql.project
+      .whereExists('members', (q) => q.where('userId', args.userId))
+      .orderBy('id', 'asc'),
   taskById: (args: { id: string }) => zql.task.where('id', args.id).one(),
   projectsOrderMulti: () =>
     zql.project.orderBy('ownerId', 'asc').orderBy('name', 'desc').limit(5),
@@ -227,11 +234,7 @@ export const queryBuilders = {
   // server evaluation exactly
   tasksTopByRank: () => zql.task.orderBy('rank', 'desc').orderBy('id', 'asc').limit(5),
   tasksAfterCursor: (args: { cursor: { rank: number; id: string } }) =>
-    zql.task
-      .orderBy('rank', 'asc')
-      .orderBy('id', 'asc')
-      .start(args.cursor)
-      .limit(6),
+    zql.task.orderBy('rank', 'asc').orderBy('id', 'asc').start(args.cursor).limit(6),
   projectTasksPage: () =>
     zql.project
       .orderBy('name', 'asc')
@@ -240,7 +243,10 @@ export const queryBuilders = {
       .related('members', (q) => q.related('user', (q) => q.one())),
   tasksDueNull: () => zql.task.where('dueAt', 'IS', null).orderBy('id', 'asc'),
   tasksDueBefore: (args: { before: number }) =>
-    zql.task.where('dueAt', '<', args.before).orderBy('dueAt', 'asc').orderBy('id', 'asc'),
+    zql.task
+      .where('dueAt', '<', args.before)
+      .orderBy('dueAt', 'asc')
+      .orderBy('id', 'asc'),
 } as const
 
 export type QueryName = keyof typeof queryBuilders
@@ -337,7 +343,13 @@ type Tx = Transaction<Schema>
 export const mutators = defineMutators({
   project: {
     create: defineMutator(
-      async ({ tx, args }: { tx: Tx; args: { id: string; ownerId: string; name: string } }) => {
+      async ({
+        tx,
+        args,
+      }: {
+        tx: Tx
+        args: { id: string; ownerId: string; name: string }
+      }) => {
         await tx.mutate.project.insert(args)
       }
     ),
@@ -352,7 +364,13 @@ export const mutators = defineMutators({
   },
   member: {
     add: defineMutator(
-      async ({ tx, args }: { tx: Tx; args: { id: string; projectId: string; userId: string } }) => {
+      async ({
+        tx,
+        args,
+      }: {
+        tx: Tx
+        args: { id: string; projectId: string; userId: string }
+      }) => {
         await tx.mutate.member.insert(args)
       }
     ),
@@ -420,13 +438,17 @@ export { DDL, SEED, generateSeed, jsonColumnsOf as jsonColumns } from './fixture
     JSON.stringify(v, (_k, val) =>
       val !== null && typeof val === 'object' && !Array.isArray(val)
         ? Object.fromEntries(
-            Object.entries(val as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
+            Object.entries(val as Record<string, unknown>).sort(([a], [b]) =>
+              a.localeCompare(b)
+            )
           )
         : val
     )
   const want = sortKeys(tablesFromZeroSchema(schema))
   const got = sortKeys(TABLES)
   if (want !== got) {
-    throw new Error(`fixture-data TABLES drifted from zero schema:\n got ${got}\nwant ${want}`)
+    throw new Error(
+      `fixture-data TABLES drifted from zero schema:\n got ${got}\nwant ${want}`
+    )
   }
 }

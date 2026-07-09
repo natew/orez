@@ -6,7 +6,9 @@ export function canonical(value: unknown): string {
   return JSON.stringify(value, (_k, v) =>
     v !== null && typeof v === 'object' && !Array.isArray(v)
       ? Object.fromEntries(
-          Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
+          Object.entries(v as Record<string, unknown>).sort(([a], [b]) =>
+            a.localeCompare(b)
+          )
         )
       : v
   )

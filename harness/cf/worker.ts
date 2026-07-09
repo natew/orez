@@ -7,8 +7,18 @@
 //
 // bundles fixture-data + orez src/sync-server only — no @rocicorp/zero in
 // the worker.
-import { type SyncDb, type SyncServer, createSyncServer } from '../../src/sync-server/sync-server'
-import { DDL, TABLES, executeMutator, seedSqlite, userIDFromAuth } from '../src/fixture-data'
+import {
+  type SyncDb,
+  type SyncServer,
+  createSyncServer,
+} from '../../src/sync-server/sync-server'
+import {
+  DDL,
+  TABLES,
+  executeMutator,
+  seedSqlite,
+  userIDFromAuth,
+} from '../src/fixture-data'
 
 type Env = {
   SYNC_DO: DurableObjectNamespace
@@ -57,7 +67,11 @@ export class SyncServerDO {
     if (seeded.length === 0) {
       this.#db.transaction(() => seedSqlite(this.#db))
     }
-    this.#sync = createSyncServer({ db: this.#db, tables: TABLES, mutate: executeMutator })
+    this.#sync = createSyncServer({
+      db: this.#db,
+      tables: TABLES,
+      mutate: executeMutator,
+    })
     return this.#sync
   }
 

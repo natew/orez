@@ -121,15 +121,15 @@ assertion) in addition to per-client session checks.
 
 zero's checkable guarantees, mapped:
 
-| invariant | how to check |
-| --- | --- |
+| invariant                                                              | how to check                                                                     |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | pokes are transactionally atomic (never observe a partial upstream tx) | tag rows with tx ids; assert clients never materialize a strict subset of one tx |
-| per-client-group causal / monotonic snapshots | elle strong-session models over append histories |
-| read-your-writes after mutation ack | history check: ack(m) then query must reflect m |
-| exactly-once mutation application (LMID) | counter/list-append mutators; final value equals committed history |
-| rollback on app-error is complete (no phantom rows) | inject failing mutators; assert optimistic state fully reverts |
-| strong convergence | quiesce; every client's materialized views byte-equal the pg oracle |
-| query correctness across the zql surface | differential vs pg oracle (steal upstream's axes/normalization rules) |
+| per-client-group causal / monotonic snapshots                          | elle strong-session models over append histories                                 |
+| read-your-writes after mutation ack                                    | history check: ack(m) then query must reflect m                                  |
+| exactly-once mutation application (LMID)                               | counter/list-append mutators; final value equals committed history               |
+| rollback on app-error is complete (no phantom rows)                    | inject failing mutators; assert optimistic state fully reverts                   |
+| strong convergence                                                     | quiesce; every client's materialized views byte-equal the pg oracle              |
+| query correctness across the zql surface                               | differential vs pg oracle (steal upstream's axes/normalization rules)            |
 
 elle's list-append workload maps cleanly: custom mutators append integers to
 a row's json array column (or an append-only table per key); reads are synced
@@ -245,11 +245,11 @@ SyncTarget interface
   teardown()
 ```
 
-| target | server | store | client transport | oracle |
-| --- | --- | --- | --- | --- |
-| `stock-zero` | real zero-cache (docker) | postgres (testcontainers) | stock websocket | fresh pg query |
-| `orez-local` | orez sync server core, plain bun/node process | **pure sqlite file** | on-zero `http-pull` | fresh sqlite query |
-| `orez-cf` | same core hosted in a DO | DO sqlite | on-zero `http-pull` | sealed admin sql read on the DO |
+| target       | server                                        | store                     | client transport    | oracle                          |
+| ------------ | --------------------------------------------- | ------------------------- | ------------------- | ------------------------------- |
+| `stock-zero` | real zero-cache (docker)                      | postgres (testcontainers) | stock websocket     | fresh pg query                  |
+| `orez-local` | orez sync server core, plain bun/node process | **pure sqlite file**      | on-zero `http-pull` | fresh sqlite query              |
+| `orez-cf`    | same core hosted in a DO                      | DO sqlite                 | on-zero `http-pull` | sealed admin sql read on the DO |
 
 the `orez-local` target does not exist yet and building it IS the point: a
 generic, schema-driven sync server core (snapshot pull + push/LMID, later
@@ -282,7 +282,7 @@ server (`harness/src/app-server.ts`) serving named-query transform
 (ZERO_QUERY_URL) and custom-mutator execution (ZERO_MUTATE_URL); permissions
 deployed by replicating zero-deploy-permissions' SQL in-process. legacy
 CRUD/queries are OFF (`ZERO_ENABLE_CRUD_MUTATIONS=false`, no
-enableLegacy* schema flags) per nate: the harness exercises the modern
+enableLegacy\* schema flags) per nate: the harness exercises the modern
 surface the orez server must serve. smoke green: 50 clients hydrate named
 queries, push 400 custom mutations (server-acked in 1.16s), receive
 upstream-behind-zero's-back writes via replication, converge, oracle-compare
@@ -307,38 +307,39 @@ mutations in 5.5s, no postgres, no docker.
 open]:** shipped `harness/src/shapes.ts` (commit d21277d): a 17-query
 CROSS-IMPLEMENTATION differential — identical deterministic dataset + write
 script on stock-zero and orez-local, every corpus query compared at hydrate
-+ post-writes + incremental==fresh, with a no-vacuous-greens gate (every
-query must return data). this reframing matters: stock evaluates queries
-server-side (IVM row selection), orez-local ships snapshots and evaluates
-client-side; equal results IS the conformance property the rewrite must
-hold. found immediately: client not(exists()) unsupported (upstream bug
-3438), postgres.js jsonb double-encoding writer discipline, pg-jsonb key
-order normalization policy, 1.6.1 registry raw-args invocation.
-EXPANDED 2026-07-09 (same day, after cursor-diff pulls landed): corpus is
-now 22 shapes — added tasksTopByRank (top-level limit window),
-tasksAfterCursor (.start() pagination with a real seed row as cursor),
-projectTasksPage (top-level window + per-relation windows + nested one()),
-tasksDueNull (IS null), tasksDueBefore (nullable compare) — plus write
-script churn that forces rows ACROSS the windows (task.setRank mutator,
-dueAt null flips via upstream sql). all 22 green on stock-zero vs
-orez-local AND vs orez-cf.
-SWEEP LANE SHIPPED (same day, `harness/src/sweep.ts`): seeded randomized
-differential — one `generated` named query whose ARGS are a shape spec
-(cmp/and-or trees, exists, orderBy+tiebreak, limit, related windows,
-one()), interpreted into zql by a builder shared by the client registry and
-the server transform, so random shapes need no per-shape registration.
-each round adds shapes (views accumulate → old shapes keep being
-incrementally maintained under later churn), runs mirrored random writes
-(mutators + upstream sql, live id pools), sentinel-barriers, compares all
-live views canonically; ends with incremental==fresh late clients over
-every spec. deterministic per seed; divergences write replay artifacts to
-harness/regressions/. green: seeds 42/7/1337/999983 x 15 rounds vs
-orez-local (~85% shapes non-vacuous), seed 4242 vs orez-cf. sabotage-
-validated (breaking diff dels makes it fail; that run also exposed that a
-corrupted target wedges zero's ack promises forever — every ack await in
-the lane is now timeboxed). still open: chat-census junction depth in the
-generator (only depth-1 related subs now), start() cursors in generated
-shapes, upstream-mono-style pairwise coverage accounting.
+
+- post-writes + incremental==fresh, with a no-vacuous-greens gate (every
+  query must return data). this reframing matters: stock evaluates queries
+  server-side (IVM row selection), orez-local ships snapshots and evaluates
+  client-side; equal results IS the conformance property the rewrite must
+  hold. found immediately: client not(exists()) unsupported (upstream bug
+  3438), postgres.js jsonb double-encoding writer discipline, pg-jsonb key
+  order normalization policy, 1.6.1 registry raw-args invocation.
+  EXPANDED 2026-07-09 (same day, after cursor-diff pulls landed): corpus is
+  now 22 shapes — added tasksTopByRank (top-level limit window),
+  tasksAfterCursor (.start() pagination with a real seed row as cursor),
+  projectTasksPage (top-level window + per-relation windows + nested one()),
+  tasksDueNull (IS null), tasksDueBefore (nullable compare) — plus write
+  script churn that forces rows ACROSS the windows (task.setRank mutator,
+  dueAt null flips via upstream sql). all 22 green on stock-zero vs
+  orez-local AND vs orez-cf.
+  SWEEP LANE SHIPPED (same day, `harness/src/sweep.ts`): seeded randomized
+  differential — one `generated` named query whose ARGS are a shape spec
+  (cmp/and-or trees, exists, orderBy+tiebreak, limit, related windows,
+  one()), interpreted into zql by a builder shared by the client registry and
+  the server transform, so random shapes need no per-shape registration.
+  each round adds shapes (views accumulate → old shapes keep being
+  incrementally maintained under later churn), runs mirrored random writes
+  (mutators + upstream sql, live id pools), sentinel-barriers, compares all
+  live views canonically; ends with incremental==fresh late clients over
+  every spec. deterministic per seed; divergences write replay artifacts to
+  harness/regressions/. green: seeds 42/7/1337/999983 x 15 rounds vs
+  orez-local (~85% shapes non-vacuous), seed 4242 vs orez-cf. sabotage-
+  validated (breaking diff dels makes it fail; that run also exposed that a
+  corrupted target wedges zero's ack promises forever — every ack await in
+  the lane is now timeboxed). still open: chat-census junction depth in the
+  generator (only depth-1 related subs now), start() cursors in generated
+  shapes, upstream-mono-style pairwise coverage accounting.
 
 query-shape corpus: model on ~/chat (nate 2026-07-09), the canonical large
 zero app. census of its query layer (`src/data/queries/` 37 files +
@@ -384,6 +385,7 @@ SAME DAY: rewrite phase 2 cursor-diff pulls landed in the core
 dominates propagation. orez-local same grid: ack p50 2ms, propagation p50
 144ms (250ms poll).
 findings pinned:
+
 - DO SqlStorage REJECTS raw `BEGIN`/`SAVEPOINT` SQL. the core's app-error
   path originally used `SAVEPOINT zsync_mutation` to keep the LMID advance
   while dropping the mutator's rows — restructured to be host-portable:
@@ -394,8 +396,8 @@ findings pinned:
 - only plain positional `?` bindings on DO (no `?N`), already handled.
 - deploys take ~30-60s to propagate; a probe right after `wrangler deploy`
   can hit the previous version. re-probe before diagnosing.
-cf containers (credits) still available for sweep width later; faults/
-kill-restart lanes stay local where we have process control.
+  cf containers (credits) still available for sweep width later; faults/
+  kill-restart lanes stay local where we have process control.
 
 **M6, make it a gate:** nightly backbone+sweep+load on `mini-16` (agentbus
 scheduled), results posted; wire `bun harness backbone --target orez-local`
@@ -403,6 +405,7 @@ into orez CI; the rewrite plan's phase 2 acceptance references these lanes
 byte-for-byte.
 
 ### runners (nate 2026-07-09: dev + initial validation happen on `work`;
+
 ### the mini is purely the runner for LARGER tests)
 
 - `work` (this machine): all development, M0 initial validation, backbone

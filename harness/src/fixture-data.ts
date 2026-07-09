@@ -75,7 +75,9 @@ export function generateSeed(seed = 1) {
 
   const users = Array.from({ length: 8 }, (_, i) => ({
     id: `u${i}`,
-    name: pick(['ann', 'bob 🌵', 'çelik', 'dee', 'evan fix', 'frida', 'gus', 'hana']) + ` ${i}`,
+    name:
+      pick(['ann', 'bob 🌵', 'çelik', 'dee', 'evan fix', 'frida', 'gus', 'hana']) +
+      ` ${i}`,
   }))
 
   const projects = Array.from({ length: 12 }, (_, i) => ({
@@ -114,8 +116,14 @@ export function generateSeed(seed = 1) {
     id: `t${i}`,
     projectId: `p${Math.floor(rng() * 10)}`, // p10/p11 stay task-less
     title:
-      pick(['fix login', 'polish ux', 'refactor sync', 'fix flaky test', 'ship it 🚀', 'triage']) +
-      ` ${i}`,
+      pick([
+        'fix login',
+        'polish ux',
+        'refactor sync',
+        'fix flaky test',
+        'ship it 🚀',
+        'triage',
+      ]) + ` ${i}`,
     rank: Math.round((rng() * 20 - 4) * 100) / 100,
     done: rng() > 0.6,
     meta: pick(metas),
@@ -158,7 +166,12 @@ export function seedSqlite(db: SyncDb) {
 // as the client registry in fixture.ts; plain SQL like soot's server side.
 // semantics must MATCH the client impls exactly (e.g. project.delete does not
 // cascade, because the client mutator doesn't).
-export function executeMutator(tx: SyncDb, name: string, args: unknown, _ctx: { userID: string }) {
+export function executeMutator(
+  tx: SyncDb,
+  name: string,
+  args: unknown,
+  _ctx: { userID: string }
+) {
   switch (name) {
     case 'project.create': {
       const a = args as { id: string; ownerId: string; name: string }

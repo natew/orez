@@ -8,9 +8,11 @@
 //
 //   bun src/smoke.ts --target stock-zero --clients 10
 import { parseArgs } from 'node:util'
+
 import { SEED, mutators, queries, zql } from './fixture.js'
-import type { FixtureZero, SyncTarget } from './target.js'
 import { startStockZero } from './targets/stock-zero.js'
+
+import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: {
@@ -25,7 +27,8 @@ const PROJECTS_PER_CLIENT = Number(args.projects)
 
 async function startTarget(name: string): Promise<SyncTarget> {
   if (name === 'stock-zero') return startStockZero()
-  if (name === 'orez-local') return (await import('./targets/orez-local.js')).startOrezLocal()
+  if (name === 'orez-local')
+    return (await import('./targets/orez-local.js')).startOrezLocal()
   if (name === 'orez-cf') return (await import('./targets/orez-cf.js')).startOrezCf()
   throw new Error(`unknown target '${name}' (orez-cf is M5)`)
 }
@@ -129,7 +132,9 @@ try {
   )
 
   await Promise.all(serverAcks)
-  console.log(`[smoke] all ${serverAcks.length} mutations server-acked at +${Date.now() - tWrites}ms`)
+  console.log(
+    `[smoke] all ${serverAcks.length} mutations server-acked at +${Date.now() - tWrites}ms`
+  )
 
   const expectedProjects = SEED.project.length + 1 + CLIENTS * PROJECTS_PER_CLIENT // seed + upstream + mutated
   const expectedMembers = SEED.member.length + 1 + CLIENTS * PROJECTS_PER_CLIENT
@@ -141,7 +146,9 @@ try {
     () => {
       for (const [i, w] of watchers.entries()) {
         if (w.rows.length !== expectedProjects) {
-          throw new Error(`client ${i} sees ${w.rows.length}/${expectedProjects} projects`)
+          throw new Error(
+            `client ${i} sees ${w.rows.length}/${expectedProjects} projects`
+          )
         }
         const memberCount = w.rows.reduce((n, r) => n + r.members.length, 0)
         if (memberCount !== expectedMembers) {
@@ -152,7 +159,9 @@ try {
     60_000,
     'convergence'
   )
-  console.log(`[smoke] ${CLIENTS} clients converged on ${expectedProjects} projects in ${tConverge}ms`)
+  console.log(
+    `[smoke] ${CLIENTS} clients converged on ${expectedProjects} projects in ${tConverge}ms`
+  )
 
   // oracle compare: converged client state must equal a fresh authoritative read
   const oracleProjects = sortById(
@@ -163,23 +172,35 @@ try {
   ) as { id: string; projectId: string; userId: string }[]
 
   for (const [i, w] of watchers.entries()) {
-    const clientProjects = sortById(w.rows).map(({ id, ownerId, name }) => ({ id, ownerId, name }))
+    const clientProjects = sortById(w.rows).map(({ id, ownerId, name }) => ({
+      id,
+      ownerId,
+      name,
+    }))
     const clientMembers = sortById(
-      w.rows.flatMap((r) => r.members as { id: string; projectId: string; userId: string }[])
+      w.rows.flatMap(
+        (r) => r.members as { id: string; projectId: string; userId: string }[]
+      )
     ).map(({ id, projectId, userId }) => ({ id, projectId, userId }))
 
     const wantProjects = JSON.stringify(oracleProjects)
     const gotProjects = JSON.stringify(clientProjects)
     if (gotProjects !== wantProjects) {
-      throw new Error(`client ${i} project divergence:\n got ${gotProjects}\nwant ${wantProjects}`)
+      throw new Error(
+        `client ${i} project divergence:\n got ${gotProjects}\nwant ${wantProjects}`
+      )
     }
     const wantMembers = JSON.stringify(oracleMembers)
     const gotMembers = JSON.stringify(clientMembers)
     if (gotMembers !== wantMembers) {
-      throw new Error(`client ${i} member divergence:\n got ${gotMembers}\nwant ${wantMembers}`)
+      throw new Error(
+        `client ${i} member divergence:\n got ${gotMembers}\nwant ${wantMembers}`
+      )
     }
   }
-  console.log(`[smoke] oracle compare: ${CLIENTS} clients x ${oracleProjects.length} projects + ${oracleMembers.length} members all equal`)
+  console.log(
+    `[smoke] oracle compare: ${CLIENTS} clients x ${oracleProjects.length} projects + ${oracleMembers.length} members all equal`
+  )
 
   // fresh-client hydration: a client that connects AFTER all writes has no
   // local cache to answer from — everything it sees must come from the
@@ -197,12 +218,18 @@ try {
     30_000,
     'fresh-client hydration'
   )
-  const lateProjects = sortById(lateWatch.rows).map(({ id, ownerId, name }) => ({ id, ownerId, name }))
+  const lateProjects = sortById(lateWatch.rows).map(({ id, ownerId, name }) => ({
+    id,
+    ownerId,
+    name,
+  }))
   if (JSON.stringify(lateProjects) !== JSON.stringify(oracleProjects)) {
     throw new Error('fresh client hydration diverged from oracle')
   }
   lateWatch.destroy()
-  console.log(`[smoke] fresh late-joining client hydrated ${expectedProjects} projects from server in ${tLate}ms, equals oracle`)
+  console.log(
+    `[smoke] fresh late-joining client hydrated ${expectedProjects} projects from server in ${tLate}ms, equals oracle`
+  )
 
   // ad-hoc local zql: reads the already-synced cache only (never syncs more).
   // the member table synced via allProjects' related(); a local query over it
@@ -220,10 +247,14 @@ try {
     )
   }
   localView.destroy()
-  console.log(`[smoke] ad-hoc local zql over synced cache: ${localRows.length} members, no extra sync`)
+  console.log(
+    `[smoke] ad-hoc local zql over synced cache: ${localRows.length} members, no extra sync`
+  )
 
   for (const w of watchers) w.destroy()
-  console.log(`[smoke] PASS target=${target.name} clients=${CLIENTS} total=${Date.now() - t0}ms`)
+  console.log(
+    `[smoke] PASS target=${target.name} clients=${CLIENTS} total=${Date.now() - t0}ms`
+  )
 } catch (error) {
   failed = true
   console.error(`[smoke] FAIL:`, error)
