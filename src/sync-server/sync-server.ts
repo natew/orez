@@ -166,13 +166,13 @@ export function createSyncServer(config: SyncServerConfig) {
   // 0.3), so row images through json_object would corrupt float columns. the
   // diff pull re-reads live rows in its own transaction instead — exists=put,
   // gone=del — which is also trivially consistent with pull-time state.
-  // op 'lmid' rows carry no pk; they only advance the watermark for
-  // LMID-only pushes. (pk values themselves do pass through json_object:
-  // TEXT/INTEGER are exact, so don't use REAL primary keys.)
+  // op 'marker' rows carry no pk; they only advance the watermark (LMID-only
+  // pushes, epoch invalidation). (pk values themselves do pass through
+  // json_object: TEXT/INTEGER are exact, so don't use REAL primary keys.)
   db.exec(`CREATE TABLE IF NOT EXISTS _zsync_changes (
     watermark INTEGER PRIMARY KEY AUTOINCREMENT,
     tableName TEXT NOT NULL,
-    op TEXT NOT NULL CHECK (op IN ('row', 'lmid')),
+    op TEXT NOT NULL CHECK (op IN ('row', 'marker')),
     pk TEXT
   )`)
 
@@ -208,6 +208,23 @@ export function createSyncServer(config: SyncServerConfig) {
 
   function floorValue(): number {
     return Number(db.all(`SELECT floor FROM _zsync_meta`)[0]!.floor)
+  }
+
+  // epoch bump: forces every client's next pull to be a full snapshot — for
+  // changes no row diff can express (visibility/membership revocation,
+  // table-set change). the marker advances the watermark so no cookie can
+  // answer `unchanged`; the floor then rises past every prior cookie. one
+  // recovery path: same snapshot the fresh-client and below-retention cases
+  // use. measured prod project snapshots are sub-MB (see
+  // plans/zero-server-rewrite.md), so a global epoch is deliberately the
+  // whole mechanism — no per-user bookkeeping.
+  function invalidate(): void {
+    db.transaction(() => {
+      db.exec(`INSERT INTO _zsync_changes (tableName, op, pk)
+               VALUES ('_zsync_meta', 'marker', NULL)`)
+      db.exec(`UPDATE _zsync_meta SET floor =
+               (SELECT COALESCE(MAX(watermark), 0) FROM _zsync_changes)`)
+    })
   }
 
   // guarded claim (soot's claimStatement, sqlite dialect): bind the group to
@@ -386,7 +403,7 @@ export function createSyncServer(config: SyncServerConfig) {
           // mutation recovery never settles
           db.exec(
             `INSERT INTO _zsync_changes (tableName, op, pk)
-             VALUES ('_zsync_clients', 'lmid', NULL)`
+             VALUES ('_zsync_clients', 'marker', NULL)`
           )
           return 'applied'
         })
@@ -420,7 +437,7 @@ export function createSyncServer(config: SyncServerConfig) {
     return { pushResponse: { mutations: results } }
   }
 
-  return { handlePull, handlePush, watermark }
+  return { handlePull, handlePush, watermark, invalidate }
 }
 
 export type SyncServer = ReturnType<typeof createSyncServer>

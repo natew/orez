@@ -417,6 +417,35 @@ describe('retention floor', () => {
   })
 })
 
+describe('epoch invalidation', () => {
+  test('invalidate() forces one snapshot on every client, then diffs resume', () => {
+    const { sync } = setup()
+    const c1 = (pull(sync, null) as { cookie: number }).cookie
+    // a client that is fully caught up would otherwise answer `unchanged`
+    sync.invalidate()
+    const afterInvalidate = pull(sync, c1) as { cookie: number; rowsPatch?: Patch[] }
+    expect(afterInvalidate.cookie).toBeGreaterThan(c1)
+    expect(patchOf(afterInvalidate)[0]).toEqual({ op: 'clear' }) // full snapshot
+    // after re-snapshotting, incremental diffs resume
+    push(sync, 'item.put', {
+      id: 'post',
+      label: 'post',
+      rank: 1,
+      done: false,
+      meta: null,
+    })
+    const diff = patchOf(pull(sync, afterInvalidate.cookie))
+    expect(diff.some((op) => op.op === 'clear')).toBe(false)
+    expect(diff).toEqual([
+      {
+        op: 'put',
+        tableName: 'item',
+        value: { id: 'post', label: 'post', rank: 1, done: false, meta: null },
+      },
+    ])
+  })
+})
+
 describe('per-user visibility', () => {
   test('visible() configs always snapshot, filtered per user', () => {
     const { sync } = setup({ visible: true })
