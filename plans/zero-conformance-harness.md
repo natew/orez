@@ -396,7 +396,11 @@ SAME DAY: rewrite phase 2 cursor-diff pulls landed in the core
 (src/sync-server + 18-test delta suite) and re-ran this grid: ack p50/p95
 173/1079ms, propagation p50/p95 551/1333ms — the 500ms poll interval now
 dominates propagation. orez-local same grid: ack p50 2ms, propagation p50
-144ms (250ms poll).
+144ms (250ms poll). width on ONE DO namespace (5 writers x 5/s): 25 clients
+ack p50/p95 391/1791ms, 50 clients 642/1269ms, propagation ~1-2s, zero
+errors — a single DO serializes ~100 pull req/s fine but acks degrade;
+irrelevant for prod (per-project DOs shard far below that), pinned as the
+single-instance ceiling.
 findings pinned:
 
 - DO SqlStorage REJECTS raw `BEGIN`/`SAVEPOINT` SQL. the core's app-error

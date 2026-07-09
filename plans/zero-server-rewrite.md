@@ -201,6 +201,18 @@ decision gate: measure real per-table row counts and byte sizes across prod
 project DOs before committing. if p95 project full-sync is single-digit MB,
 option 1 with generous windows wins.
 
+**MEASURED 2026-07-09** (soot `scripts/ops/cf-project-do-sizes.ts`, offline
+parse of the 6-hourly R2 backups, 1040 project DOs): project logical size
+p50 0.23MB / p90 0.37MB / p95 0.40MB / max 1.15MB; rows p50 664 / max 1165.
+app data is tiny — the byte budget is dominated by embed-support state:
+`_orez_pg_metadata` 193.6MB fleet-wide (76% of all bytes),
+`soot_0_replicas` + `soot_0_publishedSchema` 24.6MB, `_zero_changes`
+22.6MB. `file` is the largest app table at 13.1MB fleet / 0.07MB max per
+project; `message` maxes at 20 rows in any project. **decision: no window
+policy for now — full-project snapshots are sub-MB even at max, so option
+1 isn't needed yet; re-run the measurement when a factory-shaped project
+appears. bonus: phase 3 deletes the reason most of those bytes exist.**
+
 ### acceptance
 
 - the conformance harness lanes (`plans/zero-conformance-harness.md`
