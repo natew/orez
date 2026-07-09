@@ -1,0 +1,4 @@
+node_modules/
+# nightly run logs (mini writes these; regressions/ stays TRACKED — those
+# are pinned repro artifacts)
+results/
