@@ -262,8 +262,8 @@ server grow up together, which is exactly the leverage we want.
 
 ### milestones (each ends runnable with one command)
 
-**M0, baseline upstream (start immediately, mac mini):** clone mono on
-`mini-16`, pnpm install, run the zql-integration-tests no-pg lane and the
+**M0, baseline upstream (start immediately, on `work`):** ~/github/mono at
+main, pnpm install, run the zql-integration-tests no-pg lane and the
 chinook fuzz backbone + zero-cache fuzzer pg lanes (testcontainers, needs
 docker). deliverable: green/red report + wall-clock cost of each lane, so we
 know exactly what we inherit and what it costs to run continuously.
@@ -312,11 +312,15 @@ scheduled), results posted; wire `bun harness backbone --target orez-local`
 into orez CI; the rewrite plan's phase 2 acceptance references these lanes
 byte-for-byte.
 
-### runners
+### runners (nate 2026-07-09: dev + initial validation happen on `work`;
+### the mini is purely the runner for LARGER tests)
 
-- `mini-16` (mac mini, agentbus peer, online): the owned always-on runner.
-  needs: bun, docker (for stock-zero + testcontainers), a checkout of
-  ~/orez + ~/github/mono. M0 verifies the environment.
+- `work` (this machine): all development, M0 initial validation, backbone
+  lanes, smokes.
+- `mini-16` (mac mini, agentbus peer, online, idle/isolated): the runner
+  for the big stuff only — sweep lanes, load grids, longevity runs. it has
+  been idle a while; provision on first use (bun, docker/colima, checkouts).
+  note: spawn cwd must be a real path on the peer, `~` did not resolve.
 - `ci-64` peer exists too if a sweep needs more cores.
 - cloudflare: lslcf account for the orez-cf target deploys + containers for
   sweep width (GA, active-cpu billing, thousands of lite instances).
