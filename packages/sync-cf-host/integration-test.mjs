@@ -164,7 +164,7 @@ try {
   )
   const queryStatus = await admin('/admin/status')
   assert.ok(
-    queryStatus.body.counters.queryRecompilations >= 1,
+    queryStatus.counters.queryRecompilations >= 1,
     'query recompilation counter increments for named query puts'
   )
   assertions += 2
