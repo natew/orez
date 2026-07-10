@@ -3,7 +3,7 @@
 // machines without the takeout checkout. refresh deliberately with:
 //   cp ~/takeout/packages/on-zero/src/httpPullTransport.ts \
 //      harness/src/vendor/httpPullTransport.ts   (re-add this header)
-// vendored 2026-07-09 from takeout commit 85df3051 (adds the wake channel).
+// vendored 2026-07-09 from takeout commit 07a7d8f9 (wake channel + wake-during-pull fix).
 // http-pull transport: runs a stock @rocicorp/zero client over stateless HTTP
 // by intercepting its /sync/v51/connect WebSocket with a shim that translates
 // pull responses into v51 pokes. ported from the orez zero-http spike — the
@@ -336,7 +336,12 @@ class ZeroHttpSocket {
         this.openWakeChannel()
       }, 500)
     }
-    socket.onmessage = () => this.run(this.pull())
+    // route through requestPullAfterCurrent, NOT pull() directly: a wake that
+    // lands while a pull is already in flight must set pullAfterCurrent so the
+    // in-flight pull re-runs and picks up the woken change. calling pull()
+    // directly would return the existing promise and silently drop the wake,
+    // leaving convergence to the safety poll (a burst-storm latency bug).
+    socket.onmessage = () => this.requestPullAfterCurrent()
     socket.onclose = reconnect
     socket.onerror = reconnect
   }
