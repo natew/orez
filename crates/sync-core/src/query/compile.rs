@@ -204,28 +204,55 @@ impl<'a> Compiler<'a> {
 
         // lexicographic "after": OR over prefixes — for key i, all earlier keys
         // equal and key i strictly past the bound (direction-aware). the last
-        // clause uses >=/<= when the bound is inclusive.
+        // clause is inclusive when the bound is inclusive. NULL is the smallest
+        // value (stock ZQL compareValues: null === null, null < anything; SQLite
+        // ASC-nulls-first), so a null cursor component uses IS NULL / IS NOT NULL
+        // branches rather than `col {><} NULL`, which SQLite evaluates to NULL and
+        // would drop every later row.
         let mut clauses: Vec<String> = Vec::new();
         for i in 0..keys.len() {
             let mut ands: Vec<String> = Vec::new();
+            // earlier keys equal the cursor (null === null -> IS NULL)
             for (col, _) in keys.iter().take(i) {
-                ands.push(format!("{}.{} = ?", quote_ident(alias), quote_ident(col)));
-                self.params.push(scalar_to_sql(value_for(col).unwrap()));
+                let colq = format!("{}.{}", quote_ident(alias), quote_ident(col));
+                match value_for(col).unwrap() {
+                    Scalar::Null => ands.push(format!("{colq} IS NULL")),
+                    v => {
+                        ands.push(format!("{colq} = ?"));
+                        self.params.push(scalar_to_sql(v));
+                    }
+                }
             }
+            // key i strictly (or inclusively) past the cursor, null-aware
             let (col, desc) = &keys[i];
-            let last = i == keys.len() - 1;
-            let op = match (desc, last && !bound.exclusive) {
-                (false, false) => ">",
-                (false, true) => ">=",
-                (true, false) => "<",
-                (true, true) => "<=",
+            let colq = format!("{}.{}", quote_ident(alias), quote_ident(col));
+            let inclusive = i == keys.len() - 1 && !bound.exclusive;
+            let v = value_for(col).unwrap();
+            let cmp = match (*desc, inclusive, matches!(v, Scalar::Null)) {
+                // ascending (null smallest): col sorts after the cursor value
+                (false, false, true) => format!("{colq} IS NOT NULL"),
+                (false, true, true) => "1".to_string(),
+                (false, false, false) => {
+                    self.params.push(scalar_to_sql(v));
+                    format!("{colq} > ?")
+                }
+                (false, true, false) => {
+                    self.params.push(scalar_to_sql(v));
+                    format!("{colq} >= ?")
+                }
+                // descending (null largest in traversal): col sorts before the value
+                (true, false, true) => "0".to_string(),
+                (true, true, true) => format!("{colq} IS NULL"),
+                (true, false, false) => {
+                    self.params.push(scalar_to_sql(v));
+                    format!("({colq} < ? OR {colq} IS NULL)")
+                }
+                (true, true, false) => {
+                    self.params.push(scalar_to_sql(v));
+                    format!("({colq} <= ? OR {colq} IS NULL)")
+                }
             };
-            ands.push(format!(
-                "{}.{} {op} ?",
-                quote_ident(alias),
-                quote_ident(col)
-            ));
-            self.params.push(scalar_to_sql(value_for(col).unwrap()));
+            ands.push(cmp);
             clauses.push(format!("({})", ands.join(" AND ")));
         }
         Ok(Some(format!("({})", clauses.join(" OR "))))

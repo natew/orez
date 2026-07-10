@@ -284,12 +284,16 @@ fn parse_bound(value: &Value, order_by: &[OrderPart]) -> Result<Bound, EngineErr
         .get("row")
         .and_then(Value::as_object)
         .ok_or_else(|| reject("start.row must be an object"))?;
-    // the bound row must cover exactly the order-by columns (the compiler needs
-    // a value per ordered column to build the cursor predicate)
+    // the bound row must cover the order-by columns, but the compiler's effective
+    // ordering key is orderBy + an appended primary-key tie-break, and the stock
+    // builder emits a cursor carrying that PK too. capture EVERY field the cursor
+    // supplies (orderBy columns validated present, plus the PK/other tie-break
+    // columns), not just the explicit orderBy, so compile_start finds a value for
+    // the full key set instead of 400ing on the implicit PK component.
     if order_by.is_empty() {
         return Err(reject("start cursor requires an orderBy"));
     }
-    let mut row = Vec::with_capacity(order_by.len());
+    let mut row = Vec::with_capacity(row_obj.len());
     for part in order_by {
         let v = row_obj.get(&part.column).ok_or_else(|| {
             reject(format!(
@@ -298,6 +302,13 @@ fn parse_bound(value: &Value, order_by: &[OrderPart]) -> Result<Bound, EngineErr
             ))
         })?;
         row.push((part.column.clone(), parse_scalar(v)?));
+    }
+    // additional cursor fields (e.g. the appended PK tie-break) in a stable order
+    for (col, v) in row_obj {
+        if order_by.iter().any(|p| &p.column == col) {
+            continue;
+        }
+        row.push((col.clone(), parse_scalar(v)?));
     }
     Ok(Bound { row, exclusive })
 }

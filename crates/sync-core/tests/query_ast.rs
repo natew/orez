@@ -201,6 +201,53 @@ fn start_cursor_paginates() {
 }
 
 #[test]
+fn start_cursor_null_ordering() {
+    // GAP-2b: a cursor whose ordered value is NULL must not drop every later row.
+    // NULL sorts first ascending / last descending (stock ZQL: null < anything);
+    // `col > NULL` / `col = NULL` are SQL NULL, so the engine needs IS NULL /
+    // IS NOT NULL branches.
+    let mut db = seeded_db();
+    db.exec(
+        "INSERT INTO issue VALUES ('i5','eps',0,NULL,'u1'), ('i6','zed',0,NULL,'u1')",
+        &[],
+    )
+    .unwrap();
+    // ascending (nulls first): i5(null), i6(null), i3(1), i2(3), i4(3), i1(5).
+    // exclusive after the NULL cursor (priority=null, id=i5) -> everything after i5.
+    let asc = json!({
+        "table": "issue",
+        "orderBy": [["priority", "asc"]],
+        "start": { "row": { "priority": null, "id": "i5" }, "exclusive": true }
+    });
+    assert_eq!(run_ids(&mut db, asc), vec!["i6", "i3", "i2", "i4", "i1"]);
+
+    // descending (nulls last): i1(5), i2(3), i4(3), i3(1), i5(null), i6(null).
+    // exclusive after (priority=3, id=i2) -> the null rows must still appear last.
+    let desc = json!({
+        "table": "issue",
+        "orderBy": [["priority", "desc"]],
+        "start": { "row": { "priority": 3, "id": "i2" }, "exclusive": true }
+    });
+    assert_eq!(run_ids(&mut db, desc), vec!["i4", "i3", "i5", "i6"]);
+}
+
+#[test]
+fn start_cursor_includes_implicit_pk_tiebreak() {
+    // GAP-2a: orderBy does NOT list the pk, but the effective ordering key appends
+    // it and the stock cursor carries it. parse_bound must capture the pk field so
+    // compile_start does not 400 "missing ordering key 'id'".
+    let mut db = seeded_db();
+    // priorities i1=5,i2=3,i3=1,i4=3 -> asc by priority then id: i3,i2,i4,i1.
+    // exclusive after (priority=3, id=i2) -> i4(3), i1(5).
+    let q = json!({
+        "table": "issue",
+        "orderBy": [["priority", "asc"]],
+        "start": { "row": { "priority": 3, "id": "i2" }, "exclusive": true }
+    });
+    assert_eq!(run_ids(&mut db, q), vec!["i4", "i1"]);
+}
+
+#[test]
 fn start_cursor_multi_key() {
     let mut db = seeded_db();
     // order priority desc, id asc; start exclusively after (priority=3, id=i2)
