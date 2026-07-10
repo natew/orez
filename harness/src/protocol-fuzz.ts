@@ -296,6 +296,10 @@ async function worker() {
       },
       body,
       signal: AbortSignal.timeout(2_000),
+    }).catch((error: unknown) => {
+      throw new Error(
+        `case ${index} route=${route} failed after ${Math.round(performance.now() - requestStarted)}ms: ${error}`
+      )
     })
     await response.arrayBuffer()
     const elapsed = performance.now() - requestStarted
