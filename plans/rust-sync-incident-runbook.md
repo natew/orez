@@ -96,6 +96,11 @@ Check:
 - confirm raw client-authored AST puts and unknown names return HTTP 400;
 - compare `queriesRecomputed`, `queryRecompilations`, row puts/deletes, and the
   query acknowledgement version;
+- compare boot IDs around the first missing acknowledgement and verify the
+  query-aware, visibility, and retention controls still read their persisted
+  values. These controls must live in `_zsync_host_control`; an instance-local
+  override reverting after eviction produces repeated `{cookie, unchanged}`
+  pulls even while the client keeps sending desired-query patches;
 - verify the query transform version stored for the affected group/hash;
 - test permission expansion and contraction separately;
 - run the named-query lifecycle and stock-Zero differential lanes with the
