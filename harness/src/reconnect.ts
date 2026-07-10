@@ -105,20 +105,13 @@ const pulls: Observed[] = []
 const observe = (observation: Observed) => {
   pulls.push(observation)
 }
+const referenceOpts = { pullIntervalMs: 100, retainChanges: 2, onPull: observe }
 const target =
   cli.target === 'rust-local'
-    ? await (
-        await import('./targets/rust-local.js')
-      ).startRustLocal({
-        pullIntervalMs: 100,
-        retainChanges: 2,
-        onPull: observe,
-      })
-    : await startOrezLocal({
-        pullIntervalMs: 100,
-        retainChanges: 2,
-        onPull: observe,
-      })
+    ? await (await import('./targets/rust-local.js')).startRustLocal(referenceOpts)
+    : cli.target === 'rust-cf'
+      ? await (await import('./targets/rust-cf.js')).startRustCf(referenceOpts)
+      : await startOrezLocal(referenceOpts)
 const views: ReturnType<typeof watchProjects>[] = []
 
 try {
