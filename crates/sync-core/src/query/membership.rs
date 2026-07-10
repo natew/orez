@@ -120,9 +120,28 @@ pub fn register_query(
     ast_json: &Value,
 ) -> Result<(), EngineError> {
     let ast = parse_ast(ast_json)?;
-    let compiled = compile(&ast, tables)?;
-    let deps = serde_json::to_string(&compiled.dependency_tables).unwrap();
+    compile(&ast, tables)?; // validate + reject unsupported shapes here
+    // the dependency set includes related-output and EXISTS child tables (not
+    // just the root query's), so touched-table narrowing never skips a query
+    // whose child rows changed.
+    let mut dep_set = BTreeSet::new();
+    super::ast::collect_dependency_tables(&ast, &mut dep_set);
+    let deps = serde_json::to_string(&dep_set).unwrap();
     let ast_text = serde_json::to_string(ast_json).unwrap();
+
+    // if the transformed AST changed (a permission/schema transformation), the
+    // computed markers for this hash are cleared so every group recomputes it on
+    // the next pull and can never retain a more-permissive older result
+    // (invariant 15).
+    let prev_ast = db
+        .query(
+            "SELECT ast FROM _zsync_queries WHERE hash = ?",
+            &[text(hash)],
+        )?
+        .first()
+        .and_then(|r| str_col(r.get("ast")).ok());
+    let ast_changed = prev_ast.as_deref() != Some(ast_text.as_str());
+
     db.exec(
         "INSERT INTO _zsync_queries (hash, ast, rootTable, deps, transformVersion)
          VALUES (?, ?, ?, ?, 0)
@@ -130,6 +149,12 @@ pub fn register_query(
              rootTable = excluded.rootTable, deps = excluded.deps",
         &[text(hash), text(ast_text), text(&ast.table), text(deps)],
     )?;
+    if ast_changed {
+        db.exec(
+            "DELETE FROM _zsync_query_state WHERE hash = ?",
+            &[text(hash)],
+        )?;
+    }
     Ok(())
 }
 
@@ -216,6 +241,11 @@ pub(crate) fn reset_group(db: &mut dyn SyncDb, group: &str) -> Result<(), Engine
         "DELETE FROM _zsync_row_refs WHERE clientGroupID = ?",
         &[text(group)],
     )?;
+    // clear the computed markers so a fresh re-sync recomputes every query
+    db.exec(
+        "DELETE FROM _zsync_query_state WHERE clientGroupID = ?",
+        &[text(group)],
+    )?;
     Ok(())
 }
 
@@ -231,12 +261,13 @@ struct ActiveQuery {
     hash: String,
     ast_json: Value,
     root_table: String,
+    deps: Vec<String>,
 }
 
 // the distinct queries any client in the group currently desires
 fn active_queries(db: &mut dyn SyncDb, group: &str) -> Result<Vec<ActiveQuery>, EngineError> {
     let rows = db.query(
-        "SELECT DISTINCT q.hash AS hash, q.ast AS ast, q.rootTable AS rootTable
+        "SELECT DISTINCT q.hash AS hash, q.ast AS ast, q.rootTable AS rootTable, q.deps AS deps
          FROM _zsync_desires d JOIN _zsync_queries q ON q.hash = d.hash
          WHERE d.clientGroupID = ?",
         &[text(group)],
@@ -246,15 +277,38 @@ fn active_queries(db: &mut dyn SyncDb, group: &str) -> Result<Vec<ActiveQuery>, 
         let hash = str_col(row.get("hash"))?;
         let ast_text = str_col(row.get("ast"))?;
         let root_table = str_col(row.get("rootTable"))?;
+        let deps: Vec<String> =
+            serde_json::from_str(&str_col(row.get("deps"))?).unwrap_or_default();
         let ast_json: Value = serde_json::from_str(&ast_text)
             .map_err(|e| EngineError::internal(format!("stored query ast is not json: {e}")))?;
         out.push(ActiveQuery {
             hash,
             ast_json,
             root_table,
+            deps,
         });
     }
     Ok(out)
+}
+
+// the set of query hashes already computed at least once for the group
+fn read_query_state(db: &mut dyn SyncDb, group: &str) -> Result<BTreeSet<String>, EngineError> {
+    let rows = db.query(
+        "SELECT hash FROM _zsync_query_state WHERE clientGroupID = ?",
+        &[text(group)],
+    )?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| str_col(r.get("hash")).ok())
+        .collect())
+}
+
+fn set_query_state(db: &mut dyn SyncDb, group: &str, hash: &str) -> Result<(), EngineError> {
+    db.exec(
+        "INSERT OR IGNORE INTO _zsync_query_state (clientGroupID, hash) VALUES (?, ?)",
+        &[text(group), text(hash)],
+    )?;
+    Ok(())
 }
 
 fn str_col(v: Option<&SqlValue>) -> Result<String, EngineError> {
@@ -413,11 +467,34 @@ pub fn recompute_group(
 ) -> Result<Vec<Value>, EngineError> {
     let queries = active_queries(db, group)?;
 
+    // clear computed markers for queries this group no longer desires, so a
+    // later re-desire recomputes from scratch instead of being narrowed away.
+    db.exec(
+        "DELETE FROM _zsync_query_state WHERE clientGroupID = ?
+         AND hash NOT IN (SELECT DISTINCT hash FROM _zsync_desires WHERE clientGroupID = ?)",
+        &[text(group), text(group)],
+    )?;
+
+    // recomputation narrowing (plan algorithm step 2): a query is recomputed only
+    // when the touched tables intersect its dependency set, or it has never been
+    // computed for this group (newly desired, or its AST changed and its marker
+    // was cleared). an untouched query's membership cannot have changed. the
+    // computed-marker set is loaded once so a skip costs no SQL.
+    let touched: BTreeSet<&str> = changed.iter().map(|(t, _)| t.as_str()).collect();
+    let mut computed: BTreeSet<String> = read_query_state(db, group)?;
+
     // net reference delta per (table, pk), and the live value cache for puts
     let mut ref_delta: BTreeMap<(String, String), i64> = BTreeMap::new();
     let mut values: BTreeMap<(String, String), Value> = BTreeMap::new();
 
     for q in &queries {
+        let dep_touched = q.deps.iter().any(|t| touched.contains(t.as_str()));
+        if !dep_touched && computed.contains(&q.hash) {
+            continue; // untouched query: membership unchanged, skip its recompute
+        }
+        if computed.insert(q.hash.clone()) {
+            set_query_state(db, group, &q.hash)?;
+        }
         let spec = tables.get(&q.root_table).ok_or_else(|| {
             EngineError::internal(format!("query root table '{}' missing", q.root_table))
         })?;
@@ -475,24 +552,27 @@ pub fn recompute_group(
     // deactivated queries: a query no client desires any more still has durable
     // membership rows. drop them and release their references (invariant 15:
     // dropping a desired query removes its rows unless another query holds them).
-    let active_hashes: BTreeSet<&str> = queries.iter().map(|q| q.hash.as_str()).collect();
-    let lingering = db.query(
-        "SELECT hash, rowTable, rowPk FROM _zsync_query_rows WHERE clientGroupID = ?",
-        &[text(group)],
-    )?;
-    for row in &lingering {
-        let hash = str_col(row.get("hash"))?;
-        if active_hashes.contains(hash.as_str()) {
-            continue;
+    // find just the deactivated hashes first, so a recompute with no deactivation
+    // never scans the whole membership.
+    let deactivated: Vec<String> = db
+        .query(
+            "SELECT DISTINCT hash FROM _zsync_query_rows WHERE clientGroupID = ?
+             AND hash NOT IN (SELECT DISTINCT hash FROM _zsync_desires WHERE clientGroupID = ?)",
+            &[text(group), text(group)],
+        )?
+        .iter()
+        .filter_map(|r| str_col(r.get("hash")).ok())
+        .collect();
+    for hash in &deactivated {
+        let rows = read_query_row_keys(db, group, hash)?;
+        for (table, pk) in rows {
+            db.exec(
+                "DELETE FROM _zsync_query_rows
+                 WHERE clientGroupID = ? AND hash = ? AND rowTable = ? AND rowPk = ?",
+                &[text(group), text(hash), text(&table), text(&pk)],
+            )?;
+            *ref_delta.entry((table, pk)).or_insert(0) -= 1;
         }
-        let table = str_col(row.get("rowTable"))?;
-        let pk = str_col(row.get("rowPk"))?;
-        db.exec(
-            "DELETE FROM _zsync_query_rows
-             WHERE clientGroupID = ? AND hash = ? AND rowTable = ? AND rowPk = ?",
-            &[text(group), text(&hash), text(&table), text(&pk)],
-        )?;
-        *ref_delta.entry((table, pk)).or_insert(0) -= 1;
     }
 
     // apply net deltas; emit a put on 0 -> positive, a del on positive -> 0
