@@ -255,6 +255,14 @@ export function createSyncServer(config: SyncServerConfig) {
     return Number(db.all(`SELECT floor FROM _zsync_meta`)[0]!.floor)
   }
 
+  function pruneChanges(): void {
+    const cutoff = watermark() - retainChanges
+    if (cutoff > floorValue()) {
+      db.exec(`DELETE FROM _zsync_changes WHERE watermark <= ?`, [cutoff])
+      db.exec(`UPDATE _zsync_meta SET floor = ?`, [cutoff])
+    }
+  }
+
   // epoch bump: forces every client's next pull to be a full snapshot — for
   // changes no row diff can express (visibility/membership revocation,
   // table-set change). the marker advances the watermark so no cookie can
@@ -314,6 +322,9 @@ export function createSyncServer(config: SyncServerConfig) {
     // repeatable-read gymnastics on pg; sqlite gives it for free)
     return db.transaction(() => {
       claimClient(clientGroupID, clientID, userID)
+      // Upstream/admin writes also feed the log, so a read-only workload must
+      // not depend on a later client push to enforce retention.
+      pruneChanges()
       const current = watermark()
       if (cookie !== null && cookie > current) {
         throw new SyncHttpError(
@@ -489,13 +500,7 @@ export function createSyncServer(config: SyncServerConfig) {
     // size-bounded retention: pruned changes raise the floor; clients whose
     // cookie fell below it get one snapshot on their next pull
     if (mutations.length > 0) {
-      db.transaction(() => {
-        const cutoff = watermark() - retainChanges
-        if (cutoff > floorValue()) {
-          db.exec(`DELETE FROM _zsync_changes WHERE watermark <= ?`, [cutoff])
-          db.exec(`UPDATE _zsync_meta SET floor = ?`, [cutoff])
-        }
-      })
+      db.transaction(pruneChanges)
     }
 
     return { pushResponse: { mutations: results } }

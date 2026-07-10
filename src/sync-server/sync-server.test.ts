@@ -475,6 +475,26 @@ describe('push semantics', () => {
 })
 
 describe('retention floor', () => {
+  test('pull prunes upstream-only churn before an unchanged response', () => {
+    const { db, sync } = setup({ retainChanges: 2 })
+    const ancient = (pull(sync, null) as { cookie: number }).cookie
+    for (let i = 0; i < 6; i++) {
+      db.exec(
+        `INSERT INTO item (id, label, rank, done, meta) VALUES (?, ?, ?, 0, NULL)`,
+        [`upstream-${i}`, `upstream ${i}`, i]
+      )
+    }
+    const current = sync.watermark()
+    expect(db.all(`SELECT * FROM _zsync_changes`)).toHaveLength(6)
+
+    expect(pull(sync, current)).toEqual({ cookie: current, unchanged: true })
+    expect(db.all(`SELECT * FROM _zsync_changes`)).toHaveLength(2)
+    expect(db.all(`SELECT floor FROM _zsync_meta`)).toEqual([{ floor: current - 2 }])
+
+    const stale = patchOf(pull(sync, ancient))
+    expect(stale[0]).toEqual({ op: 'clear' })
+  })
+
   test('cookie below the pruned floor falls back to snapshot; recent cookies still diff', () => {
     const { sync } = setup({ retainChanges: 2 })
     const ancient = (pull(sync, null) as { cookie: number }).cookie
