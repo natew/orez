@@ -67,6 +67,10 @@ async function churnWake(index: number) {
 }
 
 try {
+  // The measured instance must stay alive for the whole run: a restart
+  // re-instantiates the wasm module and resets linear memory, which turns
+  // every sample into a boot-footprint reading and hides any leak. Restart
+  // and eviction churn are covered by the eviction lane, never here.
   async function runBlock(label: string, block: number) {
     for (let batchStart = 0; batchStart < ops; batchStart += 100) {
       const patch: Array<Record<string, unknown>> = []
@@ -78,7 +82,6 @@ try {
       }
       await queryPatch(patch)
       await churnWake(block * ops + batchStart)
-      await target.restart()
     }
   }
 
