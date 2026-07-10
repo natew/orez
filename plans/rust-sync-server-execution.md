@@ -43,7 +43,13 @@ Multiple agents work this worktree concurrently. Rules:
       p95 810 ms < 1 s, propagation commit->seen p95 406 ms without
       safety-poll convergence, ack/prop within 20% of the TS DO baseline;
       deploy 871a13df, README 4c2a3bc)
-- [ ] M4a: soot migration prep (baseline surface)
+- [~] M4a: soot migration prep (baseline surface) — auth/namespace
+      adapter, DO-local mutator adapter with post-commit outbox, shared
+      visibility fragments (fixed a repeated-`?` param bug in the legacy
+      endpoint), workerd control/project/wake tests, cutover/rollback
+      scripts (not executed). Offline executable comparison green (legacy
+      cursor/snapshot/ack 17 pass, Rust workerd 8 pass). Production cutover
+      remains user-gated.
 - [x] M4b: query-aware layer (AST compiler, membership, desired queries)
       (2026-07-09: engine + transport + lanes green vs rust-local. v51 AST
       subset incl. junction EXISTS, nested related, ILIKE folding, empty
