@@ -86,7 +86,7 @@ Cloudflare LAX edge (`cf-ray …-LAX`).
 | Deployed production integration | 16 assertions passed |
 | Local M0 platform regression | 36 assertions passed |
 | Rust core tests | 27 reference + 13 composition + 2 model tests passed |
-| Bundle upload | 344.96 KiB total; 136.56 KiB gzip |
+| Bundle upload | 328.34 KiB total; 130.45 KiB gzip |
 | Wasm module | approximately 273 KiB on disk |
 | Wrangler reported startup | 1 ms |
 | Local cold DO pull (30 namespaces) | p50 5.362 ms; p95 7.081 ms |
@@ -96,6 +96,7 @@ Cloudflare LAX edge (`cf-ray …-LAX`).
 | Local workerd RSS | 97.391 MiB baseline; 146.625 MiB after load (+49.234 MiB process RSS) |
 | CF eviction lane | boot ID changed; 20 writes; 126 pulls; zero 409s; monotone cookies |
 | CF wake-only storm (100 clients, 5 writers, 10 s safety poll) | propagation p50/p95 809/810 ms |
+| CF clean-write propagation (10 clients, 20 writes, 10 s safety poll) | commit-to-seen p50/p95 136/406 ms; issue-to-seen p95 858 ms |
 | CF 10-client/2-writer bench | ack p50/p95 178/243 ms; propagation p50/p95 381/524 ms |
 | Equivalent TS DO bench | ack p50/p95 165/903 ms; propagation p50/p95 583/1,074 ms |
 
@@ -103,7 +104,7 @@ Wake fan-out is anchored with `waitUntil` after commit and is not on the push
 response's critical path. The acknowledgement result is a local wall-time
 proxy, not billed Cloudflare CPU. RSS is the whole local
 workerd process, not an isolate allocation; Cloudflare's 128 MiB per-isolate
-limit cannot be inferred from that process number. The bundle is 95.6% below
+limit cannot be inferred from that process number. The bundle is 95.8% below
 the 3 MiB gzip Free-plan limit (and 98.7% below the 10 MiB paid-plan limit).
 See [Cloudflare Worker limits](https://developers.cloudflare.com/workers/platform/limits/).
 
@@ -112,7 +113,7 @@ See [Cloudflare Worker limits](https://developers.cloudflare.com/workers/platfor
 `wrangler.toml` is checked in with Worker name `orez-rust-sync`, SQLite Durable
 Object class `SyncDurableObject`, and account `6afff1f79e2fd12f1cfd1bfe1dfd08d1`.
 The deployed test version used for this M3 pass was
-`bdce2432-b6c0-4be0-b6b7-915586f25eba` at
+`871a13df-7c3b-4e1c-bc90-c3cbd00f2dea` at
 `https://orez-rust-sync.lslcf.workers.dev`. The throwaway M0 Worker was already
 absent when the cleanup command was run (Cloudflare returned error 10090), so no
 old probe service remains to receive traffic.
