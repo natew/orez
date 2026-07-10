@@ -1,16 +1,16 @@
-name = "orez-rust-sync-m0-probe"
-main = "src/worker.ts"
+name = "orez-rust-sync"
+main = "src/harness-worker.ts"
 compatibility_date = "2026-06-01"
 account_id = "6afff1f79e2fd12f1cfd1bfe1dfd08d1"
 workers_dev = true
 
 [[durable_objects.bindings]]
-name = "PROBE_DO"
-class_name = "ProbeDurableObject"
+name = "SYNC_DO"
+class_name = "SyncDurableObject"
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["ProbeDurableObject"]
+new_sqlite_classes = ["SyncDurableObject"]
 
 [observability]
 enabled = true

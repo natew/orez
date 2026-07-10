@@ -4,11 +4,23 @@ const externalURL = process.env.M0_BASE_URL?.replace(/\/$/, '')
 const port = 9_000 + Math.floor(Math.random() * 500)
 const server = externalURL
   ? undefined
-  : Bun.spawn(['bunx', 'wrangler', 'dev', '--local', '--port', String(port)], {
-      cwd: new URL('.', import.meta.url).pathname,
-      stdout: 'inherit',
-      stderr: 'inherit',
-    })
+  : Bun.spawn(
+      [
+        'bunx',
+        'wrangler',
+        'dev',
+        '--config',
+        'wrangler.platform.toml',
+        '--local',
+        '--port',
+        String(port),
+      ],
+      {
+        cwd: new URL('.', import.meta.url).pathname,
+        stdout: 'inherit',
+        stderr: 'inherit',
+      },
+    )
 const baseURL = externalURL ?? `http://127.0.0.1:${port}`
 
 if (server) {

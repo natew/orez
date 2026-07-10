@@ -7,6 +7,10 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+platform-probes = []
+
 [dependencies]
 js-sys = "0.3"
 serde.workspace = true

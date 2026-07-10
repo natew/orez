@@ -1,14 +1,20 @@
 {
-  "name": "@orez/sync-cf-host-m0",
+  "name": "@orez/sync-cf-host",
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "build:wasm": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm",
+    "build:wasm:platform": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm -- --features platform-probes",
     "bundle": "bun run build:wasm && wrangler deploy --dry-run --outdir dist",
     "measure": "bun run build:wasm && bun measure.mjs",
-    "test": "bun run build:wasm && bun test.mjs",
-    "typecheck": "tsc --noEmit"
+    "test": "bun run test:platform && bun run test:integration",
+    "test:integration": "bun run build:wasm && bun integration-test.mjs",
+    "test:platform": "bun run build:wasm:platform && bun platform-test.mjs",
+    "typecheck": "bun run build:wasm:platform && tsc --noEmit"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "4.20260617.1",

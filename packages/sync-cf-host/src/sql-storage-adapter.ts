@@ -1,3 +1,5 @@
+import type { MutatorSql, SyncSql } from './types.js'
+
 type WireValue =
   | { kind: 'null' }
   | { kind: 'integer'; value: string }
@@ -18,12 +20,14 @@ export type AdapterStats = {
   sqlMs: number
 }
 
-const TX_SQL = /(^|[;\s])(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)(?=\s|;|$)/i
+// Match transaction control only as the statement itself. CREATE TRIGGER uses
+// `... BEGIN ... END` for its body, which is valid DO SQL and not a transaction.
+const TX_SQL = /^\s*(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)(?=\s|;|$)/i
 const NUMBERED_PARAMETER = /\?[0-9]+/
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER)
 const MIN_SAFE = BigInt(Number.MIN_SAFE_INTEGER)
 
-function assertEngineSql(sql: string): void {
+export function assertHostSql(sql: string): void {
   if (TX_SQL.test(sql)) {
     throw new TypeError('transaction SQL is host-owned and forbidden')
   }
@@ -87,7 +91,7 @@ export class SqlStorageSyncDb implements JsSyncDb {
   }
 
   exec(sql: string, params: WireValue[]): void {
-    assertEngineSql(sql)
+    assertHostSql(sql)
     const start = performance.now()
     this.sql.exec(sql, ...params.map(decodeBinding))
     this.stats.execCalls++
@@ -95,7 +99,7 @@ export class SqlStorageSyncDb implements JsSyncDb {
   }
 
   query(sql: string, params: WireValue[]): WireRow[] {
-    assertEngineSql(sql)
+    assertHostSql(sql)
     const start = performance.now()
     const cursor = this.sql.exec(sql, ...params.map(decodeBinding))
     const columns = [...cursor.columnNames]
@@ -108,5 +112,43 @@ export class SqlStorageSyncDb implements JsSyncDb {
     this.stats.queryCalls++
     this.stats.sqlMs += performance.now() - start
     return rows
+  }
+}
+
+/** Direct application SQL surface used for initialization and admin reads. */
+export class SqlStorageDirect implements SyncSql {
+  constructor(private readonly sql: SqlStorage) {}
+
+  exec(sql: string, params: readonly unknown[] = []): void {
+    assertHostSql(sql)
+    this.sql.exec(sql, ...params)
+  }
+
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = [],
+  ): Row[] {
+    assertHostSql(sql)
+    return this.sql.exec(sql, ...params).toArray() as Row[]
+  }
+}
+
+/**
+ * Async-compatible consumer mutator surface. Each method fully completes and
+ * materializes its SqlStorage operation before its promise resolves, so an
+ * existing `await tx.query(...)` cannot carry a cursor across an await.
+ */
+export class SqlStorageMutatorTransaction implements MutatorSql {
+  constructor(private readonly direct: SqlStorageDirect) {}
+
+  async exec(sql: string, params: readonly unknown[] = []): Promise<void> {
+    this.direct.exec(sql, params)
+  }
+
+  async query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = [],
+  ): Promise<Row[]> {
+    return this.direct.query<Row>(sql, params)
   }
 }

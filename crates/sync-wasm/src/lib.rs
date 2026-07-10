@@ -112,6 +112,7 @@ fn js_err(error: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&error.to_string()).into()
 }
 
+#[cfg(feature = "platform-probes")]
 fn one_text(row: &Row, name: &str) -> Result<String, JsValue> {
     match row.get(name) {
         Some(SqlValue::Text(value)) => Ok(value.clone()),
@@ -122,6 +123,7 @@ fn one_text(row: &Row, name: &str) -> Result<String, JsValue> {
 }
 
 /// Initialize only probe tables. The host wraps this in `transactionSync`.
+#[cfg(feature = "platform-probes")]
 #[wasm_bindgen]
 pub fn init_probe_schema(db: &JsSyncDb) -> Result<(), JsValue> {
     let mut db = WasmDb(db);
@@ -147,6 +149,7 @@ pub fn init_probe_schema(db: &JsSyncDb) -> Result<(), JsValue> {
     .map_err(js_err)
 }
 
+#[cfg(feature = "platform-probes")]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PullSnapshot {
@@ -155,6 +158,7 @@ struct PullSnapshot {
 }
 
 /// Representative synchronous pull read performed wholly inside the host tx.
+#[cfg(feature = "platform-probes")]
 #[wasm_bindgen]
 pub fn pull_snapshot(db: &JsSyncDb) -> Result<JsValue, JsValue> {
     let mut db = WasmDb(db);
@@ -175,6 +179,7 @@ pub fn pull_snapshot(db: &JsSyncDb) -> Result<JsValue, JsValue> {
 }
 
 /// Ordering/replay preflight. LMIDs cross JS as decimal strings, never numbers.
+#[cfg(feature = "platform-probes")]
 #[wasm_bindgen]
 pub fn push_preflight(db: &JsSyncDb, mutation_id: &str) -> Result<String, JsValue> {
     let mut db = WasmDb(db);
@@ -201,6 +206,7 @@ pub fn push_preflight(db: &JsSyncDb, mutation_id: &str) -> Result<String, JsValu
 }
 
 /// Finalize ordering only after the JavaScript mutator has succeeded.
+#[cfg(feature = "platform-probes")]
 #[wasm_bindgen]
 pub fn push_finalize(
     db: &JsSyncDb,
@@ -247,6 +253,7 @@ pub fn push_finalize(
 
 /// Mutate both application data and the counter, then trap. The host must roll
 /// back both writes when the panic crosses the wasm/JavaScript boundary.
+#[cfg(feature = "platform-probes")]
 #[wasm_bindgen]
 pub fn rust_panic_after_writes(db: &JsSyncDb) -> Result<(), JsValue> {
     let mut db = WasmDb(db);
@@ -267,6 +274,7 @@ pub fn rust_panic_after_writes(db: &JsSyncDb) -> Result<(), JsValue> {
     panic!("intentional M0 Rust panic after SQL writes")
 }
 
+#[cfg(feature = "platform-probes")]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ValueRoundTrip {
@@ -282,6 +290,7 @@ struct ValueRoundTrip {
 
 /// JS -> wasm -> SQLite -> wasm -> JS fidelity probe. Integer fields are
 /// decimal strings on the JS/wire side; SQL uses INTEGER and exact CAST reads.
+#[cfg(feature = "platform-probes")]
 #[wasm_bindgen]
 pub fn value_round_trip(db: &JsSyncDb, input: JsValue) -> Result<JsValue, JsValue> {
     let input: ValueRoundTrip = serde_wasm_bindgen::from_value(input).map_err(js_err)?;
@@ -340,4 +349,320 @@ pub fn value_round_trip(db: &JsSyncDb, input: JsValue) -> Result<JsValue, JsValu
     output
         .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
         .map_err(js_err)
+}
+
+// ---- production sync-core boundary ---------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CapsWire {
+    max_change_rows: usize,
+    max_change_bytes: usize,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VisibilityWire {
+    row_local: bool,
+    filters: Vec<VisibilityFilterWire>,
+}
+
+#[derive(Clone, Deserialize)]
+struct VisibilityFilterWire {
+    table: String,
+    sql: String,
+    params: Vec<serde_json::Value>,
+}
+
+fn from_js<T: for<'de> Deserialize<'de>>(value: JsValue) -> Result<T, JsValue> {
+    serde_wasm_bindgen::from_value(value).map_err(js_err)
+}
+
+fn to_js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
+    value
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .map_err(js_err)
+}
+
+fn engine_error(error: sync_core::EngineError) -> JsValue {
+    let js_error = js_sys::Error::new(&error.message);
+    let _ = js_sys::Reflect::set(
+        js_error.as_ref(),
+        &JsValue::from_str("status"),
+        &JsValue::from_f64(f64::from(error.status)),
+    );
+    js_error.into()
+}
+
+fn tables_from_js(schema: JsValue) -> Result<sync_core::Tables, JsValue> {
+    let schema: serde_json::Value = from_js(schema)?;
+    sync_core::Tables::from_zero_schema(&schema).map_err(js_err)
+}
+
+fn parse_counter(value: &str, name: &str) -> Result<i64, JsValue> {
+    value
+        .parse::<i64>()
+        .map_err(|error| js_err(format!("invalid {name} {value:?}: {error}")))
+}
+
+fn sql_value_from_json(value: serde_json::Value) -> Result<SqlValue, JsValue> {
+    match value {
+        serde_json::Value::Null => Ok(SqlValue::Null),
+        serde_json::Value::Bool(value) => Ok(SqlValue::Integer(i64::from(value))),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(SqlValue::Integer(value))
+            } else {
+                value
+                    .as_f64()
+                    .map(SqlValue::Real)
+                    .ok_or_else(|| js_err("visibility parameter is not a finite number"))
+            }
+        }
+        serde_json::Value::String(value) => Ok(SqlValue::Text(value)),
+        value => Err(js_err(format!(
+            "visibility parameter must be a scalar, got {value}"
+        ))),
+    }
+}
+
+/// Initialize the sync engine's durable metadata and triggers. The host calls
+/// this inside startup `transactionSync` after application DDL and seed.
+#[wasm_bindgen]
+pub fn engine_init_schema(db: &JsSyncDb, schema: JsValue) -> Result<(), JsValue> {
+    let mut db = WasmDb(db);
+    let tables = tables_from_js(schema)?;
+    sync_core::init_schema(&mut db, &tables).map_err(js_err)
+}
+
+/// Production pull entry. The TypeScript host owns `transactionSync`.
+#[wasm_bindgen]
+pub fn engine_handle_pull(
+    db: &JsSyncDb,
+    schema: JsValue,
+    visibility: JsValue,
+    caps: JsValue,
+    retain_changes: &str,
+    body: JsValue,
+    user_id: &str,
+) -> Result<JsValue, JsValue> {
+    let mut db = WasmDb(db);
+    let tables = tables_from_js(schema)?;
+    let visibility: Option<VisibilityWire> = from_js(visibility)?;
+    if let Some(visibility) = &visibility {
+        for filter in &visibility.filters {
+            for param in &filter.params {
+                sql_value_from_json(param.clone())?;
+            }
+        }
+    }
+    let visibility = visibility.map(|visibility| {
+        let filters = visibility.filters;
+        sync_core::Visibility {
+            row_local: visibility.row_local,
+            filter: Box::new(move |table, _user_id| {
+                let filter = filters.iter().find(|filter| filter.table == table)?;
+                Some(sync_core::VisibleFilter {
+                    sql: filter.sql.clone(),
+                    params: filter
+                        .params
+                        .clone()
+                        .into_iter()
+                        .map(sql_value_from_json)
+                        .collect::<Result<Vec<_>, _>>()
+                        .expect("visibility params validated before engine call"),
+                })
+            }),
+        }
+    });
+    let caps: CapsWire = from_js(caps)?;
+    let body: serde_json::Value = from_js(body)?;
+    let result = sync_core::handle_pull(
+        &mut db,
+        &tables,
+        parse_counter(retain_changes, "retention count")?,
+        visibility.as_ref(),
+        sync_core::Caps {
+            max_change_rows: caps.max_change_rows,
+            max_change_bytes: caps.max_change_bytes,
+        },
+        &body,
+        user_id,
+    )
+    .map_err(engine_error)?;
+    to_js(&result)
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum PushPlanWire {
+    Respond {
+        response: serde_json::Value,
+    },
+    Process {
+        #[serde(rename = "clientGroupID")]
+        client_group_id: String,
+        mutations: Vec<PushMutationWire>,
+    },
+}
+
+#[derive(Serialize)]
+struct PushMutationWire {
+    id: String,
+    #[serde(rename = "clientID")]
+    client_id: String,
+    name: String,
+    args: Vec<serde_json::Value>,
+}
+
+/// Validate an entire push before the host opens the first mutation tx.
+#[wasm_bindgen]
+pub fn engine_push_validate(body: JsValue) -> Result<JsValue, JsValue> {
+    let body: serde_json::Value = from_js(body)?;
+    let plan = match sync_core::push_validate(&body).map_err(engine_error)? {
+        sync_core::PushPlan::Respond(response) => PushPlanWire::Respond { response },
+        sync_core::PushPlan::Process(body) => PushPlanWire::Process {
+            client_group_id: body.client_group_id,
+            mutations: body
+                .mutations
+                .into_iter()
+                .map(|mutation| PushMutationWire {
+                    id: mutation.id.to_string(),
+                    client_id: mutation.client_id,
+                    name: mutation.name,
+                    args: mutation.args,
+                })
+                .collect(),
+        },
+    };
+    to_js(&plan)
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum PreflightWire {
+    Applied,
+    Replay { expected: String },
+}
+
+#[wasm_bindgen]
+pub fn engine_preflight(
+    db: &JsSyncDb,
+    client_group_id: &str,
+    client_id: &str,
+    mutation_id: &str,
+    user_id: &str,
+) -> Result<JsValue, JsValue> {
+    let mut db = WasmDb(db);
+    let result = sync_core::preflight(
+        &mut db,
+        client_group_id,
+        client_id,
+        parse_counter(mutation_id, "mutation id")?,
+        user_id,
+    )
+    .map_err(engine_error)?;
+    to_js(&match result {
+        sync_core::Preflight::Applied => PreflightWire::Applied,
+        sync_core::Preflight::Replay { expected } => PreflightWire::Replay {
+            expected: expected.to_string(),
+        },
+    })
+}
+
+#[wasm_bindgen]
+pub fn engine_finalize(
+    db: &JsSyncDb,
+    client_group_id: &str,
+    client_id: &str,
+    mutation_id: &str,
+) -> Result<(), JsValue> {
+    let mut db = WasmDb(db);
+    sync_core::finalize(
+        &mut db,
+        client_group_id,
+        client_id,
+        parse_counter(mutation_id, "mutation id")?,
+    )
+    .map_err(engine_error)
+}
+
+#[wasm_bindgen]
+pub fn engine_record_app_error(
+    db: &JsSyncDb,
+    client_group_id: &str,
+    client_id: &str,
+    mutation_id: &str,
+    user_id: &str,
+) -> Result<(), JsValue> {
+    let mut db = WasmDb(db);
+    sync_core::record_app_error(
+        &mut db,
+        client_group_id,
+        client_id,
+        parse_counter(mutation_id, "mutation id")?,
+        user_id,
+    )
+    .map_err(engine_error)
+}
+
+#[wasm_bindgen]
+pub fn engine_prune(db: &JsSyncDb, retain_changes: &str) -> Result<(), JsValue> {
+    let mut db = WasmDb(db);
+    sync_core::prune(&mut db, parse_counter(retain_changes, "retention count")?)
+        .map_err(engine_error)
+}
+
+#[wasm_bindgen]
+pub fn engine_invalidate(db: &JsSyncDb) -> Result<(), JsValue> {
+    let mut db = WasmDb(db);
+    sync_core::invalidate(&mut db).map_err(engine_error)
+}
+
+#[derive(Deserialize)]
+struct MutationResultWire {
+    #[serde(rename = "clientID")]
+    client_id: String,
+    id: String,
+    result: serde_json::Value,
+}
+
+#[wasm_bindgen]
+pub fn engine_assemble_push_response(results: JsValue) -> Result<JsValue, JsValue> {
+    let results: Vec<MutationResultWire> = from_js(results)?;
+    let results = results
+        .into_iter()
+        .map(|result| {
+            Ok(sync_core::MutationResult {
+                client_id: result.client_id,
+                id: parse_counter(&result.id, "mutation id")?,
+                result: result.result,
+            })
+        })
+        .collect::<Result<Vec<_>, JsValue>>()?;
+    to_js(&sync_core::assemble_push_response(results))
+}
+
+#[derive(Serialize)]
+struct EngineStateWire {
+    watermark: String,
+    floor: String,
+}
+
+#[wasm_bindgen]
+pub fn engine_state(db: &JsSyncDb) -> Result<JsValue, JsValue> {
+    let mut db = WasmDb(db);
+    to_js(&EngineStateWire {
+        watermark: sync_core::watermark(&mut db)
+            .map_err(engine_error)?
+            .to_string(),
+        floor: sync_core::pull::floor(&mut db)
+            .map_err(engine_error)?
+            .to_string(),
+    })
+}
+
+#[wasm_bindgen]
+pub fn engine_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
