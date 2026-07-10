@@ -1,0 +1,11 @@
+[package]
+name = "native-rusqlite-transaction-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# Keep this focused probe independent from the production workspace crates.
+[workspace]
