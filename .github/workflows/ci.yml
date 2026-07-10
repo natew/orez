@@ -219,6 +219,15 @@ jobs:
       - name: rust-local wake propagation
         run: cd harness && bun src/propagation.ts --against rust-local --baseline none
 
+      - name: rust-local query-aware lifecycle
+        # desired-query membership: put/overlap/limit/related/delete/reconnect/
+        # permission/lost-response, with forbidden-row raw-store assertions
+        run: cd harness && bun src/queries.ts --against rust-local
+
+      - name: rust-local query-aware differential (stock zero-cache)
+        # every corpus query's server-side membership must equal stock zero-cache
+        run: cd harness && bun src/query-diff.ts
+
       - name: upload sweep regressions
         if: failure()
         uses: actions/upload-artifact@v4
