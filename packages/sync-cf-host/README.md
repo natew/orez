@@ -33,6 +33,27 @@ deterministic model resets in-memory state and changes boot ID while retaining
 SQLite state and sockets. This models the harness/cf idle-teardown pattern; it
 does not claim that a real platform eviction happens on a 5-second schedule.
 
+## Authenticated operator controls
+
+All `/admin/*` routes are rejected unless the consumer's `authorizeAdmin`
+callback succeeds or the request presents the deployment's `ADMIN_KEY` through
+`x-admin-key`. Harness and operator deployments expose `/admin/status`; it
+includes the persisted writer-enabled state and wasm linear-memory byte length
+in addition to the engine/counter fields above.
+
+`POST /admin/writer` with `{ "enabled": false }` durably stops pushes for that
+namespace. A stopped writer consumes and discards the request body, returns 503,
+and performs no engine or application write. Canary rollback drills must stop
+one writer and prove rejection before enabling another. The test-only runner is:
+
+```sh
+mise exec node@24.3.0 -- bun harness/src/rollback-drill.ts --confirm-test-only
+```
+
+The runner accepts only loopback or the `lslcf.workers.dev` test worker and does
+not mutate a production route. These controls are mechanisms, not authorization
+to perform a production cutover.
+
 ## Counter and HTTP wire representation
 
 Inside the wasm/JavaScript engine boundary, cookies, watermarks, and LMIDs are
