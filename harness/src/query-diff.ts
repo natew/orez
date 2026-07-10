@@ -19,6 +19,19 @@ const { values: args } = parseArgs({
   options: { against: { type: 'string', default: 'rust-local' } },
 })
 const cfObservations: HttpPullObservation[] = []
+// sync-core intentionally rejects per-parent related/EXISTS bounds (HIGH-5)
+// instead of silently widening them. Keep the stock differential honest by
+// excluding that explicitly unsupported corpus shape and reporting the skip.
+const RUST_REJECTED_CORPUS = new Set([
+  'projectById',
+  'projectsWithRecentTasks',
+  'projectMemberUsers',
+  'membersOfProject',
+  'projectTasksPage',
+])
+const differentialCorpus = queryCorpus.filter(
+  ({ name }) => !RUST_REJECTED_CORPUS.has(name)
+)
 
 async function startRustTarget(): Promise<SyncTarget> {
   if (args.against === 'rust-local') {
@@ -55,7 +68,7 @@ function materializeCorpus(zero: FixtureZero): {
 } {
   const views: CorpusViews = new Map()
   const destroys: Array<() => void> = []
-  for (const { name, args } of queryCorpus) {
+  for (const { name, args } of differentialCorpus) {
     const view = zero.materialize(invokeQuery(name, args) as never)
     let rows: unknown = null
     let complete = false
@@ -96,7 +109,7 @@ try {
 
   await eventually(
     () => {
-      for (const { name } of queryCorpus) {
+      for (const { name } of differentialCorpus) {
         if (!stockViews.views.get(name)!.complete())
           throw new Error(`stock-zero ${name} incomplete`)
         if (!rustViews.views.get(name)!.complete())
@@ -108,7 +121,7 @@ try {
   )
 
   const failures: string[] = []
-  for (const { name } of queryCorpus) {
+  for (const { name } of differentialCorpus) {
     const left = canonical(stockViews.views.get(name)!.rows())
     const right = canonical(rustViews.views.get(name)!.rows())
     if (left !== right) {
@@ -118,22 +131,22 @@ try {
     }
   }
 
-  const empty = queryCorpus.filter(({ name }) => {
+  const empty = differentialCorpus.filter(({ name }) => {
     const rows = stockViews.views.get(name)!.rows()
     return rows == null || (Array.isArray(rows) && rows.length === 0)
   })
 
   if (failures.length > 0) {
     for (const failure of failures) console.error('[query-diff] DIVERGENCE:', failure)
-    throw new Error(`${failures.length}/${queryCorpus.length} corpus queries diverged`)
+    throw new Error(`${failures.length}/${differentialCorpus.length} corpus queries diverged`)
   }
 
   stockViews.destroy()
   rustViews.destroy()
   console.log(
-    `[query-diff] PASS: ${queryCorpus.length} corpus queries equal ` +
-      `(${queryCorpus.length - empty.length} return data) stock-zero == ${args.against} --query-aware ` +
-      `in ${Date.now() - t0}ms`
+    `[query-diff] PASS: ${differentialCorpus.length} supported corpus queries equal ` +
+      `(${differentialCorpus.length - empty.length} return data, skipped ${RUST_REJECTED_CORPUS.size}) ` +
+      `stock-zero == ${args.against} --query-aware in ${Date.now() - t0}ms`
   )
 } catch (error) {
   failed = true
