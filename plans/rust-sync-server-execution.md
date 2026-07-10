@@ -164,15 +164,26 @@ sweep 06ba5cd), the `rust` job missing bun for the differential ts-oracle
 loader failure — npm can't ship the soname symlinks, so stock-zero.ts now
 recreates them (32d88c9).
 
-Two remaining RED legs are PRE-EXISTING orez failures, also red on `main`
-(v0.4.48), not introduced by this branch:
+Remaining RED leg, PRE-EXISTING orez failure, not introduced by this
+branch:
 
 - `native-integration`: the legacy native embed test times out on
   `pokePart` after a restore/resync (litestream disabled) — the old
   zero-cache native path, unrelated to the Rust hosts.
-- `harness` `randomized sweep`: stock zero-cache 1.7.0 crashes parsing its
-  own config with `Expected string at taskID. Got true` when the sweep
-  boots the oracle. The `conformance shapes` step (the Rust acceptance
-  differential, same stock-zero boot) PASSES in the same job, so this is a
-  stock-zero config-parse quirk on the sweep path, not a Rust regression.
-  Needs a runtime probe; tracked separately from the Rust deliverable.
+
+ROOT-CAUSED AND FIXED 2026-07-10: the intermittent `harness`
+`randomized sweep` failure (`Expected string at taskID. Got true`). It is
+an upstream zero-cache 1.7.0 bug: when ZERO*TASK_ID is unset the runner
+generates a nanoid and re-exports it to child workers via ZERO_TASK_ID;
+the shared options parser converts env vars to argv (`--task-id <value>`),
+and a nanoid that starts with `-` followed by letters is consumed by
+command-line-args as an option token, leaving `--task-id` valueless
+(boolean true) and failing the string schema. Reproduced deterministically
+with `ZERO_TASK_ID='-abcdefg'` (crash) vs `-p123456` / `*-abc`(fine);
+~0.03% of boots flake, which is why the same boot passed in the shapes
+step and in two later full-green runs (29083578717, 29083748638). Fix:
+the harness pins`ZERO_TASK_ID=zharness-stock-<port>` in stock-zero.ts so
+the nanoid path never runs. (An earlier note here claimed this failure was
+also red on main; that was wrong — on main the harness job died earlier at
+the embedded-postgres libicu step, so the sweep never booted zero-cache.)
+The bug is worth reporting upstream to rocicorp/mono.

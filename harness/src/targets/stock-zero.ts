@@ -174,6 +174,13 @@ export async function startStockZero(opts?: {
       ZERO_PORT: String(zeroPort),
       ZERO_LOG_LEVEL: opts?.logLevel ?? 'warn',
       ZERO_NUM_SYNC_WORKERS: '1',
+      // pin the task id: when unset, zero-cache 1.7.0 generates a nanoid and
+      // re-exports it to child workers via ZERO_TASK_ID; a nanoid starting
+      // with '-' followed by letters is mis-parsed by the env->argv config
+      // round-trip as an option token, leaving --task-id valueless (boolean
+      // true) and crashing the worker at boot with "Expected string at
+      // taskID. Got true" (~0.03% of boots, an intermittent CI failure)
+      ZERO_TASK_ID: `zharness-stock-${zeroPort}`,
       OTEL_SDK_DISABLED: 'true',
       // modern surface only: custom mutators + named queries through the app
       // server; setting both URLs also enables them without JWT config. CRUD
