@@ -590,10 +590,7 @@ export class ZeroDO extends DurableObject {
         .exec('SELECT MIN(watermark) AS watermark FROM _zero_changes')
         .one() as { watermark?: number | null } | null
       const oldest = first?.watermark == null ? null : Number(first.watermark)
-      if (
-        watermark < head &&
-        (oldest === null || oldest > watermark + 1)
-      ) {
+      if (watermark < head && (oldest === null || oldest > watermark + 1)) {
         return Response.json(
           { error: 'watermarkTooOld', watermark: head, oldestWatermark: oldest },
           { status: 410 }

@@ -410,16 +410,21 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       }
     }
 
-    #serviceBinding(
-      name = config.upstream?.binding
-    ): { fetch(input: string | Request, init?: RequestInit): Promise<Response> } {
+    #serviceBinding(name = config.upstream?.binding): {
+      fetch(input: string | Request, init?: RequestInit): Promise<Response>
+    } {
       const value = name
         ? (this.env as unknown as Record<string, unknown>)[name]
         : undefined
       if (!value || typeof (value as { fetch?: unknown }).fetch !== 'function') {
-        throw requestError(`missing upstream service binding: ${name ?? '(not configured)'}`, 500)
+        throw requestError(
+          `missing upstream service binding: ${name ?? '(not configured)'}`,
+          500
+        )
       }
-      return value as { fetch(input: string | Request, init?: RequestInit): Promise<Response> }
+      return value as {
+        fetch(input: string | Request, init?: RequestInit): Promise<Response>
+      }
     }
 
     #rememberUpstreamPath(request: Request): string | null {
@@ -469,16 +474,11 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             throw new Error(`upstream changes returned ${response.status}`)
           }
           const batch = (await response.json()) as UpstreamBatch
-          if (
-            !Number.isSafeInteger(batch.watermark) ||
-            !Array.isArray(batch.changes)
-          ) {
+          if (!Number.isSafeInteger(batch.watermark) || !Array.isArray(batch.changes)) {
             throw new Error('invalid upstream changes response')
           }
           const result = this.ctx.storage.transactionSync(() =>
-            this.#wasm(() =>
-              engine_apply_upstream(this.#engineDb, config.schema, batch)
-            )
+            this.#wasm(() => engine_apply_upstream(this.#engineDb, config.schema, batch))
           ) as ApplyUpstreamResult
           total += result.applied
           if (result.caughtUp) break
@@ -784,7 +784,10 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       if (config.mutateUrl) {
         try {
           const bytes = await request.arrayBuffer()
-          const body = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>
+          const body = JSON.parse(new TextDecoder().decode(bytes)) as Record<
+            string,
+            unknown
+          >
           const plan = this.#wasm(() => engine_push_validate(body)) as PushPlan
           if (plan.kind === 'respond') return json(plan.response)
 
@@ -813,7 +816,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
               mutations?: Array<{ id?: { clientID?: unknown; id?: unknown } }>
             }
           }
-          const acknowledged = upstreamBody.pushResponse?.mutations ?? upstreamBody.mutations
+          const acknowledged =
+            upstreamBody.pushResponse?.mutations ?? upstreamBody.mutations
           if (!Array.isArray(acknowledged)) {
             throw new Error('delegated push returned no mutation results')
           }

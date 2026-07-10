@@ -85,7 +85,7 @@ watermark). Semantics:
   fine; the apex cutover inherits the reset-on-cutover client story.
 - soot: same shape against soot-cf-orez-data-demo namespaces; soot's
   projections/jobs keep writing pg-wire as today. Migration = restore the
-  __soot_export dump into the namespace (existing machinery), start ingest
+  \_\_soot_export dump into the namespace (existing machinery), start ingest
   at the restore watermark.
 
 ### P4 — native host parity

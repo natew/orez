@@ -56,30 +56,30 @@ export const SyncDurableObject = createSyncDurableObject(config)
 export { ZeroDO }
 
 async function upstreamFetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url)
-    const [, namespace, ...rest] = url.pathname.split('/')
-    if (!namespace) return new Response('namespace required', { status: 400 })
-    const stub = env.UPSTREAM_DO.get(env.UPSTREAM_DO.idFromName(namespace))
-    const exec = async (sql: string, params: unknown[] = []) => {
-      const response = await stub.fetch('https://upstream.invalid/exec', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sql, params }),
-      })
-      if (!response.ok) throw new Error(`upstream init failed: ${await response.text()}`)
-    }
-    await exec(
-      'CREATE TABLE IF NOT EXISTS item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)'
-    )
-    await exec(
-      'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)'
-    )
-    await exec('INSERT OR IGNORE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)', [
-      'item',
-      JSON.stringify(schema.tables.item),
-    ])
-    url.pathname = `/${rest.join('/')}`
-    return stub.fetch(new Request(url, request))
+  const url = new URL(request.url)
+  const [, namespace, ...rest] = url.pathname.split('/')
+  if (!namespace) return new Response('namespace required', { status: 400 })
+  const stub = env.UPSTREAM_DO.get(env.UPSTREAM_DO.idFromName(namespace))
+  const exec = async (sql: string, params: unknown[] = []) => {
+    const response = await stub.fetch('https://upstream.invalid/exec', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sql, params }),
+    })
+    if (!response.ok) throw new Error(`upstream init failed: ${await response.text()}`)
+  }
+  await exec(
+    'CREATE TABLE IF NOT EXISTS item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)'
+  )
+  await exec(
+    'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)'
+  )
+  await exec(
+    'INSERT OR IGNORE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
+    ['item', JSON.stringify(schema.tables.item)]
+  )
+  url.pathname = `/${rest.join('/')}`
+  return stub.fetch(new Request(url, request))
 }
 
 /** Self service-binding target backed by the real ZeroSqlDO. */
@@ -87,7 +87,9 @@ export class DataService extends WorkerEntrypoint<Env> {
   fetch(request: Request): Promise<Response> {
     const pathname = new URL(request.url).pathname
     if (!pathname.endsWith('/changes') && !pathname.endsWith('/snapshot')) {
-      return Promise.resolve(new Response('DATA route rejected non-feed request', { status: 418 }))
+      return Promise.resolve(
+        new Response('DATA route rejected non-feed request', { status: 418 })
+      )
     }
     return upstreamFetch(request, this.env)
   }
@@ -96,7 +98,9 @@ export class DataService extends WorkerEntrypoint<Env> {
 export class AppService extends WorkerEntrypoint<Env> {
   fetch(request: Request): Promise<Response> {
     if (!new URL(request.url).pathname.endsWith('/api/zero/push')) {
-      return Promise.resolve(new Response('APP route rejected non-push request', { status: 418 }))
+      return Promise.resolve(
+        new Response('APP route rejected non-push request', { status: 418 })
+      )
     }
     return upstreamFetch(request, this.env)
   }

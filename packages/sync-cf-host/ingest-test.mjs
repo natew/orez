@@ -2,7 +2,16 @@ import assert from 'node:assert/strict'
 
 const port = 9_000 + Math.floor(Math.random() * 500)
 const server = Bun.spawn(
-  ['bunx', 'wrangler', 'dev', '--config', 'wrangler.ingest.toml', '--local', '--port', String(port)],
+  [
+    'bunx',
+    'wrangler',
+    'dev',
+    '--config',
+    'wrangler.ingest.toml',
+    '--local',
+    '--port',
+    String(port),
+  ],
   { cwd: new URL('.', import.meta.url).pathname, stdout: 'inherit', stderr: 'inherit' }
 )
 const base = `http://127.0.0.1:${port}`
@@ -22,7 +31,10 @@ try {
   const post = async (path, body) => {
     const response = await fetch(`${origin}${path}`, {
       method: 'POST',
-      headers: { authorization: 'Bearer token-user-a', 'content-type': 'application/json' },
+      headers: {
+        authorization: 'Bearer token-user-a',
+        'content-type': 'application/json',
+      },
       body: JSON.stringify(body),
     })
     const text = await response.text()
@@ -79,8 +91,9 @@ try {
   })
   assert.equal(initial.status, 200)
   assert.equal(
-    initial.body.rowsPatch.filter((entry) => entry.op === 'put' && entry.tableName === 'item')
-      .length,
+    initial.body.rowsPatch.filter(
+      (entry) => entry.op === 'put' && entry.tableName === 'item'
+    ).length,
     2
   )
 
@@ -93,7 +106,15 @@ try {
         clientID: 'writer',
         id: 1,
         name: 'item.insert',
-        args: [{ id: 'up-1', label: 'delegated', rank: 7.5, done: false, meta: { lane: true } }],
+        args: [
+          {
+            id: 'up-1',
+            label: 'delegated',
+            rank: 7.5,
+            done: false,
+            meta: { lane: true },
+          },
+        ],
       },
     ],
   }
@@ -111,7 +132,8 @@ try {
   assert.equal(pulled.status, 200)
   assert.equal(pulled.body.lastMutationIDChanges.writer, 1)
   const put = pulled.body.rowsPatch.find(
-    (entry) => entry.op === 'put' && entry.tableName === 'item' && entry.value.id === 'up-1'
+    (entry) =>
+      entry.op === 'put' && entry.tableName === 'item' && entry.value.id === 'up-1'
   )
   assert.deepEqual(put.value, {
     id: 'up-1',

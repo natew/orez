@@ -25,7 +25,9 @@ export function validateSyncHostConfig<Env extends SyncHostEnv>(
     throw new TypeError('sync host config mutateBinding must not be empty')
   }
   if (hasMutators && config.upstream) {
-    throw new TypeError('sync host config cannot combine local mutators with upstream ingest')
+    throw new TypeError(
+      'sync host config cannot combine local mutators with upstream ingest'
+    )
   }
   if (config.mutateUrl && !config.mutateUrl.startsWith('/')) {
     throw new TypeError('mutateUrl must be an absolute path')
