@@ -296,7 +296,12 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
             params: [user, user],
           }
         }
-        if (table === 'member') return { sql: '"userId" = ?', params: [user] }
+        if (table === 'member') {
+          return {
+            sql: 'EXISTS (SELECT 1 FROM project p WHERE p.id = member."projectId" AND (p."ownerId" = ? OR EXISTS (SELECT 1 FROM member access WHERE access."projectId" = p.id AND access."userId" = ?)))',
+            params: [user, user],
+          }
+        }
         if (table === 'task') return { sql: 'EXISTS (SELECT 1 FROM project WHERE project.id = task."projectId" AND (project."ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?)))', params: [user, user] }
         return undefined
       },
