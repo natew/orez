@@ -76,42 +76,85 @@ fn raw_pk(spec: &TableSpec, row: &crate::db::Row) -> Value {
 // shape, and add the forward migration in migrate_query_schema.
 const QUERY_SCHEMA_VERSION: i64 = 1;
 
-// forward-only migration for the query-aware tables. CREATE TABLE IF NOT EXISTS
-// cannot alter an existing table, so a namespace created before a shape change
-// would hit "no such column" (the pre-CRITICAL-2 _zsync_queries had a hash-only
-// PK and no clientGroupID). the plan mandates an explicit forward migration: the
-// query-aware state is fully reconstructable from clients' next desiredQueriesPatch
-// + recompute, and the old rows carry no client-group to backfill, so the
-// deterministic migration is a reset (drop the query-aware tables so they are
-// recreated at the current version). baseline _zsync_* tables never changed shape
-// and are untouched.
-fn migrate_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
-    let existing_sql = db
-        .query(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '_zsync_queries'",
-            &[],
-        )?
-        .first()
-        .and_then(|r| match r.get("sql") {
-            Some(SqlValue::Text(s)) => Some(s.clone()),
-            _ => None,
-        });
-    // a pre-CRITICAL-2 install: _zsync_queries exists but is not group-scoped.
-    if let Some(sql) = existing_sql
-        && !sql.contains("clientGroupID")
-    {
-        for table in [
-            "_zsync_queries",
-            "_zsync_desires",
-            "_zsync_query_ack",
-            "_zsync_query_rows",
-            "_zsync_row_refs",
-            "_zsync_query_state",
-            "_zsync_query_meta",
-        ] {
-            db.exec(&format!("DROP TABLE IF EXISTS {table}"), &[])?;
-        }
+fn table_exists(db: &mut dyn SyncDb, name: &str) -> Result<bool, EngineError> {
+    let rows = db.query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        &[text(name)],
+    )?;
+    Ok(!rows.is_empty())
+}
+
+fn read_query_meta_version(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
+    let rows = db.query(
+        "SELECT CAST(version AS TEXT) AS v FROM _zsync_query_meta WHERE lock = 1",
+        &[],
+    )?;
+    match rows.first().and_then(|r| r.get("v")) {
+        Some(SqlValue::Text(s)) => Ok(s.parse().unwrap_or(0)),
+        _ => Ok(0),
     }
+}
+
+// forward-only migration for the query-aware tables, driven by the stored schema
+// version. CREATE TABLE IF NOT EXISTS cannot alter an existing table, so a shape
+// change (e.g. the pre-CRITICAL-2 hash-only _zsync_queries with no clientGroupID)
+// needs an explicit migration. the query-aware state is fully reconstructable from
+// clients' next desiredQueriesPatch + recompute and the old rows carry no client
+// group to backfill, so an out-of-date version RESETS the query-aware tables (init
+// recreates them at the current version). a version NEWER than this engine fails
+// loud rather than silently downgrading. baseline _zsync_* tables are untouched.
+fn migrate_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
+    // determine the stored version: from _zsync_query_meta if present, else infer
+    // from the _zsync_queries shape (pre-versioning installs have no meta table —
+    // a group-scoped _zsync_queries is v1, a hash-only one is v0). no query tables
+    // at all means a fresh install with nothing to migrate.
+    let stored_version = if table_exists(db, "_zsync_query_meta")? {
+        read_query_meta_version(db)?
+    } else {
+        let queries_sql = db
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '_zsync_queries'",
+                &[],
+            )?
+            .first()
+            .and_then(|r| match r.get("sql") {
+                Some(SqlValue::Text(s)) => Some(s.clone()),
+                _ => None,
+            });
+        match queries_sql {
+            Some(sql) if sql.contains("clientGroupID") => QUERY_SCHEMA_VERSION,
+            Some(_) => 0,
+            None => return Ok(()), // fresh install
+        }
+    };
+
+    if stored_version > QUERY_SCHEMA_VERSION {
+        return Err(EngineError::internal(format!(
+            "query-schema version {stored_version} is newer than this engine's {QUERY_SCHEMA_VERSION}; refusing to downgrade"
+        )));
+    }
+    if stored_version == QUERY_SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    // out of date: reset the query-aware tables (init recreates them at the current
+    // version) AND bump the epoch, so every client's cookie is stale and it
+    // full-resyncs — re-sending its desired queries. without the epoch bump a
+    // caught-up client fast-paths to {unchanged} forever and never re-sends its
+    // already-acked patch, and the wiped membership can no longer delete its stale
+    // rows (GAP-3a).
+    for table in [
+        "_zsync_queries",
+        "_zsync_desires",
+        "_zsync_query_ack",
+        "_zsync_query_rows",
+        "_zsync_row_refs",
+        "_zsync_query_state",
+        "_zsync_query_meta",
+    ] {
+        db.exec(&format!("DROP TABLE IF EXISTS {table}"), &[])?;
+    }
+    crate::store::invalidate(db)?;
     Ok(())
 }
 

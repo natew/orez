@@ -15,7 +15,7 @@ use sync_core::query::{
 };
 use sync_core::schema::TableSpec;
 use sync_core::value::ZeroColumnType;
-use sync_core::{SqlValue, SyncDb, Tables, Transactor};
+use sync_core::{SqlValue, SyncDb, Tables, Transactor, init_schema};
 
 const G: &str = "g1";
 
@@ -384,13 +384,26 @@ fn init_query_schema_migrates_pre_critical2_schema() {
     )
     .unwrap();
 
+    // baseline schema (change log + triggers) exists in a real query-aware deploy;
+    // the migration's epoch bump needs it.
+    let tables = schema();
+    init_schema(&mut db, &tables).unwrap();
+
     // forward migration on init: the old _zsync_queries is detected and reset.
     init_query_schema(&mut db).unwrap();
+
+    // GAP-3a: the reset bumped the epoch, so every client's cookie is now below the
+    // floor and forces a fresh resync (re-sending its desired queries) instead of
+    // fast-pathing to {cookie:0, unchanged:true} forever.
+    let floor = db.transaction(|d| sync_core::pull::floor(d)).unwrap();
+    assert!(
+        floor >= 1,
+        "migration must bump the epoch so cookie 0 is stale"
+    );
 
     // the new group-scoped schema is in place: register + desire + recompute work
     // (a group-scoped INSERT would crash "no such column clientGroupID" against
     // the old table). the stale global 'h' row was dropped by the reset.
-    let tables = schema();
     register_query(
         &mut db,
         &tables,
@@ -412,6 +425,46 @@ fn init_query_schema_migrates_pre_critical2_schema() {
         .transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
         .unwrap();
     assert!(again.is_empty(), "second init preserved the migrated state");
+}
+
+// GAP-3b: init must READ the stored schema version, not blindly stamp the current
+// one. a version NEWER than this engine fails loud rather than being silently
+// downgraded (which would corrupt a namespace written by a newer engine).
+#[test]
+fn future_query_schema_version_fails_loud() {
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE issue (id TEXT PRIMARY KEY, title TEXT, closed INTEGER, priority INTEGER)",
+        &[],
+    )
+    .unwrap();
+    let tables = schema();
+    init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap(); // current-version schema + meta
+
+    // a newer engine stamped a future version
+    db.exec(
+        "UPDATE _zsync_query_meta SET version = 999 WHERE lock = 1",
+        &[],
+    )
+    .unwrap();
+    let err = init_query_schema(&mut db).unwrap_err();
+    assert_eq!(err.status, 500);
+    assert!(
+        err.to_string().contains("newer"),
+        "expected a fail-loud downgrade refusal, got: {err}"
+    );
+    // the future version was NOT downgraded (fail-loud left it intact)
+    let v = db
+        .query(
+            "SELECT CAST(version AS TEXT) AS v FROM _zsync_query_meta WHERE lock = 1",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        v.first().and_then(|r| r.get("v")),
+        Some(&SqlValue::Text("999".to_string()))
+    );
 }
 
 // CRITICAL-2 companion: a transform-version bump on a group's query forces a
