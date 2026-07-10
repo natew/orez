@@ -6,7 +6,11 @@
 //
 // model (everything scoped per client GROUP, since a replica is shared across a
 // group's tabs):
-// - _zsync_queries:    hash -> transformed AST + root table + dependency tables
+// - _zsync_queries:    (group, hash) -> transformed AST + root table + dependency
+//                      tables + transform version. scoped by group because the
+//                      hash is client-chosen: a global row would let one group's
+//                      permission-transformed AST overwrite another group's under
+//                      the same hash and leak forbidden rows (invariant 15).
 // - _zsync_desires:    (group, client, hash) -> the client's query-state version
 // - _zsync_query_rows: (group, hash) -> the rows currently in that query's result
 // - _zsync_row_refs:   (group, rowTable, rowPk) -> how many of the group's active
@@ -71,11 +75,13 @@ fn raw_pk(spec: &TableSpec, row: &crate::db::Row) -> Value {
 pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_queries (
-            hash TEXT PRIMARY KEY,
+            clientGroupID TEXT NOT NULL,
+            hash TEXT NOT NULL,
             ast TEXT NOT NULL,
             rootTable TEXT NOT NULL,
             deps TEXT NOT NULL,
-            transformVersion INTEGER NOT NULL DEFAULT 0
+            transformVersion INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (clientGroupID, hash)
         )",
         &[],
     )?;
@@ -124,14 +130,25 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
     Ok(())
 }
 
-// register (or replace) a query by its stable hash. validates + compiles the
-// transformed AST so an invalid query is rejected here, not at pull time, and
-// records the root table + dependency tables recomputation narrows on.
+// register (or replace) a query for a client GROUP by its stable hash. validates
+// + compiles the transformed AST so an invalid query is rejected here, not at
+// pull time, and records the root table + dependency tables recomputation
+// narrows on, plus the consumer-supplied transformation version.
+//
+// scoping by (group, hash) is a security boundary: the hash is client-chosen, so
+// a globally-keyed row would let group B register a permissive AST under group
+// A's hash and overwrite A's restricted (permission-transformed) definition,
+// leaking forbidden rows on A's next pull (invariant 15). each group keeps its
+// own definition; a change to the AST OR the transformation version clears just
+// this group's computed markers so its next pull recomputes and can never retain
+// a more-permissive older result.
 pub fn register_query(
     db: &mut dyn SyncDb,
     tables: &Tables,
+    group: &str,
     hash: &str,
     ast_json: &Value,
+    transform_version: i64,
 ) -> Result<(), EngineError> {
     let ast = parse_ast(ast_json)?;
     compile(&ast, tables)?; // validate + reject unsupported shapes here
@@ -143,30 +160,42 @@ pub fn register_query(
     let deps = serde_json::to_string(&dep_set).unwrap();
     let ast_text = serde_json::to_string(ast_json).unwrap();
 
-    // if the transformed AST changed (a permission/schema transformation), the
-    // computed markers for this hash are cleared so every group recomputes it on
-    // the next pull and can never retain a more-permissive older result
-    // (invariant 15).
-    let prev_ast = db
-        .query(
-            "SELECT ast FROM _zsync_queries WHERE hash = ?",
-            &[text(hash)],
-        )?
-        .first()
-        .and_then(|r| str_col(r.get("ast")).ok());
-    let ast_changed = prev_ast.as_deref() != Some(ast_text.as_str());
+    let prev = db.query(
+        "SELECT ast, CAST(transformVersion AS TEXT) AS tv FROM _zsync_queries
+         WHERE clientGroupID = ? AND hash = ?",
+        &[text(group), text(hash)],
+    )?;
+    let (prev_ast, prev_tv) = match prev.first() {
+        Some(r) => (
+            str_col(r.get("ast")).ok(),
+            match r.get("tv") {
+                Some(SqlValue::Text(s)) => s.parse::<i64>().unwrap_or(0),
+                _ => 0,
+            },
+        ),
+        None => (None, 0),
+    };
+    let changed = prev_ast.as_deref() != Some(ast_text.as_str()) || prev_tv != transform_version;
 
     db.exec(
-        "INSERT INTO _zsync_queries (hash, ast, rootTable, deps, transformVersion)
-         VALUES (?, ?, ?, ?, 0)
-         ON CONFLICT (hash) DO UPDATE SET ast = excluded.ast,
-             rootTable = excluded.rootTable, deps = excluded.deps",
-        &[text(hash), text(ast_text), text(&ast.table), text(deps)],
+        "INSERT INTO _zsync_queries (clientGroupID, hash, ast, rootTable, deps, transformVersion)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (clientGroupID, hash) DO UPDATE SET ast = excluded.ast,
+             rootTable = excluded.rootTable, deps = excluded.deps,
+             transformVersion = excluded.transformVersion",
+        &[
+            text(group),
+            text(hash),
+            text(ast_text),
+            text(&ast.table),
+            text(deps),
+            SqlValue::Text(transform_version.to_string()),
+        ],
     )?;
-    if ast_changed {
+    if changed {
         db.exec(
-            "DELETE FROM _zsync_query_state WHERE hash = ?",
-            &[text(hash)],
+            "DELETE FROM _zsync_query_state WHERE clientGroupID = ? AND hash = ?",
+            &[text(group), text(hash)],
         )?;
     }
     Ok(())
@@ -282,7 +311,8 @@ struct ActiveQuery {
 fn active_queries(db: &mut dyn SyncDb, group: &str) -> Result<Vec<ActiveQuery>, EngineError> {
     let rows = db.query(
         "SELECT DISTINCT q.hash AS hash, q.ast AS ast, q.rootTable AS rootTable, q.deps AS deps
-         FROM _zsync_desires d JOIN _zsync_queries q ON q.hash = d.hash
+         FROM _zsync_desires d JOIN _zsync_queries q
+           ON q.clientGroupID = d.clientGroupID AND q.hash = d.hash
          WHERE d.clientGroupID = ?",
         &[text(group)],
     )?;
