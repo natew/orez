@@ -435,6 +435,26 @@ pub fn engine_init_schema(db: &JsSyncDb, schema: JsValue) -> Result<(), JsValue>
     sync_core::init_schema(&mut db, &tables).map_err(js_err)
 }
 
+#[derive(Serialize)]
+struct CompiledQueryWire {
+    sql: String,
+    params: Vec<WireValue>,
+}
+
+/// Compile a validated Zero query AST for a consumer mutator's transactional
+/// `tx.run(...)`. Execution remains in the host-owned application transaction.
+#[wasm_bindgen]
+pub fn engine_compile_query(schema: JsValue, ast: JsValue) -> Result<JsValue, JsValue> {
+    let tables = tables_from_js(schema)?;
+    let ast: serde_json::Value = from_js(ast)?;
+    let ast = sync_core::query::parse_ast(&ast).map_err(engine_error)?;
+    let compiled = sync_core::query::compile(&ast, &tables).map_err(engine_error)?;
+    to_js(&CompiledQueryWire {
+        sql: compiled.sql,
+        params: compiled.params.iter().map(WireValue::from).collect(),
+    })
+}
+
 /// Production pull entry. The TypeScript host owns `transactionSync`.
 #[wasm_bindgen]
 pub fn engine_handle_pull(
