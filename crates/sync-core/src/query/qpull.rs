@@ -19,8 +19,8 @@ use crate::store;
 use crate::wire;
 
 use super::membership::{
-    canonical_pk_text, clear_desires, client_query_version, desired_hashes, recompute_group,
-    register_query, remove_desire, reset_group, set_desire,
+    advance_query_ack, canonical_pk_text, clear_desires, client_query_version, desired_hashes,
+    recompute_group, register_query, remove_desire, reset_group, set_desire,
 };
 
 // apply the desiredQueriesPatch and return the client's query-state version
@@ -83,6 +83,10 @@ fn apply_desired_patch(
             _ => return Err(EngineError::bad_request("unknown desiredQueriesPatch op")),
         }
     }
+    // record the applied version monotonically so a later del/clear cannot make
+    // the gotQueries ack regress (MEDIUM-6). done once per patch, after every op,
+    // covering put/del/clear and an empty patch that only bumps the version.
+    advance_query_ack(db, group, client, version)?;
     Ok(version)
 }
 
@@ -180,12 +184,11 @@ pub fn handle_query_pull(
     for hash in desired_hashes(db, group, client_id)? {
         got_patch.push(json!({ "op": "put", "hash": hash }));
     }
-    // the version the client is now synced to (its stored query-state version),
-    // acknowledged only now that the row effects above are durable
-    let ack_version = match query_version {
-        Some(v) => v,
-        None => client_query_version(db, group, client_id)?,
-    };
+    // the version the client is now synced to: its durable, monotonic query-state
+    // version (advanced above when this request carried a patch), acknowledged
+    // only now that the row effects are durable. reading the stored value — not
+    // this request's version — keeps the ack from regressing across del/clear.
+    let ack_version = client_query_version(db, group, client_id)?;
 
     let lmids = store::all_lmids(db, group)?;
     let mut lmid_map = Map::new();

@@ -181,6 +181,63 @@ fn deleting_a_desired_query_removes_its_rows() {
 }
 
 #[test]
+fn gotqueries_version_never_regresses_after_del_or_clear() {
+    // MEDIUM-6: only `put` recorded a version, so after a higher-versioned
+    // del/clear the ack fell back to the max over remaining desires (a lower
+    // number), churning the client (replayed gotQueries). the acked version must
+    // be monotonic per client, independent of which desires remain.
+    let mut h = QHost::new();
+    // put A@1, then put B@2 -> two desires at increasing versions
+    let r1 = h.pull(
+        "c",
+        json!(0),
+        Some(json!({ "version": 1, "patch": [{ "op": "put", "hash": "A", "ast": open_query() }] })),
+    );
+    assert_eq!(r1["gotQueries"]["version"], json!(1));
+    let r2 = h.pull(
+        "c",
+        r1["cookie"].clone(),
+        Some(json!({ "version": 2, "patch": [{ "op": "put", "hash": "B", "ast": open_query() }] })),
+    );
+    assert_eq!(r2["gotQueries"]["version"], json!(2));
+
+    // del B at version 3 -> ack 3
+    let r3 = h.pull(
+        "c",
+        r2["cookie"].clone(),
+        Some(json!({ "version": 3, "patch": [{ "op": "del", "hash": "B" }] })),
+    );
+    assert_eq!(r3["gotQueries"]["version"], json!(3));
+
+    // a data change makes the next pull non-caught-up; a pull WITHOUT a queries
+    // patch must still ack 3, not the max over the remaining desire A@1.
+    h.exec("INSERT INTO issue VALUES ('i4', 't-i4', 0)");
+    let r4 = h.pull("c", r3["cookie"].clone(), None);
+    assert_eq!(
+        r4["gotQueries"]["version"],
+        json!(3),
+        "ack regressed after del"
+    );
+
+    // clear at version 4 -> ack 4 even though no desire remains
+    let r5 = h.pull(
+        "c",
+        r4["cookie"].clone(),
+        Some(json!({ "version": 4, "patch": [{ "op": "clear" }] })),
+    );
+    assert_eq!(r5["gotQueries"], json!({ "version": 4, "patch": [] }));
+
+    // another non-caught-up pull without queries still acks 4, not 0
+    h.exec("INSERT INTO issue VALUES ('i5', 't-i5', 0)");
+    let r6 = h.pull("c", r5["cookie"].clone(), None);
+    assert_eq!(
+        r6["gotQueries"]["version"],
+        json!(4),
+        "ack regressed after clear"
+    );
+}
+
+#[test]
 fn query_ack_never_leads_row_effects() {
     // invariant 13: the gotQueries version is acknowledged in the SAME response
     // (same transaction) that carries the query's row effects, so a client can
