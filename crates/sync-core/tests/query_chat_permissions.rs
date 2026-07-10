@@ -36,14 +36,22 @@ fn tables() -> Tables {
         .with(
             "userRole",
             TableSpec {
-                columns: vec![s("id"), s("serverId"), s("userId"), b("canAdmin")],
+                columns: vec![
+                    s("id"),
+                    s("serverId"),
+                    s("userId"),
+                    s("roleId"),
+                    b("canAdmin"),
+                ],
                 primary_key: vec!["id".into()],
             },
         )
+        // the channelUserRoles junction is a real two-hop: channel ->
+        // channelPermission (by channelId) -> userRole (by roleId)
         .with(
-            "channelUserRole",
+            "channelPermission",
             TableSpec {
-                columns: vec![s("id"), s("channelId"), s("userId")],
+                columns: vec![s("id"), s("channelId"), s("roleId")],
                 primary_key: vec!["id".into()],
             },
         )
@@ -121,6 +129,17 @@ fn server_admin_for(auth: &str) -> Value {
     )
 }
 
+// channel.ts channelUserRoles junction (two-hop): channel -> channelPermission
+// (by channelId) -> userRole (by roleId) matching the user.
+fn user_has_channel_role(auth: &str) -> Value {
+    exists(
+        "id",
+        "channelId",
+        "channelPermission",
+        exists("roleId", "roleId", "userRole", eq("userId", json!(auth))),
+    )
+}
+
 // channel.ts hasChannelReadPermission: not deleted AND the server is readable
 // AND (channel not private OR the user has a channel role OR is a server admin).
 fn channel_readable(auth: &str) -> Value {
@@ -129,12 +148,7 @@ fn channel_readable(auth: &str) -> Value {
         exists("serverId", "id", "server", server_readable(auth)),
         or(vec![
             eq("private", json!(false)),
-            exists(
-                "id",
-                "channelId",
-                "channelUserRole",
-                eq("userId", json!(auth)),
-            ),
+            user_has_channel_role(auth),
             server_admin_for(auth),
         ]),
     ])
@@ -161,8 +175,8 @@ fn fixture() -> TestDb {
     for ddl in [
         "CREATE TABLE server (id TEXT PRIMARY KEY, private INTEGER, creatorId TEXT)",
         "CREATE TABLE serverMember (id TEXT PRIMARY KEY, serverId TEXT, userId TEXT)",
-        "CREATE TABLE userRole (id TEXT PRIMARY KEY, serverId TEXT, userId TEXT, canAdmin INTEGER)",
-        "CREATE TABLE channelUserRole (id TEXT PRIMARY KEY, channelId TEXT, userId TEXT)",
+        "CREATE TABLE userRole (id TEXT PRIMARY KEY, serverId TEXT, userId TEXT, roleId TEXT, canAdmin INTEGER)",
+        "CREATE TABLE channelPermission (id TEXT PRIMARY KEY, channelId TEXT, roleId TEXT)",
         "CREATE TABLE channel (id TEXT PRIMARY KEY, serverId TEXT, private INTEGER, deleted INTEGER, solo INTEGER)",
         "CREATE TABLE message (id TEXT PRIMARY KEY, channelId TEXT, creatorId TEXT, type TEXT, deleted INTEGER)",
     ] {
@@ -175,13 +189,13 @@ fn fixture() -> TestDb {
     )
     .unwrap();
     db.exec("INSERT INTO serverMember VALUES ('m1','s1','alice'), ('m2','s2','alice'), ('m3','s1','bob')", &[]).unwrap();
-    // alice is admin of s1
-    db.exec("INSERT INTO userRole VALUES ('ur','s1','alice',1)", &[])
-        .unwrap();
-    // channels: c1 public in s1; c2 private in s1 (alice has a role); c3 private in s2 (nobody's role); c4 solo in s1
+    // alice is admin of s1 (role adminRole), and holds channelRole (a non-admin role)
+    db.exec("INSERT INTO userRole VALUES ('ur','s1','alice','adminRole',1), ('ur2','s1','alice','channelRole',0)", &[]).unwrap();
+    // channels: c1 public in s1; c2 private in s1 (alice has a role via channelPermission); c3 private in s2 (nobody's role); c4 solo in s1
     db.exec("INSERT INTO channel VALUES ('c1','s1',0,0,0), ('c2','s1',1,0,0), ('c3','s2',1,0,0), ('c4','s1',0,0,1)", &[]).unwrap();
     db.exec(
-        "INSERT INTO channelUserRole VALUES ('cur','c2','alice')",
+        // c2 grants channelRole; alice holds channelRole -> she can read c2
+        "INSERT INTO channelPermission VALUES ('cp','c2','channelRole')",
         &[],
     )
     .unwrap();
