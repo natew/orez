@@ -7,7 +7,7 @@ import { join } from 'node:path'
 
 import { Zero } from '@rocicorp/zero'
 
-import { mutators, queryNameToAst, schema } from '../fixture.js'
+import { mutators, schema } from '../fixture.js'
 import { observedPullFetch, type HttpPullObservation } from '../observed-fetch.js'
 import { ensureHttpPullTransport } from '../vendor/httpPullTransport.js'
 
@@ -82,7 +82,7 @@ export async function startRustCf(opts?: {
     fetch: opts?.onPull ? observedPullFetch(opts.onPull) : undefined,
     pullIntervalMs: opts?.pullIntervalMs ?? 500,
     wake: true,
-    queryTransform: opts?.queryAware ? queryNameToAst : undefined,
+    queryForward: opts?.queryAware,
   })
   const clients: Zero<typeof schema, typeof mutators>[] = []
   let clientNumber = 0

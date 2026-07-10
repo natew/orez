@@ -22,7 +22,7 @@ const server = externalURL
         cwd: new URL('.', import.meta.url).pathname,
         stdout: 'inherit',
         stderr: 'inherit',
-      },
+      }
     )
 const baseURL = externalURL ?? `http://127.0.0.1:${port}`
 
@@ -65,7 +65,11 @@ const admin = async (path, body) => {
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  assert.equal(response.ok, true, `${path}: ${response.status} ${await response.clone().text()}`)
+  assert.equal(
+    response.ok,
+    true,
+    `${path}: ${response.status} ${await response.clone().text()}`
+  )
   return response.json()
 }
 
@@ -83,7 +87,10 @@ function openWake(clientID, userID) {
   const messages = []
   socket.addEventListener('message', (event) => messages.push(String(event.data)))
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`wake socket ${clientID} did not open`)), 5_000)
+    const timer = setTimeout(
+      () => reject(new Error(`wake socket ${clientID} did not open`)),
+      5_000
+    )
     socket.addEventListener('open', () => {
       clearTimeout(timer)
       resolve({ socket, messages })
@@ -115,7 +122,10 @@ try {
   })
   equal(firstPull.status, 200, 'initial pull status')
   equal(firstPull.body.cookie, 0, 'initial cookie')
-  assert.ok(firstPull.body.rowsPatch.length > 60, 'initial snapshot includes fixture rows')
+  assert.ok(
+    firstPull.body.rowsPatch.length > 60,
+    'initial snapshot includes fixture rows'
+  )
   assertions++
 
   await admin('/admin/query-aware', { enabled: true })
@@ -136,17 +146,21 @@ try {
     },
   })
   equal(queryPull.status, 200, 'query-aware pull status')
-  equal(queryPull.body.gotQueries, {
-    version: 1,
-    patch: [{ op: 'put', hash: 'tasks-p1-p4' }],
-  }, 'server resolves and acknowledges named query')
+  equal(
+    queryPull.body.gotQueries,
+    {
+      version: 1,
+      patch: [{ op: 'put', hash: 'tasks-p1-p4' }],
+    },
+    'server resolves and acknowledges named query'
+  )
   const queryTaskPuts = queryPull.body.rowsPatch.filter(
-    (entry) => entry.op === 'put' && entry.tableName === 'task',
+    (entry) => entry.op === 'put' && entry.tableName === 'task'
   )
   assert.ok(queryTaskPuts.length > 0, 'query-aware pull includes members')
   assert.ok(
     queryTaskPuts.every((entry) => ['p1', 'p4'].includes(entry.value.projectId)),
-    'query-aware pull excludes non-members',
+    'query-aware pull excludes non-members'
   )
   assertions += 2
   const queryFollowup = await post('/pull', {
@@ -155,7 +169,48 @@ try {
     cookie: queryPull.body.cookie,
   })
   equal(queryFollowup.status, 200, 'query-aware pull without query patch status')
-  equal(queryFollowup.body.unchanged, true, 'query-aware route persists without queries field')
+  equal(
+    queryFollowup.body.unchanged,
+    true,
+    'query-aware route persists without queries field'
+  )
+
+  const injected = await post('/pull', {
+    clientID: 'attacker',
+    clientGroupID: 'attacker-group',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [
+        {
+          op: 'put',
+          hash: 'client-controlled',
+          ast: { table: 'user' },
+        },
+      ],
+    },
+  })
+  equal(injected.status, 400, 'client-authored raw AST is rejected')
+  assert.match(injected.body.error, /server-resolved named query/)
+  assertions++
+
+  const malformedQuery = await post('/pull', {
+    clientID: 'malformed-query',
+    clientGroupID: 'malformed-group',
+    cookie: null,
+    queries: {
+      version: -1,
+      patch: [
+        {
+          op: 'put',
+          hash: 'bad-version',
+          name: 'tasksDone',
+          args: [],
+        },
+      ],
+    },
+  })
+  equal(malformedQuery.status, 400, 'query-aware EngineError status reaches HTTP')
   await admin('/admin/query-aware', { enabled: false })
 
   let response = await post(
@@ -164,7 +219,7 @@ try {
       id: 'prod-created',
       ownerId: 'user-a',
       name: 'production host',
-    }),
+    })
   )
   equal(response.status, 200, 'push status')
   equal(response.body.pushResponse.mutations[0].result, {}, 'push result')
@@ -175,7 +230,7 @@ try {
       id: 'effect-success',
       clientID: 'client-a',
       mutationID: 2,
-    }),
+    })
   )
   equal(response.status, 200, 'deferred-effect push status')
   let rows = await admin('/admin/sql', {
@@ -185,7 +240,7 @@ try {
 
   response = await post(
     '/push',
-    mutation('client-a', 3, 'test.effectRollback', { id: 'effect-rollback' }),
+    mutation('client-a', 3, 'test.effectRollback', { id: 'effect-rollback' })
   )
   equal(response.status, 200, 'application error is a push response')
   equal(response.body.pushResponse.mutations[0].result.error, 'app', 'app error result')
@@ -198,7 +253,7 @@ try {
   equal(
     rows.rows,
     [{ projectCount: 0, effectCount: 0, lmid: '3' }],
-    'awaited app error rolls back rows/effect and advances LMID in tx2',
+    'awaited app error rolls back rows/effect and advances LMID in tx2'
   )
 
   const receiver = await openWake('wake-receiver', 'user-a')
@@ -210,10 +265,14 @@ try {
       ownerId: 'user-b',
       name: 'wake',
     }),
-    'user-b',
+    'user-b'
   )
   equal(response.status, 200, 'wake push status')
-  await eventually(() => equal(receiver.messages[0], 'wake', 'receiver got wake'), 1_000, 'wake')
+  await eventually(
+    () => equal(receiver.messages[0], 'wake', 'receiver got wake'),
+    1_000,
+    'wake'
+  )
   await new Promise((resolve) => setTimeout(resolve, 50))
   equal(pusher.messages, [], 'pusher excluded from wake')
 
@@ -231,18 +290,18 @@ try {
       ownerId: 'user-b',
       name: 'wake after idle',
     }),
-    'user-b',
+    'user-b'
   )
   await eventually(
     () => equal(receiver.messages[1], 'wake', 'wake delivered after re-instantiation'),
     1_000,
-    'post-idle wake',
+    'post-idle wake'
   )
   receiver.socket.close()
   pusher.socket.close()
 
   console.log(
-    `M3 production ${externalURL ? 'deployed' : 'workerd'} integration passed (${assertions} assertions)`,
+    `M3 production ${externalURL ? 'deployed' : 'workerd'} integration passed (${assertions} assertions)`
   )
 } finally {
   if (server) {

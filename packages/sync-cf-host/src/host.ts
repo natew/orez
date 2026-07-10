@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+
+import { validatePullCaps } from "./config.js";
 import {
   engine_assemble_push_response,
   engine_compile_query,
@@ -112,6 +114,13 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function requestError(
+  message: string,
+  status = 400,
+): Error & { status: number } {
+  return Object.assign(new Error(message), { status });
+}
+
 function routeAfterNamespace(pathname: string): string {
   const [, , ...parts] = pathname.split("/");
   return `/${parts.join("/")}`;
@@ -193,7 +202,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
   config: SyncHostConfig<Env>,
 ) {
   const defaultRetainChanges = String(config.retainChanges ?? 4_096);
-  const caps: PullCaps = { ...DEFAULT_CAPS, ...config.caps };
+  const caps: PullCaps = validatePullCaps({ ...DEFAULT_CAPS, ...config.caps });
   const idleTeardownMs = config.idleTeardownMs ?? 5_000;
   // A CF fan-out wakes every client into an HTTP pull. Give concurrent writer
   // requests a real batching window so a storm burst creates one pull wave.
@@ -220,8 +229,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       super(ctx, env);
       this.#engineDb = new SqlStorageSyncDb(ctx.storage.sql);
       this.#directSql = new SqlStorageDirect(ctx.storage.sql);
-      this.#mutatorSql = new SqlStorageMutatorTransaction(this.#directSql, (ast) =>
-        this.#wasm(() => engine_compile_query(config.schema, ast)),
+      this.#mutatorSql = new SqlStorageMutatorTransaction(
+        this.#directSql,
+        (ast) => this.#wasm(() => engine_compile_query(config.schema, ast)),
       );
       ctx.blockConcurrencyWhile(async () => {
         ctx.storage.transactionSync(() => {
@@ -350,9 +360,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
               event: "sync_wake",
               hostVersion: config.hostVersion,
               socketCount: sockets.length,
-            originCount: origins.size,
-            sent,
-            eligibleRecipients: recipients.size,
+              originCount: origins.size,
+              sent,
+              eligibleRecipients: recipients.size,
               coalesceMs: fanoutStarted - queuedAt,
               fanoutMs: performance.now() - fanoutStarted,
             }),
@@ -377,22 +387,36 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       let body: Record<string, unknown> | undefined;
       try {
         body = (await request.json()) as Record<string, unknown>;
-        const queryAware = this.#queryAwareOverride ?? (
-          typeof config.queryAware === "function"
+        const queryAware =
+          this.#queryAwareOverride ??
+          (typeof config.queryAware === "function"
             ? config.queryAware(claims)
-            : config.queryAware ?? Boolean(config.resolveQuery)
-        );
-        if (queryAware && body.queries && config.resolveQuery) {
-          const queries = body.queries as { version?: unknown; patch?: unknown };
+            : (config.queryAware ?? Boolean(config.resolveQuery)));
+        if (queryAware && body.queries) {
+          const queries = body.queries as {
+            version?: unknown;
+            patch?: unknown;
+          };
           if (Array.isArray(queries.patch)) {
             const patch = [];
             for (const operation of queries.patch) {
-              if (!operation || typeof operation !== "object") { patch.push(operation); continue; }
+              if (!operation || typeof operation !== "object") {
+                patch.push(operation);
+                continue;
+              }
               const op = operation as Record<string, unknown>;
-              if (op.op === "put" && typeof op.name === "string") {
-                const args = Array.isArray(op.args) ? op.args as JsonValue[] : [];
+              if (op.op === "put") {
+                if (!config.resolveQuery || typeof op.name !== "string") {
+                  throw requestError(
+                    "query put requires a server-resolved named query",
+                  );
+                }
+                if (!Array.isArray(op.args)) {
+                  throw requestError("named query args must be an array");
+                }
+                const args = op.args as JsonValue[];
                 const ast = config.resolveQuery(op.name, args, claims);
-                patch.push({ ...op, ast });
+                patch.push({ op: "put", hash: op.hash, ast });
               } else patch.push(operation);
             }
             body = { ...body, queries: { ...queries, patch } };
@@ -406,8 +430,22 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           response = this.ctx.storage.transactionSync(() =>
             this.#wasm(() =>
               queryAware
-                ? engine_handle_query_pull(this.#engineDb, config.schema, this.#retainChanges, body, claims.userID)
-                : engine_handle_pull(this.#engineDb, config.schema, this.#visibility(claims), caps, this.#retainChanges, body, claims.userID),
+                ? engine_handle_query_pull(
+                    this.#engineDb,
+                    config.schema,
+                    this.#retainChanges,
+                    body,
+                    claims.userID,
+                  )
+                : engine_handle_pull(
+                    this.#engineDb,
+                    config.schema,
+                    this.#visibility(claims),
+                    caps,
+                    this.#retainChanges,
+                    body,
+                    claims.userID,
+                  ),
             ),
           ) as Record<string, unknown>;
           transactionMs = performance.now() - txStarted;
