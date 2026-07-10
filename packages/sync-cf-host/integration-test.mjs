@@ -266,6 +266,104 @@ try {
   writerStatus = await admin('/admin/writer', { enabled: true })
   equal(writerStatus.writerEnabled, true, 'operator can restore writer')
 
+  await admin('/admin/fault', { point: 'push_before_mutation', kind: 'error' })
+  let faultResponse = await post(
+    '/push',
+    mutation('fault-before-client', 1, 'project.create', {
+      id: 'fault-before-row',
+      ownerId: 'user-a',
+      name: 'must not commit',
+    })
+  )
+  equal(faultResponse.status, 500, 'pre-mutation fault returns infra error')
+  let faultRows = await admin('/admin/sql', {
+    query:
+      "SELECT (SELECT COUNT(*) FROM project WHERE id = 'fault-before-row') AS projectCount, " +
+      "(SELECT COUNT(*) FROM _zsync_clients WHERE clientID = 'fault-before-client') AS clientCount",
+  })
+  equal(
+    faultRows.rows,
+    [{ projectCount: 0, clientCount: 0 }],
+    'pre-mutation fault changes no application or LMID state'
+  )
+
+  await admin('/admin/fault', {
+    point: 'push_after_write_before_commit',
+    kind: 'quota',
+  })
+  faultResponse = await post(
+    '/push',
+    mutation('fault-before-commit-client', 1, 'project.create', {
+      id: 'fault-before-commit-row',
+      ownerId: 'user-a',
+      name: 'must roll back',
+    })
+  )
+  equal(faultResponse.status, 507, 'pre-commit quota fault returns quota error')
+  faultRows = await admin('/admin/sql', {
+    query:
+      "SELECT (SELECT COUNT(*) FROM project WHERE id = 'fault-before-commit-row') AS projectCount, " +
+      "(SELECT COUNT(*) FROM _zsync_clients WHERE clientID = 'fault-before-commit-client') AS clientCount",
+  })
+  equal(
+    faultRows.rows,
+    [{ projectCount: 0, clientCount: 0 }],
+    'pre-commit quota fault rolls back application row and LMID'
+  )
+
+  const afterCommitMutation = mutation(
+    'fault-after-commit-client',
+    1,
+    'project.create',
+    {
+      id: 'fault-after-commit-row',
+      ownerId: 'user-a',
+      name: 'committed before response fault',
+    }
+  )
+  await admin('/admin/fault', {
+    point: 'push_after_commit_before_response',
+    kind: 'error',
+  })
+  faultResponse = await post('/push', afterCommitMutation)
+  equal(faultResponse.status, 500, 'post-commit response fault returns infra error')
+  faultRows = await admin('/admin/sql', {
+    query:
+      "SELECT (SELECT COUNT(*) FROM project WHERE id = 'fault-after-commit-row') AS projectCount, " +
+      "(SELECT CAST(lastMutationID AS TEXT) FROM _zsync_clients WHERE clientID = 'fault-after-commit-client') AS lmid",
+  })
+  equal(
+    faultRows.rows,
+    [{ projectCount: 1, lmid: '1' }],
+    'post-commit response fault preserves durable row and LMID'
+  )
+  faultResponse = await post('/push', afterCommitMutation)
+  equal(faultResponse.status, 200, 'post-commit retry is handled as a replay')
+
+  await admin('/admin/fault', { point: 'pull_during_tx', kind: 'error' })
+  faultResponse = await post('/pull', {
+    clientID: 'fault-pull-during',
+    clientGroupID: 'fault-pull-group-during',
+    cookie: null,
+  })
+  equal(faultResponse.status, 500, 'in-pull transaction fault returns infra error')
+  faultRows = await admin('/admin/sql', {
+    query: "SELECT COUNT(*) AS n FROM _zsync_clients WHERE clientID = 'fault-pull-during'",
+  })
+  equal(faultRows.rows, [{ n: 0 }], 'in-pull fault rolls back client claim')
+
+  await admin('/admin/fault', { point: 'pull_after_commit', kind: 'quota' })
+  faultResponse = await post('/pull', {
+    clientID: 'fault-pull-after',
+    clientGroupID: 'fault-pull-group-after',
+    cookie: null,
+  })
+  equal(faultResponse.status, 507, 'post-pull commit fault returns quota error')
+  faultRows = await admin('/admin/sql', {
+    query: "SELECT COUNT(*) AS n FROM _zsync_clients WHERE clientID = 'fault-pull-after'",
+  })
+  equal(faultRows.rows, [{ n: 1 }], 'post-pull fault preserves committed client claim')
+
   let response = await post(
     '/push',
     mutation('client-a', 1, 'project.create', {

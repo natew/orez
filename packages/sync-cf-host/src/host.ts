@@ -66,6 +66,13 @@ type MutationResult = {
 
 type EngineState = { watermark: string; floor: string };
 type SocketAttachment = { clientID: string };
+type FaultPoint =
+  | "push_before_mutation"
+  | "push_after_write_before_commit"
+  | "push_after_commit_before_response"
+  | "pull_during_tx"
+  | "pull_after_commit";
+type FaultKind = "error" | "quota";
 
 type Counters = {
   pulls: number;
@@ -343,6 +350,22 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       return this.#controlGet("retainChanges") ?? defaultRetainChanges;
     }
 
+    #takeFault(point: FaultPoint): FaultKind | null {
+      if (this.#controlGet("faultPoint") !== point) return null;
+      const kind = this.#controlGet("faultKind");
+      this.#directSql.exec(
+        "DELETE FROM _zsync_host_control WHERE key IN ('faultPoint', 'faultKind')",
+      );
+      return kind === "quota" ? "quota" : "error";
+    }
+
+    #faultError(kind: FaultKind, point: FaultPoint): Error & { status: number } {
+      return requestError(
+        `injected ${kind} fault at ${point}`,
+        kind === "quota" ? 507 : 500,
+      );
+    }
+
     #engineState(): EngineState | null {
       try {
         return this.#wasm(() => engine_state(this.#engineDb)) as EngineState;
@@ -514,8 +537,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         let response: Record<string, unknown>;
         try {
           const txStarted = performance.now();
-          response = this.ctx.storage.transactionSync(() =>
-            this.#wasm(() =>
+          const duringFault = this.#takeFault("pull_during_tx");
+          response = this.ctx.storage.transactionSync(() => {
+            const result = this.#wasm(() =>
               queryAware
                 ? engine_handle_query_pull(
                     this.#engineDb,
@@ -533,12 +557,18 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                     body,
                     claims.userID,
                   ),
-            ),
-          ) as Record<string, unknown>;
+            ) as Record<string, unknown>;
+            if (duringFault)
+              throw this.#faultError(duringFault, "pull_during_tx");
+            return result;
+          });
           transactionMs = performance.now() - txStarted;
         } finally {
           this.#pulling.delete(clientID);
         }
+        const afterPullFault = this.#takeFault("pull_after_commit");
+        if (afterPullFault)
+          throw this.#faultError(afterPullFault, "pull_after_commit");
         const patch = Array.isArray(response.rowsPatch)
           ? response.rowsPatch
           : [];
@@ -638,6 +668,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       }
       try {
         const body = await requestObject(request);
+        const beforeMutationFault = this.#takeFault("push_before_mutation");
+        if (beforeMutationFault)
+          throw this.#faultError(beforeMutationFault, "push_before_mutation");
         const plan = this.#wasm(() => engine_push_validate(body)) as PushPlan;
         if (plan.kind === "respond") return json(plan.response);
 
@@ -671,6 +704,14 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                   deferred.push(effect);
                 },
               });
+              const beforeCommitFault = this.#takeFault(
+                "push_after_write_before_commit",
+              );
+              if (beforeCommitFault)
+                throw this.#faultError(
+                  beforeCommitFault,
+                  "push_after_write_before_commit",
+                );
               this.#wasm(() =>
                 engine_finalize(
                   this.#engineDb,
@@ -750,6 +791,15 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           transactionMs += performance.now() - txStarted;
           this.#counters.retentionRuns++;
         }
+
+        const afterCommitFault = this.#takeFault(
+          "push_after_commit_before_response",
+        );
+        if (afterCommitFault)
+          throw this.#faultError(
+            afterCommitFault,
+            "push_after_commit_before_response",
+          );
 
         const response = this.#wasm(() =>
           engine_assemble_push_response(results),
@@ -900,6 +950,41 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
               return json({ error: "enabled must be a boolean" }, 400);
             this.#controlSet("writerEnabled", enabled ? "1" : "0");
             return json({ ok: true, writerEnabled: enabled });
+          });
+      }
+      if (route === "/admin/fault") {
+        return request
+          .json()
+          .catch(() => ({}))
+          .then((body) => {
+            const value = body as {
+              clear?: unknown;
+              point?: unknown;
+              kind?: unknown;
+            };
+            if (value.clear === true) {
+              this.#directSql.exec(
+                "DELETE FROM _zsync_host_control WHERE key IN ('faultPoint', 'faultKind')",
+              );
+              return json({ ok: true, armed: null });
+            }
+            const points: FaultPoint[] = [
+              "push_before_mutation",
+              "push_after_write_before_commit",
+              "push_after_commit_before_response",
+              "pull_during_tx",
+              "pull_after_commit",
+            ];
+            if (!points.includes(value.point as FaultPoint))
+              return json({ error: "invalid fault point" }, 400);
+            if (value.kind !== "error" && value.kind !== "quota")
+              return json({ error: "invalid fault kind" }, 400);
+            this.#controlSet("faultPoint", value.point as string);
+            this.#controlSet("faultKind", value.kind);
+            return json({
+              ok: true,
+              armed: { point: value.point, kind: value.kind },
+            });
           });
       }
       return json({ error: "not found" }, 404);
