@@ -95,12 +95,20 @@ below the applicable Cloudflare limit.
 
 ```sh
 mise exec node@24.3.0 -- bun harness/src/memory-soak.ts --target rust-cf --blocks 3 --ops 1000
+mise exec node@24.3.0 -- bun harness/src/push-memory-soak.ts --target rust-cf --blocks 3 --ops 3000 --writers 12
 mise exec node@24.3.0 -- bun --cwd packages/sync-cf-host run measure
 ```
 
 The wasm lane uses the host's authenticated byte-count diagnostic and must not
 infer flat linear memory from process RSS or database size. Native allocator/RSS
 soak is tracked separately because it is not a wasm runtime.
+
+The push lane warms the instance with 3,000 chat-shaped `message.send` pushes,
+then runs three measured 3,000-push blocks through 12 writers. It applies the
+same 65,536-byte block-growth and three-block monotonic-growth gates to wasm
+memory, fails on any push or application error, and samples JS heap bytes from
+the authenticated status endpoint when the current workerd exposes
+`performance.memory`.
 
 ### Storage failure, quota, and clock skew
 
@@ -195,3 +203,14 @@ CF suite vs deployed lslcf worker (9/9 PASS, 157.2 s total):
 
 Local workerd `measure` at the same SHA: cold DO p50/p95 5.351/7.829 ms, ack
 p50/p95 1.797/3.127 ms, storage delta 8,192 bytes across 50 pushes.
+
+### 2026-07-10 push-memory addendum
+
+The CF lane list now includes `cf-push-memory`. A local workerd qualification
+completed 12,000 chat-shaped pushes with zero failures and flat wasm samples of
+1,245,184 bytes across the warm block and all three measured blocks. This
+workerd build returns `null` for the optional JS heap fields, so the leak fix was
+also verified with the inspector: V8 heap returned to its roughly 31 MB baseline
+after collection. The full Chat adapter and server-effects path completed
+12,000/12,000 `message.send` pushes after the fix; before it, pushes failed at
+workerd's 10,000-active-timeout limit.

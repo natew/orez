@@ -139,6 +139,21 @@ const cf: Lane[] = [
     ],
   },
   {
+    name: 'cf-push-memory',
+    command: [
+      'bun',
+      'src/push-memory-soak.ts',
+      '--target',
+      'rust-cf',
+      '--blocks',
+      '3',
+      '--ops',
+      quick ? '50' : '3000',
+      '--writers',
+      '12',
+    ],
+  },
+  {
     name: 'cf-rollback-one-writer',
     command: ['bun', 'src/rollback-drill.ts', '--confirm-test-only'],
   },

@@ -171,7 +171,11 @@ try {
     Number.isSafeInteger(queryStatus.wasmMemoryBytes) && queryStatus.wasmMemoryBytes > 0,
     'authenticated status reports wasm linear-memory bytes'
   )
-  assertions += 3
+  assert.ok(
+    queryStatus.heapUsedBytes === null || Number.isSafeInteger(queryStatus.heapUsedBytes),
+    'authenticated status reports js heap bytes when workerd exposes them'
+  )
+  assertions += 4
   const storedTransform = await admin('/admin/sql', {
     query:
       "SELECT transformVersion FROM _zsync_queries WHERE clientGroupID = 'query-group' AND hash = 'tasks-p1-p4'",

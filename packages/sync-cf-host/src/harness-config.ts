@@ -42,6 +42,20 @@ export const harnessSchema = {
       },
       primaryKey: ['id'],
     },
+    message: {
+      columns: {
+        id: { type: 'string' },
+        serverId: { type: 'string' },
+        channelId: { type: 'string' },
+        creatorId: { type: 'string' },
+        content: { type: 'string' },
+        type: { type: 'string' },
+        createdAt: { type: 'number' },
+        order: { type: 'string' },
+        meta: { type: 'json' },
+      },
+      primaryKey: ['id'],
+    },
   },
 } as const satisfies ZeroSchemaConfig
 
@@ -57,6 +71,17 @@ const DDL = [
     done INTEGER NOT NULL,
     meta TEXT,
     "dueAt" INTEGER
+  )`,
+  `CREATE TABLE IF NOT EXISTS message (
+    id TEXT PRIMARY KEY,
+    "serverId" TEXT NOT NULL,
+    "channelId" TEXT NOT NULL,
+    "creatorId" TEXT NOT NULL,
+    content TEXT NOT NULL,
+    type TEXT NOT NULL,
+    "createdAt" INTEGER NOT NULL,
+    "order" TEXT NOT NULL,
+    meta TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS _harness_effects (
     id TEXT PRIMARY KEY,
@@ -242,6 +267,33 @@ const harnessMutators = registerMutators({
     const value = args as { id: string; rank: number }
     await tx.exec('UPDATE task SET rank = ? WHERE id = ?', [value.rank, value.id])
   },
+  async 'message.send'(tx, args) {
+    const value = args as {
+      id: string
+      serverId: string
+      channelId: string
+      creatorId: string
+      content: string
+      type: string
+      createdAt: number
+      order: string
+      meta?: unknown
+    }
+    await tx.exec(
+      'INSERT INTO message (id, "serverId", "channelId", "creatorId", content, type, "createdAt", "order", meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        value.id,
+        value.serverId,
+        value.channelId,
+        value.creatorId,
+        value.content,
+        value.type,
+        value.createdAt,
+        value.order,
+        value.meta == null ? null : JSON.stringify(value.meta),
+      ]
+    )
+  },
   async 'test.effectSuccess'(tx, args, context) {
     const value = args as { id: string; clientID: string; mutationID: number }
     await tx.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
@@ -318,6 +370,11 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
         if (table === 'task')
           return {
             sql: 'EXISTS (SELECT 1 FROM project WHERE project.id = task."projectId" AND (project."ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?)))',
+            params: [user, user],
+          }
+        if (table === 'message')
+          return {
+            sql: 'EXISTS (SELECT 1 FROM project WHERE project.id = message."serverId" AND (project."ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?)))',
             params: [user, user],
           }
         return undefined
