@@ -7,8 +7,12 @@
 
 pub mod ast;
 pub mod compile;
+pub mod membership;
 
 pub use ast::{
     Ast, Condition, CorrelatedSubquery, OrderPart, RightVal, Scalar, SimpleOp, ValueRef, parse_ast,
 };
 pub use compile::{CompiledQuery, compile};
+pub use membership::{
+    init_query_schema, recompute_group, register_query, remove_desire, set_desire,
+};
