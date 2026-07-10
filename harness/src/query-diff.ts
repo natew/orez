@@ -13,10 +13,12 @@ import { queries, queryCorpus } from './fixture.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
+import type { HttpPullObservation } from './observed-fetch.js'
 
 const { values: args } = parseArgs({
   options: { against: { type: 'string', default: 'rust-local' } },
 })
+const cfObservations: HttpPullObservation[] = []
 
 async function startRustTarget(): Promise<SyncTarget> {
   if (args.against === 'rust-local') {
@@ -30,6 +32,7 @@ async function startRustTarget(): Promise<SyncTarget> {
       queryAware: true,
       pullIntervalMs: 300,
       onPull(observation) {
+        cfObservations.push(observation)
         if (observation.status !== 200) {
           console.error('[query-diff] rust-cf pull error', observation)
         }
@@ -135,6 +138,9 @@ try {
 } catch (error) {
   failed = true
   console.error('[query-diff] FAIL:', error)
+  if (args.against === 'rust-cf') {
+    console.error('[query-diff] last rust-cf pulls:', cfObservations.slice(-5))
+  }
 } finally {
   for (const target of targets) await target.close()
 }
