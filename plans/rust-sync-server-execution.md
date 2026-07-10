@@ -66,6 +66,12 @@ propagation (wake-driven, no safety-poll convergence). Native ack p50 1 ms
 (gate <= 3 ms), p95 3 ms; wake propagation p95 12 ms (gate < 100 ms);
 differential vs stock zero-cache websocket push p95 391 ms.
 
+Independent replication on mini-16 (10 cores / 16 GB, 2026-07-09):
+smoke (20 clients, 791 ms), propagation (commit->seen p95 12 ms, no
+safety-poll convergence), storm (100 clients: ack p50/p95 9/23 ms,
+propagation p50/p95 70/84 ms), eviction (SIGKILL, outage 1563 ms, zero
+409s, cookies monotone) — all PASS vs rust-local on a fresh checkout.
+
 M3 production host (orez-rust-sync on lslcf, 2026-07-09 checkpoint):
 bundle 121.58 KiB gzip; startup 1 ms; cold p50/p95 4.792/6.652 ms; ack
 p50/p95 13.951/15.055 ms remote; storage 81,920 -> 90,112 bytes across 50
