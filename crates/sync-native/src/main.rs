@@ -97,7 +97,8 @@ fn parse_args() -> Config {
 }
 
 fn expect_value(args: &mut impl Iterator<Item = String>, flag: &str) -> String {
-    args.next().unwrap_or_else(|| panic!("{flag} needs a value"))
+    args.next()
+        .unwrap_or_else(|| panic!("{flag} needs a value"))
 }
 
 fn boot_id() -> String {
@@ -265,7 +266,11 @@ async fn admin_sql(
     let Ok(value) = serde_json::from_slice::<Value>(&body) else {
         return json_status(400, json!({ "error": "invalid json" }));
     };
-    let Some(query) = value.get("query").and_then(Value::as_str).map(str::to_string) else {
+    let Some(query) = value
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
         return json_status(400, json!({ "error": "missing query" }));
     };
     let namespace = match state.manager.get(&ns) {
@@ -294,10 +299,7 @@ async fn admin_status(State(state): State<Arc<AppState>>, Path(_ns): Path<String
     )
 }
 
-async fn admin_invalidate(
-    State(state): State<Arc<AppState>>,
-    Path(ns): Path<String>,
-) -> Response {
+async fn admin_invalidate(State(state): State<Arc<AppState>>, Path(ns): Path<String>) -> Response {
     let namespace = match state.manager.get(&ns) {
         Ok(n) => n,
         Err(e) => return json_status(400, json!({ "error": e })),

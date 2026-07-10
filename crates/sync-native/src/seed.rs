@@ -25,9 +25,7 @@ impl Rng {
         // t = imul(a ^ (a >>> 15), 1 | a)
         let mut t = (a ^ (((a as u32) >> 15) as i32)).wrapping_mul(1 | a);
         // t = (t + imul(t ^ (t >>> 7), 61 | t)) ^ t
-        t = t
-            .wrapping_add((t ^ (((t as u32) >> 7) as i32)).wrapping_mul(61 | t))
-            ^ t;
+        t = t.wrapping_add((t ^ (((t as u32) >> 7) as i32)).wrapping_mul(61 | t)) ^ t;
         // ((t ^ (t >>> 14)) >>> 0) / 4294967296
         let bits = (t ^ (((t as u32) >> 14) as i32)) as u32;
         (bits as f64) / 4294967296.0
@@ -236,9 +234,7 @@ mod tests {
         let members: Vec<Value> = d
             .members
             .iter()
-            .map(|(id, project, user)| {
-                json!({ "id": id, "projectId": project, "userId": user })
-            })
+            .map(|(id, project, user)| json!({ "id": id, "projectId": project, "userId": user }))
             .collect();
         let tasks: Vec<Value> = d
             .tasks
