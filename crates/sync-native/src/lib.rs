@@ -8,6 +8,7 @@
 
 pub mod db;
 pub mod engine;
+pub mod fault;
 pub mod fixture;
 pub mod namespace;
 pub mod obs;

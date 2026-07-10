@@ -16,7 +16,19 @@ use sync_core::value::ZeroColumnType;
 use sync_core::{DbError, SyncDb};
 
 use crate::db::RusqliteDb;
+use crate::fault::{FaultKind, FaultPoint, FaultRegistry};
 use crate::fixture::{self, ColType};
+
+// the EngineError an Error/Quota fault injects (Kill never reaches here — it exits).
+fn injected_error(kind: FaultKind, point: FaultPoint) -> EngineError {
+    match kind {
+        FaultKind::Quota => EngineError::new(
+            507,
+            format!("storage quota exceeded (injected at {})", point.as_str()),
+        ),
+        _ => EngineError::new(500, format!("injected fault at {}", point.as_str())),
+    }
+}
 
 // process-wide engine configuration shared by every namespace worker.
 pub struct EngineContext {
@@ -129,10 +141,17 @@ pub fn read_watermark(conn: &Connection) -> i64 {
 
 // pull runs inside one host-entered transaction, matching the CF host's
 // transactionSync. commit on Ok, roll back on Err (a 409 undoes the claim).
-pub fn pull(conn: &Connection, ctx: &EngineContext, body: &Value, user_id: &str) -> Observed {
+pub fn pull(
+    conn: &Connection,
+    ctx: &EngineContext,
+    faults: &FaultRegistry,
+    ns: &str,
+    body: &Value,
+    user_id: &str,
+) -> Observed {
     let floor_before = read_floor(conn);
     conn.execute_batch("BEGIN").expect("BEGIN failed");
-    let result = {
+    let mut result = {
         let mut db = RusqliteDb::new(conn);
         if ctx.query_aware {
             // query-aware pull: desired queries in the body drive membership;
@@ -157,7 +176,26 @@ pub fn pull(conn: &Connection, ctx: &EngineContext, body: &Value, user_id: &str)
             )
         }
     };
+    // fault: mid pull transaction, before COMMIT. Kill exits (SIGKILL-shaped, so
+    // the tx never commits); Error/Quota roll back via finish() below.
+    if result.is_ok()
+        && let Some(kind) = faults.take(ns, FaultPoint::PullDuringTx)
+    {
+        match kind {
+            FaultKind::Kill => std::process::exit(137),
+            _ => result = Err(injected_error(kind, FaultPoint::PullDuringTx)),
+        }
+    }
     finish(conn, result.is_ok());
+    // fault: after the pull committed, before the client sees the response.
+    if result.is_ok()
+        && let Some(kind) = faults.take(ns, FaultPoint::PullAfterCommit)
+    {
+        match kind {
+            FaultKind::Kill => std::process::exit(137),
+            _ => result = Err(injected_error(kind, FaultPoint::PullAfterCommit)),
+        }
+    }
     Observed {
         result,
         floor_before,
@@ -169,10 +207,31 @@ pub fn pull(conn: &Connection, ctx: &EngineContext, body: &Value, user_id: &str)
 // push drives the per-mutation tx1/tx2 steps through the Transactor; the CF
 // host runs the same steps around its async JS mutator inside ctx.storage
 // .transaction. row effects + LMID advance commit atomically per mutation.
-pub fn push(conn: &Connection, ctx: &EngineContext, body: &Value, user_id: &str) -> Observed {
+pub fn push(
+    conn: &Connection,
+    ctx: &EngineContext,
+    faults: &FaultRegistry,
+    ns: &str,
+    body: &Value,
+    user_id: &str,
+) -> Observed {
     let floor_before = read_floor(conn);
-    let mut txor = ConnTransactor { conn };
-    let result = handle_push(
+    // fault: before any mutation is applied
+    if let Some(kind) = faults.take(ns, FaultPoint::PushBeforeMutation) {
+        match kind {
+            FaultKind::Kill => std::process::exit(137),
+            _ => {
+                return Observed {
+                    result: Err(injected_error(kind, FaultPoint::PushBeforeMutation)),
+                    floor_before,
+                    floor: floor_before,
+                    watermark: read_watermark(conn),
+                };
+            }
+        }
+    }
+    let mut txor = ConnTransactor { conn, faults, ns };
+    let mut result = handle_push(
         &mut txor,
         &ctx.tables,
         ctx.retain_changes,
@@ -180,6 +239,22 @@ pub fn push(conn: &Connection, ctx: &EngineContext, body: &Value, user_id: &str)
         body,
         user_id,
     );
+    // fault: the push committed durably, before the client sees the ack. Kill
+    // exits after the commit (durability probe); Error/Quota return a failure the
+    // client must reconcile against already-committed state.
+    if result.is_ok()
+        && let Some(kind) = faults.take(ns, FaultPoint::PushAfterCommitBeforeResponse)
+    {
+        match kind {
+            FaultKind::Kill => std::process::exit(137),
+            _ => {
+                result = Err(injected_error(
+                    kind,
+                    FaultPoint::PushAfterCommitBeforeResponse,
+                ))
+            }
+        }
+    }
     Observed {
         result,
         floor_before,
@@ -225,6 +300,8 @@ fn finish(conn: &Connection, ok: bool) {
 // host-owned transaction boundary for the synchronous native push path.
 struct ConnTransactor<'c> {
     conn: &'c Connection,
+    faults: &'c FaultRegistry,
+    ns: &'c str,
 }
 
 impl<'c> Transactor for ConnTransactor<'c> {
@@ -237,6 +314,18 @@ impl<'c> Transactor for ConnTransactor<'c> {
             let mut db = RusqliteDb::new(self.conn);
             body(&mut db)
         };
+        // fault: the mutation's app rows are written, before this per-mutation
+        // COMMIT. Kill-only: exiting here leaves the writes uncommitted in the WAL,
+        // so they are gone on restart (durability probe). the generic tx error type
+        // cannot be forged, so Error/Quota are rejected for this point at arm time.
+        if outcome.is_ok()
+            && self
+                .faults
+                .take(self.ns, FaultPoint::PushAfterWriteBeforeCommit)
+                == Some(FaultKind::Kill)
+        {
+            std::process::exit(137);
+        }
         match outcome {
             Ok(value) => {
                 self.conn.execute_batch("COMMIT").expect("COMMIT failed");
