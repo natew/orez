@@ -506,11 +506,10 @@ pub fn compile_related_of(
         ));
     }
     let ct = quote_ident(&child.table);
-    let primary_key = tables
+    let child_spec = tables
         .get(&child.table)
-        .ok_or_else(|| reject(format!("unknown table '{}'", child.table)))?
-        .primary_key
-        .clone();
+        .ok_or_else(|| reject(format!("unknown table '{}'", child.table)))?;
+    let primary_key = child_spec.primary_key.clone();
 
     // an UNBOUNDED related child is a row SET: a plain correlated join (row order
     // is immaterial, the client re-sorts). params: the parent subquery (in the
@@ -563,16 +562,24 @@ pub fn compile_related_of(
                 .map(|cf| format!("{}.{}", quote_ident(&rc), quote_ident(cf)))
                 .collect();
             let order_terms = c.order_by_terms(child, &rc)?;
-            Some((limit, partition, order_terms))
+            // the ROW_NUMBER rank alias must NOT collide with a real child column,
+            // else `{rc}_w.<alias>` resolves to the application column and the
+            // `<= limit` filter compares the wrong value (GAP-2c). derive one proven
+            // absent from the child's schema.
+            let mut rank_alias = String::from("_zsync_rn");
+            while child_spec.columns.iter().any(|(col, _)| *col == rank_alias) {
+                rank_alias.push('_');
+            }
+            Some((limit, partition, order_terms, rank_alias))
         }
         None => None,
     };
     params.extend(c.params);
 
-    let sql = if let Some((limit, partition, order_terms)) = window {
+    let sql = if let Some((limit, partition, order_terms, rank_alias)) = window {
         // per-parent window: PARTITION BY the correlation child columns, ORDER BY
-        // the child's orderBy + pk tie-breaker, keep rank <= limit. the extra
-        // _zrn column is ignored by the row reader (it reads only schema columns).
+        // the child's orderBy + pk tie-breaker, keep rank <= limit. the extra rank
+        // column is ignored by the row reader (it reads only schema columns).
         let order_sql = if order_terms.is_empty() {
             String::new()
         } else {
@@ -580,8 +587,8 @@ pub fn compile_related_of(
         };
         params.push(SqlValue::Integer(limit));
         format!(
-            "SELECT * FROM (SELECT {rc}.*, ROW_NUMBER() OVER (PARTITION BY {part}{order}) AS _zrn \
-             FROM {ct} AS {rc} WHERE {where_clause}) AS {rc}_w WHERE {rc}_w._zrn <= ?",
+            "SELECT * FROM (SELECT {rc}.*, ROW_NUMBER() OVER (PARTITION BY {part}{order}) AS {rank_alias} \
+             FROM {ct} AS {rc} WHERE {where_clause}) AS {rc}_w WHERE {rc}_w.{rank_alias} <= ?",
             part = partition.join(", "),
             order = order_sql,
         )
