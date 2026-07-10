@@ -23,6 +23,7 @@ use crate::error::EngineError;
 use crate::schema::{TableSpec, Tables};
 use crate::value::{zero_pk_id, zero_row};
 
+use super::compile::compile_related;
 use super::{compile, parse_ast};
 
 fn text(s: impl Into<String>) -> SqlValue {
@@ -250,19 +251,24 @@ fn str_col(v: Option<&SqlValue>) -> Result<String, EngineError> {
     }
 }
 
-fn read_query_row_pks(
+// a query's durable member rows, as (rowTable, rowPk) keys (a query with
+// related output has members in more than one table)
+fn read_query_row_keys(
     db: &mut dyn SyncDb,
     group: &str,
     hash: &str,
-) -> Result<BTreeSet<String>, EngineError> {
+) -> Result<BTreeSet<(String, String)>, EngineError> {
     let rows = db.query(
-        "SELECT rowPk FROM _zsync_query_rows WHERE clientGroupID = ? AND hash = ?",
+        "SELECT rowTable, rowPk FROM _zsync_query_rows WHERE clientGroupID = ? AND hash = ?",
         &[text(group), text(hash)],
     )?;
-    Ok(rows
-        .iter()
-        .filter_map(|r| str_col(r.get("rowPk")).ok())
-        .collect())
+    let mut out = BTreeSet::new();
+    for r in &rows {
+        if let (Ok(t), Ok(pk)) = (str_col(r.get("rowTable")), str_col(r.get("rowPk"))) {
+            out.insert((t, pk));
+        }
+    }
+    Ok(out)
 }
 
 fn read_ref(db: &mut dyn SyncDb, group: &str, table: &str, pk: &str) -> Result<i64, EngineError> {
@@ -316,45 +322,58 @@ pub fn recompute_group(
     // net reference delta per (table, pk), and the live value cache for puts
     let mut ref_delta: BTreeMap<(String, String), i64> = BTreeMap::new();
     let mut values: BTreeMap<(String, String), Value> = BTreeMap::new();
-    let mut pk_objects: BTreeMap<(String, String), Value> = BTreeMap::new();
 
     for q in &queries {
         let spec = tables.get(&q.root_table).ok_or_else(|| {
             EngineError::internal(format!("query root table '{}' missing", q.root_table))
         })?;
         let ast = parse_ast(&q.ast_json)?;
-        let compiled = compile(&ast, tables)?;
-        let live_rows = db.query(&compiled.sql, &compiled.params)?;
 
-        let mut live_pks: BTreeSet<String> = BTreeSet::new();
-        for row in &live_rows {
+        // the query's live members = root rows + related-output child rows, keyed
+        // by (table, pk). collecting into one set lets the diff/refcount logic
+        // treat every member uniformly regardless of which table it came from.
+        let mut live: BTreeSet<(String, String)> = BTreeSet::new();
+
+        let compiled = compile(&ast, tables)?;
+        for row in &db.query(&compiled.sql, &compiled.params)? {
             let pk_obj = raw_pk(spec, row);
             let key = canonical_pk(&pk_obj);
-            live_pks.insert(key.clone());
-            values.insert((q.root_table.clone(), key.clone()), zero_row(spec, row));
-            pk_objects.insert((q.root_table.clone(), key), pk_obj);
+            live.insert((q.root_table.clone(), key.clone()));
+            values.insert((q.root_table.clone(), key), zero_row(spec, row));
         }
 
-        let durable = read_query_row_pks(db, group, &q.hash)?;
-        for pk in live_pks.difference(&durable) {
+        // one level of related output: child rows correlated to the matching
+        // roots. a parent membership change re-runs this join, so child rows
+        // follow their parents even when the child table was untouched.
+        for rel in &ast.related {
+            let cr = compile_related(&ast, rel, tables)?;
+            let child_spec = tables.get(&cr.child_table).ok_or_else(|| {
+                EngineError::internal(format!("related child table '{}' missing", cr.child_table))
+            })?;
+            for row in &db.query(&cr.sql, &cr.params)? {
+                let pk_obj = raw_pk(child_spec, row);
+                let key = canonical_pk(&pk_obj);
+                live.insert((cr.child_table.clone(), key.clone()));
+                values.insert((cr.child_table.clone(), key), zero_row(child_spec, row));
+            }
+        }
+
+        let durable = read_query_row_keys(db, group, &q.hash)?;
+        for key in live.difference(&durable) {
             db.exec(
                 "INSERT OR IGNORE INTO _zsync_query_rows (clientGroupID, hash, rowTable, rowPk)
                  VALUES (?, ?, ?, ?)",
-                &[text(group), text(&q.hash), text(&q.root_table), text(pk)],
+                &[text(group), text(&q.hash), text(&key.0), text(&key.1)],
             )?;
-            *ref_delta
-                .entry((q.root_table.clone(), pk.clone()))
-                .or_insert(0) += 1;
+            *ref_delta.entry(key.clone()).or_insert(0) += 1;
         }
-        for pk in durable.difference(&live_pks) {
+        for key in durable.difference(&live) {
             db.exec(
                 "DELETE FROM _zsync_query_rows
                  WHERE clientGroupID = ? AND hash = ? AND rowTable = ? AND rowPk = ?",
-                &[text(group), text(&q.hash), text(&q.root_table), text(pk)],
+                &[text(group), text(&q.hash), text(&key.0), text(&key.1)],
             )?;
-            *ref_delta
-                .entry((q.root_table.clone(), pk.clone()))
-                .or_insert(0) -= 1;
+            *ref_delta.entry(key.clone()).or_insert(0) -= 1;
         }
     }
 
