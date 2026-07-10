@@ -139,6 +139,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # the sync-core differential test shells out to bun to run the
+      # ts-oracle (crates/sync-core/ts-oracle/run-oracle.ts) against the
+      # reference spec; it is self-contained (bun:sqlite only, no install).
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

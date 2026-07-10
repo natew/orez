@@ -2,7 +2,7 @@
 // zero-cache spawned from node_modules. this is the reference implementation
 // every other target's behavior is compared against.
 import { type ChildProcess, spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -86,6 +86,34 @@ export async function startStockZero(opts?: {
   const zeroPort = opts?.zeroPort ?? base + 4
   const appPort = opts?.appPort ?? base + 12
   const dataDir = mkdtempSync(join(tmpdir(), 'zharness-stock-'))
+
+  // npm packages cannot contain symlinks, so @embedded-postgres/linux-x64
+  // ships only fully-versioned libs (libicuuc.so.60.2) while initdb's loader
+  // wants the soname (libicuuc.so.60); on any linux without a system libicu60
+  // (ubuntu-latest CI) initdb dies at load. recreate the missing soname links
+  // next to the bundled libs before booting.
+  if (process.platform === 'linux') {
+    const resolved = require.resolve('embedded-postgres')
+    const nodeModules = resolved.slice(
+      0,
+      resolved.lastIndexOf('node_modules') + 'node_modules'.length
+    )
+    const libDir = join(
+      nodeModules,
+      '@embedded-postgres',
+      `linux-${process.arch}`,
+      'native',
+      'lib'
+    )
+    if (existsSync(libDir)) {
+      for (const file of readdirSync(libDir)) {
+        const soname = file.match(/^(.+\.so\.\d+)\.[\d.]+$/)?.[1]
+        if (soname && !existsSync(join(libDir, soname))) {
+          symlinkSync(file, join(libDir, soname))
+        }
+      }
+    }
+  }
 
   // embedded-postgres default export is the class
   const { default: EmbeddedPostgres } = await import('embedded-postgres')
