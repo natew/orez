@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers'
+
 import {
   initSync,
   init_probe_schema,
@@ -63,7 +64,7 @@ export class ProbeDurableObject extends DurableObject<Env> {
           (SELECT COUNT(*) FROM ledger) AS ledgerCount,
           (SELECT COUNT(*) FROM outbox) AS outboxCount,
           (SELECT COUNT(*) FROM mutation_log) AS mutationCount,
-          (SELECT COUNT(*) FROM value_probe) AS valueCount`,
+          (SELECT COUNT(*) FROM value_probe) AS valueCount`
       )
       .one()
     return {
@@ -81,13 +82,13 @@ export class ProbeDurableObject extends DurableObject<Env> {
       await scheduler.wait(1)
       this.ctx.storage.sql.exec(
         "UPDATE accounts SET balance = ? WHERE id = 'primary'",
-        balance + 10,
+        balance + 10
       )
       this.ctx.storage.sql.exec(
         'INSERT INTO ledger (account_id, amount, note) VALUES (?, ?, ?)',
         'primary',
         10,
-        'read-then-write',
+        'read-then-write'
       )
       deferred.push({ mutationID: '', kind: 'balance-notification' })
       return
@@ -95,19 +96,19 @@ export class ProbeDurableObject extends DurableObject<Env> {
 
     if (name === 'multi-table') {
       this.ctx.storage.sql.exec(
-        "UPDATE accounts SET balance = balance - 5 WHERE id = 'primary'",
+        "UPDATE accounts SET balance = balance - 5 WHERE id = 'primary'"
       )
       await scheduler.wait(1)
       this.ctx.storage.sql.exec(
         'INSERT INTO ledger (account_id, amount, note) VALUES (?, ?, ?)',
         'primary',
         -5,
-        'multi-table',
+        'multi-table'
       )
       this.ctx.storage.sql.exec(
         'INSERT INTO outbox (topic, payload) VALUES (?, ?)',
         'account.changed',
-        JSON.stringify({ id: 'primary', delta: -5 }),
+        JSON.stringify({ id: 'primary', delta: -5 })
       )
       deferred.push({ mutationID: '', kind: 'outbox-notification' })
       return
@@ -118,14 +119,14 @@ export class ProbeDurableObject extends DurableObject<Env> {
       .one() as { balance: number }
     this.ctx.storage.sql.exec(
       "UPDATE accounts SET balance = ? WHERE id = 'primary'",
-      balance + 777,
+      balance + 777
     )
     await scheduler.wait(1)
     this.ctx.storage.sql.exec(
       'INSERT INTO ledger (account_id, amount, note) VALUES (?, ?, ?)',
       'primary',
       777,
-      'application-error',
+      'application-error'
     )
     deferred.push({ mutationID: '', kind: 'must-not-run' })
     throw new Error('intentional application mutator error')
@@ -161,7 +162,7 @@ export class ProbeDurableObject extends DurableObject<Env> {
           state: this.#state(),
           effectsDeferredButNotRun: deferred.length,
         },
-        409,
+        409
       )
     }
 
@@ -169,9 +170,13 @@ export class ProbeDurableObject extends DurableObject<Env> {
     // resolves. Each effect independently verifies its mutation is durable.
     for (const effect of deferred) {
       effect.mutationID = mutationID
-      const committed = this.ctx.storage.sql
-        .exec('SELECT 1 AS committed FROM mutation_log WHERE mutation_id = ?', mutationID)
-        .toArray().length === 1
+      const committed =
+        this.ctx.storage.sql
+          .exec(
+            'SELECT 1 AS committed FROM mutation_log WHERE mutation_id = ?',
+            mutationID
+          )
+          .toArray().length === 1
       this.#effects.push({ ...effect, observedCommitted: committed })
     }
 
@@ -229,19 +234,22 @@ export class ProbeDurableObject extends DurableObject<Env> {
         await this.ctx.storage.transaction(async () => {
           const expected = push_preflight(this.#db, 'js-exception')
           this.ctx.storage.sql.exec(
-            "UPDATE accounts SET balance = balance + 123 WHERE id = 'primary'",
+            "UPDATE accounts SET balance = balance + 123 WHERE id = 'primary'"
           )
           await scheduler.wait(1)
           this.ctx.storage.sql.exec(
             'INSERT INTO outbox (topic, payload) VALUES (?, ?)',
             'must.rollback',
-            '{}',
+            '{}'
           )
           push_finalize(this.#db, 'js-exception', expected)
           throw new Error('intentional JS exception after finalization')
         })
       } catch (error) {
-        return json({ ok: false, error: String(error), before, after: this.#state() }, 409)
+        return json(
+          { ok: false, error: String(error), before, after: this.#state() },
+          409
+        )
       }
       return json({ error: 'JS exception did not escape transaction' }, 500)
     }
@@ -251,14 +259,19 @@ export class ProbeDurableObject extends DurableObject<Env> {
       try {
         this.ctx.storage.transactionSync(() => rust_panic_after_writes(this.#db))
       } catch (error) {
-        return json({ ok: false, error: String(error), before, after: this.#state() }, 409)
+        return json(
+          { ok: false, error: String(error), before, after: this.#state() },
+          409
+        )
       }
       return json({ error: 'Rust panic did not escape transaction' }, 500)
     }
 
     if (route === '/values') {
       const input = await request.json()
-      const output = this.ctx.storage.transactionSync(() => value_round_trip(this.#db, input))
+      const output = this.ctx.storage.transactionSync(() =>
+        value_round_trip(this.#db, input)
+      )
       return json(output)
     }
 

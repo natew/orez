@@ -73,7 +73,9 @@ function encodeResult(value: unknown): WireValue {
       value: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)),
     }
   }
-  throw new TypeError(`unsupported SqlStorage result: ${Object.prototype.toString.call(value)}`)
+  throw new TypeError(
+    `unsupported SqlStorage result: ${Object.prototype.toString.call(value)}`
+  )
 }
 
 /**
@@ -128,7 +130,7 @@ export class SqlStorageDirect implements SyncSql {
 
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
-    params: readonly unknown[] = [],
+    params: readonly unknown[] = []
   ): Row[] {
     assertHostSql(sql)
     return this.sql.exec(sql, ...params).toArray() as Row[]
@@ -143,7 +145,7 @@ export class SqlStorageDirect implements SyncSql {
 export class SqlStorageMutatorTransaction implements MutatorSql {
   constructor(
     private readonly direct: SqlStorageDirect,
-    private readonly compileQuery: (ast: unknown) => CompiledQuery,
+    private readonly compileQuery: (ast: unknown) => CompiledQuery
   ) {}
 
   async exec(sql: string, params: readonly unknown[] = []): Promise<void> {
@@ -152,13 +154,13 @@ export class SqlStorageMutatorTransaction implements MutatorSql {
 
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
-    params: readonly unknown[] = [],
+    params: readonly unknown[] = []
   ): Promise<Row[]> {
     return this.direct.query<Row>(sql, params)
   }
 
   async queryAst<Row extends Record<string, unknown> = Record<string, unknown>>(
-    ast: unknown,
+    ast: unknown
   ): Promise<Row[]> {
     const compiled = this.compileQuery(ast)
     return this.direct.query<Row>(compiled.sql, compiled.params.map(decodeBinding))

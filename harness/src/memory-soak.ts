@@ -44,7 +44,8 @@ async function queryPatch(operation: Record<string, unknown>) {
     signal: AbortSignal.timeout(5_000),
   })
   const body = (await response.json()) as { cookie?: unknown; error?: string }
-  if (!response.ok) throw new Error(`query churn failed ${response.status}: ${body.error}`)
+  if (!response.ok)
+    throw new Error(`query churn failed ${response.status}: ${body.error}`)
   cookie = body.cookie ?? cookie
 }
 
@@ -86,10 +87,14 @@ try {
 
   const growth = samples.slice(1).map((value, index) => value - samples[index]!)
   if (growth.some((bytes) => bytes > 65_536)) {
-    throw new Error(`wasm memory grew by more than one page in a block: ${growth.join(',')}`)
+    throw new Error(
+      `wasm memory grew by more than one page in a block: ${growth.join(',')}`
+    )
   }
   if (growth.length >= 3 && growth.slice(-3).every((bytes) => bytes > 0)) {
-    throw new Error(`wasm memory increased across three consecutive blocks: ${growth.join(',')}`)
+    throw new Error(
+      `wasm memory increased across three consecutive blocks: ${growth.join(',')}`
+    )
   }
 
   console.log(
@@ -101,7 +106,7 @@ try {
       samples,
       growth,
       pageBudgetBytes: 65_536,
-    }),
+    })
   )
 } finally {
   await target.close()

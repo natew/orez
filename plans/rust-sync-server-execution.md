@@ -9,7 +9,7 @@ Multiple agents work this worktree concurrently. Rules:
 - Own your paths (table below). Do not edit another track's files; if you
   need a change there, message the owner or the coordinator on agentbus.
 - Commit with explicit pathspecs only (`git add <files> && git commit -m
-  "..." -- <files>`). Conventional commits. Never `git add -A`, never
+"..." -- <files>`). Conventional commits. Never `git add -A`, never
   stash, never amend, never reset.
 - `crates/sync-core`'s public API (esp. `db.rs` SyncDb/SqlValue/Row) is
   shared by all tracks. M1 owns it; announce any signature change on
@@ -20,12 +20,12 @@ Multiple agents work this worktree concurrently. Rules:
 
 ## Ownership
 
-| Track | Paths | Owner |
-| --- | --- | --- |
-| M0 platform proof | `crates/sync-wasm`, `packages/sync-cf-host`, `probes/` | sol-m0 |
-| M1 core port | `crates/sync-core` | opus-m1 |
-| M2 native + harness | `crates/sync-native`, `harness/` | opus-m2 |
-| Workspace root, plans | `Cargo.toml`, `plans/` | coordinator |
+| Track                 | Paths                                                  | Owner       |
+| --------------------- | ------------------------------------------------------ | ----------- |
+| M0 platform proof     | `crates/sync-wasm`, `packages/sync-cf-host`, `probes/` | sol-m0      |
+| M1 core port          | `crates/sync-core`                                     | opus-m1     |
+| M2 native + harness   | `crates/sync-native`, `harness/`                       | opus-m2     |
+| Workspace root, plans | `Cargo.toml`, `plans/`                                 | coordinator |
 
 ## Status
 
@@ -44,38 +44,38 @@ Multiple agents work this worktree concurrently. Rules:
       safety-poll convergence, ack/prop within 20% of the TS DO baseline;
       deploy 871a13df, README 4c2a3bc)
 - [~] M4a: soot migration prep (baseline surface) — auth/namespace
-      adapter, DO-local mutator adapter with post-commit outbox, shared
-      visibility fragments (fixed a repeated-`?` param bug in the legacy
-      endpoint), workerd control/project/wake tests, cutover/rollback
-      scripts (not executed). Offline executable comparison green (legacy
-      cursor/snapshot/ack 17 pass, Rust workerd 8 pass). Production cutover
-      remains user-gated.
+  adapter, DO-local mutator adapter with post-commit outbox, shared
+  visibility fragments (fixed a repeated-`?` param bug in the legacy
+  endpoint), workerd control/project/wake tests, cutover/rollback
+  scripts (not executed). Offline executable comparison green (legacy
+  cursor/snapshot/ack 17 pass, Rust workerd 8 pass). Production cutover
+  remains user-gated.
 - [~] M4b: query-aware layer (AST compiler, membership, desired queries).
-      Engine + transport + lifecycle lanes green vs rust-local and rust-cf
-      (v51 AST subset incl. junction EXISTS, nested related, ILIKE folding,
-      empty IN, composite tie-breakers; recomputation narrowing measured
-      12x dependency-intersection and 11x touched-pk; forbidden-row
-      raw-store, overlap retention, permission contraction, reconnect
-      replay, lost-response). A cross-model adversarial review + re-verify
-      (plans/rust-sync-review-findings-2026-07-09.md) fixed 8 defects
-      including two criticals (client raw-AST permission bypass, global
-      query-hash cross-group collision). First reopen round closed:
-      nested per-parent bounds now COMPILE via ROW_NUMBER windowing
-      (a840443, all 22 query-diff shapes green vs rust-local and rust-cf,
-      15b8be8), forward migration (6235344), unknown named query 400
-      (8de39d1), CI cargo test --workspace + sync-cf-host job (d0753a8;
-      immediately caught a latent broken assertion, 8c17d03). The
-      intermittent rust-cf query-diff stall was root-caused to volatile
-      admin knobs in the CF host and fixed with durable
-      _zsync_host_control + a workerd restart regression lane (002def5).
-      SECOND re-verify round (2026-07-10) keeps the gate OPEN: GAP-2a
-      cursor rows discarding implicit PK tie-breaks (400 on valid stock
-      cursors), GAP-2b nullable cursor comparisons hide rows, GAP-2c
-      `_zrn` window-alias collision, GAP-3a migration reset without epoch
-      invalidation (silent staleness), GAP-3b QUERY_SCHEMA_VERSION never
-      read. All five dispatched to opus-m1 with regression-test
-      requirement; reverify agent standing by for the final targeted
-      re-check.
+  Engine + transport + lifecycle lanes green vs rust-local and rust-cf
+  (v51 AST subset incl. junction EXISTS, nested related, ILIKE folding,
+  empty IN, composite tie-breakers; recomputation narrowing measured
+  12x dependency-intersection and 11x touched-pk; forbidden-row
+  raw-store, overlap retention, permission contraction, reconnect
+  replay, lost-response). A cross-model adversarial review + re-verify
+  (plans/rust-sync-review-findings-2026-07-09.md) fixed 8 defects
+  including two criticals (client raw-AST permission bypass, global
+  query-hash cross-group collision). First reopen round closed:
+  nested per-parent bounds now COMPILE via ROW_NUMBER windowing
+  (a840443, all 22 query-diff shapes green vs rust-local and rust-cf,
+  15b8be8), forward migration (6235344), unknown named query 400
+  (8de39d1), CI cargo test --workspace + sync-cf-host job (d0753a8;
+  immediately caught a latent broken assertion, 8c17d03). The
+  intermittent rust-cf query-diff stall was root-caused to volatile
+  admin knobs in the CF host and fixed with durable
+  \_zsync_host_control + a workerd restart regression lane (002def5).
+  SECOND re-verify round (2026-07-10) keeps the gate OPEN: GAP-2a
+  cursor rows discarding implicit PK tie-breaks (400 on valid stock
+  cursors), GAP-2b nullable cursor comparisons hide rows, GAP-2c
+  `_zrn` window-alias collision, GAP-3a migration reset without epoch
+  invalidation (silent staleness), GAP-3b QUERY_SCHEMA_VERSION never
+  read. All five dispatched to opus-m1 with regression-test
+  requirement; reverify agent standing by for the final targeted
+  re-check.
 - [ ] M4c: chat compatibility branch (measurement)
 - [ ] M5/M6 gates: see final plan
 

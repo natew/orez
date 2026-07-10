@@ -40,7 +40,13 @@ function bunSqliteDb(sqlite: Database): SyncDb {
 
 const TABLES: SyncTables = {
   item: {
-    columns: { id: 'string', label: 'string', rank: 'number', done: 'boolean', meta: 'json' },
+    columns: {
+      id: 'string',
+      label: 'string',
+      rank: 'number',
+      done: 'boolean',
+      meta: 'json',
+    },
     primaryKey: ['id'],
   },
 }
@@ -52,7 +58,13 @@ function mutate(tx: SyncDb, name: string, args: unknown, _ctx: { userID: string 
       `INSERT INTO item (id, label, rank, done, meta) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET label = excluded.label, rank = excluded.rank,
        done = excluded.done, meta = excluded.meta`,
-      [a.id, a.label, a.rank, a.done ? 1 : 0, a.meta === null ? null : JSON.stringify(a.meta)]
+      [
+        a.id,
+        a.label,
+        a.rank,
+        a.done ? 1 : 0,
+        a.meta === null ? null : JSON.stringify(a.meta),
+      ]
     )
     return
   }
@@ -92,7 +104,8 @@ for (const op of trace) {
     case 'reject': {
       const client = op.client as string
       const id = (nextId[client] = (nextId[client] ?? 0) + 1)
-      const name = op.op === 'put' ? 'item.put' : op.op === 'del' ? 'item.del' : 'item.reject'
+      const name =
+        op.op === 'put' ? 'item.put' : op.op === 'del' ? 'item.del' : 'item.reject'
       const args =
         op.op === 'put'
           ? { id: op.item, label: op.label, rank: op.rank, done: op.done, meta: op.meta }
@@ -102,7 +115,9 @@ for (const op of trace) {
       sync.handlePush(
         {
           clientGroupID: 'g1',
-          mutations: [{ type: 'custom', id, clientID: client, name, args: [args], timestamp: 0 }],
+          mutations: [
+            { type: 'custom', id, clientID: client, name, args: [args], timestamp: 0 },
+          ],
           pushVersion: 1,
           requestID: 'r',
         },
@@ -119,7 +134,10 @@ for (const op of trace) {
     case 'pull': {
       const client = op.client as string
       const cookie = cookies[client] ?? null
-      const resp = sync.handlePull({ clientID: client, clientGroupID: 'g1', cookie }, 'u1') as {
+      const resp = sync.handlePull(
+        { clientID: client, clientGroupID: 'g1', cookie },
+        'u1'
+      ) as {
         cookie: number
       }
       cookies[client] = resp.cookie

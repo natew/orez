@@ -23,7 +23,7 @@ const server = Bun.spawn(
     cwd: new URL('.', import.meta.url).pathname,
     stdout: 'ignore',
     stderr: 'inherit',
-  },
+  }
 )
 const baseURL = `http://127.0.0.1:${port}`
 
@@ -49,7 +49,12 @@ function workerdRssKiB() {
     .map((line) => {
       const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/)
       return match
-        ? { pid: Number(match[1]), ppid: Number(match[2]), rss: Number(match[3]), command: match[4] }
+        ? {
+            pid: Number(match[1]),
+            ppid: Number(match[2]),
+            rss: Number(match[3]),
+            command: match[4],
+          }
         : null
     })
     .filter(Boolean)
@@ -58,7 +63,9 @@ function workerdRssKiB() {
     for (const row of rows) if (descendants.has(row.ppid)) descendants.add(row.pid)
   }
   return rows
-    .filter((row) => descendants.has(row.pid) && /(^|[/\s])workerd(?:\s|$)/.test(row.command))
+    .filter(
+      (row) => descendants.has(row.pid) && /(^|[/\s])workerd(?:\s|$)/.test(row.command)
+    )
     .reduce((total, row) => total + row.rss, 0)
 }
 
@@ -73,7 +80,8 @@ const request = async (namespace, route, body, admin = false) => {
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  if (!response.ok) throw new Error(`${route}: ${response.status} ${await response.text()}`)
+  if (!response.ok)
+    throw new Error(`${route}: ${response.status} ${await response.text()}`)
   return response.json()
 }
 
@@ -139,7 +147,8 @@ try {
         storage: {
           seededBytes: statusAfterSeed.databaseSizeBytes,
           afterFiftyPushesBytes: statusAfterLoad.databaseSizeBytes,
-          deltaBytes: statusAfterLoad.databaseSizeBytes - statusAfterSeed.databaseSizeBytes,
+          deltaBytes:
+            statusAfterLoad.databaseSizeBytes - statusAfterSeed.databaseSizeBytes,
         },
         memory: {
           note: 'resident set of the local workerd child process; isolate memory is not separately exposed',
@@ -150,8 +159,8 @@ try {
         },
       },
       null,
-      2,
-    ),
+      2
+    )
   )
 } finally {
   server.kill()

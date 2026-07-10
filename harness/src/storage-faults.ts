@@ -96,7 +96,7 @@ async function pull(clientID: string) {
 async function counts(rowID: string, clientID: string) {
   const rows = await target.oracle(
     `SELECT (SELECT COUNT(*) FROM project WHERE id = '${rowID}') AS projectCount, ` +
-      `(SELECT COUNT(*) FROM _zsync_clients WHERE clientID = '${clientID}') AS clientCount`,
+      `(SELECT COUNT(*) FROM _zsync_clients WHERE clientID = '${clientID}') AS clientCount`
   )
   return {
     project: Number(rows[0]?.projectCount),
@@ -192,7 +192,7 @@ try {
       target: args.target,
       points: 5,
       nativeKillDurability: !cf,
-    }),
+    })
   )
 } finally {
   await target.close()

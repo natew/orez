@@ -65,7 +65,7 @@ const unknown = await fetch(`${origin}/pull`, {
 const unknownBody = (await unknown.json()) as { error?: string }
 if (unknown.status !== 400 || !unknownBody.error?.includes('unknown or unsupported')) {
   throw new Error(
-    `unknown named query was not rejected as malformed: ${unknown.status} ${JSON.stringify(unknownBody)}`,
+    `unknown named query was not rejected as malformed: ${unknown.status} ${JSON.stringify(unknownBody)}`
   )
 }
 console.log('[query-security] PASS rust-cf: unknown named query rejected with 400')

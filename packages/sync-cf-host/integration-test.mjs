@@ -311,16 +311,11 @@ try {
     'pre-commit quota fault rolls back application row and LMID'
   )
 
-  const afterCommitMutation = mutation(
-    'fault-after-commit-client',
-    1,
-    'project.create',
-    {
-      id: 'fault-after-commit-row',
-      ownerId: 'user-a',
-      name: 'committed before response fault',
-    }
-  )
+  const afterCommitMutation = mutation('fault-after-commit-client', 1, 'project.create', {
+    id: 'fault-after-commit-row',
+    ownerId: 'user-a',
+    name: 'committed before response fault',
+  })
   await admin('/admin/fault', {
     point: 'push_after_commit_before_response',
     kind: 'error',
@@ -348,7 +343,8 @@ try {
   })
   equal(faultResponse.status, 500, 'in-pull transaction fault returns infra error')
   faultRows = await admin('/admin/sql', {
-    query: "SELECT COUNT(*) AS n FROM _zsync_clients WHERE clientID = 'fault-pull-during'",
+    query:
+      "SELECT COUNT(*) AS n FROM _zsync_clients WHERE clientID = 'fault-pull-during'",
   })
   equal(faultRows.rows, [{ n: 0 }], 'in-pull fault rolls back client claim')
 
