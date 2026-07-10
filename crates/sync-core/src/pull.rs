@@ -73,12 +73,15 @@ pub fn handle_pull(
     body: &Value,
     user_id: &str,
 ) -> Result<Value, EngineError> {
-    // validate the pull body (matches the reference core's validatePullBody)
+    // validate the pull body (matches the reference core's validatePullBody):
+    // clientID/clientGroupID are strings and the cookie field is PRESENT and is
+    // null or a valid counter. a missing cookie (undefined) is malformed.
     let client_id = body.get("clientID").and_then(Value::as_str);
     let group = body.get("clientGroupID").and_then(Value::as_str);
+    let cookie_present = body.get("cookie").is_some();
     let cookie = wire::parse_cookie(body.get("cookie"));
     let (client_id, group, cookie) = match (client_id, group, cookie) {
-        (Some(c), Some(g), Ok(cookie)) => (c, g, cookie),
+        (Some(c), Some(g), Ok(cookie)) if cookie_present => (c, g, cookie),
         _ => return Err(EngineError::bad_request("invalid pull body")),
     };
 
