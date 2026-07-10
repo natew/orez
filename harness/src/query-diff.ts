@@ -29,6 +29,11 @@ async function startRustTarget(): Promise<SyncTarget> {
     return (await import('./targets/rust-cf.js')).startRustCf({
       queryAware: true,
       pullIntervalMs: 300,
+      onPull(observation) {
+        if (observation.status !== 200) {
+          console.error('[query-diff] rust-cf pull error', observation)
+        }
+      },
     })
   }
   throw new Error(`query-diff --against must be rust-local or rust-cf`)
