@@ -7,9 +7,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use sync_core::{DbError, Row, SqlValue, SyncDb};
-use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 extern "C" {
