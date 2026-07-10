@@ -47,6 +47,10 @@ const native: Lane[] = [
     name: 'native-clock-skew',
     command: ['bun', 'src/clock-skew.ts', '--target', 'rust-local', '--clock-skew-hours', '24'],
   },
+  {
+    name: 'native-storage-faults',
+    command: ['bun', 'src/storage-faults.ts', '--target', 'rust-local'],
+  },
 ]
 
 const cf: Lane[] = [
@@ -80,6 +84,10 @@ const cf: Lane[] = [
   {
     name: 'cf-clock-skew',
     command: ['bun', 'src/clock-skew.ts', '--target', 'rust-cf', '--clock-skew-hours', '24'],
+  },
+  {
+    name: 'cf-storage-faults',
+    command: ['bun', 'src/storage-faults.ts', '--target', 'rust-cf'],
   },
   {
     name: 'cf-wasm-memory',

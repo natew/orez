@@ -108,13 +108,17 @@ increasing invariant failures. Application timestamp tests cover ±24 hours of
 skew and never use the skewed client clock for sync ordering.
 
 ```sh
+mise exec node@24.3.0 -- bun harness/src/storage-faults.ts --target rust-local
+mise exec node@24.3.0 -- bun harness/src/storage-faults.ts --target rust-cf
 mise exec node@24.3.0 -- bun harness/src/clock-skew.ts --target rust-local --clock-skew-hours 24
 mise exec node@24.3.0 -- bun harness/src/clock-skew.ts --target rust-cf --clock-skew-hours 24
 ```
 
-The precise storage/quota failure runner remains pending the harness-only fault
-hooks listed in the eviction section. Do not substitute a lost HTTP response
-for an injected storage failure.
+Native uses SIGKILL-shaped faults to prove the pre-commit row is absent after
+restart and the post-commit row survives. Cloudflare injects transaction errors
+and quota responses at the equivalent boundaries; real process/instance loss is
+covered by the persistent-workerd restart and DO eviction lanes. A lost HTTP
+response is not treated as a storage failure.
 
 ### Backup, restore, canary, and rollback
 
