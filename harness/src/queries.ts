@@ -45,7 +45,7 @@ async function startTarget(): Promise<SyncTarget> {
     return (await import('./targets/rust-cf.js')).startRustCf({
       queryAware: true,
       pullIntervalMs: 300,
-    } as never)
+    })
   }
   throw new Error(
     `queries --against must be rust-local or rust-cf (got '${args.against}')`
