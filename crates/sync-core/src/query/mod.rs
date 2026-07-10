@@ -11,7 +11,8 @@ pub mod membership;
 pub mod qpull;
 
 pub use ast::{
-    Ast, Condition, CorrelatedSubquery, OrderPart, RightVal, Scalar, SimpleOp, ValueRef, parse_ast,
+    Ast, Condition, CorrelatedSubquery, OrderPart, RightVal, Scalar, SimpleOp, ValueRef,
+    collect_dependency_tables, parse_ast,
 };
 pub use compile::{CompiledQuery, compile};
 pub use membership::{

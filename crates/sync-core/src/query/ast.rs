@@ -134,6 +134,33 @@ pub struct CorrelatedSubquery {
     pub hidden: bool,
 }
 
+// every table a query's RESULT depends on: its root table, the tables of its
+// correlated EXISTS subqueries (a permission flip on one changes membership),
+// and its related-output subqueries (a child row appearing/leaving), all walked
+// recursively. recomputation narrowing (plan algorithm step 2) recomputes a
+// query only when the touched tables intersect this set.
+pub fn collect_dependency_tables(ast: &Ast, out: &mut std::collections::BTreeSet<String>) {
+    out.insert(ast.table.clone());
+    if let Some(cond) = &ast.where_ {
+        collect_condition_tables(cond, out);
+    }
+    for rel in &ast.related {
+        collect_dependency_tables(&rel.subquery, out);
+    }
+}
+
+fn collect_condition_tables(cond: &Condition, out: &mut std::collections::BTreeSet<String>) {
+    match cond {
+        Condition::Simple { .. } => {}
+        Condition::And(conds) | Condition::Or(conds) => {
+            for c in conds {
+                collect_condition_tables(c, out);
+            }
+        }
+        Condition::Exists { related, .. } => collect_dependency_tables(&related.subquery, out),
+    }
+}
+
 fn reject(msg: impl Into<String>) -> EngineError {
     EngineError::bad_request(msg)
 }
