@@ -63,6 +63,23 @@ Multiple agents work this worktree concurrently. Rules:
   domain break itself and must ride the user-gated cutover, not prep.
   Branch caveat: requires an orez dist overlay (mount not on npm) until
   a release is approved.
+  DEPLOYED CONFORMANCE CLOSED 2026-07-10: soot's OWN composition
+  (createSyncWorker(sootConfig)) deployed as a test worker on lslcf
+  (soot-rust-sync-prep, version 6579f13a, 278 KiB gzip, 29 ms start; the
+  lslcf account, never soot's) and the new committed harness lane
+  soot-deployed-conformance (dc69387) passed 20/20 against it:
+  control-plane own-row visibility + cross-user write denial, project
+  plane attachCommand/projectAddon visibility, cross-table mutators
+  (snapshot + message.sendMainBean), app-error and access-deny paths,
+  and immediate wake propagation with pusher excluded. The generic
+  fixture drill lanes cannot target soot's composition (different auth
+  header, mutator registry, and schema — curl-confirmed); host-level
+  eviction/retention/replay mechanics are covered by the M6 lanes on the
+  identical host code, with soot-specific semantics + wake re-proven by
+  the deployed lane. One pre-existing soot-side stale unit assertion
+  noted ({sql:'FALSE'} vs {sql:'0'}, both deny predicates; runtime
+  verified). What remains for M4a is exactly the user-gated production
+  canary/cutover.
 - [x] M4b: query-aware layer (AST compiler, membership, desired queries).
       GATE CLOSED 2026-07-10 (cross-model reviewer APPROVED at e306bda).
       Engine + transport + lifecycle lanes green vs rust-local and rust-cf
