@@ -180,10 +180,10 @@ jobs:
         with:
           bun-version: latest
 
-      # zero-cache (spawned as `node`) needs Node 22/24; zero-sqlite3 rejects 25
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+      # no explicit node setup: the runner's default node is what the existing
+      # `harness` job boots stock-zero under, and zero-sqlite3's native binding
+      # is built for that ABI. pinning a different node risks a prebuild ABI
+      # mismatch (NODE_MODULE_VERSION), so mirror the harness job's environment.
 
       - uses: dtolnay/rust-toolchain@stable
 
