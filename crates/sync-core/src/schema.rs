@@ -80,12 +80,21 @@ impl Tables {
             .ok_or_else(|| "schema.tables must be an object".to_string())?;
         let mut tables = Tables::new();
         for (name, table) in tables_obj {
+            // the consumer schema is trusted, but a malformed or hostile name
+            // reaches trigger DDL, so reject anything that is not a plain SQL
+            // identifier at ingest (defense in depth alongside quote_ident).
+            if !is_valid_identifier(name) {
+                return Err(format!("table name '{name}' is not a valid identifier"));
+            }
             let columns_obj = table
                 .get("columns")
                 .and_then(|c| c.as_object())
                 .ok_or_else(|| format!("table '{name}'.columns must be an object"))?;
             let mut columns = Vec::new();
             for (col, spec) in columns_obj {
+                if !is_valid_identifier(col) {
+                    return Err(format!("column '{name}.{col}' is not a valid identifier"));
+                }
                 let ty = spec
                     .get("type")
                     .and_then(|t| t.as_str())
@@ -98,9 +107,15 @@ impl Tables {
                 .ok_or_else(|| format!("table '{name}'.primaryKey must be an array"))?
                 .iter()
                 .map(|v| {
-                    v.as_str()
-                        .map(str::to_string)
-                        .ok_or_else(|| format!("table '{name}'.primaryKey entries must be strings"))
+                    let col = v.as_str().map(str::to_string).ok_or_else(|| {
+                        format!("table '{name}'.primaryKey entries must be strings")
+                    })?;
+                    if !is_valid_identifier(&col) {
+                        return Err(format!(
+                            "table '{name}'.primaryKey entry '{col}' is not a valid identifier"
+                        ));
+                    }
+                    Ok(col)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             tables.push(
@@ -120,6 +135,19 @@ impl Tables {
 // reserved words and mixed-case identifiers correct.
 pub(crate) fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+// a plain SQL identifier: non-empty, starts with a letter or underscore, then
+// letters/digits/underscores. every real Zero schema name (camelCase tables and
+// columns) satisfies this; anything else (embedded quotes, whitespace, dots) is
+// rejected at schema ingest so an injection-shaped name never reaches DDL.
+fn is_valid_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 // SQLite string literal quoting for the trigger bodies (single quotes).
@@ -201,21 +229,29 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
     for (table, spec) in tables.iter() {
         let tq = quote_ident(table);
         let tl = quote_str(table);
+        // the trigger NAME embeds the table name, so it must be quoted/escaped
+        // just like the target identifier — a raw interpolation lets a table
+        // named `x" AFTER INSERT ON "victim" ...` break out of the quoted name
+        // and install an injected trigger (from_zero_schema also rejects such
+        // names, but the quoting is the actual barrier for any Tables source).
+        let tr_i = quote_ident(&format!("_zsync_tr_{table}_i"));
+        let tr_u = quote_ident(&format!("_zsync_tr_{table}_u"));
+        let tr_d = quote_ident(&format!("_zsync_tr_{table}_d"));
         let new_pk = pk_object(spec, "NEW");
         let old_pk = pk_object(spec, "OLD");
         out.push(format!(
-            "CREATE TRIGGER IF NOT EXISTS \"_zsync_tr_{table}_i\" AFTER INSERT ON {tq} BEGIN
+            "CREATE TRIGGER IF NOT EXISTS {tr_i} AFTER INSERT ON {tq} BEGIN
                 INSERT INTO _zsync_changes (tableName, op, pk) VALUES ({tl}, 'row', {new_pk});
             END"
         ));
         out.push(format!(
-            "CREATE TRIGGER IF NOT EXISTS \"_zsync_tr_{table}_u\" AFTER UPDATE ON {tq} BEGIN
+            "CREATE TRIGGER IF NOT EXISTS {tr_u} AFTER UPDATE ON {tq} BEGIN
                 INSERT INTO _zsync_changes (tableName, op, pk) VALUES ({tl}, 'row', {old_pk});
                 INSERT INTO _zsync_changes (tableName, op, pk) VALUES ({tl}, 'row', {new_pk});
             END"
         ));
         out.push(format!(
-            "CREATE TRIGGER IF NOT EXISTS \"_zsync_tr_{table}_d\" AFTER DELETE ON {tq} BEGIN
+            "CREATE TRIGGER IF NOT EXISTS {tr_d} AFTER DELETE ON {tq} BEGIN
                 INSERT INTO _zsync_changes (tableName, op, pk) VALUES ({tl}, 'row', {old_pk});
             END"
         ));
