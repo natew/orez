@@ -176,6 +176,13 @@ related to the Rust hosts):
   zero port can accept briefly and then drop during the replica resync;
   the after-reset reconnect window was widened 30s -> 120s within the
   360s describe budget (9f054a9, failed runs 29085214517 + 29086848167).
+  Deeper root cause fixed in 2bfb3fc: the initial sync after a reset can
+  transiently abort the change-streamer's schema-sync transaction (25P02
+  cascade), and because the crash watcher ignores exits while
+  resetInProgress, one bad boot left zero-cache down permanently. The
+  reset path now retries the start up to 3 times (kill half-booted
+  instance + clean partial replica between attempts). Green at 2bfb3fc:
+  run 29088122120.
 - `harness` `randomized sweep`: see below.
 
 ROOT-CAUSED AND FIXED 2026-07-10: the intermittent `harness`
