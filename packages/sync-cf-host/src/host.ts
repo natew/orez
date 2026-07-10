@@ -656,6 +656,11 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           const deferred: DeferredEffect[] = []
           try {
             const txStarted = performance.now()
+            // consume the before-commit fault OUTSIDE the transaction it is
+            // about to abort: taken inside, the control-table delete rolls
+            // back with the abort and the fault re-fires on every retry
+            // instead of being one-shot.
+            const beforeCommitFault = this.#takeFault('push_after_write_before_commit')
             const preflight = await this.ctx.storage.transaction(async () => {
               // Storage transactions may retry their closure. Never carry a
               // deferred effect from an abandoned attempt into the commit.
@@ -680,7 +685,6 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                   deferred.push(effect)
                 },
               })
-              const beforeCommitFault = this.#takeFault('push_after_write_before_commit')
               if (beforeCommitFault)
                 throw this.#faultError(
                   beforeCommitFault,
