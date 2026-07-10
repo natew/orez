@@ -297,3 +297,62 @@ fn nested_related_of_related_includes_grandchildren() {
         ]
     );
 }
+
+// GAP-2: a related child with a per-parent orderBy+limit is windowed PER PARENT,
+// not widened to every child. `issue related comment (orderBy id desc, limit 1)`
+// -> each issue keeps only its single newest comment.
+fn issues_with_newest_comment() -> Value {
+    json!({
+        "table": "issue",
+        "related": [{
+            "correlation": { "parentField": ["id"], "childField": ["issueId"] },
+            "subquery": { "table": "comment", "orderBy": [["id", "desc"]], "limit": 1 }
+        }]
+    })
+}
+
+#[test]
+fn windowed_related_output_keeps_top_n_per_parent() {
+    let mut h = Host::new();
+    register_query(
+        &mut h.db,
+        &schema(),
+        G,
+        "q",
+        &issues_with_newest_comment(),
+        0,
+    )
+    .unwrap();
+    set_desire(&mut h.db, G, "cl", "q", 1).unwrap();
+    // i1 has c1,c2 -> top-1 by id desc = c2 (c1 is NOT synced); i2 has only c3.
+    assert_eq!(
+        puts(&h.recompute(&[])),
+        vec!["comment:c2", "comment:c3", "issue:i1", "issue:i2"]
+    );
+}
+
+#[test]
+fn windowed_related_output_shifts_incrementally() {
+    let mut h = Host::new();
+    register_query(
+        &mut h.db,
+        &schema(),
+        G,
+        "q",
+        &issues_with_newest_comment(),
+        0,
+    )
+    .unwrap();
+    set_desire(&mut h.db, G, "cl", "q", 1).unwrap();
+    assert_eq!(
+        puts(&h.recompute(&[])),
+        vec!["comment:c2", "comment:c3", "issue:i1", "issue:i2"]
+    );
+
+    // a newer comment on i1 shifts its window: c4 enters, the old top (c2) leaves.
+    // the incremental recompute must equal a fresh evaluation.
+    h.exec("INSERT INTO comment VALUES ('c4','i1','d')");
+    let patch = h.recompute(&[("comment", "c4")]);
+    assert_eq!(puts(&patch), vec!["comment:c4"]);
+    assert_eq!(dels(&patch), vec!["comment:c2"]);
+}
