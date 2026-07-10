@@ -33,7 +33,7 @@ Multiple agents work this worktree concurrently. Rules:
 - [x] M0: platform contract proof (workerd DO host, transactionSync +
       async-tx probes, real-shape mutators, value round trips, rollback,
       eviction, size/latency measurements)
-- [ ] M1: sync-core port of the reference cursor spec (19 delta tests,
+- [x] M1: sync-core port of the reference cursor spec (19 delta tests,
       soot 13-test composition semantics, model tests, trace differential)
 - [ ] M2: sync-native axum host + harness `rust-local` target + admin
       routes + wake channel + CI lanes
@@ -45,3 +45,26 @@ Multiple agents work this worktree concurrently. Rules:
 - [ ] M5/M6 gates: see final plan
 
 Keep this checklist current when a track lands its exit gate.
+
+## Recorded measurements
+
+M0 (workerd + deployed lslcf probe, 2026-07-09): wasm bundle 83.41 KiB
+gzip (97.3% below the 3 MiB limit); deployed startup 1 ms; local cold DO
+p50/p95 2.059/2.624 ms; async tx p50/p95 3/3 ms. Counter wire decision:
+i64 internal, decimal strings at the wasm/JS boundary, JSON numbers on the
+HTTP wire (byte-compat with the vendored transport).
+
+M2 native lanes vs `rust-local` (all required lanes green, 2026-07-09):
+smoke, shapes (22-query differential vs stock-zero, 0 divergences), sweep
+(seed 1623147715, 12 rounds), permissions, reconnect, multi-tab, eviction
+(SIGKILL, cookies monotone, zero 409s), storm (20 clients), bench,
+propagation (wake-driven, no safety-poll convergence). Native ack p50 1 ms
+(gate <= 3 ms), p95 3 ms; wake propagation p95 12 ms (gate < 100 ms);
+differential vs stock zero-cache websocket push p95 391 ms.
+
+M3 production host (orez-rust-sync on lslcf, 2026-07-09 checkpoint):
+bundle 121.58 KiB gzip; startup 1 ms; cold p50/p95 4.792/6.652 ms; ack
+p50/p95 13.951/15.055 ms remote; storage 81,920 -> 90,112 bytes across 50
+pushes; hibernating wake sockets + teardown probes green; deployed
+integration 16/16. Full lane matrix vs `rust-cf` pending target
+registration.
