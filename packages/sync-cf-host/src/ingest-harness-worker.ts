@@ -23,6 +23,7 @@ const schema = {
 type Fetcher = { fetch(input: string | Request, init?: RequestInit): Promise<Response> }
 interface Env extends SyncHostEnv {
   DATA: Fetcher
+  APP: Fetcher
   UPSTREAM_DO: DurableObjectNamespace
 }
 
@@ -30,6 +31,7 @@ const config: SyncHostConfig<Env> = {
   hostVersion: 'upstream-ingest-harness',
   schema,
   mutateUrl: '/api/zero/push',
+  mutateBinding: 'APP',
   upstream: {
     binding: 'DATA',
     namespacePath: (namespace) => `/${namespace}`,
@@ -81,8 +83,21 @@ async function upstreamFetch(request: Request, env: Env): Promise<Response> {
 }
 
 /** Self service-binding target backed by the real ZeroSqlDO. */
-export class UpstreamService extends WorkerEntrypoint<Env> {
+export class DataService extends WorkerEntrypoint<Env> {
   fetch(request: Request): Promise<Response> {
+    const pathname = new URL(request.url).pathname
+    if (!pathname.endsWith('/changes') && !pathname.endsWith('/snapshot')) {
+      return Promise.resolve(new Response('DATA route rejected non-feed request', { status: 418 }))
+    }
+    return upstreamFetch(request, this.env)
+  }
+}
+
+export class AppService extends WorkerEntrypoint<Env> {
+  fetch(request: Request): Promise<Response> {
+    if (!new URL(request.url).pathname.endsWith('/api/zero/push')) {
+      return Promise.resolve(new Response('APP route rejected non-push request', { status: 418 }))
+    }
     return upstreamFetch(request, this.env)
   }
 }

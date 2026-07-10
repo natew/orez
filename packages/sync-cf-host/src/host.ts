@@ -410,8 +410,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       }
     }
 
-    #serviceBinding(): { fetch(input: string | Request, init?: RequestInit): Promise<Response> } {
-      const name = config.upstream?.binding
+    #serviceBinding(
+      name = config.upstream?.binding
+    ): { fetch(input: string | Request, init?: RequestInit): Promise<Response> } {
       const value = name
         ? (this.env as unknown as Record<string, unknown>)[name]
         : undefined
@@ -796,7 +797,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           headers.delete(NAMESPACE_HEADER)
           headers.delete(UPSTREAM_PATH_HEADER)
           headers.set('host', endpoint.host)
-          const upstreamResponse = await this.#serviceBinding().fetch(endpoint.toString(), {
+          const upstreamResponse = await this.#serviceBinding(
+            config.mutateBinding ?? config.upstream?.binding
+          ).fetch(endpoint.toString(), {
             method: 'POST',
             headers,
             body: bytes,

@@ -18,6 +18,12 @@ export function validateSyncHostConfig<Env extends SyncHostEnv>(
   if (hasDelegate && !config.upstream) {
     throw new TypeError('sync host config mutateUrl requires upstream')
   }
+  if (config.mutateBinding !== undefined && !hasDelegate) {
+    throw new TypeError('sync host config mutateBinding requires mutateUrl')
+  }
+  if (config.mutateBinding !== undefined && !config.mutateBinding) {
+    throw new TypeError('sync host config mutateBinding must not be empty')
+  }
   if (hasMutators && config.upstream) {
     throw new TypeError('sync host config cannot combine local mutators with upstream ingest')
   }

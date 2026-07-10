@@ -43,6 +43,20 @@ describe('mutation mode', () => {
     ).not.toThrow()
   })
 
+  test('mutateBinding is static and only valid for delegated pushes', () => {
+    expect(() =>
+      validateSyncHostConfig({ ...base, mutators: {}, mutateBinding: 'APP' })
+    ).toThrow('requires mutateUrl')
+    expect(() =>
+      validateSyncHostConfig({
+        ...base,
+        mutateUrl: '/push',
+        mutateBinding: 'APP',
+        upstream: { binding: 'DATA', namespacePath: '/data' },
+      })
+    ).not.toThrow()
+  })
+
   test('forbids local mutators plus upstream ingest', () => {
     expect(() =>
       validateSyncHostConfig({

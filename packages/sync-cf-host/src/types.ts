@@ -124,6 +124,8 @@ export type SyncHostConfig<Env extends SyncHostEnv = SyncHostEnv> = {
   mutators?: MutatorRegistry
   /** Relative app push endpoint on the upstream service binding. */
   mutateUrl?: string
+  /** Env binding for delegated pushes; defaults to upstream.binding. */
+  mutateBinding?: string
   /** Required for delegated push; forbidden with local mutators (no dual apply). */
   upstream?: UpstreamConfig
   /** Application DDL and optional seed, called before sync-core schema init. */

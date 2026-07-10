@@ -13,7 +13,12 @@ class_name = "ZeroDO"
 [[services]]
 binding = "DATA"
 service = "orez-rust-sync-ingest-harness"
-entrypoint = "UpstreamService"
+entrypoint = "DataService"
+
+[[services]]
+binding = "APP"
+service = "orez-rust-sync-ingest-harness"
+entrypoint = "AppService"
 
 [[migrations]]
 tag = "v1"
