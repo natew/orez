@@ -21,6 +21,8 @@ bun src/shapes.ts --against orez-cf                # same differential vs the CF
 bun src/sweep.ts --rounds 15                       # seeded randomized differential (prints seed)
 bun src/sweep.ts --seed 12345 --against orez-cf    # deterministic replay / CF host
 bun src/bench.ts --target orez-local --clients 20 --writers 5 --rate 10 --duration 15
+bun src/storm.ts --target orez-local --clients 100 # one-project width + round gates
+bun src/storm.ts --target orez-cf --clients 100    # same against one deployed DO
 bun src/permissions.ts                             # per-user visibility + add/revoke
 bun src/reconnect.ts                               # persisted resume + recovery faults
 bun src/multi-tab.ts                               # real shared client group + LMIDs
@@ -51,6 +53,13 @@ of Zero's own SQLite KV store. they exercise the actual persisted Replicache
 cookie/client-group state: sequential close/reopen recovery (including lost
 responses, retention/epoch fallback, host restart, and future-cookie reset)
 and concurrent same-storage-key tabs with distinct client IDs and per-client LMIDs.
+
+`storm.ts` holds one `projectById(p0)` reactive read on every client while five
+writers create, toggle, and re-rank the same task set at 5 mutations/sec. every
+round gates on all-client convergence and an authoritative oracle comparison;
+the final state is checked again through a fresh late client. use the same
+arguments at 10, 20, and 100 clients for the width comparison recorded in the
+plan.
 
 `stock-zero` boots embedded postgres (wal_level=logical), the fixture app
 server (`src/app-server.ts`: named-query transform on /query + custom-mutator

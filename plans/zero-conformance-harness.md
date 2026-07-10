@@ -493,6 +493,32 @@ findings pinned:
   remote Cloudflare eviction remain integration-level fault lanes; the local
   host restart deliberately preserves its SQLite authority.
 
+**M8, 100-client single-project storm [DONE 2026-07-09]:**
+
+- `harness/src/storm.ts` keeps one reactive `projectById(p0)` read on every
+  stock client while five writers issue create/toggle/set-rank rounds at a
+  sustainable aggregate 5 mutations/sec. every round requires all clients to
+  reach the exact expected task state and match the authoritative oracle;
+  final equality is repeated and a fresh late client must hydrate it.
+- comparable 10/20/100 runs used five rounds × 20 mutations (100 total),
+  250ms local polling and 1s CF polling (holding the 100-client DO near 100
+  pull requests/sec). all six runs passed with zero mutation errors:
+
+| target     | clients | hydrate | ack p50/p95/p99 | propagation p50/p95/p99 | late hydrate | rss   |
+| ---------- | ------- | ------- | --------------- | ----------------------- | ------------ | ----- |
+| orez-local | 10      | 106ms   | 3/8/9ms         | 201/234/237ms           | 51ms         | 163MB |
+| orez-local | 20      | 112ms   | 3/8/8ms         | 206/235/237ms           | 52ms         | 185MB |
+| orez-local | 100     | 267ms   | 3/8/9ms         | 147/201/203ms           | 51ms         | 330MB |
+| orez-cf    | 10      | 615ms   | 170/268/272ms   | 604/1163/1164ms         | 206ms        | —     |
+| orez-cf    | 20      | 618ms   | 167/800/819ms   | 604/1300/1302ms         | 205ms        | —     |
+| orez-cf    | 100     | 950ms   | 184/582/607ms   | 886/1606/1608ms         | 207ms        | —     |
+
+- verdict: local stays flat through 100. one CF DO remains convergent at 100
+  clients and 5 writes/sec; p95 propagation is 1.61s (about 1.3 polls) and
+  p95 ack is 582ms, with every per-round and final gate green. the client-side
+  process RSS number includes all 100 Zero clients and views, not just server
+  state.
+
 ### runners (nate 2026-07-09: dev + initial validation happen on `work`;
 
 ### the mini is purely the runner for LARGER tests)
