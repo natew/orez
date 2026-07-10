@@ -15,6 +15,7 @@ import { mutators, queries } from './fixture.js'
 import { assertServerOutcome } from './server-outcome.js'
 import { startOrezCf } from './targets/orez-cf.js'
 import { startOrezLocalProcess } from './targets/orez-local-process.js'
+import { startRustCf } from './targets/rust-cf.js'
 import { startRustLocal } from './targets/rust-local.js'
 
 import type { HttpPullObservation } from './observed-fetch.js'
@@ -316,11 +317,25 @@ async function runLocal(
   }
 }
 
-async function runCf() {
+type EvictionCfTarget = SyncTarget & {
+  pull(): Promise<void>
+  hibernationStatus(): Promise<{ bootID: string; idleTeardownMs: number }>
+}
+
+// idle-teardown/hibernation drill, shared by orez-cf and the rust-cf host:
+// both resume the same clients across a DO memory teardown that changes the
+// boot ID, with no interval poll during the idle window.
+async function runCf(
+  label: string,
+  start: (opts: {
+    pullIntervalMs: number
+    onPull: (observation: HttpPullObservation) => void
+  }) => Promise<EvictionCfTarget>
+) {
   const observations: HttpPullObservation[] = []
   // no interval: after the initial pull and pre-idle writes, the DO sees no
   // traffic until this lane explicitly resumes it.
-  const target = await startOrezCf({
+  const target = await start({
     pullIntervalMs: 0,
     onPull: (observation) => observations.push(observation),
   })
@@ -328,7 +343,7 @@ async function runCf() {
   const watchers: ReturnType<typeof watchTaskIDs>[] = []
   const expected = new Set<string>()
   const outcomes: Promise<void>[] = []
-  const prefix = `evict-cf-${Date.now().toString(36)}`
+  const prefix = `evict-${label}-${Date.now().toString(36)}`
   try {
     for (let i = 0; i < CLIENTS; i++) {
       const zero = target.createClient(`hibernate-user-${i}`)
@@ -379,7 +394,7 @@ async function runCf() {
     const history = assertPullHistory(observations, clientIDs, resumedAt, false)
     const lateHydrateMs = await lateClientCheck(target, expected, 120_000)
     console.log(
-      `[eviction] CF PASS boot ${before.bootID}->${after.bootID}, idle=${idleMs}ms, ` +
+      `[eviction] ${label} PASS boot ${before.bootID}->${after.bootID}, idle=${idleMs}ms, ` +
         `${expected.size} writes, converge=${convergeMs}ms, late=${lateHydrateMs}ms, ` +
         `pulls=${history.successful}, 409s=0, cookies monotone`
     )
@@ -393,8 +408,13 @@ let failed = false
 try {
   if (args.target === 'local') await runLocal('local', startOrezLocalProcess)
   else if (args.target === 'rust-local') await runLocal('rust-local', startRustLocal)
-  else if (args.target === 'cf') await runCf()
-  else throw new Error(`target must be local, rust-local, or cf, got '${args.target}'`)
+  else if (args.target === 'cf') await runCf('cf', startOrezCf)
+  else if (args.target === 'rust-cf') await runCf('rust-cf', startRustCf)
+  else {
+    throw new Error(
+      `target must be local, rust-local, cf, or rust-cf, got '${args.target}'`
+    )
+  }
 } catch (error) {
   failed = true
   console.error('[eviction] FAIL:', error)
