@@ -113,7 +113,7 @@ pub fn handle_pull(
     };
 
     let (cookie_out, lmids, rows_patch) = if can_diff {
-        diff(db, tables, cookie.unwrap(), current, caps, visible, user_id)?
+        diff(db, tables, group, cookie.unwrap(), current, caps, visible, user_id)?
     } else {
         let lmids = store::all_lmids(db, group)?;
         (current, lmids, snapshot(db, tables, visible, user_id)?)
@@ -192,6 +192,7 @@ struct Change {
 fn diff(
     db: &mut dyn SyncDb,
     tables: &Tables,
+    group: &str,
     cookie: i64,
     current: i64,
     caps: Caps,
@@ -268,14 +269,19 @@ fn diff(
                 // resolution) and is free to include.
             }
             "lmid" => {
+                // acks for THIS group only — never leak a peer group's lmid
                 if let Some(pk) = &change.pk {
-                    if let (Some(client), Some(lmid)) = (
-                        pk.get("clientID").and_then(Value::as_str),
-                        pk.get("lmid").and_then(parse_lmid_field),
-                    ) {
-                        if lmid > lmids.get(client).copied().unwrap_or(0) {
-                            pending_lmid = Some((client.to_string(), lmid));
-                            delta = client.len() + 24; // approx bytes of the ack entry
+                    let same_group =
+                        pk.get("clientGroupID").and_then(Value::as_str) == Some(group);
+                    if same_group {
+                        if let (Some(client), Some(lmid)) = (
+                            pk.get("clientID").and_then(Value::as_str),
+                            pk.get("lmid").and_then(parse_lmid_field),
+                        ) {
+                            if lmid > lmids.get(client).copied().unwrap_or(0) {
+                                pending_lmid = Some((client.to_string(), lmid));
+                                delta = client.len() + 24; // approx bytes of the ack entry
+                            }
                         }
                     }
                 }

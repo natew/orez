@@ -174,11 +174,14 @@ pub(crate) fn advance_lmid(
          WHERE clientGroupID = ? AND clientID = ?",
         &[counter(mutation_id), text(client_group_id), text(client_id)],
     )?;
-    // lmid value stored as text in the json so it too avoids any number path
+    // the lmid row carries the group so a diff derives acks for its OWN group
+    // only (never leaking a peer group's lmid); the lmid value rides as text so
+    // it too avoids any number path.
     db.exec(
         "INSERT INTO _zsync_changes (tableName, op, pk)
-         VALUES ('_zsync_clients', 'lmid', json_object('clientID', ?, 'lmid', ?))",
-        &[text(client_id), counter(mutation_id)],
+         VALUES ('_zsync_clients', 'lmid',
+                 json_object('clientGroupID', ?, 'clientID', ?, 'lmid', ?))",
+        &[text(client_group_id), text(client_id), counter(mutation_id)],
     )?;
     Ok(())
 }
