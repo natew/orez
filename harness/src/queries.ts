@@ -30,6 +30,10 @@ const { values: args } = parseArgs({
 
 type Row = { id: string }
 
+// the query lanes need the shared fault hooks (both rust-local and rust-cf
+// expose them); narrow to what this lane calls.
+type QueryTarget = SyncTarget & { dropNextPushResponse(): Promise<void> }
+
 async function startTarget(): Promise<SyncTarget> {
   if (args.against === 'rust-local') {
     return (await import('./targets/rust-local.js')).startRustLocal({
@@ -321,6 +325,42 @@ try {
     memberOf.destroy()
     console.log(
       `[queries] permission: expand+contract via membership, revoked row left raw store PASS`
+    )
+  }
+
+  // --- lost push response, query-aware client ----------------------------
+  // commit a mutation but drop its HTTP response; the client must reconnect and
+  // settle via replay, and the woken query must converge on the new row without
+  // a duplicate — the query membership recovers through the pull, not the ack.
+  {
+    const u = client('u8')
+    const view = watch(u, queries.tasksInProjects({ projectIds: ['p3'] }))
+    const before = await oracleIds(target, `SELECT id FROM task WHERE "projectId" = 'p3'`)
+    await eventually(
+      () => equal(view.ids(), before, 'p3 tasks before'),
+      'lost-response precondition'
+    )
+    const newId = `q-lost-${Date.now().toString(36)}`
+    await (target as QueryTarget).dropNextPushResponse()
+    const req = u.mutate(
+      mutators.task.create({
+        id: newId,
+        projectId: 'p3',
+        title: 'lost response task',
+        rank: 1,
+        done: false,
+      })
+    )
+    await req.client
+    await assertServerOutcome(req.server, 'success', newId)
+    await eventually(() => {
+      if (!view.ids().includes(newId)) throw new Error('recovered row not in query')
+    }, 'lost-response query convergence')
+    const rows = await target.oracle(`SELECT id FROM task WHERE id = '${newId}'`)
+    if (rows.length !== 1) throw new Error('lost-response mutation was duplicated')
+    view.destroy()
+    console.log(
+      '[queries] lost-response: query converged on the recovered row, no duplicate PASS'
     )
   }
 
