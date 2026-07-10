@@ -45,50 +45,6 @@ fn reject(msg: impl Into<String>) -> EngineError {
     EngineError::bad_request(msg)
 }
 
-// related-output and correlated-EXISTS child subqueries are synced as row SETS
-// (or evaluated as existence tests); that form cannot express a per-parent limit
-// or start cursor, so dropping such a bound would silently widen membership (a
-// desired single related row becomes every related row) or flip an EXISTS (a
-// limit-0 subquery that should yield nothing tests as existing). a child carrying
-// limit/start is therefore rejected rather than widened. orderBy on a child has
-// no effect on the synced set or on existence and is accepted (ignored).
-fn reject_unsupported_child_bounds(ast: &Ast) -> Result<(), EngineError> {
-    if let Some(cond) = &ast.where_ {
-        reject_bounds_in_condition(cond)?;
-    }
-    for rel in &ast.related {
-        reject_child_bounds(&rel.subquery)?;
-    }
-    Ok(())
-}
-
-fn reject_bounds_in_condition(cond: &Condition) -> Result<(), EngineError> {
-    match cond {
-        Condition::Exists { related, .. } => reject_child_bounds(&related.subquery),
-        Condition::And(conds) | Condition::Or(conds) => {
-            for c in conds {
-                reject_bounds_in_condition(c)?;
-            }
-            Ok(())
-        }
-        Condition::Simple { .. } => Ok(()),
-    }
-}
-
-fn reject_child_bounds(child: &Ast) -> Result<(), EngineError> {
-    if child.limit.is_some() {
-        return Err(reject(
-            "a related/EXISTS subquery cannot carry a limit (per-parent bound unsupported)",
-        ));
-    }
-    if child.start.is_some() {
-        return Err(reject(
-            "a related/EXISTS subquery cannot carry a start cursor (per-parent bound unsupported)",
-        ));
-    }
-    reject_unsupported_child_bounds(child)
-}
-
 fn scalar_to_sql(s: &Scalar) -> SqlValue {
     match s {
         Scalar::Null => SqlValue::Null,
@@ -181,8 +137,10 @@ impl<'a> Compiler<'a> {
         Ok(sql)
     }
 
-    // orderBy with a stable primary-key tie-breaker appended
-    fn compile_order_by(&self, ast: &Ast, alias: &str) -> Result<String, EngineError> {
+    // the ORDER BY terms ("alias.col DIR") for an ast: its orderBy columns plus a
+    // stable primary-key tie-breaker. shared by the root ORDER BY and the
+    // per-parent window's ROW_NUMBER ordering so ranking is deterministic.
+    fn order_by_terms(&self, ast: &Ast, alias: &str) -> Result<Vec<String>, EngineError> {
         let spec = self.tables.get(&ast.table).unwrap();
         let mut parts: Vec<String> = Vec::new();
         let mut seen: BTreeSet<&str> = BTreeSet::new();
@@ -202,6 +160,12 @@ impl<'a> Compiler<'a> {
                 parts.push(format!("{}.{} ASC", quote_ident(alias), quote_ident(pk)));
             }
         }
+        Ok(parts)
+    }
+
+    // orderBy with a stable primary-key tie-breaker appended
+    fn compile_order_by(&self, ast: &Ast, alias: &str) -> Result<String, EngineError> {
+        let parts = self.order_by_terms(ast, alias)?;
         if parts.is_empty() {
             Ok(String::new())
         } else {
@@ -380,6 +344,16 @@ impl<'a> Compiler<'a> {
     ) -> Result<String, EngineError> {
         let child = &related.subquery;
         self.check_table(&child.table)?;
+
+        // a bounded correlated EXISTS: a limit of 0 makes the subquery empty, so
+        // existence is a constant (false for EXISTS, true for NOT EXISTS); a limit
+        // >= 1 does not change whether ANY row exists and is ignored; a start
+        // cursor restricts existence to rows past the cursor; orderBy has no effect
+        // on existence.
+        if child.limit == Some(0) {
+            return Ok(if negated { "1" } else { "0" }.to_string());
+        }
+
         let child_alias = self.alias();
 
         // correlation predicate: child.childField[i] = parent.parentField[i]
@@ -397,6 +371,9 @@ impl<'a> Compiler<'a> {
         }
 
         let mut wheres = corr;
+        if let Some(cursor) = self.compile_start(child, &child_alias)? {
+            wheres.push(cursor);
+        }
         if let Some(cond) = &child.where_ {
             wheres.push(self.compile_condition(cond, &child.table, &child_alias)?);
         }
@@ -444,9 +421,6 @@ pub fn compile_predicate_probe(
 }
 
 pub fn compile(ast: &Ast, tables: &Tables) -> Result<CompiledQuery, EngineError> {
-    // reject child subqueries carrying per-parent bounds before compiling; this is
-    // the single validation gate (register_query and every recompute call it).
-    reject_unsupported_child_bounds(ast)?;
     let mut c = Compiler::new(tables);
     let sql = c.compile_root(ast)?;
     let primary_key = tables
@@ -492,11 +466,11 @@ pub fn compile_related_of(
 
     let rc = format!("rc{depth}");
     let rp = format!("rp{depth}");
-    let mut on: Vec<String> = Vec::new();
+    let mut corr: Vec<String> = Vec::new();
     for (pf, cf) in rel.parent_field.iter().zip(rel.child_field.iter()) {
         c.check_column(parent_table, pf)?;
         c.check_column(&child.table, cf)?;
-        on.push(format!(
+        corr.push(format!(
             "{}.{} = {}.{}",
             quote_ident(&rc),
             quote_ident(cf),
@@ -504,26 +478,92 @@ pub fn compile_related_of(
             quote_ident(pf)
         ));
     }
-
-    // params in SQL order: the parent subquery (in the JOIN) binds first, then
-    // the child filter in the WHERE.
-    let mut params = parent_params.to_vec();
-    let where_sql = match &child.where_ {
-        Some(cond) => format!(" WHERE {}", c.compile_condition(cond, &child.table, &rc)?),
-        None => String::new(),
-    };
-    params.extend(c.params);
-
-    let sql = format!(
-        "SELECT DISTINCT {rc}.* FROM {ct} AS {rc} JOIN ({parent_sql}) AS {rp} ON {on}{where_sql}",
-        ct = quote_ident(&child.table),
-        on = on.join(" AND "),
-    );
+    let ct = quote_ident(&child.table);
     let primary_key = tables
         .get(&child.table)
         .ok_or_else(|| reject(format!("unknown table '{}'", child.table)))?
         .primary_key
         .clone();
+
+    // an UNBOUNDED related child is a row SET: a plain correlated join (row order
+    // is immaterial, the client re-sorts). params: the parent subquery (in the
+    // JOIN) binds first, then the child filter.
+    if child.limit.is_none() && child.start.is_none() {
+        let mut params = parent_params.to_vec();
+        let where_sql = match &child.where_ {
+            Some(cond) => format!(" WHERE {}", c.compile_condition(cond, &child.table, &rc)?),
+            None => String::new(),
+        };
+        params.extend(c.params);
+        let sql = format!(
+            "SELECT DISTINCT {rc}.* FROM {ct} AS {rc} JOIN ({parent_sql}) AS {rp} ON {on}{where_sql}",
+            on = corr.join(" AND "),
+        );
+        return Ok(CompiledRelated {
+            sql,
+            params,
+            child_table: child.table.clone(),
+            primary_key,
+        });
+    }
+
+    // a BOUNDED related child carries a per-parent limit and/or start cursor
+    // (e.g. `.related('tasks', q => q.orderBy('rank','desc').limit(3))` or a
+    // `.one()`). correlate each child to the parent row-set with EXISTS, apply the
+    // child WHERE + start cursor, then for a limit rank rows WITHIN each
+    // parent-correlation partition and keep the top N. params in textual order:
+    // parent (EXISTS) -> start cursor -> child where -> limit.
+    let mut params = parent_params.to_vec();
+    let exists = format!(
+        "EXISTS (SELECT 1 FROM ({parent_sql}) AS {rp} WHERE {})",
+        corr.join(" AND ")
+    );
+    let mut inner: Vec<String> = vec![exists];
+    if let Some(cursor) = c.compile_start(child, &rc)? {
+        inner.push(cursor);
+    }
+    if let Some(cond) = &child.where_ {
+        inner.push(c.compile_condition(cond, &child.table, &rc)?);
+    }
+    let where_clause = inner.join(" AND ");
+
+    // build the window ordering (no binds) BEFORE consuming c.params for a limit.
+    let window = match child.limit {
+        Some(limit) => {
+            let partition: Vec<String> = rel
+                .child_field
+                .iter()
+                .map(|cf| format!("{}.{}", quote_ident(&rc), quote_ident(cf)))
+                .collect();
+            let order_terms = c.order_by_terms(child, &rc)?;
+            Some((limit, partition, order_terms))
+        }
+        None => None,
+    };
+    params.extend(c.params);
+
+    let sql = if let Some((limit, partition, order_terms)) = window {
+        // per-parent window: PARTITION BY the correlation child columns, ORDER BY
+        // the child's orderBy + pk tie-breaker, keep rank <= limit. the extra
+        // _zrn column is ignored by the row reader (it reads only schema columns).
+        let order_sql = if order_terms.is_empty() {
+            String::new()
+        } else {
+            format!(" ORDER BY {}", order_terms.join(", "))
+        };
+        params.push(SqlValue::Integer(limit));
+        format!(
+            "SELECT * FROM (SELECT {rc}.*, ROW_NUMBER() OVER (PARTITION BY {part}{order}) AS _zrn \
+             FROM {ct} AS {rc} WHERE {where_clause}) AS {rc}_w WHERE {rc}_w._zrn <= ?",
+            part = partition.join(", "),
+            order = order_sql,
+        )
+    } else {
+        // start cursor with no limit: the cursor already bounds the set, so a
+        // deduped correlated select suffices.
+        format!("SELECT DISTINCT {rc}.* FROM {ct} AS {rc} WHERE {where_clause}")
+    };
+
     Ok(CompiledRelated {
         sql,
         params,

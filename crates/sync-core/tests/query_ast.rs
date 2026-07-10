@@ -331,69 +331,44 @@ fn rejects_unsupported_shapes() {
 }
 
 #[test]
-fn rejects_bounded_child_subqueries() {
-    // HIGH-5: a related-output or EXISTS child subquery cannot carry a per-parent
-    // limit/start; the engine rejects rather than silently syncing every related
-    // row (limit dropped) or flipping a limit-0 EXISTS to true.
+fn compiles_bounded_child_subqueries() {
+    // GAP-2: a related-output child carrying a per-parent orderBy/limit/start is
+    // COMPILED (per-parent window), not rejected -- Chat's inventory needs the
+    // windowed "last N per parent" shape (and .one()). correctness of the produced
+    // membership is proved in query_related.rs; here we only assert they compile.
     let rel = |child: Value| {
         json!({ "table": "issue", "related": [{
             "correlation": { "parentField": ["id"], "childField": ["issueId"] },
             "subquery": child }] })
     };
-    let exists = |child: Value| {
-        json!({ "table": "issue", "where": {
-            "type": "correlatedSubquery", "op": "EXISTS",
-            "related": { "correlation": { "parentField": ["id"], "childField": ["issueId"] },
-                         "subquery": child } } })
-    };
-
-    // related output with a per-parent limit / start -> 400
-    assert_eq!(reject(rel(json!({ "table": "comment", "limit": 1 }))), 400);
-    assert_eq!(
-        reject(rel(json!({ "table": "comment", "orderBy": [["id", "asc"]],
-                           "start": { "row": { "id": "c1" }, "exclusive": true } }))),
-        400
-    );
-    // EXISTS filter with a limit (incl. the limit-0 flip) / start -> 400
-    assert_eq!(
-        reject(exists(json!({ "table": "comment", "limit": 0 }))),
-        400
-    );
-    assert_eq!(
-        reject(exists(json!({ "table": "comment", "limit": 5 }))),
-        400
-    );
-    assert_eq!(
-        reject(exists(
-            json!({ "table": "comment", "orderBy": [["id", "asc"]],
-                              "start": { "row": { "id": "c1" }, "exclusive": true } })
-        )),
-        400
-    );
-    // nested: a bound buried under a grandchild EXISTS is still rejected
-    assert_eq!(
-        reject(rel(json!({ "table": "comment", "where": {
-            "type": "correlatedSubquery", "op": "EXISTS",
-            "related": { "correlation": { "parentField": ["issueId"], "childField": ["issueId"] },
-                         "subquery": { "table": "comment", "limit": 1 } } } }))),
-        400
-    );
-
-    // orderBy WITHOUT a bound on a child is accepted (no membership/existence
-    // effect): the row set / existence is identical, the client sorts locally.
-    assert!(
-        parse_ast(&rel(
-            json!({ "table": "comment", "orderBy": [["id", "asc"]] })
-        ))
-        .and_then(|a| compile(&a, &schema()).map(|_| ()))
-        .is_ok()
-    );
-    // a plain related/EXISTS child still compiles
-    assert!(
-        parse_ast(&rel(json!({ "table": "comment" })))
+    let ok = |ast: Value| {
+        parse_ast(&ast)
             .and_then(|a| compile(&a, &schema()).map(|_| ()))
             .is_ok()
-    );
+    };
+
+    assert!(ok(rel(json!({ "table": "comment", "limit": 1 })))); // .one()
+    assert!(ok(rel(
+        json!({ "table": "comment", "orderBy": [["id", "desc"]], "limit": 2 })
+    ))); // top-2 per parent
+    assert!(ok(rel(
+        json!({ "table": "comment", "orderBy": [["id", "asc"]],
+        "start": { "row": { "id": "c1" }, "exclusive": true }, "limit": 3 })
+    )));
+    // start with no limit compiles (cursor-bounded set)
+    assert!(ok(rel(
+        json!({ "table": "comment", "orderBy": [["id", "asc"]],
+        "start": { "row": { "id": "c1" }, "exclusive": true } })
+    )));
+    // nested: a bounded grandchild under a related child compiles
+    assert!(ok(rel(json!({ "table": "comment", "related": [{
+        "correlation": { "parentField": ["issueId"], "childField": ["issueId"] },
+        "subquery": { "table": "comment", "limit": 1 } }] }))));
+    // orderBy-only and plain children still compile
+    assert!(ok(rel(
+        json!({ "table": "comment", "orderBy": [["id", "asc"]] })
+    )));
+    assert!(ok(rel(json!({ "table": "comment" }))));
 }
 
 fn sorted(mut v: Vec<String>) -> Vec<String> {
