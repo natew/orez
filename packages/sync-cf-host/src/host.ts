@@ -500,7 +500,12 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                 const args = op.args as JsonValue[]
                 let ast: JsonValue
                 try {
-                  ast = config.resolveQuery(op.name, args, claims)
+                  // resolveQuery may be async and needs `env` (a consumer can
+                  // delegate the transform to its app's real synced-queries
+                  // endpoint over an app service binding — authenticate runs in the
+                  // worker isolate, but the query loop runs here in the DO, so the
+                  // binding must come from the DO's own env, not a shared global).
+                  ast = await config.resolveQuery(op.name, args, claims, this.env)
                 } catch (error) {
                   throw requestError(`unknown or unsupported named query: ${op.name}`)
                 }

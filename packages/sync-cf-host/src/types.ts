@@ -89,8 +89,9 @@ export type VisibilityConfig = {
 export type QueryResolver = (
   name: string,
   args: readonly JsonValue[],
-  claims: NormalizedClaims
-) => JsonValue
+  claims: NormalizedClaims,
+  env: SyncHostEnv
+) => JsonValue | Promise<JsonValue>
 
 export type PullCaps = {
   maxChangeRows: number
