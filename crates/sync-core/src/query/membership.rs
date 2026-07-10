@@ -148,6 +148,71 @@ pub fn remove_desire(
     Ok(())
 }
 
+// clear all of a client's desired queries (a desiredQueriesPatch 'clear')
+pub fn clear_desires(db: &mut dyn SyncDb, group: &str, client: &str) -> Result<(), EngineError> {
+    db.exec(
+        "DELETE FROM _zsync_desires WHERE clientGroupID = ? AND clientID = ?",
+        &[text(group), text(client)],
+    )?;
+    Ok(())
+}
+
+// the hashes a client currently desires (for the gotQueries acknowledgement)
+pub(crate) fn desired_hashes(
+    db: &mut dyn SyncDb,
+    group: &str,
+    client: &str,
+) -> Result<Vec<String>, EngineError> {
+    let rows = db.query(
+        "SELECT hash FROM _zsync_desires WHERE clientGroupID = ? AND clientID = ? ORDER BY hash",
+        &[text(group), text(client)],
+    )?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| str_col(r.get("hash")).ok())
+        .collect())
+}
+
+// the client's current query-state version = the max version it has recorded
+// across its desires (0 if it desires nothing)
+pub(crate) fn client_query_version(
+    db: &mut dyn SyncDb,
+    group: &str,
+    client: &str,
+) -> Result<i64, EngineError> {
+    let rows = db.query(
+        "SELECT CAST(COALESCE(MAX(clientVersion), 0) AS TEXT) AS v FROM _zsync_desires
+         WHERE clientGroupID = ? AND clientID = ?",
+        &[text(group), text(client)],
+    )?;
+    match rows.first().and_then(|r| r.get("v")) {
+        Some(SqlValue::Text(s)) => Ok(s.parse().unwrap_or(0)),
+        _ => Ok(0),
+    }
+}
+
+// drop a group's entire durable membership + reference counts. used when a fresh
+// or reset client (null / below-floor cookie) must be re-synced from scratch.
+pub(crate) fn reset_group(db: &mut dyn SyncDb, group: &str) -> Result<(), EngineError> {
+    db.exec(
+        "DELETE FROM _zsync_query_rows WHERE clientGroupID = ?",
+        &[text(group)],
+    )?;
+    db.exec(
+        "DELETE FROM _zsync_row_refs WHERE clientGroupID = ?",
+        &[text(group)],
+    )?;
+    Ok(())
+}
+
+// canonicalize a change-log pk (json_object text) to the membership key form
+pub(crate) fn canonical_pk_text(pk_text: &str) -> String {
+    match serde_json::from_str::<Value>(pk_text) {
+        Ok(v) => canonical_pk(&v),
+        Err(_) => pk_text.to_string(),
+    }
+}
+
 struct ActiveQuery {
     hash: String,
     ast_json: Value,
