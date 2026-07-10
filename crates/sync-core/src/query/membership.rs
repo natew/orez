@@ -23,7 +23,7 @@ use crate::error::EngineError;
 use crate::schema::{TableSpec, Tables};
 use crate::value::{zero_pk_id, zero_row};
 
-use super::ast::CorrelatedSubquery;
+use super::ast::{Ast, Condition, CorrelatedSubquery};
 use super::compile::compile_related_of;
 use super::{compile, parse_ast};
 
@@ -92,6 +92,18 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
             rowPk TEXT NOT NULL,
             refcount INTEGER NOT NULL,
             PRIMARY KEY (clientGroupID, rowTable, rowPk)
+        )",
+        &[],
+    )?;
+    // marks a (group, query) whose membership has been computed at least once.
+    // recomputation narrowing skips a query whose dependency tables were not
+    // touched, EXCEPT one with no marker yet (a newly desired query, or one
+    // whose AST changed and had its marker cleared), which always recomputes.
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _zsync_query_state (
+            clientGroupID TEXT NOT NULL,
+            hash TEXT NOT NULL,
+            PRIMARY KEY (clientGroupID, hash)
         )",
         &[],
     )?;
@@ -307,26 +319,64 @@ fn set_ref(
     Ok(())
 }
 
-// walk a query's related subtree, adding every correlated child (and
-// grandchild, recursively) row to the query's live member set. `parent_sql` is
-// the compiled SQL of the parent row-set at this level; each related child is
-// joined to it and its own SQL becomes the parent for the next level down.
+// the correlated subqueries whose rows a stock client needs to reproduce the
+// query locally: every related-OUTPUT subquery, plus every positive
+// correlated-EXISTS FILTER subquery. the client re-runs the whole query against
+// its synced rows, so it must have the member rows that make each EXISTS true;
+// without them its local EXISTS is false and the query collapses to empty.
+// NOT EXISTS is skipped: a matching parent has no matching child by definition,
+// so there are no rows to sync, and the client re-runs over the matching parent
+// set the server already sent.
+fn dependent_subqueries(ast: &Ast) -> Vec<&CorrelatedSubquery> {
+    let mut subs: Vec<&CorrelatedSubquery> = Vec::new();
+    if let Some(cond) = &ast.where_ {
+        collect_positive_exists(cond, &mut subs);
+    }
+    for rel in &ast.related {
+        subs.push(rel);
+    }
+    subs
+}
+
+fn collect_positive_exists<'a>(cond: &'a Condition, out: &mut Vec<&'a CorrelatedSubquery>) {
+    match cond {
+        Condition::Exists {
+            negated: false,
+            related,
+        } => out.push(related),
+        Condition::Exists { negated: true, .. } | Condition::Simple { .. } => {}
+        Condition::And(conds) | Condition::Or(conds) => {
+            for c in conds {
+                collect_positive_exists(c, out);
+            }
+        }
+    }
+}
+
+// walk a query's dependent subtree (related output + positive-EXISTS filter
+// subqueries), adding every correlated child (and grandchild, recursively) row
+// to the query's live member set. `parent_sql` is the compiled SQL of the
+// parent row-set at this level; each dependent subquery is joined to it and its
+// own SQL becomes the parent for the next level down.
 #[allow(clippy::too_many_arguments)]
-fn collect_related(
+fn collect_dependent_rows(
     db: &mut dyn SyncDb,
     tables: &Tables,
     parent_sql: &str,
     parent_params: &[SqlValue],
     parent_table: &str,
-    related: &[CorrelatedSubquery],
+    ast: &Ast,
     depth: usize,
     live: &mut BTreeSet<(String, String)>,
     values: &mut BTreeMap<(String, String), Value>,
 ) -> Result<(), EngineError> {
-    for rel in related {
-        let cr = compile_related_of(parent_sql, parent_params, parent_table, rel, tables, depth)?;
+    for sub in dependent_subqueries(ast) {
+        let cr = compile_related_of(parent_sql, parent_params, parent_table, sub, tables, depth)?;
         let child_spec = tables.get(&cr.child_table).ok_or_else(|| {
-            EngineError::internal(format!("related child table '{}' missing", cr.child_table))
+            EngineError::internal(format!(
+                "dependent child table '{}' missing",
+                cr.child_table
+            ))
         })?;
         for row in &db.query(&cr.sql, &cr.params)? {
             let pk_obj = raw_pk(child_spec, row);
@@ -334,14 +384,14 @@ fn collect_related(
             live.insert((cr.child_table.clone(), key.clone()));
             values.insert((cr.child_table.clone(), key), zero_row(child_spec, row));
         }
-        // the child row-set is the parent for the child's own related subqueries
-        collect_related(
+        // the child row-set is the parent for the child's own dependent subqueries
+        collect_dependent_rows(
             db,
             tables,
             &cr.sql,
             &cr.params,
             &cr.child_table,
-            &rel.subquery.related,
+            &sub.subquery,
             depth + 1,
             live,
             values,
@@ -386,17 +436,18 @@ pub fn recompute_group(
             values.insert((q.root_table.clone(), key), zero_row(spec, row));
         }
 
-        // related output, walked recursively so nested related-of-related child
-        // rows are included too. a parent membership change re-runs these joins,
-        // so children follow their parents even when the child table was
-        // untouched (invariant: the whole authorized result-tree is a member).
-        collect_related(
+        // dependent rows (related output + positive-EXISTS filter subqueries),
+        // walked recursively. a parent membership change re-runs these joins, so
+        // children follow their parents even when the child table was untouched.
+        // syncing the EXISTS-filter rows is what lets the stock client re-run the
+        // query locally and reproduce the server's membership.
+        collect_dependent_rows(
             db,
             tables,
             &compiled.sql,
             &compiled.params,
             &ast.table,
-            &ast.related,
+            &ast,
             0,
             &mut live,
             &mut values,

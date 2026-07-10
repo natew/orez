@@ -212,6 +212,36 @@ fn a_new_parent_brings_its_children() {
     assert_eq!(puts(&patch), vec!["comment:c3", "issue:i2"]);
 }
 
+// a whereExists FILTER: issues that HAVE a comment with body 'a'. the stock
+// Zero client re-runs this query against its synced rows, so the engine must
+// sync BOTH the matching issue rows AND the comment rows that satisfy the
+// EXISTS, or the client's local EXISTS is false and the result collapses.
+#[test]
+fn exists_filter_syncs_subquery_rows_for_local_reevaluation() {
+    let mut h = Host::new();
+    let q = json!({ "table": "issue", "where": {
+        "type": "correlatedSubquery", "op": "EXISTS",
+        "related": {
+            "correlation": { "parentField": ["id"], "childField": ["issueId"] },
+            "subquery": { "table": "comment", "where": {
+                "type": "simple", "op": "=", "left": { "type": "column", "name": "body" },
+                "right": { "type": "literal", "value": "a" } } }
+        }
+    } });
+    register_query(&mut h.db, &schema(), "q", &q).unwrap();
+    set_desire(&mut h.db, G, "cl", "q", 1).unwrap();
+    // i1 has c1 (body 'a') so it matches; the response must carry issue:i1 AND
+    // comment:c1 (the EXISTS witness the client needs to re-evaluate the filter).
+    let patch = h.recompute(&[]);
+    assert_eq!(puts(&patch), vec!["comment:c1", "issue:i1"]);
+
+    // when the witness comment's body changes so it no longer matches, the issue
+    // leaves and the comment is no longer synced
+    h.exec("UPDATE comment SET body = 'z' WHERE id = 'c1'");
+    let patch = h.recompute(&[("comment", "c1")]);
+    assert_eq!(dels(&patch), vec!["comment:c1", "issue:i1"]);
+}
+
 // open issues -> comments -> reactions (nested related-of-related, the shape
 // Chat's queryMessageItemRelations uses several levels deep)
 fn open_comments_reactions() -> Value {
