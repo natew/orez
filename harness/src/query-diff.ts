@@ -140,6 +140,7 @@ try {
   failed = true
   console.error('[query-diff] FAIL:', error)
   if (args.against === 'rust-cf') {
+    console.error('[query-diff] first rust-cf pulls:', cfObservations.slice(0, 5))
     console.error('[query-diff] last rust-cf pulls:', cfObservations.slice(-5))
   }
 } finally {
