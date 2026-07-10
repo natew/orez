@@ -43,6 +43,10 @@ const native: Lane[] = [
     name: 'native-query-tab-churn',
     command: ['bun', 'src/multi-tab.ts', '--target', 'rust-local'],
   },
+  {
+    name: 'native-clock-skew',
+    command: ['bun', 'src/clock-skew.ts', '--target', 'rust-local', '--clock-skew-hours', '24'],
+  },
 ]
 
 const cf: Lane[] = [
@@ -72,6 +76,10 @@ const cf: Lane[] = [
   {
     name: 'cf-query-tab-churn',
     command: ['bun', 'src/multi-tab.ts', '--target', 'rust-cf'],
+  },
+  {
+    name: 'cf-clock-skew',
+    command: ['bun', 'src/clock-skew.ts', '--target', 'rust-cf', '--clock-skew-hours', '24'],
   },
   {
     name: 'cf-wasm-memory',
