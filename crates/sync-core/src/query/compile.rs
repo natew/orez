@@ -366,6 +366,39 @@ impl<'a> Compiler<'a> {
     }
 }
 
+// a relevance probe: does a single primary-key row of the root table match the
+// query's predicate (EXISTS conditions included), ignoring order/limit? returns
+// the SQL with the root predicate binds plus a trailing `?` per pk column, and
+// the pk column order the caller binds after the predicate params. touched-pk
+// narrowing (plan optimization: "narrow recomputation using touched primary
+// keys") uses this to skip a query when no touched root row is a member or a
+// match.
+pub fn compile_predicate_probe(
+    ast: &Ast,
+    tables: &Tables,
+) -> Result<(String, Vec<SqlValue>, Vec<String>), EngineError> {
+    let mut c = Compiler::new(tables);
+    c.check_table(&ast.table)?;
+    let spec = tables
+        .get(&ast.table)
+        .ok_or_else(|| reject(format!("unknown table '{}'", ast.table)))?;
+    let alias = c.alias();
+    let mut wheres: Vec<String> = Vec::new();
+    if let Some(cond) = &ast.where_ {
+        wheres.push(c.compile_condition(cond, &ast.table, &alias)?);
+    }
+    for col in &spec.primary_key {
+        wheres.push(format!("{}.{} = ?", quote_ident(&alias), quote_ident(col)));
+    }
+    let sql = format!(
+        "SELECT 1 FROM {} AS {} WHERE {} LIMIT 1",
+        quote_ident(&ast.table),
+        quote_ident(&alias),
+        wheres.join(" AND ")
+    );
+    Ok((sql, c.params, spec.primary_key.clone()))
+}
+
 pub fn compile(ast: &Ast, tables: &Tables) -> Result<CompiledQuery, EngineError> {
     let mut c = Compiler::new(tables);
     let sql = c.compile_root(ast)?;

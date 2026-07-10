@@ -138,6 +138,62 @@ fn narrowing_respects_related_and_exists_dependency_tables() {
     assert_eq!(put_keys(&patch), vec!["t0:a", "t1:m"]);
 }
 
+fn where_v(v: i64) -> Value {
+    json!({ "table": "t0", "where": {
+        "type": "simple", "op": "=", "left": { "type": "column", "name": "v" },
+        "right": { "type": "literal", "value": v } } })
+}
+
+#[test]
+fn touched_pk_narrowing_skips_same_table_queries_that_do_not_match() {
+    // two queries on the SAME table t0: v=1 and v=2. a change to a v=1 row must
+    // not recompute the v=2 query (touched-pk narrowing — the touched row is
+    // neither a member of nor a match for the v=2 query). this is the "one new
+    // message recomputes one channel's window" case: same table, different filter.
+    let mut db = TestDb::memory();
+    db.exec("CREATE TABLE t0 (id TEXT PRIMARY KEY, v INTEGER)", &[])
+        .unwrap();
+    db.exec("CREATE TABLE t1 (id TEXT PRIMARY KEY, v INTEGER)", &[])
+        .unwrap();
+    let tables = tables(2);
+    init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+    db.exec("INSERT INTO t0 VALUES ('a', 1), ('b', 2)", &[])
+        .unwrap();
+
+    register_query(&mut db, &tables, "q1", &where_v(1)).unwrap();
+    register_query(&mut db, &tables, "q2", &where_v(2)).unwrap();
+    set_desire(&mut db, G, "c", "q1", 1).unwrap();
+    set_desire(&mut db, G, "c", "q2", 1).unwrap();
+    assert_eq!(
+        put_keys(
+            &db.transaction(|d| recompute_group(d, &tables, G, &changed(&[])))
+                .unwrap()
+        ),
+        vec!["t0:a", "t0:b"]
+    );
+
+    // insert a new v=1 row AND a new v=2 row; report only the v=1 row touched.
+    // q1 recomputes (the row matches v=1); q2 is narrowed away (the touched row
+    // is not a v=2 member and does not match v=2), so the new v=2 row is not seen.
+    db.exec("INSERT INTO t0 VALUES ('c', 1), ('d', 2)", &[])
+        .unwrap();
+    let narrowed = db
+        .transaction(|d| recompute_group(d, &tables, G, &changed(&[("t0", "c")])))
+        .unwrap();
+    assert_eq!(
+        put_keys(&narrowed),
+        vec!["t0:c"],
+        "q2 should have been narrowed away by touched-pk"
+    );
+
+    // reporting the v=2 row touched recomputes q2
+    let caught = db
+        .transaction(|d| recompute_group(d, &tables, G, &changed(&[("t0", "d")])))
+        .unwrap();
+    assert_eq!(put_keys(&caught), vec!["t0:d"]);
+}
+
 #[test]
 #[ignore = "benchmark — run with --ignored --nocapture"]
 fn narrowing_benchmark() {
@@ -193,7 +249,88 @@ fn narrowing_benchmark() {
     let one_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
     println!(
-        "\n=== recomputation narrowing (dependency-intersection) ===\n{N} queries x {ROWS} rows | ALL touched (unnarrowed): {full_ms:.1}ms | ONE table touched (narrowed): {one_ms:.2}ms | speedup {:.0}x",
+        "\n=== (a) dependency-intersection narrowing ===\n{N} queries on {N} distinct tables x {ROWS} rows | ALL tables touched (unnarrowed): {full_ms:.1}ms | ONE table touched (narrowed): {one_ms:.2}ms | speedup {:.0}x",
         full_ms / one_ms.max(0.001)
+    );
+
+    // (b) same-table narrowing: many windowed queries over ONE table (like open
+    // channels over `message`), each filtered to a distinct value. a change to
+    // one value's row must recompute only that query.
+    let mut db2 = TestDb::memory();
+    db2.exec(
+        "CREATE TABLE m (id TEXT PRIMARY KEY, ch INTEGER, v INTEGER)",
+        &[],
+    )
+    .unwrap();
+    let mtables = Tables::new().with(
+        "m",
+        TableSpec {
+            columns: vec![
+                ("id".into(), ZeroColumnType::String),
+                ("ch".into(), ZeroColumnType::Number),
+                ("v".into(), ZeroColumnType::Number),
+            ],
+            primary_key: vec!["id".into()],
+        },
+    );
+    init_schema(&mut db2, &mtables).unwrap();
+    init_query_schema(&mut db2).unwrap();
+    for ch in 0..N {
+        for r in 0..ROWS {
+            db2.exec(
+                &format!("INSERT INTO m VALUES ('c{ch}r{r}', {ch}, {r})"),
+                &[],
+            )
+            .unwrap();
+        }
+        // channelMessages(ch) with a window: m where ch=ch orderBy v desc limit 100
+        let q = json!({ "table": "m", "where": {
+            "type": "simple", "op": "=", "left": { "type": "column", "name": "ch" },
+            "right": { "type": "literal", "value": ch as i64 } },
+            "orderBy": [["v", "desc"]], "limit": 100 });
+        register_query(&mut db2, &mtables, &format!("ch{ch}"), &q).unwrap();
+        set_desire(&mut db2, G, "c", &format!("ch{ch}"), 1).unwrap();
+    }
+    db2.transaction(|d| recompute_group(d, &mtables, G, &changed(&[])))
+        .unwrap();
+
+    // baseline: without touched-pk narrowing every ch-query depends on table `m`,
+    // so a new message would recompute all N windows. approximate that by
+    // touching one row per channel so every query is relevant.
+    db2.exec("INSERT INTO m VALUES ('new0', 0, 9999)", &[])
+        .unwrap();
+    let all_ch: BTreeSet<(String, String)> = (0..N)
+        .map(|_| ("m".to_string(), json!({ "id": "new0" }).to_string()))
+        .collect();
+    // (new0 matches only ch=0; to force all, touch a matching row per channel)
+    let all_ch: BTreeSet<(String, String)> = {
+        let mut s = all_ch;
+        for ch in 0..N {
+            db2.exec(&format!("INSERT INTO m VALUES ('n{ch}', {ch}, 9999)"), &[])
+                .unwrap();
+            s.insert((
+                "m".to_string(),
+                json!({ "id": format!("n{ch}") }).to_string(),
+            ));
+        }
+        s
+    };
+    let tb = Instant::now();
+    db2.transaction(|d| recompute_group(d, &mtables, G, &all_ch))
+        .unwrap();
+    let all_ch_ms = tb.elapsed().as_secs_f64() * 1000.0;
+
+    // narrowed: one new message in channel 3 only -> only ch3's window recomputes
+    db2.exec("INSERT INTO m VALUES ('msg', 3, 10000)", &[])
+        .unwrap();
+    let one_ch = changed(&[("m", "msg")]);
+    let tc = Instant::now();
+    db2.transaction(|d| recompute_group(d, &mtables, G, &one_ch))
+        .unwrap();
+    let one_ch_ms = tc.elapsed().as_secs_f64() * 1000.0;
+
+    println!(
+        "=== (b) touched-pk narrowing ===\n{N} windowed queries over ONE table (open channels) | new msg in ALL channels: {all_ch_ms:.1}ms | new msg in ONE channel (narrowed): {one_ch_ms:.2}ms | speedup {:.0}x",
+        all_ch_ms / one_ch_ms.max(0.001)
     );
 }

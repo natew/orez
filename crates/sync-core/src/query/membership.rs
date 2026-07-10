@@ -24,8 +24,22 @@ use crate::schema::{TableSpec, Tables};
 use crate::value::{zero_pk_id, zero_row};
 
 use super::ast::{Ast, Condition, CorrelatedSubquery};
-use super::compile::compile_related_of;
+use super::compile::{compile_predicate_probe, compile_related_of};
 use super::{compile, parse_ast};
+
+// bind a pk column (parsed from a canonical pk json) as a sqlite value
+fn json_pk_to_sql(v: Option<&Value>) -> SqlValue {
+    match v {
+        None | Some(Value::Null) => SqlValue::Null,
+        Some(Value::Bool(b)) => SqlValue::Integer(if *b { 1 } else { 0 }),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .map(SqlValue::Integer)
+            .unwrap_or_else(|| SqlValue::Real(n.as_f64().unwrap_or(0.0))),
+        Some(Value::String(s)) => SqlValue::Text(s.clone()),
+        Some(other) => SqlValue::Text(other.to_string()),
+    }
+}
 
 fn text(s: impl Into<String>) -> SqlValue {
     SqlValue::Text(s.into())
@@ -454,6 +468,52 @@ fn collect_dependent_rows(
     Ok(())
 }
 
+// touched-pk narrowing: is any touched row actually relevant to this query? a
+// touched row in a non-root dependency table (an EXISTS/related child) is
+// conservatively relevant (its effect on parents is not cheaply localized). a
+// touched ROOT row is relevant only if it is a current member (it may leave or
+// its data changed) or it matches the query predicate (it may enter, possibly
+// shifting a limited window). so a new message in channel Y probes as a
+// non-member non-match for channel X's query and is skipped.
+fn query_relevant(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+    group: &str,
+    q: &ActiveQuery,
+    changed: &BTreeSet<(String, String)>,
+) -> Result<bool, EngineError> {
+    let mut root_pks: Vec<&String> = Vec::new();
+    for (table, pk) in changed {
+        if !q.deps.iter().any(|d| d == table) {
+            continue;
+        }
+        if table != &q.root_table {
+            return Ok(true); // non-root dependency change
+        }
+        root_pks.push(pk);
+    }
+    if root_pks.is_empty() {
+        return Ok(false);
+    }
+    let durable = read_query_row_keys(db, group, &q.hash)?;
+    let ast = parse_ast(&q.ast_json)?;
+    let (sql, base_params, pk_cols) = compile_predicate_probe(&ast, tables)?;
+    for pk in root_pks {
+        if durable.contains(&(q.root_table.clone(), pk.clone())) {
+            return Ok(true);
+        }
+        let pk_obj: Value = serde_json::from_str(pk).unwrap_or(Value::Null);
+        let mut params = base_params.clone();
+        for col in &pk_cols {
+            params.push(json_pk_to_sql(pk_obj.get(col)));
+        }
+        if !db.query(&sql, &params)?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // recompute every active query for the group, diff each against durable
 // membership, net the per-row reference changes, and emit row puts (a row's
 // first reference in the group) and dels (its last reference gone). `changed`
@@ -488,11 +548,19 @@ pub fn recompute_group(
     let mut values: BTreeMap<(String, String), Value> = BTreeMap::new();
 
     for q in &queries {
-        let dep_touched = q.deps.iter().any(|t| touched.contains(t.as_str()));
-        if !dep_touched && computed.contains(&q.hash) {
-            continue; // untouched query: membership unchanged, skip its recompute
-        }
-        if computed.insert(q.hash.clone()) {
+        if computed.contains(&q.hash) {
+            // (a) dependency-intersection: skip if no dependency table was touched
+            let dep_touched = q.deps.iter().any(|t| touched.contains(t.as_str()));
+            if !dep_touched {
+                continue;
+            }
+            // (b) touched-pk narrowing: skip if no touched row is relevant
+            if !query_relevant(db, tables, group, q, changed)? {
+                continue;
+            }
+        } else {
+            // never computed for this group (newly desired, or AST changed): compute
+            computed.insert(q.hash.clone());
             set_query_state(db, group, &q.hash)?;
         }
         let spec = tables.get(&q.root_table).ok_or_else(|| {
