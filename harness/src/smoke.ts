@@ -10,6 +10,7 @@
 import { parseArgs } from 'node:util'
 
 import { SEED, mutators, queries, zql } from './fixture.js'
+import { assertServerOutcome } from './server-outcome.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
@@ -103,7 +104,7 @@ try {
   // concurrent custom-mutator writes from every client; collect the server
   // (authoritative) promises so the oracle compare waits for real commits
   const tWrites = Date.now()
-  const serverAcks: Promise<unknown>[] = []
+  const serverAcks: Promise<void>[] = []
   await Promise.all(
     zeros.map(async (zero, i) => {
       for (let p = 0; p < PROJECTS_PER_CLIENT; p++) {
@@ -111,12 +112,16 @@ try {
         const created = zero.mutate(
           mutators.project.create({ id, ownerId: `user-${i}`, name: `proj ${i}.${p}` })
         )
-        serverAcks.push(created.server)
+        serverAcks.push(
+          assertServerOutcome(created.server, 'success', `project.create ${id}`)
+        )
         await created.client
         const added = zero.mutate(
           mutators.member.add({ id: `m-${i}-${p}`, projectId: id, userId: `user-${i}` })
         )
-        serverAcks.push(added.server)
+        serverAcks.push(
+          assertServerOutcome(added.server, 'success', `member.add m-${i}-${p}`)
+        )
         await added.client
       }
     })

@@ -28,6 +28,7 @@ import {
   mutators,
   queries,
 } from './fixture.js'
+import { assertServerOutcome, type ExpectedServerOutcome } from './server-outcome.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
@@ -75,6 +76,7 @@ const pools = {
   member: SEED.member.map((m) => m.id),
   task: SEED.task.map((t) => t.id),
 }
+const taskDone = new Map(SEED.task.map((task) => [task.id, task.done]))
 
 const TITLE_PATTERNS = ['%fix%', '%ux%', '%🚀%', '%sync%', 'fix%', '%triage%']
 const NAME_PATTERNS = ['%a%', '%fix%', '%Zen%', '%ütopia%', '%x %']
@@ -275,6 +277,7 @@ type Write =
   | {
       kind: 'mutate'
       label: string
+      expected: ExpectedServerOutcome
       make: (z: FixtureZero) => { client: Promise<unknown>; server: Promise<unknown> }
     }
   | { kind: 'sql'; label: string; sql: string }
@@ -293,6 +296,7 @@ function genWrites(round: number): Write[] {
       writes.push({
         kind: 'mutate',
         label: `project.create ${id}`,
+        expected: 'success',
         make: (z) =>
           z.mutate(mutators.project.create({ id, ownerId, name: `sweep ${id}` })),
       })
@@ -302,6 +306,7 @@ function genWrites(round: number): Write[] {
       const projectId = pick(pools.project)
       const rank = Math.round((rng() * 24 - 4) * 100) / 100
       const done = chance(0.4)
+      taskDone.set(id, done)
       const meta = chance(0.5) ? { round, tag: pick(['a', 'b', '✅']) } : undefined
       const dueAt = chance(0.6)
         ? 1750000000000 + Math.floor(rng() * 10_000_000_000)
@@ -309,6 +314,7 @@ function genWrites(round: number): Write[] {
       writes.push({
         kind: 'mutate',
         label: `task.create ${id}`,
+        expected: 'success',
         make: (z) =>
           z.mutate(
             mutators.task.create({
@@ -324,10 +330,13 @@ function genWrites(round: number): Write[] {
       })
     } else if (roll < 0.55) {
       const id = pick(pools.task)
+      const done = !taskDone.get(id)!
+      taskDone.set(id, done)
       writes.push({
         kind: 'mutate',
         label: `task.toggle ${id}`,
-        make: (z) => z.mutate(mutators.task.toggle({ id })),
+        expected: 'success',
+        make: (z) => z.mutate(mutators.task.toggle({ id, done })),
       })
     } else if (roll < 0.7) {
       const id = pick(pools.task)
@@ -335,6 +344,7 @@ function genWrites(round: number): Write[] {
       writes.push({
         kind: 'mutate',
         label: `task.setRank ${id} ${rank}`,
+        expected: 'success',
         make: (z) => z.mutate(mutators.task.setRank({ id, rank })),
       })
     } else if (roll < 0.8) {
@@ -345,6 +355,7 @@ function genWrites(round: number): Write[] {
       writes.push({
         kind: 'mutate',
         label: `member.add ${id}`,
+        expected: 'success',
         make: (z) => z.mutate(mutators.member.add({ id, projectId, userId })),
       })
     } else if (roll < 0.87 && pools.member.length > 3) {
@@ -353,11 +364,13 @@ function genWrites(round: number): Write[] {
       writes.push({
         kind: 'mutate',
         label: `member.remove ${id}`,
+        expected: 'success',
         make: (z) => z.mutate(mutators.member.remove({ id })),
       })
     } else if (roll < 0.94 && pools.task.length > 10) {
       const idx = int(0, pools.task.length - 1)
       const id = pools.task.splice(idx, 1)[0]!
+      taskDone.delete(id)
       writes.push({
         kind: 'sql',
         label: `sql delete task ${id}`,
@@ -596,12 +609,21 @@ try {
 
     // mirrored random writes through each target's own client + upstream sql
     const writes = genWrites(round)
-    const acks: Promise<unknown>[] = []
+    const acks: Promise<void>[] = []
     for (const write of writes) {
       if (write.kind === 'mutate') {
-        for (const zero of [stockZero, otherZero]) {
+        for (const [targetName, zero] of [
+          [stock.name, stockZero],
+          [other.name, otherZero],
+        ] as const) {
           const req = write.make(zero)
-          acks.push(req.server)
+          acks.push(
+            assertServerOutcome(
+              req.server,
+              write.expected,
+              `${targetName} ${write.label}`
+            )
+          )
           await withTimeout(req.client, 15_000, `client apply: ${write.label}`)
         }
       } else {
@@ -609,7 +631,7 @@ try {
         await other.sql(write.sql)
       }
     }
-    await withTimeout(Promise.allSettled(acks), 30_000, `round ${round} server acks`)
+    await withTimeout(Promise.all(acks), 30_000, `round ${round} server acks`)
 
     // sentinel barrier: both targets must see this round's marker project
     const sentinel = `sentinel-${SWEEP_SEED}-${round}`
@@ -618,7 +640,11 @@ try {
       const req = zero.mutate(
         mutators.project.create({ id: sentinel, ownerId: 'u0', name: sentinel })
       )
-      await withTimeout(req.server, 30_000, `sentinel ${sentinel} server ack`)
+      await withTimeout(
+        assertServerOutcome(req.server, 'success', `sentinel ${sentinel}`),
+        30_000,
+        `sentinel ${sentinel} server ack`
+      )
     }
     await eventually(
       () => {

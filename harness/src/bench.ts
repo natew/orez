@@ -121,7 +121,13 @@ try {
         )
         serverAcks.push(
           req.server.then(
-            () => ackLatencies.push(Date.now() - issued),
+            (result) => {
+              if (result.type === 'success') {
+                ackLatencies.push(Date.now() - issued)
+              } else {
+                mutationErrors++
+              }
+            },
             () => mutationErrors++
           )
         )
@@ -133,6 +139,9 @@ try {
     })
   )
   await Promise.all(serverAcks)
+  if (mutationErrors > 0) {
+    throw new Error(`${mutationErrors} mutation server ack(s) failed`)
+  }
   const writeWallMs = Date.now() - tW0
   const written = issuedAt.size
 

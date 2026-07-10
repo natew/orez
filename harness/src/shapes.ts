@@ -15,7 +15,8 @@
 import { parseArgs } from 'node:util'
 
 import { canonical } from './canonical.js'
-import { mutators, queries, queryCorpus } from './fixture.js'
+import { SEED, mutators, queries, queryCorpus } from './fixture.js'
+import { assertServerOutcome, type ExpectedServerOutcome } from './server-outcome.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
@@ -94,16 +95,22 @@ function diffCorpus(
 // deterministic write script: mutations through each target's own client +
 // upstream sql behind zero's back, same order on both targets
 async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
-  const acks: Promise<unknown>[] = []
-  const mutate = (req: { client: Promise<unknown>; server: Promise<unknown> }) => {
-    acks.push(req.server)
+  const acks: Promise<void>[] = []
+  const mutate = (
+    label: string,
+    req: { client: Promise<unknown>; server: Promise<unknown> },
+    expected: ExpectedServerOutcome = 'success'
+  ) => {
+    acks.push(assertServerOutcome(req.server, expected, `${target.name} ${label}`))
     return req.client
   }
 
   await mutate(
+    'project.create pw1',
     zero.mutate(mutators.project.create({ id: 'pw1', ownerId: 'u1', name: 'written α' }))
   )
   await mutate(
+    'task.create tw1',
     zero.mutate(
       mutators.task.create({
         id: 'tw1',
@@ -116,22 +123,48 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
       })
     )
   )
-  await mutate(zero.mutate(mutators.task.toggle({ id: 'tw1' })))
-  await mutate(zero.mutate(mutators.task.toggle({ id: 't3' })))
-  await mutate(zero.mutate(mutators.project.rename({ id: 'p3', name: 'renamed ζ' })))
   await mutate(
+    'task.toggle tw1',
+    zero.mutate(mutators.task.toggle({ id: 'tw1', done: true }))
+  )
+  await mutate(
+    'task.toggle t3',
+    zero.mutate(
+      mutators.task.toggle({
+        id: 't3',
+        done: !SEED.task.find((task) => task.id === 't3')!.done,
+      })
+    )
+  )
+  await mutate(
+    'project.rename p3',
+    zero.mutate(mutators.project.rename({ id: 'p3', name: 'renamed ζ' }))
+  )
+  await mutate(
+    'member.add mw1',
     zero.mutate(mutators.member.add({ id: 'mw1', projectId: 'p2', userId: 'u7' }))
   )
-  await mutate(zero.mutate(mutators.member.remove({ id: 'm2' })))
-  await mutate(zero.mutate(mutators.project.delete({ id: 'p9' })))
+  await mutate('member.remove m2', zero.mutate(mutators.member.remove({ id: 'm2' })))
+  await mutate('project.delete p9', zero.mutate(mutators.project.delete({ id: 'p9' })))
   // window churn: shove rows across the tasksTopByRank/tasksAfterCursor
   // boundaries so the incremental maintenance path has to add AND evict
-  await mutate(zero.mutate(mutators.task.setRank({ id: 't11', rank: 99.5 })))
-  await mutate(zero.mutate(mutators.task.setRank({ id: 't13', rank: 98.25 })))
-  await mutate(zero.mutate(mutators.task.setRank({ id: 't20', rank: -99 })))
-  // app-error path: duplicate create must reject server-side + roll back
   await mutate(
-    zero.mutate(mutators.project.create({ id: 'pw1', ownerId: 'u1', name: 'dupe' }))
+    'task.setRank t11',
+    zero.mutate(mutators.task.setRank({ id: 't11', rank: 99.5 }))
+  )
+  await mutate(
+    'task.setRank t13',
+    zero.mutate(mutators.task.setRank({ id: 't13', rank: 98.25 }))
+  )
+  await mutate(
+    'task.setRank t20',
+    zero.mutate(mutators.task.setRank({ id: 't20', rank: -99 }))
+  )
+  // app-error path: duplicate create must fail server-side + roll back
+  await mutate(
+    'project.create duplicate pw1',
+    zero.mutate(mutators.project.create({ id: 'pw1', ownerId: 'u1', name: 'dupe' })),
+    { type: 'app-error' }
   )
 
   // upstream writes behind zero's back (replication path on stock, version
@@ -149,7 +182,7 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
   await target.sql(`UPDATE task SET "dueAt" = NULL WHERE id = 't2'`)
   await target.sql(`UPDATE task SET "dueAt" = 1750000005000 WHERE id = 't6'`)
 
-  await Promise.allSettled(acks) // the dupe create rejects; the rest must resolve
+  await Promise.all(acks) // exact outcomes: only the duplicate create rejects
 }
 
 async function startAgainst(name: string): Promise<SyncTarget> {

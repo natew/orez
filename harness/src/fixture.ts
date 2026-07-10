@@ -409,11 +409,14 @@ export const mutators = defineMutators({
         await tx.mutate.task.insert(args as never)
       }
     ),
-    toggle: defineMutator(async ({ tx, args }: { tx: Tx; args: { id: string } }) => {
-      const existing = await tx.query.task.where('id', args.id).one()
-      if (!existing) throw new Error('not-found')
-      await tx.mutate.task.update({ id: args.id, done: !existing.done })
-    }),
+    toggle: defineMutator(
+      async ({ tx, args }: { tx: Tx; args: { id: string; done: boolean } }) => {
+        // A client transaction can only read rows already present in that
+        // client's synced cache. Have the caller provide the optimistic target
+        // state; executeMutator remains authoritative and flips the DB row.
+        await tx.mutate.task.update(args)
+      }
+    ),
     setRank: defineMutator(
       async ({ tx, args }: { tx: Tx; args: { id: string; rank: number } }) => {
         await tx.mutate.task.update({ id: args.id, rank: args.rank })
