@@ -107,3 +107,24 @@ fn is_truthy(raw: &Value) -> bool {
         _ => false,
     }
 }
+
+// build a zero-typed row object (a rowsPatch `value`) from a live SQLite row
+pub fn zero_row(spec: &crate::schema::TableSpec, row: &crate::db::Row) -> Value {
+    let mut value = serde_json::Map::new();
+    for (col, ty) in &spec.columns {
+        let raw = row.get(col).cloned().unwrap_or(SqlValue::Null);
+        value.insert(col.clone(), to_zero_value(*ty, &raw));
+    }
+    Value::Object(value)
+}
+
+// build a zero-typed `id` object (a `del` op's id) from a primary-key JSON map
+pub fn zero_pk_id(spec: &crate::schema::TableSpec, pk: &Value) -> Value {
+    let mut id = serde_json::Map::new();
+    for col in &spec.primary_key {
+        let ty = spec.column_type(col).unwrap_or(ZeroColumnType::String);
+        let raw = pk.get(col).cloned().unwrap_or(Value::Null);
+        id.insert(col.clone(), to_zero_value_json(ty, raw));
+    }
+    Value::Object(id)
+}

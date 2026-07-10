@@ -13,7 +13,6 @@ use crate::db::{Row, SqlValue, SyncDb};
 use crate::error::EngineError;
 use crate::schema::{TableSpec, Tables, quote_ident};
 use crate::store;
-use crate::value::{to_zero_value, to_zero_value_json};
 use crate::wire;
 
 // per-user row visibility. `filter` returns a WHERE fragment + params selecting
@@ -184,12 +183,7 @@ fn snapshot(
 
 // build a zero-typed row object from a live sqlite row
 fn row_value(spec: &TableSpec, row: &Row) -> Value {
-    let mut value = Map::new();
-    for (col, ty) in &spec.columns {
-        let raw = row.get(col).cloned().unwrap_or(SqlValue::Null);
-        value.insert(col.clone(), to_zero_value(*ty, &raw));
-    }
-    Value::Object(value)
+    crate::value::zero_row(spec, row)
 }
 
 // (cookie, prefix lmids, rowsPatch) — the diff's result
@@ -370,15 +364,7 @@ fn resolve_row(
 
 // del ids carry zero-typed primary-key columns
 fn pk_id(spec: &TableSpec, pk: &Value) -> Value {
-    let mut id = Map::new();
-    for col in &spec.primary_key {
-        let ty = spec
-            .column_type(col)
-            .unwrap_or(crate::value::ZeroColumnType::String);
-        let raw = pk.get(col).cloned().unwrap_or(Value::Null);
-        id.insert(col.clone(), to_zero_value_json(ty, raw));
-    }
-    Value::Object(id)
+    crate::value::zero_pk_id(spec, pk)
 }
 
 // dedup key = client table name + the pk column values, JSON-normalized (the
