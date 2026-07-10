@@ -50,15 +50,22 @@ Multiple agents work this worktree concurrently. Rules:
       scripts (not executed). Offline executable comparison green (legacy
       cursor/snapshot/ack 17 pass, Rust workerd 8 pass). Production cutover
       remains user-gated.
-- [x] M4b: query-aware layer (AST compiler, membership, desired queries)
-      (2026-07-09: engine + transport + lanes green vs rust-local. v51 AST
-      subset incl. junction EXISTS, nested related, ILIKE folding, empty
-      IN, composite tie-breakers; recomputation narrowing measured 12x on
-      dependency-intersection and 11x on touched-pk windows; query
-      lifecycle lane matrix green incl. forbidden-row raw-store, overlap
-      retention, permission contraction, reconnect replay, lost-response.
-      Open follow-ups: stock-zero cross-differential on query lanes;
-      rust-cf query matrix run — wired, assigned to sol)
+- [~] M4b: query-aware layer (AST compiler, membership, desired queries).
+      Engine + transport + lifecycle lanes green vs rust-local and rust-cf
+      (v51 AST subset incl. junction EXISTS, nested related, ILIKE folding,
+      empty IN, composite tie-breakers; recomputation narrowing measured
+      12x dependency-intersection and 11x touched-pk; forbidden-row
+      raw-store, overlap retention, permission contraction, reconnect
+      replay, lost-response). A cross-model adversarial review + re-verify
+      (plans/rust-sync-review-findings-2026-07-09.md) fixed 8 defects
+      including two criticals (client raw-AST permission bypass, global
+      query-hash cross-group collision). REOPENED items before the gate is
+      green: (1) nested related per-relation orderBy+limit must be
+      SUPPORTED not rejected — Chat's windowed queries need it, and 5
+      corpus shapes are currently skipped in query-diff; (2) forward
+      migration for the _zsync_queries (clientGroupID,hash) rekey; (3) CI
+      must run cargo test --workspace + a sync-cf-host test job; (4)
+      unknown named query must return 400 not 500.
 - [ ] M4c: chat compatibility branch (measurement)
 - [ ] M5/M6 gates: see final plan
 
