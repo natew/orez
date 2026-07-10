@@ -162,6 +162,11 @@ try {
     queryTaskPuts.every((entry) => ['p1', 'p4'].includes(entry.value.projectId)),
     'query-aware pull excludes non-members'
   )
+  const queryStatus = await admin('/admin/status')
+  assert.ok(
+    queryStatus.body.counters.queryRecompilations >= 1,
+    'query recompilation counter increments for named query puts'
+  )
   assertions += 2
   const storedTransform = await admin('/admin/sql', {
     query:

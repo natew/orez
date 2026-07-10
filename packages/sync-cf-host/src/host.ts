@@ -73,6 +73,7 @@ type Counters = {
   applicationErrors: number;
   invariantFailures: number;
   retentionRuns: number;
+  queryRecompilations: number;
   wasmBoundaryCalls: number;
   wakeFrames: number;
   wakeBatches: number;
@@ -87,6 +88,7 @@ function freshCounters(): Counters {
     applicationErrors: 0,
     invariantFailures: 0,
     retentionRuns: 0,
+    queryRecompilations: 0,
     wasmBoundaryCalls: 0,
     wakeFrames: 0,
     wakeBatches: 0,
@@ -479,6 +481,10 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         const patch = Array.isArray(response.rowsPatch)
           ? response.rowsPatch
           : [];
+        const queryPuts = queryAware && Array.isArray(body.queries?.patch)
+          ? body.queries.patch.filter((entry) => entry?.op === "put").length
+          : 0;
+        this.#counters.queryRecompilations += queryPuts;
         const state = this.#engineState();
         this.#log({
           namespaceHash: namespace,
@@ -490,7 +496,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           currentWatermark: state?.watermark ?? null,
           changeRowsScanned: null,
           changeRowsIncluded: null,
-          queriesRecomputed: 0,
+          queriesRecomputed: queryPuts,
           rowPuts: patch.filter((entry) => entry?.op === "put").length,
           rowDeletes: patch.filter((entry) => entry?.op === "del").length,
           lmidAdvances: 0,
