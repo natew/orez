@@ -150,15 +150,15 @@ describe('installZeroSqlWriteCircuitBreaker', () => {
     installZeroSqlWriteCircuitBreaker(sql)
     expect(() => write(sql, 10_000_001)).toThrow(/circuit breaker tripped/)
     // WITH ... SELECT is a read: never refused, never metered
-    expect(() =>
-      sql.exec('WITH recent AS (SELECT 1) SELECT * FROM recent')
-    ).not.toThrow()
+    expect(() => sql.exec('WITH recent AS (SELECT 1) SELECT * FROM recent')).not.toThrow()
     // WITH ... INSERT/UPDATE/DELETE is a write: refused like any other mutation
     expect(() =>
       sql.exec('WITH src AS (SELECT 1 AS v) INSERT INTO app_data SELECT v FROM src')
     ).toThrow(/refusing SQL write/)
     expect(() =>
-      sql.exec('with doomed as (select id from t) delete from t where id in (select id from doomed)')
+      sql.exec(
+        'with doomed as (select id from t) delete from t where id in (select id from doomed)'
+      )
     ).toThrow(/refusing SQL write/)
   })
 
