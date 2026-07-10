@@ -313,7 +313,9 @@ if (existsSync(compilerPkgPath)) {
 // engine isn't built.
 const cfHostDir = resolve(root, 'packages', 'sync-cf-host')
 const cfHostPkgPath = resolve(cfHostDir, 'package.json')
-const cfHostWasmExists = existsSync(resolve(cfHostDir, 'src', 'generated', 'sync_wasm_bg.wasm'))
+const cfHostWasmExists = existsSync(
+  resolve(cfHostDir, 'src', 'generated', 'sync_wasm_bg.wasm')
+)
 if (existsSync(cfHostPkgPath) && cfHostWasmExists) {
   const cfHostPkg = JSON.parse(readFileSync(cfHostPkgPath, 'utf-8'))
   packages.push({
@@ -324,7 +326,9 @@ if (existsSync(cfHostPkgPath) && cfHostWasmExists) {
     next: orezNext,
   })
 } else if (existsSync(cfHostPkgPath)) {
-  console.info('skipping @orez/sync-cf-host (no wasm built — run bun run build:wasm there)')
+  console.info(
+    'skipping @orez/sync-cf-host (no wasm built — run bun run build:wasm there)'
+  )
 }
 
 // for --pack-only, use current versions instead of bumping
