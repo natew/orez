@@ -15,6 +15,7 @@ state against a fresh oracle read of the authoritative store.
 bun install
 bun run smoke                                      # 10 clients vs real zero-cache
 bun src/smoke.ts --target orez-local --clients 50  # same vs the sqlite sync-server core
+bun src/multi-project-mount.ts                      # plain vs /p-<id> transport + DB isolation
 bun src/smoke.ts --target orez-cf --clients 5      # same vs the deployed CF DO
 bun src/shapes.ts                                  # 22-query differential: stock-zero vs orez-local
 bun src/shapes.ts --against orez-cf                # same differential vs the CF DO
