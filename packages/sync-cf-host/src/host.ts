@@ -164,7 +164,11 @@ export function createSyncWorker<Env extends SyncHostEnv>(
       const headers = new Headers(request.headers)
       headers.delete(CLAIMS_HEADER)
       headers.delete(NAMESPACE_HEADER)
-      if (!isAdmin) {
+      // Wake sockets carry only a client ID and the literal "wake" hint; they
+      // expose no rows, claims, or mutation state. Keep this advisory channel
+      // compatible with the vendored transport, which cannot attach an HTTP
+      // Authorization header to its native WebSocket constructor.
+      if (!isAdmin && route !== '/wake') {
         const claims = await config.authenticate(request, env)
         if (!claims) return json({ error: 'missing authentication' }, 401)
         headers.set(CLAIMS_HEADER, encodeURIComponent(JSON.stringify(claims)))
@@ -182,10 +186,10 @@ export function createSyncWorker<Env extends SyncHostEnv>(
 export function createSyncDurableObject<Env extends SyncHostEnv>(
   config: SyncHostConfig<Env>,
 ) {
-  const retainChanges = String(config.retainChanges ?? 4_096)
+  const defaultRetainChanges = String(config.retainChanges ?? 4_096)
   const caps: PullCaps = { ...DEFAULT_CAPS, ...config.caps }
   const idleTeardownMs = config.idleTeardownMs ?? 5_000
-  const wakeCoalesceMs = config.wakeCoalesceMs ?? 10
+  const wakeCoalesceMs = config.wakeCoalesceMs ?? 2
 
   return class SyncDurableObject extends DurableObject<Env> {
     readonly #engineDb: SqlStorageSyncDb
@@ -199,6 +203,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #pulling = new Set<string>()
     #wakeOrigins = new Set<string>()
     #wakePromise: Promise<void> | null = null
+    #visibilityEnabled = false
+    #retainChanges = defaultRetainChanges
 
     constructor(ctx: DurableObjectState, env: Env) {
       super(ctx, env)
@@ -231,7 +237,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     }
 
     #visibility(claims: NormalizedClaims): unknown {
-      if (!config.visibility) return null
+      if (!config.visibility || !this.#visibilityEnabled) return null
       return {
         rowLocal: config.visibility.rowLocal,
         filters: Object.keys(config.schema.tables).flatMap((table) => {
@@ -331,7 +337,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                 config.schema,
                 this.#visibility(claims),
                 caps,
-                retainChanges,
+                this.#retainChanges,
                 body,
                 claims.userID,
               ),
@@ -496,7 +502,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         if (plan.mutations.length > 0) {
           const txStarted = performance.now()
           await this.ctx.storage.transaction(async () => {
-            this.#wasm(() => engine_prune(this.#engineDb, retainChanges))
+            this.#wasm(() => engine_prune(this.#engineDb, this.#retainChanges))
           })
           transactionMs += performance.now() - txStarted
           this.#counters.retentionRuns++
@@ -597,6 +603,28 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         this.#dropNextPushResponse = true
         return json({ ok: true })
       }
+      if (route === '/admin/restart') {
+        this.#bootID = crypto.randomUUID()
+        this.#hibernations++
+        this.#counters = freshCounters()
+        this.#pulling.clear()
+        this.#wakeOrigins.clear()
+        return json({ ok: true, bootID: this.#bootID })
+      }
+      if (route === '/admin/visibility') {
+        return request.json().then((body) => {
+          this.#visibilityEnabled = Boolean((body as { enabled?: unknown }).enabled)
+          return json({ ok: true, enabled: this.#visibilityEnabled })
+        })
+      }
+      if (route === '/admin/retention') {
+        return request.json().catch(() => ({})).then((body) => {
+          const value = Number((body as { retainChanges?: unknown }).retainChanges)
+          if (!Number.isSafeInteger(value) || value < 0) return json({ error: 'invalid retainChanges' }, 400)
+          this.#retainChanges = String(value)
+          return json({ ok: true, retainChanges: value })
+        })
+      }
       return json({ error: 'not found' }, 404)
     }
 
@@ -606,6 +634,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       const namespace = request.headers.get(NAMESPACE_HEADER) ?? 'unknown'
       if (route.startsWith('/admin/')) return this.#admin(route, request)
 
+      if (route === '/wake' && request.method === 'GET') return this.#wake(request)
+
       const claims = claimsFromRequest(request)
       if (!claims) return json({ error: 'missing normalized claims' }, 401)
       if (route === '/pull' && request.method === 'POST') {
@@ -614,7 +644,6 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       if (route === '/push' && request.method === 'POST') {
         return this.#push(request, claims, namespace)
       }
-      if (route === '/wake' && request.method === 'GET') return this.#wake(request)
       return json({ error: 'not found' }, 404)
     }
 
