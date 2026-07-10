@@ -11,7 +11,12 @@ path = "src/main.rs"
 [dependencies]
 sync-core = { path = "../sync-core" }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# preserve_order: json objects keep insertion order (id, ownerId, name) instead
+# of serde's default alphabetical BTreeMap, so admin/sql oracle rows serialize
+# in SELECT-column order to match the client's field order, and engine snapshot
+# emission matches the reference core's Object.entries() iteration (the plan's
+# value-fidelity rule). unifies workspace-wide via cargo feature resolution.
+serde_json = { workspace = true, features = ["preserve_order"] }
 tokio = { version = "1", features = [
   "rt-multi-thread",
   "macros",

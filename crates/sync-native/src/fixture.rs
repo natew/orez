@@ -143,8 +143,10 @@ pub fn run_mutator(
             let id = text(args, "id")?;
             let owner = text(args, "ownerId")?;
             let name = text(args, "name")?;
-            let exists =
-                db.query("SELECT 1 FROM project WHERE id = ?", &[SqlValue::Text(id.clone())])?;
+            let exists = db.query(
+                "SELECT 1 FROM project WHERE id = ?",
+                &[SqlValue::Text(id.clone())],
+            )?;
             if !exists.is_empty() {
                 return Err(MutateError::App("exists".into()));
             }
@@ -229,8 +231,10 @@ pub fn run_mutator(
         }
         "task.toggle" => {
             let id = text(args, "id")?;
-            let existing =
-                db.query("SELECT done FROM task WHERE id = ?", &[SqlValue::Text(id.clone())])?;
+            let existing = db.query(
+                "SELECT done FROM task WHERE id = ?",
+                &[SqlValue::Text(id.clone())],
+            )?;
             let Some(row) = existing.first() else {
                 return Err(MutateError::App("not-found".into()));
             };
@@ -260,41 +264,45 @@ pub fn run_mutator(
     }
 }
 
-// optional per-user row visibility (permissions lane). returns the SELECT +
-// positional params for the user's visible rows of `table`. ported verbatim
-// from permissions.ts fixtureVisibility.
+// optional per-user row visibility (permissions lane). returns a WHERE FRAGMENT
+// (+ positional params) selecting the user's visible rows of `table`; the engine
+// composes it as `SELECT * FROM "<table>" WHERE <fragment>` (snapshot) or
+// `... AND (<fragment>)` (diff point-read). semantically identical to
+// permissions.ts fixtureVisibility, rewritten from aliased full SELECTs to
+// unaliased fragments to match sync-core's Visibility contract.
 pub fn fixture_visible(table: &str, user_id: &str) -> Option<(String, Vec<SqlValue>)> {
-    let project_access = r#"(p."ownerId" = ? OR EXISTS (
-        SELECT 1 FROM member access
-        WHERE access."projectId" = p.id AND access."userId" = ?
-    ))"#;
+    // project access predicate against the project table by two references: the
+    // unaliased `project` row (used when filtering the project table itself)
+    // and a `p`-aliased project subquery (used inside member/task EXISTS).
+    let access = |project_ref: &str| {
+        format!(
+            r#"({project_ref}."ownerId" = ? OR EXISTS (
+                SELECT 1 FROM member access
+                WHERE access."projectId" = {project_ref}.id AND access."userId" = ?
+            ))"#
+        )
+    };
     let uid = || SqlValue::Text(user_id.to_string());
     match table {
-        "user" => Some((
-            r#"SELECT * FROM "user" WHERE id = ?"#.to_string(),
-            vec![uid()],
-        )),
-        "project" => Some((
-            format!("SELECT p.* FROM project p WHERE {project_access}"),
-            vec![uid(), uid()],
-        )),
+        "user" => Some(("id = ?".to_string(), vec![uid()])),
+        "project" => Some((access("project"), vec![uid(), uid()])),
         "member" => Some((
             format!(
-                r#"SELECT m.* FROM member m
-                   WHERE EXISTS (
-                     SELECT 1 FROM project p
-                     WHERE p.id = m."projectId" AND {project_access}
-                   )"#
+                r#"EXISTS (
+                    SELECT 1 FROM project p
+                    WHERE p.id = member."projectId" AND {}
+                )"#,
+                access("p")
             ),
             vec![uid(), uid()],
         )),
         "task" => Some((
             format!(
-                r#"SELECT t.* FROM task t
-                   WHERE EXISTS (
-                     SELECT 1 FROM project p
-                     WHERE p.id = t."projectId" AND {project_access}
-                   )"#
+                r#"EXISTS (
+                    SELECT 1 FROM project p
+                    WHERE p.id = task."projectId" AND {}
+                )"#,
+                access("p")
             ),
             vec![uid(), uid()],
         )),
