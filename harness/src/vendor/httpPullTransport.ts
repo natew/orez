@@ -3,7 +3,7 @@
 // machines without the takeout checkout. refresh deliberately with:
 //   cp ~/takeout/packages/on-zero/src/httpPullTransport.ts \
 //      harness/src/vendor/httpPullTransport.ts   (re-add this header)
-// vendored 2026-07-09 from takeout commit 42904c69 (wake channel + query-aware extension).
+// vendored 2026-07-09 from takeout commit 9099cda7 (wake channel + query-aware extension).
 // http-pull transport: runs a stock @rocicorp/zero client over stateless HTTP
 // by intercepting its /sync/v51/connect WebSocket with a shim that translates
 // pull responses into v51 pokes. ported from the orez zero-http spike — the
@@ -579,11 +579,23 @@ class ZeroHttpSocket {
   }
 
   private emitPoke(response: Exclude<PullResponse, { unchanged: true }>) {
-    const nextCookie = toWebSocketCookie(response.cookie)
-    if (isStaleCookie(this.cookie, response.cookie)) {
+    const currentServer = toHttpCookie(this.cookie)
+    let nextCookie: string
+    if (currentServer !== null && response.cookie < currentServer) {
+      // the server watermark is BEHIND the client: a real reset/restore. mirror
+      // the 409 stale path instead of poking the client backwards.
       throw new Error(
         `zero-http pull returned stale cookie ${response.cookie} for ${this.cookie}`
       )
+    } else if (currentServer !== null && response.cookie === currentServer) {
+      // same server watermark but a non-empty patch: a query-aware membership
+      // delta (a desired-query change recomputes rows without advancing the
+      // change log). bump a client-local cookie id so replicache sees a changed
+      // cookie — otherwise it trips "cookie did not change, but patch is not
+      // empty" and drops the patch.
+      nextCookie = toLocalWebSocketCookie(response.cookie, ++this.nextLocalCookieID)
+    } else {
+      nextCookie = toWebSocketCookie(response.cookie) as string
     }
 
     const pokeID = `zero-http-${++this.state.nextPokeID}`
@@ -743,11 +755,6 @@ function toLocalWebSocketCookie(cookie: number, localID: number): string {
     6,
     '0'
   )}`
-}
-
-function isStaleCookie(current: string | null, next: number) {
-  const currentNumber = toHttpCookie(current)
-  return currentNumber !== null && next <= currentNumber
 }
 
 function errorMessage(error: unknown) {

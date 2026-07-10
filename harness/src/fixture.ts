@@ -262,6 +262,18 @@ export const queryBuilders = {
 
 export type QueryName = keyof typeof queryBuilders
 
+// the query-aware transport's transform seam: resolve a named query's
+// (name, args) to its Zero v51 AST via the SAME builder map the client
+// registry + stock-zero app-server use. args arrives as the client's desired-
+// query arg array ([argObject] or []), so the single arg object is args[0].
+// this is the harness playing the trusted consumer-transform role (app-server
+// .ts plays it for stock-zero); a production worker would apply auth here.
+export function queryNameToAst(name: string, args: readonly unknown[]): unknown {
+  const build = queryBuilders[name as QueryName]
+  if (!build) throw new Error(`unknown query: ${name}`)
+  return (build(args[0] as never) as { ast: unknown }).ast
+}
+
 export const queries = defineQueries({
   generated: defineQuery(({ args }: { args: GenSpec }) => buildGenerated(args)),
   allProjects: defineQuery(() => queryBuilders.allProjects()),
