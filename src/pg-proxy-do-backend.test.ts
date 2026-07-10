@@ -1284,6 +1284,99 @@ describe('DoBackend', () => {
     ])
   })
 
+  test('reloads schema metadata persisted after backend initialization', async () => {
+    const batch = await deployTimeSchemaBatchStatements(`
+      CREATE TABLE "probe" (
+        "id" text PRIMARY KEY,
+        "enabled" boolean NOT NULL,
+        "payload" jsonb,
+        "createdAt" timestamp NOT NULL
+      );
+    `)
+    const metadataRows: Record<string, unknown>[] = []
+    const http = await startDoHttp((sql) => {
+      const compact = compactSQL(sql)
+      if (compact.startsWith('SELECT kind, key, subkey, value FROM')) {
+        return {
+          rows: metadataRows,
+          columns: ['kind', 'key', 'subkey', 'value'],
+        }
+      }
+      if (compact.includes("sqlite_master WHERE type = 'table'")) {
+        return {
+          rows: [
+            {
+              name: 'probe',
+              sql: 'CREATE TABLE probe (id text PRIMARY KEY, enabled integer NOT NULL, payload text, createdAt text NOT NULL)',
+            },
+          ],
+          columns: ['name', 'sql'],
+        }
+      }
+      if (compact.includes('PRAGMA table_info("probe")')) {
+        return {
+          rows: [
+            { cid: 0, name: 'id', type: 'text', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 1,
+              name: 'enabled',
+              type: 'integer',
+              notnull: 1,
+              dflt_value: null,
+              pk: 0,
+            },
+            {
+              cid: 2,
+              name: 'payload',
+              type: 'text',
+              notnull: 0,
+              dflt_value: null,
+              pk: 0,
+            },
+            {
+              cid: 3,
+              name: 'createdAt',
+              type: 'text',
+              notnull: 1,
+              dflt_value: null,
+              pk: 0,
+            },
+          ],
+          columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'late-schema-metadata-test')
+    await backend.waitReady
+
+    for (const statement of batch) {
+      if (statement.params) appendMetadataParamRows(metadataRows, statement.params)
+    }
+
+    const result = await (backend as any).handleCatalogQuery(`
+      SELECT c.column_name::text AS column,
+             c.data_type::text AS "dataType",
+             t.typname::text AS typename
+      FROM information_schema.columns c
+      JOIN pg_catalog.pg_type t ON c.udt_name = t.typname
+      LEFT JOIN pg_catalog.pg_type et ON t.typelem = et.oid
+      JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
+      WHERE (c.table_schema, c.table_name) IN (('public'::text, 'probe'::text))
+    `)
+
+    expect(result.rows).toEqual([
+      { column: 'id', dataType: 'text', typename: 'text' },
+      { column: 'enabled', dataType: 'boolean', typename: 'bool' },
+      { column: 'payload', dataType: 'jsonb', typename: 'jsonb' },
+      {
+        column: 'createdAt',
+        dataType: 'timestamp without time zone',
+        typename: 'timestamp',
+      },
+    ])
+  })
+
   test('tracks parser-backed publication membership without private table lists', async () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('sqlite_master')) {
