@@ -1,6 +1,6 @@
 {
   "name": "orez",
-  "version": "0.4.50",
+  "version": "0.4.51",
   "description": "PGlite-powered zero-sync development backend. No Docker required.",
   "type": "module",
   "license": "MIT",
@@ -31,6 +31,7 @@
       "types": "./dist/sync-server/sync-server.d.ts",
       "import": "./dist/sync-server/sync-server.js"
     },
+    "./sync-cf": "./packages/sync-cf-host/src/index.ts",
     "./worker/*": {
       "types": "./dist/worker/*.d.ts",
       "import": "./dist/worker/*.js"
@@ -48,7 +49,8 @@
     "orez": "dist/cli-entry.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "packages/sync-cf-host/src"
   ],
   "scripts": {
     "build": "tsc && chmod +x dist/cli-entry.js",

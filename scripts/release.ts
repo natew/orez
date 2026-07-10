@@ -183,6 +183,7 @@ if (into) {
   console.info('building...')
   cleanRootDist()
   run('bun run build')
+  run('bun run build:wasm', { cwd: resolve(root, 'packages', 'sync-cf-host') })
   preparePgToSqliteDist()
 
   const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
@@ -205,13 +206,6 @@ if (into) {
     pkgDirs.push({ name: sqlPkg.name, dir: sqlDir })
   }
 
-  const syncHostDir = resolve(root, 'packages', 'sync-cf-host')
-  const syncHostPkgPath = resolve(syncHostDir, 'package.json')
-  if (existsSync(syncHostPkgPath)) {
-    const syncHostPkg = JSON.parse(readFileSync(syncHostPkgPath, 'utf-8'))
-    pkgDirs.push({ name: syncHostPkg.name, dir: syncHostDir })
-  }
-
   let released = 0
   try {
     for (const { name, dir } of pkgDirs) {
@@ -222,9 +216,6 @@ if (into) {
       }
 
       try {
-        if (name === '@orez/sync-cf-host') {
-          run('bun run build:wasm', { cwd: dir })
-        }
         run(`npm pack --pack-destination ${tmpDir}`, { cwd: dir, silent: true })
 
         const files = readdirSync(tmpDir)
@@ -308,29 +299,6 @@ if (existsSync(compilerPkgPath)) {
   })
 }
 
-// @orez/sync-cf-host — CF DO host for the rust sync engine, published as TS
-// source + generated wasm (consumers bundle with wrangler). skip if the wasm
-// engine isn't built.
-const cfHostDir = resolve(root, 'packages', 'sync-cf-host')
-const cfHostPkgPath = resolve(cfHostDir, 'package.json')
-const cfHostWasmExists = existsSync(
-  resolve(cfHostDir, 'src', 'generated', 'sync_wasm_bg.wasm')
-)
-if (existsSync(cfHostPkgPath) && cfHostWasmExists) {
-  const cfHostPkg = JSON.parse(readFileSync(cfHostPkgPath, 'utf-8'))
-  packages.push({
-    dir: cfHostDir,
-    originalVersion: cfHostPkg.version,
-    pkgPath: cfHostPkgPath,
-    pkg: cfHostPkg,
-    next: orezNext,
-  })
-} else if (existsSync(cfHostPkgPath)) {
-  console.info(
-    'skipping @orez/sync-cf-host (no wasm built — run bun run build:wasm there)'
-  )
-}
-
 // for --pack-only, use current versions instead of bumping
 if (packOnly) {
   for (const p of packages) {
@@ -369,6 +337,7 @@ if (!packOnly) {
 console.info('\nbuilding...')
 cleanRootDist()
 run('bun run build')
+run('bun run build:wasm', { cwd: resolve(root, 'packages', 'sync-cf-host') })
 preparePgToSqliteDist()
 
 // bump versions in source (skip for --pack-only and --canary)
