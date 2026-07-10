@@ -163,6 +163,15 @@ try {
     'query-aware pull excludes non-members'
   )
   assertions += 2
+  const storedTransform = await admin('/admin/sql', {
+    query:
+      "SELECT transformVersion FROM _zsync_queries WHERE clientGroupID = 'query-group' AND hash = 'tasks-p1-p4'",
+  })
+  equal(
+    storedTransform.rows,
+    [{ transformVersion: 1 }],
+    'query transform version is server-authored'
+  )
   const queryFollowup = await post('/pull', {
     clientID: 'query-client',
     clientGroupID: 'query-group',

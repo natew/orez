@@ -1,3 +1,4 @@
+import { queryNameToAst } from '../../../harness/src/query-resolver.mjs'
 import {
   MutationApplicationError,
   registerMutators,
@@ -6,7 +7,6 @@ import {
   type SyncSql,
   type ZeroSchemaConfig,
 } from './index.js'
-import { queryNameToAst } from '../../../harness/src/query-resolver.mjs'
 
 export const harnessSchema = {
   tables: {
@@ -134,7 +134,9 @@ function seedRows() {
 
 function initializeHarness(sql: SyncSql): void {
   for (const statement of DDL) sql.exec(statement)
-  const [{ count }] = sql.query<{ count: number }>('SELECT COUNT(*) AS count FROM project')
+  const [{ count }] = sql.query<{ count: number }>(
+    'SELECT COUNT(*) AS count FROM project'
+  )
   if (Number(count) > 0) return
 
   const seed = seedRows()
@@ -166,7 +168,7 @@ function initializeHarness(sql: SyncSql): void {
         row.done ? 1 : 0,
         row.meta === null ? null : JSON.stringify(row.meta),
         row.dueAt,
-      ],
+      ]
     )
   }
 }
@@ -222,7 +224,7 @@ const harnessMutators = registerMutators({
         value.done ? 1 : 0,
         value.meta == null ? null : JSON.stringify(value.meta),
         value.dueAt ?? null,
-      ],
+      ]
     )
   },
   async 'task.toggle'(tx, args) {
@@ -231,7 +233,10 @@ const harnessMutators = registerMutators({
       value.id,
     ])
     if (rows.length === 0) throw new MutationApplicationError('not-found')
-    await tx.exec('UPDATE task SET done = ? WHERE id = ?', [rows[0]!.done ? 0 : 1, value.id])
+    await tx.exec('UPDATE task SET done = ? WHERE id = ?', [
+      rows[0]!.done ? 0 : 1,
+      value.id,
+    ])
   },
   async 'task.setRank'(tx, args) {
     const value = args as { id: string; rank: number }
@@ -248,11 +253,11 @@ const harnessMutators = registerMutators({
       const rows = await tx.query<{ committed: number }>(
         `SELECT COUNT(*) AS committed FROM _zsync_clients
          WHERE clientID = ? AND lastMutationID >= ?`,
-        [value.clientID, value.mutationID],
+        [value.clientID, value.mutationID]
       )
       await tx.exec(
         'INSERT INTO _harness_effects (id, observedCommitted) VALUES (?, ?)',
-        [value.id, Number(rows[0]?.committed ?? 0) > 0 ? 1 : 0],
+        [value.id, Number(rows[0]?.committed ?? 0) > 0 ? 1 : 0]
       )
     })
   },
@@ -266,7 +271,7 @@ const harnessMutators = registerMutators({
     context.defer(() =>
       tx.exec('INSERT INTO _harness_effects (id, observedCommitted) VALUES (?, 0)', [
         value.id,
-      ]),
+      ])
     )
     await scheduler.wait(1)
     throw new MutationApplicationError('intentional-rollback')
@@ -279,6 +284,7 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
     schema: harnessSchema,
     mutators: harnessMutators,
     queryAware: false,
+    queryTransformVersion: 1,
     resolveQuery(name, args) {
       return queryNameToAst(name, args) as never
     },
@@ -287,7 +293,9 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
       return new URL(request.url).pathname.split('/')[1] || null
     },
     authenticate(request) {
-      const userID = request.headers.get('authorization')?.match(/^Bearer token-(.+)$/)?.[1]
+      const userID = request.headers
+        .get('authorization')
+        ?.match(/^Bearer token-(.+)$/)?.[1]
       return userID ? { userID } : null
     },
     visibility: {
@@ -307,7 +315,11 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
             params: [user, user],
           }
         }
-        if (table === 'task') return { sql: 'EXISTS (SELECT 1 FROM project WHERE project.id = task."projectId" AND (project."ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?)))', params: [user, user] }
+        if (table === 'task')
+          return {
+            sql: 'EXISTS (SELECT 1 FROM project WHERE project.id = task."projectId" AND (project."ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?)))',
+            params: [user, user],
+          }
         return undefined
       },
     },
