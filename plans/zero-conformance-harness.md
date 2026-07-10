@@ -446,18 +446,18 @@ findings pinned:
   federation is re-paired, and note the nightly only becomes live after
   these commits are pushed to main (the mini pulls origin/main).
 
-**HIGH 6, permissions/visibility lane [DESIGNED 2026-07-09]:**
+**HIGH 6, permissions/visibility lane [DONE 2026-07-09]:**
 
-- add a visible-filtered `orez-local` target mode using the fixture's actual
+- shipped a visible-filtered `orez-local` target mode using the fixture's actual
   access graph: a project is visible to its owner or a listed member; tasks
   and membership rows are visible only through a visible project; a user row
   is visible only to that user. keep this as an explicit target option so the
   global visibility assumed by smoke/shapes/sweep does not change.
-- add `harness/src/permissions.ts` with three concurrent stock clients:
+- `harness/src/permissions.ts` runs three concurrent stock clients:
   owner, member, and foreign user. seed isolated owner/member/foreign
   projects and tasks, then assert each materialized project/task view includes
   exactly the accessible isolated rows (including related membership rows).
-- exercise access-set churn through upstream membership writes. adding the
+- access-set churn runs through upstream membership writes. adding the
   foreign user must reveal the already-existing project and task; removing the
   original member must clear both from that client's already-populated cache,
   while the owner remains stable. assertions wait for complete materialized
@@ -468,7 +468,7 @@ findings pinned:
   auth-token refresh/staleness, and ACL changes outside synced tables require
   separate lanes; the last category must call `invalidate()` because no row
   change can advance the visibility epoch.
-- acceptance: `bun src/permissions.ts` exits zero only after initial owner /
+- acceptance is green: `bun src/permissions.ts` exits zero only after initial owner /
   member / foreign isolation, membership-add reveal, membership-revoke cache
   clearing, and a fresh late-client check all pass.
 
@@ -491,7 +491,7 @@ findings pinned:
 - custom mutators need a push executor per target; M2's core provides it
   for orez targets, and stock-zero lanes use zero's own push endpoint with
   a tiny fixture app server (zero-pg PushProcessor).
-- permissions axes: the HIGH 6 pull-visibility lane above is designed;
+- permissions axes: the HIGH 6 pull-visibility lane above is shipped;
   push-role/auth-refresh/external-ACL invalidation lanes remain greenfield
   because upstream punts permissions to L4.
 - how much generator code ports cleanly vs needs rewrite: answered in M3 by

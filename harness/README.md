@@ -21,6 +21,7 @@ bun src/shapes.ts --against orez-cf                # same differential vs the CF
 bun src/sweep.ts --rounds 15                       # seeded randomized differential (prints seed)
 bun src/sweep.ts --seed 12345 --against orez-cf    # deterministic replay / CF host
 bun src/bench.ts --target orez-local --clients 20 --writers 5 --rate 10 --duration 15
+bun src/permissions.ts                             # per-user visibility + add/revoke
 ```
 
 sweep divergences write replay artifacts to `regressions/` (seed + spec +
@@ -36,6 +37,12 @@ with `cd cf && bunx wrangler deploy`, then wait ~1min for propagation before
 probing). DO sqlite gotchas the core is written around: no raw
 `BEGIN`/`SAVEPOINT` SQL (only `storage.transactionSync`), no `?N` numbered
 bindings.
+
+`permissions.ts` runs `orez-local` with its optional `visible()` policy:
+owner-or-member projects, tasks/members through visible projects, and only
+the authenticated user's own user row. it is intentionally separate from
+the globally visible differential lanes and asserts that membership removal
+clears already-cached project/task data.
 
 `stock-zero` boots embedded postgres (wal_level=logical), the fixture app
 server (`src/app-server.ts`: named-query transform on /query + custom-mutator

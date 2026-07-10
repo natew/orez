@@ -8,7 +8,11 @@ import { createServer, type Server } from 'node:http'
 
 import { Zero } from '@rocicorp/zero'
 
-import { type SyncDb, createSyncServer } from '../../../src/sync-server/sync-server'
+import {
+  type SyncDb,
+  type SyncServerConfig,
+  createSyncServer,
+} from '../../../src/sync-server/sync-server'
 import { TABLES, executeMutator, seedSqlite, userIDFromAuth } from '../fixture-data.js'
 import { mutators, schema } from '../fixture.js'
 // the production transport source, vendored verbatim (self-contained module,
@@ -35,6 +39,7 @@ function bunSqliteDb(db: Database): SyncDb {
 export async function startOrezLocal(opts?: {
   port?: number
   pullIntervalMs?: number
+  visible?: SyncServerConfig['visible']
 }): Promise<SyncTarget> {
   // random per run — see stock-zero.ts port note
   const port = opts?.port ?? 59_000 + Math.floor(Math.random() * 4_000)
@@ -47,6 +52,7 @@ export async function startOrezLocal(opts?: {
     db,
     tables: TABLES,
     mutate: executeMutator,
+    visible: opts?.visible,
   })
 
   const server: Server = createServer(async (req, res) => {
