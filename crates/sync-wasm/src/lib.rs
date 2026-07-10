@@ -539,7 +539,7 @@ pub fn engine_handle_query_pull(
         &body,
         user_id,
     )
-    .map_err(js_err)
+    .map_err(engine_error)
     .and_then(|value| to_js(&value))
 }
 
