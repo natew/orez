@@ -29,6 +29,7 @@ pub mod db;
 pub mod error;
 pub mod pull;
 pub mod push;
+pub mod query;
 pub mod schema;
 mod store;
 pub mod value;
