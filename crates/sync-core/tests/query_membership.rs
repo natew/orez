@@ -342,6 +342,78 @@ fn query_definitions_are_scoped_per_group_not_by_client_hash() {
     );
 }
 
+// GAP-3 regression: a namespace created before the CRITICAL-2 rekey has a
+// hash-only _zsync_queries with no clientGroupID column. CREATE TABLE IF NOT
+// EXISTS cannot add the column, so init_query_schema must forward-migrate (reset
+// the query-aware state) rather than let the next group-scoped INSERT crash with
+// "no such column clientGroupID".
+#[test]
+fn init_query_schema_migrates_pre_critical2_schema() {
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE issue (id TEXT PRIMARY KEY, title TEXT, closed INTEGER, priority INTEGER)",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "INSERT INTO issue VALUES ('i1', 't-i1', 0, 5), ('i2', 't-i2', 1, 3)",
+        &[],
+    )
+    .unwrap();
+
+    // simulate the pre-CRITICAL-2 install: _zsync_queries keyed by hash only, plus
+    // an old query row and the other (unchanged-shape) query tables.
+    db.exec(
+        "CREATE TABLE _zsync_queries (
+            hash TEXT PRIMARY KEY, ast TEXT NOT NULL, rootTable TEXT NOT NULL,
+            deps TEXT NOT NULL, transformVersion INTEGER NOT NULL DEFAULT 0)",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "INSERT INTO _zsync_queries (hash, ast, rootTable, deps)
+         VALUES ('h', '{\"table\":\"issue\"}', 'issue', '[\"issue\"]')",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "CREATE TABLE _zsync_desires (clientGroupID TEXT NOT NULL, clientID TEXT NOT NULL,
+            hash TEXT NOT NULL, clientVersion INTEGER NOT NULL,
+            PRIMARY KEY (clientGroupID, clientID, hash))",
+        &[],
+    )
+    .unwrap();
+
+    // forward migration on init: the old _zsync_queries is detected and reset.
+    init_query_schema(&mut db).unwrap();
+
+    // the new group-scoped schema is in place: register + desire + recompute work
+    // (a group-scoped INSERT would crash "no such column clientGroupID" against
+    // the old table). the stale global 'h' row was dropped by the reset.
+    let tables = schema();
+    register_query(
+        &mut db,
+        &tables,
+        G,
+        "h",
+        &json!({ "table": "issue", "where": where_eq("closed", json!(false)) }),
+        0,
+    )
+    .unwrap();
+    set_desire(&mut db, G, "c", "h", 1).unwrap();
+    let patch = db
+        .transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
+        .unwrap();
+    assert_eq!(put_ids(&patch), vec!["i1"]); // only the open issue
+
+    // idempotent: a second init on the now-current schema neither resets nor errors.
+    init_query_schema(&mut db).unwrap();
+    let again = db
+        .transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
+        .unwrap();
+    assert!(again.is_empty(), "second init preserved the migrated state");
+}
+
 // CRITICAL-2 companion: a transform-version bump on a group's query forces a
 // recompute so a tightened permission transform cannot retain older, more-
 // permissive rows even if the AST text were unchanged.

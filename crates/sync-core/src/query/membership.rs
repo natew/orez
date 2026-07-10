@@ -72,7 +72,58 @@ fn raw_pk(spec: &TableSpec, row: &crate::db::Row) -> Value {
     Value::Object(pk)
 }
 
+// the current query-aware schema version. bump when a query-aware table changes
+// shape, and add the forward migration in migrate_query_schema.
+const QUERY_SCHEMA_VERSION: i64 = 1;
+
+// forward-only migration for the query-aware tables. CREATE TABLE IF NOT EXISTS
+// cannot alter an existing table, so a namespace created before a shape change
+// would hit "no such column" (the pre-CRITICAL-2 _zsync_queries had a hash-only
+// PK and no clientGroupID). the plan mandates an explicit forward migration: the
+// query-aware state is fully reconstructable from clients' next desiredQueriesPatch
+// + recompute, and the old rows carry no client-group to backfill, so the
+// deterministic migration is a reset (drop the query-aware tables so they are
+// recreated at the current version). baseline _zsync_* tables never changed shape
+// and are untouched.
+fn migrate_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
+    let existing_sql = db
+        .query(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '_zsync_queries'",
+            &[],
+        )?
+        .first()
+        .and_then(|r| match r.get("sql") {
+            Some(SqlValue::Text(s)) => Some(s.clone()),
+            _ => None,
+        });
+    // a pre-CRITICAL-2 install: _zsync_queries exists but is not group-scoped.
+    if let Some(sql) = existing_sql
+        && !sql.contains("clientGroupID")
+    {
+        for table in [
+            "_zsync_queries",
+            "_zsync_desires",
+            "_zsync_query_ack",
+            "_zsync_query_rows",
+            "_zsync_row_refs",
+            "_zsync_query_state",
+            "_zsync_query_meta",
+        ] {
+            db.exec(&format!("DROP TABLE IF EXISTS {table}"), &[])?;
+        }
+    }
+    Ok(())
+}
+
 pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
+    migrate_query_schema(db)?;
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _zsync_query_meta (
+            lock INTEGER PRIMARY KEY CHECK (lock = 1),
+            version INTEGER NOT NULL
+        )",
+        &[],
+    )?;
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_queries (
             clientGroupID TEXT NOT NULL,
@@ -140,6 +191,12 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
             PRIMARY KEY (clientGroupID, hash)
         )",
         &[],
+    )?;
+    // record the schema version so a future shape change can migrate forward.
+    db.exec(
+        "INSERT INTO _zsync_query_meta (lock, version) VALUES (1, ?)
+         ON CONFLICT (lock) DO UPDATE SET version = excluded.version",
+        &[SqlValue::Integer(QUERY_SCHEMA_VERSION)],
     )?;
     Ok(())
 }
