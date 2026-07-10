@@ -128,11 +128,15 @@ Mutation ordering and desired-query acknowledgement survive rollback; invariant
 failure counters remain zero. Complete the drill in 5 minutes.
 
 ```sh
+mise exec node@24.3.0 -- bun harness/src/backup-restore.ts --target rust-local
+mise exec node@24.3.0 -- bun harness/src/backup-restore.ts --target rust-cf
 mise exec node@24.3.0 -- bun harness/src/rollback-drill.ts --confirm-test-only
 ```
 
-The runner accepts only `lslcf.workers.dev` or loopback and creates fresh
-`drill-*` namespaces. It never changes a production route.
+Backup/restore quiesces the source, captures the four fixture application
+tables, restores them into a fresh namespace, and requires a full fresh-client
+snapshot. The rollback runner accepts only `lslcf.workers.dev` or loopback and
+creates fresh `drill-*` namespaces. Neither changes a production route.
 
 ## Evidence record
 

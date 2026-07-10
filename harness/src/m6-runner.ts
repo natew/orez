@@ -65,6 +65,10 @@ const native: Lane[] = [
     name: 'native-storage-faults',
     command: ['bun', 'src/storage-faults.ts', '--target', 'rust-local'],
   },
+  {
+    name: 'native-backup-restore',
+    command: ['bun', 'src/backup-restore.ts', '--target', 'rust-local'],
+  },
 ]
 
 const cf: Lane[] = [
@@ -116,6 +120,10 @@ const cf: Lane[] = [
   {
     name: 'cf-storage-faults',
     command: ['bun', 'src/storage-faults.ts', '--target', 'rust-cf'],
+  },
+  {
+    name: 'cf-backup-restore',
+    command: ['bun', 'src/backup-restore.ts', '--target', 'rust-cf'],
   },
   {
     name: 'cf-wasm-memory',
