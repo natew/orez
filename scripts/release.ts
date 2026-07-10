@@ -206,6 +206,13 @@ if (into) {
     pkgDirs.push({ name: sqlPkg.name, dir: sqlDir })
   }
 
+  const syncHostDir = resolve(root, 'packages', 'sync-cf-host')
+  const syncHostPkgPath = resolve(syncHostDir, 'package.json')
+  if (existsSync(syncHostPkgPath)) {
+    const syncHostPkg = JSON.parse(readFileSync(syncHostPkgPath, 'utf-8'))
+    pkgDirs.push({ name: syncHostPkg.name, dir: syncHostDir })
+  }
+
   let released = 0
   try {
     for (const { name, dir } of pkgDirs) {
@@ -295,6 +302,22 @@ if (existsSync(compilerPkgPath)) {
     originalVersion: compilerPkg.version,
     pkgPath: compilerPkgPath,
     pkg: compilerPkg,
+    next: orezNext,
+  })
+}
+
+// orez-sync-cf-host — CF DO host for the rust sync engine (TS source +
+// generated wasm; consumers bundle with wrangler). skip if wasm isn't built —
+// the release build step builds it.
+const cfHostDir = resolve(root, 'packages', 'sync-cf-host')
+const cfHostPkgPath = resolve(cfHostDir, 'package.json')
+if (existsSync(cfHostPkgPath)) {
+  const cfHostPkg = JSON.parse(readFileSync(cfHostPkgPath, 'utf-8'))
+  packages.push({
+    dir: cfHostDir,
+    originalVersion: cfHostPkg.version,
+    pkgPath: cfHostPkgPath,
+    pkg: cfHostPkg,
     next: orezNext,
   })
 }
