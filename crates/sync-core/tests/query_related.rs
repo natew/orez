@@ -332,6 +332,62 @@ fn windowed_related_output_keeps_top_n_per_parent() {
 }
 
 #[test]
+fn windowed_child_rank_alias_avoids_column_collision() {
+    // GAP-2c: a child column named like the ROW_NUMBER rank alias must not shadow
+    // it. here the child carries both the legacy `_zrn` and the current `_zsync_rn`
+    // as real columns (value 99); a top-1 window must still return the top row, not
+    // zero rows (the collision made `_zrn <= 1` compare the app column, 99 <= 1).
+    use sync_core::value::ZeroColumnType::{Number, String as S};
+    let mut db = TestDb::memory();
+    db.exec("CREATE TABLE parent (id TEXT PRIMARY KEY)", &[])
+        .unwrap();
+    db.exec(
+        "CREATE TABLE item (id TEXT PRIMARY KEY, parentId TEXT, rank INTEGER, _zrn INTEGER, _zsync_rn INTEGER)",
+        &[],
+    )
+    .unwrap();
+    db.exec("INSERT INTO parent VALUES ('p')", &[]).unwrap();
+    db.exec(
+        "INSERT INTO item VALUES ('i1','p',1,99,99), ('i2','p',2,99,99)",
+        &[],
+    )
+    .unwrap();
+    let tables = Tables::new()
+        .with(
+            "parent",
+            TableSpec {
+                columns: vec![("id".into(), S)],
+                primary_key: vec!["id".into()],
+            },
+        )
+        .with(
+            "item",
+            TableSpec {
+                columns: vec![
+                    ("id".into(), S),
+                    ("parentId".into(), S),
+                    ("rank".into(), Number),
+                    ("_zrn".into(), Number),
+                    ("_zsync_rn".into(), Number),
+                ],
+                primary_key: vec!["id".into()],
+            },
+        );
+    init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+
+    let q = json!({ "table": "parent", "related": [{
+        "correlation": { "parentField": ["id"], "childField": ["parentId"] },
+        "subquery": { "table": "item", "orderBy": [["rank", "desc"]], "limit": 1 } }] });
+    register_query(&mut db, &tables, G, "q", &q, 0).unwrap();
+    set_desire(&mut db, G, "cl", "q", 1).unwrap();
+    let patch = db
+        .transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
+        .unwrap();
+    assert_eq!(puts(&patch), vec!["item:i2", "parent:p"]);
+}
+
+#[test]
 fn windowed_related_output_shifts_incrementally() {
     let mut h = Host::new();
     register_query(
