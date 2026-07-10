@@ -194,7 +194,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
   const idleTeardownMs = config.idleTeardownMs ?? 5_000;
   // A CF fan-out wakes every client into an HTTP pull. Give concurrent writer
   // requests a real batching window so a storm burst creates one pull wave.
-  const wakeCoalesceMs = config.wakeCoalesceMs ?? 50;
+  const wakeCoalesceMs = config.wakeCoalesceMs ?? 200;
 
   return class SyncDurableObject extends DurableObject<Env> {
     readonly #engineDb: SqlStorageSyncDb;
@@ -513,10 +513,11 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
               id: mutation.id,
               result: {},
             });
-            await Promise.all([
-              this.#runEffects(deferred),
-              this.#enqueueWake(mutation.clientID),
-            ]);
+            // Keep the advisory fan-out off the push response's critical path.
+            // waitUntil anchors the coalescing timer across request completion,
+            // while the next serialized client push can join the same batch.
+            this.ctx.waitUntil(this.#enqueueWake(mutation.clientID));
+            await this.#runEffects(deferred);
           } catch (error) {
             const isAppError = error instanceof MutationApplicationError;
             if (!isAppError) throw error;
@@ -546,7 +547,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                 details: appError.details ?? appError.message,
               },
             });
-            await this.#enqueueWake(mutation.clientID);
+            this.ctx.waitUntil(this.#enqueueWake(mutation.clientID));
           }
         }
 
