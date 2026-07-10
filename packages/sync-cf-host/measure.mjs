@@ -6,11 +6,25 @@ const percentile = (values, p) => {
 const round = (value) => Math.round(value * 1_000) / 1_000
 const port = 9_500 + Math.floor(Math.random() * 300)
 const spawnedAt = performance.now()
-const server = Bun.spawn(['bunx', 'wrangler', 'dev', '--local', '--port', String(port)], {
-  cwd: new URL('.', import.meta.url).pathname,
-  stdout: 'ignore',
-  stderr: 'inherit',
-})
+const server = Bun.spawn(
+  [
+    'bunx',
+    'wrangler',
+    'dev',
+    '--config',
+    'wrangler.toml',
+    '--local',
+    '--var',
+    'ADMIN_KEY:measure-admin',
+    '--port',
+    String(port),
+  ],
+  {
+    cwd: new URL('.', import.meta.url).pathname,
+    stdout: 'ignore',
+    stderr: 'inherit',
+  },
+)
 const baseURL = `http://127.0.0.1:${port}`
 
 let readyAt
@@ -48,10 +62,15 @@ function workerdRssKiB() {
     .reduce((total, row) => total + row.rss, 0)
 }
 
-const request = async (namespace, route, body) => {
+const request = async (namespace, route, body, admin = false) => {
   const response = await fetch(`${baseURL}/${namespace}${route}`, {
     method: body === undefined ? 'GET' : 'POST',
-    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+    headers: {
+      ...(admin
+        ? { 'x-admin-key': 'measure-admin' }
+        : { authorization: 'Bearer token-measure' }),
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
   if (!response.ok) throw new Error(`${route}: ${response.status} ${await response.text()}`)
@@ -63,23 +82,36 @@ try {
   const coldDoMs = []
   for (let index = 0; index < 30; index++) {
     const start = performance.now()
-    await request(`cold-${crypto.randomUUID()}`, '/pull')
+    await request(`cold-${crypto.randomUUID()}`, '/pull', {
+      clientID: `cold-client-${index}`,
+      clientGroupID: `cold-group-${index}`,
+      cookie: null,
+    })
     coldDoMs.push(performance.now() - start)
   }
   const afterColdRssKiB = workerdRssKiB()
 
-  const executionMs = []
-  const wasmMs = []
-  const sqlMs = []
+  const acknowledgementMs = []
   const namespace = `cpu-${crypto.randomUUID()}`
+  const statusAfterSeed = await request(namespace, '/admin/status', undefined, true)
   for (let index = 0; index < 50; index++) {
-    const result = await request(namespace, '/push/read-then-write', {
-      mutationID: `measure-${index}`,
+    const start = performance.now()
+    await request(namespace, '/push', {
+      clientGroupID: 'measure-group',
+      pushVersion: 1,
+      mutations: [
+        {
+          type: 'custom',
+          clientID: 'measure-client',
+          id: index + 1,
+          name: 'project.rename',
+          args: [{ id: 'p0', name: `measure-${index}` }],
+        },
+      ],
     })
-    executionMs.push(result.timing.elapsedMs)
-    wasmMs.push(result.timing.wasmMs)
-    sqlMs.push(result.timing.sqlMs)
+    acknowledgementMs.push(performance.now() - start)
   }
+  const statusAfterLoad = await request(namespace, '/admin/status', undefined, true)
   const afterLoadRssKiB = workerdRssKiB()
 
   console.log(
@@ -99,14 +131,15 @@ try {
           durableObjectP95Ms: round(percentile(coldDoMs, 0.95)),
         },
         transactionCpuProxy: {
-          note: 'DO-side performance.now elapsed time; local workerd wall time, not billed production CPU',
-          samples: executionMs.length,
-          elapsedP50Ms: round(percentile(executionMs, 0.5)),
-          elapsedP95Ms: round(percentile(executionMs, 0.95)),
-          wasmBoundaryP50Ms: round(percentile(wasmMs, 0.5)),
-          wasmBoundaryP95Ms: round(percentile(wasmMs, 0.95)),
-          sqlP50Ms: round(percentile(sqlMs, 0.5)),
-          sqlP95Ms: round(percentile(sqlMs, 0.95)),
+          note: 'client-observed local workerd acknowledgement wall time; includes 10ms wake coalescing, not billed production CPU',
+          samples: acknowledgementMs.length,
+          acknowledgementP50Ms: round(percentile(acknowledgementMs, 0.5)),
+          acknowledgementP95Ms: round(percentile(acknowledgementMs, 0.95)),
+        },
+        storage: {
+          seededBytes: statusAfterSeed.databaseSizeBytes,
+          afterFiftyPushesBytes: statusAfterLoad.databaseSizeBytes,
+          deltaBytes: statusAfterLoad.databaseSizeBytes - statusAfterSeed.databaseSizeBytes,
         },
         memory: {
           note: 'resident set of the local workerd child process; isolate memory is not separately exposed',

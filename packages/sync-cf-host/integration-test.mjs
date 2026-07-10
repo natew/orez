@@ -1,33 +1,39 @@
 import assert from 'node:assert/strict'
 
+const externalURL = process.env.M3_BASE_URL?.replace(/\/$/, '')
+const adminKey = process.env.M3_ADMIN_KEY ?? 'local-admin'
 const port = 9_000 + Math.floor(Math.random() * 500)
-const server = Bun.spawn(
-  [
-    'bunx',
-    'wrangler',
-    'dev',
-    '--config',
-    'wrangler.toml',
-    '--local',
-    '--var',
-    'ADMIN_KEY:local-admin',
-    '--port',
-    String(port),
-  ],
-  {
-    cwd: new URL('.', import.meta.url).pathname,
-    stdout: 'inherit',
-    stderr: 'inherit',
-  },
-)
-const baseURL = `http://127.0.0.1:${port}`
+const server = externalURL
+  ? undefined
+  : Bun.spawn(
+      [
+        'bunx',
+        'wrangler',
+        'dev',
+        '--config',
+        'wrangler.toml',
+        '--local',
+        '--var',
+        `ADMIN_KEY:${adminKey}`,
+        '--port',
+        String(port),
+      ],
+      {
+        cwd: new URL('.', import.meta.url).pathname,
+        stdout: 'inherit',
+        stderr: 'inherit',
+      },
+    )
+const baseURL = externalURL ?? `http://127.0.0.1:${port}`
 
-for (let attempt = 0; ; attempt++) {
-  try {
-    if ((await fetch(baseURL)).ok) break
-  } catch {}
-  if (attempt >= 150) throw new Error('production workerd did not become ready')
-  await new Promise((resolve) => setTimeout(resolve, 100))
+if (server) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      if ((await fetch(baseURL)).ok) break
+    } catch {}
+    if (attempt >= 150) throw new Error('production workerd did not become ready')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
 }
 
 let assertions = 0
@@ -54,7 +60,7 @@ const admin = async (path, body) => {
   const response = await fetch(`${origin}${path}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: {
-      'x-admin-key': 'local-admin',
+      'x-admin-key': adminKey,
       ...(body === undefined ? {} : { 'content-type': 'application/json' }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -195,8 +201,12 @@ try {
   receiver.socket.close()
   pusher.socket.close()
 
-  console.log(`M3 production workerd integration passed (${assertions} assertions)`)
+  console.log(
+    `M3 production ${externalURL ? 'deployed' : 'workerd'} integration passed (${assertions} assertions)`,
+  )
 } finally {
-  server.kill()
-  await server.exited
+  if (server) {
+    server.kill()
+    await server.exited
+  }
 }

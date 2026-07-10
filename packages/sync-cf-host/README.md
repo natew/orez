@@ -1,132 +1,116 @@
-# sync-cf-host M0 platform proof
+# `sync-cf-host`
 
-This package is the executable platform-contract probe for the Rust sync
-engine's Cloudflare host. It is intentionally a test Durable Object rather than
-the M3 production host. `wasm-pack` compiles `crates/sync-wasm`, Wrangler bundles
-the generated module, and the same 36-assertion script runs against local
-workerd and the throwaway deployed Worker.
+This is the production-shaped Cloudflare Durable Object host for the Rust sync
+engine. The package exposes a consumer integration surface (`createSyncWorker`,
+`createSyncDurableObject`, `registerMutators`) and a harness deployment built
+from `src/harness-worker.ts`. Consumers provide a JSON Zero schema, application
+DDL/seed initializer, normalized-claims authenticator, mutator registry, and an
+optional row-visibility hook.
 
-## Boundary proved
+The Worker authenticates at the consumer edge, forwards only normalized claims
+to a per-namespace Durable Object, and never logs tokens, mutation arguments, or
+row contents. Pull runs `engine_handle_pull` inside `transactionSync`; push runs
+Rust `push_validate`/`preflight`/`finalize`/`record_app_error` steps around the
+registered asynchronous TypeScript mutator inside `ctx.storage.transaction`.
+Every SQL cursor is materialized before an await. Application effects are
+collected and run only after their transaction commits; application failures use
+the required second transaction to advance the LMID marker.
 
-- Pull enters `ctx.storage.transactionSync()` and calls synchronous Rust wasm,
-  which calls back into `SqlStorageSyncDb` for fully materialized queries.
-- Push enters `ctx.storage.transaction(async)`. Rust preflight runs first, the
-  TypeScript mutator performs SQL on both sides of `await scheduler.wait(1)`,
-  and Rust finalization runs last.
-- The SQL adapter exposes only synchronous `exec` and `query`, positional `?`
-  bindings, and rejects transaction statements plus numbered `?N` parameters.
-  Rust never emits `BEGIN`, `COMMIT`, `ROLLBACK`, or `SAVEPOINT`.
-- Deferred external effects are examined only after the transaction promise
-  resolves. Before an effect runs, the probe verifies that its mutation record
-  is visible in durable SQL.
+## Wake channel and eviction
 
-The real-shape mutators are read-then-write, multi-table (account, ledger, and
-outbox), and application-error with a deferred notification. A separate JS
-fault throws after an await *and after Rust finalization*, proving that account,
-outbox, mutation log, and LMID writes all roll back. The Rust panic probe writes
-both ledger and LMID before trapping across wasm; both roll back as well.
+`GET /<namespace>/wake?clientID=<id>` upgrades to a Durable Object hibernating
+WebSocket. Socket attachments carry only the client ID. A committed push sends a
+text `wake` frame to all connected clients except the pusher; a scheduler window
+coalesces a burst into one frame per socket. `ping` receives `pong`. The message
+contains no state and carries no correctness weight: clients pull after a wake
+and retain their safety poll. `ctx.getWebSockets()` plus serialized attachments
+means sockets remain discoverable after hibernation/re-instantiation.
 
-This behavior agrees with Cloudflare's documented SQLite transaction contract:
-[`transactionSync` rolls back on a thrown exception and async `transaction`
-includes direct SQLite storage operations](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/).
+`/admin/status` reports a boot ID, hibernation simulation count, connected wake
+sockets, durable database size, engine watermark/floor, and aggregate counters.
+After the configured idle gap (5 seconds in the harness deployment), the local
+deterministic model resets in-memory state and changes boot ID while retaining
+SQLite state and sockets. This models the harness/cf idle-teardown pattern; it
+does not claim that a real platform eviction happens on a 5-second schedule.
 
-## Cookie, watermark, and i64 decision
+## Counter and HTTP wire representation
 
-Cookies, watermarks, and LMIDs use **canonical unsigned decimal strings** at
-every JavaScript, JSON, and wasm boundary:
+Inside the wasm/JavaScript engine boundary, cookies, watermarks, and LMIDs are
+canonical decimal strings (`0` or non-zero ASCII digits), parsed as signed
+SQLite-range `i64`; exact SQLite reads use `CAST(... AS TEXT)`. The baseline HTTP
+wire remains JSON numbers for Zero 1.7 byte compatibility, accepted only within
+the JavaScript safe-integer range. M1 centralizes this conversion in
+`sync-core::wire::counter_to_json` and accepts either representation inbound.
+No engine code silently converts an unsafe persisted counter through a JS
+`Number`.
 
-- grammar: `0` or `[1-9][0-9]*` (no sign, fraction, exponent, or leading zero)
-- initial supported range: SQLite signed integer, `0..=9223372036854775807`
-- Rust parses and compares the value as `i64`; JavaScript never compares the
-  decimal strings lexicographically
-- exact SQLite reads must select `CAST(counter AS TEXT)`
-- an unsafe integer binding crosses JS as decimal text into an INTEGER-affinity
-  column, allowing SQLite to parse it without an intermediate JS `Number`
-- JSON emits the decimal string, never a `number` or `bigint`
-
-This is required because SqlStorage explicitly documents that a retrieved
-`int64` can lose precision in JavaScript. The value test stores and retrieves
-`9007199254740993` (`2^53 + 1`) exactly through JS -> wasm -> SQLite -> wasm ->
-JS. It also round-trips `-42`, `0.1 + 0.2` as
-`0.30000000000000004`, Unicode text, a five-byte blob, null, nested JSON, and a
-boolean. See [Cloudflare's SqlStorage numeric warning](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#exec).
-
-The baseline TypeScript host currently types cookies as numbers. M1/M3 must
-change that host/wire validation to accept the canonical string; converting a
-persisted watermark to a JS number is not an allowed compatibility shortcut.
-
-## Reproduction
-
-Requirements are Bun 1.3.10, Rust 1.94, `wasm32-unknown-unknown`, and wasm-pack
-0.14. The package pins Wrangler and workerd locally.
+## Local checks
 
 ```sh
 cd packages/sync-cf-host
 bun install
-bun run typecheck
-bun run test
-bun run bundle
-bun run measure
+bun run typecheck             # builds probe-enabled wasm for all TS declarations
+bun run test:platform         # M0 boundary regression: 36 local workerd assertions
+bun run test:integration      # production host: pull/push/rollback/wake/eviction
+bun run bundle                # Wrangler dry-run bundle report
+bun run measure               # cold start/CPU/storage/memory baseline
+cargo test -p sync-core       # engine/model/reference/soot suites (from repo root)
 ```
 
-`bun run test` builds wasm and then launches `wrangler dev --local`, which runs the Worker in local
-workerd. To run the identical checks against a deployed probe:
+The production integration suite can target a deployed Worker:
 
 ```sh
-bun run build:wasm
-M0_BASE_URL=https://orez-rust-sync-m0-probe.lslcf.workers.dev bun test.mjs
+M3_BASE_URL=https://orez-rust-sync.lslcf.workers.dev \
+M3_ADMIN_KEY="$(tr -d '\n' < ~/.zharness-cf-admin-key)" \
+bun integration-test.mjs
 ```
 
-The native SQLite proof is independent of the workspace and runs with:
+The platform regression remains a separate feature-enabled test path so probe
+helpers are absent from the production wasm bundle:
 
 ```sh
-cargo test --manifest-path probes/native-rusqlite/Cargo.toml
+bun run test:platform
 ```
 
-## Recorded results
+## M3 measurements
 
-Measured 2026-07-09 HST (2026-07-10 04:27 UTC) on local darwin-arm64 with
-Wrangler 4.103.0 and workerd 1.20260617.1.
+Measured 2026-07-10 UTC on darwin-arm64, Bun 1.3.10, Rust 1.94.0,
+wasm-pack 0.14.0, Wrangler 4.103.0, workerd 1.20260617.1. Local workerd was
+started with the production `orez-rust-sync` config and an equivalent local
+admin variable; deployed requests used the `lslcf` account and returned a
+Cloudflare LAX edge (`cf-ray …-LAX`).
 
-| Check | Result |
+| Measurement | Result |
 | --- | --- |
-| Local workerd suite | 36 assertions passed |
-| Deployed suite | 36 assertions passed |
-| Native rusqlite | 3 tests passed |
-| Wrangler upload | 197.30 KiB total; 83.41 KiB gzip |
-| Wasm module | 167 KiB on disk |
-| Deployed Worker startup | 1 ms reported by Wrangler |
-| Local Wrangler spawn to ready | 629.339 ms (includes CLI/process startup) |
-| Cold DO first pull, 30 new objects | p50 2.059 ms; p95 2.624 ms |
-| Async read-then-write tx, 50 pushes | p50 3 ms; p95 3 ms DO-side elapsed |
-| Rust/JS boundary portion | p50 0 ms; p95 1 ms (workerd timer resolution) |
-| SQL adapter portion | p50 0 ms; p95 0 ms (workerd timer resolution) |
-| workerd RSS baseline | 97.938 MiB |
-| workerd RSS after 30 cold DOs | 115.703 MiB |
-| workerd RSS after 50 additional pushes | 126.797 MiB; +28.859 MiB total |
+| Local production integration | 16 assertions passed |
+| Deployed production integration | 16 assertions passed |
+| Local M0 platform regression | 36 assertions passed |
+| Rust core tests | 27 reference + 13 composition + 2 model tests passed |
+| Bundle upload | 304.78 KiB total; 121.58 KiB gzip |
+| Wasm module | approximately 252 KiB on disk |
+| Wrangler reported startup | 1 ms |
+| Local cold DO pull (30 namespaces) | p50 4.792 ms; p95 6.652 ms |
+| Local push acknowledgement (50 mutations) | p50 13.951 ms; p95 15.055 ms |
+| Seeded storage | 81,920 bytes |
+| Storage after 50 pushes | 90,112 bytes (+8,192 bytes) |
+| Local workerd RSS | 98.641 MiB baseline; 149.313 MiB after load (+50.672 MiB process RSS) |
 
-The successful push uses five wasm-to-JS database crossings (two `exec`, three
-`query`) in addition to the TypeScript mutator's direct SQL. The CPU figures are
-local wall-time proxies from `performance.now()`, not billed production CPU.
-The memory figure is the whole local workerd child RSS, because per-isolate
-memory is not exposed; it is an initial regression baseline, not a per-namespace
-allocation claim.
+The acknowledgement measurement includes the 10 ms wake-coalescing window and
+is a local wall-time proxy, not billed Cloudflare CPU. RSS is the whole local
+workerd process, not an isolate allocation; Cloudflare's 128 MiB per-isolate
+limit cannot be inferred from that process number. The bundle is 96.0% below
+the 3 MiB gzip Free-plan limit (and 98.8% below the 10 MiB paid-plan limit).
+See [Cloudflare Worker limits](https://developers.cloudflare.com/workers/platform/limits/).
 
-Cloudflare's conservative Free-plan bundle limit is 3 MiB gzip (10 MiB paid),
-so 83.41 KiB is **97.3% below the 3 MiB limit**, comfortably beyond the M0 target
-of 40% headroom. The platform memory limit is 128 MiB per isolate, but local
-process RSS is not directly comparable to that isolate limit. Limits source:
-[Cloudflare Workers limits](https://developers.cloudflare.com/workers/platform/limits/).
+## Deployment
 
-The deployed throwaway is `orez-rust-sync-m0-probe` on the `lslcf` account at
-the URL above. The verified deployment version is
-`135c1874-5efe-4e49-b340-4b33d6c14103`.
+`wrangler.toml` is checked in with Worker name `orez-rust-sync`, SQLite Durable
+Object class `SyncDurableObject`, and account `6afff1f79e2fd12f1cfd1bfe1dfd08d1`.
+The deployed test version used for this M3 pass was
+`7e00a772-e096-445a-b899-b3d255f011c7` at
+`https://orez-rust-sync.lslcf.workers.dev`. The throwaway M0 Worker was already
+absent when the cleanup command was run (Cloudflare returned error 10090), so no
+old probe service remains to receive traffic.
 
-## Eviction model
-
-Normal platform eviction is nondeterministic. Following `harness/cf/worker.ts`,
-the probe deterministically discards its in-memory boot ID and side-effect list
-after a 250 ms idle gap, then reconstructs behavior over unchanged Durable
-Object SQL. The test requires a changed boot ID while LMID, balance, and the
-mutation record remain intact. This is a deterministic re-instantiation model,
-not a claim that workerd physically killed the object process at 250 ms.
+The rust toolchain is pinned at the workspace root in
+[rust-toolchain.toml](/Users/n8/.worktrees/orez-rust-sync/rust-toolchain.toml).
