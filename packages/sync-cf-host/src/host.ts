@@ -4,6 +4,8 @@ import {
   engine_compile_query,
   engine_finalize,
   engine_handle_pull,
+  engine_handle_query_pull,
+  engine_init_query_schema,
   engine_init_schema,
   engine_invalidate,
   engine_preflight,
@@ -211,6 +213,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #wakeRecipients = new Set<WebSocket>();
     #wakePromise: Promise<void> | null = null;
     #visibilityEnabled = config.visibilityEnabled ?? false;
+    #queryAwareOverride: boolean | null = null;
     #retainChanges = defaultRetainChanges;
 
     constructor(ctx: DurableObjectState, env: Env) {
@@ -224,6 +227,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         ctx.storage.transactionSync(() => {
           config.initialize(this.#directSql);
           this.#wasm(() => engine_init_schema(this.#engineDb, config.schema));
+          if (config.queryAware || config.resolveQuery)
+            this.#wasm(() => engine_init_query_schema(this.#engineDb));
         });
       });
     }
@@ -372,6 +377,27 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       let body: Record<string, unknown> | undefined;
       try {
         body = (await request.json()) as Record<string, unknown>;
+        const queryAware = this.#queryAwareOverride ?? (
+          typeof config.queryAware === "function"
+            ? config.queryAware(claims)
+            : config.queryAware ?? Boolean(config.resolveQuery)
+        );
+        if (queryAware && body.queries && config.resolveQuery) {
+          const queries = body.queries as { version?: unknown; patch?: unknown };
+          if (Array.isArray(queries.patch)) {
+            const patch = [];
+            for (const operation of queries.patch) {
+              if (!operation || typeof operation !== "object") { patch.push(operation); continue; }
+              const op = operation as Record<string, unknown>;
+              if (op.op === "put" && typeof op.name === "string") {
+                const args = Array.isArray(op.args) ? op.args as JsonValue[] : [];
+                const ast = config.resolveQuery(op.name, args, claims);
+                patch.push({ ...op, ast });
+              } else patch.push(operation);
+            }
+            body = { ...body, queries: { ...queries, patch } };
+          }
+        }
         const clientID = typeof body.clientID === "string" ? body.clientID : "";
         this.#pulling.add(clientID);
         let response: Record<string, unknown>;
@@ -379,15 +405,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           const txStarted = performance.now();
           response = this.ctx.storage.transactionSync(() =>
             this.#wasm(() =>
-              engine_handle_pull(
-                this.#engineDb,
-                config.schema,
-                this.#visibility(claims),
-                caps,
-                this.#retainChanges,
-                body,
-                claims.userID,
-              ),
+              queryAware
+                ? engine_handle_query_pull(this.#engineDb, config.schema, this.#retainChanges, body, claims.userID)
+                : engine_handle_pull(this.#engineDb, config.schema, this.#visibility(claims), caps, this.#retainChanges, body, claims.userID),
             ),
           ) as Record<string, unknown>;
           transactionMs = performance.now() - txStarted;
@@ -485,6 +505,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                 throw new Error(`unknown mutator: ${mutation.name}`);
               await mutator(this.#mutatorSql, mutation.args[0] ?? null, {
                 claims,
+                clientID: mutation.clientID,
+                mutationID: mutation.id,
                 defer(effect) {
                   deferred.push(effect);
                 },
@@ -682,6 +704,14 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             (body as { enabled?: unknown }).enabled,
           );
           return json({ ok: true, enabled: this.#visibilityEnabled });
+        });
+      }
+      if (route === "/admin/query-aware") {
+        return request.json().then((body) => {
+          this.#queryAwareOverride = Boolean(
+            (body as { enabled?: unknown }).enabled,
+          );
+          return json({ ok: true, enabled: this.#queryAwareOverride });
         });
       }
       if (route === "/admin/retention") {

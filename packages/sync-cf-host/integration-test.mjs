@@ -118,6 +118,46 @@ try {
   assert.ok(firstPull.body.rowsPatch.length > 60, 'initial snapshot includes fixture rows')
   assertions++
 
+  await admin('/admin/query-aware', { enabled: true })
+  const queryPull = await post('/pull', {
+    clientID: 'query-client',
+    clientGroupID: 'query-group',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [
+        {
+          op: 'put',
+          hash: 'tasks-p1-p4',
+          name: 'tasksInProjects',
+          args: [{ projectIds: ['p1', 'p4'] }],
+        },
+      ],
+    },
+  })
+  equal(queryPull.status, 200, 'query-aware pull status')
+  equal(queryPull.body.gotQueries, {
+    version: 1,
+    patch: [{ op: 'put', hash: 'tasks-p1-p4' }],
+  }, 'server resolves and acknowledges named query')
+  const queryTaskPuts = queryPull.body.rowsPatch.filter(
+    (entry) => entry.op === 'put' && entry.tableName === 'task',
+  )
+  assert.ok(queryTaskPuts.length > 0, 'query-aware pull includes members')
+  assert.ok(
+    queryTaskPuts.every((entry) => ['p1', 'p4'].includes(entry.value.projectId)),
+    'query-aware pull excludes non-members',
+  )
+  assertions += 2
+  const queryFollowup = await post('/pull', {
+    clientID: 'query-client',
+    clientGroupID: 'query-group',
+    cookie: queryPull.body.cookie,
+  })
+  equal(queryFollowup.status, 200, 'query-aware pull without query patch status')
+  equal(queryFollowup.body.unchanged, true, 'query-aware route persists without queries field')
+  await admin('/admin/query-aware', { enabled: false })
+
   let response = await post(
     '/push',
     mutation('client-a', 1, 'project.create', {

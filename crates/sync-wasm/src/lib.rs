@@ -435,6 +435,13 @@ pub fn engine_init_schema(db: &JsSyncDb, schema: JsValue) -> Result<(), JsValue>
     sync_core::init_schema(&mut db, &tables).map_err(js_err)
 }
 
+/// Initialize the additive query-aware durable tables. The host owns the
+/// transaction boundary, exactly as it does for the baseline schema.
+#[wasm_bindgen]
+pub fn engine_init_query_schema(db: &JsSyncDb) -> Result<(), JsValue> {
+    sync_core::query::init_query_schema(&mut WasmDb(db)).map_err(js_err)
+}
+
 #[derive(Serialize)]
 struct CompiledQueryWire {
     sql: String,
@@ -511,6 +518,29 @@ pub fn engine_handle_pull(
     )
     .map_err(engine_error)?;
     to_js(&result)
+}
+
+/// Query-aware pull entry point. Desired-query ASTs are already resolved and
+/// validated by the consumer host before crossing this boundary.
+#[wasm_bindgen]
+pub fn engine_handle_query_pull(
+    db: &JsSyncDb,
+    schema: JsValue,
+    retain_changes: &str,
+    body: JsValue,
+    user_id: &str,
+) -> Result<JsValue, JsValue> {
+    let tables = tables_from_js(schema)?;
+    let body: serde_json::Value = from_js(body)?;
+    sync_core::query::handle_query_pull(
+        &mut WasmDb(db),
+        &tables,
+        parse_counter(retain_changes, "retention count")?,
+        &body,
+        user_id,
+    )
+    .map_err(js_err)
+    .and_then(|value| to_js(&value))
 }
 
 #[derive(Serialize)]
