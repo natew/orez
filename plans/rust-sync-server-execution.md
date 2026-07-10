@@ -103,20 +103,36 @@ Multiple agents work this worktree concurrently. Rules:
       is the pass of record. Production cutover for soot/chat remains
       user-gated and is NOT part of this gate.
 
-- [~] Chat testbed integration (user-cleared, 2026-07-10): the real Chat app
-  runs end-to-end against the rust chat-host — browser Zero client with the
-  better-auth bearer bridge, CORS, pull/push/wake all green; 8,000
-  message.send pushes at ~346 msg/s with 0 failures; query-aware
-  channelMessages history load 47 ms for 800 messages. Six integration bugs
-  found and fixed on rust-sync-compat (auth timing, bearer bridge,
-  websocket-close DO crash — fixed in packages/sync-cf-host on this branch,
-  CORS, session-cache negative poisoning, admin-email elevation) plus a
-  dev/test config collision. resolveQuery corpus being extended to the full
-  124-query inventory with per-query oracle tests (194 green so far).
-  OPEN FINDING: the push path OOMs local workerd's JS heap at ~10k messages
-  in a single DO under sustained writes — the M6 wasm soak only covered
-  query churn; a dedicated push-path memory lane is running (sol).
-  Production cutover NOT touched.
+- [x] Chat testbed integration (user-cleared, 2026-07-10): the real Chat app
+      runs end-to-end against the rust chat-host — browser Zero client with the
+      better-auth bearer bridge, CORS, pull/push/wake all green; sustained
+      message.send load at ~346 msg/s with 0 failures; query-aware
+      channelMessages history load 47 ms for 800 messages. Six integration bugs
+      found and fixed on rust-sync-compat (auth timing, bearer bridge,
+      websocket-close DO crash — fixed in packages/sync-cf-host on this branch,
+      CORS, session-cache negative poisoning, admin-email elevation) plus a
+      dev/test config collision. resolveQuery corpus COMPLETE: 123/124 named
+      queries registered as per-query builders composed with composable
+      permission families (exploreTable deliberately unregistered — runtime
+      table name, fail-loud); 285 tests green including a ~250-case allow/deny
+      oracle lane and a completeness assertion that fails on any un-transcribed
+      upstream query; fixed a latent channelReadable admin-correlation bug and
+      added the faithful admin read bypass. devtools PII queries
+      (waitlist/privateBetaInvite) secured admin-only server-side even though
+      ungated in source; dataSearch publicOnly stays open by design.
+      PUSH-PATH OOM ROOT-CAUSED AND FIXED: workerd died at ~10k sustained
+      pushes because on-zero's createMutators.withTimeoutGuard leaked one 60s
+      setTimeout per completed mutation (never cleared after Promise.race),
+      hitting workerd's 10,000 active-timer cap (V8 heap 30->102 MB, wasm
+      flat). Fixed at source in takeout d942e301 (clearTimeout in finally,
+      regression tests, on-zero 147 tests green — NOT published; user gates
+      releases); chat's client-side sibling (src/zero/mutate.ts 90s timer)
+      fixed on rust-sync-compat e1dfaa7d6; soot already cleared its timers.
+      After the fix two independent 12k real-Chat runs completed 12,000/12,000
+      with zero failures and flat heap. New harness push-memory-soak lane +
+      JS-heap gauge in /admin/status wired into CI and the M6 qualification
+      doc (d133d83) so this class regresses loudly.
+      Production cutover NOT touched.
 
 Keep this checklist current when a track lands its exit gate.
 
