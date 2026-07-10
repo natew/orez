@@ -1294,9 +1294,11 @@ describe('DoBackend', () => {
       );
     `)
     const metadataRows: Record<string, unknown>[] = []
+    let metadataSelects = 0
     const http = await startDoHttp((sql) => {
       const compact = compactSQL(sql)
       if (compact.startsWith('SELECT kind, key, subkey, value FROM')) {
+        metadataSelects++
         return {
           rows: metadataRows,
           columns: ['kind', 'key', 'subkey', 'value'],
@@ -1349,12 +1351,13 @@ describe('DoBackend', () => {
     })
     const backend = new DoBackend(http.url, 'postgres', 'late-schema-metadata-test')
     await backend.waitReady
+    await backend.exec('BEGIN')
 
     for (const statement of batch) {
       if (statement.params) appendMetadataParamRows(metadataRows, statement.params)
     }
 
-    const result = await (backend as any).handleCatalogQuery(`
+    const catalogSQL = `
       SELECT c.column_name::text AS column,
              c.data_type::text AS "dataType",
              t.typname::text AS typename
@@ -1363,7 +1366,8 @@ describe('DoBackend', () => {
       LEFT JOIN pg_catalog.pg_type et ON t.typelem = et.oid
       JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
       WHERE (c.table_schema, c.table_name) IN (('public'::text, 'probe'::text))
-    `)
+    `
+    const result = await backend.query(catalogSQL)
 
     expect(result.rows).toEqual([
       { column: 'id', dataType: 'text', typename: 'text' },
@@ -1375,6 +1379,11 @@ describe('DoBackend', () => {
         typename: 'timestamp',
       },
     ])
+
+    await backend.exec('ROLLBACK')
+    const afterRollback = await backend.query(catalogSQL)
+    expect(afterRollback.rows).toEqual(result.rows)
+    expect(metadataSelects).toBe(3)
   })
 
   test('tracks parser-backed publication membership without private table lists', async () => {

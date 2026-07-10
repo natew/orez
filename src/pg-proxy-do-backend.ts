@@ -170,10 +170,11 @@ interface TransactionMetadataSnapshot {
 // is small. 256 keeps the hot path cached while bounding aggregate footprint.
 const MAX_REWRITE_CACHE_ENTRIES = 256
 const METADATA_TABLE = '_orez_pg_metadata'
-// how long stale-cache self-heals wait between durable metadata re-reads —
-// short enough that a concurrently-applied migration/publication is visible
-// quickly, long enough to collapse zero-cache's burst of catalog queries.
-const DURABLE_METADATA_RELOAD_THROTTLE_MS = 1000
+// how long reloadPublicationsIfEmpty waits between re-reads while publications
+// stay empty — short enough that the first write after a concurrently-created
+// publication picks it up quickly, long enough that a genuinely
+// publication-less db doesn't re-query on every write.
+const EMPTY_PUBLICATION_RELOAD_THROTTLE_MS = 1000
 
 // ── Utilities ─────────────────────────────────────────────────────────────
 
@@ -5249,10 +5250,6 @@ export class DoBackend {
   // throttle for reloadPublicationsIfEmpty (self-heal of a stale-empty
   // publication cache). undefined until the first empty-publication write.
   private lastEmptyPublicationReloadAt: number | undefined
-  // schema metadata is written out-of-band by the deploy migration backend.
-  // A backend that initialized before that write must refresh before serving
-  // catalog types rather than retaining physical SQLite types forever.
-  private lastEmptySchemaMetadataReloadAt: number | undefined
   private rewriteCache: Map<string, RewrittenStatement[]>
   private preparedStatements = new Map<string, PreparedStatement>()
   private portals = new Map<string, BoundPortal>()
@@ -5455,21 +5452,13 @@ export class DoBackend {
 
   // Schema migrations persist PostgreSQL type metadata directly into the
   // shared SQL DO, outside this backend instance. If this backend initialized
-  // first, its one-time load cached an empty or older schema and catalog reads
-  // then exposed physical SQLite INTEGER/TEXT types to zero forever. Refresh
-  // schema rows before schema-bearing catalog answers. A non-empty cache was
-  // already hydrated at init; avoid re-reading hundreds of rows for every
-  // short-lived zero-cache catalog session.
+  // first, its one-time load cached an empty schema and requests then exposed
+  // physical SQLite INTEGER/TEXT types to zero forever. Refresh before parsing
+  // any request so prepared statements also get semantic parameter types. Do
+  // not negative-cache an empty read: the migration may commit immediately
+  // after it, which is the race this self-heal exists to close.
   private async reloadSchemaMetadataIfEmpty(): Promise<void> {
     if (this.dbName !== 'postgres' || this.schemaMetadata.size > 0) return
-    const now = Date.now()
-    if (
-      this.lastEmptySchemaMetadataReloadAt &&
-      now - this.lastEmptySchemaMetadataReloadAt < DURABLE_METADATA_RELOAD_THROTTLE_MS
-    ) {
-      return
-    }
-    this.lastEmptySchemaMetadataReloadAt = now
     try {
       await this.ensureMetadataTable()
       const result = await this.doExecResult(
@@ -5486,6 +5475,12 @@ export class DoBackend {
         persisted.set(`schema-column\u0000${key}\u0000${subkey}`, value)
       }
       if (changed) {
+        if (this.txSnapshot) {
+          // The rows were committed out-of-band, not by this transaction. A
+          // later ROLLBACK must preserve them rather than restoring the stale
+          // empty snapshot captured before the migration finished.
+          this.txSnapshot.schemaMetadata = this.cloneSchemaMetadata(this.schemaMetadata)
+        }
         this.rewriteCache.clear()
         this.publicationTableInfoCache = null
       }
@@ -5510,7 +5505,7 @@ export class DoBackend {
     const now = Date.now()
     if (
       this.lastEmptyPublicationReloadAt &&
-      now - this.lastEmptyPublicationReloadAt < DURABLE_METADATA_RELOAD_THROTTLE_MS
+      now - this.lastEmptyPublicationReloadAt < EMPTY_PUBLICATION_RELOAD_THROTTLE_MS
     ) {
       return
     }
@@ -5852,8 +5847,10 @@ export class DoBackend {
     try {
       switch (msgType) {
         case FT_QUERY:
+          await this.reloadSchemaMetadataIfEmpty()
           return this.handleSimpleQuery(message)
         case FT_PARSE:
+          await this.reloadSchemaMetadataIfEmpty()
           return this.handleParse(message)
         case FT_BIND:
           return this.handleBind(message)
@@ -6434,6 +6431,7 @@ export class DoBackend {
 
   private async execLocked(sql: string): Promise<any[]> {
     if (!this.ready) await this.waitReady
+    await this.reloadSchemaMetadataIfEmpty()
     if (await this.handleTransactionControl(sql)) return []
     const statements = this.rewriteSQLStatements(sql)
     const rewritten = rewrittenSQLText(statements)
@@ -6503,6 +6501,7 @@ export class DoBackend {
     params?: any[]
   ): Promise<{ rows: T[] }> {
     if (!this.ready) await this.waitReady
+    await this.reloadSchemaMetadataIfEmpty()
     if (await this.handleTransactionControl(sql)) return { rows: [] }
     const statements = this.rewriteSQLStatements(sql)
     const rewritten = rewrittenSQLText(statements)
@@ -8409,16 +8408,6 @@ export class DoBackend {
   }
 
   private async handleCatalogSelect(select: any): Promise<CatalogResult> {
-    if (
-      selectReferencesTable(select, 'columns') ||
-      selectReferencesTable(select, 'table_constraints') ||
-      selectReferencesTable(select, 'key_column_usage') ||
-      selectReferencesTable(select, 'pg_publication_tables') ||
-      selectReferencesTable(select, 'pg_attribute') ||
-      selectReferencesTable(select, 'pg_index')
-    ) {
-      await this.reloadSchemaMetadataIfEmpty()
-    }
     // zero-cache's initial sync validates the publication via pg_publication /
     // pg_publication_tables. those answers come from in-memory this.publications,
     // loaded once at backend init. a backend instance constructed during early
