@@ -384,54 +384,52 @@ pub struct CompiledRelated {
     pub primary_key: Vec<String>,
 }
 
-// compile one top-level related subquery into the child rows it contributes:
-// child rows correlated (child.childField = root.parentField) to the roots that
-// match the root query. a parent membership change re-runs this join, so child
-// rows follow their parents even when the child table itself was untouched.
-pub fn compile_related(
-    root: &Ast,
+// compile one related subquery into the child rows it contributes: child rows
+// correlated (child.childField = parent.parentField) to a PARENT row-set given
+// as an already-compiled `(parent_sql)` subquery. `parent_table` names the
+// parent rows' table so the parentField columns can be validated. this composes
+// recursively: the returned child SQL is itself a valid parent_sql for the
+// child's own related subqueries, which is how nested related-of-related is
+// walked. `depth` keeps the correlation aliases unique across nesting levels.
+pub fn compile_related_of(
+    parent_sql: &str,
+    parent_params: &[SqlValue],
+    parent_table: &str,
     rel: &CorrelatedSubquery,
     tables: &Tables,
+    depth: usize,
 ) -> Result<CompiledRelated, EngineError> {
     let mut c = Compiler::new(tables);
-    c.check_table(&root.table)?;
     let child = &rel.subquery;
     c.check_table(&child.table)?;
 
-    let r = "r";
-    let ch = "c";
+    let rc = format!("rc{depth}");
+    let rp = format!("rp{depth}");
     let mut on: Vec<String> = Vec::new();
     for (pf, cf) in rel.parent_field.iter().zip(rel.child_field.iter()) {
-        c.check_column(&root.table, pf)?;
+        c.check_column(parent_table, pf)?;
         c.check_column(&child.table, cf)?;
         on.push(format!(
             "{}.{} = {}.{}",
-            quote_ident(ch),
+            quote_ident(&rc),
             quote_ident(cf),
-            quote_ident(r),
+            quote_ident(&rp),
             quote_ident(pf)
         ));
     }
 
-    // params accumulate in SQL order: the root filter (over r) then the child
-    // filter (over c); the JOIN ON correlation carries no binds.
-    let mut wheres: Vec<String> = Vec::new();
-    if let Some(cond) = &root.where_ {
-        wheres.push(c.compile_condition(cond, &root.table, r)?);
-    }
-    if let Some(cond) = &child.where_ {
-        wheres.push(c.compile_condition(cond, &child.table, ch)?);
-    }
-    let where_sql = if wheres.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", wheres.join(" AND "))
+    // params in SQL order: the parent subquery (in the JOIN) binds first, then
+    // the child filter in the WHERE.
+    let mut params = parent_params.to_vec();
+    let where_sql = match &child.where_ {
+        Some(cond) => format!(" WHERE {}", c.compile_condition(cond, &child.table, &rc)?),
+        None => String::new(),
     };
+    params.extend(c.params);
 
     let sql = format!(
-        "SELECT DISTINCT {ch}.* FROM {ct} AS {ch} JOIN {rt} AS {r} ON {on}{where_sql}",
+        "SELECT DISTINCT {rc}.* FROM {ct} AS {rc} JOIN ({parent_sql}) AS {rp} ON {on}{where_sql}",
         ct = quote_ident(&child.table),
-        rt = quote_ident(&root.table),
         on = on.join(" AND "),
     );
     let primary_key = tables
@@ -441,7 +439,7 @@ pub fn compile_related(
         .clone();
     Ok(CompiledRelated {
         sql,
-        params: c.params,
+        params,
         child_table: child.table.clone(),
         primary_key,
     })

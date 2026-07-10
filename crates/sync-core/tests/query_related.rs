@@ -37,6 +37,17 @@ fn schema() -> Tables {
                 primary_key: vec!["id".into()],
             },
         )
+        .with(
+            "reaction",
+            TableSpec {
+                columns: vec![
+                    ("id".into(), String),
+                    ("commentId".into(), String),
+                    ("emoji".into(), String),
+                ],
+                primary_key: vec!["id".into()],
+            },
+        )
 }
 
 struct Host {
@@ -57,11 +68,22 @@ impl Host {
             &[],
         )
         .unwrap();
+        db.exec(
+            "CREATE TABLE reaction (id TEXT PRIMARY KEY, commentId TEXT, emoji TEXT)",
+            &[],
+        )
+        .unwrap();
         // i1 open (with c1, c2), i2 closed (with c3)
         db.exec("INSERT INTO issue VALUES ('i1', 0), ('i2', 1)", &[])
             .unwrap();
         db.exec(
             "INSERT INTO comment VALUES ('c1','i1','a'), ('c2','i1','b'), ('c3','i2','c')",
+            &[],
+        )
+        .unwrap();
+        // reactions: r1 on c1 (i1's comment), r2 on c3 (i2's comment)
+        db.exec(
+            "INSERT INTO reaction VALUES ('r1','c1','+1'), ('r2','c3','heart')",
             &[],
         )
         .unwrap();
@@ -188,4 +210,60 @@ fn a_new_parent_brings_its_children() {
     h.exec("UPDATE issue SET closed = 0 WHERE id = 'i2'");
     let patch = h.recompute(&[("issue", "i2")]);
     assert_eq!(puts(&patch), vec!["comment:c3", "issue:i2"]);
+}
+
+// open issues -> comments -> reactions (nested related-of-related, the shape
+// Chat's queryMessageItemRelations uses several levels deep)
+fn open_comments_reactions() -> Value {
+    json!({
+        "table": "issue",
+        "where": { "type": "simple", "op": "=", "left": { "type": "column", "name": "closed" },
+                   "right": { "type": "literal", "value": false } },
+        "related": [{
+            "correlation": { "parentField": ["id"], "childField": ["issueId"] },
+            "subquery": {
+                "table": "comment",
+                "related": [{
+                    "correlation": { "parentField": ["id"], "childField": ["commentId"] },
+                    "subquery": { "table": "reaction" }
+                }]
+            }
+        }]
+    })
+}
+
+#[test]
+fn nested_related_of_related_includes_grandchildren() {
+    let mut h = Host::new();
+    register_query(&mut h.db, &schema(), "q", &open_comments_reactions()).unwrap();
+    set_desire(&mut h.db, G, "cl", "q", 1).unwrap();
+
+    // i1 open -> its comments c1,c2 -> c1's reaction r1. i2 closed excludes its
+    // comment c3 and grandchild reaction r2.
+    let patch = h.recompute(&[]);
+    assert_eq!(
+        puts(&patch),
+        vec!["comment:c1", "comment:c2", "issue:i1", "reaction:r1"]
+    );
+
+    // a reaction added to an included comment flows through (grandchild-table
+    // change, parents untouched)
+    h.exec("INSERT INTO reaction VALUES ('r3','c2','tada')");
+    let patch = h.recompute(&[("reaction", "r3")]);
+    assert_eq!(puts(&patch), vec!["reaction:r3"]);
+
+    // closing i1 pulls out the whole subtree: issue, its comments, and their
+    // reactions (grandchildren follow even though only the issue table changed)
+    h.exec("UPDATE issue SET closed = 1 WHERE id = 'i1'");
+    let patch = h.recompute(&[("issue", "i1")]);
+    assert_eq!(
+        dels(&patch),
+        vec![
+            "comment:c1",
+            "comment:c2",
+            "issue:i1",
+            "reaction:r1",
+            "reaction:r3"
+        ]
+    );
 }

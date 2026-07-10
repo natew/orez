@@ -23,7 +23,8 @@ use crate::error::EngineError;
 use crate::schema::{TableSpec, Tables};
 use crate::value::{zero_pk_id, zero_row};
 
-use super::compile::compile_related;
+use super::ast::CorrelatedSubquery;
+use super::compile::compile_related_of;
 use super::{compile, parse_ast};
 
 fn text(s: impl Into<String>) -> SqlValue {
@@ -306,6 +307,49 @@ fn set_ref(
     Ok(())
 }
 
+// walk a query's related subtree, adding every correlated child (and
+// grandchild, recursively) row to the query's live member set. `parent_sql` is
+// the compiled SQL of the parent row-set at this level; each related child is
+// joined to it and its own SQL becomes the parent for the next level down.
+#[allow(clippy::too_many_arguments)]
+fn collect_related(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+    parent_sql: &str,
+    parent_params: &[SqlValue],
+    parent_table: &str,
+    related: &[CorrelatedSubquery],
+    depth: usize,
+    live: &mut BTreeSet<(String, String)>,
+    values: &mut BTreeMap<(String, String), Value>,
+) -> Result<(), EngineError> {
+    for rel in related {
+        let cr = compile_related_of(parent_sql, parent_params, parent_table, rel, tables, depth)?;
+        let child_spec = tables.get(&cr.child_table).ok_or_else(|| {
+            EngineError::internal(format!("related child table '{}' missing", cr.child_table))
+        })?;
+        for row in &db.query(&cr.sql, &cr.params)? {
+            let pk_obj = raw_pk(child_spec, row);
+            let key = canonical_pk(&pk_obj);
+            live.insert((cr.child_table.clone(), key.clone()));
+            values.insert((cr.child_table.clone(), key), zero_row(child_spec, row));
+        }
+        // the child row-set is the parent for the child's own related subqueries
+        collect_related(
+            db,
+            tables,
+            &cr.sql,
+            &cr.params,
+            &cr.child_table,
+            &rel.subquery.related,
+            depth + 1,
+            live,
+            values,
+        )?;
+    }
+    Ok(())
+}
+
 // recompute every active query for the group, diff each against durable
 // membership, net the per-row reference changes, and emit row puts (a row's
 // first reference in the group) and dels (its last reference gone). `changed`
@@ -342,21 +386,21 @@ pub fn recompute_group(
             values.insert((q.root_table.clone(), key), zero_row(spec, row));
         }
 
-        // one level of related output: child rows correlated to the matching
-        // roots. a parent membership change re-runs this join, so child rows
-        // follow their parents even when the child table was untouched.
-        for rel in &ast.related {
-            let cr = compile_related(&ast, rel, tables)?;
-            let child_spec = tables.get(&cr.child_table).ok_or_else(|| {
-                EngineError::internal(format!("related child table '{}' missing", cr.child_table))
-            })?;
-            for row in &db.query(&cr.sql, &cr.params)? {
-                let pk_obj = raw_pk(child_spec, row);
-                let key = canonical_pk(&pk_obj);
-                live.insert((cr.child_table.clone(), key.clone()));
-                values.insert((cr.child_table.clone(), key), zero_row(child_spec, row));
-            }
-        }
+        // related output, walked recursively so nested related-of-related child
+        // rows are included too. a parent membership change re-runs these joins,
+        // so children follow their parents even when the child table was
+        // untouched (invariant: the whole authorized result-tree is a member).
+        collect_related(
+            db,
+            tables,
+            &compiled.sql,
+            &compiled.params,
+            &ast.table,
+            &ast.related,
+            0,
+            &mut live,
+            &mut values,
+        )?;
 
         let durable = read_query_row_keys(db, group, &q.hash)?;
         for key in live.difference(&durable) {
