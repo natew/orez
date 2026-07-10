@@ -43,7 +43,9 @@ pub fn f64_to_json(f: f64) -> Value {
     if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
         Value::Number(Number::from(f as i64))
     } else {
-        Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null)
+        Number::from_f64(f)
+            .map(Value::Number)
+            .unwrap_or(Value::Null)
     }
 }
 

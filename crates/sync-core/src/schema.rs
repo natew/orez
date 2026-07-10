@@ -26,7 +26,10 @@ pub struct TableSpec {
 
 impl TableSpec {
     pub fn column_type(&self, name: &str) -> Option<ZeroColumnType> {
-        self.columns.iter().find(|(c, _)| c == name).map(|(_, t)| *t)
+        self.columns
+            .iter()
+            .find(|(c, _)| c == name)
+            .map(|(_, t)| *t)
     }
 }
 
@@ -100,7 +103,13 @@ impl Tables {
                         .ok_or_else(|| format!("table '{name}'.primaryKey entries must be strings"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            tables.push(name.clone(), TableSpec { columns, primary_key });
+            tables.push(
+                name.clone(),
+                TableSpec {
+                    columns,
+                    primary_key,
+                },
+            );
         }
         Ok(tables)
     }

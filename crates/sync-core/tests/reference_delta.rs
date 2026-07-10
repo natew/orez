@@ -3,11 +3,11 @@
 // engine through the synchronous test host (rusqlite + the push-step driver).
 mod common;
 
-use common::{item_tables, Host};
-use serde_json::{json, Value};
+use common::{Host, item_tables};
+use serde_json::{Value, json};
 
-use sync_core::pull::{Caps, VisibleFilter, Visibility};
-use sync_core::{handle_pull, invalidate, push_validate, EngineError, SqlValue, Transactor};
+use sync_core::pull::{Caps, Visibility, VisibleFilter};
+use sync_core::{EngineError, SqlValue, Transactor, handle_pull, invalidate, push_validate};
 
 // ---- helpers mirroring the TS suite's push()/pull()/patchOf() -------------
 
@@ -48,10 +48,10 @@ fn rejects_invalid_pull_cookies() {
         json!({}),
         json!([]),
         json!(true),
-        json!("abc"),   // non-numeric string
-        json!("01"),    // non-canonical (leading zero)
-        json!("-5"),    // signed
-        json!("1.5"),   // fractional string
+        json!("abc"), // non-numeric string
+        json!("01"),  // non-canonical (leading zero)
+        json!("-5"),  // signed
+        json!("1.5"), // fractional string
     ];
     for cookie in cases {
         let mut h = setup();
@@ -68,10 +68,9 @@ fn rejects_invalid_pull_cookies() {
     let mut h = setup();
     let tables = item_tables();
     let body = json!({ "clientID": "c1", "clientGroupID": "g1" });
-    let err = h
-        .db
-        .transaction(|db| handle_pull(db, &tables, 4096, None, Caps::default(), &body, "u1"))
-        .unwrap_err();
+    let err =
+        h.db.transaction(|db| handle_pull(db, &tables, 4096, None, Caps::default(), &body, "u1"))
+            .unwrap_err();
     assert_eq!(err.status, 400, "missing cookie should 400");
 }
 
@@ -82,10 +81,9 @@ fn canonical_string_cookie_is_accepted() {
     let mut h = setup();
     let tables = item_tables();
     let body = json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": "0" });
-    let resp = h
-        .db
-        .transaction(|db| handle_pull(db, &tables, 4096, None, Caps::default(), &body, "u1"))
-        .unwrap();
+    let resp =
+        h.db.transaction(|db| handle_pull(db, &tables, 4096, None, Caps::default(), &body, "u1"))
+            .unwrap();
     assert_eq!(resp, json!({ "cookie": 0, "unchanged": true }));
 }
 
@@ -218,7 +216,11 @@ fn insert_arrives_as_put_diff_without_clear_floats_exact() {
     let mut h = setup();
     let cookie = cookie_of(&h.pull(json!(null), "u1").unwrap());
     let rank = 0.1 + 0.2; // 0.30000000000000004 — 17 significant digits
-    h.put("i2", json!({ "id": "i2", "label": "two", "rank": rank, "done": true, "meta": [1, "x"] }), 1);
+    h.put(
+        "i2",
+        json!({ "id": "i2", "label": "two", "rank": rank, "done": true, "meta": [1, "x"] }),
+        1,
+    );
     let resp = h.pull(json!(cookie), "u1").unwrap();
     let patch = patch_of(&resp);
     assert!(!patch.iter().any(|op| op["op"] == "clear"));
@@ -234,9 +236,17 @@ fn insert_arrives_as_put_diff_without_clear_floats_exact() {
 #[test]
 fn update_arrives_as_put_of_only_the_touched_row() {
     let mut h = setup();
-    h.put("i2", json!({ "id": "i2", "label": "two", "rank": 2, "done": false, "meta": null }), 1);
+    h.put(
+        "i2",
+        json!({ "id": "i2", "label": "two", "rank": 2, "done": false, "meta": null }),
+        1,
+    );
     let cookie = cookie_of(&h.pull(json!(null), "u1").unwrap());
-    h.put("i2", json!({ "id": "i2", "label": "renamed", "rank": 2, "done": false, "meta": null }), 2);
+    h.put(
+        "i2",
+        json!({ "id": "i2", "label": "renamed", "rank": 2, "done": false, "meta": null }),
+        2,
+    );
     let patch = patch_of(&h.pull(json!(cookie), "u1").unwrap()).clone();
     let ps = puts(&patch);
     assert_eq!(ps.len(), 1);
@@ -247,11 +257,18 @@ fn update_arrives_as_put_of_only_the_touched_row() {
 #[test]
 fn delete_arrives_as_del_with_primary_key() {
     let mut h = setup();
-    h.put("i2", json!({ "id": "i2", "label": "two", "rank": 2, "done": false, "meta": null }), 1);
+    h.put(
+        "i2",
+        json!({ "id": "i2", "label": "two", "rank": 2, "done": false, "meta": null }),
+        1,
+    );
     let cookie = cookie_of(&h.pull(json!(null), "u1").unwrap());
     h.del("i2", 2);
     let patch = patch_of(&h.pull(json!(cookie), "u1").unwrap()).clone();
-    assert_eq!(patch, vec![json!({ "op": "del", "tableName": "item", "id": { "id": "i2" } })]);
+    assert_eq!(
+        patch,
+        vec![json!({ "op": "del", "tableName": "item", "id": { "id": "i2" } })]
+    );
 }
 
 #[test]
@@ -259,7 +276,11 @@ fn delete_then_recreate_collapses_to_put() {
     let mut h = setup();
     let cookie = cookie_of(&h.pull(json!(null), "u1").unwrap());
     h.del("seed1", 1);
-    h.put("seed1", json!({ "id": "seed1", "label": "reborn", "rank": 9, "done": false, "meta": null }), 2);
+    h.put(
+        "seed1",
+        json!({ "id": "seed1", "label": "reborn", "rank": 9, "done": false, "meta": null }),
+        2,
+    );
     let patch = patch_of(&h.pull(json!(cookie), "u1").unwrap()).clone();
     assert_eq!(
         patch,
@@ -272,10 +293,17 @@ fn delete_then_recreate_collapses_to_put() {
 fn insert_then_delete_collapses_to_del() {
     let mut h = setup();
     let cookie = cookie_of(&h.pull(json!(null), "u1").unwrap());
-    h.put("ephemeral", json!({ "id": "ephemeral", "label": "x", "rank": 0, "done": false, "meta": null }), 1);
+    h.put(
+        "ephemeral",
+        json!({ "id": "ephemeral", "label": "x", "rank": 0, "done": false, "meta": null }),
+        1,
+    );
     h.del("ephemeral", 2);
     let patch = patch_of(&h.pull(json!(cookie), "u1").unwrap()).clone();
-    assert_eq!(patch, vec![json!({ "op": "del", "tableName": "item", "id": { "id": "ephemeral" } })]);
+    assert_eq!(
+        patch,
+        vec![json!({ "op": "del", "tableName": "item", "id": { "id": "ephemeral" } })]
+    );
 }
 
 #[test]
@@ -309,7 +337,9 @@ fn pk_changing_update_dels_old_and_puts_new() {
 fn app_error_advances_lmid_and_watermark_but_no_rows() {
     let mut h = setup();
     let cookie = cookie_of(&h.pull(json!(null), "u1").unwrap());
-    let resp = h.push_one("item.reject", json!({}), "c1", "g1", 1, "u1").unwrap();
+    let resp = h
+        .push_one("item.reject", json!({}), "c1", "g1", 1, "u1")
+        .unwrap();
     assert_eq!(
         resp["pushResponse"]["mutations"][0]["result"],
         json!({ "error": "app", "message": "nope", "details": "nope" })
@@ -324,22 +354,42 @@ fn app_error_advances_lmid_and_watermark_but_no_rows() {
 #[test]
 fn replayed_mutation_acks_idempotently() {
     let mut h = setup();
-    h.push_one("item.put", json!({ "id": "i2", "label": "once", "rank": 1, "done": false, "meta": null }), "c1", "g1", 1, "u1").unwrap();
+    h.push_one(
+        "item.put",
+        json!({ "id": "i2", "label": "once", "rank": 1, "done": false, "meta": null }),
+        "c1",
+        "g1",
+        1,
+        "u1",
+    )
+    .unwrap();
     let replay = h
-        .push_one("item.put", json!({ "id": "i2", "label": "twice?", "rank": 1, "done": false, "meta": null }), "c1", "g1", 1, "u1")
+        .push_one(
+            "item.put",
+            json!({ "id": "i2", "label": "twice?", "rank": 1, "done": false, "meta": null }),
+            "c1",
+            "g1",
+            1,
+            "u1",
+        )
         .unwrap();
     assert_eq!(
         replay["pushResponse"]["mutations"][0]["result"],
         json!({ "error": "alreadyProcessed",
                 "details": "Ignoring mutation from c1 with ID 1 as it was already processed. Expected: 2" })
     );
-    assert_eq!(h.query_item("i2").unwrap()["label"].as_str().unwrap(), "once");
+    assert_eq!(
+        h.query_item("i2").unwrap()["label"].as_str().unwrap(),
+        "once"
+    );
 }
 
 #[test]
 fn out_of_order_mutation_id_is_400() {
     let mut h = setup();
-    let err = h.push_one("item.put", json!({ "id": "x" }), "c1", "g1", 5, "u1").unwrap_err();
+    let err = h
+        .push_one("item.put", json!({ "id": "x" }), "c1", "g1", 5, "u1")
+        .unwrap_err();
     assert_eq!(err.status, 400);
     assert!(err.message.contains("skips lmid"));
 }
@@ -347,10 +397,29 @@ fn out_of_order_mutation_id_is_400() {
 #[test]
 fn two_tabs_settle_through_last_mutation_id_changes() {
     let mut h = setup();
-    h.push_one("item.put", json!({ "id": "a", "label": "a", "rank": 0, "done": false, "meta": null }), "tab1", "g1", 1, "u1").unwrap();
-    h.push_one("item.put", json!({ "id": "b", "label": "b", "rank": 0, "done": false, "meta": null }), "tab2", "g1", 1, "u1").unwrap();
+    h.push_one(
+        "item.put",
+        json!({ "id": "a", "label": "a", "rank": 0, "done": false, "meta": null }),
+        "tab1",
+        "g1",
+        1,
+        "u1",
+    )
+    .unwrap();
+    h.push_one(
+        "item.put",
+        json!({ "id": "b", "label": "b", "rank": 0, "done": false, "meta": null }),
+        "tab2",
+        "g1",
+        1,
+        "u1",
+    )
+    .unwrap();
     let resp = h.pull_as("tab1", "g1", json!(null), None, "u1").unwrap();
-    assert_eq!(resp["lastMutationIDChanges"], json!({ "tab1": 1, "tab2": 1 }));
+    assert_eq!(
+        resp["lastMutationIDChanges"],
+        json!({ "tab1": 1, "tab2": 1 })
+    );
 }
 
 #[test]
@@ -399,7 +468,15 @@ fn cookie_below_floor_snapshots_recent_cookies_still_diff() {
         h.push_one("item.put", json!({ "id": format!("i{i}"), "label": format!("l{i}"), "rank": i, "done": false, "meta": null }), "c1", "g1", i + 1, "u1").unwrap();
     }
     let recent = cookie_of(&h.pull_as("c2", "g1", json!(null), None, "u1").unwrap());
-    h.push_one("item.put", json!({ "id": "last", "label": "last", "rank": 99, "done": false, "meta": null }), "c1", "g1", 7, "u1").unwrap();
+    h.push_one(
+        "item.put",
+        json!({ "id": "last", "label": "last", "rank": 99, "done": false, "meta": null }),
+        "c1",
+        "g1",
+        7,
+        "u1",
+    )
+    .unwrap();
 
     let stale = h.pull(json!(ancient), "u1").unwrap();
     let stale_patch = patch_of(&stale).clone();
@@ -430,7 +507,11 @@ fn invalidate_forces_one_snapshot_then_diffs_resume() {
     assert_eq!(patch_of(&after)[0], json!({ "op": "clear" })); // full snapshot
     let _ = tables;
     // after re-snapshotting, incremental diffs resume
-    h.put("post", json!({ "id": "post", "label": "post", "rank": 1, "done": false, "meta": null }), 1);
+    h.put(
+        "post",
+        json!({ "id": "post", "label": "post", "rank": 1, "done": false, "meta": null }),
+        1,
+    );
     let diff = h.pull(json!(cookie_of(&after)), "u1").unwrap();
     let diff_patch = patch_of(&diff).clone();
     assert!(!diff_patch.iter().any(|op| op["op"] == "clear"));
@@ -451,16 +532,38 @@ fn visible_configs_always_snapshot_filtered_per_user() {
     let vis = Visibility {
         row_local: false,
         filter: Box::new(|_table: &str, _user: &str| {
-            Some(VisibleFilter { sql: "done = 0".into(), params: Vec::<SqlValue>::new() })
+            Some(VisibleFilter {
+                sql: "done = 0".into(),
+                params: Vec::<SqlValue>::new(),
+            })
         }),
     };
-    h.push_one("item.put", json!({ "id": "hidden", "label": "done item", "rank": 0, "done": true, "meta": null }), "c1", "g1", 1, "u1").unwrap();
+    h.push_one(
+        "item.put",
+        json!({ "id": "hidden", "label": "done item", "rank": 0, "done": true, "meta": null }),
+        "c1",
+        "g1",
+        1,
+        "u1",
+    )
+    .unwrap();
     let cookie = cookie_of(&h.pull_vis(json!(null), Some(&vis), "u1").unwrap());
-    h.push_one("item.put", json!({ "id": "shown", "label": "open item", "rank": 0, "done": false, "meta": null }), "c1", "g1", 2, "u1").unwrap();
+    h.push_one(
+        "item.put",
+        json!({ "id": "shown", "label": "open item", "rank": 0, "done": false, "meta": null }),
+        "c1",
+        "g1",
+        2,
+        "u1",
+    )
+    .unwrap();
     let resp = h.pull_vis(json!(cookie), Some(&vis), "u1").unwrap();
     let patch = patch_of(&resp).clone();
     assert_eq!(patch[0], json!({ "op": "clear" })); // never a diff with visibility filtering
-    let ids: Vec<Value> = puts(&patch).iter().map(|op| op["value"]["id"].clone()).collect();
+    let ids: Vec<Value> = puts(&patch)
+        .iter()
+        .map(|op| op["value"]["id"].clone())
+        .collect();
     assert!(ids.iter().any(|id| id == &json!("shown")));
     assert!(!ids.iter().any(|id| id == &json!("hidden")));
 }
@@ -482,7 +585,9 @@ fn interleaved_pushes_and_upstream_converge() {
         stores: &mut std::collections::HashMap<&str, std::collections::HashMap<String, Value>>,
         cookies: &mut std::collections::HashMap<&str, Value>,
     ) {
-        let resp = h.pull_as(client, "g1", cookies[client].clone(), None, "u1").unwrap();
+        let resp = h
+            .pull_as(client, "g1", cookies[client].clone(), None, "u1")
+            .unwrap();
         cookies.insert(client, resp["cookie"].clone());
         if resp.get("unchanged") == Some(&json!(true)) {
             return;
@@ -492,7 +597,10 @@ fn interleaved_pushes_and_upstream_converge() {
             match op["op"].as_str() {
                 Some("clear") => store.clear(),
                 Some("put") => {
-                    store.insert(op["value"]["id"].as_str().unwrap().to_string(), op["value"].clone());
+                    store.insert(
+                        op["value"]["id"].as_str().unwrap().to_string(),
+                        op["value"].clone(),
+                    );
                 }
                 Some("del") => {
                     store.remove(op["id"]["id"].as_str().unwrap());
@@ -506,7 +614,11 @@ fn interleaved_pushes_and_upstream_converge() {
     let mut ids: HashMap<&str, i64> = HashMap::new();
     ids.insert("c1", 0);
     for round in 0..20 {
-        let id = { let e = ids.entry("c1").or_insert(0); *e += 1; *e };
+        let id = {
+            let e = ids.entry("c1").or_insert(0);
+            *e += 1;
+            *e
+        };
         h.push_one(
             "item.put",
             json!({ "id": format!("r{}", round % 7), "label": format!("round {round}"),
@@ -519,7 +631,10 @@ fn interleaved_pushes_and_upstream_converge() {
         )
         .unwrap();
         if round % 4 == 0 {
-            h.exec(&format!("DELETE FROM item WHERE id = 'r{}'", (round + 3) % 7));
+            h.exec(&format!(
+                "DELETE FROM item WHERE id = 'r{}'",
+                (round + 3) % 7
+            ));
         }
         if round % 5 == 2 {
             apply_pull(&mut h, "c1", &mut stores, &mut cookies);
@@ -536,11 +651,17 @@ fn interleaved_pushes_and_upstream_converge() {
     let mut oracle: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     for op in oracle_resp["rowsPatch"].as_array().unwrap() {
         if op["op"] == "put" {
-            oracle.insert(op["value"]["id"].as_str().unwrap().to_string(), op["value"].clone());
+            oracle.insert(
+                op["value"]["id"].as_str().unwrap().to_string(),
+                op["value"].clone(),
+            );
         }
     }
     for client in ["c1", "c2"] {
-        assert_eq!(&stores[client], &oracle, "client {client} diverged from oracle");
+        assert_eq!(
+            &stores[client], &oracle,
+            "client {client} diverged from oracle"
+        );
     }
 }
 

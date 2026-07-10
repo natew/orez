@@ -18,7 +18,10 @@ pub struct EngineError {
 
 impl EngineError {
     pub fn new(status: u16, message: impl Into<String>) -> Self {
-        Self { status, message: message.into() }
+        Self {
+            status,
+            message: message.into(),
+        }
     }
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(400, message)
@@ -68,6 +71,9 @@ pub enum MutateError {
 impl MutateError {
     pub fn app(details: impl Into<String>) -> Self {
         let details = details.into();
-        MutateError::App { message: details.clone(), details }
+        MutateError::App {
+            message: details.clone(),
+            details,
+        }
     }
 }

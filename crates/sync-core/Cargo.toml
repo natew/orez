@@ -6,7 +6,12 @@ license.workspace = true
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+# float_roundtrip: serde_json's DEFAULT float parser is ~1 ULP lossy
+# (from_str(ryu(x)) can return x±1ulp), which would corrupt a client's float
+# column args parsed from a request body and break invariant 1 (exact float
+# round-trip). this feature makes parsing exact. it unifies workspace-wide via
+# cargo, so every host that parses a body through serde gets the fix.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror = { workspace = true }
 
 # rusqlite is a DEV-dependency ONLY: it is the in-memory SyncDb impl the unit,

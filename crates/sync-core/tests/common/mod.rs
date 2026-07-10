@@ -5,17 +5,17 @@
 // host composition. rusqlite is a DEV-dependency only.
 #![allow(dead_code)]
 
-use rusqlite::types::{Value as Sqlite, ValueRef};
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use rusqlite::types::{Value as Sqlite, ValueRef};
+use serde_json::{Value, json};
 
-use sync_core::{
-    handle_pull, handle_push, init_schema, DbError, Mutator, MutateError, Row, SqlValue, SyncDb,
-    Tables, Transactor, Visibility,
-};
 use sync_core::pull::Caps;
 use sync_core::schema::TableSpec;
 use sync_core::value::ZeroColumnType;
+use sync_core::{
+    DbError, MutateError, Mutator, Row, SqlValue, SyncDb, Tables, Transactor, Visibility,
+    handle_pull, handle_push, init_schema,
+};
 
 pub struct TestDb {
     pub conn: Connection,
@@ -23,7 +23,9 @@ pub struct TestDb {
 
 impl TestDb {
     pub fn memory() -> Self {
-        TestDb { conn: Connection::open_in_memory().expect("open in-memory sqlite") }
+        TestDb {
+            conn: Connection::open_in_memory().expect("open in-memory sqlite"),
+        }
     }
 }
 
@@ -58,19 +60,28 @@ impl SyncDb for TestDb {
 
     fn query(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, DbError> {
         let binds: Vec<Sqlite> = params.iter().map(to_sqlite).collect();
-        let mut stmt = self.conn.prepare(sql).map_err(|e| DbError(format!("{e}: {sql}")))?;
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| DbError(format!("{e}: {sql}")))?;
         let columns: std::sync::Arc<[String]> =
             stmt.column_names().iter().map(|s| s.to_string()).collect();
         let ncols = columns.len();
         let mut rows_out = Vec::new();
-        let mut rows =
-            stmt.query(rusqlite::params_from_iter(binds.iter())).map_err(|e| DbError(e.to_string()))?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(binds.iter()))
+            .map_err(|e| DbError(e.to_string()))?;
         while let Some(row) = rows.next().map_err(|e| DbError(e.to_string()))? {
             let mut values = Vec::with_capacity(ncols);
             for i in 0..ncols {
-                values.push(from_ref(row.get_ref(i).map_err(|e| DbError(e.to_string()))?));
+                values.push(from_ref(
+                    row.get_ref(i).map_err(|e| DbError(e.to_string()))?,
+                ));
             }
-            rows_out.push(Row { columns: columns.clone(), values });
+            rows_out.push(Row {
+                columns: columns.clone(),
+                values,
+            });
         }
         Ok(rows_out)
     }
@@ -147,7 +158,10 @@ impl Mutator for ItemMutator {
                 .map_err(|e| MutateError::Other(e.0))
             }
             "item.del" => db
-                .exec("DELETE FROM item WHERE id = ?", &[json_to_sql(args.get("id"))])
+                .exec(
+                    "DELETE FROM item WHERE id = ?",
+                    &[json_to_sql(args.get("id"))],
+                )
                 .map_err(|e| MutateError::Other(e.0)),
             "item.reject" => {
                 db.exec(
@@ -199,7 +213,12 @@ impl Host {
             )
             .unwrap();
         }
-        Host { db, tables: item_tables(), retain: 4096, caps: Caps::default() }
+        Host {
+            db,
+            tables: item_tables(),
+            retain: 4096,
+            caps: Caps::default(),
+        }
     }
 
     // run arbitrary sql outside the sync path (seed rows / upstream writes)
@@ -289,11 +308,20 @@ impl Host {
 
     // convenience: item.put / item.del as client c1 in group g1 as user u1
     pub fn put(&mut self, _id: &str, args: Value, mutation_id: i64) {
-        self.push_one("item.put", args, "c1", "g1", mutation_id, "u1").unwrap();
+        self.push_one("item.put", args, "c1", "g1", mutation_id, "u1")
+            .unwrap();
     }
 
     pub fn del(&mut self, id: &str, mutation_id: i64) {
-        self.push_one("item.del", json!({ "id": id }), "c1", "g1", mutation_id, "u1").unwrap();
+        self.push_one(
+            "item.del",
+            json!({ "id": id }),
+            "c1",
+            "g1",
+            mutation_id,
+            "u1",
+        )
+        .unwrap();
     }
 
     pub fn watermark(&mut self) -> i64 {
@@ -301,13 +329,18 @@ impl Host {
     }
 
     pub fn floor(&mut self) -> i64 {
-        self.db.transaction(|db| sync_core::pull::floor(db)).unwrap()
+        self.db
+            .transaction(|db| sync_core::pull::floor(db))
+            .unwrap()
     }
 
     pub fn change_count(&mut self) -> i64 {
         let rows = self
             .db
-            .query("SELECT CAST(COUNT(*) AS TEXT) AS n FROM _zsync_changes", &[])
+            .query(
+                "SELECT CAST(COUNT(*) AS TEXT) AS n FROM _zsync_changes",
+                &[],
+            )
             .unwrap();
         match rows.first().and_then(|r| r.values.first()) {
             Some(SqlValue::Text(s)) => s.parse().unwrap_or(0),
@@ -320,7 +353,10 @@ impl Host {
     pub fn query_item(&mut self, id: &str) -> Option<Value> {
         let rows = self
             .db
-            .query("SELECT * FROM item WHERE id = ?", &[SqlValue::Text(id.to_string())])
+            .query(
+                "SELECT * FROM item WHERE id = ?",
+                &[SqlValue::Text(id.to_string())],
+            )
             .unwrap();
         let row = rows.first()?;
         let mut obj = serde_json::Map::new();

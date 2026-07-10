@@ -36,10 +36,10 @@ pub mod wire;
 
 pub use db::{DbError, Row, SqlValue, SyncDb};
 pub use error::{EngineError, MutateError};
-pub use pull::{handle_pull, invalidate, prune, watermark, Caps, VisibleFilter, Visibility};
+pub use pull::{Caps, Visibility, VisibleFilter, handle_pull, invalidate, prune, watermark};
 pub use push::{
+    MutationResult, Mutator, Preflight, PushBody, PushMutation, PushPlan, Transactor,
     assemble_push_response, finalize, handle_push, preflight, push_validate, record_app_error,
-    Mutator, MutationResult, Preflight, PushBody, PushMutation, PushPlan, Transactor,
 };
-pub use schema::{init_schema, trigger_ddl, TableSpec, Tables};
-pub use value::{to_zero_value, to_zero_value_json, ZeroColumnType};
+pub use schema::{TableSpec, Tables, init_schema, trigger_ddl};
+pub use value::{ZeroColumnType, to_zero_value, to_zero_value_json};
