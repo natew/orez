@@ -37,8 +37,12 @@ Multiple agents work this worktree concurrently. Rules:
       soot 13-test composition semantics, model tests, trace differential)
 - [x] M2: sync-native axum host + harness `rust-local` target + admin
       routes + wake channel + CI lanes
-- [ ] M3: sync-cf-host production shape + `rust-cf` target + hibernating
-      wake sockets
+- [x] M3: sync-cf-host production shape + `rust-cf` target + hibernating
+      wake sockets (exit gate 2026-07-09: full lane matrix vs rust-cf,
+      eviction zero 409s + monotone cookies, 100-client wake-only storm
+      p95 810 ms < 1 s, propagation commit->seen p95 406 ms without
+      safety-poll convergence, ack/prop within 20% of the TS DO baseline;
+      deploy 871a13df, README 4c2a3bc)
 - [ ] M4a: soot migration prep (baseline surface)
 - [ ] M4b: query-aware layer (AST compiler, membership, desired queries)
 - [ ] M4c: chat compatibility branch (measurement)
