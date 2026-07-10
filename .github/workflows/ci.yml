@@ -71,6 +71,42 @@ jobs:
       - name: compiler tests (incl. pgsqlite oracle)
         run: bun run test:compiler
 
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # root install: the harness imports src/sync-server from the repo root
+      - run: bun install --frozen-lockfile
+
+      - name: harness install
+        run: cd harness && bun install
+
+      - name: sync-server smoke (pure sqlite, 20 clients)
+        run: cd harness && bun src/smoke.ts --target orez-local --clients 20 --projects 3
+
+      - name: conformance shapes (stock zero-cache vs sync-server)
+        # boots embedded postgres + real zero-cache; the cross-implementation
+        # differential is the rewrite's acceptance gate
+        run: cd harness && bun src/shapes.ts
+
+      - name: randomized sweep (fresh seed every run)
+        run: cd harness && bun src/sweep.ts --rounds 10
+
+      - name: upload sweep regressions
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-regressions
+          path: harness/regressions/
+          if-no-files-found: ignore
+
   native-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 15

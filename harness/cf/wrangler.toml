@@ -1,0 +1,16 @@
+name = "zharness-sync"
+main = "worker.ts"
+compatibility_date = "2025-04-01"
+# lightstrike labs — same account as the orez-cf-todo-experiment
+account_id = "6afff1f79e2fd12f1cfd1bfe1dfd08d1"
+
+[[durable_objects.bindings]]
+name = "SYNC_DO"
+class_name = "SyncServerDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SyncServerDO"]
+
+[observability]
+enabled = true
