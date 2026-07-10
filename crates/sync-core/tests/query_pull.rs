@@ -263,3 +263,75 @@ fn future_cookie_is_409() {
     };
     assert_eq!(err.status, 409);
 }
+
+// reproduces the differential's `allProjects` (project.related('members'),
+// unbounded) end to end through handle_query_pull: a fresh pull must return the
+// project rows AND their related member rows (clear + puts), and the caught-up
+// follow-up pull is unchanged.
+#[test]
+fn unbounded_related_fresh_pull_includes_child_rows() {
+    use ZeroColumnType::String as S;
+    let mut db = TestDb::memory();
+    db.exec("CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT)", &[])
+        .unwrap();
+    db.exec(
+        "CREATE TABLE member (id TEXT PRIMARY KEY, projectId TEXT, userId TEXT)",
+        &[],
+    )
+    .unwrap();
+    db.exec("INSERT INTO project VALUES ('p0','P0'), ('p1','P1')", &[])
+        .unwrap();
+    db.exec(
+        "INSERT INTO member VALUES ('m0','p0','u0'), ('m1','p0','u1'), ('m2','p1','u2')",
+        &[],
+    )
+    .unwrap();
+    let tables = Tables::new()
+        .with(
+            "project",
+            TableSpec {
+                columns: vec![("id".into(), S), ("name".into(), S)],
+                primary_key: vec!["id".into()],
+            },
+        )
+        .with(
+            "member",
+            TableSpec {
+                columns: vec![
+                    ("id".into(), S),
+                    ("projectId".into(), S),
+                    ("userId".into(), S),
+                ],
+                primary_key: vec!["id".into()],
+            },
+        );
+    init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+
+    let all_projects = json!({ "table": "project", "related": [{
+        "correlation": { "parentField": ["id"], "childField": ["projectId"] },
+        "subquery": { "table": "member" } }] });
+    let body = json!({ "clientID": "c", "clientGroupID": "g", "cookie": null,
+        "queries": { "version": 1, "patch": [{ "op": "put", "hash": "allProjects", "ast": all_projects }] } });
+    let resp = db
+        .transaction(|d| handle_query_pull(d, &tables, 4096, &body, "u"))
+        .unwrap();
+
+    let rows = resp["rowsPatch"].as_array().unwrap();
+    let by_table = |t: &str| -> Vec<String> {
+        let mut v: Vec<String> = rows
+            .iter()
+            .filter(|op| op["op"] == "put" && op["tableName"] == t)
+            .map(|op| op["value"]["id"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(by_table("project"), vec!["p0", "p1"]);
+    assert_eq!(
+        by_table("member"),
+        vec!["m0", "m1", "m2"],
+        "fresh pull must sync the related member rows"
+    );
+    assert_eq!(resp["gotQueries"]["version"], json!(1));
+}
