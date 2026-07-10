@@ -1831,6 +1831,128 @@ describe('DoBackend', () => {
     expect(memberPk.map((row) => row.ordinal_position)).toEqual([1, 2])
   })
 
+  test('promotion trusts <table>_pkey on nullable legacy columns; other indexes need NOT NULL and full coverage', async () => {
+    // three keyless tables:
+    // - member: LEGACY shape — nullable physical columns (no metadata either),
+    //   <table>_pkey unique index. must promote (the pkey name IS the
+    //   generator's primary-key convention; prod accountMember predates
+    //   NOT NULL in its DDL).
+    // - audit: only a PARTIAL unique index and a unique index over a nullable
+    //   column. must NOT promote (no row identity).
+    // - pref: a 2-column <table>_pkey AND a narrower single-column unique
+    //   index. the pkey convention must win over narrowest.
+    const tableInfo: Record<string, unknown[]> = {
+      member: [
+        { cid: 0, name: 'accountId', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+        { cid: 1, name: 'userId', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+        { cid: 2, name: 'role', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+      ],
+      audit: [
+        { cid: 0, name: 'actor', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+        { cid: 1, name: 'event', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+      ],
+      pref: [
+        { cid: 0, name: 'orgId', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+        { cid: 1, name: 'slug', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+        { cid: 2, name: 'alias', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+      ],
+    }
+    const indexList: Record<string, unknown[]> = {
+      member: [{ seq: 0, name: 'member_pkey', unique: 1, origin: 'c', partial: 0 }],
+      audit: [
+        { seq: 0, name: 'audit_partial_key', unique: 1, origin: 'c', partial: 1 },
+        { seq: 1, name: 'audit_actor_key', unique: 1, origin: 'c', partial: 0 },
+      ],
+      pref: [
+        { seq: 0, name: 'pref_alias_key', unique: 1, origin: 'c', partial: 0 },
+        { seq: 1, name: 'pref_pkey', unique: 1, origin: 'c', partial: 0 },
+      ],
+    }
+    const indexColumns: Record<string, unknown[]> = {
+      member_pkey: [
+        { seqno: 0, cid: 0, name: 'accountId', desc: 0, key: 1 },
+        { seqno: 1, cid: 1, name: 'userId', desc: 0, key: 1 },
+      ],
+      audit_partial_key: [{ seqno: 0, cid: 1, name: 'event', desc: 0, key: 1 }],
+      audit_actor_key: [{ seqno: 0, cid: 0, name: 'actor', desc: 0, key: 1 }],
+      pref_alias_key: [{ seqno: 0, cid: 2, name: 'alias', desc: 0, key: 1 }],
+      pref_pkey: [
+        { seqno: 0, cid: 0, name: 'orgId', desc: 0, key: 1 },
+        { seqno: 1, cid: 1, name: 'slug', desc: 0, key: 1 },
+      ],
+    }
+    const http = await startDoHttp((sql) => {
+      if (sql.includes('sqlite_master')) {
+        return {
+          rows: Object.keys(tableInfo).map((name) => ({
+            name,
+            sql: `CREATE TABLE ${name} (x TEXT)`,
+          })),
+          columns: ['name', 'sql'],
+        }
+      }
+      const tableMatch = sql.match(/PRAGMA table_info\("(\w+)"\)/)
+      if (tableMatch) {
+        return {
+          rows: tableInfo[tableMatch[1]] ?? [],
+          columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
+        }
+      }
+      const listMatch = sql.match(/PRAGMA index_list\("(\w+)"\)/)
+      if (listMatch) {
+        return {
+          rows: indexList[listMatch[1]] ?? [],
+          columns: ['seq', 'name', 'unique', 'origin', 'partial'],
+        }
+      }
+      const xinfoMatch = sql.match(/PRAGMA index_xinfo\("(\w+)"\)/)
+      if (xinfoMatch) {
+        return {
+          rows: indexColumns[xinfoMatch[1]] ?? [],
+          columns: ['seqno', 'cid', 'name', 'desc', 'key'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'promotion-qualification-test')
+    await backend.waitReady
+
+    const result = await backend.query<{
+      kind: string
+      table_name: string
+      column_name: string
+      ordinal_position: number
+    }>(
+      `SELECT 'pk' AS kind, tc.table_schema, tc.table_name, kcu.column_name, NULL AS data_type, kcu.ordinal_position
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+       WHERE tc.constraint_type = 'PRIMARY KEY'
+         AND tc.table_schema = ANY($1)
+       UNION ALL
+       SELECT 'col' AS kind, table_schema, table_name, column_name, data_type, ordinal_position
+       FROM information_schema.columns
+       WHERE table_schema = ANY($1)
+       ORDER BY table_schema, table_name, kind, ordinal_position`,
+      [['public']]
+    )
+
+    const pkByTable = new Map<string, string[]>()
+    for (const row of result.rows) {
+      if (row.kind !== 'pk') continue
+      const list = pkByTable.get(row.table_name) ?? []
+      list.push(row.column_name)
+      pkByTable.set(row.table_name, list)
+    }
+    // legacy nullable pkey: promoted
+    expect(pkByTable.get('member')).toEqual(['accountId', 'userId'])
+    // partial + nullable-column indexes: no identity, no promotion
+    expect(pkByTable.get('audit')).toBeUndefined()
+    // pkey convention beats the narrower arbitrary unique index
+    expect(pkByTable.get('pref')).toEqual(['orgId', 'slug'])
+  })
+
   test('synthesizes primary-key rows for zero-cache relation metadata queries', async () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('sqlite_master')) {

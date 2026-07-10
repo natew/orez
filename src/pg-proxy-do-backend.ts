@@ -7123,22 +7123,30 @@ export class DoBackend {
     return columns
   }
 
-  // a table with no PRIMARY KEY but a full, non-partial UNIQUE index over
-  // NOT NULL columns is keyed by that index — the shape soot's DDL generator
-  // emits for composite drizzle primaryKey() tables (CREATE TABLE without a
-  // PK + CREATE UNIQUE INDEX <table>_pkey), because a PK cannot be retrofitted
-  // onto an existing sqlite table. real pg conveys this key via replica
-  // identity; without promoting it here, zero's initial sync builds a keyless
-  // replica spec and its change processor throws "Cannot replicate table
-  // without a PRIMARY KEY or UNIQUE INDEX" on the first UPDATE (2026-07-10
-  // soot prod outage). prefer the <table>_pkey-named index, else the narrowest
-  // qualifying index, name as the tiebreak for determinism.
+  // a table with no PRIMARY KEY but a full, non-partial UNIQUE index is keyed
+  // by that index — the shape soot's DDL generator emits for composite drizzle
+  // primaryKey() tables (CREATE TABLE without a PK + CREATE UNIQUE INDEX
+  // <table>_pkey), because a PK cannot be retrofitted onto an existing sqlite
+  // table. real pg conveys this key via replica identity; without promoting it
+  // here, zero's initial sync builds a keyless replica spec and its change
+  // processor throws "Cannot replicate table without a PRIMARY KEY or UNIQUE
+  // INDEX" on the first UPDATE (2026-07-10 soot prod outage).
+  //
+  // the <table>_pkey name IS the generator's primary-key convention, so it is
+  // trusted outright: legacy tables created before NOT NULL reached their DDL
+  // have nullable physical columns (and possibly no durable metadata), yet the
+  // index still represents the app-level composite PK — requiring NOT NULL
+  // there would silently skip exactly the tables this promotion exists to
+  // heal. any OTHER unique index must cover only NOT NULL columns (a unique
+  // index over nullable columns permits duplicate NULL rows and is not a row
+  // identity); among those, narrowest wins, name as the tiebreak.
   private promotedUniqueIndexKey(
     sqliteTableName: string,
     columns: SqliteColumnInfo[],
     indexListRows: SqliteRow[],
     indexColumnsByName: Map<string, Record<string, 'ASC' | 'DESC'>>
   ): string[] {
+    const columnNames = new Set(columns.map((column) => column.name))
     const notNull = new Set(
       columns
         .filter((column) => {
@@ -7155,12 +7163,12 @@ export class DoBackend {
       if (!name || !Number(row.unique ?? 0) || Number(row.partial ?? 0)) continue
       const indexColumns = Object.keys(indexColumnsByName.get(name) ?? {})
       if (indexColumns.length === 0) continue
+      if (!indexColumns.every((column) => columnNames.has(column))) continue
+      if (name === pkeyName) return indexColumns
       if (!indexColumns.every((column) => notNull.has(column))) continue
       candidates.push({ name, columns: indexColumns })
     }
     if (candidates.length === 0) return []
-    const preferred = candidates.find((candidate) => candidate.name === pkeyName)
-    if (preferred) return preferred.columns
     candidates.sort(
       (a, b) => a.columns.length - b.columns.length || a.name.localeCompare(b.name)
     )
@@ -7614,8 +7622,17 @@ export class DoBackend {
               elemPgTypeClass: metadata?.elemTyptype ?? null,
               typeOID: metadata?.typeOid ?? pgTypeOid(dataType),
               characterMaximumLength: metadata?.characterMaximumLength ?? null,
+              // primary-key columns are never-null by definition; legacy
+              // tables whose key was promoted from a <table>_pkey unique
+              // index carry nullable physical columns, and zero's
+              // view-syncer refuses to sync a table whose key columns are
+              // nullable on the replica (checkClientSchema).
               notNull: Boolean(
-                metadata?.notNull || metadata?.primaryKey || column.notnull || column.pk
+                metadata?.notNull ||
+                  metadata?.primaryKey ||
+                  column.notnull ||
+                  column.pk ||
+                  info.primaryKey.includes(column.name)
               ),
               dflt: null,
             },

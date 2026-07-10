@@ -472,11 +472,13 @@ describe('zero-cache embed on the CF data plane (ZeroDO upstream, local cvr/cdb)
     seed = createBackend('postgres')
     await seed.waitReady
     await seed.exec(`CREATE TABLE foo (id TEXT PRIMARY KEY, value TEXT, num INTEGER)`)
-    // the accountMember shape: keyless table, composite key as a separate
-    // unique index (2026-07-10 soot prod: first UPDATE through the streamer
-    // crashed change-processor #getKey when the replica lacked the index)
+    // the accountMember LEGACY shape, worst case: keyless table with NULLABLE
+    // physical columns (created before NOT NULL reached the generated DDL, so
+    // neither PRAGMA nor durable metadata says notNull) and the composite key
+    // added later as a <table>_pkey unique index. 2026-07-10 soot prod: first
+    // UPDATE through the streamer crashed change-processor #getKey.
     await seed.exec(
-      `CREATE TABLE member ("accountId" TEXT NOT NULL, "userId" TEXT NOT NULL, role TEXT NOT NULL)`
+      `CREATE TABLE member ("accountId" TEXT, "userId" TEXT, role TEXT)`
     )
     await seed.exec(
       `CREATE UNIQUE INDEX "member_pkey" ON "member" ("accountId", "userId")`
