@@ -430,6 +430,29 @@ Surface the DO-local SQLite adapter must provide (observed in
 
 ### 5.2 Tables written beyond the target (derived-state writes in the same tx)
 
+Per-namespace write matrix (direct `tx.mutate.<table>` calls; helper-routed
+writes such as `helpers/insertServer.ts` add more, so treat this as a lower
+bound). `eff` = has external/deferred side effects (`asyncTasks` /
+`server.actions` / `server-effects`):
+
+| Mutator | Tables written | eff | Mutator | Tables written | eff |
+| --- | --- | --- | --- | --- | --- |
+| admin | privateBetaInvite, waitlist | y | message | attachment, message, message{Channel,Role,User}Mention | y |
+| agentConfig | agentConfig | | messageReaction | messageReaction | y |
+| apiKey | apiKey | | notification | notification | y |
+| app | app, message, thread | y | pin | message, pin | |
+| appInstall | appInstall, channel | y | role | role | |
+| approval | approval, notification | y | secret | appInstall | |
+| channel | channel, message, notification, server | | seen | seen | |
+| contentVersion | agentConfig, app, appSource, channel, contentVersion, flow, server, skill | | serverAction | serverAction, serverLog | y |
+| data | data | y | serverMember | serverLog, serverMember | y |
+| flow | flow, message, thread | y | thread | message, thread | y |
+| flowRun | flowRun | y | userPublic | userPublic | y |
+| friendship | friendship, notification | | userState | userState | y |
+| indicator | indicator | y | waitlist | waitlist | |
+| invite | invite | y | job | job | |
+| meeting | meeting, meetingUser | y | | | |
+
 Mutators write more than their own table. `message.send` /`insert` writes
 `message`, then `applyMessageDerivedState` (`:573-592`) updates channel latest
 order + `recomputeThreadReplyCount` (thread), inserts `thread` on auto-thread
