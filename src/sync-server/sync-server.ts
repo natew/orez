@@ -510,3 +510,51 @@ export function createSyncServer(config: SyncServerConfig) {
 }
 
 export type SyncServer = ReturnType<typeof createSyncServer>
+
+export type SyncServerOperation = 'pull' | 'push'
+
+export type SyncServerRoute = {
+  databaseID: string
+  operation: SyncServerOperation
+}
+
+export type SyncServerMountConfig = {
+  // routes are `${pathPrefix}<databaseID>/pull|push`; `/p-` produces soot's
+  // `/p-<projectID>/pull|push`, while `/` produces `/<namespace>/pull|push`.
+  pathPrefix: string
+  // resolved only when mount.handle() runs, after the caller has had a chance
+  // to authorize route.databaseID. the caller owns server and db lifetime.
+  server(databaseID: string): SyncServer
+}
+
+const SYNC_DATABASE_ROUTE = /^([A-Za-z0-9_-]{1,64})\/(pull|push)$/
+
+// mount the byte-identical pull/push handlers behind one database-id path
+// segment. match() performs routing only; handle() delegates directly without
+// translating bodies, responses, or errors.
+export function createSyncServerMount(config: SyncServerMountConfig) {
+  if (
+    !config.pathPrefix.startsWith('/') ||
+    (config.pathPrefix !== '/' && config.pathPrefix.endsWith('/'))
+  ) {
+    throw new TypeError(`pathPrefix must start with '/' and end before the database ID`)
+  }
+
+  return {
+    match(pathname: string): SyncServerRoute | null {
+      if (!pathname.startsWith(config.pathPrefix)) return null
+      const match = SYNC_DATABASE_ROUTE.exec(pathname.slice(config.pathPrefix.length))
+      if (!match) return null
+
+      const databaseID = match[1]!
+      const operation = match[2]! as SyncServerOperation
+      return { databaseID, operation }
+    },
+    handle(route: SyncServerRoute, body: unknown, userID: string) {
+      const server = config.server(route.databaseID)
+      return route.operation === 'pull'
+        ? server.handlePull(body, userID)
+        : server.handlePush(body, userID)
+    },
+  }
+}

@@ -91,6 +91,9 @@ jobs:
       - name: sync-server smoke (pure sqlite, 20 clients)
         run: cd harness && bun src/smoke.ts --target orez-local --clients 20 --projects 3
 
+      - name: multi-project sync-server mount
+        run: cd harness && bun src/multi-project-mount.ts
+
       - name: conformance shapes (stock zero-cache vs sync-server)
         # boots embedded postgres + real zero-cache; the cross-implementation
         # differential is the rewrite's acceptance gate

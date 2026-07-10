@@ -27,6 +27,10 @@
       "types": "./dist/change-tracking.d.ts",
       "import": "./dist/change-tracking.js"
     },
+    "./sync-server": {
+      "types": "./dist/sync-server/sync-server.d.ts",
+      "import": "./dist/sync-server/sync-server.js"
+    },
     "./worker/*": {
       "types": "./dist/worker/*.d.ts",
       "import": "./dist/worker/*.js"
