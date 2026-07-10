@@ -59,6 +59,7 @@ struct Config {
     port: u16,
     retain_changes: i64,
     visible: bool,
+    query_aware: bool,
 }
 
 fn parse_args() -> Config {
@@ -66,6 +67,7 @@ fn parse_args() -> Config {
     let mut port: Option<u16> = None;
     let mut retain_changes: i64 = 4096;
     let mut visible = false;
+    let mut query_aware = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -84,6 +86,7 @@ fn parse_args() -> Config {
                     .expect("--retain-changes must be an integer")
             }
             "--visible" => visible = true,
+            "--query-aware" => query_aware = true,
             other => panic!("unknown argument {other}"),
         }
     }
@@ -93,6 +96,7 @@ fn parse_args() -> Config {
         port: port.expect("--port is required"),
         retain_changes,
         visible,
+        query_aware,
     }
 }
 
@@ -114,7 +118,11 @@ async fn main() {
     let config = parse_args();
     std::fs::create_dir_all(&config.data_dir).expect("failed to create data dir");
 
-    let ctx = Arc::new(EngineContext::new(config.retain_changes, config.visible));
+    let ctx = Arc::new(EngineContext::new(
+        config.retain_changes,
+        config.visible,
+        config.query_aware,
+    ));
     let init_ctx = ctx.clone();
     let init: InitFn = Arc::new(move |db: &mut dyn SyncDb| engine::init_namespace(db, &init_ctx));
     let manager = Arc::new(Manager::new(config.data_dir, init));
