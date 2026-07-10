@@ -232,9 +232,6 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #wakeOrigins = new Set<string>();
     #wakeRecipients = new Set<WebSocket>();
     #wakePromise: Promise<void> | null = null;
-    #visibilityEnabled = config.visibilityEnabled ?? false;
-    #queryAwareOverride: boolean | null = null;
-    #retainChanges = defaultRetainChanges;
 
     constructor(ctx: DurableObjectState, env: Env) {
       super(ctx, env);
@@ -283,7 +280,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     }
 
     #visibility(claims: NormalizedClaims): unknown {
-      if (!config.visibility || !this.#visibilityEnabled) return null;
+      if (!config.visibility || !this.#visibilityEnabled()) return null;
       return {
         rowLocal:
           typeof config.visibility.rowLocal === "function"
@@ -298,11 +295,45 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       };
     }
 
-    #writerEnabled(): boolean {
+    // the admin-set namespace knobs (writer, visibility, query-aware,
+    // retention) live in _zsync_host_control, NOT in instance fields: a real
+    // eviction recreates this instance, and an in-memory override silently
+    // reverting to the config default mid-run turns a query-aware namespace
+    // back into a baseline one — the client keeps re-sending its desired-query
+    // patch, the host ignores it, and every pull answers {unchanged:true}
+    // forever.
+    #controlGet(key: string): string | null {
       const row = this.#directSql.query<{ value: string }>(
-        "SELECT value FROM _zsync_host_control WHERE key = 'writerEnabled'",
+        "SELECT value FROM _zsync_host_control WHERE key = ?",
+        [key],
       )[0];
-      return row?.value === "1";
+      return row?.value ?? null;
+    }
+
+    #controlSet(key: string, value: string): void {
+      this.#directSql.exec(
+        "INSERT INTO _zsync_host_control (key, value) VALUES (?, ?) " +
+          "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [key, value],
+      );
+    }
+
+    #writerEnabled(): boolean {
+      return this.#controlGet("writerEnabled") === "1";
+    }
+
+    #visibilityEnabled(): boolean {
+      const value = this.#controlGet("visibilityEnabled");
+      return value === null ? (config.visibilityEnabled ?? false) : value === "1";
+    }
+
+    #queryAwareOverride(): boolean | null {
+      const value = this.#controlGet("queryAwareOverride");
+      return value === null ? null : value === "1";
+    }
+
+    #retainChanges(): string {
+      return this.#controlGet("retainChanges") ?? defaultRetainChanges;
     }
 
     #engineState(): EngineState | null {
@@ -413,7 +444,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       try {
         body = (await requestJson(request)) as Record<string, unknown>;
         const queryAware =
-          this.#queryAwareOverride ??
+          this.#queryAwareOverride() ??
           (typeof config.queryAware === "function"
             ? config.queryAware(claims)
             : (config.queryAware ?? Boolean(config.resolveQuery)));
@@ -482,7 +513,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                 ? engine_handle_query_pull(
                     this.#engineDb,
                     config.schema,
-                    this.#retainChanges,
+                    this.#retainChanges(),
                     body,
                     claims.userID,
                   )
@@ -491,7 +522,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                     config.schema,
                     this.#visibility(claims),
                     caps,
-                    this.#retainChanges,
+                    this.#retainChanges(),
                     body,
                     claims.userID,
                   ),
@@ -504,9 +535,13 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         const patch = Array.isArray(response.rowsPatch)
           ? response.rowsPatch
           : [];
-        const queryPuts = queryAware && Array.isArray(body.queries?.patch)
-          ? body.queries.patch.filter((entry) => entry?.op === "put").length
-          : 0;
+        const queriesBody = body.queries as { patch?: unknown[] } | undefined;
+        const queryPuts =
+          queryAware && Array.isArray(queriesBody?.patch)
+            ? queriesBody.patch.filter(
+                (entry) => (entry as { op?: unknown } | null)?.op === "put",
+              ).length
+            : 0;
         this.#counters.queryRecompilations += queryPuts;
         const state = this.#engineState();
         this.#log({
@@ -703,7 +738,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         if (plan.mutations.length > 0) {
           const txStarted = performance.now();
           await this.ctx.storage.transaction(async () => {
-            this.#wasm(() => engine_prune(this.#engineDb, this.#retainChanges));
+            this.#wasm(() => engine_prune(this.#engineDb, this.#retainChanges()));
           });
           transactionMs += performance.now() - txStarted;
           this.#counters.retentionRuns++;
@@ -820,18 +855,16 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       }
       if (route === "/admin/visibility") {
         return request.json().then((body) => {
-          this.#visibilityEnabled = Boolean(
-            (body as { enabled?: unknown }).enabled,
-          );
-          return json({ ok: true, enabled: this.#visibilityEnabled });
+          const enabled = Boolean((body as { enabled?: unknown }).enabled);
+          this.#controlSet("visibilityEnabled", enabled ? "1" : "0");
+          return json({ ok: true, enabled });
         });
       }
       if (route === "/admin/query-aware") {
         return request.json().then((body) => {
-          this.#queryAwareOverride = Boolean(
-            (body as { enabled?: unknown }).enabled,
-          );
-          return json({ ok: true, enabled: this.#queryAwareOverride });
+          const enabled = Boolean((body as { enabled?: unknown }).enabled);
+          this.#controlSet("queryAwareOverride", enabled ? "1" : "0");
+          return json({ ok: true, enabled });
         });
       }
       if (route === "/admin/retention") {
@@ -844,7 +877,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             );
             if (!Number.isSafeInteger(value) || value < 0)
               return json({ error: "invalid retainChanges" }, 400);
-            this.#retainChanges = String(value);
+            this.#controlSet("retainChanges", String(value));
             return json({ ok: true, retainChanges: value });
           });
       }
@@ -858,10 +891,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             const enabled = (body as { enabled?: unknown }).enabled;
             if (typeof enabled !== "boolean")
               return json({ error: "enabled must be a boolean" }, 400);
-            this.#directSql.exec(
-              "UPDATE _zsync_host_control SET value = ? WHERE key = 'writerEnabled'",
-              [enabled ? "1" : "0"],
-            );
+            this.#controlSet("writerEnabled", enabled ? "1" : "0");
             return json({ ok: true, writerEnabled: enabled });
           });
       }
