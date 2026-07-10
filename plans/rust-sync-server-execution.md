@@ -164,12 +164,19 @@ sweep 06ba5cd), the `rust` job missing bun for the differential ts-oracle
 loader failure — npm can't ship the soname symlinks, so stock-zero.ts now
 recreates them (32d88c9).
 
-Remaining RED leg, PRE-EXISTING orez failure, not introduced by this
-branch:
+BRANCH CI FULLY GREEN 2026-07-10: run 29086944710 at 9f054a9 (all jobs).
+Three intermittent legacy-orez flakes were root-caused and deflaked on
+this branch (all pre-existing test-timing issues, none introduced by or
+related to the Rust hosts):
 
-- `native-integration`: the legacy native embed test times out on
-  `pokePart` after a restore/resync (litestream disabled) — the old
-  zero-cache native path, unrelated to the Rust hosts.
+- `test` `tcp-replication`: the update-stream test used a single fixed
+  1500 ms collection window; converted to the deadline-loop pattern the
+  delete/multi-table tests already use (7e74d30, failed run 29086372162).
+- `native-integration` `restore-live-stress`: after the SIGUSR1 reset the
+  zero port can accept briefly and then drop during the replica resync;
+  the after-reset reconnect window was widened 30s -> 120s within the
+  360s describe budget (9f054a9, failed runs 29085214517 + 29086848167).
+- `harness` `randomized sweep`: see below.
 
 ROOT-CAUSED AND FIXED 2026-07-10: the intermittent `harness`
 `randomized sweep` failure (`Expected string at taskID. Got true`). It is
