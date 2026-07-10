@@ -45,6 +45,50 @@ fn reject(msg: impl Into<String>) -> EngineError {
     EngineError::bad_request(msg)
 }
 
+// related-output and correlated-EXISTS child subqueries are synced as row SETS
+// (or evaluated as existence tests); that form cannot express a per-parent limit
+// or start cursor, so dropping such a bound would silently widen membership (a
+// desired single related row becomes every related row) or flip an EXISTS (a
+// limit-0 subquery that should yield nothing tests as existing). a child carrying
+// limit/start is therefore rejected rather than widened. orderBy on a child has
+// no effect on the synced set or on existence and is accepted (ignored).
+fn reject_unsupported_child_bounds(ast: &Ast) -> Result<(), EngineError> {
+    if let Some(cond) = &ast.where_ {
+        reject_bounds_in_condition(cond)?;
+    }
+    for rel in &ast.related {
+        reject_child_bounds(&rel.subquery)?;
+    }
+    Ok(())
+}
+
+fn reject_bounds_in_condition(cond: &Condition) -> Result<(), EngineError> {
+    match cond {
+        Condition::Exists { related, .. } => reject_child_bounds(&related.subquery),
+        Condition::And(conds) | Condition::Or(conds) => {
+            for c in conds {
+                reject_bounds_in_condition(c)?;
+            }
+            Ok(())
+        }
+        Condition::Simple { .. } => Ok(()),
+    }
+}
+
+fn reject_child_bounds(child: &Ast) -> Result<(), EngineError> {
+    if child.limit.is_some() {
+        return Err(reject(
+            "a related/EXISTS subquery cannot carry a limit (per-parent bound unsupported)",
+        ));
+    }
+    if child.start.is_some() {
+        return Err(reject(
+            "a related/EXISTS subquery cannot carry a start cursor (per-parent bound unsupported)",
+        ));
+    }
+    reject_unsupported_child_bounds(child)
+}
+
 fn scalar_to_sql(s: &Scalar) -> SqlValue {
     match s {
         Scalar::Null => SqlValue::Null,
@@ -400,6 +444,9 @@ pub fn compile_predicate_probe(
 }
 
 pub fn compile(ast: &Ast, tables: &Tables) -> Result<CompiledQuery, EngineError> {
+    // reject child subqueries carrying per-parent bounds before compiling; this is
+    // the single validation gate (register_query and every recompute call it).
+    reject_unsupported_child_bounds(ast)?;
     let mut c = Compiler::new(tables);
     let sql = c.compile_root(ast)?;
     let primary_key = tables
