@@ -84,7 +84,7 @@ runtime probes in the CF embed harness:
 The fix depends on which case reproduces:
 
 - If Zero already has a durable `lastWatermark` but sends `START_REPLICATION
-  0/0`, fix the Zero/Orez embed startup path that lost the existing replica or
+0/0`, fix the Zero/Orez embed startup path that lost the existing replica or
   change DB state.
 - If Zero sends a non-zero LSN but Orez does not purge, fix the
   `confirmStreamedBatches` path or the DO SQL translation for
