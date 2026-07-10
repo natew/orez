@@ -227,6 +227,26 @@ try {
   equal(malformedQuery.status, 400, 'query-aware EngineError status reaches HTTP')
   await admin('/admin/query-aware', { enabled: false })
 
+  let writerStatus = await admin('/admin/writer')
+  equal(writerStatus.writerEnabled, true, 'writer starts enabled')
+  writerStatus = await admin('/admin/writer', { enabled: false })
+  equal(writerStatus.writerEnabled, false, 'operator can stop writer')
+  let disabledPush = await post(
+    '/push',
+    mutation('writer-probe', 1, 'project.create', {
+      id: 'writer-disabled-row',
+      ownerId: 'user-a',
+      name: 'must not commit',
+    })
+  )
+  equal(disabledPush.status, 503, 'disabled writer rejects pushes')
+  let writerRows = await admin('/admin/sql', {
+    query: "SELECT COUNT(*) AS n FROM project WHERE id = 'writer-disabled-row'",
+  })
+  equal(writerRows.rows, [{ n: 0 }], 'disabled writer commits no application row')
+  writerStatus = await admin('/admin/writer', { enabled: true })
+  equal(writerStatus.writerEnabled, true, 'operator can restore writer')
+
   let response = await post(
     '/push',
     mutation('client-a', 1, 'project.create', {

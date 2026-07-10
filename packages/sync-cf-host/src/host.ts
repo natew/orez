@@ -238,6 +238,13 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       ctx.blockConcurrencyWhile(async () => {
         ctx.storage.transactionSync(() => {
           config.initialize(this.#directSql);
+          this.#directSql.exec(`CREATE TABLE IF NOT EXISTS _zsync_host_control (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          )`);
+          this.#directSql.exec(
+            "INSERT OR IGNORE INTO _zsync_host_control (key, value) VALUES ('writerEnabled', '1')",
+          );
           this.#wasm(() => engine_init_schema(this.#engineDb, config.schema));
           if (config.queryAware || config.resolveQuery)
             this.#wasm(() => engine_init_query_schema(this.#engineDb));
@@ -280,6 +287,13 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             : [];
         }),
       };
+    }
+
+    #writerEnabled(): boolean {
+      const row = this.#directSql.query<{ value: string }>(
+        "SELECT value FROM _zsync_host_control WHERE key = 'writerEnabled'",
+      )[0];
+      return row?.value === "1";
     }
 
     #engineState(): EngineState | null {
@@ -544,6 +558,33 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       let transactionMs = 0;
       let lmidAdvances = 0;
       let resultClass = "success";
+      if (!this.#writerEnabled()) {
+        // Workerd requires the request stream to be consumed before the DO
+        // returns a response. Discard it without parsing or logging payloads.
+        await request.arrayBuffer();
+        const state = this.#engineState();
+        this.#log({
+          namespaceHash: namespace,
+          requestKind: "push",
+          resultClass: "writer_disabled",
+          inputCookie: null,
+          outputCookie: null,
+          retainedFloor: state?.floor ?? null,
+          currentWatermark: state?.watermark ?? null,
+          changeRowsScanned: 0,
+          changeRowsIncluded: 0,
+          queriesRecomputed: 0,
+          rowPuts: 0,
+          rowDeletes: 0,
+          lmidAdvances: 0,
+          transactionMs: 0,
+          totalMs: performance.now() - started,
+          resetReason: "writer disabled by operator",
+          wasmBoundaryCalls: this.#counters.wasmBoundaryCalls,
+          sql: this.#engineDb.stats,
+        });
+        return json({ error: "writer disabled by operator" }, 503);
+      }
       try {
         const body = await request.json();
         const plan = this.#wasm(() => engine_push_validate(body)) as PushPlan;
@@ -735,6 +776,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           hibernations: this.#hibernations,
           databaseSizeBytes: this.ctx.storage.sql.databaseSize,
           connectedWakeSockets: this.ctx.getWebSockets().length,
+          writerEnabled: this.#writerEnabled(),
           engine: this.#engineState(),
           counters: this.#counters,
         });
@@ -794,6 +836,23 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
               return json({ error: "invalid retainChanges" }, 400);
             this.#retainChanges = String(value);
             return json({ ok: true, retainChanges: value });
+          });
+      }
+      if (route === "/admin/writer") {
+        if (request.method === "GET")
+          return json({ writerEnabled: this.#writerEnabled() });
+        return request
+          .json()
+          .catch(() => ({}))
+          .then((body) => {
+            const enabled = (body as { enabled?: unknown }).enabled;
+            if (typeof enabled !== "boolean")
+              return json({ error: "enabled must be a boolean" }, 400);
+            this.#directSql.exec(
+              "UPDATE _zsync_host_control SET value = ? WHERE key = 'writerEnabled'",
+              [enabled ? "1" : "0"],
+            );
+            return json({ ok: true, writerEnabled: enabled });
           });
       }
       return json({ error: "not found" }, 404);
