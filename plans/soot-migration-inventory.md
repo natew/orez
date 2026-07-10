@@ -522,3 +522,23 @@ Surface (implemented on branch `rust-sync-server` by sol-absorb):
   harness proves two `/p-<id>` mounts hold independent watermarks, LMIDs,
   client-group ownership, and row state, and that the same client transport
   works against a mounted path and a plain server.
+
+Soot-consumption trip list (sol-absorb, post-implementation review):
+
+1. Preserve the ordering match -> authenticate -> membership gate
+   (resolveProjectStorageAccess) -> mount.handle; match is deliberately lazy
+   and calling handle first would resolve the project DB too early.
+2. `databaseID` is the raw projectId; the resolver must still map it to
+   soot's projectDb(projectId) + `proj-<projectId>` namespace. The URL `p-`
+   prefix is not the storage namespace.
+3. Cookies change domains on cutover (derived `_orez._zero_changes` / node
+   WAL clock vs the generic `_zsync_changes` watermark). Clients need a new
+   storage identity or an explicit forced reset; numerically plausible old
+   cookies must never be accepted accidentally.
+4. The mount absorbs routing + transport dispatch only. Before deleting
+   `httpPullProject.server.ts`, preserve its project table allowlist, the
+   control/legacy skip classifier, attachCommand + projectAddon visibility,
+   capped-prefix cookie + LMID rules, and the node shared-snapshot
+   distinction in the chosen SyncServer / Rust host configuration.
+5. Resolver lifetime: exactly one stable SyncServer per project DB, never
+   reused across project IDs.
