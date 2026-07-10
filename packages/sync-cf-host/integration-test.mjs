@@ -310,6 +310,18 @@ try {
     [{ projectCount: 0, clientCount: 0 }],
     'pre-commit quota fault rolls back application row and LMID'
   )
+  // the fault must be one-shot even though it aborts the transaction: the
+  // consume must not roll back with the abort (regression: every retry
+  // re-fired the fault until an operator cleared it)
+  faultResponse = await post(
+    '/push',
+    mutation('fault-before-commit-client', 1, 'project.create', {
+      id: 'fault-before-commit-row',
+      ownerId: 'user-a',
+      name: 'must roll back',
+    })
+  )
+  equal(faultResponse.status, 200, 'pre-commit fault is consumed on first fire')
 
   const afterCommitMutation = mutation('fault-after-commit-client', 1, 'project.create', {
     id: 'fault-after-commit-row',
