@@ -477,9 +477,7 @@ describe('zero-cache embed on the CF data plane (ZeroDO upstream, local cvr/cdb)
     // neither PRAGMA nor durable metadata says notNull) and the composite key
     // added later as a <table>_pkey unique index. 2026-07-10 soot prod: first
     // UPDATE through the streamer crashed change-processor #getKey.
-    await seed.exec(
-      `CREATE TABLE member ("accountId" TEXT, "userId" TEXT, role TEXT)`
-    )
+    await seed.exec(`CREATE TABLE member ("accountId" TEXT, "userId" TEXT, role TEXT)`)
     await seed.exec(
       `CREATE UNIQUE INDEX "member_pkey" ON "member" ("accountId", "userId")`
     )
@@ -665,7 +663,11 @@ describe('zero-cache embed on the CF data plane (ZeroDO upstream, local cvr/cdb)
       // hydrate a client group on the member table (replica spec must key it
       // off the member_pkey unique index — there is no PRIMARY KEY)
       const downstream = new Queue<unknown>()
-      const ws = connectAndSubscribeMember(zeroPort, `cg-member-${Date.now()}`, downstream)
+      const ws = connectAndSubscribeMember(
+        zeroPort,
+        `cg-member-${Date.now()}`,
+        downstream
+      )
       try {
         await waitForMemberRole(downstream, 'acc-1', 'member', 45000)
 
@@ -685,10 +687,10 @@ describe('zero-cache embed on the CF data plane (ZeroDO upstream, local cvr/cdb)
           ['acc-2', 'user-2', 'guest']
         )
         await waitForMemberRole(downstream, 'acc-2', 'guest', 45000)
-        await seed.query(
-          `DELETE FROM member WHERE "accountId" = $1 AND "userId" = $2`,
-          ['acc-2', 'user-2']
-        )
+        await seed.query(`DELETE FROM member WHERE "accountId" = $1 AND "userId" = $2`, [
+          'acc-2',
+          'user-2',
+        ])
         const deadline = Date.now() + 45000
         let deleted = false
         while (Date.now() < deadline && !deleted) {

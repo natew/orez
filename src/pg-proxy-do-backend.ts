@@ -7680,10 +7680,10 @@ export class DoBackend {
               // nullable on the replica (checkClientSchema).
               notNull: Boolean(
                 metadata?.notNull ||
-                  metadata?.primaryKey ||
-                  column.notnull ||
-                  column.pk ||
-                  info.primaryKey.includes(column.name)
+                metadata?.primaryKey ||
+                column.notnull ||
+                column.pk ||
+                info.primaryKey.includes(column.name)
               ),
               dflt: null,
             },

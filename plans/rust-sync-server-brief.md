@@ -22,8 +22,8 @@ that turns sync into stateless HTTP polls). that surface is:
 
 - `POST {base}/pull` `{clientID, clientGroupID, cookie: number|null}` →
   `{cookie, unchanged: true}` | `{cookie, lastMutationIDChanges: {clientID:
-  lmid}, rowsPatch: [{op:'clear'} | {op:'put', tableName, value} |
-  {op:'del', tableName, id}]}` — ops are zero protocol-v51 poke rowsPatch
+lmid}, rowsPatch: [{op:'clear'} | {op:'put', tableName, value} |
+{op:'del', tableName, id}]}` — ops are zero protocol-v51 poke rowsPatch
   shapes passed through verbatim to the client.
 - `POST {base}/push` = zero PushProcessor body verbatim (custom mutators) →
   `{pushResponse}`. LMID bookkeeping in `<appID>_0.clients`.
@@ -49,7 +49,7 @@ fuzzer in mono was ported FROM it (driver header in
 ## 2. the assets you inherit (read these before planning)
 
 - **TS reference core (executable spec)**: `~/orez/src/sync-server/
-  sync-server.ts` (~500 lines) + `sync-server.test.ts` (19-test delta
+sync-server.ts` (~500 lines) + `sync-server.test.ts` (19-test delta
   suite). implements: change log of touched pks (watermark autoincrement),
   cursor-diff pulls resolved against LIVE rows, snapshot recovery
   (clear+puts) as the single recovery path, marker rows so LMID-only
@@ -81,7 +81,7 @@ fuzzer in mono was ported FROM it (driver header in
   to beat (TS core): local ack p50 3ms; CF (in a DO) ack p50 174-184ms,
   propagation p95 1.6s at 1s polls, 100 clients converging.
 - **the original Rust harness proposal**: `~/orez/plans/
-  zero-conformance-harness.md` § "proposal: zbench" — a clean-room
+zero-conformance-harness.md` § "proposal: zbench" — a clean-room
   protocol-v51 Rust client design (websocket connect, initConnection,
   desiredQueriesPatch, poke application). nate deferred it for the harness;
   it's directly reusable as the protocol-crate skeleton for scope (b), and
@@ -89,7 +89,7 @@ fuzzer in mono was ported FROM it (driver header in
 - **plans**: `~/orez/plans/zero-server-rewrite.md` (phases + landing
   status), review docs from the codex worker in the worktree
   (`~/.worktrees/orez-zero-sync-server/plans/
-  review-zero-sync-server-2026-07-09.md`).
+review-zero-sync-server-2026-07-09.md`).
 
 ## 3. hard-won invariants — do not re-learn these in production
 

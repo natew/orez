@@ -11,7 +11,6 @@ coexistence measurement, then the default flip. 100-client storm lane green
 (delete the project-namespace zero-cache embed) follows a stable mixed-mode
 window.
 
-
 status: consolidated plan, 2026-07-09. this merges the prior decision docs and
 the passed zero-http spike into one execution plan. the direction is the
 "clean-room zero-compatible engine" (soot's
