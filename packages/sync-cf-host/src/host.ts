@@ -194,7 +194,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
   const idleTeardownMs = config.idleTeardownMs ?? 5_000;
   // A CF fan-out wakes every client into an HTTP pull. Give concurrent writer
   // requests a real batching window so a storm burst creates one pull wave.
-  const wakeCoalesceMs = config.wakeCoalesceMs ?? 200;
+  const wakeCoalesceMs = config.wakeCoalesceMs ?? 25;
 
   return class SyncDurableObject extends DurableObject<Env> {
     readonly #engineDb: SqlStorageSyncDb;
