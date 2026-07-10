@@ -67,17 +67,12 @@ async function churnWake(index: number) {
 }
 
 try {
-  // Warm the query compiler and allocator before taking the baseline.
-  await queryPatch([{ op: 'put', hash: 'memory-warm', name: 'tasksDone', args: [] }])
-  await queryPatch([{ op: 'del', hash: 'memory-warm' }])
-  const samples = [(await target.hibernationStatus()).wasmMemoryBytes]
-
-  for (let block = 0; block < blocks; block++) {
+  async function runBlock(label: string, block: number) {
     for (let batchStart = 0; batchStart < ops; batchStart += 100) {
       const patch: Array<Record<string, unknown>> = []
       const batchEnd = Math.min(batchStart + 100, ops)
       for (let index = batchStart; index < batchEnd; index++) {
-        const hash = `memory-${block}-${index}`
+        const hash = `memory-${label}-${block}-${index}`
         patch.push({ op: 'put', hash, name: 'tasksDone', args: [] })
         patch.push({ op: 'del', hash })
       }
@@ -85,6 +80,15 @@ try {
       await churnWake(block * ops + batchStart)
       await target.restart()
     }
+  }
+
+  // Warm the compiler and allocator with one full representative block. The
+  // budget applies to the three subsequent blocks, not cold-start ramp-up.
+  await runBlock('warm', 0)
+  const samples = [(await target.hibernationStatus()).wasmMemoryBytes]
+
+  for (let block = 0; block < blocks; block++) {
+    await runBlock('measure', block)
     samples.push((await target.hibernationStatus()).wasmMemoryBytes)
   }
 
