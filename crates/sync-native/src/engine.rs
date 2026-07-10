@@ -97,14 +97,40 @@ pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), St
     Ok(())
 }
 
+// a completed pull/push plus the engine state the host needs for its structured
+// telemetry: the response the client sees, and the retention floor (before + after)
+// and durable watermark so the host can log floor/watermark and detect a prune
+// (floor advanced) without the engine surfacing either.
+pub struct Observed {
+    pub result: Result<Value, EngineError>,
+    pub floor_before: i64,
+    pub floor: i64,
+    pub watermark: i64,
+}
+
+// the retention floor: the oldest change watermark still retained. advances only
+// when old changes are pruned, so a jump signals a retention run.
+pub fn read_floor(conn: &Connection) -> i64 {
+    conn.query_row("SELECT floor FROM _zsync_meta WHERE lock = 1", [], |row| {
+        row.get(0)
+    })
+    .unwrap_or(0)
+}
+
+// the durable high-water mark: the max watermark ever assigned in this namespace.
+pub fn read_watermark(conn: &Connection) -> i64 {
+    conn.query_row(
+        "SELECT high FROM _zsync_watermark WHERE lock = 1",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap_or(0)
+}
+
 // pull runs inside one host-entered transaction, matching the CF host's
 // transactionSync. commit on Ok, roll back on Err (a 409 undoes the claim).
-pub fn pull(
-    conn: &Connection,
-    ctx: &EngineContext,
-    body: &Value,
-    user_id: &str,
-) -> Result<Value, EngineError> {
+pub fn pull(conn: &Connection, ctx: &EngineContext, body: &Value, user_id: &str) -> Observed {
+    let floor_before = read_floor(conn);
     conn.execute_batch("BEGIN").expect("BEGIN failed");
     let result = {
         let mut db = RusqliteDb::new(conn);
@@ -132,27 +158,34 @@ pub fn pull(
         }
     };
     finish(conn, result.is_ok());
-    result
+    Observed {
+        result,
+        floor_before,
+        floor: read_floor(conn),
+        watermark: read_watermark(conn),
+    }
 }
 
 // push drives the per-mutation tx1/tx2 steps through the Transactor; the CF
 // host runs the same steps around its async JS mutator inside ctx.storage
 // .transaction. row effects + LMID advance commit atomically per mutation.
-pub fn push(
-    conn: &Connection,
-    ctx: &EngineContext,
-    body: &Value,
-    user_id: &str,
-) -> Result<Value, EngineError> {
+pub fn push(conn: &Connection, ctx: &EngineContext, body: &Value, user_id: &str) -> Observed {
+    let floor_before = read_floor(conn);
     let mut txor = ConnTransactor { conn };
-    handle_push(
+    let result = handle_push(
         &mut txor,
         &ctx.tables,
         ctx.retain_changes,
         &FixtureMutator,
         body,
         user_id,
-    )
+    );
+    Observed {
+        result,
+        floor_before,
+        floor: read_floor(conn),
+        watermark: read_watermark(conn),
+    }
 }
 
 // epoch invalidation (harness invalidate hook): force every client's next pull

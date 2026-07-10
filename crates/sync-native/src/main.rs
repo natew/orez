@@ -7,7 +7,7 @@
 //   POST /<ns>/pull, /<ns>/push        the http-pull dialect (engine)
 //   GET  /<ns>/wake                     wake WebSocket ("pull now" only)
 //   POST /<ns>/admin/sql                oracle reads + upstream writes
-//   GET  /<ns>/admin/status            { ok, bootID, pid }
+//   GET  /<ns>/admin/status            { ok, bootID, pid, versions, counters }
 //   POST /<ns>/admin/invalidate         epoch bump
 //   POST /<ns>/admin/reset-cursor       restored/behind-server fault
 //   POST /<ns>/admin/drop-next-push-response  lost-response fault
@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -34,6 +34,7 @@ use sync_core::{Row, SqlValue, SyncDb};
 use sync_native::db::RusqliteDb;
 use sync_native::engine::{self, EngineContext};
 use sync_native::namespace::{InitFn, Manager};
+use sync_native::obs::{self, Counters};
 use sync_native::wake::WakeRegistry;
 
 struct AppState {
@@ -41,6 +42,8 @@ struct AppState {
     wake: Arc<WakeRegistry>,
     ctx: Arc<EngineContext>,
     boot_id: String,
+    // process-wide aggregate telemetry (mirrors the CF host's counters)
+    counters: Counters,
     // namespaces with a one-shot "drop the next push response" fault armed
     drop_push: Mutex<HashSet<String>>,
 }
@@ -132,6 +135,7 @@ async fn main() {
         wake: WakeRegistry::new(),
         ctx,
         boot_id: boot_id(),
+        counters: Counters::default(),
         drop_push: Mutex::new(HashSet::new()),
     });
 
@@ -186,6 +190,7 @@ async fn pull(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let started = Instant::now();
     let Some(user_id) = auth(&headers) else {
         return json_status(401, json!({ "error": "missing auth" }));
     };
@@ -196,11 +201,71 @@ async fn pull(
         Ok(n) => n,
         Err(e) => return json_status(400, json!({ "error": e })),
     };
+    let ns_hash = obs::namespace_hash(&ns);
+    let input_cookie = value.get("cookie").cloned().unwrap_or(Value::Null);
+    let query_puts = obs::count_query_puts(&value);
     let ctx = state.ctx.clone();
-    let result = namespace
+    let tx_started = Instant::now();
+    let observed = namespace
         .run(move |conn| engine::pull(conn, &ctx, &value, &user_id))
         .await;
-    match result {
+    let transaction_ms = tx_started.elapsed().as_millis() as u64;
+    Counters::bump(&state.counters.pulls);
+
+    let mut result_class = "success";
+    let mut output_cookie = Value::Null;
+    let mut row_puts = 0;
+    let mut row_deletes = 0;
+    let mut reset_reason = Value::Null;
+    match &observed.result {
+        Ok(response) => {
+            if response.get("unchanged").and_then(Value::as_bool) == Some(true) {
+                result_class = "unchanged";
+            }
+            output_cookie = response.get("cookie").cloned().unwrap_or(Value::Null);
+            let (puts, deletes) = obs::count_patch(response);
+            row_puts = puts;
+            row_deletes = deletes;
+            // each desired-query put drives a recompile, mirroring CF's counter
+            Counters::add(&state.counters.query_recompilations, query_puts);
+        }
+        Err(e) => {
+            if e.status == 409 {
+                result_class = "reset";
+                reset_reason = Value::String(e.message.clone());
+                Counters::bump(&state.counters.resets);
+            } else {
+                result_class = "error";
+                if e.status == 500 {
+                    Counters::bump(&state.counters.invariant_failures);
+                }
+            }
+        }
+    }
+    // floor advancing means old changes were pruned: a retention run
+    if observed.floor > observed.floor_before {
+        Counters::bump(&state.counters.retention_runs);
+    }
+    obs::RequestEvent {
+        namespace_hash: &ns_hash,
+        request_kind: "pull",
+        result_class,
+        input_cookie,
+        output_cookie,
+        retained_floor: observed.floor,
+        current_watermark: observed.watermark,
+        change_rows_included: row_puts + row_deletes,
+        queries_recomputed: query_puts,
+        row_puts,
+        row_deletes,
+        lmid_advances: 0,
+        transaction_ms,
+        total_ms: started.elapsed().as_millis() as u64,
+        reset_reason,
+    }
+    .emit();
+
+    match observed.result {
         Ok(v) => json_status(200, v),
         Err(e) => json_status(e.status, json!({ "error": e.message })),
     }
@@ -212,6 +277,7 @@ async fn push(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let started = Instant::now();
     let Some(user_id) = auth(&headers) else {
         return json_status(401, json!({ "error": "missing auth" }));
     };
@@ -232,11 +298,56 @@ async fn push(
         Ok(n) => n,
         Err(e) => return json_status(400, json!({ "error": e })),
     };
+    let ns_hash = obs::namespace_hash(&ns);
     let ctx = state.ctx.clone();
-    let result = namespace
+    let tx_started = Instant::now();
+    let observed = namespace
         .run(move |conn| engine::push(conn, &ctx, &value, &user_id))
         .await;
-    match result {
+    let transaction_ms = tx_started.elapsed().as_millis() as u64;
+    Counters::bump(&state.counters.pushes);
+
+    let mut result_class = "success";
+    let mut lmid_advances = 0;
+    let mut reset_reason = Value::Null;
+    match &observed.result {
+        Ok(response) => {
+            let (advances, app_errors) = obs::count_push_mutations(response);
+            lmid_advances = advances;
+            Counters::add(&state.counters.application_errors, app_errors);
+        }
+        Err(e) => {
+            result_class = "error";
+            if e.status == 409 {
+                reset_reason = Value::String(e.message.clone());
+            } else if e.status == 500 {
+                Counters::bump(&state.counters.invariant_failures);
+            }
+        }
+    }
+    if observed.floor > observed.floor_before {
+        Counters::bump(&state.counters.retention_runs);
+    }
+    obs::RequestEvent {
+        namespace_hash: &ns_hash,
+        request_kind: "push",
+        result_class,
+        input_cookie: Value::Null,
+        output_cookie: Value::Null,
+        retained_floor: observed.floor,
+        current_watermark: observed.watermark,
+        change_rows_included: 0,
+        queries_recomputed: 0,
+        row_puts: 0,
+        row_deletes: 0,
+        lmid_advances,
+        transaction_ms,
+        total_ms: started.elapsed().as_millis() as u64,
+        reset_reason,
+    }
+    .emit();
+
+    match observed.result {
         Ok(v) => {
             // wake the namespace's other clients post-commit
             state.wake.wake(&ns, &pusher);
@@ -301,9 +412,19 @@ async fn admin_sql(
 }
 
 async fn admin_status(State(state): State<Arc<AppState>>, Path(_ns): Path<String>) -> Response {
+    // diagnostics surface: process-wide aggregate counters alongside boot info.
+    // this host binds 127.0.0.1 only and admin/* is the operator/harness surface,
+    // so it is not reachable by sync clients.
     json_status(
         200,
-        json!({ "ok": true, "bootID": state.boot_id, "pid": std::process::id() }),
+        json!({
+            "ok": true,
+            "bootID": state.boot_id,
+            "pid": std::process::id(),
+            "hostVersion": obs::HOST_VERSION,
+            "engineVersion": obs::ENGINE_VERSION,
+            "counters": state.counters.snapshot(),
+        }),
     )
 }
 
