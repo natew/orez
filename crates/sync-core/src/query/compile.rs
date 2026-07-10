@@ -299,16 +299,23 @@ impl<'a> Compiler<'a> {
                     return Err(reject("LIKE requires a scalar operand"));
                 };
                 self.params.push(scalar_to_sql(s));
-                // note: SQLite LIKE is ASCII-case-insensitive by default, so both
-                // LIKE and ILIKE map to LIKE here; that differs from Postgres's
-                // case-sensitive LIKE and matches ILIKE. refine with a collation
-                // if a conformance lane needs case-sensitive LIKE.
-                let kw = if matches!(op, SimpleOp::NotLike | SimpleOp::NotILike) {
-                    "NOT LIKE"
+                let negate = matches!(op, SimpleOp::NotLike | SimpleOp::NotILike);
+                let kw = if negate { "NOT LIKE" } else { "LIKE" };
+                if matches!(op, SimpleOp::ILike | SimpleOp::NotILike) {
+                    // ILIKE: case-insensitive regardless of the host's
+                    // case_sensitive_like pragma, by folding both operands with
+                    // LOWER. SQLite LOWER folds ASCII only, matching Postgres
+                    // ILIKE for ASCII; unicode case differences are not folded
+                    // (documented caveat — search on non-ASCII case pairs can
+                    // diverge from stock zero-cache/Postgres).
+                    Ok(format!("LOWER({left_sql}) {kw} LOWER(?)"))
                 } else {
-                    "LIKE"
-                };
-                Ok(format!("{left_sql} {kw} ?"))
+                    // LIKE inherits SQLite's LIKE case-folding (ASCII
+                    // case-insensitive by default). a host wanting Postgres's
+                    // case-sensitive LIKE sets `PRAGMA case_sensitive_like = ON`,
+                    // under which the ILIKE branch above stays case-insensitive.
+                    Ok(format!("{left_sql} {kw} ?"))
+                }
             }
             _ => {
                 let RightVal::Scalar(s) = right else {
