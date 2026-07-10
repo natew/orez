@@ -6,11 +6,33 @@
 // here the SERVER decides membership on both sides. read-only hydrate diff.
 //
 //   bun src/query-diff.ts   # needs Node for stock-zero
+import { parseArgs } from 'node:util'
+
 import { canonical } from './canonical.js'
 import { queries, queryCorpus } from './fixture.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
+
+const { values: args } = parseArgs({
+  options: { against: { type: 'string', default: 'rust-local' } },
+})
+
+async function startRustTarget(): Promise<SyncTarget> {
+  if (args.against === 'rust-local') {
+    return (await import('./targets/rust-local.js')).startRustLocal({
+      queryAware: true,
+      pullIntervalMs: 150,
+    })
+  }
+  if (args.against === 'rust-cf') {
+    return (await import('./targets/rust-cf.js')).startRustCf({
+      queryAware: true,
+      pullIntervalMs: 300,
+    })
+  }
+  throw new Error(`query-diff --against must be rust-local or rust-cf`)
+}
 
 function invokeQuery(name: string, args: unknown) {
   const def = (queries as unknown as Record<string, (args?: unknown) => unknown>)[name]!
@@ -55,14 +77,8 @@ async function eventually(check: () => void, timeoutMs: number, label: string) {
 }
 
 const t0 = Date.now()
-console.log('[query-diff] booting stock-zero and rust-local --query-aware...')
-const [stock, rust] = await Promise.all([
-  startStockZero(),
-  (await import('./targets/rust-local.js')).startRustLocal({
-    queryAware: true,
-    pullIntervalMs: 150,
-  }),
-])
+console.log(`[query-diff] booting stock-zero and ${args.against} --query-aware...`)
+const [stock, rust] = await Promise.all([startStockZero(), startRustTarget()])
 const targets: SyncTarget[] = [stock, rust]
 
 let failed = false
@@ -76,7 +92,7 @@ try {
         if (!stockViews.views.get(name)!.complete())
           throw new Error(`stock-zero ${name} incomplete`)
         if (!rustViews.views.get(name)!.complete())
-          throw new Error(`rust-local ${name} incomplete`)
+          throw new Error(`${args.against} ${name} incomplete`)
       }
     },
     90_000,
@@ -89,7 +105,7 @@ try {
     const right = canonical(rustViews.views.get(name)!.rows())
     if (left !== right) {
       failures.push(
-        `${name} diverged:\n  stock-zero: ${left?.slice(0, 400)}\n  rust-local(qa): ${right?.slice(0, 400)}`
+        `${name} diverged:\n  stock-zero: ${left?.slice(0, 400)}\n  ${args.against}(qa): ${right?.slice(0, 400)}`
       )
     }
   }
@@ -108,7 +124,7 @@ try {
   rustViews.destroy()
   console.log(
     `[query-diff] PASS: ${queryCorpus.length} corpus queries equal ` +
-      `(${queryCorpus.length - empty.length} return data) stock-zero == rust-local --query-aware ` +
+      `(${queryCorpus.length - empty.length} return data) stock-zero == ${args.against} --query-aware ` +
       `in ${Date.now() - t0}ms`
   )
 } catch (error) {
