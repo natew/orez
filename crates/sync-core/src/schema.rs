@@ -90,7 +90,7 @@ impl Tables {
                     .get("type")
                     .and_then(|t| t.as_str())
                     .ok_or_else(|| format!("column '{name}.{col}'.type must be a string"))?;
-                columns.push((col.clone(), ZeroColumnType::from_str(ty)));
+                columns.push((col.clone(), ZeroColumnType::from_type_str(ty)));
             }
             let primary_key = table
                 .get("primaryKey")

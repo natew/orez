@@ -21,7 +21,7 @@ pub enum ZeroColumnType {
 
 impl ZeroColumnType {
     // parse a zero schema column type string (createSchema() result)
-    pub fn from_str(ty: &str) -> ZeroColumnType {
+    pub fn from_type_str(ty: &str) -> ZeroColumnType {
         match ty {
             "boolean" => ZeroColumnType::Boolean,
             "number" => ZeroColumnType::Number,

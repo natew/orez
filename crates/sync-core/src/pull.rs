@@ -26,9 +26,12 @@ use crate::wire;
 // predicate can flip without touching the row, which no diff can express, so
 // it forces every pull to a full snapshot (the reference core's `visible`
 // behavior). see invariants 8, 9, 15.
+// a per-(table, user) row-visibility predicate returning a WHERE fragment
+pub type VisibleFn<'a> = dyn Fn(&str, &str) -> Option<VisibleFilter> + 'a;
+
 pub struct Visibility<'a> {
     pub row_local: bool,
-    pub filter: Box<dyn Fn(&str, &str) -> Option<VisibleFilter> + 'a>,
+    pub filter: Box<VisibleFn<'a>>,
 }
 
 pub struct VisibleFilter {
@@ -189,6 +192,9 @@ fn row_value(spec: &TableSpec, row: &Row) -> Value {
     Value::Object(value)
 }
 
+// (cookie, prefix lmids, rowsPatch) — the diff's result
+type DiffResult = (i64, BTreeMap<String, i64>, Vec<Value>);
+
 // one change-log row the diff scan walks
 struct Change {
     watermark: i64,
@@ -201,6 +207,7 @@ struct Change {
 // dedup, resolved against LIVE table state. returns (cookie, prefix lmids,
 // rowsPatch). the cookie is the last INCLUDED watermark when capped, else the
 // current watermark (matching the reference core's uncapped behavior).
+#[allow(clippy::too_many_arguments)]
 fn diff(
     db: &mut dyn SyncDb,
     tables: &Tables,
@@ -210,7 +217,7 @@ fn diff(
     caps: Caps,
     visible: Option<&Visibility>,
     user_id: &str,
-) -> Result<(i64, BTreeMap<String, i64>, Vec<Value>), EngineError> {
+) -> Result<DiffResult, EngineError> {
     // read one extra row to detect "there is more beyond the row cap"
     let raw = db.query(
         "SELECT CAST(watermark AS TEXT) AS w, tableName, op, pk FROM _zsync_changes
@@ -247,7 +254,7 @@ fn diff(
     let mut ops: Vec<Value> = Vec::new();
     let mut lmids: BTreeMap<String, i64> = BTreeMap::new();
     let mut bytes: usize = 0;
-    let mut included = 0usize;
+    let mut admitted_any = false;
     let mut cut_watermark = cookie;
     let mut byte_capped = false;
 
@@ -287,16 +294,14 @@ fn diff(
                 // acks for THIS group only — never leak a peer group's lmid
                 if let Some(pk) = &change.pk {
                     let same_group = pk.get("clientGroupID").and_then(Value::as_str) == Some(group);
-                    if same_group {
-                        if let (Some(client), Some(lmid)) = (
-                            pk.get("clientID").and_then(Value::as_str),
-                            pk.get("lmid").and_then(parse_lmid_field),
-                        ) {
-                            if lmid > lmids.get(client).copied().unwrap_or(0) {
-                                pending_lmid = Some((client.to_string(), lmid));
-                                delta = client.len() + 24; // approx bytes of the ack entry
-                            }
-                        }
+                    if let (true, Some(client), Some(lmid)) = (
+                        same_group,
+                        pk.get("clientID").and_then(Value::as_str),
+                        pk.get("lmid").and_then(parse_lmid_field),
+                    ) && lmid > lmids.get(client).copied().unwrap_or(0)
+                    {
+                        pending_lmid = Some((client.to_string(), lmid));
+                        delta = client.len() + 24; // approx bytes of the ack entry
                     }
                 }
             }
@@ -304,7 +309,7 @@ fn diff(
             _ => {}
         }
 
-        if included >= 1 && bytes + delta > caps.max_change_bytes {
+        if admitted_any && bytes + delta > caps.max_change_bytes {
             byte_capped = true;
             break;
         }
@@ -319,7 +324,7 @@ fn diff(
             lmids.insert(client, lmid);
         }
         bytes += delta;
-        included += 1;
+        admitted_any = true;
         cut_watermark = change.watermark;
     }
 

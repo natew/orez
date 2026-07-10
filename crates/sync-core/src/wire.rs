@@ -44,7 +44,8 @@ pub fn non_negative_safe_int(value: &Value) -> Option<i64> {
 // parse an inbound cookie field. accepts JSON null (fresh client), a
 // non-negative safe-integer JSON number, or a canonical unsigned base-10 string
 // in 0..=i64::MAX. anything else is a malformed request. returns Ok(None) for a
-// null/absent cookie.
+// null/absent cookie. the unit Err is intentional — the caller maps it to a 400.
+#[allow(clippy::result_unit_err)]
 pub fn parse_cookie(value: Option<&Value>) -> Result<Option<i64>, ()> {
     match value {
         None | Some(Value::Null) => Ok(None),

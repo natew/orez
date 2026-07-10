@@ -131,12 +131,12 @@ pub(crate) fn claim_client(
         &[text(client_group_id)],
     )?;
     for row in &owners {
-        if let Some(SqlValue::Text(owner)) = row.values.first() {
-            if owner != user_id {
-                return Err(EngineError::forbidden(
-                    "client group belongs to a different user",
-                ));
-            }
+        if let Some(SqlValue::Text(owner)) = row.values.first()
+            && owner != user_id
+        {
+            return Err(EngineError::forbidden(
+                "client group belongs to a different user",
+            ));
         }
     }
     Ok(())
