@@ -130,3 +130,99 @@ jobs:
         # the heavier embed/live-frontend tests live here, not in the unit suite,
         # so a loaded unit-suite run can't starve their in-process change-streamer.
         run: bun run native:bootstrap && bun run test:integration
+
+  # rust sync engine: workspace build + native crate tests + format gate.
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      # the whole workspace must compile (the native host depends on sync-core
+      # and sync-wasm building); per-crate fmt + test gates stay owned by each
+      # track (sync-core/sync-wasm add their own).
+      - name: build workspace
+        run: cargo build --workspace
+
+      - name: sync-native format check
+        run: cargo fmt -p sync-native -- --check
+
+      - name: sync-native tests
+        run: cargo test -p sync-native
+
+  # native real-client conformance: build the sync-native release binary and run
+  # the rust-local harness lanes against it. shapes/sweep boot embedded postgres +
+  # real zero-cache (Node), the same differential the orez-local harness job runs.
+  rust-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # zero-cache (spawned as `node`) needs Node 22/24; zero-sqlite3 rejects 25
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      - name: build sync-native (release)
+        run: cargo build --release -p sync-native
+
+      # root install: the harness imports src/sync-server from the repo root
+      - run: bun install --frozen-lockfile
+
+      - name: harness install
+        run: cd harness && bun install
+
+      - name: rust-local smoke (native host, 20 clients)
+        run: cd harness && bun src/smoke.ts --target rust-local --clients 20 --projects 3
+
+      - name: rust-local conformance shapes (stock zero-cache vs native host)
+        run: cd harness && bun src/shapes.ts --against rust-local
+
+      - name: rust-local randomized sweep
+        run: cd harness && bun src/sweep.ts --against rust-local --rounds 10
+
+      - name: rust-local wake propagation
+        run: cd harness && bun src/propagation.ts --against rust-local --baseline none
+
+      - name: upload sweep regressions
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-local-sweep-regressions
+          path: harness/regressions/
+          if-no-files-found: ignore
