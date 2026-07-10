@@ -148,3 +148,50 @@ target, command, configured budget, measured result, and PASS/FAIL. A lane with
 missing measurements is pending, not green. Production retirement remains
 outside this prep gate and requires user-approved cutover plus the observation
 window.
+
+### 2026-07-10 full re-qualification (fable-5, replaces retracted passes #0101–#0106)
+
+The prior qualification passes were retracted after the running session was
+silently downgraded to a small model. This run re-executes both suites on a
+trusted model after an audit of that session's lanes fixed two defects: the CF
+before-commit fault re-fired forever (fix 50c6860, coordinator), and the
+memory-soak lane restarted the instance inside measured blocks so it could not
+observe a leak (fix cbb66bc). The fuzz corpus was also replaced with a seeded
+structural generator under a strict every-case-4xx assertion (e2100e4).
+
+- Source SHA: `011bf2d` (native suite; CF worker built and deployed from it).
+  CF deploy: `orez-rust-sync.lslcf.workers.dev` version
+  `3762dad8-92f7-445f-a18a-de29eeda4c4a`, upload 664.96 KiB / 220.39 KiB gzip
+  (92.8% headroom below the 3 MiB limit; budget >= 40%). The CF suite ran at
+  `f08ac4c` (adds fuzz error context only; worker artifact unchanged).
+- Command: `bun harness/src/m6-runner.ts --suite native` and `--suite cf`
+  (full budgets, not `--quick`).
+
+Native suite (7/7 PASS, 43.4 s total):
+
+| lane | measured result |
+| --- | --- |
+| protocol-fuzz | 10,000 seeded cases (seed 1), all 400, 137 ms; also green on seeds 2/3/42 |
+| eviction | SIGKILL restart, outage 1559 ms (budget 10 s), 30 writes, converge 53 ms, 0 409s, cookies monotone |
+| retention-reconnect | persisted resume, lost-response recovery, epoch snapshot, future-cookie 409 all PASS |
+| query-tab-churn | shared group, per-tab LMIDs, replacement-tab resume PASS |
+| clock-skew | ±24 h application timestamps stored verbatim, LMID 2, ordering unaffected |
+| storage-faults | 5 boundary points, kill-shaped: pre-commit row absent after restart, post-commit row survives |
+| backup-restore | 4 tables, 91 rows, fresh snapshot emitted exactly 91 puts |
+
+CF suite vs deployed lslcf worker (9/9 PASS, 157.2 s total):
+
+| lane | measured result |
+| --- | --- |
+| protocol-fuzz | 10,000 seeded cases, all 400, 68.9 s (one earlier post-deploy cold run had a single >2 s request; clean end-to-end rerun recorded here) |
+| eviction | DO boot ID changed across teardown, 20 writes, 0 409s, cookies monotone, late convergence 155 ms |
+| retention-reconnect | all four phases PASS |
+| query-tab-churn | PASS |
+| clock-skew | ±24 h, LMID 2 |
+| storage-faults | 5 points via error/quota injection, pre-commit rollback + post-commit durability + replay + recovery |
+| backup-restore | 91 rows, 91 fresh-snapshot puts |
+| wasm-memory-soak | live instance, warm block + 3 measured blocks of 1,000 query/connection churn ops: samples 1,572,864 bytes flat, growth 0/0/0 (budget <= 65,536 per block) |
+| rollback-one-writer | old-only -> none -> new-only -> none -> old-only, stopped writers reject with 503, 0 invariant failures |
+
+Local workerd `measure` at the same SHA: cold DO p50/p95 5.351/7.829 ms, ack
+p50/p95 1.797/3.127 ms, storage delta 8,192 bytes across 50 pushes.
