@@ -142,9 +142,12 @@ pub fn generate_seed() -> SeedData {
     }
 }
 
+// one seedable table: name, insert-column names, and the bound row values.
+pub type SeedTable = (&'static str, &'static [&'static str], Vec<Vec<SqlValue>>);
+
 // insert-column layout per table, matching fixture-data.ts seedSqlite: json
 // columns store json text, booleans store 0/1, everything else raw.
-pub fn seed_rows() -> Vec<(&'static str, &'static [&'static str], Vec<Vec<SqlValue>>)> {
+pub fn seed_rows() -> Vec<SeedTable> {
     let data = generate_seed();
     vec![
         (
