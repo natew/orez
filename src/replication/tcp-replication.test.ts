@@ -637,14 +637,20 @@ describe('tcp replication', () => {
 
     await db.exec(`UPDATE public.items SET value = 20 WHERE name = 'upd_target'`)
     signalReplicationChange()
-    const stream = await replClient.collectStream(1500)
 
+    // collect until the Update arrives (with timeout): a single fixed window
+    // flakes on slow CI runners when the change flushes late
     const decoded: PgOutputMessage[] = []
-    for (const msg of stream) {
-      if (msg.type === 0x64) {
-        const result = decodeCopyData(new Uint8Array(msg.data))
-        if (result) decoded.push(result)
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      const stream = await replClient.collectStream(500)
+      for (const msg of stream) {
+        if (msg.type === 0x64) {
+          const result = decodeCopyData(new Uint8Array(msg.data))
+          if (result) decoded.push(result)
+        }
       }
+      if (decoded.some((m) => m.type === 'Update')) break
     }
 
     const update = decoded.find((m) => m.type === 'Update') as UpdateMessage
