@@ -131,7 +131,7 @@ try {
           durableObjectP95Ms: round(percentile(coldDoMs, 0.95)),
         },
         transactionCpuProxy: {
-          note: 'client-observed local workerd acknowledgement wall time; includes 10ms wake coalescing, not billed production CPU',
+          note: 'client-observed local workerd acknowledgement wall time; wake fan-out runs asynchronously after commit, not billed production CPU',
           samples: acknowledgementMs.length,
           acknowledgementP50Ms: round(percentile(acknowledgementMs, 0.5)),
           acknowledgementP95Ms: round(percentile(acknowledgementMs, 0.95)),
