@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   engine_assemble_push_response,
+  engine_compile_query,
   engine_finalize,
   engine_handle_pull,
   engine_init_schema,
@@ -216,7 +217,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       super(ctx, env);
       this.#engineDb = new SqlStorageSyncDb(ctx.storage.sql);
       this.#directSql = new SqlStorageDirect(ctx.storage.sql);
-      this.#mutatorSql = new SqlStorageMutatorTransaction(this.#directSql);
+      this.#mutatorSql = new SqlStorageMutatorTransaction(this.#directSql, (ast) =>
+        this.#wasm(() => engine_compile_query(config.schema, ast)),
+      );
       ctx.blockConcurrencyWhile(async () => {
         ctx.storage.transactionSync(() => {
           config.initialize(this.#directSql);
@@ -249,7 +252,10 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #visibility(claims: NormalizedClaims): unknown {
       if (!config.visibility || !this.#visibilityEnabled) return null;
       return {
-        rowLocal: config.visibility.rowLocal,
+        rowLocal:
+          typeof config.visibility.rowLocal === "function"
+            ? config.visibility.rowLocal(claims)
+            : config.visibility.rowLocal,
         filters: Object.keys(config.schema.tables).flatMap((table) => {
           const filter = config.visibility?.filter(table, claims);
           return filter

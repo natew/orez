@@ -34,6 +34,10 @@ export interface MutatorSql {
     sql: string,
     params?: readonly unknown[],
   ): Promise<Row[]>
+  /** Execute a validated Zero AST inside the current application transaction. */
+  queryAst<Row extends Record<string, unknown> = Record<string, unknown>>(
+    ast: JsonValue,
+  ): Promise<Row[]>
 }
 
 export type DeferredEffect = () => void | Promise<void>
@@ -76,7 +80,7 @@ export type VisibilityFilter = {
 
 export type VisibilityConfig = {
   /** True only when every predicate depends on the selected row alone. */
-  rowLocal: boolean
+  rowLocal: boolean | ((claims: NormalizedClaims) => boolean)
   filter(
     table: string,
     claims: NormalizedClaims,

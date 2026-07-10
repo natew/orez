@@ -14,6 +14,8 @@ interface JsSyncDb {
   query(sql: string, params: WireValue[]): WireRow[]
 }
 
+export type CompiledQuery = { sql: string; params: WireValue[] }
+
 export type AdapterStats = {
   execCalls: number
   queryCalls: number
@@ -139,7 +141,10 @@ export class SqlStorageDirect implements SyncSql {
  * existing `await tx.query(...)` cannot carry a cursor across an await.
  */
 export class SqlStorageMutatorTransaction implements MutatorSql {
-  constructor(private readonly direct: SqlStorageDirect) {}
+  constructor(
+    private readonly direct: SqlStorageDirect,
+    private readonly compileQuery: (ast: unknown) => CompiledQuery,
+  ) {}
 
   async exec(sql: string, params: readonly unknown[] = []): Promise<void> {
     this.direct.exec(sql, params)
@@ -150,5 +155,12 @@ export class SqlStorageMutatorTransaction implements MutatorSql {
     params: readonly unknown[] = [],
   ): Promise<Row[]> {
     return this.direct.query<Row>(sql, params)
+  }
+
+  async queryAst<Row extends Record<string, unknown> = Record<string, unknown>>(
+    ast: unknown,
+  ): Promise<Row[]> {
+    const compiled = this.compileQuery(ast)
+    return this.direct.query<Row>(compiled.sql, compiled.params.map(decodeBinding))
   }
 }
