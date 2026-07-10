@@ -4,17 +4,24 @@ import type { Schema, mutators } from './fixture.js'
 // directly, and read fresh oracle answers from. three implementations planned
 // (stock-zero, orez-local sqlite, orez-cf); see plans/zero-conformance-harness.md.
 import type { Zero } from '@rocicorp/zero'
+import type { StoreProvider } from '@rocicorp/zero/sqlite'
 
 export type Rows = Record<string, unknown>[]
 
 export type FixtureZero = Zero<Schema, typeof mutators>
+
+export type ClientStorageOptions = {
+  storageKey?: string
+  kvStore?: 'mem' | 'idb' | StoreProvider
+  onClientStateNotFound?: () => void
+}
 
 export type SyncTarget = {
   readonly name: string
 
   // a stock @rocicorp/zero client wired for this target (server url +
   // transport differ per target; the client code never does)
-  createClient(userID: string): FixtureZero
+  createClient(userID: string, storage?: ClientStorageOptions): FixtureZero
 
   // upstream write straight to the authoritative store, bypassing sync —
   // exercises the replication path

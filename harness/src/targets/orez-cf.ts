@@ -59,15 +59,16 @@ export async function startOrezCf(opts?: {
   return {
     name: 'orez-cf',
 
-    createClient(userID: string) {
+    createClient(userID: string, storage) {
       const zero = new Zero({
         server: origin,
         userID,
         auth: `token-${userID}`,
         schema,
         mutators,
-        kvStore: 'mem' as const,
-        storageKey: `zharness-cf-${++clientN}`,
+        kvStore: storage?.kvStore ?? ('mem' as const),
+        onClientStateNotFound: storage?.onClientStateNotFound,
+        storageKey: storage?.storageKey ?? `zharness-cf-${++clientN}`,
       })
       clients.push(zero)
       return zero

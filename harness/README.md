@@ -22,6 +22,8 @@ bun src/sweep.ts --rounds 15                       # seeded randomized different
 bun src/sweep.ts --seed 12345 --against orez-cf    # deterministic replay / CF host
 bun src/bench.ts --target orez-local --clients 20 --writers 5 --rate 10 --duration 15
 bun src/permissions.ts                             # per-user visibility + add/revoke
+bun src/reconnect.ts                               # persisted resume + recovery faults
+bun src/multi-tab.ts                               # real shared client group + LMIDs
 ```
 
 sweep divergences write replay artifacts to `regressions/` (seed + spec +
@@ -43,6 +45,12 @@ owner-or-member projects, tasks/members through visible projects, and only
 the authenticated user's own user row. it is intentionally separate from
 the globally visible differential lanes and asserts that membership removal
 clears already-cached project/task data.
+
+`reconnect.ts` and `multi-tab.ts` use a temporary file-backed implementation
+of Zero's own SQLite KV store. they exercise the actual persisted Replicache
+cookie/client-group state: sequential close/reopen recovery (including lost
+responses, retention/epoch fallback, host restart, and future-cookie reset)
+and concurrent same-storage-key tabs with distinct client IDs and per-client LMIDs.
 
 `stock-zero` boots embedded postgres (wal_level=logical), the fixture app
 server (`src/app-server.ts`: named-query transform on /query + custom-mutator

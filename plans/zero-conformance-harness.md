@@ -472,6 +472,27 @@ findings pinned:
   member / foreign isolation, membership-add reveal, membership-revoke cache
   clearing, and a fresh late-client check all pass.
 
+**M7, persisted reconnect + real client groups [DONE 2026-07-09]:**
+
+- `harness/src/persistent-kv.ts` adapts Bun SQLite to Zero's own transactional
+  `SQLiteStore`; harness clients can now persist the real Replicache DAG instead
+  of relying on `kvStore: 'mem'` or Node's IndexedDB-to-memory fallback.
+- `harness/src/reconnect.ts` closes and recreates a stock Zero client with the
+  same on-disk storage key. it pins a new client ID in the same client group and
+  a non-null resumed cookie, then covers HTTP-host restart, below-retention
+  snapshot fallback, dropped push-response recovery through LMIDs, epoch
+  snapshot fallback, and future-cookie 409 invalidation followed by a fresh
+  reload snapshot.
+- `harness/src/multi-tab.ts` opens two concurrent stock clients over the same
+  persisted store, requires distinct client IDs in one real client group, races
+  per-tab mutations plus an upstream write, and checks authoritative LMIDs and
+  convergence. one tab then closes while a third joins the same group and races
+  the surviving tab.
+- these lanes exercise the production HTTP transport and stock Zero 1.6.1
+  client state machine against `orez-local`. process/DO data-store restart and
+  remote Cloudflare eviction remain integration-level fault lanes; the local
+  host restart deliberately preserves its SQLite authority.
+
 ### runners (nate 2026-07-09: dev + initial validation happen on `work`;
 
 ### the mini is purely the runner for LARGER tests)

@@ -170,15 +170,16 @@ export async function startStockZero(opts?: {
   return {
     name: 'stock-zero',
 
-    createClient(userID: string) {
+    createClient(userID: string, storage) {
       const zero = new Zero({
         server: `http://127.0.0.1:${zeroPort}`,
         userID,
         auth: `token-${userID}`,
         schema,
         mutators,
-        kvStore: 'mem' as const,
-        storageKey: `zharness-${++clientN}`,
+        kvStore: storage?.kvStore ?? ('mem' as const),
+        onClientStateNotFound: storage?.onClientStateNotFound,
+        storageKey: storage?.storageKey ?? `zharness-${++clientN}`,
       })
       clients.push(zero)
       return zero
