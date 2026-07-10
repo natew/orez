@@ -153,6 +153,95 @@ function patchOf(response: unknown): Patch[] {
   return rowsPatch!
 }
 
+function validPushBody(mutation: Record<string, unknown> = {}) {
+  return {
+    clientGroupID: 'g1',
+    mutations: [
+      {
+        type: 'custom',
+        id: 1,
+        clientID: 'c1',
+        name: 'item.put',
+        args: [{ id: 'validated', label: 'ok', rank: 1, done: false, meta: null }],
+        timestamp: 0,
+        ...mutation,
+      },
+    ],
+    pushVersion: 1,
+    requestID: 'validated-request',
+  }
+}
+
+describe('request validation', () => {
+  test.each([undefined, '0', -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid pull cookie %s',
+    (cookie) => {
+      const { sync } = setup()
+      expect(() =>
+        sync.handlePull({ clientID: 'c1', clientGroupID: 'g1', cookie }, 'u1')
+      ).toThrowError(SyncHttpError)
+    }
+  )
+
+  test.each([
+    { clientID: 1, clientGroupID: 'g1', cookie: null },
+    { clientID: 'c1', clientGroupID: 1, cookie: null },
+    null,
+  ])('rejects malformed pull body %#', (body) => {
+    const { sync } = setup()
+    expect(() => sync.handlePull(body, 'u1')).toThrowError(SyncHttpError)
+  })
+
+  test.each([
+    ['non-integer id', { id: 1.5 }],
+    ['zero id', { id: 0 }],
+    ['non-string clientID', { clientID: 7 }],
+    ['non-string name', { name: 7 }],
+    ['non-array args', { args: { id: 'x' } }],
+    ['non-custom type', { type: 'crud' }],
+  ])('rejects mutation with %s', (_label, mutation) => {
+    const { sync } = setup()
+    expect(() => sync.handlePush(validPushBody(mutation), 'u1')).toThrowError(
+      SyncHttpError
+    )
+  })
+
+  test.each([
+    null,
+    { clientGroupID: 1, mutations: [], pushVersion: 1 },
+    { clientGroupID: 'g1', mutations: {}, pushVersion: 1 },
+    { clientGroupID: 'g1', mutations: [], pushVersion: '1' },
+    { clientGroupID: 'g1', mutations: [], pushVersion: Number.NaN },
+  ])('rejects malformed push body %#', (body) => {
+    const { sync } = setup()
+    expect(() => sync.handlePush(body, 'u1')).toThrowError(SyncHttpError)
+  })
+
+  test('validates the entire push before processing its first mutation', () => {
+    const { db, sync } = setup()
+    const body = validPushBody()
+    body.mutations.push({ ...body.mutations[0]!, id: 2, name: 42 })
+
+    expect(() => sync.handlePush(body, 'u1')).toThrowError(SyncHttpError)
+    expect(db.all(`SELECT * FROM item WHERE id = 'validated'`)).toHaveLength(0)
+    expect(sync.watermark()).toBe(0)
+  })
+
+  test('returns stock-compatible unsupportedPushVersion without processing', () => {
+    const { db, sync } = setup()
+    const body = { ...validPushBody(), pushVersion: 2 }
+
+    expect(sync.handlePush(body, 'u1')).toEqual({
+      pushResponse: {
+        error: 'unsupportedPushVersion',
+        mutationIDs: [{ clientID: 'c1', id: 1 }],
+      },
+    })
+    expect(db.all(`SELECT * FROM item WHERE id = 'validated'`)).toHaveLength(0)
+    expect(sync.watermark()).toBe(0)
+  })
+})
+
 describe('snapshot and unchanged', () => {
   test('fresh pull is a clear+puts snapshot with typed values', () => {
     const { sync } = setup()

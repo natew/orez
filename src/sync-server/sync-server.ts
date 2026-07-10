@@ -107,6 +107,51 @@ type PushBody = {
   requestID?: string
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function validatePullBody(body: unknown): asserts body is PullBody {
+  if (
+    !isRecord(body) ||
+    typeof body.clientID !== 'string' ||
+    typeof body.clientGroupID !== 'string' ||
+    (body.cookie !== null && !isNonNegativeInteger(body.cookie))
+  ) {
+    throw new SyncHttpError(400, 'invalid pull body')
+  }
+}
+
+function validatePushBody(body: unknown): asserts body is PushBody {
+  if (
+    !isRecord(body) ||
+    typeof body.clientGroupID !== 'string' ||
+    !Array.isArray(body.mutations) ||
+    typeof body.pushVersion !== 'number' ||
+    !Number.isFinite(body.pushVersion)
+  ) {
+    throw new SyncHttpError(400, 'invalid push body')
+  }
+
+  for (const [index, mutation] of body.mutations.entries()) {
+    if (
+      !isRecord(mutation) ||
+      mutation.type !== 'custom' ||
+      !isNonNegativeInteger(mutation.id) ||
+      mutation.id === 0 ||
+      typeof mutation.clientID !== 'string' ||
+      typeof mutation.name !== 'string' ||
+      !Array.isArray(mutation.args)
+    ) {
+      throw new SyncHttpError(400, `invalid mutation at index ${index}`)
+    }
+  }
+}
+
 // derive the tables spec from a zero createSchema() result
 export function tablesFromZeroSchema(schema: {
   tables: Record<
@@ -261,11 +306,9 @@ export function createSyncServer(config: SyncServerConfig) {
     return db.all(`SELECT * FROM "${table}"`)
   }
 
-  function handlePull(body: PullBody, userID: string) {
+  function handlePull(body: unknown, userID: string) {
+    validatePullBody(body)
     const { clientID, clientGroupID, cookie } = body
-    if (typeof clientID !== 'string' || typeof clientGroupID !== 'string') {
-      throw new SyncHttpError(400, 'invalid pull body')
-    }
 
     // one synchronous sqlite transaction = one consistent view (soot needed
     // repeatable-read gymnastics on pg; sqlite gives it for free)
@@ -352,10 +395,20 @@ export function createSyncServer(config: SyncServerConfig) {
     return rowsPatch
   }
 
-  function handlePush(body: PushBody, userID: string) {
+  function handlePush(body: unknown, userID: string) {
+    validatePushBody(body)
     const { clientGroupID, mutations } = body
-    if (typeof clientGroupID !== 'string' || !Array.isArray(mutations)) {
-      throw new SyncHttpError(400, 'invalid push body')
+
+    // The pinned client still accepts this legacy pushResponse error form.
+    // It is the direct-transport equivalent of zero-cache's PushFailed /
+    // unsupportedPushVersion response and prevents any mutation processing.
+    if (body.pushVersion !== 1) {
+      return {
+        pushResponse: {
+          error: 'unsupportedPushVersion' as const,
+          mutationIDs: mutations.map(({ clientID, id }) => ({ clientID, id })),
+        },
+      }
     }
 
     const results: Array<{
@@ -364,9 +417,6 @@ export function createSyncServer(config: SyncServerConfig) {
     }> = []
 
     for (const mutation of mutations) {
-      if (mutation.type !== 'custom') {
-        throw new SyncHttpError(400, `unsupported mutation type: ${mutation.type}`)
-      }
       // each mutation commits atomically (rows + LMID advance in one tx). an
       // app error aborts that whole tx, then a SECOND tx advances the LMID
       // and records the error — same net semantics as a savepoint rollback,
