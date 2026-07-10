@@ -1,0 +1,136 @@
+# Rust sync M6 qualification matrix
+
+This matrix is for native and `lslcf` test infrastructure only. It does not
+authorize a Chat/Soot production deploy, namespace routing change, or package
+publish. Run Node-dependent harness commands with the repository mise default
+(`node 24.3.0`); the stock-Zero SQLite native module must remain ABI 137.
+
+## Reproducibility rules
+
+- Build and deploy only from a committed, clean worktree and record the SHA and
+  Cloudflare version ID.
+- Use a fresh `drill-*`, `rust-*`, or other explicitly test-only namespace for
+  every remote run.
+- Record the exact command, budget, elapsed time, and final structured result.
+- A correctness failure fails the lane even if its latency or memory budget
+  passes.
+- Never log request bodies, row contents, named-query arguments, tokens, admin
+  keys, or raw production namespaces.
+
+## Lane budgets and commands
+
+### Eviction and hard-kill recovery
+
+Budget: 25 repeated cycles per target; zero 409s, duplicate mutations, cookie
+regressions, or missed rows. Recovery must complete within 10 seconds per
+cycle. Durable Object boot ID or native process ID must change each cycle.
+
+```sh
+mise exec node@24.3.0 -- bun harness/src/eviction.ts --target rust-local --clients 20
+mise exec node@24.3.0 -- bun harness/src/eviction.ts --target rust-cf --clients 20
+```
+
+The long qualification runner repeats these commands 25 times. Boundary fault
+coverage must include before application mutation, after application mutation
+before LMID finalize, after commit before response, during pull transaction,
+and after pull commit before response. Lost-response coverage is already in the
+reconnect/query lifecycle lanes; the remaining precise boundary hooks are an
+explicit M6 harness item, not inferred from a process kill between requests.
+
+### Retention pressure and offline clients
+
+Budget: retention window 2, at least 100 committed changes while one client is
+offline, then convergence by a safe snapshot/reset in 15 seconds. Zero partial
+incremental patches, unauthorized rows, LMID regression, or cookie regression.
+
+```sh
+mise exec node@24.3.0 -- bun harness/src/reconnect.ts --target rust-local
+mise exec node@24.3.0 -- bun harness/src/reconnect.ts --target rust-cf
+```
+
+### Query, connection, and tab churn
+
+Budget: all 22 desired-query corpus shapes, 100 clients, 5 writers, 5 rounds,
+20 operations per writer, and 100 tab open/close cycles. Zero reset, raw-store
+membership, permission, or convergence failures. Cloudflare propagation p95
+must remain below 1 second; native below 100 ms; no safety-poll convergence.
+
+```sh
+mise exec node@24.3.0 -- bun harness/src/query-diff.ts --against rust-local
+mise exec node@24.3.0 -- bun harness/src/query-diff.ts --against rust-cf
+mise exec node@24.3.0 -- bun harness/src/storm.ts --target rust-local --clients 100 --writers 5 --rounds 5 --ops-per-writer 20
+mise exec node@24.3.0 -- bun harness/src/storm.ts --target rust-cf --clients 100 --writers 5 --rounds 5 --ops-per-writer 20
+mise exec node@24.3.0 -- bun harness/src/multi-tab.ts --target rust-local
+mise exec node@24.3.0 -- bun harness/src/multi-tab.ts --target rust-cf
+```
+
+The rust-cf differential is currently held red for an intermittent
+`allProjects` completion stall; do not record this lane green until the first
+pull/ack sequence is root-caused and repeated runs pass.
+
+### Malformed and adversarial protocol inputs
+
+Budget: at least 10,000 deterministic seeded pull/push cases per target. All
+requests must complete in 2 seconds, malformed/unsupported requests must return
+4xx, invariant failures must remain zero, and a valid pull/push must succeed
+after the corpus. Raw AST and unknown named query puts must return 400.
+
+```sh
+mise exec node@24.3.0 -- bun harness/src/query-security.ts
+mise exec node@24.3.0 -- bun harness/src/protocol-fuzz.ts --target rust-local --cases 10000 --seed 1
+mise exec node@24.3.0 -- bun harness/src/protocol-fuzz.ts --target rust-cf --cases 10000 --seed 1
+```
+
+### Memory and bundle headroom
+
+Budget: after warm-up, wasm linear-memory high-water growth must be at most one
+page (64 KiB) across each block of 1,000 query/connection/eviction churn
+operations and must not increase across three consecutive blocks. Database size
+is tracked separately and is not a substitute for wasm memory. The compressed
+worker bundle must retain at least 40 percent headroom below the applicable
+Cloudflare limit.
+
+```sh
+mise exec node@24.3.0 -- bun harness/src/memory-soak.ts --target rust-cf --blocks 3 --ops 1000
+mise exec node@24.3.0 -- bun harness/src/memory-soak.ts --target rust-local --blocks 3 --ops 1000
+mise exec node@24.3.0 -- bun --cwd packages/sync-cf-host run measure
+```
+
+The memory lane requires a host/native memory diagnostic that reports only byte
+counts and is protected like `/admin/status`; it must not infer flat memory from
+process RSS or database size.
+
+### Storage failure, quota, and clock skew
+
+Budget: every injected storage failure rolls back application rows, LMID, query
+membership, and deferred effects together. Recovery succeeds within 10 seconds
+after clearing the fault. Quota exhaustion returns a bounded error without
+increasing invariant failures. Application timestamp tests cover ±24 hours of
+skew and never use the skewed client clock for sync ordering.
+
+```sh
+mise exec node@24.3.0 -- bun harness/src/storage-faults.ts --target rust-local --clock-skew-hours 24
+mise exec node@24.3.0 -- bun harness/src/storage-faults.ts --target rust-cf --clock-skew-hours 24
+```
+
+### Backup, restore, canary, and rollback
+
+Budget: one writer at every observable phase, with an explicit zero-writer gap
+between owners. A stopped writer must reject pushes before the other is enabled.
+Mutation ordering and desired-query acknowledgement survive rollback; invariant
+failure counters remain zero. Complete the drill in 5 minutes.
+
+```sh
+mise exec node@24.3.0 -- bun harness/src/rollback-drill.ts --confirm-test-only
+```
+
+The runner accepts only `lslcf.workers.dev` or loopback and creates fresh
+`drill-*` namespaces. It never changes a production route.
+
+## Evidence record
+
+For every run, append a dated entry containing source SHA, deployed version,
+target, command, configured budget, measured result, and PASS/FAIL. A lane with
+missing measurements is pending, not green. Production retirement remains
+outside this prep gate and requires user-approved cutover plus the observation
+window.
