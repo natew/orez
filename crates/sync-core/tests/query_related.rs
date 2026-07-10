@@ -388,6 +388,60 @@ fn windowed_child_rank_alias_avoids_column_collision() {
 }
 
 #[test]
+fn windowed_child_rank_alias_avoids_case_insensitive_collision() {
+    // RESIDUAL-2c: SQLite identifiers are ASCII case-insensitive, so a child column
+    // `_ZSYNC_RN` collides with the `_zsync_rn` rank alias. the absence check must
+    // fold case; otherwise the top-1 window returns zero rows.
+    use sync_core::value::ZeroColumnType::{Number, String as S};
+    let mut db = TestDb::memory();
+    db.exec("CREATE TABLE parent (id TEXT PRIMARY KEY)", &[])
+        .unwrap();
+    db.exec(
+        "CREATE TABLE item (id TEXT PRIMARY KEY, parentId TEXT, rank INTEGER, _ZSYNC_RN INTEGER)",
+        &[],
+    )
+    .unwrap();
+    db.exec("INSERT INTO parent VALUES ('p')", &[]).unwrap();
+    db.exec(
+        "INSERT INTO item VALUES ('i1','p',1,99), ('i2','p',2,99)",
+        &[],
+    )
+    .unwrap();
+    let tables = Tables::new()
+        .with(
+            "parent",
+            TableSpec {
+                columns: vec![("id".into(), S)],
+                primary_key: vec!["id".into()],
+            },
+        )
+        .with(
+            "item",
+            TableSpec {
+                columns: vec![
+                    ("id".into(), S),
+                    ("parentId".into(), S),
+                    ("rank".into(), Number),
+                    ("_ZSYNC_RN".into(), Number),
+                ],
+                primary_key: vec!["id".into()],
+            },
+        );
+    init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+
+    let q = json!({ "table": "parent", "related": [{
+        "correlation": { "parentField": ["id"], "childField": ["parentId"] },
+        "subquery": { "table": "item", "orderBy": [["rank", "desc"]], "limit": 1 } }] });
+    register_query(&mut db, &tables, G, "q", &q, 0).unwrap();
+    set_desire(&mut db, G, "cl", "q", 1).unwrap();
+    let patch = db
+        .transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
+        .unwrap();
+    assert_eq!(puts(&patch), vec!["item:i2", "parent:p"]);
+}
+
+#[test]
 fn windowed_related_output_shifts_incrementally() {
     let mut h = Host::new();
     register_query(

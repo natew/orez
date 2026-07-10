@@ -565,9 +565,15 @@ pub fn compile_related_of(
             // the ROW_NUMBER rank alias must NOT collide with a real child column,
             // else `{rc}_w.<alias>` resolves to the application column and the
             // `<= limit` filter compares the wrong value (GAP-2c). derive one proven
-            // absent from the child's schema.
+            // absent from the child's schema. SQLite identifiers are ASCII
+            // case-insensitive, so the absence check must be too (RESIDUAL-2c: a
+            // column `_ZSYNC_RN` would otherwise shadow `_zsync_rn`).
             let mut rank_alias = String::from("_zsync_rn");
-            while child_spec.columns.iter().any(|(col, _)| *col == rank_alias) {
+            while child_spec
+                .columns
+                .iter()
+                .any(|(col, _)| col.eq_ignore_ascii_case(rank_alias.as_str()))
+            {
                 rank_alias.push('_');
             }
             Some((limit, partition, order_terms, rank_alias))
