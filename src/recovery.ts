@@ -138,6 +138,17 @@ export function hasZeroStateInconsistencySignature(details: string): boolean {
   ) {
     return true
   }
+  // the change-processor throws "Unknown table <x>" when the change stream
+  // delivers a row for a table the replica's schema doesn't have — the table
+  // entered the publication after the replica's initial-sync snapshot (e.g.
+  // ALTER PUBLICATION ... ADD TABLE racing a reset). the stream will redeliver
+  // the same change forever, so a plain restart loops on the same crash; only
+  // a replica rebuild (cache-only reset) re-reads the publication and heals.
+  // scoped to the replicator's change-processor so an application-level
+  // "Unknown table" can never trigger a state reset.
+  if (details.includes('Unknown table') && details.includes('change-processor')) {
+    return true
+  }
 
   return false
 }
