@@ -27,7 +27,9 @@ fn read_i64(db: &mut dyn SyncDb, sql: &str, params: &[SqlValue]) -> Result<i64, 
             .parse::<i64>()
             .map_err(|_| EngineError::internal(format!("counter is not an integer: {s}"))),
         Some(SqlValue::Integer(i)) => Ok(*i),
-        Some(other) => Err(EngineError::internal(format!("counter has wrong type: {other:?}"))),
+        Some(other) => Err(EngineError::internal(format!(
+            "counter has wrong type: {other:?}"
+        ))),
     }
 }
 
@@ -40,16 +42,27 @@ pub(crate) fn watermark(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
         "SELECT CAST(COALESCE(MAX(watermark), 0) AS TEXT) FROM _zsync_changes",
         &[],
     )?;
-    let high = read_i64(db, "SELECT CAST(high AS TEXT) FROM _zsync_watermark WHERE lock = 1", &[])?;
+    let high = read_i64(
+        db,
+        "SELECT CAST(high AS TEXT) FROM _zsync_watermark WHERE lock = 1",
+        &[],
+    )?;
     let wm = max_log.max(high);
     if wm > high {
-        db.exec("UPDATE _zsync_watermark SET high = ? WHERE lock = 1", &[counter(wm)])?;
+        db.exec(
+            "UPDATE _zsync_watermark SET high = ? WHERE lock = 1",
+            &[counter(wm)],
+        )?;
     }
     Ok(wm)
 }
 
 pub(crate) fn floor(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
-    read_i64(db, "SELECT CAST(floor AS TEXT) FROM _zsync_meta WHERE lock = 1", &[])
+    read_i64(
+        db,
+        "SELECT CAST(floor AS TEXT) FROM _zsync_meta WHERE lock = 1",
+        &[],
+    )
 }
 
 // size-bounded retention: prune change rows at or below (watermark - retain),
@@ -57,8 +70,14 @@ pub(crate) fn floor(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
 pub(crate) fn prune(db: &mut dyn SyncDb, retain_changes: i64) -> Result<(), EngineError> {
     let cutoff = watermark(db)? - retain_changes;
     if cutoff > floor(db)? {
-        db.exec("DELETE FROM _zsync_changes WHERE watermark <= ?", &[counter(cutoff)])?;
-        db.exec("UPDATE _zsync_meta SET floor = ? WHERE lock = 1", &[counter(cutoff)])?;
+        db.exec(
+            "DELETE FROM _zsync_changes WHERE watermark <= ?",
+            &[counter(cutoff)],
+        )?;
+        db.exec(
+            "UPDATE _zsync_meta SET floor = ? WHERE lock = 1",
+            &[counter(cutoff)],
+        )?;
     }
     Ok(())
 }
@@ -114,7 +133,9 @@ pub(crate) fn claim_client(
     for row in &owners {
         if let Some(SqlValue::Text(owner)) = row.values.first() {
             if owner != user_id {
-                return Err(EngineError::forbidden("client group belongs to a different user"));
+                return Err(EngineError::forbidden(
+                    "client group belongs to a different user",
+                ));
             }
         }
     }

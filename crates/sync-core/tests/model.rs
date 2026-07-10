@@ -14,10 +14,10 @@ mod common;
 use std::collections::HashMap;
 
 use common::Host;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use sync_core::pull::Caps;
 use sync_core::Transactor;
+use sync_core::pull::Caps;
 
 // xorshift64* — deterministic, seedable, no external rng dependency
 struct Rng(u64);
@@ -61,7 +61,12 @@ impl Model {
             stores.insert(c, HashMap::new());
             cookies.insert(c, json!(null));
         }
-        Model { next_id, stores, cookies, effect_wm: HashMap::new() }
+        Model {
+            next_id,
+            stores,
+            cookies,
+            effect_wm: HashMap::new(),
+        }
     }
 }
 
@@ -70,7 +75,10 @@ fn apply_patch(store: &mut HashMap<String, Value>, patch: &[Value]) {
         match op["op"].as_str() {
             Some("clear") => store.clear(),
             Some("put") => {
-                store.insert(op["value"]["id"].as_str().unwrap().to_string(), op["value"].clone());
+                store.insert(
+                    op["value"]["id"].as_str().unwrap().to_string(),
+                    op["value"].clone(),
+                );
             }
             Some("del") => {
                 store.remove(op["id"]["id"].as_str().unwrap());
@@ -94,25 +102,41 @@ fn pull_and_check(h: &mut Host, m: &mut Model, client: &'static str, seed: u64) 
             m.stores.get_mut(client).unwrap().clear();
             return;
         }
-        Err(e) => panic!("seed {seed}: unexpected pull error {}: {}", e.status, e.message),
+        Err(e) => panic!(
+            "seed {seed}: unexpected pull error {}: {}",
+            e.status, e.message
+        ),
     };
     let wm_after = h.watermark();
     let c = resp["cookie"].as_i64().unwrap();
 
-    assert!(c <= wm_after, "seed {seed}: cookie {c} ahead of watermark {wm_after}");
+    assert!(
+        c <= wm_after,
+        "seed {seed}: cookie {c} ahead of watermark {wm_after}"
+    );
     if let Some(pc) = prev.as_i64() {
-        assert!(c >= pc, "seed {seed}: cookie regressed {pc} -> {c} for {client}");
+        assert!(
+            c >= pc,
+            "seed {seed}: cookie regressed {pc} -> {c} for {client}"
+        );
     }
 
     if resp.get("unchanged") == Some(&json!(true)) {
-        assert_eq!(prev.as_i64(), Some(c), "seed {seed}: unchanged with a moving cookie");
+        assert_eq!(
+            prev.as_i64(),
+            Some(c),
+            "seed {seed}: unchanged with a moving cookie"
+        );
     } else {
         let patch = resp["rowsPatch"].as_array().unwrap();
         apply_patch(m.stores.get_mut(client).unwrap(), patch);
         for (target, lmid) in resp["lastMutationIDChanges"].as_object().unwrap() {
             let l = lmid.as_i64().unwrap();
             if let Some(w) = m.effect_wm.get(&(client_key(target), l)) {
-                assert!(c >= *w, "seed {seed}: ack {target}->{l} (effects @ {w}) ahead of cookie {c}");
+                assert!(
+                    c >= *w,
+                    "seed {seed}: ack {target}->{l} (effects @ {w}) ahead of cookie {c}"
+                );
             }
         }
     }
@@ -129,20 +153,34 @@ fn run_trace(seed: u64, steps: u64) {
     for step in 0..steps {
         // occasionally shrink caps so diffs truncate and must be drained
         h.caps = match rng.below(4) {
-            0 => Caps { max_change_rows: 1, max_change_bytes: 120 },
-            1 => Caps { max_change_rows: 3, max_change_bytes: 300 },
+            0 => Caps {
+                max_change_rows: 1,
+                max_change_bytes: 120,
+            },
+            1 => Caps {
+                max_change_rows: 3,
+                max_change_bytes: 300,
+            },
             _ => Caps::default(),
         };
 
         match rng.below(6) {
             0 | 1 => {
                 let client = CLIENTS[rng.below(3) as usize];
-                let id = { let e = m.next_id.get_mut(client).unwrap(); *e += 1; *e };
+                let id = {
+                    let e = m.next_id.get_mut(client).unwrap();
+                    *e += 1;
+                    *e
+                };
                 seq += 1;
                 let item = format!("k{}", rng.below(POOL));
                 let rank = (rng.below(1000) as f64) / 7.0; // fractional
                 let done = rng.boolean();
-                let meta = if rng.boolean() { json!({ "s": seq }) } else { json!(null) };
+                let meta = if rng.boolean() {
+                    json!({ "s": seq })
+                } else {
+                    json!(null)
+                };
                 let res = h
                     .push_one(
                         "item.put",
@@ -159,16 +197,26 @@ fn run_trace(seed: u64, steps: u64) {
             }
             2 => {
                 let client = CLIENTS[rng.below(3) as usize];
-                let id = { let e = m.next_id.get_mut(client).unwrap(); *e += 1; *e };
+                let id = {
+                    let e = m.next_id.get_mut(client).unwrap();
+                    *e += 1;
+                    *e
+                };
                 let item = format!("k{}", rng.below(POOL));
-                h.push_one("item.del", json!({ "id": item }), client, GROUP, id, USER).unwrap();
+                h.push_one("item.del", json!({ "id": item }), client, GROUP, id, USER)
+                    .unwrap();
                 m.effect_wm.insert((client, id), h.watermark());
             }
             3 => {
                 // app-error push: rolls back its row effect, still advances lmid
                 let client = CLIENTS[rng.below(3) as usize];
-                let id = { let e = m.next_id.get_mut(client).unwrap(); *e += 1; *e };
-                h.push_one("item.reject", json!({}), client, GROUP, id, USER).unwrap();
+                let id = {
+                    let e = m.next_id.get_mut(client).unwrap();
+                    *e += 1;
+                    *e
+                };
+                h.push_one("item.reject", json!({}), client, GROUP, id, USER)
+                    .unwrap();
                 m.effect_wm.insert((client, id), h.watermark());
             }
             4 => {
@@ -207,15 +255,23 @@ fn run_trace(seed: u64, steps: u64) {
             }
         }
     }
-    let oracle_resp = h.pull_as("c1", "oracle-group", json!(null), None, USER).unwrap();
+    let oracle_resp = h
+        .pull_as("c1", "oracle-group", json!(null), None, USER)
+        .unwrap();
     let mut oracle: HashMap<String, Value> = HashMap::new();
     for op in oracle_resp["rowsPatch"].as_array().unwrap() {
         if op["op"] == "put" {
-            oracle.insert(op["value"]["id"].as_str().unwrap().to_string(), op["value"].clone());
+            oracle.insert(
+                op["value"]["id"].as_str().unwrap().to_string(),
+                op["value"].clone(),
+            );
         }
     }
     for client in CLIENTS {
-        assert_eq!(&m.stores[client], &oracle, "seed {seed}: client {client} did not converge");
+        assert_eq!(
+            &m.stores[client], &oracle,
+            "seed {seed}: client {client} did not converge"
+        );
     }
 }
 

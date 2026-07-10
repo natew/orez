@@ -7,11 +7,11 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::db::{Row, SqlValue, SyncDb};
 use crate::error::EngineError;
-use crate::schema::{quote_ident, TableSpec, Tables};
+use crate::schema::{TableSpec, Tables, quote_ident};
 use crate::store;
 use crate::value::{to_zero_value, to_zero_value_json};
 use crate::wire;
@@ -56,7 +56,10 @@ impl Default for Caps {
     fn default() -> Self {
         // soot's production budgets: a backlog-pacing budget, not a platform
         // limit. one oversize row is always admitted so progress is possible.
-        Caps { max_change_rows: 10_000, max_change_bytes: 2_000_000 }
+        Caps {
+            max_change_rows: 10_000,
+            max_change_bytes: 2_000_000,
+        }
     }
 }
 
@@ -113,7 +116,16 @@ pub fn handle_pull(
     };
 
     let (cookie_out, lmids, rows_patch) = if can_diff {
-        diff(db, tables, group, cookie.unwrap(), current, caps, visible, user_id)?
+        diff(
+            db,
+            tables,
+            group,
+            cookie.unwrap(),
+            current,
+            caps,
+            visible,
+            user_id,
+        )?
     } else {
         let lmids = store::all_lmids(db, group)?;
         (current, lmids, snapshot(db, tables, visible, user_id)?)
@@ -203,7 +215,10 @@ fn diff(
     let raw = db.query(
         "SELECT CAST(watermark AS TEXT) AS w, tableName, op, pk FROM _zsync_changes
          WHERE watermark > ? ORDER BY watermark LIMIT ?",
-        &[store::counter(cookie), SqlValue::Integer(caps.max_change_rows as i64 + 1)],
+        &[
+            store::counter(cookie),
+            SqlValue::Integer(caps.max_change_rows as i64 + 1),
+        ],
     )?;
     let row_capped = raw.len() > caps.max_change_rows;
     let mut changes: Vec<Change> = Vec::with_capacity(raw.len().min(caps.max_change_rows));
@@ -271,8 +286,7 @@ fn diff(
             "lmid" => {
                 // acks for THIS group only — never leak a peer group's lmid
                 if let Some(pk) = &change.pk {
-                    let same_group =
-                        pk.get("clientGroupID").and_then(Value::as_str) == Some(group);
+                    let same_group = pk.get("clientGroupID").and_then(Value::as_str) == Some(group);
                     if same_group {
                         if let (Some(client), Some(lmid)) = (
                             pk.get("clientID").and_then(Value::as_str),
@@ -330,8 +344,11 @@ fn resolve_row(
         .map(|col| format!("{} = ?", quote_ident(col)))
         .collect::<Vec<_>>()
         .join(" AND ");
-    let mut params: Vec<SqlValue> =
-        spec.primary_key.iter().map(|col| json_pk_to_sql(pk.get(col))).collect();
+    let mut params: Vec<SqlValue> = spec
+        .primary_key
+        .iter()
+        .map(|col| json_pk_to_sql(pk.get(col)))
+        .collect();
     let mut sql = format!("SELECT * FROM {} WHERE {}", quote_ident(table), where_pk);
     // diff only runs under row-local (or absent) visibility, so applying the
     // filter to the point read is safe: an invisible row emits del.
@@ -350,7 +367,9 @@ fn resolve_row(
 fn pk_id(spec: &TableSpec, pk: &Value) -> Value {
     let mut id = Map::new();
     for col in &spec.primary_key {
-        let ty = spec.column_type(col).unwrap_or(crate::value::ZeroColumnType::String);
+        let ty = spec
+            .column_type(col)
+            .unwrap_or(crate::value::ZeroColumnType::String);
         let raw = pk.get(col).cloned().unwrap_or(Value::Null);
         id.insert(col.clone(), to_zero_value_json(ty, raw));
     }
@@ -360,9 +379,16 @@ fn pk_id(spec: &TableSpec, pk: &Value) -> Value {
 // dedup key = client table name + the pk column values, JSON-normalized (the
 // reference core's `${table} ${JSON.stringify(primaryKey.map(pk))}`)
 fn dedup_key(table: &str, spec: &TableSpec, pk: &Value) -> String {
-    let vals: Vec<Value> =
-        spec.primary_key.iter().map(|c| pk.get(c).cloned().unwrap_or(Value::Null)).collect();
-    format!("{} {}", table, serde_json::to_string(&vals).unwrap_or_default())
+    let vals: Vec<Value> = spec
+        .primary_key
+        .iter()
+        .map(|c| pk.get(c).cloned().unwrap_or(Value::Null))
+        .collect();
+    format!(
+        "{} {}",
+        table,
+        serde_json::to_string(&vals).unwrap_or_default()
+    )
 }
 
 // bind a pk column (parsed from the change log's json_object) as a sqlite value

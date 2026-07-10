@@ -13,7 +13,7 @@
 // crash between tx1 and tx2 is safe: nothing committed, replay re-executes and
 // hits the same app error (invariant 8). replay is idempotent (invariant 12).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::db::SyncDb;
 use crate::error::{EngineError, MutateError};
@@ -78,7 +78,10 @@ fn is_record(v: &Value) -> bool {
 // for pushVersion != 1.
 pub fn push_validate(body: &Value) -> Result<PushPlan, EngineError> {
     if !is_record(body)
-        || !body.get("clientGroupID").map(Value::is_string).unwrap_or(false)
+        || !body
+            .get("clientGroupID")
+            .map(Value::is_string)
+            .unwrap_or(false)
         || !body.get("mutations").map(Value::is_array).unwrap_or(false)
         || !body
             .get("pushVersion")
@@ -101,7 +104,9 @@ pub fn push_validate(body: &Value) -> Result<PushPlan, EngineError> {
             && m.get("name").map(Value::is_string).unwrap_or(false)
             && m.get("args").map(Value::is_array).unwrap_or(false);
         if !valid {
-            return Err(EngineError::bad_request(format!("invalid mutation at index {index}")));
+            return Err(EngineError::bad_request(format!(
+                "invalid mutation at index {index}"
+            )));
         }
         mutations.push(PushMutation {
             id: id.unwrap(),
@@ -124,7 +129,10 @@ pub fn push_validate(body: &Value) -> Result<PushPlan, EngineError> {
         })));
     }
 
-    Ok(PushPlan::Process(PushBody { client_group_id, mutations }))
+    Ok(PushPlan::Process(PushBody {
+        client_group_id,
+        mutations,
+    }))
 }
 
 // tx1 step: claim the client group (403 if owned by another user), read the
@@ -266,24 +274,26 @@ pub fn handle_push(
         let tx1 = txor.transaction(|db| -> Result<Tx1Ok, Tx1Error> {
             match preflight(db, group, &m.client_id, m.id, user_id)? {
                 Preflight::Replay { expected } => Ok(Tx1Ok::Replay { expected }),
-                Preflight::Applied => {
-                    match mutator.mutate(db, &m.name, &arg, user_id) {
-                        Ok(()) => {
-                            finalize(db, group, &m.client_id, m.id)?;
-                            Ok(Tx1Ok::Applied)
-                        }
-                        Err(MutateError::App { details, message }) => {
-                            Err(Tx1Error::App { details, message })
-                        }
-                        Err(MutateError::Other(e)) => Err(Tx1Error::Other(e)),
+                Preflight::Applied => match mutator.mutate(db, &m.name, &arg, user_id) {
+                    Ok(()) => {
+                        finalize(db, group, &m.client_id, m.id)?;
+                        Ok(Tx1Ok::Applied)
                     }
-                }
+                    Err(MutateError::App { details, message }) => {
+                        Err(Tx1Error::App { details, message })
+                    }
+                    Err(MutateError::Other(e)) => Err(Tx1Error::Other(e)),
+                },
             }
         });
 
         match tx1 {
             Ok(Tx1Ok::Applied) => {
-                results.push(MutationResult { client_id: m.client_id.clone(), id: m.id, result: json!({}) });
+                results.push(MutationResult {
+                    client_id: m.client_id.clone(),
+                    id: m.id,
+                    result: json!({}),
+                });
             }
             Ok(Tx1Ok::Replay { expected }) => {
                 results.push(MutationResult {
