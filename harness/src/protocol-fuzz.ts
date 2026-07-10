@@ -76,7 +76,8 @@ async function worker() {
     const index = next++
     if (index >= total) return
     const route = random() % 2 === 0 ? 'pull' : 'push'
-    const body = malformed[random() % malformed.length]!
+    const templateIndex = random() % malformed.length
+    const body = malformed[templateIndex]!
     const requestStarted = performance.now()
     const response = await fetch(`${origin}/${route}`, {
       method: 'POST',
@@ -91,7 +92,9 @@ async function worker() {
     const elapsed = performance.now() - requestStarted
     if (elapsed > 2_000) throw new Error(`case ${index} exceeded 2s (${elapsed}ms)`)
     if (response.status >= 500) {
-      throw new Error(`case ${index} produced server error ${response.status}`)
+      throw new Error(
+        `case ${index} route=${route} template=${templateIndex} produced server error ${response.status}`,
+      )
     }
     statuses.set(response.status, (statuses.get(response.status) ?? 0) + 1)
     completed++
