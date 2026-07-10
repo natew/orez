@@ -12,8 +12,8 @@ import { canonical } from './canonical.js'
 import { queries, queryCorpus } from './fixture.js'
 import { startStockZero } from './targets/stock-zero.js'
 
-import type { FixtureZero, SyncTarget } from './target.js'
 import type { HttpPullObservation } from './observed-fetch.js'
+import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: { against: { type: 'string', default: 'rust-local' } },
@@ -126,7 +126,9 @@ try {
 
   if (failures.length > 0) {
     for (const failure of failures) console.error('[query-diff] DIVERGENCE:', failure)
-    throw new Error(`${failures.length}/${differentialCorpus.length} corpus queries diverged`)
+    throw new Error(
+      `${failures.length}/${differentialCorpus.length} corpus queries diverged`
+    )
   }
 
   stockViews.destroy()

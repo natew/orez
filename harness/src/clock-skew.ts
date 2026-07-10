@@ -15,7 +15,8 @@ const { values: args } = parseArgs({
   },
 })
 const hours = Number(args['clock-skew-hours'])
-if (!Number.isFinite(hours) || hours <= 0) throw new Error('clock-skew-hours must be positive')
+if (!Number.isFinite(hours) || hours <= 0)
+  throw new Error('clock-skew-hours must be positive')
 
 const target =
   args.target === 'rust-cf'
@@ -42,14 +43,14 @@ try {
         rank: index,
         done: false,
         dueAt: due[index],
-      }),
+      })
     )
     await request.client
     await assertServerOutcome(request.server, 'success', ids[index]!)
   }
 
   const rows = await target.oracle(
-    `SELECT id, "dueAt" FROM task WHERE id IN ('${ids[0]}', '${ids[1]}') ORDER BY id`,
+    `SELECT id, "dueAt" FROM task WHERE id IN ('${ids[0]}', '${ids[1]}') ORDER BY id`
   )
   if (rows.length !== 2) throw new Error(`expected two skew rows, got ${rows.length}`)
   const byID = new Map(rows.map((row) => [String(row.id), Number(row.dueAt)]))
@@ -59,7 +60,7 @@ try {
     }
   }
   const clients = await target.oracle(
-    'SELECT CAST(MAX(lastMutationID) AS TEXT) AS lmid FROM _zsync_clients',
+    'SELECT CAST(MAX(lastMutationID) AS TEXT) AS lmid FROM _zsync_clients'
   )
   if (String(clients[0]?.lmid) !== '2') {
     throw new Error(`skewed application timestamps affected mutation ordering`)
@@ -73,7 +74,7 @@ try {
       skewHours: hours,
       mutationCount: 2,
       lmid: 2,
-    }),
+    })
   )
 } finally {
   await target.close()

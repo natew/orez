@@ -12,7 +12,7 @@ transaction interface (identical `MutatorContext`).
 Key framing for M4a: **Soot already runs on an HTTP-pull TypeScript reference
 implementation, not zero-cache websockets.** Both planes' clients hold
 `transport="http-pull"` today (`src/zero/client.tsx:279`, `:431`). So M4a
-replaces the *TypeScript* pull/push servers (`httpPull.server.ts`,
+replaces the _TypeScript_ pull/push servers (`httpPull.server.ts`,
 `httpPullProject.server.ts`) with the Rust engine, per namespace, and the
 "current endpoint" the plan compares against is those TS handlers, not a
 zero-cache server. The legacy zero-cache routes still exist in the tree
@@ -24,8 +24,7 @@ zero-cache server. The legacy zero-cache routes still exist in the tree
 
 Soot splits its Zero graph into a **control plane** (one singleton DO
 namespace `soot`) and a **project plane** (one DO namespace per project,
-`proj-<projectId>`). Shared constant `APP_SCHEMA = \`${ZERO_APP_ID}_0\`` =
-`soot_0` (`src/zero/httpPull.server.ts:22`).
+`proj-<projectId>`). Shared constant `APP_SCHEMA = \`${ZERO_APP_ID}\_0\``=`soot_0` (`src/zero/httpPull.server.ts:22`).
 
 ### A.1 Control plane — `src/zero/httpPull.server.ts`
 
@@ -45,22 +44,22 @@ Composition semantics:
 
 - **Caps**: per-table `LIMIT` inside the snapshot SQL, no byte budget, no
   change-row cap (no log to bound). `usageLedger` `ORDER BY ul."createdAt"
-  DESC LIMIT 200` (`:216-217`); `tokenUsage` `... LIMIT 200` (`:236`).
+DESC LIMIT 200` (`:216-217`); `tokenUsage` `... LIMIT 200` (`:236`).
 - **Prefix LMIDs**: N/A — LMIDs read in full from the group's `clients` rows
   (`SELECT "clientID","lastMutationID" FROM "${APP_SCHEMA}".clients WHERE
-  "clientGroupID"=$1`, `:361-364`), folded into `lastMutationIDChanges`
+"clientGroupID"=$1`, `:361-364`), folded into `lastMutationIDChanges`
   (`:388-391`). No log prefix, so no prefix-bounded LMID.
 - **`visible()`**: no `visible()` abstraction; visibility is inlined per
   statement as WHERE clauses keyed on `$1 = userID`, plus the shared
   full-org-actor predicate `FULL_ORG_ACTOR_SQL` (`:112-114`):
   `(actor.role IN ('owner','admin') OR (actor."accessMode"='all_resources'
-  AND actor."accessLevel"='full'))`, and project rows gated by
+AND actor."accessLevel"='full'))`, and project rows gated by
   `projectAccessSql('project','$1')` unless `isDevOpenAccess()` (`:119-121`).
 - **Skip/throw classifier**: **does not exist on the control plane** (no
   change log to classify). The only table guard is `toZeroRow`, which throws
   on a table missing from the zero schema:
   `throw new ZeroHttpError(500, \`table ${table} missing from zero schema\`)`
-  (`:275`).
+(`:275`).
 - **Cookie/watermark**: derived, not a real change clock.
   `deriveZeroHttpPullCookie` (`src/zero/httpPullWatermark.ts:15-38`) =
   `latestSnapshotClock * 1000 + maxLastMutationID`, scanning only
@@ -134,9 +133,9 @@ Composition semantics:
   skipped **throws** (`diffRowsPatch`, `:326-333`):
   `throw new ZeroHttpError(500, \`change log row for unmapped table
   '${change.table_name}'\`)`. Rationale (`:137-139`): "a silently dropped
-  synced change is permanent client divergence." This is exactly the plan's
-  invariant 10 (explicit skip classifier, throw on unmapped tables) — the Rust
-  engine must reproduce `skipLogTable`'s skip set and throw arm.
+synced change is permanent client divergence." This is exactly the plan's
+invariant 10 (explicit skip classifier, throw on unmapped tables) — the Rust
+engine must reproduce `skipLogTable`'s skip set and throw arm.
 
 Shared plumbing both planes reuse from `httpPull.server.ts`: `claimStatement`
 guarded group→user claim (`:74-90`), `groupOwnersStatement` /
@@ -150,8 +149,8 @@ guarded group→user claim (`:74-90`), `groupOwnersStatement` /
 
 - Entry point: `src/zero/server.ts:13-21` builds `zeroServer` via
   `createZeroServer({ schema, models, createServerActions, queries,
-  mutations: mutationValidators, database: server.ZERO_UPSTREAM_DB,
-  defaultAllowAdminRole: 'all' })`.
+mutations: mutationValidators, database: server.ZERO_UPSTREAM_DB,
+defaultAllowAdminRole: 'all' })`.
 - Sources: `models` = `src/data/generated/models.ts` (24 namespaces,
   auto-generated), each importing `src/data/mutations/<name>.ts`; validators =
   `src/data/generated/syncedMutations.ts` (`mutationValidators`). Client-side
@@ -196,24 +195,24 @@ webhooks / entitlements, never by clients — `subscription.ts:3-4`,
 A mutator namespace often writes tables beyond its own — the DO-local
 transaction must let a single mutator touch several tables atomically:
 
-| Mutator file | Tables written | External effect |
-| --- | --- | --- |
-| agentEvent | agentEvent | — |
-| attachCommand | attachCommand | — |
-| communityListing | communityListing, communityListingLike | — |
-| decision | decision | — |
-| deploySlug | deploySlug | — |
-| deployment | deployment, iosProjectSetup | `enqueueZeroAsyncAction` |
-| message | message, thread | — |
-| project | project, message, sootAgent, sootTask | `enqueueZeroAsyncAction` |
-| snapshot | snapshot | — |
-| sootAgent | sootAgent, message, sootTask, sootTaskComment | `enqueueZeroAsyncAction` |
-| sootSession | sootSession, workspace, worktree | — |
-| sootTask | sootTask, sootAgent, sootTaskComment | `enqueueZeroAsyncAction` |
-| sootTaskComment | sootTaskComment | — |
-| thread | thread | — |
-| userState | userState | — |
-| workspace | workspace | — |
+| Mutator file     | Tables written                                | External effect          |
+| ---------------- | --------------------------------------------- | ------------------------ |
+| agentEvent       | agentEvent                                    | —                        |
+| attachCommand    | attachCommand                                 | —                        |
+| communityListing | communityListing, communityListingLike        | —                        |
+| decision         | decision                                      | —                        |
+| deploySlug       | deploySlug                                    | —                        |
+| deployment       | deployment, iosProjectSetup                   | `enqueueZeroAsyncAction` |
+| message          | message, thread                               | —                        |
+| project          | project, message, sootAgent, sootTask         | `enqueueZeroAsyncAction` |
+| snapshot         | snapshot                                      | —                        |
+| sootAgent        | sootAgent, message, sootTask, sootTaskComment | `enqueueZeroAsyncAction` |
+| sootSession      | sootSession, workspace, worktree              | —                        |
+| sootTask         | sootTask, sootAgent, sootTaskComment          | `enqueueZeroAsyncAction` |
+| sootTaskComment  | sootTaskComment                               | —                        |
+| thread           | thread                                        | —                        |
+| userState        | userState                                     | —                        |
+| workspace        | workspace                                     | —                        |
 
 ### B.3 External side effects
 
@@ -246,6 +245,7 @@ MutatorContext = {
 ```
 
 Required surface (observed in soot mutators):
+
 - `tx.mutate.<table>.{insert,update,delete}(row)` — `deployment.ts:62`,
   `agentEvent.ts:37`.
 - `tx.run(zql.<table>.where(...).one())` reads (`zql` from on-zero) —
@@ -256,12 +256,13 @@ Required surface (observed in soot mutators):
 
 **The seam M4a plugs into** is the browser/DO server shim
 `src/worker/stubs/on-zero-server.ts` (`createZeroServer` there):
+
 - `handleMutationRequest` (`:62-85`) builds mutators via `createMutators({
-  asyncTasks, can, createServerActions, models, authData, validateMutation,
-  mutationValidators })` and runs `processor.process(mutators, request)` where
+asyncTasks, can, createServerActions, models, authData, validateMutation,
+mutationValidators })` and runs `processor.process(mutators, request)` where
   `processor = new PushProcessor(zeroNodePg(schema, externalPool))` (`:54-60`).
 - It **requires an external pool** — `throw '[on-zero/server browser shim]
-  database strings are not supported; pass an external pool'` (`:47-52`). That
+database strings are not supported; pass an external pool'` (`:47-52`). That
   external pool is the seam a DO-local (or Rust-backed) SQLite backend plugs
   into.
 - `transaction()` (`:137-151`) reuses the in-flight `mutatorContext().tx` when
@@ -289,14 +290,14 @@ Rust records LMID + change markers, commit, then `asyncTasks` run.
 - Both resolve via `authDataForSessionToken` — the load-bearing SQL
   (`:118-125`):
   `SELECT s."userId", u.email, u.role FROM session s JOIN "user" u ON
-  u.id=s."userId" WHERE s.token=$1 AND s."expiresAt" > now() LIMIT 1`.
+u.id=s."userId" WHERE s.token=$1 AND s."expiresAt" > now() LIMIT 1`.
   A failed lookup **throws** rather than returning null (documented anti-wedge
   behavior, `:44-51`, `:126-129`).
 - **Normalized claims passed to the engine** (plan's "auth handoff"): `{ userId
-  (→ id), email, role }`. Anonymous identity: signed `soot_anon_id` cookie
+(→ id), email, role }`. Anonymous identity: signed `soot_anon_id` cookie
   (`src/auth/anonCookie.server.ts`, IDs shaped `anon-<hex>`, `:12-14`);
   endpoints fall back to anon when no session (control `app/zero-http/
-  pull+api.tsx:17-18`; project `httpPullProject.server.ts:664-669`).
+pull+api.tsx:17-18`; project `httpPullProject.server.ts:664-669`).
 
 ### C.2 userID → namespace (DO / database)
 
@@ -354,9 +355,9 @@ Rust records LMID + change markers, commit, then `asyncTasks` run.
   `zeroProviderDisable.test.ts`, `zeroFatalLocalStore.test.ts`,
   `zeroAuthUserId.test.ts`.
 - **Gap (flagged):** there is no dedicated `handleZeroHttpPull` control-plane
-  *pull* integration test parallel to `httpPullProject.test.ts` — only the
+  _pull_ integration test parallel to `httpPullProject.test.ts` — only the
   watermark unit test and indirect references (`test/headlessFactorySupervisor
-  .test.ts`, `test/cloudflare-do-deploy.test.ts`). M4a's control-plane
+.test.ts`, `test/cloudflare-do-deploy.test.ts`). M4a's control-plane
   conformance should add one when pointing at the Rust target.
 
 ### D.3 Cloudflare runtime validators + DDL/deploy composition
@@ -404,12 +405,13 @@ Rust records LMID + change markers, commit, then `asyncTasks` run.
 ### E.2 Client sync-path selection — `src/zero/client.tsx` (what a cutover flips)
 
 Both instances are hardwired to `http-pull` today:
+
 - Control: `controlTransport = bootstrapUserGraph ? ('http-pull') : undefined`
   (`:233`), `controlServer = \`${APP_ORIGIN}/zero-http\`` (`:215-217`), mounted
-  `:277-282`.
+`:277-282`.
 - Project: hardcoded `transport="http-pull"`, `pullIntervalMs={15_000}`,
   `cacheURL={projectId ? \`${APP_ORIGIN}/p-${projectId}\` : cacheURL}`
-  (`:431-433`).
+(`:431-433`).
 - **Stale comment (flagged):** `:270` still says the project instance "keeps
   the websocket path" — contradicted by the actual `transport="http-pull"`
   prop at `:431`. Treat the code as authoritative: both planes are http-pull.
@@ -442,7 +444,7 @@ Both instances are hardwired to `http-pull` today:
   `globalThis.__soot_cf_project_pool`, `db.server.ts:55-60`) plus the CF shim
   globals `__soot_cf_do_create_pg_pool`, `__soot_cf_project_pool`,
   `__soot_run_in_ns`, `__soot_background_task` installed by
-  `packages/orez-cf-deploy`. M4a's per-namespace cutover flips *which engine*
+  `packages/orez-cf-deploy`. M4a's per-namespace cutover flips _which engine_
   the namespace routes to, at this seam.
 
 ### E.4 Eventually-deleted surface (M4a/M6)
@@ -464,6 +466,7 @@ zero-cache routes + env + the TS `httpPull.server.ts` / `httpPullProject
 ## F. `plans/sootbean/zero/` index
 
 10 files; migration-relevant:
+
 - `zero-http-project-plane.md` — project-plane http-pull design/contract
   (status BUILT 2026-07-09); names all code files and the `/p-<id>/pull|push`
   → One-router fall-through routing fact.
@@ -491,7 +494,7 @@ zero-cache routes + env + the TS `httpPull.server.ts` / `httpPullProject
    transport props (`client.tsx`) + deployment constant
    (`hasProjectNamespaces()`) + CF shim globals. `ZERO_MUTATE_URL` /
    `ZERO_QUERY_URL` still wire the legacy zero-cache path.
-4. The control-plane cookie is *derived* (`deriveZeroHttpPullCookie`), not a
+4. The control-plane cookie is _derived_ (`deriveZeroHttpPullCookie`), not a
    real change clock; cutover to the Rust real-watermark engine may not
    represent an old derived cookie safely, so control-plane clients likely
    reset on cutover (plan cutover step 5).

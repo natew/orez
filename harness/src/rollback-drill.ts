@@ -77,7 +77,10 @@ function endpoint(label: 'old' | 'new') {
         ],
       }),
     })
-    return { status: response.status, body: (await response.json()) as Record<string, unknown> }
+    return {
+      status: response.status,
+      body: (await response.json()) as Record<string, unknown>,
+    }
   }
 
   async function queryState() {
@@ -94,7 +97,9 @@ function endpoint(label: 'old' | 'new') {
         cookie: null,
         queries: {
           version: 1,
-          patch: [{ op: 'put', hash: 'drill-all-projects', name: 'allProjects', args: [] }],
+          patch: [
+            { op: 'put', hash: 'drill-all-projects', name: 'allProjects', args: [] },
+          ],
         },
       }),
     })
@@ -124,7 +129,10 @@ const newHost = endpoint('new')
 
 async function assertWriterOwnership(expected: 'old' | 'new' | 'none') {
   const [oldStatus, newStatus] = await Promise.all([oldHost.status(), newHost.status()])
-  const enabled = [oldStatus.writerEnabled ? 'old' : null, newStatus.writerEnabled ? 'new' : null]
+  const enabled = [
+    oldStatus.writerEnabled ? 'old' : null,
+    newStatus.writerEnabled ? 'new' : null,
+  ]
     .filter(Boolean)
     .join(',')
   const actual = enabled || 'none'
@@ -143,29 +151,56 @@ function expectPush(result: { status: number }, expected: number, label: string)
 await oldHost.setWriter(true)
 await newHost.setWriter(false)
 await assertWriterOwnership('old')
-expectPush(await oldHost.push('drill-old-client', 1, `${drillID}-old-1`), 200, 'old initial write')
-expectPush(await newHost.push('drill-new-client', 1, `${drillID}-new-rejected`), 503, 'dark new')
+expectPush(
+  await oldHost.push('drill-old-client', 1, `${drillID}-old-1`),
+  200,
+  'old initial write'
+)
+expectPush(
+  await newHost.push('drill-new-client', 1, `${drillID}-new-rejected`),
+  503,
+  'dark new'
+)
 
 // Canary migration: stop old first, then start new.
 await oldHost.setWriter(false)
 await assertWriterOwnership('none')
 await newHost.setWriter(true)
 await assertWriterOwnership('new')
-expectPush(await oldHost.push('drill-old-client', 2, `${drillID}-old-rejected`), 503, 'stopped old')
-expectPush(await newHost.push('drill-new-client', 1, `${drillID}-new-1`), 200, 'new canary write')
+expectPush(
+  await oldHost.push('drill-old-client', 2, `${drillID}-old-rejected`),
+  503,
+  'stopped old'
+)
+expectPush(
+  await newHost.push('drill-new-client', 1, `${drillID}-new-1`),
+  200,
+  'new canary write'
+)
 await newHost.queryState()
 
 // Rollback: stop new and prove rejection before restoring old.
 await newHost.setWriter(false)
 await assertWriterOwnership('none')
-expectPush(await newHost.push('drill-new-client', 2, `${drillID}-new-after-stop`), 503, 'new stopped')
+expectPush(
+  await newHost.push('drill-new-client', 2, `${drillID}-new-after-stop`),
+  503,
+  'new stopped'
+)
 await oldHost.setWriter(true)
 await assertWriterOwnership('old')
-expectPush(await oldHost.push('drill-old-client', 2, `${drillID}-old-2`), 200, 'old restored')
+expectPush(
+  await oldHost.push('drill-old-client', 2, `${drillID}-old-2`),
+  200,
+  'old restored'
+)
 await oldHost.queryState()
 
 const [oldStatus, newStatus] = await Promise.all([oldHost.status(), newHost.status()])
-if ((oldStatus.counters.invariantFailures ?? 0) !== 0 || (newStatus.counters.invariantFailures ?? 0) !== 0) {
+if (
+  (oldStatus.counters.invariantFailures ?? 0) !== 0 ||
+  (newStatus.counters.invariantFailures ?? 0) !== 0
+) {
   throw new Error('invariant failure counter increased during rollback drill')
 }
 
@@ -177,5 +212,5 @@ console.log(
     phases: ['old-only', 'none', 'new-only', 'none', 'old-only'],
     oldEngine: oldStatus.engine,
     newEngine: newStatus.engine,
-  }),
+  })
 )

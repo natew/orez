@@ -30,12 +30,12 @@ written; the drizzle source is `~/chat/drizzle-zero.config.ts` +
 Only four Zero column types appear across all 51 tables
 (`grep "type: '...'" schema.ts`):
 
-| Zero type | count | SQLite mapping (for M4b `toZeroValue`) |
-| --- | --- | --- |
-| `string` | 329 | TEXT |
-| `number` | 127 | INTEGER or REAL (JS number; i64/2^53 boundary per M0) |
-| `boolean` | 40 | INTEGER 0/1 |
-| `json` | 38 | TEXT (parsed on read) |
+| Zero type | count | SQLite mapping (for M4b `toZeroValue`)                |
+| --------- | ----- | ----------------------------------------------------- |
+| `string`  | 329   | TEXT                                                  |
+| `number`  | 127   | INTEGER or REAL (JS number; i64/2^53 boundary per M0) |
+| `boolean` | 40    | INTEGER 0/1                                           |
+| `json`    | 38    | TEXT (parsed on read)                                 |
 
 No blob, no date/timestamp column type: timestamps are `number` (epoch ms,
 e.g. `notification.createdAt` `schema.ts:2196-2200`). JSON columns carry
@@ -49,36 +49,36 @@ All 51 synced tables with PKs (from `schema.ts`). **9 have composite PKs**
 (bolded) — these force the ordering tie-breaker (invariant 16) and any
 cursor/limit logic to key on multiple columns:
 
-| Table | PK | Table | PK |
-| --- | --- | --- | --- |
-| agentConfig | id | messageReaction | **messageId, creatorId, reactionId** |
-| apiKey | id | messageReactionStats | **messageId, reactionId** |
-| app | id | messageRoleMention | id |
-| appInstall | id | messageUserMention | id |
-| appInstallPermission | id | notification | id |
-| appSource | **appId** | pin | id |
-| approval | id | privateBetaInvite | id |
-| attachment | id | privateChatsStats | **serverId, userServerId** |
-| channel | id | reaction | id |
-| channelActive | **userId, channelId** | role | id |
-| channelAgentConfig | **channelId, agentConfigId** | seen | id |
-| channelNotificationSetting | id | server | id |
-| channelNotificationState | id | serverAction | id |
-| channelPermission | id | serverLog | id |
-| channelTopic | id | serverMember | **serverId, userId** |
-| channelTopicMessage | id | skill | id |
-| contentVersion | id | thread | id |
-| data | id | userPublic | id |
-| device | id | userRole | **serverId, userId, roleId** |
-| flow | id | userState | id |
-| flowRun | id | waitlist | id |
-| flowRunDetail | **flowRunId** | meeting | id |
-| friendship | **requestingId, acceptingId** | meetingUser | **meetingId, userId** |
-| indicator | id | channelTopicMessage | id |
-| invite | id | | |
-| job | id | | |
-| message | id | | |
-| messageChannelMention | id | | |
+| Table                      | PK                            | Table                | PK                                   |
+| -------------------------- | ----------------------------- | -------------------- | ------------------------------------ |
+| agentConfig                | id                            | messageReaction      | **messageId, creatorId, reactionId** |
+| apiKey                     | id                            | messageReactionStats | **messageId, reactionId**            |
+| app                        | id                            | messageRoleMention   | id                                   |
+| appInstall                 | id                            | messageUserMention   | id                                   |
+| appInstallPermission       | id                            | notification         | id                                   |
+| appSource                  | **appId**                     | pin                  | id                                   |
+| approval                   | id                            | privateBetaInvite    | id                                   |
+| attachment                 | id                            | privateChatsStats    | **serverId, userServerId**           |
+| channel                    | id                            | reaction             | id                                   |
+| channelActive              | **userId, channelId**         | role                 | id                                   |
+| channelAgentConfig         | **channelId, agentConfigId**  | seen                 | id                                   |
+| channelNotificationSetting | id                            | server               | id                                   |
+| channelNotificationState   | id                            | serverAction         | id                                   |
+| channelPermission          | id                            | serverLog            | id                                   |
+| channelTopic               | id                            | serverMember         | **serverId, userId**                 |
+| channelTopicMessage        | id                            | skill                | id                                   |
+| contentVersion             | id                            | thread               | id                                   |
+| data                       | id                            | userPublic           | id                                   |
+| device                     | id                            | userRole             | **serverId, userId, roleId**         |
+| flow                       | id                            | userState            | id                                   |
+| flowRun                    | id                            | waitlist             | id                                   |
+| flowRunDetail              | **flowRunId**                 | meeting              | id                                   |
+| friendship                 | **requestingId, acceptingId** | meetingUser          | **meetingId, userId**                |
+| indicator                  | id                            | channelTopicMessage  | id                                   |
+| invite                     | id                            |                      |                                      |
+| job                        | id                            |                      |                                      |
+| message                    | id                            |                      |                                      |
+| messageChannelMention      | id                            |                      |                                      |
 
 Note `appSource.PK = appId` (not `id`) and `flowRunDetail.PK = flowRunId`;
 single-column but not the usual `id`.
@@ -90,16 +90,16 @@ single-column but not the usual `id`.
 relationship whose value is an array of two connection objects, which the
 compiler must expand into the intermediate table (two joins), not one:
 
-| Junction (source → junction table → dest) | schema.ts | Used in |
-| --- | --- | --- |
-| channel.`roles` → channelPermission → role | :3686 | `channelWithRoles`, `currentServer.roles` |
-| channel.`channelUserRoles` → channelPermission → userRole | :3714 | **channel read permission** `where/channel.ts:43,66,89` |
-| server.`members` → serverMember → userPublic | :4745 | membership listings |
-| server.`installedApps` → appInstall → app | :4986 | app UI |
-| userPublic.`servers` → serverMember → server | :5247 | |
-| userPublic.`friends` → friendship → userPublic (self-join) | :5627 | `userWithFriends` |
-| userPublic.`userRoles` → userRole → role | :5641 | roles |
-| (+ role.`role`, channel.`messages`, server.`member`, userPublic.`server`, server.`servers` two-hop entries) | | |
+| Junction (source → junction table → dest)                                                                   | schema.ts | Used in                                                 |
+| ----------------------------------------------------------------------------------------------------------- | --------- | ------------------------------------------------------- |
+| channel.`roles` → channelPermission → role                                                                  | :3686     | `channelWithRoles`, `currentServer.roles`               |
+| channel.`channelUserRoles` → channelPermission → userRole                                                   | :3714     | **channel read permission** `where/channel.ts:43,66,89` |
+| server.`members` → serverMember → userPublic                                                                | :4745     | membership listings                                     |
+| server.`installedApps` → appInstall → app                                                                   | :4986     | app UI                                                  |
+| userPublic.`servers` → serverMember → server                                                                | :5247     |                                                         |
+| userPublic.`friends` → friendship → userPublic (self-join)                                                  | :5627     | `userWithFriends`                                       |
+| userPublic.`userRoles` → userRole → role                                                                    | :5641     | roles                                                   |
+| (+ role.`role`, channel.`messages`, server.`member`, userPublic.`server`, server.`servers` two-hop entries) |           |                                                         |
 
 The junction `channelUserRoles` is security-relevant: the channel read
 predicate resolves "does this user have a role on this private channel" by an
@@ -207,20 +207,20 @@ manual `.where(col, op, val)` pagination. `.start()` is used **nowhere**.
 
 Grep of `src/data/queries/`:
 
-| Operator | count | files | example |
-| --- | --- | --- | --- |
-| `=` (implicit + explicit) | pervasive | all | `.where('id', props.channelId)` `channel.ts:26` |
-| `!=` | pervasive | many | `.where('deleted', '!=', true)` `channel.ts:34` |
-| `<` `<=` `>` `>=` | 15 | data, channel, server, message, channelTopic | `.where('createdAt', '>=', x)` `data.ts:54` |
-| `IN` | 7 | channel, data, message, app | `.where('id', 'IN', props.channelIds)` `channel.ts:39` |
-| `LIKE` | 3 | data, devtools, user | `.where('key', 'LIKE', props.keyPattern)` `data.ts:181` |
-| `ILIKE` | 11 | data, channel, message, server, user | `.where('username', 'ILIKE', '%'+s+'%')` `server.ts:90` |
-| `IS` (NULL) | (of 9) | server, message | `.where('userId', 'IS', null)` `server.ts:143` |
-| `IS NOT` (NOT NULL) | (of 9) | channel, devtools | `.where('threadId', 'IS NOT', null)` `channel.ts:211` |
-| `.orderBy` | 50 | many | dynamic col in `data.dataSearch`, `job.jobsSorted`, `devtools.exploreTable` |
-| `.related` | 93 | many | nested to 3-4 levels; junctions |
-| `whereExists`/`exists` | 40 | queries + `where/*` | nested to 3 levels |
-| `.one` | 109 | many | compiles to LIMIT 1 |
+| Operator                  | count     | files                                        | example                                                                     |
+| ------------------------- | --------- | -------------------------------------------- | --------------------------------------------------------------------------- |
+| `=` (implicit + explicit) | pervasive | all                                          | `.where('id', props.channelId)` `channel.ts:26`                             |
+| `!=`                      | pervasive | many                                         | `.where('deleted', '!=', true)` `channel.ts:34`                             |
+| `<` `<=` `>` `>=`         | 15        | data, channel, server, message, channelTopic | `.where('createdAt', '>=', x)` `data.ts:54`                                 |
+| `IN`                      | 7         | channel, data, message, app                  | `.where('id', 'IN', props.channelIds)` `channel.ts:39`                      |
+| `LIKE`                    | 3         | data, devtools, user                         | `.where('key', 'LIKE', props.keyPattern)` `data.ts:181`                     |
+| `ILIKE`                   | 11        | data, channel, message, server, user         | `.where('username', 'ILIKE', '%'+s+'%')` `server.ts:90`                     |
+| `IS` (NULL)               | (of 9)    | server, message                              | `.where('userId', 'IS', null)` `server.ts:143`                              |
+| `IS NOT` (NOT NULL)       | (of 9)    | channel, devtools                            | `.where('threadId', 'IS NOT', null)` `channel.ts:211`                       |
+| `.orderBy`                | 50        | many                                         | dynamic col in `data.dataSearch`, `job.jobsSorted`, `devtools.exploreTable` |
+| `.related`                | 93        | many                                         | nested to 3-4 levels; junctions                                             |
+| `whereExists`/`exists`    | 40        | queries + `where/*`                          | nested to 3 levels                                                          |
+| `.one`                    | 109       | many                                         | compiles to LIMIT 1                                                         |
 
 Boolean combinators `.and` / `.or` / `.not` are used throughout the `where/`
 predicates and inline (e.g. `message.ts:205-207` `eb.or(...)`,
@@ -239,7 +239,7 @@ predicates and inline (e.g. `message.ts:205-207` `eb.or(...)`,
   (before/after), no `.start()`.
 - **`server.currentServer`** (`queries/server.ts:35-43`) — readPermission is a
   deep boolean: `_.or(_.and(cmp,_.or(cmp,cmp)), _.and(_.not(cmp),cmp),
-  _.and(_.not(cmp),cmp,_.exists('member',...)))` (`server.ts:18-33`) — NOT +
+_.and(_.not(cmp),cmp,_.exists('member',...)))` (`server.ts:18-33`) — NOT +
   correlated EXISTS + nested and/or. Then R(member.one, roles.limit(100),
   apps→install.one).
 - **`channel.channelMembers`** (`queries/channel.ts:82-131`) — 3-level
@@ -297,7 +297,7 @@ by feature, so nothing is missed by M4b:
   `serverMembers`/`serverMemberById`; `useVirtualChannelMembers` →
   `channelMembers`/`channelMemberById`), except one genuinely inline builder:
   `DialogAllPins.tsx:52-56` `queryMessageItemRelationsMinimal(zql.message
-  .where('id', id), serverId).one()`.
+.where('id', id), serverId).one()`.
 - **Runtime sandbox** (`MarkdownSandboxQuery.tsx:86` + `runQuerySandbox.ts:11-30`):
   `new Function`-evals a `zero.query.<table>.where(...)` string from markdown.
   **Arbitrary, user-authored shape.** Devtools/markdown-only, not in the e2e
@@ -319,21 +319,21 @@ The `_` builder methods used: `.exists(rel, sub)`, `.whereExists(rel, sub)`,
 
 ### 4.1 `where/server.ts` (all cross-table EXISTS over server relations)
 
-| Predicate | Family | Shape | Cross-table? |
-| --- | --- | --- | --- |
-| `hasServerOwnerPermission` :4 | allow | EXISTS server WHERE creatorId=me OR userId=me | yes (server) |
-| `hasServerAdminPermission` :13 | allow | EXISTS server → EXISTS userRoles(userId=me, canAdmin) | yes (userRole) |
-| `hasServerChannelManagePermission` :21 | allow | EXISTS userRoles(me, canAdmin\|canEditChannel\|canEditServer) | yes |
-| `hasServerAppManagePermission` :37 | allow | EXISTS userRoles(me, canAdmin\|canEditApp\|canEditServer) | yes |
-| `hasServerModeratePermission` :53 | allow | EXISTS userRoles(me, canAdmin\|canModerate) | yes |
-| `hasServerMemberPermission` :65 | allow | EXISTS server → EXISTS serverMembers(userId=me) | yes (serverMember) |
-| `hasServerReadPermission` :73 | allow | EXISTS server WHERE private=false OR EXISTS serverMembers(me) | yes |
+| Predicate                              | Family | Shape                                                         | Cross-table?       |
+| -------------------------------------- | ------ | ------------------------------------------------------------- | ------------------ |
+| `hasServerOwnerPermission` :4          | allow  | EXISTS server WHERE creatorId=me OR userId=me                 | yes (server)       |
+| `hasServerAdminPermission` :13         | allow  | EXISTS server → EXISTS userRoles(userId=me, canAdmin)         | yes (userRole)     |
+| `hasServerChannelManagePermission` :21 | allow  | EXISTS userRoles(me, canAdmin\|canEditChannel\|canEditServer) | yes                |
+| `hasServerAppManagePermission` :37     | allow  | EXISTS userRoles(me, canAdmin\|canEditApp\|canEditServer)     | yes                |
+| `hasServerModeratePermission` :53      | allow  | EXISTS userRoles(me, canAdmin\|canModerate)                   | yes                |
+| `hasServerMemberPermission` :65        | allow  | EXISTS server → EXISTS serverMembers(userId=me)               | yes (serverMember) |
+| `hasServerReadPermission` :73          | allow  | EXISTS server WHERE private=false OR EXISTS serverMembers(me) | yes                |
 
 ### 4.2 `where/channel.ts` (server membership + channel-role EXISTS, incl. junction)
 
 - `hasChannelSelfReadPermission` :39 — `_.and(deleted != true,
-  hasServerReadPermissionOnChannelSelf, _.or(private=false,
-  EXISTS channelUserRoles(me), isServerAdmin))`. Uses the **junction**
+hasServerReadPermissionOnChannelSelf, _.or(private=false,
+EXISTS channelUserRoles(me), isServerAdmin))`. Uses the **junction**
   `channelUserRoles` (:43) and nested server EXISTS.
 - `hasServerReadPermissionOnChannelSelf` :28 — EXISTS server WHERE (private=false
   OR EXISTS serverMembers(me)).
@@ -350,8 +350,8 @@ The `_` builder methods used: `.exists(rel, sub)`, `.whereExists(rel, sub)`,
 ### 4.3 `where/message.ts` (channel read + solo-channel + NOT EXISTS)
 
 - `hasMessageReadPermission` :4 — admin bypass; else `_.and(deleted != true,
-  hasChannelReadPermission, soloCheck)` where `soloCheck = _.or(
-  _.not(_.exists('channel', solo=true)), creatorId=me, type='bot')`
+hasChannelReadPermission, soloCheck)` where `soloCheck = _.or(
+_.not(_.exists('channel', solo=true)), creatorId=me, type='bot')`
   (`:10-14`). **NOT + EXISTS** plus a transitive channel-read EXISTS chain.
 - `hasRelatedMessageReadPermission` :19 — same logic wrapped in
   `EXISTS message(...)` for `messageReaction`.
@@ -359,8 +359,8 @@ The `_` builder methods used: `.exists(rel, sub)`, `.whereExists(rel, sub)`,
 ### 4.4 `where/data.ts` (membership + row-local secret/permission gate)
 
 - `hasDataReadPermission` :23 — `_.and(isServerMember (EXISTS serverMembers),
-  permissions != 'secret', _.or(public, creator, owner, hasViewRole
-  (EXISTS userRoles canViewData), admin))`. Mixes **cross-table EXISTS** with
+permissions != 'secret', _.or(public, creator, owner, hasViewRole
+(EXISTS userRoles canViewData), admin))`. Mixes **cross-table EXISTS** with
   **row-local** column checks. The `!= 'secret'` is the guard that keeps
   secret rows (API keys, OAuth tokens) out of every client store.
 - `hasDataWritePermission` :43, `hasDataViewRole` :5, `hasDataEditRole` :14 —
@@ -419,7 +419,7 @@ Surface the DO-local SQLite adapter must provide (observed in
 - `tx.mutate.<table>.{insert,upsert,update,delete}(row)` — e.g. `:79`,
   `:103`, `:112`, `:244`.
 - `tx.run(query)` — read inside the tx, e.g. `:86` `tx.run(zql.message
-  .where('id', ...).one())`.
+.where('id', ...).one())`.
 - module-level `run(query)` (on-zero) for SSR reads — e.g. `:289`, `:307`.
 - `ctx.can(permission, obj)` — throws → Zero rolls back the tx.
 - `ctx.authData` — id/role for permission and creator resolution.
@@ -435,23 +435,23 @@ writes such as `helpers/insertServer.ts` add more, so treat this as a lower
 bound). `eff` = has external/deferred side effects (`asyncTasks` /
 `server.actions` / `server-effects`):
 
-| Mutator | Tables written | eff | Mutator | Tables written | eff |
-| --- | --- | --- | --- | --- | --- |
-| admin | privateBetaInvite, waitlist | y | message | attachment, message, message{Channel,Role,User}Mention | y |
-| agentConfig | agentConfig | | messageReaction | messageReaction | y |
-| apiKey | apiKey | | notification | notification | y |
-| app | app, message, thread | y | pin | message, pin | |
-| appInstall | appInstall, channel | y | role | role | |
-| approval | approval, notification | y | secret | appInstall | |
-| channel | channel, message, notification, server | | seen | seen | |
-| contentVersion | agentConfig, app, appSource, channel, contentVersion, flow, server, skill | | serverAction | serverAction, serverLog | y |
-| data | data | y | serverMember | serverLog, serverMember | y |
-| flow | flow, message, thread | y | thread | message, thread | y |
-| flowRun | flowRun | y | userPublic | userPublic | y |
-| friendship | friendship, notification | | userState | userState | y |
-| indicator | indicator | y | waitlist | waitlist | |
-| invite | invite | y | job | job | |
-| meeting | meeting, meetingUser | y | | | |
+| Mutator        | Tables written                                                            | eff | Mutator         | Tables written                                         | eff |
+| -------------- | ------------------------------------------------------------------------- | --- | --------------- | ------------------------------------------------------ | --- |
+| admin          | privateBetaInvite, waitlist                                               | y   | message         | attachment, message, message{Channel,Role,User}Mention | y   |
+| agentConfig    | agentConfig                                                               |     | messageReaction | messageReaction                                        | y   |
+| apiKey         | apiKey                                                                    |     | notification    | notification                                           | y   |
+| app            | app, message, thread                                                      | y   | pin             | message, pin                                           |     |
+| appInstall     | appInstall, channel                                                       | y   | role            | role                                                   |     |
+| approval       | approval, notification                                                    | y   | secret          | appInstall                                             |     |
+| channel        | channel, message, notification, server                                    |     | seen            | seen                                                   |     |
+| contentVersion | agentConfig, app, appSource, channel, contentVersion, flow, server, skill |     | serverAction    | serverAction, serverLog                                | y   |
+| data           | data                                                                      | y   | serverMember    | serverLog, serverMember                                | y   |
+| flow           | flow, message, thread                                                     | y   | thread          | message, thread                                        | y   |
+| flowRun        | flowRun                                                                   | y   | userPublic      | userPublic                                             | y   |
+| friendship     | friendship, notification                                                  |     | userState       | userState                                              | y   |
+| indicator      | indicator                                                                 | y   | waitlist        | waitlist                                               |     |
+| invite         | invite                                                                    | y   | job             | job                                                    |     |
+| meeting        | meeting, meetingUser                                                      | y   |                 |                                                        |     |
 
 Mutators write more than their own table. `message.send` /`insert` writes
 `message`, then `applyMessageDerivedState` (`:573-592`) updates channel latest
@@ -502,6 +502,7 @@ permission trio: `permissions-visibility`, `permissions-messages`,
 
 **Permission coverage** (the families the query engine must keep green),
 describe/test titles:
+
 - admin / member / outsider × visibility (`permissions-visibility.test.ts`):
   public vs private server discovery + sidebar, public/private channel access,
   member-without-role cannot post in private channel.
@@ -519,10 +520,11 @@ assertions) are **new work** — the current suite verifies visibility through
 the rendered tree, so M4b/M4c must add direct store inspection.
 
 **Current skip list** (only two, both in the e2e suite):
+
 - `src/integration/e2e/onboarding.test.ts:142` — `test.skip('complete
-  onboarding flow — form, chat with HUD, continue')`.
+onboarding flow — form, chat with HUD, continue')`.
 - `src/integration/e2e/channels.test.ts:233` — `test.fixme('mute/unmute cycle
-  works')`.
+works')`.
 
 M4c exit gate ("complete Chat end-to-end suite with zero new skips") is
 measured against this baseline: 2 pre-existing skips, no others.
@@ -560,7 +562,7 @@ harness case per the plan.
 7. **Limits**, including `limit(0)` (`topPrivateChats`) and `min(1000, n)`
    caps; `.one()` = LIMIT 1.
 8. **Cursor pagination via comparison operators** (`where(col, </>, cursor)`
-   + `orderBy` + `limit`) — **not** `.start()`.
+   - `orderBy` + `limit`) — **not** `.start()`.
 9. **Parameter binding** with positional `?` and **no** SQL string
    interpolation; arrays bind to `IN (?, ?, …)`. Bind types: string, number,
    boolean, null, string[].

@@ -33,7 +33,14 @@ const native: Lane[] = [
   },
   {
     name: 'native-eviction',
-    command: ['bun', 'src/eviction.ts', '--target', 'rust-local', '--clients', quick ? '5' : '20'],
+    command: [
+      'bun',
+      'src/eviction.ts',
+      '--target',
+      'rust-local',
+      '--clients',
+      quick ? '5' : '20',
+    ],
   },
   {
     name: 'native-retention-reconnect',
@@ -45,7 +52,14 @@ const native: Lane[] = [
   },
   {
     name: 'native-clock-skew',
-    command: ['bun', 'src/clock-skew.ts', '--target', 'rust-local', '--clock-skew-hours', '24'],
+    command: [
+      'bun',
+      'src/clock-skew.ts',
+      '--target',
+      'rust-local',
+      '--clock-skew-hours',
+      '24',
+    ],
   },
   {
     name: 'native-storage-faults',
@@ -71,7 +85,14 @@ const cf: Lane[] = [
   },
   {
     name: 'cf-eviction',
-    command: ['bun', 'src/eviction.ts', '--target', 'rust-cf', '--clients', quick ? '5' : '20'],
+    command: [
+      'bun',
+      'src/eviction.ts',
+      '--target',
+      'rust-cf',
+      '--clients',
+      quick ? '5' : '20',
+    ],
   },
   {
     name: 'cf-retention-reconnect',
@@ -83,7 +104,14 @@ const cf: Lane[] = [
   },
   {
     name: 'cf-clock-skew',
-    command: ['bun', 'src/clock-skew.ts', '--target', 'rust-cf', '--clock-skew-hours', '24'],
+    command: [
+      'bun',
+      'src/clock-skew.ts',
+      '--target',
+      'rust-cf',
+      '--clock-skew-hours',
+      '24',
+    ],
   },
   {
     name: 'cf-storage-faults',
@@ -108,7 +136,8 @@ const cf: Lane[] = [
   },
 ]
 
-const lanes = args.suite === 'native' ? native : args.suite === 'cf' ? cf : [...native, ...cf]
+const lanes =
+  args.suite === 'native' ? native : args.suite === 'cf' ? cf : [...native, ...cf]
 const started = performance.now()
 for (const lane of lanes) {
   console.log(`[m6] START ${lane.name}`)
@@ -131,5 +160,5 @@ console.log(
     quick,
     lanes: lanes.map(({ name }) => name),
     elapsedMs: Math.round(performance.now() - started),
-  }),
+  })
 )

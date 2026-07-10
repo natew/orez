@@ -19,7 +19,7 @@ const server = externalURL
         cwd: new URL('.', import.meta.url).pathname,
         stdout: 'inherit',
         stderr: 'inherit',
-      },
+      }
     )
 const baseURL = externalURL ?? `http://127.0.0.1:${port}`
 
@@ -63,7 +63,11 @@ try {
   check(result.body.state.balance, 110, 'read-then-write balance')
   check(result.body.state.ledgerCount, 1, 'read-then-write ledger')
   check(result.body.state.sideEffectCount, 1, 'post-commit effect count')
-  check(result.body.state.sideEffects[0].observedCommitted, true, 'effect observed commit')
+  check(
+    result.body.state.sideEffects[0].observedCommitted,
+    true,
+    'effect observed commit'
+  )
 
   result = await call(transactions, '/push/multi-table', { mutationID: 'm2' })
   check(result.status, 200, 'multi-table status')
@@ -77,18 +81,30 @@ try {
   result = await call(transactions, '/push/application-error', { mutationID: 'm3' })
   check(result.status, 409, 'application error status')
   check(result.body.effectsDeferredButNotRun, 1, 'failed mutator deferred an effect')
-  check(result.body.state, beforeAppError, 'application error rolls back and runs no effect')
+  check(
+    result.body.state,
+    beforeAppError,
+    'application error rolls back and runs no effect'
+  )
 
   const jsError = ns('js-error')
   result = await call(jsError, '/js-exception')
   check(result.status, 409, 'JS exception status')
-  check(result.body.after, result.body.before, 'awaited JS exception rolls back every effect and LMID')
+  check(
+    result.body.after,
+    result.body.before,
+    'awaited JS exception rolls back every effect and LMID'
+  )
   check(result.body.after.lmid, '0', 'JS exception cannot advance LMID')
 
   const rustPanic = ns('rust-panic')
   result = await call(rustPanic, '/rust-panic')
   check(result.status, 409, 'Rust panic status')
-  check(result.body.after, result.body.before, 'Rust panic rolls back every effect and LMID')
+  check(
+    result.body.after,
+    result.body.before,
+    'Rust panic rolls back every effect and LMID'
+  )
   check(result.body.after.lmid, '0', 'Rust panic cannot advance LMID')
 
   const values = ns('values')
@@ -123,13 +139,23 @@ try {
   check(
     afterEviction.body.reinstantiations,
     beforeEviction.body.reinstantiations + 1,
-    'one additional idle teardown was observed',
+    'one additional idle teardown was observed'
   )
   check(afterEviction.body.state.lmid, '1', 'LMID persists across re-instantiation')
-  check(afterEviction.body.state.balance, 110, 'application data persists across re-instantiation')
-  check(afterEviction.body.state.mutationCount, 1, 'mutation record persists across re-instantiation')
+  check(
+    afterEviction.body.state.balance,
+    110,
+    'application data persists across re-instantiation'
+  )
+  check(
+    afterEviction.body.state.mutationCount,
+    1,
+    'mutation record persists across re-instantiation'
+  )
 
-  console.log(`M0 ${externalURL ? 'deployed' : 'local workerd'} probe passed (${assertions} assertions)`)
+  console.log(
+    `M0 ${externalURL ? 'deployed' : 'local workerd'} probe passed (${assertions} assertions)`
+  )
 } finally {
   if (server) {
     server.kill()

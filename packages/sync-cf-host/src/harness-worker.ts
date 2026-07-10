@@ -1,5 +1,5 @@
-import { createSyncDurableObject, createSyncWorker } from './index.js'
 import { harnessConfig } from './harness-config.js'
+import { createSyncDurableObject, createSyncWorker } from './index.js'
 
 import type { SyncHostEnv } from './index.js'
 

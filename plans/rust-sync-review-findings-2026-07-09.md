@@ -112,7 +112,7 @@ open until these close.
   valid cursor with a null ordered value hides all later rows.
 - GAP-2c (NEW from a840443): ROW_NUMBER window alias `_zrn` hard-coded
   but legal as an application column; a child table with its own `_zrn`
-  makes the window filter compare against app data (repro: app _zrn=99,
+  makes the window filter compare against app data (repro: app \_zrn=99,
   limit 1 -> zero rows).
 - GAP-3a (blocking): the query-schema migration reset wipes
   defs/desires/acks/membership but never invalidates the baseline
@@ -129,5 +129,5 @@ Separately root-caused by the coordinator during this round (fixed,
 keeping admin namespace knobs (query-aware/visibility/retention) in
 instance fields; a DO restart reverted a query-aware namespace to
 baseline and every pull answered {unchanged:true}. Knobs now persist in
-_zsync_host_control with a workerd kill+restart regression lane
+\_zsync_host_control with a workerd kill+restart regression lane
 (test:restart).

@@ -66,12 +66,12 @@ Release build, in-memory SQLite.
 
 Full authorized snapshot per namespace:
 
-| namespace | channels | members | msgs/channel | total messages | authorized rows | snapshot bytes | engine time |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| small | 10 | 20 | 100 | 1,000 | 1,000 | 0.4 MB | 1.9 ms |
-| medium | 30 | 100 | 500 | 15,000 | 15,000 | 5.4 MB | 26.7 ms |
-| large | 50 | 300 | 2,000 | 100,000 | 100,000 | 35.8 MB | 178.7 ms |
-| message-heavy | 80 | 500 | 6,250 | 500,000 | 500,000 | 179.5 MB | 908.6 ms |
+| namespace     | channels | members | msgs/channel | total messages | authorized rows | snapshot bytes | engine time |
+| ------------- | -------: | ------: | -----------: | -------------: | --------------: | -------------: | ----------: |
+| small         |       10 |      20 |          100 |          1,000 |           1,000 |         0.4 MB |      1.9 ms |
+| medium        |       30 |     100 |          500 |         15,000 |          15,000 |         5.4 MB |     26.7 ms |
+| large         |       50 |     300 |        2,000 |        100,000 |         100,000 |        35.8 MB |    178.7 ms |
+| message-heavy |       80 |     500 |        6,250 |        500,000 |         500,000 |       179.5 MB |    908.6 ms |
 
 Snapshot bytes and engine time scale linearly with the authorized message count
 (~376 bytes and ~1.8 microseconds of engine time per message). The non-message
@@ -85,12 +85,12 @@ instead of the whole namespace: one open channel's most-recent message window
 list). The window is a fixed ~36 KB and ~1 ms of engine time regardless of
 namespace size, because it ships the limit, not the history:
 
-| namespace | full snapshot | windowed query (1 channel, 100 msgs) | snapshot / window bytes |
-| --- | ---: | ---: | ---: |
-| small | 0.4 MB / 1.9 ms | 36.3 KB / 0.21 ms | 10x |
-| medium | 5.4 MB / 26.7 ms | 36.4 KB / 0.47 ms | 151x |
-| large | 35.8 MB / 178.7 ms | 36.4 KB / 0.99 ms | 1007x |
-| message-heavy | 179.5 MB / 908.6 ms | 36.5 KB / 1.56 ms | 5034x |
+| namespace     |       full snapshot | windowed query (1 channel, 100 msgs) | snapshot / window bytes |
+| ------------- | ------------------: | -----------------------------------: | ----------------------: |
+| small         |     0.4 MB / 1.9 ms |                    36.3 KB / 0.21 ms |                     10x |
+| medium        |    5.4 MB / 26.7 ms |                    36.4 KB / 0.47 ms |                    151x |
+| large         |  35.8 MB / 178.7 ms |                    36.4 KB / 0.99 ms |                   1007x |
+| message-heavy | 179.5 MB / 908.6 ms |                    36.5 KB / 1.56 ms |                   5034x |
 
 ## What the numbers say
 
