@@ -11,6 +11,7 @@
 //   POST /<ns>/admin/invalidate         epoch bump
 //   POST /<ns>/admin/reset-cursor       restored/behind-server fault
 //   POST /<ns>/admin/drop-next-push-response  lost-response fault
+//   POST /<ns>/admin/fault              arm a one-shot pull/push lifecycle fault (M6)
 //   GET  /admin/health                  process readiness (no namespace)
 
 use std::collections::{HashMap, HashSet};
@@ -33,6 +34,7 @@ use sync_core::{Row, SqlValue, SyncDb};
 
 use sync_native::db::RusqliteDb;
 use sync_native::engine::{self, EngineContext};
+use sync_native::fault::{FaultKind, FaultPoint, FaultRegistry};
 use sync_native::namespace::{InitFn, Manager};
 use sync_native::obs::{self, Counters};
 use sync_native::wake::WakeRegistry;
@@ -44,6 +46,8 @@ struct AppState {
     boot_id: String,
     // process-wide aggregate telemetry (mirrors the CF host's counters)
     counters: Counters,
+    // harness/operator fault injection, armed per namespace (M6)
+    faults: Arc<FaultRegistry>,
     // namespaces with a one-shot "drop the next push response" fault armed
     drop_push: Mutex<HashSet<String>>,
 }
@@ -136,6 +140,7 @@ async fn main() {
         ctx,
         boot_id: boot_id(),
         counters: Counters::default(),
+        faults: FaultRegistry::new(),
         drop_push: Mutex::new(HashSet::new()),
     });
 
@@ -149,6 +154,7 @@ async fn main() {
         .route("/{ns}/admin/invalidate", post(admin_invalidate))
         .route("/{ns}/admin/reset-cursor", post(admin_reset_cursor))
         .route("/{ns}/admin/drop-next-push-response", post(admin_drop_push))
+        .route("/{ns}/admin/fault", post(admin_fault))
         .with_state(state);
 
     let listener = TcpListener::bind(("127.0.0.1", config.port))
@@ -205,9 +211,11 @@ async fn pull(
     let input_cookie = value.get("cookie").cloned().unwrap_or(Value::Null);
     let query_puts = obs::count_query_puts(&value);
     let ctx = state.ctx.clone();
+    let faults = state.faults.clone();
+    let fault_ns = ns.clone();
     let tx_started = Instant::now();
     let observed = namespace
-        .run(move |conn| engine::pull(conn, &ctx, &value, &user_id))
+        .run(move |conn| engine::pull(conn, &ctx, &faults, &fault_ns, &value, &user_id))
         .await;
     let transaction_ms = tx_started.elapsed().as_millis() as u64;
     Counters::bump(&state.counters.pulls);
@@ -300,9 +308,11 @@ async fn push(
     };
     let ns_hash = obs::namespace_hash(&ns);
     let ctx = state.ctx.clone();
+    let faults = state.faults.clone();
+    let fault_ns = ns.clone();
     let tx_started = Instant::now();
     let observed = namespace
-        .run(move |conn| engine::push(conn, &ctx, &value, &user_id))
+        .run(move |conn| engine::push(conn, &ctx, &faults, &fault_ns, &value, &user_id))
         .await;
     let transaction_ms = tx_started.elapsed().as_millis() as u64;
     Counters::bump(&state.counters.pushes);
@@ -458,6 +468,57 @@ async fn admin_reset_cursor(
 async fn admin_drop_push(State(state): State<Arc<AppState>>, Path(ns): Path<String>) -> Response {
     state.arm_drop_push(&ns);
     json_status(200, json!({ "ok": true }))
+}
+
+// arm a one-shot fault for a namespace at a precise pull/push lifecycle point (M6).
+// body: { "point": <point>, "kind": "kill" | "error" | "quota" }, or { "clear": true }
+// to disarm. operator/harness-only: this host is 127.0.0.1-bound and admin/* is not
+// reachable by sync clients.
+async fn admin_fault(
+    State(state): State<Arc<AppState>>,
+    Path(ns): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Ok(value) = serde_json::from_slice::<Value>(&body) else {
+        return json_status(400, json!({ "error": "invalid json" }));
+    };
+    if value.get("clear").and_then(Value::as_bool) == Some(true) {
+        state.faults.clear(&ns);
+        return json_status(200, json!({ "ok": true, "armed": false }));
+    }
+    let Some(point) = value
+        .get("point")
+        .and_then(Value::as_str)
+        .and_then(FaultPoint::parse)
+    else {
+        return json_status(
+            400,
+            json!({ "error": "point must be one of push_before_mutation, push_after_write_before_commit, push_after_commit_before_response, pull_during_tx, pull_after_commit" }),
+        );
+    };
+    let Some(kind) = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .and_then(FaultKind::parse)
+    else {
+        return json_status(
+            400,
+            json!({ "error": "kind must be kill, error, or quota" }),
+        );
+    };
+    // the after-write point is kill-only: the engine's generic per-mutation tx error
+    // type cannot be forged to inject an Error/Quota return mid-transaction.
+    if point == FaultPoint::PushAfterWriteBeforeCommit && kind != FaultKind::Kill {
+        return json_status(
+            400,
+            json!({ "error": "push_after_write_before_commit supports only kind=kill" }),
+        );
+    }
+    state.faults.arm(&ns, point, kind);
+    json_status(
+        200,
+        json!({ "ok": true, "armed": true, "point": point.as_str() }),
+    )
 }
 
 async fn wake_ws(
