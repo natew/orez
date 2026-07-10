@@ -149,6 +149,10 @@ struct Measured {
     total_messages: usize,
     query_ms: f64,
     serialize_ms: f64,
+    // the query-aware alternative: one open channel's most-recent window
+    window_rows: usize,
+    window_bytes: usize,
+    window_ms: f64,
 }
 
 fn seed_and_measure(scale: &Scale, auth: &str) -> Measured {
@@ -264,29 +268,54 @@ fn seed_and_measure(scale: &Scale, auth: &str) -> Measured {
     }
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
+    // the query-aware alternative M4b would ship instead of the whole namespace:
+    // one open channel's most-recent message window (the client's list limit).
+    let window_ast = parse_ast(&json!({
+        "table": "message",
+        "where": { "type": "simple", "op": "=", "left": { "type": "column", "name": "channelId" },
+                   "right": { "type": "literal", "value": "c0" } },
+        "orderBy": [["id", "desc"]],
+        "limit": 100
+    }))
+    .unwrap();
+    let window_compiled = compile(&window_ast, &tables).unwrap();
+    let tw = Instant::now();
+    let window_result = db
+        .query(&window_compiled.sql, &window_compiled.params)
+        .unwrap();
+    let mut window_bytes = 0usize;
+    for row in &window_result {
+        window_bytes += serde_json::to_string(&zero_row(&spec, row)).unwrap().len();
+    }
+    let window_ms = tw.elapsed().as_secs_f64() * 1000.0;
+
     Measured {
         authorized_rows: rows.len(),
         snapshot_bytes: bytes,
         total_messages,
         query_ms,
         serialize_ms,
+        window_rows: window_result.len(),
+        window_bytes,
+        window_ms,
     }
 }
 
 fn report_line(name: &str, scale: &Scale) {
     let m = seed_and_measure(scale, "auth-user");
+    let ratio = m.snapshot_bytes as f64 / (m.window_bytes.max(1) as f64);
     println!(
-        "{name}: channels={} members={} msgs/ch={} | total_msgs={} authorized_msg_rows={} snapshot_bytes={} ({:.1} MB) query={:.1}ms serialize={:.1}ms total={:.1}ms",
-        scale.channels,
-        scale.members,
-        scale.messages_per_channel,
+        "{name}: total_msgs={} | FULL SNAPSHOT rows={} bytes={} ({:.1} MB) engine={:.1}ms || WINDOW(1 channel, 100 msgs) rows={} bytes={} ({:.1} KB) engine={:.2}ms || snapshot/window bytes ratio {:.0}x",
         m.total_messages,
         m.authorized_rows,
         m.snapshot_bytes,
         m.snapshot_bytes as f64 / 1_048_576.0,
-        m.query_ms,
-        m.serialize_ms,
         m.query_ms + m.serialize_ms,
+        m.window_rows,
+        m.window_bytes,
+        m.window_bytes as f64 / 1024.0,
+        m.window_ms,
+        ratio,
     );
 }
 
