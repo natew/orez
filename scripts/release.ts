@@ -298,6 +298,25 @@ if (existsSync(compilerPkgPath)) {
   })
 }
 
+// @orez/sync-cf-host — CF DO host for the rust sync engine, published as TS
+// source + generated wasm (consumers bundle with wrangler). skip if the wasm
+// engine isn't built.
+const cfHostDir = resolve(root, 'packages', 'sync-cf-host')
+const cfHostPkgPath = resolve(cfHostDir, 'package.json')
+const cfHostWasmExists = existsSync(resolve(cfHostDir, 'src', 'generated', 'sync_wasm_bg.wasm'))
+if (existsSync(cfHostPkgPath) && cfHostWasmExists) {
+  const cfHostPkg = JSON.parse(readFileSync(cfHostPkgPath, 'utf-8'))
+  packages.push({
+    dir: cfHostDir,
+    originalVersion: cfHostPkg.version,
+    pkgPath: cfHostPkgPath,
+    pkg: cfHostPkg,
+    next: orezNext,
+  })
+} else if (existsSync(cfHostPkgPath)) {
+  console.info('skipping @orez/sync-cf-host (no wasm built — run bun run build:wasm there)')
+}
+
 // for --pack-only, use current versions instead of bumping
 if (packOnly) {
   for (const p of packages) {

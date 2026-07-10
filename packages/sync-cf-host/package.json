@@ -1,14 +1,17 @@
 {
   "name": "@orez/sync-cf-host",
   "version": "0.0.0",
-  "private": true,
+  "description": "Cloudflare Durable Object host for the orez rust sync engine (TS source + wasm, bundle with wrangler)",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
+  "files": [
+    "src"
+  ],
   "scripts": {
-    "build:wasm": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm",
-    "build:wasm:platform": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm -- --features platform-probes",
+    "build:wasm": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm && rm -f src/generated/.gitignore",
+    "build:wasm:platform": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm -- --features platform-probes && rm -f src/generated/.gitignore",
     "bundle": "bun run build:wasm && wrangler deploy --dry-run --outdir dist",
     "measure": "bun run build:wasm && bun measure.mjs",
     "test": "bun run test:config && bun run test:platform && bun run test:integration && bun run test:ingest && bun run test:restart",
