@@ -3,36 +3,35 @@
 Everything in plans/rust-sync-server-final-plan.md that can be done
 without your explicit word is done and green (tracker:
 rust-sync-server-execution.md, CI green at 3caf010, run 29101207022).
-Three actions remain, each yours to trigger. They are ordered; each
-unblocks the next.
 
-## 1. Release orez `rust-sync-server` (npm)
+Status update 2026-07-10: on-zero 0.6.8 shipped with the timer fix
+(d942e301) — item 2 below is DONE. orez 0.4.49 shipped from main and
+does NOT contain this branch (no `orez/sync-server` export), so item 1
+still needs the merge first. The branch is rebased onto v0.4.49 and
+fully green locally (lint + format + types + 899 tests); merging is now
+a fast-forward push of `rust-sync-server` to main, then a normal
+release. Chat staging deploy (item 3 phase 1) is in progress.
+
+## 1. Merge + release orez `rust-sync-server` (npm) — STILL PENDING
 
 What it ships: the sync-server core + `orez/sync-server` export
 (createSyncServer, createSyncServerMount), the reset-retry and
-recovery-classifier fixes, the four CI-flake fixes, the pg-proxy work.
+recovery-classifier fixes, the four CI-flake fixes.
 
 ```sh
-cd ~/orez   # after merging rust-sync-server, or release from the branch per repo flow
-bun release --patch --ci --skip-test   # tests just ran green in CI
+# branch is pre-rebased onto main; this is a clean fast-forward
+cd ~/.worktrees/orez-rust-sync
+git push origin rust-sync-server:main
+cd ~/orez && git pull && bun release --patch --ci --skip-test
 ```
 
 Unblocks: removing the dist-overlay caveat on soot's
 `soot-mount-consume` branch (it imports `orez/sync-server`).
 
-## 2. Publish takeout on-zero timer fix
+## 2. Publish takeout on-zero timer fix — DONE (0.6.8, 2026-07-10)
 
-What it ships: `d942e301` — createMutators.withTimeoutGuard clears its
-60s timer in a finally. Without it every on-zero consumer accumulates
-one live timer per completed mutation; workerd dies at its 10,000
-active-timer cap (~10k sustained pushes), Node just accumulates.
-Validated: on-zero 147 tests green; two independent 12k real-Chat runs
-clean after the fix.
-
-```sh
-cd ~/takeout && bun ./packages/scripts/src/release.ts --patch --ci --skip-tests --dirty
-# then in consumers: bun up takeout
-```
+`d942e301` — createMutators.withTimeoutGuard clears its 60s timer in a
+finally. Consumers still need `bun up` to pick it up.
 
 ## 3. Production cutover (soot, then chat)
 
