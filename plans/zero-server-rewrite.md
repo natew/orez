@@ -1,5 +1,17 @@
 # zero server rewrite: purpose-built sync server for sqlite/cloudflare
 
+**LANDING STATUS (2026-07-09):** phase 2 LANDED. orez main carries the
+reference core (src/sync-server), cursor-pull, and the conformance harness
+(v0.4.46 released); soot main carries the project-plane http-pull endpoint
+(src/zero/httpPullProject.server.ts, three review rounds vs the codex
+worker, 13-test suite + node e2e) plus the `?projectHttpPull=1` client
+rollout flag — deploying to production for cursor-path validation,
+coexistence measurement, then the default flip. 100-client storm lane green
+(CF ack p50 184ms / p95 582ms, propagation p95 1.6s at 1s polls). phase 3
+(delete the project-namespace zero-cache embed) follows a stable mixed-mode
+window.
+
+
 status: consolidated plan, 2026-07-09. this merges the prior decision docs and
 the passed zero-http spike into one execution plan. the direction is the
 "clean-room zero-compatible engine" (soot's
