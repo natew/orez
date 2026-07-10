@@ -216,6 +216,37 @@ fn permission_contraction_removes_forbidden_rows() {
 }
 
 #[test]
+fn transform_change_never_retains_a_more_permissive_result() {
+    // invariant 15: a permission/schema transformation change re-registers the
+    // query hash with a new transformed AST; the next recompute must drop the
+    // now-forbidden rows even when no underlying row data changed.
+    let mut h = Host::new();
+    // v1 permission predicate admits everything (priority >= 0)
+    h.register(
+        "q_perm",
+        json!({ "table": "issue", "where": where_cmp(">=", "priority", json!(0)) }),
+    );
+    h.desire("c1", "q_perm", 1);
+    assert_eq!(put_ids(&h.recompute(&[])), vec!["i1", "i2", "i3", "i4"]);
+
+    // transform TIGHTENS to priority >= 3 — i3 (priority 1) becomes forbidden
+    h.register(
+        "q_perm",
+        json!({ "table": "issue", "where": where_cmp(">=", "priority", json!(3)) }),
+    );
+    let patch = h.recompute(&[]);
+    assert_eq!(del_ids(&patch), vec!["i3"]);
+    assert!(put_ids(&patch).is_empty());
+
+    // transform LOOSENS to priority >= 1 — i3 becomes visible again
+    h.register(
+        "q_perm",
+        json!({ "table": "issue", "where": where_cmp(">=", "priority", json!(1)) }),
+    );
+    assert_eq!(put_ids(&h.recompute(&[])), vec!["i3"]);
+}
+
+#[test]
 fn two_clients_one_group_share_membership() {
     let mut h = Host::new();
     h.register(
