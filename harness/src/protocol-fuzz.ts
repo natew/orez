@@ -34,9 +34,7 @@ const target =
         })()
 
 const origin =
-  'origin' in target
-    ? target.origin
-    : `${target.baseUrl}/${target.namespace}`
+  'origin' in target ? target.origin : `${target.baseUrl}/${target.namespace}`
 
 function mulberry32(initial: number) {
   let value = initial
@@ -65,6 +63,10 @@ const malformed = [
   '{"pushVersion":1,"clientGroupID":"g","mutations":[{}]}',
   '{"pushVersion":1,"clientGroupID":"g","mutations":[{"type":"custom","clientID":"c","id":0,"name":1,"args":[]}]}',
 ] as const
+const corpus = Array.from({ length: total }, () => ({
+  route: random() % 2 === 0 ? ('pull' as const) : ('push' as const),
+  templateIndex: random() % malformed.length,
+}))
 
 let next = 0
 let completed = 0
@@ -75,8 +77,7 @@ async function worker() {
   while (true) {
     const index = next++
     if (index >= total) return
-    const route = random() % 2 === 0 ? 'pull' : 'push'
-    const templateIndex = random() % malformed.length
+    const { route, templateIndex } = corpus[index]!
     const body = malformed[templateIndex]!
     const requestStarted = performance.now()
     const response = await fetch(`${origin}/${route}`, {
@@ -93,7 +94,7 @@ async function worker() {
     if (elapsed > 2_000) throw new Error(`case ${index} exceeded 2s (${elapsed}ms)`)
     if (response.status >= 500) {
       throw new Error(
-        `case ${index} route=${route} template=${templateIndex} produced server error ${response.status}`,
+        `case ${index} route=${route} template=${templateIndex} produced server error ${response.status}`
       )
     }
     statuses.set(response.status, (statuses.get(response.status) ?? 0) + 1)
@@ -131,7 +132,7 @@ try {
       concurrency,
       elapsedMs: Math.round(performance.now() - started),
       statuses: Object.fromEntries([...statuses].sort(([left], [right]) => left - right)),
-    }),
+    })
   )
 } finally {
   await target.close()
