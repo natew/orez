@@ -157,7 +157,7 @@ fn open_with_comments() -> Value {
 #[test]
 fn related_output_includes_child_rows() {
     let mut h = Host::new();
-    register_query(&mut h.db, &schema(), "q", &open_with_comments()).unwrap();
+    register_query(&mut h.db, &schema(), G, "q", &open_with_comments(), 0).unwrap();
     set_desire(&mut h.db, G, "cl", "q", 1).unwrap();
 
     // i1 is open -> issue:i1 plus its comments c1, c2. i2 closed -> excluded,
@@ -169,7 +169,7 @@ fn related_output_includes_child_rows() {
 #[test]
 fn adding_a_child_to_an_included_parent_flows_through() {
     let mut h = Host::new();
-    register_query(&mut h.db, &schema(), "q", &open_with_comments()).unwrap();
+    register_query(&mut h.db, &schema(), G, "q", &open_with_comments(), 0).unwrap();
     set_desire(&mut h.db, G, "cl", "q", 1).unwrap();
     h.recompute(&[]);
 
@@ -184,7 +184,7 @@ fn adding_a_child_to_an_included_parent_flows_through() {
 #[test]
 fn a_parent_leaving_pulls_its_children_out() {
     let mut h = Host::new();
-    register_query(&mut h.db, &schema(), "q", &open_with_comments()).unwrap();
+    register_query(&mut h.db, &schema(), G, "q", &open_with_comments(), 0).unwrap();
     set_desire(&mut h.db, G, "cl", "q", 1).unwrap();
     assert_eq!(
         puts(&h.recompute(&[])),
@@ -202,7 +202,7 @@ fn a_parent_leaving_pulls_its_children_out() {
 #[test]
 fn a_new_parent_brings_its_children() {
     let mut h = Host::new();
-    register_query(&mut h.db, &schema(), "q", &open_with_comments()).unwrap();
+    register_query(&mut h.db, &schema(), G, "q", &open_with_comments(), 0).unwrap();
     set_desire(&mut h.db, G, "cl", "q", 1).unwrap();
     h.recompute(&[]);
 
@@ -228,7 +228,7 @@ fn exists_filter_syncs_subquery_rows_for_local_reevaluation() {
                 "right": { "type": "literal", "value": "a" } } }
         }
     } });
-    register_query(&mut h.db, &schema(), "q", &q).unwrap();
+    register_query(&mut h.db, &schema(), G, "q", &q, 0).unwrap();
     set_desire(&mut h.db, G, "cl", "q", 1).unwrap();
     // i1 has c1 (body 'a') so it matches; the response must carry issue:i1 AND
     // comment:c1 (the EXISTS witness the client needs to re-evaluate the filter).
@@ -265,7 +265,7 @@ fn open_comments_reactions() -> Value {
 #[test]
 fn nested_related_of_related_includes_grandchildren() {
     let mut h = Host::new();
-    register_query(&mut h.db, &schema(), "q", &open_comments_reactions()).unwrap();
+    register_query(&mut h.db, &schema(), G, "q", &open_comments_reactions(), 0).unwrap();
     set_desire(&mut h.db, G, "cl", "q", 1).unwrap();
 
     // i1 open -> its comments c1,c2 -> c1's reaction r1. i2 closed excludes its

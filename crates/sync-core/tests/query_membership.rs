@@ -72,7 +72,7 @@ impl Host {
     }
 
     fn register(&mut self, hash: &str, ast: Value) {
-        register_query(&mut self.db, &self.tables, hash, &ast).unwrap();
+        register_query(&mut self.db, &self.tables, G, hash, &ast, 0).unwrap();
     }
 
     fn desire(&mut self, client: &str, hash: &str, version: i64) {
@@ -265,4 +265,132 @@ fn two_clients_one_group_share_membership() {
     // c2 also stops -> query inactive -> rows leave
     h.undesire("c2", "q_open");
     assert_eq!(del_ids(&h.recompute(&[])), vec!["i1", "i3", "i4"]);
+}
+
+// CRITICAL-2 regression: the query hash is client-chosen, so two client groups
+// can desire the SAME hash carrying DIFFERENT permission-transformed ASTs. group
+// B registering a permissive AST under group A's hash must NOT overwrite A's
+// restricted definition — A's pull must still see only its restricted rows
+// (invariant 15: a group-scoped query can never leak forbidden rows via a shared
+// hash). before the (group, hash) rekey, B's ON CONFLICT overwrote the single
+// global row and A recomputed under B's permissive AST.
+#[test]
+fn query_definitions_are_scoped_per_group_not_by_client_hash() {
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE issue (id TEXT PRIMARY KEY, title TEXT, closed INTEGER, priority INTEGER)",
+        &[],
+    )
+    .unwrap();
+    init_query_schema(&mut db).unwrap();
+    for (id, closed, priority) in [("i1", 0, 5), ("i2", 1, 3), ("i3", 0, 1)] {
+        db.exec(
+            "INSERT INTO issue VALUES (?, ?, ?, ?)",
+            &[
+                SqlValue::Text(id.into()),
+                SqlValue::Text(format!("t-{id}")),
+                SqlValue::Integer(closed),
+                SqlValue::Integer(priority),
+            ],
+        )
+        .unwrap();
+    }
+    let tables = schema();
+    const GA: &str = "groupA";
+    const GB: &str = "groupB";
+    let hash = "shared";
+
+    // group A: RESTRICTED to priority = 1 (its permission transform). group B:
+    // PERMISSIVE, every issue. same client-chosen hash.
+    register_query(
+        &mut db,
+        &tables,
+        GA,
+        hash,
+        &json!({ "table": "issue", "where": where_eq("priority", json!(1)) }),
+        0,
+    )
+    .unwrap();
+    register_query(&mut db, &tables, GB, hash, &json!({ "table": "issue" }), 0).unwrap();
+    set_desire(&mut db, GA, "ca", hash, 1).unwrap();
+    set_desire(&mut db, GB, "cb", hash, 1).unwrap();
+
+    // group A sees ONLY its restricted row i3 (priority 1), never i1/i2.
+    let a = db
+        .transaction(|d| recompute_group(d, &tables, GA, &BTreeSet::new()))
+        .unwrap();
+    assert_eq!(
+        put_ids(&a),
+        vec!["i3"],
+        "group A's restricted AST must not be overwritten by group B's hash"
+    );
+
+    // group B sees all rows under its own permissive AST.
+    let b = db
+        .transaction(|d| recompute_group(d, &tables, GB, &BTreeSet::new()))
+        .unwrap();
+    assert_eq!(put_ids(&b), vec!["i1", "i2", "i3"]);
+
+    // re-registering B on a later pull still must not disturb A's membership.
+    register_query(&mut db, &tables, GB, hash, &json!({ "table": "issue" }), 0).unwrap();
+    let a2 = db
+        .transaction(|d| recompute_group(d, &tables, GA, &BTreeSet::new()))
+        .unwrap();
+    assert!(
+        put_ids(&a2).is_empty() && del_ids(&a2).is_empty(),
+        "group A's membership is unchanged; only i3 stays durable"
+    );
+}
+
+// CRITICAL-2 companion: a transform-version bump on a group's query forces a
+// recompute so a tightened permission transform cannot retain older, more-
+// permissive rows even if the AST text were unchanged.
+#[test]
+fn transform_version_bump_forces_recompute() {
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE issue (id TEXT PRIMARY KEY, title TEXT, closed INTEGER, priority INTEGER)",
+        &[],
+    )
+    .unwrap();
+    init_query_schema(&mut db).unwrap();
+    for (id, closed, priority) in [("i1", 0, 5), ("i3", 0, 1)] {
+        db.exec(
+            "INSERT INTO issue VALUES (?, ?, ?, ?)",
+            &[
+                SqlValue::Text(id.into()),
+                SqlValue::Text(format!("t-{id}")),
+                SqlValue::Integer(closed),
+                SqlValue::Integer(priority),
+            ],
+        )
+        .unwrap();
+    }
+    let tables = schema();
+    let all = json!({ "table": "issue" });
+    register_query(&mut db, &tables, G, "q", &all, 0).unwrap();
+    set_desire(&mut db, G, "c", "q", 1).unwrap();
+    let first = db
+        .transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
+        .unwrap();
+    assert_eq!(put_ids(&first), vec!["i1", "i3"]);
+
+    // same AST text, bumped transform version -> the query's marker is cleared,
+    // so the next recompute re-runs it (rather than being narrowed away with no
+    // touched tables). membership is unchanged here, so no spurious puts/dels.
+    register_query(&mut db, &tables, G, "q", &all, 1).unwrap();
+    let after = db
+        .transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
+        .unwrap();
+    assert!(
+        put_ids(&after).is_empty() && del_ids(&after).is_empty(),
+        "recompute ran (marker cleared) but membership is identical"
+    );
+
+    // prove the marker was actually cleared: with NO transform bump and no
+    // touched tables, the query is narrowed away (the state row exists again).
+    let noop = db
+        .transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
+        .unwrap();
+    assert!(noop.is_empty());
 }

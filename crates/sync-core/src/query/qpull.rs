@@ -55,7 +55,21 @@ fn apply_desired_patch(
                 let ast = op
                     .get("ast")
                     .ok_or_else(|| EngineError::bad_request("query put requires an ast"))?;
-                register_query(db, tables, hash, ast)?;
+                // a SERVER-OWNED permission/schema transformation version the host
+                // attaches to the resolved put op (after resolveQuery, alongside
+                // the ast). NEVER client-trusted: the host strips client fields and
+                // re-emits {op, hash, ast[, transformVersion]}, so a client cannot
+                // set it. a bump forces this group to recompute even when the AST
+                // text is unchanged, so a tightened transform can never retain
+                // older, more-permissive rows. absent -> 0, which is still safe
+                // because any AST-content change already forces a recompute.
+                let transform_version = match op.get("transformVersion") {
+                    None | Some(Value::Null) => 0,
+                    Some(v) => wire::non_negative_safe_int(v).ok_or_else(|| {
+                        EngineError::bad_request("transformVersion must be a non-negative integer")
+                    })?,
+                };
+                register_query(db, tables, group, hash, ast, transform_version)?;
                 set_desire(db, group, client, hash, version)?;
             }
             Some("del") => {

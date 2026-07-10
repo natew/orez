@@ -69,8 +69,8 @@ fn narrowing_skips_queries_whose_deps_were_not_touched() {
     db.exec("INSERT INTO t1 VALUES ('x', 1)", &[]).unwrap();
 
     // query A over t0, query B over t1
-    register_query(&mut db, &tables, "qa", &json!({ "table": "t0" })).unwrap();
-    register_query(&mut db, &tables, "qb", &json!({ "table": "t1" })).unwrap();
+    register_query(&mut db, &tables, G, "qa", &json!({ "table": "t0" }), 0).unwrap();
+    register_query(&mut db, &tables, G, "qb", &json!({ "table": "t1" }), 0).unwrap();
     set_desire(&mut db, G, "c", "qa", 1).unwrap();
     set_desire(&mut db, G, "c", "qb", 1).unwrap();
     let first = db
@@ -118,7 +118,7 @@ fn narrowing_respects_related_and_exists_dependency_tables() {
         "related": { "correlation": { "parentField": ["v"], "childField": ["v"] },
                      "subquery": { "table": "t1" } }
     } });
-    register_query(&mut db, &tables, "q", &q).unwrap();
+    register_query(&mut db, &tables, G, "q", &q, 0).unwrap();
     set_desire(&mut db, G, "c", "q", 1).unwrap();
     // no matching t1 yet -> empty
     assert!(
@@ -161,8 +161,8 @@ fn touched_pk_narrowing_skips_same_table_queries_that_do_not_match() {
     db.exec("INSERT INTO t0 VALUES ('a', 1), ('b', 2)", &[])
         .unwrap();
 
-    register_query(&mut db, &tables, "q1", &where_v(1)).unwrap();
-    register_query(&mut db, &tables, "q2", &where_v(2)).unwrap();
+    register_query(&mut db, &tables, G, "q1", &where_v(1), 0).unwrap();
+    register_query(&mut db, &tables, G, "q2", &where_v(2), 0).unwrap();
     set_desire(&mut db, G, "c", "q1", 1).unwrap();
     set_desire(&mut db, G, "c", "q2", 1).unwrap();
     assert_eq!(
@@ -220,8 +220,10 @@ fn narrowing_benchmark() {
         register_query(
             &mut db,
             &tables,
+            G,
             &format!("q{i}"),
             &json!({ "table": format!("t{i}") }),
+            0,
         )
         .unwrap();
         set_desire(&mut db, G, "c", &format!("q{i}"), 1).unwrap();
@@ -288,7 +290,7 @@ fn narrowing_benchmark() {
             "type": "simple", "op": "=", "left": { "type": "column", "name": "ch" },
             "right": { "type": "literal", "value": ch as i64 } },
             "orderBy": [["v", "desc"]], "limit": 100 });
-        register_query(&mut db2, &mtables, &format!("ch{ch}"), &q).unwrap();
+        register_query(&mut db2, &mtables, G, &format!("ch{ch}"), &q, 0).unwrap();
         set_desire(&mut db2, G, "c", &format!("ch{ch}"), 1).unwrap();
     }
     db2.transaction(|d| recompute_group(d, &mtables, G, &changed(&[])))

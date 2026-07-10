@@ -109,7 +109,7 @@ fn run_trace(seed: u64, steps: u64) {
 
     let pool = query_pool();
     for (hash, ast) in &pool {
-        register_query(&mut db, &tables, hash, ast).unwrap();
+        register_query(&mut db, &tables, G, hash, ast, 0).unwrap();
     }
 
     let mut store: BTreeSet<String> = BTreeSet::new();
