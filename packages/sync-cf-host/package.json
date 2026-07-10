@@ -11,7 +11,8 @@
     "build:wasm:platform": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm -- --features platform-probes",
     "bundle": "bun run build:wasm && wrangler deploy --dry-run --outdir dist",
     "measure": "bun run build:wasm && bun measure.mjs",
-    "test": "bun run test:platform && bun run test:integration",
+    "test": "bun run test:config && bun run test:platform && bun run test:integration",
+    "test:config": "bun test config.test.mjs",
     "test:integration": "bun run build:wasm && bun integration-test.mjs",
     "test:platform": "bun run build:wasm:platform && bun platform-test.mjs",
     "typecheck": "bun run build:wasm:platform && tsc --noEmit"

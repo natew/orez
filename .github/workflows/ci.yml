@@ -155,16 +155,18 @@ jobs:
             rust-${{ runner.os }}-
 
       # the whole workspace must compile (the native host depends on sync-core
-      # and sync-wasm building); per-crate fmt + test gates stay owned by each
-      # track (sync-core/sync-wasm add their own).
+      # and sync-wasm building); per-crate fmt gates stay owned by each track.
       - name: build workspace
         run: cargo build --workspace
 
       - name: sync-native format check
         run: cargo fmt -p sync-native -- --check
 
-      - name: sync-native tests
-        run: cargo test -p sync-native
+      # run every crate's test suite, not just sync-native: sync-core carries
+      # the query-compiler + permission regression tests behind the review
+      # fixes, and they must be enforced here rather than left unrun.
+      - name: workspace tests
+        run: cargo test --workspace
 
   # native real-client conformance: build the sync-native release binary and run
   # the rust-local harness lanes against it. shapes/sweep boot embedded postgres +
@@ -235,3 +237,46 @@ jobs:
           name: rust-local-sweep-regressions
           path: harness/regressions/
           if-no-files-found: ignore
+
+  # cloudflare durable-object host: build the wasm engine and run the full
+  # sync-cf-host suite. this is where the config cap-validation regression
+  # (config.test.mjs) and the workerd platform/integration contracts are
+  # enforced; without this job they run only on sol's machine.
+  sync-cf-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      - name: install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - run: bun install --frozen-lockfile
+
+      - name: sync-cf-host install
+        run: cd packages/sync-cf-host && bun install
+
+      # full suite: config cap-validation (bun:test) + workerd platform probe +
+      # wasm integration contract. build:wasm runs inside the package scripts.
+      - name: sync-cf-host suite
+        run: cd packages/sync-cf-host && bun run test
