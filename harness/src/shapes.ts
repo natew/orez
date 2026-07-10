@@ -27,7 +27,7 @@ const { values: args } = parseArgs({
   },
 })
 
-// registry entries take the RAW args value in 1.6.1 (the {args, ctx} options
+// registry entries take the RAW args value in 1.7.0 (the {args, ctx} options
 // object is the DEFINITION-side signature; wrapping here double-wraps and
 // every filter silently matches nothing — this lane caught that as all
 // arg-taking queries returning empty)

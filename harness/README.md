@@ -76,7 +76,8 @@ stock Zero's reconnect diagnostics, not lane failures.
 server (`src/app-server.ts`: named-query transform on /query + custom-mutator
 execution on /mutate, the role soot's app worker plays in prod), and real
 zero-cache from node_modules (spawned with `node`, never bun). no docker
-needed. zero pinned at 1.6.1 to match orez/soot.
+needed. Zero is pinned at stable 1.7.0 to match orez/soot. use Node 22 or 24
+for stock-zero lanes; `@rocicorp/zero-sqlite3` does not support Node 25.
 
 modern zero surface ONLY, no legacy: queries are `defineQueries` named
 queries transformed server-side via `ZERO_QUERY_URL`; writes are

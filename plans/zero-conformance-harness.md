@@ -57,8 +57,7 @@ also present upstream: `zql-integration-tests` (zql vs zqlite vs zero-pg
 differential, chinook + pagila fixtures, collation/text-semantics/bigint
 edges), `zql-benchmarks`, 144 test files in zero-cache, plus vitest lanes
 against pg 15/16/17/18. protocol is still v51 on latest main (matches the
-orez spike's pinned knowledge; chat runs 1.7.0-canary.3, soot/orez pin
-1.6.1, one protocol client covers all of it).
+orez spike's pinned knowledge; soot, orez, and this harness run stable 1.7.0).
 
 ## finding 2: the gap is exactly the half we need
 
@@ -181,8 +180,8 @@ right fit; keep seeds + full histories so every failure replays.
 
 ## run it against real zero FIRST (validation ladder)
 
-1. stock zero-cache + real pg (docker compose), zero 1.6.1 and 1.7 canary
-   lanes. harness must pass clean here or the harness is wrong. seed known
+1. stock zero-cache + real pg (docker compose), stable Zero 1.7.0. harness must
+   pass clean here or the harness is wrong. seed known
    bugs (kill -9 mid-tx, drop websocket mid-poke) to prove the checkers
    catch them. divergences found here are upstreamable bug reports
    (credibility + fixes flow back).
@@ -277,7 +276,7 @@ zql-integration-tests'. runbook in `harness/README.md`.
 **M1, harness skeleton + stock-zero target [DONE 2026-07-09, modern API]:**
 `~/orez/harness/` (zharness, commits d0315e0 + 96d284b). SyncTarget
 interface; stock-zero target = embedded postgres (wal_level=logical, no
-docker) + real zero-cache 1.6.1 spawned from node_modules + the fixture app
+docker) + real zero-cache 1.7.0 spawned from node_modules + the fixture app
 server (`harness/src/app-server.ts`) serving named-query transform
 (ZERO_QUERY_URL) and custom-mutator execution (ZERO_MUTATE_URL); permissions
 deployed by replicating zero-deploy-permissions' SQL in-process. legacy
@@ -289,7 +288,7 @@ upstream-behind-zero's-back writes via replication, converge, oracle-compare
 equal, and an ad-hoc local zql query is asserted to read the synced cache
 without syncing more. wire facts pinned in harness/README.md (auth-echo
 userID pinning, callable-form registry mutate, node-not-bun spawn).
-still open in M1 scope: a 1.7-canary lane, chinook fixture.
+still open in M1 scope: a chinook fixture.
 
 **M2, orez-local pure-sqlite target [DONE 2026-07-09]:** the sync server
 core landed in orez proper (`src/sync-server/sync-server.ts`, commit
@@ -314,7 +313,7 @@ script on stock-zero and orez-local, every corpus query compared at hydrate
   client-side; equal results IS the conformance property the rewrite must
   hold. found immediately: client not(exists()) unsupported (upstream bug
   3438), postgres.js jsonb double-encoding writer discipline, pg-jsonb key
-  order normalization policy, 1.6.1 registry raw-args invocation.
+  order normalization policy, registry raw-args invocation.
   EXPANDED 2026-07-09 (same day, after cursor-diff pulls landed): corpus is
   now 22 shapes — added tasksTopByRank (top-level limit window),
   tasksAfterCursor (.start() pagination with a real seed row as cursor),
@@ -488,7 +487,7 @@ findings pinned:
   per-tab mutations plus an upstream write, and checks authoritative LMIDs and
   convergence. one tab then closes while a third joins the same group and races
   the surviving tab.
-- these lanes exercise the production HTTP transport and stock Zero 1.6.1
+- these lanes exercise the production HTTP transport and stock Zero 1.7.0
   client state machine against `orez-local`. process/DO data-store restart and
   remote Cloudflare eviction remain integration-level fault lanes; the local
   host restart deliberately preserves its SQLite authority.
@@ -541,6 +540,25 @@ rerun after harness deploy]:**
   6s idle, all 20 before/after writes converged in 52ms, late hydrate 53ms, 50
   successful pulls, zero 409s, monotone cookies. rerun `--target cf` against the
   deployed worker after this worker revision lands.
+
+**M10, stable Zero 1.7 client/server package [DONE 2026-07-09]:**
+
+- upgraded the single harness `@rocicorp/zero` pin from 1.6.1 to stable 1.7.0,
+  matching the orez/soot landing. this deliberately upgrades both the stock
+  clients used against every target and the real zero-cache/zero-pg reference
+  stack used by differential lanes; there is no parallel canary dependency.
+- green against the sqlite core: 10-client smoke, permissions add/revoke,
+  persisted reconnect/fault recovery, three-tab client-group recovery, a
+  two-round single-project storm, and the process-kill/file-backed eviction
+  lane. green against the deployed DO: five-client smoke with mutations,
+  oracle equality, and fresh late hydration.
+- green against the real 1.7.0 zero-cache reference: all 22 shapes across
+  hydrate + writes + incremental/fresh equality, plus a fresh 10-round/40-shape
+  randomized sweep (seed 1255724879) with zero divergences.
+- Zero 1.7 remains sync protocol v51 and preserved the harness-pinned custom
+  mutation result and named-query invocation behavior. the package's native
+  `@rocicorp/zero-sqlite3` supports Node 22/24, not Node 25; stock-zero lanes
+  must run under a supported Node even though the harness driver itself is Bun.
 
 ### runners (nate 2026-07-09: dev + initial validation happen on `work`;
 

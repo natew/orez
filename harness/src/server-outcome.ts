@@ -17,7 +17,7 @@ function actualOutcome(result: unknown): string {
   }
 }
 
-// Zero 1.6.1 normalizes mutation failures into a resolved MutatorResultDetails
+// Zero 1.7.0 normalizes mutation failures into a resolved MutatorResultDetails
 // union. Attach this check immediately when the mutation is issued so every
 // write declares and verifies its semantic server outcome.
 export function assertServerOutcome(
