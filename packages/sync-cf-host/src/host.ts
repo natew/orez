@@ -416,7 +416,24 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                 }
                 const args = op.args as JsonValue[];
                 const ast = config.resolveQuery(op.name, args, claims);
-                patch.push({ op: "put", hash: op.hash, ast });
+                const transformVersion =
+                  typeof config.queryTransformVersion === "function"
+                    ? config.queryTransformVersion(claims)
+                    : (config.queryTransformVersion ?? 0);
+                if (
+                  !Number.isSafeInteger(transformVersion) ||
+                  transformVersion < 0
+                ) {
+                  throw new TypeError(
+                    "queryTransformVersion must be a non-negative safe integer",
+                  );
+                }
+                patch.push({
+                  op: "put",
+                  hash: op.hash,
+                  ast,
+                  transformVersion,
+                });
               } else patch.push(operation);
             }
             body = { ...body, queries: { ...queries, patch } };
