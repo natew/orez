@@ -60,6 +60,50 @@ impl Tables {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    // build the table set from a zero createSchema() result serialized to JSON:
+    //   { "tables": { "<name>": { "columns": { "<col>": { "type": "<t>" }, ... },
+    //                             "primaryKey": ["<col>", ...] }, ... } }
+    // mirrors the reference core's tablesFromZeroSchema. this is how a host (the
+    // wasm CF host, the native host) constructs Tables without touching the
+    // internal representation. column/table order follows the JSON map's
+    // iteration order, which is non-semantic on the wire (patch values are
+    // objects and clients converge regardless of key/row order); tests that
+    // assert positional patch order use the ordered `with()` builder instead.
+    pub fn from_zero_schema(schema: &serde_json::Value) -> Result<Tables, String> {
+        let tables_obj = schema
+            .get("tables")
+            .and_then(|t| t.as_object())
+            .ok_or_else(|| "schema.tables must be an object".to_string())?;
+        let mut tables = Tables::new();
+        for (name, table) in tables_obj {
+            let columns_obj = table
+                .get("columns")
+                .and_then(|c| c.as_object())
+                .ok_or_else(|| format!("table '{name}'.columns must be an object"))?;
+            let mut columns = Vec::new();
+            for (col, spec) in columns_obj {
+                let ty = spec
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .ok_or_else(|| format!("column '{name}.{col}'.type must be a string"))?;
+                columns.push((col.clone(), ZeroColumnType::from_str(ty)));
+            }
+            let primary_key = table
+                .get("primaryKey")
+                .and_then(|p| p.as_array())
+                .ok_or_else(|| format!("table '{name}'.primaryKey must be an array"))?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| format!("table '{name}'.primaryKey entries must be strings"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            tables.push(name.clone(), TableSpec { columns, primary_key });
+        }
+        Ok(tables)
+    }
 }
 
 // SQLite identifier quoting: double-quote and escape embedded quotes. table
