@@ -852,6 +852,15 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #admin(route: string, request: Request): Promise<Response> | Response {
       if (route === '/admin/health') return json({ ok: true })
       if (route === '/admin/status') {
+        const heap = (
+          performance as Performance & {
+            memory?: {
+              usedJSHeapSize: number
+              totalJSHeapSize: number
+              jsHeapSizeLimit: number
+            }
+          }
+        ).memory
         return json({
           bootID: this.#bootID,
           idleTeardownMs,
@@ -860,6 +869,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           connectedWakeSockets: this.ctx.getWebSockets().length,
           writerEnabled: this.#writerEnabled(),
           wasmMemoryBytes: engine_memory_bytes(),
+          heapUsedBytes: heap?.usedJSHeapSize ?? null,
+          heapTotalBytes: heap?.totalJSHeapSize ?? null,
+          heapLimitBytes: heap?.jsHeapSizeLimit ?? null,
           engine: this.#engineState(),
           counters: this.#counters,
         })

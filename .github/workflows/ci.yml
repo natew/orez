@@ -290,3 +290,17 @@ jobs:
       # wasm integration contract. build:wasm runs inside the package scripts.
       - name: sync-cf-host suite
         run: cd packages/sync-cf-host && bun run test
+
+      - name: sync-cf-host push memory soak
+        run: |
+          cd packages/sync-cf-host
+          bunx wrangler dev --config wrangler.toml --local --var ADMIN_KEY:push-memory-admin --port 8999 --log-level error --show-interactive-dev-session false > /tmp/push-memory-worker.log 2>&1 &
+          worker_pid=$!
+          trap 'kill "$worker_pid"; wait "$worker_pid" || true' EXIT
+          for attempt in $(seq 1 150); do
+            if curl --fail --silent http://127.0.0.1:8999 > /dev/null; then break; fi
+            if [ "$attempt" = 150 ]; then cat /tmp/push-memory-worker.log; exit 1; fi
+            sleep 0.1
+          done
+          cd ../../harness
+          bun src/push-memory-soak.ts --target rust-cf --blocks 3 --ops 3000 --writers 12 --worker http://127.0.0.1:8999 --admin-key push-memory-admin

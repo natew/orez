@@ -22,6 +22,9 @@ export type RustCfStatus = {
   hibernations: number
   databaseSizeBytes: number
   wasmMemoryBytes: number
+  heapUsedBytes: number | null
+  heapTotalBytes: number | null
+  heapLimitBytes: number | null
   connectedWakeSockets: number
   engine: { watermark: string; floor: string } | null
   counters: Record<string, number>
