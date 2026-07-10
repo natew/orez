@@ -23,14 +23,19 @@ pub struct EngineContext {
     pub tables: Tables,
     pub retain_changes: i64,
     pub visibility_enabled: bool,
+    // query-aware mode: pulls carry desired queries and go through the
+    // query-aware engine (membership/refcount) instead of the baseline
+    // full-namespace pull. a namespace serves one consumer kind, not a mix.
+    pub query_aware: bool,
 }
 
 impl EngineContext {
-    pub fn new(retain_changes: i64, visibility_enabled: bool) -> Self {
+    pub fn new(retain_changes: i64, visibility_enabled: bool, query_aware: bool) -> Self {
         Self {
             tables: build_tables(),
             retain_changes,
             visibility_enabled,
+            query_aware,
         }
     }
 
@@ -86,6 +91,9 @@ fn build_tables() -> Tables {
 pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), String> {
     fixture::install_app_tables_and_seed(db).map_err(|e| e.0)?;
     init_schema(db, &ctx.tables).map_err(|e| e.0)?;
+    // the query-aware tables are idempotent + unused in baseline mode, so
+    // install them always so a namespace can serve query-aware pulls.
+    sync_core::query::init_query_schema(db).map_err(|e| e.message)?;
     Ok(())
 }
 
@@ -97,19 +105,31 @@ pub fn pull(
     body: &Value,
     user_id: &str,
 ) -> Result<Value, EngineError> {
-    let visibility = ctx.visibility();
     conn.execute_batch("BEGIN").expect("BEGIN failed");
     let result = {
         let mut db = RusqliteDb::new(conn);
-        handle_pull(
-            &mut db,
-            &ctx.tables,
-            ctx.retain_changes,
-            visibility.as_ref(),
-            Caps::default(),
-            body,
-            user_id,
-        )
+        if ctx.query_aware {
+            // query-aware pull: desired queries in the body drive membership;
+            // no whole-namespace visibility filter (permissions ride the AST).
+            sync_core::query::handle_query_pull(
+                &mut db,
+                &ctx.tables,
+                ctx.retain_changes,
+                body,
+                user_id,
+            )
+        } else {
+            let visibility = ctx.visibility();
+            handle_pull(
+                &mut db,
+                &ctx.tables,
+                ctx.retain_changes,
+                visibility.as_ref(),
+                Caps::default(),
+                body,
+                user_id,
+            )
+        }
     };
     finish(conn, result.is_ok());
     result
