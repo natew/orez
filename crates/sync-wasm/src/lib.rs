@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use sync_core::{DbError, Row, SqlValue, SyncDb};
 use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 
 #[wasm_bindgen]
 extern "C" {
@@ -715,4 +717,23 @@ pub fn engine_state(db: &JsSyncDb) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub fn engine_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Linear-memory size for authenticated operator soak diagnostics. This is a
+/// byte count only; it contains no application or query data.
+#[wasm_bindgen]
+pub fn engine_memory_bytes() -> Result<u32, JsValue> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let memory = wasm_bindgen::memory()
+            .dyn_into::<js_sys::WebAssembly::Memory>()
+            .map_err(|_| js_err("wasm linear memory is unavailable"))?;
+        let buffer = memory
+            .buffer()
+            .dyn_into::<js_sys::ArrayBuffer>()
+            .map_err(|_| js_err("wasm memory buffer is unavailable"))?;
+        return Ok(buffer.byte_length());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    Err(js_err("wasm memory diagnostics require wasm32"))
 }

@@ -21,6 +21,7 @@ export type RustCfStatus = {
   idleTeardownMs: number
   hibernations: number
   databaseSizeBytes: number
+  wasmMemoryBytes: number
   connectedWakeSockets: number
   engine: { watermark: string; floor: string } | null
   counters: Record<string, number>

@@ -167,7 +167,11 @@ try {
     queryStatus.counters.queryRecompilations >= 1,
     'query recompilation counter increments for named query puts'
   )
-  assertions += 2
+  assert.ok(
+    Number.isSafeInteger(queryStatus.wasmMemoryBytes) && queryStatus.wasmMemoryBytes > 0,
+    'authenticated status reports wasm linear-memory bytes'
+  )
+  assertions += 3
   const storedTransform = await admin('/admin/sql', {
     query:
       "SELECT transformVersion FROM _zsync_queries WHERE clientGroupID = 'query-group' AND hash = 'tasks-p1-p4'",

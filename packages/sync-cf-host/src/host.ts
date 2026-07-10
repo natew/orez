@@ -10,6 +10,7 @@ import {
   engine_init_query_schema,
   engine_init_schema,
   engine_invalidate,
+  engine_memory_bytes,
   engine_preflight,
   engine_prune,
   engine_push_validate,
@@ -785,6 +786,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           databaseSizeBytes: this.ctx.storage.sql.databaseSize,
           connectedWakeSockets: this.ctx.getWebSockets().length,
           writerEnabled: this.#writerEnabled(),
+          wasmMemoryBytes: engine_memory_bytes(),
           engine: this.#engineState(),
           counters: this.#counters,
         });
