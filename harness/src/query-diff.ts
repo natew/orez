@@ -19,19 +19,7 @@ const { values: args } = parseArgs({
   options: { against: { type: 'string', default: 'rust-local' } },
 })
 const cfObservations: HttpPullObservation[] = []
-// sync-core intentionally rejects per-parent related/EXISTS bounds (HIGH-5)
-// instead of silently widening them. Keep the stock differential honest by
-// excluding that explicitly unsupported corpus shape and reporting the skip.
-const RUST_REJECTED_CORPUS = new Set([
-  'projectById',
-  'projectsWithRecentTasks',
-  'projectMemberUsers',
-  'membersOfProject',
-  'projectTasksPage',
-])
-const differentialCorpus = queryCorpus.filter(
-  ({ name }) => !RUST_REJECTED_CORPUS.has(name)
-)
+const differentialCorpus = queryCorpus
 
 async function startRustTarget(): Promise<SyncTarget> {
   if (args.against === 'rust-local') {
@@ -145,7 +133,7 @@ try {
   rustViews.destroy()
   console.log(
     `[query-diff] PASS: ${differentialCorpus.length} supported corpus queries equal ` +
-      `(${differentialCorpus.length - empty.length} return data, skipped ${RUST_REJECTED_CORPUS.size}) ` +
+      `(${differentialCorpus.length - empty.length} return data) ` +
       `stock-zero == ${args.against} --query-aware in ${Date.now() - t0}ms`
   )
 } catch (error) {
