@@ -1,0 +1,20 @@
+name = "orez-rust-sync-ingest-harness"
+main = "src/ingest-harness-worker.ts"
+compatibility_date = "2026-06-01"
+
+[[durable_objects.bindings]]
+name = "SYNC_DO"
+class_name = "SyncDurableObject"
+
+[[durable_objects.bindings]]
+name = "UPSTREAM_DO"
+class_name = "ZeroDO"
+
+[[services]]
+binding = "DATA"
+service = "orez-rust-sync-ingest-harness"
+entrypoint = "UpstreamService"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SyncDurableObject", "ZeroDO"]

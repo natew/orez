@@ -102,14 +102,25 @@ cutovers; keeps one engine story across deployments.
 - No new cookie/watermark domain: ingest advances the engine's existing
   change log; clients never see upstream watermarks.
 
-## Open questions
+## Decisions resolved during implementation (2026-07-10)
 
-- /changes row images: confirm they carry full post-image values for
-  updates (engine needs full rows or must read-through; full images
-  preferred — check do-sql-tracking payloads).
-- Feed retention: readChangesSince window vs an engine that was offline
-  long enough to miss it — needs a "watermark too old -> full resync from
-  upstream tables" path (mirror of zero-cache initial sync).
-- Delegated push auth: the app push endpoint must authenticate the host's
-  forwarded request (service-binding origin + forwarded client token, same
-  pattern as the chat transform delegation).
+- `/changes` carries the required full images. `executeSQL` tracks the complete
+  `RETURNING` row after INSERT/UPDATE as `rowData`; DELETE carries the complete
+  prior row as `oldData`. Ingest binds those images directly and uses `oldData`
+  only to remove a changed primary key or a deleted row.
+- Retention gaps are explicit, not guessed. `/changes` returns HTTP 410
+  `watermarkTooOld` when the requested cursor precedes the retained floor. The
+  host then reads `/snapshot`, atomically replaces every configured application
+  table in one engine transaction, records the snapshot watermark, and resumes
+  `/changes` from that watermark to close writes that raced the snapshot. This
+  is the same snapshot-then-stream shape as initial replication.
+- Delegated pushes preserve the caller's exact body bytes and Authorization
+  header on a service-binding subrequest; the host removes only its private
+  normalized-claims/namespace headers and supplies the binding request Host.
+  Thus the app endpoint authenticates the original client token using the same
+  binding-origin pattern as Chat query-transform delegation. There is no host
+  credential fallback.
+- LMID and row arrival are deliberately independent. A successful app response
+  advances only mutation IDs for result entries the app actually returned.
+  Application rows arrive exclusively through ingest; retries that the app
+  reports as already processed still repair a missing local LMID acknowledgment.

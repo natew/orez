@@ -181,10 +181,25 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_meta (
             lock INTEGER PRIMARY KEY CHECK (lock = 1),
-            floor INTEGER NOT NULL
+            floor INTEGER NOT NULL,
+            upstream_watermark INTEGER NOT NULL DEFAULT 0
         )",
         &[],
     )?;
+    // Additive migration for stores created before upstream ingest existed.
+    let has_upstream_watermark = db
+        .query(
+            "SELECT name FROM pragma_table_info('_zsync_meta') WHERE name = 'upstream_watermark'",
+            &[],
+        )?
+        .first()
+        .is_some();
+    if !has_upstream_watermark {
+        db.exec(
+            "ALTER TABLE _zsync_meta ADD COLUMN upstream_watermark INTEGER NOT NULL DEFAULT 0",
+            &[],
+        )?;
+    }
     db.exec(
         "INSERT INTO _zsync_meta (lock, floor) VALUES (1, 0)
          ON CONFLICT (lock) DO NOTHING",

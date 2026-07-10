@@ -32,6 +32,7 @@ pub mod push;
 pub mod query;
 pub mod schema;
 mod store;
+pub mod upstream;
 pub mod value;
 pub mod wire;
 
@@ -43,4 +44,8 @@ pub use push::{
     assemble_push_response, finalize, handle_push, preflight, push_validate, record_app_error,
 };
 pub use schema::{TableSpec, Tables, init_schema, trigger_ddl};
+pub use upstream::{
+    ApplyUpstreamResult, UpstreamBatch, UpstreamChange, UpstreamSnapshot, apply_upstream,
+    apply_upstream_snapshot, upstream_watermark,
+};
 pub use value::{ZeroColumnType, to_zero_value, to_zero_value_json};

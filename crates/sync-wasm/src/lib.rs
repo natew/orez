@@ -437,6 +437,37 @@ pub fn engine_init_schema(db: &JsSyncDb, schema: JsValue) -> Result<(), JsValue>
     sync_core::init_schema(&mut db, &tables).map_err(js_err)
 }
 
+/// Apply one ordered page from the upstream ZeroSqlDO change feed. The host
+/// owns one transaction around this call; application triggers append the
+/// ordinary engine change-log entries consumed by pull/CVR code.
+#[wasm_bindgen]
+pub fn engine_apply_upstream(
+    db: &JsSyncDb,
+    schema: JsValue,
+    batch: JsValue,
+) -> Result<JsValue, JsValue> {
+    let mut db = WasmDb(db);
+    let tables = tables_from_js(schema)?;
+    let batch: sync_core::UpstreamBatch = from_js(batch)?;
+    let result = sync_core::apply_upstream(&mut db, &tables, &batch).map_err(engine_error)?;
+    to_js(&result)
+}
+
+/// Atomically rebuild application rows from a point-in-time upstream snapshot.
+#[wasm_bindgen]
+pub fn engine_apply_upstream_snapshot(
+    db: &JsSyncDb,
+    schema: JsValue,
+    snapshot: JsValue,
+) -> Result<JsValue, JsValue> {
+    let mut db = WasmDb(db);
+    let tables = tables_from_js(schema)?;
+    let snapshot: sync_core::UpstreamSnapshot = from_js(snapshot)?;
+    let result =
+        sync_core::apply_upstream_snapshot(&mut db, &tables, &snapshot).map_err(engine_error)?;
+    to_js(&result)
+}
+
 /// Initialize the additive query-aware durable tables. The host owns the
 /// transaction boundary, exactly as it does for the baseline schema.
 #[wasm_bindgen]
@@ -696,9 +727,11 @@ pub fn engine_assemble_push_response(results: JsValue) -> Result<JsValue, JsValu
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct EngineStateWire {
     watermark: String,
     floor: String,
+    upstream_watermark: String,
 }
 
 #[wasm_bindgen]
@@ -709,6 +742,9 @@ pub fn engine_state(db: &JsSyncDb) -> Result<JsValue, JsValue> {
             .map_err(engine_error)?
             .to_string(),
         floor: sync_core::pull::floor(&mut db)
+            .map_err(engine_error)?
+            .to_string(),
+        upstream_watermark: sync_core::upstream_watermark(&mut db)
             .map_err(engine_error)?
             .to_string(),
     })

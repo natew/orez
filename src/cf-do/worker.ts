@@ -182,6 +182,8 @@ export class ZeroDO extends DurableObject {
       (request.method === 'GET' || request.method === 'POST')
     )
       return this.handleChanges(request, url)
+    if (url.pathname === '/snapshot' && request.method === 'GET')
+      return this.handleSnapshot()
     if (url.pathname === '/notify' && request.method === 'POST')
       return Response.json({ ok: true, cookie: this.cookie() })
     return new Response('not found', { status: 404 })
@@ -583,9 +585,40 @@ export class ZeroDO extends DurableObject {
       }
       if (!Number.isFinite(watermark) || watermark < 0) watermark = 0
       if (!Number.isFinite(limit) || limit <= 0) limit = 1000
+      const head = this.watermark()
+      const first = this.sql
+        .exec('SELECT MIN(watermark) AS watermark FROM _zero_changes')
+        .one() as { watermark?: number | null } | null
+      const oldest = first?.watermark == null ? null : Number(first.watermark)
+      if (
+        watermark < head &&
+        (oldest === null || oldest > watermark + 1)
+      ) {
+        return Response.json(
+          { error: 'watermarkTooOld', watermark: head, oldestWatermark: oldest },
+          { status: 410 }
+        )
+      }
       return Response.json({
-        watermark: this.watermark(),
+        watermark: head,
         changes: this.readChangesSince(watermark).slice(0, Math.min(limit, 10_000)),
+      })
+    } catch (err: any) {
+      return Response.json({ error: err.message }, { status: 500 })
+    }
+  }
+
+  private handleSnapshot(): Response {
+    try {
+      return this.ctx.storage.transactionSync(() => {
+        this.ensureSchemaMetadataTable()
+        const names = this.sql
+          .exec('SELECT name FROM _zero_schema_tables ORDER BY name')
+          .toArray()
+          .map((row: any) => String(row.name))
+        const tables: Record<string, Record<string, unknown>[]> = {}
+        for (const name of names) tables[name] = this.readAllRows(name)
+        return Response.json({ watermark: this.watermark(), tables })
       })
     } catch (err: any) {
       return Response.json({ error: err.message }, { status: 500 })

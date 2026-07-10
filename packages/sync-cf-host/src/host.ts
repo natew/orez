@@ -1,7 +1,9 @@
 import { DurableObject } from 'cloudflare:workers'
 
-import { validatePullCaps } from './config.js'
+import { validatePullCaps, validateSyncHostConfig } from './config.js'
 import {
+  engine_apply_upstream,
+  engine_apply_upstream_snapshot,
   engine_assemble_push_response,
   engine_compile_query,
   engine_finalize,
@@ -40,6 +42,7 @@ initSync({ module: wasmModule })
 
 const CLAIMS_HEADER = 'x-orez-sync-claims'
 const NAMESPACE_HEADER = 'x-orez-sync-namespace'
+const UPSTREAM_PATH_HEADER = 'x-orez-sync-upstream-path'
 const DEFAULT_CAPS: PullCaps = {
   maxChangeRows: 10_000,
   maxChangeBytes: 2_000_000,
@@ -64,7 +67,22 @@ type MutationResult = {
   result: Record<string, unknown>
 }
 
-type EngineState = { watermark: string; floor: string }
+type EngineState = { watermark: string; floor: string; upstreamWatermark: string }
+type UpstreamBatch = {
+  watermark: number
+  changes: Array<{
+    watermark: number
+    tableName: string
+    op: string
+    rowData: Record<string, unknown> | null
+    oldData: Record<string, unknown> | null
+  }>
+}
+type ApplyUpstreamResult = {
+  watermark: number | string
+  applied: number
+  caughtUp: boolean
+}
 type SocketAttachment = { clientID: string }
 type FaultPoint =
   | 'push_before_mutation'
@@ -190,6 +208,7 @@ function socketCloseQuietly(socket: WebSocket, code: number, reason: string): vo
 export function createSyncWorker<Env extends SyncHostEnv>(
   config: SyncHostConfig<Env>
 ): ExportedHandler<Env> {
+  validateSyncHostConfig(config)
   return {
     async fetch(request, env): Promise<Response> {
       const namespace = config.namespace(request)
@@ -207,16 +226,27 @@ export function createSyncWorker<Env extends SyncHostEnv>(
       const headers = new Headers(request.headers)
       headers.delete(CLAIMS_HEADER)
       headers.delete(NAMESPACE_HEADER)
+      headers.delete(UPSTREAM_PATH_HEADER)
       // Wake sockets carry only a client ID and the literal "wake" hint; they
       // expose no rows, claims, or mutation state. Keep this advisory channel
       // compatible with the vendored transport, which cannot attach an HTTP
       // Authorization header to its native WebSocket constructor.
-      if (!isAdmin && route !== '/wake') {
+      if (!isAdmin && route !== '/wake' && route !== '/notify') {
         const claims = await config.authenticate(request, env)
         if (!claims) return json({ error: 'missing authentication' }, 401)
         headers.set(CLAIMS_HEADER, encodeURIComponent(JSON.stringify(claims)))
       }
       headers.set(NAMESPACE_HEADER, await namespaceHash(namespace))
+      if (config.upstream) {
+        const namespacePath =
+          typeof config.upstream.namespacePath === 'function'
+            ? config.upstream.namespacePath(namespace)
+            : config.upstream.namespacePath
+        if (!namespacePath.startsWith('/')) {
+          return json({ error: 'upstream namespacePath must be an absolute path' }, 500)
+        }
+        headers.set(UPSTREAM_PATH_HEADER, namespacePath.replace(/\/$/, ''))
+      }
 
       const forwarded = new Request(request, { headers })
       const id = env.SYNC_DO.idFromName(namespace)
@@ -229,12 +259,15 @@ export function createSyncWorker<Env extends SyncHostEnv>(
 export function createSyncDurableObject<Env extends SyncHostEnv>(
   config: SyncHostConfig<Env>
 ) {
+  validateSyncHostConfig(config)
   const defaultRetainChanges = String(config.retainChanges ?? 4_096)
   const caps: PullCaps = validatePullCaps({ ...DEFAULT_CAPS, ...config.caps })
   const idleTeardownMs = config.idleTeardownMs ?? 5_000
   // A CF fan-out wakes every client into an HTTP pull. Give concurrent writer
   // requests a real batching window so a storm burst creates one pull wave.
   const wakeCoalesceMs = config.wakeCoalesceMs ?? 25
+  const upstreamIntervalMs = config.upstream?.intervalMs ?? 15_000
+  const upstreamLimit = config.upstream?.changeLimit ?? 1_000
 
   return class SyncDurableObject extends DurableObject<Env> {
     readonly #engineDb: SqlStorageSyncDb
@@ -249,6 +282,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #wakeOrigins = new Set<string>()
     #wakeRecipients = new Set<WebSocket>()
     #wakePromise: Promise<void> | null = null
+    #ingestPromise: Promise<number> | null = null
 
     constructor(ctx: DurableObjectState, env: Env) {
       super(ctx, env)
@@ -271,6 +305,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           if (config.queryAware || config.resolveQuery)
             this.#wasm(() => engine_init_query_schema(this.#engineDb))
         })
+        if (config.upstream && (await ctx.storage.getAlarm()) === null) {
+          await ctx.storage.setAlarm(Date.now() + upstreamIntervalMs)
+        }
       })
     }
 
@@ -371,6 +408,89 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       } catch {
         return null
       }
+    }
+
+    #serviceBinding(): { fetch(input: string | Request, init?: RequestInit): Promise<Response> } {
+      const name = config.upstream?.binding
+      const value = name
+        ? (this.env as unknown as Record<string, unknown>)[name]
+        : undefined
+      if (!value || typeof (value as { fetch?: unknown }).fetch !== 'function') {
+        throw requestError(`missing upstream service binding: ${name ?? '(not configured)'}`, 500)
+      }
+      return value as { fetch(input: string | Request, init?: RequestInit): Promise<Response> }
+    }
+
+    #rememberUpstreamPath(request: Request): string | null {
+      if (!config.upstream) return null
+      const path = request.headers.get(UPSTREAM_PATH_HEADER)
+      if (path) {
+        this.#controlSet('upstreamPath', path)
+        return path
+      }
+      return this.#controlGet('upstreamPath')
+    }
+
+    #ingest(upstreamPath?: string | null): Promise<number> {
+      if (!config.upstream) return Promise.resolve(0)
+      if (this.#ingestPromise) return this.#ingestPromise
+      const path = upstreamPath ?? this.#controlGet('upstreamPath')
+      if (!path) return Promise.resolve(0)
+      this.#ingestPromise = (async () => {
+        let total = 0
+        for (;;) {
+          const cursor = this.#engineState()?.upstreamWatermark ?? '0'
+          const endpoint = new URL(`${path}/changes`, 'https://upstream.invalid')
+          endpoint.searchParams.set('watermark', cursor)
+          endpoint.searchParams.set('limit', String(upstreamLimit))
+          const response = await this.#serviceBinding().fetch(endpoint.toString(), {
+            headers: { host: endpoint.host },
+          })
+          if (response.status === 410) {
+            const snapshotEndpoint = new URL(`${path}/snapshot`, endpoint)
+            const snapshotResponse = await this.#serviceBinding().fetch(
+              snapshotEndpoint.toString(),
+              { headers: { host: snapshotEndpoint.host } }
+            )
+            if (!snapshotResponse.ok) {
+              throw new Error(`upstream snapshot returned ${snapshotResponse.status}`)
+            }
+            const snapshot = await snapshotResponse.json()
+            const rebuilt = this.ctx.storage.transactionSync(() =>
+              this.#wasm(() =>
+                engine_apply_upstream_snapshot(this.#engineDb, config.schema, snapshot)
+              )
+            ) as ApplyUpstreamResult
+            total += rebuilt.applied
+            continue
+          }
+          if (!response.ok) {
+            throw new Error(`upstream changes returned ${response.status}`)
+          }
+          const batch = (await response.json()) as UpstreamBatch
+          if (
+            !Number.isSafeInteger(batch.watermark) ||
+            !Array.isArray(batch.changes)
+          ) {
+            throw new Error('invalid upstream changes response')
+          }
+          const result = this.ctx.storage.transactionSync(() =>
+            this.#wasm(() =>
+              engine_apply_upstream(this.#engineDb, config.schema, batch)
+            )
+          ) as ApplyUpstreamResult
+          total += result.applied
+          if (result.caughtUp) break
+          if (result.applied === 0) {
+            throw new Error('upstream change cursor made no progress')
+          }
+        }
+        if (total > 0) await this.#enqueueWake('__upstream__')
+        return total
+      })().finally(() => {
+        this.#ingestPromise = null
+      })
+      return this.#ingestPromise
     }
 
     #log(fields: Record<string, unknown>): void {
@@ -624,7 +744,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     async #push(
       request: Request,
       claims: NormalizedClaims,
-      namespace: string
+      namespace: string,
+      upstreamPath: string | null
     ): Promise<Response> {
       this.#counters.pushes++
       this.#engineDb.resetStats()
@@ -659,6 +780,82 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         })
         return json({ error: 'writer disabled by operator' }, 503)
       }
+      if (config.mutateUrl) {
+        try {
+          const bytes = await request.arrayBuffer()
+          const body = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>
+          const plan = this.#wasm(() => engine_push_validate(body)) as PushPlan
+          if (plan.kind === 'respond') return json(plan.response)
+
+          const endpoint = new URL(
+            `${upstreamPath ?? ''}${config.mutateUrl}`,
+            'https://upstream.invalid'
+          )
+          const headers = new Headers(request.headers)
+          headers.delete(CLAIMS_HEADER)
+          headers.delete(NAMESPACE_HEADER)
+          headers.delete(UPSTREAM_PATH_HEADER)
+          headers.set('host', endpoint.host)
+          const upstreamResponse = await this.#serviceBinding().fetch(endpoint.toString(), {
+            method: 'POST',
+            headers,
+            body: bytes,
+          })
+          if (!upstreamResponse.ok) {
+            return new Response(upstreamResponse.body, upstreamResponse)
+          }
+          const upstreamBody = (await upstreamResponse.json()) as {
+            mutations?: Array<{ id?: { clientID?: unknown; id?: unknown } }>
+            pushResponse?: {
+              mutations?: Array<{ id?: { clientID?: unknown; id?: unknown } }>
+            }
+          }
+          const acknowledged = upstreamBody.pushResponse?.mutations ?? upstreamBody.mutations
+          if (!Array.isArray(acknowledged)) {
+            throw new Error('delegated push returned no mutation results')
+          }
+          for (const mutation of plan.mutations) {
+            const ack = acknowledged.some(
+              (result) =>
+                result.id?.clientID === mutation.clientID &&
+                String(result.id?.id) === mutation.id
+            )
+            if (!ack) continue
+            this.ctx.storage.transactionSync(() => {
+              const decision = this.#wasm(() =>
+                engine_preflight(
+                  this.#engineDb,
+                  plan.clientGroupID,
+                  mutation.clientID,
+                  mutation.id,
+                  claims.userID
+                )
+              ) as Preflight
+              if (decision.kind === 'applied') {
+                this.#wasm(() =>
+                  engine_finalize(
+                    this.#engineDb,
+                    plan.clientGroupID,
+                    mutation.clientID,
+                    mutation.id
+                  )
+                )
+                lmidAdvances++
+              }
+            })
+          }
+          if (lmidAdvances > 0) {
+            this.ctx.storage.transactionSync(() =>
+              this.#wasm(() => engine_prune(this.#engineDb, this.#retainChanges()))
+            )
+          }
+          await this.#ingest(upstreamPath)
+          return json({ pushResponse: upstreamBody.pushResponse ?? upstreamBody })
+        } catch (error) {
+          const status = statusOf(error)
+          return json({ error: errorMessage(error) }, status)
+        }
+      }
       try {
         const body = await requestObject(request)
         const beforeMutationFault = this.#takeFault('push_before_mutation')
@@ -691,7 +888,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                 )
               ) as Preflight
               if (decision.kind === 'replay') return decision
-              const mutator = config.mutators[mutation.name]
+              const mutator = config.mutators?.[mutation.name]
               if (!mutator) throw new Error(`unknown mutator: ${mutation.name}`)
               await mutator(this.#mutatorSql, mutation.args[0] ?? null, {
                 claims,
@@ -989,19 +1186,49 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       this.#simulateIdleTeardown(Date.now())
       const route = routeAfterNamespace(new URL(request.url).pathname)
       const namespace = request.headers.get(NAMESPACE_HEADER) ?? 'unknown'
+      const upstreamPath = this.#rememberUpstreamPath(request)
       if (route.startsWith('/admin/')) return this.#admin(route, request)
 
       if (route === '/wake' && request.method === 'GET') return this.#wake(request)
+      if (route === '/notify' && request.method === 'POST') {
+        try {
+          const applied = await this.#ingest(upstreamPath)
+          return json({ ok: true, applied })
+        } catch (error) {
+          return json({ error: errorMessage(error) }, statusOf(error))
+        }
+      }
 
       const claims = claimsFromRequest(request)
       if (!claims) return json({ error: 'missing normalized claims' }, 401)
       if (route === '/pull' && request.method === 'POST') {
+        try {
+          await this.#ingest(upstreamPath)
+        } catch (error) {
+          return json({ error: errorMessage(error) }, statusOf(error))
+        }
         return this.#pull(request, claims, namespace)
       }
       if (route === '/push' && request.method === 'POST') {
-        return this.#push(request, claims, namespace)
+        return this.#push(request, claims, namespace, upstreamPath)
       }
       return json({ error: 'not found' }, 404)
+    }
+
+    async alarm(): Promise<void> {
+      try {
+        await this.#ingest()
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            event: 'sync_upstream_ingest_error',
+            status: statusOf(error),
+            error: errorMessage(error),
+          })
+        )
+      } finally {
+        await this.ctx.storage.setAlarm(Date.now() + upstreamIntervalMs)
+      }
     }
 
     webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
