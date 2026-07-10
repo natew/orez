@@ -415,7 +415,14 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                   throw requestError("named query args must be an array");
                 }
                 const args = op.args as JsonValue[];
-                const ast = config.resolveQuery(op.name, args, claims);
+                let ast: JsonValue;
+                try {
+                  ast = config.resolveQuery(op.name, args, claims);
+                } catch (error) {
+                  throw requestError(
+                    `unknown or unsupported named query: ${op.name}`,
+                  );
+                }
                 const transformVersion =
                   typeof config.queryTransformVersion === "function"
                     ? config.queryTransformVersion(claims)

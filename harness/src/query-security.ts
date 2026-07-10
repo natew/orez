@@ -45,3 +45,27 @@ if (response.status !== 400 || !body.error?.includes('server-resolved named quer
   )
 }
 console.log('[query-security] PASS rust-cf: client-authored raw AST rejected with 400')
+
+const unknown = await fetch(`${origin}/pull`, {
+  method: 'POST',
+  headers: {
+    authorization: 'Bearer token-attacker',
+    'content-type': 'application/json',
+  },
+  body: JSON.stringify({
+    clientID: 'attacker-unknown',
+    clientGroupID: 'attacker-group',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [{ op: 'put', hash: 'unknown', name: 'doesNotExist', args: [] }],
+    },
+  }),
+})
+const unknownBody = (await unknown.json()) as { error?: string }
+if (unknown.status !== 400 || !unknownBody.error?.includes('unknown or unsupported')) {
+  throw new Error(
+    `unknown named query was not rejected as malformed: ${unknown.status} ${JSON.stringify(unknownBody)}`,
+  )
+}
+console.log('[query-security] PASS rust-cf: unknown named query rejected with 400')
