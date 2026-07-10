@@ -4,5 +4,21 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "sync-native"
+path = "src/main.rs"
+
 [dependencies]
 sync-core = { path = "../sync-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "sync",
+  "signal",
+  "net",
+  "time",
+] }
+axum = { version = "0.8", features = ["ws"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
