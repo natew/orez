@@ -5252,7 +5252,7 @@ export class DoBackend {
   // schema metadata is written out-of-band by the deploy migration backend.
   // A backend that initialized before that write must refresh before serving
   // catalog types rather than retaining physical SQLite types forever.
-  private lastSchemaMetadataReloadAt: number | undefined
+  private lastEmptySchemaMetadataReloadAt: number | undefined
   private rewriteCache: Map<string, RewrittenStatement[]>
   private preparedStatements = new Map<string, PreparedStatement>()
   private portals = new Map<string, BoundPortal>()
@@ -5457,18 +5457,19 @@ export class DoBackend {
   // shared SQL DO, outside this backend instance. If this backend initialized
   // first, its one-time load cached an empty or older schema and catalog reads
   // then exposed physical SQLite INTEGER/TEXT types to zero forever. Refresh
-  // schema rows before schema-bearing catalog answers. This also covers a
-  // later migration adding columns to a backend whose cache was non-empty.
-  private async reloadSchemaMetadata(): Promise<void> {
-    if (this.dbName !== 'postgres') return
+  // schema rows before schema-bearing catalog answers. A non-empty cache was
+  // already hydrated at init; avoid re-reading hundreds of rows for every
+  // short-lived zero-cache catalog session.
+  private async reloadSchemaMetadataIfEmpty(): Promise<void> {
+    if (this.dbName !== 'postgres' || this.schemaMetadata.size > 0) return
     const now = Date.now()
     if (
-      this.lastSchemaMetadataReloadAt &&
-      now - this.lastSchemaMetadataReloadAt < DURABLE_METADATA_RELOAD_THROTTLE_MS
+      this.lastEmptySchemaMetadataReloadAt &&
+      now - this.lastEmptySchemaMetadataReloadAt < DURABLE_METADATA_RELOAD_THROTTLE_MS
     ) {
       return
     }
-    this.lastSchemaMetadataReloadAt = now
+    this.lastEmptySchemaMetadataReloadAt = now
     try {
       await this.ensureMetadataTable()
       const result = await this.doExecResult(
@@ -8416,7 +8417,7 @@ export class DoBackend {
       selectReferencesTable(select, 'pg_attribute') ||
       selectReferencesTable(select, 'pg_index')
     ) {
-      await this.reloadSchemaMetadata()
+      await this.reloadSchemaMetadataIfEmpty()
     }
     // zero-cache's initial sync validates the publication via pg_publication /
     // pg_publication_tables. those answers come from in-memory this.publications,
