@@ -519,6 +519,29 @@ findings pinned:
   process RSS number includes all 100 Zero clients and views, not just server
   state.
 
+**M9, eviction / hibernation faults [DONE locally 2026-07-09; deployed CF
+rerun after harness deploy]:**
+
+- `harness/src/targets/orez-local-process*.ts` moves the local sync server into
+  a real Bun child process over a WAL-mode, FULL-synchronous SQLite file. the
+  lane keeps 10 stock clients polling and 30 task mutations churning while it
+  SIGKILLs that process for 1.5s, then starts a new PID over the same file.
+- `harness/cf/worker.ts` gives the harness DO a deterministic 5s idle teardown:
+  the next request after the window discards and reconstructs the in-memory
+  `SyncServer` over unchanged Durable Object SQL. `/admin/status` exposes a
+  memory boot ID, so the lane proves it crossed that boundary (a real platform
+  eviction also changes the ID) rather than merely sleeping.
+- pull observation uses the transport's existing injectable-fetch seam; it
+  asserts every original client successfully pulls on both sides of the fault,
+  request and response cookies never regress, responses never trail request
+  cookies, and no pull returns 409.
+- validation: local PASS, PID 27328→27898, 1.574s outage, all 30 writes settled
+  exactly once, converge 141ms, late hydrate 53ms, 491 successful pulls + 10
+  expected network failures, zero 409s. CF workerd PASS, boot ID changed after
+  6s idle, all 20 before/after writes converged in 52ms, late hydrate 53ms, 50
+  successful pulls, zero 409s, monotone cookies. rerun `--target cf` against the
+  deployed worker after this worker revision lands.
+
 ### runners (nate 2026-07-09: dev + initial validation happen on `work`;
 
 ### the mini is purely the runner for LARGER tests)

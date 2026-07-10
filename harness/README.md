@@ -23,6 +23,8 @@ bun src/sweep.ts --seed 12345 --against orez-cf    # deterministic replay / CF h
 bun src/bench.ts --target orez-local --clients 20 --writers 5 --rate 10 --duration 15
 bun src/storm.ts --target orez-local --clients 100 # one-project width + round gates
 bun src/storm.ts --target orez-cf --clients 100    # same against one deployed DO
+bun src/eviction.ts --target local                 # SIGKILL + file-backed restart
+bun src/eviction.ts --target cf                    # idle DO memory teardown + resume
 bun src/permissions.ts                             # per-user visibility + add/revoke
 bun src/reconnect.ts                               # persisted resume + recovery faults
 bun src/multi-tab.ts                               # real shared client group + LMIDs
@@ -60,6 +62,15 @@ round gates on all-client convergence and an authoritative oracle comparison;
 the final state is checked again through a fresh late client. use the same
 arguments at 10, 20, and 100 clients for the width comparison recorded in the
 plan.
+
+`eviction.ts` keeps clients alive across authority-memory loss. the local path
+runs the sync server in a child process over a WAL-mode SQLite file, SIGKILLs it
+mid-churn, and starts a new PID on the same file. the CF path disables interval
+polling, idles beyond the harness DO's deterministic memory-teardown window,
+proves the boot ID changed, and resumes the same clients. both require exact
+all-client/oracle/late-client convergence, zero 409s, and monotone request and
+response cookies. expected connection-close logs during the local outage are
+stock Zero's reconnect diagnostics, not lane failures.
 
 `stock-zero` boots embedded postgres (wal_level=logical), the fixture app
 server (`src/app-server.ts`: named-query transform on /query + custom-mutator

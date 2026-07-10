@@ -14,20 +14,33 @@ import { join } from 'node:path'
 import { Zero } from '@rocicorp/zero'
 
 import { mutators, schema } from '../fixture.js'
+import { observedPullFetch, type HttpPullObservation } from '../observed-fetch.js'
 import { ensureHttpPullTransport } from '../vendor/httpPullTransport.js'
 
 import type { Rows, SyncTarget } from '../target.js'
 
-const WORKER = 'https://zharness-sync.lslcf.workers.dev'
+const WORKER = process.env.ZHARNESS_CF_WORKER ?? 'https://zharness-sync.lslcf.workers.dev'
+
+export type OrezCfTarget = SyncTarget & {
+  pull(): Promise<void>
+  hibernationStatus(): Promise<{
+    bootID: string
+    idleTeardownMs: number
+    hibernations: number
+  }>
+}
 
 export async function startOrezCf(opts?: {
   namespace?: string
   pullIntervalMs?: number
-}): Promise<SyncTarget> {
+  onPull?: (observation: HttpPullObservation) => void
+}): Promise<OrezCfTarget> {
   const ns =
     opts?.namespace ??
     `run-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
-  const adminKey = readFileSync(join(homedir(), '.zharness-cf-admin-key'), 'utf8').trim()
+  const adminKey =
+    process.env.ZHARNESS_CF_ADMIN_KEY ??
+    readFileSync(join(homedir(), '.zharness-cf-admin-key'), 'utf8').trim()
   // zero's server option allows at most ONE path component — the namespace
   // is that component
   const origin = `${WORKER}/${ns}`
@@ -50,6 +63,7 @@ export async function startOrezCf(opts?: {
 
   const transport = ensureHttpPullTransport({
     origin,
+    fetch: opts?.onPull ? observedPullFetch(opts.onPull) : undefined,
     pullIntervalMs: opts?.pullIntervalMs ?? 500,
   })
 
@@ -84,6 +98,24 @@ export async function startOrezCf(opts?: {
 
     async metrics() {
       return {}
+    },
+
+    pull() {
+      return transport.pull()
+    },
+
+    async hibernationStatus() {
+      const response = await fetch(`${origin}/admin/status`, {
+        headers: { 'x-admin-key': adminKey },
+      })
+      if (!response.ok) {
+        throw new Error(`admin/status ${response.status}: ${await response.text()}`)
+      }
+      return response.json() as Promise<{
+        bootID: string
+        idleTeardownMs: number
+        hibernations: number
+      }>
     },
 
     async close() {

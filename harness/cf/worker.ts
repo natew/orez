@@ -37,6 +37,13 @@ type DurableObjectNamespace = {
   get(id: unknown): { fetch(request: Request): Promise<Response> }
 }
 
+// Deterministic harness analogue of a DO eviction: after this much inactivity,
+// the next request discards every in-memory sync-server object and reconstructs
+// it over the same durable SQL storage. A real platform eviction also reruns
+// the class constructor; bootID changes in either case, giving the lane proof
+// that it crossed a memory-teardown boundary instead of merely waiting.
+const IDLE_TEARDOWN_MS = 5_000
+
 function doSqliteDb(state: DurableObjectState): SyncDb {
   return {
     exec(sql, params = []) {
@@ -54,6 +61,9 @@ function doSqliteDb(state: DurableObjectState): SyncDb {
 export class SyncServerDO {
   #db: SyncDb
   #sync: SyncServer | null = null
+  #bootID = crypto.randomUUID()
+  #lastRequestAt = 0
+  #hibernations = 0
 
   constructor(state: DurableObjectState) {
     this.#db = doSqliteDb(state)
@@ -76,6 +86,13 @@ export class SyncServerDO {
   }
 
   async fetch(request: Request): Promise<Response> {
+    const now = Date.now()
+    if (this.#lastRequestAt > 0 && now - this.#lastRequestAt >= IDLE_TEARDOWN_MS) {
+      this.#sync = null
+      this.#bootID = crypto.randomUUID()
+      this.#hibernations++
+    }
+    this.#lastRequestAt = now
     const url = new URL(request.url)
     // path arrives as /<ns>/<route...>; strip the namespace segment
     const [, , ...rest] = url.pathname.split('/')
@@ -89,6 +106,13 @@ export class SyncServerDO {
       })
 
     try {
+      if (route === '/admin/status') {
+        return json({
+          bootID: this.#bootID,
+          idleTeardownMs: IDLE_TEARDOWN_MS,
+          hibernations: this.#hibernations,
+        })
+      }
       if (route === '/admin/sql') {
         // the core's table triggers feed the change log, so admin writes
         // advance the watermark on their own
