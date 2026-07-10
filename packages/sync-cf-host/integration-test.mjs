@@ -232,16 +232,18 @@ try {
   await admin('/admin/query-aware', { enabled: false })
 
   for (const route of ['/pull', '/push']) {
-    const malformed = await fetch(`${origin}${route}`, {
-      method: 'POST',
-      headers: {
-        authorization: 'Bearer token-user-a',
-        'content-type': 'application/json',
-      },
-      body: '{',
-    })
-    equal(malformed.status, 400, `${route} malformed JSON is a bad request`)
-    await malformed.arrayBuffer()
+    for (const body of ['{', 'null', '[]']) {
+      const malformed = await fetch(`${origin}${route}`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer token-user-a',
+          'content-type': 'application/json',
+        },
+        body,
+      })
+      equal(malformed.status, 400, `${route} malformed/non-object JSON is a bad request`)
+      await malformed.arrayBuffer()
+    }
   }
 
   let writerStatus = await admin('/admin/writer')
