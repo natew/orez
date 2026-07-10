@@ -92,7 +92,9 @@ const target =
     ? await (
         await import('./targets/rust-local.js')
       ).startRustLocal({ pullIntervalMs: 75 })
-    : await startOrezLocal({ pullIntervalMs: 75 })
+    : cli.target === 'rust-cf'
+      ? await (await import('./targets/rust-cf.js')).startRustCf({ pullIntervalMs: 75 })
+      : await startOrezLocal({ pullIntervalMs: 75 })
 const views: ReturnType<typeof watchProjects>[] = []
 
 try {

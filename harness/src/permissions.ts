@@ -130,17 +130,18 @@ function equal(actual: string[], expected: string[], label: string) {
   }
 }
 
-// rust-local bakes the SAME fixture visibility policy into the native host
+// rust-local/rust-cf bake the SAME fixture visibility policy into the host
 // behind --visible; orez-local takes it as a JS callback. same semantics.
 const target =
   cli.target === 'rust-local'
     ? await (
         await import('./targets/rust-local.js')
-      ).startRustLocal({
-        pullIntervalMs: 100,
-        visible: true,
-      })
-    : await startOrezLocal({ pullIntervalMs: 100, visible: fixtureVisibility })
+      ).startRustLocal({ pullIntervalMs: 100, visible: true })
+    : cli.target === 'rust-cf'
+      ? await (
+          await import('./targets/rust-cf.js')
+        ).startRustCf({ pullIntervalMs: 100, visible: true })
+      : await startOrezLocal({ pullIntervalMs: 100, visible: fixtureVisibility })
 const views: ReturnType<typeof watchAccess>[] = []
 
 try {
