@@ -103,6 +103,21 @@ Multiple agents work this worktree concurrently. Rules:
       is the pass of record. Production cutover for soot/chat remains
       user-gated and is NOT part of this gate.
 
+- [~] Chat testbed integration (user-cleared, 2026-07-10): the real Chat app
+  runs end-to-end against the rust chat-host — browser Zero client with the
+  better-auth bearer bridge, CORS, pull/push/wake all green; 8,000
+  message.send pushes at ~346 msg/s with 0 failures; query-aware
+  channelMessages history load 47 ms for 800 messages. Six integration bugs
+  found and fixed on rust-sync-compat (auth timing, bearer bridge,
+  websocket-close DO crash — fixed in packages/sync-cf-host on this branch,
+  CORS, session-cache negative poisoning, admin-email elevation) plus a
+  dev/test config collision. resolveQuery corpus being extended to the full
+  124-query inventory with per-query oracle tests (194 green so far).
+  OPEN FINDING: the push path OOMs local workerd's JS heap at ~10k messages
+  in a single DO under sustained writes — the M6 wasm soak only covered
+  query churn; a dedicated push-path memory lane is running (sol).
+  Production cutover NOT touched.
+
 Keep this checklist current when a track lands its exit gate.
 
 ## Recorded measurements
