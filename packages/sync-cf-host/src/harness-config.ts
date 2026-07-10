@@ -289,15 +289,15 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
       rowLocal: false,
       filter(table, claims) {
         const user = claims.userID
-        if (table === 'user') return { sql: 'id = ?', params: [user] }
+        if (table === 'user') return { sql: '"id" = ?', params: [user] }
         if (table === 'project') {
           return {
-            sql: '(p."ownerId" = ? OR EXISTS (SELECT 1 FROM member m WHERE m."projectId" = p.id AND m."userId" = ?))',
+            sql: '("ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?))',
             params: [user, user],
           }
         }
         if (table === 'member') return { sql: '"userId" = ?', params: [user] }
-        if (table === 'task') return { sql: 'EXISTS (SELECT 1 FROM project p WHERE p.id = task."projectId" AND (p."ownerId" = ? OR EXISTS (SELECT 1 FROM member m WHERE m."projectId" = p.id AND m."userId" = ?)))', params: [user, user] }
+        if (table === 'task') return { sql: 'EXISTS (SELECT 1 FROM project WHERE project.id = task."projectId" AND (project."ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?)))', params: [user, user] }
         return undefined
       },
     },
