@@ -95,6 +95,20 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
         )",
         &[],
     )?;
+    // the monotonic acknowledged query-state version per (group, client). the
+    // gotQueries ack is read from here, NOT from the max over current desire rows:
+    // a del/clear removes desires but must never regress the acked version
+    // (MEDIUM-6). every applied desiredQueriesPatch advances it to max(stored,
+    // patch.version).
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _zsync_query_ack (
+            clientGroupID TEXT NOT NULL,
+            clientID TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            PRIMARY KEY (clientGroupID, clientID)
+        )",
+        &[],
+    )?;
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_query_rows (
             clientGroupID TEXT NOT NULL,
@@ -255,15 +269,40 @@ pub(crate) fn desired_hashes(
         .collect())
 }
 
-// the client's current query-state version = the max version it has recorded
-// across its desires (0 if it desires nothing)
+// advance a client's acknowledged query-state version monotonically. called for
+// every applied desiredQueriesPatch (put/del/clear alike), so the ack tracks the
+// patch version independently of which desire rows currently exist and never
+// regresses when del/clear shrink the desire set (MEDIUM-6).
+pub(crate) fn advance_query_ack(
+    db: &mut dyn SyncDb,
+    group: &str,
+    client: &str,
+    version: i64,
+) -> Result<(), EngineError> {
+    db.exec(
+        "INSERT INTO _zsync_query_ack (clientGroupID, clientID, version)
+         VALUES (?, ?, ?)
+         ON CONFLICT (clientGroupID, clientID) DO UPDATE SET version = max(version, excluded.version)",
+        &[
+            text(group),
+            text(client),
+            SqlValue::Text(version.to_string()),
+        ],
+    )?;
+    Ok(())
+}
+
+// the client's acknowledged query-state version: the monotonic value recorded by
+// advance_query_ack (0 if it has never sent a desiredQueriesPatch). read from the
+// durable ack row, NOT the max over current desires, so a del/clear cannot make
+// the gotQueries ack regress.
 pub(crate) fn client_query_version(
     db: &mut dyn SyncDb,
     group: &str,
     client: &str,
 ) -> Result<i64, EngineError> {
     let rows = db.query(
-        "SELECT CAST(COALESCE(MAX(clientVersion), 0) AS TEXT) AS v FROM _zsync_desires
+        "SELECT CAST(version AS TEXT) AS v FROM _zsync_query_ack
          WHERE clientGroupID = ? AND clientID = ?",
         &[text(group), text(client)],
     )?;
