@@ -148,6 +148,82 @@ function connectAndSubscribe(
   return ws
 }
 
+// subscribe to the keyless composite-key table (the accountMember shape:
+// no PRIMARY KEY on the table, key carried by a separate <name>_pkey unique
+// index — soot generateDDL emits composite primaryKey() this way for the DO).
+function connectAndSubscribeMember(
+  port: number,
+  clientGroupID: string,
+  downstream: Queue<unknown>
+): WebSocket {
+  const cid = `${clientGroupID}-client`
+  const secProtocol = encodeSecProtocols(
+    [
+      'initConnection',
+      {
+        desiredQueriesPatch: [
+          {
+            op: 'put',
+            hash: 'qm1',
+            ast: { table: 'member', orderBy: [['accountId', 'asc']] },
+          },
+        ],
+        clientSchema: {
+          tables: {
+            member: {
+              columns: {
+                accountId: { type: 'string' },
+                userId: { type: 'string' },
+                role: { type: 'string' },
+              },
+              primaryKey: ['accountId', 'userId'],
+            },
+          },
+        },
+      },
+    ],
+    undefined
+  )
+  const ws = new WebSocket(
+    `ws://localhost:${port}/sync/v${SYNC_PROTOCOL_VERSION}/connect` +
+      `?clientGroupID=${clientGroupID}&clientID=${cid}&wsid=ws1&schemaVersion=1&baseCookie=&ts=${Date.now()}&lmid=0`,
+    secProtocol
+  )
+  ws.on('message', (data) => {
+    downstream.enqueue(JSON.parse(data.toString()))
+  })
+  return ws
+}
+
+async function waitForMemberRole(
+  downstream: Queue<unknown>,
+  accountId: string,
+  role: string,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const remaining = Math.max(1000, deadline - Date.now())
+    const msg = (await downstream.dequeue('timeout' as any, remaining)) as any
+    if (msg === 'timeout') break
+    if (Array.isArray(msg) && msg[0] === 'pokePart' && msg[1]?.rowsPatch) {
+      for (const row of msg[1].rowsPatch) {
+        if (
+          row.op === 'put' &&
+          row.tableName === 'member' &&
+          row.value?.accountId === accountId &&
+          row.value?.role === role
+        ) {
+          return
+        }
+      }
+    }
+  }
+  throw new Error(
+    `timed out waiting for member/${accountId} role=${role} after ${timeoutMs}ms`
+  )
+}
+
 async function waitForRowPut(
   downstream: Queue<unknown>,
   id: string,
@@ -396,12 +472,22 @@ describe('zero-cache embed on the CF data plane (ZeroDO upstream, local cvr/cdb)
     seed = createBackend('postgres')
     await seed.waitReady
     await seed.exec(`CREATE TABLE foo (id TEXT PRIMARY KEY, value TEXT, num INTEGER)`)
+    // the accountMember shape: keyless table, composite key as a separate
+    // unique index (2026-07-10 soot prod: first UPDATE through the streamer
+    // crashed change-processor #getKey when the replica lacked the index)
+    await seed.exec(
+      `CREATE TABLE member ("accountId" TEXT NOT NULL, "userId" TEXT NOT NULL, role TEXT NOT NULL)`
+    )
+    await seed.exec(
+      `CREATE UNIQUE INDEX "member_pkey" ON "member" ("accountId", "userId")`
+    )
     await seed.exec(`CREATE PUBLICATION "${PUB_NAME}"`)
     await seed.exec(`ALTER PUBLICATION "${PUB_NAME}" ADD TABLE "public"."foo"`)
+    await seed.exec(`ALTER PUBLICATION "${PUB_NAME}" ADD TABLE "public"."member"`)
     await seed.exec(
       `CREATE TABLE IF NOT EXISTS "zero"."permissions" ("permissions" JSONB, "hash" TEXT, "lock" BOOL PRIMARY KEY DEFAULT true)`
     )
-    const permissions = allowAllPermissionsJson(['foo'])
+    const permissions = allowAllPermissionsJson(['foo', 'member'])
     await seed.query(
       `INSERT INTO "zero"."permissions" ("permissions", "hash", "lock") VALUES ($1, $2, true)`,
       [permissions, createHash('md5').update(permissions).digest('hex')]
@@ -411,6 +497,10 @@ describe('zero-cache embed on the CF data plane (ZeroDO upstream, local cvr/cdb)
       'hello',
       1,
     ])
+    await seed.query(
+      `INSERT INTO member ("accountId", "userId", role) VALUES ($1, $2, $3)`,
+      ['acc-1', 'user-1', 'member']
+    )
 
     const backends = {
       postgres: createBackend('postgres'),
@@ -560,6 +650,66 @@ describe('zero-cache embed on the CF data plane (ZeroDO upstream, local cvr/cdb)
             `${retained} row(s) after 30s — standby-feedback confirmation is not ` +
             `reaching the producer, so retention can never trim\n${diagnostics()}`
         )
+      } finally {
+        ws.close()
+      }
+    }
+  )
+
+  test(
+    'a keyless table with a composite unique index syncs updates and deletes',
+    { timeout: 120000 },
+    async () => {
+      // hydrate a client group on the member table (replica spec must key it
+      // off the member_pkey unique index — there is no PRIMARY KEY)
+      const downstream = new Queue<unknown>()
+      const ws = connectAndSubscribeMember(zeroPort, `cg-member-${Date.now()}`, downstream)
+      try {
+        await waitForMemberRole(downstream, 'acc-1', 'member', 45000)
+
+        // the 2026-07-10 soot prod crash: the FIRST UPDATE through the
+        // change-streamer for this shape threw in change-processor #getKey
+        // ("Cannot replicate table without a PRIMARY KEY or UNIQUE INDEX")
+        // when the replica lacked the index. a healthy replica must stream it.
+        await seed.query(
+          `UPDATE member SET role = $1 WHERE "accountId" = $2 AND "userId" = $3`,
+          ['admin', 'acc-1', 'user-1']
+        )
+        await waitForMemberRole(downstream, 'acc-1', 'admin', 45000)
+
+        // deletes exercise the same key derivation
+        await seed.query(
+          `INSERT INTO member ("accountId", "userId", role) VALUES ($1, $2, $3)`,
+          ['acc-2', 'user-2', 'guest']
+        )
+        await waitForMemberRole(downstream, 'acc-2', 'guest', 45000)
+        await seed.query(
+          `DELETE FROM member WHERE "accountId" = $1 AND "userId" = $2`,
+          ['acc-2', 'user-2']
+        )
+        const deadline = Date.now() + 45000
+        let deleted = false
+        while (Date.now() < deadline && !deleted) {
+          const remaining = Math.max(1000, deadline - Date.now())
+          const msg = (await downstream.dequeue('timeout' as any, remaining)) as any
+          if (msg === 'timeout') break
+          if (Array.isArray(msg) && msg[0] === 'pokePart' && msg[1]?.rowsPatch) {
+            for (const row of msg[1].rowsPatch) {
+              if (
+                row.op === 'del' &&
+                row.tableName === 'member' &&
+                row.id?.accountId === 'acc-2'
+              ) {
+                deleted = true
+              }
+            }
+          }
+        }
+        if (!deleted) {
+          throw new Error(`timed out waiting for del of member/acc-2\n${diagnostics()}`)
+        }
+      } catch (err) {
+        throw new Error(`${(err as Error).message}\n${diagnostics()}`)
       } finally {
         ws.close()
       }

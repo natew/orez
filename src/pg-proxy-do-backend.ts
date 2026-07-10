@@ -7123,6 +7123,50 @@ export class DoBackend {
     return columns
   }
 
+  // a table with no PRIMARY KEY but a full, non-partial UNIQUE index over
+  // NOT NULL columns is keyed by that index — the shape soot's DDL generator
+  // emits for composite drizzle primaryKey() tables (CREATE TABLE without a
+  // PK + CREATE UNIQUE INDEX <table>_pkey), because a PK cannot be retrofitted
+  // onto an existing sqlite table. real pg conveys this key via replica
+  // identity; without promoting it here, zero's initial sync builds a keyless
+  // replica spec and its change processor throws "Cannot replicate table
+  // without a PRIMARY KEY or UNIQUE INDEX" on the first UPDATE (2026-07-10
+  // soot prod outage). prefer the <table>_pkey-named index, else the narrowest
+  // qualifying index, name as the tiebreak for determinism.
+  private promotedUniqueIndexKey(
+    sqliteTableName: string,
+    columns: SqliteColumnInfo[],
+    indexListRows: SqliteRow[],
+    indexColumnsByName: Map<string, Record<string, 'ASC' | 'DESC'>>
+  ): string[] {
+    const notNull = new Set(
+      columns
+        .filter((column) => {
+          const metadata = this.schemaMetadata.get(sqliteTableName)?.get(column.name)
+          return metadata?.notNull || metadata?.primaryKey || column.notnull || column.pk
+        })
+        .map((column) => column.name)
+    )
+    const ref = this.tableRefForSqliteTable(sqliteTableName)
+    const pkeyName = `${ref.tableName}_pkey`
+    const candidates: Array<{ name: string; columns: string[] }> = []
+    for (const row of indexListRows) {
+      const name = String(row.name ?? '')
+      if (!name || !Number(row.unique ?? 0) || Number(row.partial ?? 0)) continue
+      const indexColumns = Object.keys(indexColumnsByName.get(name) ?? {})
+      if (indexColumns.length === 0) continue
+      if (!indexColumns.every((column) => notNull.has(column))) continue
+      candidates.push({ name, columns: indexColumns })
+    }
+    if (candidates.length === 0) return []
+    const preferred = candidates.find((candidate) => candidate.name === pkeyName)
+    if (preferred) return preferred.columns
+    candidates.sort(
+      (a, b) => a.columns.length - b.columns.length || a.name.localeCompare(b.name)
+    )
+    return candidates[0].columns
+  }
+
   private tableIndexInfos(
     table: PublicationTableRef,
     columns: SqliteColumnInfo[],
@@ -7300,18 +7344,27 @@ export class DoBackend {
           (column) => this.schemaMetadata.get(table.name)?.get(column.name)?.primaryKey
         )
         .map((column) => column.name)
+      const sqlitePrimaryKey = columns
+        .filter((column) => column.pk > 0)
+        .sort((a, b) => a.pk - b.pk)
+        .map((column) => column.name)
+      const primaryKey =
+        metadataPrimaryKey.length > 0
+          ? metadataPrimaryKey
+          : sqlitePrimaryKey.length > 0
+            ? sqlitePrimaryKey
+            : this.promotedUniqueIndexKey(
+                table.name,
+                columns,
+                pragmaResults[i * 2 + 1]?.rows ?? [],
+                indexColumnsByName
+              )
       const info = {
         name: table.name,
         schema: ref.schema,
         tableName: ref.tableName,
         columns,
-        primaryKey:
-          metadataPrimaryKey.length > 0
-            ? metadataPrimaryKey
-            : columns
-                .filter((column) => column.pk > 0)
-                .sort((a, b) => a.pk - b.pk)
-                .map((column) => column.name),
+        primaryKey,
         indexes: [],
       }
       info.indexes = this.tableIndexInfos(

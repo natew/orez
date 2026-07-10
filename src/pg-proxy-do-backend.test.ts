@@ -1748,6 +1748,89 @@ describe('DoBackend', () => {
     expect(compactSQL(tracked.sql)).toContain('__orez_returning_1')
   })
 
+  test("promotes a keyless table's unique index to its primary key in catalog answers", async () => {
+    // the accountMember shape: no PK on the table, key carried by a separate
+    // <table>_pkey unique index (soot generateDDL for composite drizzle
+    // primaryKey()). without promotion, zero builds a keyless replica spec and
+    // its change processor throws on the first UPDATE (2026-07-10 soot prod).
+    const http = await startDoHttp((sql) => {
+      if (sql.includes('sqlite_master')) {
+        return {
+          rows: [
+            {
+              name: 'member',
+              sql: 'CREATE TABLE member ("accountId" TEXT NOT NULL, "userId" TEXT NOT NULL, role TEXT NOT NULL)',
+            },
+          ],
+          columns: ['name', 'sql'],
+        }
+      }
+      if (sql.includes('PRAGMA table_info("member")')) {
+        return {
+          rows: [
+            {
+              cid: 0,
+              name: 'accountId',
+              type: 'TEXT',
+              notnull: 1,
+              dflt_value: null,
+              pk: 0,
+            },
+            { cid: 1, name: 'userId', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+            { cid: 2, name: 'role', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+          ],
+          columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
+        }
+      }
+      if (sql.includes('PRAGMA index_list("member")')) {
+        return {
+          rows: [{ seq: 0, name: 'member_pkey', unique: 1, origin: 'c', partial: 0 }],
+          columns: ['seq', 'name', 'unique', 'origin', 'partial'],
+        }
+      }
+      if (sql.includes('PRAGMA index_xinfo("member_pkey")')) {
+        return {
+          rows: [
+            { seqno: 0, cid: 0, name: 'accountId', desc: 0, key: 1 },
+            { seqno: 1, cid: 1, name: 'userId', desc: 0, key: 1 },
+            { seqno: 2, cid: -1, name: null, desc: 0, key: 0 },
+          ],
+          columns: ['seqno', 'cid', 'name', 'desc', 'key'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'promoted-key-test')
+    await backend.waitReady
+
+    const result = await backend.query<{
+      kind: string
+      table_name: string
+      column_name: string
+      ordinal_position: number
+    }>(
+      `SELECT 'pk' AS kind, tc.table_schema, tc.table_name, kcu.column_name, NULL AS data_type, kcu.ordinal_position
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+       WHERE tc.constraint_type = 'PRIMARY KEY'
+         AND tc.table_schema = ANY($1)
+       UNION ALL
+       SELECT 'col' AS kind, table_schema, table_name, column_name, data_type, ordinal_position
+       FROM information_schema.columns
+       WHERE table_schema = ANY($1)
+       ORDER BY table_schema, table_name, kind, ordinal_position`,
+      [['public']]
+    )
+
+    const memberPk = result.rows.filter(
+      (row) => row.kind === 'pk' && row.table_name === 'member'
+    )
+    expect(memberPk.map((row) => row.column_name)).toEqual(['accountId', 'userId'])
+    expect(memberPk.map((row) => row.ordinal_position)).toEqual([1, 2])
+  })
+
   test('synthesizes primary-key rows for zero-cache relation metadata queries', async () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('sqlite_master')) {
