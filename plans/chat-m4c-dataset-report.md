@@ -64,18 +64,33 @@ message row is ~376 bytes. `query` is the compiled permission query's execution
 time; `serialize` is the `zero_row` JSON conversion of every authorized row.
 Release build, in-memory SQLite.
 
-| namespace | channels | members | msgs/channel | total messages | authorized rows | snapshot bytes | query | serialize | engine total |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| small | 10 | 20 | 100 | 1,000 | 1,000 | 0.4 MB | 1.0 ms | 0.9 ms | 1.9 ms |
-| medium | 30 | 100 | 500 | 15,000 | 15,000 | 5.4 MB | 14.7 ms | 12.7 ms | 27.4 ms |
-| large | 50 | 300 | 2,000 | 100,000 | 100,000 | 35.8 MB | 94.7 ms | 83.9 ms | 178.6 ms |
-| message-heavy | 80 | 500 | 6,250 | 500,000 | 500,000 | 179.5 MB | 484.1 ms | 424.6 ms | 908.7 ms |
+Full authorized snapshot per namespace:
+
+| namespace | channels | members | msgs/channel | total messages | authorized rows | snapshot bytes | engine time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| small | 10 | 20 | 100 | 1,000 | 1,000 | 0.4 MB | 1.9 ms |
+| medium | 30 | 100 | 500 | 15,000 | 15,000 | 5.4 MB | 26.7 ms |
+| large | 50 | 300 | 2,000 | 100,000 | 100,000 | 35.8 MB | 178.7 ms |
+| message-heavy | 80 | 500 | 6,250 | 500,000 | 500,000 | 179.5 MB | 908.6 ms |
 
 Snapshot bytes and engine time scale linearly with the authorized message count
 (~376 bytes and ~1.8 microseconds of engine time per message). The non-message
 tables add a fixed overhead in the low tens of kilobytes (hundreds of channels,
 members, and roles), so the message rows are more than 99% of the snapshot for
 every namespace at or above the medium scale.
+
+For contrast, the same run measures the query-aware alternative M4b would ship
+instead of the whole namespace: one open channel's most-recent message window
+(a `where channelId = ? orderBy id desc limit 100` query, the client's message
+list). The window is a fixed ~36 KB and ~1 ms of engine time regardless of
+namespace size, because it ships the limit, not the history:
+
+| namespace | full snapshot | windowed query (1 channel, 100 msgs) | snapshot / window bytes |
+| --- | ---: | ---: | ---: |
+| small | 0.4 MB / 1.9 ms | 36.3 KB / 0.21 ms | 10x |
+| medium | 5.4 MB / 26.7 ms | 36.4 KB / 0.47 ms | 151x |
+| large | 35.8 MB / 178.7 ms | 36.4 KB / 0.99 ms | 1007x |
+| message-heavy | 179.5 MB / 908.6 ms | 36.5 KB / 1.56 ms | 5034x |
 
 ## What the numbers say
 
@@ -111,9 +126,13 @@ window (the client's `queryMessages` limit), not all 500,000 rows. Two things
 the numbers make concrete for the narrowing work:
 
 1. **Message queries must be served by the query-aware layer with limits, never
-   by a full-namespace snapshot.** The visible window for a channel is on the
-   order of the client's page size (tens to low hundreds of messages), which is
-   four to five orders of magnitude smaller than the full history.
+   by a full-namespace snapshot.** The measured windowed query (one channel, 100
+   messages) is a fixed ~36 KB while the full snapshot for the message-heavy
+   namespace is 179.5 MB, so the query-aware path ships 5,034x fewer bytes for a
+   client actively reading one channel, and the gap grows with history because
+   the window is constant. The visible window is the client's page size (tens to
+   low hundreds of messages), independent of how many messages the namespace
+   holds.
 2. **The recomputation cost that matters is per-touched-key, not
    per-namespace.** The current engine recomputes all active queries on every
    pull (correct, and fine at the query-aware row volumes); the touched-table
