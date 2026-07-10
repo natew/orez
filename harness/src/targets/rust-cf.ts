@@ -129,7 +129,8 @@ export async function startRustCf(opts?: {
 
     async resetCursor() {
       await admin('/admin/sql', {
-        query: 'DELETE FROM _zsync_changes; UPDATE _zsync_meta SET floor = 0',
+        query:
+          'DELETE FROM _zsync_changes; UPDATE _zsync_meta SET floor = 0; UPDATE _zsync_watermark SET high = 0',
       })
     },
 
