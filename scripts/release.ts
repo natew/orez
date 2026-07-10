@@ -205,6 +205,13 @@ if (into) {
     pkgDirs.push({ name: sqlPkg.name, dir: sqlDir })
   }
 
+  const syncHostDir = resolve(root, 'packages', 'sync-cf-host')
+  const syncHostPkgPath = resolve(syncHostDir, 'package.json')
+  if (existsSync(syncHostPkgPath)) {
+    const syncHostPkg = JSON.parse(readFileSync(syncHostPkgPath, 'utf-8'))
+    pkgDirs.push({ name: syncHostPkg.name, dir: syncHostDir })
+  }
+
   let released = 0
   try {
     for (const { name, dir } of pkgDirs) {
@@ -215,6 +222,9 @@ if (into) {
       }
 
       try {
+        if (name === '@orez/sync-cf-host') {
+          run('bun run build:wasm', { cwd: dir })
+        }
         run(`npm pack --pack-destination ${tmpDir}`, { cwd: dir, silent: true })
 
         const files = readdirSync(tmpDir)
