@@ -79,6 +79,19 @@ describe('zero recovery signatures', () => {
         '[orez:zero] pid=94245,worker=write-worker Message Processing failed: {"name":"Error","errorMsg":"Already in a transaction {\\"tag\\":\\"begin\\",\\"commitLsn\\":\\"001E44E7/FFBA2006\\",\\"xid\\":1}"}'
       )
     ).toBe(true)
+    // change-processor rejecting a row for a table missing from the replica
+    // (the table entered the publication after the initial-sync snapshot);
+    // the captured line carries the JSON-stringified error incl. the stack
+    expect(
+      hasZeroStateInconsistencySignature(
+        '[orez:zero] pid=4060,worker=write-worker Message Processing failed: {"name":"Error","errorMsg":"Unknown table reset_probe","stack":"Error: Unknown table reset_probe\\n    at must (.../shared/src/must.js:3:23)\\n    at #tableSpec (.../services/replicator/change-processor.js:232:10)"}'
+      )
+    ).toBe(true)
+    // an application-level unknown-table error without the replicator's
+    // change-processor stack must NOT trigger a state reset
+    expect(
+      hasZeroStateInconsistencySignature('query failed: Unknown table user_prefs')
+    ).toBe(false)
   })
 
   it('treats replica monitor missing metadata as warmup noise', () => {
