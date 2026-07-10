@@ -59,13 +59,23 @@ Multiple agents work this worktree concurrently. Rules:
       replay, lost-response). A cross-model adversarial review + re-verify
       (plans/rust-sync-review-findings-2026-07-09.md) fixed 8 defects
       including two criticals (client raw-AST permission bypass, global
-      query-hash cross-group collision). REOPENED items before the gate is
-      green: (1) nested related per-relation orderBy+limit must be
-      SUPPORTED not rejected — Chat's windowed queries need it, and 5
-      corpus shapes are currently skipped in query-diff; (2) forward
-      migration for the _zsync_queries (clientGroupID,hash) rekey; (3) CI
-      must run cargo test --workspace + a sync-cf-host test job; (4)
-      unknown named query must return 400 not 500.
+      query-hash cross-group collision). First reopen round closed:
+      nested per-parent bounds now COMPILE via ROW_NUMBER windowing
+      (a840443, all 22 query-diff shapes green vs rust-local and rust-cf,
+      15b8be8), forward migration (6235344), unknown named query 400
+      (8de39d1), CI cargo test --workspace + sync-cf-host job (d0753a8;
+      immediately caught a latent broken assertion, 8c17d03). The
+      intermittent rust-cf query-diff stall was root-caused to volatile
+      admin knobs in the CF host and fixed with durable
+      _zsync_host_control + a workerd restart regression lane (002def5).
+      SECOND re-verify round (2026-07-10) keeps the gate OPEN: GAP-2a
+      cursor rows discarding implicit PK tie-breaks (400 on valid stock
+      cursors), GAP-2b nullable cursor comparisons hide rows, GAP-2c
+      `_zrn` window-alias collision, GAP-3a migration reset without epoch
+      invalidation (silent staleness), GAP-3b QUERY_SCHEMA_VERSION never
+      read. All five dispatched to opus-m1 with regression-test
+      requirement; reverify agent standing by for the final targeted
+      re-check.
 - [ ] M4c: chat compatibility branch (measurement)
 - [ ] M5/M6 gates: see final plan
 

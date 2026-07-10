@@ -93,3 +93,41 @@ unsoundness. Any non-root dependency touch forces recompute; recursively
 collected dependency tables cover EXISTS + related-of-related; a root
 touch recomputes if the row was durable or currently matches — sufficient
 for departure/entry and window shifts.
+
+## Re-verify round (2026-07-10, fresh sol reviewer)
+
+Scope: the four gaps dispatched after the first round (a840443 GAP-2
+nested bounds, 6235344 GAP-3 forward migration, 8de39d1 GAP-1 unknown
+query 400, d0753a8 GAP-4 CI). Verdict: GAP-1 and GAP-4 RESOLVED; GAP-2
+and GAP-3 PARTIAL; one NEW defect from the GAP-2 fix. M4b gate stays
+open until these close.
+
+- GAP-2a (blocking): ast.rs ~292-301 copies only explicit orderBy fields
+  into Bound.row, discarding implicit PK tie-break components. Stock
+  builder cursors include the PK (start({rank:2,id:'t2'})), so
+  compile_start 400s with "start.row missing ordering key 'id'".
+  Composite PKs drop every implicit component.
+- GAP-2b (blocking): nullable cursor comparisons — compile.rs ~205-228
+  emits `col > NULL` / `col = NULL`, false for all rows in SQLite, so a
+  valid cursor with a null ordered value hides all later rows.
+- GAP-2c (NEW from a840443): ROW_NUMBER window alias `_zrn` hard-coded
+  but legal as an application column; a child table with its own `_zrn`
+  makes the window filter compare against app data (repro: app _zrn=99,
+  limit 1 -> zero rows).
+- GAP-3a (blocking): the query-schema migration reset wipes
+  defs/desires/acks/membership but never invalidates the baseline
+  cookie/epoch; a migrated client's next pull fast-paths to
+  {unchanged:true} forever (silent staleness, live-reproduced on
+  persisted workerd storage).
+- GAP-3b: QUERY_SCHEMA_VERSION is never read — init unconditionally
+  overwrites the stored version, so shape mismatches (including FUTURE
+  versions) are silently stamped back instead of triggering reset or
+  fail-loud.
+
+Separately root-caused by the coordinator during this round (fixed,
+002def5): the intermittent rust-cf query-diff timeout was the CF host
+keeping admin namespace knobs (query-aware/visibility/retention) in
+instance fields; a DO restart reverted a query-aware namespace to
+baseline and every pull answered {unchanged:true}. Knobs now persist in
+_zsync_host_control with a workerd kill+restart regression lane
+(test:restart).
