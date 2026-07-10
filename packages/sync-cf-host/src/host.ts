@@ -207,6 +207,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #counters = freshCounters();
     #pulling = new Set<string>();
     #wakeOrigins = new Set<string>();
+    #wakeRecipients = new Set<WebSocket>();
     #wakePromise: Promise<void> | null = null;
     #visibilityEnabled = false;
     #retainChanges = defaultRetainChanges;
@@ -239,6 +240,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         this.#counters = freshCounters();
         this.#pulling.clear();
         this.#wakeOrigins.clear();
+        this.#wakeRecipients.clear();
         this.#wakePromise = null;
       }
       this.#lastRequestAt = now;
@@ -295,6 +297,17 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
 
     #enqueueWake(originClientID: string): Promise<void> {
       this.#wakeOrigins.add(originClientID);
+      for (const socket of this.ctx.getWebSockets()) {
+        const attachment = socketAttachment(socket);
+        if (
+          !attachment ||
+          attachment.clientID === originClientID ||
+          this.#pulling.has(attachment.clientID)
+        ) {
+          continue;
+        }
+        this.#wakeRecipients.add(socket);
+      }
       return this.#scheduleWake();
     }
 
@@ -306,21 +319,12 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           const fanoutStarted = performance.now();
           const origins = this.#wakeOrigins;
           this.#wakeOrigins = new Set();
+          const recipients = this.#wakeRecipients;
+          this.#wakeRecipients = new Set();
           this.#counters.wakeBatches++;
           let sent = 0;
-          let skippedPulling = 0;
-          let skippedOrigin = 0;
           const sockets = this.ctx.getWebSockets();
-          for (const socket of sockets) {
-            const attachment = socketAttachment(socket);
-            if (!attachment || this.#pulling.has(attachment.clientID)) {
-              skippedPulling++;
-              continue;
-            }
-            if (origins.size === 1 && origins.has(attachment.clientID)) {
-              skippedOrigin++;
-              continue;
-            }
+          for (const socket of recipients) {
             try {
               socket.send("wake");
               sent++;
@@ -335,10 +339,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
               event: "sync_wake",
               hostVersion: config.hostVersion,
               socketCount: sockets.length,
-              originCount: origins.size,
-              sent,
-              skippedPulling,
-              skippedOrigin,
+            originCount: origins.size,
+            sent,
+            eligibleRecipients: recipients.size,
               coalesceMs: fanoutStarted - queuedAt,
               fanoutMs: performance.now() - fanoutStarted,
             }),
@@ -664,6 +667,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         this.#counters = freshCounters();
         this.#pulling.clear();
         this.#wakeOrigins.clear();
+        this.#wakeRecipients.clear();
         return json({ ok: true, bootID: this.#bootID });
       }
       if (route === "/admin/visibility") {
