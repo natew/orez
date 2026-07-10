@@ -84,11 +84,14 @@ mise exec node@24.3.0 -- bun harness/src/protocol-fuzz.ts --target rust-cf --cas
 ### Memory and bundle headroom
 
 Budget: after warm-up, wasm linear-memory high-water growth must be at most one
-page (64 KiB) across each block of 1,000 query/connection/eviction churn
-operations and must not increase across three consecutive blocks. Database size
-is tracked separately and is not a substitute for wasm memory. The compressed
-worker bundle must retain at least 40 percent headroom below the applicable
-Cloudflare limit.
+page (64 KiB) across each block of 1,000 query/connection churn operations and
+must not increase across three consecutive blocks. The measured instance must
+stay alive for the whole run: a restart re-instantiates the wasm module and
+resets linear memory, which turns every sample into a boot-footprint reading
+and hides any leak. Restart/eviction churn belongs to the eviction lane, never
+this one. Database size is tracked separately and is not a substitute for wasm
+memory. The compressed worker bundle must retain at least 40 percent headroom
+below the applicable Cloudflare limit.
 
 ```sh
 mise exec node@24.3.0 -- bun harness/src/memory-soak.ts --target rust-cf --blocks 3 --ops 1000
