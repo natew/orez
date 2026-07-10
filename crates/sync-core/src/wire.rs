@@ -12,6 +12,8 @@
 
 use serde_json::{Number, Value};
 
+use crate::error::EngineError;
+
 // JavaScript's Number.MAX_SAFE_INTEGER — the reference core's isNonNegativeInteger
 // ceiling for a JSON-number cookie.
 pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
@@ -19,8 +21,19 @@ pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 // emit a counter to its JSON wire form. THE single flip point: if the HTTP wire
 // ever moves to base-10 strings end to end, change this to Value::String and
 // update the vendored transport + poke path to match (see the crate docs).
-pub fn counter_to_json(value: i64) -> Value {
-    Value::Number(Number::from(value))
+//
+// below (and at) MAX_SAFE_INTEGER a JSON number is lossless and byte-compatible
+// with the vendored transport. ABOVE it a JSON number would silently round
+// (2^53+1 -> 2^53), corrupting the cookie/lmid, so the engine FAILS LOUD instead
+// of emitting a rounded value. counters are monotonic from 0 and never reach
+// 2^53 in practice, so this is a guard, not a live path.
+pub fn counter_to_json(value: i64) -> Result<Value, EngineError> {
+    if value > MAX_SAFE_INTEGER {
+        return Err(EngineError::internal(format!(
+            "counter {value} exceeds MAX_SAFE_INTEGER ({MAX_SAFE_INTEGER}); a JSON number would silently round — refusing to emit a corrupt cookie/lmid"
+        )));
+    }
+    Ok(Value::Number(Number::from(value)))
 }
 
 // the reference core's isNonNegativeInteger: a JSON number that is a
@@ -66,4 +79,29 @@ fn parse_canonical_u63(s: &str) -> Option<i64> {
         return None;
     }
     s.parse::<i64>().ok().filter(|v| *v >= 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counter_to_json_is_byte_compatible_below_the_safe_bound() {
+        assert_eq!(counter_to_json(0).unwrap(), Value::Number(0.into()));
+        assert_eq!(counter_to_json(1).unwrap(), Value::Number(1.into()));
+        assert_eq!(
+            counter_to_json(MAX_SAFE_INTEGER).unwrap(),
+            Value::Number(MAX_SAFE_INTEGER.into())
+        );
+    }
+
+    #[test]
+    fn counter_to_json_fails_loud_above_the_safe_bound() {
+        // one past the JS safe integer would round in a JSON number -> fail loud
+        assert_eq!(
+            counter_to_json(MAX_SAFE_INTEGER + 1).unwrap_err().status,
+            500
+        );
+        assert_eq!(counter_to_json(i64::MAX).unwrap_err().status, 500);
+    }
 }

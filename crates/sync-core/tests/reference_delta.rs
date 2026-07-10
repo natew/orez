@@ -665,6 +665,44 @@ fn interleaved_pushes_and_upstream_converge() {
     }
 }
 
+#[test]
+fn row_cap_zero_still_makes_progress() {
+    // MEDIUM-8: a maxChangeRows cap of 0 must not stall the diff forever. the
+    // engine admits at least one change row per diff, so repeated pulls drain the
+    // log instead of echoing the same cookie with an empty patch.
+    let mut h = Host::new(true);
+    h.init();
+    let c0 = cookie_of(&h.pull(json!(null), "u1").unwrap());
+    // triggers are installed by init(), so direct inserts append change rows
+    for i in 0..3 {
+        h.exec(&format!(
+            "INSERT INTO item VALUES ('i{i}', 'l', 1.0, 0, NULL)"
+        ));
+    }
+    let target = h.watermark();
+    assert!(target > c0);
+
+    h.caps = Caps {
+        max_change_rows: 0,
+        max_change_bytes: 2_000_000,
+    };
+    let mut cookie = c0;
+    let mut steps = 0;
+    loop {
+        let resp = h.pull(json!(cookie), "u1").unwrap();
+        let next = cookie_of(&resp);
+        if resp.get("unchanged") == Some(&json!(true)) || next == target {
+            cookie = next;
+            break;
+        }
+        assert!(next > cookie, "cap-0 diff stalled at cookie {cookie}");
+        cookie = next;
+        steps += 1;
+        assert!(steps < 100, "cap-0 diff did not drain the log");
+    }
+    assert_eq!(cookie, target, "cap-0 diffs drained the whole change log");
+}
+
 // exercised indirectly above but keep the type imports honest
 #[allow(dead_code)]
 fn _uses(_: EngineError) {}

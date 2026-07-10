@@ -160,7 +160,7 @@ pub fn handle_query_pull(
 
     // fast path: caught up and no desired-query change -> unchanged
     if !fresh && cookie == Some(current) && query_version.is_none() {
-        return Ok(json!({ "cookie": wire::counter_to_json(current), "unchanged": true }));
+        return Ok(json!({ "cookie": wire::counter_to_json(current)?, "unchanged": true }));
     }
 
     if fresh {
@@ -193,13 +193,13 @@ pub fn handle_query_pull(
     let lmids = store::all_lmids(db, group)?;
     let mut lmid_map = Map::new();
     for (client, lmid) in &lmids {
-        lmid_map.insert(client.clone(), wire::counter_to_json(*lmid));
+        lmid_map.insert(client.clone(), wire::counter_to_json(*lmid)?);
     }
 
     Ok(json!({
-        "cookie": wire::counter_to_json(current),
+        "cookie": wire::counter_to_json(current)?,
         "lastMutationIDChanges": Value::Object(lmid_map),
         "rowsPatch": rows_patch,
-        "gotQueries": { "version": wire::counter_to_json(ack_version), "patch": got_patch },
+        "gotQueries": { "version": wire::counter_to_json(ack_version)?, "patch": got_patch },
     }))
 }
