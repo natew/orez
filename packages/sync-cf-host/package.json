@@ -1,6 +1,6 @@
 {
   "name": "orez-sync-cf-host",
-  "version": "0.4.51",
+  "version": "0.4.52",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -24,7 +24,6 @@
     "workerd": "1.20260617.1",
     "wrangler": "4.103.0"
   },
-  "private": true,
   "files": [
     "src"
   ]
