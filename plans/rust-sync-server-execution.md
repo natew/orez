@@ -35,7 +35,7 @@ Multiple agents work this worktree concurrently. Rules:
       eviction, size/latency measurements)
 - [x] M1: sync-core port of the reference cursor spec (19 delta tests,
       soot 13-test composition semantics, model tests, trace differential)
-- [ ] M2: sync-native axum host + harness `rust-local` target + admin
+- [x] M2: sync-native axum host + harness `rust-local` target + admin
       routes + wake channel + CI lanes
 - [ ] M3: sync-cf-host production shape + `rust-cf` target + hibernating
       wake sockets
