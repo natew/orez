@@ -919,21 +919,42 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         await installChangeTracking(db)
       }
 
-      // restart zero-cache
-      log.orez('starting zero-cache...')
-      // use internal port when http proxy is enabled
+      // restart zero-cache. the initial sync after a reset can hit a
+      // transient failure (e.g. a statement aborting the change-streamer's
+      // schema-sync transaction while post-reset state settles); the crash
+      // watcher deliberately ignores exits while resetInProgress, so without
+      // a retry here one bad boot leaves zero-cache down permanently.
       const zeroConfig = httpLog ? { ...config, zeroPort: zeroInternalPort } : config
-      const result = await startZeroCache(
-        zeroConfig,
-        logStore,
-        sqliteMode,
-        sqliteModeConfig,
-        (details) => requestZeroStateRecovery?.(details, 'live-log')
-      )
-      zeroCacheProcess = result.process
-      zeroEnv = result.env
-
-      await waitForZeroCache(zeroConfig, zeroCacheProcess, 60000, sqliteMode)
+      const RESET_START_ATTEMPTS = 3
+      for (let attempt = 1; ; attempt++) {
+        log.orez(
+          `starting zero-cache...${attempt > 1 ? ` (attempt ${attempt}/${RESET_START_ATTEMPTS})` : ''}`
+        )
+        const result = await startZeroCache(
+          zeroConfig,
+          logStore,
+          sqliteMode,
+          sqliteModeConfig,
+          (details) => requestZeroStateRecovery?.(details, 'live-log')
+        )
+        zeroCacheProcess = result.process
+        zeroEnv = result.env
+        try {
+          await waitForZeroCache(zeroConfig, zeroCacheProcess, 60000, sqliteMode)
+          break
+        } catch (err: any) {
+          if (attempt >= RESET_START_ATTEMPTS) throw err
+          log.orez(
+            `zero-cache failed to come up after reset (${err?.message || err}), retrying`
+          )
+          // kill a still-running half-booted instance (waitForZeroCache can
+          // time out with the process alive) and sweep lingering native
+          // backends that would stall the next initial sync
+          await killZeroCache()
+          // a failed boot can leave a partially initial-synced replica behind
+          cleanupStaleReplica(config)
+        }
+      }
       // a completed reset is durable progress — the change log was cut, so the
       // bankruptcy monitor must not re-fire on the pre-reset stall window.
       markReplicationProgress()
