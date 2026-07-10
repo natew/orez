@@ -44,7 +44,17 @@ export interface WriteCircuitOptions {
 
 // any statement that can write rows (so reads never pay the meter cost).
 const MUTATION_RE =
-  /^\s*(?:insert|update|delete|replace|create|alter|drop|truncate|vacuum|reindex|with)\b/i
+  /^\s*(?:insert|update|delete|replace|create|alter|drop|truncate|vacuum|reindex)\b/i
+// a WITH statement only writes when a data-modifying clause follows the CTEs;
+// WITH ... SELECT is a read and must stay open while tripped (2026-07-10
+// incident: gating `with` wholesale refused CTE reads during recovery). a
+// keyword match inside a literal/identifier only over-gates, never under-gates:
+// a real WITH write always carries insert/update/delete/replace.
+const WITH_RE = /^\s*with\b/i
+const WITH_MUTATION_RE = /\b(?:insert|update|delete|replace)\b/i
+
+const isMutationStatement = (text: string): boolean =>
+  MUTATION_RE.test(text) || (WITH_RE.test(text) && WITH_MUTATION_RE.test(text))
 
 const INSTALLED = new WeakSet<DurableSqlStorage>()
 
@@ -173,7 +183,7 @@ export function installZeroSqlWriteCircuitBreaker(
   sql.exec = (statement: string, ...params: unknown[]) => {
     const text = String(statement || '')
     const isCircuitStatement = text.includes(table)
-    const isMutation = MUTATION_RE.test(text) && !isCircuitStatement
+    const isMutation = isMutationStatement(text) && !isCircuitStatement
     if (isMutation) assertOpen(text)
     const cursor = rawExec(statement, ...params)
     if (isMutation && recordRowsWritten(cursor && cursor.rowsWritten, text)) {
