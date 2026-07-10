@@ -315,6 +315,7 @@ describe('push semantics', () => {
     const response = push(sync, 'item.reject', {})
     expect(response.pushResponse.mutations[0]!.result).toEqual({
       error: 'app',
+      message: 'nope',
       details: 'nope',
     })
     expect(db.all(`SELECT * FROM item WHERE id = 'rejected'`)).toHaveLength(0)
@@ -336,12 +337,17 @@ describe('push semantics', () => {
       { id: 'i2', label: 'once', rank: 1, done: false, meta: null },
       { id: 1 }
     )
-    push(
+    const replay = push(
       sync,
       'item.put',
       { id: 'i2', label: 'twice?', rank: 1, done: false, meta: null },
       { id: 1 }
     )
+    expect(replay.pushResponse.mutations[0]!.result).toEqual({
+      error: 'alreadyProcessed',
+      details:
+        'Ignoring mutation from c1 with ID 1 as it was already processed. Expected: 2',
+    })
     expect(db.all(`SELECT label FROM item WHERE id = 'i2'`)).toEqual([{ label: 'once' }])
   })
 

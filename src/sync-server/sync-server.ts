@@ -373,7 +373,9 @@ export function createSyncServer(config: SyncServerConfig) {
       // but with NO savepoint: DO sqlite forbids raw SAVEPOINT/BEGIN (only
       // storage.transactionSync). crash between the two txs is safe: nothing
       // committed, replay re-executes and hits the same app error.
-      const applyMutation = (executeMutator: boolean): 'applied' | 'replay' =>
+      const applyMutation = (
+        executeMutator: boolean
+      ): { status: 'applied' } | { status: 'replay'; expectedID: number } =>
         db.transaction(() => {
           claimClient(clientGroupID, mutation.clientID, userID)
           const lmid = Number(
@@ -383,7 +385,7 @@ export function createSyncServer(config: SyncServerConfig) {
               [clientGroupID, mutation.clientID]
             )[0]!.lastMutationID
           )
-          if (mutation.id <= lmid) return 'replay'
+          if (mutation.id <= lmid) return { status: 'replay', expectedID: lmid + 1 }
           if (mutation.id > lmid + 1) {
             throw new SyncHttpError(
               400,
@@ -405,17 +407,29 @@ export function createSyncServer(config: SyncServerConfig) {
             `INSERT INTO _zsync_changes (tableName, op, pk)
              VALUES ('_zsync_clients', 'marker', NULL)`
           )
-          return 'applied'
+          return { status: 'applied' }
         })
 
       const id = { clientID: mutation.clientID, id: mutation.id }
       try {
-        applyMutation(true)
-        results.push({ id, result: {} })
+        const applied = applyMutation(true)
+        results.push({
+          id,
+          result:
+            applied.status === 'replay'
+              ? {
+                  error: 'alreadyProcessed',
+                  details: `Ignoring mutation from ${mutation.clientID} with ID ${mutation.id} as it was already processed. Expected: ${applied.expectedID}`,
+                }
+              : {},
+        })
       } catch (error) {
         if (error instanceof MutationAppError) {
           applyMutation(false)
-          results.push({ id, result: { error: 'app', details: error.details } })
+          results.push({
+            id,
+            result: { error: 'app', message: error.message, details: error.details },
+          })
         } else {
           throw error
         }

@@ -164,7 +164,13 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
   await mutate(
     'project.create duplicate pw1',
     zero.mutate(mutators.project.create({ id: 'pw1', ownerId: 'u1', name: 'dupe' })),
-    { type: 'app-error' }
+    {
+      type: 'app-error',
+      message:
+        target.name === 'stock-zero'
+          ? /duplicate key value violates unique constraint/
+          : 'exists',
+    }
   )
 
   // upstream writes behind zero's back (replication path on stock, version
