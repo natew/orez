@@ -498,3 +498,27 @@ zero-cache routes + env + the TS `httpPull.server.ts` / `httpPullProject
    real change clock; cutover to the Rust real-watermark engine may not
    represent an old derived cookie safely, so control-plane clients likely
    reset on cutover (plan cutover step 5).
+
+---
+
+## H. Orez-side absorption of the project plane (2026-07-10)
+
+The user's long-term direction is that Orez should absorb (= support) Soot's
+project-DB routing structure so Soot consumes the generic machinery directly
+instead of mirroring the cursor-diff logic in `httpPullProject.server.ts`.
+
+Surface (implemented on branch `rust-sync-server` by sol-absorb):
+`createSyncServerMount({ pathPrefix, server(databaseID) })` in
+`src/sync-server/sync-server.ts`.
+
+- `match(pathname)` parses exactly `${pathPrefix}<safe-id>/(pull|push)` with a
+  strict id charset (`[A-Za-z0-9_-]{1,64}`); anything else is rejected before
+  any resolver call, so Soot's async membership gate runs on
+  `route.databaseID` BEFORE any project DB access.
+- `handle(route, body, userID)` lazily resolves the per-database `SyncServer`
+  via the supplied `server(databaseID)`; the caller owns DB/server lifetime
+  (no cache inside the core).
+- Byte-compatible with the plain `/pull` + `/push` handler semantics; the
+  harness proves two `/p-<id>` mounts hold independent watermarks, LMIDs,
+  client-group ownership, and row state, and that the same client transport
+  works against a mounted path and a plain server.
