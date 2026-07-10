@@ -27,6 +27,7 @@ export type RustCfStatus = {
 }
 
 export type RustCfTarget = SyncTarget & {
+  readonly origin: string
   pull(): Promise<void>
   hibernationStatus(): Promise<RustCfStatus>
   dropNextPushResponse(): Promise<void>
@@ -89,6 +90,7 @@ export async function startRustCf(opts?: {
 
   return {
     name: 'rust-cf',
+    origin,
 
     createClient(userID: string, storage) {
       const zero = new Zero({

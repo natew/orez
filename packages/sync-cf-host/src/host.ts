@@ -123,6 +123,14 @@ function requestError(
   return Object.assign(new Error(message), { status });
 }
 
+async function requestJson(request: Request): Promise<unknown> {
+  try {
+    return await request.json();
+  } catch {
+    throw requestError("invalid JSON request body");
+  }
+}
+
 function routeAfterNamespace(pathname: string): string {
   const [, , ...parts] = pathname.split("/");
   return `/${parts.join("/")}`;
@@ -402,7 +410,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       let transactionMs = 0;
       let body: Record<string, unknown> | undefined;
       try {
-        body = (await request.json()) as Record<string, unknown>;
+        body = (await requestJson(request)) as Record<string, unknown>;
         const queryAware =
           this.#queryAwareOverride ??
           (typeof config.queryAware === "function"
@@ -586,7 +594,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         return json({ error: "writer disabled by operator" }, 503);
       }
       try {
-        const body = await request.json();
+        const body = await requestJson(request);
         const plan = this.#wasm(() => engine_push_validate(body)) as PushPlan;
         if (plan.kind === "respond") return json(plan.response);
 

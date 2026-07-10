@@ -227,6 +227,19 @@ try {
   equal(malformedQuery.status, 400, 'query-aware EngineError status reaches HTTP')
   await admin('/admin/query-aware', { enabled: false })
 
+  for (const route of ['/pull', '/push']) {
+    const malformed = await fetch(`${origin}${route}`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token-user-a',
+        'content-type': 'application/json',
+      },
+      body: '{',
+    })
+    equal(malformed.status, 400, `${route} malformed JSON is a bad request`)
+    await malformed.arrayBuffer()
+  }
+
   let writerStatus = await admin('/admin/writer')
   equal(writerStatus.writerEnabled, true, 'writer starts enabled')
   writerStatus = await admin('/admin/writer', { enabled: false })
