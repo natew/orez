@@ -172,6 +172,17 @@ function socketAttachment(socket: WebSocket): SocketAttachment | null {
   return value && typeof value.clientID === 'string' ? value : null
 }
 
+// Closing a socket that is already closed/closing throws, and a throw inside a
+// hibernatable WebSocket handler aborts the DO. Swallow it: the socket is going
+// away regardless.
+function socketCloseQuietly(socket: WebSocket, code: number, reason: string): void {
+  try {
+    socket.close(code, reason)
+  } catch {
+    // already closing/closed, or workerd rejected the code — nothing to do
+  }
+}
+
 /**
  * Create the consumer-facing Worker router. Authentication happens here; the
  * Durable Object receives only normalized claims over a binding-private header.
@@ -986,11 +997,17 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       reason: string,
       _wasClean: boolean
     ): void {
-      socket.close(code, reason)
+      // The peer already closed, so echo the close to release the socket — but
+      // WebSocket.close() rejects reserved/absent codes (1005 "no status", 1006
+      // abnormal, 1015) with InvalidAccessError, and a real browser routinely
+      // closes with 1001/1005. An uncaught throw here aborts the DO, so only
+      // echo an application-permitted code and otherwise close cleanly.
+      const echoable = code === 1000 || (code >= 3000 && code <= 4999)
+      socketCloseQuietly(socket, echoable ? code : 1000, echoable ? reason : '')
     }
 
     webSocketError(socket: WebSocket, _error: unknown): void {
-      socket.close(1011, 'wake socket error')
+      socketCloseQuietly(socket, 1011, 'wake socket error')
     }
   }
 }
