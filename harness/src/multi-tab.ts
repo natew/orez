@@ -4,9 +4,11 @@
 // group LMIDs include every tab, and a replacement tab resumes the group.
 //
 //   bun src/multi-tab.ts
+//   bun src/multi-tab.ts --target rust-local
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { parseArgs } from 'node:util'
 
 import { mutators, queries } from './fixture.js'
 import { persistentKVStoreProvider } from './persistent-kv.js'
@@ -14,6 +16,10 @@ import { assertServerOutcome } from './server-outcome.js'
 import { startOrezLocal } from './targets/orez-local.js'
 
 import type { FixtureZero } from './target.js'
+
+const { values: cli } = parseArgs({
+  options: { target: { type: 'string', default: 'orez-local' } },
+})
 
 type ProjectRow = { id: string }
 
@@ -81,7 +87,12 @@ async function mutateProjects(
 const storageDir = mkdtempSync(join(tmpdir(), 'zharness-tabs-'))
 const kvStore = persistentKVStoreProvider(storageDir)
 const storageKey = `zharness-tabs-${Date.now()}`
-const target = await startOrezLocal({ pullIntervalMs: 75 })
+const target =
+  cli.target === 'rust-local'
+    ? await (
+        await import('./targets/rust-local.js')
+      ).startRustLocal({ pullIntervalMs: 75 })
+    : await startOrezLocal({ pullIntervalMs: 75 })
 const views: ReturnType<typeof watchProjects>[] = []
 
 try {

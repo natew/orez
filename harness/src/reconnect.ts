@@ -4,16 +4,27 @@
 // and future-cookie invalidation/reload.
 //
 //   bun src/reconnect.ts
+//   bun src/reconnect.ts --target rust-local
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { parseArgs } from 'node:util'
 
 import { mutators, queries } from './fixture.js'
 import { persistentKVStoreProvider } from './persistent-kv.js'
 import { assertServerOutcome } from './server-outcome.js'
-import { startOrezLocal, type PullObservation } from './targets/orez-local.js'
+import { startOrezLocal } from './targets/orez-local.js'
 
 import type { FixtureZero } from './target.js'
+
+const { values: cli } = parseArgs({
+  options: { target: { type: 'string', default: 'orez-local' } },
+})
+
+// the only shape both targets' onPull observations share (orez-local emits
+// {body,response}; the spawned rust-local emits an observedPullFetch record).
+// the lane only inspects the request body and the response rowsPatch.
+type Observed = { body: unknown; response?: unknown }
 
 type ProjectRow = { id: string }
 
@@ -73,7 +84,7 @@ async function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs = 30
   }
 }
 
-function pullBody(observation: PullObservation) {
+function pullBody(observation: Observed) {
   return observation.body as {
     clientID?: string
     clientGroupID?: string
@@ -81,21 +92,33 @@ function pullBody(observation: PullObservation) {
   }
 }
 
-function isSnapshot(observation: PullObservation) {
+function isSnapshot(observation: Observed) {
   const rowsPatch = (observation.response as { rowsPatch?: Array<{ op?: string }> })
-    .rowsPatch
+    ?.rowsPatch
   return rowsPatch?.[0]?.op === 'clear'
 }
 
 const storageDir = mkdtempSync(join(tmpdir(), 'zharness-persist-'))
 const kvStore = persistentKVStoreProvider(storageDir)
 const storageKey = `zharness-resume-${Date.now()}`
-const pulls: PullObservation[] = []
-const target = await startOrezLocal({
-  pullIntervalMs: 100,
-  retainChanges: 2,
-  onPull: (observation) => pulls.push(observation),
-})
+const pulls: Observed[] = []
+const observe = (observation: Observed) => {
+  pulls.push(observation)
+}
+const target =
+  cli.target === 'rust-local'
+    ? await (
+        await import('./targets/rust-local.js')
+      ).startRustLocal({
+        pullIntervalMs: 100,
+        retainChanges: 2,
+        onPull: observe,
+      })
+    : await startOrezLocal({
+        pullIntervalMs: 100,
+        retainChanges: 2,
+        onPull: observe,
+      })
 const views: ReturnType<typeof watchProjects>[] = []
 
 try {
@@ -181,7 +204,7 @@ try {
   // Commit the mutation but destroy its HTTP response. The stock client must
   // reconnect and settle .server through replay/LMID recovery, without a
   // duplicate row or a permanently pending mutation.
-  target.dropNextPushResponse()
+  await target.dropNextPushResponse()
   const lostResponse = resumed.mutate(
     mutators.project.create({
       id: 'resume-lost-response',
@@ -204,7 +227,7 @@ try {
   console.log('[reconnect] lost push response mutation recovery PASS')
 
   const epochPullStart = pulls.length
-  target.invalidate()
+  await target.invalidate()
   await eventually(() => {
     const snapshot = pulls
       .slice(epochPullStart)
@@ -222,7 +245,7 @@ try {
   // client. The transport emits InvalidConnectionRequestBaseCookie; Zero drops
   // the durable DB and invokes the host reload hook. Recreating the client then
   // performs a fresh null-cookie snapshot.
-  target.resetCursor()
+  await target.resetCursor()
   await eventually(() => {
     if (!clientStateNotFound) throw new Error('future-cookie invalidation not surfaced')
   }, 'future-cookie client invalidation')
