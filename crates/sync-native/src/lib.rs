@@ -10,5 +10,6 @@ pub mod db;
 pub mod engine;
 pub mod fixture;
 pub mod namespace;
+pub mod obs;
 pub mod seed;
 pub mod wake;
