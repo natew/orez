@@ -104,7 +104,7 @@ pub fn handle_pull(
             )));
         }
         if c == current {
-            return Ok(json!({ "cookie": wire::counter_to_json(current), "unchanged": true }));
+            return Ok(json!({ "cookie": wire::counter_to_json(current)?, "unchanged": true }));
         }
     }
 
@@ -134,18 +134,18 @@ pub fn handle_pull(
     };
 
     Ok(json!({
-        "cookie": wire::counter_to_json(cookie_out),
-        "lastMutationIDChanges": lmid_json(&lmids),
+        "cookie": wire::counter_to_json(cookie_out)?,
+        "lastMutationIDChanges": lmid_json(&lmids)?,
         "rowsPatch": rows_patch,
     }))
 }
 
-fn lmid_json(lmids: &BTreeMap<String, i64>) -> Value {
+fn lmid_json(lmids: &BTreeMap<String, i64>) -> Result<Value, EngineError> {
     let mut map = Map::new();
     for (client, lmid) in lmids {
-        map.insert(client.clone(), wire::counter_to_json(*lmid));
+        map.insert(client.clone(), wire::counter_to_json(*lmid)?);
     }
-    Value::Object(map)
+    Ok(Value::Object(map))
 }
 
 // snapshot: clear + one put per visible row of every table, live values.
@@ -212,18 +212,23 @@ fn diff(
     visible: Option<&Visibility>,
     user_id: &str,
 ) -> Result<DiffResult, EngineError> {
+    // a row cap below 1 would admit no change row, leaving cut_watermark at the
+    // input cookie so every pull repeats the same cookie + empty patch forever
+    // (MEDIUM-8). guarantee at least one row of progress; a host may also reject
+    // cap < 1 up front.
+    let max_change_rows = caps.max_change_rows.max(1);
     // read one extra row to detect "there is more beyond the row cap"
     let raw = db.query(
         "SELECT CAST(watermark AS TEXT) AS w, tableName, op, pk FROM _zsync_changes
          WHERE watermark > ? ORDER BY watermark LIMIT ?",
         &[
             store::counter(cookie),
-            SqlValue::Integer(caps.max_change_rows as i64 + 1),
+            SqlValue::Integer(max_change_rows as i64 + 1),
         ],
     )?;
-    let row_capped = raw.len() > caps.max_change_rows;
-    let mut changes: Vec<Change> = Vec::with_capacity(raw.len().min(caps.max_change_rows));
-    for row in raw.iter().take(caps.max_change_rows) {
+    let row_capped = raw.len() > max_change_rows;
+    let mut changes: Vec<Change> = Vec::with_capacity(raw.len().min(max_change_rows));
+    for row in raw.iter().take(max_change_rows) {
         changes.push(Change {
             watermark: counter_col(row.get("w")),
             table_name: text_col(row.get("tableName")),
