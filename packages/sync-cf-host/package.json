@@ -1,14 +1,10 @@
 {
   "name": "@orez/sync-cf-host",
-  "version": "0.0.0",
-  "description": "Cloudflare Durable Object host for the orez rust sync engine (TS source + wasm, bundle with wrangler)",
+  "version": "0.4.51",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
-  "files": [
-    "src"
-  ],
   "scripts": {
     "build:wasm": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm && rm -f src/generated/.gitignore && bun scripts/write-wasm-module-type.ts",
     "build:wasm:platform": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm -- --features platform-probes && rm -f src/generated/.gitignore && bun scripts/write-wasm-module-type.ts",
@@ -27,5 +23,6 @@
     "typescript": "5.9.3",
     "workerd": "1.20260617.1",
     "wrangler": "4.103.0"
-  }
+  },
+  "private": true
 }
