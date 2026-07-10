@@ -44,7 +44,15 @@ Multiple agents work this worktree concurrently. Rules:
       safety-poll convergence, ack/prop within 20% of the TS DO baseline;
       deploy 871a13df, README 4c2a3bc)
 - [ ] M4a: soot migration prep (baseline surface)
-- [ ] M4b: query-aware layer (AST compiler, membership, desired queries)
+- [x] M4b: query-aware layer (AST compiler, membership, desired queries)
+      (2026-07-09: engine + transport + lanes green vs rust-local. v51 AST
+      subset incl. junction EXISTS, nested related, ILIKE folding, empty
+      IN, composite tie-breakers; recomputation narrowing measured 12x on
+      dependency-intersection and 11x on touched-pk windows; query
+      lifecycle lane matrix green incl. forbidden-row raw-store, overlap
+      retention, permission contraction, reconnect replay, lost-response.
+      Open follow-ups: stock-zero cross-differential on query lanes;
+      rust-cf query matrix run — wired, assigned to sol)
 - [ ] M4c: chat compatibility branch (measurement)
 - [ ] M5/M6 gates: see final plan
 
