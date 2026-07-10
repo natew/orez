@@ -95,6 +95,7 @@ Cloudflare LAX edge (`cf-ray …-LAX`).
 | Storage after 50 pushes | 90,112 bytes (+8,192 bytes) |
 | Local workerd RSS | 97.391 MiB baseline; 146.625 MiB after load (+49.234 MiB process RSS) |
 | CF eviction lane | boot ID changed; 20 writes; 126 pulls; zero 409s; monotone cookies |
+| CF wake-only storm (100 clients, 5 writers, 10 s safety poll) | propagation p50/p95 809/810 ms |
 | CF 10-client/2-writer bench | ack p50/p95 178/243 ms; propagation p50/p95 381/524 ms |
 | Equivalent TS DO bench | ack p50/p95 165/903 ms; propagation p50/p95 583/1,074 ms |
 
