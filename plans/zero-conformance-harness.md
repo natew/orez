@@ -341,7 +341,18 @@ script on stock-zero and orez-local, every corpus query compared at hydrate
   over (rank, id) with real seed rows as cursors; `--dry` prints axis
   coverage (seed 42, 200 specs: 149 where, 48 exists, 88 related, 35
   nested-related, 13 start, 84 limit, 14 one). green vs orez-local and
-  orez-cf. still open: upstream-mono-style pairwise coverage accounting.
+  orez-cf.
+  PAIRWISE ACCOUNTING SHIPPED (same day): `harness/src/sweep-coverage.ts`
+  classifies every generated spec over eight formal axes (root table, filter
+  shape, exists shape, order shape, limit, cursor start, relation depth, root
+  cardinality) and measures all two-axis value tuples. its 225-tuple
+  denominator is constrained to the generator grammar, excluding impossible
+  combinations such as a cursor on a non-task table or root `one()` with a
+  limit. runtime sweeps print total coverage + their three weakest axis pairs;
+  `--dry` emits the full per-pair report and missing tuples. seed 42 reaches
+  221/225 (98.2%) at 200 specs and 225/225 (100%) at 400 specs. a focused
+  bun:test suite pins classification, denominator math, deterministic missing
+  output, and fail-loud handling when generator/classifier constraints drift.
 
 query-shape corpus: model on ~/chat (nate 2026-07-09), the canonical large
 zero app. census of its query layer (`src/data/queries/` 37 files +

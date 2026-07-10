@@ -46,6 +46,7 @@ import {
   writeCorpusEntry,
 } from './spec-corpus.js'
 import { constructCount, shrinkSpec } from './spec-shrink.js'
+import { sweepPairwiseCoverage } from './sweep-coverage.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
@@ -548,6 +549,7 @@ function emitDivergence(input: {
 
 if (args.dry) {
   const specs = Array.from({ length: ROUNDS * QUERIES_PER_ROUND }, () => genSpec())
+  const pairwise = sweepPairwiseCoverage(specs)
   const has = (test: (s: GenSpec) => boolean) => specs.filter(test).length
   const hasNested = (s: GenSpec) =>
     (s.related ?? []).some((r) => (r.sub?.related ?? []).length > 0)
@@ -563,6 +565,14 @@ if (args.dry) {
         related: has((s) => !!s.related),
         nestedRelated: has(hasNested),
         start: has((s) => !!s.start),
+        pairwise: {
+          hit: pairwise.hit,
+          total: pairwise.total,
+          percent: pairwise.percent,
+          byAxisPair: pairwise.byAxisPair,
+          missing: pairwise.missing.slice(0, 20),
+          missingTruncated: Math.max(0, pairwise.missing.length - 20),
+        },
       },
       null,
       2
@@ -978,9 +988,15 @@ try {
   }
 
   const total = allSpecs.length
+  const pairwise = sweepPairwiseCoverage(allSpecs)
   console.log(
-    `[sweep] coverage: ${total} shapes, ${total - emptyAtHydrate}/${total} returned data at hydrate`
+    `[sweep] coverage: ${total} shapes, ${total - emptyAtHydrate}/${total} returned data at hydrate; pairwise ${pairwise.hit}/${pairwise.total} (${pairwise.percent}%)`
   )
+  const weakest = [...pairwise.byAxisPair]
+    .sort((a, b) => a.percent - b.percent || a.axes.join().localeCompare(b.axes.join()))
+    .slice(0, 3)
+    .map((entry) => `${entry.axes.join('×')} ${entry.hit}/${entry.total}`)
+  console.log(`[sweep] weakest axis pairs: ${weakest.join(', ')}`)
 
   beacons.forEach((b) => b.destroy())
   stockViews.forEach((v) => v.destroy())

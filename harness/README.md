@@ -40,6 +40,11 @@ sweep and state-machine divergences write replay artifacts to `regressions/`
 (seed + trace/spec + observations). The state machine delta-debugs a failing
 trace before exit. See `corpus/README.md` for the pinned upstream source,
 license, scenario-ID, adaptation, and supported-host ledger.
+every sweep also reports constrained pairwise coverage across eight grammar
+axes (table, filter, exists, order, limit, start, related depth, cardinality)
+and the three weakest axis pairs. `--dry` prints the full per-pair accounting
+and missing tuples without booting targets; seed 42 reaches all 225/225
+coverable pairs with 400 generated specs (`--rounds 100 --queriesPerRound 4`).
 
 targets: `stock-zero` (real zero-cache + embedded postgres + fixture app
 server), `orez-local` (orez `src/sync-server` core over pure bun:sqlite,
