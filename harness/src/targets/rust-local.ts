@@ -19,7 +19,7 @@ import { promisify } from 'node:util'
 
 import { Zero } from '@rocicorp/zero'
 
-import { mutators, schema } from '../fixture.js'
+import { mutators, queryNameToAst, schema } from '../fixture.js'
 import { observedPullFetch, type HttpPullObservation } from '../observed-fetch.js'
 import { ensureHttpPullTransport } from '../vendor/httpPullTransport.js'
 
@@ -90,6 +90,7 @@ export async function startRustLocal(opts?: {
   pullIntervalMs?: number
   retainChanges?: number
   visible?: boolean
+  queryAware?: boolean
   onPull?: (observation: HttpPullObservation) => void
 }): Promise<RustLocalTarget> {
   await ensureBinaryBuilt()
@@ -105,6 +106,7 @@ export async function startRustLocal(opts?: {
   if (opts?.retainChanges !== undefined)
     spawnArgs.push('--retain-changes', String(opts.retainChanges))
   if (opts?.visible) spawnArgs.push('--visible')
+  if (opts?.queryAware) spawnArgs.push('--query-aware')
 
   let child: ChildProcess | undefined
   let childLogs = ''
@@ -145,6 +147,9 @@ export async function startRustLocal(opts?: {
     // subscribe to the native wake channel: a push commit wakes the other
     // clients for a push-shaped pull, with the interval poll as safety net.
     wake: true,
+    // query-aware: ship desired queries (name+args resolved to AST) to the
+    // host and take got-query acks from the server, matching --query-aware.
+    queryTransform: opts?.queryAware ? queryNameToAst : undefined,
   })
   const clients: Zero<typeof schema, typeof mutators>[] = []
   let clientN = 0
