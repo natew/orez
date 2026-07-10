@@ -32,12 +32,15 @@ export type RustCfTarget = SyncTarget & {
   dropNextPushResponse(): Promise<void>
   invalidate(): Promise<void>
   resetCursor(): Promise<void>
+  restart(): Promise<void>
 }
 
 export async function startRustCf(opts?: {
   namespace?: string
   pullIntervalMs?: number
   onPull?: (observation: HttpPullObservation) => void
+  visible?: boolean
+  retainChanges?: number
 }): Promise<RustCfTarget> {
   const namespace =
     opts?.namespace ??
@@ -66,11 +69,14 @@ export async function startRustCf(opts?: {
     query: 'SELECT COUNT(*) AS n FROM project',
   })
   if (Number(seeded.rows[0]?.n) < 1) throw new Error('rust-cf seed missing')
+  if (opts?.visible !== undefined) await admin('/admin/visibility', { enabled: opts.visible })
+  if (opts?.retainChanges !== undefined) await admin('/admin/retention', { retainChanges: opts.retainChanges })
 
   const transport = ensureHttpPullTransport({
     origin,
     fetch: opts?.onPull ? observedPullFetch(opts.onPull) : undefined,
     pullIntervalMs: opts?.pullIntervalMs ?? 500,
+    wake: true,
   })
   const clients: Zero<typeof schema, typeof mutators>[] = []
   let clientNumber = 0
@@ -125,6 +131,10 @@ export async function startRustCf(opts?: {
       await admin('/admin/sql', {
         query: 'DELETE FROM _zsync_changes; UPDATE _zsync_meta SET floor = 0',
       })
+    },
+
+    async restart() {
+      await admin('/admin/restart', {})
     },
 
     async close() {

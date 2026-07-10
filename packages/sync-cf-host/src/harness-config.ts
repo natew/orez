@@ -285,5 +285,21 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
       const userID = request.headers.get('authorization')?.match(/^Bearer token-(.+)$/)?.[1]
       return userID ? { userID } : null
     },
+    visibility: {
+      rowLocal: false,
+      filter(table, claims) {
+        const user = claims.userID
+        if (table === 'user') return { sql: 'id = ?', params: [user] }
+        if (table === 'project') {
+          return {
+            sql: '(p."ownerId" = ? OR EXISTS (SELECT 1 FROM member m WHERE m."projectId" = p.id AND m."userId" = ?))',
+            params: [user, user],
+          }
+        }
+        if (table === 'member') return { sql: '"userId" = ?', params: [user] }
+        if (table === 'task') return { sql: 'EXISTS (SELECT 1 FROM project p WHERE p.id = task."projectId" AND (p."ownerId" = ? OR EXISTS (SELECT 1 FROM member m WHERE m."projectId" = p.id AND m."userId" = ?)))', params: [user, user] }
+        return undefined
+      },
+    },
   }
 }
