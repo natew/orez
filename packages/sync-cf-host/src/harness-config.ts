@@ -6,6 +6,7 @@ import {
   type SyncSql,
   type ZeroSchemaConfig,
 } from './index.js'
+import { queryNameToAst } from '../../../harness/src/query-resolver.mjs'
 
 export const harnessSchema = {
   tables: {
@@ -277,6 +278,10 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
     hostVersion: '0.1.0',
     schema: harnessSchema,
     mutators: harnessMutators,
+    queryAware: false,
+    resolveQuery(name, args) {
+      return queryNameToAst(name, args) as never
+    },
     initialize: initializeHarness,
     namespace(request) {
       return new URL(request.url).pathname.split('/')[1] || null

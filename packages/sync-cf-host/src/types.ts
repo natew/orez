@@ -44,6 +44,9 @@ export type DeferredEffect = () => void | Promise<void>
 
 export type MutatorContext = {
   claims: NormalizedClaims
+  /** Current Zero mutation identity, when invoked by the production host. */
+  clientID?: string
+  mutationID?: string | number
   defer(effect: DeferredEffect): void
 }
 
@@ -87,6 +90,12 @@ export type VisibilityConfig = {
   ): VisibilityFilter | undefined
 }
 
+export type QueryResolver = (
+  name: string,
+  args: readonly JsonValue[],
+  claims: NormalizedClaims,
+) => JsonValue
+
 export type PullCaps = {
   maxChangeRows: number
   maxChangeBytes: number
@@ -110,6 +119,10 @@ export type SyncHostConfig<Env extends SyncHostEnv = SyncHostEnv> = {
   /** Resolve the first path component or another consumer-defined namespace. */
   namespace(request: Request): string | null
   visibility?: VisibilityConfig
+  /** Enable desired-query pulls for this namespace and resolve named queries
+   * into validated Zero ASTs before they reach sync-core. */
+  queryAware?: boolean | ((claims: NormalizedClaims) => boolean)
+  resolveQuery?: QueryResolver
   /** Enable consumer visibility from the first request. Defaults to false for harnesses. */
   visibilityEnabled?: boolean
   retainChanges?: number
