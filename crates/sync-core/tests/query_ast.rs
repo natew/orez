@@ -245,15 +245,46 @@ fn reject(ast_json: Value) -> u16 {
 }
 
 #[test]
+fn like_and_in_and_is_null() {
+    let mut db = seeded_db();
+    // LIKE on title: titles starting with a consonant-then-'l' — 'al%' matches
+    // "alpha" only
+    let like = json!({ "table": "issue", "where": simple("LIKE", "title", json!("al%")) });
+    assert_eq!(sorted(run_ids(&mut db, like)), vec!["i1"]); // alpha
+
+    // IN over priorities
+    let in_q = json!({ "table": "issue", "where": {
+        "type": "simple", "op": "IN",
+        "left": { "type": "column", "name": "priority" },
+        "right": { "type": "literal", "value": [1, 5] }
+    } });
+    assert_eq!(sorted(run_ids(&mut db, in_q)), vec!["i1", "i3"]);
+
+    // NOT IN
+    let not_in = json!({ "table": "issue", "where": {
+        "type": "simple", "op": "NOT IN",
+        "left": { "type": "column", "name": "priority" },
+        "right": { "type": "literal", "value": [1, 5] }
+    } });
+    assert_eq!(sorted(run_ids(&mut db, not_in)), vec!["i2", "i4"]);
+
+    // IS NULL via IS op with a null literal (ownerId is never null here, use a
+    // column that can be null: reuse priority with a crafted row)
+    db.exec("INSERT INTO issue VALUES ('i5', 'eps', 0, NULL, 'u1')", &[])
+        .unwrap();
+    let is_null = json!({ "table": "issue", "where": {
+        "type": "simple", "op": "IS",
+        "left": { "type": "column", "name": "priority" },
+        "right": { "type": "literal", "value": null }
+    } });
+    assert_eq!(run_ids(&mut db, is_null), vec!["i5"]);
+}
+
+#[test]
 fn rejects_unsupported_shapes() {
-    // unknown operator (LIKE not in the supported subset)
+    // IN with a scalar (non-array) operand
     assert_eq!(
-        reject(json!({ "table": "issue", "where": simple("LIKE", "title", json!("a%")) })),
-        400
-    );
-    // IN operator
-    assert_eq!(
-        reject(json!({ "table": "issue", "where": simple("IN", "priority", json!([1, 2])) })),
+        reject(json!({ "table": "issue", "where": simple("IN", "priority", json!(2)) })),
         400
     );
     // array literal (IN operand)

@@ -12,7 +12,25 @@ use crate::db::SqlValue;
 use crate::error::EngineError;
 use crate::schema::{Tables, quote_ident};
 
-use super::ast::{Ast, Condition, CorrelatedSubquery, OrderPart, Scalar, SimpleOp, ValueRef};
+use super::ast::{
+    Ast, Condition, CorrelatedSubquery, OrderPart, RightVal, Scalar, SimpleOp, ValueRef,
+};
+
+// the SQL operator for the binary comparison ops (not IN/LIKE, which compile
+// to their own shapes)
+fn binary_op_sql(op: &SimpleOp) -> &'static str {
+    match op {
+        SimpleOp::Eq => "=",
+        SimpleOp::Ne => "!=",
+        SimpleOp::Is => "IS",
+        SimpleOp::IsNot => "IS NOT",
+        SimpleOp::Lt => "<",
+        SimpleOp::Gt => ">",
+        SimpleOp::Le => "<=",
+        SimpleOp::Ge => ">=",
+        _ => unreachable!("binary_op_sql called on a non-binary op"),
+    }
+}
 
 pub struct CompiledQuery {
     pub sql: String,
@@ -245,7 +263,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         op: &SimpleOp,
         left: &ValueRef,
-        right: &Scalar,
+        right: &RightVal,
         table: &str,
         alias: &str,
     ) -> Result<String, EngineError> {
@@ -259,8 +277,47 @@ impl<'a> Compiler<'a> {
                 "?".to_string()
             }
         };
-        self.params.push(scalar_to_sql(right));
-        Ok(format!("{left_sql} {} ?", op.sql()))
+        match op {
+            SimpleOp::In | SimpleOp::NotIn => {
+                let RightVal::List(list) = right else {
+                    return Err(reject("IN/NOT IN requires an array operand"));
+                };
+                let negate = matches!(op, SimpleOp::NotIn);
+                if list.is_empty() {
+                    // `x IN ()` is a syntax error; empty IN is false, empty NOT IN is true
+                    return Ok(if negate { "1" } else { "0" }.to_string());
+                }
+                let holes = vec!["?"; list.len()].join(", ");
+                for s in list {
+                    self.params.push(scalar_to_sql(s));
+                }
+                let kw = if negate { "NOT IN" } else { "IN" };
+                Ok(format!("{left_sql} {kw} ({holes})"))
+            }
+            SimpleOp::Like | SimpleOp::NotLike | SimpleOp::ILike | SimpleOp::NotILike => {
+                let RightVal::Scalar(s) = right else {
+                    return Err(reject("LIKE requires a scalar operand"));
+                };
+                self.params.push(scalar_to_sql(s));
+                // note: SQLite LIKE is ASCII-case-insensitive by default, so both
+                // LIKE and ILIKE map to LIKE here; that differs from Postgres's
+                // case-sensitive LIKE and matches ILIKE. refine with a collation
+                // if a conformance lane needs case-sensitive LIKE.
+                let kw = if matches!(op, SimpleOp::NotLike | SimpleOp::NotILike) {
+                    "NOT LIKE"
+                } else {
+                    "LIKE"
+                };
+                Ok(format!("{left_sql} {kw} ?"))
+            }
+            _ => {
+                let RightVal::Scalar(s) = right else {
+                    return Err(reject("operator requires a scalar operand"));
+                };
+                self.params.push(scalar_to_sql(s));
+                Ok(format!("{left_sql} {} ?", binary_op_sql(op)))
+            }
+        }
     }
 
     fn compile_exists(

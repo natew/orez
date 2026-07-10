@@ -6,11 +6,12 @@
 // AST (invariant: trust nothing), accepting EXACTLY the plan's supported subset
 // and rejecting everything else deterministically.
 //
-// supported: simple conditions (= != IS "IS NOT" < > <= >=) with a column or
-// literal on the left and a literal on the right; and/or; correlated
-// EXISTS/NOT EXISTS subqueries; related subqueries; orderBy (with a stable pk
-// tie-breaker added at compile time); limit; start cursor. unsupported (LIKE,
-// IN, static params, cross-table column refs, unknown ops/fields) is a 400.
+// supported: simple conditions (= != IS "IS NOT" < > <= >= LIKE "NOT LIKE"
+// ILIKE "NOT ILIKE" IN "NOT IN") with a column or literal on the left and a
+// literal (or array, for IN) on the right; and/or; correlated EXISTS/NOT EXISTS
+// subqueries; related subqueries; orderBy (with a stable pk tie-breaker added at
+// compile time); limit; start cursor. unsupported (static params, cross-table
+// column refs, unknown ops/fields/tables/columns) is a 400.
 
 use serde_json::Value;
 
@@ -60,6 +61,12 @@ pub enum SimpleOp {
     Gt,
     Le,
     Ge,
+    Like,
+    NotLike,
+    ILike,
+    NotILike,
+    In,
+    NotIn,
 }
 
 impl SimpleOp {
@@ -73,22 +80,27 @@ impl SimpleOp {
             ">" => SimpleOp::Gt,
             "<=" => SimpleOp::Le,
             ">=" => SimpleOp::Ge,
+            "LIKE" => SimpleOp::Like,
+            "NOT LIKE" => SimpleOp::NotLike,
+            "ILIKE" => SimpleOp::ILike,
+            "NOT ILIKE" => SimpleOp::NotILike,
+            "IN" => SimpleOp::In,
+            "NOT IN" => SimpleOp::NotIn,
             _ => return None,
         })
     }
 
-    pub fn sql(&self) -> &'static str {
-        match self {
-            SimpleOp::Eq => "=",
-            SimpleOp::Ne => "!=",
-            SimpleOp::Is => "IS",
-            SimpleOp::IsNot => "IS NOT",
-            SimpleOp::Lt => "<",
-            SimpleOp::Gt => ">",
-            SimpleOp::Le => "<=",
-            SimpleOp::Ge => ">=",
-        }
+    // IN / NOT IN take an array operand; every other op takes a scalar
+    pub fn takes_list(&self) -> bool {
+        matches!(self, SimpleOp::In | SimpleOp::NotIn)
     }
+}
+
+// the right-hand operand of a simple condition: a scalar, or an array for IN
+#[derive(Debug, Clone, PartialEq)]
+pub enum RightVal {
+    Scalar(Scalar),
+    List(Vec<Scalar>),
 }
 
 // left of a simple condition: a column or a resolved literal (a cross-table
@@ -104,7 +116,7 @@ pub enum Condition {
     Simple {
         op: SimpleOp,
         left: ValueRef,
-        right: Scalar,
+        right: RightVal,
     },
     And(Vec<Condition>),
     Or(Vec<Condition>),
@@ -287,6 +299,7 @@ fn parse_condition(value: &Value) -> Result<Condition, EngineError> {
             let right = parse_right(
                 obj.get("right")
                     .ok_or_else(|| reject("simple condition requires right"))?,
+                op.takes_list(),
             )?;
             Ok(Condition::Simple { op, left, right })
         }
@@ -408,8 +421,9 @@ fn parse_value_ref(value: &Value) -> Result<ValueRef, EngineError> {
 }
 
 // right side of a simple condition: a literal only (a column on the right is
-// disallowed by the v51 SimpleCondition type)
-fn parse_right(value: &Value) -> Result<Scalar, EngineError> {
+// disallowed by the v51 SimpleCondition type). IN/NOT IN require an array
+// literal; every other op requires a scalar.
+fn parse_right(value: &Value, wants_list: bool) -> Result<RightVal, EngineError> {
     let obj = value
         .as_object()
         .ok_or_else(|| reject("condition right must be an object"))?;
@@ -417,14 +431,30 @@ fn parse_right(value: &Value) -> Result<Scalar, EngineError> {
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| reject("condition right requires a type"))?;
-    match ty {
-        "literal" => parse_literal(obj),
-        "static" => Err(reject(
+    if ty == "static" {
+        return Err(reject(
             "static parameters must be resolved before reaching the engine",
-        )),
-        other => Err(reject(format!(
-            "condition right must be a literal, got '{other}'"
-        ))),
+        ));
+    }
+    if ty != "literal" {
+        return Err(reject(format!(
+            "condition right must be a literal, got '{ty}'"
+        )));
+    }
+    assert_only_keys(obj, &["type", "value"], "literal")?;
+    let v = obj
+        .get("value")
+        .ok_or_else(|| reject("literal requires a value"))?;
+    match (wants_list, v) {
+        (true, Value::Array(items)) => {
+            let list = items
+                .iter()
+                .map(parse_scalar)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(RightVal::List(list))
+        }
+        (true, _) => Err(reject("IN/NOT IN requires an array literal")),
+        (false, _) => Ok(RightVal::Scalar(parse_scalar(v)?)),
     }
 }
 
@@ -448,8 +478,8 @@ fn parse_scalar(v: &Value) -> Result<Scalar, EngineError> {
             }
         }
         Value::String(s) => Ok(Scalar::Text(s.clone())),
-        // arrays are IN/NOT IN operands, which are not in the supported subset
-        Value::Array(_) => Err(reject("array literals (IN/NOT IN) are unsupported")),
+        // a nested array (array-of-arrays) is not a valid scalar operand
+        Value::Array(_) => Err(reject("nested array literals are unsupported")),
         Value::Object(_) => Err(reject("object literals are unsupported")),
     }
 }

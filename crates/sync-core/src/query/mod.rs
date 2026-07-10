@@ -9,6 +9,6 @@ pub mod ast;
 pub mod compile;
 
 pub use ast::{
-    Ast, Condition, CorrelatedSubquery, OrderPart, Scalar, SimpleOp, ValueRef, parse_ast,
+    Ast, Condition, CorrelatedSubquery, OrderPart, RightVal, Scalar, SimpleOp, ValueRef, parse_ast,
 };
 pub use compile::{CompiledQuery, compile};
