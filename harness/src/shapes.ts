@@ -197,6 +197,14 @@ async function startAgainst(name: string): Promise<SyncTarget> {
       pullIntervalMs: 150,
     })
   }
+  if (name === 'rust-local') {
+    return (await import('./targets/rust-local.js')).startRustLocal({
+      pullIntervalMs: 150,
+    })
+  }
+  if (name === 'rust-cf') {
+    return (await import('./targets/rust-cf.js')).startRustCf({ pullIntervalMs: 150 })
+  }
   if (name === 'orez-cf') {
     return (await import('./targets/orez-cf.js')).startOrezCf({ pullIntervalMs: 150 })
   }

@@ -3,7 +3,7 @@
 // machines without the takeout checkout. refresh deliberately with:
 //   cp ~/takeout/packages/on-zero/src/httpPullTransport.ts \
 //      harness/src/vendor/httpPullTransport.ts   (re-add this header)
-// vendored 2026-07-09 from takeout commit 78bb43a8.
+// vendored 2026-07-09 from takeout commit 85df3051 (adds the wake channel).
 // http-pull transport: runs a stock @rocicorp/zero client over stateless HTTP
 // by intercepting its /sync/v51/connect WebSocket with a shim that translates
 // pull responses into v51 pokes. ported from the orez zero-http spike — the
@@ -50,6 +50,7 @@ type TransportState = {
   readonly nativeWebSocket: WebSocketConstructor | undefined
   readonly sockets: Set<ZeroHttpSocket>
   readonly pullIntervalMs: number | undefined
+  readonly wakeEnabled: boolean
   nextPokeID: number
   transientFailureCount: number
 }
@@ -70,6 +71,12 @@ export type HttpPullTransportOptions = {
   // when set, every open connection also pulls on this interval so
   // server-initiated changes arrive without a client-side trigger
   pullIntervalMs?: number
+  // when true, each connection also opens a notification-only wake socket to
+  // <origin>/wake and pulls immediately on any wake, demoting the interval
+  // poll to a safety net. the wake channel carries no data ("pull now" only)
+  // and zero correctness weight: a lost or duplicated wake can never cause
+  // missed or wrong data because convergence comes from the pull protocol.
+  wake?: boolean
 }
 
 export function installHttpPullTransport(
@@ -91,6 +98,7 @@ export function installHttpPullTransport(
     nativeWebSocket: previousWebSocket,
     sockets: new Set(),
     pullIntervalMs: opts.pullIntervalMs,
+    wakeEnabled: opts.wake ?? false,
     nextPokeID: 0,
     transientFailureCount: 0,
   }
@@ -173,6 +181,8 @@ class ZeroHttpSocket {
   private nextLocalCookieID: number
   private openTimer: ReturnType<typeof setTimeout> | undefined
   private pullTimer: ReturnType<typeof setInterval> | undefined
+  private wakeSocket: { close(): void } | undefined
+  private wakeReconnectTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
     private readonly state: TransportState,
@@ -251,6 +261,7 @@ class ZeroHttpSocket {
     if (this.readyState === this.CLOSED) return
     if (this.openTimer) clearTimeout(this.openTimer)
     if (this.pullTimer) clearInterval(this.pullTimer)
+    this.closeWakeChannel()
     this.readyState = this.CLOSED
     this.state.sockets.delete(this)
     this.emit('close', { code, reason, wasClean: code <= 1001 })
@@ -290,6 +301,59 @@ class ZeroHttpSocket {
       this.pullTimer = setInterval(() => {
         this.run(this.pull())
       }, this.state.pullIntervalMs)
+    }
+    if (this.state.wakeEnabled) this.openWakeChannel()
+  }
+
+  // notification-only wake channel: a real WebSocket to <origin>/wake that
+  // carries no data. any frame means "pull now", so a wake triggers an
+  // immediate (coalesced) pull — push-shaped propagation without waiting on
+  // the poll interval. advisory only: if it drops we reconnect, and the
+  // interval poll remains the safety net that guarantees convergence.
+  private openWakeChannel() {
+    const Native = this.state.nativeWebSocket
+    if (!Native || this.wakeSocket || this.readyState !== this.OPEN) return
+    const wsBase = this.state.originString.replace(/^http/, 'ws')
+    const url = `${wsBase}/wake?clientID=${encodeURIComponent(this.clientID)}`
+    let socket: {
+      onmessage: (() => void) | null
+      onclose: (() => void) | null
+      onerror: (() => void) | null
+      close(): void
+    }
+    try {
+      socket = new Native(url) as unknown as typeof socket
+    } catch {
+      return
+    }
+    this.wakeSocket = socket
+    const reconnect = () => {
+      if (this.wakeSocket !== socket) return
+      this.wakeSocket = undefined
+      if (this.readyState !== this.OPEN || this.wakeReconnectTimer) return
+      this.wakeReconnectTimer = setTimeout(() => {
+        this.wakeReconnectTimer = undefined
+        this.openWakeChannel()
+      }, 500)
+    }
+    socket.onmessage = () => this.run(this.pull())
+    socket.onclose = reconnect
+    socket.onerror = reconnect
+  }
+
+  private closeWakeChannel() {
+    if (this.wakeReconnectTimer) {
+      clearTimeout(this.wakeReconnectTimer)
+      this.wakeReconnectTimer = undefined
+    }
+    const socket = this.wakeSocket
+    this.wakeSocket = undefined
+    if (socket) {
+      try {
+        socket.close()
+      } catch {
+        // best effort: an already-closing wake socket is harmless
+      }
     }
   }
 

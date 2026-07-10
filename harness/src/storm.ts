@@ -60,11 +60,21 @@ async function startTarget(): Promise<SyncTarget> {
     const { startOrezLocal } = await import('./targets/orez-local.js')
     return startOrezLocal({ pullIntervalMs: PULL_INTERVAL_MS })
   }
+  if (TARGET === 'rust-local') {
+    const { startRustLocal } = await import('./targets/rust-local.js')
+    return startRustLocal({ pullIntervalMs: PULL_INTERVAL_MS })
+  }
+  if (TARGET === 'rust-cf') {
+    const { startRustCf } = await import('./targets/rust-cf.js')
+    return startRustCf({ pullIntervalMs: PULL_INTERVAL_MS })
+  }
   if (TARGET === 'orez-cf') {
     const { startOrezCf } = await import('./targets/orez-cf.js')
     return startOrezCf({ pullIntervalMs: PULL_INTERVAL_MS })
   }
-  throw new Error(`storm target must be orez-local or orez-cf, got '${TARGET}'`)
+  throw new Error(
+    `storm target must be orez-local, rust-local, rust-cf, or orez-cf, got '${TARGET}'`
+  )
 }
 
 type TaskRow = {

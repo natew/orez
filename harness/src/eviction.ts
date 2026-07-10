@@ -15,6 +15,7 @@ import { mutators, queries } from './fixture.js'
 import { assertServerOutcome } from './server-outcome.js'
 import { startOrezCf } from './targets/orez-cf.js'
 import { startOrezLocalProcess } from './targets/orez-local-process.js'
+import { startRustLocal } from './targets/rust-local.js'
 
 import type { HttpPullObservation } from './observed-fetch.js'
 import type { FixtureZero, SyncTarget } from './target.js'
@@ -243,9 +244,23 @@ async function lateClientCheck(
   }
 }
 
-async function runLocal() {
+type EvictionProcessTarget = SyncTarget & {
+  readonly databaseFile: string
+  pull(): Promise<void>
+  crashAndRestart(downForMs?: number): Promise<{ before: number; after: number }>
+}
+
+// process-backed SIGKILL + reopen drill, shared by orez-local-process and the
+// native rust-local host (both persist a file-backed authority across the kill).
+async function runLocal(
+  label: string,
+  start: (opts: {
+    pullIntervalMs: number
+    onPull: (observation: HttpPullObservation) => void
+  }) => Promise<EvictionProcessTarget>
+) {
   const observations: HttpPullObservation[] = []
-  const target = await startOrezLocalProcess({
+  const target = await start({
     pullIntervalMs: 100,
     onPull: (observation) => observations.push(observation),
   })
@@ -253,7 +268,7 @@ async function runLocal() {
   const watchers: ReturnType<typeof watchTaskIDs>[] = []
   const expected = new Set<string>()
   const outcomes: Promise<void>[] = []
-  const prefix = `evict-local-${Date.now().toString(36)}`
+  const prefix = `evict-${label}-${Date.now().toString(36)}`
   try {
     for (let i = 0; i < CLIENTS; i++) {
       const zero = target.createClient(`evict-user-${i}`)
@@ -291,7 +306,7 @@ async function runLocal() {
     const history = assertPullHistory(observations, clientIDs, restartedAt, true)
     const lateHydrateMs = await lateClientCheck(target, expected, 60_000)
     console.log(
-      `[eviction] local PASS pid ${pids.before}->${pids.after}, outage=${restartedAt - crashStartedAt}ms, ` +
+      `[eviction] ${label} PASS pid ${pids.before}->${pids.after}, outage=${restartedAt - crashStartedAt}ms, ` +
         `${expected.size} writes, converge=${convergeMs}ms, late=${lateHydrateMs}ms, ` +
         `pulls=${history.successful}, failed-pulls=${history.networkFailures}, 409s=0, cookies monotone`
     )
@@ -376,9 +391,10 @@ async function runCf() {
 
 let failed = false
 try {
-  if (args.target === 'local') await runLocal()
+  if (args.target === 'local') await runLocal('local', startOrezLocalProcess)
+  else if (args.target === 'rust-local') await runLocal('rust-local', startRustLocal)
   else if (args.target === 'cf') await runCf()
-  else throw new Error(`target must be local or cf, got '${args.target}'`)
+  else throw new Error(`target must be local, rust-local, or cf, got '${args.target}'`)
 } catch (error) {
   failed = true
   console.error('[eviction] FAIL:', error)
