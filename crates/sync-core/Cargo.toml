@@ -8,3 +8,12 @@ license.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+# rusqlite is a DEV-dependency ONLY: it is the in-memory SyncDb impl the unit,
+# model, and differential tests run against. it must NEVER become a regular
+# dependency — the crate must stay wasm-compilable (verified in CI with
+# `cargo build --target wasm32-unknown-unknown -p sync-core`). pinned to 0.32
+# (libsqlite3-sys 0.30) because 0.38+ needs the unstable cfg_select on rustc
+# 1.94.
+[dev-dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }

@@ -30,6 +30,7 @@ pub mod error;
 pub mod pull;
 pub mod push;
 pub mod schema;
+mod store;
 pub mod value;
 pub mod wire;
 

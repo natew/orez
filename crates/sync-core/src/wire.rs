@@ -23,6 +23,24 @@ pub fn counter_to_json(value: i64) -> Value {
     Value::Number(Number::from(value))
 }
 
+// the reference core's isNonNegativeInteger: a JSON number that is a
+// non-negative integer within the JS safe range. an integral float is accepted
+// (JS makes no int/float distinction); fractional or out-of-range is rejected.
+pub fn non_negative_safe_int(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                (0..=MAX_SAFE_INTEGER).contains(&i).then_some(i)
+            } else if let Some(f) = n.as_f64() {
+                (f.fract() == 0.0 && f >= 0.0 && f <= MAX_SAFE_INTEGER as f64).then_some(f as i64)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 // parse an inbound cookie field. accepts JSON null (fresh client), a
 // non-negative safe-integer JSON number, or a canonical unsigned base-10 string
 // in 0..=i64::MAX. anything else is a malformed request. returns Ok(None) for a
@@ -30,22 +48,7 @@ pub fn counter_to_json(value: i64) -> Value {
 pub fn parse_cookie(value: Option<&Value>) -> Result<Option<i64>, ()> {
     match value {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(n)) => {
-            // isNonNegativeInteger: a non-negative value within the JS safe
-            // range. an integral float (JS makes no int/float distinction) is
-            // accepted; a fractional or out-of-range number is rejected.
-            if let Some(i) = n.as_i64() {
-                if (0..=MAX_SAFE_INTEGER).contains(&i) { Ok(Some(i)) } else { Err(()) }
-            } else if let Some(f) = n.as_f64() {
-                if f.fract() == 0.0 && f >= 0.0 && f <= MAX_SAFE_INTEGER as f64 {
-                    Ok(Some(f as i64))
-                } else {
-                    Err(())
-                }
-            } else {
-                Err(())
-            }
-        }
+        Some(n @ Value::Number(_)) => non_negative_safe_int(n).map(Some).ok_or(()),
         Some(Value::String(s)) => parse_canonical_u63(s).map(Some).ok_or(()),
         _ => Err(()),
     }
