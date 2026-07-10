@@ -92,13 +92,12 @@ Cloudflare limit.
 
 ```sh
 mise exec node@24.3.0 -- bun harness/src/memory-soak.ts --target rust-cf --blocks 3 --ops 1000
-mise exec node@24.3.0 -- bun harness/src/memory-soak.ts --target rust-local --blocks 3 --ops 1000
 mise exec node@24.3.0 -- bun --cwd packages/sync-cf-host run measure
 ```
 
-The memory lane requires a host/native memory diagnostic that reports only byte
-counts and is protected like `/admin/status`; it must not infer flat memory from
-process RSS or database size.
+The wasm lane uses the host's authenticated byte-count diagnostic and must not
+infer flat linear memory from process RSS or database size. Native allocator/RSS
+soak is tracked separately because it is not a wasm runtime.
 
 ### Storage failure, quota, and clock skew
 
