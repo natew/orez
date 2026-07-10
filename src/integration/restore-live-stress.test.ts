@@ -405,10 +405,18 @@ describe('live restore stress with connected frontend', { timeout: 360_000 }, ()
       ws.close()
     } catch {}
     const downstreamAfterReset = new Queue<unknown>()
-    ws = await connectAndSubscribeWithRetry(zeroPort, downstreamAfterReset, {
-      table: 'restore_live_probe',
-      orderBy: [['id', 'asc']],
-    })
+    // after a SIGUSR1 reset the port can come up and drop again while the
+    // replica resyncs from the restored dump; on slow CI runners that outage
+    // exceeds the default 30s retry window (run 29085214517)
+    ws = await connectAndSubscribeWithRetry(
+      zeroPort,
+      downstreamAfterReset,
+      {
+        table: 'restore_live_probe',
+        orderBy: [['id', 'asc']],
+      },
+      120_000
+    )
     await drainInitialPokes(downstreamAfterReset)
 
     // verify write is captured in change tracking after reset
