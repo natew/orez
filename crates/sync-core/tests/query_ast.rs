@@ -232,6 +232,27 @@ fn start_cursor_null_ordering() {
 }
 
 #[test]
+fn start_cursor_ignores_non_ordering_and_non_scalar_fields() {
+    // RESIDUAL-2a: a stock full-row cursor carries every column, including json/
+    // array ones. parse_bound must retain only the ordering-key scalars (orderBy +
+    // PK) and IGNORE non-ordering / non-scalar fields, not 400 "object literals are
+    // unsupported".
+    let mut db = seeded_db();
+    let q = json!({
+        "table": "issue",
+        "orderBy": [["priority", "asc"]],
+        "start": { "row": {
+            "priority": 3, "id": "i2",
+            "title": "beta",           // extra scalar column -> ignored
+            "meta": { "tag": "x" },    // json object -> ignored (not 400)
+            "tags": [1, 2, 3]          // array -> ignored
+        }, "exclusive": true }
+    });
+    // same result as the pk-only cursor: extras don't change pagination.
+    assert_eq!(run_ids(&mut db, q), vec!["i4", "i1"]);
+}
+
+#[test]
 fn start_cursor_includes_implicit_pk_tiebreak() {
     // GAP-2a: orderBy does NOT list the pk, but the effective ordering key appends
     // it and the stock cursor carries it. parse_bound must capture the pk field so

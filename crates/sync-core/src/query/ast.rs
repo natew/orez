@@ -303,12 +303,18 @@ fn parse_bound(value: &Value, order_by: &[OrderPart]) -> Result<Bound, EngineErr
         })?;
         row.push((part.column.clone(), parse_scalar(v)?));
     }
-    // additional cursor fields (e.g. the appended PK tie-break) in a stable order
+    // additional cursor fields (e.g. the appended PK tie-break) in a stable order.
+    // a stock builder ships a full materialized row, which may carry non-ordering
+    // columns of any type (json objects, arrays); only the ordering key + PK
+    // (scalars) matter to compile_start, so capture the SCALAR extras and ignore
+    // anything that is not a scalar operand rather than 400ing on it.
     for (col, v) in row_obj {
         if order_by.iter().any(|p| &p.column == col) {
             continue;
         }
-        row.push((col.clone(), parse_scalar(v)?));
+        if let Ok(scalar) = parse_scalar(v) {
+            row.push((col.clone(), scalar));
+        }
     }
     Ok(Bound { row, exclusive })
 }
