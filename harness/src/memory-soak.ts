@@ -27,7 +27,7 @@ const clientGroupID = `memory-group-${crypto.randomUUID()}`
 let cookie: unknown = null
 let queryVersion = 0
 
-async function queryPatch(operation: Record<string, unknown>) {
+async function queryPatch(patch: Array<Record<string, unknown>>) {
   queryVersion++
   const response = await fetch(`${origin}/pull`, {
     method: 'POST',
@@ -39,7 +39,7 @@ async function queryPatch(operation: Record<string, unknown>) {
       clientID,
       clientGroupID,
       cookie,
-      queries: { version: queryVersion, patch: [operation] },
+      queries: { version: queryVersion, patch },
     }),
     signal: AbortSignal.timeout(5_000),
   })
@@ -68,19 +68,22 @@ async function churnWake(index: number) {
 
 try {
   // Warm the query compiler and allocator before taking the baseline.
-  await queryPatch({ op: 'put', hash: 'memory-warm', name: 'tasksDone', args: [] })
-  await queryPatch({ op: 'del', hash: 'memory-warm' })
+  await queryPatch([{ op: 'put', hash: 'memory-warm', name: 'tasksDone', args: [] }])
+  await queryPatch([{ op: 'del', hash: 'memory-warm' }])
   const samples = [(await target.hibernationStatus()).wasmMemoryBytes]
 
   for (let block = 0; block < blocks; block++) {
-    for (let index = 0; index < ops; index++) {
-      const hash = `memory-${block}-${index}`
-      await queryPatch({ op: 'put', hash, name: 'tasksDone', args: [] })
-      await queryPatch({ op: 'del', hash })
-      if (index % 100 === 0) {
-        await churnWake(block * ops + index)
-        await target.restart()
+    for (let batchStart = 0; batchStart < ops; batchStart += 100) {
+      const patch: Array<Record<string, unknown>> = []
+      const batchEnd = Math.min(batchStart + 100, ops)
+      for (let index = batchStart; index < batchEnd; index++) {
+        const hash = `memory-${block}-${index}`
+        patch.push({ op: 'put', hash, name: 'tasksDone', args: [] })
+        patch.push({ op: 'del', hash })
       }
+      await queryPatch(patch)
+      await churnWake(block * ops + batchStart)
+      await target.restart()
     }
     samples.push((await target.hibernationStatus()).wasmMemoryBytes)
   }
