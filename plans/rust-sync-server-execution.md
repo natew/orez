@@ -30,7 +30,7 @@ Multiple agents work this worktree concurrently. Rules:
 ## Status
 
 - [x] worktree + cargo workspace skeleton (coordinator)
-- [ ] M0: platform contract proof (workerd DO host, transactionSync +
+- [x] M0: platform contract proof (workerd DO host, transactionSync +
       async-tx probes, real-shape mutators, value round trips, rollback,
       eviction, size/latency measurements)
 - [ ] M1: sync-core port of the reference cursor spec (19 delta tests,

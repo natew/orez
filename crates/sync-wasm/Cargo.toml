@@ -8,4 +8,9 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+js-sys = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+serde-wasm-bindgen = "0.6"
 sync-core = { path = "../sync-core" }
+wasm-bindgen = "0.2"
