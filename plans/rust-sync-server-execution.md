@@ -88,12 +88,20 @@ Multiple agents work this worktree concurrently. Rules:
       mutators.test.ts, permission lane 24/24 with the full mutator graph
       bundled (chat worktree 94012c0b6). Remaining resolveQuery corpus (124
       named queries) + more permission families are incremental, lane-driven.
-- [~] M5/M6 gates: observability mirrored in both hosts, rollback/canary
-  - one-writer scripts, fault/soak/fuzz/memory/backup lanes with budgets,
-    incident runbook — prep landed (see final plan). Production cutover
-    user-gated. NOTE: the M5/M6 harness/host commits authored while the sol
-    lane was silently downgraded to gpt-5.6-luna were audited; one real bug
-    fixed (50c6860), the rest sound.
+- [x] M5/M6 gates: observability mirrored in both hosts, rollback/canary +
+      one-writer scripts, fault/soak/fuzz/memory/backup lanes with budgets,
+      incident runbook. QUALIFICATION CLOSED 2026-07-10: full native (7/7)
+      and CF (9/9) suites re-run green on a trusted model at 011bf2d /
+      deploy 3762dad8, replacing the retracted small-model passes
+      (per-lane evidence in plans/rust-sync-m6-qualification.md, 54c48bd);
+      coordinator independently reproduced the rollback/one-writer drill
+      PASS against the same deploy. NOTE: the M5/M6 harness/host commits
+      authored while the sol lane was silently downgraded to gpt-5.6-luna
+      were audited; one real bug fixed (50c6860), the rest sound. The
+      first CF suite pass claim was retracted when a tee-masked exit code
+      was found; the rerun (with per-case fuzz error context, f08ac4c)
+      is the pass of record. Production cutover for soot/chat remains
+      user-gated and is NOT part of this gate.
 
 Keep this checklist current when a track lands its exit gate.
 
@@ -118,6 +126,25 @@ smoke (20 clients, 791 ms), propagation (commit->seen p95 12 ms, no
 safety-poll convergence), storm (100 clients: ack p50/p95 9/23 ms,
 propagation p50/p95 70/84 ms), eviction (SIGKILL, outage 1563 ms, zero
 409s, cookies monotone) — all PASS vs rust-local on a fresh checkout.
+
+M6 qualification (SHA 011bf2d, deploy 3762dad8, 2026-07-10): NATIVE 7/7
+in 43.4s — protocol fuzz 10,000 seeded structural cases all-400 in 137 ms
+(seeds 1/2/3/42); eviction SIGKILL outage 1559 ms, 30 writes, converge
+53 ms, zero 409s, cookies monotone; reconnect 4 phases; multi-tab;
+clock-skew ±24h LMID 2; storage-faults 5 boundary points kill-durability
+(pre-commit row absent after restart, post-commit survives);
+backup-restore 91 rows -> 91 fresh-snapshot puts. CF 9/9 in 157.2s —
+fuzz 10,000 all-400 in 68.9s; eviction boot-ID change, 20 writes, zero
+409s, monotone, late converge 155 ms; reconnect; multi-tab; clock-skew
+LMID 2; storage-faults 5 points error/quota; backup-restore 91/91;
+wasm-memory-soak on a live instance (no restarts, cbb66bc): samples flat
+at 1,572,864 bytes, growth 0/0/0 against the 65,536-byte page budget;
+rollback/one-writer drill PASS with 0 invariant failures (independently
+reproduced by the coordinator: phases old-only -> none -> new-only ->
+none -> old-only, old watermark 4, new watermark 2, floors 0). Bundle
+220.39 KiB gzip upload (92.8% headroom); local cold DO p50/p95
+5.351/7.829 ms; ack p50/p95 1.797/3.127 ms; storage delta 8,192 bytes
+per 50 pushes.
 
 M3 production host (orez-rust-sync on lslcf, 2026-07-09 checkpoint):
 bundle 121.58 KiB gzip; startup 1 ms; cold p50/p95 4.792/6.652 ms; ack
