@@ -13,3 +13,4 @@ test-chat/
 .orez-*
 perf/reports/
 .wrangler/
+target/

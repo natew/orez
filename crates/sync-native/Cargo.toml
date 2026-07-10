@@ -1,0 +1,8 @@
+[package]
+name = "sync-native"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+sync-core = { path = "../sync-core" }
