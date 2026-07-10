@@ -49,7 +49,20 @@ Multiple agents work this worktree concurrently. Rules:
   endpoint), workerd control/project/wake tests, cutover/rollback
   scripts (not executed). Offline executable comparison green (legacy
   cursor/snapshot/ack 17 pass, Rust workerd 8 pass). Production cutover
-  remains user-gated.
+  remains user-gated. UPDATE 2026-07-10: soot now consumes orez's
+  createSyncServerMount for routing + dispatch on soot branch
+  soot-mount-consume (b50df8aa87, not pushed): mount routing verified
+  byte-identical to projectIdFromPathname across 13 edge cases, one
+  stable per-project SyncServer-shaped adapter delegating to the
+  unchanged cursorPull/snapshot, push kept on a thin request-aware seam
+  (rate limit + withPushParams need the raw Request; adapter handlePush
+  fails loud), 17/17 soot tests green with ZERO expectation rewrites.
+  Key cutover finding baked into that commit: soot's project plane spans
+  THREE cookie domains (zero-cache embed watermark / node WAL LSN / orez
+  \_zsync_changes) — a full createSyncServer replacement is the cookie-
+  domain break itself and must ride the user-gated cutover, not prep.
+  Branch caveat: requires an orez dist overlay (mount not on npm) until
+  a release is approved.
 - [x] M4b: query-aware layer (AST compiler, membership, desired queries).
       GATE CLOSED 2026-07-10 (cross-model reviewer APPROVED at e306bda).
       Engine + transport + lifecycle lanes green vs rust-local and rust-cf
@@ -157,6 +170,15 @@ smoke (20 clients, 791 ms), propagation (commit->seen p95 12 ms, no
 safety-poll convergence), storm (100 clients: ack p50/p95 9/23 ms,
 propagation p50/p95 70/84 ms), eviction (SIGKILL, outage 1563 ms, zero
 409s, cookies monotone) — all PASS vs rust-local on a fresh checkout.
+
+Mini-16 extended matrix at 726ac0c (2026-07-10, run headless over SSH
+since mini's agentbus daemon cannot launch agents — bare PATH + a
+deepseek-proxied claude): protocol fuzz 3 x 34,000 structural cases
+(seeds 1/7/13), 102,000 total, every case 400, ~590 ms per seed batch;
+storm 100 clients ack p50/p95/p99 9/17/17 ms, propagation 71/97/97 ms,
+PASS; eviction 25/25 consecutive SIGKILL cycles PASS with outage
+1562-1567 ms, converge 50-53 ms, zero 409s, cookies monotone every
+cycle.
 
 M6 qualification (SHA 011bf2d, deploy 3762dad8, 2026-07-10): NATIVE 7/7
 in 43.4s — protocol fuzz 10,000 seeded structural cases all-400 in 137 ms
