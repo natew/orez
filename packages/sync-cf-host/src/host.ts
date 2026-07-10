@@ -210,7 +210,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #wakeOrigins = new Set<string>();
     #wakeRecipients = new Set<WebSocket>();
     #wakePromise: Promise<void> | null = null;
-    #visibilityEnabled = false;
+    #visibilityEnabled = config.visibilityEnabled ?? false;
     #retainChanges = defaultRetainChanges;
 
     constructor(ctx: DurableObjectState, env: Env) {

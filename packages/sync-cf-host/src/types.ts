@@ -110,6 +110,8 @@ export type SyncHostConfig<Env extends SyncHostEnv = SyncHostEnv> = {
   /** Resolve the first path component or another consumer-defined namespace. */
   namespace(request: Request): string | null
   visibility?: VisibilityConfig
+  /** Enable consumer visibility from the first request. Defaults to false for harnesses. */
+  visibilityEnabled?: boolean
   retainChanges?: number
   caps?: Partial<PullCaps>
   idleTeardownMs?: number
