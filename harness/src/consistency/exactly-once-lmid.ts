@@ -197,11 +197,8 @@ export function checkExactlyOnceLmid(
   const pulls = terminalPairs(events, 'pull').sort(
     (a, b) => a.invoke.exactlyOnce.attempt - b.invoke.exactlyOnce.attempt
   )
-  if (
-    pulls.length !== 2 ||
-    pulls.some((pair, index) => pair.invoke.exactlyOnce.attempt !== index + 1)
-  ) {
-    violations.push('pull attempts must be exactly sequential attempts 1 and 2')
+  if (pulls.length !== 1 || pulls[0]?.invoke.exactlyOnce.attempt !== 1) {
+    violations.push('requires exactly one completed pull attempt 1')
   }
   for (const pair of pulls) {
     const observed = pair.terminal?.exactlyOnce.observed

@@ -181,17 +181,6 @@ function history(phase: TerminalPhase = 'ok'): {
       observed: { outcome: 'already-processed', mutationId: 1 },
     }
   )
-  pair(
-    'pull-2',
-    'pull-2',
-    'pull',
-    { ...pullStable, attempt: 2, observed: null },
-    {
-      ...pullStable,
-      attempt: 2,
-      observed: { outcome: 'pull-lmid-observed', lastMutationId: '1' },
-    }
-  )
   recorder.record({
     opId: 'mutation-1',
     process: 'writer',
