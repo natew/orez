@@ -2,7 +2,6 @@ export type HttpPullObservation = {
   at: number
   body: unknown
   rawBody?: string
-  rawBody?: string
   response?: unknown
   rawResponseBody?: string
   status?: number
@@ -14,7 +13,9 @@ export type SyncHttpObservation = {
   path: 'push' | 'pull'
   phase: 'invoke' | 'terminal'
   body: unknown
+  rawBody?: string
   response?: unknown
+  rawResponseBody?: string
   status?: number
   error?: unknown
 }
@@ -52,49 +53,6 @@ export function createOperationBoundDropFetch(
     },
   }
 }
-
-export const singleAttemptHttpFetch: typeof fetch = (input, init) =>
-  new Promise((resolve, reject) => {
-    const url = new URL(
-      typeof input === 'string' || input instanceof URL ? input : input.url
-    )
-    if (url.protocol !== 'http:') {
-      reject(new Error('single-attempt fetch supports only http'))
-      return
-    }
-    const requestHeaders = Object.fromEntries(new Headers(init?.headers).entries())
-    const outgoing = request(
-      url,
-      { method: init?.method ?? 'GET', headers: requestHeaders },
-      (incoming) => {
-        const headers = new Headers()
-        for (const [name, value] of Object.entries(incoming.headers)) {
-          if (Array.isArray(value)) for (const item of value) headers.append(name, item)
-          else if (value !== undefined) headers.set(name, value)
-        }
-        resolve(
-          new Response(Readable.toWeb(incoming) as ReadableStream, {
-            status: incoming.statusCode ?? 500,
-            statusText: incoming.statusMessage,
-            headers,
-          })
-        )
-      }
-    )
-    outgoing.once('error', reject)
-    if (init?.signal) {
-      const abort = () => outgoing.destroy(new Error('request aborted'))
-      if (init.signal.aborted) abort()
-      else init.signal.addEventListener('abort', abort, { once: true })
-    }
-    if (typeof init?.body === 'string' || init?.body instanceof Uint8Array) {
-      outgoing.write(init.body)
-    } else if (init?.body !== undefined && init.body !== null) {
-      outgoing.destroy(new Error('single-attempt fetch requires a string body'))
-      return
-    }
-    outgoing.end()
-  })
 
 export function observedSyncFetch(
   onObservation: (observation: SyncHttpObservation) => void,
@@ -169,10 +127,9 @@ export function observedPullFetch(
       body: observation.body,
       rawBody: observation.rawBody,
       response: observation.response,
+      rawResponseBody: observation.rawResponseBody,
       status: observation.status,
       error: observation.error,
     })
   }, fetchImpl)
 }
-import { request } from 'node:http'
-import { Readable } from 'node:stream'
