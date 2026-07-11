@@ -800,6 +800,62 @@ console.log('[spec-corpus] writer helpers — id, buildSweepDivergence, refuse-o
     )
   }
 
+  // the two NON-exact writer shapes the sweep live-integration emits (parser
+  // classification is proven above; here the WRITER must produce them correctly).
+  {
+    // post-writes cross-target: never exact, never minimized, full seeded replay.
+    const pw = buildSweepDivergence({
+      phase: 'post-writes',
+      comparisonKind: 'cross-target',
+      round: 3,
+      specIndex: 5,
+      rounds: 10,
+      queriesPerRound: 4,
+      seed: 42,
+      spec: specA,
+      against: 'orez-local',
+      observedTarget: 'orez-local',
+      leftRows: [{ id: 'a' }],
+      rightRows: [{ id: 'b' }],
+      note: 'post-writes',
+      // even if a caller passes true, a non-exact entry is coerced to false.
+      minimizationComplete: true,
+    })
+    assert(
+      !pw.exactReplayable &&
+        !pw.minimizationComplete &&
+        !pw.replay.includes('--replay-corpus') &&
+        pw.replay.startsWith('bun src/sweep.ts --seed 42'),
+      'writer: post-writes cross-target is non-exact with a full seeded replay'
+    )
+  }
+  {
+    // incremental single-target observed on stock-zero: round === rounds.
+    const inc = buildSweepDivergence({
+      phase: 'incremental',
+      comparisonKind: 'single-target',
+      round: 10,
+      specIndex: 7,
+      rounds: 10,
+      queriesPerRound: 4,
+      seed: 42,
+      spec: specA,
+      against: 'orez-local',
+      observedTarget: 'stock-zero',
+      leftRows: [{ id: 'a' }],
+      rightRows: [{ id: 'b' }],
+      note: 'incremental on stock-zero',
+      minimizationComplete: false,
+    })
+    assert(
+      !inc.exactReplayable &&
+        inc.comparisonKind === 'single-target' &&
+        inc.observedTarget === 'stock-zero' &&
+        !inc.replay.includes('--replay-corpus'),
+      'writer: incremental single-target on stock-zero is a valid non-exact entry'
+    )
+  }
+
   const wdir = mkdtempSync(join(tmpdir(), 'corpus-write-'))
   try {
     const e = buildExact('v1')

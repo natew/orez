@@ -9,14 +9,21 @@
 // being incrementally maintained under later churn. at the end, fresh late
 // clients rematerialize every spec (incremental == fresh).
 //
-// deterministic per seed: a divergence prints the seed + writes a replay
-// artifact to regressions/. re-run any run with --seed.
+// deterministic per seed. a divergence writes a self-validated SweepDivergence
+// to regressions/sweep/v1/<id>.json (spec-corpus.ts). the FIRST eligible
+// (round-0 hydrate cross-target) divergence is delta-debugged to a minimal
+// still-reproducing spec (spec-shrink.ts) before it is written — the only phase
+// that replays exactly from (seed, spec). every other divergence is stored
+// non-exact with its full seeded replay command.
 //
 //   bun src/sweep.ts                                  # random seed, orez-local
 //   bun src/sweep.ts --seed 12345 --rounds 20
 //   bun src/sweep.ts --against orez-cf --rounds 8
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+//   bun src/sweep.ts --replay-corpus regressions/sweep/v1/<id>.json  # one entry
+//   bun src/sweep.ts --corpus                         # nightly: preload + replay
+//   bun src/sweep.ts --inject --seed 42 --queriesPerRound 4  # proof seam
+import { readFileSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { canonical } from './canonical.js'
@@ -29,6 +36,16 @@ import {
   queries,
 } from './fixture.js'
 import { assertServerOutcome, type ExpectedServerOutcome } from './server-outcome.js'
+import {
+  buildSweepDivergence,
+  corpusDir,
+  currentSeedFingerprint,
+  loadCorpus,
+  parseCorpusEntry,
+  type Phase,
+  writeCorpusEntry,
+} from './spec-corpus.js'
+import { constructCount, shrinkSpec } from './spec-shrink.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
@@ -42,6 +59,17 @@ const { values: args } = parseArgs({
     // generate the specs and print grammar-axis coverage without booting
     // targets — for verifying generator changes actually produce the axes
     dry: { type: 'boolean', default: false },
+    // replay ONE committed known-gap corpus entry (no random rounds): boot fresh
+    // targets, materialize its spec on both, assert CONVERGE. exit 0 converge, 1
+    // regressed, 2 corrupt/target-mismatch/fingerprint-mismatch.
+    'replay-corpus': { type: 'string' },
+    // NIGHTLY-only: before the random rounds, replay each committed exact
+    // corpus entry and assert convergence. ordinary PR sweep does NOT preload.
+    corpus: { type: 'boolean', default: false },
+    // demo/proof: make the orez side drop its first result row so a divergence
+    // is injected reproducibly (exercises the writer + shrink path on a green
+    // sweep). never for normal runs.
+    inject: { type: 'boolean', default: false },
   },
 })
 
@@ -459,12 +487,23 @@ type LiveView = {
   destroy: () => void
 }
 
-function materializeSpec(zero: FixtureZero, spec: GenSpec, specIndex: number): LiveView {
+// `dropFirst` (only under --inject) drops the first ROOT row on the orez side so
+// a cross-target divergence is injected reproducibly on a green sweep — it must
+// apply to EVERY orez materialization (initial views AND shrink candidates) so
+// stillDiverges sees the same injection the round-0 hydrate compare did.
+function materializeSpec(
+  zero: FixtureZero,
+  spec: GenSpec,
+  specIndex: number,
+  dropFirst = false
+): LiveView {
   const view = zero.materialize(queries.generated(spec) as never)
   let rows: unknown = null
   let complete = false
   view.addListener((data: unknown, resultType: string) => {
-    rows = JSON.parse(JSON.stringify(data ?? null))
+    let snapshot: unknown = JSON.parse(JSON.stringify(data ?? null))
+    if (dropFirst && Array.isArray(snapshot)) snapshot = snapshot.slice(1)
+    rows = snapshot
     if (resultType === 'complete') complete = true
   })
   return {
@@ -476,37 +515,31 @@ function materializeSpec(zero: FixtureZero, spec: GenSpec, specIndex: number): L
   }
 }
 
-const REGRESSIONS_DIR = join(import.meta.dirname, '..', 'regressions')
-
-function recordDivergence(entry: {
-  phase: string
+// the ONE divergence writer (replaces the legacy recordDivergence): builds a
+// self-validated SweepDivergence and writes it to regressions/sweep/v1/<id>.json
+// under a deterministic, collision-safe, no-overwrite id. run-shape provenance
+// (seed/rounds/queriesPerRound/against) comes from the module constants.
+function emitDivergence(input: {
+  phase: Phase
+  comparisonKind: 'cross-target' | 'single-target'
   round: number
   specIndex: number
   spec: GenSpec
-  left: string
-  right: string
-}) {
-  mkdirSync(REGRESSIONS_DIR, { recursive: true })
-  const file = join(
-    REGRESSIONS_DIR,
-    `sweep-seed${SWEEP_SEED}-r${entry.round}-q${entry.specIndex}.json`
-  )
-  writeFileSync(
-    file,
-    JSON.stringify(
-      {
-        seed: SWEEP_SEED,
-        rounds: ROUNDS,
-        queriesPerRound: QUERIES_PER_ROUND,
-        against: args.against,
-        replay: `bun src/sweep.ts --seed ${SWEEP_SEED} --rounds ${ROUNDS} --queriesPerRound ${QUERIES_PER_ROUND} --against ${args.against}`,
-        ...entry,
-      },
-      null,
-      2
-    )
-  )
-  return file
+  observedTarget: string
+  leftRows: unknown
+  rightRows: unknown
+  note: string
+  originalConstructCount?: number
+  minimizationComplete: boolean
+}): string {
+  const entry = buildSweepDivergence({
+    ...input,
+    rounds: ROUNDS,
+    queriesPerRound: QUERIES_PER_ROUND,
+    seed: SWEEP_SEED,
+    against: args.against!,
+  })
+  return writeCorpusEntry(corpusDir(), entry)
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +572,75 @@ if (args.dry) {
   process.exit(0)
 }
 
+// --replay-corpus <path>: replay ONE committed exact entry (no random rounds).
+// boot fresh targets, materialize its minimized spec on stock-zero + its target,
+// assert CONVERGE. exit 0 converge, 1 regressed, 2 corrupt / fingerprint /
+// target / not-exact / inconclusive. the parser (with the current fixture
+// fingerprint) is the grammar + anti-corruption preflight before any boot.
+if (args['replay-corpus'] !== undefined) {
+  const p = args['replay-corpus']
+  const file = isAbsolute(p) ? p : join(import.meta.dirname, '..', p)
+  let entry: ReturnType<typeof parseCorpusEntry>
+  try {
+    entry = parseCorpusEntry(readFileSync(file, 'utf-8'), {
+      expectedFingerprint: currentSeedFingerprint(),
+    })
+  } catch (error) {
+    console.error(`[replay] corrupt/invalid corpus entry ${file}: ${error}`)
+    process.exit(2)
+  }
+  if (!entry.exactReplayable) {
+    console.error(
+      `[replay] ${entry.id} is not exact-replayable (phase=${entry.phase} round=${entry.round} ${entry.comparisonKind}); only hydrate+round0+cross-target entries replay exactly`
+    )
+    process.exit(2)
+  }
+  if (entry.against !== args.against) {
+    console.error(
+      `[replay] target mismatch: entry recorded against ${entry.against}, run invoked --against ${args.against}`
+    )
+    process.exit(2)
+  }
+  console.log(
+    `[replay] ${entry.id}: materializing minimized spec (constructCount ${entry.constructCount}) on stock-zero + ${entry.against}, expecting CONVERGE`
+  )
+  const [rStock, rOther] = await Promise.all([
+    startStockZero(),
+    startAgainst(entry.against),
+  ])
+  try {
+    // --inject reactivates the orez-side fault so the exit-1 (REGRESSED) path is
+    // deterministically testable; a plain replay (no inject) expects CONVERGE.
+    const sv = materializeSpec(rStock.createClient('user-1'), entry.spec, 0)
+    const ov = materializeSpec(rOther.createClient('user-1'), entry.spec, 0, args.inject)
+    await eventually(
+      () => {
+        if (!sv.complete() || !ov.complete()) throw new Error('replay views not complete')
+      },
+      120_000,
+      `replay ${entry.id} hydration`
+    )
+    const left = canonical(sv.rows())
+    const right = canonical(ov.rows())
+    sv.destroy()
+    ov.destroy()
+    await Promise.allSettled([rStock.close(), rOther.close()])
+    if (left === right) {
+      console.log(`[replay] CONVERGE ${entry.id}`)
+      process.exit(0)
+    }
+    console.error(
+      `[replay] REGRESSED ${entry.id}: committed repro diverged again\n  stock-zero: ${left.slice(0, 400)}\n  ${entry.against}: ${right.slice(0, 400)}`
+    )
+    process.exit(1)
+  } catch (error) {
+    // build/timeout during replay is inconclusive, not a clean converge/regress
+    await Promise.allSettled([rStock.close(), rOther.close()])
+    console.error(`[replay] inconclusive for ${entry.id}: ${error}`)
+    process.exit(2)
+  }
+}
+
 const t0 = Date.now()
 console.log(
   `[sweep] seed=${SWEEP_SEED} rounds=${ROUNDS} queries/round=${QUERIES_PER_ROUND} against=${args.against}`
@@ -565,20 +667,45 @@ try {
   const allSpecs: GenSpec[] = []
   let emptyAtHydrate = 0
 
-  const compareAll = (phase: string, round: number) => {
+  // the FIRST eligible (hydrate + round 0 + cross-target) divergence per run is
+  // captured here and shrunk+written in a POST-STEP after the round-0 hydrate
+  // compare (compareAll stays synchronous; shrinkSpec is async because it
+  // materializes candidates on the live targets). all other divergences are
+  // written immediately as non-exact entries.
+  let pendingShrink: { specIndex: number; spec: GenSpec } | null = null
+  // set true once the round-0 shrink post-step runs — used to make --inject
+  // anti-vacuous (an inject run that shrinks nothing is a false green).
+  let shrankEligible = false
+
+  const compareAll = (phase: Phase, round: number) => {
     let diverged = 0
     for (let i = 0; i < stockViews.length; i++) {
-      const left = canonical(stockViews[i]!.rows())
-      const right = canonical(otherViews[i]!.rows())
+      const leftRows = stockViews[i]!.rows()
+      const rightRows = otherViews[i]!.rows()
+      const left = canonical(leftRows)
+      const right = canonical(rightRows)
       if (left !== right) {
         diverged++
-        const file = recordDivergence({
+        const eligible = phase === 'hydrate' && round === 0
+        if (eligible && pendingShrink === null) {
+          // defer: the minimized entry is shrunk + written in the post-step.
+          pendingShrink = { specIndex: i, spec: allSpecs[i]! }
+          failures.push(
+            `[hydrate r0] spec ${i} diverged (eligible — shrinking to a minimal round-0 repro)\n  spec: ${JSON.stringify(allSpecs[i])}\n  stock-zero: ${left.slice(0, 300)}\n  ${other.name}: ${right.slice(0, 300)}`
+          )
+          continue
+        }
+        const file = emitDivergence({
           phase,
+          comparisonKind: 'cross-target',
           round,
           specIndex: i,
           spec: allSpecs[i]!,
-          left: left.slice(0, 2000),
-          right: right.slice(0, 2000),
+          observedTarget: args.against!,
+          leftRows,
+          rightRows,
+          note: `sweep ${phase} divergence at round ${round} spec ${i} vs ${args.against}`,
+          minimizationComplete: false,
         })
         failures.push(
           `[${phase} r${round}] spec ${i} diverged (artifact ${file})\n  spec: ${JSON.stringify(allSpecs[i])}\n  stock-zero: ${left.slice(0, 300)}\n  ${other.name}: ${right.slice(0, 300)}`
@@ -588,6 +715,117 @@ try {
     return diverged
   }
 
+  // materialize one spec on both fresh (round-0) clients, wait for hydration,
+  // return each side's rows + whether they diverge — or null if the spec fails
+  // to BUILD or does not hydrate within the timeout (both treated as
+  // non-reproduction). ALWAYS destroys the candidate views. inject drops the
+  // orez side's first row so stillDiverges matches the live compare.
+  const evalSpec = async (
+    spec: GenSpec
+  ): Promise<{ left: unknown; right: unknown; diverges: boolean } | null> => {
+    let sv: LiveView | undefined
+    let ov: LiveView | undefined
+    try {
+      sv = materializeSpec(stockZero, spec, -1)
+      ov = materializeSpec(otherZero, spec, -1, args.inject)
+      await eventually(
+        () => {
+          if (!sv!.complete() || !ov!.complete()) throw new Error('candidate incomplete')
+        },
+        30_000,
+        'shrink candidate hydration'
+      )
+      const left = sv.rows()
+      const right = ov.rows()
+      return { left, right, diverges: canonical(left) !== canonical(right) }
+    } catch {
+      return null // build error or timeout: not a reproduction
+    } finally {
+      sv?.destroy()
+      ov?.destroy()
+    }
+  }
+  const stillDiverges = async (spec: GenSpec): Promise<boolean> =>
+    (await evalSpec(spec))?.diverges === true
+
+  // one global evaluation budget for the run's single shrink (not per finding).
+  const SHRINK_EVAL_BUDGET = 300
+
+  const shrinkAndEmit = async (p: { specIndex: number; spec: GenSpec }) => {
+    const originalConstructCount = constructCount(p.spec)
+    const result = await shrinkSpec(p.spec, stillDiverges, SHRINK_EVAL_BUDGET)
+    const minCount = constructCount(result.spec)
+    // recapture the MINIMIZED spec's still-divergent rows on the same fresh
+    // (round-0) state for the stored hashes/previews. round-0 hydrate is
+    // deterministic, so a spec shrinkSpec accepted must reproduce here.
+    const rec = await evalSpec(result.spec)
+    if (!rec || !rec.diverges) {
+      throw new Error(
+        `minimized spec failed to reproduce on recapture (nondeterministic round-0 state?): ${JSON.stringify(result.spec)}`
+      )
+    }
+    const file = emitDivergence({
+      phase: 'hydrate',
+      comparisonKind: 'cross-target',
+      round: 0,
+      specIndex: p.specIndex,
+      spec: result.spec,
+      observedTarget: args.against!,
+      leftRows: rec.left,
+      rightRows: rec.right,
+      note: `minimized hydrate r0 divergence vs ${args.against}: constructCount ${originalConstructCount} -> ${minCount} in ${result.evaluations} evals (${result.complete ? 'complete' : 'budget-exhausted'})`,
+      originalConstructCount,
+      minimizationComplete: result.complete,
+    })
+    console.log(
+      `[sweep] shrank eligible divergence spec ${p.specIndex}: constructCount ${originalConstructCount}->${minCount}, ${result.evaluations} evals, complete=${result.complete}, wrote ${file}`
+    )
+  }
+
+  // NIGHTLY-only (--corpus): before the random rounds, replay each committed
+  // EXACT entry for this target from the fresh seed state and assert it still
+  // converges (the fix that closed the original divergence must hold). the
+  // ordinary PR sweep does NOT preload, so no new PR-gating live work is added.
+  if (args.corpus) {
+    const all = loadCorpus()
+    const exact = all.filter((e) => e.exactReplayable && e.against === args.against)
+    const skipped = all.length - exact.length
+    if (exact.length === 0) {
+      console.log(
+        `[sweep] corpus preload: anti-vacuity: 0 exact-replayable entries for ${args.against} (infrastructure-only)${skipped ? `, ${skipped} for other targets/phases skipped` : ''}`
+      )
+    } else {
+      console.log(
+        `[sweep] corpus preload: replaying ${exact.length} exact entries for ${args.against}${skipped ? ` (${skipped} for other targets/phases skipped)` : ''}`
+      )
+      const pv = exact.map((e) => ({
+        e,
+        sv: materializeSpec(stockZero, e.spec, -1),
+        ov: materializeSpec(otherZero, e.spec, -1),
+      }))
+      await eventually(
+        () => {
+          for (const q of pv)
+            if (!q.sv.complete() || !q.ov.complete())
+              throw new Error(`corpus ${q.e.id} not complete`)
+        },
+        120_000,
+        'corpus preload hydration'
+      )
+      for (const q of pv) {
+        if (canonical(q.sv.rows()) !== canonical(q.ov.rows())) {
+          failures.push(
+            `[corpus] REGRESSED ${q.e.id}: committed exact repro diverged again\n  replay: ${q.e.replay}`
+          )
+        } else {
+          console.log(`[sweep] corpus ${q.e.id}: converged`)
+        }
+        q.sv.destroy()
+        q.ov.destroy()
+      }
+    }
+  }
+
   for (let round = 0; round < ROUNDS; round++) {
     // new shapes this round
     for (let k = 0; k < QUERIES_PER_ROUND; k++) {
@@ -595,7 +833,7 @@ try {
       const specIndex = allSpecs.length
       allSpecs.push(spec)
       stockViews.push(materializeSpec(stockZero, spec, specIndex))
-      otherViews.push(materializeSpec(otherZero, spec, specIndex))
+      otherViews.push(materializeSpec(otherZero, spec, specIndex, args.inject))
     }
 
     await eventually(
@@ -614,6 +852,16 @@ try {
     }
 
     compareAll('hydrate', round)
+
+    // POST-STEP: shrink + write the first eligible (round-0 hydrate cross-target)
+    // divergence. runs here, before this round's writes are applied, so the live
+    // clients are still at fresh seed state — the only state a round-0 hydrate
+    // repro is exact against.
+    if (round === 0 && pendingShrink) {
+      await shrinkAndEmit(pendingShrink)
+      pendingShrink = null
+      shrankEligible = true
+    }
 
     // mirrored random writes through each target's own client + upstream sql
     const writes = genWrites(round)
@@ -670,14 +918,31 @@ try {
     )
   }
 
+  // --inject is a proof seam, never a normal run: it MUST produce an eligible
+  // round-0 hydrate divergence to shrink. if it didn't (every round-0 spec
+  // returned empty or a one() object, so dropping the orez first row was a
+  // no-op), the run vacuously "passed" without exercising the writer/shrink
+  // path — fail loudly rather than report a false green.
+  if (args.inject && !shrankEligible) {
+    failures.push(
+      '[inject] vacuous: no eligible round-0 hydrate divergence was produced (every round-0 spec returned empty or a one() object). pick a seed/queriesPerRound with nonempty array hydration, e.g. --seed 42 --queriesPerRound 4'
+    )
+  }
+
   // incremental == fresh: late clients rematerialize EVERY spec from scratch
   const lateChecks = [
     { target: stock, views: stockViews },
     { target: other, views: otherViews },
   ]
   for (const { target, views } of lateChecks) {
+    // inject drops the orez side's first row; apply it to the late fresh views of
+    // the orez target too, so a green single-target incremental check stays green
+    // (both maintained and fresh drop the same first row).
+    const injectThis = target === other && args.inject
     const late = target.createClient('user-1')
-    const lateViews = allSpecs.map((spec, i) => materializeSpec(late, spec, i))
+    const lateViews = allSpecs.map((spec, i) =>
+      materializeSpec(late, spec, i, injectThis)
+    )
     await eventually(
       () => {
         for (const v of lateViews)
@@ -687,16 +952,22 @@ try {
       `${target.name} late hydration`
     )
     for (let i = 0; i < allSpecs.length; i++) {
-      const fresh = canonical(lateViews[i]!.rows())
-      const maintained = canonical(views[i]!.rows())
+      const freshRows = lateViews[i]!.rows()
+      const maintainedRows = views[i]!.rows()
+      const fresh = canonical(freshRows)
+      const maintained = canonical(maintainedRows)
       if (fresh !== maintained) {
-        const file = recordDivergence({
-          phase: `incremental==fresh:${target.name}`,
+        const file = emitDivergence({
+          phase: 'incremental',
+          comparisonKind: 'single-target',
           round: ROUNDS,
           specIndex: i,
           spec: allSpecs[i]!,
-          left: maintained.slice(0, 2000),
-          right: fresh.slice(0, 2000),
+          observedTarget: target.name,
+          leftRows: maintainedRows,
+          rightRows: freshRows,
+          note: `incremental==fresh divergence on ${target.name} spec ${i}: maintained view != a late fresh rematerialization`,
+          minimizationComplete: false,
         })
         failures.push(
           `[incremental==fresh] ${target.name} spec ${i} (artifact ${file})\n  spec: ${JSON.stringify(allSpecs[i])}\n  maintained: ${maintained.slice(0, 300)}\n  fresh: ${fresh.slice(0, 300)}`
