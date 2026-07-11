@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -77,7 +77,7 @@ function checks(): ConsistencyChecksArtifact {
   }
 }
 
-function completeRecorder(): HistoryRecorder {
+function completeRecorder(metadata?: Record<string, unknown>): HistoryRecorder {
   const times = [10_000, 10_005]
   const recorder = new HistoryRecorder(() => times.shift()!)
   recorder.record({
@@ -94,6 +94,7 @@ function completeRecorder(): HistoryRecorder {
     kind: 'read',
     clientId: 'client-1',
     snapshot: { generation: 'generation-1', watermark: '9007199254740993' },
+    metadata,
   })
   return recorder
 }
@@ -133,6 +134,7 @@ describe('consistency artifact writer', () => {
     expect(validateHistory(history)).toEqual({ valid: true, violations: [] })
     expect(history[1]!.snapshot!.watermark).toBe('9007199254740993')
     expect(typeof history[1]!.snapshot!.watermark).toBe('string')
+    expect(await readdir(join(results, '..'))).toEqual(['run-1'])
   })
 
   test('refuses to overwrite an existing results directory', async () => {
@@ -190,6 +192,105 @@ describe('consistency artifact writer', () => {
       })
     ).rejects.toThrow('plan fault-1 expected exactly one heal receipt, got 0')
     expect(await exists(results)).toBe(false)
+  })
+
+  test('serialization failure leaves no final or staging bundle', async () => {
+    const { parent, results } = await tempResults()
+    await expect(
+      writeConsistencyArtifacts({
+        resultsDir: results,
+        recorder: completeRecorder({ bad: 1n }),
+        manifest: manifest(),
+        schedule: schedule(),
+        checks: checks(),
+      })
+    ).rejects.toThrow('BigInt')
+    expect(await exists(results)).toBe(false)
+    expect(await readdir(parent)).toEqual([])
+  })
+
+  test('rejects malformed manifest metadata before creating artifacts', async () => {
+    const cases: [string, (value: RunManifest) => void][] = [
+      ['manifest has an empty seed value', (value) => (value.seed.value = '')],
+      [
+        'manifest has invalid seed source other',
+        (value) => (value.seed.source = 'other' as never),
+      ],
+      ['manifest has an empty workload name', (value) => (value.workload.name = '')],
+      [
+        'manifest has invalid workload version 0',
+        (value) => (value.workload.version = 0),
+      ],
+      [
+        `manifest has invalid workload version ${Number.MAX_SAFE_INTEGER + 1}`,
+        (value) => (value.workload.version = Number.MAX_SAFE_INTEGER + 1),
+      ],
+      ['manifest has an empty target name', (value) => (value.target.name = '')],
+      ['manifest has an empty target build', (value) => (value.target.build = '')],
+      [
+        'manifest has invalid replay environment key BAD-KEY',
+        (value) => (value.replay.env['BAD-KEY'] = 'value'),
+      ],
+      [
+        'manifest has invalid replay environment value for BAD_VALUE',
+        (value) => (value.replay.env.BAD_VALUE = 1 as never),
+      ],
+    ]
+    for (const [message, mutate] of cases) {
+      const { results } = await tempResults()
+      const candidate = manifest()
+      mutate(candidate)
+      await expect(
+        writeConsistencyArtifacts({
+          resultsDir: results,
+          recorder: completeRecorder(),
+          manifest: candidate,
+          schedule: schedule(),
+          checks: checks(),
+        })
+      ).rejects.toThrow(message)
+      expect(await exists(results)).toBe(false)
+    }
+  })
+
+  test('rejects malformed or ambiguous checks before creating artifacts', async () => {
+    const cases: [string, (value: ConsistencyChecksArtifact) => void][] = [
+      ['checks artifact has no checks', (value) => (value.checks = [])],
+      [
+        'check identity history-structure@1 is not unique',
+        (value) => value.checks.push(structuredClone(value.checks[0]!)),
+      ],
+      [
+        'check history-structure has invalid input other.json',
+        (value) => (value.checks[0]!.input = 'other.json' as never),
+      ],
+      [
+        'check history-structure has an empty violation',
+        (value) => {
+          value.checks[0]!.valid = false
+          value.checks[0]!.violations = ['']
+        },
+      ],
+      [
+        'check history-structure has malformed reports',
+        (value) => (value.checks[0]!.reports = ['']),
+      ],
+    ]
+    for (const [message, mutate] of cases) {
+      const { results } = await tempResults()
+      const candidate = checks()
+      mutate(candidate)
+      await expect(
+        writeConsistencyArtifacts({
+          resultsDir: results,
+          recorder: completeRecorder(),
+          manifest: manifest(),
+          schedule: schedule(),
+          checks: candidate,
+        })
+      ).rejects.toThrow(message)
+      expect(await exists(results)).toBe(false)
+    }
   })
 
   test('saved history mutants are rejected by validateHistory', async () => {

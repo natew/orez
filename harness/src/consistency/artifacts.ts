@@ -1,5 +1,5 @@
-import { mkdir, stat, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { mkdir, mkdtemp, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 
 import { validateFaultSchedule, type FaultSchedule } from './fault-schedule.js'
 import { HISTORY_SCHEMA_VERSION, validateHistory, type RunManifest } from './history.js'
@@ -35,9 +35,53 @@ function validateManifest(manifest: RunManifest): void {
   if (manifest.kind !== 'orez-consistency-history') {
     throw new Error(`manifest has kind ${String(manifest.kind)}`)
   }
-  if (manifest.runId.trim() === '') throw new Error('manifest has an empty runId')
-  if (manifest.replay.command.trim() === '') {
+  if (typeof manifest.runId !== 'string' || manifest.runId.trim() === '') {
+    throw new Error('manifest has an empty runId')
+  }
+  if (typeof manifest.seed?.value !== 'string' || manifest.seed.value.trim() === '') {
+    throw new Error('manifest has an empty seed value')
+  }
+  if (!['fixed', 'random', 'replay'].includes(manifest.seed.source)) {
+    throw new Error(`manifest has invalid seed source ${String(manifest.seed.source)}`)
+  }
+  if (
+    typeof manifest.workload?.name !== 'string' ||
+    manifest.workload.name.trim() === ''
+  ) {
+    throw new Error('manifest has an empty workload name')
+  }
+  if (
+    !Number.isSafeInteger(manifest.workload.version) ||
+    manifest.workload.version <= 0
+  ) {
+    throw new Error(`manifest has invalid workload version ${manifest.workload.version}`)
+  }
+  if (typeof manifest.target?.name !== 'string' || manifest.target.name.trim() === '') {
+    throw new Error('manifest has an empty target name')
+  }
+  if (typeof manifest.target?.build !== 'string' || manifest.target.build.trim() === '') {
+    throw new Error('manifest has an empty target build')
+  }
+  if (
+    typeof manifest.replay?.command !== 'string' ||
+    manifest.replay.command.trim() === ''
+  ) {
     throw new Error('manifest has an empty replay command')
+  }
+  if (
+    manifest.replay.env === null ||
+    typeof manifest.replay.env !== 'object' ||
+    Array.isArray(manifest.replay.env)
+  ) {
+    throw new Error('manifest has invalid replay environment')
+  }
+  for (const [key, value] of Object.entries(manifest.replay.env)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new Error(`manifest has invalid replay environment key ${key}`)
+    }
+    if (typeof value !== 'string' || value.includes('\u0000')) {
+      throw new Error(`manifest has invalid replay environment value for ${key}`)
+    }
   }
 }
 
@@ -48,10 +92,47 @@ function validateChecks(checks: ConsistencyChecksArtifact): void {
   if (checks.kind !== 'orez-consistency-checks') {
     throw new Error(`checks have kind ${String(checks.kind)}`)
   }
+  if (!Array.isArray(checks.checks) || checks.checks.length === 0) {
+    throw new Error('checks artifact has no checks')
+  }
+  const identities = new Set<string>()
   for (const [index, check] of checks.checks.entries()) {
-    if (check.name.trim() === '') throw new Error(`check ${index} has an empty name`)
-    if (check.version.trim() === '')
+    if (typeof check.name !== 'string' || check.name.trim() === '') {
+      throw new Error(`check ${index} has an empty name`)
+    }
+    if (typeof check.version !== 'string' || check.version.trim() === '') {
       throw new Error(`check ${index} has an empty version`)
+    }
+    const identity = `${check.name}\u0000${check.version}`
+    if (identities.has(identity)) {
+      throw new Error(`check identity ${check.name}@${check.version} is not unique`)
+    }
+    identities.add(identity)
+    if (check.input !== 'history.jsonl' && check.input !== 'schedule.json') {
+      throw new Error(`check ${check.name} has invalid input ${String(check.input)}`)
+    }
+    if (!Array.isArray(check.violations)) {
+      throw new Error(`check ${check.name} has malformed violations`)
+    }
+    if (
+      check.violations.some(
+        (violation) => typeof violation !== 'string' || violation.trim() === ''
+      )
+    ) {
+      throw new Error(`check ${check.name} has an empty violation`)
+    }
+    if (
+      check.reports !== undefined &&
+      (!Array.isArray(check.reports) ||
+        check.reports.some(
+          (report) => typeof report !== 'string' || report.trim() === ''
+        ))
+    ) {
+      throw new Error(`check ${check.name} has malformed reports`)
+    }
+    if (typeof check.valid !== 'boolean') {
+      throw new Error(`check ${check.name} has invalid valid flag`)
+    }
     if (check.valid !== (check.violations.length === 0)) {
       throw new Error(`check ${check.name} validity disagrees with its violations`)
     }
@@ -89,22 +170,35 @@ export async function writeConsistencyArtifacts(
     )
   }
 
-  await mkdir(dirname(resultsDir), { recursive: true })
+  // Serialize before reserving any filesystem path. A BigInt or other invalid
+  // runtime payload must not strand an empty final directory.
+  const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`
+  const serialized = {
+    manifest: json(manifest),
+    history: history.map((event) => JSON.stringify(event)).join('\n') + '\n',
+    schedule: json(schedule),
+    checks: json(checks),
+  }
+
+  const parent = dirname(resultsDir)
+  await mkdir(parent, { recursive: true })
+  const staging = await mkdtemp(join(parent, `.${basename(resultsDir)}.writing-`))
+  let published = false
   try {
-    await mkdir(resultsDir)
+    await Promise.all([
+      writeFile(join(staging, 'manifest.json'), serialized.manifest, { flag: 'wx' }),
+      writeFile(join(staging, 'history.jsonl'), serialized.history, { flag: 'wx' }),
+      writeFile(join(staging, 'schedule.json'), serialized.schedule, { flag: 'wx' }),
+      writeFile(join(staging, 'checks.json'), serialized.checks, { flag: 'wx' }),
+    ])
+    await rename(staging, resultsDir)
+    published = true
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
       throw new Error(`refusing to overwrite results directory ${resultsDir}`)
     }
     throw error
+  } finally {
+    if (!published) await rm(staging, { recursive: true, force: true })
   }
-
-  const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`
-  const jsonl = history.map((event) => JSON.stringify(event)).join('\n') + '\n'
-  await Promise.all([
-    writeFile(join(resultsDir, 'manifest.json'), json(manifest), { flag: 'wx' }),
-    writeFile(join(resultsDir, 'history.jsonl'), jsonl, { flag: 'wx' }),
-    writeFile(join(resultsDir, 'schedule.json'), json(schedule), { flag: 'wx' }),
-    writeFile(join(resultsDir, 'checks.json'), json(checks), { flag: 'wx' }),
-  ])
 }
