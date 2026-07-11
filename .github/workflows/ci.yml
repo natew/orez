@@ -91,7 +91,7 @@ jobs:
       - name: consistency checker self-tests
         run: |
           cd harness
-          bun test src/consistency/history.test.ts src/consistency/fault-schedule.test.ts
+          bun test src/consistency/history.test.ts src/consistency/fault-schedule.test.ts src/consistency/recorder.test.ts src/consistency/artifacts.test.ts
 
       - name: metamorphic checker self-test
         run: cd harness && bun src/metamorphic.selftest.ts
