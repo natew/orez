@@ -216,3 +216,27 @@ evict (about a minute), then redeploy the host. This came from a real incident
 during the Soot cutover: a catalog-cache fix was deployed but the resident
 `ZeroSqlDO` stayed on the old class because the host never stopped polling
 `/changes`.
+
+Fresh DO instances always boot the newest deploy, so a fix that only matters
+for new namespaces (for example a provisioning-race fix) is effective the
+moment the worker deploys, without evicting resident objects.
+
+### 6. Deploy-time traps that have bitten in production
+
+- **Environment selection.** A deploy script run through a dev-oriented env
+  loader (`bun src/env.ts -- ...` styles that default to `.env.development`)
+  will silently deploy dev-valued secrets to production workers. The Soot data
+  worker twice received a dev `BETTER_AUTH_SECRET` (which also feeds
+  `OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN`) this way; the app kept serving because
+  the app worker held the prod value, so smoke checks passed while admin
+  routes 403'd. After any data-worker deploy, verify secret provenance or
+  re-put the prod values explicitly.
+- **Secret uploads create new worker versions.** `wrangler secret put` after
+  `wrangler deploy` produces a second version id; when reconciling "which
+  build is live" from tails, expect the post-secret version, not the one the
+  deploy printed.
+- **`wrangler tail` can go silently blind** on a long-idle worker: the
+  WebSocket drops while the process stays alive, so a supervisor that only
+  watches process liveness never reconnects. Monitors need a per-tail
+  freshness heartbeat (page when the newest event is older than the worker's
+  known activity from another signal, such as a budget counter moving).
