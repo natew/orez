@@ -94,6 +94,9 @@ let pullAttempt = 0
 let pushTerminals = 0
 let pullTerminals = 0
 let capturedPushBody: string | undefined
+let firstStockPushSemantic:
+  | { bodyDigest: string; mutationTimestamp: unknown; requestId: unknown }
+  | undefined
 let quiescing = false
 let quiesced = false
 type PushSource = 'stock-client' | 'harness-replay'
@@ -150,6 +153,27 @@ function protocolObservation(source: PushSource, observation: SyncHttpObservatio
           throw new Error('harness replay began before client quiescence')
         if (attempt === 1 && source === 'stock-client') {
           capturedPushBody = observation.rawBody
+          const body = observation.body as {
+            requestID?: unknown
+            mutations?: Array<{ timestamp?: unknown }>
+          }
+          firstStockPushSemantic = {
+            bodyDigest: parsed.bodyDigest,
+            mutationTimestamp: body.mutations?.[0]?.timestamp,
+            requestId: body.requestID,
+          }
+        } else if (
+          source === 'stock-client' &&
+          firstStockPushSemantic &&
+          parsed.bodyDigest !== firstStockPushSemantic.bodyDigest
+        ) {
+          const body = observation.body as {
+            requestID?: unknown
+            mutations?: Array<{ timestamp?: unknown }>
+          }
+          console.error(
+            `[exactly-once-lmid] stock retry semantic mismatch: mutation timestamp ${String(firstStockPushSemantic.mutationTimestamp)} -> ${String(body.mutations?.[0]?.timestamp)}, requestID ${String(firstStockPushSemantic.requestId)} -> ${String(body.requestID)}`
+          )
         }
         const evidence = {
           type: 'push' as const,
