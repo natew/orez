@@ -152,4 +152,118 @@ describe('deterministic fault schedule', () => {
       'plan duplicate-pull-1 has an unplanned heal receipt'
     )
   })
+
+  test('rejects schema version and empty plan metadata mutants', () => {
+    expectOnly(
+      mutant((schedule) => {
+        schedule.schemaVersion = 2 as typeof FAULT_SCHEDULE_SCHEMA_VERSION
+      }),
+      'schedule has schema version 2'
+    )
+    expectOnly(
+      mutant((schedule) => {
+        schedule.plans[0]!.id = ''
+        for (const receipt of schedule.receipts) {
+          if (receipt.planId === 'drop-push-1') receipt.planId = ''
+        }
+      }),
+      'plan 0 has an empty id'
+    )
+    expectOnly(
+      mutant((schedule) => {
+        schedule.plans[0]!.kind = ''
+      }),
+      'plan drop-push-1 has an empty kind'
+    )
+  })
+
+  test('rejects negative and unsafe plan logical steps', () => {
+    expect(
+      validateFaultSchedule(
+        mutant((schedule) => {
+          schedule.plans[0]!.arm.logicalStep = -1
+        })
+      )
+    ).toEqual({
+      valid: false,
+      violations: [
+        'plan drop-push-1 arm has invalid logical step -1',
+        'plan drop-push-1 arm receipt step 2 does not match -1',
+      ],
+    })
+    const unsafe = Number.MAX_SAFE_INTEGER + 1
+    expect(
+      validateFaultSchedule(
+        mutant((schedule) => {
+          schedule.plans[0]!.heal!.logicalStep = unsafe
+        })
+      )
+    ).toEqual({
+      valid: false,
+      violations: [
+        `plan drop-push-1 heal has invalid logical step ${unsafe}`,
+        `plan drop-push-1 heal receipt step 5 does not match ${unsafe}`,
+      ],
+    })
+  })
+
+  test('rejects negative and unsafe receipt logical steps', () => {
+    expect(
+      validateFaultSchedule(
+        mutant((schedule) => (schedule.receipts[0]!.logicalStep = -1))
+      )
+    ).toEqual({
+      valid: false,
+      violations: [
+        'receipt 0 has invalid logical step -1',
+        'plan drop-push-1 arm receipt step -1 does not match 2',
+      ],
+    })
+    const unsafe = Number.MAX_SAFE_INTEGER + 1
+    expect(
+      validateFaultSchedule(
+        mutant((schedule) => (schedule.receipts[2]!.logicalStep = unsafe))
+      )
+    ).toEqual({
+      valid: false,
+      violations: [
+        `receipt 2 has invalid logical step ${unsafe}`,
+        `plan drop-push-1 heal receipt step ${unsafe} does not match 5`,
+      ],
+    })
+  })
+
+  test('rejects empty plan and receipt hooks', () => {
+    expect(
+      validateFaultSchedule(mutant((schedule) => (schedule.plans[0]!.fire.hook = '')))
+    ).toEqual({
+      valid: false,
+      violations: [
+        'plan drop-push-1 fire has an empty hook',
+        'plan drop-push-1 fire receipt hook after-commit-before-response does not match ',
+      ],
+    })
+    expect(
+      validateFaultSchedule(mutant((schedule) => (schedule.receipts[1]!.hook = '')))
+    ).toEqual({
+      valid: false,
+      violations: [
+        'receipt 1 has an empty hook',
+        'plan drop-push-1 fire receipt hook  does not match after-commit-before-response',
+      ],
+    })
+  })
+
+  test('rejects an unknown receipt phase', () => {
+    const schedule = mutant((candidate) => {
+      candidate.receipts[1]!.phase = 'explode' as never
+    })
+    expect(validateFaultSchedule(schedule)).toEqual({
+      valid: false,
+      violations: [
+        'receipt 1 has unknown phase explode',
+        'plan drop-push-1 expected exactly one fire receipt, got 0',
+      ],
+    })
+  })
 })
