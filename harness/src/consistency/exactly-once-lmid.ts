@@ -264,9 +264,10 @@ export function checkExactlyOnceLmid(
     )
       violations.push(`pull attempt ${pair.invoke.exactlyOnce.attempt} has wrong outcome`)
   }
-  const pullRecovered = pulls.some(
-    (pair) => pair.terminal?.exactlyOnce.observed?.lastMutationId === '1'
-  )
+  const pullRecovered = pulls.some((pair) => {
+    const observed = pair.terminal?.exactlyOnce.observed
+    return observed?.outcome === 'pull-lmid-observed' && observed.lastMutationId === '1'
+  })
   const stockRetryCount = stockPushes.length - 1
   if (!pullRecovered && stockRetryCount === 0)
     violations.push('stock client produced neither LMID pull nor retry recovery evidence')
