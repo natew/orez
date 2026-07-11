@@ -6489,6 +6489,26 @@ export class DoBackend {
     return this.runExclusive(() => this.queryLocked(sql, params))
   }
 
+  /**
+   * Execute one caller request's ordered statements while holding the backend
+   * operation lock for the entire request. This is required for clients that
+   * express a Postgres transaction as separate BEGIN / statement / COMMIT
+   * calls: transaction state belongs to this shared DoBackend instance, so
+   * releasing the lock between those calls lets another request join, commit,
+   * or roll back the transaction in progress.
+   */
+  async queryBatch<T = Record<string, unknown>>(
+    statements: Array<{ sql: string; params?: any[] }>
+  ): Promise<Array<{ rows: T[] }>> {
+    return this.runExclusive(async () => {
+      const results: Array<{ rows: T[] }> = []
+      for (const statement of statements) {
+        results.push(await this.queryLocked<T>(statement.sql, statement.params))
+      }
+      return results
+    })
+  }
+
   private async queryLocked<T = Record<string, unknown>>(
     sql: string,
     params?: any[]

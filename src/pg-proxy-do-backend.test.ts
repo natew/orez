@@ -2898,6 +2898,61 @@ describe('DoBackend', () => {
     ])
   })
 
+  test('holds the operation lock across an entire transaction batch', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'transaction-batch-queue-test')
+    await backend.waitReady
+
+    const events: string[] = []
+    let beginCompleted!: () => void
+    let releaseBatch!: () => void
+    const beginCompletedPromise = new Promise<void>((resolve) => {
+      beginCompleted = resolve
+    })
+    const releaseBatchPromise = new Promise<void>((resolve) => {
+      releaseBatch = resolve
+    })
+    const originalQueryLocked = (backend as any).queryLocked.bind(backend)
+    ;(backend as any).queryLocked = async (sql: string, params?: any[]) => {
+      events.push(`start:${sql}`)
+      const result = await originalQueryLocked(sql, params)
+      events.push(`end:${sql}`)
+      if (sql === 'BEGIN') {
+        beginCompleted()
+        await releaseBatchPromise
+      }
+      return result
+    }
+
+    const batch = backend.queryBatch([
+      { sql: 'BEGIN' },
+      { sql: 'SELECT batch_write' },
+      { sql: 'COMMIT' },
+    ])
+    await beginCompletedPromise
+
+    // This models a second /__nspfx_pg request arriving after the first
+    // request's BEGIN. It must wait for the whole request-level transaction;
+    // otherwise its ROLLBACK can commandeer the shared backend transaction.
+    const overlappingRollback = backend.query('ROLLBACK')
+    await Promise.resolve()
+    expect(events).toEqual(['start:BEGIN', 'end:BEGIN'])
+
+    releaseBatch()
+    await Promise.all([batch, overlappingRollback])
+    expect(events).toEqual([
+      'start:BEGIN',
+      'end:BEGIN',
+      'start:SELECT batch_write',
+      'end:SELECT batch_write',
+      'start:COMMIT',
+      'end:COMMIT',
+      'start:ROLLBACK',
+      'end:ROLLBACK',
+    ])
+    expect((backend as any).inTransaction).toBe(false)
+  })
+
   test('rejects transaction snapshots before writing a null manifest tx id', async () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('sqlite_master')) {
