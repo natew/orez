@@ -209,10 +209,11 @@ export function checkExactlyOnceLmid(
     expectedPushes === 2 &&
     (second?.outcome !== 'response' ||
       second.status !== 200 ||
+      second.responseMutationCount !== 1 ||
       second.responseClientId !== identity?.clientId ||
       second.mutationId !== identity?.mutationId ||
       second.error !== 'alreadyProcessed' ||
-      !second.details?.includes('Expected: 2'))
+      second.details?.match(/Expected:\s*(\d+)$/)?.[1] !== '2')
   ) {
     violations.push('push attempt 2 is not the matching already-processed replay')
   }

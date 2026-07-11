@@ -226,6 +226,7 @@ function protocolObservation(source: PushSource, observation: SyncHttpObservatio
                 .update(observation.rawResponseBody)
                 .digest('hex'),
               responseClientId: mutation?.id?.clientID ?? null,
+              responseMutationCount: response?.pushResponse?.mutations?.length ?? 0,
               mutationId: mutation?.id?.id ?? null,
               error: mutation?.result?.error ?? null,
               details: mutation?.result?.details ?? null,
@@ -320,8 +321,27 @@ async function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
   }
 }
 
-const stockFetch = observedSyncFetch((observation) =>
-  protocolObservation('stock-client', observation)
+let forceStockPushLoss = false
+const deterministicDropFetch: typeof fetch = async (input, init) => {
+  try {
+    const response = await globalThis.fetch(input, init)
+    const url = new URL(
+      typeof input === 'string' || input instanceof URL ? input : input.url
+    )
+    if (forceStockPushLoss && url.pathname.endsWith('/push')) {
+      forceStockPushLoss = false
+      await response.arrayBuffer().catch(() => {})
+      throw new Error('deterministic post-commit push response loss')
+    }
+    return response
+  } catch (error) {
+    if (forceStockPushLoss) forceStockPushLoss = false
+    throw error
+  }
+}
+const stockFetch = observedSyncFetch(
+  (observation) => protocolObservation('stock-client', observation),
+  deterministicDropFetch
 )
 const harnessReplayFetch = observedSyncFetch((observation) =>
   protocolObservation('harness-replay', observation)
@@ -441,6 +461,7 @@ try {
   } as const
   const receipts: FaultReceipt[] = []
   const faultStage = (stage: 'arm' | 'fire' | 'heal') => {
+    if (stage === 'fire') forceStockPushLoss = true
     const stable = {
       type: 'fault' as const,
       profileVersion: 1 as const,

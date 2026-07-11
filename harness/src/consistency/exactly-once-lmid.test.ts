@@ -212,6 +212,7 @@ function history(phase: TerminalPhase = 'ok'): {
           status: 200,
           bodySha256: 'c'.repeat(64),
           responseClientId: identity.clientId,
+          responseMutationCount: 1,
           mutationId: 1,
           error: 'alreadyProcessed',
           details: 'Ignoring mutation. Expected: 2',
@@ -424,6 +425,22 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
             event.exactlyOnce.observed?.outcome === 'response'
           )
             event.exactlyOnce.observed.details = 'Expected: 3'
+        },
+      ],
+      [
+        'extra replay response mutation',
+        ({ events }) => {
+          const event = events.find(
+            (candidate) =>
+              candidate.exactlyOnce?.type === 'push' &&
+              candidate.exactlyOnce.attempt === 2 &&
+              candidate.phase === 'ok'
+          )!
+          if (
+            event.exactlyOnce?.type === 'push' &&
+            event.exactlyOnce.observed?.outcome === 'response'
+          )
+            event.exactlyOnce.observed.responseMutationCount = 2
         },
       ],
       [

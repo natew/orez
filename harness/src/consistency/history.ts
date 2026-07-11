@@ -71,6 +71,7 @@ export type ExactlyOnceEvidence =
             status: number
             bodySha256: string
             responseClientId: string | null
+            responseMutationCount: number
             mutationId: number | null
             error: string | null
             details: string | null
@@ -440,6 +441,7 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
             'mutationId',
             'outcome',
             'responseClientId',
+            'responseMutationCount',
             'status',
           ]) ||
             !Number.isSafeInteger(value.status) ||
@@ -447,6 +449,8 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
             !/^[0-9a-f]{64}$/.test(String(value.bodySha256)) ||
             (value.responseClientId !== null &&
               typeof value.responseClientId !== 'string') ||
+            !Number.isSafeInteger(value.responseMutationCount) ||
+            Number(value.responseMutationCount) < 0 ||
             (value.mutationId !== null &&
               (!Number.isSafeInteger(value.mutationId) ||
                 Number(value.mutationId) <= 0)) ||
