@@ -176,6 +176,7 @@ export class AtomicObservationCollector {
   ) => void
   #initialized = false
   #armed = false
+  #terminal: 'partial' | 'all' | undefined
 
   constructor(
     effects: readonly AtomicAppendEffect[],
@@ -202,8 +203,12 @@ export class AtomicObservationCollector {
 
   observe(rows: readonly AtomicTaskRow[]): 'none' | 'partial' | 'all' {
     if (!this.#armed) throw new Error('atomic observer is not armed')
+    if (this.#terminal !== undefined) {
+      throw new Error(`atomic observer is terminal after ${this.#terminal}`)
+    }
     const classification = classifyAtomicObservation(this.#effects, rows)
     this.#record(rows, classification)
+    if (classification !== 'none') this.#terminal = classification
     return classification
   }
 }

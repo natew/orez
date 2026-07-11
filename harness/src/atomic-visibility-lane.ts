@@ -104,7 +104,7 @@ async function startTarget(name: string): Promise<SyncTarget> {
 type CompleteWatcher = {
   initial(timeoutMs: number): Promise<AtomicTaskRow[]>
   startCollecting(collector: AtomicObservationCollector): void
-  waitForAll(timeoutMs: number): Promise<void>
+  waitForTerminal(timeoutMs: number): Promise<'partial' | 'all'>
   destroy(): void
 }
 
@@ -114,19 +114,21 @@ function watchCompleteScope(zero: FixtureZero): CompleteWatcher {
   let resolveInitial: ((rows: AtomicTaskRow[]) => void) | undefined
   let collector: AtomicObservationCollector | undefined
   const pending: AtomicTaskRow[][] = []
-  let sawAll = false
+  let terminal: 'partial' | 'all' | undefined
   let collectionError: unknown
-  let resolveAll: (() => void) | undefined
-  let rejectAll: ((error: unknown) => void) | undefined
+  let resolveTerminal: ((result: 'partial' | 'all') => void) | undefined
+  let rejectTerminal: ((error: unknown) => void) | undefined
   const dispatch = (rows: AtomicTaskRow[]) => {
+    if (terminal !== undefined) return
     try {
-      if (collector!.observe(rows) === 'all') {
-        sawAll = true
-        resolveAll?.()
+      const classification = collector!.observe(rows)
+      if (classification !== 'none') {
+        terminal = classification
+        resolveTerminal?.(classification)
       }
     } catch (error) {
       collectionError = error
-      rejectAll?.(error)
+      rejectTerminal?.(error)
     }
   }
   view.addListener((data, resultType) => {
@@ -161,19 +163,19 @@ function watchCompleteScope(zero: FixtureZero): CompleteWatcher {
       collector = nextCollector
       for (const rows of pending.splice(0)) dispatch(rows)
     },
-    waitForAll(timeoutMs) {
+    waitForTerminal(timeoutMs) {
       if (collectionError !== undefined) return Promise.reject(collectionError)
-      if (sawAll) return Promise.resolve()
+      if (terminal !== undefined) return Promise.resolve(terminal)
       return new Promise((resolve, reject) => {
         const deadline = setTimeout(
-          () => reject(new Error('timed out waiting for complete atomic observation')),
+          () => reject(new Error('timed out waiting for terminal atomic observation')),
           timeoutMs
         )
-        resolveAll = () => {
+        resolveTerminal = (result) => {
           clearTimeout(deadline)
-          resolve()
+          resolve(result)
         }
-        rejectAll = reject
+        rejectTerminal = reject
       })
     },
     destroy: () => view.destroy(),
@@ -282,7 +284,7 @@ try {
     throw error
   }
 
-  await watcher.waitForAll(30_000)
+  await watcher.waitForTerminal(30_000)
   watcher.destroy()
   watcher = undefined
 

@@ -147,7 +147,7 @@ describe('atomic visibility workload contract', () => {
     )
   })
 
-  test('records none, strict-subset, and all callbacks so the checker sees the anomaly', () => {
+  test('records a strict subset as terminal and freezes the decisive history', () => {
     let now = 0
     const recorder = new HistoryRecorder(() => now++)
     const recordPair = (opId: string, rows: typeof effects) => {
@@ -199,15 +199,18 @@ describe('atomic visibility workload contract', () => {
     collector.arm()
     collector.observe([])
     collector.observe([effects[0]!])
-    collector.observe(effects)
+    const frozenLength = recorder.snapshot().length
+    expect(() => collector.observe(effects)).toThrow(
+      'atomic observer is terminal after partial'
+    )
 
-    expect(seen).toEqual(['none', 'partial', 'all'])
-    expect(checkAtomicVisibility(recorder.snapshot())).toEqual({
-      valid: false,
-      violations: [
-        'atomic group group is partially visible in read after-1; missing effects: p1=102',
-      ],
-    })
+    expect(seen).toEqual(['none', 'partial'])
+    expect(recorder.snapshot()).toHaveLength(frozenLength)
+    const outcome = checkAtomicVisibility(recorder.snapshot())
+    expect(outcome.valid).toBe(false)
+    expect(outcome.violations).toContain(
+      'atomic group group is partially visible in read after-1; missing effects: p1=102'
+    )
   })
 
   test('replay command preserves a safe leading-dash seed as one option value', () => {
