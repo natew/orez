@@ -87,9 +87,9 @@ async fn main() {
 
     // fixture authenticate: Bearer token-<userID>
     let authenticate: AuthFn = Arc::new(|headers: &HeaderMap| {
-            let value = headers.get("authorization")?.to_str().ok()?;
-            value.strip_prefix("Bearer token-").map(str::to_string)
-        });
+        let value = headers.get("authorization")?.to_str().ok()?;
+        value.strip_prefix("Bearer token-").map(str::to_string)
+    });
 
     // fixture initialize: install app tables + seed
     let initialize: InitFn =
