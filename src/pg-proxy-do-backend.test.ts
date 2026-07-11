@@ -2953,13 +2953,15 @@ describe('DoBackend', () => {
     expect((backend as any).inTransaction).toBe(false)
   })
 
-  test('releases the batch lock after failure so the caller can roll back', async () => {
+  test('rolls back a failed batch before releasing the operation lock', async () => {
     const http = await startDoHttp(() => ({ rows: [], columns: [] }))
     const backend = new DoBackend(http.url, 'postgres', 'transaction-batch-failure-test')
     await backend.waitReady
 
+    const queries: string[] = []
     const originalQueryLocked = (backend as any).queryLocked.bind(backend)
     ;(backend as any).queryLocked = async (sql: string, params?: any[]) => {
+      queries.push(sql)
       if (sql === 'SELECT fail_batch') throw new Error('injected batch failure')
       return originalQueryLocked(sql, params)
     }
@@ -2971,9 +2973,7 @@ describe('DoBackend', () => {
         { sql: 'COMMIT' },
       ])
     ).rejects.toThrow('injected batch failure')
-    expect((backend as any).inTransaction).toBe(true)
-
-    await backend.query('ROLLBACK')
+    expect(queries).toEqual(['BEGIN', 'SELECT fail_batch', 'ROLLBACK'])
     expect((backend as any).inTransaction).toBe(false)
   })
 

@@ -6502,10 +6502,20 @@ export class DoBackend {
   ): Promise<Array<{ rows: T[] }>> {
     return this.runExclusive(async () => {
       const results: Array<{ rows: T[] }> = []
-      for (const statement of statements) {
-        results.push(await this.queryLocked<T>(statement.sql, statement.params))
+      try {
+        for (const statement of statements) {
+          results.push(await this.queryLocked<T>(statement.sql, statement.params))
+        }
+        return results
+      } catch (error) {
+        // Roll back before releasing the request-level lock. If cleanup were a
+        // later public query, another request could acquire the backend first
+        // and silently join the failed transaction.
+        try {
+          await this.queryLocked('ROLLBACK')
+        } catch {}
+        throw error
       }
-      return results
     })
   }
 
