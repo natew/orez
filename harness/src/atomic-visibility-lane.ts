@@ -283,6 +283,8 @@ try {
   }
 
   await watcher.waitForAll(30_000)
+  watcher.destroy()
+  watcher = undefined
 
   const authority = (await target.oracle(
     `SELECT id, "projectId", rank FROM task WHERE id IN (${ids}) ORDER BY id`
