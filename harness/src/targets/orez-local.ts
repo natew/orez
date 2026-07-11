@@ -33,6 +33,7 @@ export type PullObservation = {
 }
 
 export type OrezLocalTarget = SyncTarget & {
+  readonly origin: string
   dropNextPushResponse(): void
   pull(): Promise<void>
   invalidate(): void
@@ -170,6 +171,7 @@ export async function startOrezLocal(opts?: {
 
   return {
     name: 'orez-local',
+    origin,
 
     createClient(userID: string, storage) {
       const zero = new Zero({

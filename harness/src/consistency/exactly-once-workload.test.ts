@@ -7,7 +7,10 @@ import {
 } from './exactly-once-workload.js'
 
 const body = {
+  timestamp: 123450,
   clientGroupID: 'group-1',
+  pushVersion: 1,
+  requestID: 'request-1',
   mutations: [
     {
       type: 'custom',
@@ -30,9 +33,9 @@ describe('exactly-once workload boundary', () => {
     })
     expect(parsed.args).toEqual({ id: 'probe-1' })
     expect(parsed.bodyDigest).toMatch(/^[0-9a-f]{64}$/)
-    expect(parseExactlyOncePush({ ...body, requestID: 'different' }).bodyDigest).toBe(
-      parsed.bodyDigest
-    )
+    expect(
+      parseExactlyOncePush({ ...body, requestID: 'different', timestamp: 999 }).bodyDigest
+    ).toBe(parsed.bodyDigest)
     const changedTimestamp = {
       ...body,
       mutations: [{ ...body.mutations[0], timestamp: 123457 }],
@@ -51,6 +54,20 @@ describe('exactly-once workload boundary', () => {
       parseExactlyOncePush({
         ...body,
         mutations: [{ ...body.mutations[0], id: 0 }],
+      })
+    ).toThrow('does not match')
+    expect(() => parseExactlyOncePush({ ...body, pushVersion: 2 })).toThrow(
+      'does not match'
+    )
+    const { timestamp: _timestamp, ...withoutTimestamp } = body
+    expect(() => parseExactlyOncePush(withoutTimestamp)).toThrow('unknown fields')
+    const { requestID: _requestID, ...withoutRequestID } = body
+    expect(() => parseExactlyOncePush(withoutRequestID)).toThrow('unknown fields')
+    expect(() => parseExactlyOncePush({ ...body, extra: true })).toThrow('unknown fields')
+    expect(() =>
+      parseExactlyOncePush({
+        ...body,
+        mutations: [{ ...body.mutations[0], extra: true }],
       })
     ).toThrow('does not match')
     expect(() =>

@@ -89,6 +89,18 @@ function validateManifest(manifest: RunManifest): void {
 }
 
 function validateChecks(checks: ConsistencyChecksArtifact): void {
+  if (typeof checks !== 'object' || checks === null) {
+    throw new Error('checks artifact is not an object')
+  }
+  const rootKeys = Object.keys(checks).sort()
+  if (
+    rootKeys.length !== 3 ||
+    rootKeys[0] !== 'checks' ||
+    rootKeys[1] !== 'kind' ||
+    rootKeys[2] !== 'schemaVersion'
+  ) {
+    throw new Error('checks artifact has unknown or legacy fields')
+  }
   if (checks.schemaVersion !== CHECKS_SCHEMA_VERSION) {
     throw new Error(`checks have schema version ${checks.schemaVersion}`)
   }
@@ -100,6 +112,19 @@ function validateChecks(checks: ConsistencyChecksArtifact): void {
   }
   const identities = new Set<string>()
   for (const [index, check] of checks.checks.entries()) {
+    if (typeof check !== 'object' || check === null) {
+      throw new Error(`check ${index} is not an object`)
+    }
+    const keys = Object.keys(check).sort()
+    const allowed = ['inputs', 'name', 'reports', 'status', 'version', 'violations']
+    if (
+      keys.some((key) => !allowed.includes(key)) ||
+      !['inputs', 'name', 'status', 'version', 'violations'].every((key) =>
+        keys.includes(key)
+      )
+    ) {
+      throw new Error(`check ${index} has unknown or legacy fields`)
+    }
     if (typeof check.name !== 'string' || check.name.trim() === '') {
       throw new Error(`check ${index} has an empty name`)
     }

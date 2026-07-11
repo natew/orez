@@ -8,7 +8,7 @@ import {
 import type { ConsistencyCheck } from './artifacts.js'
 
 export const EXACTLY_ONCE_LMID_PROFILE = {
-  name: 'exactly-once-lost-push-lmid-recovery',
+  name: 'exactly-once-lost-push-lmid-plus-server-replay',
   version: 1,
 } as const
 
@@ -167,19 +167,37 @@ export function checkExactlyOnceLmid(
   const pushes = terminalPairs(events, 'push').sort(
     (a, b) => a.invoke.exactlyOnce.attempt - b.invoke.exactlyOnce.attempt
   )
+  const mutationPhase = mutation?.terminal?.phase
+  const expectedPushes = mutationPhase === 'fail' ? 1 : 2
   if (
-    pushes.length !== 2 ||
+    pushes.length !== expectedPushes ||
     pushes.some((pair, index) => pair.invoke.exactlyOnce.attempt !== index + 1)
   ) {
     violations.push('push attempts must be exactly sequential attempts 1 and 2')
   }
-  if (pushes.some((pair) => !/^[0-9a-f]{64}$/.test(pair.invoke.exactlyOnce.bodyDigest))) {
+  if (
+    pushes[0]?.invoke.exactlyOnce.source !== 'stock-client' ||
+    (expectedPushes === 2 && pushes[1]?.invoke.exactlyOnce.source !== 'harness-replay')
+  ) {
+    violations.push('requires one stock-client push then one harness replay')
+  }
+  if (
+    pushes.some(
+      (pair) =>
+        !/^[0-9a-f]{64}$/.test(pair.invoke.exactlyOnce.bodyDigest) ||
+        !/^[0-9a-f]{64}$/.test(pair.invoke.exactlyOnce.rawBodySha256)
+    )
+  ) {
     violations.push('push body digest is not canonical sha256 hex')
   }
   if (
+    expectedPushes === 2 &&
     pushes[0] &&
     pushes[1] &&
-    pushes[0].invoke.exactlyOnce.bodyDigest !== pushes[1].invoke.exactlyOnce.bodyDigest
+    (pushes[0].invoke.exactlyOnce.bodyDigest !==
+      pushes[1].invoke.exactlyOnce.bodyDigest ||
+      pushes[0].invoke.exactlyOnce.rawBodySha256 !==
+        pushes[1].invoke.exactlyOnce.rawBodySha256)
   ) {
     violations.push('push replay body digest does not match attempt 1')
   }
@@ -188,8 +206,13 @@ export function checkExactlyOnceLmid(
   }
   const second = pushes[1]?.terminal?.exactlyOnce.observed
   if (
-    second?.outcome !== 'already-processed' ||
-    second.mutationId !== identity?.mutationId
+    expectedPushes === 2 &&
+    (second?.outcome !== 'response' ||
+      second.status !== 200 ||
+      second.responseClientId !== identity?.clientId ||
+      second.mutationId !== identity?.mutationId ||
+      second.error !== 'alreadyProcessed' ||
+      !second.details?.includes('Expected: 2'))
   ) {
     violations.push('push attempt 2 is not the matching already-processed replay')
   }
@@ -282,6 +305,7 @@ export function checkExactlyOnceLmid(
 
   const ordered = [
     before?.terminal?.index,
+    terminalPairs(events, 'client-probe')[0]?.terminal?.index,
     stageEvent('arm')?.index,
     mutation?.invoke.index,
     pushes[0]?.invoke.index,
@@ -289,9 +313,10 @@ export function checkExactlyOnceLmid(
     stageEvent('heal')?.index,
     pushes[0]?.terminal?.index,
     recovered?.terminal.index,
-    pushes[1]?.invoke.index,
-    pushes[1]?.terminal?.index,
     mutation?.terminal?.index,
+    ...(expectedPushes === 2
+      ? [pushes[1]?.invoke.index, pushes[1]?.terminal?.index]
+      : []),
     after?.terminal?.index,
   ]
   if (
@@ -301,8 +326,16 @@ export function checkExactlyOnceLmid(
     violations.push('exactly-once evidence is not in the required history order')
   }
 
-  const mutationPhase = mutation?.terminal?.phase
   if (mutationPhase === 'fail') violations.push('success-only mutation terminated fail')
+  const clientProbes = terminalPairs(events, 'client-probe')
+  const clientObserved = clientProbes[0]?.terminal?.exactlyOnce.observed
+  if (
+    clientProbes.length !== 1 ||
+    clientObserved?.resultType !== 'complete' ||
+    canonicalI64(clientObserved.applicationCount) !== 0n
+  ) {
+    violations.push('missing complete client rank-0 probe precondition')
+  }
   if (violations.length > 0) return { status: 'fail', violations }
   if (mutationPhase === 'info') {
     reports.push('mutation terminal outcome is unknown after complete recovery evidence')
@@ -314,6 +347,9 @@ export function checkExactlyOnceLmid(
   return {
     status: 'pass',
     violations: [],
-    reports: ['recovered via pull LMID 1 and identical already-processed push replay'],
+    reports: [
+      'stock push response lost; pull observed LMID 1; harness replay was already processed',
+      'no automatic stock-client retry is claimed',
+    ],
   }
 }

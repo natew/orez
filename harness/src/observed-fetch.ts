@@ -1,7 +1,10 @@
 export type HttpPullObservation = {
   at: number
   body: unknown
+  rawBody?: string
+  rawBody?: string
   response?: unknown
+  rawResponseBody?: string
   status?: number
   error?: unknown
 }
@@ -33,23 +36,26 @@ export function observedSyncFetch(
         : undefined
     if (!path) return bound(input, init)
     let body: unknown
+    const rawBody = typeof init?.body === 'string' ? init.body : undefined
     try {
       body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
     } catch {
       body = undefined
     }
     const id = ++request
-    onObservation({ request: id, path, phase: 'invoke', body })
+    onObservation({ request: id, path, phase: 'invoke', body, rawBody })
     let response: Response
     try {
       response = await bound(input, init)
     } catch (error) {
-      onObservation({ request: id, path, phase: 'terminal', body, error })
+      onObservation({ request: id, path, phase: 'terminal', body, rawBody, error })
       throw error
     }
     let responseBody: unknown
+    let rawResponseBody: string | undefined
     try {
-      responseBody = await response.clone().json()
+      rawResponseBody = await response.clone().text()
+      responseBody = JSON.parse(rawResponseBody)
     } catch {
       responseBody = undefined
     }
@@ -58,7 +64,9 @@ export function observedSyncFetch(
       path,
       phase: 'terminal',
       body,
+      rawBody,
       response: responseBody,
+      rawResponseBody,
       status: response.status,
     })
     return response
@@ -77,6 +85,7 @@ export function observedPullFetch(
     onPull?.({
       at: Date.now(),
       body: observation.body,
+      rawBody: observation.rawBody,
       response: observation.response,
       status: observation.status,
       error: observation.error,

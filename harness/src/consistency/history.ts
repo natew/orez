@@ -49,15 +49,32 @@ export type ExactlyOnceEvidence =
       }
     }
   | {
+      type: 'client-probe'
+      profileVersion: 1
+      identity: ExactlyOnceIdentity
+      effect: ExactlyOnceEffect
+      observed: null | { resultType: 'complete'; applicationCount: string }
+    }
+  | {
       type: 'push'
       profileVersion: 1
       identity: ExactlyOnceIdentity
       attempt: number
+      source: 'stock-client' | 'harness-replay'
       bodyDigest: string
+      rawBodySha256: string
       observed:
         | null
         | { outcome: 'response-lost' }
-        | { outcome: 'already-processed'; mutationId: number }
+        | {
+            outcome: 'response'
+            status: number
+            bodySha256: string
+            responseClientId: string | null
+            mutationId: number | null
+            error: string | null
+            details: string | null
+          }
     }
   | {
       type: 'pull'
@@ -209,6 +226,14 @@ function nonemptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== ''
 }
 
+function exactKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  const actual = Object.keys(value).sort()
+  const sorted = [...expected].sort()
+  return (
+    actual.length === sorted.length && actual.every((key, index) => key === sorted[index])
+  )
+}
+
 function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): boolean {
   const evidence = event.exactlyOnce
   if (evidence === undefined) return true
@@ -217,8 +242,44 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
     return false
   }
   const raw = evidence as unknown as Record<string, unknown>
+  const allowedEvidenceKeys: Record<string, string[]> = {
+    mutation: ['effect', 'identity', 'profileVersion', 'type'],
+    authority: [
+      'effect',
+      'identity',
+      'observation',
+      'observed',
+      'profileVersion',
+      'type',
+    ],
+    'client-probe': ['effect', 'identity', 'observed', 'profileVersion', 'type'],
+    push: [
+      'attempt',
+      'bodyDigest',
+      'identity',
+      'observed',
+      'profileVersion',
+      'rawBodySha256',
+      'source',
+      'type',
+    ],
+    pull: ['attempt', 'identity', 'observed', 'profileVersion', 'type'],
+    fault: [
+      'hook',
+      'identity',
+      'observed',
+      'operationId',
+      'planId',
+      'profileVersion',
+      'stage',
+      'type',
+    ],
+  }
+  const allowed = allowedEvidenceKeys[String(raw.type)]
   if (
-    !['mutation', 'authority', 'push', 'pull', 'fault'].includes(String(raw.type)) ||
+    !['mutation', 'authority', 'client-probe', 'push', 'pull', 'fault'].includes(
+      String(raw.type)
+    ) ||
     raw.profileVersion !== 1 ||
     typeof raw.identity !== 'object' ||
     raw.identity === null
@@ -226,8 +287,24 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
     violations.push(`event ${event.index} has malformed exactly-once evidence`)
     return false
   }
+  if (
+    !allowed ||
+    Object.keys(raw)
+      .sort()
+      .some((key, index) => key !== allowed[index]) ||
+    Object.keys(raw).length !== allowed.length
+  ) {
+    violations.push(`event ${event.index} has forbidden exactly-once fields`)
+    return false
+  }
   const rawIdentity = raw.identity as Record<string, unknown>
   if (
+    !exactKeys(
+      rawIdentity,
+      raw.type === 'pull'
+        ? ['clientId', 'clientGroupId']
+        : ['clientId', 'clientGroupId', 'mutationId']
+    ) ||
     !nonemptyString(rawIdentity.clientId) ||
     !nonemptyString(rawIdentity.clientGroupId) ||
     (raw.type !== 'pull' &&
@@ -242,9 +319,12 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
     return false
   }
   if (
-    (raw.type === 'authority' || raw.type === 'mutation') &&
+    (raw.type === 'authority' ||
+      raw.type === 'mutation' ||
+      raw.type === 'client-probe') &&
     (typeof raw.effect !== 'object' ||
       raw.effect === null ||
+      !exactKeys(raw.effect as Record<string, unknown>, ['type', 'probeId']) ||
       (raw.effect as Record<string, unknown>).type !== 'increment-probe' ||
       !nonemptyString((raw.effect as Record<string, unknown>).probeId))
   ) {
@@ -258,8 +338,19 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
     violations.push(`event ${event.index} has malformed exactly-once attempt`)
     return false
   }
-  if (raw.type === 'push' && !nonemptyString(raw.bodyDigest)) {
+  if (
+    raw.type === 'push' &&
+    (!nonemptyString(raw.bodyDigest) || !nonemptyString(raw.rawBodySha256))
+  ) {
     violations.push(`event ${event.index} has malformed push body digest`)
+    return false
+  }
+  if (
+    raw.type === 'push' &&
+    raw.source !== 'stock-client' &&
+    raw.source !== 'harness-replay'
+  ) {
+    violations.push(`event ${event.index} has malformed push source`)
     return false
   }
   if (
@@ -280,7 +371,10 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
       `event ${event.index} exactly-once clientGroupId disagrees with top level`
     )
   }
-  const expectedKind = evidence.type === 'authority' ? 'read' : evidence.type
+  const expectedKind =
+    evidence.type === 'authority' || evidence.type === 'client-probe'
+      ? 'read'
+      : evidence.type
   if (event.kind !== expectedKind) {
     violations.push(
       `event ${event.index} exactly-once ${evidence.type} uses kind ${event.kind}`
@@ -303,7 +397,13 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
     const value = observed as Record<string, unknown>
     if (
       evidence.type === 'authority' &&
-      (!Number.isSafeInteger(value.probeRowCount) ||
+      (!exactKeys(value, [
+        'probeRowCount',
+        'applicationCount',
+        'clientRowCount',
+        'lastMutationId',
+      ]) ||
+        !Number.isSafeInteger(value.probeRowCount) ||
         !Number.isSafeInteger(value.clientRowCount) ||
         typeof value.applicationCount !== 'string' ||
         (value.lastMutationId !== null && typeof value.lastMutationId !== 'string'))
@@ -312,21 +412,64 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
       return false
     }
     if (
+      evidence.type === 'client-probe' &&
+      (!exactKeys(value, ['resultType', 'applicationCount']) ||
+        value.resultType !== 'complete' ||
+        typeof value.applicationCount !== 'string')
+    ) {
+      violations.push(`event ${event.index} has malformed client probe observation`)
+      return false
+    }
+    if (
       evidence.type === 'push' &&
-      !['response-lost', 'already-processed'].includes(String(value.outcome))
+      !['response-lost', 'response'].includes(String(value.outcome))
     ) {
       violations.push(`event ${event.index} has malformed push observation`)
       return false
     }
+    if (evidence.type === 'push') {
+      const keys = Object.keys(value).sort()
+      if (
+        (value.outcome === 'response-lost' &&
+          (keys.length !== 1 || keys[0] !== 'outcome')) ||
+        (value.outcome === 'response' &&
+          (!exactKeys(value, [
+            'bodySha256',
+            'details',
+            'error',
+            'mutationId',
+            'outcome',
+            'responseClientId',
+            'status',
+          ]) ||
+            !Number.isSafeInteger(value.status) ||
+            Number(value.status) < 0 ||
+            !/^[0-9a-f]{64}$/.test(String(value.bodySha256)) ||
+            (value.responseClientId !== null &&
+              typeof value.responseClientId !== 'string') ||
+            (value.mutationId !== null &&
+              (!Number.isSafeInteger(value.mutationId) ||
+                Number(value.mutationId) <= 0)) ||
+            (value.error !== null && typeof value.error !== 'string') ||
+            (value.details !== null && typeof value.details !== 'string')))
+      ) {
+        violations.push(`event ${event.index} has malformed push observation fields`)
+        return false
+      }
+    }
     if (
       evidence.type === 'pull' &&
-      (value.outcome !== 'pull-lmid-observed' ||
+      (!exactKeys(value, ['outcome', 'lastMutationId']) ||
+        value.outcome !== 'pull-lmid-observed' ||
         (value.lastMutationId !== null && typeof value.lastMutationId !== 'string'))
     ) {
       violations.push(`event ${event.index} has malformed pull observation`)
       return false
     }
-    if (evidence.type === 'fault' && value.acknowledged !== true) {
+    if (
+      evidence.type === 'fault' &&
+      (!exactKeys(value, ['acknowledged']) || value.acknowledged !== true)
+    ) {
       violations.push(`event ${event.index} has malformed fault observation`)
       return false
     }
@@ -336,6 +479,7 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
 
 export function validateHistory(events: readonly HistoryEvent[]): CheckResult {
   const violations: string[] = []
+  if (!Array.isArray(events)) return result(['history is not an array'])
   const inFlightByProcess = new Map<string, string>()
   const invoked = new Map<string, HistoryEvent>()
   const completed = new Set<string>()
@@ -368,6 +512,14 @@ export function validateHistory(events: readonly HistoryEvent[]): CheckResult {
     }
     if (!['invoke', 'ok', 'fail', 'info'].includes(event.phase)) {
       violations.push(`event ${position} has invalid phase ${String(event.phase)}`)
+      continue
+    }
+    if (
+      !['transaction', 'read', 'mutation', 'barrier', 'fault', 'push', 'pull'].includes(
+        event.kind
+      )
+    ) {
+      violations.push(`event ${position} has invalid kind ${String(event.kind)}`)
       continue
     }
 

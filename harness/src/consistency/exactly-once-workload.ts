@@ -34,6 +34,20 @@ export function parseExactlyOncePush(body: unknown): ParsedExactlyOncePush {
     throw new Error('push body must be an object')
   }
   const value = body as Record<string, unknown>
+  const rootKeys = Object.keys(value).sort()
+  const allowedRoot = [
+    'clientGroupID',
+    'mutations',
+    'pushVersion',
+    'requestID',
+    'timestamp',
+  ]
+  if (
+    rootKeys.length !== allowedRoot.length ||
+    rootKeys.some((key) => !allowedRoot.includes(key))
+  ) {
+    throw new Error('push body has unknown fields')
+  }
   if (typeof value.clientGroupID !== 'string' || value.clientGroupID.trim() === '') {
     throw new Error('push has invalid clientGroupID')
   }
@@ -45,7 +59,11 @@ export function parseExactlyOncePush(body: unknown): ParsedExactlyOncePush {
     throw new Error('push mutation must be an object')
   }
   const raw = mutation as Record<string, unknown>
+  const mutationKeys = Object.keys(raw).sort()
+  const allowedMutation = ['args', 'clientID', 'id', 'name', 'timestamp', 'type']
   if (
+    mutationKeys.length !== allowedMutation.length ||
+    mutationKeys.some((key, index) => key !== allowedMutation[index]) ||
     raw.type !== 'custom' ||
     raw.name !== EXACTLY_ONCE_MUTATOR ||
     typeof raw.clientID !== 'string' ||
@@ -55,7 +73,12 @@ export function parseExactlyOncePush(body: unknown): ParsedExactlyOncePush {
     !Number.isSafeInteger(raw.timestamp) ||
     Number(raw.timestamp) <= 0 ||
     !Array.isArray(raw.args) ||
-    raw.args.length !== 1
+    raw.args.length !== 1 ||
+    value.pushVersion !== 1 ||
+    typeof value.requestID !== 'string' ||
+    value.requestID.trim() === '' ||
+    !Number.isSafeInteger(value.timestamp) ||
+    Number(value.timestamp) <= 0
   ) {
     throw new Error('push mutation does not match the increment probe contract')
   }
@@ -66,6 +89,7 @@ export function parseExactlyOncePush(body: unknown): ParsedExactlyOncePush {
     mutationId: Number(raw.id),
     timestamp: Number(raw.timestamp),
     name: EXACTLY_ONCE_MUTATOR,
+    pushVersion: 1,
     args,
   }
   return {

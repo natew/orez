@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { checkExactlyOnceLmid, EXACTLY_ONCE_LMID_PROFILE } from './exactly-once-lmid.js'
 import { FAULT_SCHEDULE_SCHEMA_VERSION, type FaultSchedule } from './fault-schedule.js'
+import { validateHistory } from './history.js'
 import { HistoryRecorder } from './recorder.js'
 
 import type {
@@ -76,6 +77,22 @@ function history(phase: TerminalPhase = 'ok'): {
     clientRowCount: 0,
     lastMutationId: null,
   })
+  const clientProbe = {
+    type: 'client-probe' as const,
+    profileVersion: 1 as const,
+    identity,
+    effect,
+  }
+  pair(
+    'client-probe',
+    'client-probe',
+    'read',
+    { ...clientProbe, observed: null },
+    {
+      ...clientProbe,
+      observed: { resultType: 'complete', applicationCount: '0' },
+    }
+  )
   const faultEvents = new Map<string, HistoryEvent>()
   const fault = (stage: 'arm' | 'fire' | 'heal', hook: string) => {
     const stable = {
@@ -119,7 +136,9 @@ function history(phase: TerminalPhase = 'ok'): {
     profileVersion: 1 as const,
     identity,
     attempt,
+    source: attempt === 1 ? ('stock-client' as const) : ('harness-replay' as const),
     bodyDigest: 'a'.repeat(64),
+    rawBodySha256: 'b'.repeat(64),
   })
   recorder.record({
     opId: 'push-1',
@@ -171,16 +190,6 @@ function history(phase: TerminalPhase = 'ok'): {
       observed: { outcome: 'pull-lmid-observed', lastMutationId: '1' },
     },
   })
-  pair(
-    'push-2',
-    'push-2',
-    'push',
-    { ...pushStable(2), observed: null },
-    {
-      ...pushStable(2),
-      observed: { outcome: 'already-processed', mutationId: 1 },
-    }
-  )
   recorder.record({
     opId: 'mutation-1',
     process: 'writer',
@@ -190,6 +199,26 @@ function history(phase: TerminalPhase = 'ok'): {
     clientGroupId: identity.clientGroupId,
     exactlyOnce: mutationEvidence,
   })
+  if (phase !== 'fail') {
+    pair(
+      'push-2',
+      'push-2',
+      'push',
+      { ...pushStable(2), observed: null },
+      {
+        ...pushStable(2),
+        observed: {
+          outcome: 'response',
+          status: 200,
+          bodySha256: 'c'.repeat(64),
+          responseClientId: identity.clientId,
+          mutationId: 1,
+          error: 'alreadyProcessed',
+          details: 'Ignoring mutation. Expected: 2',
+        },
+      }
+    )
+  }
   authority('after', {
     probeRowCount: 1,
     applicationCount: '1',
@@ -232,10 +261,14 @@ function history(phase: TerminalPhase = 'ok'): {
 describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}`, () => {
   test('accepts the exact lost-response, pull-LMID, and replay path', () => {
     const fixture = history()
+    expect(validateHistory(fixture.events)).toEqual({ valid: true, violations: [] })
     expect(checkExactlyOnceLmid(fixture.events, fixture.schedule)).toEqual({
       status: 'pass',
       violations: [],
-      reports: ['recovered via pull LMID 1 and identical already-processed push replay'],
+      reports: [
+        'stock push response lost; pull observed LMID 1; harness replay was already processed',
+        'no automatic stock-client retry is claimed',
+      ],
     })
   })
 
@@ -324,5 +357,169 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
     expect(
       checkExactlyOnceLmid(malformedSchedule.events, malformedSchedule.schedule).status
     ).toBe('fail')
+  })
+
+  test('rejects source, raw digest, rank, pull, attempt, and outcome mutants', () => {
+    const cases: Array<[string, (fixture: ReturnType<typeof history>) => void]> = [
+      [
+        'source swap',
+        ({ events }) => {
+          for (const event of events) {
+            if (event.exactlyOnce?.type === 'push' && event.exactlyOnce.attempt === 1)
+              event.exactlyOnce.source = 'harness-replay'
+          }
+        },
+      ],
+      [
+        'unequal raw digest',
+        ({ events }) => {
+          for (const event of events) {
+            if (event.exactlyOnce?.type === 'push' && event.exactlyOnce.attempt === 2)
+              event.exactlyOnce.rawBodySha256 = 'c'.repeat(64)
+          }
+        },
+      ],
+      [
+        'rank one preflight',
+        ({ events }) => {
+          const event = events.find(
+            (candidate) =>
+              candidate.exactlyOnce?.type === 'client-probe' && candidate.phase === 'ok'
+          )!
+          if (event.exactlyOnce?.type === 'client-probe' && event.exactlyOnce.observed)
+            event.exactlyOnce.observed.applicationCount = '1'
+        },
+      ],
+      [
+        'pull wrong lmid',
+        ({ events }) => {
+          const event = events.find(
+            (candidate) =>
+              candidate.exactlyOnce?.type === 'pull' && candidate.phase === 'ok'
+          )!
+          if (event.exactlyOnce?.type === 'pull' && event.exactlyOnce.observed)
+            event.exactlyOnce.observed.lastMutationId = '2'
+        },
+      ],
+      [
+        'duplicate attempt',
+        ({ events }) => {
+          for (const event of events) {
+            if (event.exactlyOnce?.type === 'push' && event.exactlyOnce.attempt === 2)
+              event.exactlyOnce.attempt = 1
+          }
+        },
+      ],
+      [
+        'wrong expected id',
+        ({ events }) => {
+          const event = events.find(
+            (candidate) =>
+              candidate.exactlyOnce?.type === 'push' &&
+              candidate.exactlyOnce.attempt === 2 &&
+              candidate.phase === 'ok'
+          )!
+          if (
+            event.exactlyOnce?.type === 'push' &&
+            event.exactlyOnce.observed?.outcome === 'response'
+          )
+            event.exactlyOnce.observed.details = 'Expected: 3'
+        },
+      ],
+      [
+        'authority row missing',
+        ({ events }) => {
+          const event = events.find(
+            (candidate) =>
+              candidate.exactlyOnce?.type === 'authority' &&
+              candidate.exactlyOnce.observation === 'after' &&
+              candidate.phase === 'ok'
+          )!
+          if (event.exactlyOnce?.type === 'authority' && event.exactlyOnce.observed)
+            event.exactlyOnce.observed.probeRowCount = 0
+        },
+      ],
+    ]
+    for (const [label, mutate] of cases) {
+      const fixture = history()
+      mutate(fixture)
+      const result = checkExactlyOnceLmid(fixture.events, fixture.schedule)
+      expect(result.status, label).toBe('fail')
+      expect(result.violations.length, label).toBeGreaterThan(0)
+    }
+  })
+
+  test('rank-one plus info remains fail and mutation fail is invalid', () => {
+    const rank = history('info')
+    const probe = rank.events.find(
+      (event) => event.exactlyOnce?.type === 'client-probe' && event.phase === 'ok'
+    )!
+    if (probe.exactlyOnce?.type === 'client-probe' && probe.exactlyOnce.observed)
+      probe.exactlyOnce.observed.applicationCount = '1'
+    expect(checkExactlyOnceLmid(rank.events, rank.schedule).status).toBe('fail')
+    expect(
+      checkExactlyOnceLmid(history('fail').events, history('fail').schedule).status
+    ).toBe('fail')
+  })
+
+  test('closes nested raw evidence objects', () => {
+    const mutants: Array<(events: HistoryEvent[]) => void> = [
+      (events) => Object.assign(events[0]!.exactlyOnce!.identity, { extra: true }),
+      (events) =>
+        Object.assign(
+          (
+            events.find((event) => event.exactlyOnce?.type === 'mutation')!
+              .exactlyOnce as Extract<ExactlyOnceEvidence, { type: 'mutation' }>
+          ).effect,
+          { extra: true }
+        ),
+      (events) => {
+        const event = events.find(
+          (candidate) =>
+            candidate.exactlyOnce?.type === 'authority' && candidate.phase === 'ok'
+        )!
+        Object.assign(
+          (event.exactlyOnce as Extract<ExactlyOnceEvidence, { type: 'authority' }>)
+            .observed,
+          { extra: true }
+        )
+      },
+      (events) => {
+        const event = events.find(
+          (candidate) =>
+            candidate.exactlyOnce?.type === 'client-probe' && candidate.phase === 'ok'
+        )!
+        Object.assign(
+          (event.exactlyOnce as Extract<ExactlyOnceEvidence, { type: 'client-probe' }>)
+            .observed,
+          { extra: true }
+        )
+      },
+      (events) => {
+        const event = events.find(
+          (candidate) =>
+            candidate.exactlyOnce?.type === 'pull' && candidate.phase === 'ok'
+        )!
+        Object.assign(
+          (event.exactlyOnce as Extract<ExactlyOnceEvidence, { type: 'pull' }>).observed,
+          { extra: true }
+        )
+      },
+      (events) => {
+        const event = events.find(
+          (candidate) =>
+            candidate.exactlyOnce?.type === 'fault' && candidate.phase === 'ok'
+        )!
+        Object.assign(
+          (event.exactlyOnce as Extract<ExactlyOnceEvidence, { type: 'fault' }>).observed,
+          { extra: true }
+        )
+      },
+    ]
+    for (const mutate of mutants) {
+      const events = history().events
+      mutate(events)
+      expect(validateHistory(events).valid).toBe(false)
+    }
   })
 })

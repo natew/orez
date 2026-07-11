@@ -363,6 +363,20 @@ describe('consistency artifact writer', () => {
         'check history-structure version contains NUL',
         (value) => (value.checks[0]!.version = '1\u0000alternate'),
       ],
+      [
+        'check 0 has unknown or legacy fields',
+        (value) => ((value.checks[0] as never as Record<string, unknown>).valid = true),
+      ],
+      [
+        'check 0 has unknown or legacy fields',
+        (value) =>
+          ((value.checks[0] as never as Record<string, unknown>).input = 'history.jsonl'),
+      ],
+      [
+        'check 0 has unknown or legacy fields',
+        (value) => ((value.checks[0] as never as Record<string, unknown>).extra = true),
+      ],
+      ['check 0 is not an object', (value) => (value.checks[0] = null as never)],
     ]
     for (const [message, mutate] of cases) {
       const { results } = await tempResults()

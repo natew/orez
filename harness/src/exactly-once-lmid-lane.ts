@@ -87,8 +87,10 @@ let pushAttempt = 0
 let pullAttempt = 0
 let pushTerminals = 0
 let pullTerminals = 0
-const protocolOps = new Map<number, { opId: string; evidence: ExactlyOnceEvidence }>()
-const ignoredProtocolRequests = new Set<number>()
+let capturedPushBody: string | undefined
+type PushSource = 'stock-client' | 'harness-replay'
+const protocolOps = new Map<string, { opId: string; evidence: ExactlyOnceEvidence }>()
+const ignoredProtocolRequests = new Set<string>()
 const protocolWaiters = new Set<() => void>()
 
 function recordPair(
@@ -119,20 +121,29 @@ function recordPair(
   })
 }
 
-function protocolObservation(observation: SyncHttpObservation): void {
+function protocolObservation(source: PushSource, observation: SyncHttpObservation): void {
   if (!recordingProtocol || !identity) return
   try {
     if (observation.phase === 'invoke') {
       if (observation.path === 'push') {
         const parsed = parseExactlyOncePush(observation.body)
+        if (typeof observation.rawBody !== 'string') {
+          throw new Error('push request body is not an exact string')
+        }
         assertExpectedExactlyOncePush(parsed, { identity, args: { id: probeId } })
         const attempt = ++pushAttempt
+        if (attempt > 2) throw new Error(`unexpected push attempt ${attempt}`)
+        if (attempt === 1 && source === 'stock-client') {
+          capturedPushBody = observation.rawBody
+        }
         const evidence = {
           type: 'push' as const,
           profileVersion: 1 as const,
           identity,
           attempt,
+          source,
           bodyDigest: parsed.bodyDigest,
+          rawBodySha256: createHash('sha256').update(observation.rawBody).digest('hex'),
           observed: null,
         }
         const opId = `${runId}-push-${attempt}`
@@ -145,8 +156,11 @@ function protocolObservation(observation: SyncHttpObservation): void {
           clientGroupId: identity.clientGroupId,
           exactlyOnce: evidence,
         })
-        protocolOps.set(observation.request, { opId, evidence })
+        protocolOps.set(`${source}:${observation.request}`, { opId, evidence })
       } else {
+        if (source !== 'stock-client') {
+          throw new Error('harness replay observer received pull traffic')
+        }
         const body = observation.body as Record<string, unknown>
         if (
           body?.clientID !== identity.clientId ||
@@ -159,7 +173,7 @@ function protocolObservation(observation: SyncHttpObservation): void {
         // not completed when request.server settled. Keep incomplete protocol
         // traffic outside the paired consistency history.
         if (attempt > 1) {
-          ignoredProtocolRequests.add(observation.request)
+          ignoredProtocolRequests.add(`${source}:${observation.request}`)
           return
         }
         const evidence = {
@@ -182,28 +196,42 @@ function protocolObservation(observation: SyncHttpObservation): void {
           clientGroupId: identity.clientGroupId,
           exactlyOnce: evidence,
         })
-        protocolOps.set(observation.request, { opId, evidence })
+        protocolOps.set(`${source}:${observation.request}`, { opId, evidence })
       }
       return
     }
 
-    if (ignoredProtocolRequests.delete(observation.request)) return
-    const pending = protocolOps.get(observation.request)
+    const requestKey = `${source}:${observation.request}`
+    if (ignoredProtocolRequests.delete(requestKey)) return
+    const pending = protocolOps.get(requestKey)
     if (!pending) throw new Error(`protocol request ${observation.request} has no invoke`)
     if (pending.evidence.type === 'push') {
       const response = observation.response as {
         pushResponse?: {
-          mutations?: Array<{ id?: { id?: number }; result?: { error?: string } }>
+          mutations?: Array<{
+            id?: { clientID?: string; id?: number }
+            result?: { error?: string; details?: string }
+          }>
         }
       }
       const mutation = response?.pushResponse?.mutations?.[0]
       const observed = observation.error
         ? ({ outcome: 'response-lost' } as const)
-        : mutation?.result?.error === 'alreadyProcessed' &&
-            mutation.id?.id === identity.mutationId
-          ? ({ outcome: 'already-processed', mutationId: identity.mutationId } as const)
+        : typeof observation.rawResponseBody === 'string' &&
+            observation.response !== undefined
+          ? ({
+              outcome: 'response',
+              status: observation.status ?? 0,
+              bodySha256: createHash('sha256')
+                .update(observation.rawResponseBody)
+                .digest('hex'),
+              responseClientId: mutation?.id?.clientID ?? null,
+              mutationId: mutation?.id?.id ?? null,
+              error: mutation?.result?.error ?? null,
+              details: mutation?.result?.details ?? null,
+            } as const)
           : (() => {
-              throw new Error('push terminal does not match lost/already-processed path')
+              throw new Error('push terminal response is not valid JSON evidence')
             })()
       recorder.record({
         opId: pending.opId,
@@ -236,7 +264,7 @@ function protocolObservation(observation: SyncHttpObservation): void {
       })
       pullTerminals++
     }
-    protocolOps.delete(observation.request)
+    protocolOps.delete(requestKey)
     for (const wake of protocolWaiters) wake()
   } catch (error) {
     protocolError = error
@@ -244,10 +272,10 @@ function protocolObservation(observation: SyncHttpObservation): void {
   }
 }
 
-async function waitForProtocol(): Promise<void> {
+async function waitForProtocol(expectedPushes: number): Promise<void> {
   const complete = () => {
     if (protocolError) throw protocolError
-    if (pushTerminals !== 2 || pullTerminals !== 1) {
+    if (pushTerminals !== expectedPushes || pullTerminals !== 1) {
       throw new Error(
         `waiting for two push/one pull terminals, got ${pushTerminals}/${pullTerminals}`
       )
@@ -278,9 +306,29 @@ async function waitForProtocol(): Promise<void> {
   })
 }
 
+async function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out`)), 30_000)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+const stockFetch = observedSyncFetch((observation) =>
+  protocolObservation('stock-client', observation)
+)
+const harnessReplayFetch = observedSyncFetch((observation) =>
+  protocolObservation('harness-replay', observation)
+)
 const target = await startOrezLocal({
   pullIntervalMs: 0,
-  fetch: observedSyncFetch(protocolObservation),
+  fetch: stockFetch,
 })
 let client: ReturnType<typeof target.createClient> | undefined
 const replay = `bun src/exactly-once-lmid-lane.ts --target orez-local --seed=${seed} --replay`
@@ -338,6 +386,22 @@ try {
   }
   await authority('before')
 
+  const clientProbeStable = {
+    type: 'client-probe' as const,
+    profileVersion: 1 as const,
+    identity,
+    effect,
+  }
+  const clientProbeOp = `${runId}-client-probe`
+  recorder.record({
+    opId: clientProbeOp,
+    process: 'client-probe',
+    phase: 'invoke',
+    kind: 'read',
+    clientId: identity.clientId,
+    clientGroupId: identity.clientGroupId,
+    exactlyOnce: { ...clientProbeStable, observed: null },
+  })
   const probeView = client.materialize(queries.taskById({ id: probeId }))
   await new Promise<void>((resolve, reject) => {
     const deadline = setTimeout(
@@ -350,6 +414,18 @@ try {
       if (!data || data.rank !== 0) {
         reject(new Error(`initial client probe rank is ${String(data?.rank)}`))
       } else {
+        recorder.record({
+          opId: clientProbeOp,
+          process: 'client-probe',
+          phase: 'ok',
+          kind: 'read',
+          clientId: identity!.clientId,
+          clientGroupId: identity!.clientGroupId,
+          exactlyOnce: {
+            ...clientProbeStable,
+            observed: { resultType: 'complete', applicationCount: String(data.rank) },
+          },
+        })
         resolve()
       }
     })
@@ -413,12 +489,10 @@ try {
   let mutationPhase: 'ok' | 'fail' | 'info' = 'ok'
   let mutationError: string | undefined
   try {
-    await Promise.race([
+    await withTimeout(
       assertServerOutcome(request.server, 'success', mutationOp),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('mutation server outcome timed out')), 30_000)
-      ),
-    ])
+      'mutation server outcome'
+    )
   } catch (error) {
     mutationError = error instanceof Error ? error.message : String(error)
     mutationPhase = mutationError.includes('timed out') ? 'info' : 'fail'
@@ -433,7 +507,20 @@ try {
     exactlyOnce: mutationEvidence,
     ...(mutationError ? { error: mutationError } : {}),
   })
-  await waitForProtocol()
+  await waitForProtocol(1)
+  if (mutationPhase !== 'fail') {
+    if (!capturedPushBody) throw new Error('stock push raw body was not captured')
+    const replayResponse = await harnessReplayFetch(`${target.origin}/push`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token-exactly-once-client',
+        'content-type': 'application/json',
+      },
+      body: capturedPushBody,
+    })
+    await replayResponse.arrayBuffer()
+    await waitForProtocol(2)
+  }
   recordingProtocol = false
   await authority('after')
 
