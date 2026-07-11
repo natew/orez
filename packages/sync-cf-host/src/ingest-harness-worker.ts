@@ -29,6 +29,7 @@ interface Env extends SyncHostEnv {
 
 const runawayNamespaces = new Set<string>()
 const numericTextNamespaces = new Set<string>()
+const hydratedNamespaces = new Set<string>()
 let delegatedFailuresRemaining = 0
 let delegatedAttempts = 0
 
@@ -96,7 +97,7 @@ async function upstreamFetch(request: Request, env: Env): Promise<Response> {
 
 /** Self service-binding target backed by the real ZeroSqlDO. */
 export class DataService extends WorkerEntrypoint<Env> {
-  fetch(request: Request): Promise<Response> {
+  async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
     const pathname = url.pathname
     if (
@@ -170,7 +171,9 @@ export class DataService extends WorkerEntrypoint<Env> {
         })
       )
     }
-    return upstreamFetch(request, this.env)
+    const response = await upstreamFetch(request, this.env)
+    if (pathname.endsWith('/changes') && response.ok) hydratedNamespaces.add(namespace)
+    return response
   }
 }
 
@@ -179,6 +182,12 @@ export class AppService extends WorkerEntrypoint<Env> {
     if (!new URL(request.url).pathname.endsWith('/api/zero/push')) {
       return Promise.resolve(
         new Response('APP route rejected non-push request', { status: 418 })
+      )
+    }
+    const namespace = new URL(request.url).pathname.split('/')[1] ?? ''
+    if (!hydratedNamespaces.has(namespace)) {
+      return Promise.resolve(
+        Response.json({ error: 'schema provisioning has not completed' }, { status: 500 })
       )
     }
     delegatedAttempts++

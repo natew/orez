@@ -47,6 +47,41 @@ try {
     return { status: response.status, body: parsed }
   }
 
+  // A push can be the first request for a brand-new namespace. The host must
+  // force the DATA /changes provisioning barrier before delegating the
+  // mutation to APP; otherwise APP observes a half-provisioned namespace and
+  // returns the production's silent 500.
+  const firstPushNamespace = `first-push-${crypto.randomUUID()}`
+  const firstPushResponse = await fetch(`${base}/${firstPushNamespace}/push`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientGroupID: 'first-push-group',
+      pushVersion: 1,
+      mutations: [
+        {
+          type: 'custom',
+          clientID: 'first-push-writer',
+          id: 1,
+          name: 'item.insert',
+          args: [
+            {
+              id: 'first-push-row',
+              label: 'first request is a push',
+              rank: 1,
+              done: false,
+              meta: null,
+            },
+          ],
+        },
+      ],
+    }),
+  })
+  assert.equal(firstPushResponse.status, 200)
+
   // Force a retention gap before the engine has a cursor. The next pull must
   // recover via the ZeroDO /snapshot endpoint, not an unavailable change row.
   const upstreamPush = await fetch(`${upstream}/api/zero/push`, {

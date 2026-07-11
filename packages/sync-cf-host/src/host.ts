@@ -1477,6 +1477,17 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         return this.#pull(request, claims, namespace)
       }
       if (route === '/push' && request.method === 'POST') {
+        // A push may be the first request for a fresh namespace. DATA's
+        // /changes call is also its schema-provisioning barrier, so complete it
+        // before delegating the mutation to APP. Pull already enforces this
+        // ordering above; skipping it here let APP race half-created tables and
+        // surface a terminal, bodyless 500 to Zero.
+        try {
+          await this.#ingest(upstreamPath)
+        } catch (error) {
+          await request.arrayBuffer()
+          return json(errorBody(error), statusOf(error))
+        }
         return this.#push(request, claims, namespace, upstreamPath)
       }
       return json({ error: 'not found' }, 404)
