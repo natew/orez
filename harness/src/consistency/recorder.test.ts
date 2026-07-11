@@ -160,6 +160,19 @@ describe('HistoryRecorder', () => {
     expect(() =>
       new HistoryRecorder(clock(0)).record(invocation({ metadata: { value: -0 } }))
     ).toThrow('history event input.metadata.value contains negative zero')
+
+    const changing = [0]
+    let reads = 0
+    Object.defineProperty(changing, 0, {
+      enumerable: true,
+      get: () => ++reads,
+    })
+    expect(() =>
+      new HistoryRecorder(clock(0)).record(invocation({ metadata: { changing } }))
+    ).toThrow(
+      'history event input.metadata.changing array index 0 is not an enumerable data property'
+    )
+    expect(reads).toBe(0)
   })
 
   test('round-trip mutation is rejected by the existing validator', () => {

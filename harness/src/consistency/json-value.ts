@@ -22,7 +22,13 @@ export function assertLosslessJsonValue(
       }
       for (let index = 0; index < value.length; index++) {
         if (!Object.hasOwn(value, index)) throw new Error(`${path} array is sparse`)
-        assertLosslessJsonValue(value[index], `${path}[${index}]`, ancestors)
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index))!
+        if (!descriptor.enumerable || !('value' in descriptor)) {
+          throw new Error(
+            `${path} array index ${index} is not an enumerable data property`
+          )
+        }
+        assertLosslessJsonValue(descriptor.value, `${path}[${index}]`, ancestors)
       }
       for (const key of keys) {
         if (key === 'length') continue
