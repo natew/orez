@@ -15,6 +15,24 @@ import { DDL, SEED, jsonColumns, mutators, permissions, schema } from '../fixtur
 
 import type { Rows, SyncTarget } from '../target.js'
 
+// derive every install-name a bundled darwin dylib might be referenced by:
+// lib<name>.<v1>.<v2>...<vk>.dylib -> lib<name>.dylib, lib<name>.<v1>.dylib,
+// ..., lib<name>.<v1>...<v(k-1)>.dylib (every prefix truncation except the full
+// file). the vendored binaries link a MIX of the unversioned name
+// (libicui18n.dylib) and the major soname (libzstd.1.dylib), so create both.
+// files with a single version component (libpq.5.dylib) yield the unversioned
+// link; already-unversioned files (libfoo.dylib) yield none.
+function darwinSonames(file: string): string[] {
+  if (!file.endsWith('.dylib')) return []
+  const parts = file.slice(0, -'.dylib'.length).split('.')
+  const firstNum = parts.findIndex((p) => /^\d+$/.test(p))
+  if (firstNum <= 0) return []
+  const versions = parts.slice(firstNum)
+  if (!versions.every((v) => /^\d+$/.test(v))) return []
+  const base = parts.slice(0, firstNum).join('.')
+  return versions.map((_, k) => `${[base, ...versions.slice(0, k)].join('.')}.dylib`)
+}
+
 const require = createRequire(import.meta.url)
 
 // crib of orez src/native-postgres.ts SERVER_FLAGS: logical replication for
@@ -87,12 +105,32 @@ export async function startStockZero(opts?: {
   const appPort = opts?.appPort ?? base + 12
   const dataDir = mkdtempSync(join(tmpdir(), 'zharness-stock-'))
 
-  // npm packages cannot contain symlinks, so @embedded-postgres/linux-x64
-  // ships only fully-versioned libs (libicuuc.so.60.2) while initdb's loader
-  // wants the soname (libicuuc.so.60); on any linux without a system libicu60
-  // (ubuntu-latest CI) initdb dies at load. recreate the missing soname links
-  // next to the bundled libs before booting.
-  if (process.platform === 'linux') {
+  // npm packages cannot contain symlinks, so @embedded-postgres/<platform>
+  // ships only fully-versioned libs while initdb's loader wants the bare
+  // soname. on any host without the system libs (ubuntu-latest CI; a mac with
+  // no homebrew icu/zstd) initdb dies at load. recreate the missing soname
+  // links next to the bundled libs before booting.
+  //   linux:  libicuuc.so.60.2       -> loader wants libicuuc.so.60
+  //   darwin: libicudata.68.2.dylib  -> loader wants libicudata.68.dylib
+  //           libzstd.1.5.6.dylib    -> loader wants libzstd.1.dylib
+  // darwin binaries here reference a MIX of install names: some fully
+  // versioned (libzstd.1.dylib), some unversioned (libicui18n.dylib). so for a
+  // real file lib<name>.<v1>.<v2>...<vk>.dylib create every prefix truncation
+  // (lib<name>.dylib, lib<name>.v1.dylib, ...) that is missing. linux keeps the
+  // narrower soname (lib<name>.so.<major>) the existing CI relies on.
+  const sonameCandidates =
+    process.platform === 'linux'
+      ? {
+          dir: `linux-${process.arch}`,
+          names: (f: string) =>
+            f.match(/^(.+\.so\.\d+)\.[\d.]+$/)?.[1]
+              ? [f.match(/^(.+\.so\.\d+)\.[\d.]+$/)![1]]
+              : [],
+        }
+      : process.platform === 'darwin'
+        ? { dir: `darwin-${process.arch}`, names: darwinSonames }
+        : undefined
+  if (sonameCandidates) {
     const resolved = require.resolve('embedded-postgres')
     const nodeModules = resolved.slice(
       0,
@@ -101,15 +139,16 @@ export async function startStockZero(opts?: {
     const libDir = join(
       nodeModules,
       '@embedded-postgres',
-      `linux-${process.arch}`,
+      sonameCandidates.dir,
       'native',
       'lib'
     )
     if (existsSync(libDir)) {
       for (const file of readdirSync(libDir)) {
-        const soname = file.match(/^(.+\.so\.\d+)\.[\d.]+$/)?.[1]
-        if (soname && !existsSync(join(libDir, soname))) {
-          symlinkSync(file, join(libDir, soname))
+        for (const soname of sonameCandidates.names(file)) {
+          if (soname !== file && !existsSync(join(libDir, soname))) {
+            symlinkSync(file, join(libDir, soname))
+          }
         }
       }
     }
