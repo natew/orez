@@ -94,7 +94,7 @@ function completeRecorder(metadata?: Record<string, unknown>): HistoryRecorder {
     kind: 'read',
     clientId: 'client-1',
     snapshot: { generation: 'generation-1', watermark: '9007199254740993' },
-    metadata,
+    ...(metadata === undefined ? {} : { metadata }),
   })
   return recorder
 }
@@ -157,6 +157,34 @@ describe('consistency artifact writer', () => {
     ).rejects.toThrow(`refusing to overwrite results directory ${results}`)
   })
 
+  test('concurrent writers publish one complete bundle and one refusal', async () => {
+    const { parent, results } = await tempResults()
+    const write = () =>
+      writeConsistencyArtifacts({
+        resultsDir: results,
+        recorder: completeRecorder(),
+        manifest: manifest(),
+        schedule: schedule(),
+        checks: checks(),
+      })
+    const outcomes = await Promise.allSettled([write(), write()])
+    expect(outcomes.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+    const rejected = outcomes.filter(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected'
+    )
+    expect(rejected).toHaveLength(1)
+    expect(String(rejected[0]!.reason)).toContain(
+      `refusing to overwrite results directory ${results}`
+    )
+    expect((await readdir(results)).sort()).toEqual([
+      'checks.json',
+      'history.jsonl',
+      'manifest.json',
+      'schedule.json',
+    ])
+    expect(await readdir(parent)).toEqual(['run-1'])
+  })
+
   test('refuses incomplete finalize without creating the results directory', async () => {
     const { results } = await tempResults()
     const recorder = new HistoryRecorder(() => 0)
@@ -194,19 +222,67 @@ describe('consistency artifact writer', () => {
     expect(await exists(results)).toBe(false)
   })
 
-  test('serialization failure leaves no final or staging bundle', async () => {
-    const { parent, results } = await tempResults()
-    await expect(
-      writeConsistencyArtifacts({
-        resultsDir: results,
-        recorder: completeRecorder({ bad: 1n }),
-        manifest: manifest(),
-        schedule: schedule(),
-        checks: checks(),
-      })
-    ).rejects.toThrow('BigInt')
-    expect(await exists(results)).toBe(false)
-    expect(await readdir(parent)).toEqual([])
+  test('lossy JSON metadata mutants leave no final or staging bundle', async () => {
+    const cycle: Record<string, unknown> = {}
+    cycle.self = cycle
+    const cases: [string, () => Record<string, unknown>][] = [
+      ['contains non-JSON value bigint', () => ({ bad: 1n })],
+      ['contains a non-finite number', () => ({ bad: Number.NaN })],
+      ['contains a non-finite number', () => ({ bad: Number.POSITIVE_INFINITY })],
+      ['contains negative zero', () => ({ bad: -0 })],
+      ['contains non-JSON value undefined', () => ({ bad: undefined })],
+      ['contains non-plain object Map', () => ({ bad: new Map([['key', 'value']]) })],
+      ['contains non-plain object Date', () => ({ bad: new Date(0) })],
+      ['contains a cycle', () => ({ bad: cycle })],
+    ]
+    for (const [message, metadata] of cases) {
+      const { parent, results } = await tempResults()
+      const candidate = manifest() as RunManifest & { metadata?: Record<string, unknown> }
+      candidate.metadata = metadata()
+      await expect(
+        writeConsistencyArtifacts({
+          resultsDir: results,
+          recorder: completeRecorder(),
+          manifest: candidate,
+          schedule: schedule(),
+          checks: checks(),
+        })
+      ).rejects.toThrow(message)
+      expect(await exists(results)).toBe(false)
+      expect(await readdir(parent)).toEqual([])
+    }
+  })
+
+  test('rejects every non-JSON container shape before publication', async () => {
+    const sparse = new Array(1)
+    const extraKey = [1] as number[] & { extra?: number }
+    extraKey.extra = 2
+    const symbolKey = { value: 1 } as Record<PropertyKey, unknown>
+    symbolKey[Symbol('hidden')] = 2
+    const cases: [string, unknown][] = [
+      ['contains non-JSON value function', () => 1],
+      ['contains non-JSON value symbol', Symbol('value')],
+      ['contains non-plain object Set', new Set([1])],
+      ['array is sparse', sparse],
+      ['array has extra key extra', extraKey],
+      ['object has a symbol key', symbolKey],
+    ]
+    for (const [message, extra] of cases) {
+      const { parent, results } = await tempResults()
+      const candidate = manifest() as RunManifest & { extra?: unknown }
+      candidate.extra = extra
+      await expect(
+        writeConsistencyArtifacts({
+          resultsDir: results,
+          recorder: completeRecorder(),
+          manifest: candidate,
+          schedule: schedule(),
+          checks: checks(),
+        })
+      ).rejects.toThrow(message)
+      expect(await exists(results)).toBe(false)
+      expect(await readdir(parent)).toEqual([])
+    }
   })
 
   test('rejects malformed manifest metadata before creating artifacts', async () => {
@@ -274,6 +350,14 @@ describe('consistency artifact writer', () => {
       [
         'check history-structure has malformed reports',
         (value) => (value.checks[0]!.reports = ['']),
+      ],
+      [
+        'check 0 name contains NUL',
+        (value) => (value.checks[0]!.name = 'history\u0000structure'),
+      ],
+      [
+        'check history-structure version contains NUL',
+        (value) => (value.checks[0]!.version = '1\u0000alternate'),
       ],
     ]
     for (const [message, mutate] of cases) {

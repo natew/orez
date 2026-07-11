@@ -144,6 +144,24 @@ describe('HistoryRecorder', () => {
     )
   })
 
+  test('rejects metadata that structuredClone or JSON would alter', () => {
+    const hidden = { visible: 1 }
+    Object.defineProperty(hidden, 'secret', { value: 2, enumerable: false })
+    expect(() =>
+      new HistoryRecorder(clock(0)).record(invocation({ metadata: hidden }))
+    ).toThrow('history event input.metadata.secret is not an enumerable data property')
+
+    const symbolKey = { visible: 1 } as Record<PropertyKey, unknown>
+    symbolKey[Symbol('secret')] = 2
+    expect(() =>
+      new HistoryRecorder(clock(0)).record(invocation({ metadata: symbolKey }))
+    ).toThrow('history event input.metadata object has a symbol key')
+
+    expect(() =>
+      new HistoryRecorder(clock(0)).record(invocation({ metadata: { value: -0 } }))
+    ).toThrow('history event input.metadata.value contains negative zero')
+  })
+
   test('round-trip mutation is rejected by the existing validator', () => {
     const recorder = new HistoryRecorder(clock(0, 1))
     recorder.record(invocation())

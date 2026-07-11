@@ -4,6 +4,7 @@ import {
   type HistoryEvent,
   type MicroOp,
 } from './history.js'
+import { assertLosslessJsonValue } from './json-value.js'
 
 export type HistoryEventInput = Omit<
   HistoryEvent,
@@ -41,6 +42,7 @@ export class HistoryRecorder {
 
   record(input: HistoryEventInput): HistoryEvent {
     if (this.#finalized) throw new Error('history recorder is finalized')
+    assertLosslessJsonValue(input, 'history event input')
 
     const now = this.#clock()
     if (!Number.isSafeInteger(now))

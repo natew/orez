@@ -3,6 +3,7 @@ import { basename, dirname, join } from 'node:path'
 
 import { validateFaultSchedule, type FaultSchedule } from './fault-schedule.js'
 import { HISTORY_SCHEMA_VERSION, validateHistory, type RunManifest } from './history.js'
+import { assertLosslessJsonValue } from './json-value.js'
 import { HistoryRecorder } from './recorder.js'
 
 export type ConsistencyCheck = {
@@ -100,8 +101,12 @@ function validateChecks(checks: ConsistencyChecksArtifact): void {
     if (typeof check.name !== 'string' || check.name.trim() === '') {
       throw new Error(`check ${index} has an empty name`)
     }
+    if (check.name.includes('\u0000')) throw new Error(`check ${index} name contains NUL`)
     if (typeof check.version !== 'string' || check.version.trim() === '') {
       throw new Error(`check ${index} has an empty version`)
+    }
+    if (check.version.includes('\u0000')) {
+      throw new Error(`check ${check.name} version contains NUL`)
     }
     const identity = `${check.name}\u0000${check.version}`
     if (identities.has(identity)) {
@@ -170,6 +175,11 @@ export async function writeConsistencyArtifacts(
     )
   }
 
+  assertLosslessJsonValue(manifest, 'manifest')
+  assertLosslessJsonValue(history, 'history')
+  assertLosslessJsonValue(schedule, 'schedule')
+  assertLosslessJsonValue(checks, 'checks')
+
   // Serialize before reserving any filesystem path. A BigInt or other invalid
   // runtime payload must not strand an empty final directory.
   const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`
@@ -194,7 +204,8 @@ export async function writeConsistencyArtifacts(
     await rename(staging, resultsDir)
     published = true
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'EEXIST' || code === 'ENOTEMPTY') {
       throw new Error(`refusing to overwrite results directory ${resultsDir}`)
     }
     throw error
