@@ -82,15 +82,33 @@ const resultsDir =
   args['results-dir'] ??
   join('target', 'consistency', 'permission-transition', defaultResultsName)
 
-let build = 'unknown'
-try {
-  build = execFileSync('git', ['rev-parse', 'HEAD'], {
-    cwd: fileURLToPath(new URL('../..', import.meta.url)),
-    encoding: 'utf8',
-  }).trim()
-} catch {
-  // provenance is best-effort; the lane still runs outside a git checkout
+// Provenance mirrors the atomic-visibility lane: an evidence bundle is only
+// trustworthy if the executable inputs are clean, so refuse to run (or replay)
+// with a dirty tree and stamp the exact canonical HEAD. No best-effort fallback.
+const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
+const dirty = execFileSync(
+  'git',
+  [
+    'status',
+    '--porcelain',
+    '--untracked-files=all',
+    '--',
+    'src',
+    'harness/src',
+    'package.json',
+    'bun.lock',
+    'harness/package.json',
+    'harness/bun.lock',
+  ],
+  { cwd: repoRoot, encoding: 'utf8' }
+).trim()
+if (dirty !== '') {
+  throw new Error(`refusing evidence run with dirty executable inputs:\n${dirty}`)
 }
+const build = execFileSync('git', ['rev-parse', 'HEAD'], {
+  cwd: repoRoot,
+  encoding: 'utf8',
+}).trim()
 
 const PT = scenario.protectedIds
 const SN = scenario.sentinel
@@ -283,6 +301,7 @@ type ClientWatcher = {
   storageKey: string
   fresh: boolean
   settledAt(epoch: PermissionEpoch): boolean
+  observedSentinelMarker(): string
   observation(origin: 'named' | 'raw'): ProtectedObservation
   echoed(): boolean
   destroy(): Promise<void>
@@ -351,6 +370,10 @@ async function createClient(
       const task = relatedTasks(sentinelRow).find((t) => t.id === SN.task)
       return task?.title === scenario.sentinelMarkers[epoch]
     },
+    observedSentinelMarker() {
+      const task = relatedTasks(sentinelRow).find((t) => t.id === SN.task)
+      return task ? String(task.title) : ''
+    },
     observation(origin) {
       if (origin === 'named') {
         return {
@@ -371,7 +394,14 @@ async function createClient(
       }
     },
     echoed() {
-      return echoes.some((e) => e.clientID === clientId && e.clientGroupID === groupId)
+      // the pull body must echo this client's identity AND arrive on this
+      // client's own namespace mount, never a sibling namespace's
+      return echoes.some(
+        (e) =>
+          e.databaseID === namespaceId &&
+          e.clientID === clientId &&
+          e.clientGroupID === groupId
+      )
     },
     async destroy() {
       named.destroy()
@@ -442,6 +472,7 @@ function snapshot(clients: ClientWatcher[], epoch: PermissionEpoch): void {
         origin,
         rows,
         markers,
+        sentinelMarker: client.observedSentinelMarker(),
         complete: true,
         fresh: client.fresh,
         pullEchoed: client.echoed(),
@@ -536,6 +567,12 @@ async function pullBoth(): Promise<void> {
   await Promise.all([...transports.values()].map((transport) => transport.pull()))
 }
 
+// the sorted opIds of every client observation emitted at this epoch, matching
+// snapshot()'s `${id}-${origin}-${epoch}` convention exactly
+function observationRefs(clients: ClientWatcher[], epoch: PermissionEpoch): string[] {
+  return clients.flatMap((c) => [`${c.id}-named-${epoch}`, `${c.id}-raw-${epoch}`]).sort()
+}
+
 // ---- drive the epochs ------------------------------------------------------
 
 const allClients: ClientWatcher[] = []
@@ -567,6 +604,9 @@ try {
     marker: scenario.sentinelMarkers[0],
     complete: true,
     observers: [...new Set(originals.map((c) => c.clientId))].sort(),
+    observationRefs: observationRefs(originals, 0),
+    changeRef: null,
+    authorityRef: null,
   })
 
   // epoch 1: grant the subject, advance the sentinel, add fresh clients
@@ -589,6 +629,9 @@ try {
     marker: scenario.sentinelMarkers[1],
     complete: true,
     observers: [...new Set(atGrant.map((c) => c.clientId))].sort(),
+    observationRefs: observationRefs(atGrant, 1),
+    changeRef: 'grant',
+    authorityRef: 'membership-1',
   })
 
   // epoch 2: revoke the subject, advance the sentinel, add fresh clients
@@ -611,6 +654,9 @@ try {
     marker: scenario.sentinelMarkers[2],
     complete: true,
     observers: [...new Set(atRevoke.map((c) => c.clientId))].sort(),
+    observationRefs: observationRefs(atRevoke, 2),
+    changeRef: 'revoke',
+    authorityRef: 'membership-2',
   })
 
   const outcome = checkPermissionTransition(events)

@@ -68,7 +68,54 @@ function nonempty(value: unknown, label: string): void {
   }
 }
 
+// Every persisted object is a closed record: exactly the allowed keys, no more.
+// An unknown key means the writer and the schema have drifted, so we refuse
+// rather than silently persist a field nothing validated.
+function assertExactKeys(
+  value: unknown,
+  allowed: readonly string[],
+  label: string
+): void {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} is not an object`)
+  }
+  const keys = Object.keys(value as Record<string, unknown>)
+  const permitted = new Set(allowed)
+  for (const key of keys) {
+    if (!permitted.has(key)) throw new Error(`${label} has unknown key ${key}`)
+  }
+  for (const key of allowed) {
+    if (!(key in (value as Record<string, unknown>))) {
+      throw new Error(`${label} is missing key ${key}`)
+    }
+  }
+}
+
 function validateManifest(manifest: PermissionManifest): void {
+  assertExactKeys(
+    manifest,
+    [
+      'schemaVersion',
+      'kind',
+      'runId',
+      'seed',
+      'profile',
+      'host',
+      'namespaces',
+      'target',
+      'replay',
+    ],
+    'manifest'
+  )
+  assertExactKeys(manifest.seed, ['value', 'source'], 'manifest seed')
+  assertExactKeys(
+    manifest.profile,
+    ['name', 'version', 'historySchemaVersion', 'checksSchemaVersion'],
+    'manifest profile'
+  )
+  assertExactKeys(manifest.namespaces, ['transition', 'stable'], 'manifest namespaces')
+  assertExactKeys(manifest.target, ['name', 'build'], 'manifest target')
+  assertExactKeys(manifest.replay, ['command'], 'manifest replay')
   if (manifest.schemaVersion !== PERMISSION_CHECKS_SCHEMA_VERSION) {
     throw new Error(`manifest has schema version ${manifest.schemaVersion}`)
   }
@@ -100,6 +147,11 @@ function validateManifest(manifest: PermissionManifest): void {
 }
 
 function validateChecks(checks: PermissionChecksArtifact): void {
+  assertExactKeys(
+    checks,
+    ['schemaVersion', 'kind', 'result', 'checks'],
+    'checks envelope'
+  )
   if (checks.schemaVersion !== PERMISSION_CHECKS_SCHEMA_VERSION) {
     throw new Error(`checks have schema version ${checks.schemaVersion}`)
   }
@@ -109,27 +161,31 @@ function validateChecks(checks: PermissionChecksArtifact): void {
   if (!['pass', 'fail', 'inconclusive'].includes(checks.result)) {
     throw new Error(`checks have invalid result ${String(checks.result)}`)
   }
-  if (!Array.isArray(checks.checks) || checks.checks.length === 0) {
-    throw new Error('checks artifact has no checks')
+  // the frozen v1 profile is a single named check; there is exactly one
+  if (!Array.isArray(checks.checks) || checks.checks.length !== 1) {
+    throw new Error('checks artifact must carry exactly one frozen profile check')
   }
-  for (const check of checks.checks) {
-    nonempty(check.name, 'check name')
-    nonempty(check.version, 'check version')
-    if (!Array.isArray(check.violations)) {
-      throw new Error(`check ${check.name} has malformed violations`)
-    }
-    if (check.violations.some((v) => typeof v !== 'string' || v.trim() === '')) {
-      throw new Error(`check ${check.name} has an empty violation`)
-    }
-    if (typeof check.valid !== 'boolean') {
-      throw new Error(`check ${check.name} has invalid valid flag`)
-    }
-    if (check.valid !== (check.violations.length === 0)) {
-      throw new Error(`check ${check.name} validity disagrees with its violations`)
-    }
+  const check = checks.checks[0]!
+  assertExactKeys(check, ['name', 'version', 'valid', 'violations'], 'check')
+  if (check.name !== PERMISSION_TRANSITION_PROFILE.name) {
+    throw new Error(`check name ${check.name} is not the frozen profile`)
   }
-  const passed = checks.checks.every((check) => check.valid)
-  if ((checks.result === 'pass') !== passed) {
+  if (check.version !== String(PERMISSION_TRANSITION_PROFILE_VERSION)) {
+    throw new Error(`check version ${check.version} is not the frozen profile version`)
+  }
+  if (!Array.isArray(check.violations)) {
+    throw new Error(`check ${check.name} has malformed violations`)
+  }
+  if (check.violations.some((v) => typeof v !== 'string' || v.trim() === '')) {
+    throw new Error(`check ${check.name} has an empty violation`)
+  }
+  if (typeof check.valid !== 'boolean') {
+    throw new Error(`check ${check.name} has invalid valid flag`)
+  }
+  if (check.valid !== (check.violations.length === 0)) {
+    throw new Error(`check ${check.name} validity disagrees with its violations`)
+  }
+  if ((checks.result === 'pass') !== check.valid) {
     throw new Error('checks result disagrees with its check validity')
   }
 }

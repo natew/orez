@@ -193,6 +193,37 @@ describe('permission transition artifact writer', () => {
     )
   })
 
+  test('rejects a manifest with an unknown top-level key', async () => {
+    const manifest = { ...baseManifest(), stray: 1 } as unknown as PermissionManifest
+    await expect(write({ manifest })).rejects.toThrow('manifest has unknown key stray')
+  })
+
+  test('rejects a manifest with an unknown nested key', async () => {
+    const manifest = baseManifest()
+    ;(manifest.target as unknown as Record<string, unknown>).extra = 'x'
+    await expect(write({ manifest })).rejects.toThrow(
+      'manifest target has unknown key extra'
+    )
+  })
+
+  test('rejects a checks envelope carrying more than one check', async () => {
+    const checks = checksFor(validPermissionHistory())
+    checks.checks.push({ ...checks.checks[0]! })
+    await expect(write({ checks })).rejects.toThrow('exactly one frozen profile check')
+  })
+
+  test('rejects a check whose name is not the frozen profile', async () => {
+    const checks = checksFor(validPermissionHistory())
+    checks.checks[0]!.name = 'some-other-profile'
+    await expect(write({ checks })).rejects.toThrow('is not the frozen profile')
+  })
+
+  test('rejects a check with an unknown key', async () => {
+    const checks = checksFor(validPermissionHistory())
+    ;(checks.checks[0] as unknown as Record<string, unknown>).note = 'x'
+    await expect(write({ checks })).rejects.toThrow('check has unknown key note')
+  })
+
   test('rejects a non-empty fault schedule', async () => {
     const schedule: FaultSchedule = {
       schemaVersion: FAULT_SCHEDULE_SCHEMA_VERSION,

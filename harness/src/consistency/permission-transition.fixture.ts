@@ -106,6 +106,7 @@ export function validPermissionHistory(): PermissionEvent[] {
         origin,
         rows,
         markers,
+        sentinelMarker: `sn-${epoch}`,
         complete: true,
         fresh,
         pullEchoed: true,
@@ -124,6 +125,14 @@ export function validPermissionHistory(): PermissionEvent[] {
   client('fAs2', 'nsA', 'subjectA', true, 2, [], [])
   client('fBs2', 'nsB', 'subjectB', true, 2, FULL, ['mk-B'])
 
+  // observationRefs are exactly the client observation opIds present at each
+  // epoch, derived from what was pushed above so the barrier can never drift
+  const observationRefsAt = (epoch: 0 | 1 | 2): string[] =>
+    raw
+      .filter((e) => e.type === 'client' && e.epoch === epoch)
+      .map((e) => e.opId)
+      .sort()
+
   raw.push({
     type: 'barrier',
     opId: 'bar-0',
@@ -131,6 +140,9 @@ export function validPermissionHistory(): PermissionEvent[] {
     marker: 'sn-0',
     complete: true,
     observers: ['cAo', 'cAs', 'cBs'],
+    observationRefs: observationRefsAt(0),
+    changeRef: null,
+    authorityRef: null,
   })
   raw.push({
     type: 'barrier',
@@ -139,6 +151,9 @@ export function validPermissionHistory(): PermissionEvent[] {
     marker: 'sn-1',
     complete: true,
     observers: ['cAo', 'cAs', 'cBs', 'fAs1', 'fBs1'],
+    observationRefs: observationRefsAt(1),
+    changeRef: 'grant',
+    authorityRef: 'auth-grant',
   })
   raw.push({
     type: 'barrier',
@@ -147,6 +162,9 @@ export function validPermissionHistory(): PermissionEvent[] {
     marker: 'sn-2',
     complete: true,
     observers: ['cAo', 'cAs', 'cBs', 'fAs2', 'fBs2'],
+    observationRefs: observationRefsAt(2),
+    changeRef: 'revoke',
+    authorityRef: 'auth-revoke',
   })
 
   return raw.map((e, index) => ({
