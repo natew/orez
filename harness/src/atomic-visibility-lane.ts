@@ -54,8 +54,12 @@ const effects: AtomicAppendEffect[] = projectIds.map((projectId, index) => ({
   projectId,
   rank: 1_000_000_000 + Number.parseInt(digest.slice(index * 6, index * 6 + 6), 16),
 }))
+const defaultResultsName = args.replay
+  ? `${runId}-replay-${randomUUID().slice(0, 8)}`
+  : runId
 const resultsDir =
-  args['results-dir'] ?? join('target', 'consistency', 'atomic-visibility', runId)
+  args['results-dir'] ??
+  join('target', 'consistency', 'atomic-visibility', defaultResultsName)
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 
 function sqlString(value: string): string {
@@ -222,8 +226,7 @@ try {
   assertAtomicAuthorityRows(effects, authority)
 
   const outcome = checkAtomicVisibility(recorder.snapshot())
-  const replayDir = join('target', 'consistency', 'atomic-visibility', `${runId}-replay`)
-  const replay = `bun src/atomic-visibility-lane.ts --target ${args.target} --seed ${seed} --replay --results-dir ${replayDir}`
+  const replay = `bun src/atomic-visibility-lane.ts --target ${args.target} --seed ${seed} --replay`
   const build = execFileSync('git', ['rev-parse', 'HEAD'], {
     cwd: repoRoot,
     encoding: 'utf8',
