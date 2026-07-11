@@ -302,7 +302,7 @@ try {
     resultsDir,
     recorder,
     manifest: {
-      schemaVersion: CHECKS_SCHEMA_VERSION,
+      schemaVersion: HISTORY_SCHEMA_VERSION,
       kind: 'orez-consistency-history',
       runId,
       seed: {

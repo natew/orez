@@ -111,7 +111,7 @@ async function exists(path: string): Promise<boolean> {
 }
 
 describe('consistency artifact writer', () => {
-  test('writes four schema-v1 artifacts that round-trip through validation', async () => {
+  test('keeps history/manifest v1 independent from checks v2', async () => {
     const { results } = await tempResults()
     await writeConsistencyArtifacts({
       resultsDir: results,
@@ -127,6 +127,9 @@ describe('consistency artifact writer', () => {
     const savedManifest = JSON.parse(
       await readFile(join(results, 'manifest.json'), 'utf8')
     )
+    const savedChecks = JSON.parse(await readFile(join(results, 'checks.json'), 'utf8'))
+    expect(savedManifest.schemaVersion).toBe(HISTORY_SCHEMA_VERSION)
+    expect(savedChecks.schemaVersion).toBe(CHECKS_SCHEMA_VERSION)
     expect(savedManifest.replay).toEqual(manifest().replay)
     const history = (await readFile(join(results, 'history.jsonl'), 'utf8'))
       .trim()
