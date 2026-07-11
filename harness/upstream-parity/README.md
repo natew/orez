@@ -44,17 +44,32 @@ custom-mutator push are all re-expressed black-box in the Orez lanes. See
 ## the finding that drove the first implementation
 
 `#6121` (mono `d4f33d6a6`, 2026-07-10, *after* the 1.7.0 pin): a `start()` cursor
-anchored in a NULL-sorted region compiled `col > NULL` (SQL NULL → matches
-nothing) and silently returned empty. Both stock-zero (server zqlite) and the
-Orez snapshot targets (client zqlite) evaluate `start()` through the SAME 1.7.0
-zqlite, so a **stock-vs-Orez differential is structurally blind to it**. Orez's
-own Rust server compiler handles this correctly and is tested
-(`crates/sync-core/tests/query_ast.rs::start_cursor_null_ordering`) — that is
-compiler-side; it does not cover the shared client evaluator.
+anchored on a NULL-sorted row compiled `col > NULL` (SQL NULL → matches nothing)
+and silently returned empty.
 
-The oracle-free answer is **metamorphic self-consistency** (upstream's own
-technique, `fuzz/metamorphic.ts`): a transform whose result relationship is
-known without an oracle, checked against a single target.
+**What the lane actually found (2026-07-11, verified deterministic):** running
+metamorphic against the **stock zero-cache 1.7.0 reference**, `startSuffix`
+flagged one shape — `start(dueAt asc, after {dueAt:null, id:t1}, exclusive)` —
+where stock returns `[]` but the correct answer is the 46-row ordered suffix.
+That is confirmed #6121 in the reference's **server-side sqlite table-source**.
+The **orez-local lane passes the same shape**: it ships full snapshots and
+materializes client-side, so it never pushes the start into the buggy sqlite
+fetch. Orez's own Rust server compiler also handles NULL cursors correctly and
+is tested (`crates/sync-core/tests/query_ast.rs::start_cursor_null_ordering`).
+
+Why the stock-vs-Orez **differential** misses it: the sweep generator has **no
+nullable-column start-cursor axis**, so this shape is never generated. Had it
+been, stock (`[]`) and orez-local (rows) would DIVERGE and the differential
+would also flag it — so #6121 is a *generator-coverage* miss, not a case of both
+sides being wrong. The metamorphic guard caught it **with no oracle** by
+exercising that axis on a single target. Its distinct, structural value remains
+the harder class the differential is blind to *by construction* — where both
+targets share the same wrong behavior — plus running against any one target
+(incl. CF) with no reference impl. See `../regressions/` for the recorded repro.
+
+The oracle-free technique is **metamorphic self-consistency** (upstream's own,
+`fuzz/metamorphic.ts`): a transform whose result relationship is known without an
+oracle, checked against a single target.
 
 ## the metamorphic guard (`../src/metamorphic.ts`)
 
@@ -83,6 +98,15 @@ exercises non-binding start/limit):
   and it is **not** wired into the gating CI harness job. Run it manually or in a
   nightly audit. `bun src/metamorphic-lane.ts --against orez-local`
   (`--mutate startSuffix` plants #6121 live to prove the wiring catches it.)
+  The stock-zero reference target needs a **supported Node** for the spawned
+  zero-cache (`@rocicorp/zero-sqlite3` = Node 22.x/24.x, not 25.x) and its built
+  native binding, so run it as
+  `mise x node@22 -- bun src/metamorphic-lane.ts --against stock-zero`; if the
+  binding is missing, build it once with
+  `cd node_modules/@rocicorp/zero-sqlite3 && mise x node@22 -- npm run install`.
+  The embedded-postgres dylib/soname links are recreated automatically at boot
+  (`src/targets/stock-zero.ts`). Full prerequisites are in
+  `../regressions/known-gap-zql-6121-null-start-cursor.json`.
 
 ## verify / drift
 

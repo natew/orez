@@ -5,17 +5,27 @@
 // (audited at origin/main 7139287da3c84ec5050c1eff0d9444d912d462aa;
 //  see harness/upstream-parity/ledger.json).
 //
-// WHY this exists alongside the differential (shapes.ts / sweep.ts): the
-// differential compares stock-zero vs an orez target. But for a pure query-
-// EVALUATION bug in the shared @rocicorp/zero 1.7.0 client zqlite, BOTH sides
-// evaluate the same way (stock evaluates server-side, orez ships snapshots and
-// the client evaluates) — so they agree while both being wrong, and the
-// differential is structurally blind. Upstream's own doc: metamorphic is
-// "checked IVM-vs-IVM (no oracle needed) ... a different failure mode than the
-// differential oracle: engine self-inconsistency under a transform the answer
-// is known to be invariant under." Concrete live target: #6121 (null-safe
-// start constraints), which lands AFTER the 1.7.0 pin, so a start cursor
-// anchored in a NULL-sorted region can silently return empty.
+// WHY this exists alongside the differential (shapes.ts / sweep.ts): it is
+// ORACLE-FREE — it checks a single target's self-consistency under a transform
+// whose result relationship is known, so it needs no second implementation or
+// pg oracle and runs against any one target (incl. CF). Upstream's own doc:
+// metamorphic is "checked IVM-vs-IVM (no oracle needed) ... a different failure
+// mode than the differential oracle: engine self-inconsistency under a
+// transform the answer is known to be invariant under." It catches two things a
+// stock-vs-orez differential can miss: (1) a bug in an axis the differential's
+// GENERATOR never emits, and (2) the harder class where BOTH targets share the
+// same wrong behavior (a differential is blind to shared bugs by construction).
+//
+// EMPIRICALLY (2026-07-11) it found #6121 (null-safe start constraints, lands
+// AFTER the 1.7.0 pin) — a case (1) bug: a start cursor anchored on a NULL-
+// sorted row returns EMPTY on the stock zero-cache reference (server-side sqlite
+// table-source), while orez-local returns the correct suffix (it ships full
+// snapshots and materializes client-side, so it does not push the start into
+// the buggy sqlite fetch). The stock-vs-orez differential misses it because the
+// sweep generator has no nullable-column start-cursor axis; had it emitted one,
+// the two targets would DIVERGE (stock=[], orez=rows) and the differential would
+// also catch it. The metamorphic guard caught it with no oracle by exercising
+// that axis on a single target. See harness/regressions/ for the recorded repro.
 //
 // This module is PURE (no target boot, no @rocicorp/zero import): it produces
 // transformed GenSpecs and a `relate()` that decides pass/fail/skip from two
@@ -23,6 +33,7 @@
 // and mutation-provable (metamorphic.selftest.ts) independent of any server.
 
 import { canonical } from './canonical.js'
+
 import type { GenSpec, GenWhere } from './fixture.js'
 
 // upstream's largeLimit uses 100_000 (>= their whole fixture). the orez fixture
@@ -37,9 +48,19 @@ export type Relation =
   | 'largeLimit' // a limit >= the result size is a no-op
   // stronger COMPUTED relations upstream's metamorphic layer does not do (it
   // only exercises NON-binding start/limit). these bind the window/cursor and
-  // are the catchers for the shared-zqlite NULL-cursor blind spot:
+  // are the catchers for the NULL-cursor / window semantics (#6121):
   | 'limitPrefix' // Q.limit(n) == (Q without limit) truncated to n
   | 'startSuffix' // Q.start(cursor) == (Q without start) sliced at the cursor
+
+// the closed vocabulary — used to validate CLI --mutate so a typo cannot
+// silently run unmutated and claim a wiring proof.
+export const RELATIONS: readonly Relation[] = [
+  'redundantConjunct',
+  'andReorder',
+  'largeLimit',
+  'limitPrefix',
+  'startSuffix',
+]
 
 export type RelResult = 'pass' | 'fail' | 'skip'
 
@@ -113,7 +134,10 @@ function asRows(v: unknown): Record<string, unknown>[] | null {
   return Array.isArray(v) ? (v as Record<string, unknown>[]) : null
 }
 
-export function expectedLimitPrefix(referenceRows: unknown, limit: number): RelateOutcome {
+export function expectedLimitPrefix(
+  referenceRows: unknown,
+  limit: number
+): RelateOutcome {
   const ref = asRows(referenceRows)
   if (ref === null) return { result: 'skip', detail: 'reference not an array' }
   return { result: 'pass', expected: ref.slice(0, limit) }
@@ -160,7 +184,11 @@ function computedRelate(compute: (variantRows: unknown) => RelateOutcome) {
     if (exp.result !== 'pass') return exp // skip / (already a fail is impossible here)
     return canonical(baseRows) === canonical(exp.expected)
       ? { result: 'pass' }
-      : { result: 'fail', detail: 'base does not match the computed window', expected: exp.expected }
+      : {
+          result: 'fail',
+          detail: 'base does not match the computed window',
+          expected: exp.expected,
+        }
   }
 }
 
@@ -183,7 +211,12 @@ export function metamorphicChecks(spec: GenSpec): MetamorphicCheck[] {
   // andReorder — only when the root where is an AND of >= 2 conjuncts.
   const reversed = withReversedAnd(spec)
   if (reversed) {
-    checks.push({ relation: 'andReorder', base: spec, variant: reversed, relate: equalRelate })
+    checks.push({
+      relation: 'andReorder',
+      base: spec,
+      variant: reversed,
+      relate: equalRelate,
+    })
   }
 
   // largeLimit — non-binding take; only when no limit is present and the result
@@ -220,7 +253,9 @@ export function metamorphicChecks(spec: GenSpec): MetamorphicCheck[] {
       relation: 'startSuffix',
       base: spec,
       variant: withoutStartAndLimit(spec),
-      relate: computedRelate((variantRows) => expectedStartSuffix(variantRows, start, limit)),
+      relate: computedRelate((variantRows) =>
+        expectedStartSuffix(variantRows, start, limit)
+      ),
     })
   }
 
