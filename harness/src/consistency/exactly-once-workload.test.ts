@@ -1,0 +1,63 @@
+import { describe, expect, test } from 'bun:test'
+
+import {
+  assertExpectedExactlyOncePush,
+  parseExactlyOncePush,
+  validateIncrementProbeArgs,
+} from './exactly-once-workload.js'
+
+const body = {
+  clientGroupID: 'group-1',
+  mutations: [
+    {
+      type: 'custom',
+      clientID: 'client-1',
+      id: 1,
+      name: 'exactlyOnce.incrementProbe',
+      args: [{ id: 'probe-1' }],
+    },
+  ],
+}
+
+describe('exactly-once workload boundary', () => {
+  test('parses one canonical mutation and produces a stable digest', () => {
+    const parsed = parseExactlyOncePush(body)
+    expect(parsed.identity).toEqual({
+      clientGroupId: 'group-1',
+      clientId: 'client-1',
+      mutationId: 1,
+    })
+    expect(parsed.args).toEqual({ id: 'probe-1' })
+    expect(parsed.bodyDigest).toMatch(/^[0-9a-f]{64}$/)
+    expect(parseExactlyOncePush({ ...body, timestamp: 99 }).bodyDigest).toBe(
+      parsed.bodyDigest
+    )
+  })
+
+  test('rejects zero, multiple, malformed, and mismatched mutations', () => {
+    expect(() => parseExactlyOncePush({ ...body, mutations: [] })).toThrow(
+      'exactly one mutation'
+    )
+    expect(() =>
+      parseExactlyOncePush({ ...body, mutations: [...body.mutations, ...body.mutations] })
+    ).toThrow('exactly one mutation')
+    expect(() =>
+      parseExactlyOncePush({
+        ...body,
+        mutations: [{ ...body.mutations[0], id: 0 }],
+      })
+    ).toThrow('does not match')
+    const parsed = parseExactlyOncePush(body)
+    expect(() =>
+      assertExpectedExactlyOncePush(parsed, {
+        identity: { ...parsed.identity, mutationId: 2 },
+        args: parsed.args,
+      })
+    ).toThrow('does not match the armed')
+  })
+
+  test('validates the probe id', () => {
+    expect(validateIncrementProbeArgs({ id: 'probe' })).toEqual({ id: 'probe' })
+    expect(() => validateIncrementProbeArgs({ id: '' })).toThrow('nonempty id')
+  })
+})

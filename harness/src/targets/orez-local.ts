@@ -13,6 +13,11 @@ import {
   type SyncServerConfig,
   createSyncServer,
 } from '../../../src/sync-server/sync-server'
+import {
+  assertExpectedExactlyOncePush,
+  parseExactlyOncePush,
+  type ExpectedExactlyOncePush,
+} from '../consistency/exactly-once-workload.js'
 import { TABLES, executeMutator, seedSqlite, userIDFromAuth } from '../fixture-data.js'
 import { mutators, schema } from '../fixture.js'
 // the production transport source, vendored verbatim (self-contained module,
@@ -33,6 +38,10 @@ export type OrezLocalTarget = SyncTarget & {
   invalidate(): void
   resetCursor(): void
   restart(downForMs?: number): Promise<void>
+  armExactlyOnceResponseDrop(
+    expected: ExpectedExactlyOncePush,
+    onStage: (stage: 'arm' | 'fire' | 'heal') => void
+  ): void
 }
 
 function bunSqliteDb(db: Database): SyncDb {
@@ -55,6 +64,7 @@ export async function startOrezLocal(opts?: {
   retainChanges?: number
   visible?: SyncServerConfig['visible']
   onPull?: (observation: PullObservation) => void
+  fetch?: typeof fetch
 }): Promise<OrezLocalTarget> {
   // random per run — see stock-zero.ts port note
   const port = opts?.port ?? 59_000 + Math.floor(Math.random() * 4_000)
@@ -72,6 +82,12 @@ export async function startOrezLocal(opts?: {
   })
 
   let dropPushResponse = false
+  let exactDrop:
+    | {
+        expected: ExpectedExactlyOncePush
+        onStage: (stage: 'arm' | 'fire' | 'heal') => void
+      }
+    | undefined
   const handleRequest: Parameters<typeof createServer>[0] = async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost')
@@ -83,6 +99,11 @@ export async function startOrezLocal(opts?: {
         res.statusCode = 401
         res.end(JSON.stringify({ error: 'missing auth' }))
         return
+      }
+      const parsedExact =
+        url.pathname === '/push' && exactDrop ? parseExactlyOncePush(body) : undefined
+      if (parsedExact && exactDrop) {
+        assertExpectedExactlyOncePush(parsedExact, exactDrop.expected)
       }
       const response =
         url.pathname === '/pull'
@@ -96,6 +117,14 @@ export async function startOrezLocal(opts?: {
         return
       }
       if (url.pathname === '/pull') opts?.onPull?.({ body, response })
+      if (url.pathname === '/push' && exactDrop) {
+        const drop = exactDrop
+        drop.onStage('fire')
+        exactDrop = undefined
+        drop.onStage('heal')
+        res.destroy()
+        return
+      }
       if (url.pathname === '/push' && dropPushResponse) {
         dropPushResponse = false
         res.destroy()
@@ -132,6 +161,7 @@ export async function startOrezLocal(opts?: {
   // through to the native WebSocket untouched
   const transport = ensureHttpPullTransport({
     origin,
+    fetch: opts?.fetch,
     pullIntervalMs: opts?.pullIntervalMs ?? 250,
   })
 
@@ -176,6 +206,12 @@ export async function startOrezLocal(opts?: {
 
     pull() {
       return transport.pull()
+    },
+
+    armExactlyOnceResponseDrop(expected, onStage) {
+      if (exactDrop) throw new Error('exactly-once response drop already armed')
+      exactDrop = { expected: structuredClone(expected), onStage }
+      onStage('arm')
     },
 
     invalidate() {
