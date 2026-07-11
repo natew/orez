@@ -137,7 +137,8 @@ function history(phase: TerminalPhase = 'ok'): {
     identity,
     attempt,
     source: attempt === 1 ? ('stock-client' as const) : ('harness-replay' as const),
-    bodyDigest: 'a'.repeat(64),
+    operationDigest: 'a'.repeat(64),
+    mutationTimestamp: 123456,
     rawBodySha256: 'b'.repeat(64),
   })
   recorder.record({
@@ -315,6 +316,7 @@ function addStockRetry(fixture: ReturnType<typeof history>): void {
   if (retryInvoke.exactlyOnce?.type === 'push') {
     retryInvoke.exactlyOnce.attempt = 2
     retryInvoke.exactlyOnce.rawBodySha256 = 'd'.repeat(64)
+    retryInvoke.exactlyOnce.mutationTimestamp++
   }
   const retryTerminal = structuredClone(harness.find((event) => event.phase === 'ok')!)
   retryTerminal.opId = 'push-2'
@@ -323,11 +325,42 @@ function addStockRetry(fixture: ReturnType<typeof history>): void {
     retryTerminal.exactlyOnce.attempt = 2
     retryTerminal.exactlyOnce.source = 'stock-client'
     retryTerminal.exactlyOnce.rawBodySha256 = 'd'.repeat(64)
+    retryTerminal.exactlyOnce.mutationTimestamp++
   }
   const mutationTerminal = fixture.events.findIndex(
     (event) => event.exactlyOnce?.type === 'mutation' && event.phase !== 'invoke'
   )
   fixture.events.splice(mutationTerminal, 0, retryInvoke, retryTerminal)
+  reindex(fixture.events, fixture.schedule)
+}
+
+function addAnotherStockRetry(fixture: ReturnType<typeof history>): void {
+  const harness = fixture.events.filter(
+    (event) =>
+      event.exactlyOnce?.type === 'push' && event.exactlyOnce.source === 'harness-replay'
+  )
+  const attempt = (
+    harness[0]!.exactlyOnce as Extract<ExactlyOnceEvidence, { type: 'push' }>
+  ).attempt
+  const retry = structuredClone(harness)
+  for (const event of harness) {
+    event.opId = `push-${attempt + 1}`
+    event.process = `push-${attempt + 1}`
+    if (event.exactlyOnce?.type === 'push') event.exactlyOnce.attempt++
+  }
+  for (const event of retry) {
+    event.opId = `push-${attempt}`
+    event.process = `push-${attempt}`
+    if (event.exactlyOnce?.type === 'push') {
+      event.exactlyOnce.source = 'stock-client'
+      event.exactlyOnce.rawBodySha256 = String(attempt).repeat(64).slice(0, 64)
+      event.exactlyOnce.mutationTimestamp += attempt
+    }
+  }
+  const mutationTerminal = fixture.events.findIndex(
+    (event) => event.exactlyOnce?.type === 'mutation' && event.phase !== 'invoke'
+  )
+  fixture.events.splice(mutationTerminal, 0, ...retry)
   reindex(fixture.events, fixture.schedule)
 }
 
@@ -373,6 +406,8 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
       violations: [],
       reports: [
         'pullLmidObserved=true stockRetryCount=0',
+        'stockRetryTimestamps=none',
+        'stockRetryTimestampDriftCount=0',
         'final harness replay was already processed',
         'neither stock retry nor pull recovery is universally required',
       ],
@@ -394,6 +429,26 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
     const both = history()
     addStockRetry(both)
     expect(checkExactlyOnceLmid(both.events, both.schedule).status).toBe('pass')
+
+    const retryBeforePull = history()
+    addStockRetry(retryBeforePull)
+    const retryEvents = retryBeforePull.events.filter(
+      (event) =>
+        event.exactlyOnce?.type === 'push' &&
+        event.exactlyOnce.source === 'stock-client' &&
+        event.exactlyOnce.attempt === 2
+    )
+    retryBeforePull.events = retryBeforePull.events.filter(
+      (event) => !retryEvents.includes(event)
+    )
+    const pullTerminal = retryBeforePull.events.findIndex(
+      (event) => event.exactlyOnce?.type === 'pull' && event.phase === 'ok'
+    )
+    retryBeforePull.events.splice(pullTerminal, 0, ...retryEvents)
+    reindex(retryBeforePull.events, retryBeforePull.schedule)
+    expect(
+      checkExactlyOnceLmid(retryBeforePull.events, retryBeforePull.schedule).status
+    ).toBe('pass')
 
     const nullThenRetry = history()
     addStockRetry(nullThenRetry)
@@ -463,6 +518,62 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
           )!.phase = 'info'
         },
       ],
+      [
+        'pending push at close',
+        ({ events }) => {
+          const event = events.find(
+            (candidate) =>
+              candidate.exactlyOnce?.type === 'client-quiesce' && candidate.phase === 'ok'
+          )!
+          if (event.exactlyOnce?.type === 'client-quiesce' && event.exactlyOnce.observed)
+            event.exactlyOnce.observed.pendingPushAtClose = 1
+        },
+      ],
+      [
+        'nonzero pending after quiesce',
+        ({ events }) => {
+          const event = events.find(
+            (candidate) =>
+              candidate.exactlyOnce?.type === 'client-quiesce' && candidate.phase === 'ok'
+          )!
+          if (event.exactlyOnce?.type === 'client-quiesce' && event.exactlyOnce.observed)
+            event.exactlyOnce.observed.pendingAfterQuiesce = 1
+        },
+      ],
+      [
+        'quiesce invoke before mutation terminal',
+        (fixture) => {
+          const index = fixture.events.findIndex(
+            (event) =>
+              event.exactlyOnce?.type === 'client-quiesce' && event.phase === 'invoke'
+          )
+          const [invoke] = fixture.events.splice(index, 1)
+          const mutationTerminal = fixture.events.findIndex(
+            (event) => event.exactlyOnce?.type === 'mutation' && event.phase !== 'invoke'
+          )
+          fixture.events.splice(mutationTerminal, 0, invoke!)
+          reindex(fixture.events, fixture.schedule)
+        },
+      ],
+      [
+        'after authority invoked before replay',
+        (fixture) => {
+          const index = fixture.events.findIndex(
+            (event) =>
+              event.exactlyOnce?.type === 'authority' &&
+              event.exactlyOnce.observation === 'after' &&
+              event.phase === 'invoke'
+          )
+          const [invoke] = fixture.events.splice(index, 1)
+          const replay = fixture.events.findIndex(
+            (event) =>
+              event.exactlyOnce?.type === 'push' &&
+              event.exactlyOnce.source === 'harness-replay'
+          )
+          fixture.events.splice(replay, 0, invoke!)
+          reindex(fixture.events, fixture.schedule)
+        },
+      ],
     ]
     for (const [label, mutate] of cases) {
       const fixture = history()
@@ -489,6 +600,70 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
         event.exactlyOnce.observed[field] = -0
       expect(validateHistory(fixture.events).valid, field).toBe(false)
     }
+  })
+
+  test('rejects bounded-recovery and final-replay cardinality mutants', () => {
+    const fourRetries = history()
+    addStockRetry(fourRetries)
+    addAnotherStockRetry(fourRetries)
+    addAnotherStockRetry(fourRetries)
+    addAnotherStockRetry(fourRetries)
+    expect(checkExactlyOnceLmid(fourRetries.events, fourRetries.schedule).status).toBe(
+      'fail'
+    )
+
+    for (const mode of ['missing', 'duplicate'] as const) {
+      const fixture = history()
+      const harness = fixture.events.filter(
+        (event) =>
+          event.exactlyOnce?.type === 'push' &&
+          event.exactlyOnce.source === 'harness-replay'
+      )
+      if (mode === 'missing')
+        fixture.events = fixture.events.filter((event) => !harness.includes(event))
+      else fixture.events.splice(-2, 0, ...structuredClone(harness))
+      reindex(fixture.events, fixture.schedule)
+      expect(checkExactlyOnceLmid(fixture.events, fixture.schedule).status, mode).toBe(
+        'fail'
+      )
+    }
+  })
+
+  test('rejects stock push and pull traffic after quiescence', () => {
+    const latePull = history()
+    addStockRetry(latePull)
+    const pulls = latePull.events.filter((event) => event.exactlyOnce?.type === 'pull')
+    latePull.events = latePull.events.filter((event) => !pulls.includes(event))
+    const afterQuiesce = latePull.events.findIndex(
+      (event) => event.exactlyOnce?.type === 'client-quiesce' && event.phase === 'ok'
+    )
+    latePull.events.splice(afterQuiesce + 1, 0, ...pulls)
+    reindex(latePull.events, latePull.schedule)
+    expect(checkExactlyOnceLmid(latePull.events, latePull.schedule).violations).toContain(
+      'stock protocol traffic occurred after client quiescence'
+    )
+
+    const latePush = history()
+    const stock = latePush.events
+      .filter(
+        (event) =>
+          event.exactlyOnce?.type === 'push' &&
+          event.exactlyOnce.source === 'stock-client'
+      )
+      .map((event) => structuredClone(event))
+    for (const event of stock) {
+      event.opId = 'late-stock-push'
+      event.process = 'late-stock-push'
+      if (event.exactlyOnce?.type === 'push') event.exactlyOnce.attempt = 3
+    }
+    const quiesced = latePush.events.findIndex(
+      (event) => event.exactlyOnce?.type === 'client-quiesce' && event.phase === 'ok'
+    )
+    latePush.events.splice(quiesced + 1, 0, ...stock)
+    reindex(latePush.events, latePush.schedule)
+    expect(checkExactlyOnceLmid(latePush.events, latePush.schedule).violations).toContain(
+      'stock protocol traffic occurred after client quiescence'
+    )
   })
 
   test('duplicate application is a safety failure even with terminal info', () => {
@@ -524,7 +699,8 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
       (event) => event.exactlyOnce?.type === 'push' && event.exactlyOnce.attempt === 2
     )
     for (const event of push2) {
-      if (event.exactlyOnce?.type === 'push') event.exactlyOnce.bodyDigest = 'different'
+      if (event.exactlyOnce?.type === 'push')
+        event.exactlyOnce.operationDigest = 'different'
     }
     expect(checkExactlyOnceLmid(digest.events, digest.schedule).violations).toContain(
       'final harness replay does not match captured push 1'

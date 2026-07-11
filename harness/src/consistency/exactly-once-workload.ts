@@ -12,7 +12,8 @@ export type ExpectedExactlyOncePush = {
 }
 
 export type ParsedExactlyOncePush = ExpectedExactlyOncePush & {
-  bodyDigest: string
+  operationDigest: string
+  mutationTimestamp: number
 }
 
 export function validateIncrementProbeArgs(value: unknown): IncrementProbeArgs {
@@ -87,7 +88,7 @@ export function parseExactlyOncePush(body: unknown): ParsedExactlyOncePush {
     clientGroupId: value.clientGroupID,
     clientId: raw.clientID,
     mutationId: Number(raw.id),
-    timestamp: Number(raw.timestamp),
+    type: 'custom',
     name: EXACTLY_ONCE_MUTATOR,
     pushVersion: 1,
     args,
@@ -99,7 +100,8 @@ export function parseExactlyOncePush(body: unknown): ParsedExactlyOncePush {
       mutationId: canonical.mutationId,
     },
     args,
-    bodyDigest: createHash('sha256').update(JSON.stringify(canonical)).digest('hex'),
+    operationDigest: createHash('sha256').update(JSON.stringify(canonical)).digest('hex'),
+    mutationTimestamp: Number(raw.timestamp),
   }
 }
 

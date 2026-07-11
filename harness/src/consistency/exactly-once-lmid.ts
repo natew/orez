@@ -185,7 +185,7 @@ export function checkExactlyOnceLmid(
   if (
     pushes.some(
       (pair) =>
-        !/^[0-9a-f]{64}$/.test(pair.invoke.exactlyOnce.bodyDigest) ||
+        !/^[0-9a-f]{64}$/.test(pair.invoke.exactlyOnce.operationDigest) ||
         !/^[0-9a-f]{64}$/.test(pair.invoke.exactlyOnce.rawBodySha256)
     )
   ) {
@@ -208,7 +208,10 @@ export function checkExactlyOnceLmid(
     )
   }
   for (const retry of stockPushes.slice(1)) {
-    if (retry.invoke.exactlyOnce.bodyDigest !== first?.invoke.exactlyOnce.bodyDigest)
+    if (
+      retry.invoke.exactlyOnce.operationDigest !==
+      first?.invoke.exactlyOnce.operationDigest
+    )
       violations.push(
         `stock retry ${retry.invoke.exactlyOnce.attempt} changed semantic body`
       )
@@ -220,10 +223,12 @@ export function checkExactlyOnceLmid(
   const harnessReplay = harnessPushes[0]
   if (
     harnessReplay &&
-    (harnessReplay.invoke.exactlyOnce.bodyDigest !==
-      first?.invoke.exactlyOnce.bodyDigest ||
+    (harnessReplay.invoke.exactlyOnce.operationDigest !==
+      first?.invoke.exactlyOnce.operationDigest ||
       harnessReplay.invoke.exactlyOnce.rawBodySha256 !==
-        first?.invoke.exactlyOnce.rawBodySha256)
+        first?.invoke.exactlyOnce.rawBodySha256 ||
+      harnessReplay.invoke.exactlyOnce.mutationTimestamp !==
+        first?.invoke.exactlyOnce.mutationTimestamp)
   )
     violations.push('final harness replay does not match captured push 1')
   if (!alreadyProcessed(harnessReplay))
@@ -411,9 +416,11 @@ export function checkExactlyOnceLmid(
     violations.push('client quiesce drain counts do not match recorded operations')
   const suffix = [
     mutation?.terminal?.index,
+    quiesce?.invoke.index,
     quiesce?.terminal?.index,
     harnessReplay?.invoke.index,
     harnessReplay?.terminal?.index,
+    after?.invoke.index,
     after?.terminal?.index,
   ]
   if (
@@ -456,6 +463,21 @@ export function checkExactlyOnceLmid(
     violations: [],
     reports: [
       `pullLmidObserved=${String(pullRecovered)} stockRetryCount=${stockRetryCount}`,
+      `stockRetryTimestamps=${
+        stockPushes
+          .slice(1)
+          .map((pair) => pair.invoke.exactlyOnce.mutationTimestamp)
+          .join(',') || 'none'
+      }`,
+      `stockRetryTimestampDriftCount=${
+        stockPushes
+          .slice(1)
+          .filter(
+            (pair) =>
+              pair.invoke.exactlyOnce.mutationTimestamp !==
+              first?.invoke.exactlyOnce.mutationTimestamp
+          ).length
+      }`,
       'final harness replay was already processed',
       'neither stock retry nor pull recovery is universally required',
     ],

@@ -32,15 +32,20 @@ describe('exactly-once workload boundary', () => {
       mutationId: 1,
     })
     expect(parsed.args).toEqual({ id: 'probe-1' })
-    expect(parsed.bodyDigest).toMatch(/^[0-9a-f]{64}$/)
+    expect(parsed.operationDigest).toMatch(/^[0-9a-f]{64}$/)
+    expect(parsed.mutationTimestamp).toBe(123456)
     expect(
-      parseExactlyOncePush({ ...body, requestID: 'different', timestamp: 999 }).bodyDigest
-    ).toBe(parsed.bodyDigest)
+      parseExactlyOncePush({ ...body, requestID: 'different', timestamp: 999 })
+        .operationDigest
+    ).toBe(parsed.operationDigest)
     const changedTimestamp = {
       ...body,
       mutations: [{ ...body.mutations[0], timestamp: 123457 }],
     }
-    expect(parseExactlyOncePush(changedTimestamp).bodyDigest).not.toBe(parsed.bodyDigest)
+    expect(parseExactlyOncePush(changedTimestamp).operationDigest).toBe(
+      parsed.operationDigest
+    )
+    expect(parseExactlyOncePush(changedTimestamp).mutationTimestamp).toBe(123457)
   })
 
   test('rejects zero, multiple, malformed, and mismatched mutations', () => {

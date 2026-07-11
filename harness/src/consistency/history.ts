@@ -73,7 +73,8 @@ export type ExactlyOnceEvidence =
       identity: ExactlyOnceIdentity
       attempt: number
       source: 'stock-client' | 'harness-replay'
-      bodyDigest: string
+      operationDigest: string
+      mutationTimestamp: number
       rawBodySha256: string
       observed:
         | null
@@ -272,9 +273,10 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
     'client-quiesce': ['identity', 'observed', 'profileVersion', 'type'],
     push: [
       'attempt',
-      'bodyDigest',
       'identity',
+      'mutationTimestamp',
       'observed',
+      'operationDigest',
       'profileVersion',
       'rawBodySha256',
       'source',
@@ -367,7 +369,10 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
   }
   if (
     raw.type === 'push' &&
-    (!nonemptyString(raw.bodyDigest) || !nonemptyString(raw.rawBodySha256))
+    (!nonemptyString(raw.operationDigest) ||
+      !Number.isSafeInteger(raw.mutationTimestamp) ||
+      Number(raw.mutationTimestamp) <= 0 ||
+      !nonemptyString(raw.rawBodySha256))
   ) {
     violations.push(`event ${event.index} has malformed push body digest`)
     return false
