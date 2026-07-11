@@ -1388,8 +1388,10 @@ describe('DoBackend', () => {
 
   test('reloads a stale internal-only catalog after out-of-band schema provisioning', async () => {
     let provisioned = false
+    let metadataSelects = 0
     const http = await startDoHttp((sql) => {
-      if (sql.includes("WHERE kind = 'schema-column'")) {
+      if (sql.includes('FROM "_orez_pg_metadata"')) {
+        metadataSelects++
         const userMetadata = {
           kind: 'schema-column',
           key: 'user',
@@ -1513,6 +1515,7 @@ describe('DoBackend', () => {
         elemTypname: null,
       },
     ])
+    expect(metadataSelects).toBe(1)
     provisioned = true
     expect((await backend.query(catalogSQL)).rows).toEqual([
       {
@@ -1542,6 +1545,7 @@ describe('DoBackend', () => {
         elemTypname: null,
       },
     ])
+    expect(metadataSelects).toBe(1)
   })
 
   test('tracks parser-backed publication membership without private table lists', async () => {

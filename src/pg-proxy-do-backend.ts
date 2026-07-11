@@ -7546,7 +7546,7 @@ export class DoBackend {
     // same SQL DO as the physical tables, so make it authoritative for column
     // introspection while still requiring each physical table to exist. This
     // keeps schema validation honest if stale metadata survives a real DROP.
-    await this.reloadSchemaMetadataIfEmpty(zeroServerSchemaQuery)
+    await this.reloadSchemaMetadataIfEmpty()
     const physicalTables = new Set(
       (await this.listSqliteTables()).map((table) => table.name)
     )
