@@ -1,0 +1,60 @@
+name: Rust differential nightly
+
+on:
+  schedule:
+    - cron: "23 10 * * *"
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: Proptest cases to generate
+        required: false
+        default: "512"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROPTEST_CASES: ${{ inputs.cases || '512' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The TypeScript reference oracle uses only Bun's built-in SQLite; no
+      # package installation or other runtime is required.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-differential-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-differential-${{ runner.os }}-
+            rust-${{ runner.os }}-
+
+      # Runs both the stable 8x200 corpus and the shrinkable generated lane.
+      - name: Rust versus TypeScript differential
+        run: cargo test -p sync-core --test differential -- --nocapture
+
+      - name: upload minimized regressions and preserved traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-differential-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            crates/sync-core/proptest-regressions/differential.txt
+            /tmp/sync-core-diff-*.json
+          if-no-files-found: warn
+          retention-days: 14
