@@ -82,6 +82,78 @@ try {
   })
   assert.equal(firstPushResponse.status, 200)
 
+  // First-push provisioning and delegated endpoint construction must remain
+  // namespace-local under contention. Boot several namespaces concurrently,
+  // push a unique row through APP into each DATA object, then prove no engine
+  // observes a peer namespace's row. This is the host-side boundary for the
+  // production failure class where an app permission read reached singleton.
+  const isolatedNamespaces = Array.from(
+    { length: 8 },
+    (_, index) => `isolated-${index}-${crypto.randomUUID()}`
+  )
+  const isolatedPushes = await Promise.all(
+    isolatedNamespaces.map((isolatedNamespace, index) =>
+      fetch(`${base}/${isolatedNamespace}/push`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer token-user-a',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          clientGroupID: `isolated-group-${index}`,
+          pushVersion: 1,
+          mutations: [
+            {
+              type: 'custom',
+              clientID: `isolated-writer-${index}`,
+              id: 1,
+              name: 'item.insert',
+              args: [
+                {
+                  id: `isolated-row-${index}`,
+                  label: `namespace ${index}`,
+                  rank: index,
+                  done: false,
+                  meta: { isolatedNamespace },
+                },
+              ],
+            },
+          ],
+        }),
+      })
+    )
+  )
+  assert.deepEqual(
+    isolatedPushes.map((response) => response.status),
+    isolatedNamespaces.map(() => 200)
+  )
+  const isolatedPulls = await Promise.all(
+    isolatedNamespaces.map((isolatedNamespace, index) =>
+      fetch(`${base}/${isolatedNamespace}/pull`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer token-user-a',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          clientID: `isolated-reader-${index}`,
+          clientGroupID: `isolated-reader-group-${index}`,
+          cookie: null,
+        }),
+      }).then(async (response) => ({
+        status: response.status,
+        body: await response.json(),
+      }))
+    )
+  )
+  for (const [index, response] of isolatedPulls.entries()) {
+    assert.equal(response.status, 200)
+    const rowIDs = response.body.rowsPatch
+      .filter((entry) => entry.op === 'put' && entry.tableName === 'item')
+      .map((entry) => entry.value.id)
+    assert.deepEqual(rowIDs, [`isolated-row-${index}`])
+  }
+
   // The data DO itself must order a query that arrives just before the deploy
   // shim's migration instead of returning `no such table` immediately.
   const lateTableNamespace = `late-table-${crypto.randomUUID()}`

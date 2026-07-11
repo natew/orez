@@ -172,6 +172,9 @@ jobs:
       - name: sync-native format check
         run: cargo fmt -p sync-native -- --check
 
+      - name: workspace clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       # run every crate's test suite, not just sync-native: sync-core carries
       # the query-compiler + permission regression tests behind the review
       # fixes, and they must be enforced here rather than left unrun.

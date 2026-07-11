@@ -187,13 +187,12 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
         &[],
     )?;
     // Additive migration for stores created before upstream ingest existed.
-    let has_upstream_watermark = db
+    let has_upstream_watermark = !db
         .query(
             "SELECT name FROM pragma_table_info('_zsync_meta') WHERE name = 'upstream_watermark'",
             &[],
         )?
-        .first()
-        .is_some();
+        .is_empty();
     if !has_upstream_watermark {
         db.exec(
             "ALTER TABLE _zsync_meta ADD COLUMN upstream_watermark INTEGER NOT NULL DEFAULT 0",

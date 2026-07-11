@@ -201,54 +201,6 @@ pub fn to_zero_value_json(ty: ZeroColumnType, raw: Value) -> Value {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::{ZeroColumnType, timestamp_text_to_epoch_ms, zero_row};
-    use crate::db::{Row, SqlValue};
-    use crate::schema::TableSpec;
-
-    #[test]
-    fn parses_sql_and_iso_timestamps_as_utc_epoch_milliseconds() {
-        assert_eq!(
-            timestamp_text_to_epoch_ms("2026-07-11 13:34:46"),
-            Some(1_783_776_886_000)
-        );
-        assert_eq!(
-            timestamp_text_to_epoch_ms("2026-07-11T13:34:46.123Z"),
-            Some(1_783_776_886_123)
-        );
-        assert_eq!(
-            timestamp_text_to_epoch_ms("2026-07-11 13:34:46.123"),
-            Some(1_783_776_886_123)
-        );
-        assert_eq!(
-            timestamp_text_to_epoch_ms("2026-07-11T03:34:46-10:00"),
-            Some(1_783_776_886_000)
-        );
-    }
-
-    #[test]
-    fn invalid_schema_number_text_is_an_error_not_a_string_on_the_wire() {
-        let spec = TableSpec {
-            columns: vec![("createdAt".into(), ZeroColumnType::Number)],
-            primary_key: vec![],
-        };
-        let row = Row {
-            columns: Arc::from(["createdAt".to_string()]),
-            values: vec![SqlValue::Text("not-a-number-or-date".into())],
-        };
-        let error = zero_row(&spec, &row).unwrap_err();
-        assert_eq!(error.status, 500);
-        assert!(
-            error
-                .message
-                .contains("cannot convert schema-number column createdAt")
-        );
-    }
-}
-
 // the reference core's boolean coercion: raw === 1 || '1' || 'true' || 't'
 fn is_truthy(raw: &Value) -> bool {
     match raw {
@@ -296,4 +248,52 @@ pub fn zero_pk_id(
         id.insert(col.clone(), converted);
     }
     Ok(Value::Object(id))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{ZeroColumnType, timestamp_text_to_epoch_ms, zero_row};
+    use crate::db::{Row, SqlValue};
+    use crate::schema::TableSpec;
+
+    #[test]
+    fn parses_sql_and_iso_timestamps_as_utc_epoch_milliseconds() {
+        assert_eq!(
+            timestamp_text_to_epoch_ms("2026-07-11 13:34:46"),
+            Some(1_783_776_886_000)
+        );
+        assert_eq!(
+            timestamp_text_to_epoch_ms("2026-07-11T13:34:46.123Z"),
+            Some(1_783_776_886_123)
+        );
+        assert_eq!(
+            timestamp_text_to_epoch_ms("2026-07-11 13:34:46.123"),
+            Some(1_783_776_886_123)
+        );
+        assert_eq!(
+            timestamp_text_to_epoch_ms("2026-07-11T03:34:46-10:00"),
+            Some(1_783_776_886_000)
+        );
+    }
+
+    #[test]
+    fn invalid_schema_number_text_is_an_error_not_a_string_on_the_wire() {
+        let spec = TableSpec {
+            columns: vec![("createdAt".into(), ZeroColumnType::Number)],
+            primary_key: vec![],
+        };
+        let row = Row {
+            columns: Arc::from(["createdAt".to_string()]),
+            values: vec![SqlValue::Text("not-a-number-or-date".into())],
+        };
+        let error = zero_row(&spec, &row).unwrap_err();
+        assert_eq!(error.status, 500);
+        assert!(
+            error
+                .message
+                .contains("cannot convert schema-number column createdAt")
+        );
+    }
 }
