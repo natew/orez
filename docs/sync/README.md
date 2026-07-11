@@ -50,15 +50,15 @@ state is a last-mutation-id and the client-group to user binding.
 
 ## Where the code lives
 
-| Path | What it is |
-| --- | --- |
-| `crates/sync-core` | The deterministic Rust sync engine. |
-| `crates/sync-wasm` | The `wasm-bindgen` wrapper that compiles the engine for the DO host. |
-| `crates/sync-native` | A standalone axum host for the same engine. |
-| `packages/sync-cf-host` | The Cloudflare Durable Object host, published as `orez-sync-cf-host`. |
-| `src/sync-server/sync-server.ts` | The TypeScript reference implementation and Node mount. |
-| `src/cf-do/worker.ts` | The data worker (`ZeroSqlDO`) that owns writes and serves the change feed. |
-| `harness/` | The conformance and qualification test harness. |
+| Path                             | What it is                                                                 |
+| -------------------------------- | -------------------------------------------------------------------------- |
+| `crates/sync-core`               | The deterministic Rust sync engine.                                        |
+| `crates/sync-wasm`               | The `wasm-bindgen` wrapper that compiles the engine for the DO host.       |
+| `crates/sync-native`             | A standalone axum host for the same engine.                                |
+| `packages/sync-cf-host`          | The Cloudflare Durable Object host, published as `orez-sync-cf-host`.      |
+| `src/sync-server/sync-server.ts` | The TypeScript reference implementation and Node mount.                    |
+| `src/cf-do/worker.ts`            | The data worker (`ZeroSqlDO`) that owns writes and serves the change feed. |
+| `harness/`                       | The conformance and qualification test harness.                            |
 
 The broader orez project is a local Zero development stack (run Zero on PGlite or
 embedded Postgres with no native dependencies, see the repository README). The

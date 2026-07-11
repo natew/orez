@@ -26,11 +26,15 @@ export const chatConfig: SyncHostConfig = {
   queryAware: true,
   resolveQuery: (name, args, claims, env) => resolveQuery(name, args, claims, env),
   queryTransformVersion: 1,
-  mutators: chatMutators,          // DO-local push, no upstream
-  initialize(sql) { initializeChatSchema(sql) },
-  async authenticate(request, env) { /* resolve better-auth session */ },
+  mutators: chatMutators, // DO-local push, no upstream
+  initialize(sql) {
+    initializeChatSchema(sql)
+  },
+  async authenticate(request, env) {
+    /* resolve better-auth session */
+  },
   namespace(request) {
-    return new URL(request.url).pathname.split('/')[1] || null  // one DO per serverId
+    return new URL(request.url).pathname.split('/')[1] || null // one DO per serverId
   },
 }
 ```
@@ -79,11 +83,11 @@ export function createSootSyncConfig(authenticate) {
   return {
     hostVersion: 'soot-rust-sync-0.2',
     schema: sootZeroSchema,
-    mutateUrl: '/api/zero/push?schema=soot_0&appID=soot',   // delegated push
+    mutateUrl: '/api/zero/push?schema=soot_0&appID=soot', // delegated push
     mutateBinding: 'APP',
     upstream: {
       binding: 'DATA',
-      namespacePath: upstreamPathForNamespace,              // ns -> /soot or /proj-<id>
+      namespacePath: upstreamPathForNamespace, // ns -> /soot or /proj-<id>
     },
     initialize: initializeSootSchema,
     authenticate,
@@ -125,15 +129,15 @@ deploy-only entrypoint; the everyday worker ships test auth.
 
 ## How they differ
 
-| Aspect | Chat (live) | Soot (mid-cutover) |
-| --- | --- | --- |
-| Push | DO-local `mutators` | Delegated `mutateUrl` + `mutateBinding` |
-| Upstream ingest | none | `upstream` from the `DATA` feed |
-| Service bindings | `APP` only | `APP` and `DATA` |
-| Query transform | app `/api/zero/pull` over `APP` | app `/api/zero/pull` over `APP` (same) |
-| Auth | app `/api/auth/get-session` | app `/api/zero/rust-auth` |
-| Namespace | one DO per server id | control and project planes |
-| Tuning | all default | explicit caps, retention, idle, wake |
+| Aspect           | Chat (live)                     | Soot (mid-cutover)                      |
+| ---------------- | ------------------------------- | --------------------------------------- |
+| Push             | DO-local `mutators`             | Delegated `mutateUrl` + `mutateBinding` |
+| Upstream ingest  | none                            | `upstream` from the `DATA` feed         |
+| Service bindings | `APP` only                      | `APP` and `DATA`                        |
+| Query transform  | app `/api/zero/pull` over `APP` | app `/api/zero/pull` over `APP` (same)  |
+| Auth             | app `/api/auth/get-session`     | app `/api/zero/rust-auth`               |
+| Namespace        | one DO per server id            | control and project planes              |
+| Tuning           | all default                     | explicit caps, retention, idle, wake    |
 
 The reason Chat is local-mutator while Soot is delegated is timing. When Chat
 deployed, the engine had no upstream-ingest mode, so a delegated push would have
@@ -159,7 +163,7 @@ Then choose exactly one push model:
   live in the host.
 - **Delegated** (like Soot): `mutateUrl` (an absolute path on the app),
   `mutateBinding` (defaults to `upstream.binding`), and a required `upstream:
-  {binding, namespacePath}`. Right when writes must run in the app worker, when
+{binding, namespacePath}`. Right when writes must run in the app worker, when
   server-side effects (jobs, projections, notifications) run outside the sync
   path, or when the app already owns a real push endpoint.
 
