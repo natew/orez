@@ -17,24 +17,56 @@
 //   bun src/metamorphic-lane.ts --against orez-cf
 //   bun src/metamorphic-lane.ts --mutate startSuffix  # plant #6121 live: proves
 //                                                       # the wiring catches it
-import { mkdirSync, writeFileSync } from 'node:fs'
+//   bun src/metamorphic-lane.ts --replay regressions/known-gap-....json \
+//        --against stock-zero                          # replay ONE committed
+//                                                       # known-gap fixture
+//
+// --replay executes EXACTLY the recorded spec+relation from the fixture (not the
+// generator), gated by a SEED fingerprint so it is stable across BOTH generator
+// and fixture-data edits (a SEED change fails loud). exit semantics: a recorded
+// 'fail' that still REPRODUCES exits 1 (the known product failure is real, never
+// dressed green); a recorded 'pass' that still holds exits 0; any mismatch,
+// corrupt/inapplicable/target-mismatch/data-drift fixture exits 2. it never
+// falls through to regenerating the mutable corpus, and writes no artifact.
+import { createHash } from 'node:crypto'
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 
+import { canonical } from './canonical.js'
 import { SEED, queries, type GenSpec } from './fixture.js'
-import { metamorphicChecks, RELATIONS, type Relation } from './metamorphic.js'
+import {
+  metamorphicChecks,
+  parseFixture,
+  replayVerdict,
+  RELATIONS,
+  type MetamorphicCheck,
+  type RelateOutcome,
+  type Relation,
+} from './metamorphic.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: {
-    against: { type: 'string', default: 'orez-local' },
+    // no default: replay resolves the target from the fixture; the generator
+    // lane falls back to orez-local explicitly (args.against ?? 'orez-local').
+    against: { type: 'string' },
     // plant a bug in the live result of one relation to prove the lane catches
     // it end-to-end (demonstration; not for normal runs)
     mutate: { type: 'string' },
+    // replay ONE committed known-gap fixture instead of running the generator
+    replay: { type: 'string' },
   },
 })
+
+// --replay and --mutate are mutually exclusive: replaying a recorded product
+// outcome must never run under an injected mutation.
+if (args.replay && args.mutate) {
+  console.error('[metamorphic] --replay and --mutate are mutually exclusive')
+  process.exit(2)
+}
 
 // validate --mutate against the closed relation vocabulary so a typo cannot
 // silently run unmutated and falsely claim a wiring proof.
@@ -43,6 +75,87 @@ if (args.mutate !== undefined && !RELATIONS.includes(args.mutate as Relation)) {
     `[metamorphic] invalid --mutate '${args.mutate}'. valid relations: ${RELATIONS.join(', ')}`
   )
   process.exit(2)
+}
+
+// deterministic full SHA-256 of the fixture-data SEED a known-gap was captured
+// against (permanent provenance). canonical() sorts object keys, so this is
+// stable across runs.
+function seedFingerprint(): string {
+  return createHash('sha256').update(canonical(SEED)).digest('hex')
+}
+
+// --replay: execute EXACTLY one committed known-gap fixture's spec+relation
+// against a live target and assert its recorded outcome still holds. never
+// regenerates the mutable corpus; a corrupt/inapplicable fixture or a stale
+// record fails loud (exit 2). declared as a hoisted function; helpers below are
+// hoisted too.
+async function runReplay(file: string): Promise<never> {
+  let fixture: ReturnType<typeof parseFixture>
+  try {
+    fixture = parseFixture(readFileSync(file, 'utf-8'))
+  } catch (error) {
+    console.error(`[replay] corrupt/invalid fixture ${file}: ${error}`)
+    process.exit(2)
+  }
+  // fixture.target is the source of truth. an EXPLICIT --against that differs is
+  // a mismatch (exit 2), not a silent override.
+  if (args.against !== undefined && args.against !== fixture.target) {
+    console.error(
+      `[replay] --against ${args.against} != fixture.target ${fixture.target} — refusing to replay against a different target`
+    )
+    process.exit(2)
+  }
+  // SEED fingerprint gate BEFORE boot: a fixture-data change must fail loud, not
+  // silently reinterpret the repro against different data.
+  const currentFp = seedFingerprint()
+  if (fixture.sourceFingerprint !== currentFp) {
+    console.error(
+      `[replay] SEED fingerprint mismatch: fixture ${fixture.sourceFingerprint} != current ${currentFp} — the fixture-data SEED changed; re-capture the repro`
+    )
+    process.exit(2)
+  }
+  // the derived reference (base minus start/limit) must match the recorded one.
+  const check = metamorphicChecks(fixture.spec).find(
+    (c) => c.relation === fixture.relation
+  )!
+  if (fixture.reference && canonical(check.variant) !== canonical(fixture.reference)) {
+    console.error('[replay] derived reference does not match the recorded reference')
+    process.exit(2)
+  }
+  console.log(
+    `[replay] fixture=${fixture.id} relation=${fixture.relation} target=${fixture.target} expect=${fixture.expectOutcome} seed=${currentFp.slice(0, 12)}…`
+  )
+  const target = await startAgainst(fixture.target)
+  let verdict = replayVerdict('skip', fixture.expectOutcome)
+  try {
+    const zero = target.createClient('user-1')
+    const baseRows = await materialize(zero, check.base)
+    const variantRows = await materialize(zero, check.variant)
+    const outcome = check.relate(baseRows, variantRows)
+    verdict = replayVerdict(outcome.result, fixture.expectOutcome)
+    // consume expectedRowCount: the computed window length must match the record
+    // (a second data-drift guard beyond the fingerprint).
+    if (verdict.exitCode !== 2 && fixture.expectedRowCount !== undefined) {
+      const got = Array.isArray(outcome.expected) ? outcome.expected.length : undefined
+      if (got !== fixture.expectedRowCount) {
+        verdict = {
+          exitCode: 2,
+          status: 'mismatch',
+          message: `computed window length ${got ?? '(none)'} != recorded ${fixture.expectedRowCount} — data drift`,
+        }
+      }
+    }
+    console.log(
+      `[replay] observed=${outcome.result} -> ${verdict.status}: ${verdict.message}`
+    )
+  } finally {
+    await target.close()
+  }
+  process.exit(verdict.exitCode)
+}
+
+if (args.replay) {
+  await runReplay(args.replay)
 }
 
 // ---------------------------------------------------------------------------
@@ -198,16 +311,42 @@ async function materialize(zero: FixtureZero, spec: GenSpec): Promise<unknown> {
 
 const REGRESSIONS_DIR = join(import.meta.dirname, '..', 'regressions')
 
-function recordRepro(entry: Record<string, unknown>): string {
+// a real finding is written in the SAME replayable schema parseFixture reads, so
+// it is immediately `--replay`-able (id, spec, derived reference, expectOutcome,
+// SEED fingerprint, expected row count, and a --replay command pointing to
+// itself). filename is derived from relation+spec so re-finding overwrites the
+// same file (no timestamp churn). synthetic --mutate failures write NOTHING.
+function recordRepro(
+  check: MetamorphicCheck,
+  outcome: RelateOutcome,
+  targetName: string,
+  label: string
+): string {
   mkdirSync(REGRESSIONS_DIR, { recursive: true })
-  const file = join(
-    REGRESSIONS_DIR,
-    `metamorphic-${args.against}-${entry.relation}-${Date.now()}.json`
-  )
-  writeFileSync(
-    file,
-    JSON.stringify({ kind: 'metamorphic-known-gap', ...entry }, null, 2)
-  )
+  const specDigest = createHash('sha256')
+    .update(canonical(check.base))
+    .digest('hex')
+    .slice(0, 12)
+  const id = `metamorphic-${targetName}-${check.relation}-${specDigest}`
+  const file = join(REGRESSIONS_DIR, `${id}.json`)
+  const record = {
+    kind: 'metamorphic-known-gap',
+    id,
+    relation: check.relation,
+    target: targetName,
+    confirmedDeterministic: false,
+    note: `metamorphic ${check.relation} invariant violated on ${targetName} (${label}). Auto-recorded; curate before committing.`,
+    spec: check.base,
+    reference: check.variant,
+    expectOutcome: 'fail',
+    sourceFingerprint: seedFingerprint(),
+    expectedRowCount: Array.isArray(outcome.expected)
+      ? outcome.expected.length
+      : undefined,
+    detail: outcome.detail,
+    replay: `bun src/metamorphic-lane.ts --replay regressions/${id}.json --against ${targetName}`,
+  }
+  writeFileSync(file, JSON.stringify(record, null, 2))
   return file
 }
 
@@ -221,8 +360,9 @@ console.log('│ a FAIL is a classified known-gap/repro (e.g. #6121 in the 1.7.0
 console.log('│ NOT a CI break. checker validation is separate (metamorphic.selftest)│')
 console.log('└─────────────────────────────────────────────────────────────────────┘')
 
+const againstName = args.against ?? 'orez-local'
 const specs = [...startSpecs(), ...breadthSpecs()]
-const target = await startAgainst(args.against!)
+const target = await startAgainst(againstName)
 
 const tally: Record<string, { pass: number; fail: number; skip: number }> = {}
 const bump = (rel: Relation, r: 'pass' | 'fail' | 'skip') => {
@@ -261,23 +401,9 @@ try {
             `[${check.relation}] ${label} FAIL (synthetic --mutate injection; no repro written)`
           )
         } else {
-          // REAL conformance finding on a clean run: record a classified repro.
-          const file = recordRepro({
-            relation: check.relation,
-            target: target.name,
-            label,
-            nullAnchored,
-            spec,
-            variant: check.variant,
-            base: JSON.stringify(seenBase).slice(0, 4000),
-            expected: JSON.stringify(outcome.expected).slice(0, 4000),
-            detail: outcome.detail,
-            note:
-              nullAnchored && check.relation === 'startSuffix'
-                ? 'NULL-cursor blind spot (candidate #6121 in the pinned zqlite). Classified known-gap; flips green once the pin advances past mono d4f33d6a6.'
-                : 'metamorphic invariant violated on the target evaluator.',
-            replay: `bun src/metamorphic-lane.ts --against ${args.against}`,
-          })
+          // REAL conformance finding on a clean run: record a classified,
+          // replayable repro in the same schema --replay reads.
+          const file = recordRepro(check, outcome, target.name, label)
           failures.push(
             `[${check.relation}] ${label} FAIL (repro ${file})\n  detail: ${outcome.detail}`
           )

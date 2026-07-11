@@ -187,25 +187,39 @@ check(
   zpCount === inventory.zeroProtocol.total,
   `zero-protocol test files: ${zpCount} == ${inventory.zeroProtocol.total}`
 )
-const fuzzNonTest = git(
-  'ls-tree',
-  '-r',
-  '--name-only',
-  auditRef,
-  '--',
-  'packages/zql-integration-tests/src/chinook/fuzz'
-)
+const FUZZ_DIR = 'packages/zql-integration-tests/src/chinook/fuzz'
+const fuzzFiles = git('ls-tree', '-r', '--name-only', auditRef, '--', FUZZ_DIR)
   .split('\n')
-  .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts')).length
+  .filter((f) => f.endsWith('.ts'))
+const fuzzNonTest = fuzzFiles.filter((f) => !f.endsWith('.test.ts')).length
 check(
   fuzzNonTest === inventory.fuzzModules.nonTestModules,
   `fuzz non-test modules: ${fuzzNonTest} == ${inventory.fuzzModules.nonTestModules}`
 )
 
-// --- ledger fuzzModules: 20 entries, one per fuzz file ------------------------
+// --- ledger fuzzModules: EXACT-SET equality + duplicate rejection -------------
+// (not just a count: a duplicate path replacing a missing module must fail.)
+const ledgerPaths: string[] = ledger.fuzzModules.modules.map(
+  (m: { upstreamPath: string }) => m.upstreamPath
+)
 check(
-  ledger.fuzzModules.modules.length === inventory.fuzzModules.totalFiles,
-  `ledger fuzzModules entries: ${ledger.fuzzModules.modules.length} == ${inventory.fuzzModules.totalFiles}`
+  ledgerPaths.length === inventory.fuzzModules.totalFiles,
+  `ledger fuzzModules entries: ${ledgerPaths.length} == ${inventory.fuzzModules.totalFiles}`
+)
+const dupes = ledgerPaths.filter((p, i) => ledgerPaths.indexOf(p) !== i)
+check(
+  dupes.length === 0,
+  `ledger fuzzModules upstreamPath has no duplicates${dupes.length ? ` (dupes: ${[...new Set(dupes)].join(', ')})` : ''}`
+)
+const fuzzSet = new Set(fuzzFiles.sort())
+const ledgerSet = new Set(ledgerPaths.sort())
+const missingFromLedger = [...fuzzSet].filter((p) => !ledgerSet.has(p))
+const extraInLedger = [...ledgerSet].filter((p) => !fuzzSet.has(p))
+check(
+  missingFromLedger.length === 0 && extraInLedger.length === 0,
+  `ledger fuzzModules upstreamPath set == the ${fuzzSet.size} fuzz files at the audited SHA${
+    missingFromLedger.length ? ` (missing: ${missingFromLedger.join(', ')})` : ''
+  }${extraInLedger.length ? ` (extra/wrong: ${extraInLedger.join(', ')})` : ''}`
 )
 
 // --- every orezArtifact the ledger claims as DONE must exist ------------------

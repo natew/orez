@@ -10,7 +10,12 @@
 // real target and may legitimately go red on the 1.7.0 pin.
 //
 //   bun src/metamorphic.selftest.ts
-import { metamorphicChecks, type Relation } from './metamorphic.js'
+import {
+  metamorphicChecks,
+  parseFixture,
+  replayVerdict,
+  type Relation,
+} from './metamorphic.js'
 
 import type { GenSpec, GenWhere } from './fixture.js'
 
@@ -223,6 +228,111 @@ console.log('[selftest] check generation is non-vacuous (right relations, right 
   assert(
     metamorphicChecks(bare).length >= 2,
     'bare spec still produces checks (redundantConjunct + largeLimit)'
+  )
+}
+
+console.log('[selftest] parseFixture — corrupt/inconsistent fixtures must THROW')
+{
+  const HEX64 = '279c4730b7966f502a6b5f5e652561cf1fc1366361b67f324d7af31d88b0f087'
+  const good = {
+    kind: 'metamorphic-known-gap',
+    id: 'test',
+    relation: 'startSuffix',
+    target: 'stock-zero',
+    spec: { table: 'task', orderBy: dueOrder, start: { row: { dueAt: null, id: 't1' } } },
+    expectOutcome: 'fail',
+    sourceFingerprint: HEX64,
+    expectedRowCount: 47,
+    reference: { table: 'task', orderBy: dueOrder },
+  }
+  const throws = (mutate: (o: Record<string, unknown>) => void, label: string) => {
+    const o = JSON.parse(JSON.stringify(good))
+    mutate(o)
+    let threw = false
+    try {
+      parseFixture(JSON.stringify(o))
+    } catch {
+      threw = true
+    }
+    assert(threw, `parseFixture rejects: ${label}`)
+  }
+  // the good fixture parses and round-trips its fields
+  let parsed = false
+  try {
+    const f = parseFixture(JSON.stringify(good))
+    parsed =
+      f.relation === 'startSuffix' &&
+      f.target === 'stock-zero' &&
+      f.expectOutcome === 'fail' &&
+      f.expectedRowCount === 47 &&
+      f.sourceFingerprint === HEX64
+  } catch {
+    parsed = false
+  }
+  assert(parsed, 'parseFixture accepts a well-formed fixture and returns its fields')
+
+  throws((o) => (o.kind = 'other'), 'wrong kind')
+  throws((o) => delete o.id, 'missing id')
+  throws((o) => (o.relation = 'bogus'), 'invalid relation')
+  // startSuffix does not apply to a spec with no start -> internally inconsistent
+  throws(
+    (o) => ((o.spec as Record<string, unknown>).start = undefined),
+    'relation not applicable to spec'
+  )
+  throws((o) => delete o.spec, 'missing spec')
+  throws((o) => (o.expectOutcome = 'maybe'), 'bad expectOutcome')
+  throws((o) => delete o.sourceFingerprint, 'missing sourceFingerprint')
+  throws((o) => (o.sourceFingerprint = 'abc123'), 'short (non-64-hex) sourceFingerprint')
+  throws((o) => (o.sourceFingerprint = 'Z'.repeat(64)), 'non-hex sourceFingerprint')
+  throws(
+    (o) => (o.sourceFingerprint = HEX64.toUpperCase()),
+    'uppercase sourceFingerprint'
+  )
+  throws((o) => (o.expectedRowCount = -1), 'negative expectedRowCount')
+  throws((o) => (o.expectedRowCount = 1.5), 'non-integer expectedRowCount')
+  throws(
+    (o) => (o.expectedRowCount = Number.MAX_SAFE_INTEGER + 1),
+    'unsafe-integer expectedRowCount'
+  )
+  // invalid JSON entirely
+  let jsonThrew = false
+  try {
+    parseFixture('{ not json')
+  } catch {
+    jsonThrew = true
+  }
+  assert(jsonThrew, 'parseFixture rejects: unparseable JSON')
+}
+
+console.log('[selftest] replayVerdict — reproduced fail exits 1, mismatch/corrupt exit 2')
+{
+  assert(
+    replayVerdict('fail', 'fail').exitCode === 1,
+    'reproduced fail -> exit 1 (never green)'
+  )
+  assert(
+    replayVerdict('fail', 'fail').status === 'reproduced',
+    'reproduced fail -> status reproduced'
+  )
+  assert(
+    replayVerdict('pass', 'pass').exitCode === 0,
+    'recorded pass still holds -> exit 0'
+  )
+  assert(
+    replayVerdict('pass', 'fail').exitCode === 2,
+    'gap fixed (pass vs recorded fail) -> exit 2 mismatch'
+  )
+  assert(
+    replayVerdict('fail', 'pass').exitCode === 2,
+    'now fails vs recorded pass -> exit 2 mismatch'
+  )
+  assert(
+    replayVerdict('skip', 'fail').exitCode === 2,
+    'skip vs recorded fail -> exit 2 mismatch'
+  )
+  assert(
+    replayVerdict('skip', 'skip').exitCode === 2,
+    'skip-expected is inconclusive -> exit 2'
   )
 }
 

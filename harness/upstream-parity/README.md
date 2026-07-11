@@ -50,7 +50,7 @@ and silently returned empty.
 **What the lane actually found (2026-07-11, verified deterministic):** running
 metamorphic against the **stock zero-cache 1.7.0 reference**, `startSuffix`
 flagged one shape — `start(dueAt asc, after {dueAt:null, id:t1}, exclusive)` —
-where stock returns `[]` but the correct answer is the 46-row ordered suffix.
+where stock returns `[]` but the correct answer is the 47-row ordered suffix.
 That is confirmed #6121 in the reference's **server-side sqlite table-source**.
 The **orez-local lane passes the same shape**: it ships full snapshots and
 materializes client-side, so it never pushes the start into the buggy sqlite
@@ -94,19 +94,29 @@ exercises non-binding start/limit):
 - **`../src/metamorphic-lane.ts` — product/reference conformance. NON-GATING.**
   Runs the same relations against a live target. Because the 1.7.0 pin may
   genuinely contain #6121, a FAIL here is a **classified known-gap/repro**
-  (written to `../regressions/`), never dressed green via an expected-failure,
-  and it is **not** wired into the gating CI harness job. Run it manually or in a
-  nightly audit. `bun src/metamorphic-lane.ts --against orez-local`
-  (`--mutate startSuffix` plants #6121 live to prove the wiring catches it.)
-  The stock-zero reference target needs a **supported Node** for the spawned
-  zero-cache (`@rocicorp/zero-sqlite3` = Node 22.x/24.x, not 25.x) and its built
-  native binding, so run it as
-  `mise x node@22 -- bun src/metamorphic-lane.ts --against stock-zero`; if the
-  binding is missing, build it once with
-  `cd node_modules/@rocicorp/zero-sqlite3 && mise x node@22 -- npm run install`.
-  The embedded-postgres dylib/soname links are recreated automatically at boot
-  (`src/targets/stock-zero.ts`). Full prerequisites are in
-  `../regressions/known-gap-zql-6121-null-start-cursor.json`.
+  (written to `../regressions/` in the same schema `--replay` reads), never
+  dressed green via an expected-failure, and it is **not** wired into the gating
+  CI harness job. Run it manually or in a nightly audit.
+  `bun src/metamorphic-lane.ts --against orez-local`
+  (`--mutate startSuffix` plants #6121 live to prove the wiring catches it; it
+  writes no artifact.) The stock-zero reference target spawns zero-cache under
+  Node, and `@rocicorp/zero-sqlite3` supports **Node 22.x/24.x, not 25.x**, so
+  run it under a supported Node — `mise x node@22 -- bun src/metamorphic-lane.ts
+--against stock-zero`. Installing deps under that Node
+  (`mise x node@22 -- bun install`, frozen is fine) provides the packaged
+  zero-sqlite3 binding automatically; **no manual node-gyp build is needed.** The
+  embedded-postgres dylib/soname links are recreated automatically at boot
+  (`src/targets/stock-zero.ts`).
+- **`--replay <fixture.json>` — stable known-gap replay.** Executes EXACTLY the
+  recorded spec + relation from a committed fixture (not the generator), gated by
+  a SEED fingerprint. Exit semantics: a recorded `fail` that still **REPRODUCES
+  exits 1** (the known product failure is real, never greened); a recorded `pass`
+  that still holds exits 0; a corrupt/inapplicable fixture, an explicit
+  `--against` that differs from `fixture.target`, a SEED fingerprint or row-count
+  mismatch, or an outcome that no longer matches the record all exit 2. It writes
+  no artifact and never regenerates the corpus. Full prerequisites +
+  exit-semantics table are in the fixture itself
+  (`../regressions/known-gap-zql-6121-null-start-cursor.json`).
 
 ## verify / drift
 

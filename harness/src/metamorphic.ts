@@ -261,3 +261,154 @@ export function metamorphicChecks(spec: GenSpec): MetamorphicCheck[] {
 
   return checks
 }
+
+// ---------------------------------------------------------------------------
+// committed known-gap fixtures (regressions/*.json). a fixture pins ONE
+// recorded spec + relation + target + expected outcome so the metamorphic-lane
+// --replay path executes EXACTLY that (not the mutable generator) and asserts
+// it still holds. parsing is PURE (takes the JSON text, no fs) so it is unit-
+// and mutant-testable in metamorphic.selftest.ts. a corrupt/mismatched fixture
+// THROWS — replay must fail loud, never silently fall through to regeneration.
+// ---------------------------------------------------------------------------
+
+export type KnownGapFixture = {
+  id: string
+  relation: Relation
+  target: string
+  spec: GenSpec
+  // the outcome the record asserts for this spec+relation (a known-gap records
+  // a reproduced 'fail'). replay compares the live outcome to this.
+  expectOutcome: RelResult
+  // deterministic fingerprint of the fixture-data SEED the record was captured
+  // against. replay recomputes it and fails loud on any mismatch, so a SEED edit
+  // can never silently reinterpret the repro against different data.
+  sourceFingerprint: string
+  // the row count the relation's computed window should have (a cross-check that
+  // the reproduced result matches what was recorded).
+  expectedRowCount?: number
+  // the reference query (base minus start/limit) the relation derives. replay
+  // asserts the live-derived variant deep-equals this, so a stale record is
+  // caught even if the fingerprint somehow matched.
+  reference?: GenSpec
+}
+
+export function parseFixture(json: string): KnownGapFixture {
+  const o = JSON.parse(json) as Record<string, unknown>
+  if (o.kind !== 'metamorphic-known-gap') {
+    throw new Error(
+      `fixture kind must be "metamorphic-known-gap", got ${JSON.stringify(o.kind)}`
+    )
+  }
+  if (typeof o.id !== 'string' || o.id.length === 0) throw new Error('fixture missing id')
+  if (!RELATIONS.includes(o.relation as Relation)) {
+    throw new Error(
+      `fixture relation invalid: ${JSON.stringify(o.relation)} (valid: ${RELATIONS.join(', ')})`
+    )
+  }
+  if (typeof o.target !== 'string' || o.target.length === 0)
+    throw new Error('fixture missing target')
+  const spec = o.spec as GenSpec | undefined
+  if (!spec || typeof spec !== 'object' || typeof spec.table !== 'string') {
+    throw new Error('fixture missing/invalid spec (need an object with a string table)')
+  }
+  if (
+    o.expectOutcome !== 'pass' &&
+    o.expectOutcome !== 'fail' &&
+    o.expectOutcome !== 'skip'
+  ) {
+    throw new Error(
+      `fixture expectOutcome must be pass|fail|skip, got ${JSON.stringify(o.expectOutcome)}`
+    )
+  }
+  if (
+    typeof o.sourceFingerprint !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(o.sourceFingerprint)
+  ) {
+    throw new Error(
+      'fixture sourceFingerprint must be a lowercase 64-hex SHA-256 (full SEED digest)'
+    )
+  }
+  if (
+    o.expectedRowCount !== undefined &&
+    (typeof o.expectedRowCount !== 'number' ||
+      !Number.isSafeInteger(o.expectedRowCount) ||
+      o.expectedRowCount < 0)
+  ) {
+    throw new Error(
+      'fixture expectedRowCount must be a non-negative safe integer when present'
+    )
+  }
+  const reference = o.reference as GenSpec | undefined
+  if (
+    reference !== undefined &&
+    (typeof reference !== 'object' || typeof reference.table !== 'string')
+  ) {
+    throw new Error(
+      'fixture reference must be a spec (object with a string table) when present'
+    )
+  }
+  // the recorded relation must actually apply to the recorded spec, else the
+  // fixture is internally inconsistent (a corrupt record).
+  const relations = metamorphicChecks(spec).map((c) => c.relation)
+  if (!relations.includes(o.relation as Relation)) {
+    throw new Error(
+      `fixture relation ${o.relation} does not apply to its spec (spec yields: ${relations.join(', ') || 'none'})`
+    )
+  }
+  return {
+    id: o.id,
+    relation: o.relation as Relation,
+    target: o.target,
+    spec,
+    expectOutcome: o.expectOutcome,
+    sourceFingerprint: o.sourceFingerprint,
+    expectedRowCount: o.expectedRowCount as number | undefined,
+    reference,
+  }
+}
+
+// map (live outcome, recorded expectation) to a replay verdict + process exit.
+// PURE so metamorphic.selftest.ts can mutant-test the decision without a target.
+// semantics (per guardrail): a REPRODUCED known product failure must NOT be
+// dressed green — expected 'fail' that still fails exits 1 (REPRODUCED). a
+// recorded 'pass' that still passes exits 0. any MISMATCH (live != recorded, incl.
+// upstream fixing the bug) exits 2 so the record is flagged as stale, never
+// silently accepted.
+export type ReplayVerdict = {
+  exitCode: 0 | 1 | 2
+  status: 'confirmed-pass' | 'reproduced' | 'mismatch' | 'inconclusive'
+  message: string
+}
+
+export function replayVerdict(
+  liveOutcome: RelResult,
+  expectOutcome: RelResult
+): ReplayVerdict {
+  if (liveOutcome !== expectOutcome) {
+    return {
+      exitCode: 2,
+      status: 'mismatch',
+      message: `MISMATCH: recorded ${expectOutcome} but observed ${liveOutcome} — the record is stale (upstream may be fixed); update the fixture`,
+    }
+  }
+  if (expectOutcome === 'fail') {
+    return {
+      exitCode: 1,
+      status: 'reproduced',
+      message:
+        'REPRODUCED: the recorded known product failure still holds (non-gating; NOT dressed green)',
+    }
+  }
+  if (expectOutcome === 'pass') {
+    return {
+      exitCode: 0,
+      status: 'confirmed-pass',
+      message: 'the recorded pass still holds',
+    }
+  }
+  return {
+    exitCode: 2,
+    status: 'inconclusive',
+    message: `recorded ${expectOutcome} is not assertable as a product behavior`,
+  }
+}
