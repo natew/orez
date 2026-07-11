@@ -40,6 +40,17 @@ describe('HistoryRecorder', () => {
     expect(validateHistory(history)).toEqual({ valid: true, violations: [] })
   })
 
+  test('accepts a completed read list for an invoked null read', () => {
+    const recorder = new HistoryRecorder(clock(20, 21))
+    recorder.record(
+      invocation({ transaction: [{ type: 'read', key: 'x', value: null }] })
+    )
+    recorder.record(
+      terminal({ transaction: [{ type: 'read', key: 'x', value: [1, 2] }] })
+    )
+    expect(validateHistory(recorder.finalize())).toEqual({ valid: true, violations: [] })
+  })
+
   test('snapshots and returned events cannot mutate recorder state', () => {
     const recorder = new HistoryRecorder(clock(10, 11))
     const returned = recorder.record(invocation())
@@ -85,9 +96,25 @@ describe('HistoryRecorder', () => {
     expect(() =>
       changed.record(terminal({ transaction: [{ type: 'append', key: 'x', value: 2 }] }))
     ).toThrow('operation op-1 changes transaction at completion')
+
+    const changedProcess = new HistoryRecorder(clock(0, 1))
+    changedProcess.record(invocation())
+    expect(() => changedProcess.record(terminal({ process: 'client-2' }))).toThrow(
+      'operation op-1 changes process or kind at completion'
+    )
+
+    const changedKind = new HistoryRecorder(clock(0, 1))
+    changedKind.record(invocation())
+    expect(() => changedKind.record(terminal({ kind: 'mutation' }))).toThrow(
+      'operation op-1 changes process or kind at completion'
+    )
   })
 
   test('refuses incomplete finalize and records after finalize', () => {
+    expect(() => new HistoryRecorder(clock()).finalize()).toThrow(
+      'cannot finalize empty history'
+    )
+
     const incomplete = new HistoryRecorder(clock(0))
     incomplete.record(invocation())
     expect(() => incomplete.finalize()).toThrow(

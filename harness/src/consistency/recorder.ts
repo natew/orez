@@ -75,6 +75,7 @@ export class HistoryRecorder {
 
   finalize(): HistoryEvent[] {
     if (this.#finalized) throw new Error('history recorder is finalized')
+    if (this.#events.length === 0) throw new Error('cannot finalize empty history')
     if (this.#inFlightByProcess.size > 0) {
       const pending = [...this.#invoked.keys()].filter(
         (opId) => !this.#completed.has(opId)
