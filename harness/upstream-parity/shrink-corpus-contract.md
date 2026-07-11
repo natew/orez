@@ -20,12 +20,12 @@ review.** Revised through high R1 (R1–R6) and R2 (R1–R4).
 Only **round-0** hydrate is fresh seed state. Round N hydrate runs AFTER the
 writes of rounds 0..N-1, so it is history-dependent like post-writes.
 
-| phase | comparison | round | replayable from (seed, spec)? | v1 |
-| --- | --- | --- | --- | --- |
-| `hydrate` | cross-target | **0** | YES — fresh seed state | **shrink + exact replay** |
-| `hydrate` | cross-target | >0 | NO — after prior-round writes | store, nonexact |
-| `post-writes` | cross-target | any | NO — view mounted before the round's writes | store, nonexact |
-| `incremental` | single-target (maintained vs late fresh view) | any | NO — history-dependent | store, nonexact |
+| phase         | comparison                                    | round | replayable from (seed, spec)?               | v1                        |
+| ------------- | --------------------------------------------- | ----- | ------------------------------------------- | ------------------------- |
+| `hydrate`     | cross-target                                  | **0** | YES — fresh seed state                      | **shrink + exact replay** |
+| `hydrate`     | cross-target                                  | >0    | NO — after prior-round writes               | store, nonexact           |
+| `post-writes` | cross-target                                  | any   | NO — view mounted before the round's writes | store, nonexact           |
+| `incremental` | single-target (maintained vs late fresh view) | any   | NO — history-dependent                      | store, nonexact           |
 
 v1 shrinks and exact-replays ONLY `phase==='hydrate' && round===0 &&
 comparisonKind==='cross-target'`. All other divergences are stored with
@@ -58,60 +58,66 @@ explicit follow-up gap. **Every artifact preserves `round`/`specIndex`/`rounds`/
 
 ## 4. `harness/src/spec-corpus.ts` — PURE parser + fail-loud loader (R1.R2/R4/R5/R6, R2.R1/R2/R4)
 
-- ONE unified schema (replaces `recordDivergence`):
+The schema graph (columns + kinds + relationship CARDINALITY) lives in the pure,
+zero-free `harness/src/fixture-graph.ts`, shared by the shrinker and the parser so
+the frozen grammar has one source of truth.
+
+- ONE unified schema (replaces `recordDivergence`), AS IMPLEMENTED:
   ```
   SweepDivergence {
     schemaVersion: 1
     kind: 'sweep-divergence'
-    id, note                          // nonempty strings
+    id                                // safe token /^[A-Za-z0-9][A-Za-z0-9._-]*$/ ; === filename basename
+    note                              // nonempty NUL-free string
     phase: 'hydrate' | 'post-writes' | 'incremental'
     comparisonKind: 'cross-target' | 'single-target'
-    round, specIndex, rounds, queriesPerRound: number   // provenance, ALWAYS
+    round, specIndex, rounds, queriesPerRound: number   // provenance, ALWAYS; safe non-neg ints
     exactReplayable: boolean          // === (phase==='hydrate' && round===0 && comparisonKind==='cross-target')
-    minimized: boolean                // === minimizationComplete; both false when nonexact
-    minimizationComplete: boolean
-    spec: GenSpec
-    against: string                   // REQUIRED: the run's orez target
-    observedTarget: string            // REQUIRED: the target the comparison FAILED on
-                                      //   cross-target -> the orez target; single-target
-                                      //   incremental -> stock-zero OR the orez target name
-    seed: number                      // NUMERIC generator seed; safe non-neg int, reject -0
+    minimizationComplete: boolean     // false whenever !exactReplayable
+    spec: GenSpec                     // validated against the exact v1 generator grammar
+    against: string                   // ∈ {orez-local, orez-cf, rust-local, rust-cf} (NOT stock-zero)
+    observedTarget: string            // the target the comparison ran on (no fault attribution):
+                                      //   cross-target === against; single-target ∈ {stock-zero, against}
+    seed: number                      // NUMERIC generator seed (distinct from sourceFingerprint)
     sourceFingerprint: string         // FIXED fixture-data SEED digest (lowercase 64-hex SHA-256);
-                                      //   DISTINCT from the numeric generator `seed`
-    minimizedConstructCount: number   // === constructCount(spec)
-    leftHash, rightHash: string       // lowercase 64-hex full SHA-256 of each canonical result
+                                      //   the loader compares it to the CURRENT digest, not just format
+    constructCount: number            // === constructCount(spec) of the stored spec
+    originalConstructCount?: number   // pre-shrink count (>= constructCount), reduction evidence
+    leftHash, rightHash: string       // lowercase 64-hex SHA-256 of each canonical result; MUST DIFFER
     leftPreview, rightPreview: string // truncated evidence strings (kept)
-    fullSidecar?: string              // OPTIONAL safe repo-relative path (no '..', not absolute)
+    fullSidecar?: string              // OPTIONAL safe repo-relative path (not absolute, no '..'/backslash/NUL)
     expectConverge: true
-    replay?: string                   // OPTIONAL, phase-specific, always runnable when present
+    replay: string                    // REQUIRED, phase-specific, EXACT-equal to buildReplayCommand(entry)
   }
   ```
-  **`replay`** (when present) is `--replay-corpus <file>` IFF `exactReplayable`,
-  else the full seeded sweep command
+  `replay` is `--replay-corpus regressions/sweep/v1/<id>.json --against <against>`
+  when `exactReplayable`, else the full seeded sweep command
   (`bun src/sweep.ts --seed <seed> --against <against> --rounds <rounds> --queriesPerRound <q>`).
   A nonexact entry never carries a `--replay-corpus` command that would only exit 2.
-- `parseCorpusEntry(json): SweepDivergence` — throws on any corruption:
-  - `schemaVersion === 1`; `kind`; `phase`/`comparisonKind` in range; nonempty
-    `id`/`note`/`against`/`observedTarget`.
-  - every boolean field `typeof === 'boolean'`; `leftPreview`/`rightPreview` strings.
-  - `round`/`specIndex`/`rounds`/`queriesPerRound`/`seed`/`minimizedConstructCount`
-    safe non-negative integers, `Object.is(-0)` rejected.
-  - `sourceFingerprint`/`leftHash`/`rightHash` each lowercase 64-hex.
-  - recursive `GenSpec` validation: where tree; orderBy `[col,'asc'|'desc']` pairs
-    and **any non-empty orderBy MUST end with the `['id','asc']` tie-break**;
-    exists; start shape; related recursively; one. **Reject semantically unknown
-    table / column / relationship names** against a STATIC schema graph mirrored in
-    this module (keeps the parser pure — no @rocicorp/zero import).
-  - cross-field: `exactReplayable === (phase==='hydrate' && round===0 && comparisonKind==='cross-target')`;
-    `phase==='incremental' ⇔ comparisonKind==='single-target'`;
-    `phase==='post-writes' ⇒ comparisonKind==='cross-target'`;
-    `minimized === minimizationComplete`, and both `false` when `!exactReplayable`;
-    `expectConverge === true`; `minimizedConstructCount === constructCount(spec)`;
-    if `replay` present, it contains `--replay-corpus` iff `exactReplayable`, else `--seed`.
-  - `fullSidecar` (if present): string, no `..` segment, not absolute.
-- `loadCorpus(dir): SweepDivergence[]` — reads `*.json` in SORTED path order; a
-  **missing directory is the deterministic empty infrastructure state (returns
-  `[]`, does not throw)**; a corrupt file present in it **THROWS (fails loud)**.
+- `parseCorpusEntry(json, {expectedFingerprint?})` — throws on ANY corruption. Beyond the
+  field/format checks above: no unknown keys at any object level; FULLY RECURSIVE
+  `GenSpec` grammar — column-kind ops/values (id `=,!=` string / `IN` 2..4 strings;
+  string `LIKE/ILIKE/!=`; number comparison + finite; boolean `=,!=`; nullable
+  `IS/IS NOT null` or `</>` finite; json `IS/IS NOT null`); orderBy exactly
+  `[[id,asc]]` or `[[nonId,asc|desc],[id,asc]]` (json not orderable); and/or 2..3
+  children within depth; exists ≤ 1; related ≤ 2 root / ≤ 1 nested, depth ≤ 2,
+  unique rels, **cardinality-exact subs** (a `one`-relation sub is `{one:true,related?}`;
+  a `many`-relation sub is absent or `{orderBy(required),where?,limit?,related?}` with
+  no `one`); limits `1..8` root / `1..4` sub; root `one` XOR `limit`; start only on
+  root task with orderBy `[[rank,dir],[id,asc]]`, row exactly `{rank:number, id:string}`,
+  inclusive `true`|absent. Cross-field: exactReplayable ⇔ hydrate+round0+cross;
+  incremental ⇔ single-target; post-writes ⇒ cross-target; `minimizationComplete`
+  false when nonexact; target-role invariants; `constructCount === constructCount(spec)`;
+  `replay` EXACT-equal to the canonical builder. Provenance: `rounds*queriesPerRound`
+  safe-integer (overflow guard for every phase), then phase-sensitive
+  `specIndex < (round+1)*queriesPerRound` (hydrate/post) / `< rounds*queriesPerRound`
+  (incremental). If `expectedFingerprint` is passed, `sourceFingerprint` must equal it.
+- `loadCorpus(dir)` — a **missing directory is the deterministic empty infrastructure
+  state (`[]`, no throw)**; otherwise reads `*.json` in SORTED filename order, parses
+  each against the CURRENT fixture fingerprint, then rejects DUPLICATE ids (before the
+  per-file check) and any file whose basename != its id; a corrupt file THROWS.
+- `assertValidSpec(spec)` is exported so the selftest proves **executable closure**:
+  every `oneStepShrinks(big)` candidate passes the parser's grammar validator.
 
 ## 5. Live integration (DESIGN ONLY — returns for code high review)
 
@@ -153,6 +159,7 @@ divergence is found, fixed, and its minimized round-0 entry committed.
 ## 8. Pure test plan (no target, gates PR)
 
 `harness/src/spec-shrink.selftest.ts`:
+
 - shrinker: synthetic `stillDiverges` on one where-leaf → `shrinkSpec` reduces to a
   minimum still containing it; every `oneStepShrinks` candidate strictly smaller;
   deterministic + deduped; budget exhaustion → `complete:false`; id tie-break
