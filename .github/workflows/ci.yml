@@ -91,7 +91,7 @@ jobs:
       - name: consistency checker self-tests
         run: |
           cd harness
-          bun test src/consistency/history.test.ts src/consistency/fault-schedule.test.ts src/consistency/recorder.test.ts src/consistency/artifacts.test.ts src/consistency/atomic-visibility.test.ts src/consistency/atomic-visibility-workload.test.ts
+          bun test src/consistency/history.test.ts src/consistency/fault-schedule.test.ts src/consistency/recorder.test.ts src/consistency/artifacts.test.ts src/consistency/atomic-visibility.test.ts src/consistency/atomic-visibility-workload.test.ts src/consistency/exactly-once-lmid.test.ts src/consistency/exactly-once-workload.test.ts src/observed-fetch.test.ts
 
       - name: metamorphic checker self-test
         run: cd harness && bun src/metamorphic.selftest.ts
