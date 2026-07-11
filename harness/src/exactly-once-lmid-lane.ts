@@ -268,7 +268,11 @@ async function waitForProtocol(): Promise<void> {
     protocolWaiters.add(inspect)
     timer = setTimeout(() => {
       protocolWaiters.delete(inspect)
-      reject(new Error('timed out waiting for exact recovery traffic'))
+      reject(
+        new Error(
+          `timed out waiting for exact recovery traffic (push invokes/terminals ${pushAttempt}/${pushTerminals}, pull invokes/terminals ${pullAttempt}/${pullTerminals}, pending ${protocolOps.size}, error ${String(protocolError)})`
+        )
+      )
     }, 30_000)
     inspect()
   })

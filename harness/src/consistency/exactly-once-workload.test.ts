@@ -13,6 +13,7 @@ const body = {
       type: 'custom',
       clientID: 'client-1',
       id: 1,
+      timestamp: 123456,
       name: 'exactlyOnce.incrementProbe',
       args: [{ id: 'probe-1' }],
     },
@@ -29,9 +30,14 @@ describe('exactly-once workload boundary', () => {
     })
     expect(parsed.args).toEqual({ id: 'probe-1' })
     expect(parsed.bodyDigest).toMatch(/^[0-9a-f]{64}$/)
-    expect(parseExactlyOncePush({ ...body, timestamp: 99 }).bodyDigest).toBe(
+    expect(parseExactlyOncePush({ ...body, requestID: 'different' }).bodyDigest).toBe(
       parsed.bodyDigest
     )
+    const changedTimestamp = {
+      ...body,
+      mutations: [{ ...body.mutations[0], timestamp: 123457 }],
+    }
+    expect(parseExactlyOncePush(changedTimestamp).bodyDigest).not.toBe(parsed.bodyDigest)
   })
 
   test('rejects zero, multiple, malformed, and mismatched mutations', () => {
@@ -47,6 +53,12 @@ describe('exactly-once workload boundary', () => {
         mutations: [{ ...body.mutations[0], id: 0 }],
       })
     ).toThrow('does not match')
+    expect(() =>
+      parseExactlyOncePush({
+        ...body,
+        mutations: [{ ...body.mutations[0], args: [{ id: 'probe-1', extra: true }] }],
+      })
+    ).toThrow('nonempty id')
     const parsed = parseExactlyOncePush(body)
     expect(() =>
       assertExpectedExactlyOncePush(parsed, {

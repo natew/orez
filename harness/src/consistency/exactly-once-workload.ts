@@ -21,7 +21,8 @@ export function validateIncrementProbeArgs(value: unknown): IncrementProbeArgs {
     value === null ||
     !('id' in value) ||
     typeof value.id !== 'string' ||
-    value.id.trim() === ''
+    value.id.trim() === '' ||
+    Object.keys(value).length !== 1
   ) {
     throw new Error('increment probe requires a nonempty id')
   }
@@ -51,6 +52,8 @@ export function parseExactlyOncePush(body: unknown): ParsedExactlyOncePush {
     raw.clientID.trim() === '' ||
     !Number.isSafeInteger(raw.id) ||
     Number(raw.id) <= 0 ||
+    !Number.isSafeInteger(raw.timestamp) ||
+    Number(raw.timestamp) <= 0 ||
     !Array.isArray(raw.args) ||
     raw.args.length !== 1
   ) {
@@ -61,6 +64,7 @@ export function parseExactlyOncePush(body: unknown): ParsedExactlyOncePush {
     clientGroupId: value.clientGroupID,
     clientId: raw.clientID,
     mutationId: Number(raw.id),
+    timestamp: Number(raw.timestamp),
     name: EXACTLY_ONCE_MUTATOR,
     args,
   }

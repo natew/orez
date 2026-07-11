@@ -40,27 +40,28 @@ export function observedSyncFetch(
     }
     const id = ++request
     onObservation({ request: id, path, phase: 'invoke', body })
+    let response: Response
     try {
-      const response = await bound(input, init)
-      let responseBody: unknown
-      try {
-        responseBody = await response.clone().json()
-      } catch {
-        responseBody = undefined
-      }
-      onObservation({
-        request: id,
-        path,
-        phase: 'terminal',
-        body,
-        response: responseBody,
-        status: response.status,
-      })
-      return response
+      response = await bound(input, init)
     } catch (error) {
       onObservation({ request: id, path, phase: 'terminal', body, error })
       throw error
     }
+    let responseBody: unknown
+    try {
+      responseBody = await response.clone().json()
+    } catch {
+      responseBody = undefined
+    }
+    onObservation({
+      request: id,
+      path,
+      phase: 'terminal',
+      body,
+      response: responseBody,
+      status: response.status,
+    })
+    return response
   }
 }
 
