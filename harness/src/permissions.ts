@@ -6,6 +6,7 @@
 //   bun src/permissions.ts --target rust-local
 import { parseArgs } from 'node:util'
 
+import { fixtureVisibility } from './fixture-visibility.js'
 import { queries } from './fixture.js'
 import { startOrezLocal } from './targets/orez-local.js'
 
@@ -22,42 +23,6 @@ type ProjectRow = {
 type TaskRow = { id: string }
 
 const ISOLATED_PROJECTS = ['perm-project', 'perm-foreign']
-
-function fixtureVisibility(table: string, userID: string) {
-  const projectAccess = `(p."ownerId" = ? OR EXISTS (
-    SELECT 1 FROM member access
-    WHERE access."projectId" = p.id AND access."userId" = ?
-  ))`
-  switch (table) {
-    case 'user':
-      return { sql: `SELECT * FROM "user" WHERE id = ?`, params: [userID] }
-    case 'project':
-      return {
-        sql: `SELECT p.* FROM project p WHERE ${projectAccess}`,
-        params: [userID, userID],
-      }
-    case 'member':
-      return {
-        sql: `SELECT m.* FROM member m
-              WHERE EXISTS (
-                SELECT 1 FROM project p
-                WHERE p.id = m."projectId" AND ${projectAccess}
-              )`,
-        params: [userID, userID],
-      }
-    case 'task':
-      return {
-        sql: `SELECT t.* FROM task t
-              WHERE EXISTS (
-                SELECT 1 FROM project p
-                WHERE p.id = t."projectId" AND ${projectAccess}
-              )`,
-        params: [userID, userID],
-      }
-    default:
-      throw new Error(`no fixture visibility policy for table ${table}`)
-  }
-}
 
 function watchAccess(zero: FixtureZero) {
   const projectView = zero.materialize(queries.allProjects())
