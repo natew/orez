@@ -666,6 +666,44 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
     )
   })
 
+  test('rejects stock retry operation drift and invoke before response loss', () => {
+    const drift = history()
+    addStockRetry(drift)
+    for (const event of drift.events) {
+      if (
+        event.exactlyOnce?.type === 'push' &&
+        event.exactlyOnce.source === 'stock-client' &&
+        event.exactlyOnce.attempt === 2
+      )
+        event.exactlyOnce.operationDigest = 'e'.repeat(64)
+    }
+    expect(checkExactlyOnceLmid(drift.events, drift.schedule).violations).toContain(
+      'stock retry 2 changed semantic body'
+    )
+
+    const early = history()
+    addStockRetry(early)
+    const retryInvokeIndex = early.events.findIndex(
+      (event) =>
+        event.exactlyOnce?.type === 'push' &&
+        event.exactlyOnce.source === 'stock-client' &&
+        event.exactlyOnce.attempt === 2 &&
+        event.phase === 'invoke'
+    )
+    const [retryInvoke] = early.events.splice(retryInvokeIndex, 1)
+    const lossIndex = early.events.findIndex(
+      (event) =>
+        event.exactlyOnce?.type === 'push' &&
+        event.exactlyOnce.attempt === 1 &&
+        event.phase === 'info'
+    )
+    early.events.splice(lossIndex, 0, retryInvoke!)
+    reindex(early.events, early.schedule)
+    expect(checkExactlyOnceLmid(early.events, early.schedule).violations).toContain(
+      'stock retry invokes must follow loss and precede mutation terminal'
+    )
+  })
+
   test('duplicate application is a safety failure even with terminal info', () => {
     const fixture = history('info')
     const after = fixture.events.find(
