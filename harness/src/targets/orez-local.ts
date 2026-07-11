@@ -29,6 +29,7 @@ export type PullObservation = {
 
 export type OrezLocalTarget = SyncTarget & {
   dropNextPushResponse(): void
+  pull(): Promise<void>
   invalidate(): void
   resetCursor(): void
   restart(downForMs?: number): Promise<void>
@@ -171,6 +172,10 @@ export async function startOrezLocal(opts?: {
 
     dropNextPushResponse() {
       dropPushResponse = true
+    },
+
+    pull() {
+      return transport.pull()
     },
 
     invalidate() {

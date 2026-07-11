@@ -99,6 +99,11 @@ jobs:
       - name: sync-server smoke (pure sqlite, 20 clients)
         run: cd harness && bun src/smoke.ts --target orez-local --clients 20 --projects 3
 
+      - name: sync-server permission grant and revoke
+        # Keep the advertised default lane executable and prove removal from
+        # several already-populated client caches across repeated transitions.
+        run: cd harness && bun src/permissions.ts
+
       - name: multi-project sync-server mount
         run: cd harness && bun src/multi-project-mount.ts
 
