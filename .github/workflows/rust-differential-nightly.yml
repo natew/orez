@@ -48,13 +48,25 @@ jobs:
       - name: Rust versus TypeScript differential
         run: cargo test -p sync-core --test differential -- --nocapture
 
+      - name: collect minimized regressions and preserved traces
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p rust-differential-results/regressions rust-differential-results/traces
+          regression=crates/sync-core/proptest-regressions/differential.txt
+          if [[ -f "$regression" ]]; then
+            cp "$regression" rust-differential-results/regressions/
+          fi
+          for trace in /tmp/sync-core-diff-*.json; do
+            [[ -e "$trace" ]] || continue
+            cp "$trace" rust-differential-results/traces/
+          done
+
       - name: upload minimized regressions and preserved traces
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: rust-differential-failure-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            crates/sync-core/proptest-regressions/differential.txt
-            /tmp/sync-core-diff-*.json
+          path: rust-differential-results/
           if-no-files-found: warn
           retention-days: 14
