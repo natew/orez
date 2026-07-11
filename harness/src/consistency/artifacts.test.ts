@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { writeConsistencyArtifacts, type ConsistencyChecksArtifact } from './artifacts.js'
+import { CHECKS_SCHEMA_VERSION } from './artifacts.js'
 import { FAULT_SCHEDULE_SCHEMA_VERSION, type FaultSchedule } from './fault-schedule.js'
 import {
   HISTORY_SCHEMA_VERSION,
@@ -63,14 +64,14 @@ function schedule(): FaultSchedule {
 
 function checks(): ConsistencyChecksArtifact {
   return {
-    schemaVersion: HISTORY_SCHEMA_VERSION,
+    schemaVersion: CHECKS_SCHEMA_VERSION,
     kind: 'orez-consistency-checks',
     checks: [
       {
         name: 'history-structure',
         version: '1',
-        input: 'history.jsonl',
-        valid: true,
+        inputs: ['history.jsonl'],
+        status: 'pass',
         violations: [],
       },
     ],
@@ -337,13 +338,13 @@ describe('consistency artifact writer', () => {
         (value) => value.checks.push(structuredClone(value.checks[0]!)),
       ],
       [
-        'check history-structure has invalid input other.json',
-        (value) => (value.checks[0]!.input = 'other.json' as never),
+        'check history-structure has invalid inputs',
+        (value) => (value.checks[0]!.inputs = ['other.json' as never]),
       ],
       [
         'check history-structure has an empty violation',
         (value) => {
-          value.checks[0]!.valid = false
+          value.checks[0]!.status = 'fail'
           value.checks[0]!.violations = ['']
         },
       ],

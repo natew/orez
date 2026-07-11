@@ -10,7 +10,10 @@ import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
-import { writeConsistencyArtifacts } from './consistency/artifacts.js'
+import {
+  CHECKS_SCHEMA_VERSION,
+  writeConsistencyArtifacts,
+} from './consistency/artifacts.js'
 import {
   AtomicObservationCollector,
   atomicReplayCommand,
@@ -299,7 +302,7 @@ try {
     resultsDir,
     recorder,
     manifest: {
-      schemaVersion: HISTORY_SCHEMA_VERSION,
+      schemaVersion: CHECKS_SCHEMA_VERSION,
       kind: 'orez-consistency-history',
       runId,
       seed: {
@@ -320,14 +323,15 @@ try {
       receipts: [],
     },
     checks: {
-      schemaVersion: HISTORY_SCHEMA_VERSION,
+      schemaVersion: CHECKS_SCHEMA_VERSION,
       kind: 'orez-consistency-checks',
       checks: [
         {
           name: 'atomic-visibility',
           version: String(ATOMIC_VISIBILITY_WORKLOAD_PROFILE.version),
-          input: 'history.jsonl',
-          ...outcome,
+          inputs: ['history.jsonl'],
+          status: outcome.valid ? 'pass' : 'fail',
+          violations: outcome.violations,
         },
       ],
     },

@@ -9,17 +9,19 @@ import { HistoryRecorder } from './recorder.js'
 export type ConsistencyCheck = {
   name: string
   version: string
-  input: 'history.jsonl' | 'schedule.json'
-  valid: boolean
+  inputs: ('history.jsonl' | 'schedule.json')[]
+  status: 'pass' | 'fail' | 'inconclusive'
   violations: string[]
   reports?: string[]
 }
 
 export type ConsistencyChecksArtifact = {
-  schemaVersion: typeof HISTORY_SCHEMA_VERSION
+  schemaVersion: typeof CHECKS_SCHEMA_VERSION
   kind: 'orez-consistency-checks'
   checks: ConsistencyCheck[]
 }
+
+export const CHECKS_SCHEMA_VERSION = 2 as const
 
 export type WriteConsistencyArtifactsOptions = {
   resultsDir: string
@@ -87,7 +89,7 @@ function validateManifest(manifest: RunManifest): void {
 }
 
 function validateChecks(checks: ConsistencyChecksArtifact): void {
-  if (checks.schemaVersion !== HISTORY_SCHEMA_VERSION) {
+  if (checks.schemaVersion !== CHECKS_SCHEMA_VERSION) {
     throw new Error(`checks have schema version ${checks.schemaVersion}`)
   }
   if (checks.kind !== 'orez-consistency-checks') {
@@ -113,8 +115,15 @@ function validateChecks(checks: ConsistencyChecksArtifact): void {
       throw new Error(`check identity ${check.name}@${check.version} is not unique`)
     }
     identities.add(identity)
-    if (check.input !== 'history.jsonl' && check.input !== 'schedule.json') {
-      throw new Error(`check ${check.name} has invalid input ${String(check.input)}`)
+    if (
+      !Array.isArray(check.inputs) ||
+      check.inputs.length === 0 ||
+      check.inputs.some(
+        (input) => input !== 'history.jsonl' && input !== 'schedule.json'
+      ) ||
+      new Set(check.inputs).size !== check.inputs.length
+    ) {
+      throw new Error(`check ${check.name} has invalid inputs`)
     }
     if (!Array.isArray(check.violations)) {
       throw new Error(`check ${check.name} has malformed violations`)
@@ -135,11 +144,20 @@ function validateChecks(checks: ConsistencyChecksArtifact): void {
     ) {
       throw new Error(`check ${check.name} has malformed reports`)
     }
-    if (typeof check.valid !== 'boolean') {
-      throw new Error(`check ${check.name} has invalid valid flag`)
+    if (!['pass', 'fail', 'inconclusive'].includes(check.status)) {
+      throw new Error(`check ${check.name} has invalid status ${String(check.status)}`)
     }
-    if (check.valid !== (check.violations.length === 0)) {
-      throw new Error(`check ${check.name} validity disagrees with its violations`)
+    if (check.status === 'pass' && check.violations.length !== 0) {
+      throw new Error(`passing check ${check.name} has violations`)
+    }
+    if (check.status === 'fail' && check.violations.length === 0) {
+      throw new Error(`failing check ${check.name} has no violations`)
+    }
+    if (
+      check.status === 'inconclusive' &&
+      (check.violations.length !== 0 || (check.reports?.length ?? 0) === 0)
+    ) {
+      throw new Error(`inconclusive check ${check.name} has invalid evidence`)
     }
   }
 }
