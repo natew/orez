@@ -405,9 +405,10 @@ fn property_config() -> Config {
     }
 }
 
-fn failure_envelope(reason: String, ops: &[Op]) -> Value {
+fn failure_envelope(reason: String, ops: &[Op], artifact_path: &std::path::Path) -> Value {
     let cases = std::env::var("PROPTEST_CASES").unwrap_or_else(|_| "12".into());
     let seed = std::env::var("PROPTEST_RNG_SEED").ok();
+    let replay_path = artifact_path.display().to_string();
     json!({
         "schemaVersion": 1,
         "kind": "sync-core-differential",
@@ -421,12 +422,54 @@ fn failure_envelope(reason: String, ops: &[Op]) -> Value {
             "cases": cases,
         },
         "replay": {
-            "command": "cargo test -p sync-core --test differential rust_matches_the_ts_reference_core_on_generated_traces",
-            "env": if let Some(seed) = seed { json!({ "PROPTEST_RNG_SEED": seed, "PROPTEST_CASES": "1" }) } else { json!({}) },
+            "command": format!(
+                "SYNC_CORE_REPLAY={} cargo test -p sync-core --test differential replay_saved_differential_trace -- --ignored --exact --nocapture",
+                replay_path
+            ),
+            "env": { "SYNC_CORE_REPLAY": replay_path },
         },
         "input": { "trace": ops },
         "failure": { "message": reason },
     })
+}
+
+fn persist_failure_envelope(reason: String, ops: &[Op]) -> (std::path::PathBuf, Value) {
+    // Proptest invokes the body repeatedly while shrinking. Replacing this
+    // process-scoped file means the final write is the latest (minimized)
+    // failing input instead of leaving one artifact per shrink attempt.
+    let path = std::env::temp_dir().join(format!(
+        "sync-core-diff-{}-minimized.json",
+        std::process::id()
+    ));
+    let staging = path.with_extension("json.writing");
+    let envelope = failure_envelope(reason, ops, &path);
+    std::fs::write(&staging, serde_json::to_vec_pretty(&envelope).unwrap())
+        .expect("write differential failure artifact");
+    std::fs::rename(&staging, &path).expect("publish differential failure artifact");
+    (path, envelope)
+}
+
+#[test]
+#[ignore = "set SYNC_CORE_REPLAY to a saved differential envelope"]
+fn replay_saved_differential_trace() {
+    let path = std::env::var_os("SYNC_CORE_REPLAY").expect("SYNC_CORE_REPLAY artifact path");
+    let bytes = std::fs::read(&path).expect("read SYNC_CORE_REPLAY artifact");
+    let envelope: Value = serde_json::from_slice(&bytes).expect("parse replay envelope");
+    assert_eq!(envelope["schemaVersion"], 1, "unsupported replay schema");
+    assert_eq!(
+        envelope["kind"], "sync-core-differential",
+        "wrong replay artifact kind"
+    );
+    let ops: Vec<Op> = serde_json::from_value(envelope["input"]["trace"].clone())
+        .expect("deserialize replay input.trace");
+    let rust = run_rust(&ops);
+    let ts = run_ts(&ops);
+    if let Err(reason) = compare(&rust, &ts) {
+        panic!(
+            "replayed differential failure from {}: {reason}",
+            std::path::Path::new(&path).display()
+        );
+    }
 }
 
 #[test]
@@ -452,9 +495,11 @@ proptest! {
         let rust = run_rust(&ops);
         let ts = run_ts(&ops);
         if let Err(reason) = compare(&rust, &ts) {
-            let artifact = serde_json::to_string_pretty(&failure_envelope(reason, &ops)).unwrap();
+            let (artifact_path, envelope) = persist_failure_envelope(reason, &ops);
+            let artifact = serde_json::to_string_pretty(&envelope).unwrap();
             prop_assert!(false,
-                "minimized failure artifact:\n{artifact}\n\nThe minimized seed is saved in crates/sync-core/proptest-regressions/differential.txt; replay with the artifact command. To replay the original RNG stream, use the seed printed by proptest as PROPTEST_RNG_SEED with PROPTEST_CASES=1."
+                "minimized failure artifact saved at {}:\n{artifact}\n\nReplay with replay.command in the artifact. The minimized seed is also saved in crates/sync-core/proptest-regressions/differential.txt; to replay the original RNG stream, use the seed printed by proptest as PROPTEST_RNG_SEED with PROPTEST_CASES=1.",
+                artifact_path.display()
             );
         }
     }
