@@ -690,7 +690,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     async #fetchDelegatedPush(
       endpoint: URL,
       headers: Headers,
-      body: ArrayBuffer
+      body: ArrayBuffer,
+      provisioning = false
     ): Promise<Response> {
       const binding = this.#serviceBinding(
         config.mutateBinding ?? config.upstream?.binding
@@ -703,7 +704,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             method: 'POST',
             headers,
             body,
-            signal: AbortSignal.timeout(delegateTimeoutMs),
+            signal: AbortSignal.timeout(
+              provisioning ? Math.max(delegateTimeoutMs, 25_000) : delegateTimeoutMs
+            ),
           })
         } catch (error) {
           lastError = error
@@ -1048,7 +1051,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           const upstreamResponse = await this.#fetchDelegatedPush(
             endpoint,
             headers,
-            bytes
+            bytes,
+            this.#engineState()?.upstreamWatermark === '0'
           )
           if (!upstreamResponse.ok) {
             return new Response(upstreamResponse.body, upstreamResponse)

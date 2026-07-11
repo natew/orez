@@ -82,6 +82,24 @@ try {
   })
   assert.equal(firstPushResponse.status, 200)
 
+  // The data DO itself must order a query that arrives just before the deploy
+  // shim's migration instead of returning `no such table` immediately.
+  const lateTableNamespace = `late-table-${crypto.randomUUID()}`
+  const lateTableUpstream = `${base}/upstream/${lateTableNamespace}`
+  const pendingRead = fetch(`${lateTableUpstream}/exec`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sql: 'SELECT 1 FROM late_file LIMIT 1' }),
+  })
+  await Bun.sleep(100)
+  const migration = await fetch(`${lateTableUpstream}/exec`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sql: 'CREATE TABLE late_file (id TEXT PRIMARY KEY)' }),
+  })
+  assert.equal(migration.status, 200)
+  assert.equal((await pendingRead).status, 200)
+
   // Force a retention gap before the engine has a cursor. The next pull must
   // recover via the ZeroDO /snapshot endpoint, not an unavailable change row.
   const upstreamPush = await fetch(`${upstream}/api/zero/push`, {

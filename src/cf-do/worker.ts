@@ -110,6 +110,8 @@ const SQL_ERROR_FALLBACK_LIMIT = 4000
 const DEFAULT_WRITE_BUDGET_ROWS = 150_000
 const DEFAULT_WRITE_BUDGET_WINDOW_MS = 5 * 60 * 1000
 const WRITE_BUDGET_TRIPPED_KEY = '_orez_write_budget_tripped_at'
+const SCHEMA_PROVISIONING_WAIT_MS = 20_000
+const SCHEMA_PROVISIONING_MAX_DELAY_MS = 500
 
 function positiveEnvInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value)
@@ -576,11 +578,11 @@ export class ZeroDO extends DurableObject {
       // bare /exec is single-statement and ctx.storage.sql already serializes;
       // the transaction wrap was adding ~2-5ms × every call, which on chat's
       // 27k-stmt boot pushed orez backend startup past chat's 60s wait-for-port.
-      const result = body.track
-        ? await this.ctx.storage.transaction(() =>
-            this.executeSQL(sql, params, body.track)
-          )
-        : this.executeSQL(sql, params)
+      const result = await this.withSchemaProvisioningWait(() =>
+        body.track
+          ? this.ctx.storage.transaction(() => this.executeSQL(sql, params, body.track))
+          : this.executeSQL(sql, params)
+      )
       return Response.json(
         measurements ? { ...result, writeMeasurements: measurements } : result
       )
@@ -602,46 +604,48 @@ export class ZeroDO extends DurableObject {
       const { statements } = (await request.json()) as {
         statements: Array<string | SqlExecStatement>
       }
-      const allRows = await this.ctx.storage.transaction(() => {
-        const results: any[] = []
-        for (const statement of statements) {
-          const item = typeof statement === 'string' ? { sql: statement } : statement
-          if (!item?.sql?.trim()) continue
-          if (
-            item.skipIfColumnExists &&
-            this.tableHasColumn(
-              item.skipIfColumnExists.table,
-              item.skipIfColumnExists.column
-            )
-          ) {
-            continue
-          }
-          if (
-            item.skipIfColumnMissing &&
-            !this.tableHasColumn(
-              item.skipIfColumnMissing.table,
-              item.skipIfColumnMissing.column
-            )
-          ) {
-            continue
-          }
-          try {
-            results.push(
-              this.executeSQL(
-                item.sql,
-                Array.isArray(item.params) ? item.params : [],
-                item.track
+      const allRows = await this.withSchemaProvisioningWait(() =>
+        this.ctx.storage.transaction(() => {
+          const results: any[] = []
+          for (const statement of statements) {
+            const item = typeof statement === 'string' ? { sql: statement } : statement
+            if (!item?.sql?.trim()) continue
+            if (
+              item.skipIfColumnExists &&
+              this.tableHasColumn(
+                item.skipIfColumnExists.table,
+                item.skipIfColumnExists.column
               )
-            )
-          } catch (err: any) {
-            if (err instanceof WriteBudgetExceededError) throw err
-            throw new Error(
-              `${err.message} while executing: ${sqlErrorSnippet(item.sql, err.message)}`
-            )
+            ) {
+              continue
+            }
+            if (
+              item.skipIfColumnMissing &&
+              !this.tableHasColumn(
+                item.skipIfColumnMissing.table,
+                item.skipIfColumnMissing.column
+              )
+            ) {
+              continue
+            }
+            try {
+              results.push(
+                this.executeSQL(
+                  item.sql,
+                  Array.isArray(item.params) ? item.params : [],
+                  item.track
+                )
+              )
+            } catch (err: any) {
+              if (err instanceof WriteBudgetExceededError) throw err
+              throw new Error(
+                `${err.message} while executing: ${sqlErrorSnippet(item.sql, err.message)}`
+              )
+            }
           }
-        }
-        return results
-      })
+          return results
+        })
+      )
       return Response.json({
         results: allRows,
         ...(measurements ? { writeMeasurements: measurements } : null),
@@ -652,6 +656,29 @@ export class ZeroDO extends DurableObject {
       return Response.json({ error: err.message }, { status: 500 })
     } finally {
       if (measurements) this.activeWriteMeasurements = null
+    }
+  }
+
+  // Fresh project traffic can arrive while the deploy shim is still applying
+  // its schema through a separate request to this same DO. Yield on SQLite's
+  // undefined-table error so that migration request can commit, then retry the
+  // read/batch. The operation that failed did not execute, and a failed batch
+  // transaction has rolled back, so replay is safe.
+  private async withSchemaProvisioningWait<T>(
+    operation: () => T | Promise<T>
+  ): Promise<T> {
+    const deadline = Date.now() + SCHEMA_PROVISIONING_WAIT_MS
+    let delayMs = 25
+    for (;;) {
+      try {
+        return await operation()
+      } catch (error) {
+        if (!/no such table:/i.test(String((error as Error)?.message ?? error)))
+          throw error
+        if (Date.now() >= deadline) throw error
+        await scheduler.wait(delayMs)
+        delayMs = Math.min(SCHEMA_PROVISIONING_MAX_DELAY_MS, delayMs * 2)
+      }
     }
   }
 
