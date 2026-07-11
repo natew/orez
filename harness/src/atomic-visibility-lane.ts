@@ -12,6 +12,7 @@ import { parseArgs } from 'node:util'
 
 import { writeConsistencyArtifacts } from './consistency/artifacts.js'
 import {
+  assertAtomicAuthorityRows,
   projectAtomicRead,
   validateAtomicProfileEvidence,
   type AtomicAppendEffect,
@@ -213,6 +214,11 @@ try {
     )
   )
   recordRead(recorder, 'ok', afterOp, projectAtomicRead(projectIds, after))
+
+  const authority = (await target.oracle(
+    `SELECT id, "projectId", rank FROM task WHERE id IN (${ids}) ORDER BY id`
+  )) as AtomicTaskRow[]
+  assertAtomicAuthorityRows(effects, authority)
 
   const outcome = checkAtomicVisibility(recorder.snapshot())
   const replayDir = join('target', 'consistency', 'atomic-visibility', `${runId}-replay`)

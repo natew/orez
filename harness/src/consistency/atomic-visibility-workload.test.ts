@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { executeMutator } from '../fixture-data.js'
 import {
+  assertAtomicAuthorityRows,
   projectAtomicRead,
   validateAtomicAppendArgs,
   validateAtomicProfileEvidence,
@@ -103,5 +104,21 @@ describe('atomic visibility workload contract', () => {
         profile: { ...ATOMIC_VISIBILITY_WORKLOAD_PROFILE, version: 2 as 1 },
       })
     ).toThrow('does not match checker')
+  })
+
+  test('corroborates the exact authoritative effect set', () => {
+    expect(() => assertAtomicAuthorityRows(effects, effects)).not.toThrow()
+    expect(() => assertAtomicAuthorityRows(effects, effects.slice(0, 1))).toThrow(
+      '1 rows for 2 effects'
+    )
+    expect(() =>
+      assertAtomicAuthorityRows(effects, [effects[0]!, { ...effects[1]!, id: 'extra' }])
+    ).toThrow('unexpected id extra')
+    expect(() =>
+      assertAtomicAuthorityRows(effects, [effects[0]!, { ...effects[1]!, rank: 999 }])
+    ).toThrow('does not match p1=102')
+    expect(() => assertAtomicAuthorityRows(effects, [effects[0]!, effects[0]!])).toThrow(
+      'duplicate id run-a'
+    )
   })
 })

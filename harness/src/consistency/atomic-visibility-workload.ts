@@ -115,3 +115,31 @@ export function projectAtomicRead(
     value: values.get(projectId)!.sort((a, b) => a - b),
   }))
 }
+
+export function assertAtomicAuthorityRows(
+  effects: readonly AtomicAppendEffect[],
+  rows: readonly AtomicTaskRow[]
+): void {
+  if (rows.length !== effects.length) {
+    throw new Error(
+      `atomic authority returned ${rows.length} rows for ${effects.length} effects`
+    )
+  }
+  const expected = new Map(effects.map((effect) => [effect.id, effect]))
+  const seen = new Set<string>()
+  for (const row of rows) {
+    const effect = expected.get(row.id)
+    if (effect === undefined) {
+      throw new Error(`atomic authority returned unexpected id ${row.id}`)
+    }
+    if (seen.has(row.id)) {
+      throw new Error(`atomic authority returned duplicate id ${row.id}`)
+    }
+    seen.add(row.id)
+    if (row.projectId !== effect.projectId || row.rank !== effect.rank) {
+      throw new Error(
+        `atomic authority row ${row.id} does not match ${effect.projectId}=${effect.rank}`
+      )
+    }
+  }
+}
