@@ -7337,7 +7337,12 @@ export class DoBackend {
   private async publicationTableInfos(
     publications?: string[]
   ): Promise<PublicationTableInfo[]> {
-    if (!this.publicationTableInfoCache) {
+    // Schema migration can run through a second DoBackend instance after this
+    // one has already cached an empty physical catalog. Do not let that
+    // pre-provisioning observation make information_schema.columns report an
+    // empty database forever; empty catalogs are cheap to re-check and become
+    // stable as soon as the first table appears.
+    if (!this.publicationTableInfoCache?.length) {
       this.publicationTableInfoCache = await this.loadPublicationTableInfos()
     }
     const requested = publications?.filter((name) => this.publications.has(name)) ?? []

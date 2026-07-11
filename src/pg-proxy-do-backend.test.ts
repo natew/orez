@@ -1386,6 +1386,43 @@ describe('DoBackend', () => {
     expect(metadataSelects).toBe(3)
   })
 
+  test('reloads an empty table catalog after out-of-band schema provisioning', async () => {
+    let provisioned = false
+    const http = await startDoHttp((sql) => {
+      if (sql.includes('sqlite_master')) {
+        return {
+          rows: provisioned
+            ? [{ name: 'message', sql: 'CREATE TABLE message (id text)' }]
+            : [],
+          columns: ['name', 'sql'],
+        }
+      }
+      if (sql.includes('PRAGMA table_info("message")')) {
+        return {
+          rows: [
+            { cid: 0, name: 'id', type: 'text', notnull: 1, dflt_value: null, pk: 1 },
+          ],
+          columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'late-table-catalog-test')
+    await backend.waitReady
+    const catalogSQL = `
+      SELECT c.table_name::text AS table,
+             c.column_name::text AS column
+      FROM information_schema.columns c
+      WHERE (c.table_schema, c.table_name) IN (('public'::text, 'message'::text))
+    `
+
+    expect((await backend.query(catalogSQL)).rows).toEqual([])
+    provisioned = true
+    expect((await backend.query(catalogSQL)).rows).toEqual([
+      { table: 'message', column: 'id' },
+    ])
+  })
+
   test('tracks parser-backed publication membership without private table lists', async () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('sqlite_master')) {
