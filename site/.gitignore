@@ -1,0 +1,6 @@
+node_modules
+dist
+.vite
+.one
+.wrangler
+*.log
