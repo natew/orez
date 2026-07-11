@@ -44,7 +44,7 @@ export function validateAtomicAppendArgs(value: unknown): AtomicAppendArgs {
     nonempty(candidate.id, `atomic append effect ${index} id`)
     nonempty(candidate.projectId, `atomic append effect ${index} projectId`)
     const rank = candidate.rank
-    if (!Number.isSafeInteger(rank)) {
+    if (!Number.isSafeInteger(rank) || Object.is(rank, -0)) {
       throw new Error(`atomic append effect ${index} rank must be a safe integer`)
     }
     if (ids.has(candidate.id)) {
@@ -142,4 +142,72 @@ export function assertAtomicAuthorityRows(
       )
     }
   }
+}
+
+export function classifyAtomicObservation(
+  effects: readonly AtomicAppendEffect[],
+  rows: readonly AtomicTaskRow[]
+): 'none' | 'partial' | 'all' {
+  const present = effects.filter((effect) =>
+    rows.some((row) => row.projectId === effect.projectId && row.rank === effect.rank)
+  ).length
+  if (present === 0) return 'none'
+  if (present === effects.length) return 'all'
+  return 'partial'
+}
+
+export function assertAtomicInitialClientAbsence(
+  effects: readonly AtomicAppendEffect[],
+  rows: readonly AtomicTaskRow[]
+): void {
+  const observation = classifyAtomicObservation(effects, rows)
+  if (observation !== 'none') {
+    throw new Error(
+      `atomic visibility identities are present in initial client state (${observation})`
+    )
+  }
+}
+
+export class AtomicObservationCollector {
+  readonly #effects: readonly AtomicAppendEffect[]
+  readonly #record: (
+    rows: readonly AtomicTaskRow[],
+    classification: 'none' | 'partial' | 'all'
+  ) => void
+  #initialized = false
+  #armed = false
+
+  constructor(
+    effects: readonly AtomicAppendEffect[],
+    record: (
+      rows: readonly AtomicTaskRow[],
+      classification: 'none' | 'partial' | 'all'
+    ) => void
+  ) {
+    this.#effects = effects
+    this.#record = record
+  }
+
+  initialize(rows: readonly AtomicTaskRow[]): void {
+    if (this.#initialized) throw new Error('atomic observer is already initialized')
+    assertAtomicInitialClientAbsence(this.#effects, rows)
+    this.#initialized = true
+  }
+
+  arm(): void {
+    if (!this.#initialized) throw new Error('atomic observer is not initialized')
+    if (this.#armed) throw new Error('atomic observer is already armed')
+    this.#armed = true
+  }
+
+  observe(rows: readonly AtomicTaskRow[]): 'none' | 'partial' | 'all' {
+    if (!this.#armed) throw new Error('atomic observer is not armed')
+    const classification = classifyAtomicObservation(this.#effects, rows)
+    this.#record(rows, classification)
+    return classification
+  }
+}
+
+export function atomicReplayCommand(target: string, seed: string): string {
+  return `bun src/atomic-visibility-lane.ts --target ${target} --seed=${seed} --replay`
 }

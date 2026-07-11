@@ -6,12 +6,14 @@
 //   bun src/atomic-visibility-lane.ts --target orez-local --seed example
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
 import { writeConsistencyArtifacts } from './consistency/artifacts.js'
 import {
+  AtomicObservationCollector,
+  atomicReplayCommand,
   assertAtomicAuthorityRows,
   projectAtomicRead,
   validateAtomicProfileEvidence,
@@ -46,8 +48,8 @@ if (!/^[A-Za-z0-9._:-]+$/.test(seed)) {
   )
 }
 const digest = createHash('sha256').update(seed).digest('hex')
-const runId = `atomic-visibility-${digest.slice(0, 16)}`
-const idPrefix = `${runId}-task-`
+const scenarioId = `atomic-visibility-${digest.slice(0, 16)}`
+const idPrefix = `${scenarioId}-task-`
 const projectIds = ['p0', 'p1']
 const effects: AtomicAppendEffect[] = projectIds.map((projectId, index) => ({
   id: `${idPrefix}${index}`,
@@ -55,12 +57,36 @@ const effects: AtomicAppendEffect[] = projectIds.map((projectId, index) => ({
   rank: 1_000_000_000 + Number.parseInt(digest.slice(index * 6, index * 6 + 6), 16),
 }))
 const defaultResultsName = args.replay
-  ? `${runId}-replay-${randomUUID().slice(0, 8)}`
-  : runId
+  ? `${scenarioId}-replay-${randomUUID().slice(0, 8)}`
+  : scenarioId
 const resultsDir =
   args['results-dir'] ??
   join('target', 'consistency', 'atomic-visibility', defaultResultsName)
+const runId = basename(resultsDir)
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
+const dirty = execFileSync(
+  'git',
+  [
+    'status',
+    '--porcelain',
+    '--untracked-files=all',
+    '--',
+    'src',
+    'harness/src',
+    'package.json',
+    'bun.lock',
+    'harness/package.json',
+    'harness/bun.lock',
+  ],
+  { cwd: repoRoot, encoding: 'utf8' }
+).trim()
+if (dirty !== '') {
+  throw new Error(`refusing evidence run with dirty executable inputs:\n${dirty}`)
+}
+const build = execFileSync('git', ['rev-parse', 'HEAD'], {
+  cwd: repoRoot,
+  encoding: 'utf8',
+}).trim()
 
 function sqlString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`
@@ -76,37 +102,78 @@ async function startTarget(name: string): Promise<SyncTarget> {
 }
 
 type CompleteWatcher = {
-  waitFor(predicate: (rows: AtomicTaskRow[]) => boolean): Promise<AtomicTaskRow[]>
+  initial(timeoutMs: number): Promise<AtomicTaskRow[]>
+  startCollecting(collector: AtomicObservationCollector): void
+  waitForAll(timeoutMs: number): Promise<void>
   destroy(): void
 }
 
 function watchCompleteScope(zero: FixtureZero): CompleteWatcher {
   const view = zero.materialize(queries.tasksInProjects({ projectIds }))
-  const complete: AtomicTaskRow[][] = []
-  const waiters = new Set<() => void>()
+  let initial: AtomicTaskRow[] | undefined
+  let resolveInitial: ((rows: AtomicTaskRow[]) => void) | undefined
+  let collector: AtomicObservationCollector | undefined
+  const pending: AtomicTaskRow[][] = []
+  let sawAll = false
+  let collectionError: unknown
+  let resolveAll: (() => void) | undefined
+  let rejectAll: ((error: unknown) => void) | undefined
+  const dispatch = (rows: AtomicTaskRow[]) => {
+    try {
+      if (collector!.observe(rows) === 'all') {
+        sawAll = true
+        resolveAll?.()
+      }
+    } catch (error) {
+      collectionError = error
+      rejectAll?.(error)
+    }
+  }
   view.addListener((data, resultType) => {
     if (resultType !== 'complete') return
-    complete.push(
-      structuredClone(data).map(({ id, projectId, rank }) => ({ id, projectId, rank }))
-    )
-    for (const wake of waiters) wake()
+    const rows = structuredClone(data).map(({ id, projectId, rank }) => ({
+      id,
+      projectId,
+      rank,
+    }))
+    if (initial === undefined) {
+      initial = rows
+      resolveInitial?.(structuredClone(rows))
+    } else if (collector === undefined) pending.push(rows)
+    else dispatch(rows)
   })
   return {
-    waitFor(predicate) {
+    initial(timeoutMs) {
+      if (initial !== undefined) return Promise.resolve(structuredClone(initial))
       return new Promise((resolve, reject) => {
-        const inspect = () => {
-          const match = complete.findLast(predicate)
-          if (match === undefined) return
+        const deadline = setTimeout(
+          () => reject(new Error('timed out waiting for initial complete observation')),
+          timeoutMs
+        )
+        resolveInitial = (rows) => {
           clearTimeout(deadline)
-          waiters.delete(inspect)
-          resolve(structuredClone(match))
+          resolve(rows)
         }
-        const deadline = setTimeout(() => {
-          waiters.delete(inspect)
-          reject(new Error('timed out waiting for a complete full-scope observation'))
-        }, 30_000)
-        waiters.add(inspect)
-        inspect()
+      })
+    },
+    startCollecting(nextCollector) {
+      if (collector !== undefined) throw new Error('complete observer already collecting')
+      collector = nextCollector
+      for (const rows of pending.splice(0)) dispatch(rows)
+    },
+    waitForAll(timeoutMs) {
+      if (collectionError !== undefined) return Promise.reject(collectionError)
+      if (sawAll) return Promise.resolve()
+      return new Promise((resolve, reject) => {
+        const deadline = setTimeout(
+          () => reject(new Error('timed out waiting for complete atomic observation')),
+          timeoutMs
+        )
+        resolveAll = () => {
+          clearTimeout(deadline)
+          resolve()
+        }
+        rejectAll = reject
       })
     },
     destroy: () => view.destroy(),
@@ -160,8 +227,22 @@ try {
     projectIds.map((key) => ({ type: 'read', key, value: null }))
   )
   watcher = watchCompleteScope(observer)
-  const before = await watcher.waitFor(() => true)
+  const before = await watcher.initial(30_000)
+  const collector = new AtomicObservationCollector(effects, (rows) => {
+    const afterOp = `${runId}-read-after-${observationIndex++}`
+    recordRead(
+      recorder,
+      'invoke',
+      afterOp,
+      projectIds.map((key) => ({ type: 'read', key, value: null }))
+    )
+    recordRead(recorder, 'ok', afterOp, projectAtomicRead(projectIds, rows))
+  })
+  collector.initialize(before)
   recordRead(recorder, 'ok', beforeOp, projectAtomicRead(projectIds, before))
+  let observationIndex = 1
+  collector.arm()
+  watcher.startCollecting(collector)
 
   const mutationOp = `${runId}-mutation`
   const transaction = effects.map(({ projectId: key, rank: value }) => ({
@@ -201,24 +282,7 @@ try {
     throw error
   }
 
-  const afterOp = `${runId}-read-after`
-  recordRead(
-    recorder,
-    'invoke',
-    afterOp,
-    projectIds.map((key) => ({ type: 'read', key, value: null }))
-  )
-  const after = await watcher.waitFor((rows) =>
-    effects.every((effect) =>
-      rows.some(
-        (row) =>
-          row.id === effect.id &&
-          row.projectId === effect.projectId &&
-          row.rank === effect.rank
-      )
-    )
-  )
-  recordRead(recorder, 'ok', afterOp, projectAtomicRead(projectIds, after))
+  await watcher.waitForAll(30_000)
 
   const authority = (await target.oracle(
     `SELECT id, "projectId", rank FROM task WHERE id IN (${ids}) ORDER BY id`
@@ -226,11 +290,7 @@ try {
   assertAtomicAuthorityRows(effects, authority)
 
   const outcome = checkAtomicVisibility(recorder.snapshot())
-  const replay = `bun src/atomic-visibility-lane.ts --target ${args.target} --seed ${seed} --replay`
-  const build = execFileSync('git', ['rev-parse', 'HEAD'], {
-    cwd: repoRoot,
-    encoding: 'utf8',
-  }).trim()
+  const replay = atomicReplayCommand(args.target!, seed)
   await writeConsistencyArtifacts({
     resultsDir,
     recorder,

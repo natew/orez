@@ -2,12 +2,20 @@ import { describe, expect, test } from 'bun:test'
 
 import { executeMutator } from '../fixture-data.js'
 import {
+  AtomicObservationCollector,
+  atomicReplayCommand,
   assertAtomicAuthorityRows,
+  assertAtomicInitialClientAbsence,
+  classifyAtomicObservation,
   projectAtomicRead,
   validateAtomicAppendArgs,
   validateAtomicProfileEvidence,
 } from './atomic-visibility-workload.js'
-import { ATOMIC_VISIBILITY_WORKLOAD_PROFILE } from './atomic-visibility.js'
+import {
+  ATOMIC_VISIBILITY_WORKLOAD_PROFILE,
+  checkAtomicVisibility,
+} from './atomic-visibility.js'
+import { HistoryRecorder } from './recorder.js'
 
 import type { SyncDb } from '../../../src/sync-server/sync-server.js'
 
@@ -52,6 +60,7 @@ describe('atomic visibility workload contract', () => {
       'identity p0=101',
     ],
     [{ effects: [effects[0], { ...effects[1], rank: 1.5 }] }, 'safe integer'],
+    [{ effects: [effects[0], { ...effects[1], rank: -0 }] }, 'safe integer'],
     [{ effects: [effects[0], { ...effects[1], projectId: '' }] }, 'nonempty string'],
   ])('rejects invalid append args %#', (args, message) => {
     expect(() => validateAtomicAppendArgs(args)).toThrow(message as string)
@@ -119,6 +128,91 @@ describe('atomic visibility workload contract', () => {
     ).toThrow('does not match p1=102')
     expect(() => assertAtomicAuthorityRows(effects, [effects[0]!, effects[0]!])).toThrow(
       'duplicate id run-a'
+    )
+  })
+
+  test('classifies every observer snapshot without skipping a strict subset', () => {
+    expect(classifyAtomicObservation(effects, [])).toBe('none')
+    expect(classifyAtomicObservation(effects, [effects[0]!])).toBe('partial')
+    expect(classifyAtomicObservation(effects, effects)).toBe('all')
+  })
+
+  test('requires group identities to be absent from initial client state', () => {
+    expect(() => assertAtomicInitialClientAbsence(effects, [])).not.toThrow()
+    expect(() => assertAtomicInitialClientAbsence(effects, [effects[0]!])).toThrow(
+      'initial client state (partial)'
+    )
+    expect(() => assertAtomicInitialClientAbsence(effects, effects)).toThrow(
+      'initial client state (all)'
+    )
+  })
+
+  test('records none, strict-subset, and all callbacks so the checker sees the anomaly', () => {
+    let now = 0
+    const recorder = new HistoryRecorder(() => now++)
+    const recordPair = (opId: string, rows: typeof effects) => {
+      recorder.record({
+        opId,
+        process: 'reader',
+        phase: 'invoke',
+        kind: 'read',
+        transaction: [
+          { type: 'read', key: 'p0', value: null },
+          { type: 'read', key: 'p1', value: null },
+        ],
+      })
+      recorder.record({
+        opId,
+        process: 'reader',
+        phase: 'ok',
+        kind: 'read',
+        transaction: projectAtomicRead(['p0', 'p1'], rows),
+      })
+    }
+    recordPair('before', [])
+    const mutation = effects.map(({ projectId: key, rank: value }) => ({
+      type: 'append' as const,
+      key,
+      value,
+    }))
+    recorder.record({
+      opId: 'group',
+      process: 'writer',
+      phase: 'invoke',
+      kind: 'mutation',
+      transaction: mutation,
+    })
+    recorder.record({
+      opId: 'group',
+      process: 'writer',
+      phase: 'ok',
+      kind: 'mutation',
+      transaction: mutation,
+    })
+    const seen: string[] = []
+    let index = 0
+    const collector = new AtomicObservationCollector(effects, (rows, state) => {
+      seen.push(state)
+      recordPair(`after-${index++}`, [...rows])
+    })
+    collector.initialize([])
+    collector.arm()
+    collector.observe([])
+    collector.observe([effects[0]!])
+    collector.observe(effects)
+
+    expect(seen).toEqual(['none', 'partial', 'all'])
+    expect(checkAtomicVisibility(recorder.snapshot())).toEqual({
+      valid: false,
+      violations: [
+        'atomic group group is partially visible in read after-1; missing effects: p1=102',
+      ],
+    })
+  })
+
+  test('replay command preserves a safe leading-dash seed as one option value', () => {
+    expect(atomicReplayCommand('orez-local', '-case')).toBe(
+      'bun src/atomic-visibility-lane.ts --target orez-local --seed=-case --replay'
     )
   })
 })
