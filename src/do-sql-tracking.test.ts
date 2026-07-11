@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   isSqlMutation,
   RollingRowWriteBudget,
+  trackSqlCursorRowsWritten,
   trackedChangeRow,
   WriteBudgetExceededError,
 } from './do-sql-tracking.js'
@@ -85,5 +86,56 @@ describe('isSqlMutation', () => {
     expect(isSqlMutation('/* migration */\nINSERT INTO t VALUES (1)')).toBe(true)
     expect(isSqlMutation('SELECT 1; -- next\nDELETE FROM t')).toBe(true)
     expect(isSqlMutation('WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x')).toBe(true)
+  })
+})
+
+describe('trackSqlCursorRowsWritten', () => {
+  it('records billing rows that appear only while a RETURNING cursor is drained', () => {
+    const rows = [{ id: 1 }, { id: 2 }, { id: 3 }]
+    let index = 0
+    const cursor = {
+      rowsWritten: 0,
+      next() {
+        if (index >= rows.length) return { done: true, value: undefined }
+        this.rowsWritten += 4 // base row + three index rows billed by CF
+        return { done: false, value: rows[index++] }
+      },
+      toArray() {
+        const out = []
+        for (;;) {
+          const item = this.next()
+          if (item.done) return out
+          out.push(item.value)
+        }
+      },
+    }
+    const deltas: number[] = []
+    const tracked = trackSqlCursorRowsWritten(cursor, (delta) => deltas.push(delta))
+    expect(tracked.rowsWritten).toBe(0)
+    expect(tracked.toArray()).toEqual(rows)
+    expect(deltas).toEqual([12])
+  })
+
+  it('records immediate rows once and monotonic deltas from next/raw iteration', () => {
+    const cursor = {
+      rowsWritten: 2,
+      next() {
+        this.rowsWritten = 5
+        return { done: true, value: undefined }
+      },
+      raw() {
+        return {
+          next: () => {
+            this.rowsWritten = 9
+            return { done: true, value: undefined }
+          },
+        }
+      },
+    }
+    const deltas: number[] = []
+    const tracked = trackSqlCursorRowsWritten(cursor, (delta) => deltas.push(delta))
+    tracked.next()
+    tracked.raw().next()
+    expect(deltas).toEqual([2, 3, 4])
   })
 })

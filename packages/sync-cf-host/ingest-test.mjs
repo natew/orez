@@ -96,6 +96,17 @@ try {
     ).length,
     2
   )
+  const upstreamBudgetStatus = await fetch(`${origin}/admin/upstream-write-budget`, {
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  })
+  assert.equal(upstreamBudgetStatus.status, 200)
+  const upstreamBudget = await upstreamBudgetStatus.json()
+  assert.equal(upstreamBudget.enabled, true)
+  assert.equal(upstreamBudget.budget, 150_000)
+  assert.equal(upstreamBudget.windowRows, upstreamBudget.billableRows)
+  assert.ok(Number.isSafeInteger(upstreamBudget.billableRows))
+  assert.ok(Number.isSafeInteger(upstreamBudget.logicalRows))
+  assert.ok(upstreamBudget.billableRows > upstreamBudget.logicalRows)
 
   const pushBody = {
     clientGroupID: 'group',

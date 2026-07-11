@@ -46,7 +46,7 @@ export function validateSyncHostConfig<Env extends SyncHostEnv>(
       throw new TypeError('upstream.intervalMs must be a safe integer >= 1000')
     }
     for (const [name, value] of Object.entries({
-      ingestBudgetRows: config.upstream.ingestBudgetRows ?? 250_000,
+      ingestBudgetRows: config.upstream.ingestBudgetRows ?? 150_000,
       ingestBudgetWindowMs: config.upstream.ingestBudgetWindowMs ?? 300_000,
       ingestBackoffMs: config.upstream.ingestBackoffMs ?? 1_000,
       ingestMaxBackoffMs: config.upstream.ingestMaxBackoffMs ?? 60_000,

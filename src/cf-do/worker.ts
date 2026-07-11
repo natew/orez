@@ -4,6 +4,7 @@ import { DurableObject } from 'cloudflare:workers'
 import {
   isSqlMutation,
   RollingRowWriteBudget,
+  trackSqlCursorRowsWritten,
   trackedChangeRow,
   WriteBudgetExceededError,
 } from '../do-sql-tracking.js'
@@ -102,7 +103,7 @@ interface HibernatableWebSocket extends WebSocket {
 const SCHEMA_VERSION = 1
 const SQL_ERROR_SNIPPET_RADIUS = 1600
 const SQL_ERROR_FALLBACK_LIMIT = 4000
-const DEFAULT_WRITE_BUDGET_ROWS = 300_000
+const DEFAULT_WRITE_BUDGET_ROWS = 150_000
 const DEFAULT_WRITE_BUDGET_WINDOW_MS = 5 * 60 * 1000
 const WRITE_BUDGET_TRIPPED_KEY = '_orez_write_budget_tripped_at'
 
@@ -169,6 +170,34 @@ export class ZeroDO extends DurableObject {
   private writeBudgetDisabled: boolean
   private writeBudgetAdminToken: string | undefined
 
+  private recordWriteBudgetRows(rows: number): void {
+    const wasTripped = this.writeBudget.status().tripped
+    try {
+      this.writeBudget.recordBillable(rows)
+    } catch (error) {
+      if (error instanceof WriteBudgetExceededError && !wasTripped) {
+        const status = this.writeBudget.status()
+        console.error(
+          JSON.stringify({
+            event: 'orez_do_write_budget_tripped',
+            windowRows: status.windowRows,
+            billableRows: status.billableRows,
+            logicalRows: status.logicalRows,
+            budget: status.budget,
+            windowMs: status.windowMs,
+            trippedAt: status.trippedAt,
+          })
+        )
+        this.ctx.waitUntil(
+          Promise.resolve().then(() =>
+            this.ctx.storage.put(WRITE_BUDGET_TRIPPED_KEY, status.trippedAt ?? Date.now())
+          )
+        )
+      }
+      throw error
+    }
+  }
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
     this.sql = ctx.storage.sql
@@ -200,31 +229,10 @@ export class ZeroDO extends DurableObject {
         const mutation = isSqlMutation(statement)
         if (mutation) this.writeBudget.assertOpen()
         const cursor = rawExec(statement, ...params)
-        if (mutation) {
-          try {
-            this.writeBudget.record(cursor?.rowsWritten)
-          } catch (error) {
-            if (error instanceof WriteBudgetExceededError) {
-              const status = this.writeBudget.status()
-              console.error(
-                JSON.stringify({
-                  event: 'orez_do_write_budget_tripped',
-                  windowRows: status.windowRows,
-                  budget: status.budget,
-                  windowMs: status.windowMs,
-                  trippedAt: status.trippedAt,
-                })
-              )
-              this.ctx.waitUntil(
-                this.ctx.storage.put(
-                  WRITE_BUDGET_TRIPPED_KEY,
-                  status.trippedAt ?? Date.now()
-                )
-              )
-            }
-            throw error
-          }
-        }
+        if (mutation)
+          return trackSqlCursorRowsWritten(cursor, (rows) =>
+            this.recordWriteBudgetRows(rows)
+          )
         return cursor
       }
       ctx.blockConcurrencyWhile(async () => {
@@ -771,6 +779,7 @@ export class ZeroDO extends DurableObject {
     const cursor = this.sql.exec(sql, ...params)
     const columns = Array.isArray(cursor.columnNames) ? cursor.columnNames : []
     const rows = this.cursorRows(cursor, columns)
+    if (isSqlMutation(sql)) this.writeBudget.recordLogical(rows.length)
     if (!track) return { rows, columns }
 
     for (const row of rows) {
@@ -956,6 +965,7 @@ export class ZeroDO extends DurableObject {
       `INSERT INTO ${quoteIdent(tn)} (${qc}) VALUES (${ph})`,
       ...cols.map((c) => row[c])
     )
+    this.writeBudget.recordLogical(1)
     const next = this.readRowByPrimaryKey(tn, value, pk) || this.normalizeRow(tn, row)
     this.appendChange(tn, 'INSERT', next, null)
   }
@@ -981,6 +991,7 @@ export class ZeroDO extends DurableObject {
       ...nk.map((c) => storage[c]),
       ...pk.map((c) => this.storageColumnValue(tn, c, value[c]))
     )
+    this.writeBudget.recordLogical(1)
     const next = this.readRowByPrimaryKey(tn, value, pk)
     if (next) this.appendChange(tn, 'UPDATE', next, existing)
   }
@@ -993,6 +1004,7 @@ export class ZeroDO extends DurableObject {
       `DELETE FROM ${quoteIdent(tn)} WHERE ${this.primaryKeyWhere(pk)}`,
       ...pk.map((c) => this.storageColumnValue(tn, c, value[c]))
     )
+    this.writeBudget.recordLogical(1)
     this.appendChange(tn, 'DELETE', null, existing)
   }
 

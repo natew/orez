@@ -10,6 +10,8 @@ export type IngestBreakerOptions = {
 
 export type IngestBreakerStatus = {
   windowRows: number
+  billableRows: number
+  logicalRows: number
   budget: number
   windowMs: number
   tripped: boolean
@@ -19,7 +21,7 @@ export type IngestBreakerStatus = {
   consecutiveTrips: number
 }
 
-type Sample = { at: number; rows: number }
+type Sample = { at: number; billableRows: number; logicalRows: number }
 
 export class IngestBreakerError extends Error {
   readonly status = 429
@@ -38,7 +40,8 @@ export class IngestBreakerError extends Error {
 export class IngestCircuitBreaker {
   readonly #options: IngestBreakerOptions
   #samples: Sample[] = []
-  #windowRows = 0
+  #billableRows = 0
+  #logicalRows = 0
   #reason: IngestBreakerReason | null = null
   #retryAt: number | null = null
   #consecutiveTrips = 0
@@ -56,7 +59,8 @@ export class IngestCircuitBreaker {
     const cutoff = now - this.#options.windowMs
     let remove = 0
     while (remove < this.#samples.length && this.#samples[remove]!.at <= cutoff) {
-      this.#windowRows -= this.#samples[remove]!.rows
+      this.#billableRows -= this.#samples[remove]!.billableRows
+      this.#logicalRows -= this.#samples[remove]!.logicalRows
       remove++
     }
     if (remove > 0) this.#samples.splice(0, remove)
@@ -67,7 +71,9 @@ export class IngestCircuitBreaker {
     this.#prune(now)
     const retryAfterMs = Math.max(0, (this.#retryAt ?? now) - now)
     return {
-      windowRows: this.#windowRows,
+      windowRows: this.#billableRows,
+      billableRows: this.#billableRows,
+      logicalRows: this.#logicalRows,
       budget: this.#options.budgetRows,
       windowMs: this.#options.windowMs,
       tripped: this.#reason !== null && retryAfterMs > 0,
@@ -91,15 +97,34 @@ export class IngestCircuitBreaker {
   }
 
   record(rows: number): void {
+    this.recordLogical(rows)
+    this.recordBillable(rows)
+  }
+
+  #sample(now: number): Sample {
+    this.#prune(now)
+    const last = this.#samples[this.#samples.length - 1]
+    if (last?.at === now) return last
+    const sample = { at: now, billableRows: 0, logicalRows: 0 }
+    this.#samples.push(sample)
+    return sample
+  }
+
+  recordLogical(rows: number): void {
+    if (!Number.isSafeInteger(rows) || rows <= 0) return
+    const sample = this.#sample(this.#options.now())
+    sample.logicalRows += rows
+    this.#logicalRows += rows
+  }
+
+  recordBillable(rows: number): void {
     this.assertReady()
     if (!Number.isSafeInteger(rows) || rows <= 0) return
     const now = this.#options.now()
-    this.#prune(now)
-    const last = this.#samples[this.#samples.length - 1]
-    if (last?.at === now) last.rows += rows
-    else this.#samples.push({ at: now, rows })
-    this.#windowRows += rows
-    if (this.#windowRows > this.#options.budgetRows) this.trip('ingestBudgetExceeded')
+    const sample = this.#sample(now)
+    sample.billableRows += rows
+    this.#billableRows += rows
+    if (this.#billableRows > this.#options.budgetRows) this.trip('ingestBudgetExceeded')
   }
 
   trip(reason: IngestBreakerReason): never {
@@ -113,7 +138,7 @@ export class IngestCircuitBreaker {
     this.#retryAt = now + delay
     throw new IngestBreakerError(
       reason,
-      this.#windowRows,
+      this.#billableRows,
       this.#options.budgetRows,
       delay
     )
@@ -134,9 +159,76 @@ export class IngestCircuitBreaker {
 
   reopen(): void {
     this.#samples = []
-    this.#windowRows = 0
+    this.#billableRows = 0
+    this.#logicalRows = 0
     this.recovered()
   }
+}
+
+type BillableCursor = {
+  rowsWritten?: number
+  next?: (...args: unknown[]) => unknown
+  one?: (...args: unknown[]) => unknown
+  toArray?: (...args: unknown[]) => unknown
+  raw?: (...args: unknown[]) => unknown
+  [Symbol.iterator]?: () => Iterator<unknown>
+}
+
+export function trackBillableCursorRows<Cursor extends BillableCursor>(
+  cursor: Cursor,
+  record: (rows: number) => void
+): Cursor {
+  if (!cursor || typeof cursor !== 'object') return cursor
+  let accountedRows = 0
+  const account = () => {
+    const current = Number(cursor.rowsWritten ?? 0)
+    if (!Number.isSafeInteger(current) || current <= accountedRows) return
+    const delta = current - accountedRows
+    accountedRows = current
+    record(delta)
+  }
+  const wrapIterator = (iterator: object): object =>
+    new Proxy(iterator, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target)
+        if (property === 'next' && typeof value === 'function') {
+          return (...args: unknown[]) => {
+            try {
+              return Reflect.apply(value, target, args)
+            } finally {
+              account()
+            }
+          }
+        }
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+  let proxy: Cursor
+  proxy = new Proxy(cursor, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target)
+      if (property === Symbol.iterator) return () => proxy as unknown as Iterator<unknown>
+      if (
+        (property === 'next' || property === 'one' || property === 'toArray') &&
+        typeof value === 'function'
+      ) {
+        return (...args: unknown[]) => {
+          try {
+            return Reflect.apply(value, target, args)
+          } finally {
+            account()
+          }
+        }
+      }
+      if (property === 'raw' && typeof value === 'function') {
+        return (...args: unknown[]) =>
+          wrapIterator(Reflect.apply(value, target, args) as object)
+      }
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  account()
+  return proxy
 }
 
 export function retryDelayMs(

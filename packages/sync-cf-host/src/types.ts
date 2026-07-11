@@ -116,7 +116,7 @@ export type UpstreamConfig = {
   changeLimit?: number
   /** Durable Object alarm safety net. Defaults to 15 seconds. */
   intervalMs?: number
-  /** Applied upstream rows allowed per rolling window. Defaults to 250,000. */
+  /** Billable SQLite rows written by ingest per rolling window. Defaults to 150,000. */
   ingestBudgetRows?: number
   /** Rolling ingest budget window. Defaults to five minutes. */
   ingestBudgetWindowMs?: number

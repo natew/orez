@@ -1,3 +1,5 @@
+import { trackBillableCursorRows } from './write-safeguards.js'
+
 import type { MutatorSql, SyncSql } from './types.js'
 
 type WireValue =
@@ -86,7 +88,10 @@ function encodeResult(value: unknown): WireValue {
 export class SqlStorageSyncDb implements JsSyncDb {
   readonly stats: AdapterStats = { execCalls: 0, queryCalls: 0, sqlMs: 0 }
 
-  constructor(private readonly sql: SqlStorage) {}
+  constructor(
+    private readonly sql: SqlStorage,
+    private readonly recordRowsWritten: (rows: number) => void = () => {}
+  ) {}
 
   resetStats(): void {
     this.stats.execCalls = 0
@@ -97,7 +102,10 @@ export class SqlStorageSyncDb implements JsSyncDb {
   exec(sql: string, params: WireValue[]): void {
     assertHostSql(sql)
     const start = performance.now()
-    this.sql.exec(sql, ...params.map(decodeBinding))
+    trackBillableCursorRows(
+      this.sql.exec(sql, ...params.map(decodeBinding)),
+      this.recordRowsWritten
+    )
     this.stats.execCalls++
     this.stats.sqlMs += performance.now() - start
   }
@@ -105,7 +113,10 @@ export class SqlStorageSyncDb implements JsSyncDb {
   query(sql: string, params: WireValue[]): WireRow[] {
     assertHostSql(sql)
     const start = performance.now()
-    const cursor = this.sql.exec(sql, ...params.map(decodeBinding))
+    const cursor = trackBillableCursorRows(
+      this.sql.exec(sql, ...params.map(decodeBinding)),
+      this.recordRowsWritten
+    )
     const columns = [...cursor.columnNames]
     // A SqlStorage cursor must be fully consumed before any await. Returning a
     // materialized array here makes that property structural.
@@ -121,11 +132,14 @@ export class SqlStorageSyncDb implements JsSyncDb {
 
 /** Direct application SQL surface used for initialization and admin reads. */
 export class SqlStorageDirect implements SyncSql {
-  constructor(private readonly sql: SqlStorage) {}
+  constructor(
+    private readonly sql: SqlStorage,
+    private readonly recordRowsWritten: (rows: number) => void = () => {}
+  ) {}
 
   exec(sql: string, params: readonly unknown[] = []): void {
     assertHostSql(sql)
-    this.sql.exec(sql, ...params)
+    trackBillableCursorRows(this.sql.exec(sql, ...params), this.recordRowsWritten)
   }
 
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
@@ -133,7 +147,10 @@ export class SqlStorageDirect implements SyncSql {
     params: readonly unknown[] = []
   ): Row[] {
     assertHostSql(sql)
-    return this.sql.exec(sql, ...params).toArray() as Row[]
+    return trackBillableCursorRows(
+      this.sql.exec(sql, ...params),
+      this.recordRowsWritten
+    ).toArray() as Row[]
   }
 }
 

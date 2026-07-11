@@ -286,7 +286,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
   const wakeCoalesceMs = config.wakeCoalesceMs ?? 25
   const upstreamIntervalMs = config.upstream?.intervalMs ?? 15_000
   const upstreamLimit = config.upstream?.changeLimit ?? 1_000
-  const ingestBudgetRows = config.upstream?.ingestBudgetRows ?? 250_000
+  const ingestBudgetRows = config.upstream?.ingestBudgetRows ?? 150_000
   const ingestBudgetWindowMs = config.upstream?.ingestBudgetWindowMs ?? 5 * 60_000
   const ingestBackoffMs = config.upstream?.ingestBackoffMs ?? 1_000
   const ingestMaxBackoffMs = config.upstream?.ingestMaxBackoffMs ?? 60_000
@@ -309,6 +309,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #wakeRecipients = new Set<WebSocket>()
     #wakePromise: Promise<void> | null = null
     #ingestPromise: Promise<number> | null = null
+    #recordingIngestBillable = false
     #ingestBreaker = new IngestCircuitBreaker({
       budgetRows: ingestBudgetRows,
       windowMs: ingestBudgetWindowMs,
@@ -319,8 +320,11 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
 
     constructor(ctx: DurableObjectState, env: Env) {
       super(ctx, env)
-      this.#engineDb = new SqlStorageSyncDb(ctx.storage.sql)
-      this.#directSql = new SqlStorageDirect(ctx.storage.sql)
+      const recordRowsWritten = (rows: number) => {
+        if (this.#recordingIngestBillable) this.#ingestBreaker.recordBillable(rows)
+      }
+      this.#engineDb = new SqlStorageSyncDb(ctx.storage.sql, recordRowsWritten)
+      this.#directSql = new SqlStorageDirect(ctx.storage.sql, recordRowsWritten)
       this.#mutatorSql = new SqlStorageMutatorTransaction(this.#directSql, (ast) =>
         this.#wasm(() => engine_compile_query(config.schema, ast))
       )
@@ -499,6 +503,26 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       }
     }
 
+    async #upstreamWriteBudgetStatus(): Promise<Response> {
+      if (!config.upstream) return json({ error: 'upstream is not configured' }, 404)
+      const path = this.#controlGet('upstreamPath')
+      if (!path) return json({ error: 'upstream path is not known yet' }, 409)
+      const endpoint = new URL(`${path}/_orez/write-budget`, 'https://upstream.invalid')
+      const response = await this.#serviceBinding().fetch(endpoint.toString(), {
+        headers: { host: endpoint.host },
+      })
+      if (!response.ok) {
+        return json(
+          {
+            error: 'upstream write-budget status unavailable',
+            upstreamStatus: response.status,
+          },
+          502
+        )
+      }
+      return json(await response.json())
+    }
+
     #rememberUpstreamPath(request: Request): string | null {
       if (!config.upstream) return null
       const path = request.headers.get(UPSTREAM_PATH_HEADER)
@@ -530,21 +554,31 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       }
     }
 
-    #recordIngestRows(rows: number, fields: Record<string, unknown>): void {
+    #recordIngestLogicalRows(rows: number): void {
+      this.#ingestBreaker.recordLogical(rows)
+    }
+
+    #withIngestBilling<T>(fields: Record<string, unknown>, apply: () => T): T {
+      this.#recordingIngestBillable = true
       try {
-        this.#ingestBreaker.record(rows)
+        return apply()
       } catch (error) {
-        this.#persistIngestBreaker()
-        const status = this.#ingestBreaker.status()
-        console.error(
-          JSON.stringify({
-            event: 'sync_upstream_ingest_breaker_tripped',
-            ...status,
-            reason: 'ingestBudgetExceeded',
-            ...fields,
-          })
-        )
+        this.#recordingIngestBillable = false
+        if (error instanceof IngestBreakerError) {
+          this.#persistIngestBreaker()
+          const status = this.#ingestBreaker.status()
+          console.error(
+            JSON.stringify({
+              event: 'sync_upstream_ingest_breaker_tripped',
+              ...status,
+              reason: 'ingestBudgetExceeded',
+              ...fields,
+            })
+          )
+        }
         throw error
+      } finally {
+        this.#recordingIngestBillable = false
       }
     }
 
@@ -574,17 +608,21 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
               throw new Error(`upstream snapshot returned ${snapshotResponse.status}`)
             }
             const snapshot = await snapshotResponse.json()
-            const rebuilt = this.ctx.storage.transactionSync(() =>
-              this.#wasm(() =>
-                engine_apply_upstream_snapshot(this.#engineDb, config.schema, snapshot)
-              )
-            ) as ApplyUpstreamResult
+            const rebuilt = this.#withIngestBilling(
+              { phase: 'snapshot', cursor },
+              () =>
+                this.ctx.storage.transactionSync(() =>
+                  this.#wasm(() =>
+                    engine_apply_upstream_snapshot(
+                      this.#engineDb,
+                      config.schema,
+                      snapshot
+                    )
+                  )
+                ) as ApplyUpstreamResult
+            )
             total += rebuilt.applied
-            this.#recordIngestRows(rebuilt.applied, {
-              phase: 'snapshot',
-              cursor,
-              resultWatermark: rebuilt.watermark,
-            })
+            this.#recordIngestLogicalRows(rebuilt.applied)
             const nextCursor = this.#engineState()?.upstreamWatermark ?? cursor
             if (String(nextCursor) === String(cursor)) {
               this.#tripIngest('ingestCursorStalled', {
@@ -603,15 +641,22 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           if (!Number.isSafeInteger(batch.watermark) || !Array.isArray(batch.changes)) {
             throw new Error('invalid upstream changes response')
           }
-          const result = this.ctx.storage.transactionSync(() =>
-            this.#wasm(() => engine_apply_upstream(this.#engineDb, config.schema, batch))
+          const result = this.#withIngestBilling(
+            {
+              phase: 'changes',
+              cursor,
+              batchWatermark: batch.watermark,
+              changeRows: batch.changes.length,
+            },
+            () =>
+              this.ctx.storage.transactionSync(() =>
+                this.#wasm(() =>
+                  engine_apply_upstream(this.#engineDb, config.schema, batch)
+                )
+              )
           ) as ApplyUpstreamResult
           total += result.applied
-          this.#recordIngestRows(result.applied, {
-            phase: 'changes',
-            cursor,
-            batchWatermark: batch.watermark,
-          })
+          this.#recordIngestLogicalRows(result.applied)
           const nextCursor = this.#engineState()?.upstreamWatermark ?? cursor
           if (batch.changes.length > 0 && String(nextCursor) === String(cursor)) {
             this.#tripIngest('ingestCursorStalled', {
@@ -1258,6 +1303,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
 
     #admin(route: string, request: Request): Promise<Response> | Response {
       if (route === '/admin/health') return json({ ok: true })
+      if (route === '/admin/upstream-write-budget' && request.method === 'GET')
+        return this.#upstreamWriteBudgetStatus()
       if (route === '/admin/status') {
         const heap = (
           performance as Performance & {

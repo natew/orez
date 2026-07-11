@@ -70,6 +70,8 @@ async function upstreamFetch(request: Request, env: Env): Promise<Response> {
   const [, namespace, ...rest] = url.pathname.split('/')
   if (!namespace) return new Response('namespace required', { status: 400 })
   const stub = env.UPSTREAM_DO.get(env.UPSTREAM_DO.idFromName(namespace))
+  url.pathname = `/${rest.join('/')}`
+  if (url.pathname === '/_orez/write-budget') return stub.fetch(new Request(url, request))
   const exec = async (sql: string, params: unknown[] = []) => {
     const response = await stub.fetch('https://upstream.invalid/exec', {
       method: 'POST',
@@ -88,7 +90,6 @@ async function upstreamFetch(request: Request, env: Env): Promise<Response> {
     'INSERT OR IGNORE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
     ['item', JSON.stringify(schema.tables.item)]
   )
-  url.pathname = `/${rest.join('/')}`
   return stub.fetch(new Request(url, request))
 }
 
@@ -97,7 +98,11 @@ export class DataService extends WorkerEntrypoint<Env> {
   fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
     const pathname = url.pathname
-    if (!pathname.endsWith('/changes') && !pathname.endsWith('/snapshot')) {
+    if (
+      !pathname.endsWith('/changes') &&
+      !pathname.endsWith('/snapshot') &&
+      !pathname.endsWith('/_orez/write-budget')
+    ) {
       return Promise.resolve(
         new Response('DATA route rejected non-feed request', { status: 418 })
       )
