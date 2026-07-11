@@ -192,6 +192,45 @@ try {
     meta: { lane: true },
   })
 
+  // Production timestamp columns are Zero `number`s, but the data tier's
+  // /changes JSON can carry its exact i64 read as a TEXT token. Prove the real
+  // ingest -> incremental pull path restores the schema type on the wire.
+  const numericTextNamespace = `numeric-text-${crypto.randomUUID()}`
+  const numericTextOrigin = `${base}/${numericTextNamespace}`
+  const numericPost = async (body) => {
+    const response = await fetch(`${numericTextOrigin}/pull`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token-user-a',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+    return { status: response.status, body: await response.json() }
+  }
+  const numericInitial = await numericPost({
+    clientID: 'numeric-reader',
+    clientGroupID: 'numeric-group',
+    cookie: null,
+  })
+  assert.equal(numericInitial.status, 200)
+  await fetch(`${base}/numeric-text-control/${numericTextNamespace}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: true }),
+  })
+  const numericIncremental = await numericPost({
+    clientID: 'numeric-reader',
+    clientGroupID: 'numeric-group',
+    cookie: numericInitial.body.cookie,
+  })
+  assert.equal(numericIncremental.status, 200)
+  const numericPut = numericIncremental.body.rowsPatch.find(
+    (entry) => entry.op === 'put' && entry.value?.id === 'numeric-text'
+  )
+  assert.equal(numericPut.value.rank, 1783770313712)
+  assert.equal(typeof numericPut.value.rank, 'number')
+
   // A feed that keeps returning changes while the engine cursor no longer
   // advances must trip the ingest breaker instead of hot-looping. Once the
   // bad feed is removed and an admin reopens the circuit, normal pulls recover.

@@ -28,6 +28,7 @@ interface Env extends SyncHostEnv {
 }
 
 const runawayNamespaces = new Set<string>()
+const numericTextNamespaces = new Set<string>()
 let delegatedFailuresRemaining = 0
 let delegatedAttempts = 0
 
@@ -108,6 +109,32 @@ export class DataService extends WorkerEntrypoint<Env> {
       )
     }
     const namespace = pathname.split('/')[1] ?? ''
+    if (pathname.endsWith('/changes') && numericTextNamespaces.has(namespace)) {
+      const watermark = Number(new URL(request.url).searchParams.get('watermark') ?? 0)
+      return Promise.resolve(
+        Response.json({
+          watermark: 1,
+          changes:
+            watermark >= 1
+              ? []
+              : [
+                  {
+                    watermark: 1,
+                    tableName: 'item',
+                    op: 'INSERT',
+                    rowData: {
+                      id: 'numeric-text',
+                      label: 'timestamp-shaped numeric text',
+                      rank: '1783770313712',
+                      done: false,
+                      meta: null,
+                    },
+                    oldData: null,
+                  },
+                ],
+        })
+      )
+    }
     if (pathname.endsWith('/changes') && runawayNamespaces.has(namespace)) {
       return Promise.resolve(
         Response.json({
@@ -156,6 +183,18 @@ const syncWorker = createSyncWorker(config)
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
+    if (url.pathname.startsWith('/numeric-text-control/')) {
+      const namespace = url.pathname.slice('/numeric-text-control/'.length)
+      return request
+        .json()
+        .catch(() => ({}))
+        .then((body) => {
+          if ((body as { enabled?: unknown }).enabled === true)
+            numericTextNamespaces.add(namespace)
+          else numericTextNamespaces.delete(namespace)
+          return Response.json({ ok: true, namespace })
+        })
+    }
     if (url.pathname.startsWith('/runaway-control/')) {
       const namespace = url.pathname.slice('/runaway-control/'.length)
       return request
