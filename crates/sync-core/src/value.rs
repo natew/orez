@@ -94,7 +94,17 @@ pub fn to_zero_value_json(ty: ZeroColumnType, raw: Value) -> Value {
             Value::String(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
             other => other,
         },
-        ZeroColumnType::String | ZeroColumnType::Null => raw,
+        // Upstream snapshot and /changes feeds can represent the same SQLite
+        // value with different JSON token types. The schema is authoritative
+        // on the wire: do not let an INTEGER/REAL storage class leak as a JSON
+        // number for a declared string column and later collide with a text
+        // token in Zero's sorted indexes.
+        ZeroColumnType::String => match raw {
+            Value::String(_) => raw,
+            Value::Number(value) => Value::String(value.to_string()),
+            other => other,
+        },
+        ZeroColumnType::Null => raw,
     }
 }
 

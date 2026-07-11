@@ -1,7 +1,10 @@
 mod common;
 
 use serde_json::{Map, Value, json};
-use sync_core::{SyncDb, Transactor, apply_upstream, apply_upstream_snapshot, init_schema};
+use sync_core::{
+    Caps, SqlValue, SyncDb, TableSpec, Tables, Transactor, ZeroColumnType, apply_upstream,
+    apply_upstream_snapshot, handle_pull, init_schema,
+};
 use sync_core::{UpstreamBatch, UpstreamChange, UpstreamSnapshot};
 
 use common::{TestDb, item_tables};
@@ -192,4 +195,78 @@ fn retention_gap_snapshot_replaces_rows_atomically() {
         Some(&sync_core::SqlValue::Text("fresh".into()))
     );
     assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 50);
+}
+
+#[test]
+fn snapshot_and_incremental_pulls_emit_the_schema_type_despite_mixed_sqlite_storage() {
+    let mut db = TestDb::memory();
+    let tables = Tables::new().with(
+        "mixed",
+        TableSpec {
+            columns: vec![
+                ("id".into(), ZeroColumnType::String),
+                ("sortKey".into(), ZeroColumnType::String),
+            ],
+            primary_key: vec!["id".into()],
+        },
+    );
+    // No affinity is deliberate: an upstream snapshot can bind a JSON number
+    // while a later /changes row carries the same logical value as text.
+    db.exec(
+        "CREATE TABLE mixed (id TEXT PRIMARY KEY, sortKey BLOB NOT NULL)",
+        &[],
+    )
+    .unwrap();
+    init_schema(&mut db, &tables).unwrap();
+    db.exec(
+        "INSERT INTO mixed (id, sortKey) VALUES (?, ?)",
+        &[SqlValue::Text("old".into()), SqlValue::Integer(7)],
+    )
+    .unwrap();
+
+    let initial = db
+        .transaction(|db| {
+            handle_pull(
+                db,
+                &tables,
+                4096,
+                None,
+                Caps::default(),
+                &json!({ "clientID": "c", "clientGroupID": "g", "cookie": null }),
+                "u",
+            )
+        })
+        .unwrap();
+    assert_eq!(initial["rowsPatch"][1]["value"]["sortKey"], json!("7"));
+
+    let cookie = initial["cookie"].clone();
+    apply_upstream(
+        &mut db,
+        &tables,
+        &UpstreamBatch {
+            watermark: 1,
+            changes: vec![UpstreamChange {
+                watermark: 1,
+                table_name: "mixed".into(),
+                op: "INSERT".into(),
+                row_data: Some(row(json!({ "id": "new", "sortKey": "8" }))),
+                old_data: None,
+            }],
+        },
+    )
+    .unwrap();
+    let incremental = db
+        .transaction(|db| {
+            handle_pull(
+                db,
+                &tables,
+                4096,
+                None,
+                Caps::default(),
+                &json!({ "clientID": "c", "clientGroupID": "g", "cookie": cookie }),
+                "u",
+            )
+        })
+        .unwrap();
+    assert_eq!(incremental["rowsPatch"][0]["value"]["sortKey"], json!("8"));
 }
