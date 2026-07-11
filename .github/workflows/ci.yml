@@ -96,6 +96,9 @@ jobs:
       - name: metamorphic checker self-test
         run: cd harness && bun src/metamorphic.selftest.ts
 
+      - name: shrink and corpus self-test
+        run: cd harness && bun src/spec-shrink.selftest.ts
+
       - name: sync-server smoke (pure sqlite, 20 clients)
         run: cd harness && bun src/smoke.ts --target orez-local --clients 20 --projects 3
 
