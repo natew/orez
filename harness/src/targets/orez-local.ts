@@ -122,8 +122,17 @@ export async function startOrezLocal(opts?: {
         const drop = exactDrop
         drop.onStage('fire')
         exactDrop = undefined
-        drop.onStage('heal')
-        res.destroy()
+        // Flush a response head and a deliberately truncated JSON body before
+        // destroying the stream. Destroying before headers lets some HTTP
+        // stacks transparently retry the POST inside one fetch call, hiding
+        // the response loss from Zero.
+        res.statusCode = 200
+        res.setHeader('content-type', 'application/json')
+        res.setHeader('content-length', '1024')
+        res.write('{"truncated":', () => {
+          drop.onStage('heal')
+          res.destroy()
+        })
         return
       }
       if (url.pathname === '/push' && dropPushResponse) {
