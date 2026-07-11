@@ -25,6 +25,38 @@ pub struct TableSpec {
     pub primary_key: &'static [&'static str],
 }
 
+// build sync-core Tables from the fixture TableSpecs. used by the binary
+// and by tests that need the standard fixture schema.
+pub fn build_tables() -> sync_core::schema::Tables {
+    use sync_core::schema::TableSpec as CoreSpec;
+    use sync_core::value::ZeroColumnType;
+    let mut tables = sync_core::schema::Tables::new();
+    for spec in TABLES {
+        let columns = spec
+            .columns
+            .iter()
+            .map(|(name, ct)| {
+                let zt = match ct {
+                    ColType::String => ZeroColumnType::String,
+                    ColType::Number => ZeroColumnType::Number,
+                    ColType::Boolean => ZeroColumnType::Boolean,
+                    ColType::Json => ZeroColumnType::Json,
+                };
+                (name.to_string(), zt)
+            })
+            .collect();
+        let primary_key = spec.primary_key.iter().map(|s| s.to_string()).collect();
+        tables.push(
+            spec.name,
+            CoreSpec {
+                columns,
+                primary_key,
+            },
+        );
+    }
+    tables
+}
+
 // mirror of the zero schema (fixture.ts guards TABLES against drift). order is
 // deterministic so snapshot patches are stable across hosts.
 pub const TABLES: &[TableSpec] = &[

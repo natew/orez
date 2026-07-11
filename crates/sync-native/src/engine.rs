@@ -1,34 +1,44 @@
 // the single integration seam between the native host and the sync-core
 // engine. the host owns transaction begin/commit/rollback here (sync-core
-// never emits BEGIN/COMMIT) and adapts the fixture mutators + visibility into
-// sync-core's Mutator / Visibility / Transactor traits. every engine call runs
-// on a namespace's writer thread, so the Connection is single-threaded and a
-// plain BEGIN/COMMIT is the whole transaction story.
+// never emits BEGIN/COMMIT) and adapts the consumer's init/mutator/visibility
+// closures into sync-core's Mutator / Visibility / Transactor traits. every
+// engine call runs on a namespace's worker thread, so the Connection is
+// single-threaded and a plain BEGIN/COMMIT is the whole transaction story.
+
+use std::sync::Arc;
 
 use rusqlite::Connection;
 use serde_json::Value;
 
-use sync_core::error::EngineError;
+use sync_core::error::{EngineError, MutateError};
 use sync_core::pull::{Caps, Visibility, VisibleFilter, handle_pull};
 use sync_core::push::{Mutator, Transactor, handle_push};
-use sync_core::schema::{TableSpec, Tables, init_schema};
-use sync_core::value::ZeroColumnType;
-use sync_core::{DbError, SyncDb};
+use sync_core::schema::Tables;
+use sync_core::{DbError, SqlValue, SyncDb};
 
 use crate::db::RusqliteDb;
 use crate::fault::{FaultKind, FaultPoint, FaultRegistry};
-use crate::fixture::{self, ColType};
 
-// the EngineError an Error/Quota fault injects (Kill never reaches here — it exits).
-fn injected_error(kind: FaultKind, point: FaultPoint) -> EngineError {
-    match kind {
-        FaultKind::Quota => EngineError::new(
-            507,
-            format!("storage quota exceeded (injected at {})", point.as_str()),
-        ),
-        _ => EngineError::new(500, format!("injected fault at {}", point.as_str())),
-    }
-}
+// ---- config types -------------------------------------------------------
+
+/// Called once per namespace at creation to install app DDL and optional
+/// seed data. Runs inside a transaction before the engine installs its
+/// _zsync_* schema. Return Err(String) to fail namespace creation.
+pub type InitFn = Arc<dyn Fn(&mut dyn SyncDb) -> Result<(), String> + Send + Sync>;
+
+/// Runs a named mutator inside the push transaction. Return Ok(()) for
+/// success, Err(MutateError::app(msg)) for an app-level rejection (LMID
+/// still advances), or Err(MutateError::Other(msg)) for an infra failure
+/// that rolls back the entire push.
+pub type MutateFn =
+    Arc<dyn Fn(&mut dyn SyncDb, &str, &Value, &str) -> Result<(), MutateError> + Send + Sync>;
+
+/// Optional per-user row visibility. Returns a WHERE fragment (without the
+/// WHERE keyword) and positional parameters, or None for a table with no
+/// visibility filter.
+pub type VisibleFn = Arc<dyn Fn(&str, &str) -> Option<(String, Vec<SqlValue>)> + Send + Sync>;
+
+// ---- EngineContext -------------------------------------------------------
 
 // process-wide engine configuration shared by every namespace worker.
 pub struct EngineContext {
@@ -39,74 +49,58 @@ pub struct EngineContext {
     // query-aware engine (membership/refcount) instead of the baseline
     // full-namespace pull. a namespace serves one consumer kind, not a mix.
     pub query_aware: bool,
+    // consumer-provided callbacks
+    init_fn: InitFn,
+    mutate_fn: MutateFn,
+    visible_fn: Option<VisibleFn>,
 }
 
 impl EngineContext {
-    pub fn new(retain_changes: i64, visibility_enabled: bool, query_aware: bool) -> Self {
+    pub fn new(
+        tables: Tables,
+        retain_changes: i64,
+        visibility_enabled: bool,
+        query_aware: bool,
+        init_fn: InitFn,
+        mutate_fn: MutateFn,
+        visible_fn: Option<VisibleFn>,
+    ) -> Self {
         Self {
-            tables: build_tables(),
+            tables,
             retain_changes,
             visibility_enabled,
             query_aware,
+            init_fn,
+            mutate_fn,
+            visible_fn,
         }
     }
 
-    // the fixture visibility policy is cross-table (membership), so it is NOT
-    // row-local: a permission flip can revoke a row without touching it, which
-    // no diff can express, so every pull falls back to a snapshot. matches the
-    // reference core's `visible` behavior (permissions lane).
-    fn visibility(&self) -> Option<Visibility<'static>> {
+    fn visibility(&self) -> Option<Visibility<'_>> {
+        let visible_fn = self.visible_fn.as_ref()?;
         if !self.visibility_enabled {
             return None;
         }
         Some(Visibility {
             row_local: false,
             filter: Box::new(|table, user| {
-                fixture::fixture_visible(table, user)
-                    .map(|(sql, params)| VisibleFilter { sql, params })
+                visible_fn(table, user).map(|(sql, params)| VisibleFilter { sql, params })
             }),
         })
     }
 }
 
-fn build_tables() -> Tables {
-    let mut tables = Tables::new();
-    for spec in fixture::TABLES {
-        let columns = spec
-            .columns
-            .iter()
-            .map(|(name, ct)| {
-                let zt = match ct {
-                    ColType::String => ZeroColumnType::String,
-                    ColType::Number => ZeroColumnType::Number,
-                    ColType::Boolean => ZeroColumnType::Boolean,
-                    ColType::Json => ZeroColumnType::Json,
-                };
-                (name.to_string(), zt)
-            })
-            .collect();
-        let primary_key = spec.primary_key.iter().map(|s| s.to_string()).collect();
-        tables.push(
-            spec.name,
-            TableSpec {
-                columns,
-                primary_key,
-            },
-        );
-    }
-    tables
-}
+// ---- helpers -------------------------------------------------------------
 
-// worker init: install the fixture app tables + seed (host), then the engine's
-// _zsync_* schema + triggers. triggers install AFTER the seed so seed rows
-// stay out of the change log. idempotent across restart.
-pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), String> {
-    fixture::install_app_tables_and_seed(db).map_err(|e| e.0)?;
-    init_schema(db, &ctx.tables).map_err(|e| e.0)?;
-    // the query-aware tables are idempotent + unused in baseline mode, so
-    // install them always so a namespace can serve query-aware pulls.
-    sync_core::query::init_query_schema(db).map_err(|e| e.message)?;
-    Ok(())
+// the EngineError an Error/Quota fault injects (Kill never reaches here — it exits).
+fn injected_error(kind: FaultKind, point: FaultPoint) -> EngineError {
+    match kind {
+        FaultKind::Quota => EngineError::new(
+            507,
+            format!("storage quota exceeded (injected at {})", point.as_str()),
+        ),
+        _ => EngineError::new(500, format!("injected fault at {}", point.as_str())),
+    }
 }
 
 // a completed pull/push plus the engine state the host needs for its structured
@@ -138,6 +132,22 @@ pub fn read_watermark(conn: &Connection) -> i64 {
     )
     .unwrap_or(0)
 }
+
+// ---- worker init ---------------------------------------------------------
+
+// worker init: install the app tables + seed (consumer), then the engine's
+// _zsync_* schema + triggers. triggers install AFTER the seed so seed rows
+// stay out of the change log. idempotent across restart.
+pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), String> {
+    (ctx.init_fn)(db)?;
+    sync_core::schema::init_schema(db, &ctx.tables).map_err(|e| e.0)?;
+    // the query-aware tables are idempotent + unused in baseline mode, so
+    // install them always so a namespace can serve query-aware pulls.
+    sync_core::query::init_query_schema(db).map_err(|e| e.message)?;
+    Ok(())
+}
+
+// ---- pull / push / invalidate / reset-cursor ----------------------------
 
 // pull runs inside one host-entered transaction, matching the CF host's
 // transactionSync. commit on Ok, roll back on Err (a 409 undoes the claim).
@@ -231,11 +241,14 @@ pub fn push(
         }
     }
     let mut txor = ConnTransactor { conn, faults, ns };
+    let mutator = CallbackMutator {
+        f: ctx.mutate_fn.clone(),
+    };
     let mut result = handle_push(
         &mut txor,
         &ctx.tables,
         ctx.retain_changes,
-        &FixtureMutator,
+        &mutator,
         body,
         user_id,
     );
@@ -297,6 +310,8 @@ fn finish(conn: &Connection, ok: bool) {
     }
 }
 
+// ---- Transactor (host-owned tx boundary) ---------------------------------
+
 // host-owned transaction boundary for the synchronous native push path.
 struct ConnTransactor<'c> {
     conn: &'c Connection,
@@ -339,25 +354,21 @@ impl<'c> Transactor for ConnTransactor<'c> {
     }
 }
 
-// adapts the fixture mutators into sync-core's Mutator trait: an app-level
-// rejection maps to MutateError::App (LMID still advances), anything else to
-// Other (infra failure, the whole push fails and retries).
-struct FixtureMutator;
+// ---- Mutator adapter -----------------------------------------------------
 
-impl Mutator for FixtureMutator {
+// adapts a consumer's MutateFn closure into sync-core's Mutator trait.
+struct CallbackMutator {
+    f: MutateFn,
+}
+
+impl Mutator for CallbackMutator {
     fn mutate(
         &self,
         db: &mut dyn SyncDb,
         name: &str,
         args: &Value,
         user_id: &str,
-    ) -> Result<(), sync_core::error::MutateError> {
-        use fixture::MutateError as F;
-        match fixture::run_mutator(db, name, args, user_id) {
-            Ok(()) => Ok(()),
-            Err(F::App(details)) => Err(sync_core::error::MutateError::app(details)),
-            Err(F::Db(e)) => Err(sync_core::error::MutateError::Other(e.0)),
-            Err(F::Unknown(m)) => Err(sync_core::error::MutateError::Other(m)),
-        }
+    ) -> Result<(), MutateError> {
+        (self.f)(db, name, args, user_id)
     }
 }

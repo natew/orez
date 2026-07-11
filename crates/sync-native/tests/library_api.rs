@@ -1,0 +1,410 @@
+// integration tests for the sync-native library API.
+//
+// verifies that:
+// 1. SyncNativeHost can be constructed with a custom config
+// 2. the health endpoint responds
+// 3. pull/push work with a custom schema
+// 4. into_router() works for embedding
+
+use std::sync::Arc;
+
+use axum::http::{HeaderMap, Request, StatusCode};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+use sync_core::error::MutateError;
+use sync_core::schema::{TableSpec, Tables};
+use sync_core::value::ZeroColumnType;
+use sync_core::{SqlValue, SyncDb};
+
+use sync_native::AuthFn;
+use sync_native::SyncNativeConfig;
+use sync_native::SyncNativeHost;
+use sync_native::engine::{InitFn, MutateFn};
+
+// ---- helpers -----------------------------------------------------------
+
+fn custom_tables() -> Tables {
+    let mut tables = Tables::new();
+    tables.push(
+        "item",
+        TableSpec {
+            columns: vec![
+                ("id".to_string(), ZeroColumnType::String),
+                ("label".to_string(), ZeroColumnType::String),
+            ],
+            primary_key: vec!["id".to_string()],
+        },
+    );
+    tables
+}
+
+fn custom_init() -> InitFn {
+    Arc::new(|db: &mut dyn SyncDb| {
+        db.exec(
+            "CREATE TABLE item (id text PRIMARY KEY, label text NOT NULL)",
+            &[],
+        )
+        .map_err(|e| e.0)?;
+        // seed one row so fresh pulls are not empty
+        db.exec("INSERT INTO item (id, label) VALUES ('i1', 'hello')", &[])
+            .map_err(|e| e.0)?;
+        Ok(())
+    })
+}
+
+fn custom_mutate() -> MutateFn {
+    Arc::new(
+        |db: &mut dyn SyncDb, name: &str, args: &serde_json::Value, _user_id: &str| {
+            match name {
+                "item.create" => {
+                    let id = args
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| MutateError::Other("missing id".into()))?;
+                    let label = args
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| MutateError::Other("missing label".into()))?;
+                    // app-level validation: empty label is a client error
+                    if label.is_empty() {
+                        return Err(MutateError::app("label must not be empty"));
+                    }
+                    db.exec(
+                        "INSERT INTO item (id, label) VALUES (?, ?)",
+                        &[SqlValue::Text(id.into()), SqlValue::Text(label.into())],
+                    )
+                    .map_err(|e| MutateError::Other(e.0))?;
+                    Ok(())
+                }
+                "item.delete" => {
+                    let id = args
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| MutateError::Other("missing id".into()))?;
+                    db.exec(
+                        "DELETE FROM item WHERE id = ?",
+                        &[SqlValue::Text(id.into())],
+                    )
+                    .map_err(|e| MutateError::Other(e.0))?;
+                    Ok(())
+                }
+                other => Err(MutateError::Other(format!("unknown mutator: {other}"))),
+            }
+        },
+    )
+}
+
+fn custom_auth() -> AuthFn {
+    Arc::new(|headers: &HeaderMap| {
+        let value = headers.get("authorization")?.to_str().ok()?;
+        value.strip_prefix("Bearer ").map(str::to_string)
+    })
+}
+
+fn custom_config() -> SyncNativeConfig {
+    SyncNativeConfig {
+        tables: custom_tables(),
+        initialize: custom_init(),
+        mutate: custom_mutate(),
+        visible: None,
+        authenticate: custom_auth(),
+        retain_changes: 4096,
+        visibility_enabled: false,
+        query_aware: false,
+    }
+}
+
+// send a request against a cloned router (oneshot takes ownership).
+async fn send(router: &axum::Router, req: Request<axum::body::Body>) -> (StatusCode, Value) {
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let limit = 262_144;
+    let body_bytes = axum::body::to_bytes(resp.into_body(), limit).await.unwrap();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    if !status.is_success() {
+        eprintln!("HTTP {status}: {body_str}");
+    }
+    let v: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
+    (status, v)
+}
+
+fn pull_req(ns: &str, body: &Value, token: &str) -> Request<axum::body::Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/{ns}/pull"))
+        .header("authorization", token)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap()
+}
+
+fn push_req(ns: &str, body: &Value, token: &str) -> Request<axum::body::Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/{ns}/push"))
+        .header("authorization", token)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap()
+}
+
+fn patch_count(resp: &Value, table: &str, op: &str) -> usize {
+    resp["rowsPatch"]
+        .as_array()
+        .map(|patch| {
+            patch
+                .iter()
+                .filter(|entry| {
+                    entry["op"].as_str() == Some(op) && entry["tableName"].as_str() == Some(table)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn pull_body(cookie: Option<&Value>) -> Value {
+    json!({
+        "clientID": "test-client",
+        "clientGroupID": "test-group",
+        "cookie": cookie.unwrap_or(&Value::Null),
+    })
+}
+
+fn push_body(mutations: Value) -> Value {
+    json!({
+        "clientGroupID": "test-group",
+        "mutations": mutations,
+        "pushVersion": 1,
+    })
+}
+
+fn mutation(id: u64, name: &str, args: Value, client_id: &str) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "args": args,
+        "clientID": client_id,
+        "type": "custom",
+    })
+}
+
+// ---- tests -------------------------------------------------------------
+
+#[tokio::test]
+async fn health_endpoint_responds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    let req = Request::builder()
+        .uri("/admin/health")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (_status, v) = send(&router, req).await;
+    assert_eq!(v["ok"], json!(true));
+    assert!(v["pid"].is_number());
+}
+
+#[tokio::test]
+async fn fresh_pull_returns_seed_data() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    let body = pull_body(None);
+    let req = pull_req("test-ns", &body, "Bearer user-1");
+    let (status, v) = send(&router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // first pull is a snapshot with a clear op + puts
+    let patch = v["rowsPatch"].as_array().unwrap();
+    let has_clear = patch.iter().any(|op| op["op"] == "clear");
+    assert!(has_clear, "fresh pull should have a clear op");
+
+    let item_puts = patch_count(&v, "item", "put");
+    assert!(item_puts > 0, "seed row should be in the snapshot");
+
+    // cookie should be present and non-null
+    assert!(v["cookie"].is_number() || v["cookie"].is_string());
+}
+
+#[tokio::test]
+async fn push_applies_mutation_and_pull_sees_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    // push: create a new item
+    let push_body = push_body(json!([mutation(
+        1,
+        "item.create",
+        json!([{"id": "i2", "label": "world"}]),
+        "c1"
+    )]));
+    let req = push_req("test-ns", &push_body, "Bearer user-1");
+    let (status, push_resp) = send(&router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mutations = push_resp["pushResponse"]["mutations"].as_array().unwrap();
+    assert_eq!(mutations.len(), 1);
+    assert!(
+        mutations[0]["result"]["error"].is_null(),
+        "expected successful mutation"
+    );
+
+    // pull: should see both items
+    let body = pull_body(None);
+    let req = pull_req("test-ns", &body, "Bearer user-1");
+    let (_status, pull_resp) = send(&router, req).await;
+    let item_puts = patch_count(&pull_resp, "item", "put");
+    assert_eq!(item_puts, 2, "should see both seed + pushed item");
+}
+
+#[tokio::test]
+async fn app_error_advances_lmid_no_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    // baseline pull to obtain a cookie
+    let body = pull_body(None);
+    let req = pull_req("test-ns", &body, "Bearer user-1");
+    let (_status, before) = send(&router, req).await;
+    let cookie = before["cookie"].clone();
+
+    // push: create an item with an empty label — app-level validation error
+    let push_body = push_body(json!([mutation(
+        1,
+        "item.create",
+        json!([{"id": "bad", "label": ""}]),
+        "c1"
+    )]));
+    let req = push_req("test-ns", &push_body, "Bearer user-1");
+    let (status, push_resp) = send(&router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // app-level errors are reported in the mutation result, with LMID advanced
+    let result_error = &push_resp["pushResponse"]["mutations"][0]["result"]["error"];
+    assert!(
+        result_error.as_str().is_some(),
+        "app-level rejection should produce an error on the mutation result"
+    );
+
+    // pull with the cookie: should be unchanged since no mutation succeeded
+    let body = pull_body(Some(&cookie));
+    let req = pull_req("test-ns", &body, "Bearer user-1");
+    let (_status, after) = send(&router, req).await;
+    // unchanged or a diff with no row changes
+    if after["unchanged"] != json!(true) {
+        let put_count = patch_count(&after, "item", "put");
+        assert_eq!(put_count, 0, "failed push should not produce row changes");
+    }
+}
+
+#[tokio::test]
+async fn two_namespaces_are_independent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    // push to ns-a only
+    let push_body = push_body(json!([mutation(
+        1,
+        "item.create",
+        json!([{"id": "a-only", "label": "in-a"}]),
+        "ca"
+    )]));
+    let req = push_req("ns-a", &push_body, "Bearer user-1");
+    let (status, _resp) = send(&router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // pull ns-b: should NOT see the ns-a item
+    let body = pull_body(None);
+    let req = pull_req("ns-b", &body, "Bearer user-1");
+    let (_status, pull_resp) = send(&router, req).await;
+    let item_puts = patch_count(&pull_resp, "item", "put");
+    assert_eq!(
+        item_puts, 1,
+        "ns-b should only have the seed item, not a-only"
+    );
+}
+
+#[tokio::test]
+async fn auth_rejection_returns_401() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/test-ns/pull")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&pull_body(None)).unwrap(),
+        ))
+        .unwrap();
+    let (status, _v) = send(&router, req).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn fixture_config_still_works() {
+    // verify the fixture tables work through the library API — the binary path
+    use sync_native::fixture;
+
+    let fixture_init: InitFn =
+        Arc::new(|db| fixture::install_app_tables_and_seed(db).map_err(|e| e.0));
+
+    let fixture_mutate: MutateFn = Arc::new(|db, name, args, _user_id| {
+        use fixture::MutateError as F;
+        match fixture::run_mutator(db, name, args, _user_id) {
+            Ok(()) => Ok(()),
+            Err(F::App(d)) => Err(MutateError::app(d)),
+            Err(F::Db(e)) => Err(MutateError::Other(e.0)),
+            Err(F::Unknown(m)) => Err(MutateError::Other(m)),
+        }
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let config = SyncNativeConfig {
+        tables: fixture::build_tables(),
+        initialize: fixture_init,
+        mutate: fixture_mutate,
+        visible: None,
+        authenticate: Arc::new(|headers: &HeaderMap| {
+            let value = headers.get("authorization")?.to_str().ok()?;
+            value.strip_prefix("Bearer token-").map(str::to_string)
+        }),
+        retain_changes: 4096,
+        visibility_enabled: false,
+        query_aware: false,
+    };
+    let host = SyncNativeHost::new(config, tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    // pull: should get the fixture seed (users, projects, members, tasks)
+    let body = pull_body(None);
+    let req = pull_req("test-ns", &body, "Bearer token-u1");
+    let (_status, pull_resp) = send(&router, req).await;
+
+    // four fixture tables should each have put rows
+    for table in &["user", "project", "member", "task"] {
+        let count = patch_count(&pull_resp, table, "put");
+        assert!(
+            count > 0,
+            "fixture table {table} should have seed rows, got {count}"
+        );
+    }
+
+    // push: create a project
+    let push_body = push_body(json!([mutation(
+        1,
+        "project.create",
+        json!([{"id": "p-new", "ownerId": "u1", "name": "fresh"}]),
+        "c1"
+    )]));
+    let req = push_req("test-ns", &push_body, "Bearer token-u1");
+    let (status, _resp) = send(&router, req).await;
+    assert_eq!(status, StatusCode::OK);
+}
