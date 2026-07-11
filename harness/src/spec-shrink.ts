@@ -125,6 +125,21 @@ export function oneStepShrinks(spec: GenSpec): GenSpec[] {
     const ne = ex.filter((_, j) => j !== i)
     out.push(ne.length ? { ...spec, exists: ne } : omit(spec, 'exists'))
   }
+  // KEEP the exists entry but shrink its nested where (drop it, or simplify it) —
+  // a divergence needing the relationship plus one leaf must reduce to that leaf,
+  // not be stuck at the full where because only whole-exists removal was tried.
+  for (let i = 0; i < ex.length; i++) {
+    const e = ex[i]!
+    if (e.where) {
+      out.push({ ...spec, exists: ex.map((x, j) => (j === i ? omit(x, 'where') : x)) })
+      for (const w of condShrinks(e.where)) {
+        out.push({
+          ...spec,
+          exists: ex.map((x, j) => (j === i ? { ...x, where: w } : x)),
+        })
+      }
+    }
+  }
   const rel = spec.related ?? []
   for (let i = 0; i < rel.length; i++) {
     const nr = rel.filter((_, j) => j !== i)

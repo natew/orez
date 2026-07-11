@@ -375,6 +375,49 @@ console.log('[spec-shrink] shrinkSpec — minimizes to a fixpoint, honest budget
   }
 }
 
+console.log('[spec-shrink] shrinkSpec — minimizes a nested exists.where cause')
+{
+  // divergence needs the exists relationship PLUS the userId leaf inside a 3-way
+  // AND. Dropping the whole exists loses reproduction, so the shrinker MUST keep
+  // the exists while reducing its where to the necessary leaf.
+  const existsSpec: GenSpec = {
+    table: 'project',
+    orderBy: [['id', 'asc']],
+    exists: [
+      {
+        rel: 'members',
+        where: {
+          op: 'and',
+          children: [
+            { op: 'cmp', col: 'userId', cmp: '=', value: 'u1' },
+            { op: 'cmp', col: 'projectId', cmp: '!=', value: 'p9' },
+            { op: 'cmp', col: 'id', cmp: '=', value: 'm1' },
+          ],
+        },
+      },
+    ],
+  }
+  const hasUserId = (w: GenWhere | undefined): boolean =>
+    !w ? false : w.op === 'cmp' ? w.col === 'userId' : w.children.some(hasUserId)
+  const needsExistsUserId = async (s: GenSpec) => {
+    const e = (s.exists ?? [])[0]
+    return !!e && hasUserId(e.where)
+  }
+  const r = await shrinkSpec(existsSpec, needsExistsUserId, 1000)
+  assert(r.complete, 'exists.where shrink reaches a fixpoint')
+  assert((r.spec.exists ?? []).length === 1, 'exists entry is RETAINED (not dropped)')
+  const e = r.spec.exists![0]!
+  assert(
+    !!e.where && e.where.op === 'cmp' && e.where.col === 'userId',
+    'exists.where minimized to the necessary userId leaf'
+  )
+  assert(
+    constructCount(r.spec) === 2,
+    `minimal = exists(1) + 1 leaf = 2 (got ${constructCount(r.spec)})`
+  )
+  okSpec(r.spec, 'minimized exists spec is valid grammar')
+}
+
 // ---------------------------------------------------------------------------
 console.log('[spec-corpus] parseCorpusEntry — well-formed accepts')
 const HEX64 = currentSeedFingerprint()
