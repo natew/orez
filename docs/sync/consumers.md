@@ -1,19 +1,19 @@
 # Consumers and integration guide
 
-Two real apps run on the sync host, and they sit on opposite sides of the push
-fork. Reading both is the fastest way to understand the choice you make when you
-integrate a new app.
+Two real apps run on the sync host, and both now use delegated push with
+upstream ingest: mutations run in the app worker and the host replicates the
+committed rows from the data feed. Reading both is the fastest way to understand
+the choice you make when you integrate a new app. (Local mutators, where the
+host runs writes inside the Durable Object, remain a supported composition mode;
+Chat used it before upstream ingest existed and has since migrated.)
 
-- **Chat** (start.chat, live) uses local mutators. Its mutation logic runs inside
-  the Durable Object.
-- **Soot** (mid-cutover) uses delegated push with upstream ingest. Its mutations
-  run in the app worker and the host replicates from the data feed.
+- **Chat** (start.chat, live) uses delegated push with upstream ingest.
+- **Soot** (mid-cutover) uses delegated push with upstream ingest.
 
 Both share the identical query-permission path: they delegate the query
-transform to the app's real synced-queries endpoint. They differ only on where
-writes happen.
+transform to the app's real synced-queries endpoint.
 
-## Chat: local mutators
+## Chat: delegated push with upstream ingest
 
 Chat's integration lives in its `rust-sync/` directory, split into
 `chat-config/` (the registry) and `chat-host/` (the workerd composition and
@@ -26,26 +26,33 @@ export const chatConfig: SyncHostConfig = {
   queryAware: true,
   resolveQuery: (name, args, claims, env) => resolveQuery(name, args, claims, env),
   queryTransformVersion: 1,
-  mutators: chatMutators, // DO-local push, no upstream
+  mutateUrl: '/api/zero/push?schema=chat_0&appID=chat', // delegated push
+  mutateBinding: 'APP',
+  upstream: {
+    binding: 'DATA',
+    namespacePath: upstreamPathForNamespace, // ns -> /control or /proj-<serverId>
+  },
   initialize(sql) {
     initializeChatSchema(sql)
   },
   async authenticate(request, env) {
-    /* resolve better-auth session */
+    /* resolve better-auth session over APP */
   },
   namespace(request) {
-    return new URL(request.url).pathname.split('/')[1] || null // one DO per serverId
+    return namespaceForRequest(request) // env-isolated: staging:control, production:p-<serverId>
   },
 }
 ```
 
 The pieces:
 
-- **Push is DO-local.** `chatMutators` is built by reflecting over the app's
-  on-zero model definitions and registering each mutator under its canonical
-  wire name (for example `message|insert`), so mutations run authoritatively
-  inside the DO's SQLite transaction. There is no `upstream` block and no
-  `mutateUrl`.
+- **Push is delegated.** The host forwards the Zero push to the Chat app's real
+  `/api/zero/push` over the `APP` binding. Chat's on-zero mutators and server
+  actions remain the sole write authority; the host bundles no local mutator
+  registry. Committed rows return through **upstream ingest** — the host consumes
+  `/snapshot` and `/changes` from the paired data worker over `DATA`, advances
+  its watermark, and wakes connected clients — so app effects and the Rust
+  replica share one authoritative write path.
 - **`resolveQuery` delegates.** It POSTs a `transform` request to the Chat app
   worker's real `/api/zero/pull` over the `APP` service binding and returns the
   permission-transformed AST. The client's bearer token rides in claims and is
@@ -53,24 +60,26 @@ The pieces:
 - **`authenticate` delegates.** It reads the `Authorization: Bearer` session
   token, resolves it against the app's `/api/auth/get-session` over the `APP`
   binding, and caches the token-to-claims result briefly.
-- **`namespace` is per-server.** The first path segment is the server id, so
-  Chat runs one Durable Object per Chat server.
-- Chat leaves `caps`, `retainChanges`, `idleTeardownMs`, `wakeCoalesceMs`, and
-  `visibility` at host defaults.
+- **`namespace` is environment-isolated and per-server.** The worker stamps
+  `staging` or `production`, producing host namespaces such as `staging:control`
+  and `production:p-<serverId>`; `upstreamPathForNamespace` maps `control` to
+  `/control` and `p-<serverId>` to `/proj-<serverId>` on `DATA`.
+- Chat needs both `APP` and `DATA` service bindings, and leaves `caps`,
+  `retainChanges`, `idleTeardownMs`, `wakeCoalesceMs`, `delegatedPushRetry`, and
+  ingest-budget settings at host defaults.
 
 The composition worker (`rust-sync/chat-host/src/worker.ts`) exports
 `createSyncDurableObject(chatConfig)` as the DO class and wraps
-`createSyncWorker(chatConfig)` in a CORS layer that passes WebSocket upgrades
-through untouched. The deploy wrangler binds `APP` to the staging app worker and
-points `SYNC_DO` at the DO class.
+`createSyncWorker(chatConfig)` in an origin-restricted CORS layer that passes
+WebSocket upgrades through untouched. Staging and production use dedicated host
+workers and dedicated `APP`/`DATA` targets, and Chat imports the published
+`orez-sync-cf-host` package.
 
-Chat is live. The staging deploy record (chat's
-`plans/cf-orez-migration-run.md`, "Rust sync host staging deploy") documents the
-host at `chat-rust-sync-host.natewienert.workers.dev` bound to the app worker,
-with verification results: UI sends durable across cold reload, 10,000 of 10,000
-pushes across 16 concurrent writers, the DO holding 10,008 message rows, cold
-named-query pulls returning 200 at limits up to 2,000, and cross-context live
-wake delivery in about 1.2 seconds.
+Chat is live on this delegated design. The staging record (chat's
+`plans/cf-orez-migration-run.md`) verifies a fresh control snapshot, fresh
+project ingest, delegated message pushes, cold named-query pulls, hard-reload
+durability, cross-context live wake, and a server-action mutation replicated
+back into the Rust DO.
 
 ## Soot: delegated push with ingest
 
@@ -129,21 +138,23 @@ deploy-only entrypoint; the everyday worker ships test auth.
 
 ## How they differ
 
-| Aspect           | Chat (live)                     | Soot (mid-cutover)                      |
-| ---------------- | ------------------------------- | --------------------------------------- |
-| Push             | DO-local `mutators`             | Delegated `mutateUrl` + `mutateBinding` |
-| Upstream ingest  | none                            | `upstream` from the `DATA` feed         |
-| Service bindings | `APP` only                      | `APP` and `DATA`                        |
-| Query transform  | app `/api/zero/pull` over `APP` | app `/api/zero/pull` over `APP` (same)  |
-| Auth             | app `/api/auth/get-session`     | app `/api/zero/rust-auth`               |
-| Namespace        | one DO per server id            | control and project planes              |
-| Tuning           | all default                     | explicit caps, retention, idle, wake    |
+| Aspect           | Chat (live)                             | Soot (mid-cutover)                      |
+| ---------------- | --------------------------------------- | --------------------------------------- |
+| Push             | Delegated `mutateUrl` + `mutateBinding` | Delegated `mutateUrl` + `mutateBinding` |
+| Upstream ingest  | `upstream` from the `DATA` feed         | `upstream` from the `DATA` feed         |
+| Service bindings | `APP` and `DATA`                        | `APP` and `DATA`                        |
+| Query transform  | app `/api/zero/pull` over `APP`         | app `/api/zero/pull` over `APP` (same)  |
+| Auth             | app `/api/auth/get-session`             | app `/api/zero/rust-auth`               |
+| Namespace        | env + control/per-server planes         | control and project planes              |
+| Tuning           | host defaults                           | explicit caps, retention, idle, wake    |
 
-The reason Chat is local-mutator while Soot is delegated is timing. When Chat
-deployed, the engine had no upstream-ingest mode, so a delegated push would have
-split write authority. Soot's branch is the newer path where upstream ingest was
-added, which is what makes delegated push safe. Both keep the identical
-query-permission delegation.
+Both apps now run the delegated write path. Chat initially used local mutators
+because upstream ingest did not yet exist — a delegated push then would have
+split write authority — and migrated once ingest landed (chat's `e882b97ba`);
+`1a2941e47` moved it onto the published host package. So the two now differ only
+in their auth endpoint and namespace planes, and both keep the identical
+query-permission delegation. Local mutators remain a supported mode for an app
+whose entire write surface can live in the host.
 
 ## Integrate a new app
 
@@ -158,10 +169,10 @@ the raw client token into claims so `resolveQuery` can forward it.
 
 Then choose exactly one push model:
 
-- **Local** (like Chat): `mutators` built with `registerMutators({...})`, keyed
+- **Local**: `mutators` built with `registerMutators({...})`, keyed
   by wire mutation name. No `upstream`. Right when your entire write surface can
   live in the host.
-- **Delegated** (like Soot): `mutateUrl` (an absolute path on the app),
+- **Delegated** (like Chat and Soot): `mutateUrl` (an absolute path on the app),
   `mutateBinding` (defaults to `upstream.binding`), and a required `upstream:
 {binding, namespacePath}`. Right when writes must run in the app worker, when
   server-side effects (jobs, projections, notifications) run outside the sync
@@ -186,9 +197,9 @@ layer (handle preflight, echo headers, pass 101 upgrades through).
   `resolveQuery`, and delegated `mutateUrl`).
 - For delegated push, a second `[[services]]` `DATA` binding for the change
   feed, matching `upstream.binding`.
-- Vars for the app origin and any admin or test flags. Import either the
-  published `orez-sync-cf-host` (as Soot does) or alias the bare import to the
-  orez source (as Chat does).
+- Vars for the app origin and any admin or test flags. Import the published
+  `orez-sync-cf-host` (as Chat and Soot do); aliasing the bare import to the orez
+  source is only for local orez development.
 
 ### 4. App-worker endpoints
 
