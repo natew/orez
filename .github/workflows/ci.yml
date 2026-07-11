@@ -103,7 +103,7 @@ jobs:
       - name: consistency checker self-tests
         run: |
           cd harness
-          bun test src/consistency/history.test.ts src/consistency/fault-schedule.test.ts src/consistency/recorder.test.ts src/consistency/artifacts.test.ts src/consistency/atomic-visibility.test.ts src/consistency/atomic-visibility-workload.test.ts src/consistency/exactly-once-lmid.test.ts src/consistency/exactly-once-workload.test.ts src/observed-fetch.test.ts
+          bun test src/consistency/history.test.ts src/consistency/fault-schedule.test.ts src/consistency/recorder.test.ts src/consistency/artifacts.test.ts src/consistency/atomic-visibility.test.ts src/consistency/atomic-visibility-workload.test.ts src/consistency/exactly-once-lmid.test.ts src/consistency/exactly-once-workload.test.ts src/observed-fetch.test.ts src/consistency/permission-transition.test.ts src/consistency/permission-transition-workload.test.ts src/consistency/permission-artifacts.test.ts
 
       - name: metamorphic checker self-test
         run: cd harness && bun src/metamorphic.selftest.ts
@@ -121,6 +121,11 @@ jobs:
 
       - name: multi-project sync-server mount
         run: cd harness && bun src/multi-project-mount.ts
+
+      - name: populated-cache permission transition (same-host A/B namespaces)
+        # grant/revoke against ALREADY-populated caches across two child
+        # namespaces on one host, proven live by a disjoint sentinel barrier
+        run: cd harness && bun src/permission-transition-lane.ts
 
       - name: conformance shapes (stock zero-cache vs sync-server)
         # boots embedded postgres + real zero-cache; the cross-implementation
