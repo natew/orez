@@ -1,4 +1,5 @@
 export const HISTORY_SCHEMA_VERSION = 1 as const
+const MAX_I64 = 9223372036854775807n
 
 export type TerminalPhase = 'ok' | 'fail' | 'info'
 export type HistoryPhase = 'invoke' | TerminalPhase
@@ -84,7 +85,8 @@ function result(violations: string[]): CheckResult {
 
 function canonicalWatermark(value: string): bigint | undefined {
   if (!/^(0|[1-9][0-9]*)$/.test(value)) return undefined
-  return BigInt(value)
+  const parsed = BigInt(value)
+  return parsed <= MAX_I64 ? parsed : undefined
 }
 
 function transactionsCorrespond(
@@ -122,6 +124,7 @@ export function validateHistory(events: readonly HistoryEvent[]): CheckResult {
     }
     if (
       !Number.isSafeInteger(event.relativeMicros) ||
+      event.relativeMicros < 0 ||
       event.relativeMicros < previousTime
     ) {
       violations.push(`event ${position} has non-monotonic time ${event.relativeMicros}`)

@@ -103,9 +103,9 @@ real client use distinct process IDs while retaining the same `clientId` and
 `transaction` contains list-append micro-operations for the Elle workload.
 Completed reads contain their observed lists; invoked reads use `null`.
 `snapshot` stores a target-normalized `generation` and authoritative
-`watermark`. The watermark is a canonical unsigned decimal string and checkers
-compare it with `BigInt`; a JavaScript number would corrupt valid i64 cookies
-above `Number.MAX_SAFE_INTEGER`. The raw protocol cookie can remain in metadata
+`watermark`. The watermark is a canonical decimal string in `0..=i64::MAX` and
+checkers compare it with `BigInt`; a JavaScript number would corrupt valid i64
+cookies above `Number.MAX_SAFE_INTEGER`. The raw protocol cookie can remain in metadata
 for diagnosis, but checkers do not compare opaque JSON cookies directly.
 The Elle projection maps process strings to consecutive integers in first-seen
 order because Jepsen histories require numeric logical processes.

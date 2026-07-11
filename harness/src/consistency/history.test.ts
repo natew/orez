@@ -69,6 +69,13 @@ describe('history structure', () => {
       'operation op-1 changes transaction at completion'
     )
   })
+
+  test('rejects a negative first relative timestamp', () => {
+    const history = [event({ relativeMicros: -1 })]
+    expect(validateHistory(history).violations).toContain(
+      'event 0 has non-monotonic time -1'
+    )
+  })
 })
 
 describe('snapshot monotonicity', () => {
@@ -145,6 +152,20 @@ describe('snapshot monotonicity', () => {
     history[1]!.snapshot = { generation: 'g2', watermark: '9' }
     expect(checkSnapshotMonotonicity(history).violations).toEqual([
       'client c1 changes generation without a recorded reset reason',
+    ])
+  })
+
+  test('rejects a watermark outside the signed i64 wire domain', () => {
+    const history = [
+      event({
+        phase: 'ok',
+        kind: 'read',
+        clientId: 'c1',
+        snapshot: { generation: 'g1', watermark: '9223372036854775808' },
+      }),
+    ]
+    expect(checkSnapshotMonotonicity(history).violations).toEqual([
+      'client c1 has non-canonical watermark 9223372036854775808',
     ])
   })
 })
