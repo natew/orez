@@ -43,7 +43,10 @@ class FakeSql {
     }
 
     if (sql.includes('sqlite_master') && sql.includes('%zero_watermark%')) {
-      return new FakeResult([{ name: this.sequence.name }])
+      return new FakeResult([
+        { name: this.sequence.name },
+        { name: '_orez_tx_deadbeef_0__orez___zero_watermark' },
+      ])
     }
 
     if (sql.startsWith('SELECT last_value, is_called FROM "_orez___zero_watermark"')) {
@@ -99,5 +102,15 @@ describe('DurableWatermarkState', () => {
     expect(watermarks.current()).toBe(7)
     expect(sql.state).toBe(7)
     expect(sql.sequence).toMatchObject({ last_value: 7, is_called: 1 })
+  })
+
+  it('never treats rollback snapshots as live watermark sequences', () => {
+    const sql = new FakeSql()
+    const watermarks = new DurableWatermarkState(sql)
+
+    watermarks.mark(3)
+
+    expect(sql.state).toBe(3)
+    expect(sql.sequence).toMatchObject({ last_value: 3, is_called: 1 })
   })
 })

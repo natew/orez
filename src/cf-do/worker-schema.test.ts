@@ -132,17 +132,18 @@ class FakeChangeSql {
       })
       return new FakeResult()
     }
-    if (
-      sql.startsWith(
-        'SELECT id, table_name, op, row_data, old_data FROM _zero_pending_changes'
-      )
-    ) {
+    if (sql.startsWith('INSERT INTO _zero_changes (table_name, op')) {
       const transactionID = String(params[0])
-      return new FakeResult(
-        this.pending
-          .filter((change) => change.transaction_id === transactionID)
-          .sort((a, b) => a.id - b.id)
-      )
+      const pending = this.pending
+        .filter((change) => change.transaction_id === transactionID)
+        .sort((a, b) => a.id - b.id)
+      const watermarks: Array<{ watermark: number }> = []
+      for (const change of pending) {
+        const watermark = Math.max(0, ...this.changes.map((row) => row.watermark)) + 1
+        this.changes.push({ watermark, ...change })
+        watermarks.push({ watermark })
+      }
+      return new FakeResult(watermarks)
     }
     if (sql.startsWith('DELETE FROM _zero_pending_changes')) {
       const transactionID = String(params[0])
@@ -289,6 +290,37 @@ describe('ZeroDO schema table maintenance', () => {
 
     expect(zero.deletePendingTrackedChanges('tx-a')).toBe(1)
     expect(zero.commitPendingTrackedChanges('tx-a')).toBe(0)
+    expect(sql.pending).toEqual([])
+    expect(sql.changeState).toBe(0)
+    expect(sql.changes).toEqual([])
+    expect(zero.watermarks.current()).toBe(0)
     expect(zero.readChangesSince(0)).toEqual([])
+  })
+
+  it('promotes pending changes in insertion order with consecutive watermarks', async () => {
+    const { ZeroDO } = await import('./worker.js')
+    const { DurableWatermarkState } = await import('./watermark.js')
+    const sql = new FakeChangeSql()
+    const zero = Object.create(ZeroDO.prototype) as any
+    zero.sql = sql
+    zero.watermarks = new DurableWatermarkState(sql)
+
+    for (const id of ['first', 'second', 'third']) {
+      zero.appendTrackedChange('item', 'INSERT', { id }, null, 'tx-ordered')
+    }
+
+    expect(zero.commitPendingTrackedChanges('tx-ordered')).toBe(3)
+    expect(
+      zero.readChangesSince(0).map((change: any) => ({
+        watermark: change.watermark,
+        id: change.rowData.id,
+      }))
+    ).toEqual([
+      { watermark: 1, id: 'first' },
+      { watermark: 2, id: 'second' },
+      { watermark: 3, id: 'third' },
+    ])
+    expect(sql.changeState).toBe(3)
+    expect(sql.pending).toEqual([])
   })
 })

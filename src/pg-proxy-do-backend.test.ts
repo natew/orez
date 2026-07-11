@@ -2845,6 +2845,13 @@ describe('DoBackend', () => {
         statement.sql?.includes('INSERT INTO "_orez_tx_manifest"')
     )
     expect(manifestInsert.params?.[2]).toBe('chat_0_clients')
+    expect(
+      http.sqls.some((sql) =>
+        /CREATE TABLE "_orez_tx_.*_(?:_zero_changes|_zero_change_state|_orez___zero_watermark)" AS/.test(
+          sql
+        )
+      )
+    ).toBe(false)
     // rollback is ONE atomic server-side call carrying the journaled tx id
     expect(http.requests.some((url) => url.pathname === '/rollback-tx')).toBe(true)
     const rollbackBody = http.bodies.find((body) => body.transactionID)

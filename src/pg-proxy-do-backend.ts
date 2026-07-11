@@ -5274,12 +5274,6 @@ export class DoBackend {
   private txSnapshot: TransactionMetadataSnapshot | null = null
   private txDataSnapshots = new Map<string, string | null>()
   private txSnapshotCounter = 0
-  // once the change-feed tables (_zero_changes, _zero_change_state, *watermark*)
-  // are snapshotted for this tx, every subsequent tracked write would otherwise
-  // re-run a sqlite_master scan + 3 table-exists probes. cache the "done" flag
-  // for the duration of the tx — chat seed loops do thousands of tracked
-  // writes per migration and this lookup dominated boot.
-  private txChangeTablesSnapshotted = false
   // pending persist while inside a transaction. flushed on commit so we don't
   // round-trip to durable storage after every DDL statement in a migration.
   private txMetadataDirty = false
@@ -5718,7 +5712,6 @@ export class DoBackend {
     this.txSnapshot = null
     this.txDataSnapshots.clear()
     this.txSnapshotCounter = 0
-    this.txChangeTablesSnapshotted = false
     this.txMetadataDirty = false
     this.txHasTrackedWrite = false
   }
@@ -6830,25 +6823,10 @@ export class DoBackend {
     this.txDataSnapshots.set(table, snapshot)
   }
 
-  private async snapshotTransactionChangeTables(): Promise<void> {
-    if (this.txChangeTablesSnapshotted) return
-    this.txChangeTablesSnapshotted = true
-    await this.snapshotTransactionTable('_zero_changes')
-    await this.snapshotTransactionTable('_zero_change_state')
-    const result = await this.doExecResult(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%zero_watermark%'"
-    )
-    for (const row of result.rows) {
-      const name = String(row.name || '')
-      if (name && !name.startsWith('_orez_tx_')) await this.snapshotTransactionTable(name)
-    }
-  }
-
   private async snapshotTransactionWrite(statement: RewrittenStatement): Promise<void> {
     if (!this.inTransaction || !statement.isWrite) return
     const table = statement.writeTable?.table
     if (table) await this.snapshotTransactionTable(table)
-    if (this.trackingForStatement(statement)) await this.snapshotTransactionChangeTables()
   }
 
   private async doRawBatch(

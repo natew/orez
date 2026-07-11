@@ -86,6 +86,10 @@ interface SqlExecStatement {
   skipIfColumnExists?: { table: string; column: string }
   skipIfColumnMissing?: { table: string; column: string }
 }
+interface SqlWriteMeasurement {
+  sql: string
+  rowsWritten: number
+}
 interface SocketAttachment {
   clientID: string
   clientGroupID: string
@@ -169,6 +173,7 @@ export class ZeroDO extends DurableObject {
   private writeBudget: RollingRowWriteBudget
   private writeBudgetDisabled: boolean
   private writeBudgetAdminToken: string | undefined
+  private activeWriteMeasurements: SqlWriteMeasurement[] | null = null
 
   private recordWriteBudgetRows(rows: number): void {
     const wasTripped = this.writeBudget.status().tripped
@@ -223,18 +228,23 @@ export class ZeroDO extends DurableObject {
           warning: 'row write circuit breaker explicitly disabled',
         })
       )
-    } else {
-      const rawExec = this.sql.exec.bind(this.sql)
-      this.sql.exec = (statement: string, ...params: unknown[]) => {
-        const mutation = isSqlMutation(statement)
-        if (mutation) this.writeBudget.assertOpen()
-        const cursor = rawExec(statement, ...params)
-        if (mutation)
-          return trackSqlCursorRowsWritten(cursor, (rows) =>
-            this.recordWriteBudgetRows(rows)
-          )
-        return cursor
-      }
+    }
+    const rawExec = this.sql.exec.bind(this.sql)
+    this.sql.exec = (statement: string, ...params: unknown[]) => {
+      const mutation = isSqlMutation(statement)
+      if (mutation && !this.writeBudgetDisabled) this.writeBudget.assertOpen()
+      const measurement = this.activeWriteMeasurements
+        ? { sql: statement, rowsWritten: 0 }
+        : null
+      if (measurement) this.activeWriteMeasurements!.push(measurement)
+      const cursor = rawExec(statement, ...params)
+      if (!mutation) return cursor
+      return trackSqlCursorRowsWritten(cursor, (rows) => {
+        if (measurement) measurement.rowsWritten += rows
+        if (!this.writeBudgetDisabled) this.recordWriteBudgetRows(rows)
+      })
+    }
+    if (!this.writeBudgetDisabled) {
       ctx.blockConcurrencyWhile(async () => {
         const trippedAt = await ctx.storage.get<number>(WRITE_BUDGET_TRIPPED_KEY)
         if (trippedAt) this.writeBudget.restoreTrip(trippedAt)
@@ -549,6 +559,7 @@ export class ZeroDO extends DurableObject {
 
   private async handleExec(request: Request): Promise<Response> {
     let sql = ''
+    const measurements = this.startWriteMeasurement(request)
     try {
       const body = (await request.json()) as {
         sql: string
@@ -568,18 +579,23 @@ export class ZeroDO extends DurableObject {
             this.executeSQL(sql, params, body.track)
           )
         : this.executeSQL(sql, params)
-      return Response.json(result)
+      return Response.json(
+        measurements ? { ...result, writeMeasurements: measurements } : result
+      )
     } catch (err: any) {
       const budgetResponse = writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       const suffix = sql ? ` while executing: ${sqlErrorSnippet(sql, err.message)}` : ''
       console.error(`[exec-500] ${err.message} :: SQL=${sql.slice(0, 800)}`)
       return Response.json({ error: `${err.message}${suffix}` }, { status: 500 })
+    } finally {
+      if (measurements) this.activeWriteMeasurements = null
     }
   }
 
   /** Execute multiple statements atomically via ctx.storage.transaction() */
   private async handleBatch(request: Request): Promise<Response> {
+    const measurements = this.startWriteMeasurement(request)
     try {
       const { statements } = (await request.json()) as {
         statements: Array<string | SqlExecStatement>
@@ -624,12 +640,24 @@ export class ZeroDO extends DurableObject {
         }
         return results
       })
-      return Response.json({ results: allRows })
+      return Response.json({
+        results: allRows,
+        ...(measurements ? { writeMeasurements: measurements } : null),
+      })
     } catch (err: any) {
       const budgetResponse = writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
+    } finally {
+      if (measurements) this.activeWriteMeasurements = null
     }
+  }
+
+  private startWriteMeasurement(request: Request): SqlWriteMeasurement[] | null {
+    if (request.headers.get('x-orez-measure-writes') !== '1') return null
+    const measurements: SqlWriteMeasurement[] = []
+    this.activeWriteMeasurements = measurements
+    return measurements
   }
 
   /**
@@ -640,6 +668,7 @@ export class ZeroDO extends DurableObject {
    * manifest rows are gone (committed) or recovery rolls the tx back.
    */
   private async handleCommitTransaction(request: Request): Promise<Response> {
+    const measurements = this.startWriteMeasurement(request)
     try {
       const body = (await request.json()) as { transactionID?: unknown }
       const transactionID = String(body.transactionID || '')
@@ -649,15 +678,22 @@ export class ZeroDO extends DurableObject {
         commitTxJournal(this.sql, transactionID)
         return committed
       })
-      return Response.json({ ok: true, count })
+      return Response.json({
+        ok: true,
+        count,
+        ...(measurements ? { writeMeasurements: measurements } : null),
+      })
     } catch (err: any) {
       const budgetResponse = writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
+    } finally {
+      if (measurements) this.activeWriteMeasurements = null
     }
   }
 
   private async handleRollbackTransaction(request: Request): Promise<Response> {
+    const measurements = this.startWriteMeasurement(request)
     try {
       const body = (await request.json()) as { transactionID?: unknown }
       const transactionID = String(body.transactionID || '')
@@ -666,11 +702,17 @@ export class ZeroDO extends DurableObject {
         rollbackTxJournal(this.sql, transactionID)
         return this.deletePendingTrackedChanges(transactionID)
       })
-      return Response.json({ ok: true, count })
+      return Response.json({
+        ok: true,
+        count,
+        ...(measurements ? { writeMeasurements: measurements } : null),
+      })
     } catch (err: any) {
       const budgetResponse = writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
+    } finally {
+      if (measurements) this.activeWriteMeasurements = null
     }
   }
 
@@ -1076,19 +1118,22 @@ export class ZeroDO extends DurableObject {
 
   private commitPendingTrackedChanges(transactionID: string): number {
     this.ensurePendingTrackedChangesTable()
+    this.watermarks.ensureTables()
     const rows = this.sql
       .exec(
-        'SELECT id, table_name, op, row_data, old_data FROM _zero_pending_changes WHERE transaction_id = ? ORDER BY id',
+        `INSERT INTO _zero_changes (table_name, op, row_data, old_data)
+         SELECT table_name, op, row_data, old_data
+         FROM _zero_pending_changes
+         WHERE transaction_id = ?
+         ORDER BY id
+         RETURNING watermark`,
         transactionID
       )
       .toArray()
-    for (const row of rows) {
-      this.appendCommittedTrackedChange(
-        String(row.table_name),
-        row.op as 'INSERT' | 'UPDATE' | 'DELETE',
-        row.row_data ? JSON.parse(String(row.row_data)) : null,
-        row.old_data ? JSON.parse(String(row.old_data)) : null
-      )
+    let watermark = 0
+    for (const row of rows) watermark = Math.max(watermark, Number(row.watermark ?? 0))
+    if (watermark > 0) {
+      this.watermarks.mark(watermark)
     }
     this.deletePendingTrackedChanges(transactionID)
     return rows.length

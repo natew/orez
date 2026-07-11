@@ -19,16 +19,22 @@ function finitePositiveNumber(value: unknown): number {
 }
 
 export class DurableWatermarkState {
+  private tablesReady = false
+
   constructor(private readonly sql: DurableSqlStorage) {}
 
   ensureTables(): void {
+    if (this.tablesReady) return
     this.sql.exec(
       "CREATE TABLE IF NOT EXISTS _zero_changes (watermark INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, op TEXT NOT NULL CHECK (op IN ('INSERT', 'UPDATE', 'DELETE')), row_data TEXT, old_data TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()))"
     )
     this.sql.exec(
       `CREATE TABLE IF NOT EXISTS ${quoteIdent(WATERMARK_STATE_TABLE)} (id INTEGER PRIMARY KEY CHECK (id = 1), last_value INTEGER NOT NULL DEFAULT 0)`
     )
-    this.setWatermarkState(this.watermarkState())
+    this.sql.exec(
+      `INSERT OR IGNORE INTO ${quoteIdent(WATERMARK_STATE_TABLE)} (id, last_value) VALUES (1, 0)`
+    )
+    this.tablesReady = true
   }
 
   next(): number {
@@ -68,7 +74,6 @@ export class DurableWatermarkState {
 
   private setWatermarkState(watermark: number): void {
     const table = quoteIdent(WATERMARK_STATE_TABLE)
-    this.sql.exec(`INSERT OR IGNORE INTO ${table} (id, last_value) VALUES (1, 0)`)
     this.sql.exec(`UPDATE ${table} SET last_value = ? WHERE id = 1`, watermark)
   }
 
@@ -95,7 +100,7 @@ export class DurableWatermarkState {
       )
       .toArray()
       .map((row) => String(row.name || ''))
-      .filter(Boolean)
+      .filter((name) => name && !name.startsWith('_orez_tx_'))
   }
 
   private updateWatermarkSequences(watermark: number): void {
