@@ -12,7 +12,7 @@
 // digest so a fixture-data change fails loud. Mutant-tested in
 // spec-shrink.selftest.ts. See upstream-parity/shrink-corpus-contract.md.
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, isAbsolute, join } from 'node:path'
 
 import { canonical } from './canonical.js'
@@ -559,4 +559,145 @@ export function loadCorpus(
     if (`${e.id}.json` !== basename(n)) fail(`file ${n} basename must equal id ${e.id}`)
   }
   return parsed.map((p) => p.e) // sorted by filename
+}
+
+// ---------------------------------------------------------------------------
+// PURE writer helpers (used by the sweep live integration; unit-tested here so
+// the writer path is validated without booting a target).
+// ---------------------------------------------------------------------------
+
+// deterministic id derived from the FULL provenance identity (not just seed+spec)
+// so the same seed/spec failure on different targets / observedTargets / run
+// shapes / phases NEVER maps to the same filename (a false collision). safe
+// token; the on-disk filename is `${id}.json`.
+export type DivergenceIdentity = {
+  phase: Phase
+  comparisonKind: ComparisonKind
+  round: number
+  specIndex: number
+  rounds: number
+  queriesPerRound: number
+  seed: number
+  against: string
+  observedTarget: string
+  spec: GenSpec
+}
+export function divergenceId(i: DivergenceIdentity): string {
+  const digest = createHash('sha256')
+    .update(
+      canonical([
+        i.against,
+        i.observedTarget,
+        i.phase,
+        i.comparisonKind,
+        i.round,
+        i.specIndex,
+        i.rounds,
+        i.queriesPerRound,
+        i.seed,
+        i.spec,
+      ])
+    )
+    .digest('hex')
+    .slice(0, 16)
+  return `sweep-${i.phase}-r${i.round}-q${i.specIndex}-${digest}`
+}
+
+const hashRows = (rows: unknown): string =>
+  createHash('sha256').update(canonical(rows)).digest('hex')
+
+// build a validated SweepDivergence from raw divergence data. The stored spec is
+// the minimized one when a shrink completed; hashes/previews are of that spec's
+// (still-divergent) results. Self-validates via parseCorpusEntry so the writer
+// can never emit an out-of-grammar / inconsistent entry.
+export function buildSweepDivergence(input: {
+  phase: Phase
+  comparisonKind: ComparisonKind
+  round: number
+  specIndex: number
+  rounds: number
+  queriesPerRound: number
+  seed: number
+  spec: GenSpec
+  against: string
+  observedTarget: string
+  leftRows: unknown
+  rightRows: unknown
+  note: string
+  originalConstructCount?: number
+  minimizationComplete: boolean
+}): SweepDivergence {
+  const exactReplayable =
+    input.phase === 'hydrate' &&
+    input.round === 0 &&
+    input.comparisonKind === 'cross-target'
+  const id = divergenceId({
+    phase: input.phase,
+    comparisonKind: input.comparisonKind,
+    round: input.round,
+    specIndex: input.specIndex,
+    rounds: input.rounds,
+    queriesPerRound: input.queriesPerRound,
+    seed: input.seed,
+    against: input.against,
+    observedTarget: input.observedTarget,
+    spec: input.spec,
+  })
+  const entry: SweepDivergence = {
+    schemaVersion: 1,
+    kind: 'sweep-divergence',
+    id,
+    note: input.note,
+    phase: input.phase,
+    comparisonKind: input.comparisonKind,
+    round: input.round,
+    specIndex: input.specIndex,
+    rounds: input.rounds,
+    queriesPerRound: input.queriesPerRound,
+    exactReplayable,
+    minimizationComplete: exactReplayable ? input.minimizationComplete : false,
+    spec: input.spec,
+    against: input.against,
+    observedTarget: input.observedTarget,
+    seed: input.seed,
+    sourceFingerprint: currentSeedFingerprint(),
+    constructCount: constructCount(input.spec),
+    ...(input.originalConstructCount !== undefined
+      ? { originalConstructCount: input.originalConstructCount }
+      : {}),
+    leftHash: hashRows(input.leftRows),
+    rightHash: hashRows(input.rightRows),
+    leftPreview: canonical(input.leftRows).slice(0, 2000),
+    rightPreview: canonical(input.rightRows).slice(0, 2000),
+    expectConverge: true,
+    replay: buildReplayCommand({
+      exactReplayable,
+      id,
+      against: input.against,
+      seed: input.seed,
+      rounds: input.rounds,
+      queriesPerRound: input.queriesPerRound,
+    }),
+  }
+  // self-check: the built entry must pass the full grammar/cross-field validator.
+  return parseCorpusEntry(JSON.stringify(entry))
+}
+
+// write an entry to `dir/<id>.json`, REFUSING to overwrite a file whose content
+// differs (idempotent when identical). Uses an ATOMIC exclusive create (O_EXCL
+// via the 'wx' flag) so there is no exists-then-write TOCTOU: two writers racing
+// the same id can't both create it, and an existing different repro is never
+// clobbered.
+export function writeCorpusEntry(dir: string, entry: SweepDivergence): string {
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, `${entry.id}.json`)
+  const content = JSON.stringify(entry, null, 2)
+  try {
+    writeFileSync(file, content, { flag: 'wx' })
+    return file
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+    if (readFileSync(file, 'utf-8') === content) return file // idempotent
+    fail(`refusing to overwrite ${file} with different content`)
+  }
 }

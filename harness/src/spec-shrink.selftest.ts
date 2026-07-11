@@ -13,9 +13,12 @@ import { canonical } from './canonical.js'
 import {
   assertValidSpec,
   buildReplayCommand,
+  buildSweepDivergence,
   currentSeedFingerprint,
+  divergenceId,
   loadCorpus,
   parseCorpusEntry,
+  writeCorpusEntry,
 } from './spec-corpus.js'
 import { constructCount, oneStepShrinks, shrinkSpec } from './spec-shrink.js'
 
@@ -694,6 +697,133 @@ const load = (dir: string): { ok: boolean; err?: unknown; out?: { id: string }[]
     assert(!load(d4).ok, 'loadCorpus fails loud on a corrupt file')
   } finally {
     rmSync(d4, { recursive: true, force: true })
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log('[spec-corpus] writer helpers — id, buildSweepDivergence, refuse-overwrite')
+{
+  const baseId = {
+    phase: 'hydrate' as const,
+    comparisonKind: 'cross-target' as const,
+    round: 0,
+    specIndex: 0,
+    rounds: 10,
+    queriesPerRound: 4,
+    seed: 42,
+    against: 'orez-local',
+    observedTarget: 'orez-local',
+    spec: specA,
+  }
+  const id = divergenceId(baseId)
+  assert(/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id), 'divergenceId is a safe token')
+  assert(id === divergenceId(baseId), 'divergenceId is deterministic')
+  assert(id !== divergenceId({ ...baseId, seed: 43 }), 'divergenceId varies with seed')
+  // full-provenance identity: no false collisions across target / run shape
+  assert(
+    id !==
+      divergenceId({ ...baseId, against: 'rust-local', observedTarget: 'rust-local' }),
+    'varies with against (no cross-target collision)'
+  )
+  assert(id !== divergenceId({ ...baseId, rounds: 20 }), 'varies with rounds')
+  assert(
+    id !== divergenceId({ ...baseId, queriesPerRound: 8 }),
+    'varies with queriesPerRound'
+  )
+  const st = {
+    ...baseId,
+    phase: 'incremental' as const,
+    comparisonKind: 'single-target' as const,
+    round: 10,
+    observedTarget: 'stock-zero',
+  }
+  assert(
+    divergenceId(st) !== divergenceId({ ...st, observedTarget: 'orez-local' }),
+    'single-target varies with observedTarget'
+  )
+
+  const buildExact = (note: string) =>
+    buildSweepDivergence({
+      phase: 'hydrate',
+      comparisonKind: 'cross-target',
+      round: 0,
+      specIndex: 0,
+      rounds: 10,
+      queriesPerRound: 4,
+      seed: 42,
+      spec: specA,
+      against: 'orez-local',
+      observedTarget: 'orez-local',
+      leftRows: [{ id: 'a' }],
+      rightRows: [{ id: 'b' }],
+      note,
+      minimizationComplete: true,
+    })
+  let ok = false
+  try {
+    const e = buildExact('found')
+    ok =
+      e.exactReplayable &&
+      e.expectConverge === true &&
+      e.leftHash !== e.rightHash &&
+      e.replay.includes('--replay-corpus')
+  } catch (e) {
+    console.error('  (buildSweepDivergence threw: ' + e + ')')
+  }
+  assert(ok, 'buildSweepDivergence builds a self-validated exact entry (hashes differ)')
+  // identical results => not a divergence => build throws (leftHash === rightHash)
+  {
+    let threw = false
+    try {
+      buildSweepDivergence({
+        phase: 'post-writes',
+        comparisonKind: 'cross-target',
+        round: 1,
+        specIndex: 2,
+        rounds: 10,
+        queriesPerRound: 4,
+        seed: 7,
+        spec: specA,
+        against: 'orez-local',
+        observedTarget: 'orez-local',
+        leftRows: [{ id: 'a' }],
+        rightRows: [{ id: 'a' }],
+        note: 'same',
+        minimizationComplete: false,
+      })
+    } catch {
+      threw = true
+    }
+    assert(
+      threw,
+      'buildSweepDivergence throws when results are identical (not a divergence)'
+    )
+  }
+
+  const wdir = mkdtempSync(join(tmpdir(), 'corpus-write-'))
+  try {
+    const e = buildExact('v1')
+    const f = writeCorpusEntry(wdir, e)
+    assert(f.endsWith(`${e.id}.json`), 'writeCorpusEntry writes <id>.json')
+    assert(
+      writeCorpusEntry(wdir, e) === f,
+      'writeCorpusEntry is idempotent for identical content'
+    )
+    assert(loadCorpus(wdir).length === 1, 'the written entry loads back')
+    // same id, different content => refuse to overwrite
+    const e2 = buildExact('v2-different-note')
+    let threw = false
+    try {
+      writeCorpusEntry(wdir, e2)
+    } catch {
+      threw = true
+    }
+    assert(
+      threw,
+      'writeCorpusEntry refuses to overwrite different content at the same id'
+    )
+  } finally {
+    rmSync(wdir, { recursive: true, force: true })
   }
 }
 
