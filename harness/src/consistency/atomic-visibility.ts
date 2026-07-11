@@ -8,6 +8,11 @@ import {
 export const ATOMIC_VISIBILITY_WORKLOAD_PROFILE = {
   name: 'dedicated-append-only-atomic-visibility',
   version: 1,
+  adapterRequirements: {
+    mutation: 'authoritative-atomic-append-transaction',
+    read: 'complete-full-scope-list-observation',
+    appendIdentity: 'run-fresh-and-absent-from-initial-state',
+  },
 } as const
 
 type AtomicGroup = {
@@ -32,9 +37,12 @@ function result(violations: string[]): CheckResult {
  * Schema v1 preserves transaction grouping and observed list membership, but
  * does not prove that `kind: mutation` is an authoritative atomic transaction
  * or that `kind: read` is a complete full-scope client observation. The adapter
- * must enforce those meanings. This checker intentionally does not infer plane
- * or scope from metadata/process names, apply realtime order, require eventual
- * visibility, or support mixed/general histories.
+ * must enforce those meanings and allocate every `(key, value)` append identity
+ * freshly for this run, absent from both initial authority and client state.
+ * Without that seed-state guarantee, a legitimate pre-mutation read could look
+ * like a partially visible group because this checker intentionally applies no
+ * realtime ordering. It does not infer plane or scope from metadata/process
+ * names, require eventual visibility, or support mixed/general histories.
  */
 export function checkAtomicVisibility(events: readonly HistoryEvent[]): CheckResult {
   const structural = validateHistory(events)

@@ -68,6 +68,14 @@ function violations(events: HistoryEvent[]): string[] {
 }
 
 describe(`atomic visibility (${ATOMIC_VISIBILITY_WORKLOAD_PROFILE.name}@${ATOMIC_VISIBILITY_WORKLOAD_PROFILE.version})`, () => {
+  test('pins the dedicated adapter evidence boundary', () => {
+    expect(ATOMIC_VISIBILITY_WORKLOAD_PROFILE.adapterRequirements).toEqual({
+      mutation: 'authoritative-atomic-append-transaction',
+      read: 'complete-full-scope-list-observation',
+      appendIdentity: 'run-fresh-and-absent-from-initial-state',
+    })
+  })
+
   test('accepts none-before and all-after observations', () => {
     expect(checkAtomicVisibility(validEvidence())).toEqual({
       valid: true,
