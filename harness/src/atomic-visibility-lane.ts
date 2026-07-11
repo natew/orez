@@ -146,7 +146,8 @@ try {
     authorityPreflightRows: preflight,
   })
 
-  const zero = target.createClient('atomic-visibility-client')
+  const writer = target.createClient('atomic-writer')
+  const observer = target.createClient('atomic-reader')
   const beforeOp = `${runId}-read-before`
   recordRead(
     recorder,
@@ -154,7 +155,7 @@ try {
     beforeOp,
     projectIds.map((key) => ({ type: 'read', key, value: null }))
   )
-  watcher = watchCompleteScope(zero)
+  watcher = watchCompleteScope(observer)
   const before = await watcher.waitFor(() => true)
   recordRead(recorder, 'ok', beforeOp, projectAtomicRead(projectIds, before))
 
@@ -167,18 +168,18 @@ try {
   recorder.record({
     opId: mutationOp,
     process: 'atomic-writer',
-    clientId: 'atomic-visibility-client',
+    clientId: 'atomic-writer',
     phase: 'invoke',
     kind: 'mutation',
     transaction,
   })
-  const request = zero.mutate(mutators.atomicVisibility.appendGroup({ effects }))
+  const request = writer.mutate(mutators.atomicVisibility.appendGroup({ effects }))
   try {
     await assertServerOutcome(request.server, 'success', mutationOp)
     recorder.record({
       opId: mutationOp,
       process: 'atomic-writer',
-      clientId: 'atomic-visibility-client',
+      clientId: 'atomic-writer',
       phase: 'ok',
       kind: 'mutation',
       transaction,
@@ -187,7 +188,7 @@ try {
     recorder.record({
       opId: mutationOp,
       process: 'atomic-writer',
-      clientId: 'atomic-visibility-client',
+      clientId: 'atomic-writer',
       phase: 'info',
       kind: 'mutation',
       transaction,
