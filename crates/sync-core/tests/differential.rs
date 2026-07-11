@@ -405,10 +405,14 @@ fn property_config() -> Config {
     }
 }
 
-fn failure_envelope(reason: String, ops: &[Op], artifact_path: &std::path::Path) -> Value {
+fn failure_envelope(reason: String, ops: &[Op]) -> Value {
     let cases = std::env::var("PROPTEST_CASES").unwrap_or_else(|_| "12".into());
     let seed = std::env::var("PROPTEST_RNG_SEED").ok();
-    let replay_path = artifact_path.display().to_string();
+    // The nightly collector gives this envelope a stable basename. Discovering
+    // it beneath cwd keeps the command valid after `gh run download`, whether
+    // upload-artifact retained the results wrapper or extracted its contents.
+    let replay_path =
+        "$(find . -type f -name sync-core-differential-minimized.json -exec realpath {} \\; -quit)";
     json!({
         "schemaVersion": 1,
         "kind": "sync-core-differential",
@@ -423,10 +427,10 @@ fn failure_envelope(reason: String, ops: &[Op], artifact_path: &std::path::Path)
         },
         "replay": {
             "command": format!(
-                "SYNC_CORE_REPLAY={} cargo test -p sync-core --test differential replay_saved_differential_trace -- --ignored --exact --nocapture",
+                "SYNC_CORE_REPLAY=\"{}\" cargo test -p sync-core --test differential replay_saved_differential_trace -- --ignored --exact --nocapture",
                 replay_path
             ),
-            "env": { "SYNC_CORE_REPLAY": replay_path },
+            "env": {},
         },
         "input": { "trace": ops },
         "failure": { "message": reason },
@@ -442,7 +446,7 @@ fn persist_failure_envelope(reason: String, ops: &[Op]) -> (std::path::PathBuf, 
         std::process::id()
     ));
     let staging = path.with_extension("json.writing");
-    let envelope = failure_envelope(reason, ops, &path);
+    let envelope = failure_envelope(reason, ops);
     std::fs::write(&staging, serde_json::to_vec_pretty(&envelope).unwrap())
         .expect("write differential failure artifact");
     std::fs::rename(&staging, &path).expect("publish differential failure artifact");

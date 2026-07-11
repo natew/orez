@@ -59,7 +59,11 @@ jobs:
           fi
           for trace in /tmp/sync-core-diff-*.json; do
             [[ -e "$trace" ]] || continue
-            cp "$trace" rust-differential-results/traces/
+            if [[ "$trace" == *-minimized.json ]]; then
+              cp "$trace" rust-differential-results/traces/sync-core-differential-minimized.json
+            else
+              cp "$trace" rust-differential-results/traces/
+            fi
           done
 
       - name: upload minimized regressions and preserved traces
