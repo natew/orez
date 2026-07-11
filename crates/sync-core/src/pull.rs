@@ -175,14 +175,14 @@ fn snapshot(
     for (table, sql, params) in plans {
         let spec = tables.get(&table).expect("table in spec");
         for row in db.query(&sql, &params)? {
-            patch.push(json!({ "op": "put", "tableName": table, "value": row_value(spec, &row) }));
+            patch.push(json!({ "op": "put", "tableName": table, "value": row_value(spec, &row)? }));
         }
     }
     Ok(patch)
 }
 
 // build a zero-typed row object from a live sqlite row
-fn row_value(spec: &TableSpec, row: &Row) -> Value {
+fn row_value(spec: &TableSpec, row: &Row) -> Result<Value, EngineError> {
     crate::value::zero_row(spec, row)
 }
 
@@ -362,13 +362,13 @@ fn resolve_row(
     }
     let rows = db.query(&sql, &params)?;
     match rows.first() {
-        Some(row) => Ok(json!({ "op": "put", "tableName": table, "value": row_value(spec, row) })),
-        None => Ok(json!({ "op": "del", "tableName": table, "id": pk_id(spec, pk) })),
+        Some(row) => Ok(json!({ "op": "put", "tableName": table, "value": row_value(spec, row)? })),
+        None => Ok(json!({ "op": "del", "tableName": table, "id": pk_id(spec, pk)? })),
     }
 }
 
 // del ids carry zero-typed primary-key columns
-fn pk_id(spec: &TableSpec, pk: &Value) -> Value {
+fn pk_id(spec: &TableSpec, pk: &Value) -> Result<Value, EngineError> {
     crate::value::zero_pk_id(spec, pk)
 }
 

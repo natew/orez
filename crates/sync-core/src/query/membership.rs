@@ -619,7 +619,7 @@ fn collect_dependent_rows(
             let pk_obj = raw_pk(child_spec, row);
             let key = canonical_pk(&pk_obj);
             live.insert((cr.child_table.clone(), key.clone()));
-            values.insert((cr.child_table.clone(), key), zero_row(child_spec, row));
+            values.insert((cr.child_table.clone(), key), zero_row(child_spec, row)?);
         }
         // the child row-set is the parent for the child's own dependent subqueries
         collect_dependent_rows(
@@ -747,7 +747,7 @@ pub fn recompute_group(
             let pk_obj = raw_pk(spec, row);
             let key = canonical_pk(&pk_obj);
             live.insert((q.root_table.clone(), key.clone()));
-            values.insert((q.root_table.clone(), key), zero_row(spec, row));
+            values.insert((q.root_table.clone(), key), zero_row(spec, row)?);
         }
 
         // dependent rows (related output + positive-EXISTS filter subqueries),
@@ -830,7 +830,8 @@ pub fn recompute_group(
         } else if old > 0 && new == 0 {
             let spec = tables.get(table).unwrap();
             let pk_obj: Value = serde_json::from_str(pk).unwrap_or(Value::Null);
-            patch.push(json!({ "op": "del", "tableName": table, "id": zero_pk_id(spec, &pk_obj) }));
+            patch
+                .push(json!({ "op": "del", "tableName": table, "id": zero_pk_id(spec, &pk_obj)? }));
         }
     }
 

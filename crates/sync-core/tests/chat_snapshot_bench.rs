@@ -263,7 +263,7 @@ fn seed_and_measure(scale: &Scale, auth: &str) -> Measured {
     let t1 = Instant::now();
     let mut bytes = 0usize;
     for row in &rows {
-        let v = zero_row(&spec, row);
+        let v = zero_row(&spec, row).unwrap();
         bytes += serde_json::to_string(&v).unwrap().len();
     }
     let serialize_ms = t1.elapsed().as_secs_f64() * 1000.0;
@@ -285,7 +285,9 @@ fn seed_and_measure(scale: &Scale, auth: &str) -> Measured {
         .unwrap();
     let mut window_bytes = 0usize;
     for row in &window_result {
-        window_bytes += serde_json::to_string(&zero_row(&spec, row)).unwrap().len();
+        window_bytes += serde_json::to_string(&zero_row(&spec, row).unwrap())
+            .unwrap()
+            .len();
     }
     let window_ms = tw.elapsed().as_secs_f64() * 1000.0;
 

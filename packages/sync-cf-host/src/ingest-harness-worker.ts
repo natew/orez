@@ -113,9 +113,9 @@ export class DataService extends WorkerEntrypoint<Env> {
       const watermark = Number(new URL(request.url).searchParams.get('watermark') ?? 0)
       return Promise.resolve(
         Response.json({
-          watermark: 1,
+          watermark: 2,
           changes:
-            watermark >= 1
+            watermark >= 2
               ? []
               : [
                   {
@@ -124,8 +124,21 @@ export class DataService extends WorkerEntrypoint<Env> {
                     op: 'INSERT',
                     rowData: {
                       id: 'numeric-text',
-                      label: 'timestamp-shaped numeric text',
-                      rank: '1783770313712',
+                      label: 'SQL timestamp text',
+                      rank: '2026-07-11 13:34:46',
+                      done: false,
+                      meta: null,
+                    },
+                    oldData: null,
+                  },
+                  {
+                    watermark: 2,
+                    tableName: 'item',
+                    op: 'INSERT',
+                    rowData: {
+                      id: 'numeric-native',
+                      label: 'native JSON number',
+                      rank: 1783776886000,
                       done: false,
                       meta: null,
                     },

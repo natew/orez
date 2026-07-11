@@ -192,9 +192,9 @@ try {
     meta: { lane: true },
   })
 
-  // Production timestamp columns are Zero `number`s, but the data tier's
-  // /changes JSON can carry its exact i64 read as a TEXT token. Prove the real
-  // ingest -> incremental pull path restores the schema type on the wire.
+  // Production timestamp columns are Zero `number`s, but SQLite returns their
+  // SQL timestamp representation as TEXT. Prove the real ingest -> incremental
+  // pull path converts it to epoch milliseconds on the wire.
   const numericTextNamespace = `numeric-text-${crypto.randomUUID()}`
   const numericTextOrigin = `${base}/${numericTextNamespace}`
   const numericPost = async (body) => {
@@ -228,8 +228,13 @@ try {
   const numericPut = numericIncremental.body.rowsPatch.find(
     (entry) => entry.op === 'put' && entry.value?.id === 'numeric-text'
   )
-  assert.equal(numericPut.value.rank, 1783770313712)
+  assert.equal(numericPut.value.rank, 1783776886000)
   assert.equal(typeof numericPut.value.rank, 'number')
+  const numericNativePut = numericIncremental.body.rowsPatch.find(
+    (entry) => entry.op === 'put' && entry.value?.id === 'numeric-native'
+  )
+  assert.equal(numericNativePut.value.rank, 1783776886000)
+  assert.equal(typeof numericNativePut.value.rank, 'number')
 
   // A feed that keeps returning changes while the engine cursor no longer
   // advances must trip the ingest breaker instead of hot-looping. Once the

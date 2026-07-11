@@ -49,6 +49,103 @@ pub fn f64_to_json(f: f64) -> Value {
     }
 }
 
+// SQLite/pg timestamp columns can reach the engine as SQL text even though
+// Zero declares them as `number` (epoch milliseconds). This mirrors the
+// reference host's `new Date(raw).getTime()` conversion for the stable SQL/ISO
+// forms the data tier emits, interpreting a missing offset as UTC (the worker
+// runtime's timezone).
+fn timestamp_text_to_epoch_ms(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 19
+        || !matches!(bytes[10], b' ' | b'T')
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let digits = |start: usize, len: usize| -> Option<i32> {
+        let mut out = 0i32;
+        for byte in bytes.get(start..start + len)? {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            out = out.checked_mul(10)?.checked_add(i32::from(*byte - b'0'))?;
+        }
+        Some(out)
+    };
+    let year = digits(0, 4)?;
+    let month = digits(5, 2)?;
+    let day = digits(8, 2)?;
+    let hour = digits(11, 2)?;
+    let minute = digits(14, 2)?;
+    let second = digits(17, 2)?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if day < 1 || day > days_in_month || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+
+    let mut cursor = 19;
+    let mut millis = 0i64;
+    if bytes.get(cursor) == Some(&b'.') {
+        cursor += 1;
+        let fraction_start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            if cursor < fraction_start + 3 {
+                millis = millis * 10 + i64::from(bytes[cursor] - b'0');
+            }
+            cursor += 1;
+        }
+        if cursor == fraction_start {
+            return None;
+        }
+        for _ in cursor.saturating_sub(fraction_start)..3 {
+            millis *= 10;
+        }
+    }
+
+    let offset_seconds = match bytes.get(cursor..) {
+        Some([]) | Some([b'Z']) => 0i64,
+        Some([sign @ (b'+' | b'-'), h1, h2, b':', m1, m2])
+            if h1.is_ascii_digit()
+                && h2.is_ascii_digit()
+                && m1.is_ascii_digit()
+                && m2.is_ascii_digit() =>
+        {
+            let hours = i64::from((h1 - b'0') * 10 + (h2 - b'0'));
+            let minutes = i64::from((m1 - b'0') * 10 + (m2 - b'0'));
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            let seconds = hours * 3600 + minutes * 60;
+            if *sign == b'-' { -seconds } else { seconds }
+        }
+        _ => return None,
+    };
+
+    // Howard Hinnant's civil-date conversion, yielding days since 1970-01-01.
+    let adjusted_year = year - i32::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let shifted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = i64::from(era * 146_097 + day_of_era - 719_468);
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour * 3600 + minute * 60 + second))?
+        .checked_sub(offset_seconds)?;
+    seconds.checked_mul(1000)?.checked_add(millis)
+}
+
 // raw SQLite value -> serde_json::Value with no type coercion (the shape the
 // reference core's node:sqlite driver hands `toZeroValue`). used as the base
 // before applying the zero column type.
@@ -86,7 +183,13 @@ pub fn to_zero_value_json(ty: ZeroColumnType, raw: Value) -> Value {
         ZeroColumnType::Number => match raw {
             Value::String(ref s) => {
                 let n: f64 = s.parse().unwrap_or(f64::NAN);
-                if n.is_finite() { f64_to_json(n) } else { raw }
+                if n.is_finite() {
+                    f64_to_json(n)
+                } else if let Some(epoch_ms) = timestamp_text_to_epoch_ms(s) {
+                    Value::Number(Number::from(epoch_ms))
+                } else {
+                    raw
+                }
             }
             other => other,
         },
@@ -94,17 +197,55 @@ pub fn to_zero_value_json(ty: ZeroColumnType, raw: Value) -> Value {
             Value::String(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
             other => other,
         },
-        // Upstream snapshot and /changes feeds can represent the same SQLite
-        // value with different JSON token types. The schema is authoritative
-        // on the wire: do not let an INTEGER/REAL storage class leak as a JSON
-        // number for a declared string column and later collide with a text
-        // token in Zero's sorted indexes.
-        ZeroColumnType::String => match raw {
-            Value::String(_) => raw,
-            Value::Number(value) => Value::String(value.to_string()),
-            other => other,
-        },
-        ZeroColumnType::Null => raw,
+        ZeroColumnType::String | ZeroColumnType::Null => raw,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{ZeroColumnType, timestamp_text_to_epoch_ms, zero_row};
+    use crate::db::{Row, SqlValue};
+    use crate::schema::TableSpec;
+
+    #[test]
+    fn parses_sql_and_iso_timestamps_as_utc_epoch_milliseconds() {
+        assert_eq!(
+            timestamp_text_to_epoch_ms("2026-07-11 13:34:46"),
+            Some(1_783_776_886_000)
+        );
+        assert_eq!(
+            timestamp_text_to_epoch_ms("2026-07-11T13:34:46.123Z"),
+            Some(1_783_776_886_123)
+        );
+        assert_eq!(
+            timestamp_text_to_epoch_ms("2026-07-11 13:34:46.123"),
+            Some(1_783_776_886_123)
+        );
+        assert_eq!(
+            timestamp_text_to_epoch_ms("2026-07-11T03:34:46-10:00"),
+            Some(1_783_776_886_000)
+        );
+    }
+
+    #[test]
+    fn invalid_schema_number_text_is_an_error_not_a_string_on_the_wire() {
+        let spec = TableSpec {
+            columns: vec![("createdAt".into(), ZeroColumnType::Number)],
+            primary_key: vec![],
+        };
+        let row = Row {
+            columns: Arc::from(["createdAt".to_string()]),
+            values: vec![SqlValue::Text("not-a-number-or-date".into())],
+        };
+        let error = zero_row(&spec, &row).unwrap_err();
+        assert_eq!(error.status, 500);
+        assert!(
+            error
+                .message
+                .contains("cannot convert schema-number column createdAt")
+        );
     }
 }
 
@@ -119,22 +260,40 @@ fn is_truthy(raw: &Value) -> bool {
 }
 
 // build a zero-typed row object (a rowsPatch `value`) from a live SQLite row
-pub fn zero_row(spec: &crate::schema::TableSpec, row: &crate::db::Row) -> Value {
+pub fn zero_row(
+    spec: &crate::schema::TableSpec,
+    row: &crate::db::Row,
+) -> Result<Value, crate::error::EngineError> {
     let mut value = serde_json::Map::new();
     for (col, ty) in &spec.columns {
         let raw = row.get(col).cloned().unwrap_or(SqlValue::Null);
-        value.insert(col.clone(), to_zero_value(*ty, &raw));
+        let converted = to_zero_value(*ty, &raw);
+        if *ty == ZeroColumnType::Number && matches!(converted, Value::String(_)) {
+            return Err(crate::error::EngineError::internal(format!(
+                "cannot convert schema-number column {col} value to number: {raw:?}"
+            )));
+        }
+        value.insert(col.clone(), converted);
     }
-    Value::Object(value)
+    Ok(Value::Object(value))
 }
 
 // build a zero-typed `id` object (a `del` op's id) from a primary-key JSON map
-pub fn zero_pk_id(spec: &crate::schema::TableSpec, pk: &Value) -> Value {
+pub fn zero_pk_id(
+    spec: &crate::schema::TableSpec,
+    pk: &Value,
+) -> Result<Value, crate::error::EngineError> {
     let mut id = serde_json::Map::new();
     for col in &spec.primary_key {
         let ty = spec.column_type(col).unwrap_or(ZeroColumnType::String);
         let raw = pk.get(col).cloned().unwrap_or(Value::Null);
-        id.insert(col.clone(), to_zero_value_json(ty, raw));
+        let converted = to_zero_value_json(ty, raw);
+        if ty == ZeroColumnType::Number && matches!(converted, Value::String(_)) {
+            return Err(crate::error::EngineError::internal(format!(
+                "cannot convert schema-number primary key {col} to number"
+            )));
+        }
+        id.insert(col.clone(), converted);
     }
-    Value::Object(id)
+    Ok(Value::Object(id))
 }
