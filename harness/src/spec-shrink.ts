@@ -85,8 +85,12 @@ function oneStepShrinksSub(sub: GenSubSpec, table: string, card: Card): GenSubSp
       for (const w of condShrinks(sub.where)) out.push({ ...sub, where: w })
     }
   }
-  for (let i = 0; i < rel.length; i++)
-    out.push({ ...sub, related: rel.filter((_, j) => j !== i) })
+  for (let i = 0; i < rel.length; i++) {
+    // omit `related` entirely when removing the last entry (an empty array is
+    // outside the generator grammar).
+    const nr = rel.filter((_, j) => j !== i)
+    out.push(nr.length ? { ...sub, related: nr } : omit(sub, 'related'))
+  }
   for (let i = 0; i < rel.length; i++) {
     const child = rel[i]!
     const info = RELATIONSHIPS[table]?.[child.rel]
@@ -114,12 +118,18 @@ export function oneStepShrinks(spec: GenSpec): GenSpec[] {
       if (ob[i]![0] !== 'id') out.push({ ...spec, orderBy: ob.filter((_, j) => j !== i) })
     }
   }
+  // omit `exists`/`related` entirely when removing the last entry (an empty
+  // array is outside the generator grammar).
   const ex = spec.exists ?? []
-  for (let i = 0; i < ex.length; i++)
-    out.push({ ...spec, exists: ex.filter((_, j) => j !== i) })
+  for (let i = 0; i < ex.length; i++) {
+    const ne = ex.filter((_, j) => j !== i)
+    out.push(ne.length ? { ...spec, exists: ne } : omit(spec, 'exists'))
+  }
   const rel = spec.related ?? []
-  for (let i = 0; i < rel.length; i++)
-    out.push({ ...spec, related: rel.filter((_, j) => j !== i) })
+  for (let i = 0; i < rel.length; i++) {
+    const nr = rel.filter((_, j) => j !== i)
+    out.push(nr.length ? { ...spec, related: nr } : omit(spec, 'related'))
+  }
   for (let i = 0; i < rel.length; i++) {
     const child = rel[i]!
     const info = RELATIONSHIPS[table]?.[child.rel]

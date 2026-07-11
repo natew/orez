@@ -250,6 +250,7 @@ function validateRelatedList(
   nestLevel: number
 ) {
   if (!Array.isArray(related)) fail(`${path}.related must be an array`)
+  if (related.length === 0) fail(`${path}.related must be absent, not an empty array`)
   const max = nestLevel === 0 ? 2 : 1
   if (related.length > max)
     fail(`${path}.related has ${related.length} entries (max ${max})`)
@@ -336,6 +337,7 @@ export function assertValidSpec(spec: unknown): asserts spec is GenSpec {
   if (spec.related !== undefined) validateRelatedList(spec.related, table, 'spec', 0)
   if (spec.exists !== undefined) {
     if (!Array.isArray(spec.exists)) fail('spec.exists must be an array')
+    if (spec.exists.length === 0) fail('spec.exists must be absent, not an empty array')
     if (spec.exists.length > 1)
       fail(`spec.exists has ${spec.exists.length} entries (max 1)`)
     for (const [i, e] of spec.exists.entries()) {

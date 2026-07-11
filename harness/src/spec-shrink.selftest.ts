@@ -254,6 +254,22 @@ throwsSpec(
   },
   'start on non-(rank) order column'
 )
+throwsSpec(
+  { table: 'project', orderBy: [['id', 'asc']], exists: [] },
+  'root exists:[] empty array'
+)
+throwsSpec(
+  { table: 'project', orderBy: [['id', 'asc']], related: [] },
+  'root related:[] empty array'
+)
+throwsSpec(
+  {
+    table: 'member',
+    orderBy: [['id', 'asc']],
+    related: [{ rel: 'user', sub: { one: true, related: [] } }],
+  },
+  'nested related:[] empty array'
+)
 
 console.log('[spec-shrink] constructCount + oneStepShrinks invariants + closure')
 {
