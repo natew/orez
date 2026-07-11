@@ -52,18 +52,15 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          mkdir -p rust-differential-results/regressions rust-differential-results/traces
+          results=target/sync-core-differential
+          mkdir -p "$results/regressions" "$results/traces"
           regression=crates/sync-core/proptest-regressions/differential.txt
           if [[ -f "$regression" ]]; then
-            cp "$regression" rust-differential-results/regressions/
+            cp "$regression" "$results/regressions/"
           fi
           for trace in /tmp/sync-core-diff-*.json; do
             [[ -e "$trace" ]] || continue
-            if [[ "$trace" == *-minimized.json ]]; then
-              cp "$trace" rust-differential-results/traces/sync-core-differential-minimized.json
-            else
-              cp "$trace" rust-differential-results/traces/
-            fi
+            cp "$trace" "$results/traces/"
           done
 
       - name: upload minimized regressions and preserved traces
@@ -71,6 +68,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rust-differential-failure-${{ github.run_id }}-${{ github.run_attempt }}
-          path: rust-differential-results/
+          path: target/sync-core-differential/
           if-no-files-found: warn
           retention-days: 14

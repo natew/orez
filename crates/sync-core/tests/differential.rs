@@ -405,14 +405,15 @@ fn property_config() -> Config {
     }
 }
 
-fn failure_envelope(reason: String, ops: &[Op]) -> Value {
+fn failure_envelope(reason: String, ops: &[Op], process_id: u32) -> Value {
     let cases = std::env::var("PROPTEST_CASES").unwrap_or_else(|_| "12".into());
     let seed = std::env::var("PROPTEST_RNG_SEED").ok();
     // The nightly collector gives this envelope a stable basename. Discovering
     // it beneath cwd keeps the command valid after `gh run download`, whether
     // upload-artifact retained the results wrapper or extracted its contents.
-    let replay_path =
-        "$(find . -type f -name sync-core-differential-minimized.json -exec realpath {} \\; -quit)";
+    let replay_path = format!(
+        "$(find . -type f -path '*/{process_id}/sync-core-differential-minimized.json' -exec realpath {{}} \\; -quit)"
+    );
     json!({
         "schemaVersion": 1,
         "kind": "sync-core-differential",
@@ -441,12 +442,18 @@ fn persist_failure_envelope(reason: String, ops: &[Op]) -> (std::path::PathBuf, 
     // Proptest invokes the body repeatedly while shrinking. Replacing this
     // process-scoped file means the final write is the latest (minimized)
     // failing input instead of leaving one artifact per shrink attempt.
-    let path = std::env::temp_dir().join(format!(
-        "sync-core-diff-{}-minimized.json",
-        std::process::id()
-    ));
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("sync-core is nested under workspace/crates");
+    let process_id = std::process::id();
+    let path = workspace
+        .join("target/sync-core-differential")
+        .join(process_id.to_string())
+        .join("sync-core-differential-minimized.json");
+    std::fs::create_dir_all(path.parent().unwrap()).expect("create differential results dir");
     let staging = path.with_extension("json.writing");
-    let envelope = failure_envelope(reason, ops);
+    let envelope = failure_envelope(reason, ops, process_id);
     std::fs::write(&staging, serde_json::to_vec_pretty(&envelope).unwrap())
         .expect("write differential failure artifact");
     std::fs::rename(&staging, &path).expect("publish differential failure artifact");
