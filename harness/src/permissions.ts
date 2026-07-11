@@ -209,7 +209,79 @@ try {
     equal(lateMember.taskIDs(), [], 'late revoked member tasks')
   }, 'late revoked member hydration')
 
-  console.log('[permissions] PASS: filtered hydrate + add + revoke + late client')
+  // Keep several client caches alive across repeated grant/revoke cycles while
+  // unrelated writes and explicit pulls overlap each transition. Production's
+  // failure appeared only under fresh-namespace timing, so a single serial
+  // add/delete proves too little: every hydrated client must repeatedly reveal
+  // the rows on grant and remove them after revoke without a restart or fresh
+  // storage identity.
+  const churnMembers = [member, lateMember]
+  for (let index = 0; index < 4; index++) {
+    const view = watchAccess(target.createClient('u1'))
+    churnMembers.push(view)
+    views.push(view)
+  }
+  await eventually(() => {
+    if (!churnMembers.every((view) => view.complete)) {
+      throw new Error('permission churn views are not complete')
+    }
+    for (const [index, view] of churnMembers.entries()) {
+      equal(view.projectIDs(), [], `churn client ${index} initially revoked projects`)
+      equal(view.taskIDs(), [], `churn client ${index} initially revoked tasks`)
+    }
+  }, 'permission churn clients hydrate revoked')
+
+  for (let round = 0; round < 12; round++) {
+    await Promise.all([
+      target.sql(
+        `INSERT INTO member (id, "projectId", "userId")
+         VALUES ('perm-member', 'perm-project', 'u1')`
+      ),
+      target.sql(
+        `UPDATE task SET title = 'foreign churn ${round}'
+         WHERE id = 'perm-foreign-task'`
+      ),
+      target.pull(),
+    ])
+    await eventually(() => {
+      for (const [index, view] of churnMembers.entries()) {
+        equal(
+          view.projectIDs(),
+          ['perm-project'],
+          `round ${round} client ${index} granted projects`
+        )
+        equal(
+          view.taskIDs(),
+          ['perm-task'],
+          `round ${round} client ${index} granted tasks`
+        )
+      }
+    }, `permission churn round ${round} grant`)
+
+    await Promise.all([
+      target.sql(`DELETE FROM member WHERE id = 'perm-member'`),
+      target.sql(
+        `UPDATE task SET title = 'visible churn ${round}'
+         WHERE id = 'perm-task'`
+      ),
+      target.pull(),
+    ])
+    await eventually(() => {
+      for (const [index, view] of churnMembers.entries()) {
+        equal(view.projectIDs(), [], `round ${round} client ${index} revoked projects`)
+        equal(view.taskIDs(), [], `round ${round} client ${index} revoked tasks`)
+      }
+      equal(owner.projectIDs(), ['perm-project'], `round ${round} owner projects`)
+      equal(owner.taskIDs(), ['perm-task'], `round ${round} owner tasks`)
+    }, `permission churn round ${round} revoke`)
+  }
+  console.log(
+    `[permissions] concurrent churn PASS: ${churnMembers.length} populated caches x 12 grant/revoke rounds`
+  )
+
+  console.log(
+    '[permissions] PASS: filtered hydrate + add + revoke + late client + concurrent churn'
+  )
 } finally {
   for (const view of views) view.destroy()
   await target.close()
