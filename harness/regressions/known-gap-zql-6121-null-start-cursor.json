@@ -8,12 +8,18 @@
   "note": "CONFIRMED #6121 (rocicorp/mono d4f33d6a6, lands AFTER the @rocicorp/zero 1.7.0 harness pin). A start cursor anchored on a NULL-sorted row returns EMPTY on the stock zero-cache 1.7.0 reference: server-side sqlite table-source compiles `col > NULL` (SQL NULL, matches nothing), so the forward continuation through the NULL group came back empty. Found by the metamorphic startSuffix relation on a SINGLE target (no oracle). The stock-vs-orez differential MISSES this because the sweep generator has no nullable-column start-cursor axis; had it emitted one, stock ([]) and orez-local (correct rows) would DIVERGE and the differential would also flag it. orez-local PASSES this shape (it ships full snapshots and materializes client-side, so it never pushes the start into the buggy sqlite fetch). Classified known-gap, NON-GATING; flips green once the harness pin advances past mono d4f33d6a6.",
   "spec": {
     "table": "task",
-    "orderBy": [["dueAt", "asc"], ["id", "asc"]],
+    "orderBy": [
+      ["dueAt", "asc"],
+      ["id", "asc"]
+    ],
     "start": { "row": { "dueAt": null, "id": "t1" } }
   },
   "reference": {
     "table": "task",
-    "orderBy": [["dueAt", "asc"], ["id", "asc"]]
+    "orderBy": [
+      ["dueAt", "asc"],
+      ["id", "asc"]
+    ]
   },
   "invariant": "materialize(spec).rows must equal materialize(reference).rows sliced strictly after the row with id 't1' (exclusive start). t1 is the first NULL-dueAt row (NULLs sort first ascending), so the correct result is the entire remaining ordered suffix.",
   "observed": {

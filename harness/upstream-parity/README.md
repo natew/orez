@@ -43,7 +43,7 @@ custom-mutator push are all re-expressed black-box in the Orez lanes. See
 
 ## the finding that drove the first implementation
 
-`#6121` (mono `d4f33d6a6`, 2026-07-10, *after* the 1.7.0 pin): a `start()` cursor
+`#6121` (mono `d4f33d6a6`, 2026-07-10, _after_ the 1.7.0 pin): a `start()` cursor
 anchored on a NULL-sorted row compiled `col > NULL` (SQL NULL → matches nothing)
 and silently returned empty.
 
@@ -60,10 +60,10 @@ is tested (`crates/sync-core/tests/query_ast.rs::start_cursor_null_ordering`).
 Why the stock-vs-Orez **differential** misses it: the sweep generator has **no
 nullable-column start-cursor axis**, so this shape is never generated. Had it
 been, stock (`[]`) and orez-local (rows) would DIVERGE and the differential
-would also flag it — so #6121 is a *generator-coverage* miss, not a case of both
+would also flag it — so #6121 is a _generator-coverage_ miss, not a case of both
 sides being wrong. The metamorphic guard caught it **with no oracle** by
 exercising that axis on a single target. Its distinct, structural value remains
-the harder class the differential is blind to *by construction* — where both
+the harder class the differential is blind to _by construction_ — where both
 targets share the same wrong behavior — plus running against any one target
 (incl. CF) with no reference impl. See `../regressions/` for the recorded repro.
 
