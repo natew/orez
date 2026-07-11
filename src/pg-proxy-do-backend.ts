@@ -7479,45 +7479,54 @@ export class DoBackend {
   ): Promise<CatalogResult | null> {
     if (!selectReferencesTable(select, 'columns')) return null
     const fields = selectTargetFields(select)
-    const infos = await this.publicationTableInfos()
-    const rows: Record<string, unknown>[] = []
-    for (const info of infos) {
-      for (const column of info.columns) {
-        const metadata = this.schemaMetadata.get(info.name)?.get(column.name)
-        const dataType = pgTypeForSqliteColumn(column, metadata)
-        const baseDataType = dataType.endsWith('[]') ? dataType.slice(0, -2) : dataType
-        const row = {
-          table_schema: info.schema,
-          table_name: info.tableName,
-          column_name: column.name,
-          data_type: metadata?.elemTypname ? 'ARRAY' : baseDataType,
-          udt_name:
-            metadata?.typname ??
-            (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
-          character_maximum_length: metadata?.characterMaximumLength ?? null,
-          numeric_precision: metadata?.numericPrecision ?? null,
-          numeric_scale: metadata?.numericScale ?? null,
-          typtype: metadata?.typtype ?? 'b',
-          typname:
-            metadata?.typname ??
-            (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
-          elemTyptype: metadata?.elemTyptype ?? null,
-          elemTypname: metadata?.elemTypname ?? null,
-          schema: info.schema,
-          table: info.tableName,
-          column: column.name,
-          dataType: metadata?.elemTypname ? 'ARRAY' : baseDataType,
-          length: metadata?.characterMaximumLength ?? null,
-          precision: metadata?.numericPrecision ?? null,
-          scale: metadata?.numericScale ?? null,
-          typename:
-            metadata?.typname ??
-            (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
-        }
-        if (catalogWhereMatches(select.whereClause, row)) {
-          rows.push(this.projectCatalogRow(fields, row))
+    let rows: Record<string, unknown>[] = []
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const infos = await this.publicationTableInfos()
+      rows = []
+      for (const info of infos) {
+        for (const column of info.columns) {
+          const metadata = this.schemaMetadata.get(info.name)?.get(column.name)
+          const dataType = pgTypeForSqliteColumn(column, metadata)
+          const baseDataType = dataType.endsWith('[]') ? dataType.slice(0, -2) : dataType
+          const row = {
+            table_schema: info.schema,
+            table_name: info.tableName,
+            column_name: column.name,
+            data_type: metadata?.elemTypname ? 'ARRAY' : baseDataType,
+            udt_name:
+              metadata?.typname ??
+              (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
+            character_maximum_length: metadata?.characterMaximumLength ?? null,
+            numeric_precision: metadata?.numericPrecision ?? null,
+            numeric_scale: metadata?.numericScale ?? null,
+            typtype: metadata?.typtype ?? 'b',
+            typname:
+              metadata?.typname ??
+              (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
+            elemTyptype: metadata?.elemTyptype ?? null,
+            elemTypname: metadata?.elemTypname ?? null,
+            schema: info.schema,
+            table: info.tableName,
+            column: column.name,
+            dataType: metadata?.elemTypname ? 'ARRAY' : baseDataType,
+            length: metadata?.characterMaximumLength ?? null,
+            precision: metadata?.numericPrecision ?? null,
+            scale: metadata?.numericScale ?? null,
+            typename:
+              metadata?.typname ??
+              (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
+          }
+          if (catalogWhereMatches(select.whereClause, row)) {
+            rows.push(this.projectCatalogRow(fields, row))
+          }
         }
       }
+      if (rows.length > 0 || attempt === 1) break
+      // A different backend can provision the app tables after this instance
+      // cached only Zero's internal shard tables. One forced refresh on an
+      // otherwise empty information-schema answer heals that non-empty stale
+      // cache without turning every healthy catalog query into a full scan.
+      this.publicationTableInfoCache = null
     }
     return {
       rows,

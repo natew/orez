@@ -1386,15 +1386,26 @@ describe('DoBackend', () => {
     expect(metadataSelects).toBe(3)
   })
 
-  test('reloads an empty table catalog after out-of-band schema provisioning', async () => {
+  test('reloads a stale internal-only catalog after out-of-band schema provisioning', async () => {
     let provisioned = false
     const http = await startDoHttp((sql) => {
       if (sql.includes('sqlite_master')) {
         return {
           rows: provisioned
-            ? [{ name: 'message', sql: 'CREATE TABLE message (id text)' }]
-            : [],
+            ? [
+                { name: 'soot_0_clients', sql: 'CREATE TABLE soot_0_clients (id text)' },
+                { name: 'message', sql: 'CREATE TABLE message (id text)' },
+              ]
+            : [{ name: 'soot_0_clients', sql: 'CREATE TABLE soot_0_clients (id text)' }],
           columns: ['name', 'sql'],
+        }
+      }
+      if (sql.includes('PRAGMA table_info("soot_0_clients")')) {
+        return {
+          rows: [
+            { cid: 0, name: 'id', type: 'text', notnull: 1, dflt_value: null, pk: 1 },
+          ],
+          columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
         }
       }
       if (sql.includes('PRAGMA table_info("message")')) {
