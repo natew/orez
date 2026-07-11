@@ -2,13 +2,13 @@ name: Rust differential nightly
 
 on:
   schedule:
-    - cron: "23 10 * * *"
+    - cron: '23 10 * * *'
   workflow_dispatch:
     inputs:
       cases:
         description: Proptest cases to generate
         required: false
-        default: "512"
+        default: '512'
         type: string
 
 permissions:
