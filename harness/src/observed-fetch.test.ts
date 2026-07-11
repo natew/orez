@@ -40,3 +40,21 @@ test('separate wrappers retain provenance with overlapping request ids', async (
   expect(seen).toContain('harness:1:invoke')
   expect(seen).toContain('harness:1:terminal')
 })
+
+test('response body stream failure is one terminal transport error', async () => {
+  const observations: Array<{ phase: string; error?: unknown }> = []
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.error(new Error('body stream destroyed'))
+    },
+  })
+  const wrapped = observedSyncFetch(
+    (observation) => observations.push(observation),
+    (async () => new Response(stream)) as typeof fetch
+  )
+  await expect(
+    wrapped('http://localhost/push', { method: 'POST', body: '{}' })
+  ).rejects.toThrow('body stream destroyed')
+  expect(observations.map(({ phase }) => phase)).toEqual(['invoke', 'terminal'])
+  expect(observations[1]!.error).toBeInstanceOf(Error)
+})

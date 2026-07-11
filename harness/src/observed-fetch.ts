@@ -55,6 +55,11 @@ export function observedSyncFetch(
     let rawResponseBody: string | undefined
     try {
       rawResponseBody = await response.clone().text()
+    } catch (error) {
+      onObservation({ request: id, path, phase: 'terminal', body, rawBody, error })
+      throw error
+    }
+    try {
       responseBody = JSON.parse(rawResponseBody)
     } catch {
       responseBody = undefined
