@@ -118,11 +118,49 @@ try {
       },
     ],
   }
+  await fetch(`${base}/delegation-control`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ failures: 2 }),
+  })
   const pushed = await post('/push', pushBody)
   assert.equal(pushed.status, 200)
   assert.deepEqual(pushed.body.pushResponse.mutations, [
     { id: { clientID: 'writer', id: 1 }, result: {} },
   ])
+  const retriedDelegation = await fetch(`${base}/delegation-control`).then((response) =>
+    response.json()
+  )
+  assert.equal(retriedDelegation.delegatedAttempts, 3)
+
+  // A persistently failing endpoint receives exactly maxAttempts requests;
+  // the host returns the terminal response instead of spinning a hot loop.
+  await fetch(`${base}/delegation-control`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ failures: 10 }),
+  })
+  const exhaustedDelegation = await fetch(`${origin}/push`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      ...pushBody,
+      mutations: [{ ...pushBody.mutations[0], id: 2 }],
+    }),
+  })
+  assert.equal(exhaustedDelegation.status, 503)
+  const boundedDelegation = await fetch(`${base}/delegation-control`).then((response) =>
+    response.json()
+  )
+  assert.equal(boundedDelegation.delegatedAttempts, 3)
+  await fetch(`${base}/delegation-control`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ failures: 0 }),
+  })
 
   const pulled = await post('/pull', {
     clientID: 'reader',
@@ -142,6 +180,82 @@ try {
     done: false,
     meta: { lane: true },
   })
+
+  // A feed that keeps returning changes while the engine cursor no longer
+  // advances must trip the ingest breaker instead of hot-looping. Once the
+  // bad feed is removed and an admin reopens the circuit, normal pulls recover.
+  const runawayNamespace = `runaway-${crypto.randomUUID()}`
+  const runawayOrigin = `${base}/${runawayNamespace}`
+  const runawayUpstream = `${base}/upstream/${runawayNamespace}`
+  const seededRunaway = await fetch(`${runawayUpstream}/api/zero/push`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      clientGroupID: 'upstream',
+      mutations: [
+        {
+          type: 'custom',
+          clientID: 'seed',
+          id: 1,
+          name: 'item.insert',
+          args: [
+            {
+              id: 'runaway-replay',
+              label: 'replayed without cursor progress',
+              rank: 1,
+              done: false,
+              meta: null,
+            },
+          ],
+        },
+      ],
+    }),
+  })
+  assert.equal(seededRunaway.status, 200)
+  await fetch(`${base}/runaway-control/${runawayNamespace}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: true }),
+  })
+  const runawayPull = await fetch(`${runawayOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'runaway-reader',
+      clientGroupID: 'runaway-group',
+      cookie: null,
+    }),
+  })
+  assert.equal(runawayPull.status, 429)
+  assert.equal((await runawayPull.json()).error, 'ingestCursorStalled')
+
+  await fetch(`${base}/runaway-control/${runawayNamespace}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: false }),
+  })
+  const reopened = await fetch(`${runawayOrigin}/admin/ingest-breaker`, {
+    method: 'POST',
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  })
+  assert.equal(reopened.status, 200)
+  assert.equal((await reopened.json()).tripped, false)
+  const recoveredPull = await fetch(`${runawayOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'runaway-reader',
+      clientGroupID: 'runaway-group',
+      cookie: null,
+    }),
+  })
+  assert.equal(recoveredPull.status, 200)
   console.log('upstream ingest delegated-push harness: PASS')
 } finally {
   server.kill()

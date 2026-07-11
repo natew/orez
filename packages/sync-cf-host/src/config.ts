@@ -21,6 +21,9 @@ export function validateSyncHostConfig<Env extends SyncHostEnv>(
   if (config.mutateBinding !== undefined && !hasDelegate) {
     throw new TypeError('sync host config mutateBinding requires mutateUrl')
   }
+  if (config.delegatedPushRetry !== undefined && !hasDelegate) {
+    throw new TypeError('sync host config delegatedPushRetry requires mutateUrl')
+  }
   if (config.mutateBinding !== undefined && !config.mutateBinding) {
     throw new TypeError('sync host config mutateBinding must not be empty')
   }
@@ -41,6 +44,26 @@ export function validateSyncHostConfig<Env extends SyncHostEnv>(
     const interval = config.upstream.intervalMs ?? 15_000
     if (!Number.isSafeInteger(interval) || interval < 1_000) {
       throw new TypeError('upstream.intervalMs must be a safe integer >= 1000')
+    }
+    for (const [name, value] of Object.entries({
+      ingestBudgetRows: config.upstream.ingestBudgetRows ?? 250_000,
+      ingestBudgetWindowMs: config.upstream.ingestBudgetWindowMs ?? 300_000,
+      ingestBackoffMs: config.upstream.ingestBackoffMs ?? 1_000,
+      ingestMaxBackoffMs: config.upstream.ingestMaxBackoffMs ?? 60_000,
+    })) {
+      if (!Number.isSafeInteger(value) || value < 1)
+        throw new TypeError(`upstream.${name} must be a positive safe integer`)
+    }
+  }
+  if (config.delegatedPushRetry) {
+    for (const [name, value] of Object.entries({
+      maxAttempts: config.delegatedPushRetry.maxAttempts ?? 3,
+      initialBackoffMs: config.delegatedPushRetry.initialBackoffMs ?? 100,
+      maxBackoffMs: config.delegatedPushRetry.maxBackoffMs ?? 1_000,
+      timeoutMs: config.delegatedPushRetry.timeoutMs ?? 5_000,
+    })) {
+      if (!Number.isSafeInteger(value) || value < 1)
+        throw new TypeError(`delegatedPushRetry.${name} must be a positive safe integer`)
     }
   }
   return config

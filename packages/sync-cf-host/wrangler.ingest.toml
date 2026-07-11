@@ -2,6 +2,9 @@ name = "orez-rust-sync-ingest-harness"
 main = "src/ingest-harness-worker.ts"
 compatibility_date = "2026-06-01"
 
+[vars]
+ADMIN_KEY = "ingest-harness-admin"
+
 [[durable_objects.bindings]]
 name = "SYNC_DO"
 class_name = "SyncDurableObject"

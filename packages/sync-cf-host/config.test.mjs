@@ -57,6 +57,24 @@ describe('mutation mode', () => {
     ).not.toThrow()
   })
 
+  test('validates ingest budgets and delegated retry bounds', () => {
+    expect(() =>
+      validateSyncHostConfig({
+        ...base,
+        mutateUrl: '/push',
+        upstream: { binding: 'DATA', namespacePath: '/', ingestBudgetRows: 0 },
+      })
+    ).toThrow('upstream.ingestBudgetRows')
+    expect(() =>
+      validateSyncHostConfig({
+        ...base,
+        mutateUrl: '/push',
+        upstream: { binding: 'DATA', namespacePath: '/' },
+        delegatedPushRetry: { maxAttempts: 0 },
+      })
+    ).toThrow('delegatedPushRetry.maxAttempts')
+  })
+
   test('forbids local mutators plus upstream ingest', () => {
     expect(() =>
       validateSyncHostConfig({

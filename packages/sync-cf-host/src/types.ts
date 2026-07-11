@@ -116,6 +116,25 @@ export type UpstreamConfig = {
   changeLimit?: number
   /** Durable Object alarm safety net. Defaults to 15 seconds. */
   intervalMs?: number
+  /** Applied upstream rows allowed per rolling window. Defaults to 250,000. */
+  ingestBudgetRows?: number
+  /** Rolling ingest budget window. Defaults to five minutes. */
+  ingestBudgetWindowMs?: number
+  /** Initial breaker cooldown. Defaults to one second. */
+  ingestBackoffMs?: number
+  /** Maximum breaker cooldown. Defaults to one minute. */
+  ingestMaxBackoffMs?: number
+}
+
+export type DelegatedPushRetryConfig = {
+  /** Total attempts including the first request. Defaults to 3. */
+  maxAttempts?: number
+  /** Initial exponential delay. Defaults to 100ms. */
+  initialBackoffMs?: number
+  /** Delay cap. Defaults to 1,000ms. */
+  maxBackoffMs?: number
+  /** Per-attempt service-binding timeout. Defaults to 5,000ms. */
+  timeoutMs?: number
 }
 
 export type SyncHostConfig<Env extends SyncHostEnv = SyncHostEnv> = {
@@ -126,6 +145,7 @@ export type SyncHostConfig<Env extends SyncHostEnv = SyncHostEnv> = {
   mutateUrl?: string
   /** Env binding for delegated pushes; defaults to upstream.binding. */
   mutateBinding?: string
+  delegatedPushRetry?: DelegatedPushRetryConfig
   /** Required for delegated push; forbidden with local mutators (no dual apply). */
   upstream?: UpstreamConfig
   /** Application DDL and optional seed, called before sync-core schema init. */

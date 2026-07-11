@@ -27,11 +27,21 @@ interface Env extends SyncHostEnv {
   UPSTREAM_DO: DurableObjectNamespace
 }
 
+const runawayNamespaces = new Set<string>()
+let delegatedFailuresRemaining = 0
+let delegatedAttempts = 0
+
 const config: SyncHostConfig<Env> = {
   hostVersion: 'upstream-ingest-harness',
   schema,
   mutateUrl: '/api/zero/push',
   mutateBinding: 'APP',
+  delegatedPushRetry: {
+    maxAttempts: 3,
+    initialBackoffMs: 10,
+    maxBackoffMs: 20,
+    timeoutMs: 1_000,
+  },
   upstream: {
     binding: 'DATA',
     namespacePath: (namespace) => `/${namespace}`,
@@ -85,10 +95,34 @@ async function upstreamFetch(request: Request, env: Env): Promise<Response> {
 /** Self service-binding target backed by the real ZeroSqlDO. */
 export class DataService extends WorkerEntrypoint<Env> {
   fetch(request: Request): Promise<Response> {
-    const pathname = new URL(request.url).pathname
+    const url = new URL(request.url)
+    const pathname = url.pathname
     if (!pathname.endsWith('/changes') && !pathname.endsWith('/snapshot')) {
       return Promise.resolve(
         new Response('DATA route rejected non-feed request', { status: 418 })
+      )
+    }
+    const namespace = pathname.split('/')[1] ?? ''
+    if (pathname.endsWith('/changes') && runawayNamespaces.has(namespace)) {
+      return Promise.resolve(
+        Response.json({
+          watermark: 100,
+          changes: [
+            {
+              watermark: 1,
+              tableName: 'item',
+              op: 'INSERT',
+              rowData: {
+                id: 'runaway-replay',
+                label: 'replayed without cursor progress',
+                rank: 1,
+                done: false,
+                meta: null,
+              },
+              oldData: null,
+            },
+          ],
+        })
       )
     }
     return upstreamFetch(request, this.env)
@@ -102,6 +136,13 @@ export class AppService extends WorkerEntrypoint<Env> {
         new Response('APP route rejected non-push request', { status: 418 })
       )
     }
+    delegatedAttempts++
+    if (delegatedFailuresRemaining > 0) {
+      delegatedFailuresRemaining--
+      return Promise.resolve(
+        Response.json({ error: 'synthetic delegated push failure' }, { status: 503 })
+      )
+    }
     return upstreamFetch(request, this.env)
   }
 }
@@ -110,6 +151,40 @@ const syncWorker = createSyncWorker(config)
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
+    if (url.pathname.startsWith('/runaway-control/')) {
+      const namespace = url.pathname.slice('/runaway-control/'.length)
+      return request
+        .json()
+        .catch(() => ({}))
+        .then((body) => {
+          if ((body as { enabled?: unknown }).enabled === true)
+            runawayNamespaces.add(namespace)
+          else runawayNamespaces.delete(namespace)
+          return Response.json({
+            ok: true,
+            namespace,
+            enabled: runawayNamespaces.has(namespace),
+          })
+        })
+    }
+    if (url.pathname === '/delegation-control') {
+      if (request.method === 'GET') {
+        return Promise.resolve(
+          Response.json({ delegatedFailuresRemaining, delegatedAttempts })
+        )
+      }
+      return request
+        .json()
+        .catch(() => ({}))
+        .then((body) => {
+          delegatedFailuresRemaining = Math.max(
+            0,
+            Number((body as { failures?: unknown }).failures) || 0
+          )
+          delegatedAttempts = 0
+          return Response.json({ delegatedFailuresRemaining, delegatedAttempts })
+        })
+    }
     if (url.pathname.startsWith('/upstream/')) {
       url.pathname = url.pathname.slice('/upstream'.length)
       return upstreamFetch(new Request(url, request), env)

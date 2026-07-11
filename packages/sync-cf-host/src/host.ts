@@ -28,6 +28,12 @@ import {
   SqlStorageSyncDb,
 } from './sql-storage-adapter.js'
 import { MutationApplicationError } from './types.js'
+import {
+  IngestBreakerError,
+  IngestCircuitBreaker,
+  retryDelayMs,
+  shouldRetryDelegatedPush,
+} from './write-safeguards.js'
 
 import type {
   DeferredEffect,
@@ -139,6 +145,18 @@ function statusOf(error: unknown): number {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function errorBody(error: unknown): Record<string, unknown> {
+  if (error instanceof IngestBreakerError) {
+    return {
+      error: error.error,
+      windowRows: error.windowRows,
+      budget: error.budget,
+      retryAfterMs: error.retryAfterMs,
+    }
+  }
+  return { error: errorMessage(error) }
 }
 
 function requestError(message: string, status = 400): Error & { status: number } {
@@ -268,6 +286,14 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
   const wakeCoalesceMs = config.wakeCoalesceMs ?? 25
   const upstreamIntervalMs = config.upstream?.intervalMs ?? 15_000
   const upstreamLimit = config.upstream?.changeLimit ?? 1_000
+  const ingestBudgetRows = config.upstream?.ingestBudgetRows ?? 250_000
+  const ingestBudgetWindowMs = config.upstream?.ingestBudgetWindowMs ?? 5 * 60_000
+  const ingestBackoffMs = config.upstream?.ingestBackoffMs ?? 1_000
+  const ingestMaxBackoffMs = config.upstream?.ingestMaxBackoffMs ?? 60_000
+  const delegateMaxAttempts = config.delegatedPushRetry?.maxAttempts ?? 3
+  const delegateInitialBackoffMs = config.delegatedPushRetry?.initialBackoffMs ?? 100
+  const delegateMaxBackoffMs = config.delegatedPushRetry?.maxBackoffMs ?? 1_000
+  const delegateTimeoutMs = config.delegatedPushRetry?.timeoutMs ?? 5_000
 
   return class SyncDurableObject extends DurableObject<Env> {
     readonly #engineDb: SqlStorageSyncDb
@@ -283,6 +309,13 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #wakeRecipients = new Set<WebSocket>()
     #wakePromise: Promise<void> | null = null
     #ingestPromise: Promise<number> | null = null
+    #ingestBreaker = new IngestCircuitBreaker({
+      budgetRows: ingestBudgetRows,
+      windowMs: ingestBudgetWindowMs,
+      initialBackoffMs: ingestBackoffMs,
+      maxBackoffMs: ingestMaxBackoffMs,
+      now: () => Date.now(),
+    })
 
     constructor(ctx: DurableObjectState, env: Env) {
       super(ctx, env)
@@ -301,6 +334,17 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           this.#directSql.exec(
             "INSERT OR IGNORE INTO _zsync_host_control (key, value) VALUES ('writerEnabled', '1')"
           )
+          const ingestBreakerReason = this.#controlGet('ingestBreakerReason')
+          if (
+            ingestBreakerReason === 'ingestBudgetExceeded' ||
+            ingestBreakerReason === 'ingestCursorStalled'
+          ) {
+            this.#ingestBreaker.restore(
+              ingestBreakerReason,
+              Number(this.#controlGet('ingestBreakerRetryAt')),
+              Number(this.#controlGet('ingestBreakerTrips'))
+            )
+          }
           this.#wasm(() => engine_init_schema(this.#engineDb, config.schema))
           if (config.queryAware || config.resolveQuery)
             this.#wasm(() => engine_init_query_schema(this.#engineDb))
@@ -366,6 +410,34 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
         [key, value]
       )
+    }
+
+    #controlDelete(...keys: string[]): void {
+      if (keys.length === 0) return
+      this.#directSql.exec(
+        `DELETE FROM _zsync_host_control WHERE key IN (${keys.map(() => '?').join(', ')})`,
+        keys
+      )
+    }
+
+    #persistIngestBreaker(): void {
+      const status = this.#ingestBreaker.status()
+      if (!status.reason || status.retryAt === null) return
+      this.#controlSet('ingestBreakerReason', status.reason)
+      this.#controlSet('ingestBreakerRetryAt', String(status.retryAt))
+      this.#controlSet('ingestBreakerTrips', String(status.consecutiveTrips))
+    }
+
+    #recoverIngestBreaker(): void {
+      const wasTripped = this.#ingestBreaker.status().reason !== null
+      this.#ingestBreaker.recovered()
+      if (wasTripped) {
+        this.#controlDelete(
+          'ingestBreakerReason',
+          'ingestBreakerRetryAt',
+          'ingestBreakerTrips'
+        )
+      }
     }
 
     #writerEnabled(): boolean {
@@ -437,9 +509,49 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       return this.#controlGet('upstreamPath')
     }
 
+    #tripIngest(
+      reason: 'ingestBudgetExceeded' | 'ingestCursorStalled',
+      fields: Record<string, unknown>
+    ): never {
+      try {
+        return this.#ingestBreaker.trip(reason)
+      } catch (error) {
+        this.#persistIngestBreaker()
+        const status = this.#ingestBreaker.status()
+        console.error(
+          JSON.stringify({
+            event: 'sync_upstream_ingest_breaker_tripped',
+            ...status,
+            reason,
+            ...fields,
+          })
+        )
+        throw error
+      }
+    }
+
+    #recordIngestRows(rows: number, fields: Record<string, unknown>): void {
+      try {
+        this.#ingestBreaker.record(rows)
+      } catch (error) {
+        this.#persistIngestBreaker()
+        const status = this.#ingestBreaker.status()
+        console.error(
+          JSON.stringify({
+            event: 'sync_upstream_ingest_breaker_tripped',
+            ...status,
+            reason: 'ingestBudgetExceeded',
+            ...fields,
+          })
+        )
+        throw error
+      }
+    }
+
     #ingest(upstreamPath?: string | null): Promise<number> {
       if (!config.upstream) return Promise.resolve(0)
       if (this.#ingestPromise) return this.#ingestPromise
+      this.#ingestBreaker.assertReady()
       const path = upstreamPath ?? this.#controlGet('upstreamPath')
       if (!path) return Promise.resolve(0)
       this.#ingestPromise = (async () => {
@@ -468,6 +580,20 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
               )
             ) as ApplyUpstreamResult
             total += rebuilt.applied
+            this.#recordIngestRows(rebuilt.applied, {
+              phase: 'snapshot',
+              cursor,
+              resultWatermark: rebuilt.watermark,
+            })
+            const nextCursor = this.#engineState()?.upstreamWatermark ?? cursor
+            if (String(nextCursor) === String(cursor)) {
+              this.#tripIngest('ingestCursorStalled', {
+                phase: 'snapshot',
+                cursor,
+                resultWatermark: rebuilt.watermark,
+                applied: rebuilt.applied,
+              })
+            }
             continue
           }
           if (!response.ok) {
@@ -481,17 +607,91 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             this.#wasm(() => engine_apply_upstream(this.#engineDb, config.schema, batch))
           ) as ApplyUpstreamResult
           total += result.applied
+          this.#recordIngestRows(result.applied, {
+            phase: 'changes',
+            cursor,
+            batchWatermark: batch.watermark,
+          })
+          const nextCursor = this.#engineState()?.upstreamWatermark ?? cursor
+          if (batch.changes.length > 0 && String(nextCursor) === String(cursor)) {
+            this.#tripIngest('ingestCursorStalled', {
+              phase: 'changes',
+              cursor,
+              batchWatermark: batch.watermark,
+              changeRows: batch.changes.length,
+              applied: result.applied,
+            })
+          }
           if (result.caughtUp) break
           if (result.applied === 0) {
-            throw new Error('upstream change cursor made no progress')
+            this.#tripIngest('ingestCursorStalled', {
+              phase: 'changes',
+              cursor,
+              batchWatermark: batch.watermark,
+              changeRows: batch.changes.length,
+              applied: result.applied,
+            })
           }
         }
+        this.#recoverIngestBreaker()
         if (total > 0) await this.#enqueueWake('__upstream__')
         return total
       })().finally(() => {
         this.#ingestPromise = null
       })
       return this.#ingestPromise
+    }
+
+    async #fetchDelegatedPush(
+      endpoint: URL,
+      headers: Headers,
+      body: ArrayBuffer
+    ): Promise<Response> {
+      const binding = this.#serviceBinding(
+        config.mutateBinding ?? config.upstream?.binding
+      )
+      let lastError: unknown = null
+      for (let attempt = 1; attempt <= delegateMaxAttempts; attempt++) {
+        let response: Response | null = null
+        try {
+          response = await binding.fetch(endpoint.toString(), {
+            method: 'POST',
+            headers,
+            body,
+            signal: AbortSignal.timeout(delegateTimeoutMs),
+          })
+        } catch (error) {
+          lastError = error
+        }
+        if (
+          !shouldRetryDelegatedPush(
+            response?.status ?? null,
+            attempt,
+            delegateMaxAttempts
+          )
+        ) {
+          if (response) return response
+          throw lastError
+        }
+        await response?.body?.cancel()
+        const delayMs = retryDelayMs(
+          attempt,
+          delegateInitialBackoffMs,
+          delegateMaxBackoffMs
+        )
+        console.warn(
+          JSON.stringify({
+            event: 'sync_delegated_push_retry',
+            attempt,
+            maxAttempts: delegateMaxAttempts,
+            status: response?.status ?? null,
+            delayMs,
+            error: response ? null : errorMessage(lastError),
+          })
+        )
+        await scheduler.wait(delayMs)
+      }
+      throw lastError ?? new Error('delegated push retry exhausted')
     }
 
     #log(fields: Record<string, unknown>): void {
@@ -800,13 +1000,11 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           headers.delete(NAMESPACE_HEADER)
           headers.delete(UPSTREAM_PATH_HEADER)
           headers.set('host', endpoint.host)
-          const upstreamResponse = await this.#serviceBinding(
-            config.mutateBinding ?? config.upstream?.binding
-          ).fetch(endpoint.toString(), {
-            method: 'POST',
+          const upstreamResponse = await this.#fetchDelegatedPush(
+            endpoint,
             headers,
-            body: bytes,
-          })
+            bytes
+          )
           if (!upstreamResponse.ok) {
             return new Response(upstreamResponse.body, upstreamResponse)
           }
@@ -860,7 +1058,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           return json({ pushResponse: upstreamBody.pushResponse ?? upstreamBody })
         } catch (error) {
           const status = statusOf(error)
-          return json({ error: errorMessage(error) }, status)
+          return json(errorBody(error), status)
         }
       }
       try {
@@ -1083,6 +1281,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           heapLimitBytes: heap?.jsHeapSizeLimit ?? null,
           engine: this.#engineState(),
           counters: this.#counters,
+          ingestBreaker: this.#ingestBreaker.status(),
         })
       }
       if (route === '/admin/sql') {
@@ -1151,6 +1350,17 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             return json({ ok: true, writerEnabled: enabled })
           })
       }
+      if (route === '/admin/ingest-breaker') {
+        if (request.method === 'GET') return json(this.#ingestBreaker.status())
+        this.#ingestBreaker.reopen()
+        this.#controlDelete(
+          'ingestBreakerReason',
+          'ingestBreakerRetryAt',
+          'ingestBreakerTrips'
+        )
+        console.log(JSON.stringify({ event: 'sync_upstream_ingest_breaker_reopened' }))
+        return json({ ok: true, ...this.#ingestBreaker.status() })
+      }
       if (route === '/admin/fault') {
         return request
           .json()
@@ -1202,7 +1412,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           const applied = await this.#ingest(upstreamPath)
           return json({ ok: true, applied })
         } catch (error) {
-          return json({ error: errorMessage(error) }, statusOf(error))
+          return json(errorBody(error), statusOf(error))
         }
       }
 
@@ -1212,7 +1422,10 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         try {
           await this.#ingest(upstreamPath)
         } catch (error) {
-          return json({ error: errorMessage(error) }, statusOf(error))
+          // Workerd requires a forwarded request body to be consumed even when
+          // ingest fails before the pull handler parses it.
+          await request.arrayBuffer()
+          return json(errorBody(error), statusOf(error))
         }
         return this.#pull(request, claims, namespace)
       }
@@ -1234,7 +1447,10 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           })
         )
       } finally {
-        await this.ctx.storage.setAlarm(Date.now() + upstreamIntervalMs)
+        const retryAfterMs = this.#ingestBreaker.status().retryAfterMs
+        await this.ctx.storage.setAlarm(
+          Date.now() + Math.max(upstreamIntervalMs, retryAfterMs)
+        )
       }
     }
 

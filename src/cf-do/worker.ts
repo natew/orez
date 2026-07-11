@@ -1,7 +1,12 @@
 // @ts-nocheck — cloudflare:workers types not available in orez
 import { DurableObject } from 'cloudflare:workers'
 
-import { trackedChangeRow } from '../do-sql-tracking.js'
+import {
+  isSqlMutation,
+  RollingRowWriteBudget,
+  trackedChangeRow,
+  WriteBudgetExceededError,
+} from '../do-sql-tracking.js'
 import { commitTxJournal, recoverTxJournal, rollbackTxJournal } from './tx-journal.js'
 import { DurableWatermarkState } from './watermark.js'
 
@@ -22,6 +27,10 @@ import { DurableWatermarkState } from './watermark.js'
 
 interface Env {
   ZERO_DO: DurableObjectNamespace
+  OREZ_DO_WRITE_BUDGET_ROWS?: string
+  OREZ_DO_WRITE_BUDGET_WINDOW_MS?: string
+  OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN?: string
+  OREZ_DO_WRITE_BUDGET_DISABLED?: string
 }
 interface SchemaTable {
   primaryKey: string[]
@@ -93,6 +102,20 @@ interface HibernatableWebSocket extends WebSocket {
 const SCHEMA_VERSION = 1
 const SQL_ERROR_SNIPPET_RADIUS = 1600
 const SQL_ERROR_FALLBACK_LIMIT = 4000
+const DEFAULT_WRITE_BUDGET_ROWS = 300_000
+const DEFAULT_WRITE_BUDGET_WINDOW_MS = 5 * 60 * 1000
+const WRITE_BUDGET_TRIPPED_KEY = '_orez_write_budget_tripped_at'
+
+function positiveEnvInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function writeBudgetErrorResponse(error: unknown): Response | null {
+  return error instanceof WriteBudgetExceededError
+    ? Response.json(error.toJSON(), { status: 429 })
+    : null
+}
 
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`
@@ -142,10 +165,73 @@ export class ZeroDO extends DurableObject {
   private watermarks: DurableWatermarkState
   private schemaTables = new Set<string>()
   private tableSchemas = new Map<string, SchemaTable>()
+  private writeBudget: RollingRowWriteBudget
+  private writeBudgetDisabled: boolean
+  private writeBudgetAdminToken: string | undefined
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
     this.sql = ctx.storage.sql
+    this.writeBudgetDisabled = /^(?:1|true)$/i.test(
+      env.OREZ_DO_WRITE_BUDGET_DISABLED ?? ''
+    )
+    this.writeBudgetAdminToken = env.OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN
+    this.writeBudget = new RollingRowWriteBudget({
+      budgetRows: positiveEnvInteger(
+        env.OREZ_DO_WRITE_BUDGET_ROWS,
+        DEFAULT_WRITE_BUDGET_ROWS
+      ),
+      windowMs: positiveEnvInteger(
+        env.OREZ_DO_WRITE_BUDGET_WINDOW_MS,
+        DEFAULT_WRITE_BUDGET_WINDOW_MS
+      ),
+      now: () => Date.now(),
+    })
+    if (this.writeBudgetDisabled) {
+      console.error(
+        JSON.stringify({
+          event: 'orez_do_write_budget_disabled',
+          warning: 'row write circuit breaker explicitly disabled',
+        })
+      )
+    } else {
+      const rawExec = this.sql.exec.bind(this.sql)
+      this.sql.exec = (statement: string, ...params: unknown[]) => {
+        const mutation = isSqlMutation(statement)
+        if (mutation) this.writeBudget.assertOpen()
+        const cursor = rawExec(statement, ...params)
+        if (mutation) {
+          try {
+            this.writeBudget.record(cursor?.rowsWritten)
+          } catch (error) {
+            if (error instanceof WriteBudgetExceededError) {
+              const status = this.writeBudget.status()
+              console.error(
+                JSON.stringify({
+                  event: 'orez_do_write_budget_tripped',
+                  windowRows: status.windowRows,
+                  budget: status.budget,
+                  windowMs: status.windowMs,
+                  trippedAt: status.trippedAt,
+                })
+              )
+              this.ctx.waitUntil(
+                this.ctx.storage.put(
+                  WRITE_BUDGET_TRIPPED_KEY,
+                  status.trippedAt ?? Date.now()
+                )
+              )
+            }
+            throw error
+          }
+        }
+        return cursor
+      }
+      ctx.blockConcurrencyWhile(async () => {
+        const trippedAt = await ctx.storage.get<number>(WRITE_BUDGET_TRIPPED_KEY)
+        if (trippedAt) this.writeBudget.restoreTrip(trippedAt)
+      })
+    }
     this.watermarks = new DurableWatermarkState(this.sql)
   }
 
@@ -162,6 +248,13 @@ export class ZeroDO extends DurableObject {
     }
     if (url.pathname.startsWith('/sync/v') && url.pathname.endsWith('/connect'))
       return this.handleSyncConnect(request, url)
+    if (url.pathname === '/_orez/write-budget' && request.method === 'GET')
+      return Response.json({
+        enabled: !this.writeBudgetDisabled,
+        ...this.writeBudget.status(),
+      })
+    if (url.pathname === '/_orez/write-budget/reopen' && request.method === 'POST')
+      return this.handleWriteBudgetReopen(request)
     if (
       (url.pathname === '/zero/push' || url.pathname === '/api/zero/push') &&
       request.method === 'POST'
@@ -187,6 +280,20 @@ export class ZeroDO extends DurableObject {
     if (url.pathname === '/notify' && request.method === 'POST')
       return Response.json({ ok: true, cookie: this.cookie() })
     return new Response('not found', { status: 404 })
+  }
+
+  private async handleWriteBudgetReopen(request: Request): Promise<Response> {
+    const supplied =
+      request.headers.get('x-orez-admin-token') ??
+      request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+    if (!this.writeBudgetAdminToken || supplied !== this.writeBudgetAdminToken)
+      return Response.json({ error: 'forbidden' }, { status: 403 })
+    await this.ctx.storage.delete(WRITE_BUDGET_TRIPPED_KEY)
+    const status = this.writeBudget.reopen()
+    console.log(
+      JSON.stringify({ event: 'orez_do_write_budget_reopened', reopenedAt: Date.now() })
+    )
+    return Response.json({ ok: true, enabled: !this.writeBudgetDisabled, ...status })
   }
 
   // ── Zero sync protocol ──────────────────────────────────────────────────
@@ -412,6 +519,8 @@ export class ZeroDO extends DurableObject {
         })
       return Response.json({ mutations: mutationResults })
     } catch (err: any) {
+      const budgetResponse = writeBudgetErrorResponse(err)
+      if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
   }
@@ -453,6 +562,8 @@ export class ZeroDO extends DurableObject {
         : this.executeSQL(sql, params)
       return Response.json(result)
     } catch (err: any) {
+      const budgetResponse = writeBudgetErrorResponse(err)
+      if (budgetResponse) return budgetResponse
       const suffix = sql ? ` while executing: ${sqlErrorSnippet(sql, err.message)}` : ''
       console.error(`[exec-500] ${err.message} :: SQL=${sql.slice(0, 800)}`)
       return Response.json({ error: `${err.message}${suffix}` }, { status: 500 })
@@ -497,6 +608,7 @@ export class ZeroDO extends DurableObject {
               )
             )
           } catch (err: any) {
+            if (err instanceof WriteBudgetExceededError) throw err
             throw new Error(
               `${err.message} while executing: ${sqlErrorSnippet(item.sql, err.message)}`
             )
@@ -506,6 +618,8 @@ export class ZeroDO extends DurableObject {
       })
       return Response.json({ results: allRows })
     } catch (err: any) {
+      const budgetResponse = writeBudgetErrorResponse(err)
+      if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
   }
@@ -529,6 +643,8 @@ export class ZeroDO extends DurableObject {
       })
       return Response.json({ ok: true, count })
     } catch (err: any) {
+      const budgetResponse = writeBudgetErrorResponse(err)
+      if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
   }
@@ -544,6 +660,8 @@ export class ZeroDO extends DurableObject {
       })
       return Response.json({ ok: true, count })
     } catch (err: any) {
+      const budgetResponse = writeBudgetErrorResponse(err)
+      if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
   }
@@ -564,6 +682,8 @@ export class ZeroDO extends DurableObject {
       })
       return Response.json({ ok: true, transactionIDs })
     } catch (err: any) {
+      const budgetResponse = writeBudgetErrorResponse(err)
+      if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
   }
@@ -601,6 +721,8 @@ export class ZeroDO extends DurableObject {
         changes: this.readChangesSince(watermark).slice(0, Math.min(limit, 10_000)),
       })
     } catch (err: any) {
+      const budgetResponse = writeBudgetErrorResponse(err)
+      if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
   }
@@ -618,6 +740,8 @@ export class ZeroDO extends DurableObject {
         return Response.json({ watermark: this.watermark(), tables })
       })
     } catch (err: any) {
+      const budgetResponse = writeBudgetErrorResponse(err)
+      if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
   }
