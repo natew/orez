@@ -234,6 +234,16 @@ jobs:
       - name: rust-local wake propagation
         run: cd harness && bun src/propagation.ts --against rust-local --baseline none
 
+      - name: rust-local permission grant and revoke
+        # Prove per-user isolation plus removal from an already-populated client
+        # cache when membership is revoked.
+        run: cd harness && bun src/permissions.ts --target rust-local
+
+      - name: rust-local concurrent client storm
+        # Exercise one namespace with many live clients and mixed writers, then
+        # require every peer and a fresh late client to converge.
+        run: cd harness && bun src/storm.ts --target rust-local --clients 50
+
       - name: rust-local query-aware lifecycle
         # desired-query membership: put/overlap/limit/related/delete/reconnect/
         # permission/lost-response, with forbidden-row raw-store assertions
