@@ -408,9 +408,9 @@ fn property_config() -> Config {
 fn failure_envelope(reason: String, ops: &[Op], process_id: u32) -> Value {
     let cases = std::env::var("PROPTEST_CASES").unwrap_or_else(|_| "12".into());
     let seed = std::env::var("PROPTEST_RNG_SEED").ok();
-    // The nightly collector gives this envelope a stable basename. Discovering
-    // it beneath cwd keeps the command valid after `gh run download`, whether
-    // upload-artifact retained the results wrapper or extracted its contents.
+    // The producer gives this envelope a stable basename under a process-id
+    // directory. Discovering that suffix beneath cwd works both locally and
+    // after upload-artifact strips the results-tree root during extraction.
     let replay_path = format!(
         "$(find . -type f -path '*/{process_id}/sync-core-differential-minimized.json' -exec realpath {{}} \\; -quit)"
     );
