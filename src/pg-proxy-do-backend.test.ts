@@ -1389,6 +1389,33 @@ describe('DoBackend', () => {
   test('reloads a stale internal-only catalog after out-of-band schema provisioning', async () => {
     let provisioned = false
     const http = await startDoHttp((sql) => {
+      if (sql.includes("WHERE kind = 'schema-column'")) {
+        return {
+          rows: provisioned
+            ? [
+                {
+                  kind: 'schema-column',
+                  key: 'message',
+                  subkey: 'id',
+                  value: JSON.stringify({
+                    table: 'message',
+                    schema: 'public',
+                    tableName: 'message',
+                    column: 'id',
+                    oid: 25,
+                    typeOid: 25,
+                    dataType: 'text',
+                    typtype: 'b',
+                    typname: 'text',
+                    elemTyptype: null,
+                    elemTypname: null,
+                  }),
+                },
+              ]
+            : [],
+          columns: ['kind', 'key', 'subkey', 'value'],
+        }
+      }
       if (sql.includes('sqlite_master')) {
         return {
           rows: provisioned
@@ -1410,9 +1437,9 @@ describe('DoBackend', () => {
       }
       if (sql.includes('PRAGMA table_info("message")')) {
         return {
-          rows: [
-            { cid: 0, name: 'id', type: 'text', notnull: 1, dflt_value: null, pk: 1 },
-          ],
+          // Simulate a large out-of-band catalog scan whose PRAGMA batch did
+          // not include the newly provisioned public table.
+          rows: [],
           columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
         }
       }
