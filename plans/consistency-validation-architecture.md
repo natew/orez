@@ -161,13 +161,15 @@ as lane failure. Keep Elle's anomaly JSON/graphs with `checks.json`; manually
 review a newly reported anomaly before filing a product bug, as Elle's own
 documentation recommends.
 
-The executable-slice validation used elle-cli 0.1.9 at source commit
-`0e3fd6ea923f8c2f1ee89f153e0e413530b1fa43`, Elle 0.2.6, Jepsen 0.3.11,
-Java 21.0.2, and locally built standalone-JAR SHA-256
-`00b0e61decfcca9dab010772503a2a384c49801715509dbfa7aac4a2300dc5a3`.
-Java 17 cannot load the current transitive Jepsen dependency graph, so the
-runner requires Java 21. The checked valid fixture returned `true`; the cycle
-fixture returned `false` with `G1c` and process exit 1.
+Pin the official elle-cli 0.1.9 release asset
+`elle-cli-bin-0.1.9.zip` at SHA-256
+`7bb21b1c68580cd63816abee7655c68023b837bcca91eac9025674e4fe1ff12c`.
+Its `target/elle-cli-0.1.9-standalone.jar` must have SHA-256
+`c9ba9b9fd32640e73d632cb5f15069c162ba6528a67f27a878767187c59f539a`.
+The source revision is `0e3fd6ea923f8c2f1ee89f153e0e413530b1fa43` and the
+embedded dependencies are Elle 0.2.6 and Jepsen 0.3.11. Java 17 cannot load
+the current transitive Jepsen dependency graph, so the runner requires Java 21. The official JAR returned `true`/exit 0 for the valid fixture and
+`false`/`G1c`/exit 1 for the cycle fixture.
 
 Elle does not check query equivalence, permissions, client cookies, LMIDs,
 partial poke application, or convergence. Extending the projection to pretend
