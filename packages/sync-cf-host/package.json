@@ -1,6 +1,6 @@
 {
   "name": "orez-sync-cf-host",
-  "version": "0.4.65",
+  "version": "0.4.66",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
