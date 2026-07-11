@@ -7479,59 +7479,66 @@ export class DoBackend {
   ): Promise<CatalogResult | null> {
     if (!selectReferencesTable(select, 'columns')) return null
     const fields = selectTargetFields(select)
+    const zeroServerSchemaQuery = ['schema', 'table', 'column', 'dataType'].every(
+      (name) => fields.some((field) => field.name === name)
+    )
     let rows: Record<string, unknown>[] = []
     let matchedColumns = new Set<string>()
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const infos = await this.publicationTableInfos()
-      rows = []
-      matchedColumns = new Set()
-      for (const info of infos) {
-        for (const column of info.columns) {
-          const metadata = this.schemaMetadata.get(info.name)?.get(column.name)
-          const dataType = pgTypeForSqliteColumn(column, metadata)
-          const baseDataType = dataType.endsWith('[]') ? dataType.slice(0, -2) : dataType
-          const row = {
-            table_schema: info.schema,
-            table_name: info.tableName,
-            column_name: column.name,
-            data_type: metadata?.elemTypname ? 'ARRAY' : baseDataType,
-            udt_name:
-              metadata?.typname ??
-              (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
-            character_maximum_length: metadata?.characterMaximumLength ?? null,
-            numeric_precision: metadata?.numericPrecision ?? null,
-            numeric_scale: metadata?.numericScale ?? null,
-            typtype: metadata?.typtype ?? 'b',
-            typname:
-              metadata?.typname ??
-              (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
-            elemTyptype: metadata?.elemTyptype ?? null,
-            elemTypname: metadata?.elemTypname ?? null,
-            schema: info.schema,
-            table: info.tableName,
-            column: column.name,
-            dataType: metadata?.elemTypname ? 'ARRAY' : baseDataType,
-            length: metadata?.characterMaximumLength ?? null,
-            precision: metadata?.numericPrecision ?? null,
-            scale: metadata?.numericScale ?? null,
-            typename:
-              metadata?.typname ??
-              (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
-          }
-          if (catalogWhereMatches(select.whereClause, row)) {
-            rows.push(this.projectCatalogRow(fields, row))
-            matchedColumns.add(
-              `${info.schema}\u0000${info.tableName}\u0000${column.name}`
-            )
+    if (!zeroServerSchemaQuery) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const infos = await this.publicationTableInfos()
+        rows = []
+        matchedColumns = new Set()
+        for (const info of infos) {
+          for (const column of info.columns) {
+            const metadata = this.schemaMetadata.get(info.name)?.get(column.name)
+            const dataType = pgTypeForSqliteColumn(column, metadata)
+            const baseDataType = dataType.endsWith('[]')
+              ? dataType.slice(0, -2)
+              : dataType
+            const row = {
+              table_schema: info.schema,
+              table_name: info.tableName,
+              column_name: column.name,
+              data_type: metadata?.elemTypname ? 'ARRAY' : baseDataType,
+              udt_name:
+                metadata?.typname ??
+                (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
+              character_maximum_length: metadata?.characterMaximumLength ?? null,
+              numeric_precision: metadata?.numericPrecision ?? null,
+              numeric_scale: metadata?.numericScale ?? null,
+              typtype: metadata?.typtype ?? 'b',
+              typname:
+                metadata?.typname ??
+                (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
+              elemTyptype: metadata?.elemTyptype ?? null,
+              elemTypname: metadata?.elemTypname ?? null,
+              schema: info.schema,
+              table: info.tableName,
+              column: column.name,
+              dataType: metadata?.elemTypname ? 'ARRAY' : baseDataType,
+              length: metadata?.characterMaximumLength ?? null,
+              precision: metadata?.numericPrecision ?? null,
+              scale: metadata?.numericScale ?? null,
+              typename:
+                metadata?.typname ??
+                (dataType.endsWith('[]') ? `_${baseDataType}` : baseDataType),
+            }
+            if (catalogWhereMatches(select.whereClause, row)) {
+              rows.push(this.projectCatalogRow(fields, row))
+              matchedColumns.add(
+                `${info.schema}\u0000${info.tableName}\u0000${column.name}`
+              )
+            }
           }
         }
+        if (rows.length > 0 || attempt === 1) break
+        // A different backend can provision the app tables after this instance
+        // cached only Zero's internal shard tables. One forced refresh on an
+        // otherwise empty information-schema answer heals that non-empty stale
+        // cache without turning every healthy catalog query into a full scan.
+        this.publicationTableInfoCache = null
       }
-      if (rows.length > 0 || attempt === 1) break
-      // A different backend can provision the app tables after this instance
-      // cached only Zero's internal shard tables. One forced refresh on an
-      // otherwise empty information-schema answer heals that non-empty stale
-      // cache without turning every healthy catalog query into a full scan.
-      this.publicationTableInfoCache = null
     }
     // A large out-of-band migration can leave the PRAGMA-derived catalog
     // partially populated, which is more dangerous than an empty cache because
@@ -7539,7 +7546,7 @@ export class DoBackend {
     // same SQL DO as the physical tables, so make it authoritative for column
     // introspection while still requiring each physical table to exist. This
     // keeps schema validation honest if stale metadata survives a real DROP.
-    await this.reloadSchemaMetadataIfEmpty()
+    await this.reloadSchemaMetadataIfEmpty(zeroServerSchemaQuery)
     const physicalTables = new Set(
       (await this.listSqliteTables()).map((table) => table.name)
     )
@@ -7569,7 +7576,7 @@ export class DoBackend {
           scale: metadata.numericScale ?? null,
           typename: metadata.typname,
         }
-        if (catalogWhereMatches(select.whereClause, row)) {
+        if (zeroServerSchemaQuery || catalogWhereMatches(select.whereClause, row)) {
           const key = `${metadata.schema}\u0000${metadata.tableName}\u0000${columnName}`
           if (matchedColumns.has(key)) continue
           rows.push(this.projectCatalogRow(fields, row))

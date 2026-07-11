@@ -1477,9 +1477,21 @@ describe('DoBackend', () => {
     const backend = new DoBackend(http.url, 'postgres', 'late-table-catalog-test')
     await backend.waitReady
     const catalogSQL = `
-      SELECT c.table_name::text AS table,
-             c.column_name::text AS column
+      SELECT c.table_schema::text AS schema,
+             c.table_name::text AS table,
+             c.column_name::text AS column,
+             c.data_type::text AS "dataType",
+             c.character_maximum_length AS length,
+             c.numeric_precision AS precision,
+             c.numeric_scale AS scale,
+             t.typtype::text AS typtype,
+             t.typname::text AS typename,
+             CASE WHEN t.typelem <> 0 THEN et.typtype::text ELSE NULL END AS "elemTyptype",
+             CASE WHEN t.typelem <> 0 THEN et.typname::text ELSE NULL END AS "elemTypname"
       FROM information_schema.columns c
+      JOIN pg_catalog.pg_type t ON c.udt_name = t.typname
+      LEFT JOIN pg_catalog.pg_type et ON t.typelem = et.oid
+      JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
       WHERE (c.table_schema, c.table_name) IN (
         ('public'::text, 'user'::text),
         ('public'::text, 'message'::text)
@@ -1487,12 +1499,48 @@ describe('DoBackend', () => {
     `
 
     expect((await backend.query(catalogSQL)).rows).toEqual([
-      { table: 'user', column: 'id' },
+      {
+        schema: 'public',
+        table: 'user',
+        column: 'id',
+        dataType: 'text',
+        length: null,
+        precision: null,
+        scale: null,
+        typtype: 'b',
+        typename: 'text',
+        elemTyptype: null,
+        elemTypname: null,
+      },
     ])
     provisioned = true
     expect((await backend.query(catalogSQL)).rows).toEqual([
-      { table: 'user', column: 'id' },
-      { table: 'message', column: 'id' },
+      {
+        schema: 'public',
+        table: 'user',
+        column: 'id',
+        dataType: 'text',
+        length: null,
+        precision: null,
+        scale: null,
+        typtype: 'b',
+        typename: 'text',
+        elemTyptype: null,
+        elemTypname: null,
+      },
+      {
+        schema: 'public',
+        table: 'message',
+        column: 'id',
+        dataType: 'text',
+        length: null,
+        precision: null,
+        scale: null,
+        typtype: 'b',
+        typename: 'text',
+        elemTyptype: null,
+        elemTypname: null,
+      },
     ])
   })
 
