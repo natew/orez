@@ -201,3 +201,18 @@ The bound `APP` service must expose:
 - For delegated push only: a push endpoint (`/api/zero/push`), plus a change
   feed served at each namespace's `upstream.namespacePath` on the `DATA`
   service.
+
+### 5. Deploying updates: Durable Objects stay on old code until they restart
+
+A deployed Durable Object instance keeps running the code it was created with
+until the instance itself restarts. The host's ingest loop polls the data
+worker's change feed continuously, so a busy data-worker DO never goes idle and
+never picks up a new deploy on its own — you can `wrangler deploy` a data-tier
+fix and watch production keep exhibiting the old behavior indefinitely.
+
+To force a data-worker DO onto new code: stop whatever is polling it (for a
+disposable host worker, `wrangler delete` it), wait for the DO to go idle and
+evict (about a minute), then redeploy the host. This came from a real incident
+during the Soot cutover: a catalog-cache fix was deployed but the resident
+`ZeroSqlDO` stayed on the old class because the host never stopped polling
+`/changes`.
