@@ -73,6 +73,13 @@ type MutationResult = {
   result: Record<string, unknown>
 }
 
+type DelegatedMutationResult = { id?: { clientID?: unknown; id?: unknown } }
+type DelegatedPushBody = {
+  mutations?: DelegatedMutationResult[]
+  pushResponse?: unknown
+  [key: string]: unknown
+}
+
 type EngineState = { watermark: string; floor: string; upstreamWatermark: string }
 type UpstreamBatch = {
   watermark: number
@@ -133,6 +140,18 @@ function json(value: unknown, status = 200): Response {
     status,
     headers: { 'cache-control': 'no-store' },
   })
+}
+
+function isStructuredPushFailed(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false
+  const body = value as Record<string, unknown>
+  return (
+    body.kind === 'PushFailed' &&
+    typeof body.origin === 'string' &&
+    typeof body.reason === 'string' &&
+    typeof body.message === 'string' &&
+    Array.isArray(body.mutationIDs)
+  )
 }
 
 function statusOf(error: unknown): number {
@@ -1057,14 +1076,21 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           if (!upstreamResponse.ok) {
             return new Response(upstreamResponse.body, upstreamResponse)
           }
-          const upstreamBody = (await upstreamResponse.json()) as {
-            mutations?: Array<{ id?: { clientID?: unknown; id?: unknown } }>
-            pushResponse?: {
-              mutations?: Array<{ id?: { clientID?: unknown; id?: unknown } }>
-            }
+          const upstreamBody = (await upstreamResponse.json()) as DelegatedPushBody
+          const delegatedResponse = upstreamBody.pushResponse ?? upstreamBody
+          if (isStructuredPushFailed(delegatedResponse)) {
+            // PushFailed is a successful protocol response describing an
+            // application-level failure. There are intentionally no mutation
+            // acknowledgements to finalize in the host; preserve the body so
+            // the Zero client can apply its retry/error policy.
+            return json({ pushResponse: delegatedResponse })
           }
           const acknowledged =
-            upstreamBody.pushResponse?.mutations ?? upstreamBody.mutations
+            typeof upstreamBody.pushResponse === 'object' &&
+            upstreamBody.pushResponse !== null &&
+            'mutations' in upstreamBody.pushResponse
+              ? upstreamBody.pushResponse.mutations
+              : upstreamBody.mutations
           if (!Array.isArray(acknowledged)) {
             throw new Error('delegated push returned no mutation results')
           }
@@ -1104,7 +1130,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             )
           }
           await this.#ingest(upstreamPath)
-          return json({ pushResponse: upstreamBody.pushResponse ?? upstreamBody })
+          return json({ pushResponse: delegatedResponse })
         } catch (error) {
           const status = statusOf(error)
           return json(errorBody(error), status)

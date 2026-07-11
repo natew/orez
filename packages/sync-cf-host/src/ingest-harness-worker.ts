@@ -32,6 +32,7 @@ const numericTextNamespaces = new Set<string>()
 const hydratedNamespaces = new Set<string>()
 let delegatedFailuresRemaining = 0
 let delegatedAttempts = 0
+let delegatedPushFailedRemaining = 0
 
 const config: SyncHostConfig<Env> = {
   hostVersion: 'upstream-ingest-harness',
@@ -191,6 +192,18 @@ export class AppService extends WorkerEntrypoint<Env> {
       )
     }
     delegatedAttempts++
+    if (delegatedPushFailedRemaining > 0) {
+      delegatedPushFailedRemaining--
+      return Promise.resolve(
+        Response.json({
+          kind: 'PushFailed',
+          origin: 'server',
+          reason: 'database',
+          mutationIDs: [{ clientID: 'writer', id: 2 }],
+          message: 'synthetic mutation result persistence failure',
+        })
+      )
+    }
     if (delegatedFailuresRemaining > 0) {
       delegatedFailuresRemaining--
       return Promise.resolve(
@@ -236,7 +249,11 @@ export default {
     if (url.pathname === '/delegation-control') {
       if (request.method === 'GET') {
         return Promise.resolve(
-          Response.json({ delegatedFailuresRemaining, delegatedAttempts })
+          Response.json({
+            delegatedFailuresRemaining,
+            delegatedPushFailedRemaining,
+            delegatedAttempts,
+          })
         )
       }
       return request
@@ -247,8 +264,16 @@ export default {
             0,
             Number((body as { failures?: unknown }).failures) || 0
           )
+          delegatedPushFailedRemaining = Math.max(
+            0,
+            Number((body as { pushFailed?: unknown }).pushFailed) || 0
+          )
           delegatedAttempts = 0
-          return Response.json({ delegatedFailuresRemaining, delegatedAttempts })
+          return Response.json({
+            delegatedFailuresRemaining,
+            delegatedPushFailedRemaining,
+            delegatedAttempts,
+          })
         })
     }
     if (url.pathname.startsWith('/upstream/')) {

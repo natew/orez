@@ -226,6 +226,27 @@ try {
     body: JSON.stringify({ failures: 0 }),
   })
 
+  // A structured application-level PushFailed is a valid delegated response,
+  // not a malformed success. It intentionally has no per-mutation results:
+  // preserve it for the Zero client and leave the host LMID unchanged.
+  await fetch(`${base}/delegation-control`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ pushFailed: 1 }),
+  })
+  const structuredFailure = await post('/push', {
+    ...pushBody,
+    mutations: [{ ...pushBody.mutations[0], id: 2 }],
+  })
+  assert.equal(structuredFailure.status, 200)
+  assert.deepEqual(structuredFailure.body.pushResponse, {
+    kind: 'PushFailed',
+    origin: 'server',
+    reason: 'database',
+    mutationIDs: [{ clientID: 'writer', id: 2 }],
+    message: 'synthetic mutation result persistence failure',
+  })
+
   const pulled = await post('/pull', {
     clientID: 'reader',
     clientGroupID: 'group',
