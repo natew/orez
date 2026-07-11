@@ -76,6 +76,24 @@ function identityMatches(
   )
 }
 
+function validIdentity(value: unknown): value is ExactlyOnceIdentity {
+  if (typeof value !== 'object' || value === null) return false
+  const raw = value as Record<string, unknown>
+  const keys = Object.keys(raw).sort()
+  return (
+    keys.length === 3 &&
+    keys[0] === 'clientGroupId' &&
+    keys[1] === 'clientId' &&
+    keys[2] === 'mutationId' &&
+    typeof raw.clientGroupId === 'string' &&
+    raw.clientGroupId.trim() !== '' &&
+    typeof raw.clientId === 'string' &&
+    raw.clientId.trim() !== '' &&
+    Number.isSafeInteger(raw.mutationId) &&
+    Number(raw.mutationId) > 0
+  )
+}
+
 export function validateFaultSchedule(schedule: FaultSchedule): CheckResult {
   const violations: string[] = []
   if (typeof schedule !== 'object' || schedule === null) {
@@ -112,6 +130,9 @@ export function validateFaultSchedule(schedule: FaultSchedule): CheckResult {
       (typeof plan.operationId !== 'string' || plan.operationId.trim() === '')
     ) {
       violations.push(`plan ${plan.id} has an empty operation id`)
+    }
+    if (plan.identity !== undefined && !validIdentity(plan.identity)) {
+      violations.push(`plan ${plan.id} has an invalid identity`)
     }
     if (plans.has(plan.id)) violations.push(`plan id ${plan.id} is not unique`)
     else plans.set(plan.id, plan)
@@ -179,10 +200,16 @@ export function validateFaultSchedule(schedule: FaultSchedule): CheckResult {
       if (!identityMatches(receipt.identity, plan.identity)) {
         violations.push(`plan ${plan.id} ${phase} receipt identity does not match`)
       }
+      if (receipt.identity !== undefined && !validIdentity(receipt.identity)) {
+        violations.push(`plan ${plan.id} ${phase} receipt has an invalid identity`)
+      }
       if (
         receipt.anchor !== undefined &&
         (typeof receipt.anchor !== 'object' ||
           receipt.anchor === null ||
+          Object.keys(receipt.anchor).length !== 2 ||
+          !Object.hasOwn(receipt.anchor, 'historyIndex') ||
+          !Object.hasOwn(receipt.anchor, 'historyOpId') ||
           !Number.isSafeInteger(receipt.anchor.historyIndex) ||
           receipt.anchor.historyIndex < 0 ||
           typeof receipt.anchor.historyOpId !== 'string' ||

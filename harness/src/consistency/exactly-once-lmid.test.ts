@@ -167,7 +167,7 @@ function history(phase: TerminalPhase = 'ok'): {
     clientGroupId: identity.clientGroupId,
     exactlyOnce: { ...pullStable, observed: null },
   })
-  fault('fire', 'after-commit-before-response')
+  fault('fire', 'after-commit-before-client-delivery')
   fault('heal', 'response-drop-consumed')
   recorder.record({
     opId: 'push-1',
@@ -229,7 +229,7 @@ function history(phase: TerminalPhase = 'ok'): {
 
   const point = {
     arm: { logicalStep: 1, hook: 'before-push' },
-    fire: { logicalStep: 2, hook: 'after-commit-before-response' },
+    fire: { logicalStep: 2, hook: 'after-commit-before-client-delivery' },
     heal: { logicalStep: 3, hook: 'response-drop-consumed' },
   }
   const schedule: FaultSchedule = {

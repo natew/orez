@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 
-import { observedSyncFetch } from './observed-fetch.js'
+import { createOperationBoundDropFetch, observedSyncFetch } from './observed-fetch.js'
 
 test('observer failure emits no duplicate transport terminal', async () => {
   const phases: string[] = []
@@ -57,4 +57,40 @@ test('response body stream failure is one terminal transport error', async () =>
   ).rejects.toThrow('body stream destroyed')
   expect(observations.map(({ phase }) => phase)).toEqual(['invoke', 'terminal'])
   expect(observations[1]!.error).toBeInstanceOf(Error)
+})
+
+test('operation-bound drop token is exact and one-shot', async () => {
+  const consumed: string[] = []
+  let responseToken: string | undefined = 'token-1'
+  const controller = createOperationBoundDropFetch(
+    (token) => consumed.push(token),
+    (async () =>
+      new Response('{}', {
+        headers: responseToken ? { 'x-orez-drop-token': responseToken } : {},
+      })) as typeof fetch
+  )
+  controller.arm('token-1')
+  await expect(
+    controller.fetch('http://localhost/push', { method: 'POST', body: '{}' })
+  ).rejects.toThrow('operation-bound post-commit response loss')
+  expect(consumed).toEqual(['token-1'])
+  await expect(
+    controller.fetch('http://localhost/push', { method: 'POST', body: '{}' })
+  ).rejects.toThrow('unarmed or reused')
+
+  responseToken = undefined
+  controller.arm('token-2')
+  await expect(
+    controller.fetch('http://localhost/push', { method: 'POST', body: '{}' })
+  ).rejects.toThrow('missing its drop token')
+
+  const wrong = createOperationBoundDropFetch(
+    () => {},
+    (async () =>
+      new Response('{}', { headers: { 'x-orez-drop-token': 'wrong' } })) as typeof fetch
+  )
+  wrong.arm('expected')
+  await expect(
+    wrong.fetch('http://localhost/push', { method: 'POST', body: '{}' })
+  ).rejects.toThrow('does not match')
 })

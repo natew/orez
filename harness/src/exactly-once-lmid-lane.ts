@@ -32,7 +32,11 @@ import {
 } from './consistency/history.js'
 import { HistoryRecorder } from './consistency/recorder.js'
 import { mutators, queries } from './fixture.js'
-import { observedSyncFetch, type SyncHttpObservation } from './observed-fetch.js'
+import {
+  createOperationBoundDropFetch,
+  observedSyncFetch,
+  type SyncHttpObservation,
+} from './observed-fetch.js'
 import { assertServerOutcome } from './server-outcome.js'
 import { startOrezLocal } from './targets/orez-local.js'
 
@@ -291,7 +295,11 @@ async function waitForProtocol(expectedPushes: number): Promise<void> {
         clearTimeout(timer)
         resolve()
       } catch (error) {
-        if (protocolError) reject(error)
+        if (protocolError || pushTerminals > expectedPushes || pullTerminals > 1) {
+          protocolWaiters.delete(inspect)
+          clearTimeout(timer)
+          reject(error)
+        }
       }
     }
     protocolWaiters.add(inspect)
@@ -321,8 +329,15 @@ async function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
   }
 }
 
-const stockFetch = observedSyncFetch((observation) =>
-  protocolObservation('stock-client', observation)
+let targetForDropConsume: ReturnType<typeof startOrezLocal> extends Promise<infer T>
+  ? T
+  : never
+const dropFetch = createOperationBoundDropFetch((token) =>
+  targetForDropConsume.consumeExactlyOnceResponseDrop(token)
+)
+const stockFetch = observedSyncFetch(
+  (observation) => protocolObservation('stock-client', observation),
+  dropFetch.fetch
 )
 const harnessReplayFetch = observedSyncFetch((observation) =>
   protocolObservation('harness-replay', observation)
@@ -331,6 +346,7 @@ const target = await startOrezLocal({
   pullIntervalMs: 0,
   fetch: stockFetch,
 })
+targetForDropConsume = target
 let client: ReturnType<typeof target.createClient> | undefined
 const replay = `bun src/exactly-once-lmid-lane.ts --target orez-local --seed=${seed} --replay`
 try {
@@ -437,7 +453,7 @@ try {
   const planId = `${runId}-drop-response`
   const hooks = {
     arm: 'before-push',
-    fire: 'after-commit-before-response',
+    fire: 'after-commit-before-client-delivery',
     heal: 'response-drop-consumed',
   } as const
   const receipts: FaultReceipt[] = []
@@ -468,7 +484,11 @@ try {
       anchor: { historyIndex: event.index, historyOpId: event.opId },
     })
   }
-  target.armExactlyOnceResponseDrop({ identity, args: { id: probeId } }, faultStage)
+  const dropToken = target.armExactlyOnceResponseDrop(
+    { identity, args: { id: probeId } },
+    faultStage
+  )
+  dropFetch.arm(dropToken)
   recordingProtocol = true
 
   const mutationEvidence = {

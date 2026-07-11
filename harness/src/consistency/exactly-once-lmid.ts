@@ -256,7 +256,7 @@ export function checkExactlyOnceLmid(
   if (
     plan &&
     (plan.arm.hook !== 'before-push' ||
-      plan.fire.hook !== 'after-commit-before-response' ||
+      plan.fire.hook !== 'after-commit-before-client-delivery' ||
       plan.heal?.hook !== 'response-drop-consumed' ||
       plan.operationId !== mutation?.invoke.opId ||
       !plan.identity ||

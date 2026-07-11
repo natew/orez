@@ -4,6 +4,7 @@
 // postgres, no zero-cache, no docker — this target IS the rewrite's server
 // core under test (plans/zero-server-rewrite.md phase 2).
 import { Database } from 'bun:sqlite'
+import { randomUUID } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
 
 import { Zero } from '@rocicorp/zero'
@@ -42,7 +43,8 @@ export type OrezLocalTarget = SyncTarget & {
   armExactlyOnceResponseDrop(
     expected: ExpectedExactlyOncePush,
     onStage: (stage: 'arm' | 'fire' | 'heal') => void
-  ): void
+  ): string
+  consumeExactlyOnceResponseDrop(token: string): void
 }
 
 function bunSqliteDb(db: Database): SyncDb {
@@ -87,8 +89,10 @@ export async function startOrezLocal(opts?: {
     | {
         expected: ExpectedExactlyOncePush
         onStage: (stage: 'arm' | 'fire' | 'heal') => void
+        token: string
       }
     | undefined
+  let firedExactDrop: typeof exactDrop
   const handleRequest: Parameters<typeof createServer>[0] = async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost')
@@ -122,17 +126,10 @@ export async function startOrezLocal(opts?: {
         const drop = exactDrop
         drop.onStage('fire')
         exactDrop = undefined
-        // Flush a response head and a deliberately truncated JSON body before
-        // destroying the stream. Destroying before headers lets some HTTP
-        // stacks transparently retry the POST inside one fetch call, hiding
-        // the response loss from Zero.
-        res.statusCode = 200
+        firedExactDrop = drop
+        res.setHeader('x-orez-drop-token', drop.token)
         res.setHeader('content-type', 'application/json')
-        res.setHeader('content-length', '1024')
-        res.write('{"truncated":', () => {
-          drop.onStage('heal')
-          res.destroy()
-        })
+        res.end(JSON.stringify(response))
         return
       }
       if (url.pathname === '/push' && dropPushResponse) {
@@ -220,9 +217,21 @@ export async function startOrezLocal(opts?: {
     },
 
     armExactlyOnceResponseDrop(expected, onStage) {
-      if (exactDrop) throw new Error('exactly-once response drop already armed')
-      exactDrop = { expected: structuredClone(expected), onStage }
+      if (exactDrop || firedExactDrop)
+        throw new Error('exactly-once response drop already armed')
+      const token = randomUUID()
+      exactDrop = { expected: structuredClone(expected), onStage, token }
       onStage('arm')
+      return token
+    },
+
+    consumeExactlyOnceResponseDrop(token) {
+      if (!firedExactDrop) throw new Error('no fired exactly-once response drop')
+      if (firedExactDrop.token !== token)
+        throw new Error('exactly-once response drop token does not match')
+      const drop = firedExactDrop
+      firedExactDrop = undefined
+      drop.onStage('heal')
     },
 
     invalidate() {
