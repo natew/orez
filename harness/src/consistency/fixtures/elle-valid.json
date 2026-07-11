@@ -1,0 +1,34 @@
+[
+  {
+    "index": 0,
+    "time": 0,
+    "process": 0,
+    "type": "invoke",
+    "f": "txn",
+    "value": [["append", "x", 1]]
+  },
+  {
+    "index": 1,
+    "time": 1,
+    "process": 0,
+    "type": "ok",
+    "f": "txn",
+    "value": [["append", "x", 1]]
+  },
+  {
+    "index": 2,
+    "time": 2,
+    "process": 1,
+    "type": "invoke",
+    "f": "txn",
+    "value": [["r", "x", null]]
+  },
+  {
+    "index": 3,
+    "time": 3,
+    "process": 1,
+    "type": "ok",
+    "f": "txn",
+    "value": [["r", "x", [1]]]
+  }
+]
