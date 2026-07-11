@@ -1,6 +1,7 @@
 import {
   HISTORY_SCHEMA_VERSION,
   validateHistory,
+  exactlyOnceEvidenceCorresponds,
   type HistoryEvent,
   type MicroOp,
 } from './history.js'
@@ -121,6 +122,11 @@ export class HistoryRecorder {
     }
     if (!transactionsCorrespond(invocation.transaction, event.transaction)) {
       throw new Error(`operation ${event.opId} changes transaction at completion`)
+    }
+    if (!exactlyOnceEvidenceCorresponds(invocation.exactlyOnce, event.exactlyOnce)) {
+      throw new Error(
+        `operation ${event.opId} changes exactly-once evidence at completion`
+      )
     }
     this.#completed.add(event.opId)
     this.#inFlightByProcess.delete(event.process)

@@ -1,9 +1,81 @@
+import { isDeepStrictEqual } from 'node:util'
+
 export const HISTORY_SCHEMA_VERSION = 1 as const
 const MAX_I64 = 9223372036854775807n
 
 export type TerminalPhase = 'ok' | 'fail' | 'info'
 export type HistoryPhase = 'invoke' | TerminalPhase
-export type HistoryKind = 'transaction' | 'read' | 'mutation' | 'barrier' | 'fault'
+export type HistoryKind =
+  | 'transaction'
+  | 'read'
+  | 'mutation'
+  | 'barrier'
+  | 'fault'
+  | 'push'
+  | 'pull'
+
+export type ExactlyOnceClientIdentity = {
+  clientGroupId: string
+  clientId: string
+}
+
+export type ExactlyOnceIdentity = ExactlyOnceClientIdentity & {
+  mutationId: number
+}
+
+export type ExactlyOnceEffect = {
+  type: 'increment-probe'
+  probeId: string
+}
+
+export type ExactlyOnceEvidence =
+  | {
+      type: 'mutation'
+      profileVersion: 1
+      identity: ExactlyOnceIdentity
+      effect: ExactlyOnceEffect
+    }
+  | {
+      type: 'authority'
+      profileVersion: 1
+      observation: 'before' | 'after'
+      identity: ExactlyOnceIdentity
+      effect: ExactlyOnceEffect
+      observed: null | {
+        probeRowCount: number
+        applicationCount: string
+        clientRowCount: number
+        lastMutationId: string | null
+      }
+    }
+  | {
+      type: 'push'
+      profileVersion: 1
+      identity: ExactlyOnceIdentity
+      attempt: number
+      bodyDigest: string
+      observed:
+        | null
+        | { outcome: 'response-lost' }
+        | { outcome: 'already-processed'; mutationId: number }
+    }
+  | {
+      type: 'pull'
+      profileVersion: 1
+      identity: ExactlyOnceClientIdentity
+      attempt: number
+      observed: null | { outcome: 'pull-lmid-observed'; lastMutationId: string | null }
+    }
+  | {
+      type: 'fault'
+      profileVersion: 1
+      identity: ExactlyOnceIdentity
+      planId: string
+      operationId: string
+      stage: 'arm' | 'fire' | 'heal'
+      hook: string
+      observed: null | { acknowledged: true }
+    }
 
 export type AppendMicroOp = {
   type: 'append'
@@ -41,6 +113,7 @@ export type HistoryEvent = {
   snapshot?: Snapshot
   error?: string
   metadata?: Record<string, unknown>
+  exactlyOnce?: ExactlyOnceEvidence
 }
 
 export type RunManifest = {
@@ -107,6 +180,160 @@ function transactionsCorrespond(
   })
 }
 
+function stableExactlyOnce(value: ExactlyOnceEvidence): unknown {
+  if (value.type === 'mutation') return value
+  const { observed: _observed, ...stable } = value
+  return stable
+}
+
+export function exactlyOnceEvidenceCorresponds(
+  invocation: ExactlyOnceEvidence | undefined,
+  terminal: ExactlyOnceEvidence | undefined
+): boolean {
+  try {
+    if (invocation === undefined || terminal === undefined) return invocation === terminal
+    if (!isDeepStrictEqual(stableExactlyOnce(invocation), stableExactlyOnce(terminal)))
+      return false
+    if (invocation.type === 'mutation') return terminal.type === 'mutation'
+    return (
+      invocation.observed === null &&
+      terminal.type === invocation.type &&
+      terminal.observed !== null
+    )
+  } catch {
+    return false
+  }
+}
+
+function nonemptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): boolean {
+  const evidence = event.exactlyOnce
+  if (evidence === undefined) return true
+  if (typeof evidence !== 'object' || evidence === null) {
+    violations.push(`event ${event.index} has malformed exactly-once evidence`)
+    return false
+  }
+  const raw = evidence as unknown as Record<string, unknown>
+  if (
+    !['mutation', 'authority', 'push', 'pull', 'fault'].includes(String(raw.type)) ||
+    raw.profileVersion !== 1 ||
+    typeof raw.identity !== 'object' ||
+    raw.identity === null
+  ) {
+    violations.push(`event ${event.index} has malformed exactly-once evidence`)
+    return false
+  }
+  const rawIdentity = raw.identity as Record<string, unknown>
+  if (
+    !nonemptyString(rawIdentity.clientId) ||
+    !nonemptyString(rawIdentity.clientGroupId) ||
+    (raw.type !== 'pull' &&
+      (!Number.isSafeInteger(rawIdentity.mutationId) ||
+        Number(rawIdentity.mutationId) <= 0))
+  ) {
+    violations.push(`event ${event.index} has malformed exactly-once identity`)
+    return false
+  }
+  if (raw.type === 'pull' && 'mutationId' in rawIdentity) {
+    violations.push(`event ${event.index} pull evidence claims a mutation id`)
+    return false
+  }
+  if (
+    (raw.type === 'authority' || raw.type === 'mutation') &&
+    (typeof raw.effect !== 'object' ||
+      raw.effect === null ||
+      (raw.effect as Record<string, unknown>).type !== 'increment-probe' ||
+      !nonemptyString((raw.effect as Record<string, unknown>).probeId))
+  ) {
+    violations.push(`event ${event.index} has malformed exactly-once effect`)
+    return false
+  }
+  if (
+    (raw.type === 'push' || raw.type === 'pull') &&
+    (!Number.isSafeInteger(raw.attempt) || Number(raw.attempt) <= 0)
+  ) {
+    violations.push(`event ${event.index} has malformed exactly-once attempt`)
+    return false
+  }
+  if (raw.type === 'push' && !nonemptyString(raw.bodyDigest)) {
+    violations.push(`event ${event.index} has malformed push body digest`)
+    return false
+  }
+  if (
+    raw.type === 'fault' &&
+    (!nonemptyString(raw.planId) ||
+      !nonemptyString(raw.operationId) ||
+      !['arm', 'fire', 'heal'].includes(String(raw.stage)) ||
+      !nonemptyString(raw.hook))
+  ) {
+    violations.push(`event ${event.index} has malformed fault evidence`)
+    return false
+  }
+  if (event.clientId !== evidence.identity.clientId) {
+    violations.push(`event ${event.index} exactly-once clientId disagrees with top level`)
+  }
+  if (event.clientGroupId !== evidence.identity.clientGroupId) {
+    violations.push(
+      `event ${event.index} exactly-once clientGroupId disagrees with top level`
+    )
+  }
+  const expectedKind = evidence.type === 'authority' ? 'read' : evidence.type
+  if (event.kind !== expectedKind) {
+    violations.push(
+      `event ${event.index} exactly-once ${evidence.type} uses kind ${event.kind}`
+    )
+  }
+  if (event.phase === 'invoke') {
+    if (evidence.type !== 'mutation' && evidence.observed !== null) {
+      violations.push(
+        `event ${event.index} exactly-once invoke already has an observation`
+      )
+    }
+  } else if (evidence.type !== 'mutation' && evidence.observed === null) {
+    violations.push(`event ${event.index} exactly-once terminal has no observation`)
+  } else if (evidence.type !== 'mutation') {
+    const observed = evidence.observed as unknown
+    if (typeof observed !== 'object' || observed === null) {
+      violations.push(`event ${event.index} has malformed terminal observation`)
+      return false
+    }
+    const value = observed as Record<string, unknown>
+    if (
+      evidence.type === 'authority' &&
+      (!Number.isSafeInteger(value.probeRowCount) ||
+        !Number.isSafeInteger(value.clientRowCount) ||
+        typeof value.applicationCount !== 'string' ||
+        (value.lastMutationId !== null && typeof value.lastMutationId !== 'string'))
+    ) {
+      violations.push(`event ${event.index} has malformed authority observation`)
+      return false
+    }
+    if (
+      evidence.type === 'push' &&
+      !['response-lost', 'already-processed'].includes(String(value.outcome))
+    ) {
+      violations.push(`event ${event.index} has malformed push observation`)
+      return false
+    }
+    if (
+      evidence.type === 'pull' &&
+      (value.outcome !== 'pull-lmid-observed' ||
+        (value.lastMutationId !== null && typeof value.lastMutationId !== 'string'))
+    ) {
+      violations.push(`event ${event.index} has malformed pull observation`)
+      return false
+    }
+    if (evidence.type === 'fault' && value.acknowledged !== true) {
+      violations.push(`event ${event.index} has malformed fault observation`)
+      return false
+    }
+  }
+  return true
+}
+
 export function validateHistory(events: readonly HistoryEvent[]): CheckResult {
   const violations: string[] = []
   const inFlightByProcess = new Map<string, string>()
@@ -116,6 +343,10 @@ export function validateHistory(events: readonly HistoryEvent[]): CheckResult {
 
   for (let position = 0; position < events.length; position++) {
     const event = events[position]!
+    if (typeof event !== 'object' || event === null) {
+      violations.push(`event ${position} is not an object`)
+      continue
+    }
     if (event.schemaVersion !== HISTORY_SCHEMA_VERSION) {
       violations.push(`event ${position} has schema version ${event.schemaVersion}`)
     }
@@ -130,6 +361,15 @@ export function validateHistory(events: readonly HistoryEvent[]): CheckResult {
       violations.push(`event ${position} has non-monotonic time ${event.relativeMicros}`)
     }
     previousTime = event.relativeMicros
+    const evidenceValid = validateExactlyOnceEvent(event, violations)
+    if (!nonemptyString(event.opId) || !nonemptyString(event.process)) {
+      violations.push(`event ${position} has invalid operation or process identity`)
+      continue
+    }
+    if (!['invoke', 'ok', 'fail', 'info'].includes(event.phase)) {
+      violations.push(`event ${position} has invalid phase ${String(event.phase)}`)
+      continue
+    }
 
     if (event.phase === 'invoke') {
       if (invoked.has(event.opId) || completed.has(event.opId)) {
@@ -158,6 +398,14 @@ export function validateHistory(events: readonly HistoryEvent[]): CheckResult {
     }
     if (!transactionsCorrespond(invocation, event)) {
       violations.push(`operation ${event.opId} changes transaction at completion`)
+    }
+    if (
+      evidenceValid &&
+      !exactlyOnceEvidenceCorresponds(invocation.exactlyOnce, event.exactlyOnce)
+    ) {
+      violations.push(
+        `operation ${event.opId} changes exactly-once evidence at completion`
+      )
     }
     completed.add(event.opId)
     inFlightByProcess.delete(event.process)
