@@ -1,0 +1,101 @@
+{
+  "title": "Exhaustive upstream test-file inventory (evidence-backed accounting)",
+  "purpose": "Every conformance-relevant upstream test file individually classified, with audited totals, so 'all existing tests we could port' is evidence-backed rather than a selection. Verified by verify.ts against the mono checkout at auditedUpstreamSha. Companion to ledger.json.",
+  "auditedUpstreamSha": "7139287da3c84ec5050c1eff0d9444d912d462aa",
+  "auditedUpstreamRef": "origin/main",
+  "auditedDate": "2026-07-11",
+  "statusVocabulary": "see ledger.json.statusVocabulary",
+  "portabilityVocabulary": {
+    "differential": "Drives a query and compares results against a fresh Postgres oracle (or pins a specific query result). Conceptually portable to a black-box harness that speaks the wire and diffs vs an oracle/reference.",
+    "in-process": "Drives the mono module graph directly (IVM source changes, planner internals, scalar pre-resolve, plan flags, in-memory unit tests, legacy encodings, CPU profiling). Not portable to a different server implementation."
+  },
+  "zqlIntegrationTests": {
+    "total": 24,
+    "aggregateByPortability": { "differential": 12, "in-process": 12 },
+    "aggregateByOrezStatus": { "equivalent": 4, "equivalent-partial": 4, "portable-gap": 5, "not-applicable": 11 },
+    "aggregateNote": "'portability' is whether the TEST can leave mono's IVM. 'orezStatus' is whether Orez re-expresses the BEHAVIOR black-box. They are independent: an in-process test can still be equivalent/partial if Orez covers the behavior over the wire (e.g. fuzz.test.ts).",
+    "files": [
+      { "path": "packages/zql-integration-tests/src/cap.pg.test.ts", "purpose": "capability/edge cases; boots initialSync PG->SQLite then applies IVM source changes (add/edit/remove)", "portability": "in-process", "orezStatus": "not-applicable", "reason": "drives IVM makeSourceChange* directly; no wire surface." },
+      { "path": "packages/zql-integration-tests/src/child-merge.pg.test.ts", "purpose": "child-relationship merge correctness after initialSync", "portability": "in-process", "orezStatus": "not-applicable", "reason": "in-process IVM merge path." },
+      { "path": "packages/zql-integration-tests/src/chinook/check-zql-string.pg.test.ts", "purpose": "pins one ZQL string (nested whereExists + limit(0)) vs PG", "portability": "differential", "orezStatus": "equivalent", "orezArtifact": "harness/src/shapes.ts + sweep.ts (nested whereExists/limit shapes, cross-implementation)" },
+      { "path": "packages/zql-integration-tests/src/chinook/chinook-fuzz-backbone.pg.test.ts", "purpose": "L0/L1 fuzzer backbone (bounded-exhaustive + pairwise + push + flip + yield) vs PG, asserts 100% pairwise coverage", "portability": "differential", "orezStatus": "equivalent-partial", "orezArtifact": "harness/src/sweep.ts", "gap": "MISSING: pairwise coverage gate AND bounded-exhaustive enumeration (orez samples randomly). See ledger fuzzModules coverage.ts/cover.ts/skeleton.ts." },
+      { "path": "packages/zql-integration-tests/src/chinook/chinook-fuzz-sweep.pg.test.ts", "purpose": "seeded randomized fuzz cases + auto-shrink, differential vs PG", "portability": "differential", "orezStatus": "equivalent-partial", "orezArtifact": "harness/src/sweep.ts", "gap": "MISSING: auto-shrink (orez records seed+FULL spec, unminimized). See ledger fuzzModules shrink.ts." },
+      { "path": "packages/zql-integration-tests/src/chinook/chinook-fuzz-regressions.pg.test.ts", "purpose": "replay committed minimized repros (chinook/regressions/*.json)", "portability": "differential", "orezStatus": "portable-gap", "orezArtifact": "harness/src/sweep.ts writes artifacts to harness/regressions/ but does not replay them", "gap": "missing committed replay-first corpus gate (ledger rankedGaps #2)." },
+      { "path": "packages/zql-integration-tests/src/chinook/chinook-fuzz-scale.pg.test.ts", "purpose": "nightly scale lane: full chinook, thousands of rows", "portability": "differential", "orezStatus": "equivalent-partial", "orezArtifact": "harness/src/bench.ts + storm.ts + memory-soak.ts (scale/longevity grids)", "gap": "MISSING: a thousands-of-rows DIFFERENTIAL. Orez measures scaling curves (clients x queries x write-rate, rss/lag) at scale but does not run the correctness differential over a large dataset." },
+      { "path": "packages/zql-integration-tests/src/chinook/chinook-fuzz-scalar.pg.test.ts", "purpose": "scalar-subquery differential lane", "portability": "in-process", "orezStatus": "not-applicable", "reason": "depends on zqlite resolve-scalar-subqueries; only meaningful vs in-process IVM's non-native scalar handling." },
+      { "path": "packages/zql-integration-tests/src/chinook/chinook-join-flip.pg.test.ts", "purpose": "join-flip plan equivalence vs PG", "portability": "in-process", "orezStatus": "not-applicable", "reason": "flip is a mono IVM plan flag with no wire/pg analog." },
+      { "path": "packages/zql-integration-tests/src/chinook/chinook-zero-cache-fuzzer.pg.test.ts", "purpose": "L1 replica + L2 protocol-materialized differential vs a fresh PG oracle (richest oracle)", "portability": "differential", "orezStatus": "equivalent", "orezArtifact": "harness/src/sweep.ts + shapes.ts", "note": "upstream connects to view-syncer in-process (bypasses the socket); orez runs the cross-implementation differential over the real wire." },
+      { "path": "packages/zql-integration-tests/src/chinook/chinook.pg.test.ts", "purpose": "hand-written chinook differential vs PG; pins brokenRelationshipLimits (junction limit/orderBy gaps)", "portability": "differential", "orezStatus": "equivalent", "orezArtifact": "harness/src/shapes.ts + sweep.ts", "note": "junction limit/orderBy gap encoded as ledger knownXfails; orez fixture has no junction relationship yet." },
+      { "path": "packages/zql-integration-tests/src/chinook/fuzz/fuzz.test.ts", "purpose": "fast no-PG generator unit tests (enumeration counts, covering-array completeness, metamorphic/flip self-consistency)", "portability": "in-process", "orezStatus": "equivalent-partial", "orezArtifact": "harness/src/metamorphic.selftest.ts + sweep.ts --dry", "gap": "MISSING: enumeration-count and covering-array-completeness assertions. Orez has metamorphic self-consistency (mutation-proven) + axis-count sanity only. Example of an in-process TEST with real black-box behavioral coverage." },
+      { "path": "packages/zql-integration-tests/src/chinook/planner-controlled.test.ts", "purpose": "query-planner plan-attempt validation (controlled)", "portability": "in-process", "orezStatus": "not-applicable", "reason": "mono cost-based IVM planner internals; orez has no such planner." },
+      { "path": "packages/zql-integration-tests/src/chinook/planner-exec.pg.test.ts", "purpose": "query-planner execution validation vs PG", "portability": "in-process", "orezStatus": "not-applicable", "reason": "planner internals." },
+      { "path": "packages/zql-integration-tests/src/chinook/planner.pg.test.ts", "purpose": "query-planner cost-model validation", "portability": "in-process", "orezStatus": "not-applicable", "reason": "planner internals." },
+      { "path": "packages/zql-integration-tests/src/collate.pg.test.ts", "purpose": "collation: zql/zqlite byte-order vs PG locale-aware ordering (same set, relaxed order)", "portability": "differential", "orezStatus": "portable-gap", "orezArtifact": "none (fixture has no COLLATE-tuned column)", "gap": "value-conversion edge fixture gap (ledger rankedGaps #4)." },
+      { "path": "packages/zql-integration-tests/src/compiler-bigint.pg.test.ts", "purpose": "bigint (int8) edge through z2s/zqlite/PG", "portability": "differential", "orezStatus": "portable-gap", "orezArtifact": "none (fixture has no int8/bigint column)", "gap": "value-conversion edge fixture gap (ledger rankedGaps #4)." },
+      { "path": "packages/zql-integration-tests/src/compiler-types-with-args.pg.test.ts", "purpose": "compiler with query args across types", "portability": "differential", "orezStatus": "portable-gap", "orezArtifact": "harness/src/sweep.ts (passes typed args) but does not pin all type edges", "gap": "partial: args are exercised, per-type edge assertions are not pinned." },
+      { "path": "packages/zql-integration-tests/src/compiler.pg.test.ts", "purpose": "core z2s compiler differential (json metadata, nullable FK, timestamps)", "portability": "differential", "orezStatus": "equivalent", "orezArtifact": "harness/src/shapes.ts (json/nullable/timestamp value round-trip, cross-implementation)", "note": "the z2s ZQL->SQL compiler itself has no orez analog (orez ships snapshots / compiles in the rust core); the value round-trip it protects is covered by shapes." },
+      { "path": "packages/zql-integration-tests/src/discord-repro.pg.test.ts", "purpose": "regression repro from a Discord bug report (in-process edit source change)", "portability": "in-process", "orezStatus": "not-applicable", "reason": "in-process IVM repro; note as a candidate for the orez repro corpus once black-box shrink lands." },
+      { "path": "packages/zql-integration-tests/src/pagila/planner-exec.pg.test.ts", "purpose": "planner plan-attempt validation on the pagila graph", "portability": "in-process", "orezStatus": "not-applicable", "reason": "planner internals." },
+      { "path": "packages/zql-integration-tests/src/school-access/school-access-profile.pg.test.ts", "purpose": "CPU profile (.cpuprofile) of a normalized-OR + flipped-exists query at 8x topology", "portability": "in-process", "orezStatus": "not-applicable", "reason": "a performance profiler, not a conformance test." },
+      { "path": "packages/zql-integration-tests/src/text-semantics.pg.test.ts", "purpose": "text semantics: LIKE/ILIKE/NULL logic; pins the ILIKE Unicode-folding known divergence under COLLATE C vs default", "portability": "differential", "orezStatus": "portable-gap", "orezArtifact": "harness/src/fixture.ts uses LIKE/ILIKE patterns but does not pin the COLLATE-C divergence", "gap": "value-conversion/text-semantics edge fixture gap (ledger rankedGaps #4)." },
+      { "path": "packages/zql-integration-tests/src/v20-array-style.test.ts", "purpose": "reading legacy v20 array-style column encodings from zqlite", "portability": "in-process", "orezStatus": "not-applicable", "reason": "legacy encoding read; orez targets the current encoding." }
+    ]
+  },
+  "zeroCache": {
+    "total": 143,
+    "pgTests": 47,
+    "note": "Server-internals: replicator, change-streamer, change-source (pg), view-syncer, mutagen/pusher, auth, db, types, config, workers. As TESTS, all but one are in-process (they drive mono's own server module graph, not a wire). That is a statement about test PORTABILITY, not about behavioral coverage: several categories validate BEHAVIORS Orez re-expresses black-box in its own lanes. The two are tracked separately below. Exactly ONE test is a genuine over-the-wire v51 websocket test.",
+    "testPortability": { "black-box": 1, "in-process": 142 },
+    "testPortabilityNote": "Only integration/integration.pg.test.ts drives a real websocket. The other 142 drive mono modules directly and cannot run against a different server implementation as-is.",
+    "categories": [
+      { "dir": "services/view-syncer/", "count": 21, "testPortability": "in-process", "behavioralCoverage": "partial", "orezLane": "harness/src/smoke.ts, shapes.ts, sweep.ts, reconnect.ts", "note": "Validates the v51 downstream/poke contract + hydrate/advance + TTL + permissions + CVR. Orez exercises the downstream/poke contract, hydrate, and incremental maintenance black-box; TTL, CVR internals, and view-syncer permissions internals are not covered." },
+      { "dir": "types/", "count": 17, "testPortability": "in-process", "behavioralCoverage": "none", "note": "wire/stream/subscription primitives — internal unit tests." },
+      { "dir": "services/change-source/pg/", "count": 14, "testPortability": "in-process", "behavioralCoverage": "partial", "orezLane": "src/recovery.test.ts, src/restore-stress.test.ts, src/integration/native-startup.test.ts", "note": "logical-replication internals (initial-sync, backfill, toasted values, slot health). Relevant to Orez's pg-proxy/replication planes, where Orez has its own recovery/restore/startup integration coverage; the sync-server core the conformance harness targets ships snapshots and does not replicate." },
+      { "dir": "db/", "count": 13, "testPortability": "in-process", "behavioralCoverage": "none", "note": "migration/statement units." },
+      { "dir": "services/change-streamer/", "count": 9, "testPortability": "in-process", "behavioralCoverage": "none", "note": "server-internal change-stream transport." },
+      { "dir": "services/replicator/", "count": 6, "testPortability": "in-process", "behavioralCoverage": "partial", "orezLane": "src/recovery.test.ts, src/restore-stress.test.ts", "note": "incremental-sync / resumption — Orez has recovery/restore lanes for its own replication path." },
+      { "dir": "server/", "count": 6, "testPortability": "mixed", "behavioralCoverage": "partial", "note": "dispatcher/inspector/otel; some behaviors observable black-box, most internal." },
+      { "dir": "auth/", "count": 6, "testPortability": "in-process", "behavioralCoverage": "partial", "orezLane": "harness/src/permissions.ts", "note": "read/write-authorizer permission-filter logic. Orez covers pull visibility + membership-driven revocation black-box; push-role authorization, auth-token refresh/staleness, and external-ACL invalidation are greenfield (matches upstream L4-future)." },
+      { "dir": "services/mutagen/", "count": 3, "testPortability": "in-process", "behavioralCoverage": "partial", "orezLane": "harness/src/sweep.ts, smoke.ts", "note": "pusher / custom-mutator application. Orez exercises v51 custom-mutator push + LMID + app-error rollback black-box; the pusher/combinePushes internals are not." },
+      { "dir": "services/change-source/protocol/current/", "count": 2, "testPortability": "in-process", "behavioralCoverage": "none", "note": "server-internal change-stream wire format, not the client sync protocol." },
+      { "dir": "integration/", "count": 1, "testPortability": "black-box", "behavioralCoverage": "covered", "orezLane": "harness/src/smoke.ts, reconnect.ts, multi-tab.ts", "note": "integration.pg.test.ts — the only real ws v51 test; Orez drives real stock clients over the wire against every target and adds convergence + oracle equality." },
+      { "dir": "(other: config, workers, remaining services)", "count": 45, "testPortability": "in-process", "behavioralCoverage": "none", "note": "unit/integration files across config/workers/remaining services not individually broken out; internal." }
+    ],
+    "behavioralCoverageSummary": {
+      "note": "By CATEGORY, how much of the behavior Orez re-expresses black-box. This is NOT a per-file status; it corrects the earlier overclaim that 142 files have no analog.",
+      "covered": ["integration (1)"],
+      "partial": ["view-syncer (21)", "change-source/pg (14)", "replicator (6)", "server (6)", "auth (6)", "mutagen (3)"],
+      "none": ["types (17)", "db (13)", "change-streamer (9)", "change-source/protocol (2)", "other (45)"],
+      "counts": { "covered": 1, "partialCategoryFiles": 56, "noneCategoryFiles": 86 }
+    }
+  },
+  "zeroProtocol": {
+    "total": 9,
+    "note": "valita round-trip tests that DEFINE the v51 wire contract (ast, client-schema, push, connect, protocol-version, error, analyze-query-result, and type-tests). orezStatus: upstream-baseline (the spec orez conforms to, not something to port).",
+    "orezStatus": "upstream-baseline"
+  },
+  "fuzzModules": {
+    "totalFiles": 20,
+    "nonTestModules": 19,
+    "note": "The coverage-driven fuzzer. Each of the 20 files is individually classified in ledger.json.fuzzModules (19 library modules + fuzz.test.ts).",
+    "orezStatusAggregate": { "ported-black-box": 3, "equivalent": 4, "equivalent-partial": 4, "portable-gap": 6, "not-applicable": 3 }
+  },
+  "auditedTotals": {
+    "zqlIntegrationTestFiles": 24,
+    "zeroCacheTestFiles": 143,
+    "zeroCachePgTestFiles": 47,
+    "zeroProtocolTestFiles": 9,
+    "fuzzFiles": 20,
+    "fuzzNonTestModules": 19
+  },
+  "verification": {
+    "script": "harness/upstream-parity/verify.ts",
+    "run": "bun harness/upstream-parity/verify.ts   (from repo root, with ~/github/mono present)",
+    "contract": [
+      "the mono checkout resolves origin/main and its SHA is recorded/compared to auditedUpstreamSha (drift => warning, non-zero unless --allow-drift)",
+      "the set of packages/zql-integration-tests/src/**/*.test.ts at the audited SHA EQUALS the 24 paths listed here (no missing, no extra)",
+      "zero-cache test-file count == 143, zero-protocol == 9, fuzz non-test modules == 19",
+      "on any mismatch the audit is stale: verify.ts exits non-zero and prints the delta"
+    ]
+  }
+}
