@@ -7480,9 +7480,11 @@ export class DoBackend {
     if (!selectReferencesTable(select, 'columns')) return null
     const fields = selectTargetFields(select)
     let rows: Record<string, unknown>[] = []
+    let matchedColumns = new Set<string>()
     for (let attempt = 0; attempt < 2; attempt++) {
       const infos = await this.publicationTableInfos()
       rows = []
+      matchedColumns = new Set()
       for (const info of infos) {
         for (const column of info.columns) {
           const metadata = this.schemaMetadata.get(info.name)?.get(column.name)
@@ -7518,6 +7520,9 @@ export class DoBackend {
           }
           if (catalogWhereMatches(select.whereClause, row)) {
             rows.push(this.projectCatalogRow(fields, row))
+            matchedColumns.add(
+              `${info.schema}\u0000${info.tableName}\u0000${column.name}`
+            )
           }
         }
       }
@@ -7528,46 +7533,47 @@ export class DoBackend {
       // cache without turning every healthy catalog query into a full scan.
       this.publicationTableInfoCache = null
     }
-    if (rows.length === 0) {
-      // Large, out-of-band migrations can leave this backend with a partial
-      // PRAGMA catalog even after the one-shot rescan above. Durable schema
-      // metadata is written in the same SQL DO as the physical tables, so use
-      // it as the final information-schema source while still requiring the
-      // physical table to exist. This keeps schema validation honest if stale
-      // metadata survives a real DROP TABLE.
-      await this.reloadSchemaMetadataIfEmpty(true)
-      const physicalTables = new Set(
-        (await this.listSqliteTables()).map((table) => table.name)
-      )
-      for (const [tableName, columns] of this.schemaMetadata) {
-        if (!physicalTables.has(tableName)) continue
-        for (const [columnName, metadata] of columns) {
-          const dataType = metadata.elemTypname ? 'ARRAY' : metadata.dataType
-          const row = {
-            table_schema: metadata.schema,
-            table_name: metadata.tableName,
-            column_name: columnName,
-            data_type: dataType,
-            udt_name: metadata.typname,
-            character_maximum_length: metadata.characterMaximumLength ?? null,
-            numeric_precision: metadata.numericPrecision ?? null,
-            numeric_scale: metadata.numericScale ?? null,
-            typtype: metadata.typtype,
-            typname: metadata.typname,
-            elemTyptype: metadata.elemTyptype ?? null,
-            elemTypname: metadata.elemTypname ?? null,
-            schema: metadata.schema,
-            table: metadata.tableName,
-            column: columnName,
-            dataType,
-            length: metadata.characterMaximumLength ?? null,
-            precision: metadata.numericPrecision ?? null,
-            scale: metadata.numericScale ?? null,
-            typename: metadata.typname,
-          }
-          if (catalogWhereMatches(select.whereClause, row)) {
-            rows.push(this.projectCatalogRow(fields, row))
-          }
+    // A large out-of-band migration can leave the PRAGMA-derived catalog
+    // partially populated, which is more dangerous than an empty cache because
+    // a zero-row retry never fires. Durable schema metadata is written in the
+    // same SQL DO as the physical tables, so make it authoritative for column
+    // introspection while still requiring each physical table to exist. This
+    // keeps schema validation honest if stale metadata survives a real DROP.
+    await this.reloadSchemaMetadataIfEmpty()
+    const physicalTables = new Set(
+      (await this.listSqliteTables()).map((table) => table.name)
+    )
+    for (const [tableName, columns] of this.schemaMetadata) {
+      if (!physicalTables.has(tableName)) continue
+      for (const [columnName, metadata] of columns) {
+        const dataType = metadata.elemTypname ? 'ARRAY' : metadata.dataType
+        const row = {
+          table_schema: metadata.schema,
+          table_name: metadata.tableName,
+          column_name: columnName,
+          data_type: dataType,
+          udt_name: metadata.typname,
+          character_maximum_length: metadata.characterMaximumLength ?? null,
+          numeric_precision: metadata.numericPrecision ?? null,
+          numeric_scale: metadata.numericScale ?? null,
+          typtype: metadata.typtype,
+          typname: metadata.typname,
+          elemTyptype: metadata.elemTyptype ?? null,
+          elemTypname: metadata.elemTypname ?? null,
+          schema: metadata.schema,
+          table: metadata.tableName,
+          column: columnName,
+          dataType,
+          length: metadata.characterMaximumLength ?? null,
+          precision: metadata.numericPrecision ?? null,
+          scale: metadata.numericScale ?? null,
+          typename: metadata.typname,
+        }
+        if (catalogWhereMatches(select.whereClause, row)) {
+          const key = `${metadata.schema}\u0000${metadata.tableName}\u0000${columnName}`
+          if (matchedColumns.has(key)) continue
+          rows.push(this.projectCatalogRow(fields, row))
+          matchedColumns.add(key)
         }
       }
     }

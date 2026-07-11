@@ -1390,29 +1390,46 @@ describe('DoBackend', () => {
     let provisioned = false
     const http = await startDoHttp((sql) => {
       if (sql.includes("WHERE kind = 'schema-column'")) {
+        const userMetadata = {
+          kind: 'schema-column',
+          key: 'user',
+          subkey: 'id',
+          value: JSON.stringify({
+            table: 'user',
+            schema: 'public',
+            tableName: 'user',
+            column: 'id',
+            oid: 25,
+            typeOid: 25,
+            dataType: 'text',
+            typtype: 'b',
+            typname: 'text',
+            elemTyptype: null,
+            elemTypname: null,
+          }),
+        }
         return {
-          rows: provisioned
-            ? [
-                {
-                  kind: 'schema-column',
-                  key: 'message',
-                  subkey: 'id',
-                  value: JSON.stringify({
-                    table: 'message',
-                    schema: 'public',
-                    tableName: 'message',
-                    column: 'id',
-                    oid: 25,
-                    typeOid: 25,
-                    dataType: 'text',
-                    typtype: 'b',
-                    typname: 'text',
-                    elemTyptype: null,
-                    elemTypname: null,
-                  }),
-                },
-              ]
-            : [],
+          rows: [
+            userMetadata,
+            {
+              kind: 'schema-column',
+              key: 'message',
+              subkey: 'id',
+              value: JSON.stringify({
+                table: 'message',
+                schema: 'public',
+                tableName: 'message',
+                column: 'id',
+                oid: 25,
+                typeOid: 25,
+                dataType: 'text',
+                typtype: 'b',
+                typname: 'text',
+                elemTyptype: null,
+                elemTypname: null,
+              }),
+            },
+          ],
           columns: ['kind', 'key', 'subkey', 'value'],
         }
       }
@@ -1421,9 +1438,13 @@ describe('DoBackend', () => {
           rows: provisioned
             ? [
                 { name: 'soot_0_clients', sql: 'CREATE TABLE soot_0_clients (id text)' },
+                { name: 'user', sql: 'CREATE TABLE user (id text)' },
                 { name: 'message', sql: 'CREATE TABLE message (id text)' },
               ]
-            : [{ name: 'soot_0_clients', sql: 'CREATE TABLE soot_0_clients (id text)' }],
+            : [
+                { name: 'soot_0_clients', sql: 'CREATE TABLE soot_0_clients (id text)' },
+                { name: 'user', sql: 'CREATE TABLE user (id text)' },
+              ],
           columns: ['name', 'sql'],
         }
       }
@@ -1443,6 +1464,14 @@ describe('DoBackend', () => {
           columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
         }
       }
+      if (sql.includes('PRAGMA table_info("user")')) {
+        return {
+          rows: [
+            { cid: 0, name: 'id', type: 'text', notnull: 1, dflt_value: null, pk: 1 },
+          ],
+          columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
+        }
+      }
       return { rows: [], columns: [] }
     })
     const backend = new DoBackend(http.url, 'postgres', 'late-table-catalog-test')
@@ -1451,12 +1480,18 @@ describe('DoBackend', () => {
       SELECT c.table_name::text AS table,
              c.column_name::text AS column
       FROM information_schema.columns c
-      WHERE (c.table_schema, c.table_name) IN (('public'::text, 'message'::text))
+      WHERE (c.table_schema, c.table_name) IN (
+        ('public'::text, 'user'::text),
+        ('public'::text, 'message'::text)
+      )
     `
 
-    expect((await backend.query(catalogSQL)).rows).toEqual([])
+    expect((await backend.query(catalogSQL)).rows).toEqual([
+      { table: 'user', column: 'id' },
+    ])
     provisioned = true
     expect((await backend.query(catalogSQL)).rows).toEqual([
+      { table: 'user', column: 'id' },
       { table: 'message', column: 'id' },
     ])
   })
