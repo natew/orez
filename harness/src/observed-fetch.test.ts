@@ -1,6 +1,11 @@
 import { expect, test } from 'bun:test'
 
-import { createOperationBoundDropFetch, observedSyncFetch } from './observed-fetch.js'
+import {
+  createOperationBoundDropFetch,
+  createPullQuiescenceFetch,
+  observedSyncFetch,
+  PullAbortedByQuiesceControllerError,
+} from './observed-fetch.js'
 
 test('observer failure emits no duplicate transport terminal', async () => {
   const phases: string[] = []
@@ -93,4 +98,54 @@ test('operation-bound drop token is exact and one-shot', async () => {
   await expect(
     wrong.fetch('http://localhost/push', { method: 'POST', body: '{}' })
   ).rejects.toThrow('does not match')
+})
+
+test('pull quiescence controller aborts only its pending pulls', async () => {
+  const transport = (async (input, init) => {
+    const url = new URL(typeof input === 'string' ? input : input.toString())
+    if (url.pathname.endsWith('/push')) return Response.json({ pushed: true })
+    if (url.searchParams.has('complete')) return Response.json({ pulled: true })
+    return await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+        once: true,
+      })
+    })
+  }) as typeof fetch
+  const controller = createPullQuiescenceFetch(transport)
+  const completed = await controller.fetch('http://localhost/pull?complete=1')
+  expect(await completed.json()).toEqual({ pulled: true })
+  const first = controller.fetch('http://localhost/pull?id=1')
+  const second = controller.fetch('http://localhost/pull?id=2')
+  const aborted = Promise.allSettled([first, second])
+  expect(controller.pendingPullCount()).toBe(2)
+  expect(controller.abortPendingPulls()).toBe(2)
+  expect(controller.abortPendingPulls()).toBe(0)
+  const results = await aborted
+  for (const result of results) {
+    expect(result).toMatchObject({ status: 'rejected' })
+    if (result.status === 'rejected')
+      expect(result.reason).toBeInstanceOf(PullAbortedByQuiesceControllerError)
+  }
+  expect(controller.pendingPullCount()).toBe(0)
+  expect(controller.abortPendingPulls()).toBe(0)
+  await expect(controller.fetch('http://localhost/pull?late=1')).rejects.toThrow(
+    'after quiescence controller sealed'
+  )
+  expect(await (await controller.fetch('http://localhost/push')).json()).toEqual({
+    pushed: true,
+  })
+
+  const caller = new AbortController()
+  const callerPull = controller.fetch('http://localhost/pull?caller=1', {
+    signal: caller.signal,
+  })
+  const callerResult = Promise.allSettled([callerPull])
+  caller.abort()
+  expect(controller.abortPendingPulls()).toBe(0)
+  const [callerSettled] = await callerResult
+  expect(callerSettled).toMatchObject({ status: 'rejected' })
+  if (callerSettled!.status === 'rejected') {
+    expect(callerSettled.reason).toBeInstanceOf(Error)
+    expect(callerSettled.reason).not.toBeInstanceOf(PullAbortedByQuiesceControllerError)
+  }
 })

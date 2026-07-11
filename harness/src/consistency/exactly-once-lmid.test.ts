@@ -200,6 +200,30 @@ function history(phase: TerminalPhase = 'ok'): {
     exactlyOnce: mutationEvidence,
   })
   if (phase !== 'fail') {
+    const quiesce = {
+      type: 'client-quiesce' as const,
+      profileVersion: 1 as const,
+      identity: {
+        clientId: identity.clientId,
+        clientGroupId: identity.clientGroupId,
+      },
+    }
+    pair(
+      'client-quiesce',
+      'client-quiesce',
+      'barrier',
+      { ...quiesce, observed: null },
+      {
+        ...quiesce,
+        observed: {
+          closed: true,
+          controllerPullAbortsRequested: 0,
+          pendingAfterQuiesce: 0,
+          pendingPushAtClose: 0,
+          pendingPullAtClose: 0,
+        },
+      }
+    )
     pair(
       'push-2',
       'push-2',
@@ -259,6 +283,87 @@ function history(phase: TerminalPhase = 'ok'): {
   return { events: recorder.snapshot(), schedule }
 }
 
+function reindex(events: HistoryEvent[], schedule?: FaultSchedule): void {
+  events.forEach((event, index) => {
+    event.index = index
+    event.relativeMicros = index
+  })
+  for (const receipt of schedule?.receipts ?? []) {
+    const event = events.find(
+      (candidate) =>
+        candidate.opId === receipt.anchor?.historyOpId && candidate.phase !== 'invoke'
+    )
+    if (event && receipt.anchor) receipt.anchor.historyIndex = event.index
+  }
+}
+
+function addStockRetry(fixture: ReturnType<typeof history>): void {
+  const firstInvoke = fixture.events.find(
+    (event) => event.exactlyOnce?.type === 'push' && event.phase === 'invoke'
+  )!
+  const harness = fixture.events.filter(
+    (event) => event.exactlyOnce?.type === 'push' && event.exactlyOnce.attempt === 2
+  )
+  for (const event of harness) {
+    event.opId = 'push-3'
+    event.process = 'push-3'
+    if (event.exactlyOnce?.type === 'push') event.exactlyOnce.attempt = 3
+  }
+  const retryInvoke = structuredClone(firstInvoke)
+  retryInvoke.opId = 'push-2'
+  retryInvoke.process = 'push-2'
+  if (retryInvoke.exactlyOnce?.type === 'push') {
+    retryInvoke.exactlyOnce.attempt = 2
+    retryInvoke.exactlyOnce.rawBodySha256 = 'd'.repeat(64)
+  }
+  const retryTerminal = structuredClone(harness.find((event) => event.phase === 'ok')!)
+  retryTerminal.opId = 'push-2'
+  retryTerminal.process = 'push-2'
+  if (retryTerminal.exactlyOnce?.type === 'push') {
+    retryTerminal.exactlyOnce.attempt = 2
+    retryTerminal.exactlyOnce.source = 'stock-client'
+    retryTerminal.exactlyOnce.rawBodySha256 = 'd'.repeat(64)
+  }
+  const mutationTerminal = fixture.events.findIndex(
+    (event) => event.exactlyOnce?.type === 'mutation' && event.phase !== 'invoke'
+  )
+  fixture.events.splice(mutationTerminal, 0, retryInvoke, retryTerminal)
+  reindex(fixture.events, fixture.schedule)
+}
+
+function addPendingPullAbort(fixture: ReturnType<typeof history>): void {
+  const firstPull = fixture.events.find(
+    (event) => event.exactlyOnce?.type === 'pull' && event.phase === 'invoke'
+  )!
+  const invoke = structuredClone(firstPull)
+  invoke.opId = 'pull-2'
+  invoke.process = 'pull-2'
+  if (invoke.exactlyOnce?.type === 'pull') invoke.exactlyOnce.attempt = 2
+  const mutationTerminal = fixture.events.findIndex(
+    (event) => event.exactlyOnce?.type === 'mutation' && event.phase !== 'invoke'
+  )
+  fixture.events.splice(mutationTerminal, 0, invoke)
+  const quiesceInvoke = fixture.events.findIndex(
+    (event) => event.exactlyOnce?.type === 'client-quiesce' && event.phase === 'invoke'
+  )
+  const terminal = structuredClone(invoke)
+  terminal.phase = 'info'
+  if (terminal.exactlyOnce?.type === 'pull')
+    terminal.exactlyOnce.observed = { outcome: 'aborted-by-quiesce-controller' }
+  fixture.events.splice(quiesceInvoke + 1, 0, terminal)
+  const quiesceTerminal = fixture.events.find(
+    (event) => event.exactlyOnce?.type === 'client-quiesce' && event.phase === 'ok'
+  )!
+  if (
+    quiesceTerminal.exactlyOnce?.type === 'client-quiesce' &&
+    quiesceTerminal.exactlyOnce.observed
+  ) {
+    quiesceTerminal.exactlyOnce.observed.pendingPullAtClose = 1
+    quiesceTerminal.exactlyOnce.observed.controllerPullAbortsRequested = 1
+  }
+  reindex(fixture.events, fixture.schedule)
+}
+
 describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}`, () => {
   test('accepts the exact lost-response, pull-LMID, and replay path', () => {
     const fixture = history()
@@ -267,10 +372,123 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
       status: 'pass',
       violations: [],
       reports: [
-        'stock push response lost; pull observed LMID 1; harness replay was already processed',
-        'no automatic stock-client retry is claimed',
+        'pullLmidObserved=true stockRetryCount=0',
+        'final harness replay was already processed',
+        'neither stock retry nor pull recovery is universally required',
       ],
     })
+  })
+
+  test('accepts retry-only, both recovery branches, and pending pull quiescence', () => {
+    const retryOnly = history()
+    addStockRetry(retryOnly)
+    retryOnly.events = retryOnly.events.filter(
+      (event) => event.exactlyOnce?.type !== 'pull'
+    )
+    reindex(retryOnly.events, retryOnly.schedule)
+    expect(checkExactlyOnceLmid(retryOnly.events, retryOnly.schedule)).toMatchObject({
+      status: 'pass',
+      reports: expect.arrayContaining(['pullLmidObserved=false stockRetryCount=1']),
+    })
+
+    const both = history()
+    addStockRetry(both)
+    expect(checkExactlyOnceLmid(both.events, both.schedule).status).toBe('pass')
+
+    const nullThenRetry = history()
+    addStockRetry(nullThenRetry)
+    const nullPull = nullThenRetry.events.find(
+      (event) => event.exactlyOnce?.type === 'pull' && event.phase === 'ok'
+    )!
+    if (nullPull.exactlyOnce?.type === 'pull' && nullPull.exactlyOnce.observed)
+      nullPull.exactlyOnce.observed.lastMutationId = null
+    expect(
+      checkExactlyOnceLmid(nullThenRetry.events, nullThenRetry.schedule).status
+    ).toBe('pass')
+
+    const lifecycle = history()
+    addPendingPullAbort(lifecycle)
+    expect(checkExactlyOnceLmid(lifecycle.events, lifecycle.schedule).status).toBe('pass')
+  })
+
+  test('rejects malformed quiescence counts, identities, phases, and late traffic', () => {
+    const cases: Array<[string, (fixture: ReturnType<typeof history>) => void]> = [
+      [
+        'quiesce info',
+        ({ events }) => {
+          events.find(
+            (event) =>
+              event.exactlyOnce?.type === 'client-quiesce' && event.phase === 'ok'
+          )!.phase = 'info'
+        },
+      ],
+      [
+        'negative zero count',
+        ({ events }) => {
+          const event = events.find(
+            (candidate) =>
+              candidate.exactlyOnce?.type === 'client-quiesce' && candidate.phase === 'ok'
+          )!
+          if (event.exactlyOnce?.type === 'client-quiesce' && event.exactlyOnce.observed)
+            event.exactlyOnce.observed.pendingPushAtClose = -0
+        },
+      ],
+      [
+        'quiesce mutation identity',
+        ({ events }) => {
+          const event = events.find(
+            (candidate) => candidate.exactlyOnce?.type === 'client-quiesce'
+          )!
+          ;(
+            event.exactlyOnce!.identity as unknown as Record<string, unknown>
+          ).mutationId = 1
+        },
+      ],
+      [
+        'wrong aborted phase',
+        (fixture) => {
+          addPendingPullAbort(fixture)
+          fixture.events.find(
+            (event) =>
+              event.exactlyOnce?.type === 'pull' &&
+              event.exactlyOnce.observed?.outcome === 'aborted-by-quiesce-controller'
+          )!.phase = 'ok'
+        },
+      ],
+      [
+        'wrong LMID phase',
+        ({ events }) => {
+          events.find(
+            (event) => event.exactlyOnce?.type === 'pull' && event.phase === 'ok'
+          )!.phase = 'info'
+        },
+      ],
+    ]
+    for (const [label, mutate] of cases) {
+      const fixture = history()
+      mutate(fixture)
+      const result = checkExactlyOnceLmid(fixture.events, fixture.schedule)
+      expect(result.status, label).toBe('fail')
+      expect(result.violations.length, label).toBeGreaterThan(0)
+    }
+  })
+
+  test('rejects negative zero in every quiescence counter', () => {
+    for (const field of [
+      'pendingPushAtClose',
+      'pendingPullAtClose',
+      'controllerPullAbortsRequested',
+      'pendingAfterQuiesce',
+    ] as const) {
+      const fixture = history()
+      const event = fixture.events.find(
+        (candidate) =>
+          candidate.exactlyOnce?.type === 'client-quiesce' && candidate.phase === 'ok'
+      )!
+      if (event.exactlyOnce?.type === 'client-quiesce' && event.exactlyOnce.observed)
+        event.exactlyOnce.observed[field] = -0
+      expect(validateHistory(fixture.events).valid, field).toBe(false)
+    }
   })
 
   test('duplicate application is a safety failure even with terminal info', () => {
@@ -309,7 +527,7 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
       if (event.exactlyOnce?.type === 'push') event.exactlyOnce.bodyDigest = 'different'
     }
     expect(checkExactlyOnceLmid(digest.events, digest.schedule).violations).toContain(
-      'push replay body digest does not match attempt 1'
+      'final harness replay does not match captured push 1'
     )
 
     const anchor = history()

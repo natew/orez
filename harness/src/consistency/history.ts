@@ -56,6 +56,18 @@ export type ExactlyOnceEvidence =
       observed: null | { resultType: 'complete'; applicationCount: string }
     }
   | {
+      type: 'client-quiesce'
+      profileVersion: 1
+      identity: ExactlyOnceClientIdentity
+      observed: null | {
+        closed: true
+        pendingPushAtClose: number
+        pendingPullAtClose: number
+        controllerPullAbortsRequested: number
+        pendingAfterQuiesce: number
+      }
+    }
+  | {
       type: 'push'
       profileVersion: 1
       identity: ExactlyOnceIdentity
@@ -82,7 +94,10 @@ export type ExactlyOnceEvidence =
       profileVersion: 1
       identity: ExactlyOnceClientIdentity
       attempt: number
-      observed: null | { outcome: 'pull-lmid-observed'; lastMutationId: string | null }
+      observed:
+        | null
+        | { outcome: 'pull-lmid-observed'; lastMutationId: string | null }
+        | { outcome: 'aborted-by-quiesce-controller' }
     }
   | {
       type: 'fault'
@@ -254,6 +269,7 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
       'type',
     ],
     'client-probe': ['effect', 'identity', 'observed', 'profileVersion', 'type'],
+    'client-quiesce': ['identity', 'observed', 'profileVersion', 'type'],
     push: [
       'attempt',
       'bodyDigest',
@@ -278,9 +294,15 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
   }
   const allowed = allowedEvidenceKeys[String(raw.type)]
   if (
-    !['mutation', 'authority', 'client-probe', 'push', 'pull', 'fault'].includes(
-      String(raw.type)
-    ) ||
+    ![
+      'mutation',
+      'authority',
+      'client-probe',
+      'client-quiesce',
+      'push',
+      'pull',
+      'fault',
+    ].includes(String(raw.type)) ||
     raw.profileVersion !== 1 ||
     typeof raw.identity !== 'object' ||
     raw.identity === null
@@ -302,21 +324,25 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
   if (
     !exactKeys(
       rawIdentity,
-      raw.type === 'pull'
+      raw.type === 'pull' || raw.type === 'client-quiesce'
         ? ['clientId', 'clientGroupId']
         : ['clientId', 'clientGroupId', 'mutationId']
     ) ||
     !nonemptyString(rawIdentity.clientId) ||
     !nonemptyString(rawIdentity.clientGroupId) ||
     (raw.type !== 'pull' &&
+      raw.type !== 'client-quiesce' &&
       (!Number.isSafeInteger(rawIdentity.mutationId) ||
         Number(rawIdentity.mutationId) <= 0))
   ) {
     violations.push(`event ${event.index} has malformed exactly-once identity`)
     return false
   }
-  if (raw.type === 'pull' && 'mutationId' in rawIdentity) {
-    violations.push(`event ${event.index} pull evidence claims a mutation id`)
+  if (
+    (raw.type === 'pull' || raw.type === 'client-quiesce') &&
+    'mutationId' in rawIdentity
+  ) {
+    violations.push(`event ${event.index} client-only evidence claims a mutation id`)
     return false
   }
   if (
@@ -375,7 +401,9 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
   const expectedKind =
     evidence.type === 'authority' || evidence.type === 'client-probe'
       ? 'read'
-      : evidence.type
+      : evidence.type === 'client-quiesce'
+        ? 'barrier'
+        : evidence.type
   if (event.kind !== expectedKind) {
     violations.push(
       `event ${event.index} exactly-once ${evidence.type} uses kind ${event.kind}`
@@ -422,6 +450,32 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
       return false
     }
     if (
+      evidence.type === 'client-quiesce' &&
+      (!exactKeys(value, [
+        'closed',
+        'controllerPullAbortsRequested',
+        'pendingAfterQuiesce',
+        'pendingPushAtClose',
+        'pendingPullAtClose',
+      ]) ||
+        value.closed !== true ||
+        !Number.isSafeInteger(value.pendingPushAtClose) ||
+        Object.is(value.pendingPushAtClose, -0) ||
+        Number(value.pendingPushAtClose) < 0 ||
+        !Number.isSafeInteger(value.pendingPullAtClose) ||
+        Object.is(value.pendingPullAtClose, -0) ||
+        Number(value.pendingPullAtClose) < 0 ||
+        !Number.isSafeInteger(value.controllerPullAbortsRequested) ||
+        Object.is(value.controllerPullAbortsRequested, -0) ||
+        Number(value.controllerPullAbortsRequested) < 0 ||
+        !Number.isSafeInteger(value.pendingAfterQuiesce) ||
+        Object.is(value.pendingAfterQuiesce, -0) ||
+        Number(value.pendingAfterQuiesce) < 0)
+    ) {
+      violations.push(`event ${event.index} has malformed client quiesce observation`)
+      return false
+    }
+    if (
       evidence.type === 'push' &&
       !['response-lost', 'response'].includes(String(value.outcome))
     ) {
@@ -463,9 +517,13 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
     }
     if (
       evidence.type === 'pull' &&
-      (!exactKeys(value, ['outcome', 'lastMutationId']) ||
-        value.outcome !== 'pull-lmid-observed' ||
-        (value.lastMutationId !== null && typeof value.lastMutationId !== 'string'))
+      !(
+        (value.outcome === 'pull-lmid-observed' &&
+          exactKeys(value, ['outcome', 'lastMutationId']) &&
+          (value.lastMutationId === null || typeof value.lastMutationId === 'string')) ||
+        (value.outcome === 'aborted-by-quiesce-controller' &&
+          exactKeys(value, ['outcome']))
+      )
     ) {
       violations.push(`event ${event.index} has malformed pull observation`)
       return false

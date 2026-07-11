@@ -8,7 +8,7 @@ import {
 import type { ConsistencyCheck } from './artifacts.js'
 
 export const EXACTLY_ONCE_LMID_PROFILE = {
-  name: 'exactly-once-lost-push-lmid-plus-server-replay',
+  name: 'exactly-once-lost-push-recovery-plus-server-replay',
   version: 1,
 } as const
 
@@ -168,19 +168,20 @@ export function checkExactlyOnceLmid(
     (a, b) => a.invoke.exactlyOnce.attempt - b.invoke.exactlyOnce.attempt
   )
   const mutationPhase = mutation?.terminal?.phase
-  const expectedPushes = mutationPhase === 'fail' ? 1 : 2
-  if (
-    pushes.length !== expectedPushes ||
-    pushes.some((pair, index) => pair.invoke.exactlyOnce.attempt !== index + 1)
-  ) {
-    violations.push('push attempts must be exactly sequential attempts 1 and 2')
-  }
-  if (
-    pushes[0]?.invoke.exactlyOnce.source !== 'stock-client' ||
-    (expectedPushes === 2 && pushes[1]?.invoke.exactlyOnce.source !== 'harness-replay')
-  ) {
-    violations.push('requires one stock-client push then one harness replay')
-  }
+  if (pushes.some((pair, index) => pair.invoke.exactlyOnce.attempt !== index + 1))
+    violations.push('push attempts must be globally sequential')
+  const stockPushes = pushes.filter(
+    (pair) => pair.invoke.exactlyOnce.source === 'stock-client'
+  )
+  const harnessPushes = pushes.filter(
+    (pair) => pair.invoke.exactlyOnce.source === 'harness-replay'
+  )
+  if (stockPushes.length < 1 || stockPushes.length > 4)
+    violations.push('requires stock push 1 and at most three stock retries')
+  if (harnessPushes.length !== 1)
+    violations.push('requires exactly one final harness replay')
+  if (pushes.at(-1)?.invoke.exactlyOnce.source !== 'harness-replay')
+    violations.push('harness replay must be the final push')
   if (
     pushes.some(
       (pair) =>
@@ -190,57 +191,80 @@ export function checkExactlyOnceLmid(
   ) {
     violations.push('push body digest is not canonical sha256 hex')
   }
-  if (
-    expectedPushes === 2 &&
-    pushes[0] &&
-    pushes[1] &&
-    (pushes[0].invoke.exactlyOnce.bodyDigest !==
-      pushes[1].invoke.exactlyOnce.bodyDigest ||
-      pushes[0].invoke.exactlyOnce.rawBodySha256 !==
-        pushes[1].invoke.exactlyOnce.rawBodySha256)
-  ) {
-    violations.push('push replay body digest does not match attempt 1')
-  }
-  if (pushes[0]?.terminal?.exactlyOnce.observed?.outcome !== 'response-lost') {
+  const first = stockPushes[0]
+  if (first?.terminal?.exactlyOnce.observed?.outcome !== 'response-lost') {
     violations.push('push attempt 1 did not lose its response')
   }
-  const second = pushes[1]?.terminal?.exactlyOnce.observed
-  if (
-    expectedPushes === 2 &&
-    (second?.outcome !== 'response' ||
-      second.status !== 200 ||
-      second.responseMutationCount !== 1 ||
-      second.responseClientId !== identity?.clientId ||
-      second.mutationId !== identity?.mutationId ||
-      second.error !== 'alreadyProcessed' ||
-      second.details?.match(/Expected:\s*(\d+)$/)?.[1] !== '2')
-  ) {
-    violations.push('push attempt 2 is not the matching already-processed replay')
+  const alreadyProcessed = (pair: (typeof pushes)[number] | undefined) => {
+    const observed = pair?.terminal?.exactlyOnce.observed
+    return (
+      observed?.outcome === 'response' &&
+      observed.status === 200 &&
+      observed.responseMutationCount === 1 &&
+      observed.responseClientId === identity?.clientId &&
+      observed.mutationId === identity?.mutationId &&
+      observed.error === 'alreadyProcessed' &&
+      observed.details?.match(/Expected:\s*(\d+)$/)?.[1] === '2'
+    )
   }
+  for (const retry of stockPushes.slice(1)) {
+    if (retry.invoke.exactlyOnce.bodyDigest !== first?.invoke.exactlyOnce.bodyDigest)
+      violations.push(
+        `stock retry ${retry.invoke.exactlyOnce.attempt} changed semantic body`
+      )
+    if (!alreadyProcessed(retry))
+      violations.push(
+        `stock retry ${retry.invoke.exactlyOnce.attempt} was not already processed`
+      )
+  }
+  const harnessReplay = harnessPushes[0]
+  if (
+    harnessReplay &&
+    (harnessReplay.invoke.exactlyOnce.bodyDigest !==
+      first?.invoke.exactlyOnce.bodyDigest ||
+      harnessReplay.invoke.exactlyOnce.rawBodySha256 !==
+        first?.invoke.exactlyOnce.rawBodySha256)
+  )
+    violations.push('final harness replay does not match captured push 1')
+  if (!alreadyProcessed(harnessReplay))
+    violations.push('final harness replay was not already processed')
 
   const pulls = terminalPairs(events, 'pull').sort(
     (a, b) => a.invoke.exactlyOnce.attempt - b.invoke.exactlyOnce.attempt
   )
-  if (pulls.length !== 1 || pulls[0]?.invoke.exactlyOnce.attempt !== 1) {
-    violations.push('requires exactly one completed pull attempt 1')
-  }
+  if (
+    pulls.length > 3 ||
+    pulls.some((pair, index) => pair.invoke.exactlyOnce.attempt !== index + 1)
+  )
+    violations.push('completed pull attempts must be sequential and bounded by three')
   for (const pair of pulls) {
     const observed = pair.terminal?.exactlyOnce.observed
-    if (observed?.outcome !== 'pull-lmid-observed') {
-      violations.push(`pull attempt ${pair.invoke.exactlyOnce.attempt} has wrong outcome`)
-    } else if (
+    if (
+      (observed?.outcome === 'pull-lmid-observed' && pair.terminal?.phase !== 'ok') ||
+      (observed?.outcome === 'aborted-by-quiesce-controller' &&
+        pair.terminal?.phase !== 'info')
+    )
+      violations.push(`pull attempt ${pair.invoke.exactlyOnce.attempt} has wrong phase`)
+    if (
+      observed?.outcome === 'pull-lmid-observed' &&
       observed.lastMutationId !== null &&
       canonicalI64(observed.lastMutationId) === undefined
-    ) {
+    )
       violations.push(
         `pull attempt ${pair.invoke.exactlyOnce.attempt} has noncanonical LMID`
       )
-    }
+    else if (
+      observed?.outcome !== 'pull-lmid-observed' &&
+      observed?.outcome !== 'aborted-by-quiesce-controller'
+    )
+      violations.push(`pull attempt ${pair.invoke.exactlyOnce.attempt} has wrong outcome`)
   }
-  const recovered = pulls.find(
+  const pullRecovered = pulls.some(
     (pair) => pair.terminal?.exactlyOnce.observed?.lastMutationId === '1'
   )
-  if (!recovered?.terminal) violations.push('missing post-loss pull LMID 1 observation')
+  const stockRetryCount = stockPushes.length - 1
+  if (!pullRecovered && stockRetryCount === 0)
+    violations.push('stock client produced neither LMID pull nor retry recovery evidence')
 
   const dropPlans = schedule.plans.filter(
     (candidate) => candidate.kind === 'drop-push-response'
@@ -304,28 +328,110 @@ export function checkExactlyOnceLmid(
     }
   }
 
-  const ordered = [
+  const clientQuiesces = terminalPairs(events, 'client-quiesce')
+  const quiesce = clientQuiesces[0]
+  if (
+    clientQuiesces.length !== 1 ||
+    quiesce?.terminal?.phase !== 'ok' ||
+    quiesce.terminal.exactlyOnce.observed?.closed !== true
+  )
+    violations.push('requires exactly one completed client quiesce barrier')
+
+  const prefix = [
     before?.terminal?.index,
     terminalPairs(events, 'client-probe')[0]?.terminal?.index,
     stageEvent('arm')?.index,
     mutation?.invoke.index,
-    pushes[0]?.invoke.index,
+    first?.invoke.index,
     stageEvent('fire')?.index,
     stageEvent('heal')?.index,
-    pushes[0]?.terminal?.index,
-    recovered?.terminal.index,
-    mutation?.terminal?.index,
-    ...(expectedPushes === 2
-      ? [pushes[1]?.invoke.index, pushes[1]?.terminal?.index]
-      : []),
-    after?.terminal?.index,
+    first?.terminal?.index,
   ]
   if (
-    ordered.some((value) => value === undefined) ||
-    ordered.some((value, index) => index > 0 && value! <= ordered[index - 1]!)
+    prefix.some((value) => value === undefined) ||
+    prefix.some((value, index) => index > 0 && value! <= prefix[index - 1]!)
   ) {
     violations.push('exactly-once evidence is not in the required history order')
   }
+  const recoveryTerminals = [
+    ...pulls
+      .filter(
+        (pair) =>
+          pair.terminal?.exactlyOnce.observed?.outcome === 'pull-lmid-observed' &&
+          pair.terminal.exactlyOnce.observed.lastMutationId === '1'
+      )
+      .map((pair) => pair.terminal?.index),
+    ...stockPushes.slice(1).map((pair) => pair.terminal?.index),
+  ]
+  const lossIndex = first?.terminal?.index
+  const mutationTerminalIndex = mutation?.terminal?.index
+  if (
+    lossIndex === undefined ||
+    mutationTerminalIndex === undefined ||
+    recoveryTerminals.some((index) => index === undefined) ||
+    recoveryTerminals.some(
+      (index) => index! <= lossIndex! || index! >= mutationTerminalIndex!
+    )
+  )
+    violations.push(
+      'stock recovery terminals must follow loss and precede mutation terminal'
+    )
+  if (
+    stockPushes
+      .slice(1)
+      .some(
+        (pair) =>
+          pair.invoke.index <= (lossIndex ?? -1) ||
+          pair.invoke.index >= (mutationTerminalIndex ?? -1)
+      )
+  )
+    violations.push('stock retry invokes must follow loss and precede mutation terminal')
+  const abortedPulls = pulls.filter(
+    (pair) =>
+      pair.terminal?.exactlyOnce.observed?.outcome === 'aborted-by-quiesce-controller'
+  )
+  if (
+    (abortedPulls.length > 0 && (!quiesce?.terminal || !quiesce.invoke)) ||
+    abortedPulls.some(
+      (pair) =>
+        pair.invoke.index >= mutationTerminalIndex! ||
+        pair.terminal!.index <= (quiesce?.invoke.index ?? -1) ||
+        pair.terminal!.index >= (quiesce?.terminal?.index ?? -1)
+    )
+  )
+    violations.push('quiescence-aborted pulls are outside the client close interval')
+  const quiesceObserved = quiesce?.terminal?.exactlyOnce.observed
+  if (
+    quiesceObserved?.closed === true &&
+    (quiesceObserved.pendingPushAtClose !== 0 ||
+      quiesceObserved.pendingPullAtClose !== abortedPulls.length ||
+      quiesceObserved.controllerPullAbortsRequested !== abortedPulls.length ||
+      quiesceObserved.pendingAfterQuiesce !== 0)
+  )
+    violations.push('client quiesce drain counts do not match recorded operations')
+  const suffix = [
+    mutation?.terminal?.index,
+    quiesce?.terminal?.index,
+    harnessReplay?.invoke.index,
+    harnessReplay?.terminal?.index,
+    after?.terminal?.index,
+  ]
+  if (
+    suffix.some((value) => value === undefined) ||
+    suffix.some((value, index) => index > 0 && value! <= suffix[index - 1]!)
+  )
+    violations.push('mutation, quiesce, replay, and final authority are out of order')
+  if (
+    quiesce?.terminal &&
+    events.some(
+      (event) =>
+        event.index > quiesce.terminal!.index &&
+        (event.exactlyOnce?.type === 'pull' ||
+          (event.exactlyOnce?.type === 'push' &&
+            event.exactlyOnce.source === 'stock-client'))
+    )
+  )
+    violations.push('stock protocol traffic occurred after client quiescence')
 
   if (mutationPhase === 'fail') violations.push('success-only mutation terminated fail')
   const clientProbes = terminalPairs(events, 'client-probe')
@@ -349,8 +455,9 @@ export function checkExactlyOnceLmid(
     status: 'pass',
     violations: [],
     reports: [
-      'stock push response lost; pull observed LMID 1; harness replay was already processed',
-      'no automatic stock-client retry is claimed',
+      `pullLmidObserved=${String(pullRecovered)} stockRetryCount=${stockRetryCount}`,
+      'final harness replay was already processed',
+      'neither stock retry nor pull recovery is universally required',
     ],
   }
 }

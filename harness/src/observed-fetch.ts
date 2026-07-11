@@ -20,6 +20,71 @@ export type SyncHttpObservation = {
   error?: unknown
 }
 
+export class PullAbortedByQuiesceControllerError extends Error {
+  override readonly name = 'PullAbortedByQuiesceControllerError'
+  constructor(options?: ErrorOptions) {
+    super('stock pull aborted by quiesce controller', options)
+  }
+}
+
+export function createPullQuiescenceFetch(fetchImpl: typeof fetch = globalThis.fetch): {
+  fetch: typeof fetch
+  pendingPullCount(): number
+  abortPendingPulls(): number
+} {
+  let request = 0
+  let sealed = false
+  const pending = new Map<
+    number,
+    { controller: AbortController; abortSource?: 'caller' | 'quiesce' }
+  >()
+  return {
+    pendingPullCount: () => pending.size,
+    abortPendingPulls: () => {
+      sealed = true
+      let count = 0
+      for (const value of pending.values()) {
+        if (value.abortSource !== undefined) continue
+        count++
+        value.abortSource = 'quiesce'
+        value.controller.abort()
+      }
+      return count
+    },
+    fetch: async (input, init) => {
+      const url = new URL(
+        typeof input === 'string' || input instanceof URL ? input : input.url
+      )
+      if (!url.pathname.endsWith('/pull')) return fetchImpl(input, init)
+      if (sealed) throw new Error('stock pull began after quiescence controller sealed')
+      const id = ++request
+      const controller = new AbortController()
+      const state: {
+        controller: AbortController
+        abortSource?: 'caller' | 'quiesce'
+      } = { controller }
+      pending.set(id, state)
+      const callerAbort = () => {
+        if (state.abortSource !== undefined) return
+        state.abortSource = 'caller'
+        controller.abort(init?.signal?.reason)
+      }
+      if (init?.signal?.aborted) callerAbort()
+      else init?.signal?.addEventListener('abort', callerAbort, { once: true })
+      try {
+        return await fetchImpl(input, { ...init, signal: controller.signal })
+      } catch (error) {
+        if (state.abortSource === 'quiesce')
+          throw new PullAbortedByQuiesceControllerError({ cause: error })
+        throw error
+      } finally {
+        init?.signal?.removeEventListener('abort', callerAbort)
+        pending.delete(id)
+      }
+    },
+  }
+}
+
 export function createOperationBoundDropFetch(
   consume: (token: string) => void | Promise<void>,
   fetchImpl: typeof fetch = globalThis.fetch

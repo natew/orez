@@ -34,7 +34,9 @@ import { HistoryRecorder } from './consistency/recorder.js'
 import { mutators, queries } from './fixture.js'
 import {
   createOperationBoundDropFetch,
+  createPullQuiescenceFetch,
   observedSyncFetch,
+  PullAbortedByQuiesceControllerError,
   type SyncHttpObservation,
 } from './observed-fetch.js'
 import { assertServerOutcome } from './server-outcome.js'
@@ -92,9 +94,10 @@ let pullAttempt = 0
 let pushTerminals = 0
 let pullTerminals = 0
 let capturedPushBody: string | undefined
+let quiescing = false
+let quiesced = false
 type PushSource = 'stock-client' | 'harness-replay'
 const protocolOps = new Map<string, { opId: string; evidence: ExactlyOnceEvidence }>()
-const ignoredProtocolRequests = new Set<string>()
 const protocolWaiters = new Set<() => void>()
 
 function recordPair(
@@ -128,6 +131,10 @@ function recordPair(
 function protocolObservation(source: PushSource, observation: SyncHttpObservation): void {
   if (!recordingProtocol || !identity) return
   try {
+    if (quiesced && source === 'stock-client')
+      throw new Error('stock protocol callback occurred after client quiescence')
+    if (quiescing && source === 'stock-client' && observation.phase === 'invoke')
+      throw new Error('new stock protocol operation began during client quiescence')
     if (observation.phase === 'invoke') {
       if (observation.path === 'push') {
         const parsed = parseExactlyOncePush(observation.body)
@@ -136,7 +143,11 @@ function protocolObservation(source: PushSource, observation: SyncHttpObservatio
         }
         assertExpectedExactlyOncePush(parsed, { identity, args: { id: probeId } })
         const attempt = ++pushAttempt
-        if (attempt > 2) throw new Error(`unexpected push attempt ${attempt}`)
+        if (attempt > 5) throw new Error(`unexpected push attempt ${attempt}`)
+        if (source === 'stock-client' && attempt > 4)
+          throw new Error(`unexpected stock push attempt ${attempt}`)
+        if (source === 'harness-replay' && !quiesced)
+          throw new Error('harness replay began before client quiescence')
         if (attempt === 1 && source === 'stock-client') {
           capturedPushBody = observation.rawBody
         }
@@ -173,13 +184,7 @@ function protocolObservation(source: PushSource, observation: SyncHttpObservatio
           throw new Error('pull identity does not match the fresh client')
         }
         const attempt = ++pullAttempt
-        // The frozen empirical path includes a second pull invocation that had
-        // not completed when request.server settled. Keep incomplete protocol
-        // traffic outside the paired consistency history.
-        if (attempt > 1) {
-          ignoredProtocolRequests.add(`${source}:${observation.request}`)
-          return
-        }
+        if (attempt > 3) throw new Error(`unexpected pull attempt ${attempt}`)
         const evidence = {
           type: 'pull' as const,
           profileVersion: 1 as const,
@@ -206,7 +211,6 @@ function protocolObservation(source: PushSource, observation: SyncHttpObservatio
     }
 
     const requestKey = `${source}:${observation.request}`
-    if (ignoredProtocolRequests.delete(requestKey)) return
     const pending = protocolOps.get(requestKey)
     if (!pending) throw new Error(`protocol request ${observation.request} has no invoke`)
     if (pending.evidence.type === 'push') {
@@ -249,22 +253,26 @@ function protocolObservation(source: PushSource, observation: SyncHttpObservatio
       })
       pushTerminals++
     } else if (pending.evidence.type === 'pull') {
+      const aborted = observation.error instanceof PullAbortedByQuiesceControllerError
+      if (observation.error !== undefined && !aborted) throw observation.error
       const changes = (observation.response as { lastMutationIDChanges?: unknown })
         ?.lastMutationIDChanges as Record<string, unknown> | undefined
       const lmid = changes?.[identity.clientId]
       recorder.record({
         opId: pending.opId,
         process: `pull-${pending.evidence.attempt}`,
-        phase: 'ok',
+        phase: aborted ? 'info' : 'ok',
         kind: 'pull',
         clientId: identity.clientId,
         clientGroupId: identity.clientGroupId,
         exactlyOnce: {
           ...pending.evidence,
-          observed: {
-            outcome: 'pull-lmid-observed',
-            lastMutationId: lmid === undefined ? null : String(lmid),
-          },
+          observed: aborted
+            ? { outcome: 'aborted-by-quiesce-controller' }
+            : {
+                outcome: 'pull-lmid-observed',
+                lastMutationId: lmid === undefined ? null : String(lmid),
+              },
         },
       })
       pullTerminals++
@@ -277,14 +285,11 @@ function protocolObservation(source: PushSource, observation: SyncHttpObservatio
   }
 }
 
-async function waitForProtocol(expectedPushes: number): Promise<void> {
+async function waitForProtocolIdle(): Promise<void> {
   const complete = () => {
     if (protocolError) throw protocolError
-    if (pushTerminals !== expectedPushes || pullTerminals !== 1) {
-      throw new Error(
-        `waiting for two push/one pull terminals, got ${pushTerminals}/${pullTerminals}`
-      )
-    }
+    if (protocolOps.size !== 0)
+      throw new Error('stock protocol operations remain pending')
   }
   let timer: ReturnType<typeof setTimeout> | undefined
   await new Promise<void>((resolve, reject) => {
@@ -295,7 +300,7 @@ async function waitForProtocol(expectedPushes: number): Promise<void> {
         clearTimeout(timer)
         resolve()
       } catch (error) {
-        if (protocolError || pushTerminals > expectedPushes || pullTerminals > 1) {
+        if (protocolError || pushAttempt > 5 || pullAttempt > 3) {
           protocolWaiters.delete(inspect)
           clearTimeout(timer)
           reject(error)
@@ -307,7 +312,7 @@ async function waitForProtocol(expectedPushes: number): Promise<void> {
       protocolWaiters.delete(inspect)
       reject(
         new Error(
-          `timed out waiting for exact recovery traffic (push invokes/terminals ${pushAttempt}/${pushTerminals}, pull invokes/terminals ${pullAttempt}/${pullTerminals}, pending ${protocolOps.size}, error ${String(protocolError)})`
+          `timed out waiting for protocol quiescence (push invokes/terminals ${pushAttempt}/${pushTerminals}, pull invokes/terminals ${pullAttempt}/${pullTerminals}, pending ${protocolOps.size}, error ${String(protocolError)})`
         )
       )
     }, 30_000)
@@ -335,9 +340,10 @@ let targetForDropConsume: ReturnType<typeof startOrezLocal> extends Promise<infe
 const dropFetch = createOperationBoundDropFetch((token) =>
   targetForDropConsume.consumeExactlyOnceResponseDrop(token)
 )
+const pullController = createPullQuiescenceFetch(dropFetch.fetch)
 const stockFetch = observedSyncFetch(
   (observation) => protocolObservation('stock-client', observation),
-  dropFetch.fetch
+  pullController.fetch
 )
 const harnessReplayFetch = observedSyncFetch((observation) =>
   protocolObservation('harness-replay', observation)
@@ -528,7 +534,66 @@ try {
     exactlyOnce: mutationEvidence,
     ...(mutationError ? { error: mutationError } : {}),
   })
-  await waitForProtocol(1)
+  if (protocolError) throw protocolError
+  const pendingAtClose = [...protocolOps.values()]
+  const pendingPushAtClose = pendingAtClose.filter(
+    (pending) => pending.evidence.type === 'push'
+  ).length
+  const pendingPullAtClose = pendingAtClose.filter(
+    (pending) => pending.evidence.type === 'pull'
+  ).length
+  if (pendingPushAtClose !== 0)
+    throw new Error(`cannot quiesce with ${pendingPushAtClose} pending stock push`)
+  const quiesceStable = {
+    type: 'client-quiesce' as const,
+    profileVersion: 1 as const,
+    identity: {
+      clientId: identity.clientId,
+      clientGroupId: identity.clientGroupId,
+    },
+  }
+  const quiesceOp = `${runId}-client-quiesce`
+  recorder.record({
+    opId: quiesceOp,
+    process: 'client-quiesce',
+    phase: 'invoke',
+    kind: 'barrier',
+    clientId: identity.clientId,
+    clientGroupId: identity.clientGroupId,
+    exactlyOnce: { ...quiesceStable, observed: null },
+  })
+  quiescing = true
+  if (pullController.pendingPullCount() !== pendingPullAtClose)
+    throw new Error('pull controller pending count disagrees with recorded pulls')
+  const closeResult = withTimeout(client.close(), 'client quiescence')
+  const controllerPullAbortsRequested = pullController.abortPendingPulls()
+  if (controllerPullAbortsRequested !== pendingPullAtClose)
+    throw new Error('pull controller abort count disagrees with recorded pulls')
+  await closeResult
+  client = undefined
+  await waitForProtocolIdle()
+  if (pullController.pendingPullCount() !== 0)
+    throw new Error('pull controller did not drain after quiescence')
+  quiescing = false
+  quiesced = true
+  recorder.record({
+    opId: quiesceOp,
+    process: 'client-quiesce',
+    phase: 'ok',
+    kind: 'barrier',
+    clientId: identity.clientId,
+    clientGroupId: identity.clientGroupId,
+    exactlyOnce: {
+      ...quiesceStable,
+      observed: {
+        closed: true,
+        pendingPushAtClose,
+        pendingPullAtClose,
+        controllerPullAbortsRequested,
+        pendingAfterQuiesce: protocolOps.size,
+      },
+    },
+  })
   if (mutationPhase !== 'fail') {
     if (!capturedPushBody) throw new Error('stock push raw body was not captured')
     const replayResponse = await harnessReplayFetch(`${target.origin}/push`, {
@@ -540,7 +605,7 @@ try {
       body: capturedPushBody,
     })
     await replayResponse.arrayBuffer()
-    await waitForProtocol(2)
+    await waitForProtocolIdle()
   }
   recordingProtocol = false
   await authority('after')
