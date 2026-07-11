@@ -216,13 +216,214 @@ each wave, ask the monitor for write-budget headroom between waves, and treat an
 re-trip as a finding (record, let monitor reopen, continue). If prod visibly
 breaks for real users, stop immediately and report urgent.
 
-## Open items needing coordinator confirmation
+## Execution record (what actually happened — 2026-07-11, ~11:00-11:20 UTC)
 
-1. Does the fix touch the WASM engine (host redeploy 3b required) or orez-TS only
-   (data worker 3a suffices)?
-2. Exact prod host deploy command from the M3 lane (name + prod bindings override
-   of `orez-rust-sync` → `soot-rust-sync-host-prod-v2`).
-3. Is there already a sanctioned bound-worker reopen path in the deploy env, or do
-   we use the one-off temp worker in step 4?
-4. DO-evict confirmation signal on the data-worker tail (with the monitor) so we
-   only reopen/probe against fixed code.
+Fix scope was **orez-TS only** (`cf-do/watermark.ts`, `cf-do/worker.ts`,
+`pg-proxy-do-backend.ts`; landed `909b4db`, released 0.4.61). The refined evict
+dance was used instead of a passive idle-evict: the host continuously polls the
+data DO's `/changes`, so the DO never idles while the host exists.
+
+Sequence as executed:
+
+1. Coordinator: `release --into ~/.worktrees/soot-deploy-fix`, then
+   `fast-deploy.ts data` → data worker on fixed 0.4.61, **Version `413cb780`**
+   (old baseline `46dbfea4`), smoke green.
+2. Driver: `wrangler delete --name soot-rust-sync-host-prod-v2` (stops polling;
+   monitor confirmed host inbound=0, `/changes` −85%). Deleting the host removes
+   only its derived `SYNC_DO`; the authoritative data worker is untouched.
+3. DO evicted during a ~2min quiet window and **came up UN-tripped on the fixed
+   code** — the sticky/persisted trip did NOT carry into the fixed-code isolate,
+   so **no manual reopen was needed**.
+4. Driver: temp bound worker (`services`→`soot-cf-orez-data-demo`, self-gated by
+   `x-reopen-key`) served the status GET + reopen POST during the host-deleted
+   window (host status proxy was gone).
+5. **Verify — PASS.** GET status: `tripped:false`, decayed to 0 rows. Ambient
+   post-boot window: `billableRows 12 / logicalRows 2` (~6:1). Deliberate probe
+   (owner session mint via `prod-login`): budget delta **7 billable / 0 logical,
+   no re-trip**. vs the incident's `301642 / 25` (~12,000:1). Monitor tail: the
+   collateral `/__soot_pg` + `/__soot_query` 500s (`no such table: file`) are
+   **resolved** (now 200), no new `orez_do_write_budget_tripped`, no 5xx.
+6. Coordinator: host redeploy → `soot-rust-sync-host-prod-v2` `f05253d6`, root GET
+   200, admin route alive. Reopen capability then **proven**: POST reopen with the
+   prod len-64 token returned `{ok:true,tripped:false}`. Temp worker deleted.
+
+### Lesson for the runbook: deploy the data worker with PROD env
+
+`fast-deploy.ts data` from the worktree sourced the **default dev env**, so the
+data worker's `BETTER_AUTH_SECRET` (and its `OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN`
+alias) was written as the **dev value (len 36)** instead of prod (len 64). Symptom:
+the operator reopen with the prod token 403'd (`{"error":"forbidden"}` from the
+data worker). This also risks data-tier better-auth session validation if it uses
+`BETTER_AUTH_SECRET`. Fix applied: `wrangler secret put BETTER_AUTH_SECRET` +
+`OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN` = prod value on `soot-cf-orez-data-demo`
+(a new version; the resident DO serves the old env until its next boot).
+**Always source `~/soot/.env.production` for a worktree data deploy** (the worktree
+has no `.env.production`; the CF creds are missing there too).
+
+---
+
+## Step 6 — waves (owner override; incident closed)
+
+The owner explicitly authorized the deepseek waves this round, overriding
+`~/soot/CLAUDE.md:263`. The amplification fix landing first is what makes them
+safe. Guards: check `sysctl -n vm.loadavg` + free memory before each wave (16
+cores; skip if 1-min load > ~2x or <6GB free), ask the monitor for write-budget
+headroom between waves, capture sync-engine symptoms per wave (push failures, pull
+stalls, poke gaps, reload divergence, 410 watermarkTooOld, breaker trips, latency),
+treat any re-trip as a finding (record, monitor reopens, continue), and stop + alert
+if prod visibly breaks for real users. Per-wave sections appended below.
+
+### Prod-wave mechanism (learned the hard way)
+
+The stock `debug:bossbean` driver is a LOCAL-factory harness: even with `--origin
+https://sootbean.com --login test` (+ `E2E_ADMIN_TOKEN`, which mints an isolated
+`e2e-<run>@test.local` prod account), it crashes at `connect ECONNREFUSED
+127.0.0.1:7432` — its agent-event observer hard-requires the local `dev:factory`
+Postgres. It cannot observe a prod wave. The working mechanism (coordinator interp
+C) is to drive prod's REAL product path with headless playwright and observe from
+outside (no pg): login → `/beta?skipWelcome` → navigate
+`/project/default_<userId>/main?createProject=app&name=<n>` → FACTORY tab →
+`[data-testid="boss-chat-input"]` (gate on `__sootFactoryRuntime().projectReady`
+first) → send. Harness: `<driver-scratch>/wave-c-driver.ts` (needs
+`NODE_PATH=~/soot/node_modules`; retry the first navigations for a fresh-Chrome
+`ERR_CERT_VERIFIER_CHANGED` race).
+
+### Wave 1 (interp C) — RESULT: STALL at project-create; found a sync-engine bug
+
+Wave 1 could not create a project. Login + f2c shell OK on prod (isolated e2e
+account). `createProjectFromTemplate` failed with a poke type-comparison:
+`Cannot compare values of different types: number and string` (client IVM `rX`,
+server "Poke processing error"). Monitor's server tails: the push/write succeeded
+at every HTTP layer (push/pull/`__soot_pg`/`__soot_query` all 200) — the failure
+is below HTTP, in poke/diff processing. **No amplification** (zero trips/429 across
+all namespaces — the 0.4.61 fix holds under load; the `/soot/pull` 200 burst also
+confirmed the host pull path healthy). This bug is a different class from the
+amplification.
+
+RCA (sent to engine agent `ab-mrgal2dq-98705`, HIGH confidence): failing columns
+`project.createdAt` / `project.updatedAt` (drizzle `timestamp`, zero-schema type
+`number`, epoch-ms i64 — the only numeric columns in the `project|insert` row).
+The SNAPSHOT path coerces every `number`-typed column string→number via
+`toZeroValue` (`src/zero/httpPull.server.ts:117-145`; invariant at line 114:
+"rowsPatch values must match the ZERO schema's column types … timestamp → epoch
+ms"). The incremental POKE/changes rowsPatch path does NOT run through `toZeroRow`,
+so it streams the data-worker's i64 timestamps as CAST-AS-TEXT strings; the client
+IVM then compares a poke-string `createdAt` against the snapshot/optimistic-number
+`createdAt` → "number and string". Scope = all `CHANGE_CLOCK_FIELDS`
+(`createdAt, updatedAt, firstSeenAt, lastActiveAt, billingPeriodStart`;
+`src/zero/httpPullWatermark.ts`) across every table in the incremental poke. Fix =
+run the poke rowsPatch through the same `toZeroValue` coercion the snapshot uses.
+Waves HELD until this deploys. Repro + captured payloads:
+`<driver-scratch>/wave-c-repro.ts` → `repro-out/{push-payloads.json,pull-bodies.txt}`.
+
+### Round-2 ticket: fresh-namespace "no such table: file" race
+
+Each brand-new namespace throws 2× HTTP 500 on `POST /__soot_pg` + `/__soot_query`
+at creation: `SELECT 1 FROM file WHERE "projectId" = ? LIMIT 1` runs before the
+`file` table is provisioned in the fresh DO. Self-resolves once the namespace is
+migrated (distinct from the incident's sticky-trip-refuses-CREATE-TABLE). Not
+blocking, but a real schema-provisioning race — orez round-2 ticket. Observed on
+organic anon prod visitors' fresh `proj-default_anon-*` namespaces during wave 1.
+
+## Wave 1 execution + terminal findings ledger (replacement driver, ~14:00–14:40 UTC)
+
+Ran the real product path on the fixed stack (orez `0.4.63`, host `488840dc`, data
+`cb6b7857`/`0.4.64`): `/api/test-login` E2E account → `createProjectFromTemplate`
+(app template) → factory boss prompt ("Pace Mobile" running tracker) → watch to
+built-app-or-stall, with between-phase write-budget checks via the host admin route
+(`/soot/admin/upstream-write-budget` + `/status`, `x-admin-key`).
+
+### 1. Timestamp compare bug — FIXED (gate passed)
+
+Gate = `create_ok=true` AND `project.createdAt`/`updatedAt` arrive as JSON numbers
+in the cold `/soot/pull` snapshot. Verbatim post-fix (run `gate-063-034635`):
+`"createdAt":1783777602000,"updatedAt":1783777602000` (bare numbers; pre-fix was
+the string `"2026-07-11 13:34:46"`). `accountResourceGrant.createdAt` was numeric
+before and after. Served by host `soot-rust-sync-host-prod-v2` (`488840dc`). No
+compare error; create-from-template succeeds end-to-end. Residency confirmed
+(numbers ⇒ new isolate serving). The round-1 poke-coercion RCA above is resolved by
+the sync-core epoch-ms coercion in `0.4.63`.
+
+### 2. Wave outcome: STALL (no app built) — namespace mirror ordering race
+
+Factory reaches the boss turn (BossBean plans, writes the ProductSpec and
+strips/relays the template — a real ~200k-row write burst) but the worker beans
+cannot persist their work; the factory parks with `tasks=[]` and agents
+idle/absent. Confirmed across two runs (1d = mid-build driver-tab swap; 1e = single
+stable tab, no swap). Ground truth via harness `ui.readState()`: `parked:true`,
+agents `status:"idle"`, `currentTaskId:""`, `tasks:[]`.
+
+**Root cause (engine RCA via coordinator + monitor APP-log RCA):** the project
+namespace's access-mirror rows (`project` + `accountResourceGrant`, which carry the
+owner's admin grant) seed **asynchronously** after create. The beans' first
+`thread`/`message`/`task` inserts race ahead of the mirror rows, so the server
+permission check's EXISTS-grant predicate is false on real data absence and denies
+them — even though actor == row-owner == the project owner
+(`cLX8Hw0hfOZV4ZmOWxNPkmlTj0rYzxJS` in run 1e). A real (non-impersonation) login
+hits it identically; no impersonation quirk. Wave-1d's boss got further only by
+timing luck (it created 4 beans + 4 tasks in chat, but `readState.tasks` was still
+`[]`).
+
+**Cascade to HTTP 500 (bug #2, real regardless of identity):** after the permission
+error, the retry path calls `writeMutationResult` →
+`INSERT INTO soot_0_mutations (clientGroupID,clientID,mutationID,result)` → hits
+`UNIQUE constraint failed … SQLITE_CONSTRAINT_PRIMARYKEY` (that mutation id was
+already recorded) → `[zero] push failed kind=PushFailed reason=database`. That
+`PushFailed` body has no `mutations` array → the host's delegated-push catch
+(`packages/sync-cf-host/src/host.ts`: `!Array.isArray(acknowledged)` throw
+~1064-1065; catch ~1104-1107 returns 500 without `#log()`, matching the observed
+`exceptions:[] logs:[]` signature) → HTTP 500 on `POST /proj-<ns>/push`. The host's
+delegated target is the APP worker (`soot-cf-demo /api/zero/push`,
+`mutateBinding=APP`), which returned 200 with the malformed body — so the 500 is
+the host body-shape throw, not an APP passthrough.
+
+**Fixes in flight (coordinator/engine):** (a) move soot-side access-mirror seeding
+into namespace provisioning so the first inserts authorize; (b) orez host tolerance
+for a structured `PushFailed`; (c) make `writeMutationResult` idempotent
+(upsert/ignore an already-recorded `(clientGroupID,clientID,mutationID)` instead of
+the UNIQUE constraint). **Waves HELD until (a)+(b) deploy** — every wave parks until
+then; the next wave (after the mirror fix) is the built-app attempt.
+
+### 3. Write-budget under a real build — no trip (concurrency ceiling note)
+
+One real factory build's boss file-gen burst peaked `upstream-write-budget` at
+**212,198 / 300,000 billable (71%)** in the 300 s window (logical ~320, ~660:1
+amplification), then receded as the window slid. **No breaker trip**; ingest
+breaker stayed at 0. The `0.4.61` amplification fix holds under a real build.
+Concurrency ceiling: a single first-time build reaches ~71% of the 300k/300s
+budget, so a few concurrent first-time builds could pressure or trip it — worth a
+headroom review before multi-user factory load. Budget checked each 30 s tick;
+trace in the driver scratchpad `budget-trace.json`.
+
+### 4. Fresh-namespace provisioning race — both faces corroborated (round-2 ticket)
+
+- **query-face** (the round-2 ticket above): `no such table: file` 500s on
+  `/__soot_query` + `/__soot_pg` at fresh-ns creation, self-resolving
+  post-migration (seen on 1c, 14:07:13-31 UTC).
+- **push-face:** intermittent HTTP 500 on a fresh ns's first push(es) to the host
+  (1b `proj_mrgfkhtj` push 500 ×2; also recurred on later writes for 1d
+  `proj_mrgg5igp`). Same delegated-push catch as bug #2 but triggered by the
+  provisioning race (APP returns a provisioning-shaped 200 body → host throw).
+- data `cb6b7857`/`0.4.64` adds a no-such-table retry (query-face should decay);
+  host `0.4.64` fresh-ns push barrier deploying at wave-1 terminal.
+
+### 5. Harness notes for the next driver
+
+- Deployed factory boss composer testid is **`sootbean-chat-input`** (aria "Message
+  Soot"), NOT `boss-chat-input`; the in-page bridge `harness.ui.sendBossMessage`
+  queries the stale `boss-chat-input` and always returns `{ok:false}`. Send via
+  `textarea[data-testid="sootbean-chat-input"]` + native value setter + `input`
+  event + plain `Enter` keydown (`src/features/chat/threadChatInput.tsx:355` —
+  enter submits, shift+enter = newline).
+- `window.__sootFactoryRuntime` exposes only `drivingAgentCount` (local-driver
+  runner count → **0 in prod**, server/cloud-driven; NOT a stall signal;
+  `headlessRuntimeEnabled:false`). Use `harness.ui.readState()`
+  (`agents[].status`, `tasks`, `parked`) for real progress. `parked:true` is the
+  default local state, not a stall by itself.
+- Hold a **single stable driver tab** the whole build; do not swap mid-build (a
+  swap looked like it might cause the park until the clean single-tab 1e run
+  reproduced the same stall and the engine RCA identified the real cause).
+- Driver/repro scripts (driver scratchpad): `wave1-driver.ts`
+  (create→boss→readState watch), `wire-repro.ts` (timestamp gate), `bean-inspect.ts`
+  (readState/bean-thread state). Coordinator: `ab-mreeh1ah-69466`; monitor:
+  `ab-mrgf4lhh-94638` (push-500 correlator + trip/429 pager).

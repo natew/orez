@@ -129,3 +129,386 @@ worker, reachable only via a bound worker (data worker has no public route); the
 data shim in `src/deploy/cloudflareDoDeploy.ts` routes
 `/<ns>/_orez/write-budget/reopen` → ZeroSqlDO. Status (read-only, no mutation):
 `GET /soot/_orez/write-budget`.
+
+## Update ~10:53 UTC — soot symptom self-cleared (on old code, no reopen)
+
+soot-ns `/changes` flipped from 429 → steady **200** around 10:40–10:48 UTC. By
+10:53, the last 90s showed 48 soot `/changes` all 200, zero 429, zero 5xx, and no
+re-trip in 20+ min. This happened with the data worker **still on scriptVersion
+`46dbfea4`** (no redeploy) and **no reopen log line**.
+
+Reading: the write-**attempts** ceased, not a reopen. The initial re-stream burst
+that wrote 301k rows got rejected repeatedly; once it stopped attempting the large
+write, `/changes` returns cheap incremental 200s that write nothing, so they no
+longer hit the budget. Reads stay open while tripped, so the **sticky trip flag is
+very likely still set** — the tail cannot show the flag; only
+`GET /soot/_orez/write-budget` (`tripped`) confirms it. Consequence: polling is now
+cheap, so the soot ZeroSqlDO can idle-evict once the host stops polling it.
+
+## Recovery plan (superseded twice) → now: engine-fix-gated
+
+No keepalive drain. The trip is persisted and a drain would keep the stale-code
+isolate resident, blocking the idle-evict needed to boot fixed code. Coordinator's
+sequence: land orez engine fix → release `--into` the deploy tree → redeploy data
+worker (+ host if the fix touches the WASM engine) → **delete host** briefly to stop
+`/changes` polling so the soot ZeroSqlDO idle-evicts → one admin reopen → minimal
+probe write to confirm ~1:1 billable:logical (not 12,000×). Engine RCA (per driver
+runbook): the tracked transaction copies all of `_zero_changes` per push and
+watermark discovery treats the rollback snapshot as a live sequence → triangular
+growth; fix measured −94% to −96%.
+
+## Monitor arming for recovery execution
+
+- Tails switched to **supervised auto-reconnecting** wrappers
+  (`supervise-tail.sh`, append mode) so they survive the data redeploy and the
+  host delete→recreate without a blind gap. Supervisor pids in `super-pids.txt`.
+- Watcher (`watch.py`, recovery phase) exits + re-invokes the monitor on the first
+  of: RE_BURST (new `trippedAt` → instant page), DATA_DEPLOY (data scriptVersion ≠
+  `46dbfea4` = fixed code live; ping before reopen), HOST_DEPLOY, HOST_SILENT (host
+  events → 0 = deletion; confirm `/changes` stops), SOOT_CHANGES_STOP, and
+  DATA_TAIL_STALL (blind-guard). Baselines: data `46dbfea4-8d78-4ce6-91bb-963ee7e9a8f9`,
+  host `2aa41010-eea9-486e-90ad-38b00d196f30`.
+- Probe billable:logical: captured from the data tail; authoritative `tripped` +
+  `billableRows`/`logicalRows` via `GET /admin/upstream-write-budget` on the host
+  (gated by prod host `ADMIN_KEY`) — read by the driver/coordinator during
+  reopen+probe, not by this read-only monitor unilaterally. The reopen itself is
+  independently confirmable from the data tail: the ZeroSqlDO logs
+  `orez_do_write_budget_reopened` (`reopenedAt`) — watcher keys on it.
+
+## Recovery execution timeline (live)
+
+- ~10:58:59 / 10:59:08 UTC — **data worker redeployed** twice for 0.4.61
+  (scriptVersion `f14c6fe3` then `413cb780`). `413cb780` is current/latest;
+  old `46dbfea4` drained out. soot `/changes` stayed clean 200 throughout.
+- 11:01:46–11:02:31 UTC — **host `soot-rust-sync-host-prod-v2` deleted** (driver,
+  coordinator GO). Confirmed: host inbound events → 0; soot `/changes` dropped
+  ~85% (≈8/15s → ≈1–2/15s). Polling stopped so the soot ZeroSqlDO can idle-evict.
+  Planned all-namespace sync gap begins; tails supervised so they reconnect when
+  the host is redeployed.
+- ~11:10 UTC — after the idle-evict, the driver read the soot budget status on
+  fixed `413cb780`: **`tripped: FALSE`, decayed to 0 rows**. The DO came up
+  **un-tripped** on the fresh boot, so **no reopen was needed**. Observed ratio
+  ~6:1 (a `12:2` billable:logical window before roll-off), not 12,000×.
+- 11:12:15–11:12:58 UTC — driver ran a deliberate **prod-login probe**. Data-tail
+  confirmation: `POST /__soot_pg` and `POST /__soot_query` back to **200** (were
+  500 `no such table: file` during the incident — collateral resolved as the DO
+  booted fresh schema), `/changes` 200, budget-status GET 200, **no new trip**,
+  **zero exceptions / 5xx** in the 90s window (only benign `canceled` queries).
+- Outcome: **recovery successful on the soot ns.** The fix reduced amplification
+  from ~12,000× to ~6:1, the namespace serves writes+reads cleanly, no re-burst.
+
+### Open follow-ups (flagged, not monitor-actionable)
+
+- The data worker was deployed with a **dev `BETTER_AUTH_SECRET` (len 36)** vs the
+  prod len-64 value (driver flagged to coordinator). That secret is also
+  `OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN` and the auth secret, so it should be
+  corrected.
+- Worth explaining **why the DO came up un-tripped** after the evict, given the
+  safeguard doc says the sticky `trippedAt` is persisted in DO storage: either the
+  fixed code no longer restores/keeps the sticky flag, or the persisted flag did
+  not survive the fresh boot. Not resolved here.
+
+### Why the DO came up un-tripped (coordinator's answer)
+
+The sticky flag is written via `ctx.waitUntil(storage.put(...))` at the instant the
+budget error **throws** (`orez src/cf-do/worker.ts:196`). The `put` is a buffered
+write inside a request that ends in an uncaught throw, so the DO reset discards it —
+stickiness is unreliable by construction. Queued as a round-2 engine fix (await the
+persist before throwing). Secret defect already corrected (prod len-64 values re-put;
+uploads confirmed).
+
+### Host redeploy + close-out (~11:15–11:22 UTC)
+
+- ~11:14:46 UTC — data worker redeployed again for the secret fix (scriptVersion
+  `bc11e838`, now current). Verified healthy: pg/query/changes all 200, 0 trips,
+  0 exceptions.
+- Host `soot-rust-sync-host-prod-v2` redeployed. Driver cited `f05253d6` + root
+  GET 200 + reopen POST `{ok:true,tripped:false}` with the re-put prod len-64 token
+  (was 403 on the dev secret). **My host tail sees scriptVersion `2d6477c0`** —
+  reconciliation flagged to the driver (deployment-id vs version-id, or a second
+  redeploy).
+- Host tail required manual recovery: the wrangler-tail session zombied on the
+  deleted worker (single connect marker, never exited), then left stale children
+  after recreation. Cycled the children so the supervisor attached a fresh session
+  to the live host (jsonl fresh again 11:19:28 UTC). **Lesson: `wrangler tail`
+  does not reliably follow a worker across delete→recreate; a supervised tail must
+  be force-cycled when the target is recreated.**
+- **Confirmation (2) /changes polling resumed — CONFIRMED.** soot `/changes` on
+  the data tail climbed out of the ~1–2/15s trough to steady 5–7/25s (host
+  ingesting again; its DO alarms fire on schedule).
+- **Confirmation (1) `POST /soot/pull` → 200 — not yet observable.** No organic
+  client pull in the window (host tail shows only DO alarm firings, outcome ok);
+  the driver's root-GET-200 landed before the tail reconnected. Watcher now armed
+  to report the first `/soot/pull` (any status) the instant it appears.
+
+## Wave 1 (real, interp C — playwright drives prod product path)
+
+- First attempt **aborted**: the `debug:bossbean` driver crashed at its local pg
+  observer (`127.0.0.1:7432` ECONNREFUSED) right after a successful prod login,
+  before creating a project. No sync load reached prod. Superseded by interp C
+  (headless playwright against sootbean.com: login → create project → factory tab
+  → "Build Pace Mobile" prompt → prod factory runs agents server-side ~25 min).
+- Division of labor: driver self-polls `GET /soot/admin/upstream-write-budget`
+  (host `ADMIN_KEY`) for exact `billableRows`; monitor runs the namespace-agnostic
+  trip/429-surge pager + confirms `/soot/pull`.
+- **Real wave 1 (~11:33 UTC): STALLED at project-create — no factory load ran.**
+  The playwright harness logged in but `project|insert` failed on a **new engine
+  bug**: `Mutator 'project|insert' → 'Cannot compare values of different types:
+string and number'` in poke processing (i64/string wire-format class, client +
+  server). The harness then timed out on the create-redirect and exited. No
+  `proj_<id>` factory namespace was ever created; the factory never started.
+- **Traffic attribution (corrected).** The ~338 data-events/60s + `/soot/pull`
+  burst + `/changes` 40/window at 11:36–11:38 were the harness shell + default
+  project (`proj-default_Owwi…`) Zero-client pulling/retrying after the failed
+  mutation, **plus organic anon prod visitors** (`proj-default_anon-*`) — **not**
+  factory-agent load. Do not count it as wave throughput.
+- **Server-tail localization of the new bug** (create window 11:33–11:38): the
+  `project|insert` push **succeeded at every HTTP layer** — app `/api/zero/push`
+  200 (4×), host `/<ns>/push` 200 (8×), data `/__soot_pg`+`/__soot_query` 200
+  (217× each), `/__soot_migrate` 200 (22×). The `Cannot compare…` error appears in
+  **none** of the three tails (no console log, no `exceptions` entry, no HTTP
+  4xx/5xx) and there were **zero exceptions** on any worker in-window. So the write
+  path is healthy and the failure is in **poke/diff processing below the HTTP
+  surface** (the i64-vs-string compare when applying the poke), not the write path.
+  A different bug class from the amplification.
+- **Confirmations that stand (real recovery proof, even without factory load):**
+  `POST /soot/pull` → **200** under load (burst at 11:36:20 UTC, 14+ in 60s, no
+  500s — the incident's `/soot/pull` 500s are fully resolved), and **zero trips /
+  zero 429 / zero amplification** across all namespaces — the 0.4.61 amplifier fix
+  holds under real product load.
+- Product observation (minor, not amplification): each brand-new anon namespace
+  (`proj-default_anon-*`, organic visitors) throws 2× HTTP 500 `no such table:
+file` on `POST /__soot_pg` + `/__soot_query` at creation — a `SELECT 1 FROM file
+WHERE projectId=?` racing ahead of schema provisioning on the fresh DO.
+  Self-resolves after migration; distinct from the incident's sticky-trip cascade.
+  Worth an orez ticket.
+
+## Round-2 attempts + where the real fix lives
+
+- Host redeployed to `da5e3874` (0.4.62) at 11:49:28 UTC — **no-op for the poke
+  bug** (coordinator + driver confirmed). Data unchanged (`bc11e838`).
+- Create-repro at 11:53 UTC still failed (`create_ok=false, compareError=true`).
+  Data-tail corroboration: the new namespace `proj-proj_mrgb24n4_0ewn98` appeared
+  with exactly **1 event, 0s span, then silent** — the write landed (namespace
+  created) but no sustained sync followed = poke broke / stall. Write-healthy,
+  poke-broken, consistent throughout.
+- **The real fix is app/soot-side**: `toZeroValue` in `httpPull.server.ts`,
+  shipped by a **`soot-cf-demo` app-worker deploy** (not host WASM, not data).
+  Monitor now watches for the app-worker scriptVersion bump off baseline
+  `1ef662d1` (APP_DEPLOY signal) and will confirm on the driver's next repro when
+  `create_ok` flips true.
+
+## Verdict
+
+The new orez rust sync engine's write-budget safeguard **worked**: it caught a
+~12,000× amplification at 301,642 billable rows and held (single sticky trip, no
+re-burn), turning a potential 2026-07-08-style multi-hundred-k burn into a
+contained, reads-degraded incident. Recovery was clean — engine fix (0.4.61)
+redeploy → idle-evict → un-tripped fresh boot → probe verified ~6:1 (7 billable /
+0 logical), collateral 500s resolved.
+
+What is **confirmed**: the 0.4.61 amplifier fix holds under real prod load — zero
+trips, zero 429, zero amplification across all namespaces during real product/sync
+traffic (organic anon visitors + the wave harness's shell/default-project
+Zero-client retries). The host `/soot/pull` path is healthy under that load (200
+burst, no 500s — the incident's `/soot/pull` 500s are gone).
+
+What is **not yet tested**: actual **factory-agent write load**. Wave 1 stalled at
+`project|insert` before the factory started (new engine bug — `Cannot compare
+values of different types: string and number` in poke/diff processing, i64/string
+wire format; write path healthy, poke path broken — a different class from the
+amplification). So the factory-load stress remains pending the round-2 fix + wave
+retry; do not claim the amplifier fix is proven under factory load until then.
+
+Engine follow-ups surfaced: (a) sticky-flag persistence is unreliable (buffered
+`put` in a throwing request) — round-2 fix queued (already on orez main);
+(b) a dev `BETTER_AUTH_SECRET` shipped to the data worker — corrected; (c) the new
+`project|insert` string/number poke bug — RCA/fix in flight (engine agent
+`ab-mrgal2dq-98705`); (d) minor: fresh anon namespaces 500 on `no such table:
+file` (pg-wire query races schema provisioning) — orez ticket candidate.
+
+No factory waves ran; prod surfaced and recovered from its own showstopper, and the
+one attempted product-path wave found a second, unrelated engine bug at create.
+
+## Wave 1 retry — 2026-07-11 ~13:50 UTC (monitor ab-mreeh1ah-adopted)
+
+Monitor handed off from ab-mrg82jhn-98583 to this session; all 3 supervised tails
+adopted live (supervisors 78099/78100/78101, wrangler children 78111/78112/63868).
+
+- **New engine live:** host `soot-rust-sync-host-prod-v2` rolled `da5e3874`
+  (0.4.62) → **`488840dc` (orez 0.4.63, timestamp-coercion fix)** at **13:46:03 UTC**.
+  Fresh durableObjectId isolates booted; rollout converged (only 488840dc in the
+  last 90s; transient `3997c2cf` during propagation, gone). App worker unchanged
+  at baseline `1ef662d1` — the poke/`Cannot compare` fix shipped in the orez engine
+  (timestamps now JSON numbers), not app-side `toZeroValue`.
+- **Gate PASS** (driver ab-mrgei5ef-41125): create_ok=true, single gate create did
+  not trip; authoritative budget read `tripped=false billable=21482/300000 (~7%)
+logical=67 (~320:1) writerEnabled=true`, window resets ~13:51:39 UTC.
+- **Wave 1 launched ~13:50 UTC:** real product path on sootbean.com — login e2e-\* →
+  create project → factory prompt (Pace Mobile running tracker) → built-app-or-stall
+  (~20 min). Single e2e account, one project namespace, factory server-side. Driver
+  snapshots budget every 30s and STOPS on any trip.
+- **Monitor arming:** tail-based danger scanner `wave-danger.py` (pid in
+  `wave-danger.pid`) watches all three tails from wave-launch EOF and pages the
+  coordinator `--urgent` on write-budget trip / ≥5 429s-per-60s / ≥5 non-anon
+  5xx-per-60s. Benign fresh-anon `no such table: file` 500s tracked separately, not
+  paged. Coordinator declined to share ADMIN_KEY over the bus (correct); tail
+  detection + driver phase snapshots cover paging. Heartbeat in
+  `wave-danger.heartbeat`.
+- **Pre-load baseline (since 13:46 boot):** ZERO trips / 429 / 5xx / exceptions
+  across data, host, and app. Data tail connection-alive but idle (no data traffic
+  since 13:15 UTC) — the wave's proj namespace will be the first data-worker load.
+
+### Reliability finding — silent data-tail blind (13:15–14:01 UTC)
+
+The `soot-cf-orez-data-demo` wrangler tail went **silently blind**: its jsonl froze
+at 13:15 (file size unchanged) while the driver's authoritative budget read proved
+~12k billable rows were written to that worker's ZeroSqlDO in-window. wrangler's
+tail WebSocket dropped on the long-idle worker, but the `wrangler tail` **process
+stayed alive**, so `supervise-tail.sh` (which only reconnects when the child exits)
+never saw a disconnect and never reconnected. The supervisor's liveness model —
+"child process alive == tail healthy" — is wrong for this failure mode.
+
+Fixed by cycling the wrangler child (`kill` the tail process); the supervisor
+reconnected in 3s (new child, file appending again). No trip occurred during the
+blind window (billable stayed 12–21k, far under 300k), and the driver's 30s budget
+poll was independent coverage throughout.
+
+**Supervisor improvement to make durable:** add a per-tail freshness heartbeat —
+if a tail emits no lines for N seconds _while the worker is known to be receiving
+traffic_ (or unconditionally past a max-idle), proactively recycle the child rather
+than trusting process liveness. Idle workers are the ones whose tail sockets get
+reaped, so the longest-quiet tail is the most likely to be blind exactly when load
+finally arrives.
+
+### Wave-1 attempts 1 & 2 (pre-factory)
+
+- **Attempt 1** (proj_mrgfbxmw_y751df): project created (no trip), but the driver's
+  harness boss-composer selector matched a hidden instance and timed out **before**
+  sending the factory prompt. Zero factory load. Not a finding.
+- **Attempt 2** (proj_mrgfkhtj_hw5cvv): re-driven via the sanctioned
+  `window.SootBean.bridges.harness.ui.sendBossMessage` bridge. Create wrote through;
+  4 transient host `/push` 500s at 13:59:08–11 (fresh-namespace schema race, empty
+  logs, self-resolved to 200) then steady pull 200s. Still pre-factory-load at
+  handoff of this note.
+
+### Host push-500 RCA (localization) + unified provisioning-race story
+
+**Symptom (driver + monitor):** first push(es) to a brand-new project namespace on
+the HOST DO return HTTP 500, intermittently — `SootSyncDurableObjectV2` 488840dc,
+`exceptions:[] logs:[] outcome:ok` (a deliberate/caught 500, no crash). It blocks
+the boss composer from initializing (`bossInputCount=0`), so the factory prompt
+can't be sent. Intermittent: attempt-1 (proj_mrgfbxmw) had zero push-500 and
+mounted the factory shell; attempt-1b (proj_mrgfkhtj) hit it.
+
+**Localization (`packages/sync-cf-host/src/host.ts` `#push`):** two push paths
+exist. Soot prod uses the **delegated** path (`config.mutateUrl` → data worker,
+lines 1029-1108). Its catch (1104-1107) returns `json(errorBody, statusOf)` with
+**no `#log`, no re-throw**; `statusOf()` defaults to 500 for a non-HTTP error — an
+exact match for the empty-logs/empty-exceptions signature. The **local** path's
+catch (1266+) _does_ `#log(resultClass:'error')` and bumps `invariantFailures`, so
+the missing log rules it out. Likely throw inside the delegated catch: line
+1064-1065 `if(!Array.isArray(acknowledged)) throw 'delegated push returned no
+mutation results'` (data returns 200 but a body without `pushResponse.mutations`
+while its ZeroSqlDO provisions), or `#fetchDelegatedPush` (690) throwing after
+`delegateMaxAttempts` during data cold-start.
+
+**Unified root cause with the data 5xx:** on attempt-1c the data worker shows the
+fresh-namespace provisioning race live — `no such table: file: SELECT 1 FROM file
+WHERE "projectId"=? LIMIT 1` 500s on `/__soot_query`+`/__soot_pg` at 14:07:13-31,
+self-resolving post-migration. Same class: first writes/queries race schema + DO
+provisioning on a brand-new project. The host push-500 is very likely the
+push-path face of the same race. Engine fix direction: make the first push/query
+on a fresh namespace provision-then-retry rather than 500. Data tail now live, so a
+repeat on 1c can be captured to confirm delegated-push-body vs data-500-passthrough.
+
+### Wave 1d + scanner hardening (~14:16-14:19 UTC)
+
+- **Delegated-push target is APP, not data.** soot host config:
+  `mutateUrl='/api/zero/push?schema=soot_0&appID=soot'`, `mutateBinding='APP'`. So
+  the host `#push` delegated path fetches the **APP worker** (`soot-cf-demo`)
+  `/api/zero/push`, and the `!Array.isArray(acknowledged)` throw is on APP's
+  response body — not the data worker. A host push-500 correlates to APP
+  `/api/zero/push`: APP 200 ⇒ the array-less-body throw; APP 5xx ⇒ passthrough.
+  Correlator: `/tmp/prod-wave-logs/push500-correlate.py` → `push500.findings.log`.
+- **Scanner false-page fixed.** The 5xx-storm pager was counting the fresh-ns
+  provisioning race (query-face `/__soot_query` 500s don't self-carry the
+  `no such table` text — it rides the paired `/__soot_pg`/`/batch` event), so 5 of
+  them tripped an --urgent page with no real trip. Classifier is now race-aware:
+  `RACE_ROUTES = __soot_pg/__soot_query/__soot_migrate/batch/push` and any
+  `no such table` blob go to a non-paging `5xx_race` bucket. Trip + 429 paging
+  unchanged — those remain the real danger channel.
+- **Data worker → 0.4.64 (cb6b7857)** with the no-such-table provisioning retry;
+  tail captured the new isolate cleanly across the redeploy (no blind gap). Host
+  0.4.64 (push barrier, 299d0d7) held until wave-1 terminal to avoid restarting
+  host DOs under the live factory build.
+
+### Wave 1 terminal outcome (~14:28 UTC) — factory load exercised, engine held
+
+**HEADLINE (the thing the whole round was gated on): real factory-agent write load
+was finally exercised and the write-budget engine HELD.** The boss-planning +
+4-bean + 4-task creation phase drove the upstream write budget to a **peak of
+212k/300k (71%, ~700:1 amplification)**, which then **receded** as the 5-min
+rolling window aged out — **NO trip, NO 429, no amplification runaway**. This
+closes the prior monitor's open item ("factory-agent stress remains untested"):
+the 0.4.61 amplifier fix + 0.4.63 timestamp fix hold under genuine factory load.
+
+**Build outcome: STALL after bean-assignment (confounded).** readState on
+proj_mrgg5igp: `parked=true`, all 4 beans (Onyx/Sage/Rivet/Cinder) `status=idle
+currentTaskId="" tasks=[]`, writes flatlined to 8/300k for ~7 min. The factory
+reached boss-planning + bean/task creation, then parked; beans never executed, no
+app built. **Confound (driver was upfront):** the driver tab was swapped at
+14:20:51 right after bean assignment, and `headlessRuntimeEnabled=false` means the
+browser tab _is_ the factory driver — so the swap may have caused the park. But a
+stable tab was then present ~7 min without un-parking, and `tasks=[]` despite boss
+chat claiming 4 in-progress — so a genuine stall (tasks not persisting) can't be
+ruled out. Driver is re-running with a single stable tab, readState-based watch,
+for an uncontaminated built-app-or-stall. **This is a factory/harness question, not
+a sync/engine failure** — all sync layers stayed clean throughout.
+
+### Clean re-run push-500 = real two-bug cascade (14:32 UTC, proj_mrggrc0y)
+
+The push-500 correlator (host `/push` 5xx → paired APP `/api/zero/push`) fired on
+the clean single-tab re-run and captured the actual cause. Host push-500 at
+14:32:26 with **all 9 paired APP pushes = 200**, confirming the host
+`!Array.isArray(acknowledged)` body-shape throw (hypothesis (a)), not a
+passthrough. The APP console logs show a two-bug cascade — distinct from the
+fresh-ns provisioning race and **not** covered by 299d0d7:
+
+1. **PermissionError on the factory's own inserts.** `[permission] Not Allowed:
+thread with auth id cLX8Hw0h…` on `thread|insert#1` (id
+   `proj_mrggrc0y_qy8v83-icon-designer`) and `message with auth id …` on
+   `message|insert#1` (`threadId=thread_mainbean_proj_mrggrc0y`). The beans'
+   thread/message inserts are rejected by `runServerPermissionCheck` /
+   `ensurePermission`. **Hypothesis: this is the genuine stall cause** — beans that
+   can't persist threads/messages/tasks park with `tasks=[]`, independent of the
+   driver's tab swap.
+2. **UNIQUE-constraint 500 in the error-record path.** After the permission error,
+   the retry-without-mutator path calls `writeMutationResult` →
+   `INSERT INTO soot_0_mutations (clientGroupID, clientID, mutationID, result)` and
+   hits `UNIQUE constraint failed … SQLITE_CONSTRAINT_PRIMARYKEY` (that mutation id
+   is already recorded) → `[zero] push failed kind=PushFailed reason=database`. The
+   PushFailed body carries no mutations array → host throws → the 500.
+
+Also observed: `alreadyProcessed` replays (`sootSession|createWithWorktree#1`
+expected 2 got 1; `thread|insert#1`) — client resending mutation id 1. Host push
+recovered partially (push 200×6 / 500×2, pulls 200). No trip, budget clean.
+
+Engine/app follow-ups: (a) why the factory bean `thread|insert`/`message|insert`
+fail server permission for the project owner's auth id; (b) `writeMutationResult`
+idempotency — recording a result for an already-present
+(clientGroupID, clientID, mutationID) should upsert/ignore, not 500 the push.
+Full evidence: `/tmp/prod-wave-logs/push500.findings.log`.
+
+**CONFIRMED (driver): the permission denial is a REAL bug.** `cLX8Hw0h...` is the
+project OWNER's userId AND the 1e logged-in USER_ID — so the factory's server
+inserts run AS the owner, with the logged-in user == owner == the denied auth id,
+and are STILL permission-denied on the owner's own `thread|insert`/`message|insert`.
+Not an agent-wrong-identity issue and not the driver's tab-swap confound. This is
+the genuine stall cause: beans can't persist their threads/messages/tasks →
+`tasks=[]`, beans park, no app built. Residual (for a real-login repro to settle,
+not more static analysis): whether `/api/test-login` sets a session/auth CONTEXT
+claim that the on-zero permission rule evaluates differently than a real login. The
+permission logic is in the on-zero mutator/permission layer, not soot's
+`src/zero`/`src/database` schema. Driver is relaying the full cascade to the
+coordinator. Sync/engine layers stayed clean throughout (no trip, budget clean).
