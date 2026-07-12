@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/sync-core", "crates/sync-native", "crates/sync-wasm", "crates/soot-native"]
+members = [
+  "crates/sync-core",
+  "crates/sync-native",
+  "crates/sync-wasm",
+  "crates/soot-native",
+]
 
 [workspace.package]
 edition = "2024"

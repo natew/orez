@@ -11,10 +11,10 @@ server itself. Change one dimension at a time based on what you need to prove.
 
 ## Database backend
 
-| Mode | Select it with | Best for | Trade-off |
-| --- | --- | --- | --- |
-| PGlite | default or `--backend=pglite` | Fast, portable local development | One PostgreSQL session per database; queries serialize and logical replication is emulated |
-| Embedded Postgres | `--backend=postgres` | Concurrency, long-running processes, production-like replication | Downloads a platform server package and uses more resources |
+| Mode              | Select it with                | Best for                                                         | Trade-off                                                                                  |
+| ----------------- | ----------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| PGlite            | default or `--backend=pglite` | Fast, portable local development                                 | One PostgreSQL session per database; queries serialize and logical replication is emulated |
+| Embedded Postgres | `--backend=postgres`          | Concurrency, long-running processes, production-like replication | Downloads a platform server package and uses more resources                                |
 
 ### PGlite
 
@@ -43,11 +43,11 @@ or tests that need behavior close to a deployed Postgres system.
 
 ## zero-cache SQLite
 
-| Mode | Selection | Best for | Trade-off |
-| --- | --- | --- | --- |
-| Auto | default | Most users | Result depends on whether a native binary is available |
-| WASM | `--force-wasm-sqlite` | Portability and reproducible no-native environments | Slower than the native addon under heavy work |
-| Native | `--disable-wasm-sqlite` | Maximum zero-cache SQLite performance | Requires a working platform binary |
+| Mode   | Selection               | Best for                                            | Trade-off                                              |
+| ------ | ----------------------- | --------------------------------------------------- | ------------------------------------------------------ |
+| Auto   | default                 | Most users                                          | Result depends on whether a native binary is available |
+| WASM   | `--force-wasm-sqlite`   | Portability and reproducible no-native environments | Slower than the native addon under heavy work          |
+| Native | `--disable-wasm-sqlite` | Maximum zero-cache SQLite performance               | Requires a working platform binary                     |
 
 In auto mode orez uses native `@rocicorp/zero-sqlite3` when its binary is
 present, otherwise it falls back to `bedrock-sqlite` WASM. Both use WAL2. The

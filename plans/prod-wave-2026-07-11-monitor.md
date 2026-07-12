@@ -454,12 +454,12 @@ closes the prior monitor's open item ("factory-agent stress remains untested"):
 the 0.4.61 amplifier fix + 0.4.63 timestamp fix hold under genuine factory load.
 
 **Build outcome: STALL after bean-assignment (confounded).** readState on
-proj_mrgg5igp: `parked=true`, all 4 beans (Onyx/Sage/Rivet/Cinder) `status=idle
+proj*mrgg5igp: `parked=true`, all 4 beans (Onyx/Sage/Rivet/Cinder) `status=idle
 currentTaskId="" tasks=[]`, writes flatlined to 8/300k for ~7 min. The factory
 reached boss-planning + bean/task creation, then parked; beans never executed, no
 app built. **Confound (driver was upfront):** the driver tab was swapped at
 14:20:51 right after bean assignment, and `headlessRuntimeEnabled=false` means the
-browser tab _is_ the factory driver — so the swap may have caused the park. But a
+browser tab \_is* the factory driver — so the swap may have caused the park. But a
 stable tab was then present ~7 min without un-parking, and `tasks=[]` despite boss
 chat claiming 4 in-progress — so a genuine stall (tasks not persisting) can't be
 ruled out. Driver is re-running with a single stable tab, readState-based watch,
@@ -541,8 +541,8 @@ create used `routeKey=main` and `sootAgent` links to the project directly.
 session's routeKey, and the per-bean branch sessions have **no access grant/mirror
 seeded**. So 3ba77d5c fixed the main-project grant seeding, but the **branch-session
 access path is a second, unpatched seeding gap** — same async-mirror bug class, one
-level deeper. Same pattern in wave-1 proj_mrgg5igp (14:18 sootTask also
-routeKey=sess_branch_*). Fix direction: seed the access grant/mirror for each
+level deeper. Same pattern in wave-1 proj*mrgg5igp (14:18 sootTask also
+routeKey=sess_branch*\*). Fix direction: seed the access grant/mirror for each
 per-bean branch session (or have `linkedProjectAccessCondition` fall back to the
 parent project's grant) before tasks insert. **Sync/engine clean throughout wave 2:
 no trip, no 429, budget clean.**
@@ -602,8 +602,8 @@ content-hashed chunks). So the behavioral difference is NOT app-logic.
 Create-time probe (proj_mrgkscyt, 16:24-16:26):
 
 - **No provisioning errors:** zero app-tail lines mentioning provisionNamespace /
-  zeroAsyncActions / async-task-failed / projectNamespaceAccessMirror / __soot_migrate,
-  zero exceptions; data tail zero 5xx and zero __soot_migrate in-window. The barrier
+  zeroAsyncActions / async-task-failed / projectNamespaceAccessMirror / **soot_migrate,
+  zero exceptions; data tail zero 5xx and zero **soot_migrate in-window. The barrier
   did not visibly error.
 - **Create push was SLOW, not fast** (refutes "acked fast / backgrounded"): host
   wallTime for the wave-3 create pushes = 2184ms + 2627ms; the working wave-2

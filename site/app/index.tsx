@@ -58,8 +58,8 @@ export default function HomePage() {
           <div>
             <h2>Not a toy abstraction</h2>
             <p>
-              Switch to embedded Postgres for real logical replication, or deploy the
-              Rust sync engine on Cloudflare Durable Objects.
+              Switch to embedded Postgres for real logical replication, or deploy the Rust
+              sync engine on Cloudflare Durable Objects.
             </p>
           </div>
           <div>
