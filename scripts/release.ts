@@ -32,7 +32,11 @@ const packOnly = args.includes('--pack-only')
 const ci = args.includes('--ci')
 const intoIdx = args.indexOf('--into')
 const into = intoIdx !== -1 ? args[intoIdx + 1] : null
-const canPromptForNpmOtp = Boolean(input.isTTY && output.isTTY && !process.env.CI && !ci)
+// Match the One/Tamagui release flow: prompts also work when the release is
+// driven through an agent PTY, where Node may not report stdin/stdout as TTYs.
+// A real CI environment remains fail-closed and must provide NPM_CONFIG_OTP
+// explicitly. The local `--ci` workflow can still prompt for an OTP.
+const canPromptForNpmOtp = !process.env.CI
 
 if (!patch && !minor && !major && !canary && !packOnly && !into) {
   console.info(
