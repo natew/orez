@@ -1,0 +1,81 @@
+---
+title: Getting started
+description: Install orez, run Zero locally, add migrations, and connect an application.
+---
+
+# Getting started
+
+The shortest path is one command. orez chooses available ports, creates a local
+data directory, starts the database and zero-cache, and prints the endpoints.
+
+```sh
+bunx orez
+```
+
+You need Bun 1 or Node.js 20 or newer. No Postgres installation, Docker daemon,
+or compiler toolchain is required for the default mode.
+
+## Add migrations
+
+Point orez at a directory of SQL migrations. Files are applied in filename
+order before zero-cache starts.
+
+```sh
+bunx orez --migrations=./db/migrations
+```
+
+For repeatable settings, create `orez.config.ts`:
+
+```ts
+import { defineConfig } from 'orez'
+
+export default defineConfig({
+  migrations: './db/migrations',
+  seed: './db/seed.sql',
+  logLevel: 'info',
+})
+```
+
+CLI arguments override the config file. JavaScript or MJS config files work on
+older Node versions; TypeScript config files require Node 22.6+ or Bun.
+
+## Connect
+
+By default the PostgreSQL endpoint is:
+
+```text
+postgresql://user:password@127.0.0.1:6434/postgres
+```
+
+zero-cache listens on port `5849`, and the admin view listens on `6477`. If a
+port is occupied, orez increments it and reports the actual address rather than
+failing startup.
+
+## Run only the database
+
+If you need the embedded PostgreSQL-compatible database and wire proxy without
+Zero, skip zero-cache:
+
+```sh
+bunx orez --skip-zero-cache
+```
+
+## Start clean for tests
+
+Ephemeral mode keeps PGlite in memory and creates a per-run replica cache. It is
+well suited to tests that need isolation and do not need persistence between
+runs.
+
+```sh
+bunx orez --ephemeral --migrations=./db/migrations
+```
+
+Use `--on-db-ready` for work that must happen after migrations but before
+zero-cache, and `--on-healthy` for a command that should run after the complete
+stack is ready.
+
+## Next
+
+The defaults optimize for portability. Read [Runtime modes](/docs/modes) before
+using the stack under sustained concurrency or when you want to exercise real
+PostgreSQL replication behavior.

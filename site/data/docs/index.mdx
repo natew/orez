@@ -1,71 +1,42 @@
 ---
-title: The orez rust sync server
-description: A Zero sync server that runs on SQLite.
+title: Documentation
+description: Run Zero locally, choose the right runtime mode, and take the same model to SQLite at the edge.
 ---
 
-# The orez rust sync server
+# Documentation
 
-A Zero sync server that runs on SQLite. It speaks Zero's protocol-v51
-`http-pull` dialect to stock `@rocicorp/zero` clients and replaces zero-cache for
-deployments that would rather not run Postgres and a long-lived cache process. On
-Cloudflare it runs as one Durable Object per namespace, holding both the sync
-engine and its SQLite storage in the same object.
+orez is a set of small runtimes for building with Zero without starting with a
+conventional database stack. The default command runs PGlite, a PostgreSQL wire
+proxy, zero-cache, and its SQLite replica. More demanding workloads can opt into
+real embedded Postgres, while the separate Rust sync engine can replace
+zero-cache with SQLite on Cloudflare.
 
-The client half of Zero is unchanged. What this replaces is the server half:
-replicating upstream data, feeding row changes to clients, running custom
-mutators, tracking per-client last-mutation-ids, and serving per-query
-incremental sync.
+```sh
+bunx orez
+```
 
-## Start here
+## Pick a path
 
-- **[Architecture](/docs/architecture)**: the four code homes (the Rust engine,
-  its WASM wrapper, the native host, the Cloudflare host), the two request paths,
-  the change-log model, and how it fits the rest of orez.
-- **[The delegation model](/docs/delegation)**: the central design decision: an
-  app either bundles mutators into the host or delegates writes to its own
-  endpoint and lets the host replicate from a change feed. This is what makes it
-  a drop-in for zero-cache.
-- **[Configuration reference](/docs/configuration)**: every `SyncHostConfig`
-  field, the environment variables, and the Node mount surface.
-- **[Testing](/docs/testing)**: an honest account of what is tested, how, and
-  what is not.
-- **[Trade-offs and operational reality](/docs/trade-offs)**: Durable Object
-  storage versus an external database, single-writer semantics, the write
-  amplification billing that caused real incidents, the circuit breakers, and the
-  client reset on cutover.
-- **[Consumers and integration guide](/docs/consumers)**: how Chat (live) and
-  Soot (mid-cutover) compose the host, and a distilled guide for a new app.
+- **New local project:** follow [Getting started](/docs/getting-started). The
+  defaults are intentionally useful without configuration.
+- **Choosing storage or performance characteristics:** read [Runtime modes](/docs/modes).
+- **Using orez from a config file, API, or Vite:** see [Configuration](/docs/configuration).
+- **Running sync on Durable Objects:** start with the [Sync engine](/docs/sync-engine).
+- **Translating PostgreSQL SQL for SQLite:** use the standalone
+  [pg-to-sqlite](/docs/pg-to-sqlite) package.
 
-## The shape in one screen
+## What stays compatible
 
-A client does two things: pull and push.
+Your application still uses `@rocicorp/zero`. orez changes the server-side
+machinery: where Postgres runs, how zero-cache gets SQLite, or—when using the
+Rust engine—which server answers the Zero pull and push protocol. The client
+query API, optimistic mutations, and local store remain Zero.
 
-- **Pull** compares the client's cookie to the change log's high watermark and
-  returns `unchanged`, a diff of touched rows, or a full snapshot. A cookie ahead
-  of the watermark gets a 409 and the client rebuilds.
-- **Push** is a v51 custom-mutator body. In local-mutator mode the host runs the
-  mutator inside the push transaction. In delegation mode the host forwards the
-  push to the app's real endpoint and lets upstream ingest deliver the rows.
+## Scope
 
-The cookie is the high watermark of a per-namespace change log fed by SQLite
-triggers on every write path. Retention is size-bounded; a client below the floor
-gets a snapshot. There is one snapshot recovery path, no CVR, no per-client
-server-side view state, and no websocket poke stream. The only durable per-client
-state is a last-mutation-id and the client-group to user binding.
-
-## Where the code lives
-
-| Path                             | What it is                                                                 |
-| -------------------------------- | -------------------------------------------------------------------------- |
-| `crates/sync-core`               | The deterministic Rust sync engine.                                        |
-| `crates/sync-wasm`               | The `wasm-bindgen` wrapper that compiles the engine for the DO host.       |
-| `crates/sync-native`             | A standalone axum host for the same engine.                                |
-| `packages/sync-cf-host`          | The Cloudflare Durable Object host, published as `orez-sync-cf-host`.      |
-| `src/sync-server/sync-server.ts` | The TypeScript reference implementation and Node mount.                    |
-| `src/cf-do/worker.ts`            | The data worker (`ZeroSqlDO`) that owns writes and serves the change feed. |
-| `harness/`                       | The conformance and qualification test harness.                            |
-
-The broader orez project is a local Zero development stack (run Zero on PGlite or
-embedded Postgres with no native dependencies, see the repository README). The
-rust sync server carries that same SQLite-native approach to production on
-Cloudflare.
+The default PGlite stack is a development runtime. It prioritizes a portable,
+zero-install environment over multi-connection throughput. The embedded
+Postgres mode exercises the real PostgreSQL logical-replication path. The
+Cloudflare sync engine is a separate production-oriented runtime with its own
+storage and workload constraints. The [modes page](/docs/modes) makes those
+boundaries explicit.

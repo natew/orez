@@ -1,13 +1,30 @@
 import { Link, Slot } from 'one'
 
 const NAV = [
-  { href: '/docs', label: 'Overview' },
-  { href: '/docs/architecture', label: 'Architecture' },
-  { href: '/docs/delegation', label: 'Delegation model' },
-  { href: '/docs/configuration', label: 'Configuration' },
-  { href: '/docs/testing', label: 'Testing' },
-  { href: '/docs/trade-offs', label: 'Trade-offs' },
-  { href: '/docs/consumers', label: 'Consumers' },
+  {
+    label: 'Start',
+    items: [
+      { href: '/docs', label: 'Overview' },
+      { href: '/docs/getting-started', label: 'Getting started' },
+      { href: '/docs/modes', label: 'Runtime modes' },
+      { href: '/docs/configuration', label: 'Configuration' },
+    ],
+  },
+  {
+    label: 'Packages',
+    items: [
+      { href: '/docs/sync-engine', label: 'Sync engine' },
+      { href: '/docs/pg-to-sqlite', label: 'pg-to-sqlite' },
+    ],
+  },
+  {
+    label: 'Reference',
+    items: [
+      { href: '/docs/architecture', label: 'Architecture' },
+      { href: '/docs/testing', label: 'Testing' },
+      { href: '/docs/trade-offs', label: 'Trade-offs' },
+    ],
+  },
 ]
 
 export default function DocsLayout() {
@@ -15,24 +32,34 @@ export default function DocsLayout() {
     <>
       <header className="topbar">
         <Link href="/" className="brand">
-          orez
+          <svg className="mark" viewBox="0 0 36 30" aria-hidden="true">
+            <path d="M18 2C10.5 2 4.5 10.7 2 22.6c-.5 2.4 1.3 4.4 3.8 4.4h24.4c2.5 0 4.3-2 3.8-4.4C31.5 10.7 25.5 2 18 2Z" />
+            <path d="M12.5 21.5h11V27h-11z" />
+          </svg>
+          <span>orez</span>
         </Link>
-        <Link href="/docs">docs</Link>
-        <a href="https://github.com/natew/orez">github</a>
+        <nav aria-label="Primary navigation">
+          <Link href="/docs">Docs</Link>
+          <a href="https://github.com/natew/orez">GitHub</a>
+        </nav>
       </header>
 
       <div className="docs">
-        <nav className="docs-nav">
-          <div className="nav-label">Rust sync server</div>
-          {NAV.map((item) => (
-            <Link key={item.href} href={item.href}>
-              {item.label}
-            </Link>
+        <aside className="docs-nav">
+          {NAV.map((group) => (
+            <section key={group.label}>
+              <div className="nav-label">{group.label}</div>
+              {group.items.map((item) => (
+                <Link key={item.href} href={item.href}>
+                  {item.label}
+                </Link>
+              ))}
+            </section>
           ))}
-        </nav>
-        <div className="content">
+        </aside>
+        <article className="content">
           <Slot />
-        </div>
+        </article>
       </div>
     </>
   )

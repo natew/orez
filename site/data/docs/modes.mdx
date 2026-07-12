@@ -1,0 +1,102 @@
+---
+title: Runtime modes
+description: The database, SQLite, process, persistence, and sync-host choices in orez, with their trade-offs.
+---
+
+# Runtime modes
+
+orez separates several choices that are often conflated: the upstream database,
+zero-cache's SQLite implementation, process isolation, persistence, and the sync
+server itself. Change one dimension at a time based on what you need to prove.
+
+## Database backend
+
+| Mode | Select it with | Best for | Trade-off |
+| --- | --- | --- | --- |
+| PGlite | default or `--backend=pglite` | Fast, portable local development | One PostgreSQL session per database; queries serialize and logical replication is emulated |
+| Embedded Postgres | `--backend=postgres` | Concurrency, long-running processes, production-like replication | Downloads a platform server package and uses more resources |
+
+### PGlite
+
+PGlite is PostgreSQL compiled to WASM. orez places a PostgreSQL wire proxy in
+front of it and emulates the replication messages zero-cache expects. Nothing
+native is installed and the data remains local. The important limit is not SQL
+compatibility but concurrency: a PGlite database has one session, so orez
+serializes access through a mutex.
+
+Use it for ordinary app development, CI, examples, and disposable environments.
+Do not use this backend to draw conclusions about lock contention, connection
+pool behavior, or production Postgres throughput.
+
+### Embedded Postgres
+
+```sh
+bun add -D embedded-postgres
+bunx orez --backend=postgres
+```
+
+This starts a real PostgreSQL server from the optional `embedded-postgres`
+platform package. zero-cache connects directly and uses native logical
+replication—there is no PGlite proxy, global mutex, or trigger-based CDC
+emulation. Choose it for multi-process development, sustained concurrent writes,
+or tests that need behavior close to a deployed Postgres system.
+
+## zero-cache SQLite
+
+| Mode | Selection | Best for | Trade-off |
+| --- | --- | --- | --- |
+| Auto | default | Most users | Result depends on whether a native binary is available |
+| WASM | `--force-wasm-sqlite` | Portability and reproducible no-native environments | Slower than the native addon under heavy work |
+| Native | `--disable-wasm-sqlite` | Maximum zero-cache SQLite performance | Requires a working platform binary |
+
+In auto mode orez uses native `@rocicorp/zero-sqlite3` when its binary is
+present, otherwise it falls back to `bedrock-sqlite` WASM. Both use WAL2. The
+WASM adapter supplies the better-sqlite3 surface zero-cache expects.
+
+For forced native mode, bootstrap the binary first:
+
+```sh
+bun run native:bootstrap
+bunx orez --disable-wasm-sqlite
+```
+
+## Isolation and lifetime
+
+### Worker threads
+
+PGlite runs in worker threads by default, isolating its WASM work from the main
+event loop. `--no-worker-threads` runs it in-process, which simplifies debugging
+but makes database work compete directly with the proxy and orchestration code.
+
+### Multiple databases or one
+
+The default PGlite layout keeps the application database, zero-cache CVR, and
+zero-cache CDB in separate PGlite instances because they need independent
+transaction contexts. `--single-db` shares one instance to reduce memory in a
+constrained environment. That mode sacrifices the isolation the three-instance
+layout provides and disables read replicas.
+
+### Persistent or ephemeral
+
+The default stores state under `.orez`. `--ephemeral` keeps PGlite in memory and
+places zero-cache replica state in a temporary per-run directory. Use ephemeral
+mode for hermetic tests; use the default when restart and restore behavior are
+part of what you are developing.
+
+## Sync server
+
+The modes above all run stock zero-cache. orez also ships a Rust/SQLite sync
+engine that speaks the Zero HTTP pull/push protocol and can run in a Cloudflare
+Durable Object. It is a different deployment architecture, not a faster toggle
+for the local command. Read [Sync engine](/docs/sync-engine) for its local-mutator
+and delegated-write models.
+
+## Practical recommendations
+
+- Start with PGlite and automatic SQLite selection.
+- Force WASM in CI if you want to prove the zero-native-dependency path.
+- Switch the database backend to embedded Postgres before debugging concurrency
+  or logical-replication behavior.
+- Use ephemeral mode for isolated tests, not for recovery testing.
+- Evaluate the Rust sync engine when you want SQLite-native production sync,
+  not merely as a substitute for a local zero-cache process.
