@@ -18,4 +18,6 @@ AST with focused SQLite compatibility passes, then emits SQLite-compatible SQL.
 - `compile(sql, options?)`
 - `compileMany(sqls, options?)`
 
-Use `strict: true` to throw when a statement produces compiler warnings.
+Use `strict: true` to throw when a statement produces compiler warnings. Strict
+mode rejects known PostgreSQL-only constructs that cannot execute in SQLite,
+including `LATERAL`, `DISTINCT ON`, and `GREATEST`/`LEAST`.
