@@ -14,6 +14,7 @@ use crate::db::{SqlValue, SyncDb};
 use crate::error::EngineError;
 use crate::schema::{TableSpec, Tables, quote_ident};
 use crate::store;
+use crate::value::ZeroColumnType;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,7 +68,15 @@ fn schema_refresh(message: impl Into<String>) -> EngineError {
     EngineError::conflict(format!("schema refresh required: {}", message.into()))
 }
 
-fn sql_value(value: &Value) -> Result<SqlValue, EngineError> {
+fn sql_value(ty: ZeroColumnType, value: &Value) -> Result<SqlValue, EngineError> {
+    // upstream rowData already contains decoded JSON values. sqlite stores a
+    // zero json column as encoded text so scalar strings remain distinguishable
+    // from numbers, booleans, null, and object-looking text during hydration.
+    if ty == ZeroColumnType::Json && !value.is_null() {
+        return serde_json::to_string(value)
+            .map(SqlValue::Text)
+            .map_err(|error| EngineError::bad_request(error.to_string()));
+    }
     Ok(match value {
         Value::Null => SqlValue::Null,
         Value::Bool(value) => SqlValue::Integer(i64::from(*value)),
@@ -115,7 +124,10 @@ fn delete_row(
                 "upstream delete for {table} is missing primary key {column}"
             ))
         })?;
-        params.push(sql_value(value)?);
+        params.push(sql_value(
+            spec.column_type(column).unwrap_or(ZeroColumnType::String),
+            value,
+        )?);
     }
     let predicate = spec
         .primary_key
@@ -149,13 +161,13 @@ fn upsert_row(
         .map(|(column, _)| column)
         .collect::<Vec<_>>();
     let mut params = Vec::with_capacity(columns.len());
-    for column in &columns {
-        let value = row.get(*column).ok_or_else(|| {
+    for (column, ty) in &spec.columns {
+        let value = row.get(column).ok_or_else(|| {
             EngineError::bad_request(format!(
                 "upstream full row for {table} is missing column {column}"
             ))
         })?;
-        params.push(sql_value(value)?);
+        params.push(sql_value(*ty, value)?);
     }
     let quoted = columns
         .iter()

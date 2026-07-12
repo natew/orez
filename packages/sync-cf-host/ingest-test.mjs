@@ -382,6 +382,56 @@ try {
   assert.equal(numericNativePut.value.rank, 1783776886000)
   assert.equal(typeof numericNativePut.value.rank, 'number')
 
+  // zero json columns carry JSON values rather than JSON-encoded strings on
+  // the wire. prove every JSON kind, including strings that look like encoded
+  // numbers/booleans/null/objects, survives Rust ingest, SQLite persistence,
+  // and rowsPatch hydration without changing type.
+  const jsonNamespace = `json-values-${crypto.randomUUID()}`
+  const jsonOrigin = `${base}/${jsonNamespace}`
+  const jsonPost = async (body) => {
+    const response = await fetch(`${jsonOrigin}/pull`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token-user-a',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+    return { status: response.status, body: await response.json() }
+  }
+  const jsonInitial = await jsonPost({
+    clientID: 'json-reader',
+    clientGroupID: 'json-group',
+    cookie: null,
+  })
+  assert.equal(jsonInitial.status, 200)
+  await fetch(`${base}/json-values-control/${jsonNamespace}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: true }),
+  })
+  const jsonIncremental = await jsonPost({
+    clientID: 'json-reader',
+    clientGroupID: 'json-group',
+    cookie: jsonInitial.body.cookie,
+  })
+  assert.equal(jsonIncremental.status, 200)
+  const expectedJson = [
+    { nested: { tags: ['a', 2, true] } },
+    [1, 'two', null],
+    '42',
+    'true',
+    'null',
+    '{"looks":"encoded"}',
+    42.5,
+    true,
+  ]
+  const actualJson = jsonIncremental.body.rowsPatch
+    .filter((entry) => entry.op === 'put' && entry.tableName === 'item')
+    .sort((a, b) => a.value.id.localeCompare(b.value.id))
+    .map((entry) => entry.value.meta)
+  assert.deepEqual(actualJson, expectedJson)
+
   // A feed that keeps returning changes while the engine cursor no longer
   // advances must trip the ingest breaker instead of hot-looping. Once the
   // bad feed is removed and an admin reopens the circuit, normal pulls recover.

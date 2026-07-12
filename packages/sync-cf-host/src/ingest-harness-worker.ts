@@ -29,6 +29,7 @@ interface Env extends SyncHostEnv {
 
 const runawayNamespaces = new Set<string>()
 const numericTextNamespaces = new Set<string>()
+const jsonValueNamespaces = new Set<string>()
 const hydratedNamespaces = new Set<string>()
 let delegatedFailuresRemaining = 0
 let delegatedAttempts = 0
@@ -111,6 +112,40 @@ export class DataService extends WorkerEntrypoint<Env> {
       )
     }
     const namespace = pathname.split('/')[1] ?? ''
+    if (pathname.endsWith('/changes') && jsonValueNamespaces.has(namespace)) {
+      const cursor = Number(new URL(request.url).searchParams.get('watermark') ?? 0)
+      const values = [
+        { nested: { tags: ['a', 2, true] } },
+        [1, 'two', null],
+        '42',
+        'true',
+        'null',
+        '{"looks":"encoded"}',
+        42.5,
+        true,
+      ]
+      return Promise.resolve(
+        Response.json({
+          watermark: values.length,
+          changes: values
+            .map((meta, index) => ({
+              watermark: index + 1,
+              tableName: 'item',
+              op: 'INSERT',
+              rowData: {
+                id: `json-${index}`,
+                label: 'json round trip',
+                rank: index,
+                done: false,
+                meta,
+              },
+              oldData: null,
+            }))
+            .filter((change) => change.watermark > cursor)
+            .slice(0, 2),
+        })
+      )
+    }
     if (pathname.endsWith('/changes') && numericTextNamespaces.has(namespace)) {
       const watermark = Number(new URL(request.url).searchParams.get('watermark') ?? 0)
       return Promise.resolve(
@@ -218,6 +253,18 @@ const syncWorker = createSyncWorker(config)
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
+    if (url.pathname.startsWith('/json-values-control/')) {
+      const namespace = url.pathname.slice('/json-values-control/'.length)
+      return request
+        .json()
+        .catch(() => ({}))
+        .then((body) => {
+          if ((body as { enabled?: unknown }).enabled === true)
+            jsonValueNamespaces.add(namespace)
+          else jsonValueNamespaces.delete(namespace)
+          return Response.json({ ok: true, namespace })
+        })
+    }
     if (url.pathname.startsWith('/numeric-text-control/')) {
       const namespace = url.pathname.slice('/numeric-text-control/'.length)
       return request

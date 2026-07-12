@@ -1,6 +1,7 @@
 mod common;
 
 use serde_json::{Map, Value, json};
+use sync_core::value::zero_row;
 use sync_core::{SyncDb, Transactor, apply_upstream, apply_upstream_snapshot, init_schema};
 use sync_core::{UpstreamBatch, UpstreamChange, UpstreamSnapshot};
 
@@ -39,6 +40,52 @@ fn setup() -> (TestDb, sync_core::Tables) {
 
 fn item(id: &str, label: &str) -> Value {
     json!({ "id": id, "label": label, "rank": 1, "done": false, "meta": null })
+}
+
+#[test]
+fn upstream_json_values_persist_and_hydrate_with_their_original_types() {
+    let (mut db, tables) = setup();
+    let json_values = [
+        json!({ "nested": { "tags": ["a", 2, true] } }),
+        json!([1, "two", null]),
+        json!("42"),
+        json!("true"),
+        json!("null"),
+        json!("{\"looks\":\"encoded\"}"),
+        json!(42.5),
+        json!(true),
+    ];
+    let changes = json_values
+        .iter()
+        .enumerate()
+        .map(|(index, meta)| {
+            let mut value = item(&format!("json-{index}"), "json round trip");
+            value["meta"] = meta.clone();
+            change(index as i64 + 1, "INSERT", Some(value), None)
+        })
+        .collect();
+
+    apply_upstream(
+        &mut db,
+        &tables,
+        &UpstreamBatch {
+            watermark: json_values.len() as i64,
+            changes,
+        },
+    )
+    .unwrap();
+
+    let rows = db.query("SELECT * FROM item ORDER BY id", &[]).unwrap();
+    let spec = tables.get("item").unwrap();
+    for (row, expected) in rows.iter().zip(json_values) {
+        assert_eq!(
+            row.get("meta"),
+            Some(&sync_core::SqlValue::Text(
+                serde_json::to_string(&expected).unwrap()
+            ))
+        );
+        assert_eq!(zero_row(spec, row).unwrap()["meta"], expected);
+    }
 }
 
 #[test]
