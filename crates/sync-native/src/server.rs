@@ -15,6 +15,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::{Value, json};
+use tower_http::cors::CorsLayer;
 
 use sync_core::value::f64_to_json;
 use sync_core::{Row, SqlValue, SyncDb};
@@ -91,6 +92,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/{ns}/admin/reset-cursor", post(admin_reset_cursor))
         .route("/{ns}/admin/drop-next-push-response", post(admin_drop_push))
         .route("/{ns}/admin/fault", post(admin_fault))
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
