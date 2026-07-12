@@ -427,3 +427,184 @@ trace in the driver scratchpad `budget-trace.json`.
   (create→boss→readState watch), `wire-repro.ts` (timestamp gate), `bean-inspect.ts`
   (readState/bean-thread state). Coordinator: `ab-mreeh1ah-69466`; monitor:
   `ab-mrgf4lhh-94638` (push-500 correlator + trip/429 pager).
+
+---
+
+## Round 3 — 2026-07-11 ~15:30-15:50 PT (driver `ab-mrgik9hx-51920`, monitor `ab-mrgf4lhh-94638`, engine `ab-mrgjbzn1-14233`)
+
+Stack under test (coordinator-confirmed live): APP `3ba77d5c` (mirror-ordering
+barrier: project + accountResourceGrant commit before create acks), host orez
+`0.4.65` (`68de9353`; structured PushFailed forwarding + fresh-ns push hydration
+barrier), data `0.4.64` (`cb6b7857`; provisioning retry).
+
+### Gate: FAIL on confirmed-VALID `3ba77d5c` — no app built
+
+One create-from-template wave via the E2E impersonation (`wave2-driver.ts`,
+enhanced `wave1-driver.ts` with permission-denied + numeric-timestamp capture and a
+pre-prompt version-gate pause). Monitor's version correlator verified **all 6
+create pushes for ns `proj_mrgiwzkh_9oq7z2` were served by `3ba77d5c`** (zero
+`1ef662d1`), so the FAIL is real, not a false-negative.
+
+**What round-3 fixed (held):** create-tier mirror-ordering barrier — clean create,
+grant committed pre-ack, cold-snapshot timestamps NUMERIC, `push500=0`, zero
+denials on the create burst. Host `0.4.65` structured PushFailed forwarding —
+denials now surface as HTTP 200 `result.error='app'`, no silent 500s. **No
+UNIQUE-constraint 500 cascade** (round-2 bug #2 did not recur). Sync clean
+throughout: no trip, no 429, budget never near limit.
+
+**What still stalls → terminal `PARKED-STALL-NO-EXEC`:** BossBean planned, spawned
+4 beans (`sootAgent` inserts SUCCEEDED, persist), created 4 branch lanes, and
+called `create_task` with `routeKey=sess_branch_*`. Every `sootTask|insert` was
+"denied" (`[permission] Not Allowed: sootTask`, auth = the OWNER `Z3Yb…` itself),
+4x at 15:37:41-46, then the beans gave up → `tasks=0`, all 4 idle. No app.
+
+### Root cause — it is NOT a grant/permission bug; it is the ACTIVE-ROUTE gate
+
+The permission error is a **symptom of a skipped write**, not a real denial:
+
+1. `sootTask.insert` (`src/data/mutations/sootTask.ts`) with `status` in
+   {backlog, ready, in-progress, review} runs
+   `taskStatusRequiresActiveRoute(status)` → true.
+2. → `inactiveTaskRouteWorkError` → `isTaskRouteActive`
+   (`src/data/mutations/helpers/taskRouteState.ts`): for `routeKey != 'main'` it
+   runs `zql.sootSession.where(projectId).where(routeKey).where(status='active').one()`
+   and returns `!!route`.
+3. The per-bean branch `sootSession` (routeKey `sess_branch_*`) is **not visible as
+   an active row in the tenant tx's Zero read**, so `routeError` is non-empty and
+   the insert does **`if (routeError) return`** — the task row is never written.
+4. on-zero's mandatory post-insert `ctx.can` by task PK then finds no row and
+   throws `PermissionError: Not Allowed: sootTask`.
+
+Owner pull inspection of preserved `proj_mrgiwzkh_9oq7z2` (`inspect-ns.ts`)
+confirmed: `accountResourceGrant` owner+project **exists** (`arg_…_project_proj_mrgiwzkh_9oq7z2_Z3Yb…`);
+`sootTask` rows **absent** (`readState.tasks=0`, authoritative via `boardByProject`);
+branch routeKeys present only as `workspace` rows (`ws_sess_branch_*`), boss
+branch-tool outputs, and boss `create_task` args — **zero `sootSession` table rows
+in the board pull** (coverage-limited; not proof of server-side absence).
+`sootAgent` passes because it has no route gate. So the round-3 grant
+mirror-ordering barrier **can never fix the task path** — a different check fails.
+Same pattern seen in wave-1 `proj_mrgg5igp` (14:18 sootTask also `sess_branch_*`).
+
+### Handoff / open sub-question (owner: engine `ab-mrgjbzn1-14233`)
+
+Query `sootSession` server-side for `proj_mrgiwzkh_9oq7z2` (ALL statuses):
+
+- If the 4 `sess_branch_*` exist `status='active'` now → mirror/timing race; fix =
+  a branch-session visibility/hydration barrier before `create_task` runs (or
+  retry the task insert), mirroring the create-path barrier one level deeper.
+- If absent or non-active → the branch/worktree tool never persisted+mirrored an
+  active `sootSession` before handing the `routeKey` to the boss; fix at the
+  branch-creation path.
+
+Recommend HOLD further waves until the branch-session active-route visibility fix
+lands, then re-gate with the same `wave2-driver.ts`. Driver + inspection tabs
+stopped clean (GPU-metal, no swiftshader, no orphan chromium); ns preserved. Raw
+pull dump: driver scratchpad `inspect-out/pulls.json`; wave log `wave2.log`.
+
+---
+
+## Round 3 — wave 3, ~16:24-16:34 PT — REGRESSION on the branch-session build
+
+Re-gate authorized after APP redeploy to `3199e13c` (branch-session response
+barrier: `branch_create` commits the active `sootSession` into the project ns
+before returning the route; inactive-route declines now structured client errors;
+soot main `e18fdae488`). Monitor version-correlator confirmed ns
+`proj_mrgkscyt_zxdjfl` served **entirely by `3199e13c`** (zero stale), so the
+result is real.
+
+### Result: FAIL, aborted — `3199e13c` regressed the `3ba77d5c` create-path barrier
+
+The boss's **own `thread` + `message` inserts** (owner auth `8ImAiplL…`) are
+**persistently permission-denied** on the fresh ns — `Not Allowed: thread` +
+`Not Allowed: message`, a non-resolving retry storm (monitor tail: thread 6×,
+message 597×, 16:25:16→16:29:13+). The boss can't write planning messages →
+`agents=[]` (no beans ever spawned) → `tasks=0` → no build. This is strictly worse
+than wave 2 on `3ba77d5c`, which reached bean-spawn.
+
+**Monitor's direct tail comparison (unambiguous):** `3ba77d5c` ns `proj_mrgiwzkh`
+was CLEAN (thread 0 / message 0 denials); `3199e13c` ns `proj_mrgkscyt` denies the
+same owner-insert path. `3199e13c` carries the branch-session response barrier but
+**LOST/regressed `3ba77d5c`'s create-path mirror-ordering grant barrier** (likely
+branched off a pre-`3ba77d5c` base, or the two barriers conflict).
+
+### Owner-pull of the wave-3 ns (`proj_mrgkscyt_zxdjfl`, read-only)
+
+- **project**: exists, `state='init'` (NOT `'seeded'` — wave-2 was `'seeded'`);
+  seeding never completed.
+- **accountResourceGrant**: **exists AND is owner-readable** in the authenticated
+  pull (`arg_…_project_proj_mrgkscyt_zxdjfl_8ImAiplL…`, `createdAt 1783787107493`).
+- **sootSession / thread / sootAgent / sootTask**: all **0** — nothing persisted;
+  no active `routeKey=main` session.
+
+Key inference: the grant row exists and is client-readable, yet the **server-side**
+mutation-time permission (`linkedProjectAccessCondition`) denies the boss's first
+`thread|insert` on `3199e13c`. Seeding stalls at that first permission-gated write
+→ project stuck `init` → `createWithWorktree` main session never created/activated.
+Caveat: `sootSession` read also uses `linkedProjectAccessCondition`, so a row could
+exist server-side but be read-filtered on this broken ns; needs a server-side/DB
+check to confirm physical absence.
+
+### Fix + disposition
+
+The fix must be **additive**: rebuild `3199e13c` to carry BOTH (1) the `3ba77d5c`
+create-path mirror-ordering grant barrier AND (2) the branch-session response
+barrier. Rolling back to `3ba77d5c` restores create/bean-spawn but reintroduces
+wave-2's branch-session `sootTask` active-route stall — no built app either way.
+Only the additive build reaches a built app. Engineer `ab-mrgjbzn1-14233` went
+offline mid-RCA; full detail relayed to coordinator `ab-mreeh1ah-69466` for
+whoever resumes. HOLD until the additive rebuild deploys, then re-gate with
+`wave2-driver.ts` (now also captures structured inactive-route declines).
+Wave-3 log `wave3.log`; ns owner-pull dump `inspect-out/pulls.json`
+(overwrote wave-2's; wave-2 facts already recorded above). Boss retry storm ended
+(driver + inspection tabs killed); no orphan procs; box load ~6/16.
+
+---
+
+## Round 3 — wave 4, ~16:40-16:50 PT — decisive rolled-back-app run
+
+Coordinator reframed with a full config diff: the two app builds are
+**byte-identical** (bundle + config + bindings), and wave-3's grant committed at
+16:25:07 but the server reader denied from 16:25:16 for 4+ min — a committed row
+invisible to the pg-wire read path points to **data-tier reader staleness**, not
+app logic. With n=1 per version the "regression" attribution is weak. Decisive
+test: run the identical gate on the rolled-back app and watch thread/message.
+(Confirmed independently: the differentiating commit `d889f2ac67` only touches
+`sootTask.ts` + `branchService` + `branch/create` — nothing in the create-path
+thread/message/seeding/permission code, so it cannot be the create-path cause.)
+
+Rollback to `9ce1f207` (= `3ba77d5c`-equivalent, previous dist re-flipped).
+
+### Result — ns `proj_mrgldp5a_ghf2my`, served 100% by `9ce1f207` (monitor: 74/74 pushes)
+
+- **create-path thread/message: CLEAN** — 0 thread, 0 message denials (contrast
+  wave-3 on `3199e13c`: 6 thread + 597 message).
+- boss planned, 4 beans spawned.
+- **`sootTask|insert`: DENIED** (id 97-100, one distinct `sess_branch_*` routeKey
+  per bean) → tasks=0, beans idle, PARKED-STALL. Same as wave-2/wave-1.
+
+### The two denials are DISTINCT (not one bug)
+
+- **sootTask / branch-session denial: version-INDEPENDENT** — reproduces on
+  `9ce1f207` (wave-4), `3ba77d5c` (wave-2), wave-1. The 4 branch `sootSession`s
+  were created (beans reference them) yet `isTaskRouteActive` denies → committed
+  branch-session row not visible to the sootTask permission read. Fits the
+  active-route gate mechanism (`inactiveTaskRouteWorkError` skips the write
+  pre-permission) and/or branch-session reader-staleness.
+- **thread/message / grant denial: version-LINKED to `3199e13c`** — denied on
+  `3199e13c` (wave-3), CLEAN on `9ce1f207` (wave-4). CAVEAT: byte-identical
+  bundles argue against a code-level version cause, and with n=1 per version one
+  clean `9ce1f207` run does not rule out intermittent staleness that wave-4 simply
+  missed. Version-linked vs intermittent-staleness is not separable at n=1.
+
+### Key gap + recommended next
+
+`d889f2ac67`'s sootTask/branch-session fix is **UNVALIDATED end-to-end**: the only
+`3199e13c` run (wave-3) was blocked at the create-path grant denial before ever
+reaching the sootTask stage. Recommended (needs owner authorization — multiple
+prod factory runs): run N gates on `3199e13c` (now ~99% dominant) to (a) settle
+thread/message version-linked-vs-intermittent by the clean-vs-denied create rate,
+and (b) let any clean-create run reach sootTask and finally test whether
+`d889f2ac67` builds an app. As of wave-4, no deployed build has produced a built
+app: `9ce1f207` = clean create + sootTask stall; `3199e13c` = create-path grant
+denial (once). Wave-4 log `wave4.log`. All driver tabs stopped clean; no orphan
+procs; load ~6/16; engine clean (no trip/429) across all four waves.

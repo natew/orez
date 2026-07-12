@@ -512,3 +512,143 @@ claim that the on-zero permission rule evaluates differently than a real login. 
 permission logic is in the on-zero mutator/permission layer, not soot's
 `src/zero`/`src/database` schema. Driver is relaying the full cascade to the
 coordinator. Sync/engine layers stayed clean throughout (no trip, budget clean).
+
+## Wave 2 (post-fix, ~15:32-15:40 UTC) — mirror fix worked for main project; STALL moved one level deeper to per-bean branch sessions
+
+Fix deploys: APP 3ba77d5c (mirror-ordering barrier), host 68de9353 (0.4.65+secrets),
+data cb6b7857 (0.4.64). Gate verified served ENTIRELY by 3ba77d5c (gate-version
+correlator: all 6 gate-ns pushes = 3ba77d5c, first push project|insert≈ = 3ba77d5c,
+zero 1ef662d1) — so the result counts.
+
+**The mirror-ordering fix WORKED for the create/main-project path:** create burst
+clean, grant committed, timestamps numeric, `push500=0`, `permDenied=0`, and
+`sootAgent|insert` SUCCEEDED server-side (no error lines). The wave-1 owner-denied
+cascade and the UNIQUE-constraint 500 (bug #2) did NOT recur.
+
+**But the build still STALLED — the denial moved one level deeper.** After the boss
+spawned 4 beans, `sootTask|insert` was permission-denied 4× (mutations
+#133/136/139/142 at 15:37:41-46, client 4t41t4r1a94tqjc9su): structured app-level
+`ApplicationError [permission] Not Allowed: sootTask with auth id Z3Yb…` via
+`linkedProjectAccessCondition`, returned **http 200 with mutation result
+error='app'** (clean rejection, NOT a 500 — no cascade). Beans then gave up →
+tasks=0 → idle stall.
+
+**Root cause (why sootAgent passes but sootTask fails on the same condition): the
+linked entity differs.** Every denied `sootTask` routes through a **per-bean BRANCH
+session** (`routeKey=sess_branch_mrgj2itl/2j9q/2jp3/2k17`, one per bean), while
+create used `routeKey=main` and `sootAgent` links to the project directly.
+`linkedProjectAccessCondition` resolves project access _through_ the branch
+session's routeKey, and the per-bean branch sessions have **no access grant/mirror
+seeded**. So 3ba77d5c fixed the main-project grant seeding, but the **branch-session
+access path is a second, unpatched seeding gap** — same async-mirror bug class, one
+level deeper. Same pattern in wave-1 proj_mrgg5igp (14:18 sootTask also
+routeKey=sess_branch_*). Fix direction: seed the access grant/mirror for each
+per-bean branch session (or have `linkedProjectAccessCondition` fall back to the
+parent project's grant) before tasks insert. **Sync/engine clean throughout wave 2:
+no trip, no 429, budget clean.**
+
+### Wave 2 FINAL RCA (engine ab-mrgjbzn1-14233) — corrects the grant-gap hypothesis
+
+The `sootTask` permission-denied is a **SYMPTOM, not a grant bug** — the grant IS
+present (verified in the owner pull). Real chain: `sootTask.insert` on
+`routeKey=sess_branch_*` fails the **ACTIVE-ROUTE gate** (`isTaskRouteActive`: no
+active `sootSession` for that routeKey visible in-transaction) → the mutator's
+`if (routeError) return` **skips the write** → on-zero's post-insert `ctx.can`
+permission check **by primary key** then throws `PermissionError` because the row
+was never written. `sootAgent` passes because it has no route gate. So the branch
+session's routeKey being the distinguisher (my correlation) is correct, but the
+mechanism is the active-route gate + a post-insert permission check on a skipped
+write — **not** a missing branch-session grant. Round-3's grant barrier cannot fix
+the task path; the fix is in the active-route gate / the skip-then-permission-check
+ordering. ns proj_mrgiwzkh_9oq7z2 preserved server-side for the sootSession query.
+Terminal wave-2 state: PARKED-STALL-NO-EXEC, no app built. Sync/engine clean
+throughout (no trip, no 429, budget clean).
+
+## Wave 3 (~16:25 UTC) — 3199e13c REGRESSED the create-path owner grant fix
+
+Gate verified served entirely by 3199e13c (gate-version correlator: 4/4 gate-window
+pushes = 3199e13c, first-push = 3199e13c, zero stale). But the built-app wave failed
+immediately with a **regression**: the boss's OWN thread/message inserts are
+persistently permission-denied (owner 8ImAiplL), so it can't write planning messages
+→ agents=[] → no beans → no build.
+
+**Tail ground truth (definitive, version is the only variable):**
+
+- proj_mrgkscyt (wave 3, served ENTIRELY by 3199e13c, 834 app events, zero stale):
+  thread denied 6×, **message denied 597×**, window 16:25:16→16:29:13 and still
+  climbing (owner retry storm, not resolving over 4+ min → not an async-seed race).
+- proj_mrgiwzkh (wave 2 gate, served entirely by 3ba77d5c, 732 events): thread
+  denied 0, message denied 0 — CLEAN.
+
+So `3ba77d5c`'s mirror-ordering barrier fixed the owner create-path thread/message
+grant; **`3199e13c` (branch-session response barrier) regressed it** — the
+wave-1-class owner-denied-on-own-inserts bug is back. accountResourceGrant mirror is
+not surfaced in app push logs (grant_refs=0 on BOTH namespaces, including the working
+one), so grant-log absence is not the signal; the behavioral diff (same owner-insert
+path: denied on 3199e13c, allowed on 3ba77d5c) is. **Diagnosis: 3199e13c lost/
+regressed the 3ba77d5c create-path barrier — likely branched off a pre-3ba77d5c base
+or the two barriers conflict. Fix must be ADDITIVE: 3199e13c needs BOTH the
+mirror-ordering create-path grant barrier AND the branch-session barrier.** No trip/
+429 (app-permission denials, not budget writes); engine still clean. Driver aborting
+wave 3.
+
+### Wave 3 regression — CORRECTION + create-time runtime probe
+
+My "3199e13c lost/regressed the 3ba77d5c create-path barrier" diagnosis was WRONG.
+Coordinator's bundle-hash comparison is authoritative: 3199e13c's deployed bundle
+contains the IDENTICAL response-barrier + provisionNamespace code as 3ba77d5c (same
+content-hashed chunks). So the behavioral difference is NOT app-logic.
+
+Create-time probe (proj_mrgkscyt, 16:24-16:26):
+
+- **No provisioning errors:** zero app-tail lines mentioning provisionNamespace /
+  zeroAsyncActions / async-task-failed / projectNamespaceAccessMirror / __soot_migrate,
+  zero exceptions; data tail zero 5xx and zero __soot_migrate in-window. The barrier
+  did not visibly error.
+- **Create push was SLOW, not fast** (refutes "acked fast / backgrounded"): host
+  wallTime for the wave-3 create pushes = 2184ms + 2627ms; the working wave-2
+  (3ba77d5c) create = 605/720ms. So the barrier appears to have AWAITED ~2.2-2.6s.
+  Caveat: some may be fresh-DO cold provisioning, but it is not a fast ack.
+- **Denials are persistent ~4 min** (16:25:16→16:29:13, 597 message denials) — not a
+  transient race that clears after the ~2.6s create.
+  Implication: barrier awaited, no errors, yet owner thread/message denied for 4 min,
+  on a bundle IDENTICAL to the working 3ba77d5c → points to ENVIRONMENT/PAIRING, not
+  app logic. Prime suspects: (a) the post-deploy secret-put on 3199e13c feeding the
+  permission/grant path a wrong/rotated secret; (b) the data/host version the
+  3199e13c app was paired with vs 3ba77d5c's pairing. Engine clean throughout (no
+  trip/429; denials aren't budget writes). Wave 3 aborted.
+
+## Decisive run (~16:41-16:47 UTC) — rollback to 9ce1f207: grant regression CLEARED, branch-session stall persists
+
+Coordinator rolled the app BACK to 9ce1f207 (3ba77d5c-equivalent) to isolate
+version-linked vs data-tier reader-staleness. Gate ns proj_mrgldp5a_ghf2my.
+
+**Second silent-blind-tail incident:** the APP tail (soot-cf-demo) went silently
+blind 16:34:19→16:44 (socket dropped during the rollback redeploy, process alive,
+supervisor didn't reconnect). It corrupted an early read — I wrongly warned the gate
+was "likely 3199e13c → abort" off a stale aggregate. Cycled the app wrangler child →
+reconnected. **Added a tail-freshness watchdog to the heartbeat** (flags any tail
+jsonl silent >150s) so this can't silently corrupt signal again. Root fix still owed
+upstream: supervise-tail.sh must not treat process-liveness as tail-liveness.
+
+**Ground truth (post-reconnect, corrected):**
+
+- proj_mrgldp5a served **100% by 9ce1f207** (74/74 host-push-correlated app pushes,
+  zero 3199e13c) — the clean rolled-back test.
+- **thread/message: CLEAN (0 denials) on 9ce1f207.** Contrast wave-3 on 3199e13c:
+  597 message + 6 thread denials. ⇒ the thread/message **grant-path denial is
+  VERSION-LINKED to 3199e13c**, NOT reader-staleness (a pure reader-staleness bug
+  would deny on 9ce1f207 too). The rollback CLEARED the wave-3 grant regression.
+- **sootTask: DENIED 4× on 9ce1f207** (mut #91/94/97/100 at 16:46:35-44, each a
+  distinct branch routeKey sess_branch_mrglizp2/mrglj01l/mrglj0dt/mrglj0qz, one per
+  bean) ⇒ the branch-session sootTask stall is **version-INDEPENDENT** (reproduces on
+  the baseline lacking d889f2ac67), the same wave-2 behavior.
+
+**Refinement of the unifying reader-staleness hypothesis:** the two denials behave
+DIFFERENTLY across app versions, so they are likely NOT one bug. sootTask/
+branch-session: version-independent (fits reader-staleness or the unfixed
+active-route gate). thread/message/grant: 3199e13c-specific regression (clean on
+9ce1f207). Commit-vs-read delta not extractable from wrangler tail (successful
+sootSession/branch commits don't log); structural evidence (branch sessions created,
+sootTask read still denies) is consistent with reader-staleness for the
+branch-session path specifically. Engine clean throughout: no trip/429.
