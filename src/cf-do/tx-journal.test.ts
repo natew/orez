@@ -26,10 +26,12 @@ import {
   rollbackPendingChanges,
 } from './row-undo.js'
 import {
+  TX_MANIFEST_DDL,
   TX_MANIFEST_TABLE,
   commitTxJournal,
   recoverTxJournal,
   rollbackTxJournal,
+  upgradeToTableSnapshot,
 } from './tx-journal.js'
 
 import type { DurableSqlStorage } from './watermark.js'
@@ -283,6 +285,11 @@ function startSqliteDoServer(storage: SqliteStorage): Promise<string> {
           op: change.op,
           rowData: change.rowData,
           oldData: change.oldData,
+          rowJournal: change.rowJournal,
+          oldJournal: change.oldJournal,
+          newRowid: change.newRowid,
+          oldRowid: change.oldRowid,
+          undoable: true,
         })
       }
     }
@@ -339,7 +346,7 @@ function startSqliteDoServer(storage: SqliteStorage): Promise<string> {
           case '/rollback-tx': {
             storage.transactionSync(() => {
               const transactionID = String(parsed.transactionID)
-              rollbackPendingChanges(storage.journal, cdc, transactionID)
+              rollbackPendingChanges(storage.journal, transactionID)
               rollbackTxJournal(storage.journal, transactionID)
               deletePendingChanges(storage.journal, transactionID)
             })
@@ -352,7 +359,7 @@ function startSqliteDoServer(storage: SqliteStorage): Promise<string> {
                 storage.journal,
                 parsed.owner === undefined ? undefined : String(parsed.owner),
                 (transactionID) => {
-                  rollbackPendingChanges(storage.journal, cdc, transactionID)
+                  rollbackPendingChanges(storage.journal, transactionID)
                   deletePendingChanges(storage.journal, transactionID)
                 }
               )
@@ -457,6 +464,87 @@ describe('kill-mid-tx crash recovery (DoBackend over HTTP)', () => {
 })
 
 describe('kill-mid-tx crash recovery (embed-local backend)', () => {
+  it('does not attach a committed autocommit row to the next transaction', async () => {
+    const storage = createSqliteStorage()
+    storage.exec('CREATE TABLE "cvr_rows" (id TEXT PRIMARY KEY, version TEXT)')
+    storage.exec(`INSERT INTO "cvr_rows" VALUES ('r1', 'v1')`)
+    const local = createLocalSqlBackend({
+      exec: storage.exec,
+      transactionSync: storage.transactionSync,
+    })
+    const backend = new DoBackend('https://orez-do-backend.local', 'zero_cvr', 'zero', {
+      fetch: local.fetch,
+      txOwner: 'orez-embed',
+    })
+    await backend.waitReady
+
+    await backend.exec('BEGIN')
+    await backend.query(`UPDATE "cvr_rows" SET version = $1 WHERE id = $2`, ['v2', 'r1'])
+    await backend.exec('COMMIT')
+    await backend.query(`UPDATE "cvr_rows" SET version = $1 WHERE id = $2`, ['v3', 'r1'])
+    await backend.exec('BEGIN')
+    await backend.query(`UPDATE "cvr_rows" SET version = $1 WHERE id = $2`, ['v4', 'r1'])
+    await backend.exec('ROLLBACK')
+
+    expect(storage.rows('cvr_rows')).toEqual([{ id: 'r1', version: 'v3' }])
+  })
+
+  it('re-derives its cdc cache when a batch aborts', async () => {
+    const storage = createSqliteStorage()
+    storage.exec('CREATE TABLE "cvr_rows" (id TEXT PRIMARY KEY, version TEXT)')
+    const local = createLocalSqlBackend({
+      exec: storage.exec,
+      transactionSync: storage.transactionSync,
+    })
+    const post = (path: string, body: unknown) =>
+      local.fetch(`https://orez-do-backend.local${path}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+    const track = {
+      physicalTableName: 'cvr_rows',
+      tableName: 'cvr_rows',
+      operation: 'INSERT' as const,
+    }
+
+    // the batch registers cvr_rows for capture, installing its triggers, then
+    // trips the primary key. transactionSync() rolls the triggers back while
+    // the CDC object still remembers installing them.
+    const failed = await post('/batch', {
+      statements: [
+        {
+          sql: `INSERT INTO "cvr_rows" VALUES ('r1', 'v1')`,
+          track,
+          transactionID: 'tx-a',
+        },
+        {
+          sql: `INSERT INTO "cvr_rows" VALUES ('r1', 'v2')`,
+          track,
+          transactionID: 'tx-a',
+        },
+      ],
+    })
+    expect(failed.status).toBe(500)
+    expect(storage.rows('cvr_rows')).toHaveLength(0)
+
+    // a stale cache would short-circuit ensureTable, leave the table with no
+    // trigger, and record nothing to roll this write back with.
+    const ok = await post('/batch', {
+      statements: [
+        {
+          sql: `INSERT INTO "cvr_rows" VALUES ('r2', 'v1')`,
+          track,
+          transactionID: 'tx-b',
+        },
+      ],
+    })
+    expect(ok.status).toBe(200)
+    expect(storage.rows('cvr_rows')).toHaveLength(1)
+
+    await post('/rollback-tx', { transactionID: 'tx-b' })
+    expect(storage.rows('cvr_rows')).toHaveLength(0)
+  })
+
   it('the local cvr/cdb store recovers an abandoned tx at embed boot', async () => {
     const storage = createSqliteStorage()
     storage.exec('CREATE TABLE "cvr_rows" (id TEXT PRIMARY KEY, version TEXT)')
@@ -511,5 +599,39 @@ describe('kill-mid-tx crash recovery (embed-local backend)', () => {
     })
     expect(resp.status).toBe(500)
     expect(((await resp.json()) as { error: string }).error).toContain('change tracking')
+  })
+})
+
+describe('snapshot escalation naming', () => {
+  it('gives colliding table names distinct snapshots', () => {
+    const storage = createSqliteStorage()
+    // `a-b` and `a_b` sanitize to the same identifier, so a name derived from
+    // the table would put both tables in one snapshot.
+    storage.exec('CREATE TABLE "a-b" (v TEXT)')
+    storage.exec('CREATE TABLE "a_b" (v TEXT)')
+    storage.exec(`INSERT INTO "a-b" VALUES ('dash')`)
+    storage.exec(`INSERT INTO "a_b" VALUES ('underscore')`)
+    storage.exec(TX_MANIFEST_DDL)
+    for (const table of ['a-b', 'a_b']) {
+      storage.exec(
+        `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, ?, ?, ?)`,
+        'tx-x',
+        'orez-embed',
+        table,
+        ''
+      )
+      upgradeToTableSnapshot(storage.journal, 'tx-x', table)
+      storage.exec(`INSERT INTO "${table}" VALUES ('written')`)
+    }
+
+    const snapshots = storage
+      .exec(`SELECT snapshot FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = 'tx-x'`)
+      .toArray()
+      .map((row) => String(row.snapshot))
+    expect(new Set(snapshots).size).toBe(2)
+
+    storage.transactionSync(() => rollbackTxJournal(storage.journal, 'tx-x'))
+    expect(storage.rows('a-b')).toEqual([{ v: 'dash' }])
+    expect(storage.rows('a_b')).toEqual([{ v: 'underscore' }])
   })
 })

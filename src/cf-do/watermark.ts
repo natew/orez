@@ -23,6 +23,16 @@ export class DurableWatermarkState {
 
   constructor(private readonly sql: DurableSqlStorage) {}
 
+  /**
+   * Forget that the tables exist. `ensureTables` runs inside the owner's
+   * storage transaction, so an abort rolls its CREATE TABLE back while this
+   * object still remembers succeeding, and every later insert would hit a table
+   * SQLite no longer has.
+   */
+  invalidateCache(): void {
+    this.tablesReady = false
+  }
+
   ensureTables(): void {
     if (this.tablesReady) return
     this.sql.exec(

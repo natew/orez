@@ -26,6 +26,8 @@ import {
   commitTxJournal,
   recoverTxJournal,
   rollbackTxJournal,
+  snapshotSideEffectWriteTables,
+  upgradeToTableSnapshot,
 } from '../cf-do/tx-journal.js'
 
 import type { DurableSqlStorage } from '../cf-do/watermark.js'
@@ -87,6 +89,32 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
     },
   }
   const cdc = new TransactionalCdc(journalSql)
+  let pendingChangesReady = false
+
+  function ensurePendingChanges() {
+    if (pendingChangesReady) return
+    ensurePendingChangesTable(journalSql)
+    pendingChangesReady = true
+  }
+
+  /**
+   * Run work in a storage transaction, re-deriving the in-memory schema caches
+   * from SQLite if it aborts. transactionSync() rolls the SQLite side back on
+   * throw, but the caches are plain fields that would keep asserting state
+   * SQLite no longer has: a CDC table stays "registered and verified" with no
+   * trigger left on disk, and every later write to it goes silently uncaptured.
+   */
+  function atomically<T>(work: () => T): T {
+    try {
+      return sql.transactionSync(work)
+    } catch (error) {
+      pendingChangesReady = false
+      // Reload is intentionally last: corrupt CDC metadata must throw rather
+      // than suppressing cache invalidation and silently disabling capture.
+      cdc.reload()
+      throw error
+    }
+  }
 
   function executeStatement(statement: SqlStatement) {
     const track = statement.track
@@ -94,16 +122,30 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
     if (track && !track.physicalTableName) {
       throw new Error('local sql backend: change tracking requires a physical table name')
     }
+    let snapshotsOwnStatement = false
+    let captures = false
     if (track) {
       if (!transactionID) {
         throw new Error('local sql backend: rollback tracking requires a transaction id')
       }
-      cdc.ensureTable({
+      captures = cdc.ensureTable({
         physicalTableName: track.physicalTableName!,
         tableName: track.tableName,
         publish: false,
         ...(track.rowColumns?.length ? { columns: track.rowColumns } : null),
       })
+      // DoBackend already marked this table row-journaled, betting the DO could
+      // capture before/after images for it. When it cannot, that marker promises
+      // a rollback nothing can perform, so take the table snapshot the journal
+      // would otherwise have taken, before the DML changes the table.
+      if (!captures) {
+        upgradeToTableSnapshot(journalSql, transactionID, track.physicalTableName!)
+      }
+      snapshotsOwnStatement = snapshotSideEffectWriteTables(
+        journalSql,
+        transactionID,
+        track.physicalTableName!
+      )
     }
     const suspended = cdc.beginSchemaChange(statement.sql)
     let cursor: ReturnType<LocalDoSqlite['exec']>
@@ -118,9 +160,12 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
       : rows.length > 0
         ? Object.keys(rows[0])
         : []
-    const captured = track ? cdc.drain() : []
-    if (captured.length > 0) {
-      ensurePendingChangesTable(journalSql)
+    // Rollback-only triggers remain installed after a transaction ends. Drain
+    // them on every statement so an untracked autocommit write cannot sit in
+    // the buffer and get attached to (then undone by) the next transaction.
+    const captured = cdc.active ? cdc.drain() : []
+    if (track && captured.length > 0) {
+      ensurePendingChanges()
       for (const change of captured) {
         appendPendingChange(journalSql, {
           transactionID: transactionID!,
@@ -130,6 +175,11 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
           op: change.op,
           rowData: change.rowData,
           oldData: change.oldData,
+          rowJournal: change.rowJournal,
+          oldJournal: change.oldJournal,
+          newRowid: change.newRowid,
+          oldRowid: change.oldRowid,
+          undoable: !snapshotsOwnStatement,
         })
       }
     }
@@ -161,13 +211,13 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
           transactionID: String(body.transactionID || '') || undefined,
         }
         const result = body.track
-          ? sql.transactionSync(() => executeStatement(statement))
+          ? atomically(() => executeStatement(statement))
           : executeStatement(statement)
         return Response.json(result)
       }
       case '/batch': {
         const statements = Array.isArray(body.statements) ? body.statements : []
-        const results = sql.transactionSync(() =>
+        const results = atomically(() =>
           statements
             .map((statement) =>
               typeof statement === 'string' ? { sql: statement } : statement
@@ -180,7 +230,7 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
       case '/commit-tx': {
         const transactionID = String(body.transactionID || '')
         if (!transactionID) throw new Error('missing transactionID')
-        sql.transactionSync(() => {
+        atomically(() => {
           deletePendingChanges(journalSql, transactionID)
           commitTxJournal(journalSql, transactionID)
         })
@@ -189,8 +239,8 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
       case '/rollback-tx': {
         const transactionID = String(body.transactionID || '')
         if (!transactionID) throw new Error('missing transactionID')
-        sql.transactionSync(() => {
-          rollbackPendingChanges(journalSql, cdc, transactionID)
+        atomically(() => {
+          rollbackPendingChanges(journalSql, transactionID)
           rollbackTxJournal(journalSql, transactionID)
           deletePendingChanges(journalSql, transactionID)
         })
@@ -215,9 +265,9 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
       }
     },
     recoverOrphanedTransactions(): string[] {
-      return sql.transactionSync(() =>
+      return atomically(() =>
         recoverTxJournal(journalSql, undefined, (transactionID) => {
-          rollbackPendingChanges(journalSql, cdc, transactionID)
+          rollbackPendingChanges(journalSql, transactionID)
           deletePendingChanges(journalSql, transactionID)
         })
       )

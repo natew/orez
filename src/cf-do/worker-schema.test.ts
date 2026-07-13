@@ -99,7 +99,15 @@ class FakeChangeSql {
       return new FakeResult()
     }
     if (sql.startsWith('PRAGMA table_info(_zero_pending_changes)')) {
-      return new FakeResult([{ name: 'physical_table_name' }, { name: 'publish' }])
+      return new FakeResult([
+        { name: 'physical_table_name' },
+        { name: 'publish' },
+        { name: 'row_journal' },
+        { name: 'old_journal' },
+        { name: 'new_rowid' },
+        { name: 'old_rowid' },
+        { name: 'undoable' },
+      ])
     }
     if (sql.startsWith('INSERT OR IGNORE INTO "_zero_change_state"')) {
       return new FakeResult()
@@ -250,17 +258,22 @@ describe('ZeroDO schema table maintenance', () => {
     zero.sql = sql
     zero.watermarks = new DurableWatermarkState(sql)
 
-    zero.appendTrackedChange(
-      'zero_0.clients',
-      'UPDATE',
-      { clientID: 'client-a', lastMutationID: 1 },
-      null,
-      'tx-a'
-    )
+    zero.appendTrackedChange({
+      tableName: 'zero_0.clients',
+      op: 'UPDATE',
+      rowData: { clientID: 'client-a', lastMutationID: 1 },
+      oldData: null,
+      transactionID: 'tx-a',
+    })
 
     expect(zero.readChangesSince(0)).toEqual([])
 
-    zero.appendTrackedChange('todo', 'INSERT', { id: 'todo-a' }, null)
+    zero.appendTrackedChange({
+      tableName: 'todo',
+      op: 'INSERT',
+      rowData: { id: 'todo-a' },
+      oldData: null,
+    })
     expect(zero.readChangesSince(0).map((change: any) => change.tableName)).toEqual([
       'todo',
     ])
@@ -283,13 +296,13 @@ describe('ZeroDO schema table maintenance', () => {
     zero.sql = sql
     zero.watermarks = new DurableWatermarkState(sql)
 
-    zero.appendTrackedChange(
-      'zero_0.clients',
-      'UPDATE',
-      { clientID: 'client-a' },
-      null,
-      'tx-a'
-    )
+    zero.appendTrackedChange({
+      tableName: 'zero_0.clients',
+      op: 'UPDATE',
+      rowData: { clientID: 'client-a' },
+      oldData: null,
+      transactionID: 'tx-a',
+    })
 
     expect(zero.deletePendingTrackedChanges('tx-a')).toBe(1)
     expect(zero.commitPendingTrackedChanges('tx-a')).toBe(0)
@@ -309,7 +322,13 @@ describe('ZeroDO schema table maintenance', () => {
     zero.watermarks = new DurableWatermarkState(sql)
 
     for (const id of ['first', 'second', 'third']) {
-      zero.appendTrackedChange('item', 'INSERT', { id }, null, 'tx-ordered')
+      zero.appendTrackedChange({
+        tableName: 'item',
+        op: 'INSERT',
+        rowData: { id },
+        oldData: null,
+        transactionID: 'tx-ordered',
+      })
     }
 
     expect(zero.commitPendingTrackedChanges('tx-ordered')).toBe(3)

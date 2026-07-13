@@ -87,6 +87,8 @@ same zero-cache process and durable SQLite state.
   application statement; `ZeroDO` drains them into committed or transaction-
   pending changes before its storage transaction returns. This is logical row
   capture, not WAL/page copying, and includes writes made by business triggers.
+  Capture is refused for any table with no stable row identity (see the undo
+  invariants below), so CDC never records a change it could not roll back.
 - `src/worker/local-sql-backend.ts` - serves the DoBackend HTTP protocol
   against the embed DO's own storage for the CVR/change DBs (no cross-DO hop).
 - `src/cf-do/tx-journal.ts` - durable journal for DoBackend's emulated pg
@@ -102,6 +104,70 @@ same zero-cache process and durable SQLite state.
   with `publish: false`, so they are undoable without entering the application
   change feed.
 
+## What row-level undo actually guarantees
+
+These are the properties rollback and crash recovery depend on. Each is a
+verified guarantee, not an assumption.
+
+- **The undo journal is lossless, and is not the Zero wire encoding.** Row
+  images are stored twice on purpose. `row_data`/`old_data` hold the Zero wire
+  image (plain JSON, blobs as postgres bytea text) that the changefeed consumer
+  expects. `row_journal`/`old_journal` hold a typed image where every column is
+  tagged with its SQLite storage class and an exact payload. The wire form alone
+  cannot restore a row: a JSON number rounds any integer past 2^53, a blob is
+  indistinguishable from a TEXT column holding the same `\xHEX` literal, and
+  SQLite's JSON functions reject BLOB values outright. Integers keep their full
+  signed 64-bit decimal, reals use 17 significant digits (which round-trips a
+  double exactly, where a default text cast turns MAX_DOUBLE into `Inf`), and
+  blobs keep their hex. SQLite infinities use PostgreSQL's JSON-safe
+  `Infinity`/`-Infinity` text spellings instead of JavaScript numeric infinities,
+  which `JSON.stringify` would silently replace with null.
+- **Every undone row is identified by a stable key, never by its values.** A
+  rowid table is matched on its captured rowid, which survives a primary-key
+  update and tells two identical rows of a keyless table apart. A WITHOUT ROWID
+  table has no rowid but always declares a primary key, so it matches on that.
+  Matching on column values would delete or update every duplicate.
+- **Undo never writes a generated column.** SQLite refuses to INSERT or UPDATE
+  one, so a restore names only the writable columns reported by
+  `PRAGMA table_xinfo`. The same applies to a snapshot restore, where `SELECT *`
+  would otherwise select generated columns straight back into an INSERT.
+- **A restore never fires the restored table's triggers, business triggers
+  included.** Undo replays the inverse DML, so undoing an INSERT runs a DELETE.
+  Letting that DELETE fire the table's own AFTER DELETE trigger would write side
+  effects the original transaction never made, and if the side effect lands on a
+  captured table, its CDC trigger stages a phantom change on top. Both row-undo
+  and the snapshot restore detach every trigger on the tables they touch through
+  `suspendTriggers`, then recreate them verbatim. Detaching only the generated
+  CDC triggers leaves both holes open.
+- **Every undo statement must move exactly one row, or the transaction fails.**
+  A restore that quietly matches zero rows (the row is already gone) or several
+  (a value-matched duplicate) has corrupted the table. It raises instead, which
+  aborts the storage transaction and leaves the damage unwritten.
+- **A table CDC cannot capture is never left claiming row-level rollback.**
+  DoBackend marks a parsed write row-journaled before the DO has said whether it
+  can capture the table. When CDC declines it, the worker takes the table
+  snapshot the journal would otherwise have taken, in the same storage
+  transaction as the write, so the transaction lands back on the snapshot path
+  recovery already replays.
+- **Statements with implicit side effects use snapshots, not trigger staging
+  order.** SQLite can run a newly-created business trigger before an older CDC
+  trigger, and foreign-key CASCADE/SET actions are not visible in
+  `sqlite_master` at all. For a tracked write whose source has a business trigger
+  or is referenced by a cascading/SET foreign key, the worker snapshots every
+  user table once for that transaction. This covers unpublished and recursively
+  triggered targets and makes rollback independent of CDC buffer order. Snapshot
+  restore runs parent tables before children so a cascade cannot erase a child
+  that was already restored.
+- **In-memory schema caches are re-derived from SQLite whenever a storage
+  transaction aborts.** `ctx.storage.transaction()` rolls back the SQLite side
+  of an aborted batch, including CDC triggers, its registration metadata, and
+  any table a readiness flag just created. The caches that mirror them are plain
+  fields and would otherwise keep asserting state SQLite no longer has: a table
+  stays "registered and verified" with no trigger left on disk, and every later
+  write to it goes silently uncaptured. Every storage transaction therefore runs
+  through the `atomically` wrappers in `worker.ts` and `local-sql-backend.ts`,
+  which reload the caches on abort.
+
 ## Crash-safety + flow control invariants
 
 - A DoBackend pg transaction is committed if and only if its
@@ -114,7 +180,9 @@ same zero-cache process and durable SQLite state.
   complete group to `_zero_changes` atomically with clearing the rollback
   journal. Rollback-only internal changes are deleted at commit. Rollback and
   crash recovery instead restore every captured before-image and discard the
-  pending group.
+  pending group. Only rows carrying a typed before-image are marked `undoable`;
+  a pending row without one belongs to a table whose rollback a snapshot owns,
+  and row-undo skips it rather than guessing at a lossy wire image.
 - `_zero_changes` rows are purged only when the consumer CONFIRMS them
   (standby status updates / the resume LSN of a reconnect), mirroring how
   real postgres retains WAL until the slot's confirmed_flush_lsn passes it.

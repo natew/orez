@@ -9,14 +9,24 @@ import {
   trackedChangeRow,
   WriteBudgetExceededError,
 } from '../do-sql-tracking.js'
-import { TransactionalCdc, type CdcTableRegistration } from './cdc.js'
+import {
+  TransactionalCdc,
+  type CapturedRowChange,
+  type CdcTableRegistration,
+} from './cdc.js'
 import {
   appendPendingChange,
   deletePendingChanges,
   ensurePendingChangesTable,
   rollbackPendingChanges,
 } from './row-undo.js'
-import { commitTxJournal, recoverTxJournal, rollbackTxJournal } from './tx-journal.js'
+import {
+  commitTxJournal,
+  recoverTxJournal,
+  rollbackTxJournal,
+  snapshotSideEffectWriteTables,
+  upgradeToTableSnapshot,
+} from './tx-journal.js'
 import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
 
 /**
@@ -597,7 +607,7 @@ export class ZeroDO extends DurableObject {
         (this.cdc.active && (isSqlRowMutation(sql) || this.cdc.capturesSchemaChange(sql)))
       const result = await this.withSchemaProvisioningWait(() =>
         needsAtomicCapture
-          ? this.ctx.storage.transaction(() =>
+          ? this.atomically(() =>
               this.executeSQL(sql, params, body.track, transactionID || undefined)
             )
           : this.executeSQL(sql, params, undefined, transactionID || undefined)
@@ -625,7 +635,7 @@ export class ZeroDO extends DurableObject {
         cdcTables?: CdcTableRegistration[]
       }
       const allRows = await this.withSchemaProvisioningWait(() =>
-        this.ctx.storage.transaction(() => {
+        this.atomically(() => {
           const results: any[] = []
           if (Array.isArray(cdcTables)) this.cdc.syncTables(cdcTables)
           for (const statement of statements) {
@@ -728,7 +738,7 @@ export class ZeroDO extends DurableObject {
       const body = (await request.json()) as { transactionID?: unknown }
       const transactionID = String(body.transactionID || '')
       if (!transactionID) throw new Error('missing transactionID')
-      const count = await this.ctx.storage.transaction(() => {
+      const count = await this.atomically(() => {
         const committed = this.commitPendingTrackedChanges(transactionID)
         commitTxJournal(this.sql, transactionID)
         return committed
@@ -753,7 +763,7 @@ export class ZeroDO extends DurableObject {
       const body = (await request.json()) as { transactionID?: unknown }
       const transactionID = String(body.transactionID || '')
       if (!transactionID) throw new Error('missing transactionID')
-      const count = await this.ctx.storage.transaction(() => {
+      const count = await this.atomically(() => {
         this.rollbackPendingTrackedChanges(transactionID)
         rollbackTxJournal(this.sql, transactionID)
         return this.deletePendingTrackedChanges(transactionID)
@@ -781,7 +791,7 @@ export class ZeroDO extends DurableObject {
     try {
       const body = (await request.json().catch(() => ({}))) as { owner?: unknown }
       const owner = body.owner === undefined ? undefined : String(body.owner)
-      const transactionIDs = await this.ctx.storage.transaction(() => {
+      const transactionIDs = await this.atomically(() => {
         const recovered = recoverTxJournal(this.sql, owner, (txID) => {
           this.rollbackPendingTrackedChanges(txID)
         })
@@ -837,7 +847,7 @@ export class ZeroDO extends DurableObject {
 
   private async handleSnapshot(): Promise<Response> {
     try {
-      return this.ctx.storage.transactionSync(() => {
+      return this.atomicallySync(() => {
         this.ensureSchemaMetadataTable()
         const names = this.sql
           .exec('SELECT name FROM _zero_schema_tables ORDER BY name')
@@ -852,6 +862,43 @@ export class ZeroDO extends DurableObject {
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
+  }
+
+  /**
+   * Run work in a storage transaction, re-deriving every in-memory schema cache
+   * from SQLite if it aborts.
+   *
+   * ctx.storage.transaction() rolls the SQLite side back on throw, but the
+   * caches are plain fields that keep asserting state SQLite no longer has: a
+   * CDC table stays "registered and verified" with no trigger left on disk, so
+   * ensureTable short-circuits and every later write to it goes silently
+   * uncaptured. The readiness flags are the same class: their CREATE TABLE is
+   * rolled back while the flag still says the table exists.
+   */
+  private async atomically<T>(work: () => T): Promise<T> {
+    try {
+      return await this.ctx.storage.transaction(work)
+    } catch (error) {
+      this.invalidateSchemaCaches()
+      throw error
+    }
+  }
+
+  private atomicallySync<T>(work: () => T): T {
+    try {
+      return this.ctx.storage.transactionSync(work)
+    } catch (error) {
+      this.invalidateSchemaCaches()
+      throw error
+    }
+  }
+
+  private invalidateSchemaCaches(): void {
+    this.watermarks.invalidateCache()
+    this.pendingChangesSchemaReady = false
+    // Reload is intentionally last because corrupt persisted CDC metadata must
+    // throw (fail closed), without preventing the other caches from invalidating.
+    this.cdc.reload()
   }
 
   // sync (storage.transaction-safe) column presence check for the /batch
@@ -894,6 +941,30 @@ export class ZeroDO extends DurableObject {
       capturesTrackedTable = this.cdc.capturesTable(track.tableName)
     }
 
+    // DoBackend already marked this table row-journaled, betting the DO could
+    // capture before/after images for it. When it cannot, that marker promises
+    // a rollback nothing can perform, so take the table snapshot the journal
+    // would otherwise have taken. It has to happen before the DML, while the
+    // table still holds its pre-transaction contents.
+    const trackedTransactionID = track ? transactionID || track.transactionID : undefined
+    let snapshotsOwnStatement = false
+    if (track && !capturesTrackedTable && trackedTransactionID) {
+      const physicalTableName =
+        track.physicalTableName || track.tableName.replace(/^public\./, '')
+      if (this.tableExists(physicalTableName)) {
+        upgradeToTableSnapshot(this.sql, trackedTransactionID, physicalTableName)
+      }
+    }
+    if (track && trackedTransactionID) {
+      const physicalTableName =
+        track.physicalTableName || track.tableName.replace(/^public\./, '')
+      snapshotsOwnStatement = snapshotSideEffectWriteTables(
+        this.sql,
+        trackedTransactionID,
+        physicalTableName
+      )
+    }
+
     const suspendedCdc = this.cdc.beginSchemaChange(sql)
     let cursor: ReturnType<DurableSqlStorage['exec']>
     try {
@@ -914,14 +985,10 @@ export class ZeroDO extends DurableObject {
     const captured =
       track || (this.cdc.active && isSqlRowMutation(sql)) ? this.cdc.drain() : []
     for (const change of captured) {
-      this.appendTrackedChange(
-        change.tableName,
-        change.op,
-        change.rowData,
-        change.oldData,
+      this.appendCapturedChange(
+        change,
         transactionID || track?.transactionID,
-        change.physicalTableName,
-        change.publish !== false
+        !snapshotsOwnStatement
       )
     }
 
@@ -929,29 +996,27 @@ export class ZeroDO extends DurableObject {
     // physical SQLite table identity needed to install a trigger. Once a
     // table is registered, trigger capture is the sole source of truth and
     // includes arbitrary business-trigger side effects.
+    //
+    // These rows carry no before-image, so they only feed the changefeed. Their
+    // rollback is owned by the table snapshot taken above, and `undoable: false`
+    // keeps the row-undo pass from trying to restore them from a wire image that
+    // cannot round-trip a blob or an int64.
     if (track && !capturesTrackedTable) {
+      const physicalTableName =
+        track.physicalTableName || track.tableName.replace(/^public\./, '')
       for (const row of rows) {
         const trackedRow = trackedChangeRow(row, track)
-        if (track.operation === 'DELETE')
-          this.appendTrackedChange(
-            track.tableName,
-            'DELETE',
-            null,
-            trackedRow,
-            transactionID || track.transactionID,
-            track.physicalTableName || track.tableName.replace(/^public\./, ''),
-            track.publish !== false
-          )
-        else
-          this.appendTrackedChange(
-            track.tableName,
-            track.operation,
-            trackedRow,
-            null,
-            transactionID || track.transactionID,
-            track.physicalTableName || track.tableName.replace(/^public\./, ''),
-            track.publish !== false
-          )
+        const isDelete = track.operation === 'DELETE'
+        this.appendTrackedChange({
+          tableName: track.tableName,
+          op: isDelete ? 'DELETE' : track.operation,
+          rowData: isDelete ? null : trackedRow,
+          oldData: isDelete ? trackedRow : null,
+          transactionID: transactionID || track.transactionID,
+          physicalTableName,
+          publish: track.publish !== false,
+          undoable: false,
+        })
       }
       if (track.publish !== false) this.appendDerivedTrackedChanges(track, rows)
     }
@@ -1036,8 +1101,19 @@ export class ZeroDO extends DurableObject {
         ...values
       )
       .toArray()
+    // Derived notifications: the rows were written by business triggers and are
+    // captured for the changefeed only. They carry no physical table name, so
+    // the row-undo pass never sees them, and their real writes are rolled back
+    // by whichever journal entry owns the table.
     for (const row of rows) {
-      this.appendTrackedChange(publicTableName, 'UPDATE', row, null, transactionID)
+      this.appendTrackedChange({
+        tableName: publicTableName,
+        op: 'UPDATE',
+        rowData: row,
+        oldData: null,
+        transactionID,
+        undoable: false,
+      })
     }
   }
 
@@ -1173,32 +1249,71 @@ export class ZeroDO extends DurableObject {
     rowData: Record<string, unknown> | null,
     oldData: Record<string, unknown> | null
   ) {
-    this.appendTrackedChange(tn, op, rowData, oldData)
+    this.appendTrackedChange({ tableName: tn, op, rowData, oldData })
   }
 
-  private appendTrackedChange(
-    tableName: string,
-    op: 'INSERT' | 'UPDATE' | 'DELETE',
-    rowData: Record<string, unknown> | null,
-    oldData: Record<string, unknown> | null,
+  /** Record a trigger-captured change, before-images and row identity included. */
+  private appendCapturedChange(
+    change: CapturedRowChange,
     transactionID?: string,
-    physicalTableName?: string,
-    publish = true
+    undoable = true
   ) {
-    if (!publish && !transactionID) return
-    if (transactionID) {
-      this.appendPendingTrackedChange(
-        tableName,
-        op,
-        rowData,
-        oldData,
-        transactionID,
-        physicalTableName,
-        publish
-      )
+    this.appendTrackedChange({
+      tableName: change.tableName,
+      op: change.op,
+      rowData: change.rowData,
+      oldData: change.oldData,
+      transactionID,
+      physicalTableName: change.physicalTableName,
+      publish: change.publish !== false,
+      rowJournal: change.rowJournal,
+      oldJournal: change.oldJournal,
+      newRowid: change.newRowid,
+      oldRowid: change.oldRowid,
+      undoable,
+    })
+  }
+
+  private appendTrackedChange(change: {
+    tableName: string
+    op: 'INSERT' | 'UPDATE' | 'DELETE'
+    rowData: Record<string, unknown> | null
+    oldData: Record<string, unknown> | null
+    transactionID?: string
+    physicalTableName?: string
+    publish?: boolean
+    rowJournal?: Record<string, string> | null
+    oldJournal?: Record<string, string> | null
+    newRowid?: string | null
+    oldRowid?: string | null
+    undoable?: boolean
+  }) {
+    const publish = change.publish !== false
+    if (!publish && !change.transactionID) return
+    if (change.transactionID) {
+      this.ensurePendingTrackedChangesTable()
+      appendPendingChange(this.sql, {
+        transactionID: change.transactionID,
+        physicalTableName: change.physicalTableName,
+        tableName: change.tableName,
+        publish,
+        op: change.op,
+        rowData: change.rowData,
+        oldData: change.oldData,
+        rowJournal: change.rowJournal ?? null,
+        oldJournal: change.oldJournal ?? null,
+        newRowid: change.newRowid ?? null,
+        oldRowid: change.oldRowid ?? null,
+        undoable: change.undoable === true,
+      })
       return
     }
-    this.appendCommittedTrackedChange(tableName, op, rowData, oldData)
+    this.appendCommittedTrackedChange(
+      change.tableName,
+      change.op,
+      change.rowData,
+      change.oldData
+    )
   }
 
   private appendCommittedTrackedChange(
@@ -1226,30 +1341,9 @@ export class ZeroDO extends DurableObject {
     this.pendingChangesSchemaReady = true
   }
 
-  private appendPendingTrackedChange(
-    tableName: string,
-    op: 'INSERT' | 'UPDATE' | 'DELETE',
-    rowData: Record<string, unknown> | null,
-    oldData: Record<string, unknown> | null,
-    transactionID: string,
-    physicalTableName?: string,
-    publish = true
-  ) {
-    this.ensurePendingTrackedChangesTable()
-    appendPendingChange(this.sql, {
-      transactionID,
-      physicalTableName,
-      tableName,
-      publish,
-      op,
-      rowData,
-      oldData,
-    })
-  }
-
   private rollbackPendingTrackedChanges(transactionID: string): number {
     this.ensurePendingTrackedChangesTable()
-    return rollbackPendingChanges(this.sql, this.cdc, transactionID)
+    return rollbackPendingChanges(this.sql, transactionID)
   }
 
   private commitPendingTrackedChanges(transactionID: string): number {

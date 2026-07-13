@@ -51,7 +51,7 @@ describe('TransactionalCdc', () => {
     sql.exec(
       "INSERT INTO item VALUES (1, 'one', x'00ff'), (2, 'two', NULL), (3, 'three', NULL)"
     )
-    expect(cdc.drain()).toEqual([
+    expect(cdc.drain()).toMatchObject([
       {
         physicalTableName: 'item',
         tableName: 'public.item',
@@ -76,7 +76,7 @@ describe('TransactionalCdc', () => {
     ])
 
     sql.exec("UPDATE item SET id = 4, body = 'moved' WHERE id = 1")
-    expect(cdc.drain()).toEqual([
+    expect(cdc.drain()).toMatchObject([
       {
         physicalTableName: 'item',
         tableName: 'public.item',
@@ -127,6 +127,87 @@ describe('TransactionalCdc', () => {
     ])
   })
 
+  it('migrates legacy registrations and refreshes their capture triggers', () => {
+    const { sql } = createSqliteStorage()
+    sql.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, body TEXT)')
+    sql.exec(
+      'CREATE TABLE _orez_cdc_tables (' +
+        'physical_table TEXT PRIMARY KEY, ' +
+        'table_name TEXT NOT NULL, ' +
+        'columns_json TEXT NOT NULL, ' +
+        'publish INTEGER NOT NULL DEFAULT 1)'
+    )
+    sql.exec(
+      `INSERT INTO _orez_cdc_tables VALUES ('item', 'public.item', '["id","body"]', 1)`
+    )
+
+    const cdc = new TransactionalCdc(sql)
+    expect(cdc.active).toBe(true)
+    expect(cdc.ensureTable({ physicalTableName: 'item', tableName: 'public.item' })).toBe(
+      true
+    )
+    sql.exec("INSERT INTO item VALUES (1, 'captured')")
+
+    expect(sql.exec('SELECT schema_version FROM _orez_cdc_tables').toArray()).toEqual([
+      { schema_version: 2 },
+    ])
+    expect(cdc.drain()).toMatchObject([
+      { tableName: 'public.item', op: 'INSERT', rowData: { id: 1, body: 'captured' } },
+    ])
+  })
+
+  it('fails closed without clearing live registrations when persisted metadata is corrupt', () => {
+    const { sql } = createSqliteStorage()
+    sql.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, body TEXT)')
+    const cdc = new TransactionalCdc(sql)
+    cdc.syncTables([{ physicalTableName: 'item', tableName: 'public.item' }])
+    sql.exec(`UPDATE _orez_cdc_tables SET columns_json = 'not-json'`)
+
+    expect(() => cdc.reload()).toThrow(/corrupt columns_json/)
+    expect(cdc.active).toBe(true)
+    expect(cdc.capturesTable('public.item')).toBe(true)
+  })
+
+  it('invalidates trigger verification even when corrupt metadata makes reload fail', () => {
+    const { nativeDb, sql } = createSqliteStorage()
+    sql.exec('CREATE TABLE kept (id INTEGER PRIMARY KEY)')
+    sql.exec('CREATE TABLE added (id INTEGER PRIMARY KEY)')
+    const cdc = new TransactionalCdc(sql)
+    cdc.syncTables([{ physicalTableName: 'kept', tableName: 'public.kept' }])
+    sql.exec(`UPDATE _orez_cdc_tables SET columns_json = 'not-json'`)
+
+    nativeDb.exec('BEGIN')
+    expect(
+      cdc.ensureTable({ physicalTableName: 'added', tableName: 'public.added' })
+    ).toBe(true)
+    nativeDb.exec('ROLLBACK')
+    expect(() => cdc.reload()).toThrow(/corrupt columns_json/)
+
+    sql.exec(`UPDATE _orez_cdc_tables SET columns_json = '["id"]'`)
+    expect(
+      cdc.ensureTable({ physicalTableName: 'added', tableName: 'public.added' })
+    ).toBe(true)
+    sql.exec('INSERT INTO added VALUES (1)')
+    expect(cdc.drain()).toMatchObject([
+      { tableName: 'public.added', op: 'INSERT', rowData: { id: 1 } },
+    ])
+  })
+
+  it('keeps SQLite infinities JSON-safe for the change log', () => {
+    const { sql } = createSqliteStorage()
+    sql.exec('CREATE TABLE value (id INTEGER PRIMARY KEY, n REAL)')
+    const cdc = new TransactionalCdc(sql)
+    cdc.syncTables([{ physicalTableName: 'value', tableName: 'public.value' }])
+    sql.exec('INSERT INTO value VALUES (1, 9e999), (2, -9e999)')
+
+    const changes = cdc.drain()
+    expect(changes.map((change) => change.rowData?.n)).toEqual(['Infinity', '-Infinity'])
+    expect(JSON.parse(JSON.stringify(changes[0].rowData))).toEqual({
+      id: 1,
+      n: 'Infinity',
+    })
+  })
+
   it('captures arbitrary business-trigger side effects on another published table', () => {
     const { sql } = createSqliteStorage()
     sql.exec('CREATE TABLE channel (id TEXT PRIMARY KEY, message_count INTEGER NOT NULL)')
@@ -148,7 +229,15 @@ describe('TransactionalCdc', () => {
     const changes = cdc.drain()
 
     expect(changes).toHaveLength(2)
-    expect(changes).toEqual(
+    expect(
+      changes.map((change) => ({
+        physicalTableName: change.physicalTableName,
+        tableName: change.tableName,
+        op: change.op,
+        rowData: change.rowData,
+        oldData: change.oldData,
+      }))
+    ).toEqual(
       expect.arrayContaining([
         {
           physicalTableName: 'message',
@@ -269,7 +358,7 @@ describe('TransactionalCdc', () => {
     cdc.finishSchemaChange(suspended)
     sql.exec("INSERT INTO item VALUES (1, 'still here')")
 
-    expect(cdc.drain()).toEqual([
+    expect(cdc.drain()).toMatchObject([
       {
         physicalTableName: 'item',
         tableName: 'public.item',
