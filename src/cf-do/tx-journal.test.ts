@@ -162,6 +162,44 @@ describe('tx-journal core', () => {
     expect(storage.rows('audit')).toHaveLength(3)
   })
 
+  it.each(['rollback', 'recovery'] as const)(
+    'restores cyclic cascading foreign keys during %s',
+    (mode) => {
+      const storage = createSqliteStorage()
+      storage.exec('PRAGMA foreign_keys = ON')
+      storage.exec(
+        'CREATE TABLE a (' +
+          'id INTEGER PRIMARY KEY, ' +
+          'bid INTEGER REFERENCES b(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED)'
+      )
+      storage.exec(
+        'CREATE TABLE b (' +
+          'id INTEGER PRIMARY KEY, ' +
+          'aid INTEGER REFERENCES a(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED)'
+      )
+      storage.transactionSync(() => {
+        storage.exec('INSERT INTO a VALUES (1, NULL)')
+        storage.exec('INSERT INTO b VALUES (1, 1)')
+        storage.exec('UPDATE a SET bid = 1 WHERE id = 1')
+      })
+      snapshotTx(storage, 'cycle-tx', 'a', { owner: 'orez-embed' })
+      snapshotTx(storage, 'cycle-tx', 'b', { owner: 'orez-embed' })
+      storage.exec('UPDATE a SET bid = NULL')
+      storage.exec('UPDATE b SET aid = NULL')
+
+      if (mode === 'rollback') {
+        storage.transactionSync(() => rollbackTxJournal(storage.journal, 'cycle-tx'))
+      } else {
+        expect(
+          storage.transactionSync(() => recoverTxJournal(storage.journal, 'orez-embed'))
+        ).toEqual(['cycle-tx'])
+      }
+
+      expect(storage.rows('a')).toEqual([{ id: 1, bid: 1 }])
+      expect(storage.rows('b')).toEqual([{ id: 1, aid: 1 }])
+    }
+  )
+
   it('recovery rolls back only the requested owner and sweeps unreferenced snapshots', () => {
     const storage = createSqliteStorage()
     storage.exec('CREATE TABLE embed_table (id TEXT)')

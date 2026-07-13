@@ -414,7 +414,7 @@ describe('ZeroDO triggered writes to private tables', () => {
       // trigger order: the private child write happens before the parent CDC
       // row is staged. private_audit is deliberately not registered.
       sql.exec(
-        `CREATE TRIGGER item_audit AFTER INSERT ON item BEGIN
+        `CREATE TRIGGER xorezYcdcZhidden AFTER INSERT ON item BEGIN
            INSERT INTO private_audit (item_id, note) VALUES (NEW.id, 'private');
          END`
       )

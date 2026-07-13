@@ -156,8 +156,10 @@ verified guarantee, not an assumption.
   or is referenced by a cascading/SET foreign key, the worker snapshots every
   user table once for that transaction. This covers unpublished and recursively
   triggered targets and makes rollback independent of CDC buffer order. Snapshot
-  restore runs parent tables before children so a cascade cannot erase a child
-  that was already restored.
+  restore deletes every participating table before reinserting any snapshot rows,
+  then inserts parents before children. The two-phase restore is required for
+  cyclic cascading foreign keys, where an interleaved later delete could erase a
+  row that had already been restored.
 - **In-memory schema caches are re-derived from SQLite whenever a storage
   transaction aborts.** `ctx.storage.transaction()` rolls back the SQLite side
   of an aborted batch, including CDC triggers, its registration metadata, and

@@ -150,26 +150,20 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
 
   const restoredTables = rows.filter((row) => row.snapshot).map((row) => row.original)
   const triggers = suspendTriggers(sql, restoredTables)
-  // Defer constraint checks across the whole atomic restore. Parent tables are
-  // restored before children so ON DELETE/UPDATE cascades cannot erase child
-  // rows that were already copied back from their snapshot.
+  // Defer constraint checks across the whole atomic restore. Delete every
+  // snapshotted table before inserting any snapshot rows: interleaving those
+  // phases lets a later DELETE in a cyclic cascade erase an earlier restore.
   sql.exec('PRAGMA defer_foreign_keys = ON')
   const snapshotRows = parentFirst(
     sql,
     rows.filter((row) => row.snapshot !== null && row.snapshot !== '')
   )
-  const otherRows = rows.filter((row) => row.snapshot === null || row.snapshot === '')
-  for (const row of [...snapshotRows, ...otherRows]) {
+  for (const row of snapshotRows) {
+    sql.exec(`DELETE FROM ${quoteIdent(row.original)}`)
+  }
+  for (const row of snapshotRows) {
     const quotedTable = quoteIdent(row.original)
-    if (row.snapshot === null) {
-      sql.exec(`DROP TABLE IF EXISTS ${quotedTable}`)
-      continue
-    }
-    // Empty-string snapshots are row-journaled tables. Their before-images
-    // are restored by the owner's CDC undo callback rather than a table copy.
-    if (row.snapshot === '') continue
-    const quotedSnapshot = quoteIdent(row.snapshot)
-    sql.exec(`DELETE FROM ${quotedTable}`)
+    const quotedSnapshot = quoteIdent(row.snapshot!)
     // `SELECT *` also selects generated columns, which SQLite refuses to let
     // any INSERT name, so restore the writable columns explicitly.
     const columns = writableColumns(sql, row.original)
@@ -177,7 +171,17 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
     sql.exec(
       `INSERT OR REPLACE INTO ${quotedTable} (${columnList}) SELECT ${columnList} FROM ${quotedSnapshot}`
     )
+  }
+  for (const row of snapshotRows) {
+    const quotedSnapshot = quoteIdent(row.snapshot!)
     sql.exec(`DROP TABLE IF EXISTS ${quotedSnapshot}`)
+  }
+  for (const row of rows) {
+    if (row.snapshot === null) {
+      sql.exec(`DROP TABLE IF EXISTS ${quoteIdent(row.original)}`)
+    }
+    // Empty-string snapshots are row-journaled tables. Their before-images
+    // were restored by the owner's CDC undo callback before this function.
   }
   restoreTriggers(sql, triggers)
   sql.exec(`DELETE FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ?`, txID)
@@ -254,7 +258,7 @@ export function snapshotSideEffectWriteTables(
   const hasBusinessTrigger =
     sql
       .exec(
-        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? AND name NOT LIKE '_orez_cdc_%' LIMIT 1",
+        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? AND name NOT GLOB '_orez_cdc_*' LIMIT 1",
         sourceTable
       )
       .toArray().length > 0
