@@ -4,7 +4,8 @@ zero sync-engine conformance + load harness. plan and status:
 `../plans/zero-conformance-harness.md`. never published; private tooling.
 
 one harness, multiple targets (`src/target.ts`): stock zero-cache,
-orez-local pure-sqlite, and orez-cf (cloudflare DO). every lane points stock
+orez-local pure-sqlite, orez-cf (cloudflare DO), sync-native (`rust-local`),
+and sync-core WASM (`rust-cf`). every lane points stock
 `@rocicorp/zero` clients at a target, writes both through sync and straight
 to the upstream store, requires convergence, and compares converged client
 state against a fresh oracle read of the authoritative store.
@@ -29,10 +30,16 @@ bun src/eviction.ts --target cf                    # idle DO memory teardown + r
 bun src/permissions.ts                             # per-user visibility + add/revoke
 bun src/reconnect.ts                               # persisted resume + recovery faults
 bun src/multi-tab.ts                               # real shared client group + LMIDs
+bun src/corpus-check.ts                            # validate pinned upstream provenance
+bun src/upstream-corpus.ts                         # one observable trace across all four hosts
+bun src/state-machine.ts --against rust-local --seed 7 --steps 24
+bun src/m6-runner.ts --suite native --quick        # native fault/recovery qualification
 ```
 
-sweep divergences write replay artifacts to `regressions/` (seed + spec +
-both sides); re-run with the printed `--seed` to reproduce exactly.
+sweep and state-machine divergences write replay artifacts to `regressions/`
+(seed + trace/spec + observations). The state machine delta-debugs a failing
+trace before exit. See `corpus/README.md` for the pinned upstream source,
+license, scenario-ID, adaptation, and supported-host ledger.
 
 targets: `stock-zero` (real zero-cache + embedded postgres + fixture app
 server), `orez-local` (orez `src/sync-server` core over pure bun:sqlite,
@@ -44,6 +51,16 @@ with `cd cf && bunx wrangler deploy`, then wait ~1min for propagation before
 probing). DO sqlite gotchas the core is written around: no raw
 `BEGIN`/`SAVEPOINT` SQL (only `storage.transactionSync`), no `?N` numbered
 bindings.
+
+`rust-local` runs the release sync-native binary against a temporary,
+file-backed SQLite namespace. `rust-cf` runs the same sync-core engine as WASM
+inside the production-shaped sync-cf-host Durable Object. The
+`upstream-corpus.ts` portable lane compares TypeScript, stock Zero, native Rust,
+and Rust/WASM observations; `state-machine.ts` mixes writes, desired-query
+changes, pruning, response loss, server restart, and client restart while
+checking every live view against an authoritative SQL oracle. Rust-CF commands
+use `ZHARNESS_RUST_CF_WORKER` when set and read `ZHARNESS_CF_ADMIN_KEY` (or
+`~/.zharness-cf-admin-key`) for admin probes.
 
 `permissions.ts` runs `orez-local` with its optional `visible()` policy:
 owner-or-member projects, tasks/members through visible projects, and only

@@ -1,0 +1,221 @@
+{
+  "schemaVersion": 1,
+  "hosts": {
+    "typescript-oracle": {
+      "target": "orez-local",
+      "notes": "In-process TypeScript sync-server core over bun:sqlite."
+    },
+    "stock-zero": {
+      "target": "stock-zero",
+      "notes": "Pinned @rocicorp/zero package backed by embedded PostgreSQL."
+    },
+    "sync-native": {
+      "target": "rust-local",
+      "notes": "Native Rust host using the sync-core engine."
+    },
+    "rust-cf": {
+      "target": "rust-cf",
+      "notes": "sync-core WASM in the Cloudflare Durable Object host."
+    },
+    "sync-core-rusqlite": {
+      "target": "cargo-test",
+      "notes": "Synchronous Rust engine contract tests with a rusqlite host."
+    }
+  },
+  "sources": [
+    {
+      "id": "rocicorp-zero",
+      "repository": "https://github.com/rocicorp/mono",
+      "commit": "177d6c1f921fa8d02134d5a1d34f5c6e89115b9c",
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE"
+      }
+    },
+    {
+      "id": "turso-cdc",
+      "repository": "https://github.com/tursodatabase/turso",
+      "commit": "e7cb62a8bd2f3655a661a621ee389365c1a1e43e",
+      "license": {
+        "spdx": "MIT",
+        "path": "LICENSE.md"
+      }
+    },
+    {
+      "id": "electric-oracle",
+      "repository": "https://github.com/electric-sql/electric",
+      "commit": "9acd04f8800c349f2c49cb65d37982f76e4ee27e",
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE"
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "zero.view-syncer.initial-hydration",
+      "source": {
+        "repository": "rocicorp-zero",
+        "path": "packages/zero-cache/src/services/view-syncer/view-syncer.pg.test.ts",
+        "scenario": "initial hydration"
+      },
+      "contract": "A new client receives the complete result for its desired query.",
+      "adaptation": "portable.initial-hydration",
+      "supportedHosts": ["typescript-oracle", "stock-zero", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "zero.view-syncer.desired-query-change",
+      "source": {
+        "repository": "rocicorp-zero",
+        "path": "packages/zero-cache/src/services/view-syncer/view-syncer.pg.test.ts",
+        "scenario": "responds to changeDesiredQueries patch"
+      },
+      "contract": "Adding and removing desired queries changes the observable view without corrupting shared rows.",
+      "adaptation": "portable.desired-query-change",
+      "supportedHosts": ["typescript-oracle", "stock-zero", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "zero.view-syncer.catch-up-client",
+      "source": {
+        "repository": "rocicorp-zero",
+        "path": "packages/zero-cache/src/services/view-syncer/view-syncer.pg.test.ts",
+        "scenario": "catchup client"
+      },
+      "contract": "A client that misses writes catches up to the same state as a fresh client.",
+      "adaptation": "portable.catch-up-client",
+      "supportedHosts": ["typescript-oracle", "stock-zero", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "zero.view-syncer.client-reconnect",
+      "source": {
+        "repository": "rocicorp-zero",
+        "path": "packages/zero-cache/src/services/view-syncer/view-syncer.pg.test.ts",
+        "scenario": "delete client"
+      },
+      "contract": "Closing and recreating a client does not retain stale query results.",
+      "adaptation": "portable.client-reconnect",
+      "supportedHosts": ["typescript-oracle", "stock-zero", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "zero.view-syncer.invalid-cookie",
+      "source": {
+        "repository": "rocicorp-zero",
+        "path": "packages/zero-cache/src/services/view-syncer/view-syncer.pg.test.ts",
+        "scenario": "sends invalid base cookie if client is ahead of CVR"
+      },
+      "contract": "A client cursor ahead of the server is rejected or reset rather than accepted as valid state.",
+      "adaptation": "crates/sync-core/tests/reference_delta.rs",
+      "supportedHosts": ["typescript-oracle", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "zero.change-processor.rollback",
+      "source": {
+        "repository": "rocicorp-zero",
+        "path": "packages/zero-cache/src/services/replicator/change-processor.test.ts",
+        "scenario": "rollback"
+      },
+      "contract": "A failed change transaction leaves neither application rows nor replication metadata committed.",
+      "adaptation": "turso.trigger-cdc.failed-transaction",
+      "supportedHosts": ["sync-core-rusqlite", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "zero.change-processor.schema-metadata",
+      "source": {
+        "repository": "rocicorp-zero",
+        "path": "packages/zero-cache/src/services/replicator/change-processor.test.ts",
+        "scenario": "column-metadata-integration"
+      },
+      "contract": "Schema evolution is classified explicitly and metadata migration is idempotent.",
+      "adaptation": "turso.trigger-cdc.schema-and-metadata-evolution",
+      "supportedHosts": ["sync-core-rusqlite", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "turso.cdc.failed-operation",
+      "source": {
+        "repository": "turso-cdc",
+        "path": "tests/integration/functions/test_cdc.rs",
+        "scenario": "test_cdc_failed_op"
+      },
+      "contract": "Rows and CDC effects from a failed statement or batch are absent.",
+      "adaptation": "turso.trigger-cdc.failed-transaction",
+      "supportedHosts": ["sync-core-rusqlite", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "turso.cdc.transaction-boundary",
+      "source": {
+        "repository": "turso-cdc",
+        "path": "tests/integration/functions/test_cdc.rs",
+        "scenario": "test_cdc_transaction"
+      },
+      "contract": "A multi-change transaction becomes visible atomically with one durable cursor advance.",
+      "adaptation": "turso.trigger-cdc.transaction-boundary",
+      "supportedHosts": ["sync-core-rusqlite", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "turso.cdc.no-op-and-rollback",
+      "source": {
+        "repository": "turso-cdc",
+        "path": "tests/integration/functions/test_cdc.rs",
+        "scenario": "test_cdc_v2_no_change_commit_then_rollback"
+      },
+      "contract": "No-op commits and rolled-back transactions emit no observable changes and leave the connection usable.",
+      "adaptation": "turso.trigger-cdc.no-op-and-rollback",
+      "supportedHosts": ["sync-core-rusqlite", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "turso.cdc.recursion-guard",
+      "source": {
+        "repository": "turso-cdc",
+        "path": "tests/integration/functions/test_cdc.rs",
+        "scenario": "test_cdc_ignore_changes_in_cdc_table"
+      },
+      "contract": "CDC bookkeeping does not recursively capture its own writes.",
+      "adaptation": "turso.trigger-cdc.internal-table-recursion",
+      "supportedHosts": ["sync-core-rusqlite", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "turso.cdc.connection-scope",
+      "source": {
+        "repository": "turso-cdc",
+        "path": "tests/integration/functions/test_cdc.rs",
+        "scenario": "test_cdc_independent_connections"
+      },
+      "contract": "Independent database connections observe one durable trigger log without connection-local capture state.",
+      "adaptation": "turso.trigger-cdc.database-scoped-connections",
+      "supportedHosts": ["sync-core-rusqlite", "sync-native"]
+    },
+    {
+      "id": "turso.cdc.schema-version-evolution",
+      "source": {
+        "repository": "turso-cdc",
+        "path": "tests/integration/functions/test_cdc.rs",
+        "scenario": "test_cdc_schema_changes; test_cdc_version_backward_compat_v1_*"
+      },
+      "contract": "Schema drift requests a refresh and legacy metadata upgrades without erasing its cursor.",
+      "adaptation": "turso.trigger-cdc.schema-and-metadata-evolution",
+      "supportedHosts": ["sync-core-rusqlite", "sync-native", "rust-cf"]
+    },
+    {
+      "id": "electric.oracle.generated-state-machine",
+      "source": {
+        "repository": "electric-oracle",
+        "path": "packages/sync-service/test/integration/oracle_property_test.exs",
+        "scenario": "shapes with generated where clauses and mutations"
+      },
+      "contract": "Repeatable generated operations continuously agree with a fresh authoritative oracle and emit a minimized replay on failure.",
+      "adaptation": "harness/src/state-machine.ts",
+      "supportedHosts": ["sync-native", "rust-cf"]
+    },
+    {
+      "id": "electric.replication.transaction-fragmentation",
+      "source": {
+        "repository": "electric-oracle",
+        "path": "packages/sync-service/test/electric/replication/transaction_fragmentation_test.exs",
+        "scenario": "transaction with N rows is fully received"
+      },
+      "contract": "A transaction larger than the pull page boundary is fully received across fragments without loss or duplication and converges to the fresh snapshot.",
+      "adaptation": "turso.trigger-cdc.fragmented-transaction",
+      "supportedHosts": ["sync-core-rusqlite", "sync-native", "rust-cf"]
+    }
+  ]
+}
