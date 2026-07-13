@@ -265,8 +265,8 @@ export function snapshotSideEffectWriteTables(
   const tables = sql
     .exec(
       "SELECT name FROM sqlite_master WHERE type = 'table' " +
-        "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_orez_%' " +
-        "AND name NOT LIKE '_zero_%' ORDER BY name"
+        "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_orez_*' " +
+        "AND name NOT GLOB '_zero_*' ORDER BY name"
     )
     .toArray()
     .map((row) => String(row.name ?? ''))

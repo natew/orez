@@ -403,19 +403,26 @@ describe('ZeroDO triggered writes to private tables', () => {
       sql.exec('PRAGMA foreign_keys = ON')
       sql.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, body TEXT)')
       sql.exec(
-        'CREATE TABLE private_audit (' +
+        'CREATE TABLE xorezYaudit (' +
+          'id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL, ' +
+          'note TEXT)'
+      )
+      sql.exec(
+        'CREATE TABLE azeroXprivate (' +
           'id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL, ' +
           'note TEXT)'
       )
       sql.exec("INSERT INTO item VALUES (1, 'kept')")
-      sql.exec("INSERT INTO private_audit VALUES (1, 1, 'kept')")
+      sql.exec("INSERT INTO xorezYaudit VALUES (1, 1, 'kept')")
+      sql.exec("INSERT INTO azeroXprivate VALUES (1, 1, 'kept')")
       zero.cdc.syncTables([{ physicalTableName: 'item', tableName: 'public.item' }])
       // Creating the business trigger after CDC gives SQLite the adverse
       // trigger order: the private child write happens before the parent CDC
       // row is staged. private_audit is deliberately not registered.
       sql.exec(
         `CREATE TRIGGER xorezYcdcZhidden AFTER INSERT ON item BEGIN
-           INSERT INTO private_audit (item_id, note) VALUES (NEW.id, 'private');
+           INSERT INTO xorezYaudit (item_id, note) VALUES (NEW.id, 'private');
+           INSERT INTO azeroXprivate (item_id, note) VALUES (NEW.id, 'private');
          END`
       )
 
@@ -440,7 +447,8 @@ describe('ZeroDO triggered writes to private tables', () => {
         txID
       )
       expect(sql.exec('SELECT count(*) AS c FROM item').one()).toEqual({ c: 2 })
-      expect(sql.exec('SELECT count(*) AS c FROM private_audit').one()).toEqual({ c: 2 })
+      expect(sql.exec('SELECT count(*) AS c FROM xorezYaudit').one()).toEqual({ c: 2 })
+      expect(sql.exec('SELECT count(*) AS c FROM azeroXprivate').one()).toEqual({ c: 2 })
       expect(
         sql
           .exec(
@@ -464,7 +472,10 @@ describe('ZeroDO triggered writes to private tables', () => {
       expect(sql.exec('SELECT * FROM item ORDER BY id').toArray()).toEqual([
         { id: 1, body: 'kept' },
       ])
-      expect(sql.exec('SELECT * FROM private_audit ORDER BY id').toArray()).toEqual([
+      expect(sql.exec('SELECT * FROM xorezYaudit ORDER BY id').toArray()).toEqual([
+        { id: 1, item_id: 1, note: 'kept' },
+      ])
+      expect(sql.exec('SELECT * FROM azeroXprivate ORDER BY id').toArray()).toEqual([
         { id: 1, item_id: 1, note: 'kept' },
       ])
     }
