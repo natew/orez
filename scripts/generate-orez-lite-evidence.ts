@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
-type Status = 'verified' | 'unverified'
+export type Status = 'verified' | 'unverified'
 
 type Suite = {
   id: string
@@ -21,7 +21,7 @@ type Suite = {
   artifactsUrl: string | null
 }
 
-type Evidence = {
+export type Evidence = {
   schemaVersion: number
   status: Status
   release: { version: string; tag: string; sha: string | null; url: string }
@@ -188,7 +188,11 @@ async function releaseSha(tag: string): Promise<string> {
   return tagObject.object.sha
 }
 
-function validate(evidence: Evidence, expectedSha?: string): void {
+export function statusForBuild(releaseSha: string | null, buildSha: string): Status {
+  return releaseSha === buildSha ? 'verified' : 'unverified'
+}
+
+export function validate(evidence: Evidence, expectedSha?: string): void {
   const errors: string[] = []
   if (evidence.schemaVersion !== 1) errors.push('schemaVersion must be 1')
   if (!/^\d+\.\d+\.\d+$/.test(evidence.release.version)) {
@@ -211,15 +215,16 @@ function validate(evidence: Evidence, expectedSha?: string): void {
       errors.push(`${suite.id} needs reproduction commands`)
   }
 
-  if (evidence.status === 'verified') {
-    if (!evidence.build.sha || !/^[0-9a-f]{40}$/.test(evidence.build.sha)) {
-      errors.push('verified evidence needs a full build SHA')
-    }
-    if (expectedSha && evidence.build.sha !== expectedSha) {
-      errors.push(`evidence SHA ${evidence.build.sha} does not match ${expectedSha}`)
-    }
+  if (evidence.build.sha !== null && !/^[0-9a-f]{40}$/.test(evidence.build.sha)) {
+    errors.push('build.sha must be a full immutable commit SHA when present')
+  }
+  if (expectedSha && evidence.build.sha !== expectedSha) {
+    errors.push(`evidence SHA ${evidence.build.sha} does not match ${expectedSha}`)
+  }
+
+  if (evidence.build.sha) {
     if (!evidence.qualification.lastGreen || !evidence.qualification.qualifiedAt) {
-      errors.push('verified evidence needs a last green run and timestamp')
+      errors.push('build evidence needs a last green run and timestamp')
     }
     for (const field of [
       'scenarioCount',
@@ -229,14 +234,8 @@ function validate(evidence: Evidence, expectedSha?: string): void {
       'durationMs',
     ] as const) {
       if (evidence.qualification[field] === null) {
-        errors.push(`verified evidence needs qualification.${field}`)
+        errors.push(`build evidence needs qualification.${field}`)
       }
-    }
-    if (evidence.supportedContracts.length === 0) {
-      errors.push('verified evidence needs supported contracts')
-    }
-    if (evidence.compatibility.some((row) => row.status !== 'pass')) {
-      errors.push('every compatibility row must pass')
     }
     for (const suite of evidence.suites) {
       if (suite.status !== 'pass') errors.push(`${suite.id} is not passing`)
@@ -246,6 +245,21 @@ function validate(evidence: Evidence, expectedSha?: string): void {
       if (!suite.logsUrl || !suite.artifactsUrl) {
         errors.push(`${suite.id} is missing immutable links`)
       }
+    }
+  }
+
+  if (evidence.status === 'verified') {
+    if (!evidence.build.sha) errors.push('verified evidence needs a full build SHA')
+    if (evidence.release.sha !== evidence.build.sha) {
+      errors.push(
+        `verified release SHA ${evidence.release.sha} does not match tested build SHA ${evidence.build.sha}`
+      )
+    }
+    if (evidence.supportedContracts.length === 0) {
+      errors.push('verified evidence needs supported contracts')
+    }
+    if (evidence.compatibility.some((row) => row.status !== 'pass')) {
+      errors.push('every compatibility row must pass')
     }
   } else if (evidence.supportedContracts.length > 0) {
     errors.push('unverified evidence cannot advertise supported contracts')
@@ -262,6 +276,21 @@ async function generate(): Promise<void> {
   }
 
   const evidence = readJson<Evidence>(evidencePath)
+  const rootPackage = readJson<{
+    version: string
+    devDependencies: Record<string, string>
+  }>(join(root, 'package.json'))
+  const packageTag = `v${rootPackage.version}`
+  const pushedTag = process.env.GITHUB_REF?.startsWith('refs/tags/')
+    ? process.env.GITHUB_REF.slice('refs/tags/'.length)
+    : null
+  if (pushedTag && pushedTag !== packageTag) {
+    throw new Error(
+      `release tag ${pushedTag} does not match package version ${rootPackage.version}`
+    )
+  }
+  const releaseTag = pushedTag ?? evidence.release.tag
+  const releaseVersion = releaseTag.startsWith('v') ? releaseTag.slice(1) : releaseTag
   const [run, jobsResponse] = await Promise.all([
     githubJson<ActionsRun>(`/repos/${githubRepository}/actions/runs/${runId}`),
     githubJson<{ jobs: ActionsJob[] }>(
@@ -269,9 +298,11 @@ async function generate(): Promise<void> {
     ),
   ])
 
-  if (run.event !== 'push' || run.head_branch !== evidence.gate.branch) {
+  const isMainBuild = run.head_branch === evidence.gate.branch
+  const isReleaseTagBuild = process.env.GITHUB_REF === `refs/tags/${releaseTag}`
+  if (run.event !== 'push' || (!isMainBuild && !isReleaseTagBuild)) {
     throw new Error(
-      `only a push to ${evidence.gate.branch} can publish verified evidence`
+      `only a push to ${evidence.gate.branch} or ${releaseTag} can publish build evidence`
     )
   }
   if (run.head_sha !== sha) {
@@ -288,10 +319,6 @@ async function generate(): Promise<void> {
     return job
   })
 
-  const rootPackage = readJson<{
-    version: string
-    devDependencies: Record<string, string>
-  }>(join(root, 'package.json'))
   const cfPackage = readJson<{ devDependencies: Record<string, string> }>(
     join(root, 'packages/sync-cf-host/package.json')
   )
@@ -313,12 +340,17 @@ async function generate(): Promise<void> {
     return result
   }
 
-  evidence.status = 'verified'
-  evidence.release.version = rootPackage.version
-  evidence.release.tag = `v${rootPackage.version}`
+  evidence.release.version = releaseVersion
+  evidence.release.tag = releaseTag
   evidence.release.sha = await releaseSha(evidence.release.tag)
   evidence.release.url = `${repositoryUrl}/tree/${evidence.release.tag}`
   evidence.build = { sha, url: `${repositoryUrl}/tree/${sha}` }
+  evidence.status = statusForBuild(evidence.release.sha, sha)
+  if (isReleaseTagBuild && evidence.status !== 'verified') {
+    throw new Error(
+      `release tag ${releaseTag} resolves to ${evidence.release.sha}, not checkout SHA ${sha}`
+    )
+  }
   evidence.versions = {
     zero: rootPackage.devDependencies['@rocicorp/zero'],
     rust: rustVersion(),
@@ -390,8 +422,10 @@ async function generate(): Promise<void> {
     artifactsUrl,
   })
 
-  for (const row of evidence.compatibility) row.status = 'pass'
-  evidence.supportedContracts = [
+  for (const row of evidence.compatibility) {
+    row.status = evidence.status === 'verified' ? 'pass' : 'awaiting'
+  }
+  const qualifiedContracts = [
     'snapshot and incremental pull cookies',
     'idempotent custom-mutator push and mutation IDs',
     'query membership and permission grant/revoke',
@@ -402,6 +436,7 @@ async function generate(): Promise<void> {
     'local workerd protocol fuzz, recovery faults, backup/restore, and lifecycle state machine',
     'named-query differential against Zero 1.7.0',
   ]
+  evidence.supportedContracts = evidence.status === 'verified' ? qualifiedContracts : []
 
   const started = Math.min(...required.map((item) => new Date(item.started_at).getTime()))
   const completed = Math.max(
@@ -447,13 +482,30 @@ async function generate(): Promise<void> {
       command.replaceAll('<ledger-seed>', String(seed))
     )
   }
+  const releaseIdentityLimitation =
+    evidence.status === 'verified'
+      ? []
+      : [
+          `Candidate build ${sha} passed the required CI jobs but is not release ${releaseTag}, which resolves to ${evidence.release.sha}. No verified-release claim or supported contract is published for this build.`,
+        ]
   evidence.knownLimitations = [
+    ...releaseIdentityLimitation,
     'The workerd lane is local emulation; deployed Cloudflare isolate memory, quota, eviction, and regional propagation require a separate named deployment qualification.',
     `The compatibility corpus is pinned to Zero ${evidence.versions.zero} and does not imply compatibility with later Zero releases.`,
     'Scenario and operation totals count the explicitly named corpus cases and soak operations, not every internal assertion, HTTP request, or SQLite statement.',
     `GitHub Actions logs and artifacts are immutable per run but retained for ${evidence.artifacts.retentionDays} days.`,
   ]
   evidence.unresolvedLanes = [
+    ...(evidence.status === 'verified'
+      ? []
+      : [
+          {
+            name: 'Release identity',
+            status: 'unverified',
+            detail: `The tested build SHA ${sha} does not equal ${releaseTag} at ${evidence.release.sha}.`,
+            url: `${repositoryUrl}/compare/${evidence.release.tag}...${sha}`,
+          },
+        ]),
     {
       name: 'Deployed Cloudflare qualification',
       status: 'fragile',
@@ -462,18 +514,24 @@ async function generate(): Promise<void> {
       url: `${repositoryUrl}/blob/${sha}/plans/rust-sync-m6-qualification.md`,
     },
   ]
+  evidence.gate.policy =
+    'CI records exact-SHA candidate evidence after every required job succeeds. It publishes a verified release only when the tested build SHA also equals the immutable release-tag SHA; other main-branch builds remain explicitly unverified.'
 
   validate(evidence, sha)
   writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`)
-  console.log(`generated verified Orez Lite evidence for ${sha} from run ${runId}`)
+  console.log(
+    `generated ${evidence.status} Orez Lite ${evidence.status === 'verified' ? 'release' : 'candidate'} evidence for ${sha} from run ${runId}`
+  )
 }
 
-const mode = process.argv[2] ?? 'check'
-if (mode === 'generate') await generate()
-else if (mode === 'check') {
-  const evidence = readJson<Evidence>(evidencePath)
-  validate(evidence, process.env.EXPECTED_EVIDENCE_SHA)
-  console.log(`valid ${evidence.status} Orez Lite evidence ledger`)
-} else {
-  throw new Error('usage: bun scripts/generate-orez-lite-evidence.ts [check|generate]')
+if (import.meta.main) {
+  const mode = process.argv[2] ?? 'check'
+  if (mode === 'generate') await generate()
+  else if (mode === 'check') {
+    const evidence = readJson<Evidence>(evidencePath)
+    validate(evidence, process.env.EXPECTED_EVIDENCE_SHA)
+    console.log(`valid ${evidence.status} Orez Lite evidence ledger`)
+  } else {
+    throw new Error('usage: bun scripts/generate-orez-lite-evidence.ts [check|generate]')
+  }
 }

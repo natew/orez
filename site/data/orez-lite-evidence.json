@@ -208,6 +208,6 @@
       "rust-local-faults",
       "sync-cf-host"
     ],
-    "policy": "CI generates and builds with a verified ledger only after every required job succeeds for the same main-branch SHA. Pull requests and partial/manual runs cannot publish it."
+    "policy": "CI records exact-SHA candidate evidence after every required job succeeds. It publishes a verified release only when the tested build SHA also equals the immutable release-tag SHA; other main-branch builds remain explicitly unverified."
   }
 }

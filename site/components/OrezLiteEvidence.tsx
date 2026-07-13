@@ -1,4 +1,5 @@
 import evidence from '~/data/orez-lite-evidence.json' with { type: 'json' }
+import { classifyEvidenceIdentity } from '~/lib/evidence-identity'
 
 import { AppLink } from './AppLink'
 
@@ -37,24 +38,46 @@ function EvidenceLink({ href, children }: { href: string | null; children: strin
   )
 }
 
+function evidenceIdentity() {
+  const identity = classifyEvidenceIdentity(
+    evidence.status,
+    evidence.release.sha,
+    evidence.build.sha
+  )
+  return {
+    verified: identity === 'verified',
+    candidate: identity === 'candidate',
+  }
+}
+
 export function VerifiedBuildCard() {
-  const verified = evidence.status === 'verified'
+  const { verified, candidate } = evidenceIdentity()
   return (
     <aside className="verified-build-card" aria-labelledby="verified-build-title">
       <div className="verified-build-heading">
         <div>
           <span className="evidence-eyebrow">Build evidence</span>
-          <h2 id="verified-build-title">Verified build</h2>
+          <h2 id="verified-build-title">
+            {verified
+              ? 'Verified release'
+              : candidate
+                ? 'Candidate build'
+                : 'Build evidence'}
+          </h2>
         </div>
         <span
           className={`evidence-status evidence-status-${verified ? 'pass' : 'awaiting'}`}
         >
-          {verified ? 'CI verified' : 'Awaiting green CI'}
+          {verified
+            ? 'CI verified release'
+            : candidate
+              ? 'Unverified candidate'
+              : 'Awaiting green CI'}
         </span>
       </div>
       <dl className="verified-build-facts">
         <div>
-          <dt>Release</dt>
+          <dt>Release tag</dt>
           <dd>
             <EvidenceLink href={evidence.release.url}>
               {evidence.release.tag}
@@ -62,7 +85,9 @@ export function VerifiedBuildCard() {
           </dd>
         </div>
         <div>
-          <dt>Build SHA</dt>
+          <dt>
+            {verified ? 'Release / build SHA' : candidate ? 'Candidate SHA' : 'Build SHA'}
+          </dt>
           <dd>
             {evidence.build.url ? (
               <EvidenceLink href={evidence.build.url}>
@@ -86,7 +111,9 @@ export function VerifiedBuildCard() {
         <strong>Supported contracts:</strong>{' '}
         {verified
           ? evidence.supportedContracts.join(' · ')
-          : 'None advertised until every required job passes at one main-branch SHA.'}
+          : candidate
+            ? `None advertised for ${evidence.release.tag}: candidate SHA does not match the release-tag SHA.`
+            : 'None advertised until every required job passes at the immutable release-tag SHA.'}
       </p>
       <AppLink
         href="/docs/orez-lite/testing#evidence-ledger"
@@ -99,7 +126,7 @@ export function VerifiedBuildCard() {
 }
 
 export function EvidenceLedger() {
-  const verified = evidence.status === 'verified'
+  const { verified, candidate } = evidenceIdentity()
   const lastGreen = evidence.qualification.lastGreen as {
     runId: number
     url: string
@@ -112,12 +139,16 @@ export function EvidenceLedger() {
         <strong>
           {verified
             ? 'Qualified at this exact SHA.'
-            : 'No verified build is published yet.'}
+            : candidate
+              ? 'Candidate tested, but not a verified release.'
+              : 'No verified build is published yet.'}
         </strong>
         <span>
           {verified
-            ? 'This ledger was generated only after every required CI job passed, then included in the static site build.'
-            : 'The checked-in fallback stays unverified because the latest observed main-branch run was red. CI will replace it in the static build only after the exact-SHA gate is green.'}
+            ? 'Every required CI job passed on the same commit named by the immutable release tag.'
+            : candidate
+              ? `Every required CI job passed at ${compactSha(evidence.build.sha)}, but ${evidence.release.tag} resolves to ${compactSha(evidence.release.sha)}. This ledger makes no verified-release claim.`
+              : 'The checked-in fallback stays unverified and contains no qualified build SHA. CI replaces it only with exact-SHA candidate or release evidence; it never fabricates provenance.'}
         </span>
       </div>
 

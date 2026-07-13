@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
@@ -442,11 +443,12 @@ jobs:
             harness/results/
           if-no-files-found: error
 
-  # This is the release evidence gate. GitHub does not start it until every
-  # required job above is green. The generator independently checks the run's
-  # event, branch, job conclusions, and head SHA before it can write "verified".
+  # This is the exact-identity evidence gate. GitHub does not start it until
+  # every required job above is green. The generator independently checks the
+  # run event/ref, job conclusions, build SHA, and immutable release-tag SHA
+  # before it can write "verified"; later main SHAs remain candidates.
   orez-lite-evidence:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs:
       - test
       - compiler
@@ -469,6 +471,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.94.0
+
+      - name: test exact-SHA evidence identity
+        run: bun test scripts/generate-orez-lite-evidence.test.ts
 
       - name: collect qualified fault traces
         uses: actions/download-artifact@v4
