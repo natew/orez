@@ -95,3 +95,32 @@ impl WakeRegistry {
             .unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::WakeRegistry;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn upstream_wake_reaches_every_namespace_client() {
+        let registry = WakeRegistry::new();
+        let first = registry.subscribe("project", "first");
+        let second = registry.subscribe("project", "second");
+        let other = registry.subscribe("other", "third");
+
+        registry.wake("project", "");
+
+        tokio::time::timeout(Duration::from_millis(50), first.waked())
+            .await
+            .expect("first client was not woken");
+        tokio::time::timeout(Duration::from_millis(50), second.waked())
+            .await
+            .expect("second client was not woken");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), other.waked())
+                .await
+                .is_err(),
+            "another namespace must stay asleep"
+        );
+    }
+}

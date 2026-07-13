@@ -23,7 +23,7 @@ use sync_core::{Row, SqlValue, SyncDb};
 use crate::db::RusqliteDb;
 use crate::engine::{self, EngineContext};
 use crate::fault::{FaultKind, FaultPoint, FaultRegistry};
-use crate::namespace::Manager;
+use crate::namespace::{Manager, TransactionStep};
 use crate::obs::{self, Counters};
 use crate::wake::WakeRegistry;
 
@@ -332,14 +332,42 @@ async fn admin_sql(
         Ok(n) => n,
         Err(e) => return json_status(400, json!({ "error": e })),
     };
-    let result = namespace
-        .run(move |conn| {
-            let mut db = RusqliteDb::new(conn);
-            db.query(&query, &[])
-        })
-        .await;
+    let transaction_id = value
+        .get("transactionId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let transaction_step = value.get("transactionStep").and_then(Value::as_str);
+    let result = if let Some(transaction_id) = transaction_id {
+        let step = match transaction_step {
+            Some("begin") => TransactionStep::Begin,
+            Some("query") => TransactionStep::Query,
+            Some("end") => TransactionStep::End,
+            _ => {
+                return json_status(400, json!({ "error": "invalid transaction step" }));
+            }
+        };
+        namespace
+            .run_transaction(transaction_id, step, move |conn| {
+                let mut db = RusqliteDb::new(conn);
+                db.query(&query, &[])
+            })
+            .await
+    } else if transaction_step.is_some() {
+        return json_status(400, json!({ "error": "missing transaction id" }));
+    } else {
+        namespace
+            .run(move |conn| {
+                let mut db = RusqliteDb::new(conn);
+                db.query(&query, &[])
+            })
+            .await
+    };
     match result {
         Ok(rows) => {
+            // admin SQL is the upstream-write seam for embedded consumers.
+            // triggers captured the committed rows; wake every namespace
+            // client so they pull those changes without waiting for a push.
+            state.wake.wake(&ns, "");
             let rows: Vec<Value> = rows.iter().map(row_to_json).collect();
             json_status(200, json!({ "rows": rows }))
         }

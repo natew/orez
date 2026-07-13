@@ -6,7 +6,7 @@
 // no lock and no SQLITE_BUSY. WAL + synchronous=FULL make committed cookies
 // durable through SIGKILL, so reopening the same file resumes monotonically.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +17,20 @@ use sync_core::SyncDb;
 
 use crate::db::RusqliteDb;
 
-type Job = Box<dyn FnOnce(&Connection) + Send>;
+type Run = Box<dyn FnOnce(&Connection) + Send>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TransactionStep {
+    Begin,
+    Query,
+    End,
+}
+
+struct Job {
+    transaction_id: Option<String>,
+    step: TransactionStep,
+    run: Run,
+}
 
 // runs once on a fresh worker connection to install the app tables + seed and
 // the engine's _zsync_* schema/triggers. injected by main.rs so this module
@@ -38,9 +51,40 @@ impl Namespace {
         T: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
-        let job: Job = Box::new(move |conn| {
-            let _ = tx.send(f(conn));
-        });
+        let job = Job {
+            transaction_id: None,
+            step: TransactionStep::Query,
+            run: Box::new(move |conn| {
+                let _ = tx.send(f(conn));
+            }),
+        };
+        self.sender
+            .send(job)
+            .unwrap_or_else(|_| panic!("namespace worker thread is gone"));
+        rx.await.expect("namespace worker dropped the reply")
+    }
+
+    // run one request in an admin transaction. once Begin reaches the worker,
+    // every other namespace operation waits until that transaction's End, so
+    // pull/push traffic cannot be folded into the app server's transaction.
+    pub async fn run_transaction<T, F>(
+        &self,
+        transaction_id: String,
+        step: TransactionStep,
+        f: F,
+    ) -> T
+    where
+        F: FnOnce(&Connection) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let (tx, rx) = oneshot::channel();
+        let job = Job {
+            transaction_id: Some(transaction_id),
+            step,
+            run: Box::new(move |conn| {
+                let _ = tx.send(f(conn));
+            }),
+        };
         self.sender
             .send(job)
             .unwrap_or_else(|_| panic!("namespace worker thread is gone"));
@@ -83,8 +127,45 @@ fn spawn(name: &str, path: PathBuf, init: InitFn) -> Result<Namespace, String> {
             if ready_tx.send(Ok(())).is_err() {
                 return;
             }
-            for job in receiver {
-                job(&conn);
+            let mut active_transaction: Option<String> = None;
+            let mut deferred = VecDeque::<Job>::new();
+            loop {
+                let job = if let Some(active) = active_transaction.as_deref() {
+                    if let Some(index) = deferred
+                        .iter()
+                        .position(|job| job.transaction_id.as_deref() == Some(active))
+                    {
+                        deferred.remove(index).expect("deferred job disappeared")
+                    } else {
+                        match receiver.recv() {
+                            Ok(job) => job,
+                            Err(_) => break,
+                        }
+                    }
+                } else if let Some(job) = deferred.pop_front() {
+                    job
+                } else {
+                    match receiver.recv() {
+                        Ok(job) => job,
+                        Err(_) => break,
+                    }
+                };
+
+                if let Some(active) = active_transaction.as_deref()
+                    && job.transaction_id.as_deref() != Some(active)
+                {
+                    deferred.push_back(job);
+                    continue;
+                }
+
+                if job.step == TransactionStep::Begin {
+                    active_transaction = job.transaction_id.clone();
+                }
+                let ends_transaction = job.step == TransactionStep::End;
+                (job.run)(&conn);
+                if ends_transaction {
+                    active_transaction = None;
+                }
             }
         })
         .map_err(|e| e.to_string())?;

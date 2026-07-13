@@ -149,6 +149,27 @@ fn push_req(ns: &str, body: &Value, token: &str) -> Request<axum::body::Body> {
         .unwrap()
 }
 
+fn admin_sql_req(
+    ns: &str,
+    query: &str,
+    transaction_id: Option<&str>,
+    transaction_step: Option<&str>,
+) -> Request<axum::body::Body> {
+    let mut body = json!({ "query": query });
+    if let Some(transaction_id) = transaction_id {
+        body["transactionId"] = json!(transaction_id);
+    }
+    if let Some(transaction_step) = transaction_step {
+        body["transactionStep"] = json!(transaction_step);
+    }
+    Request::builder()
+        .method("POST")
+        .uri(format!("/{ns}/admin/sql"))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
 fn patch_count(resp: &Value, table: &str, op: &str) -> usize {
     resp["rowsPatch"]
         .as_array()
@@ -328,6 +349,68 @@ async fn two_namespaces_are_independent() {
         item_puts, 1,
         "ns-b should only have the seed item, not a-only"
     );
+}
+
+#[tokio::test]
+async fn admin_transaction_rolls_back_and_excludes_namespace_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+    let transaction_id = "tx-rollback";
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "BEGIN", Some(transaction_id), Some("begin")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "INSERT INTO item (id, label) VALUES ('rolled-back', 'pending')",
+            Some(transaction_id),
+            Some("query"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let blocked_router = router.clone();
+    let blocked_pull = tokio::spawn(async move {
+        send(
+            &blocked_router,
+            pull_req("test-ns", &pull_body(None), "Bearer user-1"),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(
+        !blocked_pull.is_finished(),
+        "pull must wait outside the active admin transaction"
+    );
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "ROLLBACK", Some(transaction_id), Some("end")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = blocked_pull.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, result) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "SELECT count(*) AS count FROM item WHERE id = 'rolled-back'",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["rows"][0]["count"], json!(0));
 }
 
 #[tokio::test]
