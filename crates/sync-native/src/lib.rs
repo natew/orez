@@ -22,6 +22,7 @@ pub mod wake;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::http::HeaderMap;
@@ -32,6 +33,12 @@ use sync_core::schema::Tables;
 /// Authentication callback. Receives HTTP request headers, returns
 /// `Some(user_id)` for an authenticated user, or `None` to reject.
 pub type AuthFn = Arc<dyn Fn(&HeaderMap) -> Option<String> + Send + Sync>;
+
+/// Default idle-between-steps budget for a server-owned admin transaction. If
+/// an admin client sends no next step within this window the namespace worker
+/// rolls the transaction back and unblocks pull/push, so a lost admin client
+/// cannot wedge a namespace.
+pub const DEFAULT_ADMIN_TX_LEASE: Duration = Duration::from_secs(30);
 
 // ---- public config -------------------------------------------------------
 
@@ -97,6 +104,13 @@ pub struct SyncNativeConfig {
     /// engine instead of the baseline full-namespace pull. Can be toggled
     /// at runtime via the admin route.
     pub query_aware: bool,
+
+    /// Idle-between-steps budget for a server-owned admin transaction (the
+    /// multi-request BEGIN/.../COMMIT protocol on `/admin/sql`). Each step
+    /// refreshes it; if it elapses with no next step the namespace worker
+    /// rolls the transaction back and unblocks pull/push. Use
+    /// [`DEFAULT_ADMIN_TX_LEASE`] unless you have a reason to tune it.
+    pub admin_tx_lease: Duration,
 }
 
 // ---- host ----------------------------------------------------------------
@@ -131,7 +145,7 @@ impl SyncNativeHost {
         let init_ctx = ctx.clone();
         let init: namespace::InitFn =
             Arc::new(move |db: &mut dyn sync_core::SyncDb| engine::init_namespace(db, &init_ctx));
-        let manager = Arc::new(Manager::new(data_dir.clone(), init));
+        let manager = Arc::new(Manager::new(data_dir.clone(), init, config.admin_tx_lease));
 
         let state = Arc::new(server::AppState::new(
             manager,

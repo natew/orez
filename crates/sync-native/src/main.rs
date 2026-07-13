@@ -124,6 +124,7 @@ async fn main() {
         retain_changes: cli.retain_changes,
         visibility_enabled: cli.visible,
         query_aware: cli.query_aware,
+        admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
     };
 
     SyncNativeHost::new(config, cli.data_dir)

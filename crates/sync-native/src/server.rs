@@ -23,7 +23,7 @@ use sync_core::{Row, SqlValue, SyncDb};
 use crate::db::RusqliteDb;
 use crate::engine::{self, EngineContext};
 use crate::fault::{FaultKind, FaultPoint, FaultRegistry};
-use crate::namespace::{Manager, TransactionStep};
+use crate::namespace::{Manager, TxEnd};
 use crate::obs::{self, Counters};
 use crate::wake::WakeRegistry;
 
@@ -337,41 +337,161 @@ async fn admin_sql(
         .and_then(Value::as_str)
         .map(str::to_string);
     let transaction_step = value.get("transactionStep").and_then(Value::as_str);
-    let result = if let Some(transaction_id) = transaction_id {
-        let step = match transaction_step {
-            Some("begin") => TransactionStep::Begin,
-            Some("query") => TransactionStep::Query,
-            Some("end") => TransactionStep::End,
-            _ => {
-                return json_status(400, json!({ "error": "invalid transaction step" }));
+
+    // an admin transaction step carries both an id and a step; a one-shot query
+    // carries neither. anything half-specified is malformed. the transaction is
+    // server-owned: begin validates the declared SQL and runs BEGIN, query runs
+    // the client statement inside it, and end runs COMMIT/ROLLBACK named by the
+    // query.
+    match (transaction_id, transaction_step) {
+        (Some(id), Some("begin")) => {
+            // the transaction is server-owned: accept only a canonical BEGIN as the
+            // step's declared intent, then run the real BEGIN in the worker.
+            if !is_canonical_begin(&query) {
+                return json_status(
+                    400,
+                    json!({ "error": "transaction begin requires a canonical BEGIN statement" }),
+                );
             }
-        };
-        namespace
-            .run_transaction(transaction_id, step, move |conn| {
-                let mut db = RusqliteDb::new(conn);
-                db.query(&query, &[])
-            })
-            .await
-    } else if transaction_step.is_some() {
-        return json_status(400, json!({ "error": "missing transaction id" }));
-    } else {
-        namespace
-            .run(move |conn| {
-                let mut db = RusqliteDb::new(conn);
-                db.query(&query, &[])
-            })
-            .await
-    };
-    match result {
-        Ok(rows) => {
-            // admin SQL is the upstream-write seam for embedded consumers.
-            // triggers captured the committed rows; wake every namespace
-            // client so they pull those changes without waiting for a push.
-            state.wake.wake(&ns, "");
-            let rows: Vec<Value> = rows.iter().map(row_to_json).collect();
-            json_status(200, json!({ "rows": rows }))
+            match namespace.tx_begin(id).await {
+                Ok(()) => json_status(200, json!({ "rows": [] })),
+                Err(e) => json_status(e.status, json!({ "error": e.message })),
+            }
         }
-        Err(e) => json_status(500, json!({ "error": e.0 })),
+        (Some(id), Some("query")) => {
+            // the worker owns begin/commit/rollback; a query step may not smuggle
+            // transaction-control SQL, which would desync scheduler and connection.
+            if is_transaction_control(&query) {
+                return json_status(
+                    400,
+                    json!({ "error": "transaction control is not allowed in a query step" }),
+                );
+            }
+            let result = namespace
+                .tx_query(id, move |conn| {
+                    let mut db = RusqliteDb::new(conn);
+                    db.query(&query, &[])
+                })
+                .await;
+            match result {
+                Ok(rows) => {
+                    // uncommitted: do not wake clients until the transaction ends.
+                    let rows: Vec<Value> = rows.iter().map(row_to_json).collect();
+                    json_status(200, json!({ "rows": rows }))
+                }
+                Err(e) => json_status(e.status, json!({ "error": e.message })),
+            }
+        }
+        (Some(id), Some("end")) => {
+            let Some(end) = parse_tx_end(&query) else {
+                return json_status(
+                    400,
+                    json!({ "error": "transaction end requires COMMIT or ROLLBACK" }),
+                );
+            };
+            match namespace.tx_end(id, end).await {
+                Ok(()) => {
+                    // a committed transaction publishes its rows; wake every
+                    // namespace client so they pull without waiting for a push.
+                    if matches!(end, TxEnd::Commit) {
+                        state.wake.wake(&ns, "");
+                    }
+                    json_status(200, json!({ "rows": [] }))
+                }
+                Err(e) => json_status(e.status, json!({ "error": e.message })),
+            }
+        }
+        (Some(_), Some(_)) => json_status(
+            400,
+            json!({ "error": "transaction step must be begin, query, or end" }),
+        ),
+        (None, Some(_)) => json_status(400, json!({ "error": "missing transaction id" })),
+        (Some(_), None) => json_status(400, json!({ "error": "missing transaction step" })),
+        (None, None) => {
+            let result = namespace
+                .run(move |conn| {
+                    let mut db = RusqliteDb::new(conn);
+                    db.query(&query, &[])
+                })
+                .await;
+            match result {
+                Ok(rows) => {
+                    // admin SQL is the upstream-write seam for embedded consumers.
+                    // triggers captured the committed rows; wake every namespace
+                    // client so they pull those changes without waiting for a push.
+                    state.wake.wake(&ns, "");
+                    let rows: Vec<Value> = rows.iter().map(row_to_json).collect();
+                    json_status(200, json!({ "rows": rows }))
+                }
+                Err(e) => json_status(500, json!({ "error": e.0 })),
+            }
+        }
+    }
+}
+
+// normalize a transaction-control token: trim whitespace and a trailing `;`,
+// then uppercase, so "begin;", "  BEGIN " and "BEGIN" compare equal.
+fn normalize_control(query: &str) -> String {
+    query
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .to_ascii_uppercase()
+}
+
+// the begin step declares its intent as SQL text; only a canonical BEGIN is
+// accepted, so malformed or mismatched SQL cannot open the transaction.
+fn is_canonical_begin(query: &str) -> bool {
+    matches!(
+        normalize_control(query).as_str(),
+        "BEGIN" | "BEGIN TRANSACTION"
+    )
+}
+
+// the first real SQL keyword, skipping leading whitespace, empty statements
+// (`;`), and SQL comments (`-- line` and `/* block */`). rusqlite executes only
+// the first statement of a query and skips comments, so this matches what the
+// connection would actually run, closing the "hide control SQL behind a comment"
+// bypass.
+fn first_sql_keyword(query: &str) -> String {
+    let mut rest = query;
+    loop {
+        let trimmed = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ';');
+        if let Some(after) = trimmed.strip_prefix("--") {
+            // line comment: skip through the newline (or to end of input).
+            rest = after.find('\n').map_or("", |nl| &after[nl + 1..]);
+            continue;
+        }
+        if let Some(after) = trimmed.strip_prefix("/*") {
+            // block comment: skip past the close (unterminated consumes the rest).
+            rest = after.find("*/").map_or("", |end| &after[end + 2..]);
+            continue;
+        }
+        rest = trimmed;
+        break;
+    }
+    rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase()
+}
+
+// reject any statement whose first keyword drives transaction state, so a query
+// step cannot open, commit, or roll back the worker-owned transaction.
+fn is_transaction_control(query: &str) -> bool {
+    matches!(
+        first_sql_keyword(query).as_str(),
+        "BEGIN" | "COMMIT" | "END" | "ROLLBACK" | "SAVEPOINT" | "RELEASE"
+    )
+}
+
+// the end step names its outcome as SQL text (COMMIT/ROLLBACK, END is a commit
+// synonym); the worker runs the real statement. anything else is a malformed end.
+fn parse_tx_end(query: &str) -> Option<TxEnd> {
+    match normalize_control(query).as_str() {
+        "COMMIT" | "END" => Some(TxEnd::Commit),
+        "ROLLBACK" => Some(TxEnd::Rollback),
+        _ => None,
     }
 }
 

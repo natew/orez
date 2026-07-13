@@ -225,6 +225,7 @@ async fn main() {
         retain_changes: cfg.retain_changes,
         visibility_enabled: cfg.visibility_enabled,
         query_aware: cfg.query_aware,
+        admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
     };
 
     let host = SyncNativeHost::new(config, PathBuf::from(&data_dir));

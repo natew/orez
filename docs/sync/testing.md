@@ -24,8 +24,8 @@ Testing is layered. Each tier exercises a different boundary.
 
 Every cargo suite drives the engine through a synchronous in-memory rusqlite host
 defined in `crates/sync-core/tests/common/mod.rs`. rusqlite is a dev-dependency
-only, so it never ships. There are roughly 115 test functions across the suite;
-two are `#[ignore]` measurements. Run them with `cargo test --workspace`
+only, so it never ships. There are over 120 test functions across the suite;
+three are `#[ignore]` measurements. Run them with `cargo test --workspace`
 (requires `bun` on PATH, because the differential lane shells out to the
 TypeScript reference).
 
@@ -54,6 +54,16 @@ The suites that matter most:
   watermark-idempotency, full-image updates and deletes, out-of-order rejection,
   schema-drift classification, legacy meta migration, and atomic retention-gap
   snapshot replacement.
+- **`upstream_corpus.rs`** is 7 behavioral CDC contracts adapted from Turso's
+  pinned CDC integration suite and Electric's transaction-fragmentation suite.
+  Because Orez captures changes with database-scoped triggers rather than a
+  connection-scoped CDC pragma, they assert the equivalent durable effects: a
+  failed upstream transaction rolls back rows, change log, and cursor together; a
+  successful batch commits them together; a no-op commit and a rolled-back write
+  emit no CDC and leave the connection usable; trigger CDC never captures its own
+  metadata writes and is visible across independent connections; schema drift
+  rolls back with an idempotent legacy-metadata upgrade; and a transaction larger
+  than the pull cap converges without loss or duplication.
 - **The query suites** (`query_ast.rs`, `query_chat_shapes.rs`,
   `query_chat_permissions.rs`, `query_membership.rs`, `query_related.rs`,
   `query_pull.rs`, `query_narrowing.rs`, `query_windowed_corpus.rs`,
@@ -63,6 +73,27 @@ The suites that matter most:
   subqueries, and the wire-level query-aware pull path.
 - **`schema_hardening.rs`** is a security regression suite for DDL and trigger
   injection, proving hostile table and column names cannot inject.
+
+## sync-native cargo tests
+
+The native host has its own cargo coverage, separate from the sync-core engine
+suites. `crates/sync-native/tests/library_api.rs` drives the real axum router
+through `tower`'s `oneshot`: health, a fresh snapshot pull, push-then-pull,
+app-error last-mutation-id semantics, per-namespace isolation, and the
+server-owned admin-transaction protocol on `/admin/sql` end to end. That protocol
+is worker-owned: the namespace thread runs the actual `BEGIN`/`COMMIT`/`ROLLBACK`
+and flips its scheduler state only after that SQL succeeds, so the integration
+tests assert commit and rollback both excluding concurrent pull/push, wrong-id
+and duplicate-begin conflicts, malformed begin/end and transaction-control-in-a-
+query rejection (including comment-hidden control SQL), and a lost admin client
+reclaimed by the transaction lease. `crates/sync-native/src/namespace.rs` adds
+worker-level unit tests for the same scheduler where the lease and connection are
+directly controllable: a failed begin or failed commit that recovers instead of
+wedging, lease reclaim of a lost client, disconnect mid-step, and a plain-job
+flood that cannot starve the lease. `crates/sync-native/src/seed.rs` keeps its
+inline golden-seed test. The running binary's behavior over a real socket
+(graceful shutdown, the wake WebSocket under load) is still exercised only by the
+`rust-local` harness lanes.
 
 ## sync-cf-host workerd lanes
 
@@ -115,6 +146,29 @@ backup and restore, and for the CF suite also WASM memory soak, push memory
 soak, and a rollback drill. The 2026-07-10 re-qualification recorded native 7 of
 7 and CF 9 of 9.
 
+**The portable upstream corpus** (`harness/src/upstream-corpus.ts`) replays the
+same behavioral scenarios across four hosts (the TypeScript oracle, stock
+zero-cache, native Rust `sync-native`, and the Rust CF Durable Object), comparing
+public observations (query results and durable rows) rather than any
+implementation's private CVR/CDC representation. **The generated state machine**
+(`harness/src/state-machine.ts`) is an Electric-style lifecycle model for the
+Rust hosts: a deterministic seeded trace mixes writes, desired-query changes,
+retention pruning, lost responses, and server and client restarts, and every
+operation compares live client views to an authoritative SQL oracle; a failure
+emits the seed, the full trace, and a delta-debugged (shrunk) reproducer under
+`harness/regressions/`.
+
+CI runs these as release-blocking jobs. The `rust-local-faults` job runs the
+pinned corpus ledger, the portable corpus across the TypeScript oracle, stock
+zero-cache, and native Rust, rust-local transaction and storage faults, and the
+state machine against `rust-local`. The `sync-cf-host` job's `rust-cf continuous
+fault and lifecycle gates` step runs the portable corpus against `rust-cf` plus
+protocol fuzz, reconnect, eviction, storage faults, backup/restore, and the state
+machine against `rust-cf`; both jobs upload their seeds and minimized traces as
+artifacts. The heavier `harness/scripts/nightly.sh` cron lane widens the grid:
+the full four-host corpus, the M6 qualification matrix, and the state machine at
+80 steps across several seeds against both `rust-local` and `rust-cf`.
+
 `harness/src/soot-deployed-conformance.ts` is a faithful port of soot's own
 integration test, run against the deployed worker in soot's dialect. It exists
 because the generic fixture lanes cannot target soot's exact composition.
@@ -159,16 +213,20 @@ State this plainly rather than implying blanket coverage.
 2. **`sync-wasm` has no tests of its own.** There are no `wasm_bindgen_test`
    cases and no `crates/sync-wasm/tests/`. The WASM engine is exercised only
    indirectly, through the workerd lanes and the `rust-cf` harness target.
-3. **`sync-native` has no cargo integration tests.** It has one inline
-   golden-seed test. The binary's behavior is covered only by the `rust-local`
-   harness lanes.
-4. **There is no jepsen or elle-level checker.** The linearizability and
-   transactional-anomaly harness sketched in
-   `plans/zero-conformance-harness.md` was deliberately dropped. There is no
-   history export, no anomaly checker, and no network fault injection (no
-   partition, latency, or packet-drop lanes). Faults in the real harness are
-   process-kill and injected DO storage faults only (`eviction.ts`,
-   `storage-faults.ts`).
+3. **`sync-native`'s real-socket behavior is harness-only.** The crate now has
+   cargo coverage (see "sync-native cargo tests"): a library-API integration
+   suite over the axum router and worker-level unit tests for the
+   admin-transaction scheduler. What those do not cover is the running binary
+   over a real TCP socket, graceful shutdown, and the wake WebSocket under load;
+   that behavior is exercised only by the `rust-local` harness lanes.
+4. **There is no jepsen or elle-level checker.** The generated state machine
+   (`state-machine.ts`) is a seeded lifecycle model that compares client views
+   to a SQL oracle and shrinks failing traces, but it is not a linearizability
+   or transactional-anomaly checker: there is no operation-history export for an
+   external consistency checker and no network fault injection (no partition,
+   latency, or packet-drop lanes). Faults in the real harness are process-kill,
+   injected DO storage faults (`storage-faults.ts`), eviction (`eviction.ts`),
+   and the admin-transaction lease and rollback paths only.
 5. **The upstream IVM fuzzer was not ported.** `protocol-fuzz.ts` fuzzes
    malformed input structurally (every case must 4xx); it does not fuzz
    semantically valid query shapes for correctness. The real IVM fuzzer still

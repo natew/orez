@@ -103,6 +103,10 @@ fn custom_auth() -> AuthFn {
 }
 
 fn custom_config() -> SyncNativeConfig {
+    custom_config_with_lease(sync_native::DEFAULT_ADMIN_TX_LEASE)
+}
+
+fn custom_config_with_lease(admin_tx_lease: std::time::Duration) -> SyncNativeConfig {
     SyncNativeConfig {
         tables: custom_tables(),
         initialize: custom_init(),
@@ -112,6 +116,7 @@ fn custom_config() -> SyncNativeConfig {
         retain_changes: 4096,
         visibility_enabled: false,
         query_aware: false,
+        admin_tx_lease,
     }
 }
 
@@ -414,6 +419,268 @@ async fn admin_transaction_rolls_back_and_excludes_namespace_work() {
 }
 
 #[tokio::test]
+async fn admin_transaction_commits_and_excludes_namespace_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+    let transaction_id = "tx-commit";
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "BEGIN", Some(transaction_id), Some("begin")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "INSERT INTO item (id, label) VALUES ('committed', 'kept')",
+            Some(transaction_id),
+            Some("query"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // a pull must wait outside the active admin transaction.
+    let blocked_router = router.clone();
+    let blocked_pull = tokio::spawn(async move {
+        send(
+            &blocked_router,
+            pull_req("test-ns", &pull_body(None), "Bearer user-1"),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(
+        !blocked_pull.is_finished(),
+        "pull must wait outside the active admin transaction"
+    );
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "COMMIT", Some(transaction_id), Some("end")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = blocked_pull.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+
+    // the committed row survived.
+    let (status, result) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "SELECT count(*) AS count FROM item WHERE id = 'committed'",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["rows"][0]["count"], json!(1));
+}
+
+#[tokio::test]
+async fn admin_transaction_wrong_id_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "BEGIN", Some("tx-a"), Some("begin")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // a query naming a different transaction is a conflict, not silently run.
+    let (status, body) = send(
+        &router,
+        admin_sql_req("test-ns", "SELECT 1", Some("tx-b"), Some("query")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["error"].is_string());
+
+    // the real transaction is intact and can still end.
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "ROLLBACK", Some("tx-a"), Some("end")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn admin_transaction_duplicate_begin_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "BEGIN", Some("tx-a"), Some("begin")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "BEGIN", Some("tx-a"), Some("begin")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "ROLLBACK", Some("tx-a"), Some("end")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn admin_transaction_malformed_steps_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    // a begin step whose SQL is not a canonical BEGIN.
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "SELECT 1", Some("tx-a"), Some("begin")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // a step with an id but no step name.
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "SELECT 1", Some("tx-a"), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // a step name with no id.
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "SELECT 1", None, Some("query")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // now open a real transaction and probe the query/end malformed cases.
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "BEGIN", Some("tx-a"), Some("begin")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // a query step may not run transaction-control SQL.
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "ROLLBACK", Some("tx-a"), Some("query")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // leading comments, empty statements, and whitespace must not hide control
+    // SQL from the guard (rusqlite skips them and would run the control stmt).
+    for sneaky in [
+        "-- oops\nROLLBACK",
+        "/* oops */ COMMIT",
+        "  ;\t-- x\n  rollback",
+        "/* a */ /* b */ END",
+    ] {
+        let (status, _) = send(
+            &router,
+            admin_sql_req("test-ns", sneaky, Some("tx-a"), Some("query")),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "comment-hidden control must be rejected: {sneaky:?}"
+        );
+    }
+
+    // an end step whose SQL is neither COMMIT nor ROLLBACK.
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "MAYBE", Some("tx-a"), Some("end")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // the transaction survived every rejected step and still ends cleanly.
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "ROLLBACK", Some("tx-a"), Some("end")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn admin_transaction_disconnect_recovers_namespace() {
+    // a short lease so a lost admin client is reclaimed within the test.
+    let tmp = tempfile::tempdir().unwrap();
+    let host = SyncNativeHost::new(
+        custom_config_with_lease(std::time::Duration::from_millis(150)),
+        tmp.path().to_path_buf(),
+    );
+    let router = host.into_router();
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "BEGIN", Some("tx-gone"), Some("begin")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "INSERT INTO item (id, label) VALUES ('orphan', 'pending')",
+            Some("tx-gone"),
+            Some("query"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // the client vanishes without ending. a pull queued now must eventually run
+    // once the lease reclaims the namespace.
+    let (status, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        send(
+            &router,
+            pull_req("test-ns", &pull_body(None), "Bearer user-1"),
+        ),
+    )
+    .await
+    .expect("lease did not unblock the namespace");
+    assert_eq!(status, StatusCode::OK);
+
+    // the pending insert was rolled back on reclaim.
+    let (status, result) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "SELECT count(*) AS count FROM item WHERE id = 'orphan'",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["rows"][0]["count"], json!(0));
+}
+
+#[tokio::test]
 async fn auth_rejection_returns_401() {
     let tmp = tempfile::tempdir().unwrap();
     let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
@@ -462,6 +729,7 @@ async fn fixture_config_still_works() {
         retain_changes: 4096,
         visibility_enabled: false,
         query_aware: false,
+        admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
     };
     let host = SyncNativeHost::new(config, tmp.path().to_path_buf());
     let router = host.into_router();
