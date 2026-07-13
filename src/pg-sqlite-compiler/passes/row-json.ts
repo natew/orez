@@ -80,20 +80,28 @@ function expandStar(
   qualifier: string | null,
   ctx: PassContext
 ): string[] | null {
-  const rangeVars: any[] = []
-  collectRangeVars(fromClause, rangeVars)
-
   let rv: any
   if (qualifier == null) {
-    // a bare `*` is only unambiguous over a single base table.
-    if (rangeVars.length !== 1) {
+    // a bare `*` covers EVERY source in the FROM clause, so it is only
+    // resolvable when that clause is exactly one base table. A second table, a
+    // sub-select, a function, or a join contributes columns a single table's
+    // shape can't account for, and silently expanding just the one table would
+    // drop the rest. Decline instead of guessing.
+    rv =
+      Array.isArray(fromClause) && fromClause.length === 1
+        ? fromClause[0]?.RangeVar
+        : undefined
+    if (!rv) {
       return decline(
         ctx,
-        'row_to_json over SELECT * needs a single known table to resolve columns'
+        'row_to_json over SELECT * needs the from clause to be a single known table'
       )
     }
-    rv = rangeVars[0]
   } else {
+    // a qualified `t.*` names exactly one table, so it stays resolvable even
+    // amid other FROM sources — find that table wherever it sits.
+    const rangeVars: any[] = []
+    collectRangeVars(fromClause, rangeVars)
     rv = rangeVars.find((v) => (v.alias?.aliasname ?? v.relname) === qualifier)
     if (!rv) {
       return decline(ctx, `row_to_json star qualifier ${qualifier} matches no table`)
@@ -160,7 +168,29 @@ function resolveShape(subselect: any, ctx: PassContext): string[] | null {
     resolvedTargets.push({ target, columns: [], needsAlias: true })
   }
 
-  const usedNames = new Set(resolvedTargets.flatMap((target) => target.columns))
+  // The rewrite addresses each subquery column as `alias.<name>`, so the real
+  // (non-generated) output names must be unique or that reference is ambiguous:
+  // duplicate columns (a.id, b.id), duplicate explicit aliases, and a star that
+  // re-expands an explicitly-listed column all make two outputs share a name,
+  // and SQLite silently resolves the reference to just one, losing the other.
+  // SQLite matches column names case-insensitively, so compare case-folded.
+  // Decline before mutating any target so a declined rewrite leaves the AST
+  // untouched.
+  const usedNames = new Set<string>()
+  for (const resolved of resolvedTargets) {
+    if (resolved.needsAlias) continue
+    for (const column of resolved.columns) {
+      const key = column.toLowerCase()
+      if (usedNames.has(key)) {
+        return decline(
+          ctx,
+          `row_to_json subquery has duplicate output column ${column}; cannot address it unambiguously`
+        )
+      }
+      usedNames.add(key)
+    }
+  }
+
   for (let i = 0; i < resolvedTargets.length; i++) {
     const resolved = resolvedTargets[i]
     if (!resolved.needsAlias) continue
@@ -169,10 +199,10 @@ function resolveShape(subselect: any, ctx: PassContext): string[] | null {
     // real alias that cannot collide with another target or expanded star.
     let suffix = i + 1
     let generated = `_orez_col_${suffix}`
-    while (usedNames.has(generated)) generated = `_orez_col_${++suffix}`
+    while (usedNames.has(generated.toLowerCase())) generated = `_orez_col_${++suffix}`
     resolved.target.name = generated
     resolved.columns = [generated]
-    usedNames.add(generated)
+    usedNames.add(generated.toLowerCase())
   }
   return resolvedTargets.flatMap((target) => target.columns)
 }

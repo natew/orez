@@ -128,6 +128,22 @@ describe('row_to_json → json_object executes correctly', () => {
     expect(warnings).toEqual([])
     expect(result).toEqual({ id: 'w1', label: 'hello' })
   })
+
+  it('expands a qualified t.* even when other FROM sources are present', () => {
+    // qualified `w.*` names exactly one table, so it stays resolvable regardless
+    // of what else sits in the FROM clause.
+    const { result, warnings } = runRowJson(
+      `SELECT row_to_json(zql_root) AS zql_result
+       FROM (
+         SELECT w.* FROM widget AS w, (SELECT 7 AS extra) AS q
+       ) AS zql_root`,
+      `CREATE TABLE widget (id TEXT, label TEXT);
+       INSERT INTO widget (id, label) VALUES ('w1', 'hello');`,
+      { schema: schemaWith({ widget: ['id', 'label'] }) }
+    )
+    expect(warnings).toEqual([])
+    expect(result).toEqual({ id: 'w1', label: 'hello' })
+  })
 })
 
 describe('row_to_json declines rather than inventing names', () => {
@@ -142,6 +158,20 @@ describe('row_to_json declines rather than inventing names', () => {
     expect(sql).not.toMatch(/_orez_col_/i)
   })
 
+  it('declines a bare SELECT * when the FROM clause has more than one source', () => {
+    // widget=[id] resolves, but the extra sub-select `q` also contributes a
+    // column. A single-table expansion would silently drop q.extra, so a bare
+    // `*` over a multi-source FROM must decline instead of guessing.
+    const { sql, warnings } = compile(
+      `SELECT row_to_json(z) AS zql_result
+       FROM (SELECT * FROM widget, (SELECT 7 AS extra) q) AS z`,
+      { schema: schemaWith({ widget: ['id'] }) }
+    )
+    expect(warnings.some((w) => w.kind === 'row-json-unsupported')).toBe(true)
+    expect(sql).toMatch(/row_to_json/i)
+    expect(sql).not.toMatch(/json_object/i)
+  })
+
   it('throws in strict mode when a SELECT * cannot be resolved', () => {
     expect(() =>
       compile(
@@ -150,5 +180,68 @@ describe('row_to_json declines rather than inventing names', () => {
         { strict: true }
       )
     ).toThrow(CompileError)
+  })
+
+  const duplicateShapeCases: Array<[string, string]> = [
+    [
+      'two columns resolving to the same name',
+      `SELECT row_to_json(z) AS zql_result FROM (SELECT a.id, b.id FROM a, b) AS z`,
+    ],
+    [
+      'duplicate explicit aliases',
+      `SELECT row_to_json(z) AS zql_result FROM (SELECT a AS dup, b AS dup FROM widget) AS z`,
+    ],
+    [
+      'names differing only in case',
+      `SELECT row_to_json(z) AS zql_result FROM (SELECT id, "ID" FROM widget) AS z`,
+    ],
+  ]
+
+  for (const [label, pgSql] of duplicateShapeCases) {
+    it(`declines when output names are not unique: ${label}`, () => {
+      const { sql, warnings } = compile(pgSql)
+      expect(warnings.some((w) => w.kind === 'row-json-unsupported')).toBe(true)
+      expect(sql).toMatch(/row_to_json/i)
+      expect(sql).not.toMatch(/json_object/i)
+    })
+
+    it(`throws in strict mode for non-unique output names: ${label}`, () => {
+      expect(() => compile(pgSql, { strict: true })).toThrow(CompileError)
+    })
+  }
+
+  it('declines a star-plus-explicit collision using the authoritative shape', () => {
+    // `*` expands to [id, label]; the explicit `id` collides with the star's id.
+    const { sql, warnings } = compile(
+      `SELECT row_to_json(z) AS zql_result FROM (SELECT *, id FROM widget) AS z`,
+      { schema: schemaWith({ widget: ['id', 'label'] }) }
+    )
+    expect(warnings.some((w) => w.kind === 'row-json-unsupported')).toBe(true)
+    expect(sql).not.toMatch(/json_object/i)
+  })
+
+  it('demonstrates the runtime data loss that the decline prevents', () => {
+    const db = new Database(':memory:')
+    try {
+      db.exec(`CREATE TABLE a (id TEXT); INSERT INTO a (id) VALUES ('a-id');
+               CREATE TABLE b (id TEXT); INSERT INTO b (id) VALUES ('b-id');`)
+      // the naive rewrite the compiler must NOT emit: both refs hit the first id
+      const naive = `SELECT json_object('id', z.id, 'id', z.id) AS zql_result
+                     FROM (SELECT a.id, b.id FROM a, b) AS z`
+      const lossy = JSON.parse(
+        (db.prepare(naive).get() as { zql_result: string }).zql_result
+      )
+      // b.id is silently gone: only one 'id' survives, and it is a's
+      expect(lossy).toEqual({ id: 'a-id' })
+    } finally {
+      db.close()
+    }
+
+    // the compiler declines instead of emitting that lossy shape
+    const { sql, warnings } = compile(
+      `SELECT row_to_json(z) AS zql_result FROM (SELECT a.id, b.id FROM a, b) AS z`
+    )
+    expect(warnings.some((w) => w.kind === 'row-json-unsupported')).toBe(true)
+    expect(sql).not.toMatch(/json_object/i)
   })
 })
