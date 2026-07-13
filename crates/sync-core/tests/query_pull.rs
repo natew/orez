@@ -165,6 +165,31 @@ fn fresh_client_full_resync_clears_and_resends() {
 }
 
 #[test]
+fn newly_desiring_client_rehydrates_existing_group_query() {
+    let mut h = QHost::new();
+    let query = || json!({ "version": 1, "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }] });
+    let first = h.pull("c1", json!(null), Some(query()));
+    assert_eq!(put_ids(&first), vec!["i1", "i3"]);
+
+    // a restarted client keeps the group cookie but has a new client id and may
+    // have evicted ttl=0 rows from its local store. the group membership is
+    // already computed, so the new desire must re-send the members without a
+    // clear or a refcount transition.
+    let restarted = h.pull("c2", first["cookie"].clone(), Some(query()));
+    assert!(!has_clear(&restarted));
+    assert_eq!(put_ids(&restarted), vec!["i1", "i3"]);
+
+    // replaying the same put for the same client is only a version update and
+    // does not resend the full result repeatedly.
+    let replay = h.pull(
+        "c2",
+        restarted["cookie"].clone(),
+        Some(json!({ "version": 2, "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }] })),
+    );
+    assert!(put_ids(&replay).is_empty());
+}
+
+#[test]
 fn deleting_a_desired_query_removes_its_rows() {
     let mut h = QHost::new();
     let put =

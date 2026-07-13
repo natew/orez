@@ -321,14 +321,21 @@ pub fn set_desire(
     client: &str,
     hash: &str,
     client_version: i64,
-) -> Result<(), EngineError> {
+) -> Result<bool, EngineError> {
+    let existed = !db
+        .query(
+            "SELECT 1 FROM _zsync_desires
+             WHERE clientGroupID = ? AND clientID = ? AND hash = ?",
+            &[text(group), text(client), text(hash)],
+        )?
+        .is_empty();
     db.exec(
         "INSERT INTO _zsync_desires (clientGroupID, clientID, hash, clientVersion)
          VALUES (?, ?, ?, ?)
          ON CONFLICT (clientGroupID, clientID, hash) DO UPDATE SET clientVersion = excluded.clientVersion",
         &[text(group), text(client), text(hash), SqlValue::Text(client_version.to_string())],
     )?;
-    Ok(())
+    Ok(!existed)
 }
 
 pub fn remove_desire(
@@ -694,6 +701,16 @@ pub fn recompute_group(
     group: &str,
     changed: &BTreeSet<(String, String)>,
 ) -> Result<Vec<Value>, EngineError> {
+    recompute_group_with_rehydrate(db, tables, group, changed, &BTreeSet::new())
+}
+
+pub(crate) fn recompute_group_with_rehydrate(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+    group: &str,
+    changed: &BTreeSet<(String, String)>,
+    rehydrate: &BTreeSet<String>,
+) -> Result<Vec<Value>, EngineError> {
     let queries = active_queries(db, group)?;
 
     // clear computed markers for queries this group no longer desires, so a
@@ -715,9 +732,10 @@ pub fn recompute_group(
     // net reference delta per (table, pk), and the live value cache for puts
     let mut ref_delta: BTreeMap<(String, String), i64> = BTreeMap::new();
     let mut values: BTreeMap<(String, String), Value> = BTreeMap::new();
+    let mut rehydrate_rows: BTreeSet<(String, String)> = BTreeSet::new();
 
     for q in &queries {
-        if computed.contains(&q.hash) {
+        if computed.contains(&q.hash) && !rehydrate.contains(&q.hash) {
             // (a) dependency-intersection: skip if no dependency table was touched
             let dep_touched = q.deps.iter().any(|t| touched.contains(t.as_str()));
             if !dep_touched {
@@ -767,6 +785,10 @@ pub fn recompute_group(
             &mut values,
         )?;
 
+        if rehydrate.contains(&q.hash) {
+            rehydrate_rows.extend(live.iter().cloned());
+        }
+
         let durable = read_query_row_keys(db, group, &q.hash)?;
         for key in live.difference(&durable) {
             db.exec(
@@ -814,6 +836,7 @@ pub fn recompute_group(
 
     // apply net deltas; emit a put on 0 -> positive, a del on positive -> 0
     let mut patch: Vec<Value> = Vec::new();
+    let mut emitted: BTreeSet<(String, String)> = BTreeSet::new();
     for ((table, pk), delta) in &ref_delta {
         if *delta == 0 {
             continue;
@@ -827,11 +850,13 @@ pub fn recompute_group(
                 .cloned()
                 .ok_or_else(|| EngineError::internal("added row missing live value"))?;
             patch.push(json!({ "op": "put", "tableName": table, "value": value }));
+            emitted.insert((table.clone(), pk.clone()));
         } else if old > 0 && new == 0 {
             let spec = tables.get(table).unwrap();
             let pk_obj: Value = serde_json::from_str(pk).unwrap_or(Value::Null);
             patch
                 .push(json!({ "op": "del", "tableName": table, "id": zero_pk_id(spec, &pk_obj)? }));
+            emitted.insert((table.clone(), pk.clone()));
         }
     }
 
@@ -846,7 +871,24 @@ pub fn recompute_group(
             && let Some(value) = values.get(&key)
         {
             patch.push(json!({ "op": "put", "tableName": table, "value": value }));
+            emitted.insert(key);
         }
+    }
+
+    // a newly-desiring client in an existing group may have an empty local
+    // cache even though the group's durable membership and cookie are current
+    // (for example after a ttl=0 client restart). membership refcounts do not
+    // change, but that client still needs the live rows for its query. duplicate
+    // puts are idempotent in the shared client-group store.
+    for key in rehydrate_rows {
+        if emitted.contains(&key) {
+            continue;
+        }
+        let value = values
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| EngineError::internal("rehydrated row missing live value"))?;
+        patch.push(json!({ "op": "put", "tableName": key.0, "value": value }));
     }
 
     Ok(patch)

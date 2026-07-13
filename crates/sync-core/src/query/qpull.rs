@@ -20,17 +20,20 @@ use crate::wire;
 
 use super::membership::{
     advance_query_ack, canonical_pk_text, clear_desires, client_query_version, desired_hashes,
-    recompute_group, register_query, remove_desire, reset_group, set_desire,
+    recompute_group_with_rehydrate, register_query, remove_desire, reset_group, set_desire,
 };
 
-// apply the desiredQueriesPatch and return the client's query-state version
+// apply the desiredQueriesPatch and return queries newly desired by this client.
+// an existing group can already have
+// durable membership for those hashes, but the new client's local store may not
+// have the rows and needs an idempotent re-send.
 fn apply_desired_patch(
     db: &mut dyn SyncDb,
     tables: &Tables,
     group: &str,
     client: &str,
     queries: &Value,
-) -> Result<i64, EngineError> {
+) -> Result<BTreeSet<String>, EngineError> {
     let obj = queries
         .as_object()
         .ok_or_else(|| EngineError::bad_request("queries must be an object"))?;
@@ -44,6 +47,7 @@ fn apply_desired_patch(
         .get("patch")
         .and_then(Value::as_array)
         .ok_or_else(|| EngineError::bad_request("queries.patch must be an array"))?;
+    let mut rehydrate = BTreeSet::new();
     for op in patch {
         let kind = op.get("op").and_then(Value::as_str);
         match kind {
@@ -70,7 +74,9 @@ fn apply_desired_patch(
                     })?,
                 };
                 register_query(db, tables, group, hash, ast, transform_version)?;
-                set_desire(db, group, client, hash, version)?;
+                if set_desire(db, group, client, hash, version)? {
+                    rehydrate.insert(hash.to_string());
+                }
             }
             Some("del") => {
                 let hash = op
@@ -87,7 +93,7 @@ fn apply_desired_patch(
     // the gotQueries ack regress (MEDIUM-6). done once per patch, after every op,
     // covering put/del/clear and an empty patch that only bumps the version.
     advance_query_ack(db, group, client, version)?;
-    Ok(version)
+    Ok(rehydrate)
 }
 
 // (table, canonical pk) touched since the cookie — for the membership
@@ -134,7 +140,7 @@ pub fn handle_query_pull(
     store::claim_client(db, group, client_id, user_id)?;
 
     // apply the desired-query lifecycle before recomputing
-    let query_version = match body.get("queries") {
+    let applied_queries = match body.get("queries") {
         None | Some(Value::Null) => None,
         Some(queries) => Some(apply_desired_patch(db, tables, group, client_id, queries)?),
     };
@@ -159,7 +165,7 @@ pub fn handle_query_pull(
     let fresh = cookie.is_none() || below_floor;
 
     // fast path: caught up and no desired-query change -> unchanged
-    if !fresh && cookie == Some(current) && query_version.is_none() {
+    if !fresh && cookie == Some(current) && applied_queries.is_none() {
         return Ok(json!({ "cookie": wire::counter_to_json(current)?, "unchanged": true }));
     }
 
@@ -171,7 +177,8 @@ pub fn handle_query_pull(
     } else {
         scan_changed(db, cookie.unwrap())?
     };
-    let mut rows_patch = recompute_group(db, tables, group, &changed)?;
+    let rehydrate = applied_queries.as_ref().cloned().unwrap_or_default();
+    let mut rows_patch = recompute_group_with_rehydrate(db, tables, group, &changed, &rehydrate)?;
     if fresh {
         // wipe the client store before the full re-send
         rows_patch.insert(0, json!({ "op": "clear" }));
