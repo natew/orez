@@ -34,6 +34,15 @@ function stripTrailingSemicolon(s: string): string {
   return s.slice(0, i)
 }
 
+function normalizeEscapeStringLiterals(sql: string): string {
+  // pgsql-deparser prefixes any string containing a backslash with PostgreSQL's
+  // E syntax and doubles each backslash. SQLite strings keep backslashes
+  // literally and reject the E prefix, so restore the AST value before emit.
+  return sql.replace(/\bE'((?:''|[^'])*)'/g, (_literal, body: string) => {
+    return `'${body.replaceAll('\\\\', '\\')}'`
+  })
+}
+
 export class CompileError extends Error {
   constructor(
     readonly warnings: CompileResult['warnings'],
@@ -89,9 +98,11 @@ export function compile(pgSql: string, opts: CompileOptions = {}): CompileResult
   throwIfStrict(opts, warnings, trimmed)
 
   const quotedByMarker = markSQLiteKeywordIdentifiers(stmts)
-  const emitted = restoreSQLiteKeywordIdentifierMarkers(
-    deparseSync({ version: parsed.version ?? version, stmts } as any),
-    quotedByMarker
+  const emitted = normalizeEscapeStringLiterals(
+    restoreSQLiteKeywordIdentifierMarkers(
+      deparseSync({ version: parsed.version ?? version, stmts } as any),
+      quotedByMarker
+    )
   )
   const sql = stripTrailingSemicolon(emitted.trim())
   throwIfStrict(opts, warnings, sql)
