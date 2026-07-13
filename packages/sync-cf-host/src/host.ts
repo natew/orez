@@ -372,10 +372,18 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           if (config.queryAware || config.resolveQuery)
             this.#wasm(() => engine_init_query_schema(this.#engineDb))
         })
-        if (config.upstream && (await ctx.storage.getAlarm()) === null) {
-          await ctx.storage.setAlarm(Date.now() + upstreamIntervalMs)
-        }
       })
+    }
+
+    #armUpstreamAlarm(): void {
+      if (!config.upstream) return
+      this.ctx.waitUntil(
+        (async () => {
+          if ((await this.ctx.storage.getAlarm()) === null) {
+            await this.ctx.storage.setAlarm(Date.now() + upstreamIntervalMs)
+          }
+        })()
+      )
     }
 
     #wasm<T>(call: () => T): T {
@@ -1328,6 +1336,12 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       const [client, server] = Object.values(pair)
       server.serializeAttachment({ clientID } satisfies SocketAttachment)
       this.ctx.acceptWebSocket(server, [`client:${clientID}`])
+      // The alarm is only a safety net for an actively connected consumer.
+      // A namespace with no wake socket has nobody to notify; its next pull or
+      // push ingests synchronously. Arming from construction made every
+      // namespace poll upstream forever after its first request, even across
+      // DO eviction, producing a permanent rows-written floor at zero traffic.
+      this.#armUpstreamAlarm()
       return new Response(null, { status: 101, webSocket: client })
     }
 
@@ -1345,21 +1359,24 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             }
           }
         ).memory
-        return json({
-          bootID: this.#bootID,
-          idleTeardownMs,
-          hibernations: this.#hibernations,
-          databaseSizeBytes: this.ctx.storage.sql.databaseSize,
-          connectedWakeSockets: this.ctx.getWebSockets().length,
-          writerEnabled: this.#writerEnabled(),
-          wasmMemoryBytes: engine_memory_bytes(),
-          heapUsedBytes: heap?.usedJSHeapSize ?? null,
-          heapTotalBytes: heap?.totalJSHeapSize ?? null,
-          heapLimitBytes: heap?.jsHeapSizeLimit ?? null,
-          engine: this.#engineState(),
-          counters: this.#counters,
-          ingestBreaker: this.#ingestBreaker.status(),
-        })
+        return this.ctx.storage.getAlarm().then((upstreamAlarmAt) =>
+          json({
+            bootID: this.#bootID,
+            idleTeardownMs,
+            hibernations: this.#hibernations,
+            databaseSizeBytes: this.ctx.storage.sql.databaseSize,
+            connectedWakeSockets: this.ctx.getWebSockets().length,
+            upstreamAlarmAt,
+            writerEnabled: this.#writerEnabled(),
+            wasmMemoryBytes: engine_memory_bytes(),
+            heapUsedBytes: heap?.usedJSHeapSize ?? null,
+            heapTotalBytes: heap?.totalJSHeapSize ?? null,
+            heapLimitBytes: heap?.jsHeapSizeLimit ?? null,
+            engine: this.#engineState(),
+            counters: this.#counters,
+            ingestBreaker: this.#ingestBreaker.status(),
+          })
+        )
       }
       if (route === '/admin/sql') {
         return request.json().then((body) => {
@@ -1524,6 +1541,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     }
 
     async alarm(): Promise<void> {
+      if (this.ctx.getWebSockets().length === 0) return
       try {
         await this.#ingest()
       } catch (error) {
@@ -1535,10 +1553,12 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           })
         )
       } finally {
-        const retryAfterMs = this.#ingestBreaker.status().retryAfterMs
-        await this.ctx.storage.setAlarm(
-          Date.now() + Math.max(upstreamIntervalMs, retryAfterMs)
-        )
+        if (this.ctx.getWebSockets().length > 0) {
+          const retryAfterMs = this.#ingestBreaker.status().retryAfterMs
+          await this.ctx.storage.setAlarm(
+            Date.now() + Math.max(upstreamIntervalMs, retryAfterMs)
+          )
+        }
       }
     }
 

@@ -47,6 +47,54 @@ try {
     return { status: response.status, body: parsed }
   }
 
+  // An upstream namespace must not become a permanent polling timer after its
+  // client leaves. Pulls ingest synchronously and therefore do not need an
+  // alarm. A wake socket arms the safety poll; after that socket closes, the
+  // next alarm observes zero consumers and expires without rescheduling.
+  const idleNamespace = `idle-alarm-${crypto.randomUUID()}`
+  const idleOrigin = `${base}/${idleNamespace}`
+  const idlePull = await fetch(`${idleOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'idle-reader',
+      clientGroupID: 'idle-group',
+      cookie: null,
+    }),
+  })
+  assert.equal(idlePull.status, 200)
+  const idleStatus = async () => {
+    const response = await fetch(`${idleOrigin}/admin/status`, {
+      headers: { 'x-admin-key': 'ingest-harness-admin' },
+    })
+    assert.equal(response.status, 200)
+    return response.json()
+  }
+  assert.equal((await idleStatus()).upstreamAlarmAt, null)
+
+  const wakeSocket = new WebSocket(
+    `${idleOrigin.replace('http://', 'ws://')}/wake?clientID=idle-reader`
+  )
+  await new Promise((resolve, reject) => {
+    wakeSocket.addEventListener('open', resolve, { once: true })
+    wakeSocket.addEventListener('error', reject, { once: true })
+  })
+  await Bun.sleep(50)
+  const activeWake = await idleStatus()
+  assert.equal(activeWake.connectedWakeSockets, 1)
+  assert.equal(typeof activeWake.upstreamAlarmAt, 'number')
+  wakeSocket.close()
+  await new Promise((resolve) =>
+    wakeSocket.addEventListener('close', resolve, { once: true })
+  )
+  await Bun.sleep(1_250)
+  const stoppedWake = await idleStatus()
+  assert.equal(stoppedWake.connectedWakeSockets, 0)
+  assert.equal(stoppedWake.upstreamAlarmAt, null)
+
   // A push can be the first request for a brand-new namespace. The host must
   // force the DATA /changes provisioning barrier before delegating the
   // mutation to APP; otherwise APP observes a half-provisioned namespace and

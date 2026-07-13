@@ -114,7 +114,7 @@ export type UpstreamConfig = {
   namespacePath: string | ((namespace: string) => string)
   /** Feed page size; the cursor loop continues until the reported head is reached. */
   changeLimit?: number
-  /** Durable Object alarm safety net. Defaults to 15 seconds. */
+  /** Active wake-socket alarm safety net. Defaults to 15 seconds. */
   intervalMs?: number
   /** Billable SQLite rows written by ingest per rolling window. Defaults to 150,000. */
   ingestBudgetRows?: number
