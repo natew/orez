@@ -21,6 +21,8 @@ import { resolve, join } from 'node:path'
 import { stdin as input, stdout as output } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 
+import { orderReleasePackages } from './release-package-order.js'
+
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
 const patch = args.includes('--patch')
@@ -318,6 +320,8 @@ if (existsSync(cfHostPkgPath)) {
     next: orezNext,
   })
 }
+
+packages.splice(0, packages.length, ...orderReleasePackages(packages))
 
 // for --pack-only, use current versions instead of bumping
 if (packOnly) {
