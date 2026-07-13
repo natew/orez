@@ -171,4 +171,11 @@ describe('PG startup schema barrier', () => {
     barrier.fail(failure)
     await expect(waiting).rejects.toBe(failure)
   })
+
+  it('fails a stuck ordinary connection with actionable hook guidance', async () => {
+    const barrier = new PgStartupBarrier('migration-token', 10)
+    await expect(barrier.wait(undefined)).rejects.toThrow(
+      'use a connection string from its HookContext so it can bypass the startup barrier'
+    )
+  })
 })

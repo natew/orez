@@ -3,17 +3,14 @@
  *
  * Unlike the unit test in src/pg-proxy-startup-barrier.test.ts (which constructs
  * PgStartupBarrier and HookContext by hand), this boots the real startZeroLite
- * with a FUNCTION-form onDbReady and exercises three things together:
+ * with both callback forms and exercises their runtime compatibility contract:
  *
- *   1. the barrier-creation condition covers function hooks, not just strings,
- *   2. runHook delivers a HookContext with a privileged connection to the
+ *   1. a zero-argument callback can still use its existing ordinary connection,
+ *   2. a context callback opts into the startup barrier,
+ *   3. runHook delivers a HookContext with a privileged connection to the
  *      callback (it provisions through ctx.upstreamConnectionString), and
- *   3. an ordinary programmatic client is held at PG startup until the callback
+ *   4. an ordinary programmatic client is held at PG startup until the callback
  *      finishes provisioning.
- *
- * If any of those regressed (e.g. the barrier were created only for string
- * hooks again), the ordinary client would query a not-yet-created table and the
- * final assertion would fail.
  */
 import { rmSync } from 'node:fs'
 
@@ -24,7 +21,7 @@ import { startZeroLite } from '../index.js'
 
 import type { HookContext } from '../config.js'
 
-describe('startZeroLite startup barrier holds ordinary clients during a function onDbReady', () => {
+describe('startZeroLite onDbReady callback compatibility', () => {
   let stop: (() => Promise<void>) | undefined
   let dataDir: string | undefined
   const clients: Array<ReturnType<typeof postgres>> = []
@@ -42,6 +39,60 @@ describe('startZeroLite startup barrier holds ordinary clients during a function
     }
     dataDir = undefined
   })
+
+  it(
+    'lets a legacy zero-argument callback use its ordinary proxy connection',
+    { timeout: 60_000 },
+    async () => {
+      const pgPort = 25_000 + Math.floor(Math.random() * 1000)
+      dataDir = `.orez-hook-legacy-test-${pgPort}`
+
+      let callbackCompleted = false
+      const onDbReady = async () => {
+        // This is the pre-HookContext API: existing callbacks construct an
+        // ordinary connection from their configured port. Putting this callback
+        // behind its own startup barrier makes this query self-deadlock.
+        const sql = postgres({
+          host: '127.0.0.1',
+          port: pgPort,
+          user: 'user',
+          password: 'password',
+          database: 'postgres',
+          max: 1,
+          connect_timeout: 2,
+        })
+        clients.push(sql)
+        await sql`CREATE TABLE legacy_widget (id text PRIMARY KEY)`
+        await sql`INSERT INTO legacy_widget (id) VALUES ('ready')`
+        callbackCompleted = true
+      }
+
+      const started = await startZeroLite({
+        pgPort,
+        zeroPort: pgPort + 1,
+        dataDir,
+        ephemeral: true,
+        skipZeroCache: true,
+        logLevel: 'error',
+        onDbReady,
+      })
+      stop = started.stop
+
+      expect(callbackCompleted).toBe(true)
+      const application = postgres({
+        host: '127.0.0.1',
+        port: started.config.pgPort,
+        user: 'user',
+        password: 'password',
+        database: 'postgres',
+        max: 1,
+      })
+      clients.push(application)
+      await expect(
+        application<{ id: string }[]>`SELECT id FROM legacy_widget ORDER BY id`
+      ).resolves.toEqual([{ id: 'ready' }])
+    }
+  )
 
   it(
     'blocks an ordinary programmatic client until the callback provisions the schema',

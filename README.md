@@ -192,17 +192,17 @@ On the PGlite backend, change-tracking triggers are re-installed after
 
 #### Startup blocking and the callback context
 
-`onDbReady` runs before zero-cache and before any application query is allowed
-through. On the PGlite and DO proxy backends, orez holds every ordinary PG client
-at connection startup until `onDbReady` returns, so an early application `SELECT`
-can't race the schema provisioning (or monopolize the shared DB mutex while a
-migration is still creating tables). This applies to both hook forms:
+`onDbReady` runs before zero-cache. On the PGlite and DO proxy backends, shell
+hooks and context-aware callbacks hold every ordinary PG client at connection
+startup until `onDbReady` returns, so an early application `SELECT` can't race
+schema provisioning (or monopolize the shared DB mutex while a migration is
+still creating tables).
 
 - **Shell command:** receives the tagged connection strings via
   `ZERO_UPSTREAM_DB` / `ZERO_CVR_DB` / `ZERO_CHANGE_DB` / `DATABASE_URL`, plus
   `PGAPPNAME`. Connecting with any of these bypasses the barrier.
-- **Function callback:** receives a `HookContext` argument carrying the same
-  privileged connection strings:
+- **Context-aware callback:** declare a context parameter to opt into the
+  barrier and receive its privileged connection strings:
 
   ```typescript
   onDbReady: async (ctx) => {
@@ -216,11 +216,18 @@ migration is still creating tables). This applies to both hook forms:
   }
   ```
 
-  A callback **must** provision through one of these privileged connections. If
-  it opens its own ordinary (untagged) connection to the proxy, that connection
-  is held by the same barrier the callback is meant to release, and it will
-  deadlock. Zero-argument callbacks (`onDbReady: () => {...}`) stay valid and
-  simply ignore the context.
+  A context-aware callback **must** provision through one of these privileged
+  connections. An ordinary (untagged) connection is held by the same barrier;
+  if the hook does that accidentally, the connection fails after a bounded wait
+  with an error pointing back to `HookContext` instead of hanging forever. Both
+  the hook and barrier default to a 30-second deadline; set
+  `onDbReadyTimeoutMs` higher for a legitimately longer migration.
+
+- **Legacy callback:** a zero-argument callback (`onDbReady: async () => { ... }`)
+  does not opt into the barrier. It keeps the behavior from orez v0.4.73 and
+  earlier, including the ability to open its existing ordinary proxy connection.
+  Callback arity is the runtime contract, so callbacks that need the context
+  should declare `ctx` without a default value or rest-parameter wrapper.
 
 ## Vite Plugin
 

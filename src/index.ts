@@ -142,7 +142,15 @@ function resolveNodeBinary(): string {
 }
 
 export { defineConfig, getConfig, getConnectionString } from './config.js'
-export type { Hook, HookContext, LogLevel, OrezConfig, ZeroLiteConfig } from './config.js'
+export type {
+  ContextHookCallback,
+  Hook,
+  HookContext,
+  LegacyHookCallback,
+  LogLevel,
+  OrezConfig,
+  ZeroLiteConfig,
+} from './config.js'
 export { deployTimeSchemaBatchStatements } from './pg-proxy-do-backend.js'
 export { installChangeTracking } from './replication/change-tracker.js'
 
@@ -151,16 +159,35 @@ async function runHook(
   hook: Hook | undefined,
   name: string,
   env: Record<string, string>,
-  context: HookContext
+  context: HookContext,
+  timeoutMs?: number
 ): Promise<void> {
   if (!hook) return
 
   if (typeof hook === 'function') {
     log.debug.orez(`running ${name} callback`)
-    // function callbacks run behind the startup barrier just like shell hooks;
-    // the context hands them a privileged (barrier-bypassing) connection so
-    // they can provision while ordinary clients stay held.
-    await hook(context)
+    // Context-aware callbacks run behind the startup barrier just like shell
+    // hooks; the context hands them a privileged (barrier-bypassing) connection
+    // so they can provision while ordinary clients stay held. Legacy callbacks
+    // still receive (and ignore) this argument but run without the barrier.
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        Promise.resolve().then(() => hook(context)),
+        ...(timeoutMs == null
+          ? []
+          : [
+              new Promise<never>((_, reject) => {
+                timeout = setTimeout(
+                  () => reject(startupHookTimeoutError(name, timeoutMs)),
+                  timeoutMs
+                )
+              }),
+            ]),
+      ])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+    }
     log.orez(`${name} done`)
     return
   }
@@ -173,16 +200,45 @@ async function runHook(
       stdio: 'inherit',
       env: { ...process.env, ...env },
     })
+    let settled = false
+    const finish = (error?: Error) => {
+      if (settled) return
+      settled = true
+      if (timeout) clearTimeout(timeout)
+      if (error) reject(error)
+      else resolve()
+    }
+    const timeout =
+      timeoutMs == null
+        ? undefined
+        : setTimeout(() => {
+            void terminateChildProcessTree(child, {
+              gracefulSignal: 'SIGTERM',
+              forceSignal: 'SIGKILL',
+              graceMs: 1_000,
+              forceGraceMs: 1_000,
+            }).catch(() => {})
+            finish(startupHookTimeoutError(name, timeoutMs))
+          }, timeoutMs)
     child.on('exit', (code) => {
       if (code === 0) {
         log.orez(`${name} done`)
-        resolve()
+        finish()
       } else {
-        reject(new Error(`${name} exited with code ${code}`))
+        finish(new Error(`${name} exited with code ${code}`))
       }
     })
-    child.on('error', reject)
+    child.on('error', (error) => finish(error))
   })
+}
+
+function startupHookTimeoutError(name: string, timeoutMs: number): Error {
+  return new Error(
+    `${name} timed out after ${timeoutMs}ms. ` +
+      'Context-aware callbacks must use a connection string from HookContext; ' +
+      'shell hooks must use the tagged DATABASE_URL provided by orez. ' +
+      'Increase onDbReadyTimeoutMs if the hook legitimately needs more time.'
+  )
 }
 
 /**
@@ -203,6 +259,15 @@ function buildHookContext(
     applicationName,
     pgPort: config.pgPort,
   }
+}
+
+/**
+ * Shell hooks and callbacks that declare a context parameter opt into startup
+ * isolation. A zero-argument callback is the legacy API: it must retain access
+ * to the ordinary proxy connection it used before HookContext was introduced.
+ */
+function hookUsesStartupBarrier(hook: Hook | undefined): boolean {
+  return typeof hook === 'string' || (typeof hook === 'function' && hook.length > 0)
 }
 
 function getManagedPublicationConfig(): { names: string[]; managedByOrez: boolean } {
@@ -238,6 +303,7 @@ import { resolvePackage } from './sqlite-mode/resolve-mode.js'
 
 export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const config = getConfig(overrides)
+  const onDbReadyTimeoutMs = config.onDbReadyTimeoutMs ?? 30_000
   setLogLevel(config.logLevel)
 
   if (config.ephemeral && !config.doBackendUrl) {
@@ -477,16 +543,15 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // as no-ops or DO-native equivalents (PGlite still owns the real path).
   await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
 
-  // on-db-ready hooks connect back through the proxy. Hold every other client at
-  // PG startup until that hook has provisioned the schema; otherwise an early
-  // application SELECT can monopolize the shared DB mutex while the DO retries
-  // "no such table", preventing the migration itself from running. This applies
-  // to BOTH forms of the hook: shell commands receive the tagged connection via
-  // env, and function callbacks receive it via HookContext (see buildHookContext
-  // below), so ordinary programmatic clients can't race either one.
+  // Shell on-db-ready hooks and context-aware callbacks connect back through a
+  // privileged proxy connection. Hold every other client at PG startup until
+  // the hook has provisioned the schema; otherwise an early application SELECT
+  // can monopolize the shared DB mutex while the DO retries "no such table",
+  // preventing the migration itself from running. Legacy zero-argument
+  // callbacks deliberately retain their pre-HookContext unrestricted semantics.
   const pgStartupBarrier =
-    !nativePg && config.onDbReady != null
-      ? new PgStartupBarrier(`orez-on-db-ready-${randomUUID()}`)
+    !nativePg && hookUsesStartupBarrier(config.onDbReady)
+      ? new PgStartupBarrier(`orez-on-db-ready-${randomUUID()}`, onDbReadyTimeoutMs)
       : undefined
 
   // start tcp proxy (routes connections to correct instance by database name).
@@ -532,7 +597,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
           // parameters while crossing a shell hook.
           ...(pgStartupBarrier ? { PGAPPNAME: pgStartupBarrier.applicationName } : {}),
         },
-        buildHookContext(config, hookConnectionString, pgStartupBarrier?.applicationName)
+        buildHookContext(config, hookConnectionString, pgStartupBarrier?.applicationName),
+        onDbReadyTimeoutMs
       )
 
       // re-sync publication membership
@@ -981,7 +1047,8 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
             DATABASE_URL: upstreamUrl,
             OREZ_PG_PORT: String(config.pgPort),
           },
-          buildHookContext(config, (dbName) => getConnectionString(config, dbName))
+          buildHookContext(config, (dbName) => getConnectionString(config, dbName)),
+          onDbReadyTimeoutMs
         )
       }
 

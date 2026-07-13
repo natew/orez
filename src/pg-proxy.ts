@@ -594,13 +594,15 @@ export interface PgProxyServer extends Server {
  */
 export class PgStartupBarrier {
   readonly applicationName: string
+  private readonly waitTimeoutMs: number
   private settled = false
   private failure: unknown
   private readonly ready: Promise<void>
   private releaseReady!: () => void
 
-  constructor(applicationName: string) {
+  constructor(applicationName: string, waitTimeoutMs = 30_000) {
     this.applicationName = applicationName
+    this.waitTimeoutMs = waitTimeoutMs
     this.ready = new Promise<void>((resolve) => {
       this.releaseReady = resolve
     })
@@ -608,7 +610,26 @@ export class PgStartupBarrier {
 
   async wait(applicationName: string | undefined): Promise<void> {
     if (applicationName === this.applicationName) return
-    await this.ready
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        this.ready,
+        new Promise<void>((_, reject) => {
+          timeout = setTimeout(() => {
+            reject(
+              new Error(
+                `PG startup timed out after ${this.waitTimeoutMs}ms waiting for onDbReady. ` +
+                  'If this connection is opened by a context-aware onDbReady callback, ' +
+                  'use a connection string from its HookContext so it can bypass the startup barrier. ' +
+                  'Increase onDbReadyTimeoutMs if the hook legitimately needs more time.'
+              )
+            )
+          }, this.waitTimeoutMs)
+        }),
+      ])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+    }
     if (this.failure !== undefined) throw this.failure
   }
 

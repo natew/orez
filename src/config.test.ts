@@ -10,4 +10,9 @@ describe('getConfig', () => {
     expect(config.zeroPort).toBe(0)
     expect(config.adminPort).toBe(0)
   })
+
+  it('uses a bounded onDbReady timeout that callers can extend', () => {
+    expect(getConfig().onDbReadyTimeoutMs).toBe(30_000)
+    expect(getConfig({ onDbReadyTimeoutMs: 90_000 }).onDbReadyTimeoutMs).toBe(90_000)
+  })
 })

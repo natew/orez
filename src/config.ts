@@ -7,12 +7,15 @@ export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
 /**
  * Context handed to a programmatic lifecycle callback.
  *
- * A function-form onDbReady runs behind the same startup barrier as a shell
- * hook: while it executes, ordinary PG clients are held at connection startup so
- * they cannot race the schema provisioning. The callback must therefore connect
- * through one of the connection strings below, which carry `applicationName`,
- * the tag that bypasses the barrier. A callback that opened its own ordinary
- * (untagged) connection would block against its own barrier and deadlock.
+ * An onDbReady callback that declares this context argument opts into the same
+ * startup barrier as a shell hook. While it executes, ordinary PG clients are
+ * held at connection startup so they cannot race schema provisioning. The
+ * callback must therefore connect through one of the connection strings below,
+ * which carry `applicationName`, the tag that bypasses the barrier.
+ *
+ * Legacy zero-argument callbacks do not opt into the barrier and retain their
+ * pre-context behavior, including the ability to open an ordinary proxy
+ * connection.
  */
 export interface HookContext {
   /** privileged connection string for the primary (upstream) database. */
@@ -31,10 +34,14 @@ export interface HookContext {
   pgPort: number
 }
 
-// lifecycle hooks - can be shell command string (CLI) or callback (programmatic).
-// zero-argument callbacks stay valid: a `() => ...` is assignable where a
-// `(ctx) => ...` is expected, so existing callers keep compiling unchanged.
-export type Hook = string | ((ctx: HookContext) => void | Promise<void>)
+export type LegacyHookCallback = () => void | Promise<void>
+export type ContextHookCallback = (ctx: HookContext) => void | Promise<void>
+
+// Lifecycle hooks can be shell commands (CLI) or callbacks (programmatic).
+// Callback arity is an intentional runtime contract for onDbReady: zero declared
+// parameters select legacy unrestricted startup, while one declared parameter
+// opts into the race-free startup barrier and its privileged HookContext URLs.
+export type Hook = string | LegacyHookCallback | ContextHookCallback
 
 export interface ZeroLiteConfig {
   /**
@@ -73,6 +80,7 @@ export interface ZeroLiteConfig {
   disableDiskLogs: boolean // skip writing logs to disk (default: false)
   // lifecycle hooks
   onDbReady?: Hook // after db+proxy ready, before zero-cache
+  onDbReadyTimeoutMs?: number // bounded startup-hook/barrier wait (default: 30s)
   onHealthy?: Hook // after all services ready
 }
 
@@ -132,6 +140,8 @@ export interface OrezConfig {
   logLevel?: LogLevel
   /** command to run after db+proxy ready, before zero-cache */
   onDbReady?: Hook
+  /** maximum onDbReady execution and startup-barrier wait (default: 30000ms) */
+  onDbReadyTimeoutMs?: number
   /** command to run once all services healthy */
   onHealthy?: Hook
   /** number of pglite read replicas for postgres (default: auto, 0 to disable) */
@@ -191,6 +201,7 @@ export function getConfig(overrides: Partial<ZeroLiteConfig> = {}): ZeroLiteConf
     disableDiskLogs: overrides.disableDiskLogs ?? false,
     doBackendUrl: overrides.doBackendUrl ?? process.env.DO_BACKEND_URL,
     onDbReady: overrides.onDbReady,
+    onDbReadyTimeoutMs: overrides.onDbReadyTimeoutMs ?? 30_000,
     onHealthy: overrides.onHealthy,
   }
 }

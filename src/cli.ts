@@ -1151,6 +1151,7 @@ export const main = defineCommand({
       readReplicas: cliOverrides.readReplicas,
       logLevel: cliOverrides.logLevel,
       onDbReady: cliOverrides.onDbReady || undefined,
+      onDbReadyTimeoutMs: cliOverrides.onDbReadyTimeoutMs,
       onHealthy: cliOverrides.onHealthy || undefined,
       pgliteOptions: cliOverrides.pgliteOptions,
       zeroPublications: cliOverrides.zeroPublications,
