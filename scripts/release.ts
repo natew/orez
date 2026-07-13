@@ -119,7 +119,7 @@ function preparePgToSqliteDist() {
 let cachedNpmOtp = process.env.npm_config_otp || process.env.NPM_CONFIG_OTP
 let otpPromptInFlight: Promise<string> | undefined
 
-function getNpmOtp(reason: string, optional = false): Promise<string> {
+function getNpmOtp(reason: string): Promise<string> {
   if (otpPromptInFlight) return otpPromptInFlight
 
   otpPromptInFlight = (async () => {
@@ -128,16 +128,9 @@ function getNpmOtp(reason: string, optional = false): Promise<string> {
     const rl = createInterface({ input, output })
     try {
       while (true) {
-        const code = (
-          await rl.question(
-            optional
-              ? 'npm 2FA code (6 digits, empty to skip): '
-              : 'npm 2FA code (6 digits): '
-          )
-        ).trim()
+        const code = (await rl.question('npm 2FA code (6 digits): ')).trim()
 
         if (!code) {
-          if (optional) return ''
           throw new Error('No OTP provided, aborting publish')
         }
 
@@ -406,12 +399,11 @@ if (!packOnly) {
     )
   }
 
-  if (!cachedNpmOtp && canPromptForNpmOtp) {
-    await getNpmOtp(
-      'Most orez npm publishes require 2FA. Provide the current code now so every package publish uses it.',
-      true
-    )
-  }
+  // no eager OTP prompt. an account with 2FA set to auth-only (the current one)
+  // never gets an EOTP on publish, so asking up front demanded a code npm was
+  // not going to ask for — on every single release. publishWithOtp already
+  // prompts and retries when npm actually returns EOTP, and CI still fail-closes
+  // on NPM_CONFIG_OTP, so the reactive path covers the auth-and-writes case too.
 }
 
 async function publishWithOtp(name: string, version: string, cwd: string) {
