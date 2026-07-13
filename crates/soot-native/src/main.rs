@@ -17,11 +17,11 @@ use std::sync::Arc;
 use axum::http::HeaderMap;
 use serde::Deserialize;
 use serde_json::Value;
+use sync_core::SyncDb;
 use sync_core::schema::{TableSpec, Tables};
 use sync_core::value::ZeroColumnType;
-use sync_core::SyncDb;
-use sync_native::{AuthFn, SyncNativeConfig, SyncNativeHost};
 use sync_native::engine::{InitFn, MutateFn};
+use sync_native::{AuthFn, SyncNativeConfig, SyncNativeHost};
 
 // ---- config file shapes ---------------------------------------------------
 
@@ -95,8 +95,7 @@ fn build_tables(defs: &[TableDef]) -> Tables {
 fn make_init(ddl: Vec<String>) -> InitFn {
     Arc::new(move |db: &mut dyn SyncDb| {
         for stmt in &ddl {
-            db.exec(stmt, &[])
-                .map_err(|e| format!("ddl error: {e}"))?;
+            db.exec(stmt, &[]).map_err(|e| format!("ddl error: {e}"))?;
         }
         Ok(())
     })
@@ -189,9 +188,7 @@ async fn main() {
 
     let data_dir = args.data_dir.unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        cwd.join(".orez/sync-native")
-            .to_string_lossy()
-            .to_string()
+        cwd.join(".orez/sync-native").to_string_lossy().to_string()
     });
 
     let port = args
