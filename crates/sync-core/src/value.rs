@@ -114,14 +114,26 @@ fn timestamp_text_to_epoch_ms(value: &str) -> Option<i64> {
 
     let offset_seconds = match bytes.get(cursor..) {
         Some([]) | Some([b'Z']) => 0i64,
-        Some([sign @ (b'+' | b'-'), h1, h2, b':', m1, m2])
-            if h1.is_ascii_digit()
-                && h2.is_ascii_digit()
-                && m1.is_ascii_digit()
-                && m2.is_ascii_digit() =>
-        {
-            let hours = i64::from((h1 - b'0') * 10 + (h2 - b'0'));
-            let minutes = i64::from((m1 - b'0') * 10 + (m2 - b'0'));
+        // Zero declares timestamps as `number`, but the DO data tier stores
+        // them as postgres timestamp TEXT and emits the offset in any of pg's
+        // shapes: `+00` (hour only, the common case), `+0000`, or `+00:00`.
+        // Accept all three, plus a bare `Z`/none, so every value the feed ships
+        // decodes instead of falling through to a schema-number error.
+        Some([sign @ (b'+' | b'-'), rest @ ..]) => {
+            let two_digit = |pair: &[u8]| -> Option<i64> {
+                match pair {
+                    [a, b] if a.is_ascii_digit() && b.is_ascii_digit() => {
+                        Some(i64::from((a - b'0') * 10 + (b - b'0')))
+                    }
+                    _ => None,
+                }
+            };
+            let (hours, minutes) = match rest {
+                [h1, h2] => (two_digit(&[*h1, *h2])?, 0),
+                [h1, h2, m1, m2] => (two_digit(&[*h1, *h2])?, two_digit(&[*m1, *m2])?),
+                [h1, h2, b':', m1, m2] => (two_digit(&[*h1, *h2])?, two_digit(&[*m1, *m2])?),
+                _ => return None,
+            };
             if hours > 23 || minutes > 59 {
                 return None;
             }
@@ -274,6 +286,26 @@ mod tests {
         );
         assert_eq!(
             timestamp_text_to_epoch_ms("2026-07-11T03:34:46-10:00"),
+            Some(1_783_776_886_000)
+        );
+    }
+
+    #[test]
+    fn parses_postgres_timestamptz_text_offsets() {
+        // the DO data tier stores pg timestamp/timestamptz columns as postgres
+        // timestamp TEXT (pg-proxy-do-backend `postgresTimestampText`): an
+        // epoch-ms client value becomes `<date> <time>.<ms>+00`, and a
+        // CURRENT_TIMESTAMP default becomes `<date> <time>` with no offset.
+        assert_eq!(
+            timestamp_text_to_epoch_ms("2026-07-11 13:34:46.000+00"),
+            Some(1_783_776_886_000)
+        );
+        assert_eq!(
+            timestamp_text_to_epoch_ms("2026-07-11 13:34:46+00"),
+            Some(1_783_776_886_000)
+        );
+        assert_eq!(
+            timestamp_text_to_epoch_ms("2026-07-11 03:34:46-1000"),
             Some(1_783_776_886_000)
         );
     }

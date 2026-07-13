@@ -549,3 +549,64 @@ describe('ZeroDO implicit foreign-key side effects', () => {
     }
   )
 })
+
+describe('ZeroDO snapshot feed timestamp fidelity', () => {
+  // The sync-cf-host rust engine ingests /snapshot for initial sync of any
+  // namespace whose change log has been pruned below the client cursor (every
+  // prod project namespace with history). pg timestamp/timestamptz columns are
+  // declared `number` in the zero schema but the DO stores them as postgres
+  // timestamp TEXT, so the snapshot must forward that text verbatim for the
+  // engine to decode it — never coerce it with Number() into NaN/null.
+  async function snapshotFor(rows: Array<Record<string, unknown>>) {
+    const { sql, zero } = await createWorkerCore()
+    zero.tableSchemas = new Map()
+    zero.schemaTables = new Set<string>()
+    zero.ensureSchemaTables({
+      tables: {
+        message: {
+          primaryKey: ['id'],
+          columns: {
+            id: { type: 'string' },
+            createdAt: { type: 'number' },
+          },
+        },
+      },
+    })
+    for (const row of rows) {
+      sql.exec(
+        'INSERT INTO "message" ("id", "createdAt") VALUES (?, ?)',
+        row.id,
+        row.createdAt
+      )
+    }
+    expect(sql.exec('SELECT * FROM "message" ORDER BY "id"').toArray()).toEqual(rows)
+    expect(
+      sql
+        .exec('SELECT * FROM "message" ORDER BY "id"')
+        .toArray()
+        .map((row) => zero.normalizeRow('message', row))
+    ).toEqual(rows)
+    const response = await zero.handleSnapshot()
+    const body = (await response.json()) as {
+      tables: Record<string, Array<Record<string, unknown>>>
+    }
+    return body.tables.message
+  }
+
+  it('forwards postgres timestamp text (client epoch-ms form) instead of nulling it', async () => {
+    const rows = await snapshotFor([
+      { id: 'm1', createdAt: '2026-07-11 13:34:46.000+00' },
+    ])
+    expect(rows).toEqual([{ id: 'm1', createdAt: '2026-07-11 13:34:46.000+00' }])
+  })
+
+  it('forwards CURRENT_TIMESTAMP text (server default form) instead of nulling it', async () => {
+    const rows = await snapshotFor([{ id: 'm2', createdAt: '2026-07-11 13:34:46' }])
+    expect(rows).toEqual([{ id: 'm2', createdAt: '2026-07-11 13:34:46' }])
+  })
+
+  it('still coerces a genuine numeric timestamp to a number', async () => {
+    const rows = await snapshotFor([{ id: 'm3', createdAt: 1_783_776_886_000 }])
+    expect(rows).toEqual([{ id: 'm3', createdAt: 1_783_776_886_000 }])
+  })
+})

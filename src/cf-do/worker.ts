@@ -1560,7 +1560,16 @@ export class ZeroDO extends DurableObject {
         normalized[key] =
           value === true || value === 1 || value === '1' || value === 'true'
       } else if (type === 'number') {
-        normalized[key] = Number(value)
+        // timestamp/timestamptz columns are declared `number` in the zero
+        // schema but stored as postgres timestamp TEXT (pg-proxy-do-backend
+        // `postgresTimestampText`, e.g. "2026-07-11 13:34:46.000+00"). Coercing
+        // that text with Number() yields NaN, which JSON serializes as null and
+        // silently wipes every timestamp reaching the sync-cf-host snapshot
+        // feed. Forward a non-numeric value untouched so the engine's
+        // timestamp_text_to_epoch_ms decodes it, matching the /changes feed
+        // which forwards the raw text.
+        const numeric = Number(value)
+        normalized[key] = Number.isFinite(numeric) ? numeric : value
       } else if (type === 'json' && typeof value === 'string') {
         try {
           normalized[key] = JSON.parse(value)
