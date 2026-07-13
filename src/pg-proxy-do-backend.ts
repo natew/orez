@@ -6000,7 +6000,12 @@ export class DoBackend {
     }
 
     // Prepare query
-    const rewrittenStatements = this.rewriteSQLStatements(sql)
+    let rewrittenStatements: RewrittenStatement[]
+    try {
+      rewrittenStatements = this.rewriteSQLStatements(sql)
+    } catch (err: any) {
+      return concat(buildErrorResponse(err.message), this.readyForQuery())
+    }
     const rewritten = rewrittenSQLText(rewrittenStatements)
     if (rewritten === '' || rewritten.startsWith('--')) {
       await this.applyStatementMetadata(rewrittenStatements)
@@ -6426,6 +6431,11 @@ export class DoBackend {
     const portalName = extractExecutePortalName(data)
     const portal = this.portals.get(portalName)
     if (!portal) return buildErrorResponse(`portal "${portalName}" does not exist`)
+    try {
+      this.rejectTransactionalDDL(portal.rewrittenStatements ?? [])
+    } catch (err: any) {
+      return buildErrorResponse(err.message)
+    }
     if (!portal.sql?.trim()) {
       await this.applyStatementMetadata([
         {
@@ -6828,20 +6838,52 @@ export class DoBackend {
     const arrayParamNumbers = new Set<number>()
     const jsonParamNumbers = new Set<number>()
     const epochMillisParamNumbers = new Set<number>()
+    // DDL rewriting mutates function/FK metadata before execution and DDL
+    // execution invalidates live caches. While an emulated transaction is
+    // active, rewrite against isolated state so rejecting DDL cannot itself
+    // leak a metadata or cache side effect.
+    const skippedFunctionNames = this.inTransaction
+      ? new Set(this.skippedFunctionNames)
+      : this.skippedFunctionNames
+    const triggerFunctions = this.inTransaction
+      ? this.cloneTriggerFunctions(this.triggerFunctions)
+      : this.triggerFunctions
+    const fkRegistry = this.inTransaction
+      ? this.cloneFkCascadeRegistry()
+      : this.fkRegistry
     const statements = rewriteSQLStatements(sql, {
-      skippedFunctionNames: this.skippedFunctionNames,
-      triggerFunctions: this.triggerFunctions,
+      skippedFunctionNames,
+      triggerFunctions,
       arrayParamNumbers,
       jsonParamNumbers,
       epochMillisParamNumbers,
-      fkRegistry: this.fkRegistry,
+      fkRegistry,
     })
+    this.rejectTransactionalDDL(statements)
     if (this.canCacheRewrite(statements)) {
       this.rememberRewrite(key, statements)
     } else if (this.rewriteCache.size) {
       this.rewriteCache.clear()
     }
     return statements
+  }
+
+  private cloneFkCascadeRegistry(): FkCascadeRegistry {
+    const cloned = new FkCascadeRegistry()
+    for (const [parent, child] of this.fkRegistry.entries()) {
+      cloned.add(parent, {
+        ...child,
+        columns: [...child.columns],
+        refColumns: [...child.refColumns],
+      })
+    }
+    return cloned
+  }
+
+  private rejectTransactionalDDL(statements: RewrittenStatement[]): void {
+    if (this.inTransaction && statements.some((statement) => statement.isDDL)) {
+      throw new Error('DDL statements are not supported inside emulated transactions')
+    }
   }
 
   private canCacheRewrite(statements: RewrittenStatement[]): boolean {
@@ -7148,6 +7190,7 @@ export class DoBackend {
   private async executeRewrittenStatement(
     statement: RewrittenStatement
   ): Promise<ExecResult> {
+    this.rejectTransactionalDDL([statement])
     if (!statement.sql.trim()) return { rows: [], columns: [] }
     if (await this.shouldSkipStatement(statement)) return { rows: [], columns: [] }
     if (statement.isDDL) {

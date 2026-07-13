@@ -2954,7 +2954,7 @@ describe('DoBackend', () => {
     expect(sent).not.toContain('SELECT chat_permissions, hash, lock')
   })
 
-  test('flushes transactional writes before reads so migrations can see DDL', async () => {
+  test('executes DDL outside transactions before later reads', async () => {
     const http = await startDoHttp((sql) => {
       if (/select\s+name\s+from\s+public_migrations/i.test(sql)) {
         return { rows: [], columns: ['name'] }
@@ -2964,7 +2964,6 @@ describe('DoBackend', () => {
     const backend = new DoBackend(http.url, 'postgres', 'transaction-read-test')
     await backend.waitReady
 
-    await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
     await backend.execProtocolRaw(
       msg(
         0x51,
@@ -2986,7 +2985,82 @@ describe('DoBackend', () => {
     )
     expect(createIndex).toBeGreaterThanOrEqual(0)
     expect(selectIndex).toBeGreaterThan(createIndex)
-    await backend.execProtocolRaw(msg(0x51, cstr('ROLLBACK')))
+  })
+
+  test.each([
+    [
+      'CREATE TABLE',
+      'CREATE TABLE tx_created (id INTEGER PRIMARY KEY, value TEXT NOT NULL)',
+    ],
+    ['DROP TABLE', 'DROP TABLE existing'],
+    ['ALTER TABLE', 'ALTER TABLE existing ADD COLUMN extra TEXT'],
+  ])(
+    'rejects %s inside an emulated transaction without changing SQLite',
+    async (_, ddl) => {
+      const db = new Database(':memory:')
+      db.exec(`
+      CREATE TABLE existing (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO existing (id, value) VALUES (1, 'preserved');
+    `)
+      const http = await startDoHttp((sql) => {
+        const compact = compactSQL(sql)
+        if (
+          /^(?:CREATE TABLE .*tx_created|DROP TABLE .*existing|ALTER TABLE .*existing)/i.test(
+            compact
+          )
+        ) {
+          db.exec(sql)
+        }
+        return { rows: [], columns: [] }
+      })
+      const backend = new DoBackend(http.url, 'postgres', `transactional-ddl-${_}`)
+      await backend.waitReady
+      http.sqls.length = 0
+      await backend.query('SELECT 1')
+      const rewriteCacheBefore = [...(backend as any).rewriteCache.keys()]
+
+      await backend.query('BEGIN')
+      await expect(backend.query(ddl)).rejects.toThrow(
+        'DDL statements are not supported inside emulated transactions'
+      )
+      expect([...(backend as any).rewriteCache.keys()]).toEqual(rewriteCacheBefore)
+      await backend.query('ROLLBACK')
+
+      const tables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .all() as Array<{ name: string }>
+      const columns = db.prepare('PRAGMA table_info(existing)').all() as Array<{
+        name: string
+      }>
+      const rows = db.prepare('SELECT id, value FROM existing').all()
+      expect(tables.map((table) => table.name)).toEqual(['existing'])
+      expect(columns.map((column) => column.name)).toEqual(['id', 'value'])
+      expect(rows).toEqual([{ id: 1, value: 'preserved' }])
+      expect(
+        http.sqls.some((sql) =>
+          /^(?:CREATE TABLE .*tx_created|DROP TABLE .*existing|ALTER TABLE .*existing)/i.test(
+            compactSQL(sql)
+          )
+        )
+      ).toBe(false)
+      db.close()
+    }
+  )
+
+  test('rejects DDL prepared before BEGIN when it executes inside the transaction', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'prepared-transactional-ddl')
+    await backend.waitReady
+    http.sqls.length = 0
+
+    await backend.execProtocolRaw(parseMessage('DROP TABLE existing', 'drop_existing'))
+    await backend.query('BEGIN')
+    await backend.execProtocolRaw(bindStatement('drop_existing', 'drop_portal'))
+    const result = await backend.execProtocolRaw(executePortal('drop_portal'))
+
+    expect(messageTypes(result)).toEqual(['E'])
+    expect(http.sqls.some((sql) => /DROP TABLE/i.test(sql))).toBe(false)
+    await backend.query('ROLLBACK')
   })
 
   test('emulates a non-PK BIGSERIAL column with an AFTER INSERT trigger', async () => {
@@ -3641,15 +3715,15 @@ describe('DoBackend', () => {
     expect(result.rows[0]?.zql_result).toBe('[{"id":"u1"}]')
   })
 
-  test('flushes simple-protocol transaction writes before extended statements', async () => {
+  test('executes outside DDL before extended transaction statements', async () => {
     const http = await startDoHttp(() => ({ rows: [], columns: [] }))
     const backend = new DoBackend(http.url, 'postgres', 'mixed-protocol-test')
     await backend.waitReady
 
-    await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
     await backend.execProtocolRaw(
       msg(0x51, cstr('CREATE TABLE reaction (id TEXT PRIMARY KEY)'))
     )
+    await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
     await backend.execProtocolRaw(parseMessage("INSERT INTO reaction(id) VALUES ('1')"))
     await backend.execProtocolRaw(bindStatement())
     await backend.execProtocolRaw(executePortal())
@@ -4212,23 +4286,21 @@ describe('DoBackend', () => {
     await backend.execProtocolRaw(msg(0x51, cstr('ROLLBACK')))
     expect(metadataInserts().length).toBe(afterCreate)
 
-    // DDL inside a rolled-back tx: the snapshot restore returns metadata to
-    // its pre-tx state, so the rollback persist must also write zero rows.
+    // Rejected DDL inside a transaction must not dirty or rewrite metadata.
     await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
-    await backend.execProtocolRaw(
+    const rejectedDDL = await backend.execProtocolRaw(
       msg(0x51, cstr('CREATE TABLE public.rolled_back (id text PRIMARY KEY)'))
     )
+    expect(messageTypes(rejectedDDL)).toEqual(['E', 'Z'])
     await backend.execProtocolRaw(msg(0x51, cstr('ROLLBACK')))
     expect(metadataInserts().length).toBe(afterCreate)
 
-    // committed DDL persists only the new table's rows, never the full set.
+    // Outside DDL persists only the new table's rows, never the full set.
     const before = metadataInserts()
     const beforeRows = rowCount(before)
-    await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
     await backend.execProtocolRaw(
       msg(0x51, cstr('CREATE TABLE public.diff_extra (id text PRIMARY KEY)'))
     )
-    await backend.execProtocolRaw(msg(0x51, cstr('COMMIT')))
     const committedRows = rowCount(metadataInserts()) - beforeRows
     expect(committedRows).toBeGreaterThan(0)
     expect(committedRows).toBeLessThanOrEqual(3)
@@ -4957,7 +5029,6 @@ describe('DoBackend', () => {
     const backend = new DoBackend(http.url, 'postgres', 'conditional-add-column-test')
     await backend.waitReady
 
-    await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
     await backend.execProtocolRaw(
       msg(
         0x51,
@@ -4967,8 +5038,6 @@ describe('DoBackend', () => {
         `)
       )
     )
-    await backend.execProtocolRaw(msg(0x51, cstr('COMMIT')))
-
     expect(http.sqls.some((sql) => compactSQL(sql).includes('PRAGMA table_info'))).toBe(
       true
     )
@@ -4985,7 +5054,6 @@ describe('DoBackend', () => {
     const backend = new DoBackend(http.url, 'postgres', 'plain-add-column-test')
     await backend.waitReady
 
-    await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
     await backend.execProtocolRaw(
       msg(
         0x51,
@@ -4995,8 +5063,6 @@ describe('DoBackend', () => {
         `)
       )
     )
-    await backend.execProtocolRaw(msg(0x51, cstr('COMMIT')))
-
     expect(http.sqls.some((sql) => compactSQL(sql).includes('PRAGMA table_info'))).toBe(
       true
     )
@@ -5013,7 +5079,6 @@ describe('DoBackend', () => {
     const backend = new DoBackend(http.url, 'postgres', 'conditional-drop-column-test')
     await backend.waitReady
 
-    await backend.execProtocolRaw(msg(0x51, cstr('BEGIN')))
     await backend.execProtocolRaw(
       msg(
         0x51,
@@ -5023,8 +5088,6 @@ describe('DoBackend', () => {
         `)
       )
     )
-    await backend.execProtocolRaw(msg(0x51, cstr('COMMIT')))
-
     expect(http.sqls.some((sql) => compactSQL(sql).includes('PRAGMA table_info'))).toBe(
       true
     )
