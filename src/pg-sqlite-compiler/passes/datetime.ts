@@ -41,33 +41,33 @@ function svfWrapper(op: string): {
   }
 }
 
+/** Return the SQLite-compatible value node for one PG datetime call. */
+export function rewriteDatetimeFunctionCall(node: any): any | undefined {
+  const name = lowerFuncName(node?.funcname)
+  if (!name) return undefined
+  const argless = !node.args || (Array.isArray(node.args) && node.args.length === 0)
+  if (!argless) return undefined
+
+  if (name === 'now' || name === 'current_timestamp' || name === 'clock_timestamp') {
+    return svfWrapper('SVFOP_CURRENT_TIMESTAMP')
+  }
+  if (name === 'current_date') return svfWrapper('SVFOP_CURRENT_DATE')
+  if (name === 'current_time') return svfWrapper('SVFOP_CURRENT_TIME')
+  return undefined
+}
+
 export const datetimePass: Pass = {
   name: 'datetime',
   run(rawStmt, _ctx) {
     walkAst(rawStmt, {
       FuncCall: (node: any, parent: any, key: string | number) => {
         if (parent == null) return // can't replace a root-positioned FuncCall
-        const name = lowerFuncName(node.funcname)
-        if (!name) return
-        const argless = !node.args || (Array.isArray(node.args) && node.args.length === 0)
-        if (!argless) return
-
         // Map PG datetime function calls → SQL bareword time keywords. The PG
         // AST distinguishes function-form (`now()`) from keyword-form
         // (`CURRENT_TIMESTAMP`) at the parse level; SQLite only accepts the
         // keyword form in DEFAULT clauses and uniformly elsewhere.
-        if (name === 'now' || name === 'current_timestamp') {
-          parent[key] = svfWrapper('SVFOP_CURRENT_TIMESTAMP')
-          return
-        }
-        if (name === 'current_date') {
-          parent[key] = svfWrapper('SVFOP_CURRENT_DATE')
-          return
-        }
-        if (name === 'current_time') {
-          parent[key] = svfWrapper('SVFOP_CURRENT_TIME')
-          return
-        }
+        const rewritten = rewriteDatetimeFunctionCall(node)
+        if (rewritten) parent[key] = rewritten
       },
     })
   },

@@ -3,13 +3,21 @@ import { DurableObject } from 'cloudflare:workers'
 
 import {
   isSqlMutation,
+  isSqlRowMutation,
   RollingRowWriteBudget,
   trackSqlCursorRowsWritten,
   trackedChangeRow,
   WriteBudgetExceededError,
 } from '../do-sql-tracking.js'
+import { TransactionalCdc, type CdcTableRegistration } from './cdc.js'
+import {
+  appendPendingChange,
+  deletePendingChanges,
+  ensurePendingChangesTable,
+  rollbackPendingChanges,
+} from './row-undo.js'
 import { commitTxJournal, recoverTxJournal, rollbackTxJournal } from './tx-journal.js'
-import { DurableWatermarkState } from './watermark.js'
+import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
 
 /**
  * zero-do: Durable Object that exposes raw SQL execution over ctx.storage.sql.
@@ -69,15 +77,19 @@ interface PushBody {
 }
 interface SqlTrack {
   tableName: string
+  physicalTableName?: string
   operation: 'INSERT' | 'UPDATE' | 'DELETE'
   returnRows?: boolean
   rowColumns?: string[]
   transactionID?: string
+  /** False records row images for rollback without publishing a change. */
+  publish?: boolean
 }
 interface SqlExecStatement {
   sql: string
   params?: unknown[]
   track?: SqlTrack
+  transactionID?: string
   // runtime-conditional DDL: the deploy-time rewriter can't know a target
   // namespace's current shape, so ALTER TABLE ... ADD/DROP COLUMN IF [NOT]
   // EXISTS ships as an unconditional statement plus a skip condition the DO
@@ -164,12 +176,14 @@ function sqlErrorSnippet(sql: string, message: string): string {
 export class ZeroDO extends DurableObject {
   private sql: any
   private watermarks: DurableWatermarkState
+  private cdc: TransactionalCdc
   private schemaTables = new Set<string>()
   private tableSchemas = new Map<string, SchemaTable>()
   private writeBudget: RollingRowWriteBudget
   private writeBudgetDisabled: boolean
   private writeBudgetAdminToken: string | undefined
   private activeWriteMeasurements: SqlWriteMeasurement[] | null = null
+  private pendingChangesSchemaReady = false
 
   private recordWriteBudgetRows(rows: number): void {
     const wasTripped = this.writeBudget.status().tripped
@@ -254,6 +268,7 @@ export class ZeroDO extends DurableObject {
         if (trippedAt) this.writeBudget.restoreTrip(trippedAt)
       })
     }
+    this.cdc = new TransactionalCdc(this.sql)
     this.watermarks = new DurableWatermarkState(this.sql)
   }
 
@@ -569,19 +584,23 @@ export class ZeroDO extends DurableObject {
         sql: string
         params?: unknown[]
         track?: SqlTrack
+        transactionID?: unknown
       }
       sql = body.sql
       const params = Array.isArray(body.params) ? body.params : []
-      // Only wrap in ctx.storage.transaction() when the call has change-tracking
-      // side effects (executeSQL writes BOTH the user table AND _zero_changes,
-      // which must commit together to keep source-tab sync flicker-free). A
-      // bare /exec is single-statement and ctx.storage.sql already serializes;
-      // the transaction wrap was adding ~2-5ms × every call, which on chat's
-      // 27k-stmt boot pushed orez backend startup past chat's 60s wait-for-port.
+      const transactionID = String(body.transactionID || body.track?.transactionID || '')
+      // CDC rows are drained into the durable change log before the storage
+      // transaction returns. Keep unrelated DDL/read calls on the fast path:
+      // wrapping every /exec adds ~2-5ms and materially slows large schemas.
+      const needsAtomicCapture =
+        !!body.track ||
+        (this.cdc.active && (isSqlRowMutation(sql) || this.cdc.capturesSchemaChange(sql)))
       const result = await this.withSchemaProvisioningWait(() =>
-        body.track
-          ? this.ctx.storage.transaction(() => this.executeSQL(sql, params, body.track))
-          : this.executeSQL(sql, params)
+        needsAtomicCapture
+          ? this.ctx.storage.transaction(() =>
+              this.executeSQL(sql, params, body.track, transactionID || undefined)
+            )
+          : this.executeSQL(sql, params, undefined, transactionID || undefined)
       )
       return Response.json(
         measurements ? { ...result, writeMeasurements: measurements } : result
@@ -601,12 +620,14 @@ export class ZeroDO extends DurableObject {
   private async handleBatch(request: Request): Promise<Response> {
     const measurements = this.startWriteMeasurement(request)
     try {
-      const { statements } = (await request.json()) as {
+      const { statements, cdcTables } = (await request.json()) as {
         statements: Array<string | SqlExecStatement>
+        cdcTables?: CdcTableRegistration[]
       }
       const allRows = await this.withSchemaProvisioningWait(() =>
         this.ctx.storage.transaction(() => {
           const results: any[] = []
+          if (Array.isArray(cdcTables)) this.cdc.syncTables(cdcTables)
           for (const statement of statements) {
             const item = typeof statement === 'string' ? { sql: statement } : statement
             if (!item?.sql?.trim()) continue
@@ -633,7 +654,8 @@ export class ZeroDO extends DurableObject {
                 this.executeSQL(
                   item.sql,
                   Array.isArray(item.params) ? item.params : [],
-                  item.track
+                  item.track,
+                  item.transactionID || item.track?.transactionID
                 )
               )
             } catch (err: any) {
@@ -648,6 +670,10 @@ export class ZeroDO extends DurableObject {
       )
       return Response.json({
         results: allRows,
+        capturedChanges: allRows.reduce(
+          (total, result) => total + Number(result.capturedChanges ?? 0),
+          0
+        ),
         ...(measurements ? { writeMeasurements: measurements } : null),
       })
     } catch (err: any) {
@@ -728,6 +754,7 @@ export class ZeroDO extends DurableObject {
       const transactionID = String(body.transactionID || '')
       if (!transactionID) throw new Error('missing transactionID')
       const count = await this.ctx.storage.transaction(() => {
+        this.rollbackPendingTrackedChanges(transactionID)
         rollbackTxJournal(this.sql, transactionID)
         return this.deletePendingTrackedChanges(transactionID)
       })
@@ -755,7 +782,9 @@ export class ZeroDO extends DurableObject {
       const body = (await request.json().catch(() => ({}))) as { owner?: unknown }
       const owner = body.owner === undefined ? undefined : String(body.owner)
       const transactionIDs = await this.ctx.storage.transaction(() => {
-        const recovered = recoverTxJournal(this.sql, owner)
+        const recovered = recoverTxJournal(this.sql, owner, (txID) => {
+          this.rollbackPendingTrackedChanges(txID)
+        })
         for (const txID of recovered) this.deletePendingTrackedChanges(txID)
         return recovered
       })
@@ -845,39 +874,98 @@ export class ZeroDO extends DurableObject {
   private executeSQL(
     sql: string,
     params: unknown[] = [],
-    track?: SqlTrack
-  ): { rows: Record<string, unknown>[]; columns: string[]; affectedRows?: number } {
-    const cursor = this.sql.exec(sql, ...params)
+    track?: SqlTrack,
+    transactionID?: string
+  ): {
+    rows: Record<string, unknown>[]
+    columns: string[]
+    affectedRows?: number
+    capturedChanges?: number
+  } {
+    let capturesTrackedTable = false
+    if (track?.physicalTableName) {
+      capturesTrackedTable = this.cdc.ensureTable({
+        physicalTableName: track.physicalTableName,
+        tableName: track.tableName,
+        ...(track.publish === false ? { publish: false } : null),
+        ...(track.rowColumns?.length ? { columns: track.rowColumns } : null),
+      })
+    } else if (track) {
+      capturesTrackedTable = this.cdc.capturesTable(track.tableName)
+    }
+
+    const suspendedCdc = this.cdc.beginSchemaChange(sql)
+    let cursor: ReturnType<DurableSqlStorage['exec']>
+    try {
+      cursor = this.sql.exec(sql, ...params)
+    } catch (error) {
+      // Restore capture against the unchanged schema before propagating a DDL
+      // failure. In normal /exec and /batch paths this is also protected by the
+      // surrounding storage transaction.
+      this.cdc.finishSchemaChange(suspendedCdc)
+      throw error
+    }
+    this.cdc.finishSchemaChange(suspendedCdc)
     const columns = Array.isArray(cursor.columnNames) ? cursor.columnNames : []
     const rows = this.cursorRows(cursor, columns)
-    if (isSqlMutation(sql)) this.writeBudget.recordLogical(rows.length)
-    if (!track) return { rows, columns }
-
-    for (const row of rows) {
-      const trackedRow = trackedChangeRow(row, track)
-      if (track.operation === 'DELETE')
-        this.appendTrackedChange(
-          track.tableName,
-          'DELETE',
-          null,
-          trackedRow,
-          track.transactionID
-        )
-      else
-        this.appendTrackedChange(
-          track.tableName,
-          track.operation,
-          trackedRow,
-          null,
-          track.transactionID
-        )
+    const mutation = isSqlMutation(sql)
+    if (mutation) this.writeBudget.recordLogical(rows.length)
+    if (mutation && !isSqlRowMutation(sql)) this.cdc.invalidateSchema()
+    const captured =
+      track || (this.cdc.active && isSqlRowMutation(sql)) ? this.cdc.drain() : []
+    for (const change of captured) {
+      this.appendTrackedChange(
+        change.tableName,
+        change.op,
+        change.rowData,
+        change.oldData,
+        transactionID || track?.transactionID,
+        change.physicalTableName,
+        change.publish !== false
+      )
     }
-    this.appendDerivedTrackedChanges(track, rows)
+
+    // Backward compatibility for callers that have not yet supplied the
+    // physical SQLite table identity needed to install a trigger. Once a
+    // table is registered, trigger capture is the sole source of truth and
+    // includes arbitrary business-trigger side effects.
+    if (track && !capturesTrackedTable) {
+      for (const row of rows) {
+        const trackedRow = trackedChangeRow(row, track)
+        if (track.operation === 'DELETE')
+          this.appendTrackedChange(
+            track.tableName,
+            'DELETE',
+            null,
+            trackedRow,
+            transactionID || track.transactionID,
+            track.physicalTableName || track.tableName.replace(/^public\./, ''),
+            track.publish !== false
+          )
+        else
+          this.appendTrackedChange(
+            track.tableName,
+            track.operation,
+            trackedRow,
+            null,
+            transactionID || track.transactionID,
+            track.physicalTableName || track.tableName.replace(/^public\./, ''),
+            track.publish !== false
+          )
+      }
+      if (track.publish !== false) this.appendDerivedTrackedChanges(track, rows)
+    }
+
+    const publishedCaptured = captured.filter((change) => change.publish !== false).length
+    if (!track) return { rows, columns, capturedChanges: publishedCaptured }
 
     return {
       rows: track.returnRows ? rows : [],
       columns: track.returnRows ? columns : [],
       affectedRows: rows.length,
+      capturedChanges:
+        publishedCaptured ||
+        (capturesTrackedTable || track.publish === false ? 0 : rows.length),
     }
   }
 
@@ -1093,10 +1181,21 @@ export class ZeroDO extends DurableObject {
     op: 'INSERT' | 'UPDATE' | 'DELETE',
     rowData: Record<string, unknown> | null,
     oldData: Record<string, unknown> | null,
-    transactionID?: string
+    transactionID?: string,
+    physicalTableName?: string,
+    publish = true
   ) {
+    if (!publish && !transactionID) return
     if (transactionID) {
-      this.appendPendingTrackedChange(tableName, op, rowData, oldData, transactionID)
+      this.appendPendingTrackedChange(
+        tableName,
+        op,
+        rowData,
+        oldData,
+        transactionID,
+        physicalTableName,
+        publish
+      )
       return
     }
     this.appendCommittedTrackedChange(tableName, op, rowData, oldData)
@@ -1122,9 +1221,9 @@ export class ZeroDO extends DurableObject {
   }
 
   private ensurePendingTrackedChangesTable() {
-    this.sql.exec(
-      "CREATE TABLE IF NOT EXISTS _zero_pending_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, transaction_id TEXT NOT NULL, table_name TEXT NOT NULL, op TEXT NOT NULL CHECK (op IN ('INSERT', 'UPDATE', 'DELETE')), row_data TEXT, old_data TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()))"
-    )
+    if (this.pendingChangesSchemaReady) return
+    ensurePendingChangesTable(this.sql)
+    this.pendingChangesSchemaReady = true
   }
 
   private appendPendingTrackedChange(
@@ -1132,17 +1231,25 @@ export class ZeroDO extends DurableObject {
     op: 'INSERT' | 'UPDATE' | 'DELETE',
     rowData: Record<string, unknown> | null,
     oldData: Record<string, unknown> | null,
-    transactionID: string
+    transactionID: string,
+    physicalTableName?: string,
+    publish = true
   ) {
     this.ensurePendingTrackedChangesTable()
-    this.sql.exec(
-      'INSERT INTO _zero_pending_changes (transaction_id, table_name, op, row_data, old_data) VALUES (?, ?, ?, ?, ?)',
+    appendPendingChange(this.sql, {
       transactionID,
+      physicalTableName,
       tableName,
+      publish,
       op,
-      rowData ? JSON.stringify(rowData) : null,
-      oldData ? JSON.stringify(oldData) : null
-    )
+      rowData,
+      oldData,
+    })
+  }
+
+  private rollbackPendingTrackedChanges(transactionID: string): number {
+    this.ensurePendingTrackedChangesTable()
+    return rollbackPendingChanges(this.sql, this.cdc, transactionID)
   }
 
   private commitPendingTrackedChanges(transactionID: string): number {
@@ -1153,7 +1260,7 @@ export class ZeroDO extends DurableObject {
         `INSERT INTO _zero_changes (table_name, op, row_data, old_data)
          SELECT table_name, op, row_data, old_data
          FROM _zero_pending_changes
-         WHERE transaction_id = ?
+         WHERE transaction_id = ? AND publish != 0
          ORDER BY id
          RETURNING watermark`,
         transactionID
@@ -1170,13 +1277,7 @@ export class ZeroDO extends DurableObject {
 
   private deletePendingTrackedChanges(transactionID: string): number {
     this.ensurePendingTrackedChangesTable()
-    const result = this.sql
-      .exec(
-        'DELETE FROM _zero_pending_changes WHERE transaction_id = ? RETURNING 1 AS deleted',
-        transactionID
-      )
-      .toArray()
-    return result.length
+    return deletePendingChanges(this.sql, transactionID)
   }
 
   private readChangesSince(watermark: number) {

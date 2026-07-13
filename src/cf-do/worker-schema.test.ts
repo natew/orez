@@ -98,6 +98,9 @@ class FakeChangeSql {
     if (sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_pending_changes')) {
       return new FakeResult()
     }
+    if (sql.startsWith('PRAGMA table_info(_zero_pending_changes)')) {
+      return new FakeResult([{ name: 'physical_table_name' }, { name: 'publish' }])
+    }
     if (sql.startsWith('INSERT OR IGNORE INTO "_zero_change_state"')) {
       return new FakeResult()
     }
@@ -121,7 +124,7 @@ class FakeChangeSql {
       return new FakeResult()
     }
     if (sql.startsWith('INSERT INTO _zero_pending_changes')) {
-      const [transaction_id, table_name, op, row_data, old_data] = params
+      const [transaction_id, , table_name, , op, row_data, old_data] = params
       this.pending.push({
         id: ++this.pendingSeq,
         transaction_id: String(transaction_id),

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   isSqlMutation,
+  isSqlRowMutation,
   RollingRowWriteBudget,
   trackSqlCursorRowsWritten,
   trackedChangeRow,
@@ -86,6 +87,13 @@ describe('isSqlMutation', () => {
     expect(isSqlMutation('/* migration */\nINSERT INTO t VALUES (1)')).toBe(true)
     expect(isSqlMutation('SELECT 1; -- next\nDELETE FROM t')).toBe(true)
     expect(isSqlMutation('WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x')).toBe(true)
+  })
+
+  it('distinguishes row DML from schema and maintenance writes', () => {
+    expect(isSqlRowMutation('/* write */ UPDATE t SET value = 1')).toBe(true)
+    expect(isSqlRowMutation('WITH x AS (SELECT 1) DELETE FROM t')).toBe(true)
+    expect(isSqlRowMutation('CREATE TABLE t (id INTEGER)')).toBe(false)
+    expect(isSqlRowMutation('VACUUM')).toBe(false)
   })
 })
 

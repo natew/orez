@@ -84,8 +84,22 @@ function flattenWriteTargetQualifiers(stmt: any): void {
 
 export const schemaPass: Pass = {
   name: 'schema',
-  run(rawStmt) {
+  run(rawStmt, ctx) {
     walkAst(rawStmt, {
+      AlterTableCmd: (node: any) => {
+        if (node.subtype !== 'AT_DropColumn' || !node.behavior) return
+        if (node.behavior === 'DROP_CASCADE') {
+          ctx.warnings.push({
+            kind: 'unsupported-alter-table-cascade',
+            message: 'SQLite DROP COLUMN does not support CASCADE',
+          })
+          return
+        }
+        // PostgreSQL deparses its default DROP_RESTRICT behavior as an
+        // explicit RESTRICT clause. SQLite has the same restrictive default
+        // but rejects the keyword, so omit it from the emitted statement.
+        delete node.behavior
+      },
       SelectStmt: (node: any) => {
         flattenSelectRangeVarQualifiers(node)
       },

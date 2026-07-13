@@ -54,7 +54,7 @@ The orez Cloudflare path is therefore:
 │   /exec, /batch, /commit-tx, /rollback-tx, /recover-txs,       │
 │   /changes, /notify, /__orez/*                                 │
 │   ctx.storage.sql                                              │
-│   _orez.changes populated by SQL tracking triggers             │
+│   _zero_changes populated by transactional row triggers        │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -76,12 +76,19 @@ same zero-cache process and durable SQLite state.
   protocol experiments, but the production Soot deploy path uses real
   zero-cache through `startZeroCacheEmbedCF()`.
 - `src/do-sql-tracking.ts` and `src/replication/*` - change tracking and
-  logical replication support over `_orez.changes`.
+  logical replication support over `_zero_changes`.
+- `src/cf-do/cdc.ts` - generated SQLite AFTER triggers for every published
+  table. Triggers write full before/after row images to a staging table in the
+  application statement; `ZeroDO` drains them into committed or transaction-
+  pending changes before its storage transaction returns. This is logical row
+  capture, not WAL/page copying, and includes writes made by business triggers.
 - `src/worker/local-sql-backend.ts` - serves the DoBackend HTTP protocol
   against the embed DO's own storage for the CVR/change DBs (no cross-DO hop).
 - `src/cf-do/tx-journal.ts` - durable journal for DoBackend's emulated pg
-  transactions: snapshots are recorded atomically with creation, COMMIT is one
-  atomic storage transaction, and recovery at embed boot rolls back any
+  transactions: parsed DML uses transactional CDC before-images for rollback;
+  unrecognized writes fall back to table snapshots. Journal markers and
+  snapshots are recorded atomically, COMMIT is one storage transaction, and
+  recovery at embed boot rolls back any
   transaction a dead DO generation left mid-flight (otherwise a deploy
   upgrade-kill mid-storer-write persists a partial cdc changeLog tx and wedges
   replication permanently).
@@ -92,6 +99,11 @@ same zero-cache process and durable SQLite state.
   `_orez_tx_manifest` rows are gone. Anything else is rolled back by
   `recoverTxJournal` on the next embed boot (owner-scoped, so the app
   worker's live pg sessions are never touched).
+- Application rows and their staging CDC rows are written by the same SQLite
+  statement. A failed statement leaves neither behind. Explicit DoBackend
+  transactions drain into `_zero_pending_changes`; `/commit-tx` promotes the
+  complete group to `_zero_changes` atomically with clearing the rollback
+  journal, while rollback/recovery discards the pending group.
 - `_zero_changes` rows are purged only when the consumer CONFIRMS them
   (standby status updates / the resume LSN of a reconnect), mirroring how
   real postgres retains WAL until the slot's confirmed_flush_lsn passes it.

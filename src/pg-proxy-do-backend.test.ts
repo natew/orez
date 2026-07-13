@@ -323,7 +323,12 @@ function startDoHttp(
         return
       }
       res.setHeader('content-type', 'application/json')
-      res.end(JSON.stringify({ rows: result.rows ?? [], columns: result.columns ?? [] }))
+      res.end(
+        JSON.stringify({
+          rows: result.rows ?? [],
+          columns: result.columns ?? [],
+        })
+      )
     })
   })
   servers.push(server)
@@ -391,7 +396,10 @@ describe('DoBackend', () => {
   })
 
   test('sends the configured Durable Object namespace on every SQL request', async () => {
-    const http = await startDoHttp(() => ({ rows: [{ ok: 1 }], columns: ['ok'] }))
+    const http = await startDoHttp(() => ({
+      rows: [{ ok: 1 }],
+      columns: ['ok'],
+    }))
     const backend = new DoBackend(http.url, 'postgres', 'chat-test-namespace')
     await backend.waitReady
 
@@ -668,8 +676,12 @@ describe('DoBackend', () => {
       (statement) => statement.params && statement.sql.includes('_orez_pg_metadata')
     )
     expect(metadataInserts.length).toBeGreaterThan(0)
-    const metadataRows: { kind: string; key: string; subkey: string; value: string }[] =
-      []
+    const metadataRows: {
+      kind: string
+      key: string
+      subkey: string
+      value: string
+    }[] = []
     for (const statement of metadataInserts) {
       for (let i = 0; i < statement.params!.length; i += 4) {
         const [kind, key, subkey, value] = statement.params!.slice(i, i + 4)
@@ -1152,7 +1164,10 @@ describe('DoBackend', () => {
       if (sql.includes('sqlite_master')) {
         return {
           rows: [
-            { name: 'message', sql: 'CREATE TABLE message (id varchar PRIMARY KEY)' },
+            {
+              name: 'message',
+              sql: 'CREATE TABLE message (id varchar PRIMARY KEY)',
+            },
             { name: 'user', sql: 'CREATE TABLE user (id varchar PRIMARY KEY)' },
             {
               name: 'public_migrations',
@@ -1165,7 +1180,14 @@ describe('DoBackend', () => {
       if (sql.includes('PRAGMA table_info("message")')) {
         return {
           rows: [
-            { cid: 0, name: 'id', type: 'varchar', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 0,
+              name: 'id',
+              type: 'varchar',
+              notnull: 1,
+              dflt_value: null,
+              pk: 1,
+            },
           ],
           columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
         }
@@ -1200,7 +1222,14 @@ describe('DoBackend', () => {
       if (sql.includes('PRAGMA table_info("message")')) {
         return {
           rows: [
-            { cid: 0, name: 'id', type: 'varchar', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 0,
+              name: 'id',
+              type: 'varchar',
+              notnull: 1,
+              dflt_value: null,
+              pk: 1,
+            },
             {
               cid: 1,
               name: 'payload',
@@ -1217,7 +1246,14 @@ describe('DoBackend', () => {
               dflt_value: '0',
               pk: 0,
             },
-            { cid: 3, name: 'tags', type: 'text', notnull: 0, dflt_value: null, pk: 0 },
+            {
+              cid: 3,
+              name: 'tags',
+              type: 'text',
+              notnull: 0,
+              dflt_value: null,
+              pk: 0,
+            },
           ],
           columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
         }
@@ -1318,7 +1354,14 @@ describe('DoBackend', () => {
       if (compact.includes('PRAGMA table_info("probe")')) {
         return {
           rows: [
-            { cid: 0, name: 'id', type: 'text', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 0,
+              name: 'id',
+              type: 'text',
+              notnull: 1,
+              dflt_value: null,
+              pk: 1,
+            },
             {
               cid: 1,
               name: 'enabled',
@@ -1439,12 +1482,18 @@ describe('DoBackend', () => {
         return {
           rows: provisioned
             ? [
-                { name: 'soot_0_clients', sql: 'CREATE TABLE soot_0_clients (id text)' },
+                {
+                  name: 'soot_0_clients',
+                  sql: 'CREATE TABLE soot_0_clients (id text)',
+                },
                 { name: 'user', sql: 'CREATE TABLE user (id text)' },
                 { name: 'message', sql: 'CREATE TABLE message (id text)' },
               ]
             : [
-                { name: 'soot_0_clients', sql: 'CREATE TABLE soot_0_clients (id text)' },
+                {
+                  name: 'soot_0_clients',
+                  sql: 'CREATE TABLE soot_0_clients (id text)',
+                },
                 { name: 'user', sql: 'CREATE TABLE user (id text)' },
               ],
           columns: ['name', 'sql'],
@@ -1453,7 +1502,14 @@ describe('DoBackend', () => {
       if (sql.includes('PRAGMA table_info("soot_0_clients")')) {
         return {
           rows: [
-            { cid: 0, name: 'id', type: 'text', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 0,
+              name: 'id',
+              type: 'text',
+              notnull: 1,
+              dflt_value: null,
+              pk: 1,
+            },
           ],
           columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
         }
@@ -1469,7 +1525,14 @@ describe('DoBackend', () => {
       if (sql.includes('PRAGMA table_info("user")')) {
         return {
           rows: [
-            { cid: 0, name: 'id', type: 'text', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 0,
+              name: 'id',
+              type: 'text',
+              notnull: 1,
+              dflt_value: null,
+              pk: 1,
+            },
           ],
           columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
         }
@@ -1562,7 +1625,14 @@ describe('DoBackend', () => {
       if (sql.includes('PRAGMA table_info("message")')) {
         return {
           rows: [
-            { cid: 0, name: 'id', type: 'text', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 0,
+              name: 'id',
+              type: 'text',
+              notnull: 1,
+              dflt_value: null,
+              pk: 1,
+            },
           ],
           columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
         }
@@ -1570,7 +1640,14 @@ describe('DoBackend', () => {
       if (sql.includes('PRAGMA table_info("account")')) {
         return {
           rows: [
-            { cid: 0, name: 'id', type: 'text', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 0,
+              name: 'id',
+              type: 'text',
+              notnull: 1,
+              dflt_value: null,
+              pk: 1,
+            },
           ],
           columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
         }
@@ -1628,7 +1705,10 @@ describe('DoBackend', () => {
       if (sql.includes('sqlite_master')) {
         return {
           rows: [
-            { name: 'message', sql: 'CREATE TABLE message (id varchar PRIMARY KEY)' },
+            {
+              name: 'message',
+              sql: 'CREATE TABLE message (id varchar PRIMARY KEY)',
+            },
           ],
           columns: ['name', 'sql'],
         }
@@ -1636,7 +1716,14 @@ describe('DoBackend', () => {
       if (sql.includes('PRAGMA table_info("message")')) {
         return {
           rows: [
-            { cid: 0, name: 'id', type: 'varchar', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 0,
+              name: 'id',
+              type: 'varchar',
+              notnull: 1,
+              dflt_value: null,
+              pk: 1,
+            },
             {
               cid: 1,
               name: 'deleted',
@@ -1694,8 +1781,14 @@ describe('DoBackend', () => {
         name: 'message',
         primaryKey: ['id'],
         columns: expect.objectContaining({
-          id: expect.objectContaining({ dataType: 'character varying', typeOID: 1043 }),
-          deleted: expect.objectContaining({ dataType: 'boolean', typeOID: 16 }),
+          id: expect.objectContaining({
+            dataType: 'character varying',
+            typeOID: 1043,
+          }),
+          deleted: expect.objectContaining({
+            dataType: 'boolean',
+            typeOID: 16,
+          }),
         }),
       }),
     ])
@@ -1764,7 +1857,10 @@ describe('DoBackend', () => {
       if (sql.includes('sqlite_master')) {
         return {
           rows: [
-            { name: 'message', sql: 'CREATE TABLE message (id varchar PRIMARY KEY)' },
+            {
+              name: 'message',
+              sql: 'CREATE TABLE message (id varchar PRIMARY KEY)',
+            },
           ],
           columns: ['name', 'sql'],
         }
@@ -1772,7 +1868,14 @@ describe('DoBackend', () => {
       if (sql.includes('PRAGMA table_info("message")')) {
         return {
           rows: [
-            { cid: 0, name: 'id', type: 'varchar', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 0,
+              name: 'id',
+              type: 'varchar',
+              notnull: 1,
+              dflt_value: null,
+              pk: 1,
+            },
             {
               cid: 1,
               name: 'deleted',
@@ -1849,10 +1952,67 @@ describe('DoBackend', () => {
     const tracked = http.bodies.find((body) => body.track)
     expect(tracked.track).toEqual({
       tableName: 'public.task_item',
+      physicalTableName: 'task_item',
       operation: 'INSERT',
       returnRows: false,
     })
     expect(compactSQL(tracked.sql)).toContain('RETURNING *')
+  })
+
+  test('serializes invalidated CDC table-set replacements across backend instances', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const firstBackend = new DoBackend(http.url, 'postgres', 'cdc-ordering-test')
+    const secondBackend = new DoBackend(http.url, 'postgres', 'cdc-ordering-test')
+    await Promise.all([firstBackend.waitReady, secondBackend.waitReady])
+
+    const oldSet = [{ physicalTableName: 'message', tableName: 'public.message' }]
+    const newSet = [
+      ...oldSet,
+      { physicalTableName: 'channel', tableName: 'public.channel' },
+    ]
+    const batches: any[][] = []
+    let releaseFirst!: () => void
+    let markFirstStarted!: () => void
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve
+    })
+    const firstMayFinish = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const client = {
+      post: async (_url: string, body: string) => {
+        const parsed = JSON.parse(body)
+        batches.push(parsed.cdcTables)
+        if (batches.length === 1) {
+          markFirstStarted()
+          await firstMayFinish
+        }
+        return JSON.stringify({ results: [] })
+      },
+    }
+
+    for (const [backend, registrations] of [
+      [firstBackend, oldSet],
+      [secondBackend, newSet],
+    ] as const) {
+      ;(backend as any).httpClient = client
+      ;(backend as any).publicationTableInfos = async () => registrations
+      ;(backend as any).cdcRegistrationForInfo = (info: any) => info
+    }
+
+    ;(firstBackend as any).invalidateCdcRegistration()
+    const firstSync = (firstBackend as any).ensureCdcRegistration()
+    await firstStarted
+    ;(secondBackend as any).invalidateCdcRegistration()
+    const secondSync = (secondBackend as any).ensureCdcRegistration()
+
+    // The replacement must queue behind the in-flight old set. Otherwise the
+    // old request can arrive last and remove channel's newly installed triggers.
+    await Promise.resolve()
+    expect(batches).toEqual([oldSet])
+    releaseFirst()
+    await Promise.all([firstSync, secondSync])
+    expect(batches).toEqual([oldSet, newSet])
   })
 
   test('signals replication immediately after tracked writes', async () => {
@@ -2004,6 +2164,7 @@ describe('DoBackend', () => {
     const tracked = http.bodies.find((body) => body.track)
     expect(tracked.track).toEqual({
       tableName: 'public.task_item',
+      physicalTableName: 'task_item',
       operation: 'INSERT',
       returnRows: true,
       rowColumns: ['id', 'body'],
@@ -2040,8 +2201,22 @@ describe('DoBackend', () => {
               dflt_value: null,
               pk: 0,
             },
-            { cid: 1, name: 'userId', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
-            { cid: 2, name: 'role', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+            {
+              cid: 1,
+              name: 'userId',
+              type: 'TEXT',
+              notnull: 1,
+              dflt_value: null,
+              pk: 0,
+            },
+            {
+              cid: 2,
+              name: 'role',
+              type: 'TEXT',
+              notnull: 1,
+              dflt_value: null,
+              pk: 0,
+            },
           ],
           columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
         }
@@ -2107,24 +2282,86 @@ describe('DoBackend', () => {
     //   index. the pkey convention must win over narrowest.
     const tableInfo: Record<string, unknown[]> = {
       member: [
-        { cid: 0, name: 'accountId', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
-        { cid: 1, name: 'userId', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
-        { cid: 2, name: 'role', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
+        {
+          cid: 0,
+          name: 'accountId',
+          type: 'TEXT',
+          notnull: 0,
+          dflt_value: null,
+          pk: 0,
+        },
+        {
+          cid: 1,
+          name: 'userId',
+          type: 'TEXT',
+          notnull: 0,
+          dflt_value: null,
+          pk: 0,
+        },
+        {
+          cid: 2,
+          name: 'role',
+          type: 'TEXT',
+          notnull: 0,
+          dflt_value: null,
+          pk: 0,
+        },
       ],
       audit: [
-        { cid: 0, name: 'actor', type: 'TEXT', notnull: 0, dflt_value: null, pk: 0 },
-        { cid: 1, name: 'event', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+        {
+          cid: 0,
+          name: 'actor',
+          type: 'TEXT',
+          notnull: 0,
+          dflt_value: null,
+          pk: 0,
+        },
+        {
+          cid: 1,
+          name: 'event',
+          type: 'TEXT',
+          notnull: 1,
+          dflt_value: null,
+          pk: 0,
+        },
       ],
       pref: [
-        { cid: 0, name: 'orgId', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
-        { cid: 1, name: 'slug', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
-        { cid: 2, name: 'alias', type: 'TEXT', notnull: 1, dflt_value: null, pk: 0 },
+        {
+          cid: 0,
+          name: 'orgId',
+          type: 'TEXT',
+          notnull: 1,
+          dflt_value: null,
+          pk: 0,
+        },
+        {
+          cid: 1,
+          name: 'slug',
+          type: 'TEXT',
+          notnull: 1,
+          dflt_value: null,
+          pk: 0,
+        },
+        {
+          cid: 2,
+          name: 'alias',
+          type: 'TEXT',
+          notnull: 1,
+          dflt_value: null,
+          pk: 0,
+        },
       ],
     }
     const indexList: Record<string, unknown[]> = {
       member: [{ seq: 0, name: 'member_pkey', unique: 1, origin: 'c', partial: 0 }],
       audit: [
-        { seq: 0, name: 'audit_partial_key', unique: 1, origin: 'c', partial: 1 },
+        {
+          seq: 0,
+          name: 'audit_partial_key',
+          unique: 1,
+          origin: 'c',
+          partial: 1,
+        },
         { seq: 1, name: 'audit_actor_key', unique: 1, origin: 'c', partial: 0 },
       ],
       pref: [
@@ -2221,14 +2458,26 @@ describe('DoBackend', () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('sqlite_master')) {
         return {
-          rows: [{ name: 'server', sql: 'CREATE TABLE server (id varchar PRIMARY KEY)' }],
+          rows: [
+            {
+              name: 'server',
+              sql: 'CREATE TABLE server (id varchar PRIMARY KEY)',
+            },
+          ],
           columns: ['name', 'sql'],
         }
       }
       if (sql.includes('PRAGMA table_info("server")')) {
         return {
           rows: [
-            { cid: 0, name: 'id', type: 'varchar', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 0,
+              name: 'id',
+              type: 'varchar',
+              notnull: 1,
+              dflt_value: null,
+              pk: 1,
+            },
             {
               cid: 1,
               name: 'name',
@@ -2299,6 +2548,74 @@ describe('DoBackend', () => {
     expect(http.bodies.some((body) => body.track)).toBe(false)
   })
 
+  test('row-journals unpublished writes inside transactions without publishing', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'postgres', 'private-row-journal-test')
+    await backend.waitReady
+
+    await backend.exec('BEGIN')
+    await backend.exec("INSERT INTO private_note (id) VALUES ('n1')")
+    await backend.exec('ROLLBACK')
+
+    const write = http.bodies.find(
+      (body) => body.track?.physicalTableName === 'private_note'
+    )
+    expect(write?.track).toMatchObject({
+      tableName: 'public.private_note',
+      physicalTableName: 'private_note',
+      publish: false,
+    })
+    const manifest = http.bodies
+      .flatMap((body) => body.statements ?? [])
+      .find((statement: any) =>
+        statement.sql?.includes('INSERT INTO "_orez_tx_manifest"')
+      )
+    expect(manifest?.params?.[2]).toBe('private_note')
+    expect(manifest?.params?.[3]).toBe('')
+    expect(
+      http.sqls.some((sql) =>
+        /CREATE TABLE "_orez_tx_.*_private_note" AS SELECT \* FROM "private_note"/.test(
+          sql
+        )
+      )
+    ).toBe(false)
+  })
+
+  test('row-journals zero-cache shard writes instead of copying the change log', async () => {
+    const http = await startDoHttp(() => ({ rows: [], columns: [] }))
+    const backend = new DoBackend(http.url, 'zero_cdb', 'zero-cdb-row-journal-test')
+    await backend.waitReady
+
+    await backend.exec('BEGIN')
+    await backend.exec(
+      `INSERT INTO "chat_0/cdc_changeLog" (watermark, pos, change) VALUES ('01', 0, '{}')`
+    )
+    await backend.exec('ROLLBACK')
+
+    const write = http.bodies.find(
+      (body) => body.track?.physicalTableName === 'chat_0/cdc_changeLog'
+    )
+    expect(write?.track).toMatchObject({
+      tableName: 'public.chat_0/cdc_changeLog',
+      physicalTableName: 'chat_0/cdc_changeLog',
+      publish: false,
+    })
+    const manifest = http.bodies
+      .flatMap((body) => body.statements ?? [])
+      .find((statement: any) =>
+        statement.sql?.includes('INSERT INTO "_orez_tx_manifest"')
+      )
+    expect(manifest?.params?.[2]).toBe('chat_0/cdc_changeLog')
+    expect(manifest?.params?.[3]).toBe('')
+    expect(
+      http.sqls.some((sql) =>
+        /CREATE TABLE "_orez_tx_.*_chat_0_cdc_changeLog" AS SELECT \* FROM "chat_0\/cdc_changeLog"/.test(
+          sql
+        )
+      )
+    ).toBe(false)
+  })
+
   test('synthesizes primary and unique index metadata for published tables', async () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('sqlite_master')) {
@@ -2315,7 +2632,14 @@ describe('DoBackend', () => {
       if (sql.includes('PRAGMA table_info("account")')) {
         return {
           rows: [
-            { cid: 0, name: 'id', type: 'text', notnull: 1, dflt_value: null, pk: 1 },
+            {
+              cid: 0,
+              name: 'id',
+              type: 'text',
+              notnull: 1,
+              dflt_value: null,
+              pk: 1,
+            },
             {
               cid: 1,
               name: 'email',
@@ -2453,7 +2777,14 @@ describe('DoBackend', () => {
               dflt_value: null,
               pk: 3,
             },
-            { cid: 3, name: 'id', type: 'text', notnull: 0, dflt_value: null, pk: 0 },
+            {
+              cid: 3,
+              name: 'id',
+              type: 'text',
+              notnull: 0,
+              dflt_value: null,
+              pk: 0,
+            },
           ],
           columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
         }
@@ -2529,7 +2860,10 @@ describe('DoBackend', () => {
   })
 
   test('flattens public schema table references before sending SQL to DO', async () => {
-    const http = await startDoHttp(() => ({ rows: [{ count: 0 }], columns: ['count'] }))
+    const http = await startDoHttp(() => ({
+      rows: [{ count: 0 }],
+      columns: ['count'],
+    }))
     const backend = new DoBackend(http.url, 'postgres', 'schema-flatten-test')
     await backend.waitReady
 
@@ -2783,7 +3117,7 @@ describe('DoBackend', () => {
     )
   })
 
-  test('snapshots extended transaction writes for rollback', async () => {
+  test('row-journals tracked transaction writes without copying the table', async () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('sqlite_master')) {
         return { rows: [{ ok: 1 }], columns: ['ok'] }
@@ -2821,14 +3155,16 @@ describe('DoBackend', () => {
     await backend.execProtocolRaw(bindStatement())
     await backend.execProtocolRaw(executePortal())
 
-    // the snapshot and its journal manifest row land in one atomic /batch
+    // CDC already holds full row before/after images, so the transaction only
+    // needs a durable row-journal marker; copying this hot table would make
+    // Chat's short transactions O(table size).
     expect(
       http.sqls.some((sql) =>
         /CREATE TABLE "_orez_tx_.*_chat_0_clients" AS SELECT \* FROM "chat_0_clients"/.test(
           sql
         )
       )
-    ).toBe(true)
+    ).toBe(false)
     const manifestBatch = http.bodies.find(
       (body) =>
         Array.isArray(body.statements) &&
@@ -2845,6 +3181,7 @@ describe('DoBackend', () => {
         statement.sql?.includes('INSERT INTO "_orez_tx_manifest"')
     )
     expect(manifestInsert.params?.[2]).toBe('chat_0_clients')
+    expect(manifestInsert.params?.[3]).toBe('')
     expect(
       http.sqls.some((sql) =>
         /CREATE TABLE "_orez_tx_.*_(?:_zero_changes|_zero_change_state|_orez___zero_watermark)" AS/.test(
@@ -2856,6 +3193,37 @@ describe('DoBackend', () => {
     expect(http.requests.some((url) => url.pathname === '/rollback-tx')).toBe(true)
     const rollbackBody = http.bodies.find((body) => body.transactionID)
     expect(rollbackBody?.transactionID).toBe(manifestInsert.params?.[0])
+  })
+
+  test('does not introspect protected Cloudflare SQLite tables', async () => {
+    const http = await startDoHttp((sql) => {
+      if (sql.includes('sqlite_master')) {
+        return {
+          rows: [
+            { name: '_cf_KV', sql: 'CREATE TABLE _cf_KV (key TEXT, value BLOB)' },
+            { name: 'message', sql: 'CREATE TABLE message (id TEXT PRIMARY KEY)' },
+          ],
+          columns: ['name', 'sql'],
+        }
+      }
+      if (sql.includes('PRAGMA table_info("message")')) {
+        return {
+          rows: [
+            { cid: 0, name: 'id', type: 'TEXT', notnull: 0, dflt_value: null, pk: 1 },
+          ],
+          columns: ['cid', 'name', 'type', 'notnull', 'dflt_value', 'pk'],
+        }
+      }
+      return { rows: [], columns: [] }
+    })
+    const backend = new DoBackend(http.url, 'postgres', 'protected-table-test')
+    await backend.waitReady
+
+    await backend.exec('SELECT tablename FROM pg_tables')
+
+    expect(http.sqls.some((sql) => sql.includes('PRAGMA table_info("_cf_KV")'))).toBe(
+      false
+    )
   })
 
   test('serializes concurrent public operations on one backend', async () => {
@@ -3168,7 +3536,10 @@ describe('DoBackend', () => {
   })
 
   test('rewrites Zero timestamp and row JSON helpers for SQLite', async () => {
-    const http = await startDoHttp(() => ({ rows: [], columns: ['zql_result'] }))
+    const http = await startDoHttp(() => ({
+      rows: [],
+      columns: ['zql_result'],
+    }))
     const backend = new DoBackend(http.url, 'postgres', 'zql-helper-rewrite-test')
     await backend.waitReady
 
@@ -4211,7 +4582,7 @@ describe('DoBackend', () => {
     await backend.waitReady
 
     await backend.exec(`
-      ALTER TABLE "serverApp" DROP COLUMN "id";
+      ALTER TABLE "serverApp" DROP COLUMN "id" RESTRICT;
       ALTER TABLE "serverApp" ADD CONSTRAINT "serverApp_pk" PRIMARY KEY("serverId","creatorId");
       --> statement-breakpoint
       INSERT INTO "log" ("message") VALUES ('keeps ; inside strings');
@@ -4220,6 +4591,7 @@ describe('DoBackend', () => {
     const sent = http.sqls.at(-1) || ''
     const compact = compactSQL(sent)
     expect(compact).toContain('ALTER TABLE "serverApp" DROP COLUMN id')
+    expect(compact).not.toContain('RESTRICT')
     expect(compact).toContain(
       `INSERT INTO log ( message ) VALUES ( 'keeps ; inside strings' )`
     )
@@ -4309,9 +4681,9 @@ describe('DoBackend', () => {
     )
 
     const sent = compactSQL(
-      sqlContaining(http.sqls, 'ALTER TABLE "appInstall" ADD COLUMN id varchar')
+      sqlContaining(http.sqls, 'ALTER TABLE "appInstall" ADD COLUMN id text')
     )
-    expect(sent).toContain('ALTER TABLE "appInstall" ADD COLUMN id varchar')
+    expect(sent).toContain('ALTER TABLE "appInstall" ADD COLUMN id text')
     expect(sent).not.toContain('IF NOT EXISTS')
     expect(sent).not.toContain('PRIMARY KEY')
     expect(sent).not.toContain('NOT NULL')
@@ -4323,7 +4695,12 @@ describe('DoBackend', () => {
       const compact = compactSQL(sql)
       if (compact.includes("sqlite_master WHERE type = 'table'")) {
         return {
-          rows: [{ name: 'app', sql: 'CREATE TABLE "app" ("madeAt" text, meta text)' }],
+          rows: [
+            {
+              name: 'app',
+              sql: 'CREATE TABLE "app" ("madeAt" text, meta text)',
+            },
+          ],
           columns: ['name', 'sql'],
         }
       }
@@ -4693,6 +5070,31 @@ describe('DoBackend', () => {
     expect(sent).not.toContain('GREATEST')
   })
 
+  test('rewrites Chat trim and clock timestamp predicates for SQLite', async () => {
+    const http = await startDoHttp(() => ({ rows: [{ id: 'i1' }], columns: ['id'] }))
+    const backend = new DoBackend(http.url, 'postgres', 'chat-trim-test')
+    await backend.waitReady
+
+    const result = await backend.query(
+      `
+        SELECT i.id
+        FROM invite i
+        JOIN "user" u ON lower(trim(u.email)) = lower(trim(i.email))
+        WHERE u.id = $1
+          AND i.accepted = false
+          AND i."expiresAt" > clock_timestamp()
+      `,
+      ['u1']
+    )
+
+    expect(result.rows).toEqual([{ id: 'i1' }])
+    const sent = compactSQL(http.sqls.at(-1) ?? '')
+    expect(sent).toContain('lower("trim"(u.email)) = lower("trim"(i.email))')
+    expect(sent).toContain('i."expiresAt" > CURRENT_TIMESTAMP')
+    expect(sent).not.toMatch(/TRIM\s*\(\s*BOTH/i)
+    expect(sent).not.toContain('clock_timestamp')
+  })
+
   test('rewrites PG starts_with scalar function to SQLite instr predicate', async () => {
     const http = await startDoHttp((sql) => {
       if (sql.includes('instr(')) return { rows: [{ users: 3 }], columns: ['users'] }
@@ -4805,7 +5207,10 @@ describe('DoBackend', () => {
   })
 
   test('strips PostgreSQL row-locking clauses from SELECTs for SQLite', async () => {
-    const http = await startDoHttp(() => ({ rows: [], columns: ['clientGroupID'] }))
+    const http = await startDoHttp(() => ({
+      rows: [],
+      columns: ['clientGroupID'],
+    }))
     const backend = new DoBackend(http.url, 'postgres', 'select-locking-clause-test')
     await backend.waitReady
 

@@ -2,9 +2,10 @@
  * durable transaction journal for the DO SQL backend.
  *
  * the Durable Object refuses raw SQL BEGIN/COMMIT, so DoBackend emulates pg
- * transactions by applying writes eagerly and snapshotting each table on its
- * first in-tx write (`_orez_tx_<txID>_*` tables). before this journal, the
- * snapshot bookkeeping lived only in the client's memory: a DO eviction or
+ * transactions by applying writes eagerly. Parsed DML is rolled back from the
+ * CDC row before-images captured by the same SQLite statement; unknown writes
+ * fall back to a first-write table snapshot (`_orez_tx_<txID>_*`). Before this
+ * journal, the rollback bookkeeping lived only in the client's memory: a DO eviction or
  * deploy upgrade-kill mid-transaction persisted the partial writes forever
  * (the 2026-06 poisoned cdc changeLog incident — zero's catchup replays
  * begin→data→begin and the replicator wedges permanently).
@@ -12,13 +13,13 @@
  * the journal makes the snapshot bookkeeping durable and the commit point
  * atomic:
  *
- *   - every snapshot is recorded in `_orez_tx_manifest` in the same atomic
- *     /batch that creates the snapshot table.
- *   - COMMIT = one atomic storage transaction that drops the snapshots and
+ *   - every row-journal marker or fallback snapshot is recorded in
+ *     `_orez_tx_manifest` atomically with its rollback state.
+ *   - COMMIT = one atomic storage transaction that drops rollback state and
  *     deletes the manifest rows (plus promoting pending tracked changes in
  *     ZeroDO). a tx is committed if and only if its manifest rows are gone.
- *   - ROLLBACK = one atomic storage transaction that restores every table
- *     from its snapshot (reverse order, triggers detached during restore).
+ *   - ROLLBACK = one atomic storage transaction that restores row before-images
+ *     plus any fallback table snapshots (in reverse order).
  *   - RECOVERY (`recoverTxJournal`) rolls back every manifest tx for an
  *     owner whose process generation is known dead (e.g. the zero-cache
  *     embed at boot, before it opens any pg session), so a partial tx is
@@ -116,10 +117,13 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
   }
   for (const row of rows) {
     const quotedTable = quoteIdent(row.original)
-    if (!row.snapshot) {
+    if (row.snapshot === null) {
       sql.exec(`DROP TABLE IF EXISTS ${quotedTable}`)
       continue
     }
+    // Empty-string snapshots are row-journaled tables. Their before-images
+    // are restored by the owner's CDC undo callback rather than a table copy.
+    if (row.snapshot === '') continue
     const quotedSnapshot = quoteIdent(row.snapshot)
     sql.exec(`DELETE FROM ${quotedTable}`)
     sql.exec(`INSERT OR REPLACE INTO ${quotedTable} SELECT * FROM ${quotedSnapshot}`)
@@ -158,7 +162,11 @@ function triggerDefinitionsForTables(
  * returns the recovered transaction ids so callers can clean up associated
  * state (e.g. pending tracked changes).
  */
-export function recoverTxJournal(sql: DurableSqlStorage, owner?: string): string[] {
+export function recoverTxJournal(
+  sql: DurableSqlStorage,
+  owner?: string,
+  beforeRollback?: (txID: string) => void
+): string[] {
   const recovered: string[] = []
   if (manifestTableExists(sql)) {
     const txRows =
@@ -172,6 +180,7 @@ export function recoverTxJournal(sql: DurableSqlStorage, owner?: string): string
             .toArray()
     for (const row of txRows) {
       const txID = String(row.tx_id)
+      beforeRollback?.(txID)
       rollbackTxJournal(sql, txID)
       recovered.push(txID)
     }

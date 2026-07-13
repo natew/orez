@@ -18,6 +18,13 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { DoBackend } from '../pg-proxy-do-backend.js'
 import { createLocalSqlBackend } from '../worker/local-sql-backend.js'
+import { TransactionalCdc } from './cdc.js'
+import {
+  appendPendingChange,
+  deletePendingChanges,
+  ensurePendingChangesTable,
+  rollbackPendingChanges,
+} from './row-undo.js'
 import {
   TX_MANIFEST_TABLE,
   commitTxJournal,
@@ -194,6 +201,35 @@ describe('tx-journal core', () => {
     expect(storage.rows('items')).toEqual([])
   })
 
+  it('runs row-journal recovery before clearing its manifest marker', () => {
+    const storage = createSqliteStorage()
+    storage.exec('CREATE TABLE items (id TEXT PRIMARY KEY, body TEXT)')
+    storage.exec("INSERT INTO items VALUES ('a', 'before')")
+    storage.exec(
+      `CREATE TABLE "${TX_MANIFEST_TABLE}" (seq INTEGER PRIMARY KEY AUTOINCREMENT, tx_id TEXT NOT NULL, owner TEXT NOT NULL DEFAULT 'default', original TEXT NOT NULL, snapshot TEXT)`
+    )
+    storage.exec(
+      `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, ?, ?, ?)`,
+      'row-tx',
+      'default',
+      'items',
+      ''
+    )
+    storage.exec("UPDATE items SET body = 'after' WHERE id = 'a'")
+
+    const recovered = storage.transactionSync(() =>
+      recoverTxJournal(storage.journal, undefined, (txID) => {
+        expect(txID).toBe('row-tx')
+        expect(storage.rows(TX_MANIFEST_TABLE)).toHaveLength(1)
+        storage.exec("UPDATE items SET body = 'before' WHERE id = 'a'")
+      })
+    )
+
+    expect(recovered).toEqual(['row-tx'])
+    expect(storage.rows('items')).toEqual([{ id: 'a', body: 'before' }])
+    expect(storage.rows(TX_MANIFEST_TABLE)).toEqual([])
+  })
+
   it('recovery is a no-op on a store with no journal', () => {
     const storage = createSqliteStorage()
     storage.exec('CREATE TABLE items (id TEXT)')
@@ -218,6 +254,44 @@ afterEach(async () => {
  * against real sqlite using the same journal core the production DO uses.
  */
 function startSqliteDoServer(storage: SqliteStorage): Promise<string> {
+  const cdc = new TransactionalCdc(storage.journal)
+  const execute = (statement: any) => {
+    const track = statement.track
+    const transactionID = String(statement.transactionID || track?.transactionID || '')
+    if (track?.physicalTableName) {
+      cdc.ensureTable({
+        physicalTableName: track.physicalTableName,
+        tableName: track.tableName,
+        publish: false,
+        ...(track.rowColumns?.length ? { columns: track.rowColumns } : null),
+      })
+    }
+    const cursor = storage.exec(
+      String(statement.sql ?? ''),
+      ...(Array.isArray(statement.params) ? statement.params : [])
+    )
+    const rows = cursor.toArray()
+    const captured = track ? cdc.drain() : []
+    if (captured.length > 0) {
+      ensurePendingChangesTable(storage.journal)
+      for (const change of captured) {
+        appendPendingChange(storage.journal, {
+          transactionID,
+          physicalTableName: change.physicalTableName,
+          tableName: change.tableName,
+          publish: false,
+          op: change.op,
+          rowData: change.rowData,
+          oldData: change.oldData,
+        })
+      }
+    }
+    return {
+      rows: track?.returnRows ? rows : track ? [] : rows,
+      columns: track?.returnRows ? cursor.columnNames : track ? [] : cursor.columnNames,
+      capturedChanges: 0,
+    }
+  }
   const server = createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1')
     let body = ''
@@ -234,11 +308,10 @@ function startSqliteDoServer(storage: SqliteStorage): Promise<string> {
       try {
         switch (url.pathname) {
           case '/exec': {
-            const cursor = storage.exec(
-              String(parsed.sql ?? ''),
-              ...(Array.isArray(parsed.params) ? parsed.params : [])
-            )
-            respond(200, { rows: cursor.toArray(), columns: cursor.columnNames })
+            const result = parsed.track
+              ? storage.transactionSync(() => execute(parsed))
+              : execute(parsed)
+            respond(200, result)
             return
           }
           case '/batch': {
@@ -249,28 +322,27 @@ function startSqliteDoServer(storage: SqliteStorage): Promise<string> {
                   typeof statement === 'string' ? { sql: statement } : statement
                 )
                 .filter((statement: any) => statement?.sql?.trim())
-                .map((statement: any) => {
-                  const cursor = storage.exec(
-                    statement.sql,
-                    ...(Array.isArray(statement.params) ? statement.params : [])
-                  )
-                  return { rows: cursor.toArray(), columns: cursor.columnNames }
-                })
+                .map((statement: any) => execute(statement))
             )
             respond(200, { results })
             return
           }
           case '/commit-tx': {
-            storage.transactionSync(() =>
-              commitTxJournal(storage.journal, String(parsed.transactionID))
-            )
+            storage.transactionSync(() => {
+              const transactionID = String(parsed.transactionID)
+              deletePendingChanges(storage.journal, transactionID)
+              commitTxJournal(storage.journal, transactionID)
+            })
             respond(200, { ok: true })
             return
           }
           case '/rollback-tx': {
-            storage.transactionSync(() =>
-              rollbackTxJournal(storage.journal, String(parsed.transactionID))
-            )
+            storage.transactionSync(() => {
+              const transactionID = String(parsed.transactionID)
+              rollbackPendingChanges(storage.journal, cdc, transactionID)
+              rollbackTxJournal(storage.journal, transactionID)
+              deletePendingChanges(storage.journal, transactionID)
+            })
             respond(200, { ok: true })
             return
           }
@@ -278,7 +350,11 @@ function startSqliteDoServer(storage: SqliteStorage): Promise<string> {
             const transactionIDs = storage.transactionSync(() =>
               recoverTxJournal(
                 storage.journal,
-                parsed.owner === undefined ? undefined : String(parsed.owner)
+                parsed.owner === undefined ? undefined : String(parsed.owner),
+                (transactionID) => {
+                  rollbackPendingChanges(storage.journal, cdc, transactionID)
+                  deletePendingChanges(storage.journal, transactionID)
+                }
               )
             )
             respond(200, { ok: true, transactionIDs })

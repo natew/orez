@@ -103,6 +103,25 @@ function enableSingleDbBackendScript() {
   log('patched chat lite backend script with --single-db')
 }
 
+function allowColdDoBackendStartup() {
+  const e2ePath = resolve(TEST_DIR, 'scripts', 'test', 'e2e.ts')
+  if (!existsSync(e2ePath)) return
+  const source = readFileSync(e2ePath, 'utf8')
+  const coldLiteWaits = [
+    'await waitForPort(ports.postgres, { timeoutMs: 60_000 })',
+    'await waitForPort(ports.zero, { timeoutMs: 60_000 })',
+  ]
+  let next = source
+  for (const wait of coldLiteWaits) {
+    // Replace only the first occurrence: these are the lite-mode waits. Chat's
+    // non-lite backend already uses a 120s Zero budget.
+    next = next.replace(wait, wait.replace('60_000', '120_000'))
+  }
+  if (next === source) return
+  writeFileSync(e2ePath, next)
+  log('extended cold lite backend readiness budget to 120s')
+}
+
 function main() {
   // step 0: validate ~/chat exists
   if (!existsSync(CHAT_SOURCE)) {
@@ -191,6 +210,7 @@ function main() {
   // instrumentation are present in test-chat on both fresh and retry runs.
   syncChatWorkingTree()
   enableSingleDbBackendScript()
+  allowColdDoBackendStartup()
 
   // write .env.development with offset ports
   // vite needs these to override production hostnames in .env
@@ -299,10 +319,11 @@ function main() {
   //   * playwright.config.ts — maxFailures/retries etc. stay at whatever chat
   //     ships. past overrides here (retries: 0, maxFailures: 0) masked real
   //     chat-vs-test-chat divergences as "flakes" or ate the wall-clock budget.
-  //   * test file timeouts — chat wraps every `test.setTimeout(N)` in `t(N)`,
+  //   * test-case timeouts — chat wraps every `test.setTimeout(N)` in `t(N)`,
   //     which already scales in lite mode via E2E_LITE=1. the raw-number regex
   //     we used to run didn't match `t(...)` calls anyway, so it was a no-op
-  //     the whole time.
+  //     the whole time. The cold backend readiness budget above is deliberately
+  //     separate: a fresh DO migration plus zero-cache bootstrap can exceed 60s.
 
   log('local packages installed')
 

@@ -15,6 +15,13 @@
  * app worker and lives in ZeroSqlDO.
  */
 
+import { TransactionalCdc } from '../cf-do/cdc.js'
+import {
+  appendPendingChange,
+  deletePendingChanges,
+  ensurePendingChangesTable,
+  rollbackPendingChanges,
+} from '../cf-do/row-undo.js'
 import {
   commitTxJournal,
   recoverTxJournal,
@@ -48,7 +55,16 @@ export interface LocalSqlBackend {
 interface SqlStatement {
   sql: string
   params?: unknown[]
-  track?: unknown
+  transactionID?: string
+  track?: {
+    physicalTableName?: string
+    tableName: string
+    operation: 'INSERT' | 'UPDATE' | 'DELETE'
+    rowColumns?: string[]
+    returnRows?: boolean
+    transactionID?: string
+    publish?: boolean
+  }
 }
 
 export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
@@ -70,21 +86,61 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
       }
     },
   }
+  const cdc = new TransactionalCdc(journalSql)
 
   function executeStatement(statement: SqlStatement) {
-    if (statement.track) {
-      // change tracking belongs to the shared upstream db (ZeroSqlDO); the
-      // local cvr/cdb stores are never replicated.
-      throw new Error('local sql backend: change tracking is not supported')
+    const track = statement.track
+    const transactionID = statement.transactionID || track?.transactionID
+    if (track && !track.physicalTableName) {
+      throw new Error('local sql backend: change tracking requires a physical table name')
     }
-    const cursor = sql.exec(statement.sql, ...(statement.params ?? []))
+    if (track) {
+      if (!transactionID) {
+        throw new Error('local sql backend: rollback tracking requires a transaction id')
+      }
+      cdc.ensureTable({
+        physicalTableName: track.physicalTableName!,
+        tableName: track.tableName,
+        publish: false,
+        ...(track.rowColumns?.length ? { columns: track.rowColumns } : null),
+      })
+    }
+    const suspended = cdc.beginSchemaChange(statement.sql)
+    let cursor: ReturnType<LocalDoSqlite['exec']>
+    try {
+      cursor = sql.exec(statement.sql, ...(statement.params ?? []))
+    } finally {
+      cdc.finishSchemaChange(suspended)
+    }
     const rows = cursor.toArray().map((row) => ({ ...row }))
     const columns = Array.isArray(cursor.columnNames)
       ? cursor.columnNames
       : rows.length > 0
         ? Object.keys(rows[0])
         : []
-    return { rows, columns }
+    const captured = track ? cdc.drain() : []
+    if (captured.length > 0) {
+      ensurePendingChangesTable(journalSql)
+      for (const change of captured) {
+        appendPendingChange(journalSql, {
+          transactionID: transactionID!,
+          physicalTableName: change.physicalTableName,
+          tableName: change.tableName,
+          publish: false,
+          op: change.op,
+          rowData: change.rowData,
+          oldData: change.oldData,
+        })
+      }
+    }
+    return track
+      ? {
+          rows: track.returnRows ? rows : [],
+          columns: track.returnRows ? columns : [],
+          affectedRows: rows.length,
+          capturedChanges: 0,
+        }
+      : { rows, columns }
   }
 
   async function handle(request: Request): Promise<Response> {
@@ -92,17 +148,21 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
     const body = (await request.json().catch(() => ({}))) as {
       sql?: string
       params?: unknown[]
-      track?: unknown
+      track?: SqlStatement['track']
       statements?: Array<string | SqlStatement>
       transactionID?: unknown
     }
     switch (url.pathname) {
       case '/exec': {
-        const result = executeStatement({
+        const statement = {
           sql: String(body.sql ?? ''),
           params: Array.isArray(body.params) ? body.params : [],
           track: body.track,
-        })
+          transactionID: String(body.transactionID || '') || undefined,
+        }
+        const result = body.track
+          ? sql.transactionSync(() => executeStatement(statement))
+          : executeStatement(statement)
         return Response.json(result)
       }
       case '/batch': {
@@ -120,13 +180,20 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
       case '/commit-tx': {
         const transactionID = String(body.transactionID || '')
         if (!transactionID) throw new Error('missing transactionID')
-        sql.transactionSync(() => commitTxJournal(journalSql, transactionID))
+        sql.transactionSync(() => {
+          deletePendingChanges(journalSql, transactionID)
+          commitTxJournal(journalSql, transactionID)
+        })
         return Response.json({ ok: true })
       }
       case '/rollback-tx': {
         const transactionID = String(body.transactionID || '')
         if (!transactionID) throw new Error('missing transactionID')
-        sql.transactionSync(() => rollbackTxJournal(journalSql, transactionID))
+        sql.transactionSync(() => {
+          rollbackPendingChanges(journalSql, cdc, transactionID)
+          rollbackTxJournal(journalSql, transactionID)
+          deletePendingChanges(journalSql, transactionID)
+        })
         return Response.json({ ok: true })
       }
       default:
@@ -148,7 +215,12 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
       }
     },
     recoverOrphanedTransactions(): string[] {
-      return sql.transactionSync(() => recoverTxJournal(journalSql))
+      return sql.transactionSync(() =>
+        recoverTxJournal(journalSql, undefined, (transactionID) => {
+          rollbackPendingChanges(journalSql, cdc, transactionID)
+          deletePendingChanges(journalSql, transactionID)
+        })
+      )
     },
   }
 }

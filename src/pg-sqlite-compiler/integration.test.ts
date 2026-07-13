@@ -18,6 +18,12 @@ function rewriteParams(sql: string): string {
 }
 
 describe('full compiler pipeline against chat-app workload', () => {
+  it('removes PostgreSQL RESTRICT from DROP COLUMN', () => {
+    expect(compile('ALTER TABLE plugin DROP COLUMN type RESTRICT').sql).toBe(
+      'ALTER TABLE plugin \n  DROP COLUMN type'
+    )
+  })
+
   it('round-trip: schema → insert → select → catalog probe', () => {
     const db = new Database(':memory:')
 
@@ -131,6 +137,40 @@ describe('full compiler pipeline against chat-app workload', () => {
       .get('e1') as any
     expect(row.id).toBe('e1')
     expect(String(row.updatedAt)).toMatch(/^\d{4}-\d{2}-\d{2}/)
+    db.close()
+  })
+
+  it('runs Chat trim and clock timestamp predicates', () => {
+    const db = new Database(':memory:')
+    db.exec(`
+      CREATE TABLE "user" (id text PRIMARY KEY, email text NOT NULL);
+      CREATE TABLE invite (
+        id text PRIMARY KEY,
+        email text NOT NULL,
+        accepted integer NOT NULL,
+        "expiresAt" text NOT NULL
+      );
+      INSERT INTO "user" VALUES ('u1', ' Person@example.com ');
+      INSERT INTO invite VALUES (
+        'i1',
+        'person@example.com',
+        0,
+        '2999-01-01 00:00:00'
+      );
+    `)
+
+    const { sql, warnings } = compile(`
+      SELECT i.id
+      FROM invite i
+      JOIN "user" u ON lower(trim(u.email)) = lower(trim(i.email))
+      WHERE u.id = $1
+        AND i.accepted = false
+        AND i."expiresAt" > clock_timestamp()
+    `)
+    expect(warnings).toEqual([])
+    expect(sql).not.toMatch(/TRIM\s*\(\s*BOTH/i)
+    expect(sql).not.toMatch(/clock_timestamp/i)
+    expect(db.prepare(rewriteParams(sql)).all('u1')).toEqual([{ id: 'i1' }])
     db.close()
   })
 

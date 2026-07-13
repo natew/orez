@@ -583,9 +583,53 @@ export interface PgProxyServer extends Server {
   resetDbState(dbName: string): void
 }
 
+/**
+ * Holds ordinary PG clients at startup while an initialization hook provisions
+ * the schema. The hook identifies itself with an unguessable application_name
+ * and bypasses the barrier; every other connection resumes together after the
+ * hook and post-hook change tracking finish.
+ *
+ * Resolving (rather than rejecting) the internal promise avoids an unhandled
+ * rejection when initialization fails before any client has started waiting.
+ */
+export class PgStartupBarrier {
+  readonly applicationName: string
+  private settled = false
+  private failure: unknown
+  private readonly ready: Promise<void>
+  private releaseReady!: () => void
+
+  constructor(applicationName: string) {
+    this.applicationName = applicationName
+    this.ready = new Promise<void>((resolve) => {
+      this.releaseReady = resolve
+    })
+  }
+
+  async wait(applicationName: string | undefined): Promise<void> {
+    if (applicationName === this.applicationName) return
+    await this.ready
+    if (this.failure !== undefined) throw this.failure
+  }
+
+  release(): void {
+    if (this.settled) return
+    this.settled = true
+    this.releaseReady()
+  }
+
+  fail(error: unknown): void {
+    if (this.settled) return
+    this.failure = error
+    this.settled = true
+    this.releaseReady()
+  }
+}
+
 export async function startPgProxy(
   dbInput: PGlite | PGliteInstances,
-  config: ZeroLiteConfig
+  config: ZeroLiteConfig,
+  startupBarrier?: PgStartupBarrier
 ): Promise<PgProxyServer> {
   // normalize input: single PGlite instance = use it for all databases (backwards compat for tests)
   const instances: PGliteInstances =
@@ -796,6 +840,7 @@ export async function startPgProxy(
 
         async onStartup(state) {
           const params = state.clientParams
+          await startupBarrier?.wait(params?.application_name)
           if (params?.replication === 'database') {
             isReplicationConnection = true
           }

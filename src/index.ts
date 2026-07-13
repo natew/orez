@@ -35,7 +35,7 @@ import {
 import { getConfig, getConnectionString } from './config.js'
 import { log, port, setLogLevel, setLogStore } from './log.js'
 import { DoBackend } from './pg-proxy-do-backend.js'
-import { startPgProxy } from './pg-proxy.js'
+import { PgStartupBarrier, startPgProxy } from './pg-proxy.js'
 import {
   createPGliteInstances,
   createPGliteWorkerInstances,
@@ -453,53 +453,86 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // as no-ops or DO-native equivalents (PGlite still owns the real path).
   await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
 
+  // Shell on-db-ready hooks connect back through the proxy. Hold every other
+  // client at PG startup until that hook has provisioned the schema; otherwise
+  // an early application SELECT can monopolize the shared DB mutex while the
+  // DO retries "no such table", preventing the migration itself from running.
+  // Programmatic callbacks retain their existing unrestricted proxy semantics
+  // because they do not receive/use the tagged connection URLs below.
+  const pgStartupBarrier =
+    !nativePg && typeof config.onDbReady === 'string'
+      ? new PgStartupBarrier(`orez-on-db-ready-${randomUUID()}`)
+      : undefined
+
   // start tcp proxy (routes connections to correct instance by database name).
   // the native backend needs none: real postgres listens on pgPort itself.
-  const pgServer = nativePg ? null : await startPgProxy(instances, config)
+  const pgServer = nativePg
+    ? null
+    : await startPgProxy(instances, config, pgStartupBarrier)
 
-  if (migrationsApplied > 0)
-    log.orez(
-      `${migrationsApplied} migration${migrationsApplied === 1 ? '' : 's'} applied`
-    )
-
-  // seed data if needed
-  await seedIfNeeded(db, config)
-
-  // run on-db-ready hook (e.g. migrations) before zero-cache starts
-  if (config.onDbReady) {
-    const upstreamUrl = getConnectionString(config, 'postgres')
-    const cvrUrl = getConnectionString(config, 'zero_cvr')
-    const cdbUrl = getConnectionString(config, 'zero_cdb')
-    await runHook(config.onDbReady, 'on-db-ready', {
-      ZERO_UPSTREAM_DB: upstreamUrl,
-      ZERO_CVR_DB: cvrUrl,
-      ZERO_CHANGE_DB: cdbUrl,
-      DATABASE_URL: upstreamUrl,
-      OREZ_PG_PORT: String(config.pgPort),
-    })
-
-    // re-sync publication membership
-    await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
-    await ensurePublicationHasTables(db, managedPub.names)
-    if (!nativePg) {
-      log.debug.orez('re-installing change tracking after on-db-ready')
-      await installChangeTracking(db)
-    }
-    if (!isDoBackend && pgliteVacuumMs > 0) {
-      await vacuumPGliteChurnTables(instances)
-    }
+  const hookConnectionString = (dbName: string): string => {
+    const connectionString = getConnectionString(config, dbName)
+    if (!pgStartupBarrier) return connectionString
+    const url = new URL(connectionString)
+    url.searchParams.set('application_name', pgStartupBarrier.applicationName)
+    return url.toString()
   }
 
-  if (isDoBackend) {
-    await installChangeTracking(db)
+  try {
+    if (migrationsApplied > 0)
+      log.orez(
+        `${migrationsApplied} migration${migrationsApplied === 1 ? '' : 's'} applied`
+      )
+
+    // seed data if needed
+    await seedIfNeeded(db, config)
+
+    // run on-db-ready hook (e.g. migrations) before zero-cache starts
+    if (config.onDbReady) {
+      const upstreamUrl = hookConnectionString('postgres')
+      const cvrUrl = hookConnectionString('zero_cvr')
+      const cdbUrl = hookConnectionString('zero_cdb')
+      await runHook(config.onDbReady, 'on-db-ready', {
+        ZERO_UPSTREAM_DB: upstreamUrl,
+        ZERO_CVR_DB: cvrUrl,
+        ZERO_CHANGE_DB: cdbUrl,
+        DATABASE_URL: upstreamUrl,
+        OREZ_PG_PORT: String(config.pgPort),
+        // libpq-compatible clients use this as application_name. Keep it in
+        // addition to the URL parameter because some runtimes (notably Bun's
+        // node-postgres compatibility path) can discard URI-only startup
+        // parameters while crossing a shell hook.
+        ...(pgStartupBarrier ? { PGAPPNAME: pgStartupBarrier.applicationName } : {}),
+      })
+
+      // re-sync publication membership
+      await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
+      await ensurePublicationHasTables(db, managedPub.names)
+      if (!nativePg) {
+        log.debug.orez('re-installing change tracking after on-db-ready')
+        await installChangeTracking(db)
+      }
+      if (!isDoBackend && pgliteVacuumMs > 0) {
+        await vacuumPGliteChurnTables(instances)
+      }
+    }
+
+    if (isDoBackend) {
+      await installChangeTracking(db)
+    }
+    pgStartupBarrier?.release()
+  } catch (error) {
+    // Release waiting sockets with the initialization error instead of leaving
+    // them parked until the process exits.
+    pgStartupBarrier?.fail(error)
+    throw error
   }
 
   // write the ready marker so external orchestrators (e.g. CI scripts that
   // currently `wait:ports 6434`) can wait for orez to be fully initialized.
-  // important: the pg port is bound earlier (startPgProxy above) so that
-  // on-db-ready can connect, but external clients connecting before this
-  // marker exists race with on-db-ready and corrupt transaction state on
-  // the shared pglite session.
+  // The pg port is bound earlier so on-db-ready can connect. Shell hooks use a
+  // tagged connection that bypasses pgStartupBarrier; ordinary clients are
+  // released only after the initialization above completes.
   writeFileSync(readyFile, String(Date.now()))
 
   // create read replicas after the primary is fully initialized

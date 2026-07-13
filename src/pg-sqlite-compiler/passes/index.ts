@@ -3,6 +3,7 @@ import { datetimePass } from './datetime.js'
 import { dmlCtePass } from './dml-cte.js'
 import { rowJsonPass } from './row-json.js'
 import { schemaPass } from './schema.js'
+import { stringFunctionsPass } from './string-functions.js'
 import { typesPass } from './types.js'
 import { unsupportedPass } from './unsupported.js'
 
@@ -22,6 +23,7 @@ export const DEFAULT_PASSES: Pass[] = [
   dmlCtePass,
   typesPass,
   datetimePass,
+  stringFunctionsPass,
   rowJsonPass,
   catalogPass,
   schemaPass,

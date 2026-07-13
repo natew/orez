@@ -2,7 +2,7 @@
 import { deparseSync, loadModule, parseSync } from 'pgsql-parser'
 
 import { TX_MANIFEST_DDL, TX_MANIFEST_TABLE } from './cf-do/tx-journal.js'
-import { RETURNING_INTERNAL_PREFIX } from './do-sql-tracking.js'
+import { isSqlRowMutation, RETURNING_INTERNAL_PREFIX } from './do-sql-tracking.js'
 import {
   expandDelete,
   FkCascadeRegistry,
@@ -11,6 +11,7 @@ import {
   type FkChild,
 } from './fk-cascade.js'
 import { Mutex } from './mutex.js'
+import { compile as compilePgToSqlite } from './pg-sqlite-compiler/index.js'
 import {
   foldCountMarkerResult,
   transformCountedDeleteCte,
@@ -21,13 +22,16 @@ import {
   restoreSQLiteKeywordIdentifierMarkers,
 } from './sqlite-keyword-identifiers.js'
 
+import type { CdcTableRegistration } from './cf-do/cdc.js'
+
 /**
  * DoBackend: a PGlite-compatible adapter that forwards SQL to Cloudflare Durable Objects.
  *
  * Translates PG wire protocol messages → SQL → DO HTTP API → PG wire protocol responses.
  *
  * Handles PG transactions transparently: BEGIN/COMMIT/ROLLBACK are intercepted
- * and data writes are restored from table snapshots on ROLLBACK.
+ * and data writes are restored from row before-images on ROLLBACK, with table
+ * snapshots retained as a fallback for writes the SQL planner cannot identify.
  */
 
 const textEncoder = new TextEncoder()
@@ -122,13 +126,17 @@ interface ChangeTrackingMetadata {
   returningSQL: string
   returnRows: boolean
   returningProjection?: ReturningProjection
+  /** False captures row images only so an emulated transaction can roll back. */
+  publish?: boolean
 }
 interface ChangeTrackingRequest {
   tableName: string
+  physicalTableName: string
   operation: ChangeTrackingMetadata['operation']
   returnRows: boolean
   rowColumns?: string[]
   transactionID?: string
+  publish?: boolean
 }
 type ReturningProjectionItem =
   | { kind: 'all' }
@@ -138,8 +146,17 @@ interface ReturningProjection {
   items: ReturningProjectionItem[]
 }
 type SchemaMetadataChange =
-  | { action: 'renameTable'; from: PublicationTableRef; to: PublicationTableRef }
-  | { action: 'renameColumn'; table: PublicationTableRef; from: string; to: string }
+  | {
+      action: 'renameTable'
+      from: PublicationTableRef
+      to: PublicationTableRef
+    }
+  | {
+      action: 'renameColumn'
+      table: PublicationTableRef
+      from: string
+      to: string
+    }
 interface PublicationChange {
   action: 'create' | 'drop' | 'add' | 'set' | 'remove'
   name: string
@@ -175,6 +192,33 @@ const METADATA_TABLE = '_orez_pg_metadata'
 // publication picks it up quickly, long enough that a genuinely
 // publication-less db doesn't re-query on every write.
 const EMPTY_PUBLICATION_RELOAD_THROTTLE_MS = 1000
+
+interface CdcRegistrationSyncState {
+  // The newest authoritative sync callers should await/reuse. Invalidation
+  // clears this without discarding tail, so a replacement cannot overtake an
+  // already in-flight request and apply an older table set last.
+  current: Promise<void> | null
+  tail: Promise<void>
+}
+
+// All DoBackend instances for one logical database share a durable trigger
+// set. Keep one ordered schema-scan/registration queue per target in this
+// isolate; DDL/publication changes invalidate the reusable result while
+// preserving request order.
+const cdcRegistrationSyncs = new Map<string, CdcRegistrationSyncState>()
+
+function cdcRegistrationState(key: string): CdcRegistrationSyncState {
+  let state = cdcRegistrationSyncs.get(key)
+  if (!state) {
+    state = { current: null, tail: Promise.resolve() }
+    cdcRegistrationSyncs.set(key, state)
+  }
+  return state
+}
+
+function hasCdcRegistrationSync(key: string): boolean {
+  return !!cdcRegistrationSyncs.get(key)?.current
+}
 
 // ── Utilities ─────────────────────────────────────────────────────────────
 
@@ -594,7 +638,9 @@ function inferFieldsFromSQL(sql: string): { name: string; oid?: number }[] {
       ? stripTrailingSemicolon(sql.slice(returningIndex + 'returning'.length))
       : extractTopLevelSelectList(sql)
   if (!list || list === '*') return []
-  return splitTopLevelComma(list).map((part) => ({ name: inferFieldName(part) }))
+  return splitTopLevelComma(list).map((part) => ({
+    name: inferFieldName(part),
+  }))
 }
 
 function columnRefTailName(value: any): string | null {
@@ -1372,10 +1418,6 @@ function isDollarQuoteTagStart(ch: string): boolean {
 
 function isDollarQuoteTagPart(ch: string): boolean {
   return ch === '_' || isAsciiAlpha(ch) || isAsciiDigit(ch)
-}
-
-function currentTimestampNode(): any {
-  return { SQLValueFunction: { op: 'SVFOP_CURRENT_TIMESTAMP', typmod: -1 } }
 }
 
 function isTimestampOid(oid: number | undefined): boolean {
@@ -2288,7 +2330,6 @@ function rewriteNode(value: any, context?: RewriteContext): any {
     if (name) rewriteJsonFunctionArguments(value.FuncCall, name)
     const sqliteName = SQLITE_FUNCTION_BY_PG_FUNCTION.get(name ?? '')
     if (sqliteName) value.FuncCall.funcname = [stringNode(sqliteName)]
-    if (name === 'now') return currentTimestampNode()
     if (name === 'nextval') return intConst(1)
     if (name === '_drop_zero_slot' || name === 'pg_drop_replication_slot') {
       // DO SQLite can't host orez's `_orez._drop_zero_slot` plpgsql stub (no
@@ -2512,7 +2553,11 @@ function columnConstraintMetadata(columnDef: any): {
   primaryKey?: boolean
   unique?: boolean
 } {
-  const metadata: { notNull?: boolean; primaryKey?: boolean; unique?: boolean } = {}
+  const metadata: {
+    notNull?: boolean
+    primaryKey?: boolean
+    unique?: boolean
+  } = {}
   for (const constraint of columnDef?.constraints ?? []) {
     const type = constraint?.Constraint?.contype
     if (type === 'CONSTR_NOTNULL') metadata.notNull = true
@@ -2924,7 +2969,9 @@ function normalizeAlterTable(stmt: any): {
   }
 }
 
-function normalizeRename(stmt: any): { schemaMetadataChanges?: SchemaMetadataChange[] } {
+function normalizeRename(stmt: any): {
+  schemaMetadataChanges?: SchemaMetadataChange[]
+} {
   const relation = stmt.relation
   const table = publicationTableRefForRangeVar(relation)
   delete stmt.behavior
@@ -2934,7 +2981,9 @@ function normalizeRename(stmt: any): { schemaMetadataChanges?: SchemaMetadataCha
     const to = renamedPublicationTableRef(table, stmt.newname)
     flattenRangeVar(relation)
     if (to.table !== stmt.newname) stmt.newname = to.table
-    return { schemaMetadataChanges: [{ action: 'renameTable', from: table, to }] }
+    return {
+      schemaMetadataChanges: [{ action: 'renameTable', from: table, to }],
+    }
   }
 
   if (stmt.renameType === 'OBJECT_COLUMN' && stmt.subname && stmt.newname) {
@@ -3158,7 +3207,10 @@ function rewriteSkippedFunctionInvocationSelect(
   return true
 }
 
-function replaceSchemaSpecsFunctionCalls(sql: string): { sql: string; count: number } {
+function replaceSchemaSpecsFunctionCalls(sql: string): {
+  sql: string
+  count: number
+} {
   let count = 0
   const replaced = sql.replace(
     /(?:(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*)?schema_specs\s*\(\s*\)/gi,
@@ -3172,12 +3224,17 @@ function replaceSchemaSpecsFunctionCalls(sql: string): { sql: string; count: num
 
 function deparseStatement(version: number, stmt: any): string {
   const quotedByMarker = markSQLiteKeywordIdentifiers(stmt)
-  return stripTrailingSemicolon(
+  const proxySql = stripTrailingSemicolon(
     restoreSQLiteKeywordIdentifierMarkers(
       deparseSync({ version, stmts: [{ stmt }] }),
       quotedByMarker
     ).trim()
   )
+  // The proxy owns transport-specific metadata and execution planning, but
+  // pg-to-sqlite is the final authority for PostgreSQL SQL semantics. Running
+  // the deparsed statement through the package compiler here prevents the
+  // proxy from growing a second set of function/type/syntax rewrites.
+  return compilePgToSqlite(proxySql).sql
 }
 
 function starTarget(): any {
@@ -3448,7 +3505,9 @@ function compileSelectIntoNew(
   const targetColumn = rel.relname
   const cloned = cloneAst(select)
   delete cloned.intoClause
-  const selectSQL = deparseStatement(version, { SelectStmt: rewriteNode(cloned) })
+  const selectSQL = deparseStatement(version, {
+    SelectStmt: rewriteNode(cloned),
+  })
   return rowUpdateSQL(triggerTable, targetColumn, `(${selectSQL})`, rowCondition)
 }
 
@@ -4297,7 +4356,9 @@ function copySelectSQL(sql: string): { sql: string; binary: boolean } | null {
       )
     })
     return {
-      sql: deparseStatement(parsed.version, { SelectStmt: copy.query.SelectStmt }),
+      sql: deparseStatement(parsed.version, {
+        SelectStmt: copy.query.SelectStmt,
+      }),
       binary,
     }
   } catch {
@@ -5184,7 +5245,10 @@ function advisoryLockResult(select: any): CatalogResult | null {
     : [{ name: 'pg_advisory_xact_lock', source: 'pg_advisory_xact_lock' }]
   return {
     rows: [Object.fromEntries(projectedFields.map((field) => [field.name, null]))],
-    fields: projectedFields.map((field) => ({ name: field.name, oid: field.oid })),
+    fields: projectedFields.map((field) => ({
+      name: field.name,
+      oid: field.oid,
+    })),
   }
 }
 
@@ -5260,15 +5324,16 @@ export class DoBackend {
   // connects past the client's connect budget. cache per instance, invalidated
   // on DDL / metadata / publication changes and on rollback.
   private publicationTableInfoCache: PublicationTableInfo[] | null = null
+  private cdcRegistrationDirty = false
   private readyPromise: Promise<void> | null = null
   private operationMutex = new Mutex()
 
   // Transaction state. The Durable Object refuses raw SQL BEGIN/COMMIT/SAVEPOINT
   // (Cloudflare requires ctx.storage.transaction()), so PG-style multi-call
   // transactions can't ride on SQLite's own transaction machinery. Instead we
-  // emulate rollback by snapshotting each table on its first in-tx write and
-  // restoring it atomically through /batch on ROLLBACK. Atomicity of the
-  // restore itself comes from the DO's /batch transaction.
+  // emulate rollback with CDC row before-images for parsed DML. Unknown writes
+  // fall back to snapshotting the table on its first in-tx write. Both restore
+  // paths run atomically in the DO's storage transaction.
   private inTransaction = false
   private txID: string | null = null
   private txSnapshot: TransactionMetadataSnapshot | null = null
@@ -5704,6 +5769,7 @@ export class DoBackend {
     // Cached rewrites may reference metadata that the rollback just invalidated.
     this.rewriteCache.clear()
     this.publicationTableInfoCache = null
+    this.invalidateCdcRegistration()
   }
 
   private clearTransactionState(): void {
@@ -5746,7 +5812,7 @@ export class DoBackend {
     const shouldSignal = this.txHasTrackedWrite
     const txID = this.txID
     // ONE atomic commit point on the backend: promotes pending tracked
-    // changes and clears the tx journal (snapshots + manifest) in a single
+    // changes and clears the tx journal (row images, snapshots, and manifest) in a single
     // storage transaction. read-only transactions skip the round-trip.
     if (txID && (shouldSignal || this.txDataSnapshots.size > 0)) {
       await this.httpClient.post(
@@ -5756,7 +5822,10 @@ export class DoBackend {
       )
     }
     this.clearTransactionState()
-    if (shouldPersist) await this.persistDurableMetadata()
+    if (shouldPersist) {
+      await this.persistDurableMetadata()
+      await this.ensureCdcRegistration()
+    }
     if (shouldSignal) signalReplicationChange()
   }
 
@@ -5768,8 +5837,8 @@ export class DoBackend {
     const snapshot = this.txSnapshot
     const txID = this.txID
     try {
-      // ONE atomic rollback on the backend: restores snapshotted tables from
-      // the durable tx journal and discards pending tracked changes.
+      // ONE atomic rollback on the backend: restores row before-images and any
+      // fallback table snapshots, then discards pending tracked changes.
       if (txID && (this.txHasTrackedWrite || this.txDataSnapshots.size > 0)) {
         await this.httpClient.post(
           this.url('/rollback-tx'),
@@ -5781,6 +5850,7 @@ export class DoBackend {
       if (snapshot) this.restoreTransactionMetadataSnapshot(snapshot)
       await this.persistDurableMetadata()
       this.clearTransactionState()
+      if (snapshot) await this.ensureCdcRegistration()
     }
   }
 
@@ -5968,6 +6038,13 @@ export class DoBackend {
 
   private async applyStatementMetadata(statements: RewrittenStatement[]): Promise<void> {
     let changed = false
+    let publicationChanged = false
+    if (statements.some((statement) => statement.isDDL)) {
+      // DROP/CREATE INDEX and DROP TABLE may not carry column metadata deltas,
+      // but they still invalidate both the catalog and persisted trigger set.
+      this.publicationTableInfoCache = null
+      this.invalidateCdcRegistration()
+    }
     for (const statement of statements) {
       for (const column of statement.schemaColumns ?? []) {
         let table = this.schemaMetadata.get(column.table)
@@ -5985,6 +6062,7 @@ export class DoBackend {
       for (const change of statement.publicationChanges ?? []) {
         this.applyPublicationChange(change)
         changed = true
+        publicationChanged = true
       }
       if (statement.fkEdges) {
         // edges were already added to this.fkRegistry at rewrite time; persist
@@ -5996,11 +6074,18 @@ export class DoBackend {
     }
     if (changed) {
       this.publicationTableInfoCache = null
+      this.invalidateCdcRegistration()
       // inside an explicit tx we batch the persist to commit time. chat's
       // migrations open one tx and run dozens of DDL statements; persisting
       // after every one was the hot path.
       if (this.inTransaction) this.txMetadataDirty = true
       else await this.persistDurableMetadata()
+      // Publication membership changes alter which tables may enter the
+      // changefeed. Apply those immediately; ordinary schema changes are
+      // refreshed lazily before the next row write to keep migrations fast.
+      if (publicationChanged && !this.inTransaction) {
+        await this.ensureCdcRegistration()
+      }
     }
   }
 
@@ -6078,14 +6163,22 @@ export class DoBackend {
     statement: RewrittenStatement
   ): ChangeTrackingMetadata | undefined {
     const tracking = statement.changeTracking
-    if (!tracking || this.dbName !== 'postgres') return undefined
+    if (!tracking) return undefined
+    // zero-cache's CVR/CDB databases use the same emulated PG transactions as
+    // the application database. Their parsed DML needs rollback row images too;
+    // otherwise hot internal tables such as `<shard>/cdc_changeLog` fall back to
+    // a full table copy on every transaction and produce quadratic writes.
+    if (this.dbName !== 'postgres') {
+      return this.inTransaction ? { ...tracking, publish: false } : undefined
+    }
     const { table } = tracking
+    let published = false
     if (table.schema === 'public') {
       const publications = this.publicationNames()
-      if (!publications.length) return undefined
-      return this.publicationsForTable(table, publications).length ? tracking : undefined
-    }
-    if (
+      published =
+        publications.length > 0 &&
+        this.publicationsForTable(table, publications).length > 0
+    } else if (
       table.schema !== 'pg_catalog' &&
       table.schema !== 'information_schema' &&
       !table.schema.startsWith('pg_') &&
@@ -6094,19 +6187,102 @@ export class DoBackend {
       !table.schema.includes('/') &&
       TRACKED_SHARD_TABLES.has(table.tableName)
     ) {
-      return tracking
+      published = true
     }
-    return undefined
+    if (published) return { ...tracking, publish: true }
+    // PostgreSQL transactions still need row-accurate undo for private and
+    // internal tables. The worker captures the same full before/after images
+    // but marks them rollback-only so they never enter `_zero_changes`.
+    return this.inTransaction ? { ...tracking, publish: false } : undefined
   }
 
   private trackingRequest(tracking: ChangeTrackingMetadata): ChangeTrackingRequest {
     const rowColumns = this.schemaMetadata.get(tracking.table.table)
     return {
       tableName: `${tracking.table.schema}.${tracking.table.tableName}`,
+      physicalTableName: tracking.table.table,
       operation: tracking.operation,
       returnRows: tracking.returnRows,
       ...(rowColumns ? { rowColumns: [...rowColumns.keys()] } : null),
       ...(this.inTransaction ? { transactionID: this.currentTransactionID() } : null),
+      ...(tracking.publish === false ? { publish: false } : null),
+    }
+  }
+
+  private cdcRegistrationKey(): string {
+    return this.url('/cdc-registration')
+  }
+
+  private invalidateCdcRegistration(): void {
+    this.cdcRegistrationDirty = true
+    const state = cdcRegistrationSyncs.get(this.cdcRegistrationKey())
+    if (state) state.current = null
+  }
+
+  private cdcRegistrationForInfo(
+    info: PublicationTableInfo
+  ): CdcTableRegistration | null {
+    const published =
+      info.schema === 'public' &&
+      this.publicationsForTable(info, this.publicationNames()).length > 0
+    const trackedShard =
+      info.schema !== 'public' &&
+      info.schema !== 'pg_catalog' &&
+      info.schema !== 'information_schema' &&
+      !info.schema.startsWith('pg_') &&
+      !info.schema.startsWith('zero_') &&
+      !info.schema.startsWith('_zero') &&
+      !info.schema.includes('/') &&
+      TRACKED_SHARD_TABLES.has(info.tableName)
+    if (!published && !trackedShard) return null
+    return {
+      physicalTableName: info.name,
+      tableName: `${info.schema}.${info.tableName}`,
+    }
+  }
+
+  private async ensureCdcRegistration(): Promise<void> {
+    if (this.dbName !== 'postgres') return
+    const key = this.cdcRegistrationKey()
+    const state = cdcRegistrationState(key)
+    for (;;) {
+      const forced = this.cdcRegistrationDirty
+      let pending = state.current
+      if (forced || !pending) {
+        // Mark this instance's invalidation as scheduled before yielding. If
+        // another invalidation arrives while the request is in flight it sets
+        // the flag again, and the loop queues a fresh authoritative set.
+        this.cdcRegistrationDirty = false
+        const previous = state.tail
+        pending = previous
+          .catch(() => undefined)
+          .then(async () => {
+            const infos = await this.publicationTableInfos()
+            const cdcTables = infos
+              .map((info) => this.cdcRegistrationForInfo(info))
+              .filter(
+                (registration): registration is CdcTableRegistration => !!registration
+              )
+            await this.httpClient.post(
+              this.url('/batch'),
+              JSON.stringify({ statements: [], cdcTables }),
+              { 'Content-Type': 'application/json' }
+            )
+          })
+        state.tail = pending
+        state.current = pending
+      }
+      try {
+        await pending
+      } catch (error) {
+        if (state.current === pending) state.current = null
+        if (forced) this.cdcRegistrationDirty = true
+        throw error
+      }
+      // A different backend may have invalidated or queued a replacement
+      // while this request was in flight. Do not let a caller write until the
+      // newest known registration has also landed.
+      if (state.current === pending && !this.cdcRegistrationDirty) return
     }
   }
 
@@ -6768,6 +6944,16 @@ export class DoBackend {
     track?: ChangeTrackingRequest
   ): Promise<ExecResult> {
     if (!sql.trim()) return { rows: [], columns: [] }
+    if (
+      this.dbName === 'postgres' &&
+      (track ||
+        (this.ready &&
+          isSqlRowMutation(sql) &&
+          (this.cdcRegistrationDirty ||
+            !hasCdcRegistrationSync(this.cdcRegistrationKey()))))
+    ) {
+      await this.ensureCdcRegistration()
+    }
     const execSQL = sql
     let lastErr: unknown
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -6778,6 +6964,9 @@ export class DoBackend {
             sql: execSQL,
             ...(params?.length ? { params } : null),
             ...(track ? { track } : null),
+            ...(this.inTransaction
+              ? { transactionID: this.currentTransactionID() }
+              : null),
           }),
           { 'Content-Type': 'application/json' }
         )
@@ -6796,8 +6985,20 @@ export class DoBackend {
         if (counted) {
           return { ...counted, affectedRows: rows.length }
         }
-        if (track) this.signalTrackedWrite()
-        return { rows, columns, affectedRows: result.affectedRows }
+        const hasCaptureCount = Object.hasOwn(result, 'capturedChanges')
+        const capturedChanges = Number(result.capturedChanges ?? 0)
+        if (
+          capturedChanges > 0 ||
+          (track && track.publish !== false && !hasCaptureCount)
+        ) {
+          this.signalTrackedWrite()
+        }
+        return {
+          rows,
+          columns,
+          affectedRows: result.affectedRows,
+          capturedChanges,
+        }
       } catch (err) {
         lastErr = err
       }
@@ -6853,10 +7054,32 @@ export class DoBackend {
     this.txDataSnapshots.set(table, snapshot)
   }
 
+  private async journalTransactionTable(table: string): Promise<void> {
+    if (!this.inTransaction || this.txDataSnapshots.has(table)) return
+    const txID = this.currentTransactionID()
+    // CDC stores full before/after row images for tracked writes. A manifest
+    // row with an empty snapshot marks the transaction as recoverable without
+    // copying the entire table on every short application transaction.
+    await this.doRawBatch([
+      { sql: TX_MANIFEST_DDL },
+      {
+        sql: `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, ?, ?, ?)`,
+        params: [txID, this.txOwner, table, ''],
+      },
+    ])
+    this.txDataSnapshots.set(table, '')
+  }
+
   private async snapshotTransactionWrite(statement: RewrittenStatement): Promise<void> {
     if (!this.inTransaction || !statement.isWrite) return
     const table = statement.writeTable?.table
-    if (table) await this.snapshotTransactionTable(table)
+    if (!table) return
+    if (this.trackingForStatement(statement)) {
+      await this.ensureCdcRegistration()
+      await this.journalTransactionTable(table)
+      return
+    }
+    await this.snapshotTransactionTable(table)
   }
 
   private async doRawBatch(
@@ -6927,7 +7150,10 @@ export class DoBackend {
   ): Promise<ExecResult> {
     if (!statement.sql.trim()) return { rows: [], columns: [] }
     if (await this.shouldSkipStatement(statement)) return { rows: [], columns: [] }
-    if (statement.isDDL) this.publicationTableInfoCache = null
+    if (statement.isDDL) {
+      this.publicationTableInfoCache = null
+      this.invalidateCdcRegistration()
+    }
     await this.snapshotTransactionWrite(statement)
     if (statement.cascadeStatements?.length) {
       await this.runCascadeStatements(statement.cascadeStatements, {})
@@ -7002,14 +7228,42 @@ export class DoBackend {
       const hasTrackedWrite = sqls.some(
         (statement) => typeof statement !== 'string' && Boolean(statement.track)
       )
-      await this.httpClient.post(
+      const hasPublishedTrackedWrite = sqls.some(
+        (statement) =>
+          typeof statement !== 'string' &&
+          Boolean(statement.track) &&
+          statement.track?.publish !== false
+      )
+      const hasRowWrite = sqls.some((statement) =>
+        isSqlRowMutation(typeof statement === 'string' ? statement : statement.sql)
+      )
+      if (
+        this.dbName === 'postgres' &&
+        (hasTrackedWrite ||
+          (hasRowWrite &&
+            (this.cdcRegistrationDirty ||
+              !hasCdcRegistrationSync(this.cdcRegistrationKey()))))
+      ) {
+        await this.ensureCdcRegistration()
+      }
+      const response = await this.httpClient.post(
         this.url('/batch'),
         JSON.stringify({ statements: sqls }),
-        {
-          'Content-Type': 'application/json',
-        }
+        { 'Content-Type': 'application/json' }
       )
-      if (hasTrackedWrite) this.signalTrackedWrite()
+      let capturedChanges: number | undefined
+      try {
+        const parsed = JSON.parse(response)
+        if (Object.hasOwn(parsed, 'capturedChanges')) {
+          capturedChanges = Number(parsed.capturedChanges ?? 0)
+        }
+      } catch {}
+      if (
+        (capturedChanges ?? 0) > 0 ||
+        (hasPublishedTrackedWrite && capturedChanges === undefined)
+      ) {
+        this.signalTrackedWrite()
+      }
       sqls = []
     }
 
@@ -7019,7 +7273,10 @@ export class DoBackend {
           ? ({ sql: statement } as RewrittenStatement)
           : statement
       if (!item.sql.trim()) continue
-      if (item.isDDL) this.publicationTableInfoCache = null
+      if (item.isDDL) {
+        this.publicationTableInfoCache = null
+        this.invalidateCdcRegistration()
+      }
       if (item.skipIfColumnExists || item.skipIfColumnMissing || item.skipIfTableEmpty) {
         await flush()
         if (
@@ -7052,17 +7309,22 @@ export class DoBackend {
         tracking?.returningSQL ?? item.sql,
         item
       )
-      sqls.push(
-        tracking
+      const transactionID = this.inTransaction ? this.currentTransactionID() : undefined
+      const request = tracking
+        ? {
+            sql: exec.sql,
+            ...(exec.params.length ? { params: exec.params } : null),
+            track: this.trackingRequest(tracking),
+            ...(transactionID ? { transactionID } : null),
+          }
+        : exec.params.length || transactionID
           ? {
               sql: exec.sql,
               ...(exec.params.length ? { params: exec.params } : null),
-              track: this.trackingRequest(tracking),
+              ...(transactionID ? { transactionID } : null),
             }
-          : exec.params.length
-            ? { sql: exec.sql, params: exec.params }
-            : exec.sql
-      )
+          : exec.sql
+      sqls.push(request)
     }
 
     await flush()
@@ -7084,12 +7346,21 @@ export class DoBackend {
     const result = await this.doExecResult(
       "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name"
     )
-    return result.rows
-      .map((row) => ({
-        name: String(row.name ?? ''),
-        sql: row.sql === null || row.sql === undefined ? null : String(row.sql),
-      }))
-      .filter((table) => table.name)
+    return (
+      result.rows
+        .map((row) => ({
+          name: String(row.name ?? ''),
+          sql: row.sql === null || row.sql === undefined ? null : String(row.sql),
+        }))
+        // Cloudflare owns _cf_* tables and rejects even PRAGMA introspection.
+        // They are storage implementation details, never PostgreSQL relations.
+        .filter(
+          (table) =>
+            table.name &&
+            !table.name.toLowerCase().startsWith('_cf_') &&
+            !table.name.toLowerCase().startsWith('sqlite_')
+        )
+    )
   }
 
   private tableRefForSqliteTable(name: string): PublicationTableRef {

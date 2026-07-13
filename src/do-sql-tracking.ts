@@ -164,20 +164,34 @@ export class RollingRowWriteBudget {
 
 const SQL_MUTATION_RE =
   /(?:^|;)\s*(?:insert|update|delete|replace|create|alter|drop|truncate|vacuum|reindex)\b/i
+const SQL_ROW_MUTATION_RE = /(?:^|;)\s*(?:insert|update|delete|replace)\b/i
 const SQL_WITH_RE = /(?:^|;)\s*with\b/i
 const SQL_WITH_MUTATION_RE = /\b(?:insert|update|delete|replace)\b/i
+
+function sqlWithoutLeadingTrivia(sql: unknown): string {
+  return String(sql ?? '').replace(
+    /(^|;)\s*(?:(?:--[^\n]*(?:\n|$))|(?:\/\*[\s\S]*?\*\/))\s*/g,
+    '$1'
+  )
+}
 
 /** Conservative SQL classifier used to block writes before execution. */
 export function isSqlMutation(sql: unknown): boolean {
   // SqlStorage accepts comments before a statement. Remove only trivia at the
   // beginning (and after statement separators) so a comment cannot bypass the
   // pre-execution gate on a sticky circuit.
-  const text = String(sql ?? '').replace(
-    /(^|;)\s*(?:(?:--[^\n]*(?:\n|$))|(?:\/\*[\s\S]*?\*\/))\s*/g,
-    '$1'
-  )
+  const text = sqlWithoutLeadingTrivia(sql)
   return (
     SQL_MUTATION_RE.test(text) ||
+    (SQL_WITH_RE.test(text) && SQL_WITH_MUTATION_RE.test(text))
+  )
+}
+
+/** Row-level DML classifier used to decide when a CDC drain must be atomic. */
+export function isSqlRowMutation(sql: unknown): boolean {
+  const text = sqlWithoutLeadingTrivia(sql)
+  return (
+    SQL_ROW_MUTATION_RE.test(text) ||
     (SQL_WITH_RE.test(text) && SQL_WITH_MUTATION_RE.test(text))
   )
 }
