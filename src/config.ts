@@ -4,8 +4,37 @@ import type { PGliteOptions } from '@electric-sql/pglite'
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
 
-// lifecycle hooks - can be shell command string (CLI) or callback (programmatic)
-export type Hook = string | (() => void | Promise<void>)
+/**
+ * Context handed to a programmatic lifecycle callback.
+ *
+ * A function-form onDbReady runs behind the same startup barrier as a shell
+ * hook: while it executes, ordinary PG clients are held at connection startup so
+ * they cannot race the schema provisioning. The callback must therefore connect
+ * through one of the connection strings below, which carry `applicationName`,
+ * the tag that bypasses the barrier. A callback that opened its own ordinary
+ * (untagged) connection would block against its own barrier and deadlock.
+ */
+export interface HookContext {
+  /** privileged connection string for the primary (upstream) database. */
+  upstreamConnectionString: string
+  /** privileged connection string for the zero_cvr database. */
+  cvrConnectionString: string
+  /** privileged connection string for the zero_cdb database. */
+  cdbConnectionString: string
+  /**
+   * application_name that marks a connection as privileged (bypasses the
+   * startup barrier). Present only while a barrier is active (onDbReady on the
+   * PGlite/DO proxy backends); undefined for post-startup hooks and native pg.
+   */
+  applicationName?: string
+  /** the port the orez PG proxy listens on. */
+  pgPort: number
+}
+
+// lifecycle hooks - can be shell command string (CLI) or callback (programmatic).
+// zero-argument callbacks stay valid: a `() => ...` is assignable where a
+// `(ctx) => ...` is expected, so existing callers keep compiling unchanged.
+export type Hook = string | ((ctx: HookContext) => void | Promise<void>)
 
 export interface ZeroLiteConfig {
   /**

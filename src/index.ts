@@ -83,7 +83,7 @@ import { enableZeroReplicaCheckpoint } from './zero-checkpoint-patch.js'
 import { probeZeroCacheHttp } from './zero-health.js'
 import { disableZeroLitestreamRestore } from './zero-litestream-patch.js'
 
-import type { ZeroLiteConfig } from './config.js'
+import type { Hook, HookContext, ZeroLiteConfig } from './config.js'
 import type { PGlite } from '@electric-sql/pglite'
 
 type ZeroChildProcess = ChildProcess & {
@@ -142,21 +142,25 @@ function resolveNodeBinary(): string {
 }
 
 export { defineConfig, getConfig, getConnectionString } from './config.js'
-export type { Hook, LogLevel, OrezConfig, ZeroLiteConfig } from './config.js'
+export type { Hook, HookContext, LogLevel, OrezConfig, ZeroLiteConfig } from './config.js'
 export { deployTimeSchemaBatchStatements } from './pg-proxy-do-backend.js'
 export { installChangeTracking } from './replication/change-tracker.js'
 
 // helper to run a hook (string command or callback function)
 async function runHook(
-  hook: string | (() => void | Promise<void>) | undefined,
+  hook: Hook | undefined,
   name: string,
-  env: Record<string, string>
+  env: Record<string, string>,
+  context: HookContext
 ): Promise<void> {
   if (!hook) return
 
   if (typeof hook === 'function') {
     log.debug.orez(`running ${name} callback`)
-    await hook()
+    // function callbacks run behind the startup barrier just like shell hooks;
+    // the context hands them a privileged (barrier-bypassing) connection so
+    // they can provision while ordinary clients stay held.
+    await hook(context)
     log.orez(`${name} done`)
     return
   }
@@ -179,6 +183,26 @@ async function runHook(
     })
     child.on('error', reject)
   })
+}
+
+/**
+ * Build the context passed to a programmatic lifecycle callback. `resolve`
+ * returns a connection string per database. Pass the barrier-tagged resolver at
+ * startup so the callback's connections bypass the barrier, or the plain
+ * resolver for post-startup hooks where no barrier is active.
+ */
+function buildHookContext(
+  config: ZeroLiteConfig,
+  resolve: (dbName: string) => string,
+  applicationName?: string
+): HookContext {
+  return {
+    upstreamConnectionString: resolve('postgres'),
+    cvrConnectionString: resolve('zero_cvr'),
+    cdbConnectionString: resolve('zero_cdb'),
+    applicationName,
+    pgPort: config.pgPort,
+  }
 }
 
 function getManagedPublicationConfig(): { names: string[]; managedByOrez: boolean } {
@@ -453,14 +477,15 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // as no-ops or DO-native equivalents (PGlite still owns the real path).
   await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
 
-  // Shell on-db-ready hooks connect back through the proxy. Hold every other
-  // client at PG startup until that hook has provisioned the schema; otherwise
-  // an early application SELECT can monopolize the shared DB mutex while the
-  // DO retries "no such table", preventing the migration itself from running.
-  // Programmatic callbacks retain their existing unrestricted proxy semantics
-  // because they do not receive/use the tagged connection URLs below.
+  // on-db-ready hooks connect back through the proxy. Hold every other client at
+  // PG startup until that hook has provisioned the schema; otherwise an early
+  // application SELECT can monopolize the shared DB mutex while the DO retries
+  // "no such table", preventing the migration itself from running. This applies
+  // to BOTH forms of the hook: shell commands receive the tagged connection via
+  // env, and function callbacks receive it via HookContext (see buildHookContext
+  // below), so ordinary programmatic clients can't race either one.
   const pgStartupBarrier =
-    !nativePg && typeof config.onDbReady === 'string'
+    !nativePg && config.onDbReady != null
       ? new PgStartupBarrier(`orez-on-db-ready-${randomUUID()}`)
       : undefined
 
@@ -492,18 +517,23 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
       const upstreamUrl = hookConnectionString('postgres')
       const cvrUrl = hookConnectionString('zero_cvr')
       const cdbUrl = hookConnectionString('zero_cdb')
-      await runHook(config.onDbReady, 'on-db-ready', {
-        ZERO_UPSTREAM_DB: upstreamUrl,
-        ZERO_CVR_DB: cvrUrl,
-        ZERO_CHANGE_DB: cdbUrl,
-        DATABASE_URL: upstreamUrl,
-        OREZ_PG_PORT: String(config.pgPort),
-        // libpq-compatible clients use this as application_name. Keep it in
-        // addition to the URL parameter because some runtimes (notably Bun's
-        // node-postgres compatibility path) can discard URI-only startup
-        // parameters while crossing a shell hook.
-        ...(pgStartupBarrier ? { PGAPPNAME: pgStartupBarrier.applicationName } : {}),
-      })
+      await runHook(
+        config.onDbReady,
+        'on-db-ready',
+        {
+          ZERO_UPSTREAM_DB: upstreamUrl,
+          ZERO_CVR_DB: cvrUrl,
+          ZERO_CHANGE_DB: cdbUrl,
+          DATABASE_URL: upstreamUrl,
+          OREZ_PG_PORT: String(config.pgPort),
+          // libpq-compatible clients use this as application_name. Keep it in
+          // addition to the URL parameter because some runtimes (notably Bun's
+          // node-postgres compatibility path) can discard URI-only startup
+          // parameters while crossing a shell hook.
+          ...(pgStartupBarrier ? { PGAPPNAME: pgStartupBarrier.applicationName } : {}),
+        },
+        buildHookContext(config, hookConnectionString, pgStartupBarrier?.applicationName)
+      )
 
       // re-sync publication membership
       await syncManagedPublications(db, managedPub.names, managedPub.managedByOrez)
@@ -736,12 +766,18 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     log.orez('skip zero-cache')
   }
 
-  // run on-healthy hook after all services are ready
+  // run on-healthy hook after all services are ready. the startup barrier is
+  // long released by now, so the callback gets plain (untagged) connections.
   if (config.onHealthy) {
-    await runHook(config.onHealthy, 'on-healthy', {
-      OREZ_PG_PORT: String(config.pgPort),
-      OREZ_ZERO_PORT: String(config.zeroPort),
-    })
+    await runHook(
+      config.onHealthy,
+      'on-healthy',
+      {
+        OREZ_PG_PORT: String(config.pgPort),
+        OREZ_ZERO_PORT: String(config.zeroPort),
+      },
+      buildHookContext(config, (dbName) => getConnectionString(config, dbName))
+    )
   }
 
   const killZeroCache = async () => {
@@ -935,13 +971,18 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         const upstreamUrl = getConnectionString(config, 'postgres')
         const cvrUrl = getConnectionString(config, 'zero_cvr')
         const cdbUrl = getConnectionString(config, 'zero_cdb')
-        await runHook(config.onDbReady, 'on-db-ready', {
-          ZERO_UPSTREAM_DB: upstreamUrl,
-          ZERO_CVR_DB: cvrUrl,
-          ZERO_CHANGE_DB: cdbUrl,
-          DATABASE_URL: upstreamUrl,
-          OREZ_PG_PORT: String(config.pgPort),
-        })
+        await runHook(
+          config.onDbReady,
+          'on-db-ready',
+          {
+            ZERO_UPSTREAM_DB: upstreamUrl,
+            ZERO_CVR_DB: cvrUrl,
+            ZERO_CHANGE_DB: cdbUrl,
+            DATABASE_URL: upstreamUrl,
+            OREZ_PG_PORT: String(config.pgPort),
+          },
+          buildHookContext(config, (dbName) => getConnectionString(config, dbName))
+        )
       }
 
       // always re-install change tracking after a full reset so public table

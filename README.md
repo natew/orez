@@ -190,6 +190,38 @@ Shell commands receive env vars: `DATABASE_URL`, `OREZ_PG_PORT`, `OREZ_ZERO_PORT
 On the PGlite backend, change-tracking triggers are re-installed after
 `onDbReady`.
 
+#### Startup blocking and the callback context
+
+`onDbReady` runs before zero-cache and before any application query is allowed
+through. On the PGlite and DO proxy backends, orez holds every ordinary PG client
+at connection startup until `onDbReady` returns, so an early application `SELECT`
+can't race the schema provisioning (or monopolize the shared DB mutex while a
+migration is still creating tables). This applies to both hook forms:
+
+- **Shell command:** receives the tagged connection strings via
+  `ZERO_UPSTREAM_DB` / `ZERO_CVR_DB` / `ZERO_CHANGE_DB` / `DATABASE_URL`, plus
+  `PGAPPNAME`. Connecting with any of these bypasses the barrier.
+- **Function callback:** receives a `HookContext` argument carrying the same
+  privileged connection strings:
+
+  ```typescript
+  onDbReady: async (ctx) => {
+    // ctx.upstreamConnectionString / cvrConnectionString / cdbConnectionString
+    // are tagged so they bypass the startup barrier; ctx.applicationName is the
+    // tag itself (for clients that set application_name separately), and
+    // ctx.pgPort is the proxy port.
+    const sql = postgres(ctx.upstreamConnectionString)
+    await sql`CREATE TABLE ...`
+    await sql.end()
+  }
+  ```
+
+  A callback **must** provision through one of these privileged connections. If
+  it opens its own ordinary (untagged) connection to the proxy, that connection
+  is held by the same barrier the callback is meant to release, and it will
+  deadlock. Zero-argument callbacks (`onDbReady: () => {...}`) stay valid and
+  simply ignore the context.
+
 ## Vite Plugin
 
 ```typescript

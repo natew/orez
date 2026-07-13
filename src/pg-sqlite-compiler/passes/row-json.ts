@@ -1,6 +1,6 @@
 import { walkAst } from './ast-utils.js'
 
-import type { Pass } from '../types.js'
+import type { Pass, PassContext } from '../types.js'
 
 function stringValue(node: any): string | null {
   return node?.String?.sval ?? node?.String?.str ?? null
@@ -12,14 +12,44 @@ function functionName(func: any): string | null {
   return stringValue(parts[parts.length - 1])?.toLowerCase() ?? null
 }
 
+/** last name of a ColumnRef (e.g. `s.id` → `id`), or null for `*` / non-columns. */
 function columnName(value: any): string | null {
   const fields = value?.ColumnRef?.fields
-  return Array.isArray(fields) ? stringValue(fields[fields.length - 1]) : null
+  if (!Array.isArray(fields) || fields.length === 0) return null
+  return stringValue(fields[fields.length - 1])
 }
 
-function outputName(target: any, index: number): string {
-  if (target?.name) return target.name
-  return columnName(target?.val) ?? `_orez_col_${index + 1}`
+/** true when the ColumnRef ends in `*` (bare `*` or qualified `t.*`). */
+function isStarColumnRef(value: any): boolean {
+  const fields = value?.ColumnRef?.fields
+  if (!Array.isArray(fields) || fields.length === 0) return false
+  return fields[fields.length - 1]?.A_Star !== undefined
+}
+
+/** qualifier of a `t.*` star (the `t`), or null for a bare `*`. */
+function starQualifier(value: any): string | null {
+  const fields = value?.ColumnRef?.fields
+  if (!Array.isArray(fields) || fields.length < 2) return null
+  return stringValue(fields[0])
+}
+
+/** gather every RangeVar reachable through a FROM clause, descending JoinExprs. */
+function collectRangeVars(node: any, out: any[]): void {
+  if (!node || typeof node !== 'object') return
+  if (Array.isArray(node)) {
+    for (const child of node) collectRangeVars(child, out)
+    return
+  }
+  if (node.RangeVar) {
+    out.push(node.RangeVar)
+    return
+  }
+  if (node.JoinExpr) {
+    collectRangeVars(node.JoinExpr.larg, out)
+    collectRangeVars(node.JoinExpr.rarg, out)
+  }
+  // RangeSubselect etc. expose no schema-resolvable columns, so the caller
+  // declines when a star can't be expanded from a real table.
 }
 
 function stringNode(value: string): any {
@@ -35,32 +65,149 @@ function columnNode(alias: string, column: string): any {
   }
 }
 
+function decline(ctx: PassContext, message: string): null {
+  ctx.warnings.push({ kind: 'row-json-unsupported', message, near: 'row_to_json' })
+  return null
+}
+
+/**
+ * Expand a `*` / `t.*` star into the real column names of its source table,
+ * using the authoritative schema. Returns null (already warned) when the shape
+ * can't be proven, and never invents column names.
+ */
+function expandStar(
+  fromClause: any,
+  qualifier: string | null,
+  ctx: PassContext
+): string[] | null {
+  const rangeVars: any[] = []
+  collectRangeVars(fromClause, rangeVars)
+
+  let rv: any
+  if (qualifier == null) {
+    // a bare `*` is only unambiguous over a single base table.
+    if (rangeVars.length !== 1) {
+      return decline(
+        ctx,
+        'row_to_json over SELECT * needs a single known table to resolve columns'
+      )
+    }
+    rv = rangeVars[0]
+  } else {
+    rv = rangeVars.find((v) => (v.alias?.aliasname ?? v.relname) === qualifier)
+    if (!rv) {
+      return decline(ctx, `row_to_json star qualifier ${qualifier} matches no table`)
+    }
+  }
+
+  const columns = ctx.schema.getTableColumns(rv.schemaname ?? 'public', rv.relname)
+  if (!columns || columns.length === 0) {
+    return decline(
+      ctx,
+      `row_to_json over ${rv.relname}.* needs schema info that is unavailable`
+    )
+  }
+  return [...columns]
+}
+
+/**
+ * Resolve the output column names a subquery produces, so row_to_json can be
+ * rewritten to json_object() referencing real columns. Returns null (already
+ * warned) when the shape can't be proven. Any synthetic aliases it needs are
+ * applied to the subquery targets only on success, so a declined rewrite leaves
+ * the AST untouched.
+ */
+function resolveShape(subselect: any, ctx: PassContext): string[] | null {
+  const sub = subselect?.subquery?.SelectStmt
+  const targets = sub?.targetList
+  if (!Array.isArray(targets) || targets.length === 0) {
+    return decline(ctx, 'row_to_json subquery has no resolvable target list')
+  }
+
+  const resolvedTargets: Array<{
+    target: any
+    columns: string[]
+    needsAlias: boolean
+  }> = []
+
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i]?.ResTarget
+    if (!target) return decline(ctx, 'row_to_json subquery has an unrecognized target')
+
+    // an explicit alias is already the real output column name
+    if (target.name) {
+      resolvedTargets.push({ target, columns: [target.name], needsAlias: false })
+      continue
+    }
+
+    const val = target.val
+
+    // `*` / `t.*`: expand from the authoritative table shape or decline
+    if (isStarColumnRef(val)) {
+      const expanded = expandStar(sub.fromClause, starQualifier(val), ctx)
+      if (!expanded) return null
+      resolvedTargets.push({ target, columns: expanded, needsAlias: false })
+      continue
+    }
+
+    // a plain column reference already names its output column (`s.id` → `id`)
+    const named = columnName(val)
+    if (named) {
+      resolvedTargets.push({ target, columns: [named], needsAlias: false })
+      continue
+    }
+
+    resolvedTargets.push({ target, columns: [], needsAlias: true })
+  }
+
+  const usedNames = new Set(resolvedTargets.flatMap((target) => target.columns))
+  for (let i = 0; i < resolvedTargets.length; i++) {
+    const resolved = resolvedTargets[i]
+    if (!resolved.needsAlias) continue
+
+    // an unnamed expression has no stable output name in SQLite. Give it a
+    // real alias that cannot collide with another target or expanded star.
+    let suffix = i + 1
+    let generated = `_orez_col_${suffix}`
+    while (usedNames.has(generated)) generated = `_orez_col_${++suffix}`
+    resolved.target.name = generated
+    resolved.columns = [generated]
+    usedNames.add(generated)
+  }
+  return resolvedTargets.flatMap((target) => target.columns)
+}
+
 export const rowJsonPass: Pass = {
   name: 'row-json',
-  run(rawStmt) {
+  run(rawStmt, ctx) {
     walkAst(rawStmt, {
       SelectStmt: (select) => {
-        const shapes = new Map<string, string[]>()
+        const subselects = new Map<string, any>()
         for (const fromNode of select?.fromClause ?? []) {
           const subselect = fromNode?.RangeSubselect
           const alias = subselect?.alias?.aliasname
-          const targets = subselect?.subquery?.SelectStmt?.targetList
-          if (!alias || !Array.isArray(targets)) continue
-          shapes.set(
-            alias,
-            targets.map((target: any, index: number) =>
-              outputName(target?.ResTarget, index)
-            )
-          )
+          if (alias && subselect?.subquery?.SelectStmt) {
+            subselects.set(alias, subselect)
+          }
         }
-        if (shapes.size === 0) return
+        if (subselects.size === 0) return
+
+        // resolve each referenced subquery shape at most once (and warn once)
+        const resolved = new Map<string, string[] | null>()
+        const shapeFor = (alias: string): string[] | null => {
+          if (!resolved.has(alias)) {
+            resolved.set(alias, resolveShape(subselects.get(alias), ctx))
+          }
+          return resolved.get(alias) ?? null
+        }
 
         walkAst(select.targetList ?? [], {
           FuncCall: (func, parent, key) => {
             if (functionName(func) !== 'row_to_json') return
             const alias = columnName(func.args?.[0])
-            const columns = alias ? shapes.get(alias) : undefined
-            if (!alias || !columns?.length) return
+            if (!alias || !subselects.has(alias)) return
+            const columns = shapeFor(alias)
+            if (!columns || columns.length === 0) return
             parent[key] = {
               FuncCall: {
                 funcname: [{ String: { sval: 'json_object' } }],
