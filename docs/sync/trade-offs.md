@@ -95,6 +95,24 @@ The budgets deliberately keep the hot-path counter in the worker layer and
 persist only the sticky trip state. Metering every write into a table would add
 billed writes and amplify the very incident it is meant to contain.
 
+### Transaction rollback must not copy hot tables
+
+The data worker emulates Postgres transactions over Durable Object requests.
+For parsed `INSERT`, `UPDATE`, and `DELETE` statements it journals row
+before-images transactionally through generated SQLite CDC triggers. Published
+application changes become visible as one group at commit; private zero-cache
+CVR/CDB changes use the same journal with `publish: false` and are retained only
+long enough to support rollback and crash recovery. Full-table snapshots are a
+fallback for writes the compiler cannot classify, not the normal DML path.
+
+This distinction matters to billing. A 2026-07-13 Chat cold-start profile
+recorded 1,191,374 billable rows, of which 1,077,552 came from 1,244 transaction
+snapshots of a growing internal `cdc_changeLog`. The Chat seed itself was not
+hundreds of thousands of rows. After routing internal parsed DML through the
+row journal, a clean global setup completed at 125,402 rows under the existing
+150k circuit. Keep that circuit as a regression guard; increasing it would hide
+quadratic snapshot amplification rather than fix it.
+
 ## Cookie domain and cutovers
 
 The cookie a client stores is the engine's change-log watermark, and a Zero

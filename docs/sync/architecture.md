@@ -171,8 +171,14 @@ On Cloudflare the deployment has two Durable Object roles:
   `GET/POST /<db>/changes {watermark, limit}` returns `{watermark, changes}` and
   answers HTTP 410 `watermarkTooOld` when the cursor precedes the retained
   floor; `GET /<db>/snapshot` returns every tracked table; `POST /<db>/notify`
-  wakes ingest. Change tracking is in `src/do-sql-tracking.ts` and
-  `src/change-tracking.ts`.
+  wakes ingest. Authoritative row capture is in `src/cf-do/cdc.ts`: generated
+  SQLite triggers stage full before/after images in the same statement as the
+  row write, including indirect writes from business triggers. Explicit
+  transactions are grouped and promoted only at commit; `src/cf-do/row-undo.ts`
+  uses the same images for rollback and crash recovery. This is logical CDC,
+  not WAL/page copying. `src/do-sql-tracking.ts` meters billable writes, while
+  `src/change-tracking.ts` is the separate Postgres-compatible replication
+  entrypoint.
 - The **sync host** (`packages/sync-cf-host`) is the read side. It ingests the
   data worker's feed into the engine's own change log, then serves pulls and
   pushes. In delegation mode it replaces the embedded zero-cache DO

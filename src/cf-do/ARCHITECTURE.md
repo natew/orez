@@ -69,14 +69,19 @@ same zero-cache process and durable SQLite state.
 - `src/worker/cf-patches.ts` - prepares an isolated zero-cache overlay whose
   worker graph and writer run in the Workers runtime without mutating
   `node_modules`.
-- `src/pg-proxy-do-backend.ts` - translates Postgres protocol operations from
-  zero-cache into DO SQL endpoint requests.
+- `src/pg-proxy-do-backend.ts` - implements the Postgres protocol/session,
+  transaction, publication, and catalog boundary, then sends compiled SQLite
+  to the DO SQL endpoints.
+- `src/pg-sqlite-compiler/` - the first-class Postgres-to-SQLite compiler. SQL
+  compatibility belongs here when it is generally useful; the proxy should not
+  accumulate a second statement rewriter.
 - `src/cf-do/worker.ts` - `ZeroDO`, the generic DO SQL backend. It also still
   contains a bespoke Zero sync protocol handler used for development and
   protocol experiments, but the production Soot deploy path uses real
   zero-cache through `startZeroCacheEmbedCF()`.
-- `src/do-sql-tracking.ts` and `src/replication/*` - change tracking and
-  logical replication support over `_zero_changes`.
+- `src/do-sql-tracking.ts` - billable/logical write metering and the 150k
+  rolling write circuit. `src/replication/*` streams committed
+  `_zero_changes`; neither is the source of row capture.
 - `src/cf-do/cdc.ts` - generated SQLite AFTER triggers for every published
   table. Triggers write full before/after row images to a staging table in the
   application statement; `ZeroDO` drains them into committed or transaction-
@@ -92,6 +97,10 @@ same zero-cache process and durable SQLite state.
   transaction a dead DO generation left mid-flight (otherwise a deploy
   upgrade-kill mid-storer-write persists a partial cdc changeLog tx and wedges
   replication permanently).
+- `src/cf-do/row-undo.ts` - restores captured before-images in reverse order
+  for ROLLBACK and crash recovery. Internal CVR/CDB writes use the same path
+  with `publish: false`, so they are undoable without entering the application
+  change feed.
 
 ## Crash-safety + flow control invariants
 
@@ -100,10 +109,12 @@ same zero-cache process and durable SQLite state.
   `recoverTxJournal` on the next embed boot (owner-scoped, so the app
   worker's live pg sessions are never touched).
 - Application rows and their staging CDC rows are written by the same SQLite
-  statement. A failed statement leaves neither behind. Explicit DoBackend
-  transactions drain into `_zero_pending_changes`; `/commit-tx` promotes the
+  statement. A failed statement leaves neither behind. Published application
+  changes drain into `_zero_pending_changes`; `/commit-tx` promotes the
   complete group to `_zero_changes` atomically with clearing the rollback
-  journal, while rollback/recovery discards the pending group.
+  journal. Rollback-only internal changes are deleted at commit. Rollback and
+  crash recovery instead restore every captured before-image and discard the
+  pending group.
 - `_zero_changes` rows are purged only when the consumer CONFIRMS them
   (standby status updates / the resume LSN of a reconnect), mirroring how
   real postgres retains WAL until the slot's confirmed_flush_lsn passes it.
@@ -120,16 +131,19 @@ same zero-cache process and durable SQLite state.
   bespoke sync, and zero-cache. There should be one production path:
   zero-cache -> orez Postgres protocol -> DO SQLite.
 
-If a future change needs more Postgres behavior, implement it in
-`DoBackend`/the SQL translator or the DO SQL backend. Do not put PGlite back in
-the request path.
+If a future change needs generally useful Postgres SQL behavior, implement it
+in `src/pg-sqlite-compiler/`. Keep protocol/session/catalog behavior in
+`DoBackend` and storage behavior in the DO SQL backend. Do not put PGlite back
+in the request path or grow a second SQL translator in the proxy.
 
 ## Running the chat e2e harness against this backend
 
 See `src/cf-do/CHAT_E2E.md`. The DO path is exercised end-to-end by chat's
-`--lite` mode harness, which has a hard 60-second `waitForPort(zero)` budget
-during boot. Three amplification bugs in `DoBackend` were fixed
-2026-05-26 (snapshot fan-out, metadata persist per-row HTTP, metadata persist
-per-statement-in-tx); boot now completes in ~13s on a developer laptop. If
-boot regresses past the budget again, re-capture the /exec distribution as
-described in `CHAT_E2E.md` §3 before guessing at fixes.
+`--lite` mode harness. The repository wrapper patches only the cold lite
+Postgres/Zero readiness waits to 120 seconds; it does not change Playwright
+timeouts, retries, or production behavior. Keep the data worker's original
+150k write circuit as the stronger amplification guard. A 2026-07-13 profile
+found 1.08m billable rows from repeated full copies of a growing internal
+`cdc_changeLog`; row-image journaling removed those copies and a clean global
+setup completed at 125,402 rows. Re-profile requests and billable rows before
+raising either budget.

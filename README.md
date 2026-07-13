@@ -186,7 +186,9 @@ All options are optional with sensible defaults.
 | on-db-ready | `--on-db-ready=CMD` | `onDbReady: 'CMD'` or `onDbReady: fn` | after db + proxy ready, before zero |
 | on-healthy  | `--on-healthy=CMD`  | `onHealthy: 'CMD'` or `onHealthy: fn` | after all services ready            |
 
-Shell commands receive env vars: `DATABASE_URL`, `OREZ_PG_PORT`, `OREZ_ZERO_PORT`. Change tracking triggers are re-installed after `onDbReady`.
+Shell commands receive env vars: `DATABASE_URL`, `OREZ_PG_PORT`, `OREZ_ZERO_PORT`.
+On the PGlite backend, change-tracking triggers are re-installed after
+`onDbReady`.
 
 ## Vite Plugin
 

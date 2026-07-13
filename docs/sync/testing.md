@@ -119,6 +119,33 @@ soak, and a rollback drill. The 2026-07-10 re-qualification recorded native 7 of
 integration test, run against the deployed worker in soot's dialect. It exists
 because the generic fixture lanes cannot target soot's exact composition.
 
+## Data-worker CDC and Chat compatibility
+
+The root TypeScript suite covers the Postgres-to-DO-SQLite path separately from
+the Rust engine. Run it from the repository root with `bun run test`. The most
+relevant files are:
+
+- `src/cf-do/cdc.test.ts`: real-SQLite logical CDC, including full row images,
+  failed multi-row statements, SQLite transaction rollback, primary-key
+  changes, schema changes, and indirect writes from business triggers. The
+  failed-statement, rollback, and primary-key cases are adapted from Turso's CDC
+  integration suite.
+- `src/cf-do/worker-cdc.test.ts`: staging, transaction grouping, publish versus
+  rollback-only capture, and DDL integration at the `ZeroDO` boundary.
+- `src/cf-do/tx-journal.test.ts`: commit, rollback, abandoned-owner recovery,
+  row-image undo, and full-table fallback for unclassified writes.
+- `src/pg-proxy-do-backend.test.ts` and
+  `src/pg-sqlite-compiler/integration.test.ts`: protocol transaction behavior
+  and the final Postgres-to-SQLite compilation boundary.
+
+`scripts/test-chat-e2e.ts` is the compatibility harness for a fresh Chat
+`--lite` boot. It mirrors Chat, patches only the cold PG/Zero readiness waits to
+120 seconds, and leaves Playwright retries and timeouts unchanged. The
+2026-07-13 qualification completed Chat's clean global setup at 125,402
+billable rows under the unmodified 150k data-worker circuit. A later targeted
+browser run reached the app but hit local login/Zero-connect readiness, so do
+not describe that point-in-time run as a fully green browser suite.
+
 ## What is not covered
 
 State this plainly rather than implying blanket coverage.
