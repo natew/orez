@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  actions: read
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -35,6 +39,11 @@ jobs:
       - name: test
         run: bun run test
 
+      - name: wasm sqlite test
+        # test excludes this larger lane; run it explicitly so the aggregate
+        # evidence gate covers every root TypeScript test file.
+        run: bun run test:wasm
+
       - name: native sqlite guard
         run: bun run test:native:guard
 
@@ -49,7 +58,9 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
 
       - name: cache cargo + pgsqlite build
         uses: actions/cache@v4
@@ -100,7 +111,8 @@ jobs:
         run: cd harness && bun src/shapes.ts
 
       - name: randomized sweep (fresh seed every run)
-        run: cd harness && bun src/sweep.ts --rounds 10
+        # The run ID is both fresh and replayable; the evidence ledger records it.
+        run: cd harness && bun src/sweep.ts --rounds 10 --seed ${{ github.run_id }}
 
       - name: upload sweep regressions
         if: failure()
@@ -149,8 +161,9 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.94.0
           components: rustfmt, clippy
 
       - name: cache cargo
@@ -200,7 +213,9 @@ jobs:
       # is built for that ABI. pinning a different node risks a prebuild ABI
       # mismatch (NODE_MODULE_VERSION), so mirror the harness job's environment.
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
 
       - name: cache cargo
         uses: actions/cache@v4
@@ -229,7 +244,7 @@ jobs:
         run: cd harness && bun src/shapes.ts --against rust-local
 
       - name: rust-local randomized sweep
-        run: cd harness && bun src/sweep.ts --against rust-local --rounds 10
+        run: cd harness && bun src/sweep.ts --against rust-local --rounds 10 --seed ${{ github.run_id }}
 
       - name: rust-local wake propagation
         run: cd harness && bun src/propagation.ts --against rust-local --baseline none
@@ -261,13 +276,12 @@ jobs:
           path: harness/regressions/
           if-no-files-found: ignore
 
-  # cloudflare durable-object host: build the wasm engine and run the full
-  # sync-cf-host suite. this is where the config cap-validation regression
-  # (config.test.mjs) and the workerd platform/integration contracts are
-  # enforced; without this job they run only on sol's machine.
-  sync-cf-host:
+  # Release-blocking native fault evidence. Keep this separate from the broad
+  # rust-local conformance job so the fault matrix runs in parallel and has an
+  # independent failure signal/artifact.
+  rust-local-faults:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
       - uses: actions/checkout@v4
@@ -276,8 +290,84 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.94.0
+
+      - name: cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      - run: bun install --frozen-lockfile
+
+      - name: harness install
+        run: cd harness && bun install
+
+      - name: build sync-native (release)
+        run: cargo build --release -p sync-native
+
+      - name: pinned upstream corpus ledger
+        run: cd harness && bun src/corpus-check.ts
+
+      - name: portable upstream corpus (TypeScript, stock Zero, native Rust)
+        run: cd harness && bun src/upstream-corpus.ts --hosts typescript-oracle,stock-zero,sync-native
+
+      - name: rust-local protocol fuzz
+        run: cd harness && bun src/protocol-fuzz.ts --target rust-local --cases 500 --seed ${{ github.run_id }} --concurrency 20
+
+      - name: rust-local reconnect and retention recovery
+        run: cd harness && bun src/reconnect.ts --target rust-local
+
+      - name: rust-local eviction and process restart
+        run: cd harness && bun src/eviction.ts --target rust-local --clients 5
+
+      - name: rust-local transaction and storage faults
+        run: cd harness && bun src/storage-faults.ts --target rust-local
+
+      - name: rust-local backup and restore
+        run: cd harness && bun src/backup-restore.ts --target rust-local
+
+      - name: rust-local generated lifecycle state machine
+        run: |
+          cd harness
+          bun src/state-machine.ts --against rust-local --seed 1 --steps 18
+          bun src/state-machine.ts --against rust-local --seed ${{ github.run_id }} --steps 24
+
+      - name: upload native seeds and minimized traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-local-fault-regressions
+          path: |
+            harness/regressions/
+            harness/results/
+          if-no-files-found: error
+
+  # cloudflare durable-object host: build the wasm engine and run the full
+  # sync-cf-host suite. this is where the config cap-validation regression
+  # (config.test.mjs) and the workerd platform/integration contracts are
+  # enforced; without this job they run only on sol's machine.
+  sync-cf-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
           targets: wasm32-unknown-unknown
 
       - name: cache cargo
@@ -317,3 +407,115 @@ jobs:
           done
           cd ../../harness
           bun src/push-memory-soak.ts --target rust-cf --blocks 3 --ops 3000 --writers 12 --worker http://127.0.0.1:8999 --admin-key push-memory-admin
+
+      - name: rust-cf continuous fault and lifecycle gates
+        env:
+          ZHARNESS_RUST_CF_WORKER: http://127.0.0.1:8998
+          ZHARNESS_CF_ADMIN_KEY: rust-cf-fault-admin
+        run: |
+          cd packages/sync-cf-host
+          bunx wrangler dev --config wrangler.toml --local --var ADMIN_KEY:rust-cf-fault-admin --port 8998 --log-level error --show-interactive-dev-session false > /tmp/rust-cf-fault-worker.log 2>&1 &
+          worker_pid=$!
+          trap 'kill "$worker_pid"; wait "$worker_pid" || true' EXIT
+          for attempt in $(seq 1 150); do
+            if curl --fail --silent http://127.0.0.1:8998 > /dev/null; then break; fi
+            if [ "$attempt" = 150 ]; then cat /tmp/rust-cf-fault-worker.log; exit 1; fi
+            sleep 0.1
+          done
+          cd ../../harness
+          bun src/upstream-corpus.ts --hosts typescript-oracle,rust-cf
+          bun src/protocol-fuzz.ts --target rust-cf --cases 500 --seed ${{ github.run_id }} --concurrency 20
+          bun src/reconnect.ts --target rust-cf
+          bun src/eviction.ts --target rust-cf --clients 5
+          bun src/storage-faults.ts --target rust-cf
+          bun src/backup-restore.ts --target rust-cf
+          bun src/state-machine.ts --against rust-cf --seed 1 --steps 18
+          bun src/state-machine.ts --against rust-cf --seed ${{ github.run_id }} --steps 24
+
+      - name: upload rust-cf seeds and minimized traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-cf-fault-regressions
+          path: |
+            harness/regressions/
+            harness/results/
+          if-no-files-found: error
+
+  # This is the release evidence gate. GitHub does not start it until every
+  # required job above is green. The generator independently checks the run's
+  # event, branch, job conclusions, and head SHA before it can write "verified".
+  orez-lite-evidence:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - test
+      - compiler
+      - harness
+      - native-integration
+      - rust
+      - rust-local
+      - rust-local-faults
+      - sync-cf-host
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+
+      - name: collect qualified fault traces
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-fault-regressions'
+          path: qualified-traces
+          merge-multiple: true
+
+      - name: publish minimized regression trace archive
+        id: regression-traces
+        uses: actions/upload-artifact@v4
+        with:
+          name: orez-lite-regression-traces-${{ github.sha }}
+          path: qualified-traces/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: generate exact-SHA evidence ledger
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OREZ_REGRESSION_TRACES_URL: ${{ steps.regression-traces.outputs.artifact-url }}
+          OREZ_REGRESSION_TRACES_PATH: qualified-traces
+        run: bun scripts/generate-orez-lite-evidence.ts generate
+
+      - name: validate exact-SHA release gate
+        env:
+          EXPECTED_EVIDENCE_SHA: ${{ github.sha }}
+        run: bun scripts/generate-orez-lite-evidence.ts check
+
+      - name: build static evidence site
+        run: |
+          cd site
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: upload immutable evidence ledger
+        uses: actions/upload-artifact@v4
+        with:
+          name: orez-lite-evidence-${{ github.sha }}
+          path: site/data/orez-lite-evidence.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: upload static site built from evidence JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: orez-site-${{ github.sha }}
+          path: site/dist/
+          if-no-files-found: error
+          retention-days: 90

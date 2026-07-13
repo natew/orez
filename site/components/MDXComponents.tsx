@@ -1,6 +1,7 @@
 import { H1, H2, H3, Paragraph, SizableText, Text, XStack, YStack } from 'tamagui'
 
 import { AppLink } from './AppLink'
+import { EvidenceLedger, VerifiedBuildCard } from './OrezLiteEvidence'
 
 import type { ComponentPropsWithoutRef, ReactNode } from 'react'
 
@@ -161,4 +162,6 @@ export const components = {
   Status,
   CardGrid,
   DocCard,
+  EvidenceLedger,
+  VerifiedBuildCard,
 }

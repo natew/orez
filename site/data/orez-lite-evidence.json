@@ -1,0 +1,213 @@
+{
+  "schemaVersion": 1,
+  "status": "unverified",
+  "release": {
+    "version": "0.4.73",
+    "tag": "v0.4.73",
+    "sha": "34f28cc63c741c31270b7b888b8c25d9b22b493c",
+    "url": "https://github.com/natew/orez/tree/v0.4.73"
+  },
+  "build": {
+    "sha": null,
+    "url": null
+  },
+  "versions": {
+    "zero": "1.7.0",
+    "rust": "1.94.0",
+    "sqlite": "3.46.0",
+    "rusqlite": "0.32.1",
+    "libsqlite3Sys": "0.30.1",
+    "workerd": "1.20260617.1",
+    "wrangler": "4.103.0",
+    "bun": null
+  },
+  "qualification": {
+    "qualifiedAt": null,
+    "lastGreen": null,
+    "scenarioCount": null,
+    "randomizedSeed": null,
+    "operationCount": null,
+    "operationUnit": null,
+    "restarts": null,
+    "durationMs": null
+  },
+  "supportedContracts": [],
+  "compatibility": [
+    {
+      "host": "Native",
+      "status": "awaiting",
+      "contract": "sync-native HTTP, SQLite transactions, wake, permissions, query lifecycle"
+    },
+    {
+      "host": "WASM / workerd",
+      "status": "awaiting",
+      "contract": "sync-wasm representation and the local Durable Object host boundary"
+    },
+    {
+      "host": "Stock-Zero differential",
+      "status": "awaiting",
+      "contract": "Named-query results and randomized incremental behavior against Zero 1.7.0"
+    }
+  ],
+  "suites": [
+    {
+      "id": "rust-core",
+      "name": "Deterministic Rust core",
+      "host": "Core / native SQLite",
+      "status": "awaiting",
+      "scenarioCount": null,
+      "randomizedSeed": null,
+      "operationCount": null,
+      "operationUnit": "not applicable",
+      "restarts": 0,
+      "durationMs": null,
+      "whatItProves": "No CI-qualified claim is published yet. When green, this suite covers cookies, patches, mutation IDs, retention, query membership, permissions, and model invariants at the recorded SHA.",
+      "whatItDoesNotProve": "It does not prove HTTP host lifecycle, workerd behavior, production capacity, or application-specific schemas and policies.",
+      "commands": ["cargo test --workspace"],
+      "logsUrl": null,
+      "artifactsUrl": null
+    },
+    {
+      "id": "native-host",
+      "name": "Native host qualification",
+      "host": "sync-native",
+      "status": "awaiting",
+      "scenarioCount": null,
+      "randomizedSeed": null,
+      "operationCount": null,
+      "operationUnit": "randomized query shapes",
+      "restarts": null,
+      "durationMs": null,
+      "whatItProves": "No CI-qualified claim is published yet. When green, this suite exercises the release native binary through real Zero clients, concurrent clients, permissions, wake, and query lifecycle.",
+      "whatItDoesNotProve": "It does not prove the Cloudflare host, multi-region behavior, unbounded namespace sizes, or a consumer's recovery objectives.",
+      "commands": [
+        "cd harness && bun src/shapes.ts --against rust-local",
+        "cd harness && bun src/sweep.ts --against rust-local --rounds 10 --seed <ledger-seed>",
+        "cd harness && bun src/queries.ts --against rust-local"
+      ],
+      "logsUrl": null,
+      "artifactsUrl": null
+    },
+    {
+      "id": "wasm-workerd",
+      "name": "WASM / workerd qualification",
+      "host": "sync-wasm + local workerd",
+      "status": "awaiting",
+      "scenarioCount": null,
+      "randomizedSeed": null,
+      "operationCount": null,
+      "operationUnit": "chat-shaped pushes",
+      "restarts": null,
+      "durationMs": null,
+      "whatItProves": "No CI-qualified claim is published yet. When green, this suite covers WASM value boundaries, local Durable Object SQLite transactions, ingest, restart, push-memory soak, protocol fuzz, recovery faults, backup/restore, and generated lifecycle transitions under the pinned workerd.",
+      "whatItDoesNotProve": "Local workerd is not the Cloudflare production service and does not establish isolate memory, regional propagation, quota, or eviction behavior in a deployed account.",
+      "commands": [
+        "cd packages/sync-cf-host && bun run test",
+        "cd harness && bun src/push-memory-soak.ts --target rust-cf --blocks 3 --ops 3000 --writers 12",
+        "cd harness && bun src/protocol-fuzz.ts --target rust-cf --cases 500 --seed <ledger-seed> --concurrency 20",
+        "cd harness && bun src/state-machine.ts --against rust-cf --seed <ledger-seed> --steps 24"
+      ],
+      "logsUrl": null,
+      "artifactsUrl": null
+    },
+    {
+      "id": "native-fault-recovery",
+      "name": "Native fault and lifecycle qualification",
+      "host": "sync-native + stock-Zero oracle",
+      "status": "awaiting",
+      "scenarioCount": null,
+      "randomizedSeed": null,
+      "operationCount": null,
+      "operationUnit": "protocol cases and generated lifecycle steps",
+      "restarts": null,
+      "durationMs": null,
+      "whatItProves": "No CI-qualified claim is published yet. When green, this suite covers pinned upstream corpus agreement, malformed protocol input, reconnect/retention, process eviction, transactional storage faults, backup/restore, and generated lifecycle transitions on the native host.",
+      "whatItDoesNotProve": "Injected faults cover named boundaries and generated traces, not every operating-system, filesystem, hardware, or application failure mode.",
+      "commands": [
+        "cd harness && bun src/corpus-check.ts",
+        "cd harness && bun src/upstream-corpus.ts --hosts typescript-oracle,stock-zero,sync-native",
+        "cd harness && bun src/protocol-fuzz.ts --target rust-local --cases 500 --seed <ledger-seed> --concurrency 20",
+        "cd harness && bun src/state-machine.ts --against rust-local --seed <ledger-seed> --steps 24"
+      ],
+      "logsUrl": null,
+      "artifactsUrl": null
+    },
+    {
+      "id": "stock-zero-differential",
+      "name": "Stock-Zero differential",
+      "host": "Zero 1.7.0 oracle",
+      "status": "awaiting",
+      "scenarioCount": null,
+      "randomizedSeed": null,
+      "operationCount": null,
+      "operationUnit": "query-shape comparisons",
+      "restarts": 0,
+      "durationMs": null,
+      "whatItProves": "No CI-qualified claim is published yet. When green, named and seeded query scenarios produce the same observable results as the pinned stock Zero server for the exercised corpus.",
+      "whatItDoesNotProve": "Differential agreement is limited to the recorded corpus and Zero version; it is not a claim of internal implementation equivalence or future-version compatibility.",
+      "commands": [
+        "cd harness && bun src/shapes.ts --against rust-local",
+        "cd harness && bun src/query-diff.ts",
+        "cd harness && bun src/sweep.ts --against rust-local --rounds 10 --seed <ledger-seed>"
+      ],
+      "logsUrl": null,
+      "artifactsUrl": null
+    }
+  ],
+  "artifacts": {
+    "evidenceJsonUrl": null,
+    "logsUrl": null,
+    "regressionTracesUrl": null,
+    "regressionTraceCount": 0,
+    "retentionDays": 90
+  },
+  "reproduction": {
+    "environment": [
+      "mise use node@24.3.0",
+      "bun install --frozen-lockfile",
+      "cd harness && bun install --frozen-lockfile"
+    ],
+    "full": [
+      "cargo test --workspace",
+      "cd harness && bun src/shapes.ts --against rust-local",
+      "cd harness && bun src/sweep.ts --against rust-local --rounds 10 --seed <ledger-seed>",
+      "cd harness && bun src/state-machine.ts --against rust-local --seed <ledger-seed> --steps 24",
+      "cd packages/sync-cf-host && bun run test"
+    ]
+  },
+  "knownLimitations": [
+    "There is no all-green main-branch CI run for the current evidence gate yet, so this fallback JSON makes no verified-build claim.",
+    "The workerd lane is local emulation; deployed Cloudflare isolate memory, quota, eviction, and regional propagation require a separate named deployment qualification.",
+    "The compatibility corpus is pinned to Zero 1.7.0 and does not imply compatibility with later Zero releases.",
+    "GitHub Actions logs and artifacts are immutable per run but remain subject to the repository's retention policy."
+  ],
+  "unresolvedLanes": [
+    {
+      "name": "Main-branch release gate",
+      "status": "red",
+      "detail": "The latest observed CI run failed in native integration; the gate correctly refuses to publish a verified ledger.",
+      "url": "https://github.com/natew/orez/actions/runs/29267817756"
+    },
+    {
+      "name": "Deployed Cloudflare qualification",
+      "status": "fragile",
+      "detail": "The deployed rust-cf query differential and platform-specific soak remain outside the standard CI gate.",
+      "url": "https://github.com/natew/orez/blob/261530c1778874e3fbae28d1704316e2aff1b364/plans/rust-sync-m6-qualification.md"
+    }
+  ],
+  "gate": {
+    "workflow": "CI",
+    "branch": "main",
+    "requiredJobs": [
+      "test",
+      "compiler",
+      "harness",
+      "native-integration",
+      "rust",
+      "rust-local",
+      "rust-local-faults",
+      "sync-cf-host"
+    ],
+    "policy": "CI generates and builds with a verified ledger only after every required job succeeds for the same main-branch SHA. Pull requests and partial/manual runs cannot publish it."
+  }
+}
