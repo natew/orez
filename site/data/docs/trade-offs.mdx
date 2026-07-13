@@ -1,73 +1,13 @@
 ---
-title: Trade-offs
-description: The practical limits of the local runtimes and the SQLite sync engine.
+title: Runtime trade-offs
+description: Choose a runtime based on the constraint you need to solve.
 ---
 
-# Trade-offs
+# Runtime trade-offs
 
-orez deliberately offers more than one runtime because no single embedded
-database arrangement has the right properties for every stage of a project.
+The detailed trade-offs now live with each runtime:
 
-## The local PGlite stack
+- [Node limitations](/docs/node/limitations) covers PGlite serialization, emulated replication, native SQLite selection, and the local-development support boundary.
+- [Orez Lite limitations](/docs/orez-lite/limitations) covers protocol differences, native/Cloudflare feature parity, single-writer namespaces, retention, and operational maturity.
 
-PGlite provides broad PostgreSQL compatibility with no server installation, but
-one database has one session. orez serializes queries through that session and
-emulates logical replication with triggers and a change log. This is excellent
-for development portability and a poor model for production connection
-contention or sustained concurrent writes.
-
-The default zero-cache SQLite fallback is WASM. It avoids native compilation but
-is slower under heavy database work than the native addon. Automatic mode uses
-the native binary when it is already available; use explicit flags when
-reproducibility matters.
-
-Neither limitation requires abandoning the tool: the embedded Postgres backend
-uses real multi-connection Postgres and native logical replication, while forced
-native SQLite exercises the platform addon.
-
-## Durable Object storage
-
-The Rust sync engine and SQLite storage live in the same Durable Object. There
-is no separate database process, connection pool, or cache service. The cost is
-that one namespace inherits the memory, storage, and CPU limits of one object.
-Scale comes from partitioning data into more namespaces, not making one
-namespace arbitrarily large.
-
-## Single-writer throughput
-
-One object per namespace means one ordered writer per namespace. This makes
-transactional pull and push behavior straightforward, but it also sets the
-throughput ceiling. Bulk imports and very hot shared namespaces are poor fits.
-Measure with your schema and expected concurrency rather than extrapolating from
-small mutations.
-
-## Billable-row amplification
-
-Cloudflare meters Durable Object SQLite physical rows written. One logical row
-can update the table, several indexes, foreign-key structures, and sync
-change-tracking rows. Cascading deletes can multiply that cost again. Index
-count and cascade depth are therefore billing decisions as well as query-design
-decisions.
-
-orez includes two independent rolling-window circuit breakers: one on the data
-worker's writes and one on sync-host ingest. Delegated push retries are also
-bounded. The defaults are safety rails, not a capacity plan; inspect billable
-rows with the production schema and set budgets deliberately.
-
-## Snapshots and cutovers
-
-Change-log retention is bounded. Clients older than the retained floor recover
-with a full snapshot. Moving clients to a fresh sync-host origin also changes
-the cookie domain, so their local stores rebuild once. This is a correct and
-intentional recovery path, but it can be visible for large snapshots.
-
-## Choosing honestly
-
-- Use PGlite when setup time and portability matter most.
-- Use embedded Postgres when concurrency and real replication behavior matter.
-- Use native SQLite when zero-cache throughput matters more than a zero-native
-  install.
-- Use the Rust engine when per-namespace SQLite at the edge matches the data
-  model and you are prepared to measure write amplification.
-- Keep conventional Postgres and zero-cache when one large shared database or
-  very high per-namespace write throughput is the defining requirement.
+For a side-by-side decision, use [Choose a runtime](/docs/runtimes).

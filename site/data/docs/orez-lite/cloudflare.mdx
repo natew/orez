@@ -1,0 +1,80 @@
+---
+title: Orez Lite on Cloudflare
+description: Host the Orez Lite WASM engine in a SQLite Durable Object with a consumer-owned Worker.
+---
+
+# Cloudflare deployment
+
+<Status tone="preview">Optional host · Preview</Status>
+
+The Cloudflare host compiles `sync-core` through `sync-wasm` and runs it inside a SQLite Durable Object. The outer Worker authenticates the request, resolves the namespace, and forwards normalized claims to the object.
+
+This optional host deploys Orez Lite directly on Cloudflare’s SQLite Durable Object platform.
+
+## Consumer surface
+
+The host package exports `createSyncWorker`, `createSyncDurableObject`, `registerMutators`, and the `SyncHostConfig` types:
+
+```ts
+import {
+  createSyncDurableObject,
+  createSyncWorker,
+  registerMutators,
+} from 'orez-sync-cf-host'
+
+const config = {
+  hostVersion: 'my-app-v1',
+  schema,
+  initialize(sql) {
+    sql.exec(`CREATE TABLE IF NOT EXISTS todo (
+      id TEXT PRIMARY KEY,
+      ownerId TEXT NOT NULL,
+      title TEXT NOT NULL
+    )`)
+  },
+  mutators: registerMutators({
+    async 'todo.create'(tx, args, { claims }) {
+      await tx.exec('INSERT INTO todo (id, ownerId, title) VALUES (?, ?, ?)', [
+        args.id,
+        claims.userID,
+        args.title,
+      ])
+    },
+  }),
+  authenticate(request) {
+    return authenticateAndNormalize(request)
+  },
+  namespace(request) {
+    return new URL(request.url).pathname.split('/')[1] || null
+  },
+} satisfies SyncHostConfig<Env>
+
+export const SyncDurableObject = createSyncDurableObject(config)
+export default createSyncWorker(config)
+```
+
+The snippets’ `schema`, `Env`, and authentication functions are application-owned. Bind `SYNC_DO` to the exported Durable Object class in Wrangler configuration.
+
+## Security boundary
+
+Authentication happens in the outer Worker. Only normalized claims and a hashed namespace identity cross the private boundary into the Durable Object. Host telemetry records structural counts and hashed identifiers. It excludes tokens, mutation arguments, and row contents.
+
+Admin requests require `authorizeAdmin` or an `ADMIN_KEY` sent as `x-admin-key`. Reserve `/admin/*` for authenticated operator workflows.
+
+## Durable transactions
+
+Pull runs the engine inside `transactionSync`. Local-mutator push validates and plans in Rust, executes the TypeScript mutator inside `ctx.storage.transaction`, then finalizes mutation IDs and change state. SQL cursors are materialized before an `await` so no Durable Object cursor crosses an asynchronous boundary.
+
+Side effects registered with `context.defer()` run after commit and use their own idempotency, observability, and retry policy.
+
+## Wake and hibernation
+
+`GET /<namespace>/wake?clientID=<id>` upgrades to a hibernating WebSocket. Attachments store only the client ID. After a push commits, the host coalesces wake notifications for other clients. Each client then pulls the latest state.
+
+The object can be evicted and reconstructed without losing SQLite state or socket attachments. In-memory counters and caches are deliberately non-authoritative.
+
+## Platform fit
+
+Durable Objects give each namespace ordered execution and colocated SQLite. Per-object memory, CPU, storage, and billing constraints make namespace partitioning the primary scaling mechanism.
+
+Read [Operations](/docs/orez-lite/operations) and [Limitations](/docs/orez-lite/limitations) before treating a local harness result as a deployment qualification.

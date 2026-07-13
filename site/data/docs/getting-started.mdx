@@ -1,81 +1,79 @@
 ---
-title: Getting started
-description: Install orez, run Zero locally, add migrations, and connect an application.
+title: Get started
+description: Start a complete local Zero backend with one command and connect a Zero client.
 ---
 
-# Getting started
+# Get started
 
-The shortest path is one command. orez chooses available ports, creates a local
-data directory, starts the database and zero-cache, and prints the endpoints.
+The default Orez path runs a complete Zero development backend without Docker, a separately installed Postgres server, or native compilation.
+
+## Install and run
+
+Add Zero to the application and Orez as a development dependency:
 
 ```sh
+bun add @rocicorp/zero
+bun add -D orez
 bunx orez
 ```
 
-You need Bun 1 or Node.js 20 or newer. No Postgres installation, Docker daemon,
-or compiler toolchain is required for the default mode.
+Orez starts PGlite and its PostgreSQL compatibility layer, then starts stock zero-cache with its SQLite replica. The admin server provides logs and lifecycle controls. Startup output reports the resolved ports.
 
-## Add migrations
+| Service    | Default address                                      |
+| ---------- | ---------------------------------------------------- |
+| PostgreSQL | `postgresql://user:password@127.0.0.1:6434/postgres` |
+| zero-cache | `http://localhost:5849`                              |
+| Orez admin | `http://localhost:6477`                              |
 
-Point orez at a directory of SQL migrations. Files are applied in filename
-order before zero-cache starts.
+## Connect the client
 
-```sh
-bunx orez --migrations=./db/migrations
+Point the existing Zero client at the zero-cache URL:
+
+```ts
+import { Zero } from '@rocicorp/zero'
+import { schema } from './schema'
+
+export const zero = new Zero({
+  schema,
+  userID: 'development-user',
+  cacheURL: 'http://localhost:5849',
+})
 ```
 
-For repeatable settings, create `orez.config.ts`:
+Your schema, queries, mutators, optimistic updates, and local Zero store remain normal Zero application code.
+
+## Add migrations and endpoints
+
+Create `orez.config.ts`:
 
 ```ts
 import { defineConfig } from 'orez'
 
 export default defineConfig({
   migrations: './db/migrations',
-  seed: './db/seed.sql',
-  logLevel: 'info',
+  zeroMutateUrl: 'http://localhost:3000/api/zero/push',
+  zeroQueryUrl: 'http://localhost:3000/api/zero/pull',
+  onHealthy: 'bun run dev',
 })
 ```
 
-CLI arguments override the config file. JavaScript or MJS config files work on
-older Node versions; TypeScript config files require Node 22.6+ or Bun.
+The CLI loads the file automatically. Command-line flags take precedence when a one-off run needs different values.
 
-## Connect
+## Pick a Node profile
 
-By default the PostgreSQL endpoint is:
+The default [PGlite/WASM profile](/docs/node/pglite) is best for ordinary local development and CI. It avoids native builds and uses emulated logical replication.
 
-```text
-postgresql://user:password@127.0.0.1:6434/postgres
-```
-
-zero-cache listens on port `5849`, and the admin view listens on `6477`. If a
-port is occupied, orez increments it and reports the actual address rather than
-failing startup.
-
-## Run only the database
-
-If you need the embedded PostgreSQL-compatible database and wire proxy without
-Zero, skip zero-cache:
+Install `embedded-postgres` and use [Embedded Postgres](/docs/node/embedded-postgres) when you need multiple real PostgreSQL connections and stock logical replication:
 
 ```sh
-bunx orez --skip-zero-cache
+bun add -D embedded-postgres
+bunx orez --backend=postgres
 ```
 
-## Start clean for tests
-
-Ephemeral mode keeps PGlite in memory and creates a per-run replica cache. It is
-well suited to tests that need isolation and do not need persistence between
-runs.
-
-```sh
-bunx orez --ephemeral --migrations=./db/migrations
-```
-
-Use `--on-db-ready` for work that must happen after migrations but before
-zero-cache, and `--on-healthy` for a command that should run after the complete
-stack is ready.
+Both profiles use the same CLI, config, hooks, admin surface, and Zero client setup.
 
 ## Next
 
-The defaults optimize for portability. Read [Runtime modes](/docs/modes) before
-using the stack under sustained concurrency or when you want to exercise real
-PostgreSQL replication behavior.
+- Read the full [Node setup](/docs/node/setup) for migrations, hooks, and disposable CI.
+- See [Configuration and CLI](/docs/node/configuration) for every setting.
+- Use [Choose a runtime](/docs/runtimes) when evaluating Orez Lite.

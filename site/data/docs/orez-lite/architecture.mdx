@@ -1,0 +1,61 @@
+---
+title: Orez Lite architecture
+description: The deterministic core, storage adapters, cookies, change tracking, and wake protocol behind Orez Lite.
+---
+
+# Architecture
+
+Orez Lite separates deterministic sync decisions from host-specific storage and lifecycle code.
+
+```text
+Zero client
+  │  pull / push / wake
+  ▼
+Native Axum host              Cloudflare Worker + Durable Object
+  │ auth · namespace · tx       │ auth · namespace · tx · bindings
+  └──────────────┬───────────────┘
+                 ▼
+             sync-core
+      cookies · diffs · LMIDs
+      queries · retention · values
+                 │
+                 ▼
+       rusqlite or DO SQLite
+```
+
+## Deterministic core
+
+`sync-core` accepts a small `SyncDb` interface and produces protocol values from explicit inputs. Native and WASM hosts provide sockets, transaction begin/commit/rollback, authentication, and storage.
+
+This boundary lets the same scenarios run against in-memory models, native SQLite, and Durable Object SQLite while keeping host failures testable.
+
+## Change tracking
+
+Orez Lite installs triggers after application DDL and seed data. Each insert, update, or delete appends the touched table and primary key to `_zsync_changes`.
+
+Pull reads the current row inside the same transaction. The log stays compact, intermediate values disappear naturally, and SQLite values avoid a JSON row-image round trip. A primary-key-changing update records both the previous and current key.
+
+## Cookies and retention
+
+Each namespace has a durable monotonic watermark and a retained floor:
+
+- cookie equals watermark → unchanged;
+- cookie is within the retained window → diff of touched keys;
+- new or expired cookie → full snapshot;
+- cookie ahead of the server → reset response.
+
+Pruning removes old change rows while the durable high-water mark preserves cookie monotonicity across restart and an empty log.
+
+## Push idempotency
+
+The engine tracks last-mutation IDs by client group and client. A retry of a committed mutation returns its known position. New mutations apply in order inside the host transaction.
+
+Application rejection advances the mutation ID. Infrastructure failure rolls back the transaction for a safe retry.
+
+## Query membership
+
+Query-aware mode stores desired queries, compiled transforms, row membership, and reference counts. A row remains present while at least one desired query references it. Query changes and row changes reconcile transactionally into the next patch.
+
+## Wake channel
+
+Wake contains a data-available hint. A client follows the hint with pull, and periodic safety pulls cover delayed, coalesced, duplicated, or missed wake frames. State and cookies travel through pull responses.

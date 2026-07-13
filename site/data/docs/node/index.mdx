@@ -1,0 +1,44 @@
+---
+title: Node
+description: The all-in-one Zero runner for local development, CI, and production-like testing.
+---
+
+# Node
+
+Orez for Node packages a complete Zero backend behind one command and one configuration. Give it your migrations and application endpoints. Orez then starts and manages the database, `zero-cache`, its replica storage, and the surrounding development tools.
+
+```sh
+bunx orez --migrations=./db/migrations
+```
+
+The runtime uses the stock `zero-cache` package and supplies the infrastructure it expects. Your application keeps the usual Zero client API, including its schema, queries, mutators, and optimistic updates.
+
+## Two database profiles
+
+| Profile           | Select it with       | Best for                                           | Database behavior                                        |
+| ----------------- | -------------------- | -------------------------------------------------- | -------------------------------------------------------- |
+| PGlite            | default              | Everyday development, examples, and CI             | WebAssembly PostgreSQL with Orez-managed change tracking |
+| Embedded Postgres | `--backend=postgres` | Concurrent development and production-like testing | Real PostgreSQL sessions and native logical replication  |
+
+Both profiles share the same CLI, configuration, ports, migrations, hooks, admin tools, and client setup. Switching profiles is a single configuration change.
+
+## What Orez coordinates
+
+- the application database;
+- the `zero_cvr` and `zero_cdb` databases;
+- zero-cache and its local replica file;
+- migrations, seed data, publications, and lifecycle hooks;
+- startup, shutdown, port selection, process cleanup, and bounded recovery;
+- an admin dashboard with logs, HTTP inspection, and reset controls;
+- optional local S3-compatible object storage.
+
+## Product scope
+
+The Node runtime is built for development, CI, examples, and production-like local testing. State and credentials are local, and each project owns its remote storage, availability, access-control, backup, and production operations strategy.
+
+## Start here
+
+1. Follow [Setup](/docs/node/setup) for the shortest complete path.
+2. Choose [PGlite](/docs/node/pglite) or [Embedded Postgres](/docs/node/embedded-postgres).
+3. Move repeatable settings into [Configuration](/docs/node/configuration).
+4. Use the [programmatic API or Vite plugin](/docs/node/api) when Orez should share your app’s lifecycle.

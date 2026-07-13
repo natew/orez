@@ -1,0 +1,56 @@
+---
+title: Orez Web testing and limitations
+description: Browser evidence, qualification matrix, limitations, and productization work for Orez Web.
+---
+
+# Testing and limitations
+
+<Status tone="experimental">Experimental</Status>
+
+Browser scenarios cross the real Worker, WASM, IndexedDB, proxy, and zero-cache boundaries. This exercises the runtime graph users actually boot.
+
+## Current evidence areas
+
+The Soot implementation has browser scenarios for:
+
+- worker graph boot and readiness;
+- direct SQL queries and writes;
+- change tracking after application inserts;
+- rendering and mutating a small application UI;
+- replication pipeline activation;
+- persistent database and worker lifecycle behavior.
+
+These scenarios will move with the package during upstreaming so implementation and qualification share one source tree.
+
+## Qualification matrix
+
+| Scenario               | Cold        | Warm/reload   | MessagePort | SharedArrayBuffer |
+| ---------------------- | ----------- | ------------- | ----------- | ----------------- |
+| Worker boot and ready  | Required    | Required      | Required    | Required          |
+| Schema/init SQL        | Required    | Idempotent    | Required    | Required          |
+| Query and direct write | Required    | Persists      | Required    | Required          |
+| Zero client mutation   | Required    | Exactly once  | Required    | Required          |
+| Replication and poke   | Required    | Recovers      | Required    | Required          |
+| Clean stop and restart | Required    | Lock released | Required    | Required          |
+| Asset/version mismatch | Clear error | Clear error   | Required    | Required          |
+
+## Current limitations
+
+- The package is private and currently sourced from Soot.
+- The worker build is coupled to pinned Zero internals.
+- Browser startup downloads and initializes several substantial WASM and worker assets.
+- SharedArrayBuffer requires cross-origin isolation and compatible subresources.
+- MessagePort has higher hot-path IPC overhead.
+- IndexedDB persistence follows browser quota and origin lifecycle.
+- Mobile memory and browser coverage use project-specific qualification today.
+- Direct application writes must enter the replication signaling path.
+
+## Productization path
+
+1. Upstream the package and worker build into Orez.
+2. Publish one API and generated-asset layout.
+3. Pin and continuously qualify supported Zero versions.
+4. Run persistence, reload, and mutation scenarios across a documented browser matrix.
+5. Establish reproducible bundle-size, cold-start, memory, and storage budgets.
+
+The experimental runtime is best suited to demos, previews, and disposable project data while this productization work progresses.

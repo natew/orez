@@ -1,0 +1,104 @@
+---
+title: Node configuration
+description: Configure the Orez Node runner from a file, CLI flags, or the programmatic API.
+---
+
+# Node configuration
+
+Orez accepts the same core settings from `orez.config.ts`, CLI flags, and
+`startZeroLite()`. Configuration-file values override defaults, and CLI values
+override the file.
+
+```ts
+import { defineConfig } from 'orez'
+
+export default defineConfig({
+  backend: 'pglite',
+  dataDir: '.orez',
+  migrations: './db/migrations',
+  seed: './db/seed.sql',
+  zeroMutateUrl: 'http://localhost:3000/api/zero/push',
+  zeroQueryUrl: 'http://localhost:3000/api/zero/pull',
+  onHealthy: 'echo "Zero is ready"',
+})
+```
+
+Orez searches the current directory for `orez.config.ts`, `.js`, then `.mjs`.
+TypeScript configuration requires Bun or Node 22.6 and newer.
+
+## Runtime and endpoints
+
+| Config key   | CLI flag        | CLI default | Meaning                             |
+| ------------ | --------------- | ----------- | ----------------------------------- |
+| `backend`    | `--backend`     | `pglite`    | `pglite` or `postgres`              |
+| `dataDir`    | `--data-dir`    | `.orez`     | Persistent Orez state               |
+| `pgPort`     | `--pg-port`     | `6434`      | PostgreSQL or proxy port            |
+| `zeroPort`   | `--zero-port`   | `5849`      | Public zero-cache port              |
+| `adminPort`  | `--admin-port`  | `6477`      | Admin dashboard port                |
+| `pgUser`     | `--pg-user`     | `user`      | Local PostgreSQL user               |
+| `pgPassword` | `--pg-password` | `password`  | Local PostgreSQL password           |
+| `logLevel`   | `--log-level`   | `warn`      | `error`, `warn`, `info`, or `debug` |
+
+Ports move upward when occupied. The programmatic runner returns the resolved
+`pgPort` and `zeroPort`.
+
+Raw `startZeroLite()` defaults `adminPort` to `0`. The CLI supplies `6477` and
+starts the dashboard. Set `--disable-admin` to turn the CLI dashboard off.
+
+## Schema and lifecycle
+
+| Config key                     | CLI flag        | Default                            | Meaning                                       |
+| ------------------------------ | --------------- | ---------------------------------- | --------------------------------------------- |
+| `migrations` / `migrationsDir` | `--migrations`  | none                               | SQL migration directory                       |
+| `seed` / `seedFile`            | `--seed`        | `src/database/seed.sql` if present | Optional seed SQL                             |
+| `onDbReady`                    | `--on-db-ready` | none                               | Hook after database setup, before zero-cache  |
+| `onHealthy`                    | `--on-healthy`  | none                               | Hook after the entire stack is healthy        |
+| `zeroPublications`             | config only     | managed default                    | Comma-separated `ZERO_APP_PUBLICATIONS` value |
+| `zeroMutateUrl`                | config or env   | none                               | `ZERO_MUTATE_URL` passed to zero-cache        |
+| `zeroQueryUrl`                 | config or env   | none                               | `ZERO_QUERY_URL` passed to zero-cache         |
+
+A hook may be a shell-command string or, through configuration and the API, an
+async callback. `onDbReady` receives database connection environment variables
+and runs before change tracking is refreshed and zero-cache starts.
+
+## PGlite and SQLite controls
+
+| Config key             | CLI flag                           | Default  | Meaning                                               |
+| ---------------------- | ---------------------------------- | -------- | ----------------------------------------------------- |
+| `forceWasmSqlite`      | `--force-wasm-sqlite`              | `false`  | Require the bedrock SQLite WASM adapter               |
+| `disableWasmSqlite`    | `--disable-wasm-sqlite`            | `false`  | Require Zero's native SQLite addon                    |
+| `useWorkerThreads`     | inverse of `--no-worker-threads`   | `true`   | Run PGlite outside the main thread                    |
+| `singleDb`             | `--single-db`                      | `false`  | Share one PGlite instance across three database names |
+| `ephemeral`            | `--ephemeral`                      | `false`  | In-memory PGlite and per-run replica cache            |
+| `readReplicas`         | `--read-replicas`                  | `0`      | Number of in-memory PGlite read replicas              |
+| `pgliteOptions`        | config/API only                    | `{}`     | Additional PGlite constructor options                 |
+| `checkpointIntervalMs` | `--checkpoint-interval` in seconds | `300000` | PGlite WAL checkpoint interval; `0` disables it       |
+
+`readReplicas` belongs to the multi-instance PGlite worker layout and cannot be
+combined with `singleDb`.
+
+## Logging and optional services
+
+| Config key        | CLI flag               | Default         | Meaning                                |
+| ----------------- | ---------------------- | --------------- | -------------------------------------- |
+| `maxLogFileSize`  | `--max-log-size` in MB | `2097152` bytes | Per-file rotation threshold            |
+| `disableDiskLogs` | `--disable-disk-logs`  | `false`         | Keep admin logs in memory only         |
+| `s3`              | `--s3`                 | `false`         | Start local S3-compatible storage      |
+| `s3Port`          | `--s3-port`            | `9200`          | Local S3 port                          |
+| `skipZeroCache`   | `--skip-zero-cache`    | `false`         | Run only the PGlite database and proxy |
+
+`s3` and `s3Port` are available through the CLI, config file, and Vite plugin.
+The standalone API uses `startS3Local()` from `orez/s3`.
+
+## Environment variables
+
+`OREZ_BACKEND=postgres` and `OREZ_LOG_LEVEL=debug` provide simple global
+overrides. Existing `ZERO_*` variables are forwarded to zero-cache, including
+authentication and application settings. Orez manages and overwrites the
+database URLs, replica path, Zero port, and process `NODE_ENV` because those
+values describe the stack it started.
+
+The runner supplies conservative development defaults including one sync
+worker and a disabled Zero query planner. Environment variables can override
+most Zero defaults. The managed connection values always follow the actual
+Orez ports and data directory.

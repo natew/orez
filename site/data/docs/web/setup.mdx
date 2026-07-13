@@ -1,0 +1,82 @@
+---
+title: Orez Web demo setup
+description: Boot the experimental browser runtime, initialize PGlite, and connect a Zero client.
+---
+
+# Demo setup
+
+The current implementation lives in Soot while its API, worker build, assets, and browser scenarios are upstreamed into Orez. The examples below document that active integration surface.
+
+## Start the runtime
+
+```ts
+import { prefetchOrezAssets, startOrezWeb } from 'orez-web'
+
+prefetchOrezAssets()
+
+const runtime = await startOrezWeb({
+  appId: 'todo-demo',
+  idbPrefix: 'todo-demo-v1',
+  singleDb: true,
+  initSql: `
+    CREATE TABLE IF NOT EXISTS todo (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      complete BOOLEAN NOT NULL DEFAULT false
+    );
+  `,
+  onEvent(type, metadata) {
+    console.debug('[orez-web]', type, metadata)
+  },
+})
+```
+
+`idbPrefix` identifies the persistent database generation. Reusing it reopens the same IndexedDB-backed PGlite data. A deliberate prefix change creates a fresh generation.
+
+## Connect Zero
+
+`createSyncConnection()` returns the `MessagePort` transport used by the host application’s Zero client integration:
+
+```ts
+const syncPort = runtime.createSyncConnection()
+
+// Supply syncPort through the host application’s Zero transport integration.
+```
+
+This in-process transport carries the sync connection between the application and zero-cache worker. The public package work will pin it to qualified Zero client versions.
+
+## Query and write PGlite
+
+```ts
+await runtime.exec(`
+  INSERT INTO todo (id, title, complete)
+  VALUES ('t1', 'Try Orez Web', false)
+`)
+
+const { rows } = await runtime.query<{ id: string; title: string }>(
+  'SELECT id, title FROM todo ORDER BY id'
+)
+
+runtime.signalReplication()
+```
+
+Call `signalReplication()` after direct writes for immediate propagation. The persisted change table remains the durable source for replication progress.
+
+## Asset prefetch and preboot
+
+`prefetchOrezAssets()` begins fetching and compiling PGlite and bedrock SQLite assets before project state is ready. The default single-database layout can also open PGlite during an idle window:
+
+```ts
+const prebootedPglite = prebootPglite({ idbPrefix: 'todo-demo-v1' })
+
+const runtime = await startOrezWeb({
+  idbPrefix: 'todo-demo-v1',
+  prebootedPglite,
+})
+```
+
+Pass the `prebootPglite()` promise directly. Startup validates its prefix and ready state before adopting the worker.
+
+## Shutdown
+
+Use `await runtime.stop()` for awaited cleanup. Page-hide and unload paths can call `runtime.terminate()`, which begins best-effort database close before worker termination. Clean lifecycle handling keeps same-tab reloads fast and releases the IndexedDB database for the next runtime.

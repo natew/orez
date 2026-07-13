@@ -1,0 +1,48 @@
+---
+title: Orez Web architecture
+description: How PGlite, PostgreSQL proxying, zero-cache, SQLite, and transport channels fit into browser workers.
+---
+
+# Architecture
+
+Orez Web keeps database and zero-cache work off the main thread and connects its services through browser worker channels.
+
+```text
+Application / Zero client
+     │ MessagePort sync + API calls
+     ▼
+orez-web coordinator
+     ├── PGlite worker ── IndexedDB application data
+     ├── PG proxy worker ─ PostgreSQL wire routing
+     └── zero-cache worker ─ bedrock SQLite replica
+```
+
+`singleDb: false` adds dedicated PGlite workers for CVR and CDB, producing a five-worker graph with independent database contexts.
+
+## PGlite worker
+
+PGlite opens an `idb://` data directory and owns the database connection. The coordinator sends query, exec, lifecycle, and replication messages. Worker isolation keeps WASM database work away from React, rendering, and input handling on the main thread.
+
+## PostgreSQL proxy
+
+The proxy worker routes zero-cache’s PostgreSQL wire traffic to the appropriate PGlite database. It handles database selection, connection messages, queries, and the replication stream over worker messaging.
+
+## zero-cache worker
+
+The build packages zero-cache in single-process mode, supplies browser shims, and uses bedrock SQLite WASM for the serving replica. Application push and pull fetches can be forwarded to a registered in-browser handler.
+
+The worker build is version-coupled to pinned Zero internals. Every supported Zero upgrade therefore includes a worker build and browser qualification pass.
+
+## IPC paths
+
+MessagePort is the broad compatibility path. Cross-origin-isolated pages can use SharedArrayBuffer channels for lower-overhead synchronous PostgreSQL calls. `disableSab: true` selects MessagePort for constrained environments and diagnostic runs.
+
+## Startup sequencing
+
+Worker module evaluation, PGlite WASM compilation, database open, zero-cache boot, and bedrock SQLite loading can overlap. Asset prefetch and PGlite preboot move the heaviest work into an earlier idle window and reduce the interactive startup path.
+
+## Persistence and reload
+
+Application data lives in IndexedDB through PGlite. Clean stop closes the database before worker termination. Preboot adoption accepts one proven-ready worker for one matching `idbPrefix`, keeping each database generation under a single opener.
+
+These lifecycle rules protect reload, project switching, hot module replacement, and repeated preview sessions from database-lock stalls.

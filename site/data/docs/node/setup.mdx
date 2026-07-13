@@ -1,0 +1,118 @@
+---
+title: Node setup
+description: Install Orez, start a complete Zero backend, and connect an application.
+---
+
+# Node setup
+
+If your project already uses Zero, Orez can supply its complete local backend
+with one command.
+
+## Requirements
+
+- Bun 1 or Node.js 20 or newer.
+- `@rocicorp/zero` 1.0 or newer installed in the application.
+- The default PGlite profile includes the database runtime and uses prebuilt
+  WebAssembly packages.
+
+Install Zero as your application dependency and Orez as a development tool:
+
+```sh
+bun add @rocicorp/zero
+bun add -D orez
+```
+
+The equivalent `npm install` and `npx orez` commands work under supported Node
+versions.
+
+## Start the stack
+
+```sh
+bunx orez
+```
+
+The CLI starts with these addresses unless a port is already occupied:
+
+| Service             | Default                                              |
+| ------------------- | ---------------------------------------------------- |
+| PostgreSQL endpoint | `postgresql://user:password@127.0.0.1:6434/postgres` |
+| zero-cache          | `http://localhost:5849`                              |
+| Orez admin          | `http://localhost:6477`                              |
+
+When a default port is busy, Orez selects the next available port. The endpoints
+printed at startup are the source of truth.
+
+Point your existing Zero client at the printed zero-cache URL:
+
+```ts
+import { Zero } from '@rocicorp/zero'
+import { schema } from './schema'
+
+export const zero = new Zero({
+  schema,
+  userID: 'development-user',
+  cacheURL: 'http://localhost:5849',
+})
+```
+
+Keep your application's existing `auth`, `mutators`, and user identity setup;
+only the server address changes.
+
+## Apply migrations
+
+Orez can apply a directory of SQL migrations before zero-cache starts:
+
+```sh
+bunx orez --migrations=./db/migrations
+```
+
+When a Drizzle `meta/_journal.json` is present, Orez follows its order.
+Otherwise it applies `.sql` files in filename order. Applied filenames are
+recorded in `public.migrations`. Drizzle's `--> statement-breakpoint` marker is
+understood.
+
+For migrations driven by another tool, run it after the database is accepting
+connections but before zero-cache starts:
+
+```sh
+bunx orez \
+  --on-db-ready='bun run db:migrate' \
+  --on-healthy='bun run dev'
+```
+
+The first hook receives `DATABASE_URL` and `OREZ_PG_PORT`. The second also runs
+after zero-cache is healthy and receives `OREZ_ZERO_PORT`.
+
+## Save the configuration
+
+Create `orez.config.ts` in the project root:
+
+```ts
+import { defineConfig } from 'orez'
+
+export default defineConfig({
+  migrations: './db/migrations',
+  seed: './db/seed.sql',
+  zeroMutateUrl: 'http://localhost:3000/api/zero/push',
+  zeroQueryUrl: 'http://localhost:3000/api/zero/pull',
+  logLevel: 'info',
+})
+```
+
+CLI arguments override the file. Orez also accepts `orez.config.js` and
+`orez.config.mjs`; use one of those when running TypeScript configuration on a
+Node version older than 22.6.
+
+## Disposable CI setup
+
+PGlite can keep its database in memory and give zero-cache a unique temporary
+replica directory:
+
+```sh
+bunx orez --ephemeral \
+  --migrations=./db/migrations \
+  --on-healthy='bun run test:e2e'
+```
+
+Ephemeral mode provides isolated, per-run state. Graceful shutdown removes its
+temporary replica directory.

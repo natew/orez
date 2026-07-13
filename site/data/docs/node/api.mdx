@@ -1,0 +1,116 @@
+---
+title: Node API and Vite
+description: Start and control Orez from TypeScript or bind its lifecycle to Vite.
+---
+
+# Node API and Vite
+
+Use the programmatic API when tests, a development server, or another tool
+should own Orez's lifecycle.
+
+## `startZeroLite()`
+
+```ts
+import { startZeroLite } from 'orez'
+
+const runner = await startZeroLite({
+  backend: 'pglite',
+  migrationsDir: './db/migrations',
+  zeroMutateUrl: 'http://localhost:3000/api/zero/push',
+  zeroQueryUrl: 'http://localhost:3000/api/zero/pull',
+  onDbReady: () => console.log('database ready'),
+  onHealthy: () => console.log('Zero ready'),
+})
+
+console.log(`postgresql://user:password@127.0.0.1:${runner.pgPort}/postgres`)
+console.log(`http://localhost:${runner.zeroPort}`)
+
+try {
+  await runApplication()
+} finally {
+  await runner.stop()
+}
+```
+
+Every option is optional. The raw API defaults `adminPort` to `0`. Pass a
+positive port to start the admin HTTP server. Its return value contains the
+resolved ports after collision handling.
+
+### Returned controls
+
+| Field                 | Meaning                                                             |
+| --------------------- | ------------------------------------------------------------------- |
+| `config`              | Resolved configuration, including actual ports                      |
+| `pgPort`, `zeroPort`  | Convenience copies of the actual ports                              |
+| `db`                  | Upstream database adapter for direct `query()` and `exec()` calls   |
+| `instances`           | Upstream, CVR, CDB, and any PGlite read-replica adapters            |
+| `stop()`              | Stop zero-cache, proxies, databases, timers, and temporary state    |
+| `restartZero()`       | Restart zero-cache while preserving its state                       |
+| `stopZero()`          | Stop zero-cache without stopping the database                       |
+| `resetZero()`         | Delete the replica cache and resynchronize while preserving CVR/CDB |
+| `resetZeroFull()`     | Recreate Zero state and resnapshot application data                 |
+| `zeroEnv`             | Effective environment passed to zero-cache                          |
+| `logStore`, `httpLog` | Stores created when an admin port is enabled                        |
+
+The four Zero lifecycle controls are `undefined` when `skipZeroCache` is true.
+`db` and `instances` have profile-specific implementations. Application code
+that needs normal PostgreSQL clients should connect through `pgPort` rather
+than depending on those internal adapters.
+
+## Configuration helpers
+
+```ts
+import { defineConfig, getConfig, getConnectionString } from 'orez'
+
+const config = getConfig({ backend: 'pglite', pgPort: 6434 })
+const url = getConnectionString(config)
+```
+
+- `defineConfig()` gives a configuration file its `OrezConfig` type.
+- `getConfig()` resolves API defaults into the complete internal shape.
+- `getConnectionString()` builds a local URL for `postgres` or another managed
+  database name.
+
+## Vite plugin
+
+The plugin starts Orez with the Vite development server and shuts it down when
+that server closes:
+
+```ts
+import { defineConfig } from 'vite'
+import { orezPlugin } from 'orez/vite'
+
+export default defineConfig({
+  plugins: [
+    orezPlugin({
+      backend: 'pglite',
+      migrationsDir: './db/migrations',
+      adminPort: 6477,
+      onHealthy: () => console.log('Orez ready'),
+    }),
+  ],
+})
+```
+
+The plugin accepts `startZeroLite()` options plus `s3` and `s3Port`. An
+`adminPort` greater than zero includes the dashboard in the Vite lifecycle.
+
+## Local object storage
+
+Start the small S3-compatible service independently when a test only needs
+object storage:
+
+```ts
+import { startS3Local } from 'orez/s3'
+
+const server = await startS3Local({
+  port: 9200,
+  dataDir: '.orez',
+})
+
+// later
+server.close()
+```
+
+Its focused development surface covers object `GET`, `PUT`, `DELETE`, `HEAD`,
+CORS, and a minimal ListObjectsV2 response.

@@ -1,0 +1,107 @@
+---
+title: Node architecture
+description: How Orez assembles stock zero-cache around PGlite or Embedded Postgres.
+---
+
+# Node architecture
+
+The Node runtime is an orchestrator around stock Zero. In both profiles, your
+browser uses `@rocicorp/zero` and connects to the real zero-cache process. Orez
+changes how zero-cache's databases and local SQLite dependency are supplied,
+then owns their lifecycle as one runner.
+
+```text
+@rocicorp/zero client
+        |
+        v
+  stock zero-cache -------- application push/query endpoints
+        |
+        +---- replica SQLite (native Zero addon or bedrock WASM)
+        |
+        +---- upstream / CVR / CDB databases
+                        supplied by one Node profile
+```
+
+## Shared startup sequence
+
+At a high level Orez:
+
+1. resolves configuration and available ports;
+2. starts or opens the three database roles;
+3. applies pending migrations and optional seed data;
+4. synchronizes publications and runs `onDbReady`;
+5. starts zero-cache with managed database URLs and replica path;
+6. waits for its health endpoint and runs `onHealthy`;
+7. optionally places a localhost HTTP inspector in front of zero-cache and
+   starts the admin dashboard.
+
+Shutdown reverses the process and cleans up timers, proxies, child processes,
+database handles, markers, and ephemeral state.
+
+## Embedded Postgres path
+
+```text
+zero-cache
+   | direct PostgreSQL connections + logical replication
+   v
+Embedded PostgreSQL cluster
+   +-- postgres
+   +-- zero_cvr
+   +-- zero_cdb
+```
+
+The platform PostgreSQL server listens on the requested port. Orez configures
+logical WAL, creates the two Zero databases, and exposes small pooled adapters
+for its own migration and lifecycle work. zero-cache connects directly; all
+wire protocol, session isolation, replication slots, and pgoutput behavior come
+from PostgreSQL.
+
+Orez's recovery layer terminates stale `zero-*` database sessions before a
+restart because an orphaned walsender or initial-sync transaction can otherwise
+hold a slot or advisory lock after zero-cache is gone.
+
+## PGlite path
+
+```text
+zero-cache
+   | PostgreSQL wire protocol
+   v
+Orez TCP router + compatibility layer
+   +-- postgres PGlite
+   +-- CVR PGlite
+   +-- CDB PGlite
+
+postgres writes -> Orez triggers/change log -> pgoutput encoder -> zero-cache
+```
+
+Each PGlite instance exposes one session. Orez implements change propagation
+and the database interfaces used by zero-cache:
+
+- three instances preserve independent transaction contexts by default;
+- worker proxies keep WASM database work off the main event loop;
+- a TCP server routes connections by requested database;
+- catalog and replication commands are answered with compatible values;
+- `_orez` triggers record changed primary keys;
+- a replication handler encodes and streams pgoutput messages;
+- notification-driven wakeup and adaptive polling keep the stream moving.
+
+The `_orez` schema contains the change log, slot tracking, and a monotonic
+watermark. It remains outside `public`, including across a clean restore.
+
+## zero-cache SQLite selection
+
+zero-cache normally imports `@rocicorp/zero-sqlite3`. Orez detects whether a
+usable native addon is available and can route the same interface to
+`bedrock-sqlite`, a SQLite WASM adapter.
+
+Replica SQLite is configured separately from the upstream database profile.
+Orez applies the selected native or WASM implementation to the spawned
+zero-cache process. WASM mode uses one sync worker to avoid multi-process
+shared-memory contention.
+
+## Application surface
+
+The runtime uses Zero’s sync protocol, client query engine, optimistic mutation
+behavior, CVR model, and application push/query endpoints. Orez packages their
+database dependencies, configuration, lifecycle, visibility, and recovery into
+one local command.

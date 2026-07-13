@@ -1,0 +1,68 @@
+---
+title: Embedded Postgres
+description: Run stock zero-cache against a real local PostgreSQL server managed by Orez.
+---
+
+# Embedded Postgres
+
+The Embedded Postgres profile runs Zero against a real local PostgreSQL server. Orez downloads the server, starts it, and creates the databases that zero-cache expects. It also applies your schema, enables logical replication, and manages the local process lifecycle.
+
+## Install and run
+
+```sh
+bun add -D embedded-postgres
+bunx orez --backend=postgres --migrations=./db/migrations
+```
+
+Or save the profile in `orez.config.ts`:
+
+```ts
+import { defineConfig } from 'orez'
+
+export default defineConfig({
+  backend: 'postgres',
+  migrations: './db/migrations',
+})
+```
+
+The application database is exposed on the configured PostgreSQL port, zero-cache uses the configured Zero port, and the CLI starts the Orez admin dashboard.
+
+## PostgreSQL cluster
+
+Orez starts a platform PostgreSQL distribution with `wal_level=logical` and creates three databases in one local cluster:
+
+- `postgres` for application data;
+- `zero_cvr` for client view records;
+- `zero_cdb` for zero-cache change state.
+
+PostgreSQL owns connection pooling, transactions, locks, replication slots, WAL, and pgoutput. Orez initializes the cluster, creates missing databases, starts zero-cache, clears stale sessions during recovery, and shuts down the process tree.
+
+## Best uses
+
+Choose this profile for:
+
+- several processes or agents writing concurrently;
+- multi-connection PostgreSQL behavior;
+- native logical replication and replication slots;
+- schema and query testing against a real PostgreSQL server;
+- long-running local development daemons.
+
+## Replica SQLite
+
+The upstream database and zero-cache replica are independent settings. Orez automatically selects an available replica SQLite implementation. These flags make the choice explicit:
+
+```sh
+# bedrock SQLite WASM
+bunx orez --backend=postgres --force-wasm-sqlite
+
+# Zero’s native SQLite addon
+bunx orez --backend=postgres --disable-wasm-sqlite
+```
+
+Forced native mode fails clearly when the addon is unavailable, keeping CI and local environments reproducible.
+
+## Operational characteristics
+
+The cluster persists under `.orez/pgdata-native`, binds to localhost, and uses development credentials. Orez configures `synchronous_commit=off` for local performance, so an abrupt machine or process failure can lose the most recent commits while preserving database consistency.
+
+This profile provides one local cluster. Production systems still need their own replication, high availability, encrypted storage, access control, monitoring, and managed backup policy.

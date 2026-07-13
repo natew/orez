@@ -1,0 +1,46 @@
+---
+title: Node limitations
+description: Storage, durability, compatibility, and workload boundaries of the Node runner.
+---
+
+# Node limitations
+
+Orez for Node optimizes for an easy, inspectable, all-in-one Zero environment. Its operating model is local development and CI.
+
+## Shared boundaries
+
+- **Development process model.** Orez runs zero-cache in development mode, supplies local credentials, and binds the dashboard and databases to localhost.
+- **Local durability.** State lives under one local data directory. Projects provide their own remote replication, encryption policy, managed backup, failover, and multi-machine availability.
+- **Version coupling.** Orez integrates with zero-cache startup and SQLite internals. Pin and qualify Orez and Zero versions together.
+- **Dynamic ports.** Occupied ports move upward automatically. Clients should consume the printed or returned address.
+- **Migration execution.** Built-in migration statements run in order, with each statement committed through the managed database path. Idempotent migrations simplify recovery from a partial directory.
+- **Seed heuristic.** The optional seed runs when `public."user"` is absent or empty. Durable initialization belongs in migrations or an explicit `onDbReady` hook.
+- **Local S3 subset.** The object server covers basic `GET`, `PUT`, `DELETE`, `HEAD`, CORS, and ListObjectsV2 flows.
+
+## PGlite profile
+
+- One session per database serializes queries.
+- Change propagation uses triggers, an Orez change log, and pgoutput encoding.
+- The proxy implements a focused zero-cache PostgreSQL surface.
+- Specialized replicated types such as `tsvector` and `tsquery` are filtered from the emulated stream.
+- The Zero query planner defaults off because SQLite scan statistics have caused local hangs.
+- Restore translates supported dump constructs and reports skipped extensions or oversized values.
+- Three WASM databases plus zero-cache can consume substantial memory. `singleDb` reduces the footprint by sharing transaction context.
+
+## Embedded Postgres profile
+
+- A native platform PostgreSQL package is downloaded and executed locally.
+- Supported operating systems and architectures follow the available platform packages.
+- `synchronous_commit=off` favors local speed and permits loss of the newest transactions after a hard crash.
+- The profile runs one local cluster with development credentials.
+- Standard PostgreSQL tools handle dump and restore for this profile.
+
+## Profile selection
+
+| Requirement                                       | Profile                               |
+| ------------------------------------------------- | ------------------------------------- |
+| Zero-native-build startup                         | PGlite + WASM SQLite                  |
+| Isolated empty test state                         | PGlite + `ephemeral`                  |
+| Several concurrent database writers               | Embedded Postgres                     |
+| PostgreSQL locks and logical replication          | Embedded Postgres                     |
+| Production availability and machine-loss recovery | Qualify the deployed production stack |

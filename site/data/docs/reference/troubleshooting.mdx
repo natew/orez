@@ -1,0 +1,54 @@
+---
+title: Troubleshooting
+description: Diagnose startup, port, native dependency, and Orez Lite issues.
+---
+
+# Troubleshooting
+
+Start by identifying the runtime and profile. Node PGlite, Node Embedded Postgres, Orez Lite native, and Orez Lite Cloudflare each have specific process and storage boundaries.
+
+## Node does not use the configured port
+
+Orez searches for the next available port when a preferred one is occupied. Read the resolved addresses printed at startup or returned by `startZeroLite()` rather than assuming the default.
+
+If another process should not be running, stop it and restart Orez. Do not hard-code a client URL independently from the runner in collision-prone CI.
+
+## zero-cache does not become healthy
+
+Check the Orez admin logs and the per-process log files under the data directory. Common causes are:
+
+- migrations did not create tables referenced by the Zero schema;
+- the push or query endpoint is unreachable;
+- stale replica/CVR state no longer matches application state;
+- a forced native SQLite binary is unavailable;
+- an `onDbReady` hook failed or never exited.
+
+Use the bounded reset controls described in [Node operations](/docs/node/operations) before deleting the entire data directory manually.
+
+## Native SQLite is unavailable
+
+Automatic mode falls back to WASM when the native addon is absent. `--disable-wasm-sqlite` deliberately fails instead. Bootstrap the native binary from the Orez repository when developing Orez itself, or use `--force-wasm-sqlite` when the goal is a reproducible no-native CI lane.
+
+## PGlite appears serialized
+
+One PGlite database exposes one session, so Orez serializes access through it. Use [Embedded Postgres](/docs/node/embedded-postgres) for concurrent connections.
+
+## Orez Lite client receives a snapshot
+
+A snapshot is expected for a new client, a cookie below the retained floor, or a visibility/query invalidation. Check the namespace watermark, floor, reset counters, transform version, and recent retention activity before treating it as corruption.
+
+## Orez Lite rejects a cookie as ahead
+
+Do not lower the server watermark. Confirm that the client did not switch to an older database copy or a different writer. Fence competing writers and intentionally reset or resnapshot the client when moving between cookie domains.
+
+## Reporting a useful issue
+
+Include:
+
+- Orez and `@rocicorp/zero` versions;
+- runtime and profile;
+- Bun/Node and operating system version;
+- relevant flags and redacted configuration;
+- whether the run was fresh, persistent, restored, or upgraded;
+- the smallest schema and action sequence that reproduces the result;
+- logs with tokens, claims, mutation arguments, and row contents removed.

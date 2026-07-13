@@ -1,0 +1,51 @@
+---
+title: Orez Lite operations
+description: Namespace storage, health, observability, retention, recovery, and safe cutovers.
+---
+
+# Operations
+
+Each namespace has one authoritative writer path. Cookies and mutation IDs remain durable across restarts, while the change history stays within its configured retention window. Writer cutovers must preserve those properties.
+
+## Health and status
+
+The native host exposes `/admin/health` plus namespace status routes. The Cloudflare host’s `/admin/status` reports its boot identity, connected wake sockets, durable database size, writer state, engine watermark and floor, WASM memory size, and aggregate counters.
+
+Useful counters include pulls, pushes, resets, application errors, invariant failures, retention runs, query recompilations, wake frames, and post-commit effect failures. Pair them with request traces and application-level convergence checks.
+
+## Retention
+
+`retain_changes` / `retainChanges` bounds the change log. A client below the floor receives a snapshot and continues from the current watermark. Choose the window from expected offline duration, write rate, and snapshot cost.
+
+The Cloudflare host also caps change rows and serialized bytes per pull. Clients continue pulling until they reach the current cookie.
+
+## Recovery paths
+
+| Condition                          | Safe behavior                                                   |
+| ---------------------------------- | --------------------------------------------------------------- |
+| Host restarts or DO evicts         | Reopen SQLite and reconstruct in-memory state                   |
+| Client cookie is too old           | Send a full snapshot                                            |
+| Client cookie is ahead             | Reject or reset it while preserving the durable watermark       |
+| Delegated feed cursor expired      | Atomically replace application tables from an upstream snapshot |
+| Push response is lost after commit | Client retries safely using the mutation ID                     |
+| Wake is missed                     | Safety polling eventually triggers pull                         |
+
+## Writer controls and cutover
+
+The Cloudflare host persists a writer-enabled flag. An operator can stop pushes for a namespace, verify rejection, switch routing, and then enable the next writer. This creates a single-authority cutover for canary and rollback drills.
+
+A safe cutover must prove:
+
+1. the current writer rejects new pushes,
+2. the next writer begins from an understood watermark or snapshot,
+3. client cookies are either compatible or intentionally reset,
+4. only one system can acknowledge a new mutation, and
+5. rollback repeats the same fencing process.
+
+## Budgets and breakers
+
+Delegated ingest has a rolling billable-row budget and bounded retry backoff. Capacity planning also accounts for indexes, foreign keys, cascades, and sync metadata, which can turn one logical change into several physical SQLite row writes.
+
+## Logs and sensitive data
+
+Structured engine events use hashed namespace identities and counts. Exclude tokens, normalized claims beyond safe identifiers, mutation arguments, query results, and row patches. Application mutators and authentication code should preserve the same boundary.

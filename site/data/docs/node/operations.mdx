@@ -1,0 +1,126 @@
+---
+title: Node operations
+description: Inspect, recover, back up, restore, and reset a local Orez stack.
+---
+
+# Node operations
+
+Orez is designed to make a local Zero process tree disposable without making
+its state mysterious. The CLI exposes logs and recovery controls, stores each
+component predictably, and coordinates zero-cache around disruptive database
+work.
+
+## Admin dashboard
+
+The CLI starts the dashboard at `http://localhost:6477` by default. It binds to
+localhost and provides:
+
+- live logs filtered by component and level;
+- an HTTP request and response inspector in front of zero-cache;
+- the effective Zero environment;
+- service status and database inspection;
+- restart, cache reset, and full reset actions.
+
+Disable it when a test does not need inspection:
+
+```sh
+bunx orez --disable-admin
+```
+
+When enabled, logs are written below the configured data directory and rotated
+at the configured size. `--disable-disk-logs` keeps them in memory only.
+
+## Recovery levels
+
+Orez uses different actions for different failures:
+
+| Action       | Preserves                  | Rebuilds                            | Use it for                                    |
+| ------------ | -------------------------- | ----------------------------------- | --------------------------------------------- |
+| Restart Zero | Database, CVR/CDB, replica | zero-cache processes                | A stopped or unhealthy process                |
+| Reset Zero   | Database and CVR/CDB       | Local replica file                  | A replica inconsistency or stuck local cache  |
+| Full reset   | Application database       | CVR, CDB, replica, Zero shard state | Schema changes or repeated sync-state failure |
+
+The runner also watches zero-cache process and HTTP health, removes stale lock
+files after an unclean shutdown, and escalates bounded recovery when a gentle
+restart cannot make progress. Embedded Postgres additionally cleans up orphaned
+zero-cache database sessions that could retain replication slots or locks.
+
+These mechanisms preserve development flow. Production monitoring and recovery
+policy remain part of the deployed application’s operations plan.
+
+## PGlite backup
+
+The built-in dump command reads the PGlite application database:
+
+```sh
+bunx orez pg_dump --output backup.sql
+```
+
+Without `--output`, it writes SQL to stdout:
+
+```sh
+bunx orez pg_dump > backup.sql
+```
+
+Direct dumping requires exclusive access to the PGlite directory. Stop the
+runner first if the command reports that the database is locked.
+
+## PGlite restore
+
+Restore through the running PostgreSQL wire endpoint when possible:
+
+```sh
+bunx orez pg_restore backup.sql --pg-port 6434
+```
+
+```sh
+bunx orez pg_restore backup.sql --clean --pg-port 6434
+```
+
+For a running CLI instance, Orez asks the admin service to stop zero-cache,
+restores the SQL, repairs publication membership, then restarts Zero with a full
+state refresh. `--direct` skips wire auto-detection and opens the PGlite data
+directory directly; stop the runner before using it.
+
+The restore path translates `COPY` records to batched inserts and reports
+extensions or oversized values it skips. Treat those warnings as the import’s
+compatibility report.
+
+## Embedded Postgres backup
+
+The built-in `orez pg_dump` command is PGlite-specific. For the Embedded
+Postgres profile, use ordinary PostgreSQL tools against the printed connection
+URL:
+
+```sh
+pg_dump 'postgresql://user:password@127.0.0.1:6434/postgres' > backup.sql
+```
+
+Coordinate a restore by stopping zero-cache from the admin dashboard first,
+then perform a full Zero reset so the replica and server-side state are rebuilt
+from the restored database.
+
+## Data layout
+
+With the default `.orez` data directory, notable paths include:
+
+- `pgdata-postgres`, `pgdata-cvr`, and `pgdata-cdb` for PGlite;
+- `pgdata-native` for the Embedded Postgres cluster;
+- `zero-replica.db` and its WAL files for zero-cache;
+- `s3/` for the optional local object store;
+- PID, readiness, admin-port, and reset markers used for coordination.
+
+Stop Orez before editing or removing these files. Preserve needed state, then
+remove the selected data directory for a clean start.
+
+## Local S3
+
+```sh
+bunx orez --s3
+# or independently
+bunx orez s3 --port 9200
+```
+
+Objects are stored under `.orez/s3`. The service focuses on basic local object
+flows; multipart uploads, ACLs, bucket policy, versioning, remote durability,
+and S3 authentication remain outside its development surface.

@@ -1,56 +1,27 @@
 ---
-title: Testing and confidence
-description: What orez verifies, where differential testing is used, and what remains workload-specific.
+title: Testing by runtime
+description: How Orez separates evidence for Node, Orez Lite, and pg-to-sqlite.
 ---
 
-# Testing and confidence
+# Testing by runtime
 
-orez sits between PostgreSQL, SQLite, and Zero, so unit tests alone are not a
-credible correctness story. The repository combines focused unit tests,
-integration processes, protocol fixtures, differential comparisons, and
-recovery tests.
+Orez crosses PostgreSQL, SQLite, WebAssembly, and Zero protocol surfaces. Each runtime documents evidence next to the contract it exercises, so a passing test has a clear scope.
 
-## Local runtime
+<CardGrid>
+  <DocCard href="/docs/node/testing" title="Node testing">
+    Unit and process-level evidence for orchestration, the PGlite compatibility layer,
+    real Postgres, recovery, and SQLite selection.
+  </DocCard>
+  <DocCard href="/docs/orez-lite/testing" title="Orez Lite testing" badge="Preview">
+    Deterministic model, differential, fault, permissions, retention, WASM-host, and
+    deployment qualification layers.
+  </DocCard>
+  <DocCard href="/docs/reference/pg-to-sqlite" title="pg-to-sqlite testing">
+    Translation fixtures and differential execution against an independent
+    PostgreSQL-on-SQLite implementation.
+  </DocCard>
+</CardGrid>
 
-The main suite covers configuration, port selection, wire-protocol behavior,
-publication tracking, replication encoding, foreign-key cascades, restore and
-recovery paths, browser shims, and SQLite mode switching.
+## Reading an evidence claim
 
-Integration tests start real process trees and exercise startup, restart,
-restore, PGlite IPC, embedded Postgres, replica repair, and Zero compatibility.
-Native SQLite has a separate bootstrap guard so a missing binary is reported as
-an environment failure rather than silently changing the mode under test.
-
-## Sync engine
-
-The deterministic Rust core has unit and integration coverage for pull cookies,
-snapshots, diffs, push idempotency, query compilation, membership changes,
-retention, visibility, upstream ingest, and failure boundaries. The same engine
-is exercised through its WASM Cloudflare host and native HTTP host.
-
-A conformance harness runs common scenarios against multiple targets and checks
-normalized results rather than implementation details. Differential lanes
-compare responses with the TypeScript reference implementation and stock Zero
-behavior where the protocols overlap. Fault tests cover process restarts,
-storage failures, duplicate pushes, dropped responses, and retention gaps.
-
-## pg-to-sqlite
-
-The compiler uses fixed fixtures for deterministic translations and oracle
-tests that run the same operations through an independent implementation and
-compare result sets. The oracle is a development and CI dependency, not shipped
-with the package.
-
-## What the tests do not promise
-
-- They do not make PGlite a multi-session database or turn its emulated CDC
-  into native PostgreSQL logical replication.
-- They do not prove every PostgreSQL extension or function can be translated to
-  SQLite.
-- They do not predict Durable Object billing for an application's indexes and
-  foreign-key graph.
-- They do not replace load and recovery tests against the exact schema,
-  namespace sizes, and deployment topology you intend to operate.
-
-That boundary is intentional: the suite verifies the library's contracts, while
-capacity and cost remain properties of a concrete workload.
+For each claim, the runtime page identifies the layer that ran, the implementation boundaries it crossed, and the asserted result. Compiler fixtures establish translation behavior. Process scenarios establish the behavior of a running stack under the stated setup.

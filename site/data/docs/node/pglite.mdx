@@ -1,0 +1,76 @@
+---
+title: PGlite and WASM
+description: The portable, zero-native-build Node profile for development and CI.
+---
+
+# PGlite and WASM
+
+PGlite is the default Node profile. PostgreSQL and the zero-cache replica can both run from WebAssembly packages, so local development and CI only need a JavaScript runtime. This makes setup portable and avoids Docker, a separate database installation, and native compilation.
+
+```sh
+bunx orez
+```
+
+## Database layout
+
+A PGlite database exposes one shared session. Orez uses three instances by default so the application, CVR, and change databases keep independent transaction contexts:
+
+| Database                   | Default directory       |
+| -------------------------- | ----------------------- |
+| Application data           | `.orez/pgdata-postgres` |
+| zero-cache CVR             | `.orez/pgdata-cvr`      |
+| zero-cache change database | `.orez/pgdata-cdb`      |
+
+A PostgreSQL wire-protocol proxy routes connections by database name and supplies the catalog and replication commands used by zero-cache.
+
+## Change propagation
+
+Orez supplies logical change propagation with application-table triggers, `_orez._zero_changes`, pgoutput encoding, and a streaming replication handler. Notifications wake the stream promptly, with adaptive polling as the delivery fallback.
+
+The change log records committed changes in order, tracks replication slots and watermarks, and survives restart inside the PGlite data directory.
+
+## Disposable CI
+
+Ephemeral mode starts from empty state and removes its temporary replica during graceful shutdown:
+
+```sh
+bunx orez --ephemeral \
+  --migrations=./db/migrations \
+  --force-wasm-sqlite \
+  --on-healthy='bun run test:e2e'
+```
+
+Programmatic tests should always stop the runner in `finally`:
+
+```ts
+const orez = await startZeroLite({
+  backend: 'pglite',
+  ephemeral: true,
+  forceWasmSqlite: true,
+  migrationsDir: './db/migrations',
+})
+
+try {
+  await runBrowserTests({ zeroUrl: `http://localhost:${orez.zeroPort}` })
+} finally {
+  await orez.stop()
+}
+```
+
+## Process and memory controls
+
+PGlite runs in worker threads by default, keeping WASM database work away from the orchestration event loop. `--no-worker-threads` puts the instances in-process for simpler debugging and shares that event loop.
+
+`--single-db` maps all three logical databases onto one PGlite instance. It lowers memory use while sharing one transaction context and disabling read replicas. Use it for constrained environments that have been tested with that layout.
+
+Periodic checkpoints compact WAL files. Orez also vacuums the upstream and zero-cache change tables for long-running development sessions.
+
+## Workload boundaries
+
+- One PGlite instance has one session, so Orez serializes its database work.
+- Connection-pool contention and concurrent-session locking require a real PostgreSQL test environment.
+- Replication timing comes from Orez’s trigger and pgoutput pipeline.
+- The compatibility proxy implements the PostgreSQL surface used by the supported zero-cache flow.
+- Three WASM databases plus zero-cache have a meaningful memory footprint. `singleDb` reduces it by sharing the transaction context.
+
+These characteristics make the profile especially effective for portable development, hermetic CI, examples, and disposable preview environments.

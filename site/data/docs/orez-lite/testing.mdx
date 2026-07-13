@@ -1,0 +1,46 @@
+---
+title: Orez Lite testing
+description: Model, differential, host, fault, permission, and deployment evidence for Orez Lite.
+---
+
+# Testing
+
+Orez Lite tests the protocol core, SQLite transactions, WASM representation, and platform lifecycle separately. This gives each result a precise implementation boundary.
+
+## Evidence layers
+
+| Layer                       | What it exercises                                              | Established behavior                            |
+| --------------------------- | -------------------------------------------------------------- | ----------------------------------------------- |
+| Deterministic core          | Cookies, patches, mutation IDs, values, retention              | Protocol rules and invariants                   |
+| Model/property scenarios    | Randomized writes, pulls, retries, and pruning                 | State-machine convergence across many orderings |
+| Differential scenarios      | Independent TypeScript/reference behavior                      | Observable agreement for shared contracts       |
+| Query and permission suites | Membership, refcounts, transforms, revocation                  | Server-owned row entry and removal              |
+| Native host                 | Axum routes, rusqlite transactions, namespace workers          | Native library and transaction integration      |
+| WASM/platform boundary      | JavaScript values, counters, rollback, DO SQLite               | Representation and host transaction behavior    |
+| Fault and recovery          | Dropped responses, restart, quota/error points, retention gaps | Idempotency and recovery invariants             |
+| Deployment qualification    | Bundle, cold start, storage, propagation, cutover drills       | Point-in-time behavior of a named environment   |
+
+## Important scenarios
+
+Protocol scenarios cover snapshots, incremental diffs, duplicate pushes, rejected mutations, lost responses, and retained-floor recovery. Query scenarios cover permission revocation and membership changes. Host scenarios exercise wake coalescing, restart, and delegated snapshot recovery.
+
+Value tests carry counters across WASM as exact decimal strings and emit JSON numbers only inside the JavaScript safe-integer range. Diffs re-read live SQLite values from touched primary keys.
+
+## Reading measurements
+
+Bundle size, startup, latency, propagation, memory, and storage reports should include the date, source revision, host versions, region, schema, namespace count, workload, and measurement type.
+
+Local workerd RSS describes the whole local process. Cloudflare isolate memory requires platform-specific evidence. Small-schema latency describes that schema and workload. This labeling keeps measurements reproducible and useful.
+
+## Qualification boundaries
+
+Projects qualify:
+
+- their pinned client and Orez Lite versions;
+- native or Cloudflare host capabilities;
+- namespace write rate and snapshot size;
+- schema-specific index and cascade amplification;
+- application permission rules;
+- latency, recovery, and support objectives.
+
+The evidence target is a named contract under a named build and environment.

@@ -1,0 +1,95 @@
+---
+title: pg-to-sqlite
+description: Translate PostgreSQL SQL to SQLite with the real PostgreSQL parser and focused compatibility passes.
+---
+
+# pg-to-sqlite
+
+`pg-to-sqlite` is Orez’s standalone PostgreSQL-to-SQLite compiler. It parses input with PostgreSQL’s grammar, transforms the syntax tree through focused compatibility passes, and emits SQLite SQL.
+
+```sh
+bun add pg-to-sqlite
+```
+
+```ts
+import { compile } from 'pg-to-sqlite'
+
+const result = compile('SELECT NOW() AS created_at')
+
+console.log(result.sql)
+console.log(result.warnings)
+```
+
+## Why compile an AST
+
+`pg-to-sqlite` uses `pgsql-parser`, backed by the real PostgreSQL parser, and rewrites structured AST nodes. This handles syntax such as casts, nested expressions, quoted identifiers, arrays, and JSON operators without relying on regular-expression matching.
+
+Compatibility passes cover:
+
+- dates, times, intervals, `EXTRACT`, and `DATE_TRUNC`;
+- arrays, containment operators, literals, and `unnest`;
+- PostgreSQL casts and SQLite affinity;
+- JSON and JSONB operators and functions;
+- table definitions, serial types, and defaults;
+- inserts, conflicts, and returning clauses;
+- PostgreSQL catalog and `information_schema` queries.
+
+## API
+
+### `compile(sql, options?)`
+
+Returns `{ sql, warnings }`. Translation is best-effort by default because some PostgreSQL behavior has no SQLite equivalent.
+
+```ts
+const { sql, warnings } = compile(source)
+```
+
+Use strict mode when a warning should fail the operation:
+
+```ts
+const result = compile(source, { strict: true })
+```
+
+`CompileError` retains the warnings and SQL available at the failure point.
+
+### `compileMany(statements, options?)`
+
+Compiles a list in order and returns one result for each input:
+
+```ts
+const results = compileMany([
+  'CREATE TABLE events (id BIGSERIAL PRIMARY KEY, payload JSONB)',
+  "INSERT INTO events (payload) VALUES ('{}'::jsonb)",
+])
+```
+
+## Schema-aware translation
+
+Some passes are more accurate when they know column types, enum definitions, or table columns. Supply `options.schema` with the `SchemaInfo` methods relevant to the input:
+
+```ts
+const result = compile(source, {
+  schema: {
+    getColumnType(schema, table, column) {
+      return column === 'payload' ? 'jsonb' : undefined
+    },
+    getEnum() {
+      return undefined
+    },
+    isEnumValue() {
+      return false
+    },
+    getTableColumns() {
+      return undefined
+    },
+  },
+})
+```
+
+Without metadata, type-dependent rewrites are limited to syntax the compiler can identify.
+
+## Guarantees and limits
+
+The compiler supports a documented subset of PostgreSQL behavior. Differences in types, concurrency, constraints, catalogs, extensions, and functions can produce warnings or unsupported output.
+
+Tests include deterministic translation fixtures and differential execution through an independent PostgreSQL-on-SQLite implementation. Extension portability still requires testing against the deployed SQLite build. Use strict mode at trust boundaries and run emitted SQL against that build.

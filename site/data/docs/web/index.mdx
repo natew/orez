@@ -1,0 +1,54 @@
+---
+title: Orez Web
+description: An experimental browser-native Zero stack for demos, experiments, and fully local prototypes.
+---
+
+# Web
+
+<Status tone="experimental">Experimental</Status>
+
+Orez Web runs PGlite, a PostgreSQL proxy, zero-cache, and its SQLite replica inside browser workers. Opening the application boots a complete Zero development stack in the tab, with application data persisted through IndexedDB.
+
+The current product scope is demos, experiments, portable previews, and browser-runtime development.
+
+## What it enables
+
+- A Zero demo whose database and sync services boot with the page.
+- Portable experiments with browser-owned persistence.
+- Local prototypes that query and mutate PGlite directly.
+- Worker and WebAssembly integration development.
+- Self-contained previews in products such as Soot.
+
+## Current implementation
+
+The active implementation lives in `~/soot/packages/orez-web` while it is being upstreamed into Orez. Its public-shaped surface includes:
+
+- `startOrezWeb()` for coordinated startup;
+- `prefetchOrezAssets()` for early WASM and data loading;
+- `prebootPglite()` for moving database initialization off the critical path;
+- direct `query()` and `exec()` helpers;
+- an in-browser sync connection and push-handler bridge;
+- explicit `stop()` and unload-oriented `terminate()` lifecycle controls.
+
+## Worker layouts
+
+The default `singleDb` configuration uses three workers:
+
+1. one IndexedDB-backed PGlite worker;
+2. a PostgreSQL wire/proxy worker;
+3. a worker-adapted zero-cache using bedrock SQLite for the replica.
+
+The multi-database layout uses separate PGlite workers for application data, CVR, and CDB, increasing the graph to five workers and preserving independent database contexts.
+
+## Experimental constraints
+
+The zero-cache worker build bundles server-oriented internals with browser shims and MessagePort networking. SharedArrayBuffer improves hot-path IPC and requires cross-origin isolation. Worker and WASM asset size makes cold-start sequencing, caching, and memory important product concerns.
+
+The build is coupled to pinned Zero internals and currently has a focused browser qualification matrix. Those constraints define the experimental support level.
+
+## Start here
+
+- [Demo setup](/docs/web/setup) for the current API and asset shape.
+- [Architecture](/docs/web/architecture) for workers and data flow.
+- [Browser requirements](/docs/web/requirements) for isolation, persistence, and lifecycle.
+- [Testing and limitations](/docs/web/testing) for qualification and readiness.

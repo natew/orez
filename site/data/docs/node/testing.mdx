@@ -1,0 +1,65 @@
+---
+title: Node testing and guarantees
+description: Evidence and qualification boundaries for the Node runtime.
+---
+
+# Node testing and guarantees
+
+The Node runtime crosses process, PostgreSQL, replication, SQLite, and HTTP boundaries. Its test strategy separates focused contracts from full process scenarios so each result has a clear meaning.
+
+## Evidence by contract
+
+| Contract                    | Evidence in this repository                                               | Established behavior                                         | Qualification boundary                                    |
+| --------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------- |
+| Configuration and lifecycle | Configuration, CLI, ports, child process, health, and recovery tests      | Deterministic option resolution and lifecycle decisions      | Optional platform binaries remain machine-specific        |
+| PGlite wire compatibility   | Proxy, IPC, pgoutput, publication, and compatibility tests                | Covered queries and replication frames                       | Focused zero-cache PostgreSQL surface                     |
+| Data propagation            | Real zero-cache startup and replication-latency scenarios                 | Committed changes reach clients in covered scenarios         | Latency and throughput depend on workload and hardware    |
+| Restore and recovery        | Restore, live-restore, reset, restart, stale replica, and crash scenarios | Known local failure states converge through bounded recovery | Disk-loss recovery belongs to the project backup plan     |
+| Embedded Postgres           | Startup, integration, termination, replication, and orphan cleanup lanes  | Real PostgreSQL lifecycle and logical replication            | Local single-cluster scope                                |
+| SQLite selection            | Mode resolution, native guard, WASM, and native startup lanes             | Explicit and reproducible SQLite selection                   | Each implementation needs its own performance measurement |
+
+## Repository commands
+
+```sh
+bun run build
+bun run check
+bun run test
+```
+
+`bun run test` is the focused suite. CI also runs build, linting, formatting, type checking, and the native SQLite binary guard.
+
+The process integration lane is:
+
+```sh
+bun run native:bootstrap
+bun run test:integration
+```
+
+It starts real process trees and covers native startup, PGlite integration, Embedded Postgres, restart, restore, reset, and live-restore behavior.
+
+Targeted iteration can run one contract directly:
+
+```sh
+bunx vitest run src/integration/native-postgres-backend.test.ts
+bunx vitest run src/integration/restore-reset.test.ts
+bunx vitest run src/replication/zero-compat.test.ts
+```
+
+## Application CI
+
+For the portable lane:
+
+```sh
+bunx orez --ephemeral \
+  --force-wasm-sqlite \
+  --migrations=./db/migrations \
+  --on-healthy='bun run test:e2e'
+```
+
+Applications that depend on concurrent sessions, PostgreSQL locks, transaction scheduling, or native logical replication should add an Embedded Postgres lane for those contracts.
+
+Record the Orez version, Zero version, database profile, SQLite implementation, operating system, and exact command with every reproducible result.
+
+## Qualification scope
+
+Repository evidence covers the named local configurations and scenarios. Projects still qualify their own schema, optional PostgreSQL features, supported Zero version pair, client count, recovery objectives, latency target, throughput target, and production topology.

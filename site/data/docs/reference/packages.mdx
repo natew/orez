@@ -1,0 +1,38 @@
+---
+title: Packages and source map
+description: The public packages and internal source areas that make up Orez’s runtimes.
+---
+
+# Packages and source map
+
+The table below lists Orez’s public packages and internal implementation packages. An export is supported when its runtime documentation marks it as supported.
+
+## JavaScript packages
+
+| Package/export         | Purpose                                                           | Status                         |
+| ---------------------- | ----------------------------------------------------------------- | ------------------------------ |
+| `orez`                 | Node all-in-one runner, CLI, configuration, and `startZeroLite()` | Primary                        |
+| `orez/vite`            | Bind the Node runner to a Vite dev-server lifecycle               | Primary                        |
+| `orez/s3`              | Small local S3-compatible server for development                  | Primary, intentionally limited |
+| `orez/change-tracking` | PGlite change-tracking implementation details                     | Internal/advanced              |
+| `orez/cf-do`           | Earlier stock zero-cache Durable Object experiment                | Historical                     |
+| `pg-to-sqlite`         | Standalone PostgreSQL-to-SQLite compiler                          | Public utility                 |
+| `bedrock-sqlite`       | WASM SQLite adapter used by Zero-oriented runtimes                | Workspace package              |
+
+## Orez Lite crates and host
+
+| Source package      | Role                                                                 |
+| ------------------- | -------------------------------------------------------------------- |
+| `sync-core`         | Deterministic pull, push, value, retention, query, and schema engine |
+| `sync-native`       | Axum and rusqlite native host                                        |
+| `sync-wasm`         | WASM boundary for constrained JavaScript hosts                       |
+| `orez-sync-cf-host` | Cloudflare Worker and Durable Object integration                     |
+
+Orez Lite is the public name. The `sync-*` names are current implementation identifiers and may change as packaging is productized.
+
+## Versioning guidance
+
+- Pin Orez and Zero together in applications that depend on internal compatibility layers.
+- Treat preview and experimental package paths as revision-specific.
+- Prefer documented top-level APIs over worker, proxy, or change-tracking internals.
+- Record runtime, profile, Zero version, and SQLite implementation in reproducible test reports.

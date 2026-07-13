@@ -1,42 +1,48 @@
 ---
-title: Documentation
-description: Run Zero locally, choose the right runtime mode, and take the same model to SQLite at the edge.
+title: Orez documentation
+description: Run Zero as one coordinated system with the Node runner or the SQLite-native Orez Lite engine.
 ---
 
-# Documentation
+# Orez documentation
 
-orez is a set of small runtimes for building with Zero without starting with a
-conventional database stack. The default command runs PGlite, a PostgreSQL wire
-proxy, zero-cache, and its SQLite replica. More demanding workloads can opt into
-real embedded Postgres, while the separate Rust sync engine can replace
-zero-cache with SQLite on Cloudflare.
+Orez is an easy, all-in-one way to run Zero. The Node runtime manages zero-cache, its databases, replica storage, and local lifecycle from one configuration. Orez Lite provides a SQLite-native engine for environments that need a smaller server.
 
 ```sh
 bunx orez
 ```
 
-## Pick a path
+<CardGrid>
+  <DocCard href="/docs/node" title="Node">
+    Run stock zero-cache with either Embedded Postgres or the portable PGlite/WASM
+    profile.
+  </DocCard>
+  <DocCard href="/docs/orez-lite" title="Orez Lite" badge="Preview">
+    Run Orez’s smaller SQLite-native sync engine in a native Rust service or a Cloudflare
+    Durable Object.
+  </DocCard>
+  <DocCard href="/docs/runtimes" title="Choose a runtime">
+    Compare compatibility, deployment shape, native dependencies, and support status
+    before choosing.
+  </DocCard>
+</CardGrid>
 
-- **New local project:** follow [Getting started](/docs/getting-started). The
-  defaults are intentionally useful without configuration.
-- **Choosing storage or performance characteristics:** read [Runtime modes](/docs/modes).
-- **Using orez from a config file, API, or Vite:** see [Configuration](/docs/configuration).
-- **Running sync on Durable Objects:** start with the [Sync engine](/docs/sync-engine).
-- **Translating PostgreSQL SQL for SQLite:** use the standalone
-  [pg-to-sqlite](/docs/pg-to-sqlite) package.
+## Two promises
 
-## What stays compatible
+### Zero, made easy
 
-Your application still uses `@rocicorp/zero`. orez changes the server-side
-machinery: where Postgres runs, how zero-cache gets SQLite, or—when using the
-Rust engine—which server answers the Zero pull and push protocol. The client
-query API, optimistic mutations, and local store remain Zero.
+The Node runtime is the core Orez experience. It packages stock Zero into one command and one configuration. Built-in admin and recovery tools cover the routine work around the stack.
 
-## Scope
+### Zero, anywhere
 
-The default PGlite stack is a development runtime. It prioritizes a portable,
-zero-install environment over multi-connection throughput. The embedded
-Postgres mode exercises the real PostgreSQL logical-replication path. The
-Cloudflare sync engine is a separate production-oriented runtime with its own
-storage and workload constraints. The [modes page](/docs/modes) makes those
-boundaries explicit.
+Orez Lite brings the Zero client model to SQLite through a deterministic Rust core. Native and Cloudflare hosts provide pull, push, permissions, and wake.
+
+## Recommended path
+
+1. Run the [Node quick start](/docs/getting-started).
+2. Use [PGlite/WASM](/docs/node/pglite) for the smallest local and CI setup.
+3. Switch to [Embedded Postgres](/docs/node/embedded-postgres) when you need real PostgreSQL concurrency and logical replication.
+4. Evaluate [Orez Lite](/docs/orez-lite) for a compact SQLite-native deployment.
+
+## Clear boundaries
+
+Node orchestrates the stock Zero server. Orez Lite implements synchronization in a separate deterministic engine. Each runtime documents its architecture, operations, compatibility, and test evidence independently.

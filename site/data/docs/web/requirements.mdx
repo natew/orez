@@ -1,0 +1,50 @@
+---
+title: Orez Web browser requirements
+description: Cross-origin isolation, workers, WASM assets, persistence, and lifecycle constraints for Orez Web.
+---
+
+# Browser requirements
+
+Orez Web requires module workers, WebAssembly, IndexedDB, MessageChannel, and enough browser storage and memory for PGlite plus the Zero replica.
+
+## Cross-origin isolation
+
+SharedArrayBuffer fast paths require a cross-origin-isolated document. Serve:
+
+```http
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+Scripts, workers, WASM, fonts, images, and other subresources must satisfy the embedder policy through compatible CORS or CORP headers.
+
+`disableSab: true` selects MessagePort IPC for environments without SharedArrayBuffer. PGlite, WebAssembly, module workers, and MessageChannel remain core requirements.
+
+## Worker and WASM assets
+
+The host serves the generated PGlite and zero-cache worker modules with:
+
+- `pglite.wasm`;
+- the PGlite filesystem/data bundle;
+- bedrock SQLite JavaScript and WASM;
+- the proxy worker built for the selected package version.
+
+Asset URLs are configurable. Version worker code, WASM, and data artifacts as one release so browser caches receive a coherent set.
+
+## Persistence
+
+IndexedDB storage is origin-scoped and browser-managed. Private mode, quota pressure, user clearing, and origin changes can remove it. Demos should treat browser persistence as local project state and provide explicit export or reset behavior where needed.
+
+Choose an `idbPrefix` that identifies the application and schema generation. Coordinate schema upgrades and use a new prefix for incompatible generations.
+
+## One opener per database
+
+Deduplicate runtime initialization during React remounts and development hot reload. The preboot/adoption API validates prefixes and ready state so one worker owns each PGlite data directory.
+
+## Startup budget
+
+PGlite and zero-cache are substantial browser workloads. Prefetch assets early, preboot during a useful idle window, expose meaningful progress, and measure cold and warm startup separately.
+
+## Browser qualification
+
+The current support level is experimental. Each demo should qualify its target Chrome, Safari, Firefox, mobile WebView, automation, cross-origin policy, storage quota, and memory budget. Mobile and desktop results belong to separate qualification lanes.

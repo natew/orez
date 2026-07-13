@@ -1,0 +1,27 @@
+---
+title: Choose a runtime
+description: Compare Node and Orez Lite by compatibility, deployment shape, and support level.
+---
+
+# Choose a runtime
+
+Node is the recommended starting point. Orez Lite serves applications that need a compact SQLite-native engine. The table below summarizes the deployment and support boundaries for each host.
+
+| Runtime                  | Status      | What runs                                               | Best for                                                        |
+| ------------------------ | ----------- | ------------------------------------------------------- | --------------------------------------------------------------- |
+| Node · PGlite            | Recommended | Stock zero-cache plus PGlite and WASM-compatible SQLite | Local development, CI, examples, and builds without native code |
+| Node · Embedded Postgres | Recommended | Stock zero-cache plus a real embedded PostgreSQL server | Concurrency and production-like Zero testing                    |
+| Orez Lite · Native       | Preview     | Rust sync engine and per-namespace SQLite files         | Embedded SQLite-native sync and controlled native deployments   |
+| Orez Lite · Cloudflare   | Preview     | Rust/WASM engine inside a SQLite Durable Object         | Edge namespaces that fit the Durable Object model               |
+
+## Node
+
+Node runs the stock zero-cache package and coordinates the services around it. The PGlite profile makes the runner portable across local and CI environments, while Embedded Postgres provides concurrent connections and native logical replication. Both use the same application setup.
+
+[Explore Node →](/docs/node)
+
+## Orez Lite
+
+Orez Lite implements the Zero client model in a deterministic SQLite-native server, exposed through HTTP pull and push with a best-effort wake channel. Its native and Cloudflare hosts share the core engine and have separate preview qualification.
+
+[Explore Orez Lite →](/docs/orez-lite)
