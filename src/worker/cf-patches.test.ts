@@ -84,6 +84,16 @@ describe('prepareZeroCacheForCF', () => {
     )
     expect(parser).toContain('__orezLibPgQueryInit')
     expect(parser).toContain('orez-libpg-query-wasm-binary')
+    // workerd forbids runtime wasm compilation: the overlay must import the parser
+    // wasm as a (CompiledWasm) module and use Emscripten's instantiateWasm hook,
+    // never hand raw bytes to PgQueryModule for runtime compilation.
+    expect(parser).toContain(
+      "import __orezLibPgQueryWasmModule from 'libpg-query/wasm/libpg-query.wasm';"
+    )
+    expect(parser).toContain('instantiateWasm(imports, receiveInstance)')
+    expect(parser).toContain('new WebAssembly.Instance(__orezLibPgQueryWasmModule')
+    expect(parser).not.toContain('wasmBinary')
+    expect(parser).not.toContain('__orezLibPgQueryWasmBase64')
     expect(result.aliases['libpg-query/wasm/index.js']).toBe(
       resolve(result.outDir, 'node_modules', 'libpg-query', 'wasm', 'index.js')
     )

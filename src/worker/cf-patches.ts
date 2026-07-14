@@ -588,18 +588,15 @@ function patchPgsqlParserWasm(
     return {}
   }
 
-  const wasmBase64 = readFileSync(wasmPath).toString('base64')
+  // workerd forbids compiling wasm from bytes at runtime (WebAssembly.instantiate
+  // on raw bytes throws "Wasm code generation disallowed by embedder"), so we do
+  // NOT embed the parser bytes and hand them to Emscripten. instead import the
+  // parser wasm as a module — the CF bundler attaches it as a CompiledWasm worker
+  // module (it lives next to this overlay at wasm/libpg-query.wasm) — and give
+  // Emscripten a ready instance through its standard instantiateWasm hook.
   const replacement = `\
-// orez-libpg-query-wasm-binary: embed parser wasm for CF Workers.
-const __orezLibPgQueryWasmBase64 = '${wasmBase64}';
-function __orezLibPgQueryWasmBinary() {
-    const decode = globalThis.atob
-        ? globalThis.atob(__orezLibPgQueryWasmBase64)
-        : Buffer.from(__orezLibPgQueryWasmBase64, 'base64').toString('binary');
-    const bytes = new Uint8Array(decode.length);
-    for (let i = 0; i < decode.length; i++) bytes[i] = decode.charCodeAt(i);
-    return bytes;
-}
+// orez-libpg-query-wasm-binary: precompiled parser wasm module for CF Workers.
+import __orezLibPgQueryWasmModule from 'libpg-query/wasm/libpg-query.wasm';
 try {
     const g = globalThis;
     if (g.self && !g.self.location) g.self.location = { href: 'https://orez.local/libpg-query.js' };
@@ -609,7 +606,13 @@ catch {
 }
 const __orezLibPgQueryPreviousProcessType = globalThis.process?.type;
 if (globalThis.process && !globalThis.process.type) globalThis.process.type = 'renderer';
-const __orezLibPgQueryInit = PgQueryModule({ wasmBinary: __orezLibPgQueryWasmBinary() });
+const __orezLibPgQueryInit = PgQueryModule({
+    instantiateWasm(imports, receiveInstance) {
+        const instance = new WebAssembly.Instance(__orezLibPgQueryWasmModule, imports);
+        receiveInstance(instance, __orezLibPgQueryWasmModule);
+        return instance.exports;
+    },
+});
 if (globalThis.process && __orezLibPgQueryPreviousProcessType === undefined) {
     delete globalThis.process.type;
 }
@@ -620,7 +623,7 @@ const initPromise = __orezLibPgQueryInit.then((module) => {`
 
   code = code.replace(pattern, replacement)
   writeFileSync(parserIndexPath, code)
-  console.log('[orez] patched libpg-query wasm loader (embedded wasm bytes)')
+  console.log('[orez] patched libpg-query wasm loader (precompiled wasm module)')
   return {
     'libpg-query': targetPackagePath,
     'libpg-query/wasm': parserIndexPath,
