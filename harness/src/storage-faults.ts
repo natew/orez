@@ -25,7 +25,7 @@ const origin = cf ? target.origin : `${target.baseUrl}/${target.namespace}`
 const adminKey = cf
   ? (process.env.ZHARNESS_CF_ADMIN_KEY ??
     readFileSync(join(homedir(), '.zharness-cf-admin-key'), 'utf8').trim())
-  : null
+  : target.adminKey
 const prefix = `fault-${crypto.randomUUID()}`
 
 type FaultPoint =

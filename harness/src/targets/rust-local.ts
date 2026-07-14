@@ -35,6 +35,7 @@ export type RustLocalTarget = SyncTarget & {
   readonly baseUrl: string
   readonly namespace: string
   readonly databaseFile: string
+  readonly adminKey: string
   readonly pid: number
   // fault hooks shared with the reference targets (see reconnect/eviction lanes)
   pull(): Promise<void>
@@ -187,6 +188,7 @@ export async function startRustLocal(opts?: {
     baseUrl,
     namespace,
     databaseFile,
+    adminKey: adminToken,
     get pid() {
       if (!child?.pid) throw new Error('sync-native is not running')
       return child.pid
