@@ -903,9 +903,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             : (config.queryTransformVersion ?? 0)
           : 0
         if (!Number.isSafeInteger(transformVersion) || transformVersion < 0) {
-          throw new TypeError(
-            'queryTransformVersion must be a non-negative safe integer'
-          )
+          throw new TypeError('queryTransformVersion must be a non-negative safe integer')
         }
         if (queryAware && body.queries) {
           const queries = body.queries as {
