@@ -280,19 +280,20 @@ pub fn apply_upstream_snapshot(
     tables: &Tables,
     snapshot: &UpstreamSnapshot,
 ) -> Result<ApplyUpstreamResult, EngineError> {
-    for table in snapshot.tables.keys() {
-        if tables.get(table).is_none() {
-            return Err(schema_refresh(format!("unknown table {table}")));
-        }
-    }
+    // the upstream feed is authoritative for the whole application schema, but
+    // a host may model only a subset of it (server-only tables like `user` are
+    // deliberately excluded from client sync). ignore snapshot tables this host
+    // does not model rather than rejecting the rebuild; every modeled table
+    // still rebuilds atomically. column drift on a modeled table stays a hard
+    // refresh via upsert_row's validation.
     for (table, _) in tables.iter() {
         db.exec(&format!("DELETE FROM {}", quote_ident(table)), &[])?;
     }
     let mut applied = 0;
     for (table, rows) in &snapshot.tables {
-        let spec = tables
-            .get(table)
-            .ok_or_else(|| schema_refresh(format!("unknown table {table}")))?;
+        let Some(spec) = tables.get(table) else {
+            continue;
+        };
         for row in rows {
             upsert_row(db, table, spec, row)?;
             applied += 1;

@@ -240,3 +240,35 @@ fn retention_gap_snapshot_replaces_rows_atomically() {
     );
     assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 50);
 }
+
+#[test]
+fn snapshot_ignores_tables_absent_from_host_schema() {
+    let (mut db, tables) = setup();
+    // the upstream is authoritative for the full app schema; this host models
+    // only `item`. a server-only table present in the snapshot must be ignored
+    // so a subset replica can still rebuild, instead of failing the rebuild.
+    let snapshot = UpstreamSnapshot {
+        watermark: 42,
+        tables: [
+            ("item".into(), vec![row(item("fresh", "snapshot"))]),
+            (
+                "user".into(),
+                vec![row(json!({ "id": "u1", "email": "a@b.c" }))],
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let result = db
+        .transaction(|db| apply_upstream_snapshot(db, &tables, &snapshot))
+        .unwrap();
+    // only the modeled table's row counts as applied; `user` is skipped.
+    assert_eq!(result.applied, 1);
+    let rows = db.query("SELECT id FROM item", &[]).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get("id"),
+        Some(&sync_core::SqlValue::Text("fresh".into()))
+    );
+    assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 42);
+}
