@@ -1,6 +1,7 @@
 import { catalogPass } from './catalog.js'
 import { datetimePass } from './datetime.js'
 import { dmlCtePass } from './dml-cte.js'
+import { jsonFunctionsPass } from './json-functions.js'
 import { rowJsonPass } from './row-json.js'
 import { schemaPass } from './schema.js'
 import { stringFunctionsPass } from './string-functions.js'
@@ -24,6 +25,7 @@ export const DEFAULT_PASSES: Pass[] = [
   typesPass,
   datetimePass,
   stringFunctionsPass,
+  jsonFunctionsPass,
   rowJsonPass,
   catalogPass,
   schemaPass,
@@ -31,7 +33,6 @@ export const DEFAULT_PASSES: Pass[] = [
   // future:
   //   castPass,
   //   arrayPass,
-  //   jsonPass,
   //   insertPass,
 ]
 
