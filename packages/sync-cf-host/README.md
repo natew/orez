@@ -12,9 +12,10 @@ to a per-namespace Durable Object, and never logs tokens, mutation arguments, or
 row contents. Pull runs `engine_handle_pull` inside `transactionSync`; push runs
 Rust `push_validate`/`preflight`/`finalize`/`record_app_error` steps around the
 registered asynchronous TypeScript mutator inside `ctx.storage.transaction`.
-Every SQL cursor is materialized before an await. Application effects are
-collected and run only after their transaction commits; application failures use
-the required second transaction to advance the LMID marker.
+Every SQL cursor is materialized before an await. Mutators may await only their
+`MutatorSql` operations; timers, fetches, and other external work belong in
+`context.defer`, which runs only after commit. Application failures use the
+required second transaction to advance the LMID marker.
 
 ## Wake channel and eviction
 

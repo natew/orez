@@ -79,7 +79,7 @@ export class ProbeDurableObject extends DurableObject<Env> {
       const { balance } = this.ctx.storage.sql
         .exec("SELECT balance FROM accounts WHERE id = 'primary'")
         .one() as { balance: number }
-      await scheduler.wait(1)
+      await Promise.resolve()
       this.ctx.storage.sql.exec(
         "UPDATE accounts SET balance = ? WHERE id = 'primary'",
         balance + 10
@@ -98,7 +98,7 @@ export class ProbeDurableObject extends DurableObject<Env> {
       this.ctx.storage.sql.exec(
         "UPDATE accounts SET balance = balance - 5 WHERE id = 'primary'"
       )
-      await scheduler.wait(1)
+      await Promise.resolve()
       this.ctx.storage.sql.exec(
         'INSERT INTO ledger (account_id, amount, note) VALUES (?, ?, ?)',
         'primary',
@@ -121,7 +121,7 @@ export class ProbeDurableObject extends DurableObject<Env> {
       "UPDATE accounts SET balance = ? WHERE id = 'primary'",
       balance + 777
     )
-    await scheduler.wait(1)
+    await Promise.resolve()
     this.ctx.storage.sql.exec(
       'INSERT INTO ledger (account_id, amount, note) VALUES (?, ?, ?)',
       'primary',
@@ -144,9 +144,10 @@ export class ProbeDurableObject extends DurableObject<Env> {
         const expected = push_preflight(this.#db, mutationID)
         wasmMs += performance.now() - wasmStarted
 
-        // This await is deliberately inside the storage transaction and before
-        // the remaining SQL operations. M0 exists to prove this contract.
-        await scheduler.wait(1)
+        // MutatorSql methods resolve through the microtask queue. Cross that
+        // same boundary here without admitting timers or other external work
+        // into the storage transaction.
+        await Promise.resolve()
         await this.#mutate(name, deferred)
 
         wasmStarted = performance.now()
@@ -236,7 +237,7 @@ export class ProbeDurableObject extends DurableObject<Env> {
           this.ctx.storage.sql.exec(
             "UPDATE accounts SET balance = balance + 123 WHERE id = 'primary'"
           )
-          await scheduler.wait(1)
+          await Promise.resolve()
           this.ctx.storage.sql.exec(
             'INSERT INTO outbox (topic, payload) VALUES (?, ?)',
             'must.rollback',

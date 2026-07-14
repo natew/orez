@@ -31,9 +31,9 @@ neither.
 
 ### Local mutators
 
-| Field      | Type              | Meaning                                                                                                                                                        |
-| ---------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mutators` | `MutatorRegistry` | Named mutators built with `registerMutators({...})`. Each runs inside the push transaction against a `MutatorSql` adapter. Forbidden together with `upstream`. |
+| Field      | Type              | Meaning                                                                                                                                                                                                                                                                        |
+| ---------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `mutators` | `MutatorRegistry` | Named mutators built with `registerMutators({...})`. Each runs inside the push transaction against a `MutatorSql` adapter. Await only `MutatorSql` calls there; schedule timers, fetches, and other external effects with `context.defer`. Forbidden together with `upstream`. |
 
 ### Delegated push
 

@@ -325,7 +325,6 @@ const harnessMutators = registerMutators({
         value.id,
       ])
     )
-    await scheduler.wait(1)
     throw new MutationApplicationError('intentional-rollback')
   },
 })

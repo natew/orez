@@ -403,10 +403,77 @@ try {
   const beforeResnapshot = await fetch(`${origin}/admin/status`, {
     headers: { 'x-admin-key': 'ingest-harness-admin' },
   }).then((response) => response.json())
-  const resnapshot = await fetch(`${origin}/admin/resnapshot`, {
+  const holdSnapshot = await fetch(`${base}/snapshot-control/${namespace}`, {
     method: 'POST',
-    headers: { 'x-admin-key': 'ingest-harness-admin' },
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hold: true }),
   })
+  assert.equal(holdSnapshot.status, 200)
+  const resnapshotStartedAt = performance.now()
+  const resnapshotPending = fetch(`${origin}/admin/resnapshot`, {
+    method: 'POST',
+    headers: {
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    signal: AbortSignal.timeout(5_000),
+  })
+  for (let attempt = 0; ; attempt++) {
+    const snapshotState = await fetch(`${base}/snapshot-control/${namespace}`).then(
+      (response) => response.json()
+    )
+    if (snapshotState.active === true) break
+    if (attempt >= 100) throw new Error('operator snapshot fetch did not start')
+    await Bun.sleep(10)
+  }
+  const concurrentUpstreamPush = await fetch(`${upstream}/api/zero/push`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      clientGroupID: 'upstream',
+      mutations: [
+        {
+          type: 'custom',
+          clientID: 'seed',
+          id: 3,
+          name: 'item.insert',
+          args: [
+            {
+              id: 'during-resnapshot',
+              label: 'arrived while snapshot was held',
+              rank: 3,
+              done: false,
+              meta: null,
+            },
+          ],
+        },
+      ],
+    }),
+  })
+  assert.equal(concurrentUpstreamPush.status, 200)
+  const concurrentPullPending = fetch(`${origin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'reader',
+      clientGroupID: 'group',
+      cookie: pulled.body.cookie,
+    }),
+    signal: AbortSignal.timeout(5_000),
+  })
+  const releaseSnapshot = await fetch(`${base}/snapshot-control/${namespace}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hold: false }),
+  })
+  assert.equal(releaseSnapshot.status, 200)
+  const [resnapshot, concurrentPull] = await Promise.all([
+    resnapshotPending,
+    concurrentPullPending,
+  ])
+  assert.ok(performance.now() - resnapshotStartedAt < 5_000)
   assert.equal(resnapshot.status, 200)
   const resnapshotBody = await resnapshot.json()
   assert.equal(resnapshotBody.ok, true)
@@ -415,10 +482,18 @@ try {
     beforeResnapshot.engine.upstreamWatermark
   )
   assert.equal(
-    resnapshotBody.afterUpstreamWatermark,
-    beforeResnapshot.engine.upstreamWatermark
+    Number(resnapshotBody.afterUpstreamWatermark) >
+      Number(beforeResnapshot.engine.upstreamWatermark),
+    true
   )
   assert.ok(resnapshotBody.applied >= 3)
+  assert.equal(concurrentPull.status, 200)
+  const concurrentPullBody = await concurrentPull.json()
+  assert.ok(
+    concurrentPullBody.rowsPatch.some(
+      (entry) => entry.op === 'put' && entry.value?.id === 'during-resnapshot'
+    )
+  )
   const repairedDerived = await fetch(`${origin}/admin/sql`, {
     method: 'POST',
     headers: {
@@ -427,10 +502,17 @@ try {
     },
     body: JSON.stringify({
       query:
-        "SELECT label, (SELECT lastMutationID FROM _zsync_clients WHERE clientGroupID = 'group' AND clientID = 'writer') AS lastMutationID FROM item WHERE id = 'up-1'",
+        "SELECT id, label, (SELECT lastMutationID FROM _zsync_clients WHERE clientGroupID = 'group' AND clientID = 'writer') AS lastMutationID FROM item WHERE id IN ('up-1', 'during-resnapshot') ORDER BY id",
     }),
   }).then((response) => response.json())
-  assert.deepEqual(repairedDerived.rows, [{ label: 'delegated', lastMutationID: 1 }])
+  assert.deepEqual(repairedDerived.rows, [
+    {
+      id: 'during-resnapshot',
+      label: 'arrived while snapshot was held',
+      lastMutationID: 1,
+    },
+    { id: 'up-1', label: 'delegated', lastMutationID: 1 },
+  ])
 
   // Production timestamp columns are Zero `number`s, but SQLite returns their
   // SQL timestamp representation as TEXT. Prove the real ingest -> incremental

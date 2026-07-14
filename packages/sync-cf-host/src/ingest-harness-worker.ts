@@ -31,6 +31,8 @@ const runawayNamespaces = new Set<string>()
 const numericTextNamespaces = new Set<string>()
 const jsonValueNamespaces = new Set<string>()
 const hydratedNamespaces = new Set<string>()
+const heldSnapshots = new Set<string>()
+const activeSnapshots = new Set<string>()
 let delegatedFailuresRemaining = 0
 let delegatedAttempts = 0
 let delegatedPushFailedRemaining = 0
@@ -208,6 +210,16 @@ export class DataService extends WorkerEntrypoint<Env> {
       )
     }
     const response = await upstreamFetch(request, this.env)
+    if (pathname.endsWith('/snapshot')) {
+      if (heldSnapshots.has(namespace)) {
+        activeSnapshots.add(namespace)
+        try {
+          while (heldSnapshots.has(namespace)) await scheduler.wait(10)
+        } finally {
+          activeSnapshots.delete(namespace)
+        }
+      }
+    }
     if (pathname.endsWith('/changes') && response.ok) hydratedNamespaces.add(namespace)
     return response
   }
@@ -253,6 +265,31 @@ const syncWorker = createSyncWorker(config)
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
+    if (url.pathname.startsWith('/snapshot-control/')) {
+      const namespace = url.pathname.slice('/snapshot-control/'.length)
+      if (request.method === 'GET') {
+        return Promise.resolve(
+          Response.json({
+            active: activeSnapshots.has(namespace),
+            held: heldSnapshots.has(namespace),
+          })
+        )
+      }
+      return request
+        .json()
+        .catch(() => ({}))
+        .then((body) => {
+          if ((body as { hold?: unknown }).hold === true) {
+            heldSnapshots.add(namespace)
+          } else {
+            heldSnapshots.delete(namespace)
+          }
+          return Response.json({
+            active: activeSnapshots.has(namespace),
+            held: heldSnapshots.has(namespace),
+          })
+        })
+    }
     if (url.pathname.startsWith('/json-values-control/')) {
       const namespace = url.pathname.slice('/json-values-control/'.length)
       return request
