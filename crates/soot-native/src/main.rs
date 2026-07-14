@@ -107,15 +107,7 @@ fn make_mutate() -> MutateFn {
     // push mutations from zero clients are accepted (LMID advances) but not
     // applied — the app worker is the source of truth. if a mutation needs to
     // actually write, it goes through the app worker's API, not through push.
-    Arc::new(
-        |_db: &mut dyn SyncDb, name: &str, _args: &Value, _user_id: &str| {
-            eprintln!(
-                "[soot-native] push mutation accepted (no-op): {name} — \
-                 writes go through app worker"
-            );
-            Ok(())
-        },
-    )
+    Arc::new(|_db: &mut dyn SyncDb, _name: &str, _args: &Value, _user_id: &str| Ok(()))
 }
 
 fn make_auth() -> AuthFn {
@@ -213,12 +205,6 @@ async fn main() {
 
     let cfg: ConfigFile =
         serde_json::from_str(&raw).unwrap_or_else(|e| panic!("invalid config: {e}"));
-
-    eprintln!(
-        "[soot-native] {t} tables, {d} ddl stmts, port {port}, data-dir {data_dir}",
-        t = cfg.tables.len(),
-        d = cfg.ddl.len(),
-    );
 
     let tables = build_tables(&cfg.tables);
     let initialize = make_init(cfg.ddl);
