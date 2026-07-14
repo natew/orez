@@ -1,8 +1,7 @@
 // structured observability for the native host, mirroring the Cloudflare DO host
 // (packages/sync-cf-host/src/host.ts) so an operator can diff the two hosts'
 // telemetry field-for-field. Two surfaces:
-//   1. a per-request `sync_request` JSON line on stdout (RequestEvent), matching
-//      the CF host's console.log stream.
+//   1. a `sync_request` JSON line on stderr for non-routine request results.
 //   2. process-wide aggregate Counters, surfaced on the local admin/status route.
 //
 // CF-only fields are intentionally dropped: there is no wasm boundary here, so
@@ -122,7 +121,8 @@ pub fn count_push_mutations(response: &Value) -> (u64, u64) {
     (advances, app_errors)
 }
 
-// one per-request structured event, emitted as a single JSON line on stdout.
+// one per-request structured event. routine traffic stays silent; resets and
+// failures are emitted as a single JSON line on stderr.
 pub struct RequestEvent<'a> {
     pub namespace_hash: &'a str,
     pub request_kind: &'a str,
@@ -142,11 +142,15 @@ pub struct RequestEvent<'a> {
 }
 
 impl RequestEvent<'_> {
-    pub fn emit(&self) {
+    fn payload(&self) -> Option<Value> {
+        if matches!(self.result_class, "success" | "unchanged") {
+            return None;
+        }
+
         // floor/watermark as strings, matching the CF host (its cookies/counters
         // can exceed the JS safe-int range; kept parallel here). changeRowsScanned
         // is null: the host does not see the engine's internal change scan.
-        let event = json!({
+        Some(json!({
             "event": "sync_request",
             "hostVersion": HOST_VERSION,
             "engineVersion": ENGINE_VERSION,
@@ -166,7 +170,49 @@ impl RequestEvent<'_> {
             "transactionMs": self.transaction_ms,
             "totalMs": self.total_ms,
             "resetReason": self.reset_reason,
-        });
-        println!("{event}");
+        }))
+    }
+
+    pub fn emit(&self) {
+        if let Some(event) = self.payload() {
+            eprintln!("{event}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(result_class: &'static str) -> RequestEvent<'static> {
+        RequestEvent {
+            namespace_hash: "602ee718f0b5c8d4",
+            request_kind: "pull",
+            result_class,
+            input_cookie: json!(16087),
+            output_cookie: json!(16087),
+            retained_floor: 11991,
+            current_watermark: 16087,
+            change_rows_included: 0,
+            queries_recomputed: 0,
+            row_puts: 0,
+            row_deletes: 0,
+            lmid_advances: 0,
+            transaction_ms: 42,
+            total_ms: 42,
+            reset_reason: Value::Null,
+        }
+    }
+
+    #[test]
+    fn routine_requests_are_silent() {
+        assert!(event("success").payload().is_none());
+        assert!(event("unchanged").payload().is_none());
+    }
+
+    #[test]
+    fn non_routine_requests_remain_visible() {
+        assert!(event("reset").payload().is_some());
+        assert!(event("error").payload().is_some());
     }
 }

@@ -314,8 +314,6 @@ impl SyncNativeHost {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .expect("failed to bind");
-        let addr = listener.local_addr().expect("no local addr");
-        println!("sync-native listening on {addr}");
 
         axum::serve(listener, self.router)
             .with_graceful_shutdown(server::shutdown_signal())
