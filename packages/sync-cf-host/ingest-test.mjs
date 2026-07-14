@@ -386,6 +386,52 @@ try {
     meta: { lane: true },
   })
 
+  // an operator re-snapshot repairs a corrupt derived application row from
+  // the authoritative DATA snapshot even when the normal change cursor is
+  // already caught up. internal client/LMID state must survive the rebuild.
+  const corruptDerived = await fetch(`${origin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query: "UPDATE item SET label = 'corrupt-derived' WHERE id = 'up-1'",
+    }),
+  })
+  assert.equal(corruptDerived.status, 200)
+  const beforeResnapshot = await fetch(`${origin}/admin/status`, {
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  }).then((response) => response.json())
+  const resnapshot = await fetch(`${origin}/admin/resnapshot`, {
+    method: 'POST',
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  })
+  assert.equal(resnapshot.status, 200)
+  const resnapshotBody = await resnapshot.json()
+  assert.equal(resnapshotBody.ok, true)
+  assert.equal(
+    resnapshotBody.beforeUpstreamWatermark,
+    beforeResnapshot.engine.upstreamWatermark
+  )
+  assert.equal(
+    resnapshotBody.afterUpstreamWatermark,
+    beforeResnapshot.engine.upstreamWatermark
+  )
+  assert.ok(resnapshotBody.applied >= 3)
+  const repairedDerived = await fetch(`${origin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query:
+        "SELECT label, (SELECT lastMutationID FROM _zsync_clients WHERE clientGroupID = 'group' AND clientID = 'writer') AS lastMutationID FROM item WHERE id = 'up-1'",
+    }),
+  }).then((response) => response.json())
+  assert.deepEqual(repairedDerived.rows, [{ label: 'delegated', lastMutationID: 1 }])
+
   // Production timestamp columns are Zero `number`s, but SQLite returns their
   // SQL timestamp representation as TEXT. Prove the real ingest -> incremental
   // pull path converts it to epoch milliseconds on the wire.

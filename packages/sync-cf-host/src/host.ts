@@ -609,16 +609,67 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       }
     }
 
-    #ingest(upstreamPath?: string | null): Promise<number> {
-      if (!config.upstream) return Promise.resolve(0)
-      if (this.#ingestPromise) return this.#ingestPromise
+    async #applyUpstreamSnapshot(
+      path: string,
+      cursor: string,
+      allowSameCursor: boolean
+    ): Promise<ApplyUpstreamResult> {
+      const endpoint = new URL(`${path}/snapshot`, 'https://upstream.invalid')
+      const response = await this.#serviceBinding().fetch(endpoint.toString(), {
+        headers: { host: endpoint.host },
+      })
+      if (!response.ok) {
+        throw new Error(`upstream snapshot returned ${response.status}`)
+      }
+      const snapshot = await response.json()
+      const rebuilt = this.#withIngestBilling({ phase: 'snapshot', cursor }, () =>
+        this.ctx.storage.transactionSync(() =>
+          this.#wasm(() =>
+            engine_apply_upstream_snapshot(this.#engineDb, config.schema, snapshot)
+          )
+        )
+      ) as ApplyUpstreamResult
+      this.#recordIngestLogicalRows(rebuilt.applied)
+      const nextCursor = this.#engineState()?.upstreamWatermark ?? cursor
+      if (!allowSameCursor && String(nextCursor) === String(cursor)) {
+        this.#tripIngest('ingestCursorStalled', {
+          phase: 'snapshot',
+          cursor,
+          resultWatermark: rebuilt.watermark,
+          applied: rebuilt.applied,
+        })
+      }
+      return rebuilt
+    }
+
+    #ingest(upstreamPath?: string | null, forceSnapshot = false): Promise<number> {
+      if (!config.upstream) {
+        return forceSnapshot
+          ? Promise.reject(requestError('upstream is not configured'))
+          : Promise.resolve(0)
+      }
+      if (this.#ingestPromise) {
+        return forceSnapshot
+          ? this.#ingestPromise.then(() => this.#ingest(upstreamPath, true))
+          : this.#ingestPromise
+      }
       this.#ingestBreaker.assertReady()
       const path = upstreamPath ?? this.#controlGet('upstreamPath')
-      if (!path) return Promise.resolve(0)
+      if (!path) {
+        return forceSnapshot
+          ? Promise.reject(requestError('upstream path is not available'))
+          : Promise.resolve(0)
+      }
       this.#ingestPromise = (async () => {
         let total = 0
         for (;;) {
           const cursor = this.#engineState()?.upstreamWatermark ?? '0'
+          if (forceSnapshot) {
+            forceSnapshot = false
+            const rebuilt = await this.#applyUpstreamSnapshot(path, cursor, true)
+            total += rebuilt.applied
+            continue
+          }
           const endpoint = new URL(`${path}/changes`, 'https://upstream.invalid')
           endpoint.searchParams.set('watermark', cursor)
           endpoint.searchParams.set('limit', String(upstreamLimit))
@@ -626,39 +677,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             headers: { host: endpoint.host },
           })
           if (response.status === 410) {
-            const snapshotEndpoint = new URL(`${path}/snapshot`, endpoint)
-            const snapshotResponse = await this.#serviceBinding().fetch(
-              snapshotEndpoint.toString(),
-              { headers: { host: snapshotEndpoint.host } }
-            )
-            if (!snapshotResponse.ok) {
-              throw new Error(`upstream snapshot returned ${snapshotResponse.status}`)
-            }
-            const snapshot = await snapshotResponse.json()
-            const rebuilt = this.#withIngestBilling(
-              { phase: 'snapshot', cursor },
-              () =>
-                this.ctx.storage.transactionSync(() =>
-                  this.#wasm(() =>
-                    engine_apply_upstream_snapshot(
-                      this.#engineDb,
-                      config.schema,
-                      snapshot
-                    )
-                  )
-                ) as ApplyUpstreamResult
-            )
+            const rebuilt = await this.#applyUpstreamSnapshot(path, cursor, false)
             total += rebuilt.applied
-            this.#recordIngestLogicalRows(rebuilt.applied)
-            const nextCursor = this.#engineState()?.upstreamWatermark ?? cursor
-            if (String(nextCursor) === String(cursor)) {
-              this.#tripIngest('ingestCursorStalled', {
-                phase: 'snapshot',
-                cursor,
-                resultWatermark: rebuilt.watermark,
-                applied: rebuilt.applied,
-              })
-            }
             continue
           }
           if (!response.ok) {
@@ -1345,7 +1365,11 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       return new Response(null, { status: 101, webSocket: client })
     }
 
-    #admin(route: string, request: Request): Promise<Response> | Response {
+    #admin(
+      route: string,
+      request: Request,
+      upstreamPath: string | null
+    ): Promise<Response> | Response {
       if (route === '/admin/health') return json({ ok: true })
       if (route === '/admin/upstream-write-budget' && request.method === 'GET')
         return this.#upstreamWriteBudgetStatus()
@@ -1390,6 +1414,27 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           this.#wasm(() => engine_invalidate(this.#engineDb))
         )
         return json({ ok: true, engine: this.#engineState() })
+      }
+      if (route === '/admin/resnapshot') {
+        if (request.method !== 'POST') {
+          return json({ error: 'method not allowed' }, 405)
+        }
+        return (async () => {
+          try {
+            const beforeUpstreamWatermark = this.#engineState()?.upstreamWatermark ?? null
+            const applied = await this.#ingest(upstreamPath, true)
+            const engine = this.#engineState()
+            return json({
+              ok: true,
+              applied,
+              beforeUpstreamWatermark,
+              afterUpstreamWatermark: engine?.upstreamWatermark ?? null,
+              engine,
+            })
+          } catch (error) {
+            return json(errorBody(error), statusOf(error))
+          }
+        })()
       }
       if (route === '/admin/drop-next-push-response') {
         this.#dropNextPushResponse = true
@@ -1498,7 +1543,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       const route = routeAfterNamespace(new URL(request.url).pathname)
       const namespace = request.headers.get(NAMESPACE_HEADER) ?? 'unknown'
       const upstreamPath = this.#rememberUpstreamPath(request)
-      if (route.startsWith('/admin/')) return this.#admin(route, request)
+      if (route.startsWith('/admin/')) return this.#admin(route, request, upstreamPath)
 
       if (route === '/wake' && request.method === 'GET') return this.#wake(request)
       if (route === '/notify' && request.method === 'POST') {

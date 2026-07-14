@@ -54,6 +54,14 @@ The runner accepts only loopback or the `lslcf.workers.dev` test worker and does
 not mutate a production route. These controls are mechanisms, not authorization
 to perform a production cutover.
 
+`POST /admin/resnapshot` is available only when the consumer configured an
+upstream data service. It reads that namespace's authoritative `/snapshot`,
+atomically replaces the derived application tables, then consumes `/changes`
+until caught up. Engine metadata, client last-mutation IDs, operator controls,
+and the authoritative upstream database are preserved. The JSON response
+includes before/after upstream watermarks and the number of snapshot plus
+catch-up rows applied.
+
 ## Counter and HTTP wire representation
 
 Inside the wasm/JavaScript engine boundary, cookies, watermarks, and LMIDs are

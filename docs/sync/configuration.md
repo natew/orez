@@ -145,6 +145,9 @@ Every route is under `/<namespace>/admin/` and gated by `authorizeAdmin` (or the
   counters, and `ingestBreaker` status.
 - `POST /admin/sql` `{query}`: read a SQL query against the DO storage.
 - `POST /admin/invalidate`: bump the epoch so every client re-snapshots.
+- `POST /admin/resnapshot`: atomically rebuild derived application tables from
+  the authoritative upstream snapshot, then catch up concurrent changes. This
+  preserves engine metadata, client mutation IDs, and upstream data.
 - `POST /admin/writer` `{enabled}` (also `GET`): disable or enable the writer.
   A disabled writer answers pushes with 503.
 - `POST /admin/retention` `{retainChanges}`: override retention at runtime.
