@@ -7,13 +7,13 @@ mod common;
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use common::{item_tables, Host, TestDb};
+use common::{Host, TestDb, item_tables};
 use rusqlite::Connection;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sync_core::pull::Caps;
 use sync_core::{
-    apply_upstream, init_schema, EngineError, SqlValue, SyncDb, Transactor, UpstreamBatch,
-    UpstreamChange,
+    EngineError, SqlValue, SyncDb, Transactor, UpstreamBatch, UpstreamChange, apply_upstream,
+    init_schema,
 };
 
 fn row(value: Value) -> Map<String, Value> {
