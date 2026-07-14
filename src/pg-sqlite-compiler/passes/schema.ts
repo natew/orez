@@ -10,7 +10,7 @@ function stringValue(node: any): string | null {
   return node?.String?.sval ?? node?.String?.str ?? null
 }
 
-function flattenSchemaName(schema: string, name: string): string {
+export function flattenSchemaName(schema: string, name: string): string {
   if (schema === 'public' && name === 'migrations') return 'public_migrations'
   if (schema === 'public') return name
   if (schema === '_orez' && name === '_zero_changes') return '_zero_changes'
@@ -18,7 +18,7 @@ function flattenSchemaName(schema: string, name: string): string {
     return '_orez__zero_replication_slots'
   if (schema === '_orez') return `_orez__${name}`
   if (schema === '_zero') return `_zero_${name}`
-  return `${schema}_${name}`
+  return `${schema.replaceAll('/', '_')}_${name}`
 }
 
 function flattenRangeVar(rangeVar: any): string | null {

@@ -110,6 +110,16 @@ describe('pg-sqlite-compiler smoke', () => {
     expect(sql).not.toMatch(/(^|[^_])replicas\.slot/)
   })
 
+  it('removes slashes from flattened Zero internal schema names', () => {
+    const { sql } = compile(`
+      INSERT INTO "soot_0/cdc"."versionHistory" ("dataVersion")
+      VALUES (1)
+    `)
+
+    expect(sql).toContain('"soot_0_cdc_versionHistory"')
+    expect(sql).not.toContain('soot_0/cdc')
+  })
+
   it('rejects known PG-only functions in strict mode', () => {
     for (const sql of [
       'SELECT RIGHT(id, 8) AS short_id FROM deployment',

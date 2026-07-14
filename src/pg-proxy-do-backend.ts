@@ -16,6 +16,7 @@ import {
   foldCountMarkerResult,
   transformCountedDeleteCte,
 } from './pg-sqlite-compiler/passes/dml-cte.js'
+import { flattenSchemaName } from './pg-sqlite-compiler/passes/schema.js'
 import { signalReplicationChange } from './replication/handler.js'
 import {
   markSQLiteKeywordIdentifiers,
@@ -1194,17 +1195,6 @@ function splitQualifiedIdentifier(value: string): string[] {
   }
   if (current.trim()) parts.push(current.trim())
   return parts
-}
-
-function flattenSchemaName(schema: string, name: string): string {
-  if (schema === 'public' && name === 'migrations') return 'public_migrations'
-  if (schema === 'public') return name
-  if (schema === '_orez' && name === '_zero_changes') return '_zero_changes'
-  if (schema === '_orez' && name === '_zero_replication_slots')
-    return '_orez__zero_replication_slots'
-  if (schema === '_orez') return `_orez__${name}`
-  if (schema === '_zero') return `_zero_${name}`
-  return `${schema}_${name}`
 }
 
 // canonical FK-registry key for a table: schema-qualified PG name (un-flattened),
