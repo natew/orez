@@ -378,6 +378,7 @@ a {
 
 .docs-content ul,
 .docs-content ol {
+  display: block;
   margin: 0 0 22px;
   padding-left: 25px;
   color: var(--color11);
@@ -386,6 +387,7 @@ a {
 }
 
 .docs-content li {
+  display: list-item;
   margin: 7px 0;
   padding-left: 3px;
 }

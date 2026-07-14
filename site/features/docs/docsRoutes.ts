@@ -39,10 +39,9 @@ export const docsSections: DocsSection[] = [
     title: 'Orez Lite',
     pages: [
       { title: 'Overview', route: '/docs/orez-lite', status: 'preview' },
-      { title: 'Native setup', route: '/docs/orez-lite/native' },
-      { title: 'Cloudflare deployment', route: '/docs/orez-lite/cloudflare' },
-      { title: 'Writes & mutators', route: '/docs/orez-lite/writes' },
+      { title: 'Setup', route: '/docs/orez-lite/cloudflare' },
       { title: 'Queries & permissions', route: '/docs/orez-lite/queries' },
+      { title: 'Mutations', route: '/docs/orez-lite/writes' },
       { title: 'Architecture', route: '/docs/orez-lite/architecture' },
       { title: 'Operations', route: '/docs/orez-lite/operations' },
       { title: 'Testing', route: '/docs/orez-lite/testing' },

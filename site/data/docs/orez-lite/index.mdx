@@ -1,67 +1,68 @@
 ---
 title: Orez Lite
-description: Orez’s SQLite-native sync engine for native and optional Cloudflare deployments.
+description: Run the standard Zero application model on a compact SQLite-native sync engine.
 ---
 
 # Orez Lite
 
 <Status tone="preview">Preview</Status>
 
-Orez Lite is a compact SQLite-native sync engine for the Zero client model. Its deterministic Rust core handles pull, push, wake, and optimistic mutation delivery. It also manages permissions and typed query membership.
+Orez Lite is a SQLite-native synchronization engine for Zero applications. It
+keeps the application-facing Zero model intact: named ZQL queries, custom
+mutators, optimistic local state, authenticated query and mutate endpoints, and
+one authoritative application database.
 
-Each namespace owns one SQLite database and one ordered writer, giving the engine a small operational footprint and a clear consistency boundary.
+Orez Lite replaces the sync engine behind those endpoints. Application code
+continues to use the stock `@rocicorp/zero` client or `on-zero` helpers.
 
 <VerifiedBuildCard />
 
-## Runtime shape
+## What stays the same
+
+- Define and call named queries with Zero or `on-zero`.
+- Define custom mutators once and run them optimistically on the client and
+  authoritatively on the server.
+- Authenticate the application query and mutate endpoints.
+- Express read access in authenticated ZQL.
+- Enforce write access in server-side mutators.
+- Keep the application database as the write authority.
+
+Zero’s documentation remains the source of truth for these APIs:
+
+- [Install and set up Zero](https://zero.rocicorp.dev/docs/install)
+- [Queries](https://zero.rocicorp.dev/docs/queries)
+- [Mutators](https://zero.rocicorp.dev/docs/mutators)
+- [Authentication and permission patterns](https://zero.rocicorp.dev/docs/auth)
+- [ZQL](https://zero.rocicorp.dev/docs/zql)
+
+## What Orez Lite changes
+
+Orez Lite replaces `zero-cache`, PostgreSQL logical replication, and the CVR
+implementation with a Rust sync engine backed by SQLite. The current public host
+runs as a Cloudflare Worker and SQLite Durable Object.
 
 ```text
-Zero client
-   │ pull · push · wake
-   ▼
-Orez Lite host
-   │ auth · namespace · transactions
-   ▼
-sync-core
-   │ cookies · diffs · mutation IDs · query membership
-   ▼
-SQLite
+Zero / on-zero application
+  │ named queries · custom mutators · auth
+  ▼
+application query + mutate endpoints
+  │ authoritative database commits
+  ▼
+Orez Lite replication + query tracking
+  │ pull · patches · wake
+  ▼
+stock Zero client cache
 ```
 
-## Two hosts, one core
-
-| Host       | Shape                                                                          | Best fit                                                       |
-| ---------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------- |
-| Native     | `sync-native` embeds an Axum router and stores namespace files with `rusqlite` | Native embedding, local mutators, controlled services          |
-| Cloudflare | `sync-wasm` runs inside a SQLite Durable Object with a TypeScript Worker host  | Edge namespaces, local or delegated writes, platform lifecycle |
-
-Both hosts use the same `sync-core` algorithms for cookies, snapshots, diffs, mutation IDs, retention, values, and query membership. The host supplies HTTP, authentication, transaction boundaries, storage adapters, and lifecycle.
-
-<Callout title="Host capabilities" tone="note">
-  Native currently focuses on embedded local mutators. The Cloudflare host also includes
-  delegated writes, upstream ingest, alarms, and writer controls. Choose the host whose
-  documented feature set matches the deployment.
-</Callout>
-
-## Core contracts
-
-- A namespace has one ordered SQLite writer.
-- Every committed application write is tracked by table and primary key.
-- Pull returns unchanged, an incremental diff, or a full snapshot according to its cookie and retained history.
-- Mutation IDs advance transactionally and make duplicate pushes idempotent.
-- Wake messages contain a data-available hint; clients pull to receive state.
-- Authentication resolves to a stable user identity before visibility and query rules run.
-- Durable watermarks stay monotonic across pruning and host restart.
-
-## Why SQLite-native
-
-Orez Lite grew from an earlier Cloudflare experiment that ran the full server stack across Durable Objects and workers. Although the client experience kept working at the edge, Cloudflare’s 128 MB isolate limit made the full stack difficult to operate reliably.
-
-The result led to a purpose-built SQLite engine with deterministic state transitions, small native and WASM hosts, and explicit recovery behavior for partitioned namespaces.
+The engine owns sync bookkeeping: cookies, mutation acknowledgements,
+replication cursors, query membership, row patches, retention, and wake
+notifications. It does not define application permissions or business logic.
 
 ## Start here
 
-1. Use [Native setup](/docs/orez-lite/native) for the embeddable host.
-2. Read [Writes and mutators](/docs/orez-lite/writes) to choose an authority model.
-3. Review [Architecture](/docs/orez-lite/architecture) for cookies, change tracking, queries, and wake.
-4. Read [Testing](/docs/orez-lite/testing) and [Limitations](/docs/orez-lite/limitations) before deployment.
+1. Read [Orez Lite setup](/docs/orez-lite/cloudflare) for the application and
+   deployment boundary.
+2. Read [Queries and permissions](/docs/orez-lite/queries).
+3. Read [Mutations](/docs/orez-lite/writes).
+4. Review [Testing](/docs/orez-lite/testing) and
+   [Limitations](/docs/orez-lite/limitations) before deployment.

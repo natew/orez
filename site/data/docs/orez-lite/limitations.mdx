@@ -1,36 +1,54 @@
 ---
 title: Orez Lite limitations
-description: Protocol scope, host capabilities, scaling, retention, permissions, and maturity boundaries for Orez Lite.
+description: Current transport, deployment, scaling, retention, and maturity boundaries.
 ---
 
 # Limitations
 
-Orez Lite is a production-oriented preview with a defined synchronization surface and namespace-oriented scaling model.
+Orez Lite is a preview sync engine. The application-facing model is Zero, but
+the replacement engine and Cloudflare deployment still have explicit support
+boundaries.
+
+## Current public host
+
+The documented application integration is the Cloudflare host: Rust/WASM in a
+SQLite Durable Object, connected to the application query endpoint, mutate
+endpoint, and authoritative database change feed.
+
+The native Rust host is used for engine qualification but does not yet ship the
+same application-endpoint and change-feed integration as a supported public
+deployment. Do not create a separate native mutator or permission system to work
+around that gap.
 
 ## Protocol scope
 
-The supported surface covers pull, push, mutation IDs, snapshots, incremental diffs, query-aware membership, row visibility, retention, and wake. Applications should qualify every client feature they plan to ship against the pinned Orez Lite and Zero versions.
-
-## Host capabilities
-
-The native host currently supports local mutators and per-namespace SQLite files. The Cloudflare host also supports delegated pushes, upstream feed ingest, platform alarms, durable writer fencing, and additional operator controls.
+The qualified surface covers named-query synchronization, custom mutation
+delivery, mutation IDs, snapshots, incremental patches, retained history,
+reconnects, and wake notifications. Pin Orez, `on-zero`, and Zero versions and
+run the application’s real query and mutation corpus before rollout.
 
 ## Single-writer namespaces
 
-One namespace has one ordered SQLite writer. This produces simple transaction ordering and a clear consistency boundary. It also sets the write-throughput ceiling for a single namespace. Very hot shared datasets and bulk ingest need careful partitioning and measurement.
+One namespace has one ordered SQLite writer. This keeps transaction order clear
+but sets the write-throughput ceiling for a hot namespace. Partition by a real
+ownership and scaling boundary such as organization or project.
 
 ## Retention and snapshots
 
-Incremental history is bounded. Clients below the retained floor recover with a full snapshot. Large snapshots consume storage reads, network bytes, client apply time, and memory, so retention should reflect real offline periods and dataset sizes.
-
-## Permission cost
-
-Baseline row visibility uses snapshots because a rule change can revoke untouched rows. Query-aware membership offers incremental result tracking with additional stored query state, transform versioning, and server authorization logic.
+Incremental history is bounded. A client older than the retained floor recovers
+with a full snapshot. Large snapshots cost storage reads, network bytes, client
+apply time, and memory, so retention must reflect actual offline periods and
+namespace size.
 
 ## Cloudflare constraints
 
-The Cloudflare host operates within Durable Object memory, CPU, SQLite, WebSocket, storage, and billing limits. Indexes, foreign keys, cascades, and sync metadata can amplify physical rows written. Horizontal scale comes from partitioning data into namespaces.
+The host operates within Durable Object memory, CPU, SQLite, WebSocket, storage,
+and billing limits. Indexes, foreign keys, cascades, the replicated application
+tables, and sync metadata can amplify physical rows read and written.
 
-## Operational maturity
+## Preview packaging
 
-Packaging, native/delegated capability alignment, upgrade policy, and public compatibility guarantees are still settling. Pin versions, keep recoverable snapshots, qualify the exact host and schema, monitor namespace size and write rate, and rehearse writer fencing before launch.
+The deployed Chat and Soot integrations use thin application-specific adapters
+to connect auth, query resolution, mutation forwarding, namespaces, and change
+feeds. A smaller reusable deployment adapter and stable public configuration
+surface are still in progress.

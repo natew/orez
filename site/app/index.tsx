@@ -86,7 +86,8 @@ export default function HomePage() {
             <Paragraph color="$color10" className="home-lede">
               Orez runs a complete Zero stack from one config and one command. The Node
               runtime packages stock Zero for local development and CI, while Orez Lite
-              brings the same client model to a compact SQLite-native engine.
+              runs the same application queries and mutators through a compact
+              SQLite-native sync engine.
             </Paragraph>
             <XStack className="hero-actions" items="center" gap="$3" flexWrap="wrap">
               <AppLink
@@ -149,8 +150,9 @@ export default function HomePage() {
                 Still Zero
               </Text>
               <Paragraph color="$color10">
-                Node runs stock zero-cache. Orez Lite implements the client model in a
-                smaller SQLite-native engine.
+                Node runs stock zero-cache. Orez Lite replaces the sync engine while your
+                named ZQL queries, custom mutators, and application endpoints stay the
+                same.
               </Paragraph>
             </YStack>
           </div>
@@ -178,8 +180,8 @@ export default function HomePage() {
               setup portable.
             </RuntimeCard>
             <RuntimeCard href="/docs/orez-lite" title="Orez Lite" badge="Preview">
-              Run Orez’s SQLite-native sync engine in a native Rust service or a
-              Cloudflare Durable Object.
+              Run Orez’s SQLite-native sync engine in a Cloudflare Durable Object while
+              keeping the application-facing Zero model.
             </RuntimeCard>
           </div>
         </section>
@@ -200,8 +202,9 @@ export default function HomePage() {
             </H2>
             <Paragraph color="$color10" className="section-lede">
               Node packages stock Zero into a coordinated runner. Orez Lite provides pull,
-              push, permissions, and wake through a smaller SQLite-native engine. Both use
-              the Zero client model, with compatibility documented for each runtime.
+              query tracking, replication, and wake through a smaller SQLite-native
+              engine. Queries, mutations, authentication, and permissions stay in your
+              application.
             </Paragraph>
           </div>
           <div

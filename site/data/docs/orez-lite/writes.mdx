@@ -1,68 +1,97 @@
 ---
-title: Orez Lite writes and mutators
-description: Choose local transactional mutators or the Cloudflare host’s delegated-write model.
+title: Mutations
+description: Keep Zero or on-zero mutators and the application push endpoint you already use.
 ---
 
-# Writes and mutators
+# Mutations
 
-Orez Lite supports two authority models. Every deployment needs one clear writer path. Local application writes and a separate untracked authority cannot safely write to the same namespace.
+Orez Lite does not introduce another mutation API. Define mutations with Zero or
+`on-zero`, run them optimistically on the client, and execute them authoritatively
+through your application’s existing push endpoint.
 
-## Local mutators
+If you are new to this model, start with Zero’s
+[Mutators](https://zero.rocicorp.dev/docs/mutators) guide. It covers validation,
+registries, optimistic execution, server execution, and the push protocol.
 
-Local mutators run in the same SQLite transaction as application changes, the mutation result, the client’s last-mutation ID, and change-log entries.
+## Define mutations in the application
 
-```text
-validate push
-  → check mutation ID / replay
-  → run named application mutator
-  → record touched primary keys
-  → advance LMID and watermark
-  → commit
-  → acknowledge and wake peers
+An `on-zero` application can keep its existing mutation modules. This example
+uses the authenticated user as the owner instead of trusting an owner ID from
+the client:
+
+```ts
+import { ensureLoggedIn, mutations, serverWhere } from 'on-zero'
+
+const canWriteTodo = serverWhere('todo', (q, auth) => q.cmp('ownerId', auth?.id ?? ''))
+
+export const mutate = mutations('todo', canWriteTodo, {
+  insert: async ({ tx }, args: { id: string; title: string }) => {
+    const auth = ensureLoggedIn()
+    await tx.mutate.todo.insert({
+      id: args.id,
+      title: args.title,
+      ownerId: auth.id,
+    })
+  },
+
+  update: async ({ tx }, args: { id: string; title?: string }) => {
+    await tx.mutate.todo.update(args)
+  },
+})
 ```
 
-Use this model when Orez Lite’s SQLite database is authoritative and every writer can enter through registered mutators.
+The same definition supplies the optimistic client behavior and the
+authoritative server behavior. Mutation arguments are untrusted. Authentication
+and write authorization belong in the server execution of the mutator.
 
-An application rejection still advances the mutation ID, matching the retry behavior expected by Zero clients. An infrastructure error rolls back the whole push so it can safely retry.
+## Keep the application push endpoint
 
-## Delegated writes
+The application endpoint authenticates the request and lets `on-zero` execute
+the named mutation against the authoritative database:
 
-The Cloudflare host can forward pushes to an authoritative application service and ingest its committed change feed:
+```ts
+export async function POST(request: Request) {
+  const authData = await getAuthData(request)
+  if (!authData) return new Response('unauthorized', { status: 401 })
 
-```text
-client push → Orez Lite → application mutation service
-                              ↓
-                         authoritative DB
-                              ↓
-                      retained change feed
-                              ↓
-                         Orez Lite SQLite
+  const { response } = await zeroServer.handleMutationRequest({
+    authData,
+    request,
+  })
+
+  return Response.json(response)
+}
 ```
 
-Configure `mutateUrl`, a service `mutateBinding`, and `upstream`. The host retries eligible delegated failures with bounded exponential backoff, then applies feed pages in order.
+With stock `zero-cache`, this is the endpoint configured by `ZERO_MUTATE_URL`.
+With Orez Lite, it remains the same endpoint. The Orez deployment forwards the
+push to it and replicates the committed database changes into the sync engine.
 
-This model fits systems where server actions, jobs, or other services already write to an upstream database. It adds replication lag, cursor retention, snapshot recovery, and two operational systems.
+```text
+zero.mutate(...)
+  → optimistic local mutation
+  → application /api/zero/push
+  → authenticated server mutator
+  → authoritative database commit
+  → Orez Lite replication
+  → subscribed clients update
+```
 
-<Callout title="Host difference" tone="warning">
-  Delegated push and upstream ingest are currently Cloudflare-host capabilities. Native
-  deployments currently use transactional local mutators.
-</Callout>
+The application has one write authority: its mutators and push endpoint. You do
+not copy those mutators into an Orez registry or define a second permission
+system in the sync host.
 
-## No dual apply
+## Authorization
 
-The Cloudflare config rejects a local `mutators` registry combined with delegated `upstream` writes. Running the same mutation in both systems can double-apply effects or let mutation acknowledgements get ahead of authoritative data.
+Use authenticated server context for facts the client must not choose, such as
+the current user, organization, or role. Enforce ownership and other write rules
+inside the mutator before changing rows. Zero’s
+[Authentication](https://zero.rocicorp.dev/docs/auth) guide has the canonical
+read and write authorization patterns.
 
-## Side effects
+## What Orez Lite owns
 
-Cloudflare mutators can register post-commit effects with `context.defer()`. Those effects run after the SQLite transaction commits, so they need idempotency and their own observability. A later email, queue, or webhook failure cannot alter the committed mutation.
-
-## Picking a model
-
-| Question                         | Local mutators                  | Delegated writes                                   |
-| -------------------------------- | ------------------------------- | -------------------------------------------------- |
-| Where is truth?                  | Orez Lite SQLite                | Existing upstream database                         |
-| Atomic application write + LMID? | Yes, one transaction            | Split across service response and feed convergence |
-| Other writers allowed?           | Only through the Orez Lite host | Yes, if the feed captures them                     |
-| Operational complexity           | Lower                           | Higher                                             |
-| Native host today                | Yes                             | Not yet                                            |
-| Cloudflare host today            | Yes                             | Yes                                                |
+Orez Lite owns sync bookkeeping after the application commits: mutation IDs,
+replication cursors, query updates, client patches, and wake notifications. It
+does not own application validation, business rules, authorization, or side
+effects.

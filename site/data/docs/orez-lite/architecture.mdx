@@ -1,61 +1,80 @@
 ---
 title: Orez Lite architecture
-description: The deterministic core, storage adapters, cookies, change tracking, and wake protocol behind Orez Lite.
+description: How standard Zero queries and mutations connect to the SQLite-native sync engine.
 ---
 
 # Architecture
 
-Orez Lite separates deterministic sync decisions from host-specific storage and lifecycle code.
+Orez Lite changes the synchronization machinery while leaving application
+queries, mutations, authentication, and permissions in the application.
+
+## Request and data flow
 
 ```text
-Zero client
-  │  pull / push / wake
-  ▼
-Native Axum host              Cloudflare Worker + Durable Object
-  │ auth · namespace · tx       │ auth · namespace · tx · bindings
-  └──────────────┬───────────────┘
-                 ▼
-             sync-core
-      cookies · diffs · LMIDs
-      queries · retention · values
-                 │
-                 ▼
-       rusqlite or DO SQLite
+                           query name + args
+                      ┌────────────────────────→ app query endpoint
+                      │                              │ authorized ZQL
+Zero client ──HTTP──→ Orez Lite sync host ←──────────┘
+   ▲                  │
+   │ row patches      │ mutation push
+   │                  └────────────────────────→ app mutate endpoint
+   │                                                 │ commit
+   │                                                 ▼
+   └──────────── query tracking ← change feed ← authoritative database
 ```
 
-## Deterministic core
+The two application endpoints are the same endpoints used with stock
+`zero-cache`. Orez forwards the original authenticated request instead of
+reimplementing application logic.
 
-`sync-core` accepts a small `SyncDb` interface and produces protocol values from explicit inputs. Native and WASM hosts provide sockets, transaction begin/commit/rollback, authentication, and storage.
+## Query path
 
-This boundary lets the same scenarios run against in-memory models, native SQLite, and Durable Object SQLite while keeping host failures testable.
+The client sends a registered query name and arguments. The application query
+endpoint authenticates the request and resolves that name to authorized ZQL.
+Orez tracks the resulting row membership and sends an initial snapshot followed
+by incremental patches.
 
-## Change tracking
+The engine stores an internal query representation and reference counts, but
+application authors work only with named queries and ZQL. See
+[Queries and permissions](/docs/orez-lite/queries).
 
-Orez Lite installs triggers after application DDL and seed data. Each insert, update, or delete appends the touched table and primary key to `_zsync_changes`.
+## Mutation path
 
-Pull reads the current row inside the same transaction. The log stays compact, intermediate values disappear naturally, and SQLite values avoid a JSON row-image round trip. A primary-key-changing update records both the previous and current key.
+The client runs its registered mutator optimistically, then Orez forwards the
+mutation to the application push endpoint. The endpoint authenticates the
+request and executes the server-side mutator in the authoritative database.
+Committed rows return through the database change feed.
+
+This preserves one mutation implementation and one write authority. See
+[Mutations](/docs/orez-lite/writes).
+
+## SQLite replica
+
+The Cloudflare host keeps a synchronized SQLite copy per namespace. Database
+changes enter the replica in commit order and append touched table/primary-key
+entries to the engine change log. Pull reads the current row in the same
+transaction, so intermediate values do not leak into client patches.
 
 ## Cookies and retention
 
-Each namespace has a durable monotonic watermark and a retained floor:
+Each namespace has a monotonic watermark and a retained floor:
 
-- cookie equals watermark → unchanged;
-- cookie is within the retained window → diff of touched keys;
-- new or expired cookie → full snapshot;
-- cookie ahead of the server → reset response.
+- cookie equals watermark: no changes;
+- cookie is inside retained history: incremental touched-key diff;
+- new or expired cookie: full snapshot;
+- cookie is ahead of the server: reset response.
 
-Pruning removes old change rows while the durable high-water mark preserves cookie monotonicity across restart and an empty log.
+Pruning removes old change rows while preserving the durable high-water mark.
 
-## Push idempotency
+## Mutation acknowledgements
 
-The engine tracks last-mutation IDs by client group and client. A retry of a committed mutation returns its known position. New mutations apply in order inside the host transaction.
-
-Application rejection advances the mutation ID. Infrastructure failure rolls back the transaction for a safe retry.
-
-## Query membership
-
-Query-aware mode stores desired queries, compiled transforms, row membership, and reference counts. A row remains present while at least one desired query references it. Query changes and row changes reconcile transactionally into the next patch.
+The engine tracks last-mutation IDs by client group and client. It records the
+application push result independently from row arrival through the change feed.
+This makes retries idempotent while keeping the application database as the only
+row authority.
 
 ## Wake channel
 
-Wake contains a data-available hint. A client follows the hint with pull, and periodic safety pulls cover delayed, coalesced, duplicated, or missed wake frames. State and cookies travel through pull responses.
+Wake is a data-available hint. The client follows it with a pull. Periodic safety
+pulls cover delayed, coalesced, duplicated, or missed wake frames; state and
+cookies always travel through pull responses.

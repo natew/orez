@@ -1,80 +1,117 @@
 ---
-title: Orez Lite on Cloudflare
-description: Host the Orez Lite WASM engine in a SQLite Durable Object with a consumer-owned Worker.
+title: Orez Lite setup
+description: Connect an existing Zero or on-zero application to the Cloudflare Orez Lite sync host.
 ---
 
-# Cloudflare deployment
+# Orez Lite setup
 
-<Status tone="preview">Optional host · Preview</Status>
+<Status tone="preview">Cloudflare host · Preview</Status>
 
-The Cloudflare host compiles `sync-core` through `sync-wasm` and runs it inside a SQLite Durable Object. The outer Worker authenticates the request, resolves the namespace, and forwards normalized claims to the object.
+Start with a working Zero or `on-zero` application. Orez Lite replaces the
+`zero-cache` synchronization engine. It does not replace your schema, named ZQL
+queries, custom mutators, authentication, or application endpoints.
 
-This optional host deploys Orez Lite directly on Cloudflare’s SQLite Durable Object platform.
+<Callout title="Before you start" tone="note">
+  If the application does not yet have a Zero query endpoint and mutate endpoint, follow
+  Zero’s [installation guide](https://zero.rocicorp.dev/docs/install) first.
+</Callout>
 
-## Consumer surface
+## Application surface
 
-The host package exports `createSyncWorker`, `createSyncDurableObject`, `registerMutators`, and the `SyncHostConfig` types:
+The application keeps these pieces:
 
-```ts
-import {
-  createSyncDurableObject,
-  createSyncWorker,
-  registerMutators,
-} from 'orez-sync-cf-host'
+- its Zero schema and relationships;
+- registered named queries that return ZQL;
+- registered custom mutators;
+- an authenticated query endpoint, commonly `/api/zero/pull` in `on-zero` apps;
+- an authenticated mutate endpoint, commonly `/api/zero/push`;
+- one authoritative database.
 
-const config = {
-  hostVersion: 'my-app-v1',
-  schema,
-  initialize(sql) {
-    sql.exec(`CREATE TABLE IF NOT EXISTS todo (
-      id TEXT PRIMARY KEY,
-      ownerId TEXT NOT NULL,
-      title TEXT NOT NULL
-    )`)
-  },
-  mutators: registerMutators({
-    async 'todo.create'(tx, args, { claims }) {
-      await tx.exec('INSERT INTO todo (id, ownerId, title) VALUES (?, ?, ?)', [
-        args.id,
-        claims.userID,
-        args.title,
-      ])
-    },
-  }),
-  authenticate(request) {
-    return authenticateAndNormalize(request)
-  },
-  namespace(request) {
-    return new URL(request.url).pathname.split('/')[1] || null
-  },
-} satisfies SyncHostConfig<Env>
+Permissions stay in the application. Read permissions are filters in the ZQL
+resolved by the query endpoint. Write permissions are checks in the server-side
+mutator. See [Queries and permissions](/docs/orez-lite/queries) and
+[Mutations](/docs/orez-lite/writes).
 
-export const SyncDurableObject = createSyncDurableObject(config)
-export default createSyncWorker(config)
+## Client connection
+
+The client still uses the stock `@rocicorp/zero` client and the same registered
+queries and mutators. `on-zero` applications install its Orez HTTP transport for
+the deployed namespace, then point the provider at that URL:
+
+```tsx
+import { ensureHttpPullTransport, ProvideZero } from 'on-zero'
+
+export function OrezRoot({ children, namespace, user, sessionToken }) {
+  const cacheURL = `${OREZ_SYNC_URL}/${namespace}`
+
+  if (typeof window !== 'undefined') {
+    ensureHttpPullTransport({
+      origin: cacheURL,
+      queryForward: true,
+      wake: true,
+    })
+  }
+
+  return (
+    <ProvideZero
+      cacheURL={cacheURL}
+      transport="http-pull"
+      userID={user.id}
+      auth={sessionToken}
+      authData={user}
+    >
+      {children}
+    </ProvideZero>
+  )
+}
 ```
 
-The snippets’ `schema`, `Env`, and authentication functions are application-owned. Bind `SYNC_DO` to the exported Durable Object class in Wrangler configuration.
+`queryForward` sends registered query names and arguments to the application
+query endpoint. `wake` lets the host notify the client to pull immediately after
+new data arrives. Application components continue to call `useQuery(...)` and
+`zero.mutate(...)` exactly as before.
 
-## Security boundary
+## Deployment connection
 
-Authentication happens in the outer Worker. Only normalized claims and a hashed namespace identity cross the private boundary into the Durable Object. Host telemetry records structural counts and hashed identifiers. It excludes tokens, mutation arguments, and row contents.
+The Cloudflare deployment connects the sync host to the application over
+private service bindings:
 
-Admin requests require `authorizeAdmin` or an `ADMIN_KEY` sent as `x-admin-key`. Reserve `/admin/*` for authenticated operator workflows.
+```text
+                         ┌─ query name + args ─→ app query endpoint
+Zero client ─→ Orez Lite ┤
+                         └─ mutation push ─────→ app mutate endpoint
+                                                      │
+                                                      ▼
+                                             authoritative database
+                                                      │
+                                                      ▼ changes
+                         client patches ←──── Orez Lite replica
+```
 
-## Durable transactions
+The application endpoint authenticates the original bearer token. Orez receives
+only the authorized query result shape and committed database changes needed to
+maintain client subscriptions.
 
-Pull runs the engine inside `transactionSync`. Local-mutator push validates and plans in Rust, executes the TypeScript mutator inside `ctx.storage.transaction`, then finalizes mutation IDs and change state. SQL cursors are materialized before an `await` so no Durable Object cursor crosses an asynchronous boundary.
+The deployment also chooses a namespace key, such as an organization or
+project ID. A namespace is a storage and ordering boundary, not an authorization
+mechanism. The application must still authenticate every query and mutation.
 
-Side effects registered with `context.defer()` run after commit and use their own idempotency, observability, and retry policy.
+## What is currently Cloudflare-specific
 
-## Wake and hibernation
+The public Orez Lite integration runs the Rust/WASM engine in a SQLite Durable
+Object. It uses a service binding for application queries and pushes, plus a
+change feed from the authoritative data service. Packaging this deployment into
+a smaller reusable adapter is still in progress, so the host remains marked
+preview.
 
-`GET /<namespace>/wake?clientID=<id>` upgrades to a hibernating WebSocket. Attachments store only the client ID. After a push commits, the host coalesces wake notifications for other clients. Each client then pulls the latest state.
+Application code should not depend on the host’s internal query AST, replication
+cursor, Durable Object schema, or cache-invalidation controls. Those are Orez
+implementation details and may change during preview.
 
-The object can be evicted and reconstructed without losing SQLite state or socket attachments. In-memory counters and caches are deliberately non-authoritative.
+## Next steps
 
-## Platform fit
-
-Durable Objects give each namespace ordered execution and colocated SQLite. Per-object memory, CPU, storage, and billing constraints make namespace partitioning the primary scaling mechanism.
-
-Read [Operations](/docs/orez-lite/operations) and [Limitations](/docs/orez-lite/limitations) before treating a local harness result as a deployment qualification.
+1. Review [Queries and permissions](/docs/orez-lite/queries).
+2. Review [Mutations](/docs/orez-lite/writes).
+3. Read [Architecture](/docs/orez-lite/architecture) if you need the engine and
+   replication details.
+4. Read [Limitations](/docs/orez-lite/limitations) before a production rollout.

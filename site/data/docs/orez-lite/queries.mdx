@@ -1,65 +1,93 @@
 ---
-title: Orez Lite queries and permissions
-description: Whole-namespace pulls, query-aware membership, row visibility, and permission invalidation.
+title: Queries and permissions
+description: Keep named ZQL queries and enforce read access through authenticated application context.
 ---
 
 # Queries and permissions
 
-Orez Lite supports baseline namespace synchronization and query-aware synchronization. Both strategies enforce permissions before rows enter a client patch.
+Orez Lite uses Zero’s named-query model. Define queries with ZQL, register them
+with Zero or `on-zero`, and resolve them through the application query endpoint
+you already use.
 
-## Baseline pulls
+Read Zero’s [Queries](https://zero.rocicorp.dev/docs/queries) guide for the full
+query lifecycle and the [ZQL reference](https://zero.rocicorp.dev/docs/zql) for
+filters, relationships, ordering, limits, and pagination.
 
-Baseline mode synchronizes the visible rows of configured tables. With no visibility callback, every authenticated user can see every synchronized row in the namespace.
+## Define named ZQL queries
 
-A native visibility callback returns a SQL predicate and parameters per table and user. The Cloudflare host exposes the equivalent `visibility.filter(table, claims)` configuration.
+In an `on-zero` application, exported query functions are registered by the
+generated query registry. Keep read authorization in the ZQL returned by those
+functions:
 
 ```ts
-visibility: {
-  rowLocal: true,
-  filter(table, claims) {
-    if (table === 'todo') {
-      return { sql: 'ownerId = ?', params: [claims.userID] }
-    }
-  },
+import { serverWhere, zql } from 'on-zero'
+
+const canReadProject = serverWhere('project', (q, auth) =>
+  q.or(
+    q.cmp('ownerId', auth?.id ?? ''),
+    q.exists('members', (member) => member.where('userId', auth?.id ?? ''))
+  )
+)
+
+export const projectById = (args: { id: string }) =>
+  zql.project.where(canReadProject).where('id', args.id).one()
+```
+
+The client sends the registered query name and validated arguments. The
+application resolves that name using authenticated server context and returns
+the authorized ZQL query. Client arguments are useful filters, but they are not
+proof of identity or access.
+
+## Keep the application query endpoint
+
+The application endpoint authenticates the request before `on-zero` resolves
+the registered query:
+
+```ts
+export async function POST(request: Request) {
+  const authData = await getAuthData(request)
+  if (!authData) return new Response('unauthorized', { status: 401 })
+
+  const { response } = await zeroServer.handleQueryRequest({
+    authData,
+    request,
+  })
+
+  return Response.json(response)
 }
 ```
 
-Because a permission change can revoke an untouched row, visibility-filtered baseline pulls use a full snapshot to recompute the complete visible set.
+With stock `zero-cache`, this is the endpoint configured by `ZERO_QUERY_URL`.
+With Orez Lite, it remains the same endpoint. Orez asks the application to
+resolve each named query, then maintains the resulting rows as the authoritative
+database changes.
 
-## Query-aware pulls
-
-Query-aware mode consumes desired queries from the client and compiles each allowed query into a validated Zero AST. The engine maintains membership and reference counts so the patch can add rows entering a result and remove rows leaving it.
-
-The Cloudflare host can resolve named queries after authentication:
-
-```ts
-queryAware: true,
-resolveQuery(name, args, claims) {
-  if (name === 'myTodos') {
-    return buildTodoAst({ ownerId: claims.userID, limit: args[0] })
-  }
-  throw new Error('query not allowed')
-},
-queryTransformVersion: 3,
+```text
+useQuery(projectById, { id })
+  → registered query name + arguments
+  → application /api/zero/pull
+  → authentication + authorized ZQL
+  → Orez Lite tracks the result
+  → incremental row patches reach the client
 ```
 
-The application validates query names and arguments, then constructs the authorized AST on the server.
+## Permissions are application logic
 
-## Transform invalidation
+Zero does not require a separate RLS-style permission language. Read access is
+expressed by the authenticated ZQL returned from the query endpoint. Write
+access is enforced by the server-side mutator. See Zero’s
+[permission patterns](https://zero.rocicorp.dev/docs/auth#permission-patterns)
+for ownership, membership, sharing, and role examples.
 
-`queryTransformVersion` is a server-owned epoch. Increase it when schema or permission logic changes in a way that invalidates cached query transforms. Orez Lite then rebuilds affected membership under the current rules.
+Orez’s internal query representation and cache invalidation are deployment
+details. Application authors should not construct query AST objects, SQL
+visibility callbacks, or Orez-specific permission rules.
 
-For baseline visibility, the admin invalidation route advances an engine marker so subsequent pulls rebuild from a safe snapshot.
+## Checklist
 
-## Namespace isolation
-
-Namespace resolution happens before the engine opens storage. Use namespaces as a genuine ownership and scaling boundary, such as organization, workspace, or project. Authentication still applies within every namespace.
-
-## Permission checklist
-
-- Normalize and validate identity at the host boundary.
-- Derive predicates and query ASTs on the server.
-- Parameterize SQL values; never interpolate claims into SQL strings.
-- Version permission transforms.
-- Test both initial visibility and revocation.
-- Assert that forbidden rows never appear in snapshots, diffs, logs, or operator responses.
+- Register every synchronized query by name.
+- Validate query arguments at the server boundary.
+- Derive identity and roles from the authenticated request.
+- Apply read filters in server-resolved ZQL.
+- Enforce write rules again in the server-side mutator.
+- Test both initial access and revocation with real clients.
