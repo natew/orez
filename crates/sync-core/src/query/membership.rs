@@ -74,7 +74,7 @@ fn raw_pk(spec: &TableSpec, row: &crate::db::Row) -> Value {
 
 // the current query-aware schema version. bump when a query-aware table changes
 // shape, and add the forward migration in migrate_query_schema.
-const QUERY_SCHEMA_VERSION: i64 = 1;
+const QUERY_SCHEMA_VERSION: i64 = 2;
 
 fn table_exists(db: &mut dyn SyncDb, name: &str) -> Result<bool, EngineError> {
     let rows = db.query(
@@ -122,7 +122,7 @@ fn migrate_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
                 _ => None,
             });
         match queries_sql {
-            Some(sql) if sql.contains("clientGroupID") => QUERY_SCHEMA_VERSION,
+            Some(sql) if sql.contains("clientGroupID") => 1,
             Some(_) => 0,
             None => return Ok(()), // fresh install
         }
@@ -150,6 +150,8 @@ fn migrate_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
         "_zsync_query_rows",
         "_zsync_row_refs",
         "_zsync_query_state",
+        "_zsync_query_transform_group",
+        "_zsync_query_transform_client",
         "_zsync_query_meta",
     ] {
         db.exec(&format!("DROP TABLE IF EXISTS {table}"), &[])?;
@@ -196,6 +198,22 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
     // patch.version).
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_query_ack (
+            clientGroupID TEXT NOT NULL,
+            clientID TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            PRIMARY KEY (clientGroupID, clientID)
+        )",
+        &[],
+    )?;
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _zsync_query_transform_group (
+            clientGroupID TEXT PRIMARY KEY,
+            version INTEGER NOT NULL
+        )",
+        &[],
+    )?;
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _zsync_query_transform_client (
             clientGroupID TEXT NOT NULL,
             clientID TEXT NOT NULL,
             version INTEGER NOT NULL,
@@ -436,6 +454,64 @@ pub(crate) fn reset_group(db: &mut dyn SyncDb, group: &str) -> Result<(), Engine
         &[text(group)],
     )?;
     Ok(())
+}
+
+pub(crate) fn prepare_transform_version(
+    db: &mut dyn SyncDb,
+    group: &str,
+    client: &str,
+    version: i64,
+) -> Result<bool, EngineError> {
+    let group_rows = db.query(
+        "SELECT CAST(version AS TEXT) AS v FROM _zsync_query_transform_group
+         WHERE clientGroupID = ?",
+        &[text(group)],
+    )?;
+    let group_version =
+        group_rows
+            .first()
+            .and_then(|row| row.get("v"))
+            .and_then(|value| match value {
+                SqlValue::Text(value) => value.parse::<i64>().ok(),
+                _ => None,
+            });
+
+    if group_version.is_some_and(|stored| stored != version) {
+        // keep per-client desires until each client checks in so qpull can
+        // acknowledge targeted dels. a gotQueries clear drops Zero's local
+        // named-query mapping and leaves correctly returned rows invisible.
+        db.exec(
+            "DELETE FROM _zsync_queries WHERE clientGroupID = ?",
+            &[text(group)],
+        )?;
+        reset_group(db, group)?;
+    }
+    db.exec(
+        "INSERT INTO _zsync_query_transform_group (clientGroupID, version) VALUES (?, ?)
+         ON CONFLICT (clientGroupID) DO UPDATE SET version = excluded.version",
+        &[text(group), SqlValue::Integer(version)],
+    )?;
+
+    let client_rows = db.query(
+        "SELECT CAST(version AS TEXT) AS v FROM _zsync_query_transform_client
+         WHERE clientGroupID = ? AND clientID = ?",
+        &[text(group), text(client)],
+    )?;
+    let client_version = client_rows
+        .first()
+        .and_then(|row| row.get("v"))
+        .and_then(|value| match value {
+            SqlValue::Text(value) => value.parse::<i64>().ok(),
+            _ => None,
+        });
+    let reset_client = client_version != Some(version);
+    db.exec(
+        "INSERT INTO _zsync_query_transform_client (clientGroupID, clientID, version)
+         VALUES (?, ?, ?)
+         ON CONFLICT (clientGroupID, clientID) DO UPDATE SET version = excluded.version",
+        &[text(group), text(client), SqlValue::Integer(version)],
+    )?;
+    Ok(reset_client)
 }
 
 // canonicalize a change-log pk (json_object text) to the membership key form

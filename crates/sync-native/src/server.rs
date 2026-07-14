@@ -38,6 +38,8 @@ pub struct AppState {
     pub wake: Arc<WakeRegistry>,
     pub ctx: Arc<EngineContext>,
     pub authenticate: crate::AuthFn,
+    query_resolution: Option<crate::QueryResolution>,
+    query_pull_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     admin_token: String,
     allowed_origins: HashSet<String>,
     boot_id: String,
@@ -55,6 +57,7 @@ impl AppState {
         wake: Arc<WakeRegistry>,
         ctx: Arc<EngineContext>,
         authenticate: crate::AuthFn,
+        query_resolution: Option<crate::QueryResolution>,
         admin_token: String,
         allowed_origins: Vec<String>,
     ) -> Self {
@@ -63,6 +66,8 @@ impl AppState {
             wake,
             ctx,
             authenticate,
+            query_resolution,
+            query_pull_locks: Mutex::new(HashMap::new()),
             admin_token,
             allowed_origins: allowed_origins.into_iter().collect(),
             boot_id: boot_id(),
@@ -77,6 +82,15 @@ impl AppState {
     }
     fn take_drop_push(&self, ns: &str) -> bool {
         self.drop_push.lock().unwrap().remove(ns)
+    }
+
+    fn query_pull_lock(&self, ns: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.query_pull_locks
+            .lock()
+            .unwrap()
+            .entry(ns.to_string())
+            .or_default()
+            .clone()
     }
 }
 
@@ -216,13 +230,37 @@ async fn pull(
     let Some(user_id) = (state.authenticate)(&headers) else {
         return json_status(401, json!({ "error": "missing auth" }));
     };
-    let Ok(value) = serde_json::from_slice::<Value>(&body) else {
+    let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
         return json_status(400, json!({ "error": "invalid json" }));
     };
+    if !value.is_object() {
+        return json_status(400, json!({ "error": "invalid pull body" }));
+    }
     let namespace = match state.manager.get(&ns) {
         Ok(n) => n,
         Err(e) => return json_status(400, json!({ "error": e })),
     };
+    let _query_pull_guard = if state.ctx.query_aware && state.query_resolution.is_some() {
+        Some(state.query_pull_lock(&ns).lock_owned().await)
+    } else {
+        None
+    };
+    if state.ctx.query_aware
+        && let Some(resolution) = &state.query_resolution
+    {
+        if let Err(error) = resolve_named_queries(
+            &mut value,
+            &headers,
+            &user_id,
+            &resolution.resolve,
+            resolution.transform_version,
+        )
+        .await
+        {
+            return json_status(error.status, json!({ "error": error.message }));
+        }
+        value["_serverQueryTransformVersion"] = json!(resolution.transform_version);
+    }
     let ns_hash = obs::namespace_hash(&ns);
     let input_cookie = value.get("cookie").cloned().unwrap_or(Value::Null);
     let query_puts = obs::count_query_puts(&value);
@@ -293,6 +331,81 @@ async fn pull(
         Ok(v) => json_status(200, v),
         Err(e) => json_status(e.status, json!({ "error": e.message })),
     }
+}
+
+async fn resolve_named_queries(
+    body: &mut Value,
+    headers: &HeaderMap,
+    user_id: &str,
+    resolver: &crate::ResolveQueriesFn,
+    transform_version: u64,
+) -> Result<(), crate::QueryResolveError> {
+    const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+    if transform_version > MAX_SAFE_INTEGER {
+        return Err(crate::QueryResolveError::upstream(
+            "query transform version exceeds the JSON safe integer range",
+        ));
+    }
+
+    let Some(patch) = body
+        .get_mut("queries")
+        .and_then(|queries| queries.get_mut("patch"))
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+
+    let mut named_queries = Vec::new();
+    let mut put_indices = Vec::new();
+    for (index, operation) in patch.iter().enumerate() {
+        if operation.get("op").and_then(Value::as_str) != Some("put") {
+            continue;
+        }
+        if operation.get("hash").and_then(Value::as_str).is_none() {
+            return Err(crate::QueryResolveError::bad_request(
+                "query put requires a hash",
+            ));
+        }
+        let Some(name) = operation.get("name").and_then(Value::as_str) else {
+            return Err(crate::QueryResolveError::bad_request(
+                "query put requires a server-resolved named query",
+            ));
+        };
+        let Some(args) = operation.get("args").and_then(Value::as_array) else {
+            return Err(crate::QueryResolveError::bad_request(
+                "named query args must be an array",
+            ));
+        };
+        named_queries.push(crate::NamedQuery {
+            name: name.to_string(),
+            args: args.clone(),
+        });
+        put_indices.push(index);
+    }
+
+    if named_queries.is_empty() {
+        return Ok(());
+    }
+
+    let asts = resolver(named_queries, headers.clone(), user_id.to_string()).await?;
+    if asts.len() != put_indices.len() {
+        return Err(crate::QueryResolveError::upstream(format!(
+            "query resolver returned {} ASTs for {} queries",
+            asts.len(),
+            put_indices.len()
+        )));
+    }
+
+    for (index, ast) in put_indices.into_iter().zip(asts) {
+        let hash = patch[index]["hash"].clone();
+        patch[index] = json!({
+            "op": "put",
+            "hash": hash,
+            "ast": ast,
+            "transformVersion": transform_version,
+        });
+    }
+    Ok(())
 }
 
 async fn push(

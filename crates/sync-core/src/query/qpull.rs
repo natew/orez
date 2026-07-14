@@ -20,7 +20,8 @@ use crate::wire;
 
 use super::membership::{
     advance_query_ack, canonical_pk_text, clear_desires, client_query_version, desired_hashes,
-    recompute_group_with_rehydrate, register_query, remove_desire, reset_group, set_desire,
+    prepare_transform_version, recompute_group_with_rehydrate, register_query, remove_desire,
+    reset_group, set_desire,
 };
 
 // apply the desiredQueriesPatch and return queries newly desired by this client.
@@ -139,6 +140,30 @@ pub fn handle_query_pull(
 
     store::claim_client(db, group, client_id, user_id)?;
 
+    let transform_reset = match body.get("_serverQueryTransformVersion") {
+        None => false,
+        Some(version) => {
+            let version = wire::non_negative_safe_int(version).ok_or_else(|| {
+                EngineError::bad_request(
+                    "_serverQueryTransformVersion must be a non-negative integer",
+                )
+            })?;
+            prepare_transform_version(db, group, client_id, version)?
+        }
+    };
+    // preserve the old hashes long enough to send targeted gotQueries dels.
+    // this makes Zero resend each named query without clearing its local
+    // custom-query mapping.
+    let invalidated_hashes = if transform_reset {
+        let hashes = desired_hashes(db, group, client_id)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        clear_desires(db, group, client_id)?;
+        hashes
+    } else {
+        BTreeSet::new()
+    };
+
     // apply the desired-query lifecycle before recomputing
     let applied_queries = match body.get("queries") {
         None | Some(Value::Null) => None,
@@ -162,7 +187,7 @@ pub fn handle_query_pull(
         Some(c) => c < store::floor(db)?,
         None => true,
     };
-    let fresh = cookie.is_none() || below_floor;
+    let fresh = cookie.is_none() || below_floor || transform_reset;
 
     // fast path: caught up and no desired-query change -> unchanged
     if !fresh && cookie == Some(current) && applied_queries.is_none() {
@@ -187,8 +212,13 @@ pub fn handle_query_pull(
     // gotQueries: acknowledge the client's currently-desired queries at its
     // query-state version. built AFTER the recompute, in the same transaction,
     // so the ack never precedes the row effects (invariant 13).
+    let desired_hashes = desired_hashes(db, group, client_id)?;
+    let desired_set = desired_hashes.iter().cloned().collect::<BTreeSet<_>>();
     let mut got_patch = Vec::new();
-    for hash in desired_hashes(db, group, client_id)? {
+    for hash in invalidated_hashes.difference(&desired_set) {
+        got_patch.push(json!({ "op": "del", "hash": hash }));
+    }
+    for hash in desired_hashes {
         got_patch.push(json!({ "op": "put", "hash": hash }));
     }
     // the version the client is now synced to: its durable, monotonic query-state

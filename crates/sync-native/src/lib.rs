@@ -20,7 +20,9 @@ pub mod seed;
 pub mod server;
 pub mod wake;
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,11 +30,56 @@ use axum::Router;
 use axum::http::HeaderMap;
 use engine::{EngineContext, InitFn, MutateFn, VisibleFn};
 use namespace::Manager;
+use serde_json::Value;
 use sync_core::schema::Tables;
 
 /// Authentication callback. Receives HTTP request headers, returns
 /// `Some(user_id)` for an authenticated user, or `None` to reject.
 pub type AuthFn = Arc<dyn Fn(&HeaderMap) -> Option<String> + Send + Sync>;
+
+/// One named desired query forwarded by a client for server-side resolution.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamedQuery {
+    pub name: String,
+    pub args: Vec<Value>,
+}
+
+/// A query resolver failure returned to the pull caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryResolveError {
+    pub status: u16,
+    pub message: String,
+}
+
+impl QueryResolveError {
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: 400,
+            message: message.into(),
+        }
+    }
+
+    pub fn upstream(message: impl Into<String>) -> Self {
+        Self {
+            status: 502,
+            message: message.into(),
+        }
+    }
+}
+
+pub type ResolveQueriesFuture =
+    Pin<Box<dyn Future<Output = Result<Vec<Value>, QueryResolveError>> + Send>>;
+
+/// Resolve a batch of named desired queries into permission-checked Zero ASTs.
+/// The returned ASTs must match the input order and length.
+pub type ResolveQueriesFn =
+    Arc<dyn Fn(Vec<NamedQuery>, HeaderMap, String) -> ResolveQueriesFuture + Send + Sync>;
+
+/// Server-owned query resolution and invalidation policy.
+pub struct QueryResolution {
+    pub resolve: ResolveQueriesFn,
+    pub transform_version: u64,
+}
 
 /// Default idle-between-steps budget for a server-owned admin transaction. If
 /// an admin client sends no next step within this window the namespace worker
@@ -171,6 +218,12 @@ pub struct SyncNativeConfig {
     /// at runtime via the admin route.
     pub query_aware: bool,
 
+    /// Optional server-side named-query resolver. When configured, every query
+    /// put must carry a name and args, and any client-authored AST is discarded.
+    /// The request headers are included so the consumer can apply the same auth
+    /// context as its application query endpoint.
+    pub query_resolution: Option<QueryResolution>,
+
     /// Idle-between-steps budget for a server-owned admin transaction (the
     /// multi-request BEGIN/.../COMMIT protocol on `/admin/sql`). Each step
     /// refreshes it; if it elapses with no next step the namespace worker
@@ -228,6 +281,7 @@ impl SyncNativeHost {
             wake::WakeRegistry::new(),
             ctx,
             config.authenticate,
+            config.query_resolution,
             security.admin_token.clone(),
             security.allowed_origins,
         ));

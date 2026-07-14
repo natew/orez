@@ -6,7 +6,7 @@
 // 3. pull/push work with a custom schema
 // 4. into_router() works for embedding
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::http::{HeaderMap, Request, StatusCode};
 use serde_json::{Value, json};
@@ -18,6 +18,9 @@ use sync_core::value::ZeroColumnType;
 use sync_core::{SqlValue, SyncDb};
 
 use sync_native::AuthFn;
+use sync_native::NamedQuery;
+use sync_native::QueryResolution;
+use sync_native::ResolveQueriesFn;
 use sync_native::SyncNativeConfig;
 use sync_native::SyncNativeHost;
 use sync_native::SyncNativeSecurity;
@@ -123,7 +126,23 @@ fn custom_config_with_lease(admin_tx_lease: std::time::Duration) -> SyncNativeCo
         retain_changes: 4096,
         visibility_enabled: false,
         query_aware: false,
+        query_resolution: None,
         admin_tx_lease,
+    }
+}
+
+fn item_query(label: Option<&str>) -> Value {
+    match label {
+        Some(label) => json!({
+            "table": "item",
+            "where": {
+                "type": "simple",
+                "op": "=",
+                "left": { "type": "column", "name": "label" },
+                "right": { "type": "literal", "value": label },
+            },
+        }),
+        None => json!({ "table": "item" }),
     }
 }
 
@@ -232,6 +251,457 @@ fn mutation(id: u64, name: &str, args: Value, client_id: &str) -> Value {
 }
 
 // ---- tests -------------------------------------------------------------
+
+#[tokio::test]
+async fn named_queries_are_batched_and_resolved_before_sqlite() {
+    let seen = Arc::new(Mutex::new(Vec::<NamedQuery>::new()));
+    let captured = seen.clone();
+    let resolver: ResolveQueriesFn = Arc::new(move |queries, headers, user_id| {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer user-1")
+        );
+        assert_eq!(user_id, "user-1");
+        *captured.lock().unwrap() = queries;
+        Box::pin(async { Ok(vec![item_query(None), item_query(Some("missing"))]) })
+    });
+
+    let mut config = custom_config();
+    config.query_aware = true;
+    config.query_resolution = Some(QueryResolution {
+        resolve: resolver,
+        transform_version: 7,
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let router = test_host(config, tmp.path().to_path_buf()).into_router();
+
+    let body = json!({
+        "clientID": "query-client",
+        "clientGroupID": "query-group",
+        "cookie": null,
+        "queries": {
+            "version": 1,
+            "patch": [
+                {
+                    "op": "put",
+                    "hash": "q-all",
+                    "name": "item.all",
+                    "args": [],
+                    "ast": { "table": "client-forged" },
+                    "transformVersion": 999,
+                },
+                {
+                    "op": "put",
+                    "hash": "q-missing",
+                    "name": "item.byLabel",
+                    "args": [{ "label": "missing" }],
+                },
+            ],
+        },
+    });
+    let (status, response) = send(&router, pull_req("query-ns", &body, "Bearer user-1")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(patch_count(&response, "item", "put"), 1);
+    assert_eq!(
+        response["gotQueries"],
+        json!({
+            "version": 1,
+            "patch": [
+                { "op": "put", "hash": "q-all" },
+                { "op": "put", "hash": "q-missing" },
+            ],
+        })
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            NamedQuery {
+                name: "item.all".into(),
+                args: vec![],
+            },
+            NamedQuery {
+                name: "item.byLabel".into(),
+                args: vec![json!({ "label": "missing" })],
+            },
+        ]
+    );
+
+    let (status, stored) = send(
+        &router,
+        admin_sql_req(
+            "query-ns",
+            "SELECT hash, ast, transformVersion FROM _zsync_queries ORDER BY hash",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["rows"][0]["hash"], json!("q-all"));
+    assert_eq!(
+        stored["rows"][0]["ast"],
+        json!(item_query(None).to_string())
+    );
+    assert_eq!(stored["rows"][0]["transformVersion"], json!(7));
+    assert_eq!(stored["rows"][1]["hash"], json!("q-missing"));
+    assert_eq!(
+        stored["rows"][1]["ast"],
+        json!(item_query(Some("missing")).to_string())
+    );
+    assert_eq!(stored["rows"][1]["transformVersion"], json!(7));
+}
+
+#[tokio::test]
+async fn configured_query_resolver_rejects_client_authored_ast() {
+    let calls = Arc::new(Mutex::new(0));
+    let captured = calls.clone();
+    let resolver: ResolveQueriesFn = Arc::new(move |_queries, _headers, _user_id| {
+        *captured.lock().unwrap() += 1;
+        Box::pin(async { Ok(vec![item_query(None)]) })
+    });
+    let mut config = custom_config();
+    config.query_aware = true;
+    config.query_resolution = Some(QueryResolution {
+        resolve: resolver,
+        transform_version: 0,
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let router = test_host(config, tmp.path().to_path_buf()).into_router();
+
+    let (status, response) = send(&router, pull_req("query-ns", &json!([]), "Bearer user-1")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response["error"], json!("invalid pull body"));
+
+    for operation in [
+        json!({ "op": "put", "hash": "forged", "ast": { "table": "item" } }),
+        json!({ "op": "put", "hash": "missing-args", "name": "item.all" }),
+    ] {
+        let body = json!({
+            "clientID": "query-client",
+            "clientGroupID": "query-group",
+            "cookie": null,
+            "queries": { "version": 1, "patch": [operation] },
+        });
+        let (status, _) = send(&router, pull_req("query-ns", &body, "Bearer user-1")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(*calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn query_resolution_preserves_pull_arrival_order() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let signal_started = started.clone();
+    let wait_for_resume = resume.clone();
+    let resolver: ResolveQueriesFn = Arc::new(move |_queries, _headers, _user_id| {
+        let signal_started = signal_started.clone();
+        let wait_for_resume = wait_for_resume.clone();
+        Box::pin(async move {
+            signal_started.notify_one();
+            wait_for_resume.notified().await;
+            Ok(vec![item_query(None)])
+        })
+    });
+    let mut config = custom_config();
+    config.query_aware = true;
+    config.query_resolution = Some(QueryResolution {
+        resolve: resolver,
+        transform_version: 1,
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let router = test_host(config, tmp.path().to_path_buf()).into_router();
+
+    let first_router = router.clone();
+    let first = tokio::spawn(async move {
+        let body = json!({
+            "clientID": "query-client",
+            "clientGroupID": "query-group",
+            "cookie": null,
+            "queries": {
+                "version": 1,
+                "patch": [{
+                    "op": "put",
+                    "hash": "q-all",
+                    "name": "item.all",
+                    "args": [],
+                }],
+            },
+        });
+        send(
+            &first_router,
+            pull_req("ordered-ns", &body, "Bearer user-1"),
+        )
+        .await
+    });
+    started.notified().await;
+
+    let second_router = router.clone();
+    let second = tokio::spawn(async move {
+        let body = json!({
+            "clientID": "query-client",
+            "clientGroupID": "query-group",
+            "cookie": null,
+            "queries": {
+                "version": 2,
+                "patch": [{ "op": "clear" }],
+            },
+        });
+        send(
+            &second_router,
+            pull_req("ordered-ns", &body, "Bearer user-1"),
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+    resume.notify_one();
+
+    assert_eq!(first.await.unwrap().0, StatusCode::OK);
+    assert_eq!(second.await.unwrap().0, StatusCode::OK);
+    let (status, stored) = send(
+        &router,
+        admin_sql_req(
+            "ordered-ns",
+            "SELECT (SELECT count(*) FROM _zsync_desires) AS desires, \
+                    (SELECT version FROM _zsync_query_ack WHERE clientGroupID = 'query-group' \
+                     AND clientID = 'query-client') AS version",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["rows"][0]["desires"], json!(0));
+    assert_eq!(stored["rows"][0]["version"], json!(2));
+}
+
+#[tokio::test]
+async fn transform_version_bump_revokes_stored_query_without_a_client_patch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolver: ResolveQueriesFn =
+        Arc::new(|_queries, _headers, _user_id| Box::pin(async { Ok(vec![item_query(None)]) }));
+    let mut first_config = custom_config();
+    first_config.query_aware = true;
+    first_config.query_resolution = Some(QueryResolution {
+        resolve: resolver,
+        transform_version: 1,
+    });
+    let first_router = test_host(first_config, tmp.path().to_path_buf()).into_router();
+    let body = json!({
+        "clientID": "query-client",
+        "clientGroupID": "query-group",
+        "cookie": null,
+        "queries": {
+            "version": 1,
+            "patch": [{
+                "op": "put",
+                "hash": "q-all",
+                "name": "item.all",
+                "args": [],
+            }],
+        },
+    });
+    let (status, first_response) = send(
+        &first_router,
+        pull_req("versioned-ns", &body, "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(patch_count(&first_response, "item", "put"), 1);
+    assert_eq!(
+        first_response["gotQueries"],
+        json!({ "version": 1, "patch": [{ "op": "put", "hash": "q-all" }] })
+    );
+    let cookie = first_response["cookie"].clone();
+    drop(first_router);
+
+    let resolver: ResolveQueriesFn = Arc::new(|_queries, _headers, _user_id| {
+        Box::pin(async { Ok(vec![item_query(Some("missing"))]) })
+    });
+    let mut second_config = custom_config();
+    second_config.initialize = Arc::new(|db| {
+        db.exec(
+            "CREATE TABLE IF NOT EXISTS item (id text PRIMARY KEY, label text NOT NULL)",
+            &[],
+        )
+        .map_err(|error| error.0)?;
+        db.exec(
+            "INSERT OR IGNORE INTO item (id, label) VALUES ('i1', 'hello')",
+            &[],
+        )
+        .map_err(|error| error.0)?;
+        Ok(())
+    });
+    second_config.query_aware = true;
+    second_config.query_resolution = Some(QueryResolution {
+        resolve: resolver,
+        transform_version: 2,
+    });
+    let second_router = test_host(second_config, tmp.path().to_path_buf()).into_router();
+    let body = json!({
+        "clientID": "query-client",
+        "clientGroupID": "query-group",
+        "cookie": cookie,
+    });
+    let (status, response) = send(
+        &second_router,
+        pull_req("versioned-ns", &body, "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["rowsPatch"][0], json!({ "op": "clear" }));
+    assert_eq!(patch_count(&response, "item", "put"), 0);
+    assert_eq!(
+        response["gotQueries"],
+        json!({ "version": 1, "patch": [{ "op": "del", "hash": "q-all" }] })
+    );
+
+    let body = json!({
+        "clientID": "query-client",
+        "clientGroupID": "query-group",
+        "cookie": response["cookie"],
+        "queries": {
+            "version": 2,
+            "patch": [{
+                "op": "put",
+                "hash": "q-all",
+                "name": "item.all",
+                "args": [],
+            }],
+        },
+    });
+    let (status, resent) = send(
+        &second_router,
+        pull_req("versioned-ns", &body, "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(patch_count(&resent, "item", "put"), 0);
+    assert_eq!(
+        resent["gotQueries"],
+        json!({ "version": 2, "patch": [{ "op": "put", "hash": "q-all" }] })
+    );
+}
+
+#[tokio::test]
+async fn transform_version_bump_invalidates_each_client_when_it_checks_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolver: ResolveQueriesFn = Arc::new(|queries, _headers, _user_id| {
+        Box::pin(async move { Ok(queries.iter().map(|_| item_query(None)).collect()) })
+    });
+    let mut first_config = custom_config();
+    first_config.query_aware = true;
+    first_config.query_resolution = Some(QueryResolution {
+        resolve: resolver,
+        transform_version: 1,
+    });
+    let first_router = test_host(first_config, tmp.path().to_path_buf()).into_router();
+
+    let mut cookies = Vec::new();
+    for (client, hash) in [("client-one", "q-one"), ("client-two", "q-two")] {
+        let body = json!({
+            "clientID": client,
+            "clientGroupID": "query-group",
+            "cookie": null,
+            "queries": {
+                "version": 1,
+                "patch": [{
+                    "op": "put",
+                    "hash": hash,
+                    "name": "item.all",
+                    "args": [],
+                }],
+            },
+        });
+        let (status, response) = send(
+            &first_router,
+            pull_req("multi-client-versioned-ns", &body, "Bearer user-1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        cookies.push(response["cookie"].clone());
+    }
+    drop(first_router);
+
+    let resolver: ResolveQueriesFn = Arc::new(|queries, _headers, _user_id| {
+        Box::pin(async move {
+            Ok(queries
+                .iter()
+                .map(|_| item_query(Some("missing")))
+                .collect())
+        })
+    });
+    let mut second_config = custom_config();
+    second_config.initialize = Arc::new(|db| {
+        db.exec(
+            "CREATE TABLE IF NOT EXISTS item (id text PRIMARY KEY, label text NOT NULL)",
+            &[],
+        )
+        .map_err(|error| error.0)?;
+        db.exec(
+            "INSERT OR IGNORE INTO item (id, label) VALUES ('i1', 'hello')",
+            &[],
+        )
+        .map_err(|error| error.0)?;
+        Ok(())
+    });
+    second_config.query_aware = true;
+    second_config.query_resolution = Some(QueryResolution {
+        resolve: resolver,
+        transform_version: 2,
+    });
+    let second_router = test_host(second_config, tmp.path().to_path_buf()).into_router();
+
+    let first_body = json!({
+        "clientID": "client-one",
+        "clientGroupID": "query-group",
+        "cookie": cookies[0],
+    });
+    let (status, first_response) = send(
+        &second_router,
+        pull_req("multi-client-versioned-ns", &first_body, "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        first_response["gotQueries"],
+        json!({ "version": 1, "patch": [{ "op": "del", "hash": "q-one" }] })
+    );
+
+    let (status, stored) = send(
+        &second_router,
+        admin_sql_req(
+            "multi-client-versioned-ns",
+            "SELECT clientID, hash FROM _zsync_desires ORDER BY clientID",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        stored["rows"],
+        json!([{ "clientID": "client-two", "hash": "q-two" }])
+    );
+
+    let second_body = json!({
+        "clientID": "client-two",
+        "clientGroupID": "query-group",
+        "cookie": cookies[1],
+    });
+    let (status, second_response) = send(
+        &second_router,
+        pull_req("multi-client-versioned-ns", &second_body, "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        second_response["gotQueries"],
+        json!({ "version": 1, "patch": [{ "op": "del", "hash": "q-two" }] })
+    );
+}
 
 #[tokio::test]
 async fn health_endpoint_responds() {
@@ -880,6 +1350,7 @@ async fn fixture_config_still_works() {
         retain_changes: 4096,
         visibility_enabled: false,
         query_aware: false,
+        query_resolution: None,
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
     };
     let host = test_host(config, tmp.path().to_path_buf());

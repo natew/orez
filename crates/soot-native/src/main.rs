@@ -234,6 +234,7 @@ async fn main() {
         retain_changes: cfg.retain_changes,
         visibility_enabled: cfg.visibility_enabled,
         query_aware: cfg.query_aware,
+        query_resolution: None,
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
     };
 

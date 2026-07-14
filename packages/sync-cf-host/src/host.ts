@@ -897,6 +897,16 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           (typeof config.queryAware === 'function'
             ? config.queryAware(claims)
             : (config.queryAware ?? Boolean(config.resolveQuery)))
+        const transformVersion = queryAware
+          ? typeof config.queryTransformVersion === 'function'
+            ? config.queryTransformVersion(claims)
+            : (config.queryTransformVersion ?? 0)
+          : 0
+        if (!Number.isSafeInteger(transformVersion) || transformVersion < 0) {
+          throw new TypeError(
+            'queryTransformVersion must be a non-negative safe integer'
+          )
+        }
         if (queryAware && body.queries) {
           const queries = body.queries as {
             version?: unknown
@@ -929,15 +939,6 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                 } catch (error) {
                   throw requestError(`unknown or unsupported named query: ${op.name}`)
                 }
-                const transformVersion =
-                  typeof config.queryTransformVersion === 'function'
-                    ? config.queryTransformVersion(claims)
-                    : (config.queryTransformVersion ?? 0)
-                if (!Number.isSafeInteger(transformVersion) || transformVersion < 0) {
-                  throw new TypeError(
-                    'queryTransformVersion must be a non-negative safe integer'
-                  )
-                }
                 patch.push({
                   op: 'put',
                   hash: op.hash,
@@ -948,6 +949,9 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             }
             body = { ...body, queries: { ...queries, patch } }
           }
+        }
+        if (queryAware) {
+          body = { ...body, _serverQueryTransformVersion: transformVersion }
         }
         const clientID = typeof body.clientID === 'string' ? body.clientID : ''
         this.#pulling.add(clientID)

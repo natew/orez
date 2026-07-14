@@ -141,6 +141,7 @@ async fn main() {
         retain_changes: cli.retain_changes,
         visibility_enabled: cli.visible,
         query_aware: cli.query_aware,
+        query_resolution: None,
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
     };
 
