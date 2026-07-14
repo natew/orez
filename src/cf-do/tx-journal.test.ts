@@ -31,6 +31,7 @@ import {
   commitTxJournal,
   recoverTxJournal,
   rollbackTxJournal,
+  snapshotSideEffectWriteTables,
   snapshotTxSchema,
   upgradeToTableSnapshot,
 } from './tx-journal.js'
@@ -100,6 +101,25 @@ function snapshotTx(
 }
 
 describe('tx-journal core', () => {
+  it('does not introspect Cloudflare hidden tables for referential actions', () => {
+    const storage = createSqliteStorage()
+    storage.exec('CREATE TABLE usageState (accountId TEXT PRIMARY KEY)')
+    storage.exec('CREATE TABLE _cf_KV (key TEXT PRIMARY KEY, value BLOB)')
+    let hiddenIntrospection = 0
+    const guarded: DurableSqlStorage = {
+      exec(sql, ...params) {
+        if (/^PRAGMA foreign_key_list\("_cf_/i.test(sql)) {
+          hiddenIntrospection++
+          throw new Error('not authorized: SQLITE_AUTH')
+        }
+        return storage.exec(sql, ...params)
+      },
+    }
+
+    expect(snapshotSideEffectWriteTables(guarded, 'tx1', 'usageState')).toBe(false)
+    expect(hiddenIntrospection).toBe(0)
+  })
+
   it('restores tables, data, indexes, triggers, and views after transactional DDL', () => {
     const storage = createSqliteStorage()
     storage.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT NOT NULL)')

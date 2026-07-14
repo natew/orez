@@ -520,7 +520,7 @@ export function snapshotSideEffectWriteTables(
     .exec(
       "SELECT name FROM sqlite_master WHERE type = 'table' " +
         "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_orez_*' " +
-        "AND name NOT GLOB '_zero_*' ORDER BY name"
+        "AND name NOT GLOB '_zero_*' AND name NOT GLOB '_cf_*' ORDER BY name"
     )
     .toArray()
     .map((row) => String(row.name ?? ''))
