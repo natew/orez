@@ -210,6 +210,7 @@ pub fn apply_upstream(
     batch: &UpstreamBatch,
 ) -> Result<ApplyUpstreamResult, EngineError> {
     let mut cursor = upstream_watermark(db)?;
+    let initial_cursor = cursor;
     let mut applied = 0;
     let mut last_batch_watermark = None;
     for change in &batch.changes {
@@ -220,9 +221,13 @@ pub fn apply_upstream(
         if change.watermark <= cursor {
             continue;
         }
-        let spec = tables
-            .get(&change.table_name)
-            .ok_or_else(|| schema_refresh(format!("unknown table {}", change.table_name)))?;
+        // subset replica: consume changes for tables this host does not model.
+        // advance the cursor so ingest makes durable progress past them; the row
+        // is not materialized. mirrors apply_upstream_snapshot's table skip.
+        let Some(spec) = tables.get(&change.table_name) else {
+            cursor = change.watermark;
+            continue;
+        };
         match change.op.as_str() {
             "INSERT" => upsert_row(
                 db,
@@ -260,7 +265,7 @@ pub fn apply_upstream(
         cursor = change.watermark;
         applied += 1;
     }
-    if applied > 0 {
+    if cursor > initial_cursor {
         db.exec(
             "UPDATE _zsync_meta SET upstream_watermark = ? WHERE lock = 1",
             &[store::counter(cursor)],

@@ -272,3 +272,43 @@ fn snapshot_ignores_tables_absent_from_host_schema() {
     );
     assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 42);
 }
+
+#[test]
+fn changes_skip_tables_absent_from_host_schema() {
+    let (mut db, tables) = setup();
+    // a change for a table this host does not model is consumed (the watermark
+    // advances past it) but not materialized, so ingest is never blocked by a
+    // server-only table like `user` flowing through the feed.
+    let unknown = UpstreamChange {
+        watermark: 1,
+        table_name: "user".into(),
+        op: "INSERT".into(),
+        row_data: Some(row(json!({ "id": "u1", "email": "a@b.c" }))),
+        old_data: None,
+    };
+    let result = apply_upstream(
+        &mut db,
+        &tables,
+        &UpstreamBatch {
+            watermark: 1,
+            changes: vec![unknown],
+        },
+    )
+    .unwrap();
+    assert_eq!(result.applied, 0);
+    assert!(result.caught_up);
+    // the watermark advanced past the skipped change, so ingest keeps flowing.
+    assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 1);
+    // and a later change on a modeled table still applies normally.
+    apply_upstream(
+        &mut db,
+        &tables,
+        &UpstreamBatch {
+            watermark: 2,
+            changes: vec![change(2, "INSERT", Some(item("a", "one")), None)],
+        },
+    )
+    .unwrap();
+    assert_eq!(db.query("SELECT id FROM item", &[]).unwrap().len(), 1);
+    assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 2);
+}

@@ -715,7 +715,11 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             })
           }
           if (result.caughtUp) break
-          if (result.applied === 0) {
+          // a page can legitimately apply zero rows while still advancing the
+          // watermark: the engine consumes changes for tables this host does not
+          // model (subset replica) without materializing them. only a page that
+          // neither applied nor advanced is genuinely stalled.
+          if (result.applied === 0 && String(nextCursor) === String(cursor)) {
             this.#tripIngest('ingestCursorStalled', {
               phase: 'changes',
               cursor,
