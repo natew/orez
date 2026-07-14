@@ -9,13 +9,17 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Bytes;
+use axum::extract::Request;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, ORIGIN};
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::{Value, json};
-use tower_http::cors::CorsLayer;
+use subtle::ConstantTimeEq;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use sync_core::value::f64_to_json;
 use sync_core::{Row, SqlValue, SyncDb};
@@ -34,6 +38,8 @@ pub struct AppState {
     pub wake: Arc<WakeRegistry>,
     pub ctx: Arc<EngineContext>,
     pub authenticate: crate::AuthFn,
+    admin_token: String,
+    allowed_origins: HashSet<String>,
     boot_id: String,
     // process-wide aggregate telemetry (mirrors the CF host's counters)
     counters: Counters,
@@ -49,12 +55,16 @@ impl AppState {
         wake: Arc<WakeRegistry>,
         ctx: Arc<EngineContext>,
         authenticate: crate::AuthFn,
+        admin_token: String,
+        allowed_origins: Vec<String>,
     ) -> Self {
         Self {
             manager,
             wake,
             ctx,
             authenticate,
+            admin_token,
+            allowed_origins: allowed_origins.into_iter().collect(),
             boot_id: boot_id(),
             counters: Counters::default(),
             faults: FaultRegistry::new(),
@@ -81,18 +91,37 @@ fn boot_id() -> String {
 // ---- router --------------------------------------------------------------
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let cors_origins = state.allowed_origins.clone();
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            origin
+                .to_str()
+                .ok()
+                .is_some_and(|origin| cors_origins.contains(origin))
+        }))
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE]);
+
+    let admin = Router::new()
         .route("/admin/health", get(health))
-        .route("/{ns}/pull", post(pull))
-        .route("/{ns}/push", post(push))
-        .route("/{ns}/wake", get(wake_ws))
         .route("/{ns}/admin/sql", post(admin_sql))
         .route("/{ns}/admin/status", get(admin_status))
         .route("/{ns}/admin/invalidate", post(admin_invalidate))
         .route("/{ns}/admin/reset-cursor", post(admin_reset_cursor))
         .route("/{ns}/admin/drop-next-push-response", post(admin_drop_push))
         .route("/{ns}/admin/fault", post(admin_fault))
-        .layer(CorsLayer::permissive())
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_admin));
+
+    Router::new()
+        .route("/{ns}/pull", post(pull))
+        .route("/{ns}/push", post(push))
+        .route("/{ns}/wake", get(wake_ws))
+        .layer(cors)
+        .merge(admin)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_allowed_origin,
+        ))
         .with_state(state)
 }
 
@@ -108,6 +137,52 @@ fn json_status(status: u16, body: Value) -> Response {
         axum::Json(body),
     )
         .into_response()
+}
+
+async fn require_allowed_origin(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Some(origin) = request.headers().get(ORIGIN) {
+        let allowed = origin
+            .to_str()
+            .ok()
+            .is_some_and(|origin| state.allowed_origins.contains(origin));
+        if !allowed {
+            return json_status(403, json!({ "error": "origin not allowed" }));
+        }
+    }
+    next.run(request).await
+}
+
+async fn require_admin(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Admin is a machine-only surface. This execution guard is independent of
+    // CORS response headers and applies even to an otherwise allowed origin.
+    if request.headers().contains_key(ORIGIN) {
+        return json_status(
+            403,
+            json!({ "error": "browser admin requests are forbidden" }),
+        );
+    }
+    let authenticated = request
+        .headers()
+        .get("x-admin-key")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|provided| {
+            provided
+                .as_bytes()
+                .ct_eq(state.admin_token.as_bytes())
+                .into()
+        });
+    if !authenticated {
+        return json_status(401, json!({ "error": "invalid admin token" }));
+    }
+    next.run(request).await
 }
 
 fn row_to_json(row: &Row) -> Value {
@@ -497,8 +572,7 @@ fn parse_tx_end(query: &str) -> Option<TxEnd> {
 
 async fn admin_status(State(state): State<Arc<AppState>>, Path(_ns): Path<String>) -> Response {
     // diagnostics surface: process-wide aggregate counters alongside boot info.
-    // this host binds 127.0.0.1 only and admin/* is the operator/harness surface,
-    // so it is not reachable by sync clients.
+    // the HTTP guard limits admin/* to token-authenticated, originless clients.
     json_status(
         200,
         json!({
@@ -546,8 +620,8 @@ async fn admin_drop_push(State(state): State<Arc<AppState>>, Path(ns): Path<Stri
 
 // arm a one-shot fault for a namespace at a precise pull/push lifecycle point (M6).
 // body: { "point": <point>, "kind": "kill" | "error" | "quota" }, or { "clear": true }
-// to disarm. operator/harness-only: this host is 127.0.0.1-bound and admin/* is not
-// reachable by sync clients.
+// to disarm. operator/harness-only: the HTTP guard limits admin/* to
+// token-authenticated, originless clients.
 async fn admin_fault(
     State(state): State<Arc<AppState>>,
     Path(ns): Path<String>,

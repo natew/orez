@@ -86,7 +86,12 @@ and flips its scheduler state only after that SQL succeeds, so the integration
 tests assert commit and rollback both excluding concurrent pull/push, wrong-id
 and duplicate-begin conflicts, malformed begin/end and transaction-control-in-a-
 query rejection (including comment-hidden control SQL), and a lost admin client
-reclaimed by the transaction lease. `crates/sync-native/src/namespace.rs` adds
+reclaimed by the transaction lease. The router tests also prove that default
+hosts mint distinct 256-bit admin
+tokens, missing or incorrect credentials cannot execute admin SQL, every
+browser-origin admin request is denied, unknown browser origins cannot sync,
+and the exact allowed origin completes both preflight and pull with restricted
+CORS headers. `crates/sync-native/src/namespace.rs` adds
 worker-level unit tests for the same scheduler where the lease and connection are
 directly controllable: a failed begin or failed commit that recovers instead of
 wedging, lease reclaim of a lost client, disconnect mid-step, and a plain-job

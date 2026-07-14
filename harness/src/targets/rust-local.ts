@@ -10,6 +10,7 @@
 // differentially against stock zero-cache with no target-specific normalizers.
 import { spawn, type ChildProcess } from 'node:child_process'
 import { execFile } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -101,6 +102,7 @@ export async function startRustLocal(opts?: {
   const port = await unusedPort()
   const baseUrl = `http://127.0.0.1:${port}`
   const origin = `${baseUrl}/${namespace}`
+  const adminToken = randomBytes(32).toString('hex')
 
   const spawnArgs = ['--data-dir', directory, '--port', String(port)]
   if (opts?.retainChanges !== undefined)
@@ -112,7 +114,10 @@ export async function startRustLocal(opts?: {
   let childLogs = ''
 
   const startChild = async () => {
-    const next = spawn(BINARY, spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const next = spawn(BINARY, spawnArgs, {
+      env: { ...process.env, SYNC_NATIVE_ADMIN_TOKEN: adminToken },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
     child = next
     next.stdout?.on('data', (chunk) => {
       childLogs += String(chunk)
@@ -127,7 +132,9 @@ export async function startRustLocal(opts?: {
         throw new Error(`sync-native exited ${next.exitCode}: ${childLogs}`)
       }
       try {
-        const response = await fetch(`${baseUrl}/admin/health`)
+        const response = await fetch(`${baseUrl}/admin/health`, {
+          headers: { 'x-admin-key': adminToken },
+        })
         if (response.ok) return
       } catch (error) {
         lastError = error
@@ -157,7 +164,10 @@ export async function startRustLocal(opts?: {
   async function adminSql(query: string): Promise<Rows> {
     const response = await fetch(`${origin}/admin/sql`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        'x-admin-key': adminToken,
+      },
       body: JSON.stringify({ query }),
     })
     if (!response.ok) throw new Error(`rust-local admin/sql ${response.status}`)
@@ -165,7 +175,10 @@ export async function startRustLocal(opts?: {
   }
 
   async function adminPost(path: string): Promise<void> {
-    const response = await fetch(`${origin}/admin/${path}`, { method: 'POST' })
+    const response = await fetch(`${origin}/admin/${path}`, {
+      method: 'POST',
+      headers: { 'x-admin-key': adminToken },
+    })
     if (!response.ok) throw new Error(`rust-local admin/${path} ${response.status}`)
   }
 

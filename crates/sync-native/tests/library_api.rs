@@ -20,9 +20,13 @@ use sync_core::{SqlValue, SyncDb};
 use sync_native::AuthFn;
 use sync_native::SyncNativeConfig;
 use sync_native::SyncNativeHost;
+use sync_native::SyncNativeSecurity;
 use sync_native::engine::{InitFn, MutateFn};
 
 // ---- helpers -----------------------------------------------------------
+
+const ADMIN_TOKEN: &str = "sync-native-library-test-admin-token-0000000000000000000000000000";
+const ALLOWED_ORIGIN: &str = "http://localhost:7878";
 
 fn custom_tables() -> Tables {
     let mut tables = Tables::new();
@@ -98,7 +102,10 @@ fn custom_mutate() -> MutateFn {
 fn custom_auth() -> AuthFn {
     Arc::new(|headers: &HeaderMap| {
         let value = headers.get("authorization")?.to_str().ok()?;
-        value.strip_prefix("Bearer ").map(str::to_string)
+        value
+            .strip_prefix("Bearer ")
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
     })
 }
 
@@ -118,6 +125,14 @@ fn custom_config_with_lease(admin_tx_lease: std::time::Duration) -> SyncNativeCo
         query_aware: false,
         admin_tx_lease,
     }
+}
+
+fn test_host(config: SyncNativeConfig, data_dir: std::path::PathBuf) -> SyncNativeHost {
+    SyncNativeHost::new_with_security(
+        config,
+        data_dir,
+        SyncNativeSecurity::with_admin_token(ADMIN_TOKEN).allow_origin(ALLOWED_ORIGIN),
+    )
 }
 
 // send a request against a cloned router (oneshot takes ownership).
@@ -171,6 +186,7 @@ fn admin_sql_req(
         .method("POST")
         .uri(format!("/{ns}/admin/sql"))
         .header("content-type", "application/json")
+        .header("x-admin-key", ADMIN_TOKEN)
         .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap()
 }
@@ -220,11 +236,12 @@ fn mutation(id: u64, name: &str, args: Value, client_id: &str) -> Value {
 #[tokio::test]
 async fn health_endpoint_responds() {
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
     let router = host.into_router();
 
     let req = Request::builder()
         .uri("/admin/health")
+        .header("x-admin-key", ADMIN_TOKEN)
         .body(axum::body::Body::empty())
         .unwrap();
     let (_status, v) = send(&router, req).await;
@@ -232,10 +249,140 @@ async fn health_endpoint_responds() {
     assert!(v["pid"].is_number());
 }
 
+#[test]
+fn default_hosts_generate_distinct_process_admin_tokens() {
+    let first_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+    let first = SyncNativeHost::new(custom_config(), first_dir.path().to_path_buf());
+    let second = SyncNativeHost::new(custom_config(), second_dir.path().to_path_buf());
+    assert_eq!(first.admin_token().len(), 64);
+    assert_eq!(second.admin_token().len(), 64);
+    assert_ne!(first.admin_token(), second.admin_token());
+}
+
+#[tokio::test]
+async fn admin_requires_token_and_rejects_browser_origins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    let mut missing = admin_sql_req("test-ns", "SELECT 1 AS value", None, None);
+    missing.headers_mut().remove("x-admin-key");
+    let (status, _) = send(&router, missing).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let mut wrong = admin_sql_req("test-ns", "SELECT 1 AS value", None, None);
+    wrong
+        .headers_mut()
+        .insert("x-admin-key", "wrong-admin-token".parse().unwrap());
+    let (status, _) = send(&router, wrong).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = send(
+        &router,
+        admin_sql_req("test-ns", "SELECT 1 AS value", None, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["rows"][0]["value"], json!(1));
+
+    let mut browser = admin_sql_req(
+        "test-ns",
+        "INSERT INTO item (id, label) VALUES ('browser-write', 'blocked')",
+        None,
+        None,
+    );
+    browser
+        .headers_mut()
+        .insert("origin", ALLOWED_ORIGIN.parse().unwrap());
+    let (status, _) = send(&router, browser).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let preflight = Request::builder()
+        .method("OPTIONS")
+        .uri("/test-ns/admin/sql")
+        .header("origin", ALLOWED_ORIGIN)
+        .header("access-control-request-method", "POST")
+        .header("access-control-request-headers", "content-type,x-admin-key")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(preflight).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none()
+    );
+
+    let (status, body) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "SELECT count(*) AS count FROM item WHERE id = 'browser-write'",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["rows"][0]["count"], json!(0));
+}
+
+#[tokio::test]
+async fn browser_sync_requires_an_exact_allowed_origin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+    let body = pull_body(None);
+
+    let mut denied = pull_req("test-ns", &body, "Bearer user-1");
+    denied
+        .headers_mut()
+        .insert("origin", "https://attacker.example".parse().unwrap());
+    let (status, _) = send(&router, denied).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let mut allowed = pull_req("test-ns", &body, "Bearer user-1");
+    allowed
+        .headers_mut()
+        .insert("origin", ALLOWED_ORIGIN.parse().unwrap());
+    let response = router.clone().oneshot(allowed).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some(ALLOWED_ORIGIN)
+    );
+
+    let preflight = Request::builder()
+        .method("OPTIONS")
+        .uri("/test-ns/pull")
+        .header("origin", ALLOWED_ORIGIN)
+        .header("access-control-request-method", "POST")
+        .header(
+            "access-control-request-headers",
+            "authorization,content-type",
+        )
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(preflight).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some(ALLOWED_ORIGIN)
+    );
+}
+
 #[tokio::test]
 async fn fresh_pull_returns_seed_data() {
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
     let router = host.into_router();
 
     let body = pull_body(None);
@@ -258,7 +405,7 @@ async fn fresh_pull_returns_seed_data() {
 #[tokio::test]
 async fn push_applies_mutation_and_pull_sees_it() {
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
     let router = host.into_router();
 
     // push: create a new item
@@ -290,7 +437,7 @@ async fn push_applies_mutation_and_pull_sees_it() {
 #[tokio::test]
 async fn app_error_advances_lmid_no_rows() {
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
     let router = host.into_router();
 
     // baseline pull to obtain a cookie
@@ -331,7 +478,7 @@ async fn app_error_advances_lmid_no_rows() {
 #[tokio::test]
 async fn two_namespaces_are_independent() {
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
     let router = host.into_router();
 
     // push to ns-a only
@@ -359,7 +506,7 @@ async fn two_namespaces_are_independent() {
 #[tokio::test]
 async fn admin_transaction_rolls_back_and_excludes_namespace_work() {
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
     let router = host.into_router();
     let transaction_id = "tx-rollback";
 
@@ -421,7 +568,7 @@ async fn admin_transaction_rolls_back_and_excludes_namespace_work() {
 #[tokio::test]
 async fn admin_transaction_commits_and_excludes_namespace_work() {
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
     let router = host.into_router();
     let transaction_id = "tx-commit";
 
@@ -485,7 +632,7 @@ async fn admin_transaction_commits_and_excludes_namespace_work() {
 #[tokio::test]
 async fn admin_transaction_wrong_id_rejected() {
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
     let router = host.into_router();
 
     let (status, _) = send(
@@ -516,7 +663,7 @@ async fn admin_transaction_wrong_id_rejected() {
 #[tokio::test]
 async fn admin_transaction_duplicate_begin_rejected() {
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
     let router = host.into_router();
 
     let (status, _) = send(
@@ -544,7 +691,7 @@ async fn admin_transaction_duplicate_begin_rejected() {
 #[tokio::test]
 async fn admin_transaction_malformed_steps_rejected() {
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
     let router = host.into_router();
 
     // a begin step whose SQL is not a canonical BEGIN.
@@ -628,7 +775,7 @@ async fn admin_transaction_malformed_steps_rejected() {
 async fn admin_transaction_disconnect_recovers_namespace() {
     // a short lease so a lost admin client is reclaimed within the test.
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(
+    let host = test_host(
         custom_config_with_lease(std::time::Duration::from_millis(150)),
         tmp.path().to_path_buf(),
     );
@@ -683,7 +830,7 @@ async fn admin_transaction_disconnect_recovers_namespace() {
 #[tokio::test]
 async fn auth_rejection_returns_401() {
     let tmp = tempfile::tempdir().unwrap();
-    let host = SyncNativeHost::new(custom_config(), tmp.path().to_path_buf());
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
     let router = host.into_router();
 
     let req = Request::builder()
@@ -694,6 +841,10 @@ async fn auth_rejection_returns_401() {
             serde_json::to_vec(&pull_body(None)).unwrap(),
         ))
         .unwrap();
+    let (status, _v) = send(&router, req).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let req = pull_req("test-ns", &pull_body(None), "Bearer ");
     let (status, _v) = send(&router, req).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
@@ -731,7 +882,7 @@ async fn fixture_config_still_works() {
         query_aware: false,
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
     };
-    let host = SyncNativeHost::new(config, tmp.path().to_path_buf());
+    let host = test_host(config, tmp.path().to_path_buf());
     let router = host.into_router();
 
     // pull: should get the fixture seed (users, projects, members, tasks)

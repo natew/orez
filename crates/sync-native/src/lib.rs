@@ -40,6 +40,72 @@ pub type AuthFn = Arc<dyn Fn(&HeaderMap) -> Option<String> + Send + Sync>;
 /// cannot wedge a namespace.
 pub const DEFAULT_ADMIN_TX_LEASE: Duration = Duration::from_secs(30);
 
+/// HTTP security for a native sync process.
+///
+/// Admin routes always require `x-admin-key` and never accept requests carrying
+/// a browser `Origin` header. Pull, push, and wake requests carrying an origin
+/// must match one of `allowed_origins`; originless native/server requests remain
+/// available. Use [`SyncNativeSecurity::process_random`] unless a supervisor
+/// needs to share a process-scoped token with a trusted local SQL client.
+pub struct SyncNativeSecurity {
+    admin_token: String,
+    allowed_origins: Vec<String>,
+}
+
+impl SyncNativeSecurity {
+    /// Generate a new 256-bit process-local admin token and deny every browser
+    /// origin until one is explicitly allowed.
+    pub fn process_random() -> Self {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).expect("failed to generate sync-native admin token");
+        let mut admin_token = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            use std::fmt::Write;
+            write!(&mut admin_token, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        Self {
+            admin_token,
+            allowed_origins: Vec::new(),
+        }
+    }
+
+    /// Use a supervisor-provided process token. Empty tokens are rejected.
+    pub fn with_admin_token(admin_token: impl Into<String>) -> Self {
+        let admin_token = admin_token.into();
+        assert!(
+            admin_token.len() >= 32,
+            "sync-native admin token must contain at least 32 bytes"
+        );
+        Self {
+            admin_token,
+            allowed_origins: Vec::new(),
+        }
+    }
+
+    /// Allow one exact HTTP(S) browser origin for pull, push, and wake traffic.
+    pub fn allow_origin(mut self, origin: impl Into<String>) -> Self {
+        let origin = origin.into();
+        assert!(
+            valid_origin(&origin),
+            "invalid sync-native browser origin: {origin}"
+        );
+        if !self.allowed_origins.contains(&origin) {
+            self.allowed_origins.push(origin);
+        }
+        self
+    }
+}
+
+fn valid_origin(origin: &str) -> bool {
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    matches!(uri.scheme_str(), Some("http" | "https"))
+        && uri.authority().is_some()
+        && uri.path() == "/"
+        && uri.query().is_none()
+}
+
 // ---- public config -------------------------------------------------------
 
 /// Complete configuration for a sync-native host. Populate this with your
@@ -123,6 +189,7 @@ pub struct SyncNativeConfig {
 /// router inside your own axum application.
 pub struct SyncNativeHost {
     router: Router,
+    admin_token: String,
 }
 
 impl SyncNativeHost {
@@ -130,6 +197,15 @@ impl SyncNativeHost {
     /// Namespace sqlite files are stored under `data_dir` with one file
     /// per namespace (`<name>.sqlite`).
     pub fn new(config: SyncNativeConfig, data_dir: PathBuf) -> Self {
+        Self::new_with_security(config, data_dir, SyncNativeSecurity::process_random())
+    }
+
+    /// Build a host with an explicit process security policy.
+    pub fn new_with_security(
+        config: SyncNativeConfig,
+        data_dir: PathBuf,
+        security: SyncNativeSecurity,
+    ) -> Self {
         std::fs::create_dir_all(&data_dir).expect("failed to create data dir");
 
         let ctx = Arc::new(EngineContext::new(
@@ -152,11 +228,24 @@ impl SyncNativeHost {
             wake::WakeRegistry::new(),
             ctx,
             config.authenticate,
+            security.admin_token.clone(),
+            security.allowed_origins,
         ));
 
         let router = server::build_router(state.clone());
 
-        Self { router }
+        Self {
+            router,
+            admin_token: security.admin_token,
+        }
+    }
+
+    /// Return the process-scoped token required in `x-admin-key`.
+    ///
+    /// Keep this value in the supervising process. It must never be embedded in
+    /// browser code or written to ordinary application logs.
+    pub fn admin_token(&self) -> &str {
+        &self.admin_token
     }
 
     /// Consume the host and return the axum Router for nesting inside

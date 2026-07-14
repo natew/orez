@@ -187,3 +187,24 @@ resolves the `SyncServer` for a database only after the caller has authorized
 `route.databaseID`. It returns `{match(pathname), handle(route, body,
 userID)}`. `match` does routing only; `handle` delegates without translating
 bodies, responses, or errors.
+
+## Native host HTTP security
+
+`SyncNativeHost::new(config, data_dir)` generates a fresh 256-bit admin token
+for the process and allows no browser origins. An embedding supervisor that
+needs the SQL/operator surface constructs `SyncNativeSecurity`, keeps the token
+outside browser code and ordinary logs, explicitly adds each trusted HTTP(S)
+origin, and calls `SyncNativeHost::new_with_security`.
+
+Every native admin request, including `/admin/health`, supplies the process
+token in `x-admin-key`. Admin requests with any `Origin` header are rejected
+before route execution, even if their token is valid. Pull, push, and wake
+requests with an `Origin` header must match an allowed origin exactly.
+Originless native and server-side sync clients remain supported.
+
+The standalone `sync-native` binary reads `SYNC_NATIVE_ADMIN_TOKEN` or accepts
+`--admin-token <token>`, plus a repeatable `--allow-origin <origin>`. Prefer the
+environment variable so the credential does not appear in the process command
+line. Without either token input, the binary generates an unreported
+process-local token, which intentionally leaves the admin surface unavailable
+to external clients.

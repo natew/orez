@@ -83,6 +83,11 @@ A standalone axum HTTP host for the same engine
 (`crates/sync-native/src/main.rs` and friends: `engine.rs`, `namespace.rs`,
 `wake.rs`, `seed.rs`, `fault.rs`, `obs.rs`). It serves the same pull/push
 surface over native Rust with `rusqlite` storage instead of a Durable Object.
+By default every process generates a 256-bit admin token. `/<namespace>/admin/*` and
+`/admin/health` require it in `x-admin-key`, and browser-origin admin requests
+are rejected even when the token is correct. Browser pull, push, and wake
+traffic must match an origin explicitly allowed by the embedding process;
+originless native/server clients remain supported.
 It exists to keep one engine story across deployments. It is not on the
 Cloudflare cutover path, so it trails the CF host on the newer modes (upstream
 ingest parity is described as a follow-up in

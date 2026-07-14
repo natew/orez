@@ -5,6 +5,7 @@
 // and auth, then starts the axum host.
 //
 // usage: sync-native --data-dir <dir> --port <port>
+//                    [--admin-token <token>] [--allow-origin <origin>]
 //                    [--retain-changes <n>] [--visible] [--query-aware]
 //
 // routes (namespace = one sqlite file under --data-dir):
@@ -25,6 +26,7 @@ use axum::http::HeaderMap;
 use sync_native::AuthFn;
 use sync_native::SyncNativeConfig;
 use sync_native::SyncNativeHost;
+use sync_native::SyncNativeSecurity;
 use sync_native::engine::{InitFn, MutateFn, VisibleFn};
 use sync_native::fixture;
 
@@ -34,6 +36,8 @@ struct CliConfig {
     retain_changes: i64,
     visible: bool,
     query_aware: bool,
+    admin_token: Option<String>,
+    allowed_origins: Vec<String>,
 }
 
 fn parse_args() -> CliConfig {
@@ -42,6 +46,8 @@ fn parse_args() -> CliConfig {
     let mut retain_changes: i64 = 4096;
     let mut visible = false;
     let mut query_aware = false;
+    let mut admin_token = None;
+    let mut allowed_origins = Vec::new();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -63,6 +69,12 @@ fn parse_args() -> CliConfig {
             }
             "--visible" => visible = true,
             "--query-aware" => query_aware = true,
+            "--admin-token" => {
+                admin_token = Some(expect_value(&mut args, "--admin-token"));
+            }
+            "--allow-origin" => {
+                allowed_origins.push(expect_value(&mut args, "--allow-origin"));
+            }
             other => panic!("unknown argument {other}"),
         }
     }
@@ -73,6 +85,8 @@ fn parse_args() -> CliConfig {
         retain_changes,
         visible,
         query_aware,
+        admin_token,
+        allowed_origins,
     }
 }
 
@@ -88,7 +102,10 @@ async fn main() {
     // fixture authenticate: Bearer token-<userID>
     let authenticate: AuthFn = Arc::new(|headers: &HeaderMap| {
         let value = headers.get("authorization")?.to_str().ok()?;
-        value.strip_prefix("Bearer token-").map(str::to_string)
+        value
+            .strip_prefix("Bearer token-")
+            .filter(|user_id| !user_id.is_empty())
+            .map(str::to_string)
     });
 
     // fixture initialize: install app tables + seed
@@ -127,7 +144,16 @@ async fn main() {
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
     };
 
-    SyncNativeHost::new(config, cli.data_dir)
+    let mut security = cli
+        .admin_token
+        .or_else(|| std::env::var("SYNC_NATIVE_ADMIN_TOKEN").ok())
+        .map(SyncNativeSecurity::with_admin_token)
+        .unwrap_or_else(SyncNativeSecurity::process_random);
+    for origin in cli.allowed_origins {
+        security = security.allow_origin(origin);
+    }
+
+    SyncNativeHost::new_with_security(config, cli.data_dir, security)
         .run(cli.port)
         .await;
 }

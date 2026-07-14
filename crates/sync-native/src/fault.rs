@@ -1,8 +1,8 @@
 // harness/operator fault injection (M6). One-shot faults armed per namespace at a
 // precise point in the pull/push lifecycle, checked by the engine path. This is a
-// diagnostics surface: it is armed via the admin route, which this host serves on
-// 127.0.0.1 only, so it is unreachable by sync clients. It mirrors the intent of
-// the CF host's transaction/storage fault hooks (sol mirrors the CF side).
+// diagnostics surface: it is armed via the token-gated, browser-denied admin
+// route. It mirrors the intent of the CF host's transaction/storage fault hooks
+// (sol mirrors the CF side).
 //
 // The points bracket the durability-critical transitions: a Kill at a point
 // simulates SIGKILL there (does committed state survive? does uncommitted state

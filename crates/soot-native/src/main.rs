@@ -21,7 +21,7 @@ use sync_core::SyncDb;
 use sync_core::schema::{TableSpec, Tables};
 use sync_core::value::ZeroColumnType;
 use sync_native::engine::{InitFn, MutateFn};
-use sync_native::{AuthFn, SyncNativeConfig, SyncNativeHost};
+use sync_native::{AuthFn, SyncNativeConfig, SyncNativeHost, SyncNativeSecurity};
 
 // ---- config file shapes ---------------------------------------------------
 
@@ -123,12 +123,10 @@ fn make_auth() -> AuthFn {
         let value = headers.get("authorization")?.to_str().ok()?;
         let token = value.strip_prefix("Bearer ")?;
         // the app worker mints tokens of the form "token-<userId>"
-        if let Some(user_id) = token.strip_prefix("token-") {
-            Some(user_id.to_string())
-        } else {
-            // accept the token as-is for dev flexibility
-            Some(token.to_string())
-        }
+        token
+            .strip_prefix("token-")
+            .filter(|user_id| !user_id.is_empty())
+            .map(str::to_string)
     })
 }
 
@@ -139,6 +137,8 @@ struct Args {
     config: Option<String>,
     data_dir: Option<String>,
     port: Option<u16>,
+    admin_token: Option<String>,
+    allowed_origins: Vec<String>,
 }
 
 fn parse_args() -> Args {
@@ -163,6 +163,18 @@ fn parse_args() -> Args {
                 i += 1;
                 if i < argv.len() {
                     args.port = argv[i].parse().ok();
+                }
+            }
+            "--admin-token" => {
+                i += 1;
+                if i < argv.len() {
+                    args.admin_token = Some(argv[i].clone());
+                }
+            }
+            "--allow-origin" => {
+                i += 1;
+                if i < argv.len() {
+                    args.allowed_origins.push(argv[i].clone());
                 }
             }
             _ => {}
@@ -225,6 +237,14 @@ async fn main() {
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
     };
 
-    let host = SyncNativeHost::new(config, PathBuf::from(&data_dir));
+    let mut security = args
+        .admin_token
+        .or_else(|| std::env::var("SYNC_NATIVE_ADMIN_TOKEN").ok())
+        .map(SyncNativeSecurity::with_admin_token)
+        .unwrap_or_else(SyncNativeSecurity::process_random);
+    for origin in args.allowed_origins {
+        security = security.allow_origin(origin);
+    }
+    let host = SyncNativeHost::new_with_security(config, PathBuf::from(&data_dir), security);
     host.run(port).await;
 }
