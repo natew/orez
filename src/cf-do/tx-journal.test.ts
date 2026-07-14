@@ -31,6 +31,7 @@ import {
   commitTxJournal,
   recoverTxJournal,
   rollbackTxJournal,
+  snapshotTxSchema,
   upgradeToTableSnapshot,
 } from './tx-journal.js'
 
@@ -99,6 +100,89 @@ function snapshotTx(
 }
 
 describe('tx-journal core', () => {
+  it('restores tables, data, indexes, triggers, and views after transactional DDL', () => {
+    const storage = createSqliteStorage()
+    storage.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT NOT NULL)')
+    storage.exec('CREATE TABLE audit (item_id INTEGER, value TEXT)')
+    storage.exec('CREATE INDEX items_value ON items(value)')
+    storage.exec(
+      'CREATE TRIGGER items_audit AFTER INSERT ON items BEGIN INSERT INTO audit VALUES (NEW.id, NEW.value); END'
+    )
+    storage.exec('CREATE VIEW item_values AS SELECT value FROM items')
+    storage.exec("INSERT INTO items VALUES (1, 'before')")
+    storage.exec('CREATE TABLE _zero_changes (watermark INTEGER PRIMARY KEY, value TEXT)')
+    storage.exec("INSERT INTO _zero_changes VALUES (1, 'framework')")
+
+    storage.transactionSync(() =>
+      snapshotTxSchema(storage.journal, 'schema-tx', 'embed', ['items'])
+    )
+    storage.exec('DROP VIEW item_values')
+    storage.exec('DROP TABLE items')
+    storage.exec('CREATE TABLE items (id TEXT PRIMARY KEY, replacement INTEGER)')
+    storage.exec("INSERT INTO items VALUES ('after', 2)")
+    storage.exec('CREATE TABLE created_in_tx (id INTEGER)')
+    storage.exec("UPDATE _zero_changes SET value = 'still-framework'")
+
+    storage.transactionSync(() => rollbackTxJournal(storage.journal, 'schema-tx'))
+
+    expect(storage.rows('items')).toEqual([{ id: 1, value: 'before' }])
+    expect(storage.rows('audit')).toEqual([{ item_id: 1, value: 'before' }])
+    expect(storage.rows('item_values')).toEqual([{ value: 'before' }])
+    expect(storage.rows('_zero_changes')).toEqual([
+      { watermark: 1, value: 'still-framework' },
+    ])
+    expect(
+      storage
+        .exec(
+          "SELECT type, name FROM sqlite_master WHERE name IN ('items_value', 'items_audit') ORDER BY name"
+        )
+        .toArray()
+    ).toEqual([
+      { type: 'trigger', name: 'items_audit' },
+      { type: 'index', name: 'items_value' },
+    ])
+    expect(
+      storage.exec("SELECT 1 FROM sqlite_master WHERE name = 'created_in_tx'").toArray()
+    ).toEqual([])
+  })
+
+  it('recovers DDL started against an empty schema after its owner dies', () => {
+    const storage = createSqliteStorage()
+    storage.transactionSync(() => snapshotTxSchema(storage.journal, 'dead-ddl', 'embed'))
+    storage.exec('CREATE TABLE partial (id INTEGER PRIMARY KEY)')
+    storage.exec('INSERT INTO partial VALUES (1)')
+
+    expect(
+      storage.transactionSync(() => recoverTxJournal(storage.journal, 'embed'))
+    ).toEqual(['dead-ddl'])
+    expect(
+      storage.exec("SELECT 1 FROM sqlite_master WHERE name = 'partial'").toArray()
+    ).toEqual([])
+  })
+
+  it('commits transactional DDL and removes its recovery image', () => {
+    const storage = createSqliteStorage()
+    storage.exec('CREATE TABLE original (id INTEGER PRIMARY KEY)')
+    storage.transactionSync(() =>
+      snapshotTxSchema(storage.journal, 'commit-ddl', 'embed', ['original'])
+    )
+    storage.exec('ALTER TABLE original ADD COLUMN value TEXT')
+    storage.transactionSync(() => commitTxJournal(storage.journal, 'commit-ddl'))
+
+    expect(
+      storage
+        .exec('PRAGMA table_info(original)')
+        .toArray()
+        .map((row) => row.name)
+    ).toEqual(['id', 'value'])
+    expect(recoverTxJournal(storage.journal, 'embed')).toEqual([])
+    expect(
+      storage
+        .exec("SELECT name FROM sqlite_master WHERE name GLOB '_orez_tx_undo_*'")
+        .toArray()
+    ).toEqual([])
+  })
+
   it('commit drops snapshots and manifest rows, keeps the data', () => {
     const storage = createSqliteStorage()
     storage.exec('CREATE TABLE items (id TEXT PRIMARY KEY, body TEXT)')
@@ -502,6 +586,51 @@ describe('kill-mid-tx crash recovery (DoBackend over HTTP)', () => {
 })
 
 describe('kill-mid-tx crash recovery (embed-local backend)', () => {
+  it('allows embed schema migrations while preserving unrelated committed data on rollback', async () => {
+    const storage = createSqliteStorage()
+    storage.exec('CREATE TABLE migration_target (id INTEGER PRIMARY KEY, value TEXT)')
+    storage.exec("INSERT INTO migration_target VALUES (1, 'before')")
+    storage.exec('CREATE TABLE unrelated (id INTEGER PRIMARY KEY, value TEXT)')
+    storage.exec("INSERT INTO unrelated VALUES (1, 'before')")
+    storage.exec('CREATE TABLE tx_dml (id INTEGER PRIMARY KEY, value TEXT)')
+    storage.exec("INSERT INTO tx_dml VALUES (1, 'before')")
+    const local = createLocalSqlBackend({
+      exec: storage.exec,
+      transactionSync: storage.transactionSync,
+    })
+    const backend = new DoBackend('https://orez-do-backend.local', 'zero_cvr', 'zero', {
+      fetch: local.fetch,
+      txOwner: 'orez-embed',
+    })
+    await backend.waitReady
+
+    await backend.query('BEGIN')
+    await backend.query('ALTER TABLE migration_target ADD COLUMN extra TEXT')
+    await backend.query('CREATE TABLE created_by_migration (id INTEGER PRIMARY KEY)')
+    await backend.query("UPDATE migration_target SET value = 'during', extra = 'x'")
+    await backend.query("UPDATE tx_dml SET value = 'during'")
+    // Simulate an independently committed application write while the schema
+    // transaction is open. Rollback must not replace an unrelated table from
+    // a database-wide data snapshot.
+    storage.exec("UPDATE unrelated SET value = 'committed elsewhere'")
+    await backend.query('ROLLBACK')
+
+    expect(
+      storage
+        .exec('PRAGMA table_info(migration_target)')
+        .toArray()
+        .map((row) => row.name)
+    ).toEqual(['id', 'value'])
+    expect(storage.rows('migration_target')).toEqual([{ id: 1, value: 'before' }])
+    expect(storage.rows('unrelated')).toEqual([{ id: 1, value: 'committed elsewhere' }])
+    expect(storage.rows('tx_dml')).toEqual([{ id: 1, value: 'before' }])
+    expect(
+      storage
+        .exec("SELECT 1 FROM sqlite_master WHERE name = 'created_by_migration'")
+        .toArray()
+    ).toEqual([])
+  })
+
   it('does not attach a committed autocommit row to the next transaction', async () => {
     const storage = createSqliteStorage()
     storage.exec('CREATE TABLE "cvr_rows" (id TEXT PRIMARY KEY, version TEXT)')

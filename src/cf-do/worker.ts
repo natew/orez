@@ -25,6 +25,7 @@ import {
   recoverTxJournal,
   rollbackTxJournal,
   snapshotSideEffectWriteTables,
+  snapshotTxSchema,
   upgradeToTableSnapshot,
 } from './tx-journal.js'
 import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
@@ -311,6 +312,8 @@ export class ZeroDO extends DurableObject {
       return this.handleExec(request)
     if (url.pathname === '/batch' && request.method === 'POST')
       return this.handleBatch(request)
+    if (url.pathname === '/snapshot-tx-schema' && request.method === 'POST')
+      return this.handleSnapshotTransactionSchema(request)
     if (url.pathname === '/commit-tx' && request.method === 'POST')
       return this.handleCommitTransaction(request)
     if (url.pathname === '/rollback-tx' && request.method === 'POST')
@@ -757,6 +760,30 @@ export class ZeroDO extends DurableObject {
     }
   }
 
+  private async handleSnapshotTransactionSchema(request: Request): Promise<Response> {
+    try {
+      const body = (await request.json()) as {
+        transactionID?: unknown
+        owner?: unknown
+        affectedTables?: unknown
+      }
+      const transactionID = String(body.transactionID || '')
+      if (!transactionID) throw new Error('missing transactionID')
+      const owner = body.owner === undefined ? 'default' : String(body.owner)
+      const affectedTables = Array.isArray(body.affectedTables)
+        ? body.affectedTables.map(String)
+        : []
+      await this.atomically(() =>
+        snapshotTxSchema(this.sql, transactionID, owner, affectedTables)
+      )
+      return Response.json({ ok: true })
+    } catch (err: any) {
+      const budgetResponse = await this.writeBudgetErrorResponse(err)
+      if (budgetResponse) return budgetResponse
+      return Response.json({ error: err.message }, { status: 500 })
+    }
+  }
+
   private async handleRollbackTransaction(request: Request): Promise<Response> {
     const measurements = this.startWriteMeasurement(request)
     try {
@@ -768,6 +795,7 @@ export class ZeroDO extends DurableObject {
         rollbackTxJournal(this.sql, transactionID)
         return this.deletePendingTrackedChanges(transactionID)
       })
+      this.invalidateSchemaCaches()
       return Response.json({
         ok: true,
         count,
@@ -798,6 +826,7 @@ export class ZeroDO extends DurableObject {
         for (const txID of recovered) this.deletePendingTrackedChanges(txID)
         return recovered
       })
+      this.invalidateSchemaCaches()
       return Response.json({ ok: true, transactionIDs })
     } catch (err: any) {
       const budgetResponse = await this.writeBudgetErrorResponse(err)

@@ -22,6 +22,7 @@
         "embedded-postgres": "17.10.0-beta.17",
         "oxfmt": "latest",
         "oxlint": "latest",
+        "pg": "8.22.0",
         "typescript": "^5.7.0",
         "vitest": "^3.0.0",
         "ws": "^8.19.0",
@@ -38,14 +39,14 @@
     },
     "pg-to-sqlite": {
       "name": "pg-to-sqlite",
-      "version": "0.4.36",
+      "version": "0.5.3",
       "dependencies": {
         "pgsql-parser": "^17.9.11",
       },
     },
     "sqlite-wasm": {
       "name": "bedrock-sqlite",
-      "version": "0.4.36",
+      "version": "0.5.3",
       "devDependencies": {
         "typescript": "^5.7.0",
         "vitest": "^3.0.0",

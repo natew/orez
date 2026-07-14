@@ -377,6 +377,7 @@ function startBridge(proxy: BrowserProxy): Promise<{ server: Server; port: numbe
 
 function createZeroDo() {
   const nativeDb = new BedrockSqlite.Database(':memory:')
+  let initialized = Promise.resolve()
   const sql = {
     exec(query: string, ...params: unknown[]) {
       const stmt = nativeDb.prepare(query)
@@ -393,16 +394,26 @@ function createZeroDo() {
   const ctx = {
     storage: {
       sql,
+      get: async () => undefined,
+      put: async () => undefined,
+      delete: async () => false,
       transaction: async <T>(fn: () => T): Promise<T> => nativeDb.transaction(fn)(),
       transactionSync: <T>(fn: () => T): T => nativeDb.transaction(fn)(),
+    },
+    blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T> {
+      const result = fn()
+      initialized = result.then(() => undefined)
+      return result
     },
     acceptWebSocket() {},
     getWebSockets: () => [],
   }
   const zeroDo = new (ZeroDO as any)(ctx, {})
   return {
-    fetch: ((input: RequestInfo | URL, init?: RequestInit) =>
-      zeroDo.fetch(new Request(input as RequestInfo, init))) as typeof globalThis.fetch,
+    fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      await initialized
+      return zeroDo.fetch(new Request(input as RequestInfo, init))
+    }) as typeof globalThis.fetch,
   }
 }
 

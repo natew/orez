@@ -641,7 +641,10 @@ describe('tcp replication', () => {
     // collect until the Update arrives (with timeout): a single fixed window
     // flakes on slow CI runners when the change flushes late
     const decoded: PgOutputMessage[] = []
-    const deadline = Date.now() + 5000
+    // The full CI matrix can leave the in-process PGlite poller contending with
+    // other replication suites. Keep this event-driven, but give the committed
+    // delete the same slow-runner budget as the test itself.
+    const deadline = Date.now() + 10_000
     while (Date.now() < deadline) {
       const stream = await replClient.collectStream(500)
       for (const msg of stream) {
@@ -664,7 +667,7 @@ describe('tcp replication', () => {
     expect(oldValues).toContain('10')
 
     replClient.close()
-  }, 15_000)
+  }, 20_000)
 
   it('streams deletes with key data', async () => {
     const replClient = new TestPgClient(port)

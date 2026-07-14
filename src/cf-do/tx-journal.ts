@@ -35,6 +35,7 @@ import { restoreTriggers, suspendTriggers, writableColumns } from './cdc.js'
 import type { DurableSqlStorage } from './watermark.js'
 
 export const TX_MANIFEST_TABLE = '_orez_tx_manifest'
+export const TX_SCHEMA_TABLE = '_orez_tx_schema'
 
 export const TX_MANIFEST_DDL =
   `CREATE TABLE IF NOT EXISTS "${TX_MANIFEST_TABLE}" (` +
@@ -43,6 +44,35 @@ export const TX_MANIFEST_DDL =
   "owner TEXT NOT NULL DEFAULT 'default', " +
   'original TEXT NOT NULL, ' +
   'snapshot TEXT)'
+
+export const TX_SCHEMA_DDL =
+  `CREATE TABLE IF NOT EXISTS "${TX_SCHEMA_TABLE}" (` +
+  'seq INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+  'tx_id TEXT NOT NULL, ' +
+  "owner TEXT NOT NULL DEFAULT 'default', " +
+  'type TEXT NOT NULL, ' +
+  'name TEXT NOT NULL, ' +
+  'tbl_name TEXT NOT NULL, ' +
+  'sql TEXT)'
+
+const INTERNAL_TABLES = new Set([
+  TX_MANIFEST_TABLE,
+  TX_SCHEMA_TABLE,
+  '_orez_cdc_tables',
+  '_orez_cdc_buffer',
+  '_zero_pending_changes',
+  '_zero_changes',
+  '_zero_change_state',
+  '_zero_schema_tables',
+])
+
+function isInternalObject(name: string): boolean {
+  return (
+    INTERNAL_TABLES.has(name) ||
+    name.startsWith('_orez_tx_') ||
+    name.startsWith('sqlite_')
+  )
+}
 
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`
@@ -64,6 +94,42 @@ function manifestTableExists(sql: DurableSqlStorage): boolean {
       )
       .toArray().length > 0
   )
+}
+
+function schemaTableExists(sql: DurableSqlStorage): boolean {
+  return (
+    sql
+      .exec(
+        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?",
+        TX_SCHEMA_TABLE
+      )
+      .toArray().length > 0
+  )
+}
+
+interface SchemaRow {
+  seq: number
+  type: string
+  name: string
+  table: string
+  sql: string | null
+}
+
+function schemaRows(sql: DurableSqlStorage, txID: string): SchemaRow[] {
+  if (!schemaTableExists(sql)) return []
+  return sql
+    .exec(
+      `SELECT seq, type, name, tbl_name, sql FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ? ORDER BY seq`,
+      txID
+    )
+    .toArray()
+    .map((row) => ({
+      seq: Number(row.seq),
+      type: String(row.type),
+      name: String(row.name),
+      table: String(row.tbl_name),
+      sql: row.sql === null || row.sql === undefined ? null : String(row.sql),
+    }))
 }
 
 function manifestRows(sql: DurableSqlStorage, txID: string): ManifestRow[] {
@@ -123,17 +189,199 @@ function parentFirst(sql: DurableSqlStorage, rows: ManifestRow[]): ManifestRow[]
 }
 
 /**
+ * Capture the application schema before the first DDL statement and the data
+ * of each table that a later DDL statement can destructively change. SQLite
+ * can transact DDL, but the DO protocol spans requests, so rollback needs an
+ * explicit durable image. The caller must wrap this in one storage transaction.
+ */
+export function snapshotTxSchema(
+  sql: DurableSqlStorage,
+  txID: string,
+  owner = 'default',
+  affectedTables: string[] = []
+): void {
+  sql.exec(TX_SCHEMA_DDL)
+  const exists = sql
+    .exec(`SELECT 1 AS ok FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ? LIMIT 1`, txID)
+    .toArray()
+  if (exists.length === 0) {
+    const objects = sql
+      .exec(
+        'SELECT type, name, tbl_name, sql FROM sqlite_master ' +
+          "WHERE type IN ('table', 'index', 'trigger', 'view') AND sql IS NOT NULL " +
+          'ORDER BY rowid'
+      )
+      .toArray()
+      .map((row) => ({
+        type: String(row.type ?? ''),
+        name: String(row.name ?? ''),
+        table: String(row.tbl_name ?? ''),
+        sql: String(row.sql ?? ''),
+      }))
+      .filter((row) => row.name && !isInternalObject(row.name))
+
+    // A marker makes even an empty pre-transaction schema recoverable after a
+    // kill between CREATE TABLE and the client COMMIT/ROLLBACK.
+    sql.exec(
+      `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) VALUES (?, ?, 'marker', '', '', NULL)`,
+      txID,
+      owner
+    )
+    for (const object of objects) {
+      sql.exec(
+        `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) VALUES (?, ?, ?, ?, ?, ?)`,
+        txID,
+        owner,
+        object.type,
+        object.name,
+        object.table,
+        object.sql
+      )
+    }
+  }
+
+  for (const table of new Set(affectedTables)) {
+    if (!table || isInternalObject(table)) continue
+    const tableExists = sql
+      .exec(
+        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        table
+      )
+      .toArray()
+    if (tableExists.length > 0) upgradeToTableSnapshot(sql, txID, table, owner)
+  }
+}
+
+function restoreSchemaSnapshot(
+  sql: DurableSqlStorage,
+  txID: string,
+  schema: SchemaRow[],
+  manifest: ManifestRow[]
+): void {
+  const current = sql
+    .exec(
+      'SELECT type, name, tbl_name, sql FROM sqlite_master ' +
+        "WHERE type IN ('table', 'index', 'trigger', 'view') AND sql IS NOT NULL " +
+        'ORDER BY rowid DESC'
+    )
+    .toArray()
+    .map((row) => ({
+      type: String(row.type ?? ''),
+      name: String(row.name ?? ''),
+      table: String(row.tbl_name ?? ''),
+      sql: String(row.sql ?? ''),
+    }))
+    .filter((row) => row.name && !isInternalObject(row.name))
+
+  const original = schema.filter((row) => row.type !== 'marker' && row.sql)
+  const key = (row: { type: string; name: string }) => `${row.type}\0${row.name}`
+  const originalByKey = new Map(original.map((row) => [key(row), row]))
+  const currentByKey = new Map(current.map((row) => [key(row), row]))
+  const originalTables = original.filter((row) => row.type === 'table')
+  const currentTables = current.filter((row) => row.type === 'table')
+  const changedOriginalTables = new Set(
+    originalTables
+      .filter((row) => currentByKey.get(key(row))?.sql !== row.sql)
+      .map((row) => row.name)
+  )
+  const createdTables = new Set(
+    currentTables.filter((row) => !originalByKey.has(key(row))).map((row) => row.name)
+  )
+  const tablesToDrop = new Set([...changedOriginalTables, ...createdTables])
+  const snapshotByTable = new Map(
+    manifest
+      .filter((row) => row.snapshot)
+      .map((row) => [row.original, row.snapshot!] as const)
+  )
+  for (const table of changedOriginalTables) {
+    if (!snapshotByTable.has(table)) {
+      throw new Error(`transactional DDL rollback is missing table snapshot: ${table}`)
+    }
+  }
+
+  sql.exec('PRAGMA defer_foreign_keys = ON')
+  const changedCurrentObject = (object: (typeof current)[number]) => {
+    const before = originalByKey.get(key(object))
+    return !before || before.sql !== object.sql || tablesToDrop.has(object.table)
+  }
+  // Views can depend on tables. Indexes and triggers disappear with their
+  // table, while changed standalone objects are explicitly removed.
+  for (const object of current.filter(
+    (object) => object.type === 'view' && changedCurrentObject(object)
+  )) {
+    sql.exec(`DROP VIEW IF EXISTS ${quoteIdent(object.name)}`)
+  }
+  for (const object of current.filter(
+    (object) => object.type === 'trigger' && changedCurrentObject(object)
+  )) {
+    sql.exec(`DROP TRIGGER IF EXISTS ${quoteIdent(object.name)}`)
+  }
+  for (const object of current.filter(
+    (object) => object.type === 'index' && changedCurrentObject(object)
+  )) {
+    sql.exec(`DROP INDEX IF EXISTS ${quoteIdent(object.name)}`)
+  }
+  for (const table of tablesToDrop) sql.exec(`DROP TABLE IF EXISTS ${quoteIdent(table)}`)
+
+  const tables = originalTables.filter((row) => changedOriginalTables.has(row.name))
+  for (const row of tables) sql.exec(row.sql!)
+
+  for (const row of tables) {
+    const snapshot = snapshotByTable.get(row.name)!
+    const columns = writableColumns(sql, row.name)
+    if (columns.length > 0) {
+      const columnList = columns.map(quoteIdent).join(', ')
+      sql.exec(
+        `INSERT INTO ${quoteIdent(row.name)} (${columnList}) SELECT ${columnList} FROM ${quoteIdent(snapshot)}`
+      )
+    }
+  }
+
+  // Restore secondary objects only after all table rows are back. This keeps
+  // business triggers from firing while the snapshot data is inserted.
+  for (const type of ['index', 'trigger', 'view']) {
+    for (const row of original.filter((item) => item.type === type)) {
+      const after = currentByKey.get(key(row))
+      if (!after || after.sql !== row.sql || changedOriginalTables.has(row.table)) {
+        sql.exec(row.sql!)
+      }
+    }
+  }
+
+  // Consume only the snapshots used for schema restoration. Any remaining
+  // manifest entries belong to ordinary DML in the same transaction and must
+  // still run through the row/table rollback path below.
+  if (manifestTableExists(sql)) {
+    for (const table of changedOriginalTables) {
+      const snapshot = snapshotByTable.get(table)
+      if (snapshot) dropTable(sql, snapshot)
+      sql.exec(
+        `DELETE FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ? AND original = ?`,
+        txID,
+        table
+      )
+    }
+  }
+  sql.exec(`DELETE FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ?`, txID)
+  rollbackTxJournal(sql, txID)
+}
+
+/**
  * commit a journaled transaction: drop its snapshot tables and delete its
  * manifest rows. the data writes were applied eagerly during the tx, so once
  * the manifest rows are gone the tx is durably committed. must run inside an
  * atomic storage transaction.
  */
 export function commitTxJournal(sql: DurableSqlStorage, txID: string): void {
-  if (!manifestTableExists(sql)) return
-  for (const row of manifestRows(sql, txID)) {
-    if (row.snapshot) dropTable(sql, row.snapshot)
+  if (manifestTableExists(sql)) {
+    for (const row of manifestRows(sql, txID)) {
+      if (row.snapshot) dropTable(sql, row.snapshot)
+    }
+    sql.exec(`DELETE FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ?`, txID)
   }
-  sql.exec(`DELETE FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ?`, txID)
+  if (schemaTableExists(sql)) {
+    sql.exec(`DELETE FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ?`, txID)
+  }
 }
 
 /**
@@ -144,8 +392,12 @@ export function commitTxJournal(sql: DurableSqlStorage, txID: string): void {
  * re-fire change tracking. must run inside an atomic storage transaction.
  */
 export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
-  if (!manifestTableExists(sql)) return
-  const rows = manifestRows(sql, txID).reverse()
+  const schema = schemaRows(sql, txID)
+  const rows = manifestTableExists(sql) ? manifestRows(sql, txID).reverse() : []
+  if (schema.length > 0) {
+    restoreSchemaSnapshot(sql, txID, schema, rows)
+    return
+  }
   if (rows.length === 0) return
 
   const restoredTables = rows.filter((row) => row.snapshot).map((row) => row.original)
@@ -202,7 +454,8 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
 export function upgradeToTableSnapshot(
   sql: DurableSqlStorage,
   txID: string,
-  table: string
+  table: string,
+  owner = 'default'
 ): void {
   sql.exec(TX_MANIFEST_DDL)
   const existing = sql
@@ -231,8 +484,9 @@ export function upgradeToTableSnapshot(
       : Number(
           sql
             .exec(
-              `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, 'default', ?, '') RETURNING seq`,
+              `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, ?, ?, '') RETURNING seq`,
               txID,
+              owner,
               table
             )
             .toArray()[0]?.seq
@@ -307,22 +561,26 @@ export function recoverTxJournal(
   beforeRollback?: (txID: string) => void
 ): string[] {
   const recovered: string[] = []
-  if (manifestTableExists(sql)) {
+  const transactionIDs = new Set<string>()
+  for (const table of [TX_MANIFEST_TABLE, TX_SCHEMA_TABLE]) {
+    const exists =
+      table === TX_MANIFEST_TABLE ? manifestTableExists(sql) : schemaTableExists(sql)
+    if (!exists) continue
     const txRows =
       owner === undefined
-        ? sql.exec(`SELECT DISTINCT tx_id FROM "${TX_MANIFEST_TABLE}"`).toArray()
+        ? sql.exec(`SELECT DISTINCT tx_id FROM ${quoteIdent(table)}`).toArray()
         : sql
             .exec(
-              `SELECT DISTINCT tx_id FROM "${TX_MANIFEST_TABLE}" WHERE owner = ?`,
+              `SELECT DISTINCT tx_id FROM ${quoteIdent(table)} WHERE owner = ?`,
               owner
             )
             .toArray()
-    for (const row of txRows) {
-      const txID = String(row.tx_id)
-      beforeRollback?.(txID)
-      rollbackTxJournal(sql, txID)
-      recovered.push(txID)
-    }
+    for (const row of txRows) transactionIDs.add(String(row.tx_id))
+  }
+  for (const txID of transactionIDs) {
+    beforeRollback?.(txID)
+    rollbackTxJournal(sql, txID)
+    recovered.push(txID)
   }
 
   // sweep snapshot tables nothing references: pre-journal leftovers from a
@@ -343,7 +601,7 @@ export function recoverTxJournal(
     )
     .toArray()
     .map((row) => String(row.name))
-    .filter((name) => !referenced.has(name))
+    .filter((name) => name !== TX_SCHEMA_TABLE && !referenced.has(name))
   for (const name of orphanTables) dropTable(sql, name)
 
   return recovered

@@ -179,6 +179,7 @@ interface TransactionMetadataSnapshot {
   publications: Map<string, PublicationDefinition>
   skippedFunctionNames: Set<string>
   triggerFunctions: Map<string, TriggerFunctionDefinition>
+  fkRegistry: FkCascadeRegistry
 }
 
 // per-DoBackend cache. with ~20 concurrent DoBackend sessions sharing one 128MB
@@ -5339,6 +5340,7 @@ export class DoBackend {
   private txSnapshot: TransactionMetadataSnapshot | null = null
   private txDataSnapshots = new Map<string, string | null>()
   private txSnapshotCounter = 0
+  private txSchemaSnapshotted = false
   // pending persist while inside a transaction. flushed on commit so we don't
   // round-trip to durable storage after every DDL statement in a migration.
   private txMetadataDirty = false
@@ -5746,6 +5748,7 @@ export class DoBackend {
       publications: this.clonePublications(this.publications),
       skippedFunctionNames: new Set(this.skippedFunctionNames),
       triggerFunctions: this.cloneTriggerFunctions(this.triggerFunctions),
+      fkRegistry: this.cloneFkCascadeRegistry(),
     }
   }
 
@@ -5766,6 +5769,7 @@ export class DoBackend {
     for (const [name, fn] of this.cloneTriggerFunctions(snapshot.triggerFunctions)) {
       this.triggerFunctions.set(name, fn)
     }
+    this.fkRegistry = snapshot.fkRegistry
     // Cached rewrites may reference metadata that the rollback just invalidated.
     this.rewriteCache.clear()
     this.publicationTableInfoCache = null
@@ -5778,6 +5782,7 @@ export class DoBackend {
     this.txSnapshot = null
     this.txDataSnapshots.clear()
     this.txSnapshotCounter = 0
+    this.txSchemaSnapshotted = false
     this.txMetadataDirty = false
     this.txHasTrackedWrite = false
   }
@@ -5814,7 +5819,10 @@ export class DoBackend {
     // ONE atomic commit point on the backend: promotes pending tracked
     // changes and clears the tx journal (row images, snapshots, and manifest) in a single
     // storage transaction. read-only transactions skip the round-trip.
-    if (txID && (shouldSignal || this.txDataSnapshots.size > 0)) {
+    if (
+      txID &&
+      (shouldSignal || this.txDataSnapshots.size > 0 || this.txSchemaSnapshotted)
+    ) {
       await this.httpClient.post(
         this.url('/commit-tx'),
         JSON.stringify({ transactionID: txID }),
@@ -5839,7 +5847,12 @@ export class DoBackend {
     try {
       // ONE atomic rollback on the backend: restores row before-images and any
       // fallback table snapshots, then discards pending tracked changes.
-      if (txID && (this.txHasTrackedWrite || this.txDataSnapshots.size > 0)) {
+      if (
+        txID &&
+        (this.txHasTrackedWrite ||
+          this.txDataSnapshots.size > 0 ||
+          this.txSchemaSnapshotted)
+      ) {
         await this.httpClient.post(
           this.url('/rollback-tx'),
           JSON.stringify({ transactionID: txID }),
@@ -6431,11 +6444,6 @@ export class DoBackend {
     const portalName = extractExecutePortalName(data)
     const portal = this.portals.get(portalName)
     if (!portal) return buildErrorResponse(`portal "${portalName}" does not exist`)
-    try {
-      this.rejectTransactionalDDL(portal.rewrittenStatements ?? [])
-    } catch (err: any) {
-      return buildErrorResponse(err.message)
-    }
     if (!portal.sql?.trim()) {
       await this.applyStatementMetadata([
         {
@@ -6500,7 +6508,10 @@ export class DoBackend {
         portal.rewrittenStatements?.length === 1
           ? portal.rewrittenStatements[0]
           : undefined
-      if (statement) await this.snapshotTransactionWrite(statement)
+      await this.snapshotTransactionDDLs(portal.rewrittenStatements ?? [])
+      if (statement) {
+        await this.snapshotTransactionWrite(statement)
+      }
       const tracking = statement ? this.trackingForStatement(statement) : undefined
       const bound = this.sqliteBoundSQL(
         tracking?.returningSQL ?? sql,
@@ -6630,7 +6641,10 @@ export class DoBackend {
         this.visibleResultForTracking(result, tracking)
       ).rows
     }
-    if (statement) await this.snapshotTransactionWrite(statement)
+    if (statement) {
+      await this.snapshotTransactionDDL(statement)
+      await this.snapshotTransactionWrite(statement)
+    }
     if (statement?.cascadeStatements?.length) {
       await this.runCascadeStatements(statement.cascadeStatements, {})
     }
@@ -6762,7 +6776,10 @@ export class DoBackend {
       booleanParamNumbers
     )
     const statement = statements.length === 1 ? statements[0] : undefined
-    if (statement) await this.snapshotTransactionWrite(statement)
+    if (statement) {
+      await this.snapshotTransactionDDL(statement)
+      await this.snapshotTransactionWrite(statement)
+    }
     // a public DML write whose publication cache is empty may have been built
     // before another backend instance created the publication — self-heal the
     // stale-empty cache so its change-capture isn't silently skipped.
@@ -6838,28 +6855,24 @@ export class DoBackend {
     const arrayParamNumbers = new Set<number>()
     const jsonParamNumbers = new Set<number>()
     const epochMillisParamNumbers = new Set<number>()
-    // DDL rewriting mutates function/FK metadata before execution and DDL
-    // execution invalidates live caches. While an emulated transaction is
-    // active, rewrite against isolated state so rejecting DDL cannot itself
-    // leak a metadata or cache side effect.
-    const skippedFunctionNames = this.inTransaction
-      ? new Set(this.skippedFunctionNames)
-      : this.skippedFunctionNames
-    const triggerFunctions = this.inTransaction
-      ? this.cloneTriggerFunctions(this.triggerFunctions)
-      : this.triggerFunctions
-    const fkRegistry = this.inTransaction
-      ? this.cloneFkCascadeRegistry()
-      : this.fkRegistry
+    const rejectsTransactionalDDL = this.inTransaction && this.txOwner !== 'orez-embed'
     const statements = rewriteSQLStatements(sql, {
-      skippedFunctionNames,
-      triggerFunctions,
+      skippedFunctionNames: rejectsTransactionalDDL
+        ? new Set(this.skippedFunctionNames)
+        : this.skippedFunctionNames,
+      triggerFunctions: rejectsTransactionalDDL
+        ? this.cloneTriggerFunctions(this.triggerFunctions)
+        : this.triggerFunctions,
       arrayParamNumbers,
       jsonParamNumbers,
       epochMillisParamNumbers,
-      fkRegistry,
+      fkRegistry: rejectsTransactionalDDL
+        ? this.cloneFkCascadeRegistry()
+        : this.fkRegistry,
     })
-    this.rejectTransactionalDDL(statements)
+    if (rejectsTransactionalDDL && statements.some((statement) => statement.isDDL)) {
+      throw new Error('DDL statements are not supported inside emulated transactions')
+    }
     if (this.canCacheRewrite(statements)) {
       this.rememberRewrite(key, statements)
     } else if (this.rewriteCache.size) {
@@ -6878,12 +6891,6 @@ export class DoBackend {
       })
     }
     return cloned
-  }
-
-  private rejectTransactionalDDL(statements: RewrittenStatement[]): void {
-    if (this.inTransaction && statements.some((statement) => statement.isDDL)) {
-      throw new Error('DDL statements are not supported inside emulated transactions')
-    }
   }
 
   private canCacheRewrite(statements: RewrittenStatement[]): boolean {
@@ -7124,6 +7131,46 @@ export class DoBackend {
     await this.snapshotTransactionTable(table)
   }
 
+  private async snapshotTransactionDDL(statement: RewrittenStatement): Promise<void> {
+    if (!this.inTransaction || !statement.isDDL) return
+    if (this.txOwner !== 'orez-embed') {
+      throw new Error('DDL statements are not supported inside emulated transactions')
+    }
+    const txID = this.currentTransactionID()
+    const affectedTables = new Set<string>()
+    for (const column of statement.schemaColumns ?? []) affectedTables.add(column.table)
+    if (statement.skipIfColumnExists)
+      affectedTables.add(statement.skipIfColumnExists.table)
+    if (statement.skipIfColumnMissing)
+      affectedTables.add(statement.skipIfColumnMissing.table)
+    for (const change of statement.schemaMetadataChanges ?? []) {
+      if (change.action === 'renameTable') affectedTables.add(change.from.table)
+      else affectedTables.add(change.table.table)
+    }
+    for (const match of statement.sql.matchAll(
+      /\b(?:ALTER|DROP)\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:"([^"]+)"|([A-Za-z_][\w.]*))/gi
+    )) {
+      affectedTables.add(match[1] || match[2])
+    }
+    await this.httpClient.post(
+      this.url('/snapshot-tx-schema'),
+      JSON.stringify({
+        transactionID: txID,
+        owner: this.txOwner,
+        affectedTables: [...affectedTables],
+      }),
+      { 'Content-Type': 'application/json' }
+    )
+    for (const table of affectedTables) {
+      if (!this.txDataSnapshots.has(table)) this.txDataSnapshots.set(table, '')
+    }
+    this.txSchemaSnapshotted = true
+  }
+
+  private async snapshotTransactionDDLs(statements: RewrittenStatement[]): Promise<void> {
+    for (const statement of statements) await this.snapshotTransactionDDL(statement)
+  }
+
   private async doRawBatch(
     statements: Array<string | { sql: string; params?: any[] }>
   ): Promise<void> {
@@ -7190,9 +7237,9 @@ export class DoBackend {
   private async executeRewrittenStatement(
     statement: RewrittenStatement
   ): Promise<ExecResult> {
-    this.rejectTransactionalDDL([statement])
     if (!statement.sql.trim()) return { rows: [], columns: [] }
     if (await this.shouldSkipStatement(statement)) return { rows: [], columns: [] }
+    await this.snapshotTransactionDDL(statement)
     if (statement.isDDL) {
       this.publicationTableInfoCache = null
       this.invalidateCdcRegistration()

@@ -27,6 +27,7 @@ import {
   recoverTxJournal,
   rollbackTxJournal,
   snapshotSideEffectWriteTables,
+  snapshotTxSchema,
   upgradeToTableSnapshot,
 } from '../cf-do/tx-journal.js'
 
@@ -201,6 +202,8 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
       track?: SqlStatement['track']
       statements?: Array<string | SqlStatement>
       transactionID?: unknown
+      owner?: unknown
+      affectedTables?: unknown
     }
     switch (url.pathname) {
       case '/exec': {
@@ -227,6 +230,19 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
         )
         return Response.json({ results })
       }
+      case '/snapshot-tx-schema': {
+        const transactionID = String(body.transactionID || '')
+        if (!transactionID) throw new Error('missing transactionID')
+        atomically(() =>
+          snapshotTxSchema(
+            journalSql,
+            transactionID,
+            String(body.owner || 'default'),
+            Array.isArray(body.affectedTables) ? body.affectedTables.map(String) : []
+          )
+        )
+        return Response.json({ ok: true })
+      }
       case '/commit-tx': {
         const transactionID = String(body.transactionID || '')
         if (!transactionID) throw new Error('missing transactionID')
@@ -244,6 +260,7 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
           rollbackTxJournal(journalSql, transactionID)
           deletePendingChanges(journalSql, transactionID)
         })
+        cdc.reload()
         return Response.json({ ok: true })
       }
       default:
@@ -265,12 +282,14 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
       }
     },
     recoverOrphanedTransactions(): string[] {
-      return atomically(() =>
+      const recovered = atomically(() =>
         recoverTxJournal(journalSql, undefined, (transactionID) => {
           rollbackPendingChanges(journalSql, transactionID)
           deletePendingChanges(journalSql, transactionID)
         })
       )
+      cdc.reload()
+      return recovered
     },
   }
 }
