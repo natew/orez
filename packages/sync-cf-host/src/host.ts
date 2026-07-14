@@ -616,7 +616,10 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     ): Promise<ApplyUpstreamResult> {
       const endpoint = new URL(`${path}/snapshot`, 'https://upstream.invalid')
       const response = await this.#serviceBinding().fetch(endpoint.toString(), {
-        headers: { host: endpoint.host },
+        headers: {
+          host: endpoint.host,
+          'x-orez-snapshot-tables': JSON.stringify(Object.keys(config.schema.tables)),
+        },
       })
       if (!response.ok) {
         throw new Error(`upstream snapshot returned ${response.status}`)

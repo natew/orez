@@ -570,8 +570,20 @@ describe('ZeroDO snapshot feed timestamp fidelity', () => {
             createdAt: { type: 'number' },
           },
         },
+        user: {
+          primaryKey: ['id'],
+          columns: {
+            id: { type: 'string' },
+            email: { type: 'string' },
+          },
+        },
       },
     })
+    sql.exec(
+      'INSERT INTO "user" ("id", "email") VALUES (?, ?)',
+      'private-user',
+      'private@example.test'
+    )
     for (const row of rows) {
       sql.exec(
         'INSERT INTO "message" ("id", "createdAt") VALUES (?, ?)',
@@ -586,27 +598,44 @@ describe('ZeroDO snapshot feed timestamp fidelity', () => {
         .toArray()
         .map((row) => zero.normalizeRow('message', row))
     ).toEqual(rows)
-    const response = await zero.handleSnapshot()
+    const response = await zero.handleSnapshot(
+      new Request('https://data.invalid/snapshot', {
+        headers: { 'x-orez-snapshot-tables': JSON.stringify(['message']) },
+      })
+    )
     const body = (await response.json()) as {
       tables: Record<string, Array<Record<string, unknown>>>
     }
-    return body.tables.message
+    return body.tables
   }
+
+  it('rejects a snapshot without an explicit consumer table scope', async () => {
+    const { zero } = await createWorkerCore()
+    const response = await zero.handleSnapshot(
+      new Request('https://data.invalid/snapshot')
+    )
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ error: 'snapshot table scope is required' })
+  })
 
   it('forwards postgres timestamp text (client epoch-ms form) instead of nulling it', async () => {
     const rows = await snapshotFor([
       { id: 'm1', createdAt: '2026-07-11 13:34:46.000+00' },
     ])
-    expect(rows).toEqual([{ id: 'm1', createdAt: '2026-07-11 13:34:46.000+00' }])
+    expect(rows).toEqual({
+      message: [{ id: 'm1', createdAt: '2026-07-11 13:34:46.000+00' }],
+    })
   })
 
   it('forwards CURRENT_TIMESTAMP text (server default form) instead of nulling it', async () => {
     const rows = await snapshotFor([{ id: 'm2', createdAt: '2026-07-11 13:34:46' }])
-    expect(rows).toEqual([{ id: 'm2', createdAt: '2026-07-11 13:34:46' }])
+    expect(rows).toEqual({
+      message: [{ id: 'm2', createdAt: '2026-07-11 13:34:46' }],
+    })
   })
 
   it('still coerces a genuine numeric timestamp to a number', async () => {
     const rows = await snapshotFor([{ id: 'm3', createdAt: 1_783_776_886_000 }])
-    expect(rows).toEqual([{ id: 'm3', createdAt: 1_783_776_886_000 }])
+    expect(rows).toEqual({ message: [{ id: 'm3', createdAt: 1_783_776_886_000 }] })
   })
 })

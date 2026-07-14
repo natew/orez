@@ -240,3 +240,45 @@ fn retention_gap_snapshot_replaces_rows_atomically() {
     );
     assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 50);
 }
+
+#[test]
+fn unknown_snapshot_table_aborts_without_changing_rows_or_watermark() {
+    let (mut db, tables) = setup();
+    apply_upstream(
+        &mut db,
+        &tables,
+        &UpstreamBatch {
+            watermark: 1,
+            changes: vec![change(1, "INSERT", Some(item("stale", "preserved")), None)],
+        },
+    )
+    .unwrap();
+    let snapshot = UpstreamSnapshot {
+        watermark: 50,
+        tables: [
+            ("item".into(), vec![row(item("fresh", "must roll back"))]),
+            (
+                "user".into(),
+                vec![row(
+                    json!({ "id": "private-user", "email": "private@example.test" }),
+                )],
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let error = db
+        .transaction(|db| apply_upstream_snapshot(db, &tables, &snapshot))
+        .unwrap_err();
+    assert_eq!(error.status, 409);
+    assert_eq!(error.message, "schema refresh required: unknown table user");
+    assert_eq!(
+        db.query("SELECT id, label FROM item", &[]).unwrap()[0].values,
+        vec![
+            sync_core::SqlValue::Text("stale".into()),
+            sync_core::SqlValue::Text("preserved".into()),
+        ]
+    );
+    assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 1);
+}

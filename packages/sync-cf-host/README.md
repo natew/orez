@@ -57,6 +57,7 @@ to perform a production cutover.
 
 `POST /admin/resnapshot` is available only when the consumer configured an
 upstream data service. It reads that namespace's authoritative `/snapshot`,
+scoped to the tables declared by the consumer schema,
 atomically replaces the derived application tables, then consumes `/changes`
 until caught up. Engine metadata, client last-mutation IDs, operator controls,
 and the authoritative upstream database are preserved. The JSON response

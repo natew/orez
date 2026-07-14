@@ -514,6 +514,102 @@ try {
     { id: 'up-1', label: 'delegated', lastMutationID: 1 },
   ])
 
+  // A production project DATA namespace contains private/control tables such
+  // as `user` alongside its public sync surface. The host schema deliberately
+  // excludes those tables. Resnapshot must request only its declared table
+  // surface instead of letting an unrelated DATA table abort the atomic repair.
+  const scopedSnapshotNamespace = `scoped-snapshot-${crypto.randomUUID()}`
+  const scopedSnapshotOrigin = `${base}/${scopedSnapshotNamespace}`
+  const scopedInitial = await fetch(`${scopedSnapshotOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'scoped-reader',
+      clientGroupID: 'scoped-group',
+      cookie: null,
+    }),
+  })
+  assert.equal(scopedInitial.status, 200)
+  const enablePrivateSnapshot = await fetch(
+    `${base}/private-snapshot-control/${scopedSnapshotNamespace}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    }
+  )
+  assert.equal(enablePrivateSnapshot.status, 200)
+  const seedScopedSnapshot = await fetch(
+    `${base}/upstream/${scopedSnapshotNamespace}/exec`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sql: 'INSERT INTO item (id, label, rank, done, meta) VALUES (?, ?, ?, ?, ?)',
+        params: [
+          'timestamp-repair',
+          'authoritative snapshot row',
+          '2026-07-11 13:34:46+00',
+          0,
+          null,
+        ],
+      }),
+    }
+  )
+  assert.equal(seedScopedSnapshot.status, 200)
+  const scopedResnapshotResponse = await fetch(
+    `${scopedSnapshotOrigin}/admin/resnapshot`,
+    {
+      method: 'POST',
+      headers: { 'x-admin-key': 'ingest-harness-admin' },
+    }
+  )
+  const scopedResnapshot = await scopedResnapshotResponse.json()
+  assert.equal(
+    scopedResnapshotResponse.status,
+    200,
+    `project-scoped resnapshot failed: ${JSON.stringify(scopedResnapshot)}`
+  )
+  assert.equal(scopedResnapshot.ok, true)
+  const scopedRows = await fetch(`${scopedSnapshotOrigin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query:
+        "SELECT id, rank, EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'user') AS privateTableExists FROM item WHERE id = 'timestamp-repair'",
+    }),
+  }).then((response) => response.json())
+  assert.deepEqual(scopedRows.rows, [
+    {
+      id: 'timestamp-repair',
+      rank: '2026-07-11 13:34:46+00',
+      privateTableExists: 0,
+    },
+  ])
+  const scopedPull = await fetch(`${scopedSnapshotOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'scoped-repair-reader',
+      clientGroupID: 'scoped-repair-group',
+      cookie: null,
+    }),
+  }).then(async (response) => ({ status: response.status, body: await response.json() }))
+  assert.equal(scopedPull.status, 200)
+  const repairedTimestamp = scopedPull.body.rowsPatch.find(
+    (entry) => entry.op === 'put' && entry.value?.id === 'timestamp-repair'
+  )
+  assert.equal(repairedTimestamp.value.rank, 1783776886000)
+
   // Production timestamp columns are Zero `number`s, but SQLite returns their
   // SQL timestamp representation as TEXT. Prove the real ingest -> incremental
   // pull path converts it to epoch milliseconds on the wire.

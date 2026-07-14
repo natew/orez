@@ -31,6 +31,7 @@ const runawayNamespaces = new Set<string>()
 const numericTextNamespaces = new Set<string>()
 const jsonValueNamespaces = new Set<string>()
 const hydratedNamespaces = new Set<string>()
+const privateSnapshotNamespaces = new Set<string>()
 const heldSnapshots = new Set<string>()
 const activeSnapshots = new Set<string>()
 let delegatedFailuresRemaining = 0
@@ -96,6 +97,21 @@ async function upstreamFetch(request: Request, env: Env): Promise<Response> {
     'INSERT OR IGNORE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
     ['item', JSON.stringify(schema.tables.item)]
   )
+  if (privateSnapshotNamespaces.has(namespace)) {
+    const privateUserSchema = {
+      columns: { id: { type: 'string' }, email: { type: 'string' } },
+      primaryKey: ['id'],
+    }
+    await exec('CREATE TABLE IF NOT EXISTS "user" (id TEXT PRIMARY KEY, email TEXT)')
+    await exec(
+      'INSERT OR IGNORE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
+      ['user', JSON.stringify(privateUserSchema)]
+    )
+    await exec('INSERT OR IGNORE INTO "user" (id, email) VALUES (?, ?)', [
+      'private-user',
+      'private@example.test',
+    ])
+  }
   return stub.fetch(new Request(url, request))
 }
 
@@ -311,6 +327,18 @@ export default {
           if ((body as { enabled?: unknown }).enabled === true)
             numericTextNamespaces.add(namespace)
           else numericTextNamespaces.delete(namespace)
+          return Response.json({ ok: true, namespace })
+        })
+    }
+    if (url.pathname.startsWith('/private-snapshot-control/')) {
+      const namespace = url.pathname.slice('/private-snapshot-control/'.length)
+      return request
+        .json()
+        .catch(() => ({}))
+        .then((body) => {
+          if ((body as { enabled?: unknown }).enabled === true)
+            privateSnapshotNamespaces.add(namespace)
+          else privateSnapshotNamespaces.delete(namespace)
           return Response.json({ ok: true, namespace })
         })
     }

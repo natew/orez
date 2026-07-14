@@ -326,7 +326,7 @@ export class ZeroDO extends DurableObject {
     )
       return this.handleChanges(request, url)
     if (url.pathname === '/snapshot' && request.method === 'GET')
-      return this.handleSnapshot()
+      return this.handleSnapshot(request)
     if (url.pathname === '/notify' && request.method === 'POST')
       return Response.json({ ok: true, cookie: this.cookie() })
     return new Response('not found', { status: 404 })
@@ -874,14 +874,38 @@ export class ZeroDO extends DurableObject {
     }
   }
 
-  private async handleSnapshot(): Promise<Response> {
+  private async handleSnapshot(request: Request): Promise<Response> {
     try {
+      const encodedTables = request.headers.get('x-orez-snapshot-tables')
+      if (!encodedTables) {
+        return Response.json(
+          { error: 'snapshot table scope is required' },
+          { status: 400 }
+        )
+      }
+      let requested: unknown
+      try {
+        requested = JSON.parse(encodedTables)
+      } catch {
+        return Response.json({ error: 'invalid snapshot table scope' }, { status: 400 })
+      }
+      if (!Array.isArray(requested)) {
+        return Response.json({ error: 'invalid snapshot table scope' }, { status: 400 })
+      }
+      const requestedTables = new Set<string>()
+      for (const table of requested) {
+        if (typeof table !== 'string' || table.length === 0) {
+          return Response.json({ error: 'invalid snapshot table scope' }, { status: 400 })
+        }
+        requestedTables.add(table)
+      }
       return this.atomicallySync(() => {
         this.ensureSchemaMetadataTable()
         const names = this.sql
           .exec('SELECT name FROM _zero_schema_tables ORDER BY name')
           .toArray()
           .map((row: any) => String(row.name))
+          .filter((name) => requestedTables.has(name))
         const tables: Record<string, Record<string, unknown>[]> = {}
         for (const name of names) tables[name] = this.readAllRows(name)
         return Response.json({ watermark: this.watermark(), tables })

@@ -170,8 +170,10 @@ On Cloudflare the deployment has two Durable Object roles:
   watermark-cursored change feed the sync host consumes:
   `GET/POST /<db>/changes {watermark, limit}` returns `{watermark, changes}` and
   answers HTTP 410 `watermarkTooOld` when the cursor precedes the retained
-  floor; `GET /<db>/snapshot` returns every tracked table; `POST /<db>/notify`
-  wakes ingest. Authoritative row capture is in `src/cf-do/cdc.ts`: generated
+  floor; `GET /<db>/snapshot` requires the sync host's
+  `x-orez-snapshot-tables` scope and returns only those tracked tables;
+  `POST /<db>/notify` wakes ingest. Authoritative row capture is in
+  `src/cf-do/cdc.ts`: generated
   SQLite triggers stage full before/after images in the same statement as the
   row write, including indirect writes from business triggers. Explicit
   transactions are grouped and promoted only at commit; `src/cf-do/row-undo.ts`
