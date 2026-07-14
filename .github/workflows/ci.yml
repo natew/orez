@@ -524,3 +524,11 @@ jobs:
           path: site/dist/
           if-no-files-found: error
           retention-days: 90
+
+      - name: deploy docs site to Cloudflare
+        if: github.ref == 'refs/heads/main'
+        working-directory: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 6afff1f79e2fd12f1cfd1bfe1dfd08d1
+        run: bunx wrangler@4.110.0 deploy --name orez-docs
