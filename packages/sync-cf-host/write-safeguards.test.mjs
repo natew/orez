@@ -80,6 +80,9 @@ test('billable cursor tracking captures rows that appear during raw iteration', 
     raw() {
       let done = false
       return {
+        [Symbol.iterator]() {
+          return this
+        },
         next: () => {
           if (done) return { done: true }
           done = true
@@ -91,8 +94,6 @@ test('billable cursor tracking captures rows that appear during raw iteration', 
   }
   const deltas = []
   const tracked = trackBillableCursorRows(cursor, (rows) => deltas.push(rows))
-  const raw = tracked.raw()
-  raw.next()
-  raw.next()
+  expect(Array.from(tracked.raw())).toEqual([[1]])
   expect(deltas).toEqual([7])
 })

@@ -187,22 +187,21 @@ export function trackBillableCursorRows<Cursor extends BillableCursor>(
     accountedRows = current
     record(delta)
   }
-  const wrapIterator = (iterator: object): object =>
-    new Proxy(iterator, {
-      get(target, property) {
-        const value = Reflect.get(target, property, target)
-        if (property === 'next' && typeof value === 'function') {
-          return (...args: unknown[]) => {
-            try {
-              return Reflect.apply(value, target, args)
-            } finally {
-              account()
-            }
-          }
+  const wrapIterator = (iterator: Iterator<unknown>): IterableIterator<unknown> => {
+    const next = iterator.next.bind(iterator)
+    return {
+      next(...args: [] | [unknown]) {
+        try {
+          return next(...args)
+        } finally {
+          account()
         }
-        return typeof value === 'function' ? value.bind(target) : value
       },
-    })
+      [Symbol.iterator]() {
+        return this
+      },
+    }
+  }
   let proxy: Cursor
   proxy = new Proxy(cursor, {
     get(target, property) {
@@ -222,7 +221,7 @@ export function trackBillableCursorRows<Cursor extends BillableCursor>(
       }
       if (property === 'raw' && typeof value === 'function') {
         return (...args: unknown[]) =>
-          wrapIterator(Reflect.apply(value, target, args) as object)
+          wrapIterator(Reflect.apply(value, target, args) as Iterator<unknown>)
       }
       return typeof value === 'function' ? value.bind(target) : value
     },
