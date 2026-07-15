@@ -197,18 +197,20 @@ const EMBED_TX_OWNER = 'orez-embed'
 
 // roll back journaled transactions a dead embed generation left on the
 // remote SQL DO (upstream db sessions killed mid-transaction).
+// this request is deliberately not abortable: a service-binding abort can
+// reject locally while the target DO keeps running. teardown joins this
+// promise before releasing the runtime claim, so a replacement cannot open
+// transactions under the same owner until recovery has actually responded.
 async function recoverRemoteTransactions(
   url: string,
   owner: string,
-  backendFetch?: typeof fetch,
-  signal?: AbortSignal
+  backendFetch?: typeof fetch
 ): Promise<void> {
   const fetcher = backendFetch ?? fetch
   const resp = await fetcher(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ owner }),
-    signal,
   })
   if (!resp.ok) {
     const text = await resp.text().catch(() => '')
@@ -257,6 +259,7 @@ export async function startZeroCacheEmbedCF(
 
   const startupDeadlineAt = startupStartedAt + readyTimeout
   const startupAbort = new AbortController()
+  const startupOperations = new Set<Promise<unknown>>()
   let startupPhase = 'entry'
   const emitStartupEvent = (event: Record<string, unknown>) => {
     try {
@@ -269,23 +272,49 @@ export async function startZeroCacheEmbedCF(
       // diagnostics cannot break startup
     }
   }
-  const startupTimer = setTimeout(
-    () => {
-      const error = new Error(
-        `zero-cache CF embed: startup timed out after ${readyTimeout}ms in phase ${startupPhase}`
-      )
-      emitStartupEvent({
-        elapsedMs: Date.now() - startupStartedAt,
-        event: 'startup-phase-timeout',
-        phase: startupPhase,
-        timeoutMs: readyTimeout,
-      })
-      startupAbort.abort(error)
-    },
-    Math.max(0, startupDeadlineAt - Date.now())
-  )
+  const assertWithinStartupDeadline = (phase: string) => {
+    if (startupAbort.signal.aborted) throw abortReason(startupAbort.signal)
+    const now = Date.now()
+    if (now < startupDeadlineAt) return
+    startupPhase = phase
+    const error = new Error(
+      `zero-cache CF embed: startup timed out after ${readyTimeout}ms in phase ${phase}`
+    )
+    emitStartupEvent({
+      elapsedMs: now - startupStartedAt,
+      event: 'startup-phase-timeout',
+      phase,
+      timeoutMs: readyTimeout,
+    })
+    startupAbort.abort(error)
+    throw error
+  }
+  let startupTimer!: ReturnType<typeof setTimeout>
+  const armStartupTimer = () => {
+    startupTimer = setTimeout(
+      () => {
+        try {
+          assertWithinStartupDeadline(startupPhase)
+        } catch {
+          return
+        }
+        armStartupTimer()
+      },
+      Math.max(0, startupDeadlineAt - Date.now())
+    )
+  }
+  armStartupTimer()
+  const trackStartupOperation = <T>(operation: Promise<T>): Promise<T> => {
+    startupOperations.add(operation)
+    void operation.then(
+      () => startupOperations.delete(operation),
+      () => startupOperations.delete(operation)
+    )
+    return operation
+  }
   const runStartupPhase = async <T>(phase: string, run: () => Promise<T>) => {
     startupPhase = phase
+    assertWithinStartupDeadline(phase)
     const phaseStartedAt = Date.now()
     emitStartupEvent({
       elapsedMs: phaseStartedAt - startupStartedAt,
@@ -294,10 +323,9 @@ export async function startZeroCacheEmbedCF(
       remainingMs: Math.max(0, startupDeadlineAt - phaseStartedAt),
     })
     try {
-      const result = await waitForAbortable(
-        Promise.resolve().then(run),
-        startupAbort.signal
-      )
+      const operation = trackStartupOperation(Promise.resolve().then(run))
+      const result = await waitForAbortable(operation, startupAbort.signal)
+      assertWithinStartupDeadline(phase)
       emitStartupEvent({
         elapsedMs: Date.now() - startupStartedAt,
         event: 'startup-phase-complete',
@@ -318,13 +346,13 @@ export async function startZeroCacheEmbedCF(
     }
   }
 
-  let runtime: CFInstanceRuntime
+  let registeredRuntime: CFInstanceRuntime | undefined
   try {
     await runStartupPhase('replacement-stop', () =>
       stopCFInstanceRuntimeForReplacement(opts.instanceId)
     )
-    runtime = await runStartupPhase('runtime-registration', async () =>
-      registerCFInstanceRuntime({
+    await runStartupPhase('runtime-registration', async () => {
+      registeredRuntime = registerCFInstanceRuntime({
         apiFetch: opts.apiFetch,
         doSqlite: opts.doSqlite,
         env: opts.env ?? {},
@@ -333,11 +361,17 @@ export async function startZeroCacheEmbedCF(
         pgPassword,
         pgUser,
       })
-    )
+    })
   } catch (error) {
+    if (registeredRuntime) releaseCFInstanceRuntime(registeredRuntime)
     clearTimeout(startupTimer)
     throw error
   }
+  if (!registeredRuntime) {
+    clearTimeout(startupTimer)
+    throw new Error('zero-cache CF embed: runtime registration did not complete')
+  }
+  const runtime = registeredRuntime
 
   const generation: GenerationState = {
     cleanupDone: false,
@@ -429,6 +463,8 @@ export async function startZeroCacheEmbedCF(
       if (workerFailed && workerError !== startupFailure) {
         cleanupErrors.push(workerError)
       }
+
+      await Promise.allSettled([...startupOperations])
 
       if (proxy) {
         try {
@@ -529,8 +565,7 @@ export async function startZeroCacheEmbedCF(
       recoverRemoteTransactions(
         `${backendUrl.replace(/\/+$/, '')}/recover-txs?db=postgres&ns=${encodeURIComponent(backendNamespace)}`,
         txOwner,
-        opts.backendFetch,
-        startupAbort.signal
+        opts.backendFetch
       )
     )
 
@@ -559,6 +594,7 @@ export async function startZeroCacheEmbedCF(
           })
           try {
             await backend.waitReady
+            assertWithinStartupDeadline('backend-initialization')
             emitStartupEvent({
               database,
               elapsedMs: Date.now() - startupStartedAt,
@@ -749,6 +785,7 @@ export async function startZeroCacheEmbedCF(
     )
 
     fastifyInstance = dispatcherFastifyForCFInstance(instanceId)
+    assertWithinStartupDeadline('startup-complete')
   } catch (startupError) {
     clearTimeout(startupTimer)
     if (!startupAbort.signal.aborted) startupAbort.abort(startupError)

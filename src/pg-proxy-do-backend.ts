@@ -5332,6 +5332,9 @@ export class DoBackend {
   private publicationTableInfoCache: PublicationTableInfo[] | null = null
   private cdcRegistrationDirty = false
   private readyPromise: Promise<void> | null = null
+  private closePromise: Promise<void> | null = null
+  private lifecycleAbort = new AbortController()
+  private removeExternalAbortListener: (() => void) | null = null
   private operationMutex = new Mutex()
   private instanceId: string
   private allowTransactionalDDL: boolean
@@ -5389,7 +5392,18 @@ export class DoBackend {
     this.allowTransactionalDDL = opts?.allowTransactionalDDL === true
     this.txOwner = opts?.txOwner || 'default'
     this.signalReplication = opts?.signalReplication ?? signalReplicationChange
-    this.httpClient = new HttpClient(opts?.fetch, opts?.signal)
+    if (opts?.signal) {
+      const externalSignal = opts.signal
+      const abort = () => this.lifecycleAbort.abort(externalSignal.reason)
+      if (externalSignal.aborted) {
+        abort()
+      } else {
+        externalSignal.addEventListener('abort', abort, { once: true })
+        this.removeExternalAbortListener = () =>
+          externalSignal.removeEventListener('abort', abort)
+      }
+    }
+    this.httpClient = new HttpClient(opts?.fetch, this.lifecycleAbort.signal)
     this.skippedFunctionNames = getSkippedFunctionNames(
       dbName,
       namespace,
@@ -5407,6 +5421,11 @@ export class DoBackend {
   }
 
   private ensureReady(): Promise<void> {
+    try {
+      this.assertOpen()
+    } catch (error) {
+      return Promise.reject(error)
+    }
     if (this.ready) return Promise.resolve()
     if (!this.readyPromise) {
       this.readyPromise = this.init().catch((err) => {
@@ -5417,13 +5436,23 @@ export class DoBackend {
     return this.readyPromise
   }
 
+  private assertOpen(): void {
+    if (this.closed) throw new Error('DoBackend closed')
+    this.lifecycleAbort.signal.throwIfAborted()
+  }
+
   private async init() {
+    this.assertOpen()
     await loadModule()
+    this.assertOpen()
     try {
       await this.httpClient.post(this.url('/exec'), JSON.stringify({ sql: 'SELECT 1' }))
     } catch {}
+    this.assertOpen()
     if (this.dbName === 'postgres') await this.ensureChangeTrackingTables()
+    this.assertOpen()
     await this.loadDurableMetadata()
+    this.assertOpen()
     this.ready = true
   }
 
@@ -5708,17 +5737,31 @@ export class DoBackend {
     }
   }
 
-  async close(): Promise<void> {
-    return this.runExclusive(async () => {
-      if (this.inTransaction) {
-        try {
-          await this.rollbackTransaction()
-        } catch {
-          this.clearTransactionState()
-        }
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise
+    this.closed = true
+    if (!this.lifecycleAbort.signal.aborted) {
+      this.lifecycleAbort.abort(new Error('DoBackend closed'))
+    }
+    const initialization = this.readyPromise
+    this.closePromise = (async () => {
+      try {
+        await initialization?.catch(() => {})
+        await this.runExclusive(async () => {
+          if (this.inTransaction) {
+            try {
+              await this.rollbackTransaction()
+            } catch {
+              this.clearTransactionState()
+            }
+          }
+        })
+      } finally {
+        this.removeExternalAbortListener?.()
+        this.removeExternalAbortListener = null
       }
-      this.closed = true
-    })
+    })()
+    return this.closePromise
   }
 
   private readyForQuery(): Uint8Array {
@@ -8918,16 +8961,21 @@ class HttpClient {
     body: string,
     headers?: Record<string, string>
   ): Promise<string> {
+    this.signal?.throwIfAborted()
     const resp = await this.fetcher(url, {
       method: 'POST',
       headers: headers ?? { 'Content-Type': 'application/json' },
       body,
       signal: this.signal,
     })
+    this.signal?.throwIfAborted()
     if (!resp.ok) {
       const text = await resp.text().catch(() => '')
+      this.signal?.throwIfAborted()
       throw new Error(`HTTP ${resp.status}: ${text.slice(0, 5000)}`)
     }
-    return resp.text()
+    const text = await resp.text()
+    this.signal?.throwIfAborted()
+    return text
   }
 }
