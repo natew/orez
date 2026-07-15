@@ -6,48 +6,45 @@
 // data dir without bound: soot's `.orez/sync-native` reached gigabytes of
 // `proj-*.sqlite` with no ceiling.
 //
-// these replicas are derived, not authoritative. in the delegation / no-op
-// mutate deployments this host is built for, the app owns the source of truth
-// (its own database) and writes into each replica over admin SQL; a deleted
-// replica is rebuilt on the next request through the engine's existing full
-// snapshot path. losing one forces an affected client to resync, never data
-// loss. that is what makes age- and size-bounded eviction safe.
+// deletion is safe only when these replicas are derived and sync-native is the
+// sole process allowed to open them. shared or authoritative sqlite files must
+// use the disabled policy, even when sync-native's MutateFn is a no-op.
+// exclusive retention is therefore an explicit opt-in rather than the default.
 //
 // this module holds the policy and the pure deletion planner. the Manager
 // (namespace.rs) owns the filesystem walk, idle-worker eviction, and the actual
 // unlinks, because it also holds the live-namespace map that decides which files
 // a worker still has open and must not be touched.
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde_json::json;
 
 /// Bounds on how much replica state the host keeps on disk.
 ///
-/// Use [`RetentionPolicy::default`] unless you have a reason to tune it, or
-/// [`RetentionPolicy::disabled`] to turn retention off entirely (no eviction,
-/// no deletion, no background sweep).
+/// The default is disabled. Use [`RetentionPolicy::exclusive`] only when
+/// sync-native owns the files and no other process can open them.
 #[derive(Clone, Copy)]
 pub struct RetentionPolicy {
-    /// When false, retention does nothing at all.
-    pub enabled: bool,
+    enabled: bool,
     /// Delete a replica whose newest file has not been modified within this
     /// window. An abandoned namespace's replica ages out even under budget.
-    pub max_age: Duration,
+    max_age: Duration,
     /// Total on-disk budget for all non-live replica files (main + `-wal` +
     /// `-shm`). Once the set exceeds it, the oldest replicas are deleted first
     /// until it fits.
-    pub max_bytes: u64,
+    max_bytes: u64,
     /// Evict a namespace's in-memory worker (thread + open connection) after
     /// this much idle time, so its file is closed and becomes eligible for
     /// deletion. Reopened cheaply on the next request.
-    pub idle_ttl: Duration,
+    idle_ttl: Duration,
     /// How often the background sweep runs.
-    pub interval: Duration,
+    interval: Duration,
 }
 
 impl RetentionPolicy {
-    /// Retention turned off. Every field but `enabled` is inert.
+    /// Retention turned off. No worker eviction or file deletion runs.
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -57,17 +54,43 @@ impl RetentionPolicy {
             interval: Duration::from_secs(600),
         }
     }
+
+    /// Enable retention for derived replicas owned exclusively by sync-native.
+    ///
+    /// Do not use this for an authoritative database, or for a SQLite database
+    /// opened by an application process or any other connection pool. SQLite
+    /// cannot safely unlink an open database.
+    pub fn exclusive(
+        max_age: Duration,
+        max_bytes: u64,
+        idle_ttl: Duration,
+        interval: Duration,
+    ) -> Self {
+        Self {
+            enabled: true,
+            max_age,
+            max_bytes,
+            idle_ttl,
+            interval,
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) fn idle_ttl(&self) -> Duration {
+        self.idle_ttl
+    }
+
+    pub(crate) fn interval(&self) -> Duration {
+        self.interval
+    }
 }
 
 impl Default for RetentionPolicy {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            max_age: Duration::from_secs(3 * 24 * 60 * 60), // 3 days
-            max_bytes: 2 * 1024 * 1024 * 1024,              // 2 GiB
-            idle_ttl: Duration::from_secs(30 * 60),         // 30 minutes
-            interval: Duration::from_secs(10 * 60),         // 10 minutes
-        }
+        Self::disabled()
     }
 }
 
@@ -120,23 +143,97 @@ pub fn plan_deletions(
 }
 
 /// What one retention sweep did. Empty when nothing needed eviction or deletion.
-#[derive(Default, Clone, Copy)]
+#[derive(Default)]
 pub struct SweepOutcome {
     pub evicted: usize,
     pub deleted: usize,
     pub bytes_freed: u64,
+    errors: Vec<RetentionError>,
 }
 
+/// A retention pass stopped because it could not safely inspect, checkpoint,
+/// or unlink a replica file.
+#[derive(Debug)]
+pub struct RetentionError {
+    path: PathBuf,
+    message: String,
+    bytes_freed: u64,
+}
+
+impl RetentionError {
+    pub(crate) fn new(path: impl AsRef<Path>, error: impl std::fmt::Display) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            message: error.to_string(),
+            bytes_freed: 0,
+        }
+    }
+
+    pub(crate) fn after_unlink(
+        path: impl AsRef<Path>,
+        error: impl std::fmt::Display,
+        bytes_freed: u64,
+    ) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            message: error.to_string(),
+            bytes_freed,
+        }
+    }
+
+    pub fn bytes_freed(&self) -> u64 {
+        self.bytes_freed
+    }
+
+    pub fn emit(&self) {
+        eprintln!(
+            "{}",
+            json!({
+                "event": "replica_retention_error",
+                "path": self.path.display().to_string(),
+                "error": self.message,
+                "bytesFreed": self.bytes_freed,
+            })
+        );
+    }
+}
+
+impl std::fmt::Display for RetentionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "retention failed for {} after freeing {} bytes: {}",
+            self.path.display(),
+            self.bytes_freed,
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for RetentionError {}
+
 impl SweepOutcome {
+    pub fn errors(&self) -> &[RetentionError] {
+        &self.errors
+    }
+
+    pub(crate) fn record_error(&mut self, error: RetentionError) {
+        self.bytes_freed += error.bytes_freed();
+        self.errors.push(error);
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.evicted == 0 && self.deleted == 0 && self.bytes_freed == 0
+        self.evicted == 0 && self.deleted == 0 && self.bytes_freed == 0 && self.errors.is_empty()
     }
 
     /// Emit a single structured stderr line when the sweep did something, staying
     /// silent otherwise (matching obs.rs's routine-is-silent policy so retention
     /// never floods a consumer's captured log).
     pub fn emit(&self) {
-        if self.is_empty() {
+        for error in &self.errors {
+            error.emit();
+        }
+        if self.evicted == 0 && self.deleted == 0 && self.bytes_freed == 0 {
             return;
         }
         eprintln!(
@@ -160,13 +257,12 @@ mod tests {
     }
 
     fn policy(max_age: Duration, max_bytes: u64) -> RetentionPolicy {
-        RetentionPolicy {
-            enabled: true,
+        RetentionPolicy::exclusive(
             max_age,
             max_bytes,
-            idle_ttl: Duration::from_secs(1800),
-            interval: Duration::from_secs(600),
-        }
+            Duration::from_secs(1800),
+            Duration::from_secs(600),
+        )
     }
 
     #[test]
@@ -178,6 +274,11 @@ mod tests {
         }];
         let deleted = plan_deletions(&files, &RetentionPolicy::disabled(), now);
         assert!(deleted.is_empty());
+    }
+
+    #[test]
+    fn default_is_disabled() {
+        assert!(!RetentionPolicy::default().is_enabled());
     }
 
     #[test]

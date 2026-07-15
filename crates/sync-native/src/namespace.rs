@@ -24,13 +24,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use tokio::sync::oneshot;
 
 use sync_core::{DbError, Row, SyncDb};
 
 use crate::db::RusqliteDb;
-use crate::retain::{ReplicaFile, RetentionPolicy, SweepOutcome, plan_deletions};
+use crate::retain::{ReplicaFile, RetentionError, RetentionPolicy, SweepOutcome, plan_deletions};
 
 // how an admin transaction ends. the worker runs the real COMMIT or ROLLBACK;
 // the client only names the outcome (never the raw SQL), so scheduler state and
@@ -478,16 +478,13 @@ impl Manager {
     // (oldest first). safe to call at startup (empty map -> pure on-disk sweep)
     // and on a timer. `now` is injected for testing.
     pub fn retain(&self, policy: &RetentionPolicy, now: SystemTime) -> SweepOutcome {
-        if !policy.enabled {
+        if !policy.is_enabled() {
             return SweepOutcome::default();
         }
-        let evicted = self.evict_idle(policy.idle_ttl);
-        let (deleted, bytes_freed) = self.sweep_files(policy, now);
-        SweepOutcome {
-            evicted,
-            deleted,
-            bytes_freed,
-        }
+        let mut outcome = SweepOutcome::default();
+        outcome.evicted = self.evict_idle(policy.idle_ttl());
+        self.sweep_files(policy, now, &mut outcome);
+        outcome
     }
 
     // drop workers idle past the ttl and referenced only by the map (no in-flight
@@ -518,16 +515,27 @@ impl Manager {
     // delete replica files for namespaces no live worker holds open. a namespace
     // in the map is skipped: its file is in use and, being live, is by definition
     // recently touched. returns (files deleted, bytes freed).
-    fn sweep_files(&self, policy: &RetentionPolicy, now: SystemTime) -> (usize, u64) {
+    fn sweep_files(&self, policy: &RetentionPolicy, now: SystemTime, outcome: &mut SweepOutcome) {
         let live = self.live_keys();
-        let Ok(dir) = std::fs::read_dir(&self.data_dir) else {
-            return (0, 0);
+        let dir = match std::fs::read_dir(&self.data_dir) {
+            Ok(dir) => dir,
+            Err(error) => {
+                outcome.record_error(RetentionError::new(&self.data_dir, error));
+                return;
+            }
         };
         // one candidate per namespace: its main `.sqlite` file. `-wal`/`-shm`
         // sidecars and any non-sqlite files are folded in or skipped.
         let mut keys: Vec<String> = Vec::new();
         let mut files: Vec<ReplicaFile> = Vec::new();
-        for entry in dir.flatten() {
+        for entry in dir {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    outcome.record_error(RetentionError::new(&self.data_dir, error));
+                    continue;
+                }
+            };
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             let Some(key) = name.strip_suffix(".sqlite") else {
@@ -536,13 +544,17 @@ impl Manager {
             if live.contains(key) {
                 continue;
             }
-            let (size, mtime) = replica_footprint(&self.data_dir, key);
+            let (size, mtime) = match replica_footprint(&self.data_dir, key) {
+                Ok(footprint) => footprint,
+                Err(error) => {
+                    outcome.record_error(error);
+                    continue;
+                }
+            };
             keys.push(key.to_string());
             files.push(ReplicaFile { size, mtime });
         }
 
-        let mut deleted = 0;
-        let mut bytes_freed = 0;
         for idx in plan_deletions(&files, policy, now) {
             let key = &keys[idx];
             // re-check liveness under the lock right before unlinking: a get()
@@ -552,14 +564,17 @@ impl Manager {
             if map.contains_key(key) {
                 continue;
             }
-            let freed = delete_replica(&self.data_dir, key);
+            let result = delete_replica(&self.data_dir, key);
             drop(map);
-            if freed > 0 {
-                deleted += 1;
-                bytes_freed += freed;
+            match result {
+                Ok(freed) if freed > 0 => {
+                    outcome.deleted += 1;
+                    outcome.bytes_freed += freed;
+                }
+                Ok(_) => {}
+                Err(error) => outcome.record_error(error),
             }
         }
-        (deleted, bytes_freed)
     }
 
     fn live_keys(&self) -> HashSet<String> {
@@ -568,36 +583,70 @@ impl Manager {
 }
 
 // (total bytes, newest mtime) across a replica's main + `-wal` + `-shm` files.
-fn replica_footprint(dir: &Path, key: &str) -> (u64, SystemTime) {
+fn replica_footprint(dir: &Path, key: &str) -> Result<(u64, SystemTime), RetentionError> {
     let mut size = 0;
     let mut mtime = SystemTime::UNIX_EPOCH;
     for suffix in ["", "-wal", "-shm"] {
         let path = dir.join(format!("{key}.sqlite{suffix}"));
-        if let Ok(meta) = std::fs::metadata(&path) {
-            size += meta.len();
-            if let Ok(modified) = meta.modified()
-                && modified > mtime
-            {
-                mtime = modified;
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                size += meta.len();
+                let modified = meta
+                    .modified()
+                    .map_err(|error| RetentionError::new(&path, error))?;
+                if modified > mtime {
+                    mtime = modified;
+                }
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(RetentionError::new(&path, error)),
         }
     }
-    (size, mtime)
+    Ok((size, mtime))
 }
 
-// unlink a replica's main + sidecar files. returns bytes actually removed.
-fn delete_replica(dir: &Path, key: &str) -> u64 {
+// checkpoint before unlinking so the main file remains complete if a sidecar
+// unlink succeeds and a later unlink fails. the main file is removed last, so
+// a recreated database can never inherit an old WAL.
+fn delete_replica(dir: &Path, key: &str) -> Result<u64, RetentionError> {
+    let main = dir.join(format!("{key}.sqlite"));
+    let conn = Connection::open_with_flags(
+        &main,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| RetentionError::new(&main, error))?;
+    conn.busy_timeout(Duration::ZERO)
+        .map_err(|error| RetentionError::new(&main, error))?;
+    let busy: i64 = conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+        .map_err(|error| RetentionError::new(&main, error))?;
+    if busy != 0 {
+        return Err(RetentionError::new(
+            &main,
+            "WAL checkpoint is blocked by another connection",
+        ));
+    }
+    drop(conn);
+
+    unlink_checkpointed_replica(dir, key)
+}
+
+fn unlink_checkpointed_replica(dir: &Path, key: &str) -> Result<u64, RetentionError> {
     let mut freed = 0;
-    for suffix in ["", "-wal", "-shm"] {
+    for suffix in ["-wal", "-shm", ""] {
         let path = dir.join(format!("{key}.sqlite{suffix}"));
-        if let Ok(meta) = std::fs::metadata(&path) {
-            let len = meta.len();
-            if std::fs::remove_file(&path).is_ok() {
-                freed += len;
-            }
+        let len = match std::fs::metadata(&path) {
+            Ok(meta) => meta.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(RetentionError::after_unlink(&path, error, freed)),
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => freed += len,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(RetentionError::after_unlink(&path, error, freed)),
         }
     }
-    freed
+    Ok(freed)
 }
 
 #[cfg(test)]
@@ -652,13 +701,7 @@ mod tests {
     // a policy that would evict and delete everything, used to prove the guards
     // (liveness, strong-count) are what spare a namespace, not a lenient policy.
     fn aggressive_policy() -> RetentionPolicy {
-        RetentionPolicy {
-            enabled: true,
-            max_age: Duration::ZERO,
-            max_bytes: 0,
-            idle_ttl: Duration::ZERO,
-            interval: Duration::from_secs(600),
-        }
+        RetentionPolicy::exclusive(Duration::ZERO, 0, Duration::ZERO, Duration::from_secs(600))
     }
 
     #[test]
@@ -701,6 +744,101 @@ mod tests {
     }
 
     #[test]
+    fn default_retention_preserves_an_external_database() {
+        let (dir, manager) = test_manager();
+        let path = dir.path().join("proj-external.sqlite");
+        let external = Connection::open(&path).unwrap();
+        external
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE external_writes (id INTEGER PRIMARY KEY);
+                 INSERT INTO external_writes VALUES (1);",
+            )
+            .unwrap();
+
+        let outcome = manager.retain(
+            &RetentionPolicy::default(),
+            SystemTime::now() + Duration::from_secs(4 * 24 * 60 * 60),
+        );
+
+        assert!(outcome.is_empty());
+        assert!(path.exists());
+        external
+            .execute("INSERT INTO external_writes VALUES (2)", [])
+            .unwrap();
+        drop(external);
+
+        let reopened = Connection::open(path).unwrap();
+        let count: i64 = reopened
+            .query_row("SELECT count(*) FROM external_writes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn exclusive_retention_spares_a_locked_external_reader() {
+        let (dir, manager) = test_manager();
+        let path = dir.path().join("proj-locked.sqlite");
+        let external = Connection::open(&path).unwrap();
+        external
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE external_writes (id INTEGER PRIMARY KEY);
+                 INSERT INTO external_writes VALUES (1);
+                 BEGIN;
+                 SELECT * FROM external_writes;",
+            )
+            .unwrap();
+
+        let outcome = manager.retain(
+            &aggressive_policy(),
+            SystemTime::now() + Duration::from_secs(10),
+        );
+
+        assert_eq!(outcome.deleted, 0);
+        assert_eq!(outcome.errors().len(), 1);
+        assert!(
+            outcome.errors()[0]
+                .to_string()
+                .contains("WAL checkpoint is blocked")
+        );
+        assert!(path.exists());
+        external.execute_batch("COMMIT").unwrap();
+        external
+            .execute("INSERT INTO external_writes VALUES (2)", [])
+            .unwrap();
+        drop(external);
+
+        let reopened = Connection::open(path).unwrap();
+        let count: i64 = reopened
+            .query_row("SELECT count(*) FROM external_writes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn one_delete_error_does_not_block_other_replicas() {
+        let (dir, manager) = test_manager();
+        let broken = dir.path().join("broken.sqlite");
+        let healthy = dir.path().join("healthy.sqlite");
+        std::fs::create_dir(&broken).unwrap();
+        let conn = Connection::open(&healthy).unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        drop(conn);
+
+        let outcome = manager.retain(
+            &aggressive_policy(),
+            SystemTime::now() + Duration::from_secs(10),
+        );
+
+        assert_eq!(outcome.deleted, 1);
+        assert_eq!(outcome.errors().len(), 1);
+        assert!(broken.is_dir());
+        assert!(!healthy.exists());
+    }
+
+    #[test]
     fn retain_disabled_is_a_noop() {
         let (dir, manager) = test_manager();
         let _ = manager.get("proj-a").unwrap();
@@ -708,6 +846,25 @@ mod tests {
         assert!(outcome.is_empty());
         assert_eq!(sqlite_count(dir.path()), 1);
         assert!(manager.live_keys().contains("proj-a"));
+    }
+
+    #[test]
+    fn partial_unlink_failure_is_returned_and_keeps_the_main_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "proj-partial";
+        let main = dir.path().join(format!("{key}.sqlite"));
+        let wal = dir.path().join(format!("{key}.sqlite-wal"));
+        let shm = dir.path().join(format!("{key}.sqlite-shm"));
+        std::fs::write(&main, b"checkpointed main").unwrap();
+        std::fs::write(&wal, b"stale wal").unwrap();
+        std::fs::create_dir(&shm).unwrap();
+
+        let error = unlink_checkpointed_replica(dir.path(), key).unwrap_err();
+
+        assert_eq!(error.bytes_freed(), 9);
+        assert!(!wal.exists());
+        assert!(main.exists());
+        assert!(shm.is_dir());
     }
 
     fn count(rows: &[Row]) -> i64 {

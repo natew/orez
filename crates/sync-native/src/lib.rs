@@ -232,13 +232,11 @@ pub struct SyncNativeConfig {
     /// [`DEFAULT_ADMIN_TX_LEASE`] unless you have a reason to tune it.
     pub admin_tx_lease: Duration,
 
-    /// On-disk retention for per-namespace replica files. The host evicts idle
-    /// namespace workers and deletes replicas that are abandoned (untouched past
-    /// `max_age`) or over the total-size budget (oldest first), once at startup
-    /// and then on a background timer. Replicas are derived caches, so a deleted
-    /// one is rebuilt on the next request via a full snapshot. Use
-    /// [`retain::RetentionPolicy::default`], or
-    /// [`retain::RetentionPolicy::disabled`] to turn it off. The background timer
+    /// On-disk retention for per-namespace replica files. Disabled by default.
+    /// Enable it only for derived replicas that no other process opens; shared or
+    /// authoritative SQLite files must remain disabled. When explicitly enabled,
+    /// the host evicts idle namespace workers and deletes replicas that are stale
+    /// or over budget, once at startup and then on a background timer. The timer
     /// only runs when the host is started with [`SyncNativeHost::run`].
     pub retention: retain::RetentionPolicy,
 }
@@ -339,11 +337,11 @@ impl SyncNativeHost {
         // background retention: on each tick, evict idle namespace workers and
         // reclaim disk. the startup sweep already ran in the constructor; this
         // keeps a long-lived process bounded without waiting for a restart.
-        if self.retention.enabled {
+        if self.retention.is_enabled() {
             let manager = self.manager.clone();
             let policy = self.retention;
             tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(policy.interval);
+                let mut ticker = tokio::time::interval(policy.interval());
                 ticker.tick().await; // the first tick fires immediately; skip it
                 loop {
                     ticker.tick().await;
