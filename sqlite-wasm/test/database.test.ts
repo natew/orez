@@ -227,6 +227,15 @@ describeIfBuilt('Statement reuse', () => {
     expect(rows).toHaveLength(3)
     db.close()
   })
+
+  it('can be finalized explicitly', () => {
+    const db = new Database(':memory:')
+    const stmt = db.prepare('SELECT 1')
+    stmt.finalize()
+    stmt.finalize()
+    expect(() => stmt.get()).toThrow('This statement has been finalized')
+    db.close()
+  })
 })
 
 describeIfBuilt('transaction', () => {

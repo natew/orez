@@ -15,8 +15,9 @@ per-query incremental sync.
 
 ## The pieces
 
-There are four code homes. Two are the engine, one is the Cloudflare host, and
-one is the Node/reference surface.
+The deterministic engine and its WASM wrapper feed three hosts: native,
+Cloudflare, and a browser worker. A Node implementation remains beside them as
+the executable reference and local mount surface.
 
 ### crates/sync-core
 
@@ -74,8 +75,8 @@ and a few more. It also declares `JsSyncDb`, the SQLite handle the host passes
 in, so every SQL call goes back out to the host's storage.
 
 `wasm-pack build crates/sync-wasm --target web` produces the JavaScript glue and
-`.wasm`, which is vendored into `packages/sync-cf-host/src/generated/`. The
-`build:wasm` script in the host package regenerates it.
+`.wasm`. The Cloudflare and browser host builds each package that output with
+their host code.
 
 ### crates/sync-native
 
@@ -118,6 +119,28 @@ runtime dependency of the CF host. It is the TypeScript reference implementation
 of the same protocol, and it is also a usable Node/bun mount (`createSyncServer`
 and `createSyncServerMount`). The CF host runs the Rust port of it, compiled to
 WASM.
+
+### packages/sync-browser-host
+
+The browser host is exported as `orez/sync-browser-host`. It loads sync-wasm
+and Bedrock SQLite in one worker and serves the same authenticated `/pull` and
+`/push` protocol through a `MessagePort`. The same port also exposes serialized
+direct `query` and `exec` calls for preview tooling. All attached clients receive
+an advisory `data-changed` event after a durable mutation or direct write.
+
+One operation queue owns the database. A mutation runs its generated application
+code and Rust last-mutation-id finalization inside one explicit SQLite
+transaction. The host then snapshots Bedrock's complete in-memory VFS into one
+versioned IndexedDB record and waits for that transaction before replying. If
+the IndexedDB commit fails, the live database is closed and the host rejects all
+later work. A new worker restores the previous complete snapshot before opening
+SQLite. There is no in-memory fallback.
+
+The host accepts a mutator registry and named-query resolver so an on-zero
+adapter can preserve generated validators, permissions, transaction helpers,
+and deferred effects without running on-zero's separate mutation bookkeeping.
+The root Orez package includes both WASM binaries beside the subpath export, so
+ordinary worker bundles do not need consumer-specific asset copies.
 
 ## The two request paths
 

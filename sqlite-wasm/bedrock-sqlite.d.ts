@@ -37,6 +37,7 @@ declare module "bedrock-sqlite" {
     readonly source: string;
     readonly reader: boolean;
     readonly readonly: boolean;
+    finalize(): void;
     run(...params: any[]): RunResult;
     get(...params: any[]): any;
     all(...params: any[]): any[];

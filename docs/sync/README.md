@@ -13,9 +13,9 @@ incremental sync.
 
 ## Start here
 
-- **[Architecture](./architecture.md)**: the four code homes (the Rust engine,
-  its WASM wrapper, the native host, the Cloudflare host), the two request paths,
-  the change-log model, and how it fits the rest of orez.
+- **[Architecture](./architecture.md)**: the Rust engine, its WASM wrapper,
+  native, Cloudflare, and browser hosts, the two request paths, the change-log
+  model, and how it fits the rest of orez.
 - **[The delegation model](./delegation.md)**: the central design decision: an
   app either bundles mutators into the host or delegates writes to its own
   endpoint and lets the host replicate from a change feed. This is what makes it
@@ -56,6 +56,7 @@ state is a last-mutation-id and the client-group to user binding.
 | `crates/sync-wasm`               | The `wasm-bindgen` wrapper that compiles the engine for the DO host.       |
 | `crates/sync-native`             | A standalone axum host for the same engine.                                |
 | `packages/sync-cf-host`          | The Cloudflare Durable Object host, published as `orez-sync-cf-host`.      |
+| `packages/sync-browser-host`     | The Bedrock and IndexedDB browser worker host, exported by Orez.           |
 | `src/sync-server/sync-server.ts` | The TypeScript reference implementation and Node mount.                    |
 | `src/cf-do/worker.ts`            | The data worker (`ZeroSqlDO`) that owns writes and serves the change feed. |
 | `harness/`                       | The conformance and qualification test harness.                            |

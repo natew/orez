@@ -35,6 +35,10 @@
       "types": "./dist/zero-http/transport.d.ts",
       "import": "./dist/zero-http/transport.js"
     },
+    "./sync-browser-host": {
+      "types": "./dist/sync-browser-host/index.d.ts",
+      "import": "./dist/sync-browser-host/index.js"
+    },
     "./worker/*": {
       "types": "./dist/worker/*.d.ts",
       "import": "./dist/worker/*.js"
@@ -55,7 +59,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/cli-entry.js",
+    "build": "tsc && bun run build:sync-browser-host && chmod +x dist/cli-entry.js",
+    "build:sync-browser-host": "bun run --cwd packages/sync-browser-host build:dist",
     "dev": "tsc --watch",
     "test": "vitest run --exclude 'src/integration/' --exclude 'src/wasm-sqlite.test.ts'",
     "test:integration": "vitest run src/integration/",
@@ -63,6 +68,7 @@
     "test:native:guard": "bun run native:bootstrap && vitest run src/integration/native-binary.guard.test.ts",
     "test:integration:native": "bun run test:native:guard && vitest run src/integration/native-startup.test.ts",
     "test:wasm": "vitest run src/wasm-sqlite.test.ts",
+    "test:sync-browser-host": "bun run --cwd packages/sync-browser-host test",
     "test:all": "vitest run",
     "test:watch": "vitest",
     "test:compiler": "vitest run src/pg-sqlite-compiler/",
@@ -72,7 +78,7 @@
     "lint": "oxlint --import-plugin --ignore-pattern sqlite-wasm/",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && bun run --cwd packages/sync-browser-host typecheck",
     "demo:test": "bun demo/src/test/run-e2e.ts",
     "check:all": "bun run lint && bun run format:check && bun run check && bun run test",
     "test:chat": "bun scripts/test-chat-integration.ts",
@@ -137,7 +143,8 @@
   },
   "workspaces": [
     "pg-to-sqlite",
-    "sqlite-wasm"
+    "sqlite-wasm",
+    "packages/sync-browser-host"
   ],
   "trustedDependencies": [
     "@rocicorp/zero-sqlite3"

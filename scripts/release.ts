@@ -350,6 +350,7 @@ if (!packOnly) {
   run('bun run check')
   if (!skipTest) {
     run('bun run test')
+    run('bun run test:sync-browser-host')
     if (packages.length > 1) {
       run('bun install', { cwd: sqliteWasmDir })
       run('bun run test', { cwd: sqliteWasmDir })

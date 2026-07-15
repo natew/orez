@@ -14,7 +14,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +22,14 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          targets: wasm32-unknown-unknown
+
+      - name: install wasm-pack
+        run: cargo install wasm-pack --version 0.14.0 --locked
 
       - run: bun install --frozen-lockfile
 
@@ -146,7 +154,7 @@ jobs:
 
   native-integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -154,6 +162,14 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          targets: wasm32-unknown-unknown
+
+      - name: install wasm-pack
+        run: cargo install wasm-pack --version 0.14.0 --locked
 
       - run: bun install --frozen-lockfile
 
@@ -167,6 +183,33 @@ jobs:
         # the heavier embed/live-frontend tests live here, not in the unit suite,
         # so a loaded unit-suite run can't starve their in-process change-streamer.
         run: bun run native:bootstrap && bun run test:integration
+
+  sync-browser-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          targets: wasm32-unknown-unknown
+
+      - name: install wasm-pack
+        run: cargo install wasm-pack --version 0.14.0 --locked
+
+      - run: bun install --frozen-lockfile
+
+      - name: install chromium
+        run: bunx playwright install --with-deps chromium
+
+      - name: browser worker durability and protocol suite
+        run: bun run test:sync-browser-host
 
   # rust sync engine: workspace build + native crate tests + format gate.
   rust:
@@ -516,6 +559,7 @@ jobs:
       - rust-local
       - rust-local-faults
       - sync-cf-host
+      - sync-browser-host
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

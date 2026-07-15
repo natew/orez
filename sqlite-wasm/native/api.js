@@ -20,6 +20,20 @@ const INT32_MIN = -2147483648
 const INT32_MAX = 2147483647
 const NULL = 0
 
+function isByteArray(value) {
+  return value instanceof Uint8Array
+}
+
+function copyByteArray(value) {
+  const NodeBuffer = globalThis.Buffer
+  return NodeBuffer ? NodeBuffer.from(value) : Uint8Array.from(value)
+}
+
+function emptyByteArray() {
+  const NodeBuffer = globalThis.Buffer
+  return NodeBuffer ? NodeBuffer.alloc(0) : new Uint8Array()
+}
+
 let temp
 const sqlite3 = {}
 
@@ -170,12 +184,7 @@ Module.onRuntimeInitialized = () => {
       const arg = args[0]
       if (arg === undefined || arg === null) return null
       if (Array.isArray(arg)) return arg
-      if (
-        typeof arg === 'object' &&
-        !(arg instanceof Uint8Array) &&
-        !(arg instanceof Buffer)
-      )
-        return arg
+      if (typeof arg === 'object' && !isByteArray(arg)) return arg
       return [arg]
     }
     return Array.from(args)
@@ -201,8 +210,8 @@ Module.onRuntimeInitialized = () => {
           const p = sqlite3.value_blob(ptr)
           args.push(
             p !== NULL
-              ? Buffer.from(HEAPU8.slice(p, p + sqlite3.value_bytes(ptr)))
-              : Buffer.alloc(0)
+              ? copyByteArray(HEAPU8.slice(p, p + sqlite3.value_bytes(ptr)))
+              : emptyByteArray()
           )
           break
         }
@@ -242,7 +251,7 @@ Module.onRuntimeInitialized = () => {
       case 'object':
         if (result === null) {
           sqlite3.result_null(cx)
-        } else if (result instanceof Uint8Array || Buffer.isBuffer(result)) {
+        } else if (isByteArray(result)) {
           const tp = arrayToHeap(result)
           sqlite3.result_blob(cx, tp, result.byteLength, SQLITE_TRANSIENT)
           _free(tp)
@@ -259,7 +268,7 @@ Module.onRuntimeInitialized = () => {
   // Database class (better-sqlite3 compatible)
   class Database {
     constructor(filename, options = {}) {
-      if (typeof filename !== 'string' && !Buffer.isBuffer(filename)) {
+      if (typeof filename !== 'string' && !isByteArray(filename)) {
         throw new TypeError('Expected first argument to be a string')
       }
       filename = String(filename)
@@ -400,9 +409,7 @@ Module.onRuntimeInitialized = () => {
         }
       } finally {
         // finalize the pragma statement so it doesn't block commits
-        sqlite3.finalize(stmt._ptr)
-        stmt._finalized = true
-        this._statements.delete(stmt)
+        stmt.finalize()
       }
     }
 
@@ -614,6 +621,14 @@ Module.onRuntimeInitialized = () => {
       return this._readonly
     }
 
+    finalize() {
+      if (this._finalized) return
+      sqlite3.finalize(this._ptr)
+      this._finalized = true
+      this._ptr = null
+      this._db._statements.delete(this)
+    }
+
     run(...args) {
       this._assertReady()
       const params = resolveBindParams(args)
@@ -797,9 +812,9 @@ Module.onRuntimeInitialized = () => {
                 `blob column ${i} has unreasonable size: ${nbytes} bytes`
               )
             }
-            return Buffer.from(HEAPU8.slice(p, p + nbytes))
+            return copyByteArray(HEAPU8.slice(p, p + nbytes))
           }
-          return Buffer.alloc(0)
+          return emptyByteArray()
         }
         case SQLITE_NULL:
           return null
@@ -863,7 +878,7 @@ Module.onRuntimeInitialized = () => {
         case 'object':
           if (value === null) {
             rc = sqlite3.bind_null(this._ptr, position)
-          } else if (value instanceof Uint8Array || Buffer.isBuffer(value)) {
+          } else if (isByteArray(value)) {
             const tp = arrayToHeap(value)
             rc = sqlite3.bind_blob(
               this._ptr,
