@@ -212,7 +212,11 @@ describe('zero-http transport', () => {
     await mutation.server
 
     const push = requests.find((request) => request.path.endsWith('/push'))
-    expect(push?.url).toBe('https://app.local/zero-http/push')
+    // push always carries the schema-shard routing params (native hosts route
+    // by them; other servers ignore unknown query params)
+    expect(push?.url).toBe(
+      'https://app.local/zero-http/push?schema=zero_0&appID=zero',
+    )
     expect(requests.find((request) => request.path === '/pull')?.url).toBe(
       'https://zero-http.local/pull',
     )
