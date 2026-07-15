@@ -1,0 +1,21 @@
+name = "orez-two-zero-cache-do-proof"
+main = "dist/worker.js"
+compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "ZERO_CACHE"
+class_name = "ZeroCacheDO"
+
+[[durable_objects.bindings]]
+name = "SOURCE"
+class_name = "SourceDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ZeroCacheDO", "SourceDO"]
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
