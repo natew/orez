@@ -76,7 +76,7 @@ try {
   assert.equal((await idleStatus()).upstreamAlarmAt, null)
 
   const wakeSocket = new WebSocket(
-    `${idleOrigin.replace('http://', 'ws://')}/wake?clientID=idle-reader`
+    `${idleOrigin.replace('http://', 'ws://')}/wake?clientID=idle-reader&wakeToken=ingest-harness-wake`
   )
   await new Promise((resolve, reject) => {
     wakeSocket.addEventListener('open', resolve, { once: true })

@@ -349,6 +349,14 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
         ?.match(/^Bearer token-(.+)$/)?.[1]
       return userID ? { userID } : null
     },
+    authorizeWake(request) {
+      return /^test-wake-(user-a|user-b)$/.test(
+        new URL(request.url).searchParams.get('wakeToken') ?? ''
+      )
+    },
+    authorizeNotify(request, env) {
+      return Boolean(env.ADMIN_KEY) && request.headers.get('x-admin-key') === env.ADMIN_KEY
+    },
     visibility: {
       rowLocal: false,
       filter(table, claims) {

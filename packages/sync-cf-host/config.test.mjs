@@ -17,12 +17,27 @@ const base = {
   authenticate() {
     return { userID: 'u' }
   },
+  authorizeWake() {
+    return true
+  },
+  authorizeNotify() {
+    return true
+  },
   namespace() {
     return 'n'
   },
 }
 
 describe('mutation mode', () => {
+  test('requires explicit wake and notify capabilities', () => {
+    expect(() =>
+      validateSyncHostConfig({ ...base, authorizeWake: undefined, mutators: {} })
+    ).toThrow('authorizeWake is required')
+    expect(() =>
+      validateSyncHostConfig({ ...base, authorizeNotify: undefined, mutators: {} })
+    ).toThrow('authorizeNotify is required')
+  })
+
   test('requires exactly one local or delegated path', () => {
     expect(() => validateSyncHostConfig(base)).toThrow('exactly one')
     expect(() =>

@@ -156,6 +156,12 @@ export type SyncHostConfig<Env extends SyncHostEnv = SyncHostEnv> = {
     request: Request,
     env: Env
   ): NormalizedClaims | null | Promise<NormalizedClaims | null>
+  /** Authorize the advisory wake socket before selecting a namespace DO.
+   * Browser clients should present a short-lived, namespace-scoped capability
+   * in the query string because WebSocket cannot set request headers. */
+  authorizeWake(request: Request, env: Env): boolean | Promise<boolean>
+  /** Authorize upstream service notifications before selecting a namespace DO. */
+  authorizeNotify(request: Request, env: Env): boolean | Promise<boolean>
   /** Resolve the first path component or another consumer-defined namespace. */
   namespace(request: Request): string | null
   visibility?: VisibilityConfig

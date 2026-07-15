@@ -80,10 +80,10 @@ const mutation = (clientID, id, name, args) => ({
 })
 
 function openWake(clientID, userID) {
-  const url = `${origin.replace('http:', 'ws:')}/wake?clientID=${encodeURIComponent(clientID)}`
-  const socket = new WebSocket(url, {
-    headers: { authorization: `Bearer token-${userID}` },
-  })
+  const url =
+    `${origin.replace('http:', 'ws:')}/wake?clientID=${encodeURIComponent(clientID)}` +
+    `&wakeToken=${encodeURIComponent(`test-wake-${userID}`)}`
+  const socket = new WebSocket(url)
   const messages = []
   socket.addEventListener('message', (event) => messages.push(String(event.data)))
   return new Promise((resolve, reject) => {
@@ -115,6 +115,23 @@ async function eventually(check, timeoutMs, label) {
 }
 
 try {
+  const unauthenticatedWake = await fetch(`${origin}/wake?clientID=attacker`)
+  equal(unauthenticatedWake.status, 401, 'wake rejects missing capability')
+
+  const unauthenticatedNotify = await fetch(`${origin}/notify`, { method: 'POST' })
+  equal(unauthenticatedNotify.status, 403, 'notify rejects missing service capability')
+
+  const authorizedNotify = await fetch(`${origin}/notify`, {
+    method: 'POST',
+    headers: { 'x-admin-key': adminKey },
+  })
+  equal(authorizedNotify.status, 200, 'admin capability permits notify')
+  equal(
+    await authorizedNotify.json(),
+    { ok: true, applied: 0 },
+    'authorized notify response'
+  )
+
   const firstPull = await post('/pull', {
     clientID: 'client-a',
     clientGroupID: 'group-client-a',

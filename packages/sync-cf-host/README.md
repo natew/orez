@@ -19,9 +19,13 @@ required second transaction to advance the LMID marker.
 
 ## Wake channel and eviction
 
-`GET /<namespace>/wake?clientID=<id>` upgrades to a Durable Object hibernating
-WebSocket. Socket attachments carry only the client ID. A committed push sends a
-text `wake` frame to all connected clients except the pusher; a scheduler window
+`GET /<namespace>/wake?clientID=<id>&wakeToken=<capability>` upgrades to a
+Durable Object hibernating WebSocket after `authorizeWake` accepts the
+capability. Browser consumers should mint a short-lived, namespace-scoped token
+at their authenticated edge because the native WebSocket constructor cannot set
+an authorization header. Socket attachments carry only the client ID. A
+committed push sends a text `wake` frame to all connected clients except the
+pusher; a scheduler window
 coalesces a burst into one frame per socket. `ping` receives `pong`. The message
 contains no state and carries no correctness weight: clients pull after a wake
 and retain their safety poll. `ctx.getWebSockets()` plus serialized attachments
@@ -41,6 +45,11 @@ callback succeeds or the request presents the deployment's `ADMIN_KEY` through
 `x-admin-key`. Harness and operator deployments expose `/admin/status`; it
 includes the persisted writer-enabled state and wasm linear-memory byte length
 in addition to the engine/counter fields above.
+
+`POST /<namespace>/notify` is rejected unless `authorizeNotify` accepts a
+service or operator capability. Both `authorizeWake` and `authorizeNotify` run
+before `idFromName`, so rejected requests cannot instantiate namespace Durable
+Objects.
 
 `POST /admin/writer` with `{ "enabled": false }` durably stops pushes for that
 namespace. A stopped writer consumes and discards the request body, returns 503,

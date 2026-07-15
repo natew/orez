@@ -253,7 +253,15 @@ export function createSyncWorker<Env extends SyncHostEnv>(
 
       const route = routeAfterNamespace(new URL(request.url).pathname)
       const isAdmin = route.startsWith('/admin/')
-      if (isAdmin) {
+      if (route === '/wake') {
+        if (!(await config.authorizeWake(request, env))) {
+          return json({ error: 'missing wake capability' }, 401)
+        }
+      } else if (route === '/notify') {
+        if (!(await config.authorizeNotify(request, env))) {
+          return json({ error: 'forbidden' }, 403)
+        }
+      } else if (isAdmin) {
         const authorized = config.authorizeAdmin
           ? await config.authorizeAdmin(request, env)
           : Boolean(env.ADMIN_KEY) && request.headers.get('x-admin-key') === env.ADMIN_KEY
@@ -264,10 +272,6 @@ export function createSyncWorker<Env extends SyncHostEnv>(
       headers.delete(CLAIMS_HEADER)
       headers.delete(NAMESPACE_HEADER)
       headers.delete(UPSTREAM_PATH_HEADER)
-      // Wake sockets carry only a client ID and the literal "wake" hint; they
-      // expose no rows, claims, or mutation state. Keep this advisory channel
-      // compatible with the vendored transport, which cannot attach an HTTP
-      // Authorization header to its native WebSocket constructor.
       if (!isAdmin && route !== '/wake' && route !== '/notify') {
         const claims = await config.authenticate(request, env)
         if (!claims) return json({ error: 'missing authentication' }, 401)

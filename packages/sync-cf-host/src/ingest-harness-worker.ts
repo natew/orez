@@ -65,6 +65,14 @@ const config: SyncHostConfig<Env> = {
     const userID = request.headers.get('authorization')?.match(/^Bearer token-(.+)$/)?.[1]
     return userID ? { userID } : null
   },
+  authorizeWake(request) {
+    return (
+      new URL(request.url).searchParams.get('wakeToken') === 'ingest-harness-wake'
+    )
+  },
+  authorizeNotify(request, env) {
+    return Boolean(env.ADMIN_KEY) && request.headers.get('x-admin-key') === env.ADMIN_KEY
+  },
   namespace(request) {
     return new URL(request.url).pathname.split('/')[1] || null
   },

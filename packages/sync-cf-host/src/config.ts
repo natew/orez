@@ -10,6 +10,12 @@ export function validatePullCaps(caps: PullCaps): PullCaps {
 export function validateSyncHostConfig<Env extends SyncHostEnv>(
   config: SyncHostConfig<Env>
 ): SyncHostConfig<Env> {
+  if (typeof config.authorizeWake !== 'function') {
+    throw new TypeError('sync host config authorizeWake is required')
+  }
+  if (typeof config.authorizeNotify !== 'function') {
+    throw new TypeError('sync host config authorizeNotify is required')
+  }
   const hasMutators = config.mutators !== undefined
   const hasDelegate = config.mutateUrl !== undefined
   if (hasMutators === hasDelegate) {
