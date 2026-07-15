@@ -328,32 +328,25 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     expect(harness.backendCloses).toBe(3)
   })
 
-  it('bounds remote transaction recovery from the entry deadline and aborts its fetch', async () => {
+  it('keeps the runtime claimed until the recovery request actually settles', async () => {
     vi.useFakeTimers()
+    const recovery = gate()
     const logs: Array<Record<string, unknown>> = []
-    let recoverySignal: AbortSignal | null = null
+    let recoverySettled = false
     const starting = startZeroCacheEmbedCF({
-      ...options(1_000, 'recovery-timeout-instance'),
-      backendFetch: (_input, init) =>
-        new Promise<Response>((_resolve, reject) => {
-          recoverySignal = init?.signal ?? null
-          recoverySignal?.addEventListener(
-            'abort',
-            () => reject(recoverySignal?.reason),
-            {
-              once: true,
-            }
-          )
+      ...options(1_000, 'recovery-fence-instance'),
+      backendFetch: () =>
+        recovery.promise.then(() => {
+          recoverySettled = true
+          return new Response('ok')
         }),
       log: (event) => logs.push(event),
     }).catch((error) => error)
 
-    await vi.advanceTimersByTimeAsync(1_000)
-    const error = await starting
-
-    expect(error).toBeInstanceOf(Error)
-    expect(String(error)).toContain('phase remote-transaction-recovery')
-    expect(recoverySignal?.aborted).toBe(true)
+    await vi.advanceTimersByTimeAsync(16_000)
+    const startupError = await starting
+    expect(startupError).toBeInstanceOf(AggregateError)
+    expect(recoverySettled).toBe(false)
     expect(harness.backendOpens).toBe(0)
     expect(logs).toContainEqual(
       expect.objectContaining({
@@ -362,29 +355,70 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
       })
     )
 
+    const retrying = startZeroCacheEmbedCF(
+      options(1_000, 'recovery-fence-instance')
+    ).catch((error) => error)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(String(await retrying)).toContain('phase replacement-stop')
+
+    recovery.resolve()
+    await turn()
+    expect(recoverySettled).toBe(true)
     harness.modes = ['ready']
-    const retry = await startZeroCacheEmbedCF(options(1_000, 'recovery-timeout-instance'))
+    const retry = await startZeroCacheEmbedCF(options(1_000, 'recovery-fence-instance'))
     await retry.stop()
   })
 
-  it('bounds backend initialization before the worker readiness timer would begin', async () => {
+  it('keeps the runtime claimed until abort-ignoring backend initialization settles', async () => {
     vi.useFakeTimers()
-    harness.backendWaitReadyGates.set(0, gate())
+    const backendReady = gate()
+    harness.backendWaitReadyGates.set(0, backendReady)
     const starting = startZeroCacheEmbedCF(
       options(1_000, 'backend-timeout-instance')
     ).catch((error) => error)
 
-    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.advanceTimersByTimeAsync(16_000)
     const error = await starting
 
-    expect(error).toBeInstanceOf(Error)
-    expect(String(error)).toContain('phase backend-initialization')
-    expect(harness.backendCloses).toBe(3)
+    expect(error).toBeInstanceOf(AggregateError)
+    expect(String((error as AggregateError).errors[0])).toContain(
+      'phase backend-initialization'
+    )
+    expect(harness.backendCloses).toBe(0)
     expect(harness.runCalls).toBe(0)
 
+    const retrying = startZeroCacheEmbedCF(
+      options(1_000, 'backend-timeout-instance')
+    ).catch((retryError) => retryError)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(String(await retrying)).toContain('phase replacement-stop')
+
+    backendReady.resolve()
+    await vi.waitFor(() => expect(harness.backendCloses).toBe(3))
     harness.modes = ['ready']
     const retry = await startZeroCacheEmbedCF(options(1_000, 'backend-timeout-instance'))
     await retry.stop()
+  })
+
+  it('rejects a phase result that arrives after the absolute deadline', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(10_000)
+    const backendReady = gate()
+    harness.backendWaitReadyGates.set(0, backendReady)
+    harness.modes = ['ready']
+    const starting = startZeroCacheEmbedCF(options(1_000, 'late-result-instance')).catch(
+      (error) => error
+    )
+    await vi.waitFor(() => expect(harness.backendOpens).toBe(3))
+
+    vi.setSystemTime(11_001)
+    backendReady.resolve()
+    const error = await starting
+    if (!(error instanceof Error)) await error.stop()
+
+    expect(error).toBeInstanceOf(Error)
+    expect(String(error)).toContain('phase backend-initialization')
+    expect(harness.runCalls).toBe(0)
   })
 
   it('closes every backend when proxy setup rejects', async () => {
@@ -579,11 +613,12 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
   })
 
   it('finishes teardown before retrying a ready-timeout generation', async () => {
+    vi.useFakeTimers()
     harness.modes = ['timeout', 'ready']
+    const starting = startZeroCacheEmbedCF(options(1_000)).catch((error) => error)
 
-    await expect(startZeroCacheEmbedCF(options(1))).rejects.toThrow(
-      'phase worker-readiness'
-    )
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(String(await starting)).toContain('phase worker-readiness')
     const retry = await startZeroCacheEmbedCF(options())
 
     expect(harness.runCalls).toBe(2)
@@ -694,19 +729,23 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
       options(1_000, 'startup-timeout-instance')
     ).catch((error) => error)
 
-    await vi.advanceTimersByTimeAsync(11_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await turn()
+    await vi.advanceTimersByTimeAsync(15_001)
     const startupError = await starting
 
     expect(startupError).toBeInstanceOf(AggregateError)
     expect(String(startupError)).toContain('startup failed and teardown also failed')
-    await expect(
-      startZeroCacheEmbedCF(options(1_000, 'startup-timeout-instance'))
-    ).rejects.toThrow(
-      'instance "startup-timeout-instance" is active or still tearing down'
+    const replacing = startZeroCacheEmbedCF(
+      options(1_000, 'startup-timeout-instance')
+    ).catch((error) => error)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(String(await replacing)).toContain(
+      'startup timed out after 1000ms in phase replacement-stop'
     )
 
     harness.workerReleases[0]()
-    await turn()
+    await vi.waitFor(() => expect(harness.backendCloses).toBe(3))
     const retry = await startZeroCacheEmbedCF(options(1_000, 'startup-timeout-instance'))
     await retry.stop()
     expect(harness.maxActiveGenerations).toBe(1)
