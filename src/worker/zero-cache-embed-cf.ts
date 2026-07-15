@@ -40,11 +40,6 @@ import './shims/zero-process-env.js'
 
 import { EventEmitter } from 'node:events'
 
-// static import so wrangler can follow the dependency tree and bundle
-// zero-cache with all its transitive deps + our shim aliases.
-// @ts-expect-error — internal zero-cache module, no type declarations
-import { runWorker as _runWorker } from '@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js'
-
 import { setLogLevel } from '../log.js'
 import { createBrowserProxy, type BrowserProxy } from '../pg-proxy-browser.js'
 import { DoBackend } from '../pg-proxy-do-backend.js'
@@ -58,6 +53,8 @@ import {
 import { sweepLeakedSqliteHandles } from './embed-generation.js'
 import { createLocalSqlBackend } from './local-sql-backend.js'
 import { resetFastifyRegistry } from './shims/fastify.js'
+// static import so wrangler follows zero-cache's dependency tree and shim aliases.
+import { runWorker as _runWorker } from './zero-cache-run-worker.js'
 
 const runWorkerFn = _runWorker as (
   parent: unknown,
@@ -396,12 +393,71 @@ export async function startZeroCacheEmbedCF(
   // track state
   let isReady = false
   let runWorkerPromise: Promise<void> | null = null
+  let shutdownPromise: Promise<void> | null = null
 
   // capture the Fastify shim instance from zero-cache's HttpService.
   // the fastify shim stores itself on globalThis when created.
   let fastifyInstance: any = null
   let readyTimer: ReturnType<typeof setTimeout> | undefined
   const webSocketHandoff = new DurableObjectWebSocketHandoff(() => fastifyInstance)
+
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise
+    isReady = false
+    shutdownPromise = (async () => {
+      const cleanupErrors: unknown[] = []
+      try {
+        wrappedParent.kill('SIGTERM')
+      } catch (err) {
+        cleanupErrors.push(err)
+      }
+      if (runWorkerPromise) {
+        const worker = runWorkerPromise
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 5000)
+          worker
+            .catch(() => {})
+            .then(() => {
+              clearTimeout(timer)
+              resolve()
+            })
+        })
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      try {
+        proxy.close()
+      } catch (err) {
+        cleanupErrors.push(err)
+      }
+      const backendResults = await Promise.allSettled(
+        [backends.postgres, backends.cvr, backends.cdb].map((backend) =>
+          Promise.resolve().then(() => backend.close())
+        )
+      )
+      for (const result of backendResults) {
+        if (result.status === 'rejected') cleanupErrors.push(result.reason)
+      }
+      // restore all modified globals even when worker or resource teardown fails.
+      if (origExit) {
+        ;(globalThis as any).process.exit = origExit
+      }
+      if (origNodeEnv !== undefined) {
+        ;(globalThis as any).process.env.NODE_ENV = origNodeEnv
+      }
+      if (origKill) {
+        ;(globalThis as any).process.kill = origKill
+      }
+      if (opts.apiFetch) {
+        ;(globalThis as any).fetch = origFetch
+      }
+      delete (globalThis as any).process.env.SINGLE_PROCESS
+      delete (globalThis as any).__orez_proxy_connect
+      delete (globalThis as any).__orez_proxy_user
+      delete (globalThis as any).__orez_proxy_password
+      if (cleanupErrors.length > 0) throw cleanupErrors[0]
+    })()
+    return shutdownPromise
+  }
 
   // wait for "ready" message
   const readyPromise = new Promise<void>((resolve, reject) => {
@@ -423,25 +479,30 @@ export async function startZeroCacheEmbedCF(
     })
   })
 
-  // start zero-cache
-  runWorkerPromise = runWorkerFn(wrappedParent, env).catch((err) => {
-    if (debugEmbed) console.error('[orez-zero-cache-cf] runWorker error', err)
-    if (!isReady) {
-      throw err
-    }
-    // after ready, errors during shutdown are expected
-  })
-  const workerStartupPromise = runWorkerPromise.then(() => {
-    if (!isReady) {
-      throw new Error('zero-cache CF embed: runWorker exited before ready')
-    }
-  })
-
-  // wait for ready
   try {
+    // start zero-cache and wait for ready.
+    runWorkerPromise = runWorkerFn(wrappedParent, env).catch((err) => {
+      if (debugEmbed) console.error('[orez-zero-cache-cf] runWorker error', err)
+      if (!isReady) {
+        throw err
+      }
+      // after ready, errors during shutdown are expected
+    })
+    const workerStartupPromise = runWorkerPromise.then(() => {
+      if (!isReady) {
+        throw new Error('zero-cache CF embed: runWorker exited before ready')
+      }
+    })
     await Promise.race([readyPromise, workerStartupPromise])
   } catch (err) {
     if (readyTimer) clearTimeout(readyTimer)
+    try {
+      await shutdown()
+    } catch (shutdownError) {
+      if (debugEmbed) {
+        console.error('[orez-zero-cache-cf] startup cleanup error', shutdownError)
+      }
+    }
     throw err
   }
 
@@ -477,37 +538,7 @@ export async function startZeroCacheEmbedCF(
       return handleHttpRequest(request, url, fastifyInstance)
     },
 
-    async stop() {
-      isReady = false
-      wrappedParent.kill('SIGTERM')
-      if (runWorkerPromise) {
-        await Promise.race([runWorkerPromise, new Promise((r) => setTimeout(r, 5000))])
-      }
-      await new Promise((r) => setTimeout(r, 200))
-      proxy.close()
-      await Promise.all([
-        backends.postgres.close(),
-        backends.cvr.close(),
-        backends.cdb.close(),
-      ])
-      // restore all modified globals
-      if (origExit) {
-        ;(globalThis as any).process.exit = origExit
-      }
-      if (origNodeEnv !== undefined) {
-        ;(globalThis as any).process.env.NODE_ENV = origNodeEnv
-      }
-      if (origKill) {
-        ;(globalThis as any).process.kill = origKill
-      }
-      if (opts.apiFetch) {
-        ;(globalThis as any).fetch = origFetch
-      }
-      delete (globalThis as any).process.env.SINGLE_PROCESS
-      delete (globalThis as any).__orez_proxy_connect
-      delete (globalThis as any).__orez_proxy_user
-      delete (globalThis as any).__orez_proxy_password
-    },
+    stop: shutdown,
   }
 }
 
