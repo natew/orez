@@ -7,6 +7,14 @@ export type ProfileMeasurement = {
   rowsWritten: number
 }
 
+type ProfilerState = {
+  phase: string
+  route: string
+  entries: ProfileMeasurement[]
+}
+
+const profilerStates = new Map<string, ProfilerState>()
+
 function normalizedSql(sql: string): string {
   return sql
     .replace(/_orez_tx_(?!manifest\b|schema\b)[A-Za-z0-9_-]+/g, '_orez_tx_<id>')
@@ -54,31 +62,39 @@ function summarizeEntries(entries: ProfileMeasurement[]) {
   }
 }
 
-export function installSqlProfiler(sqlStorage: { exec: Function }) {
-  let phase = 'idle'
-  let route = 'constructor'
-  const entries: ProfileMeasurement[] = []
+export function installSqlProfiler(sqlStorage: { exec: Function }, key: string) {
+  const state = profilerStates.get(key) ?? {
+    phase: 'idle',
+    route: 'constructor',
+    entries: [],
+  }
+  profilerStates.set(key, state)
   const rawExec = sqlStorage.exec.bind(sqlStorage)
   sqlStorage.exec = (sql: string, ...params: unknown[]) => {
     const cursor = rawExec(sql, ...params)
     return trackSqlCursorRowsWritten(cursor, (rowsWritten) => {
-      entries.push({ phase, route, sql, rowsWritten })
+      state.entries.push({
+        phase: state.phase,
+        route: state.route,
+        sql,
+        rowsWritten,
+      })
     })
   }
 
   return {
     setPhase(next: string) {
-      phase = next
+      state.phase = next
     },
     setRoute(next: string) {
-      route = next
+      state.route = next
     },
     report() {
-      const phases = new Set(entries.map((entry) => entry.phase))
+      const phases = new Set(state.entries.map((entry) => entry.phase))
       return Object.fromEntries(
         [...phases].map((entryPhase) => [
           entryPhase,
-          summarizeEntries(entries.filter((entry) => entry.phase === entryPhase)),
+          summarizeEntries(state.entries.filter((entry) => entry.phase === entryPhase)),
         ])
       )
     },

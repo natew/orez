@@ -4,6 +4,7 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -30,6 +31,54 @@ const root = resolve(import.meta.dir, '../..')
 const generatedDir = resolve(import.meta.dir, '.generated-chat-wrapper')
 rmSync(generatedDir, { recursive: true, force: true })
 mkdirSync(generatedDir, { recursive: true })
+
+const rollbackMode = process.env.OREZ_PROFILE_ROLLBACK_MODE || 'targeted'
+if (!['targeted', 'historical-all-table'].includes(rollbackMode)) {
+  throw new Error(`unknown OREZ_PROFILE_ROLLBACK_MODE ${rollbackMode}`)
+}
+
+const historicalAllTableRollback = `export function snapshotSideEffectWriteTables(sql, txID, sourceTable) {
+    const hasBusinessTrigger = sql
+        .exec("SELECT 1 AS ok FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? AND name NOT GLOB '_orez_cdc_*' LIMIT 1", sourceTable)
+        .toArray().length > 0;
+    const tables = sql
+        .exec("SELECT name FROM sqlite_master WHERE type = 'table' " +
+        "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_orez_*' " +
+        "AND name NOT GLOB '_zero_*' AND name NOT GLOB '_cf_*' ORDER BY name")
+        .toArray()
+        .map((row) => String(row.name ?? ''))
+        .filter(Boolean);
+    const hasReferentialAction = tables.some((child) => sql
+        .exec(\`PRAGMA foreign_key_list(\${quoteIdent(child)})\`)
+        .toArray()
+        .some((row) => {
+        if (String(row.table ?? '') !== sourceTable)
+            return false;
+        return [row.on_update, row.on_delete].some((action) => {
+            const normalized = String(action ?? 'NO ACTION').toUpperCase();
+            return normalized !== 'NO ACTION' && normalized !== 'RESTRICT';
+        });
+    }));
+    if (!hasBusinessTrigger && !hasReferentialAction)
+        return false;
+    for (const table of tables)
+        upgradeToTableSnapshot(sql, txID, table);
+    return true;
+}`
+
+function installHistoricalAllTableRollback(packageRoot: string): void {
+  const journalPath = join(packageRoot, 'dist/cf-do/tx-journal.js')
+  const source = readFileSync(journalPath, 'utf8')
+  const start = source.indexOf('export function snapshotSideEffectWriteTables(')
+  const end = source.indexOf('\n/**\n * roll back every journaled transaction', start)
+  if (start < 0 || end < 0) {
+    throw new Error('compiled rollback guard shape changed')
+  }
+  writeFileSync(
+    journalPath,
+    source.slice(0, start) + historicalAllTableRollback + source.slice(end)
+  )
+}
 
 function chatRoot(): string {
   const configured = process.env.OREZ_CHAT_PROFILE_REPO
@@ -92,6 +141,9 @@ rmSync(selfPackagePath, { recursive: true, force: true })
 mkdirSync(selfPackagePath, { recursive: true })
 copyFileSync(join(root, 'package.json'), join(selfPackagePath, 'package.json'))
 cpSync(join(root, 'dist'), join(selfPackagePath, 'dist'), { recursive: true })
+if (rollbackMode === 'historical-all-table') {
+  installHistoricalAllTableRollback(selfPackagePath)
+}
 
 const originalLog = console.log
 console.log = console.error
@@ -177,6 +229,11 @@ writeFileSync(
       chatRoot: chat,
       sourceHash: instrumented.sourceHash,
       schemaVersion,
+      rollbackMode,
+      rollbackSource:
+        rollbackMode === 'historical-all-table'
+          ? '478bd9b54ea69fdc01f5fa972e4234a52aadd51e:src/cf-do/tx-journal.ts'
+          : 'current checkout',
       builtAt: new Date().toISOString(),
     },
     null,

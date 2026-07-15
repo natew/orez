@@ -158,7 +158,7 @@ export function instrumentChatDataWorker(source: string): {
     SOURCE_RANGE_START,
     SOURCE_RANGE_END,
     '  constructor(ctx, env) {\n    super(ctx, env)\n',
-    '  constructor(ctx, env) {\n    super(ctx, env)\n    this.__profile = installSqlProfiler(ctx.storage.sql)\n',
+    "  constructor(ctx, env) {\n    super(ctx, env)\n    this.__profile = installSqlProfiler(ctx.storage.sql, 'source:' + ctx.id.toString())\n",
     'ZeroSqlDO constructor'
   )
   next = replaceInRange(
@@ -174,7 +174,7 @@ export function instrumentChatDataWorker(source: string): {
     CACHE_RANGE_START,
     CACHE_RANGE_END,
     '  constructor(ctx, env) {\n    super(ctx, env)\n',
-    '  constructor(ctx, env) {\n    super(ctx, env)\n    this.__profile = installSqlProfiler(ctx.storage.sql)\n',
+    "  constructor(ctx, env) {\n    super(ctx, env)\n    this.__profile = installSqlProfiler(ctx.storage.sql, 'cache:' + ctx.id.toString())\n",
     'ZeroCacheDO constructor'
   )
   next = replaceInRange(

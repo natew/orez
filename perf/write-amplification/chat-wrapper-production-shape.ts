@@ -18,6 +18,11 @@ type ProfileSummary = {
 
 type ProfileReport = Record<string, ProfileSummary>
 
+type PhaseMeasurements = {
+  source?: ProfileSummary
+  cache?: ProfileSummary
+}
+
 type CacheState = {
   ready: boolean
   bootPending: boolean
@@ -179,12 +184,33 @@ async function stop(instance: string) {
   await json(profilePath('cache', instance, '/__profile_stop'), { method: 'POST' })
 }
 
+async function dropReplica(instance: string) {
+  return json<{ dropped: number }>(
+    profilePath('cache', instance, '/__profile_drop_replica'),
+    { method: 'POST' }
+  )
+}
+
+async function forceBootFailures(instance: string, count: number) {
+  await json(profilePath('cache', instance, `/__profile_fail_boots?count=${count}`), {
+    method: 'POST',
+  })
+}
+
 async function report(instance: string, phase: string) {
   const [source, cache] = await Promise.all([
     json<ProfileReport>(profilePath('source', instance, '/__profile_report')),
     json<ProfileReport>(profilePath('cache', instance, '/__profile_report')),
   ])
   return { source: source[phase], cache: cache[phase] }
+}
+
+async function fullReport(instance: string) {
+  const [source, cache] = await Promise.all([
+    json<ProfileReport>(profilePath('source', instance, '/__profile_report')),
+    json<ProfileReport>(profilePath('cache', instance, '/__profile_report')),
+  ])
+  return { source, cache }
 }
 
 async function setupReady(instance: string) {
@@ -421,6 +447,189 @@ async function alarmRetryScenario() {
   return { firstFailure, withoutRequest, secondFailure, ready, measurements }
 }
 
+function phaseRows(measurements: PhaseMeasurements) {
+  return {
+    source: measurements.source?.rowsWritten ?? 0,
+    cache: measurements.cache?.rowsWritten ?? 0,
+  }
+}
+
+function addRows(...values: Array<{ source: number; cache: number }>) {
+  return values.reduce(
+    (sum, value) => ({
+      source: sum.source + value.source,
+      cache: sum.cache + value.cache,
+    }),
+    { source: 0, cache: 0 }
+  )
+}
+
+function consecutiveFailureSchedule(windowMs: number) {
+  const attempts: Array<{ attempt: number; atMs: number; nextDelayMs: number }> = []
+  let atMs = 0
+  for (let attempt = 1; atMs <= windowMs; attempt++) {
+    const nextDelayMs = attempt < 2 ? 0 : Math.min(15_000 * 2 ** (attempt - 2), 300_000)
+    attempts.push({ attempt, atMs, nextDelayMs })
+    atMs += nextDelayMs
+  }
+  return attempts
+}
+
+async function failedScheduleAttempt(instance: string, phase: string) {
+  const before = await cacheState(instance)
+  await setPhase(instance, phase)
+  const startedAt = Date.now()
+  await kickBoot(instance)
+  const state = await waitForState(
+    instance,
+    phase,
+    (candidate) =>
+      candidate.bootAttempts === before.bootAttempts + 1 &&
+      candidate.failures === before.failures + 1 &&
+      !candidate.bootPending
+  )
+  return {
+    durationMs: Date.now() - startedAt,
+    state,
+    measurements: await report(instance, phase),
+  }
+}
+
+async function readyScheduleAttempt(instance: string, phase: string) {
+  const before = await cacheState(instance)
+  await setPhase(instance, phase)
+  const startedAt = Date.now()
+  await kickBoot(instance)
+  const state = await waitForState(
+    instance,
+    phase,
+    (candidate) => candidate.ready && candidate.bootAttempts === before.bootAttempts + 1,
+    30_000
+  )
+  return {
+    durationMs: Date.now() - startedAt,
+    state,
+    measurements: await report(instance, phase),
+  }
+}
+
+async function resetScheduleReplica(instance: string, phase: string) {
+  await setPhase(instance, phase)
+  const startedAt = Date.now()
+  await stop(instance)
+  const result = await dropReplica(instance)
+  return { durationMs: Date.now() - startedAt, ...result }
+}
+
+async function historicalAttemptScheduleScenario() {
+  const instance = 'wrapper-attempt-schedule'
+  await setPhase(instance, 'seed')
+  await seed(instance)
+
+  await forceBootFailures(instance, 2)
+  const firstCycle = {
+    failed1: await failedScheduleAttempt(instance, 'schedule.first.failed1'),
+    failed2: await failedScheduleAttempt(instance, 'schedule.first.failed2'),
+    ready: await readyScheduleAttempt(instance, 'schedule.first.ready'),
+  }
+
+  const secondReset = await resetScheduleReplica(instance, 'schedule.second.reset')
+  await forceBootFailures(instance, 2)
+  const stableTwoFailureCycle = {
+    failed1: await failedScheduleAttempt(instance, 'schedule.two.failed1'),
+    failed2: await failedScheduleAttempt(instance, 'schedule.two.failed2'),
+    ready: await readyScheduleAttempt(instance, 'schedule.two.ready'),
+  }
+
+  const thirdReset = await resetScheduleReplica(instance, 'schedule.one.reset')
+  await forceBootFailures(instance, 1)
+  const stableOneFailureCycle = {
+    failed1: await failedScheduleAttempt(instance, 'schedule.one.failed1'),
+    ready: await readyScheduleAttempt(instance, 'schedule.one.ready'),
+  }
+
+  const cycleRows = (cycle: {
+    failed1: { measurements: PhaseMeasurements; durationMs: number }
+    failed2?: { measurements: PhaseMeasurements; durationMs: number }
+    ready: { measurements: PhaseMeasurements; durationMs: number }
+  }) =>
+    addRows(
+      phaseRows(cycle.failed1.measurements),
+      ...(cycle.failed2 ? [phaseRows(cycle.failed2.measurements)] : []),
+      phaseRows(cycle.ready.measurements)
+    )
+  const cycleDuration = (cycle: {
+    failed1: { durationMs: number }
+    failed2?: { durationMs: number }
+    ready: { durationMs: number }
+  }) =>
+    cycle.failed1.durationMs + (cycle.failed2?.durationMs ?? 0) + cycle.ready.durationMs
+
+  // nearest integer form of the incident ratio: 47 attempts and 19 full
+  // materializations. distribute 28 failures across the 19 successful cycles
+  // as nine two-failure cycles and ten one-failure cycles.
+  const modeledRows = addRows(
+    cycleRows(firstCycle),
+    ...Array.from({ length: 8 }, () => cycleRows(stableTwoFailureCycle)),
+    ...Array.from({ length: 10 }, () => cycleRows(stableOneFailureCycle))
+  )
+  const modeledDurationMs =
+    cycleDuration(firstCycle) +
+    8 * cycleDuration(stableTwoFailureCycle) +
+    10 * cycleDuration(stableOneFailureCycle) +
+    8 * secondReset.durationMs +
+    10 * thirdReset.durationMs
+  const incidentRows = { source: 514_346, cache: 486_876 }
+  const firstCycleRows = cycleRows(firstCycle)
+  const stableMaterializationRows = cycleRows(stableOneFailureCycle)
+  const cacheMatchedMaterializations =
+    1 + (incidentRows.cache - firstCycleRows.cache) / stableMaterializationRows.cache
+  const cacheMatchedRows = {
+    source:
+      firstCycleRows.source +
+      (cacheMatchedMaterializations - 1) * stableMaterializationRows.source,
+    cache: incidentRows.cache,
+  }
+  const consecutiveFailuresIn25Minutes = consecutiveFailureSchedule(25 * 60_000)
+
+  const allMeasurements = await fullReport(instance)
+  await setPhase(instance, 'cleanup')
+  await stop(instance)
+  return {
+    firstCycle,
+    stableTwoFailureCycle,
+    stableOneFailureCycle,
+    resets: { secondReset, thirdReset },
+    allMeasurements,
+    model: {
+      attempts: 47,
+      fullMaterializations: 19,
+      twoFailureCycles: 9,
+      oneFailureCycles: 10,
+      rows: modeledRows,
+      durationMs: modeledDurationMs,
+      incidentRows,
+      difference: {
+        source: modeledRows.source - incidentRows.source,
+        cache: modeledRows.cache - incidentRows.cache,
+      },
+      cacheMatched: {
+        fullMaterializations: cacheMatchedMaterializations,
+        rows: cacheMatchedRows,
+        difference: {
+          source: cacheMatchedRows.source - incidentRows.source,
+          cache: 0,
+        },
+      },
+      consecutiveFailureBackoff: {
+        windowMs: 25 * 60_000,
+        attempts: consecutiveFailuresIn25Minutes.length,
+        schedule: consecutiveFailuresIn25Minutes,
+      },
+    },
+  }
+}
+
 try {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -440,6 +649,7 @@ try {
     nullReplicaRankRepair: nullReplicaRankScenario,
     unhealedNullRankProbe: unhealedNullRankProbeScenario,
     alarmRetry: alarmRetryScenario,
+    historicalAttemptSchedule: historicalAttemptScheduleScenario,
   }
   const requestedScenario = process.env.OREZ_PROFILE_SCENARIO
   if (requestedScenario && !(requestedScenario in scenarioRuns)) {

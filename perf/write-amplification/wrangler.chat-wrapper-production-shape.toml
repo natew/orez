@@ -9,7 +9,7 @@ ZERO_APP_PUBLICATIONS = "profile_publication"
 ZERO_LOG_LEVEL = "warn"
 OREZ_LOG_LEVEL = "warn"
 ZERO_LITESTREAM_ENABLED = "false"
-OREZ_PROFILE_READY_TIMEOUT = "3000"
+OREZ_PROFILE_READY_TIMEOUT = "30000"
 
 [[durable_objects.bindings]]
 name = "ZERO_SQL_DO"
