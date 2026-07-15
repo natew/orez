@@ -206,7 +206,7 @@ jobs:
       - run: bun install --frozen-lockfile
 
       - name: install chromium
-        run: bunx playwright install --with-deps chromium
+        run: bun run --cwd packages/sync-browser-host playwright install --with-deps chromium
 
       - name: browser worker durability and protocol suite
         run: bun run test:sync-browser-host
