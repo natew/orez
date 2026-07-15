@@ -72,6 +72,44 @@ describe('zero-http transport', () => {
     expect(requests[0].body.clientGroupID).toEqual(expect.any(String))
   })
 
+  test('got queries survive a snapshot-reset poke after the ack', async () => {
+    // hold the FIRST /pull response until the client has sent its desired
+    // queries, so the got ack rides the first poke. every response is a full
+    // snapshot reset (leading op:'clear'), so the immediate follow-up pull
+    // emits a second clear-bearing poke AFTER the ack. a rows clear resets the
+    // client's entire replicache space including got-query marks — without the
+    // transport re-asserting its acked got set, the query regresses to
+    // 'unknown' forever and this times out (the load-dependent flake this
+    // pins deterministically).
+    let cookie = 0
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      recordRequest(input, init)
+      if (cookie === 0) await sleep(150)
+      return jsonResponse({
+        cookie: ++cookie,
+        lastMutationIDChanges: {},
+        rowsPatch: [
+          { op: 'clear' },
+          { op: 'put', tableName: 'user', value: { id: 'u1', name: 'ada' } },
+          {
+            op: 'put',
+            tableName: 'project',
+            value: { id: 'p1', ownerId: 'u1', name: 'control' },
+          },
+        ],
+      })
+    })
+    install(fetch)
+    const zero = createZero()
+
+    const view = zero.query.project.materialize()
+    const data = await waitForComplete(view)
+    view.destroy()
+
+    expect(fetch.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(data).toEqual([{ id: 'p1', ownerId: 'u1', name: 'control' }])
+  })
+
   test('push frames POST to /push, resolve server promises, and schedule a follow-up pull', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
