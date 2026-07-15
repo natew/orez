@@ -78,6 +78,7 @@
     "perf:load": "bun run perf/load/harness.ts",
     "perf:memory": "bun run perf/memory/profile.ts",
     "perf:write-profile": "bun run build && bun run perf/write-amplification/build-production-shape.ts && bun run perf/write-amplification/production-shape.ts",
+    "perf:write-wrapper-profile": "bun run build && bun run perf/write-amplification/build-chat-wrapper-production-shape.ts && bun run perf/write-amplification/chat-wrapper-production-shape.ts",
     "perf:bench": "bun run perf/scripts/bench-all.ts",
     "perf:overhead": "bun run perf/scripts/bench-proxy-overhead.ts",
     "perf:soak": "bun run perf/stability/soak.ts",
