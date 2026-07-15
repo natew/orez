@@ -8,6 +8,8 @@ import {
   type SyncDb,
   type SyncTables,
 } from '../../src/sync-server/sync-server'
+import { validateAtomicAppendArgs } from './consistency/atomic-visibility-workload.js'
+import { validateIncrementProbeArgs } from './consistency/exactly-once-workload.js'
 
 // mirror of the zero schema's tables (guarded against drift in fixture.ts)
 export const TABLES: SyncTables = {
@@ -173,6 +175,32 @@ export function executeMutator(
   _ctx: { userID: string }
 ) {
   switch (name) {
+    case 'exactlyOnce.incrementProbe': {
+      const { id } = validateIncrementProbeArgs(args)
+      const rows = tx.all(`SELECT rank FROM task WHERE id = ?`, [id])
+      if (rows.length !== 1) throw new MutationAppError('probe-not-found')
+      tx.exec(`UPDATE task SET rank = rank + 1 WHERE id = ?`, [id])
+      return
+    }
+    case 'atomicVisibility.appendGroup': {
+      const { effects } = validateAtomicAppendArgs(args)
+      for (const effect of effects) {
+        tx.exec(
+          `INSERT INTO task (id, "projectId", title, rank, done, meta, "dueAt")
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            effect.id,
+            effect.projectId,
+            `atomic-visibility:${effect.id}`,
+            effect.rank,
+            0,
+            null,
+            null,
+          ]
+        )
+      }
+      return
+    }
     case 'project.create': {
       const a = args as { id: string; ownerId: string; name: string }
       const exists = tx.all(`SELECT 1 FROM project WHERE id = ?`, [a.id])

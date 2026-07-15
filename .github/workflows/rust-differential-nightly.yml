@@ -1,0 +1,107 @@
+name: Rust differential nightly
+
+on:
+  schedule:
+    - cron: '23 10 * * *'
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: Proptest cases to generate
+        required: false
+        default: '512'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROPTEST_CASES: ${{ inputs.cases || '512' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The TypeScript reference oracle uses only Bun's built-in SQLite; no
+      # package installation or other runtime is required.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-differential-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-differential-${{ runner.os }}-
+            rust-${{ runner.os }}-
+
+      # Runs both the stable 8x200 corpus and the shrinkable generated lane.
+      - name: Rust versus TypeScript differential
+        run: cargo test -p sync-core --test differential -- --nocapture
+
+      - name: collect minimized regressions and preserved traces
+        if: failure()
+        shell: bash
+        run: |
+          results=target/sync-core-differential
+          mkdir -p "$results/regressions" "$results/traces"
+          regression=crates/sync-core/proptest-regressions/differential.txt
+          if [[ -f "$regression" ]]; then
+            cp "$regression" "$results/regressions/"
+          fi
+          for trace in /tmp/sync-core-diff-*.json; do
+            [[ -e "$trace" ]] || continue
+            cp "$trace" "$results/traces/"
+          done
+
+      - name: upload minimized regressions and preserved traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-differential-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/sync-core-differential/
+          if-no-files-found: warn
+          retention-days: 14
+
+  sweep-corpus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: harness install
+        run: cd harness && bun install
+
+      # committed exact corpus entries run before the seeded nightly sweep.
+      # ordinary pull-request sweeps deliberately omit --corpus.
+      - name: replay corpus before nightly sweep
+        run: cd harness && bun src/sweep.ts --corpus --rounds 10
+
+      - name: upload sweep regressions
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-sweep-regressions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: harness/regressions/sweep/v1/
+          if-no-files-found: warn
+          retention-days: 14

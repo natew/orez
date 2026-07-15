@@ -27,6 +27,9 @@ import {
   type Transaction,
 } from '@rocicorp/zero'
 
+import { validateAtomicAppendArgs } from './consistency/atomic-visibility-workload.js'
+import { validateIncrementProbeArgs } from './consistency/exactly-once-workload.js'
+
 const user = table('user')
   .columns({
     id: string(),
@@ -364,6 +367,26 @@ function seedCursor() {
 type Tx = Transaction<Schema>
 
 export const mutators = defineMutators({
+  exactlyOnce: {
+    incrementProbe: defineMutator(async ({ tx, args }: { tx: Tx; args: unknown }) => {
+      const { id } = validateIncrementProbeArgs(args)
+      await tx.mutate.task.update({ id, rank: 1 })
+    }),
+  },
+  atomicVisibility: {
+    appendGroup: defineMutator(async ({ tx, args }: { tx: Tx; args: unknown }) => {
+      const validated = validateAtomicAppendArgs(args)
+      for (const effect of validated.effects) {
+        await tx.mutate.task.insert({
+          id: effect.id,
+          projectId: effect.projectId,
+          title: `atomic-visibility:${effect.id}`,
+          rank: effect.rank,
+          done: false,
+        })
+      }
+    }),
+  },
   project: {
     create: defineMutator(
       async ({

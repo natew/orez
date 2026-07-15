@@ -1,0 +1,470 @@
+{
+  "title": "Orez <> rocicorp/mono upstream Zero conformance coverage ledger",
+  "purpose": "Machine-readable map of upstream ZQL/Zero conformance assets (the coverage-driven fuzzer and the differential/protocol test suites) to their Orez black-box-harness status, so parity is auditable and drift is explicit. Owned by the upstream-parity worker; see README.md. Exhaustive per-file accounting is in inventory.json; both are verified by verify.ts.",
+  "inventoryRef": "./inventory.json",
+  "statusVocabulary": {
+    "upstream-baseline": "Upstream asset is the reference/spec; Orez conforms to it rather than porting it (e.g. the v51 wire schemas, the coverage model).",
+    "ported-black-box": "Orez has a wire-level / black-box equivalent that runs against a real server (no dependency on mono's in-process IVM).",
+    "equivalent": "Orez fully re-expresses the same property by a different mechanism (e.g. cross-implementation wire differential instead of in-process IVM-vs-pg; late-client rehydrate instead of in-process push history).",
+    "equivalent-partial": "Orez re-expresses the behavior black-box but with a NAMED missing piece (e.g. differential runs vs a reference impl but without the pairwise-coverage gate / bounded enumeration / shrink / scale-differential upstream also has). Behavioral coverage is real but not complete; the gap is stated.",
+    "portable-gap": "Portable and valuable, but not yet built in Orez. Reason names the value and why it is safe to port.",
+    "not-applicable": "Cannot or should not be ported black-box AND Orez has no black-box behavioral analog. Reason names the coupling (mono planner/plan-flag/in-process transform) or the app/demo scope. NOTE: a test being implementation-coupled (in-process) does NOT by itself make it not-applicable — if Orez re-expresses the behavior black-box it is equivalent/equivalent-partial. Test portability and behavioral coverage are tracked separately (see inventory.json)."
+  },
+  "meta": {
+    "generatedBy": "upstream-parity worker (agentbus task t-mrgqz3g5-6030)",
+    "generatedDate": "2026-07-11",
+    "monoLocalCheckout": "/Users/n8/github/mono",
+    "auditedUpstreamSha": "7139287da3c84ec5050c1eff0d9444d912d462aa",
+    "auditedUpstreamRef": "origin/main",
+    "auditedUpstreamDate": "2026-07-11",
+    "orezBaselineSha": "6d84471c5c556599edfb9328d102316446db35a2",
+    "orezBaselineDate": "2026-07-09",
+    "orezBaselineNote": "The mono HEAD the Orez conformance harness was originally built against (plans/zero-conformance-harness.md). Retained ONLY as the historical baseline so drift from auditedUpstreamSha is explicit; do not re-pin work to it.",
+    "protocolVersion": 51,
+    "zeroPin": "@rocicorp/zero 1.7.0 (harness/package.json). Sync protocol v51. Client-side query evaluation (zqlite/IVM) is 1.7.0 on every snapshot-shipping target.",
+    "auditedTotals": {
+      "zqlIntegrationTestFiles": 24,
+      "zeroCacheTestFiles": 143,
+      "zeroCachePgTestFiles": 47,
+      "zeroProtocolTestFiles": 9,
+      "fuzzFiles": 20,
+      "fuzzNonTestModules": 19
+    },
+    "driftCheck": "bun harness/upstream-parity/verify.ts (fetches origin/main, verifies inventory counts + the exact 24-file set at the audited SHA, and flags drift auditedUpstreamSha..origin/main over conformance-relevant paths; exits non-zero on a stale audit or unacknowledged drift)."
+  },
+  "drift": {
+    "note": "7 commits land between orezBaselineSha and auditedUpstreamSha. The fuzz generator directory (packages/zql-integration-tests/src/chinook/fuzz) is byte-identical across the range, so the ported-generator audit holds at the audited SHA. The drift is entirely query-semantics + zero-cache connection/DDL robustness.",
+    "commits": [
+      {
+        "sha": "7139287da3c84ec5050c1eff0d9444d912d462aa",
+        "date": "2026-07-11",
+        "subject": "feat(zbugs): migrate to zero-virtual 0.6 (#6227)",
+        "relevance": "none",
+        "orezStatus": "not-applicable",
+        "reason": "zbugs demo app, not engine/protocol."
+      },
+      {
+        "sha": "e374775a9",
+        "date": "2026-07-11",
+        "subject": "perf(zbugs): hoist list Row out of ListPage (#6226)",
+        "relevance": "none",
+        "orezStatus": "not-applicable",
+        "reason": "zbugs demo app render perf."
+      },
+      {
+        "sha": "d4f33d6a6b1e598e2116b4a2184f7fe5375d5864",
+        "date": "2026-07-10",
+        "subject": "fix(zqlite): compile NULL cursor bounds into null-safe start constraints (#6121)",
+        "relevance": "high",
+        "orezStatus": "portable-gap",
+        "reason": "Query-semantics fix NOT in the 1.7.0 pin. `col > NULL`/`col = NULL` matched nothing, so a start-cursor anchored in the NULL-sorted region silently returned empty. CONFIRMED 2026-07-11 (deterministic) on the stock zero-cache 1.7.0 reference by the new metamorphic startSuffix guard: start(dueAt asc, after {null,t1}, exclusive) returns [] vs a 47-row correct suffix (server-side sqlite table-source). orez-local PASSES the same shape (ships snapshots, materializes client-side, never pushes start into the buggy sqlite fetch). The stock-vs-orez differential misses it because the sweep generator has NO nullable-column start-cursor axis; had it emitted one, stock ([]) and orez (rows) would diverge and it would also flag it. So #6121 is a generator-coverage miss, not a both-sides-wrong shared blind spot. Repro: harness/regressions/known-gap-zql-6121-null-start-cursor.json.",
+        "upstreamTests": [
+          "packages/zqlite/src/table-source.test.ts (+170: 'fetching across a NULL-sorted cursor region')",
+          "packages/zqlite/src/query-builder.test.ts (+238: NULL-bound truth-table snapshots forward/reverse)",
+          "packages/zero-cache/src/db/lite-tables.test.ts (+51: optional column |NOT_NULL mirroring — the truthful `optional` flag the null-bound admission relies on)"
+        ],
+        "orezExistingCoverage": "crates/sync-core/tests/query_ast.rs::start_cursor_null_ordering (GAP-2b) — Orez's Rust server-side compiler handles NULL cursors correctly and is tested. That is compiler-side/server-side; it does NOT cover the client-side 1.7.0 zqlite evaluator used by the snapshot-shipping harness targets."
+      },
+      {
+        "sha": "15fd7cdea",
+        "date": "2026-07-10",
+        "subject": "chore: add MutatorResult to exported types (#6223)",
+        "relevance": "none",
+        "orezStatus": "not-applicable",
+        "reason": "TypeScript export surface."
+      },
+      {
+        "sha": "e5b9c6f55",
+        "date": "2026-07-10",
+        "subject": "feat(zero-cache): add optional newColumns field to DDL events (#6222)",
+        "relevance": "moderate",
+        "orezStatus": "not-applicable",
+        "reason": "Logical-replication DDL-evolution event. Relevant to Orez's pg-proxy/replication path, not to the snapshot-shipping sync-server core the harness exercises. Tests: change-source/pg/schema/ddl.pg.test.ts (+24), types/pg.test.ts (+127). Flagged for the replication planes, out of scope for this conformance harness."
+      },
+      {
+        "sha": "72f732cd4",
+        "date": "2026-07-09",
+        "subject": "fix(zero-cache): make the socket inactivity watchdog survive TLS upgrade (#6221)",
+        "relevance": "moderate",
+        "orezStatus": "not-applicable",
+        "reason": "zero-cache persistent-websocket robustness. Orez planes use the on-zero http-pull transport (no long-lived server socket), so this affects only the stock-zero reference stack, not an Orez conformance surface."
+      },
+      {
+        "sha": "f9ff04d31",
+        "date": "2026-07-09",
+        "subject": "fix(zero-cache): reset half-open pg sockets after inactivity (#6220)",
+        "relevance": "moderate",
+        "orezStatus": "not-applicable",
+        "reason": "Upstream pg-connection robustness in zero-cache. Orez's pg handling is separate (pg-proxy / native pg / pglite); noted for those planes, not a black-box conformance surface."
+      }
+    ]
+  },
+  "fuzzModules": {
+    "note": "The 20-module coverage-driven fuzzer ported from rocicorp's internal rust `rindle-fuzz`. upstreamPath is relative to packages/zql-integration-tests/src/chinook/fuzz/. `portability` is intrinsic (can it leave mono's IVM?); `orezStatus` is where Orez stands.",
+    "modules": [
+      {
+        "file": "rng.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/rng.ts",
+        "purpose": "mulberry32 seeded PRNG for bit-exact replay",
+        "portability": "portable",
+        "orezStatus": "ported-black-box",
+        "orezArtifact": "harness/src/sweep.ts (mulberry32, lines 56-66)",
+        "note": "Same PRNG family; deterministic-per-seed replay is preserved."
+      },
+      {
+        "file": "axes.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/axes.ts",
+        "purpose": "schema read-model + per-table value roles + the 5 orthogonal decoration axes (filter x exists x order x limit x start)",
+        "portability": "portable",
+        "orezStatus": "equivalent",
+        "orezArtifact": "harness/src/fixture.ts (COLUMNS/RELS/GenSpec) + harness/src/sweep.ts (genCmp/genWhere/genOrderBy)",
+        "gap": "No formal named AXES domains with realizability gates; the axis space is implicit in the generator. Blocks a covering-array / pairwise measurement (see coverage.ts, cover.ts)."
+      },
+      {
+        "file": "literals.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/literals.ts",
+        "purpose": "data-driven non-vacuous literals so filters actually partition the fixture",
+        "portability": "portable",
+        "orezStatus": "equivalent",
+        "orezArtifact": "harness/src/sweep.ts (TITLE_PATTERNS/NAME_PATTERNS + value generators) + SEED-derived id pools",
+        "note": "Literals tuned to SEED; sweep tracks a non-vacuous rate (returned-data-at-hydrate)."
+      },
+      {
+        "file": "coverage.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/coverage.ts",
+        "purpose": "t-way (pairwise) coverage accounting + feature-interaction tags + 100% missed-tuple gate",
+        "portability": "portable",
+        "orezStatus": "portable-gap",
+        "orezArtifact": "harness/src/sweep.ts --dry (raw per-axis counts only)",
+        "gap": "HIGH value. Orez prints raw axis counts but has no pairwise/t-way tuple accounting, no missed-tuple report, and no coverage gate. This is the measurement that turns 'we exercised shapes' into a number."
+      },
+      {
+        "file": "cost.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/cost.ts",
+        "purpose": "static cost gate to skip pathologically expensive random-tail queries",
+        "portability": "portable",
+        "orezStatus": "not-applicable",
+        "reason": "Orez's generator bounds shape depth structurally (depth caps in genWhere/genSub); there is no unbounded random tail to gate. Low value at current scale."
+      },
+      {
+        "file": "skeleton.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/skeleton.ts",
+        "purpose": "L0 bounded-exhaustive structural skeleton enumeration (smallest-first)",
+        "portability": "semi-portable",
+        "orezStatus": "portable-gap",
+        "orezArtifact": "harness/src/sweep.ts (random skeletons via genSpec)",
+        "gap": "Orez does RANDOM skeletons, not bounded-exhaustive smallest-first enumeration, so there is no guarantee every small shape is covered. Moderate value; pairs with coverage accounting."
+      },
+      {
+        "file": "cover.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/cover.ts",
+        "purpose": "L1 AETG greedy pairwise covering array + assignment lowering",
+        "portability": "semi-portable",
+        "orezStatus": "portable-gap",
+        "orezArtifact": "harness/src/sweep.ts (pure random, no covering array)",
+        "gap": "No covering array; pure random generation. Pairs with coverage.ts to give a bounded, provably-pairwise-complete lane."
+      },
+      {
+        "file": "swarm.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/swarm.ts",
+        "purpose": "L2 swarm testing — per-run random feature masks that disable axes",
+        "portability": "semi-portable",
+        "orezStatus": "equivalent-partial",
+        "orezArtifact": "harness/src/sweep.ts (independent per-axis chance() gates)",
+        "note": "Orez's per-axis probabilities are a weak swarm (each axis independently present/absent); no explicit whole-run feature-mask that disables axes. Partial."
+      },
+      {
+        "file": "mutate.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/mutate.ts",
+        "purpose": "L3 mutation-from-corpus — one small twist on a known-good skeleton",
+        "portability": "semi-portable",
+        "orezStatus": "portable-gap",
+        "orezArtifact": "none (harness/src/sweep.ts genWrites mutates DATA, not QUERIES)",
+        "gap": "Orez has no query-mutation-from-corpus generator (the neighborhood where minimal repros live). Lower value: sweep accumulates shapes across rounds, giving some incremental-maintenance neighborhood coverage."
+      },
+      {
+        "file": "tail.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/tail.ts",
+        "purpose": "L4 pure-random deep-nesting long-tail generator, cost-gated",
+        "portability": "semi-portable",
+        "orezStatus": "ported-black-box",
+        "orezArtifact": "harness/src/sweep.ts genSpec (recursive related depth<=2, and/or trees depth<=2)",
+        "note": "sweep's pure-random generator is the tail analog and the shape Orez most resembles. Depth is shallower than upstream's tail (<=2 vs <=4)."
+      },
+      {
+        "file": "push.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/push.ts",
+        "purpose": "four-phase net-zero push history (RemoveAll->AddBack->EditToRandom->EditToMatch) for incremental maintenance",
+        "portability": "portable",
+        "orezStatus": "equivalent-partial",
+        "orezArtifact": "harness/src/sweep.ts genWrites (real wire mutations + upstream sql churn) + incremental==fresh late-client rehydrate",
+        "note": "Orez drives REAL v51 wire mutations and upstream sql across accumulating live views and checks incremental==fresh via a late client. Different mechanism, same invariant. MISSING: the explicit net-zero four-phase round-trip (RemoveAll->AddBack->EditToRandom->EditToMatch) that pins return-to-seed and catches transient strand/drop between mutations."
+      },
+      {
+        "file": "flip.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/flip.ts",
+        "purpose": "flip-invariance — toggle the IVM plan flag (semi-join vs FlippedJoin) on positive EXISTS",
+        "portability": "mono-plan-specific",
+        "orezStatus": "not-applicable",
+        "reason": "`flip` is a mono IVM planner flag with no wire-side or pg analog; a black-box client cannot select query plans. Also `not(exists())` is unsupported on the zero client (bugs.rocicorp.dev/3438, found by the sweep lane)."
+      },
+      {
+        "file": "metamorphic.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/metamorphic.ts",
+        "purpose": "IVM-vs-IVM metamorphic relations (oracle-free): redundantConjunct, andReorder, largeLimit, startBeforeFirst",
+        "portability": "portable",
+        "orezStatus": "ported-black-box",
+        "orezArtifact": "harness/src/metamorphic.ts (this task) + harness/src/metamorphic-lane.ts + harness/src/metamorphic.selftest.ts",
+        "note": "Ports the 3 always-true invariant transforms (redundantConjunct/andReorder/largeLimit) AND adds computed startSuffix + limitPrefix, which upstream's metamorphic layer lacks (upstream only exercises NON-binding startBeforeFirst / largeLimit). Oracle-free: checks one target's self-consistency. EMPIRICALLY found #6121 on the stock 1.7.0 reference (startSuffix, null-anchored cursor -> stock returns [], orez-local correct); the differential missed it for lack of a nullable-start axis. Mutation-proven: harness/src/metamorphic.selftest.ts shows the guard goes red on a simulated #6121 empty-continuation and an off-by-one start; harness/src/metamorphic-lane.ts --mutate proves the live wiring catches it (24/24) without writing repros."
+      },
+      {
+        "file": "shrink.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/shrink.ts",
+        "purpose": "structure-aware delta-debug shrinker -> minimal repro",
+        "portability": "portable",
+        "orezStatus": "portable-gap",
+        "orezArtifact": "none (harness/src/sweep.ts records the failing seed + FULL spec, unshrunk)",
+        "gap": "HIGH value. On a divergence Orez emits the whole random spec; there is no delta-debug to a minimal still-reproducing spec. Next asset after metamorphic; pairs with the committed replay corpus (regressions.ts)."
+      },
+      {
+        "file": "regressions.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/regressions.ts",
+        "purpose": "serialize/replay committed minimized repros first on every run",
+        "portability": "portable",
+        "orezStatus": "portable-gap",
+        "orezArtifact": "harness/src/sweep.ts (writes divergence artifacts to harness/regressions/, which is intended tracked but is NOT loaded/replayed)",
+        "gap": "The artifact-writing half exists (and harness/.gitignore keeps regressions/ tracked), but the replay-FIRST gate — load committed minimized specs and re-run them before random rounds — is missing, so a past find is not a permanent guard. Pairs with shrink.ts."
+      },
+      {
+        "file": "scalar.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/scalar.ts",
+        "purpose": "scalar-subquery lane mirroring zero-cache pipeline-driver pre-resolve",
+        "portability": "mono-internal",
+        "orezStatus": "not-applicable",
+        "reason": "Hard runtime dependency on zqlite/src/resolve-scalar-subqueries.ts; the differential is only meaningful against the in-process IVM's non-native scalar handling. Not black-box portable."
+      },
+      {
+        "file": "wrap.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/wrap.ts",
+        "purpose": "re-wrap a raw AST as a runnable mono Query",
+        "portability": "mono-internal",
+        "orezStatus": "equivalent",
+        "orezArtifact": "harness/src/fixture.ts buildGenerated (builds queries from GenSpec via the fluent builder; never leaves the builder, so no AST->Query rewrap is needed)"
+      },
+      {
+        "file": "mini.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/mini.ts",
+        "purpose": "deterministic ~40-row FK-consistent chinook fixture + DDL/seed generation",
+        "portability": "portable",
+        "orezStatus": "equivalent",
+        "orezArtifact": "harness/src/fixture.ts + harness/src/fixture-data.ts (SEED/DDL, chat-census-shaped todo schema)",
+        "note": "Different schema by design (todo app modeling ~/chat's query layer vs chinook). Same single-source-of-truth discipline; fixture.ts fails loud if the TABLES mirror drifts from the zero schema."
+      },
+      {
+        "file": "driver.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/driver.ts",
+        "purpose": "in-process orchestration: generate -> runAndCompare (IVM memory+sqlite vs pg oracle) -> capture -> minimize -> coverage",
+        "portability": "mono-internal",
+        "orezStatus": "equivalent-partial",
+        "orezArtifact": "harness/src/sweep.ts",
+        "note": "sweep is Orez's driver: generate -> materialize on BOTH stock-zero and an orez target over the wire -> canonical compare -> record. The in-process IVM-vs-pg differential is replaced by a cross-IMPLEMENTATION wire differential (reference impl, not a fresh pg oracle), which is the property the rewrite must hold. MISSING vs upstream's driver: shrink.ts (minimize repro), coverage.ts (pairwise accounting/gate), and the scalar/flip axes."
+      },
+      {
+        "file": "fuzz.test.ts",
+        "upstreamPath": "packages/zql-integration-tests/src/chinook/fuzz/fuzz.test.ts",
+        "purpose": "fast no-PG unit tests of the generator machinery (enumeration counts, covering-array completeness, metamorphic/flip self-consistency)",
+        "portability": "mono-internal",
+        "orezStatus": "equivalent-partial",
+        "orezArtifact": "harness/src/sweep.ts --dry (axis-count sanity) + harness/src/metamorphic.selftest.ts (metamorphic self-consistency + mutation proof)",
+        "gap": "MISSING enumeration-count / covering-array-completeness assertions (depends on the coverage.ts + skeleton.ts gaps)."
+      }
+    ]
+  },
+  "conformanceSuites": {
+    "note": "Selected upstream test surfaces beyond the fuzzer, classified for a black-box harness. Paths relative to mono root.",
+    "suites": [
+      {
+        "path": "packages/zero-protocol/src/{up,down,connect,poke,push,pull,queries-patch,change-desired-queries,row-patch,ast,client-schema}.ts",
+        "purpose": "v51 wire-protocol valita schemas — the spec a wire client must conform to",
+        "portability": "spec",
+        "orezStatus": "upstream-baseline",
+        "note": "Orez conforms via the on-zero http-pull transport + src/sync-server; these schemas ARE the contract, not something to port. PROTOCOL_VERSION=51."
+      },
+      {
+        "path": "packages/zql-integration-tests/src/chinook/chinook-zero-cache-fuzzer.pg.test.ts",
+        "purpose": "L1 replica + L2 protocol-materialized differential vs a fresh pg oracle (richest oracle in the repo)",
+        "portability": "in-process (protocol-shaped but connects to view-syncer in-process; bypasses the socket)",
+        "orezStatus": "equivalent",
+        "orezArtifact": "harness/src/sweep.ts + harness/src/shapes.ts",
+        "note": "Orez's differential runs OVER THE WIRE (real stock @rocicorp/zero clients on the http-pull transport) where upstream's ProtocolFuzzerClient calls viewSyncer.initConnection directly. Orez trades the pg oracle for a stock-zero reference implementation."
+      },
+      {
+        "path": "packages/zero-cache/src/integration/integration.pg.test.ts",
+        "purpose": "the only real over-the-wire websocket v51 test (asserts poke/protocol behavior; no pg-oracle diff)",
+        "portability": "black-box (real ws)",
+        "orezStatus": "equivalent",
+        "orezArtifact": "harness/src/smoke.ts + harness/src/reconnect.ts + harness/src/multi-tab.ts",
+        "note": "Orez drives real stock clients over the wire against every target; adds convergence + oracle equality upstream's integration test does not."
+      },
+      {
+        "path": "packages/zql-integration-tests/src/{compiler,compiler-bigint,collate,text-semantics}.pg.test.ts",
+        "purpose": "query-result differential edges: bigint (int8), collation (byte-order vs locale), text-semantics (LIKE/ILIKE Unicode folding under COLLATE C), json/timestamps",
+        "portability": "portable (query-result conformance)",
+        "orezStatus": "portable-gap",
+        "orezArtifact": "harness/src/shapes.ts + harness/src/sweep.ts (cross-impl differential, but no dedicated edge fixtures)",
+        "gap": "Orez's differential compares cross-implementation but the fixture has no COLLATE-C table, no int8/bigint column, and does not pin the ILIKE-Unicode-folding known divergence. Value gap: these are exactly the per-target value-conversion edges the rowsPatch path must hold."
+      },
+      {
+        "path": "packages/zero-cache/src/auth/{read-authorizer,write-authorizer}.{test,query}.ts",
+        "purpose": "permission filter logic (read/write authorization)",
+        "portability": "in-process",
+        "orezStatus": "equivalent",
+        "orezArtifact": "harness/src/permissions.ts",
+        "note": "Orez covers pull visibility + membership-driven revocation over the wire. Push-role authorization, auth-token refresh/staleness, and external-ACL invalidation remain greenfield — matching upstream, which punts permissions to the L4-future layer."
+      },
+      {
+        "path": "packages/zql/src/query/query-impl.query.test.ts (junction limitations), packages/zql-integration-tests/src/chinook/chinook.pg.test.ts (brokenRelationshipLimits)",
+        "purpose": "pins known feature gaps: limit/orderBy not supported inside junction relationships",
+        "portability": "spec",
+        "orezStatus": "upstream-baseline",
+        "note": "Encode as harness xfails; the Orez generator must not generate junction-edge limit/orderBy (see knownXfails)."
+      },
+      {
+        "path": "packages/zql-integration-tests/src/chinook/planner*.pg.test.ts, packages/zql-integration-tests/src/pagila/planner-exec.pg.test.ts",
+        "purpose": "query-planner cost-model / plan-attempt validation",
+        "portability": "mono-internal",
+        "orezStatus": "not-applicable",
+        "reason": "Orez ships snapshots (client-side evaluation) or compiles AST->SQL in the Rust core; it has no cost-based IVM planner, so the plan-choice tests have no analog."
+      }
+    ]
+  },
+  "invariants": {
+    "note": "The differential/metamorphic properties the upstream fuzzer checks, mapped to Orez lanes.",
+    "hydrateParity": {
+      "upstream": "materialized(query) == fresh pg oracle (runner.ts runAndCompare)",
+      "orez": "stock-zero result == orez-target result at hydrate (harness/src/shapes.ts, sweep.ts). Cross-implementation instead of vs-pg.",
+      "orezStatus": "equivalent"
+    },
+    "incrementalEqualsFresh": {
+      "upstream": "incrementally maintained view == fresh materialize after the same writes (driver.ts pushWalk, per step)",
+      "orez": "accumulating live views stay canonical-equal under mirrored write churn, then late clients rehydrate every spec from scratch and must match the maintained view (sweep.ts).",
+      "orezStatus": "equivalent"
+    },
+    "metamorphicSelfConsistency": {
+      "upstream": "semantically-invariant AST transforms do not change the result, checked IVM-vs-IVM with NO oracle (metamorphic.ts)",
+      "orez": "harness/src/metamorphic.ts — oracle-free single-target self-consistency. Confirmed #6121 on the stock 1.7.0 reference (the differential missed it for lack of a nullable-start axis); also covers the class a differential is blind to by construction (both targets sharing a wrong behavior).",
+      "orezStatus": "ported-black-box"
+    },
+    "flipInvariance": {
+      "upstream": "all 2^k flip assignments hydrate equal (flip.ts)",
+      "orez": "n/a — plan flag with no wire analog.",
+      "orezStatus": "not-applicable"
+    }
+  },
+  "regressionCorpusSchema": {
+    "note": "Upstream's committed replay-artifact shape (regressions.ts). Shared with the consistency-checker arch worker so operation-history / repro artifacts stay compatible. Sources are NOT stored: the fixture is regenerated deterministically, so a case is just the minimized query (+ optional push history) as plain wire JSON.",
+    "upstreamShape": {
+      "note": "string — human description of the bug this guards, plus the original seed/label",
+      "ast": "AST — the shrunk query in zero-protocol wire JSON form",
+      "pushes": "Mutation[]? — optional four-phase push history; absent => a hydrate-only repro"
+    },
+    "upstreamMutationShape": "{ table: string, kind: 'remove'|'add'|'edit', row: Row, old?: Row } (client table/column names)",
+    "orezAdaptation": {
+      "note": "Orez cases carry a GenSpec instead of a raw AST (the harness generates queries from GenSpec, never a bare AST), plus the seed/round for exact replay. The relate/mutation history is expressed as the harness Write[] script.",
+      "shape": {
+        "note": "string",
+        "spec": "GenSpec",
+        "seed": "number",
+        "round": "number",
+        "phase": "string",
+        "replay": "string (exact re-run command)"
+      },
+      "currentArtifact": "harness/src/sweep.ts recordDivergence() already writes this shape to harness/regressions/; the missing pieces are shrink (minimize spec) and a replay-first gate."
+    }
+  },
+  "coverageModel": {
+    "note": "Upstream's coverage accounting (coverage.ts/cover.ts/axes.ts). Recorded so the Orez pairwise-coverage gap can be closed compatibly.",
+    "axes": [
+      {
+        "name": "filter",
+        "domainSize": 16,
+        "values": "none,eq,ne,lt,le,gt,ge,in,is_null,is_not_null,like,ilike,not_like,and2,or2,and_or"
+      },
+      {
+        "name": "exists",
+        "domainSize": 7,
+        "values": "none,exists_top,exists_and,exists_or,not_exists_top,not_exists_and,not_exists_or"
+      },
+      { "name": "order", "domainSize": 4, "values": "none,asc1,desc1,mixed2" },
+      { "name": "limit", "domainSize": 3, "values": "none,small,large" },
+      {
+        "name": "start",
+        "domainSize": 4,
+        "values": "none,mid_exclusive,mid_inclusive,null_exclusive"
+      }
+    ],
+    "strength": "t=2 (pairwise)",
+    "pairwiseTupleCount": 405,
+    "coveringArraySize": "< 200 rows (AETG greedy), >= 112 (largest single-pair product 16*7)",
+    "realizabilityGate": "per-table only: a text filter needs a text column; an EXISTS needs an outgoing relationship. axes are otherwise orthogonal (no inter-axis constraint solver).",
+    "orezGap": "Orez has no named axis domains and no t-way accounting; sweep --dry reports only raw per-axis presence counts. Note: upstream's start axis already includes null_exclusive, an axis Orez's generator does NOT cover (its start cursors are only on the non-null `rank` column). Extending the Orez generator to order-by a nullable column with a start cursor is what makes the metamorphic startSuffix guard exercise the #6121 region."
+  },
+  "rankedGaps": [
+    {
+      "rank": 1,
+      "gap": "metamorphic self-consistency (NULL cursor / order semantics)",
+      "value": "Oracle-free single-target self-consistency: runs against any one target (incl. CF) with no reference impl. CONFIRMED #6121 on the stock 1.7.0 reference that the differential missed for lack of a nullable-start axis; also covers the harder class a differential is blind to by construction (both targets sharing a wrong behavior).",
+      "status": "DONE (this task): metamorphic.ts + metamorphic.selftest.ts + metamorphic-lane.ts",
+      "maps": ["metamorphic.ts", "#6121"]
+    },
+    {
+      "rank": 2,
+      "gap": "shrink-to-repro + committed replay-first corpus",
+      "value": "Turns each divergence into a minimal, permanent regression guard instead of a full random spec + gitignored artifact.",
+      "status": "next",
+      "maps": ["shrink.ts", "regressions.ts"]
+    },
+    {
+      "rank": 3,
+      "gap": "pairwise/t-way coverage accounting + gate",
+      "value": "Turns 'we exercised shapes' into a gated number; surfaces uncovered axis-pairs.",
+      "status": "open",
+      "maps": ["coverage.ts", "cover.ts", "axes.ts"]
+    },
+    {
+      "rank": 4,
+      "gap": "value-conversion edge fixtures (collation / text-semantics / bigint / json)",
+      "value": "Pins the per-target rowsPatch value-conversion edges the fixture currently omits.",
+      "status": "open",
+      "maps": [
+        "compiler-bigint.pg.test.ts",
+        "collate.pg.test.ts",
+        "text-semantics.pg.test.ts"
+      ]
+    },
+    {
+      "rank": 5,
+      "gap": "bounded-exhaustive skeleton enumeration",
+      "value": "Guarantees every small query shape is covered, not just sampled.",
+      "status": "open",
+      "maps": ["skeleton.ts"]
+    }
+  ],
+  "knownXfails": [
+    {
+      "id": "junction-limit-orderby",
+      "reason": "limit and orderBy are not supported inside junction relationships upstream (zql NotImplementedError; chinook.pg.test.ts brokenRelationshipLimits). The Orez generator must not emit them; the current fixture has no junction relationship so this is latent.",
+      "source": "packages/zql/src/query/query-impl.query.test.ts:1998-2049"
+    },
+    {
+      "id": "client-not-exists",
+      "reason": "not(exists()) is unsupported on the zero client (bugs.rocicorp.dev/3438, found by the sweep lane). Orez uses junction-scoped whereExists instead.",
+      "source": "harness/src/fixture.ts:229"
+    },
+    {
+      "id": "null-cursor-not-in-1.7.0",
+      "reason": "#6121 (null-safe start constraints) lands 2026-07-10, after the 1.7.0 pin. CONFIRMED (deterministic, 2026-07-11) on the stock zero-cache 1.7.0 reference: the server-side sqlite table-source returns empty for a null-anchored exclusive start cursor. orez-local PASSES the same shape (client-side snapshot materialize). The metamorphic guard records it as a NON-GATING classified known-gap (harness/regressions/known-gap-zql-6121-null-start-cursor.json) that flips green once the harness pin advances past the fix.",
+      "source": "mono d4f33d6a6 (#6121)"
+    }
+  ]
+}

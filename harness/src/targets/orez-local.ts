@@ -4,6 +4,7 @@
 // postgres, no zero-cache, no docker — this target IS the rewrite's server
 // core under test (plans/zero-server-rewrite.md phase 2).
 import { Database } from 'bun:sqlite'
+import { randomUUID } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
 
 import { Zero } from '@rocicorp/zero'
@@ -13,6 +14,11 @@ import {
   type SyncServerConfig,
   createSyncServer,
 } from '../../../src/sync-server/sync-server'
+import {
+  assertExpectedExactlyOncePush,
+  parseExactlyOncePush,
+  type ExpectedExactlyOncePush,
+} from '../consistency/exactly-once-workload.js'
 import { TABLES, executeMutator, seedSqlite, userIDFromAuth } from '../fixture-data.js'
 import { mutators, schema } from '../fixture.js'
 // the production transport source, vendored verbatim (self-contained module,
@@ -28,10 +34,17 @@ export type PullObservation = {
 }
 
 export type OrezLocalTarget = SyncTarget & {
+  readonly origin: string
   dropNextPushResponse(): void
+  pull(): Promise<void>
   invalidate(): void
   resetCursor(): void
   restart(downForMs?: number): Promise<void>
+  armExactlyOnceResponseDrop(
+    expected: ExpectedExactlyOncePush,
+    onStage: (stage: 'arm' | 'fire' | 'heal') => void
+  ): string
+  consumeExactlyOnceResponseDrop(token: string): void
 }
 
 function bunSqliteDb(db: Database): SyncDb {
@@ -54,6 +67,7 @@ export async function startOrezLocal(opts?: {
   retainChanges?: number
   visible?: SyncServerConfig['visible']
   onPull?: (observation: PullObservation) => void
+  fetch?: typeof fetch
 }): Promise<OrezLocalTarget> {
   // random per run — see stock-zero.ts port note
   const port = opts?.port ?? 59_000 + Math.floor(Math.random() * 4_000)
@@ -71,6 +85,14 @@ export async function startOrezLocal(opts?: {
   })
 
   let dropPushResponse = false
+  let exactDrop:
+    | {
+        expected: ExpectedExactlyOncePush
+        onStage: (stage: 'arm' | 'fire' | 'heal') => void
+        token: string
+      }
+    | undefined
+  let firedExactDrop: typeof exactDrop
   const handleRequest: Parameters<typeof createServer>[0] = async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://localhost')
@@ -82,6 +104,11 @@ export async function startOrezLocal(opts?: {
         res.statusCode = 401
         res.end(JSON.stringify({ error: 'missing auth' }))
         return
+      }
+      const parsedExact =
+        url.pathname === '/push' && exactDrop ? parseExactlyOncePush(body) : undefined
+      if (parsedExact && exactDrop) {
+        assertExpectedExactlyOncePush(parsedExact, exactDrop.expected)
       }
       const response =
         url.pathname === '/pull'
@@ -95,6 +122,16 @@ export async function startOrezLocal(opts?: {
         return
       }
       if (url.pathname === '/pull') opts?.onPull?.({ body, response })
+      if (url.pathname === '/push' && exactDrop) {
+        const drop = exactDrop
+        drop.onStage('fire')
+        exactDrop = undefined
+        firedExactDrop = drop
+        res.setHeader('x-orez-drop-token', drop.token)
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify(response))
+        return
+      }
       if (url.pathname === '/push' && dropPushResponse) {
         dropPushResponse = false
         res.destroy()
@@ -131,6 +168,7 @@ export async function startOrezLocal(opts?: {
   // through to the native WebSocket untouched
   const transport = ensureHttpPullTransport({
     origin,
+    fetch: opts?.fetch,
     pullIntervalMs: opts?.pullIntervalMs ?? 250,
   })
 
@@ -139,6 +177,7 @@ export async function startOrezLocal(opts?: {
 
   return {
     name: 'orez-local',
+    origin,
 
     createClient(userID: string, storage) {
       const zero = new Zero({
@@ -171,6 +210,28 @@ export async function startOrezLocal(opts?: {
 
     dropNextPushResponse() {
       dropPushResponse = true
+    },
+
+    pull() {
+      return transport.pull()
+    },
+
+    armExactlyOnceResponseDrop(expected, onStage) {
+      if (exactDrop || firedExactDrop)
+        throw new Error('exactly-once response drop already armed')
+      const token = randomUUID()
+      exactDrop = { expected: structuredClone(expected), onStage, token }
+      onStage('arm')
+      return token
+    },
+
+    consumeExactlyOnceResponseDrop(token) {
+      if (!firedExactDrop) throw new Error('no fired exactly-once response drop')
+      if (firedExactDrop.token !== token)
+        throw new Error('exactly-once response drop token does not match')
+      const drop = firedExactDrop
+      firedExactDrop = undefined
+      drop.onStage('heal')
     },
 
     invalidate() {

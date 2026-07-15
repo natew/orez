@@ -100,8 +100,24 @@ jobs:
       - name: harness install
         run: cd harness && bun install
 
+      - name: consistency checker self-tests
+        run: |
+          cd harness
+          bun test src/consistency/history.test.ts src/consistency/fault-schedule.test.ts src/consistency/recorder.test.ts src/consistency/artifacts.test.ts src/consistency/atomic-visibility.test.ts src/consistency/atomic-visibility-workload.test.ts src/consistency/exactly-once-lmid.test.ts src/consistency/exactly-once-workload.test.ts src/observed-fetch.test.ts
+
+      - name: metamorphic checker self-test
+        run: cd harness && bun src/metamorphic.selftest.ts
+
+      - name: shrink and corpus self-test
+        run: cd harness && bun src/spec-shrink.selftest.ts
+
       - name: sync-server smoke (pure sqlite, 20 clients)
         run: cd harness && bun src/smoke.ts --target orez-local --clients 20 --projects 3
+
+      - name: sync-server permission grant and revoke
+        # Keep the advertised default lane executable and prove removal from
+        # several already-populated client caches across repeated transitions.
+        run: cd harness && bun src/permissions.ts
 
       - name: multi-project sync-server mount
         run: cd harness && bun src/multi-project-mount.ts
@@ -194,6 +210,43 @@ jobs:
       # fixes, and they must be enforced here rather than left unrun.
       - name: workspace tests
         run: cargo test --workspace
+
+  # Checker-boundary self-tests only. These prove the pinned Elle binary accepts
+  # and rejects known JSON histories; they do not check an Orez workload.
+  elle-cli-self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: cache pinned Elle release
+        uses: actions/cache@v4
+        with:
+          path: .cache/elle-cli
+          key: elle-cli-${{ runner.os }}-${{ hashFiles('scripts/elle/self-test.sh') }}
+          restore-keys: |
+            elle-cli-${{ runner.os }}-
+
+      - name: official Elle CLI checker self-tests
+        env:
+          ELLE_CACHE_DIR: ${{ github.workspace }}/.cache/elle-cli
+          ELLE_RESULTS_DIR: ${{ github.workspace }}/target/elle-self-test
+        run: scripts/elle/self-test.sh
+
+      - name: upload Elle checker self-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: elle-cli-self-test-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/elle-self-test/
+          if-no-files-found: warn
+          retention-days: 14
 
   # native real-client conformance: build the sync-native release binary and run
   # the rust-local harness lanes against it. shapes/sweep boot embedded postgres +
