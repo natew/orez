@@ -132,6 +132,18 @@ try {
     'authorized notify response'
   )
 
+  const rawBegin = await fetch(`${origin}/admin/sql`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-admin-key': adminKey },
+    body: JSON.stringify({ query: 'BEGIN' }),
+  })
+  equal(rawBegin.status, 400, 'one-shot admin SQL rejects raw BEGIN')
+  equal(
+    await rawBegin.json(),
+    { error: 'transaction SQL is host-owned and forbidden' },
+    'raw BEGIN rejection is explicit'
+  )
+
   const firstPull = await post('/pull', {
     clientID: 'client-a',
     clientGroupID: 'group-client-a',

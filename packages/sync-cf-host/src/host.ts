@@ -1443,7 +1443,17 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         return request.json().then((body) => {
           const { query } = body as { query?: string }
           if (typeof query !== 'string') return json({ error: 'query is required' }, 400)
-          return json({ rows: this.#directSql.query(query) })
+          try {
+            return json({ rows: this.#directSql.query(query) })
+          } catch (error) {
+            if (
+              error instanceof TypeError &&
+              error.message === 'transaction SQL is host-owned and forbidden'
+            ) {
+              return json({ error: error.message }, 400)
+            }
+            throw error
+          }
         })
       }
       if (route === '/admin/invalidate') {
