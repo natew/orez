@@ -466,6 +466,7 @@ describe('zero-cache embed on the CF data plane (ZeroDO upstream, local cvr/cdb)
 
     const createBackend = (dbName: string) =>
       new DoBackend('https://orez-do-backend.local', dbName, 'zero', {
+        allowTransactionalDDL: true,
         fetch: dbName === 'postgres' ? remote.fetch : local.fetch,
         txOwner: EMBED_TX_OWNER,
       })

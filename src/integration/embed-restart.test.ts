@@ -329,6 +329,7 @@ async function startGeneration(opts: {
 
   const createBackend = (dbName: string) =>
     new DoBackend('https://orez-do-backend.local', dbName, 'zero', {
+      allowTransactionalDDL: true,
       fetch: dbName === 'postgres' ? opts.remoteFetch : opts.localSql.fetch,
       txOwner: EMBED_TX_OWNER,
     })
