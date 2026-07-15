@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 type RunMode =
   | 'delayed-stop'
   | 'exit-after-ready'
+  | 'never-ready-never-stop'
   | 'never-stop'
   | 'ready'
   | 'reject'
@@ -80,6 +81,7 @@ vi.mock('./zero-cache-run-worker.js', () => ({
       if (
         mode === 'delayed-stop' ||
         mode === 'exit-after-ready' ||
+        mode === 'never-ready-never-stop' ||
         mode === 'never-stop'
       ) {
         harness.workerReleases.push(release)
@@ -524,9 +526,9 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     await retry.stop()
   })
 
-  it('fails closed for one logical instance after a termination timeout', async () => {
+  it('fails closed until a timed-out worker actually terminates', async () => {
     vi.useFakeTimers()
-    harness.modes = ['never-stop', 'ready']
+    harness.modes = ['never-stop', 'ready', 'ready']
     const embed = await startZeroCacheEmbedCF(options(1_000, 'wedged-instance'))
 
     const stopResult = embed.stop().catch((error) => error)
@@ -548,12 +550,36 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     harness.workerReleases[0]()
     await turn()
     expect(process.env.SINGLE_PROCESS).toBe(originalEnv.SINGLE_PROCESS)
-    await expect(
-      startZeroCacheEmbedCF(options(1_000, 'wedged-instance'))
-    ).rejects.toThrow('instance "wedged-instance" is active or still tearing down')
+    const retry = await startZeroCacheEmbedCF(options(1_000, 'wedged-instance'))
+    await retry.stop()
 
     const other = await startZeroCacheEmbedCF(options(1_000, 'other-instance'))
     await other.stop()
+    expect(harness.maxActiveGenerations).toBe(1)
+  })
+
+  it('releases a startup-timeout claim after the worker eventually terminates', async () => {
+    vi.useFakeTimers()
+    harness.modes = ['never-ready-never-stop', 'ready']
+    const starting = startZeroCacheEmbedCF(
+      options(1_000, 'startup-timeout-instance')
+    ).catch((error) => error)
+
+    await vi.advanceTimersByTimeAsync(6_000)
+    const startupError = await starting
+
+    expect(startupError).toBeInstanceOf(AggregateError)
+    expect(String(startupError)).toContain('startup failed and teardown also failed')
+    await expect(
+      startZeroCacheEmbedCF(options(1_000, 'startup-timeout-instance'))
+    ).rejects.toThrow(
+      'instance "startup-timeout-instance" is active or still tearing down'
+    )
+
+    harness.workerReleases[0]()
+    await turn()
+    const retry = await startZeroCacheEmbedCF(options(1_000, 'startup-timeout-instance'))
+    await retry.stop()
     expect(harness.maxActiveGenerations).toBe(1)
   })
 

@@ -293,7 +293,6 @@ export async function startZeroCacheEmbedCF(
         ])
         if (timeout) clearTimeout(timeout)
         if (!workerStopped) {
-          resourceCleanupFailed = true
           cleanupErrors.push(
             new Error(
               `zero-cache CF embed: worker did not terminate within ${WORKER_SHUTDOWN_TIMEOUT_MS}ms`
