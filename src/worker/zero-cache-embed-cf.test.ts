@@ -29,6 +29,7 @@ function gate(): Gate {
 
 const harness = vi.hoisted(() => ({
   activeGenerations: 0,
+  backendCloseError: null as Error | null,
   backendCloses: 0,
   backendConstructorError: new Error('backend constructor failed'),
   backendConstructorRejectAt: -1,
@@ -163,6 +164,7 @@ vi.mock('../pg-proxy-do-backend.js', () => ({
     async close() {
       harness.backendCloses++
       harness.events.push(`backend-close-${this.index}`)
+      if (harness.backendCloseError) throw harness.backendCloseError
     }
   },
 }))
@@ -231,6 +233,7 @@ async function turn(): Promise<void> {
 describe('startZeroCacheEmbedCF lifecycle', () => {
   beforeEach(() => {
     harness.activeGenerations = 0
+    harness.backendCloseError = null
     harness.backendCloses = 0
     harness.backendConstructorRejectAt = -1
     harness.backendOpens = 0
@@ -767,6 +770,20 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     harness.sweepError = null
     const other = await startZeroCacheEmbedCF(options(1_000, 'sqlite-close-other'))
     await other.stop()
+  })
+
+  it('keeps the runtime claimed when backend transaction cleanup rejects', async () => {
+    harness.modes = ['ready']
+    const embed = await startZeroCacheEmbedCF(options(1_000, 'backend-close-failed'))
+    harness.backendCloseError = new Error('remote rollback cleanup failed')
+
+    const error = await embed.stop().catch((reason) => reason)
+
+    expect(error).toBeInstanceOf(AggregateError)
+    expect((error as AggregateError).errors).toContain(harness.backendCloseError)
+    await expect(
+      startZeroCacheEmbedCF(options(1_000, 'backend-close-failed'))
+    ).rejects.toThrow('instance "backend-close-failed" is active or still tearing down')
   })
 
   it('preserves the startup error when resource cleanup also rejects', async () => {
