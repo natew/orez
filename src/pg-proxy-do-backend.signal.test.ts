@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { DoBackend } from './pg-proxy-do-backend.js'
 
@@ -62,5 +62,47 @@ describe('DoBackend cancellation', () => {
     expect(String(initError)).toContain('closed')
     expect(fetchCalls).toBe(1)
     expect(backend.ready).toBe(false)
+  })
+
+  test('close joins remote rollback through a non-aborted cleanup request', async () => {
+    let releaseRollback!: () => void
+    const rollbackGate = new Promise<void>((resolve) => {
+      releaseRollback = resolve
+    })
+    let rollbackSignal: AbortSignal | null | undefined
+    const paths: string[] = []
+    const backendFetch = (async (input, init) => {
+      const url = new URL(
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      )
+      paths.push(url.pathname)
+      if (url.pathname === '/rollback-tx') {
+        rollbackSignal = init?.signal
+        await rollbackGate
+      }
+      return Response.json({ rows: [], columns: [], affectedRows: 1 })
+    }) as typeof fetch
+    const backend = new DoBackend(
+      'https://orez-do-backend.local',
+      'zero_cdb',
+      'close-rollback-test',
+      { fetch: backendFetch }
+    )
+    await backend.waitReady
+    await backend.exec('BEGIN')
+    await backend.exec('INSERT INTO message (id) VALUES (1)')
+
+    let closeSettled = false
+    const closing = backend.close().then(() => {
+      closeSettled = true
+    })
+    await vi.waitFor(() => expect(paths).toContain('/rollback-tx'))
+
+    expect(rollbackSignal).toBeUndefined()
+    expect(closeSettled).toBe(false)
+
+    releaseRollback()
+    await closing
+    expect(closeSettled).toBe(true)
   })
 })

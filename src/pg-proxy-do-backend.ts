@@ -5312,6 +5312,7 @@ export class DoBackend {
   private doUrl: string
   private dbName: string
   private httpClient: HttpClient
+  private cleanupHttpClient: HttpClient
   private namespace: string
   private skippedFunctionNames: Set<string>
   private triggerFunctions: Map<string, TriggerFunctionDefinition>
@@ -5404,6 +5405,10 @@ export class DoBackend {
       }
     }
     this.httpClient = new HttpClient(opts?.fetch, this.lifecycleAbort.signal)
+    // Transaction rollback is part of close itself. It must remain usable after
+    // lifecycleAbort stops ordinary queries, and close joins this request before
+    // allowing the owning runtime generation to be released.
+    this.cleanupHttpClient = new HttpClient(opts?.fetch)
     this.skippedFunctionNames = getSkippedFunctionNames(
       dbName,
       namespace,
@@ -5750,7 +5755,7 @@ export class DoBackend {
         await this.runExclusive(async () => {
           if (this.inTransaction) {
             try {
-              await this.rollbackTransaction()
+              await this.rollbackTransaction(this.cleanupHttpClient, true)
             } catch {
               this.clearTransactionState()
             }
@@ -5902,7 +5907,10 @@ export class DoBackend {
     if (shouldSignal) this.signalReplication()
   }
 
-  private async rollbackTransaction(): Promise<void> {
+  private async rollbackTransaction(
+    httpClient = this.httpClient,
+    closing = false
+  ): Promise<void> {
     if (!this.inTransaction) {
       this.clearTransactionState()
       return
@@ -5918,7 +5926,7 @@ export class DoBackend {
           this.txDataSnapshots.size > 0 ||
           this.txSchemaSnapshotted)
       ) {
-        await this.httpClient.post(
+        await httpClient.post(
           this.url('/rollback-tx'),
           JSON.stringify({ transactionID: txID }),
           { 'Content-Type': 'application/json' }
@@ -5926,9 +5934,12 @@ export class DoBackend {
       }
     } finally {
       if (snapshot) this.restoreTransactionMetadataSnapshot(snapshot)
-      await this.persistDurableMetadata()
+      // A closing backend is being discarded. The atomic remote rollback above
+      // is the required cleanup; post-rollback metadata/cache refreshes are only
+      // useful to a backend that will continue serving queries.
+      if (!closing) await this.persistDurableMetadata()
       this.clearTransactionState()
-      if (snapshot) await this.ensureCdcRegistration()
+      if (snapshot && !closing) await this.ensureCdcRegistration()
     }
   }
 
