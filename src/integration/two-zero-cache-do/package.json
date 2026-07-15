@@ -1,0 +1,13 @@
+{
+  "name": "orez-two-zero-cache-do-proof",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build.ts",
+    "proof": "bun build.ts && bun prove.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "wrangler": "4.103.0"
+  }
+}
