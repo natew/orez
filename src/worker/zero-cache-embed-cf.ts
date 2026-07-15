@@ -79,6 +79,7 @@ const runWorkerFn = _runWorker as (
 
 const WORKER_SHUTDOWN_TIMEOUT_MS = 5_000
 const WORKER_FORCE_SHUTDOWN_TIMEOUT_MS = 5_000
+const STARTUP_CLEANUP_TIMEOUT_MS = 15_000
 
 type GenerationState = {
   cleanupDone: boolean
@@ -98,6 +99,29 @@ function releaseGenerationWhenComplete(generation: GenerationState): void {
     deleteReplicationState(generation.runtime.instanceId)
     releaseCFInstanceRuntime(generation.runtime)
   }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new Error('zero-cache CF embed: operation aborted')
+}
+
+function waitForAbortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal))
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const finish = (complete: () => void) => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      complete()
+    }
+    const onAbort = () => finish(() => reject(abortReason(signal)))
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error))
+    )
+  })
 }
 
 export interface ZeroCacheEmbedCFOptions {
@@ -135,7 +159,7 @@ export interface ZeroCacheEmbedCFOptions {
   /** optional instance-scoped diagnostic sink. */
   log?: (event: Record<string, unknown>) => void
 
-  /** timeout in ms waiting for zero-cache ready (default: 30000) */
+  /** timeout in ms for the complete zero-cache startup (default: 30000) */
   readyTimeout?: number
 }
 
@@ -176,13 +200,15 @@ const EMBED_TX_OWNER = 'orez-embed'
 async function recoverRemoteTransactions(
   url: string,
   owner: string,
-  backendFetch?: typeof fetch
+  backendFetch?: typeof fetch,
+  signal?: AbortSignal
 ): Promise<void> {
   const fetcher = backendFetch ?? fetch
   const resp = await fetcher(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ owner }),
+    signal,
   })
   if (!resp.ok) {
     const text = await resp.text().catch(() => '')
@@ -212,6 +238,7 @@ function addProtocolSessionFactory(
 export async function startZeroCacheEmbedCF(
   opts: ZeroCacheEmbedCFOptions
 ): Promise<ZeroCacheEmbedCF> {
+  const startupStartedAt = Date.now()
   const appId = opts.appId || 'zero'
   const publications = opts.publications?.join(',') || `orez_${appId}_public`
   const readyTimeout = opts.readyTimeout ?? 30000
@@ -224,16 +251,93 @@ export async function startZeroCacheEmbedCF(
       'zero-cache CF embed: apiFetch is required with ZERO_MUTATE_URL or ZERO_QUERY_URL'
     )
   }
-  await stopCFInstanceRuntimeForReplacement(opts.instanceId)
-  const runtime = registerCFInstanceRuntime({
-    apiFetch: opts.apiFetch,
-    doSqlite: opts.doSqlite,
-    env: opts.env ?? {},
-    instanceId: opts.instanceId,
-    log: opts.log,
-    pgPassword,
-    pgUser,
-  })
+  if (!Number.isFinite(readyTimeout) || readyTimeout <= 0) {
+    throw new Error('zero-cache CF embed: readyTimeout must be a positive number')
+  }
+
+  const startupDeadlineAt = startupStartedAt + readyTimeout
+  const startupAbort = new AbortController()
+  let startupPhase = 'entry'
+  const emitStartupEvent = (event: Record<string, unknown>) => {
+    try {
+      opts.log?.({
+        component: 'embed',
+        instanceId: opts.instanceId,
+        ...event,
+      })
+    } catch {
+      // diagnostics cannot break startup
+    }
+  }
+  const startupTimer = setTimeout(
+    () => {
+      const error = new Error(
+        `zero-cache CF embed: startup timed out after ${readyTimeout}ms in phase ${startupPhase}`
+      )
+      emitStartupEvent({
+        elapsedMs: Date.now() - startupStartedAt,
+        event: 'startup-phase-timeout',
+        phase: startupPhase,
+        timeoutMs: readyTimeout,
+      })
+      startupAbort.abort(error)
+    },
+    Math.max(0, startupDeadlineAt - Date.now())
+  )
+  const runStartupPhase = async <T>(phase: string, run: () => Promise<T>) => {
+    startupPhase = phase
+    const phaseStartedAt = Date.now()
+    emitStartupEvent({
+      elapsedMs: phaseStartedAt - startupStartedAt,
+      event: 'startup-phase-start',
+      phase,
+      remainingMs: Math.max(0, startupDeadlineAt - phaseStartedAt),
+    })
+    try {
+      const result = await waitForAbortable(
+        Promise.resolve().then(run),
+        startupAbort.signal
+      )
+      emitStartupEvent({
+        elapsedMs: Date.now() - startupStartedAt,
+        event: 'startup-phase-complete',
+        phase,
+        phaseElapsedMs: Date.now() - phaseStartedAt,
+        remainingMs: Math.max(0, startupDeadlineAt - Date.now()),
+      })
+      return result
+    } catch (error) {
+      emitStartupEvent({
+        elapsedMs: Date.now() - startupStartedAt,
+        error: error instanceof Error ? error.message : String(error),
+        event: 'startup-phase-failed',
+        phase,
+        phaseElapsedMs: Date.now() - phaseStartedAt,
+      })
+      throw error
+    }
+  }
+
+  let runtime: CFInstanceRuntime
+  try {
+    await runStartupPhase('replacement-stop', () =>
+      stopCFInstanceRuntimeForReplacement(opts.instanceId)
+    )
+    runtime = await runStartupPhase('runtime-registration', async () =>
+      registerCFInstanceRuntime({
+        apiFetch: opts.apiFetch,
+        doSqlite: opts.doSqlite,
+        env: opts.env ?? {},
+        instanceId: opts.instanceId,
+        log: opts.log,
+        pgPassword,
+        pgUser,
+      })
+    )
+  } catch (error) {
+    clearTimeout(startupTimer)
+    throw error
+  }
 
   const generation: GenerationState = {
     cleanupDone: false,
@@ -260,7 +364,6 @@ export async function startZeroCacheEmbedCF(
   let startupFailure: unknown
   let shutdownPromise: Promise<void> | null = null
   let fastifyInstance: any = null
-  let readyTimer: ReturnType<typeof setTimeout> | undefined
   let debugEmbed = false
   const webSocketHandoff = new DurableObjectWebSocketHandoff(() => fastifyInstance)
   const releaseProcessEnvWhenWorkerDone = () => {
@@ -273,7 +376,6 @@ export async function startZeroCacheEmbedCF(
     if (shutdownPromise) return shutdownPromise
     stopping = true
     isReady = false
-    if (readyTimer) clearTimeout(readyTimer)
 
     shutdownPromise = (async () => {
       const cleanupErrors: unknown[] = []
@@ -411,6 +513,7 @@ export async function startZeroCacheEmbedCF(
         allowTransactionalDDL: true,
         fetch: dbName === 'postgres' ? opts.backendFetch : localSql.fetch,
         instanceId,
+        signal: startupAbort.signal,
         signalReplication: () => signalReplicationChange(instanceId),
         txOwner,
       })
@@ -422,10 +525,13 @@ export async function startZeroCacheEmbedCF(
     }
 
     localSql.recoverOrphanedTransactions()
-    await recoverRemoteTransactions(
-      `${backendUrl.replace(/\/+$/, '')}/recover-txs?db=postgres&ns=${encodeURIComponent(backendNamespace)}`,
-      txOwner,
-      opts.backendFetch
+    await runStartupPhase('remote-transaction-recovery', () =>
+      recoverRemoteTransactions(
+        `${backendUrl.replace(/\/+$/, '')}/recover-txs?db=postgres&ns=${encodeURIComponent(backendNamespace)}`,
+        txOwner,
+        opts.backendFetch,
+        startupAbort.signal
+      )
     )
 
     const backends = {
@@ -441,11 +547,39 @@ export async function startZeroCacheEmbedCF(
       cdb: addProtocolSessionFactory(backends.cdb, () => instantiateBackend('zero_cdb')),
     }
 
-    const backendReadyResults = await Promise.allSettled([
-      backends.postgres.waitReady,
-      backends.cvr.waitReady,
-      backends.cdb.waitReady,
-    ])
+    const backendReadyResults = await runStartupPhase('backend-initialization', () =>
+      Promise.allSettled(
+        Object.entries(backends).map(async ([database, backend]) => {
+          const startedAt = Date.now()
+          emitStartupEvent({
+            database,
+            elapsedMs: startedAt - startupStartedAt,
+            event: 'startup-backend-start',
+            phase: 'backend-initialization',
+          })
+          try {
+            await backend.waitReady
+            emitStartupEvent({
+              database,
+              elapsedMs: Date.now() - startupStartedAt,
+              event: 'startup-backend-complete',
+              phase: 'backend-initialization',
+              phaseElapsedMs: Date.now() - startedAt,
+            })
+          } catch (error) {
+            emitStartupEvent({
+              database,
+              elapsedMs: Date.now() - startupStartedAt,
+              error: error instanceof Error ? error.message : String(error),
+              event: 'startup-backend-failed',
+              phase: 'backend-initialization',
+              phaseElapsedMs: Date.now() - startedAt,
+            })
+            throw error
+          }
+        })
+      )
+    )
     const backendReadyErrors = backendReadyResults.flatMap((result) =>
       result.status === 'rejected' ? [result.reason] : []
     )
@@ -457,21 +591,23 @@ export async function startZeroCacheEmbedCF(
       )
     }
 
-    proxy = await createBrowserProxy(
-      {
-        postgres: proxyBackends.postgres as any,
-        cvr: proxyBackends.cvr as any,
-        cdb: proxyBackends.cdb as any,
-        postgresReplicas: [],
-      } as any,
-      {
-        debugWire: opts.env?.OREZ_DEBUG_WIRE === '1',
-        instanceId,
-        pgUser,
-        pgPassword,
-        singleDb: false,
-        logLevel: opts.env?.ZERO_LOG_LEVEL || 'info',
-      }
+    proxy = await runStartupPhase('proxy-creation', () =>
+      createBrowserProxy(
+        {
+          postgres: proxyBackends.postgres as any,
+          cvr: proxyBackends.cvr as any,
+          cdb: proxyBackends.cdb as any,
+          postgresReplicas: [],
+        } as any,
+        {
+          debugWire: opts.env?.OREZ_DEBUG_WIRE === '1',
+          instanceId,
+          pgUser,
+          pgPassword,
+          singleDb: false,
+          logLevel: opts.env?.ZERO_LOG_LEVEL || 'info',
+        }
+      )
     )
     setCFInstanceProxy(runtime, (port) => proxy?.handleConnection(port))
 
@@ -558,14 +694,7 @@ export async function startZeroCacheEmbedCF(
       },
     })
 
-    const readyPromise = new Promise<void>((resolve, reject) => {
-      readyTimer = setTimeout(() => {
-        reject(
-          new Error(
-            `zero-cache CF embed: timed out waiting for ready after ${readyTimeout}ms`
-          )
-        )
-      }, readyTimeout)
+    const readyPromise = new Promise<void>((resolve) => {
       parentEmitter?.on('message', (msg: unknown) => {
         if (debugEmbed) {
           logCFInstance(runtime, {
@@ -575,7 +704,6 @@ export async function startZeroCacheEmbedCF(
           })
         }
         if (!stopping && Array.isArray(msg) && msg[0] === 'ready') {
-          if (readyTimer) clearTimeout(readyTimer)
           isReady = true
           resolve()
         }
@@ -616,22 +744,55 @@ export async function startZeroCacheEmbedCF(
         throw new Error('zero-cache CF embed: runWorker exited before ready')
       }
     })
-    await Promise.race([readyPromise, workerStartupPromise])
+    await runStartupPhase('worker-readiness', () =>
+      Promise.race([readyPromise, workerStartupPromise])
+    )
 
     fastifyInstance = dispatcherFastifyForCFInstance(instanceId)
   } catch (startupError) {
+    clearTimeout(startupTimer)
+    if (!startupAbort.signal.aborted) startupAbort.abort(startupError)
     startupFailure = startupError
+    const cleanupAbort = new AbortController()
+    const cleanupStartedAt = Date.now()
+    emitStartupEvent({
+      elapsedMs: cleanupStartedAt - startupStartedAt,
+      event: 'startup-cleanup-start',
+      phase: startupPhase,
+      timeoutMs: STARTUP_CLEANUP_TIMEOUT_MS,
+    })
+    const cleanupTimer = setTimeout(() => {
+      const error = new Error(
+        `zero-cache CF embed: startup cleanup timed out after ${STARTUP_CLEANUP_TIMEOUT_MS}ms`
+      )
+      emitStartupEvent({
+        elapsedMs: Date.now() - startupStartedAt,
+        event: 'startup-cleanup-timeout',
+        phase: startupPhase,
+        timeoutMs: STARTUP_CLEANUP_TIMEOUT_MS,
+      })
+      cleanupAbort.abort(error)
+    }, STARTUP_CLEANUP_TIMEOUT_MS)
     try {
-      await shutdown()
+      await waitForAbortable(shutdown(), cleanupAbort.signal)
+      emitStartupEvent({
+        elapsedMs: Date.now() - startupStartedAt,
+        event: 'startup-cleanup-complete',
+        phase: startupPhase,
+        phaseElapsedMs: Date.now() - cleanupStartedAt,
+      })
     } catch (cleanupError) {
+      clearTimeout(cleanupTimer)
       throw new AggregateError(
         [startupError, cleanupError],
         'zero-cache CF embed: startup failed and teardown also failed',
         { cause: startupError }
       )
     }
+    clearTimeout(cleanupTimer)
     throw startupError
   }
+  clearTimeout(startupTimer)
 
   return {
     get ready() {
