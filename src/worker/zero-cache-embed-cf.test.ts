@@ -8,6 +8,7 @@ type RunMode =
   | 'ready'
   | 'reject'
   | 'sigquit-stop'
+  | 'sigquit-startup-stop'
   | 'stop-reject'
   | 'timeout'
 
@@ -85,7 +86,8 @@ vi.mock('./zero-cache-run-worker.js', () => ({
         mode === 'exit-after-ready' ||
         mode === 'never-ready-never-stop' ||
         mode === 'never-stop' ||
-        mode === 'sigquit-stop'
+        mode === 'sigquit-stop' ||
+        mode === 'sigquit-startup-stop'
       ) {
         harness.workerReleases.push(release)
         parent.once('SIGTERM', () => {
@@ -95,6 +97,13 @@ vi.mock('./zero-cache-run-worker.js', () => ({
         parent.once('SIGQUIT', () => {
           harness.events.push('sigquit')
           if (mode === 'sigquit-stop') release()
+          if (mode === 'sigquit-startup-stop') {
+            const error = new Error(
+              'zero-cache startup stopped before workers became ready'
+            )
+            error.name = 'OrezZeroStartupStoppedError'
+            finish(() => reject(error))
+          }
         })
       } else if (mode === 'stop-reject') {
         parent.once('SIGTERM', () => finish(() => reject(harness.stopError)))
@@ -676,6 +685,26 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     expect(harness.activeGenerations).toBe(0)
 
     const retry = await startZeroCacheEmbedCF(options(1_000, 'force-stop-instance'))
+    await retry.stop()
+    expect(harness.maxActiveGenerations).toBe(1)
+  })
+
+  it('releases a force-stopped worker that was still initializing', async () => {
+    vi.useFakeTimers()
+    harness.modes = ['sigquit-startup-stop', 'ready']
+    const starting = startZeroCacheEmbedCF(
+      options(1_000, 'initializing-force-stop-instance')
+    ).catch((error) => error)
+
+    await vi.advanceTimersByTimeAsync(6_000)
+    expect(String(await starting)).toContain('phase worker-readiness')
+    expect(harness.events).toContain('sigterm')
+    expect(harness.events).toContain('sigquit')
+    expect(harness.activeGenerations).toBe(0)
+
+    const retry = await startZeroCacheEmbedCF(
+      options(1_000, 'initializing-force-stop-instance')
+    )
     await retry.stop()
     expect(harness.maxActiveGenerations).toBe(1)
   })

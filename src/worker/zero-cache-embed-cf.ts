@@ -80,6 +80,7 @@ const runWorkerFn = _runWorker as (
 const WORKER_SHUTDOWN_TIMEOUT_MS = 5_000
 const WORKER_FORCE_SHUTDOWN_TIMEOUT_MS = 5_000
 const STARTUP_CLEANUP_TIMEOUT_MS = 15_000
+const ZERO_STARTUP_STOPPED_ERROR = 'OrezZeroStartupStoppedError'
 
 type GenerationState = {
   cleanupDone: boolean
@@ -103,6 +104,10 @@ function releaseGenerationWhenComplete(generation: GenerationState): void {
 
 function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new Error('zero-cache CF embed: operation aborted')
+}
+
+function isExpectedStartupStop(error: unknown): boolean {
+  return error instanceof Error && error.name === ZERO_STARTUP_STOPPED_ERROR
 }
 
 function waitForAbortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -460,7 +465,11 @@ export async function startZeroCacheEmbedCF(
           }
         }
       }
-      if (workerFailed && workerError !== startupFailure) {
+      if (
+        workerFailed &&
+        workerError !== startupFailure &&
+        !isExpectedStartupStop(workerError)
+      ) {
         cleanupErrors.push(workerError)
       }
 

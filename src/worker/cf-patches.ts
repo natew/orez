@@ -5,17 +5,18 @@
  * applies CF Worker patches there. the installed package in node_modules is
  * never modified.
  *
- * ten patches:
+ * eleven patches:
  * 1. worker-urls.js — replace file:// URLs with zero-worker:// identifiers
  * 2. server worker entrypoints — disable CLI auto-start blocks
  * 3. worker state — localize log contexts and disable process-global telemetry
  * 4. processes.js — replace dynamic import() with static worker module lookup
- * 5. write-worker-client.js — run zero-cache's replica writer in-process
- * 6. custom/fetch.js — route mutate/query fetches by logical DO identity
- * 7. initial-sync.js — cap DO batch parameter counts
- * 8. litestream commands.js — retain the durable replica on restart
- * 9. change-streamer-service.js — keep cleanup alive after no-subscriber ticks
- * 10. pgsql-parser — load libpg-query as a precompiled Worker wasm module
+ * 5. life-cycle.js — cancel a force-stopped worker that is still initializing
+ * 6. write-worker-client.js — run zero-cache's replica writer in-process
+ * 7. custom/fetch.js — route mutate/query fetches by logical DO identity
+ * 8. initial-sync.js — cap DO batch parameter counts
+ * 9. litestream commands.js — retain the durable replica on restart
+ * 10. change-streamer-service.js — keep cleanup alive after no-subscriber ticks
+ * 11. pgsql-parser — load libpg-query as a precompiled Worker wasm module
  *
  * usage in a worker build script:
  *
@@ -125,6 +126,7 @@ export function prepareZeroCacheForCF(
   patchWorkerEntrypoints(zcBase)
   patchInstanceIsolation(zcBase)
   patchProcesses(zcBase)
+  patchStartupShutdown(zcBase)
   patchWriteWorkerClient(zcBase)
   patchCustomFetch(zcBase)
   patchInitialSyncBatchParams(zcBase)
@@ -343,6 +345,38 @@ const __zc_workers = {
     patchProcessWrapperProxy(code.replace(dynamicImportPattern, staticLookup))
   writeFileSync(processesPath, code)
   console.log('[orez] patched zero-cache processes.js (static worker imports)')
+}
+
+function patchStartupShutdown(zcBase: string): void {
+  const lifecyclePath = resolve(zcBase, 'services', 'life-cycle.js')
+  if (!existsSync(lifecyclePath)) {
+    throw new Error(`orez CF overlay: life-cycle.js missing at ${lifecyclePath}`)
+  }
+
+  const marker = 'OrezZeroStartupStoppedError'
+  let code = readFileSync(lifecyclePath, 'utf-8')
+  if (code.includes(marker)) return
+
+  const previous = `\tasync allWorkersReady() {
+\t\tawait Promise.all(this.#ready);
+\t}`
+  const patched = `\tasync allWorkersReady() {
+\t\tawait Promise.race([
+\t\t\tPromise.all(this.#ready),
+\t\t\tthis.#runningState.stopped().then(() => {
+\t\t\t\tconst error = new Error("zero-cache startup stopped before workers became ready");
+\t\t\t\terror.name = "${marker}";
+\t\t\t\tthrow error;
+\t\t\t}),
+\t\t]);
+\t}`
+  if (!code.includes(previous)) {
+    throw new Error('orez CF overlay: allWorkersReady lifecycle anchor missing')
+  }
+
+  code = code.replace(previous, patched)
+  writeFileSync(lifecyclePath, code)
+  console.log('[orez] patched zero-cache startup shutdown')
 }
 
 function patchWriteWorkerClient(zcBase: string): void {

@@ -44,6 +44,13 @@ describe('prepareZeroCacheForCF', () => {
     expect(processes).not.toContain('__OREZ_DEBUG_WIRE__')
     expect(readText(sourceBase, 'types/processes.js')).toContain('import(moduleUrl.href)')
 
+    const lifecycle = readText(overlayBase, 'services/life-cycle.js')
+    expect(lifecycle).toContain('OrezZeroStartupStoppedError')
+    expect(lifecycle).toContain('this.#runningState.stopped()')
+    expect(readText(sourceBase, 'services/life-cycle.js')).not.toContain(
+      'OrezZeroStartupStoppedError'
+    )
+
     for (const entrypoint of ENTRYPOINTS) {
       const worker = readText(overlayBase, `server/${entrypoint}.js`)
       expect(worker).toContain('orez-instance-local-log-context')
@@ -356,6 +363,20 @@ async function restoreReplica(lc, config, replicaConstraints) {
   return [lc, config, replicaConstraints];
 }
 export { BackupNotFoundException, restoreReplica };
+`
+  )
+
+  writeText(
+    zcBase,
+    'services/life-cycle.js',
+    `class ProcessManager {
+\t#ready = [];
+\t#runningState;
+\tasync allWorkersReady() {
+\t\tawait Promise.all(this.#ready);
+\t}
+}
+export { ProcessManager };
 `
   )
 
