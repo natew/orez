@@ -682,6 +682,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           : Promise.resolve(0)
       }
       this.#ingestPromise = (async () => {
+        const startingWatermark = this.#engineState()?.watermark ?? null
         let total = 0
         for (;;) {
           const cursor = this.#engineState()?.upstreamWatermark ?? '0'
@@ -751,7 +752,15 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           }
         }
         this.#recoverIngestBreaker()
-        if (total > 0) await this.#enqueueWake('__upstream__')
+        const endingWatermark = this.#engineState()?.watermark ?? null
+        if (
+          total > 0 ||
+          (startingWatermark !== null &&
+            endingWatermark !== null &&
+            endingWatermark !== startingWatermark)
+        ) {
+          await this.#enqueueWake('__upstream__')
+        }
         return total
       })().finally(() => {
         this.#ingestPromise = null

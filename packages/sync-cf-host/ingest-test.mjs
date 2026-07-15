@@ -518,6 +518,92 @@ try {
     { id: 'up-1', label: 'delegated', lastMutationID: 1 },
   ])
 
+  // rebuilding from an empty authoritative snapshot deletes local rows without
+  // incrementing the applied-row count. clients still need an immediate wake.
+  const emptyNamespace = `empty-resnapshot-${crypto.randomUUID()}`
+  const emptyOrigin = `${base}/${emptyNamespace}`
+  const emptyUpstream = `${base}/upstream/${emptyNamespace}`
+  const emptySeed = await fetch(`${emptyUpstream}/api/zero/push`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      clientGroupID: 'empty-upstream',
+      mutations: [
+        {
+          type: 'custom',
+          clientID: 'empty-seed',
+          id: 1,
+          name: 'item.insert',
+          args: [
+            {
+              id: 'removed-by-empty-snapshot',
+              label: 'remove me',
+              rank: 1,
+              done: false,
+              meta: null,
+            },
+          ],
+        },
+      ],
+    }),
+  })
+  assert.equal(emptySeed.status, 200)
+  const emptyInitialPull = await fetch(`${emptyOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'empty-reader',
+      clientGroupID: 'empty-group',
+      cookie: null,
+    }),
+  })
+  assert.equal(emptyInitialPull.status, 200)
+
+  const emptyWake = new WebSocket(
+    `${emptyOrigin.replace('http://', 'ws://')}/wake?clientID=empty-reader&wakeToken=ingest-harness-wake`
+  )
+  await new Promise((resolve, reject) => {
+    emptyWake.addEventListener('open', resolve, { once: true })
+    emptyWake.addEventListener('error', reject, { once: true })
+  })
+  const emptyWakeMessage = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('empty resnapshot did not wake')), 500)
+    emptyWake.addEventListener(
+      'message',
+      (event) => {
+        clearTimeout(timeout)
+        resolve(String(event.data))
+      },
+      { once: true }
+    )
+  })
+  const clearAuthoritative = await fetch(`${emptyUpstream}/exec`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sql: 'DELETE FROM item' }),
+  })
+  assert.equal(clearAuthoritative.status, 200)
+  const emptyResnapshot = await fetch(`${emptyOrigin}/admin/resnapshot`, {
+    method: 'POST',
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  })
+  assert.equal(emptyResnapshot.status, 200)
+  assert.equal((await emptyResnapshot.json()).applied, 0)
+  assert.equal(await emptyWakeMessage, 'wake')
+  const emptyRows = await fetch(`${emptyOrigin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({ query: 'SELECT COUNT(*) AS count FROM item' }),
+  }).then((response) => response.json())
+  assert.deepEqual(emptyRows.rows, [{ count: 0 }])
+  emptyWake.close()
+
   // Production timestamp columns are Zero `number`s, but SQLite returns their
   // SQL timestamp representation as TEXT. Prove the real ingest -> incremental
   // pull path converts it to epoch milliseconds on the wire.
