@@ -70,7 +70,7 @@ type TransportState = {
   readonly nativeWebSocket: WebSocketConstructor | undefined
   readonly sockets: Set<ZeroHttpSocket>
   readonly pullIntervalMs: number | undefined
-  readonly wakeEnabled: boolean
+  readonly wake: HttpPullTransportOptions['wake']
   readonly queryTransform: QueryTransform | undefined
   readonly queryForward: boolean
   readonly queryAware: boolean
@@ -109,12 +109,18 @@ export type HttpPullTransportOptions = {
   // when set, every open connection also pulls on this interval so
   // server-initiated changes arrive without a client-side trigger
   pullIntervalMs?: number
-  // when true, each connection also opens a notification-only wake socket to
-  // <origin>/wake and pulls immediately on any wake, demoting the interval
-  // poll to a safety net. the wake channel carries no data ("pull now" only)
-  // and zero correctness weight: a lost or duplicated wake can never cause
-  // missed or wrong data because convergence comes from the pull protocol.
-  wake?: boolean
+  /**
+   * opens a notification-only socket to <origin>/wake and pulls immediately on
+   * any wake, demoting interval polling to a safety net. true preserves the
+   * bare unauthenticated URL. for an authenticated host, pass getToken: each
+   * socket attempt calls it afresh and appends the result as wakeToken because
+   * browser WebSockets cannot send headers. consumers should implement
+   * getToken by calling an authenticated edge route that mints a short-lived,
+   * namespace-scoped signed token; the consumer's authorizeWake callback must
+   * verify that token. mint failures leave this advisory channel down and retry
+   * with backoff; pulls remain the source of correctness.
+   */
+  wake?: boolean | { getToken(): Promise<string> }
   // when provided, the query-aware extension is on and desired queries are
   // resolved client-side to an AST before shipping (native host / trusted
   // harness). omit for the baseline dialect (client-local got-query synthesis).
@@ -148,7 +154,7 @@ export function installHttpPullTransport(
     nativeWebSocket: previousWebSocket,
     sockets: new Set(),
     pullIntervalMs: opts.pullIntervalMs,
-    wakeEnabled: opts.wake ?? false,
+    wake: opts.wake ?? false,
     queryTransform: opts.queryTransform,
     queryForward: opts.queryForward === true,
     queryAware: opts.queryTransform !== undefined || opts.queryForward === true,
@@ -272,6 +278,7 @@ class ZeroHttpSocket {
   private openTimer: ReturnType<typeof setTimeout> | undefined
   private pullTimer: ReturnType<typeof setInterval> | undefined
   private wakeSocket: { close(): void } | undefined
+  private wakeConnecting = false
   private wakeReconnectTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
@@ -419,7 +426,7 @@ class ZeroHttpSocket {
         this.run(this.pull())
       }, this.state.pullIntervalMs)
     }
-    if (this.state.wakeEnabled) this.openWakeChannel()
+    if (this.state.wake) void this.openWakeChannel()
   }
 
   // notification-only wake channel: a real WebSocket to <origin>/wake that
@@ -427,11 +434,19 @@ class ZeroHttpSocket {
   // immediate (coalesced) pull — push-shaped propagation without waiting on
   // the poll interval. advisory only: if it drops we reconnect, and the
   // interval poll remains the safety net that guarantees convergence.
-  private openWakeChannel() {
+  private async openWakeChannel() {
     const Native = this.state.nativeWebSocket
-    if (!Native || this.wakeSocket || this.readyState !== this.OPEN) return
+    if (
+      !Native ||
+      this.wakeSocket ||
+      this.wakeConnecting ||
+      this.readyState !== this.OPEN
+    ) {
+      return
+    }
+    this.wakeConnecting = true
     const wsBase = this.state.originString.replace(/^http/, 'ws')
-    const url = `${wsBase}/wake?clientID=${encodeURIComponent(this.clientID)}`
+    let wakeToken: string | undefined
     let socket: {
       onmessage: (() => void) | null
       onclose: (() => void) | null
@@ -439,19 +454,25 @@ class ZeroHttpSocket {
       close(): void
     }
     try {
+      if (typeof this.state.wake === 'object') {
+        wakeToken = await this.state.wake.getToken()
+      }
+      if (this.readyState !== this.OPEN || this.wakeSocket) return
+      const url =
+        `${wsBase}/wake?clientID=${encodeURIComponent(this.clientID)}` +
+        (wakeToken === undefined ? '' : `&wakeToken=${encodeURIComponent(wakeToken)}`)
       socket = new Native(url) as unknown as typeof socket
     } catch {
+      this.scheduleWakeReconnect()
       return
+    } finally {
+      this.wakeConnecting = false
     }
     this.wakeSocket = socket
     const reconnect = () => {
       if (this.wakeSocket !== socket) return
       this.wakeSocket = undefined
-      if (this.readyState !== this.OPEN || this.wakeReconnectTimer) return
-      this.wakeReconnectTimer = setTimeout(() => {
-        this.wakeReconnectTimer = undefined
-        this.openWakeChannel()
-      }, 500)
+      this.scheduleWakeReconnect()
     }
     // route through requestPullAfterCurrent, NOT pull() directly: a wake that
     // lands while a pull is already in flight must set pullAfterCurrent so the
@@ -461,6 +482,14 @@ class ZeroHttpSocket {
     socket.onmessage = () => this.requestPullAfterCurrent()
     socket.onclose = reconnect
     socket.onerror = reconnect
+  }
+
+  private scheduleWakeReconnect() {
+    if (this.readyState !== this.OPEN || this.wakeReconnectTimer) return
+    this.wakeReconnectTimer = setTimeout(() => {
+      this.wakeReconnectTimer = undefined
+      void this.openWakeChannel()
+    }, 500)
   }
 
   private closeWakeChannel() {

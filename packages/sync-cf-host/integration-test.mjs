@@ -79,10 +79,20 @@ const mutation = (clientID, id, name, args) => ({
   mutations: [{ type: 'custom', clientID, id, name, args: [args] }],
 })
 
-function openWake(clientID, userID) {
+async function mintWakeToken(userID) {
+  const response = await fetch(`${origin}/auth/wake-token`, {
+    method: 'POST',
+    headers: { authorization: `Bearer token-${userID}` },
+  })
+  equal(response.status, 200, `wake token mint status for ${userID}`)
+  return (await response.json()).token
+}
+
+async function openWake(clientID, userID) {
+  const wakeToken = await mintWakeToken(userID)
   const url =
     `${origin.replace('http:', 'ws:')}/wake?clientID=${encodeURIComponent(clientID)}` +
-    `&wakeToken=${encodeURIComponent(`test-wake-${userID}`)}`
+    `&wakeToken=${encodeURIComponent(wakeToken)}`
   const socket = new WebSocket(url)
   const messages = []
   socket.addEventListener('message', (event) => messages.push(String(event.data)))
@@ -115,6 +125,11 @@ async function eventually(check, timeoutMs, label) {
 }
 
 try {
+  const unauthenticatedMint = await fetch(`${origin}/auth/wake-token`, {
+    method: 'POST',
+  })
+  equal(unauthenticatedMint.status, 401, 'wake token mint requires authentication')
+
   const unauthenticatedWake = await fetch(`${origin}/wake?clientID=attacker`)
   equal(unauthenticatedWake.status, 401, 'wake rejects missing capability')
 

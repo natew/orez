@@ -31,6 +31,60 @@ contains no state and carries no correctness weight: clients pull after a wake
 and retain their safety poll. `ctx.getWebSockets()` plus serialized attachments
 means sockets remain discoverable after hibernation/re-instantiation.
 
+### Consumer-minted wake capabilities
+
+The consumer Worker owns both token minting and verification. Add an
+authenticated edge route that signs the namespace and a short expiry, typically
+30 to 60 seconds, with a secret that never reaches the browser. Return only the
+signed token:
+
+```ts
+// consumer edge route, after normal session authentication
+const expiresAt = Date.now() + 60_000
+const token = await signWakeToken({ namespace, userID, expiresAt }, env.WAKE_SECRET)
+return Response.json({ token, expiresAt })
+```
+
+Pass a mint callback to the canonical HTTP transport. It calls `getToken()` for
+every socket attempt, including reconnects, so short-lived tokens are never
+reused after the wake connection drops:
+
+```ts
+ensureHttpPullTransport({
+  origin: syncOrigin,
+  pullIntervalMs: 5_000,
+  wake: {
+    async getToken() {
+      const response = await fetch(`/api/sync/${namespace}/wake-token`, {
+        method: 'POST',
+      })
+      if (!response.ok) throw new Error('wake token mint failed')
+      return (await response.json()).token
+    },
+  },
+})
+```
+
+The transport appends that value as `wakeToken` because browser WebSockets
+cannot set an authorization header. Verify its signature, expiry, and namespace
+inside the consumer's `authorizeWake` callback. `sync-cf-host` deliberately does
+not prescribe a token format or hold the signing key:
+
+```ts
+authorizeWake(request, env) {
+  const url = new URL(request.url)
+  return verifyWakeToken(url.searchParams.get('wakeToken'), {
+    namespace: namespaceFrom(url),
+    secret: env.WAKE_SECRET,
+  })
+}
+```
+
+Treat the URL token as a narrowly scoped capability and avoid logging it. If
+minting or wake authorization is unavailable, the wake channel retries in the
+background while HTTP pulls and the safety poll continue to provide
+convergence.
+
 `/admin/status` reports a boot ID, hibernation simulation count, connected wake
 sockets, durable database size, engine watermark/floor, and aggregate counters.
 After the configured idle gap (5 seconds in the harness deployment), the local
