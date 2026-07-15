@@ -185,9 +185,18 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         let day = Duration::from_secs(24 * 3600);
         let files = vec![
-            ReplicaFile { mtime: at(now, day), size: 10 },        // 1d: fresh
-            ReplicaFile { mtime: at(now, day * 5), size: 10 },    // 5d: stale
-            ReplicaFile { mtime: at(now, day * 2), size: 10 },    // 2d: fresh
+            ReplicaFile {
+                mtime: at(now, day),
+                size: 10,
+            }, // 1d: fresh
+            ReplicaFile {
+                mtime: at(now, day * 5),
+                size: 10,
+            }, // 5d: stale
+            ReplicaFile {
+                mtime: at(now, day * 2),
+                size: 10,
+            }, // 2d: fresh
         ];
         // budget high enough that only age matters.
         let deleted = plan_deletions(&files, &policy(day * 3, u64::MAX), now);
@@ -202,11 +211,26 @@ mod tests {
         // enough to reach <= 250. total 500, drop the two oldest (200) -> 300,
         // still over, drop the next oldest -> 200 <= 250.
         let files = vec![
-            ReplicaFile { mtime: at(now, min * 1), size: 100 }, // newest
-            ReplicaFile { mtime: at(now, min * 5), size: 100 }, // oldest
-            ReplicaFile { mtime: at(now, min * 3), size: 100 },
-            ReplicaFile { mtime: at(now, min * 4), size: 100 },
-            ReplicaFile { mtime: at(now, min * 2), size: 100 },
+            ReplicaFile {
+                mtime: at(now, min * 1),
+                size: 100,
+            }, // newest
+            ReplicaFile {
+                mtime: at(now, min * 5),
+                size: 100,
+            }, // oldest
+            ReplicaFile {
+                mtime: at(now, min * 3),
+                size: 100,
+            },
+            ReplicaFile {
+                mtime: at(now, min * 4),
+                size: 100,
+            },
+            ReplicaFile {
+                mtime: at(now, min * 2),
+                size: 100,
+            },
         ];
         let mut deleted = plan_deletions(&files, &policy(Duration::from_secs(3600), 250), now);
         deleted.sort();
@@ -219,9 +243,18 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000);
         let day = Duration::from_secs(24 * 3600);
         let files = vec![
-            ReplicaFile { mtime: at(now, day * 10), size: 100 }, // stale by age
-            ReplicaFile { mtime: at(now, day * 1), size: 100 },  // fresh, newest
-            ReplicaFile { mtime: at(now, day * 2), size: 100 },  // fresh
+            ReplicaFile {
+                mtime: at(now, day * 10),
+                size: 100,
+            }, // stale by age
+            ReplicaFile {
+                mtime: at(now, day * 1),
+                size: 100,
+            }, // fresh, newest
+            ReplicaFile {
+                mtime: at(now, day * 2),
+                size: 100,
+            }, // fresh
         ];
         // age drops index 0; survivors total 200, budget 150 -> drop oldest
         // survivor (index 2, 2d).
@@ -234,8 +267,14 @@ mod tests {
     fn under_budget_and_fresh_keeps_everything() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         let files = vec![
-            ReplicaFile { mtime: now, size: 10 },
-            ReplicaFile { mtime: now, size: 10 },
+            ReplicaFile {
+                mtime: now,
+                size: 10,
+            },
+            ReplicaFile {
+                mtime: now,
+                size: 10,
+            },
         ];
         let deleted = plan_deletions(&files, &policy(Duration::from_secs(3600), 1000), now);
         assert!(deleted.is_empty());

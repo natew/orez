@@ -30,7 +30,7 @@ use tokio::sync::oneshot;
 use sync_core::{DbError, Row, SyncDb};
 
 use crate::db::RusqliteDb;
-use crate::retain::{plan_deletions, ReplicaFile, RetentionPolicy, SweepOutcome};
+use crate::retain::{ReplicaFile, RetentionPolicy, SweepOutcome, plan_deletions};
 
 // how an admin transaction ends. the worker runs the real COMMIT or ROLLBACK;
 // the client only names the outcome (never the raw SQL), so scheduler state and
@@ -671,7 +671,10 @@ mod tests {
         assert_eq!(sqlite_count(dir.path()), 3);
 
         // a future `now` so every replica's mtime is unambiguously in the past.
-        let outcome = manager.retain(&aggressive_policy(), SystemTime::now() + Duration::from_secs(10));
+        let outcome = manager.retain(
+            &aggressive_policy(),
+            SystemTime::now() + Duration::from_secs(10),
+        );
         assert_eq!(outcome.evicted, 3);
         assert_eq!(outcome.deleted, 3);
         assert!(outcome.bytes_freed > 0);
@@ -686,7 +689,10 @@ mod tests {
         // the map, so neither eviction nor the file sweep may touch it, even under
         // the most aggressive policy.
         let held = manager.get("proj-live").unwrap();
-        let outcome = manager.retain(&aggressive_policy(), SystemTime::now() + Duration::from_secs(10));
+        let outcome = manager.retain(
+            &aggressive_policy(),
+            SystemTime::now() + Duration::from_secs(10),
+        );
         assert_eq!(outcome.evicted, 0);
         assert_eq!(outcome.deleted, 0);
         assert_eq!(sqlite_count(dir.path()), 1);
