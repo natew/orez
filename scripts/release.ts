@@ -212,6 +212,15 @@ if (into) {
     pkgDirs.push({ name: syncHostPkg.name, dir: syncHostDir })
   }
 
+  const drizzleZeroSqliteDir = resolve(root, 'packages', 'drizzle-zero-sqlite')
+  const drizzleZeroSqlitePkgPath = resolve(drizzleZeroSqliteDir, 'package.json')
+  if (existsSync(drizzleZeroSqlitePkgPath)) {
+    const drizzleZeroSqlitePkg = JSON.parse(
+      readFileSync(drizzleZeroSqlitePkgPath, 'utf-8')
+    )
+    pkgDirs.push({ name: drizzleZeroSqlitePkg.name, dir: drizzleZeroSqliteDir })
+  }
+
   let released = 0
   try {
     for (const { name, dir } of pkgDirs) {
@@ -317,6 +326,20 @@ if (existsSync(cfHostPkgPath)) {
     originalVersion: cfHostPkg.version,
     pkgPath: cfHostPkgPath,
     pkg: cfHostPkg,
+    next: orezNext,
+  })
+}
+
+// drizzle-zero-sqlite package
+const drizzleZeroSqliteDir = resolve(root, 'packages', 'drizzle-zero-sqlite')
+const drizzleZeroSqlitePkgPath = resolve(drizzleZeroSqliteDir, 'package.json')
+if (existsSync(drizzleZeroSqlitePkgPath)) {
+  const drizzleZeroSqlitePkg = JSON.parse(readFileSync(drizzleZeroSqlitePkgPath, 'utf-8'))
+  packages.push({
+    dir: drizzleZeroSqliteDir,
+    originalVersion: drizzleZeroSqlitePkg.version,
+    pkgPath: drizzleZeroSqlitePkgPath,
+    pkg: drizzleZeroSqlitePkg,
     next: orezNext,
   })
 }

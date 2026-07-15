@@ -59,10 +59,10 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && bun run build:sync-browser-host && chmod +x dist/cli-entry.js",
+    "build": "tsc && bun run build:sync-browser-host && bun run --cwd packages/drizzle-zero-sqlite build && chmod +x dist/cli-entry.js",
     "build:sync-browser-host": "bun run --cwd packages/sync-browser-host build:dist",
     "dev": "tsc --watch",
-    "test": "vitest run --exclude 'src/integration/' --exclude 'src/wasm-sqlite.test.ts'",
+    "test": "vitest run --exclude 'src/integration/' --exclude 'src/wasm-sqlite.test.ts' && bun run --cwd packages/drizzle-zero-sqlite test",
     "test:integration": "vitest run src/integration/",
     "native:bootstrap": "bun scripts/setup-native-sqlite.ts",
     "test:native:guard": "bun run native:bootstrap && vitest run src/integration/native-binary.guard.test.ts",
@@ -78,7 +78,7 @@
     "lint": "oxlint --import-plugin --ignore-pattern sqlite-wasm/",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
-    "check": "tsc --noEmit && bun run --cwd packages/sync-browser-host typecheck",
+    "check": "tsc --noEmit && bun run --cwd packages/sync-browser-host typecheck && bun run --cwd packages/drizzle-zero-sqlite typecheck",
     "demo:test": "bun demo/src/test/run-e2e.ts",
     "check:all": "bun run lint && bun run format:check && bun run check && bun run test",
     "test:chat": "bun scripts/test-chat-integration.ts",
@@ -144,6 +144,7 @@
   "workspaces": [
     "pg-to-sqlite",
     "sqlite-wasm",
+    "packages/drizzle-zero-sqlite",
     "packages/sync-browser-host"
   ],
   "trustedDependencies": [
