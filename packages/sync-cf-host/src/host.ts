@@ -332,6 +332,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #wakeRecipients = new Set<WebSocket>()
     #wakePromise: Promise<void> | null = null
     #ingestPromise: Promise<number> | null = null
+    #queryPullLocks = new Map<string, Promise<void>>()
     #recordingIngestBillable = false
     #ingestBreaker = new IngestCircuitBreaker({
       budgetRows: ingestBudgetRows,
@@ -393,6 +394,22 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #wasm<T>(call: () => T): T {
       this.#counters.wasmBoundaryCalls++
       return call()
+    }
+
+    async #acquireQueryPullLock(clientGroupID: string): Promise<() => void> {
+      const previous = this.#queryPullLocks.get(clientGroupID)
+      let release!: () => void
+      const current = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      this.#queryPullLocks.set(clientGroupID, current)
+      if (previous) await previous
+      return () => {
+        release()
+        if (this.#queryPullLocks.get(clientGroupID) === current) {
+          this.#queryPullLocks.delete(clientGroupID)
+        }
+      }
     }
 
     #simulateIdleTeardown(now: number): void {
@@ -909,84 +926,94 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         if (!Number.isSafeInteger(transformVersion) || transformVersion < 0) {
           throw new TypeError('queryTransformVersion must be a non-negative safe integer')
         }
-        if (queryAware && body.queries) {
-          const queries = body.queries as {
-            version?: unknown
-            patch?: unknown
-          }
-          if (Array.isArray(queries.patch)) {
-            const patch = []
-            for (const operation of queries.patch) {
-              if (!operation || typeof operation !== 'object') {
-                patch.push(operation)
-                continue
-              }
-              const op = operation as Record<string, unknown>
-              if (op.op === 'put') {
-                if (!config.resolveQuery || typeof op.name !== 'string') {
-                  throw requestError('query put requires a server-resolved named query')
-                }
-                if (!Array.isArray(op.args)) {
-                  throw requestError('named query args must be an array')
-                }
-                const args = op.args as JsonValue[]
-                let ast: JsonValue
-                try {
-                  // resolveQuery may be async and needs `env` (a consumer can
-                  // delegate the transform to its app's real synced-queries
-                  // endpoint over an app service binding — authenticate runs in the
-                  // worker isolate, but the query loop runs here in the DO, so the
-                  // binding must come from the DO's own env, not a shared global).
-                  ast = await config.resolveQuery(op.name, args, claims, this.env)
-                } catch (error) {
-                  throw requestError(`unknown or unsupported named query: ${op.name}`)
-                }
-                patch.push({
-                  op: 'put',
-                  hash: op.hash,
-                  ast,
-                  transformVersion,
-                })
-              } else patch.push(operation)
-            }
-            body = { ...body, queries: { ...queries, patch } }
-          }
-        }
-        if (queryAware) {
-          body = { ...body, _serverQueryTransformVersion: transformVersion }
-        }
-        const clientID = typeof body.clientID === 'string' ? body.clientID : ''
-        this.#pulling.add(clientID)
+        const releaseQueryPull =
+          queryAware && config.resolveQuery
+            ? await this.#acquireQueryPullLock(
+                typeof body.clientGroupID === 'string' ? body.clientGroupID : ''
+              )
+            : null
         let response: Record<string, unknown>
         try {
-          const txStarted = performance.now()
-          const duringFault = this.#takeFault('pull_during_tx')
-          response = this.ctx.storage.transactionSync(() => {
-            const result = this.#wasm(() =>
-              queryAware
-                ? engine_handle_query_pull(
-                    this.#engineDb,
-                    config.schema,
-                    this.#retainChanges(),
-                    body,
-                    claims.userID
-                  )
-                : engine_handle_pull(
-                    this.#engineDb,
-                    config.schema,
-                    this.#visibility(claims),
-                    caps,
-                    this.#retainChanges(),
-                    body,
-                    claims.userID
-                  )
-            ) as Record<string, unknown>
-            if (duringFault) throw this.#faultError(duringFault, 'pull_during_tx')
-            return result
-          })
-          transactionMs = performance.now() - txStarted
+          if (queryAware && body.queries) {
+            const queries = body.queries as {
+              version?: unknown
+              patch?: unknown
+            }
+            if (Array.isArray(queries.patch)) {
+              const patch = []
+              for (const operation of queries.patch) {
+                if (!operation || typeof operation !== 'object') {
+                  patch.push(operation)
+                  continue
+                }
+                const op = operation as Record<string, unknown>
+                if (op.op === 'put') {
+                  if (!config.resolveQuery || typeof op.name !== 'string') {
+                    throw requestError('query put requires a server-resolved named query')
+                  }
+                  if (!Array.isArray(op.args)) {
+                    throw requestError('named query args must be an array')
+                  }
+                  const args = op.args as JsonValue[]
+                  let ast: JsonValue
+                  try {
+                    // resolveQuery may be async and needs `env` (a consumer can
+                    // delegate the transform to its app's real synced-queries
+                    // endpoint over an app service binding — authenticate runs in the
+                    // worker isolate, but the query loop runs here in the DO, so the
+                    // binding must come from the DO's own env, not a shared global).
+                    ast = await config.resolveQuery(op.name, args, claims, this.env)
+                  } catch (error) {
+                    throw requestError(`unknown or unsupported named query: ${op.name}`)
+                  }
+                  patch.push({
+                    op: 'put',
+                    hash: op.hash,
+                    ast,
+                    transformVersion,
+                  })
+                } else patch.push(operation)
+              }
+              body = { ...body, queries: { ...queries, patch } }
+            }
+          }
+          if (queryAware) {
+            body = { ...body, _serverQueryTransformVersion: transformVersion }
+          }
+          const clientID = typeof body.clientID === 'string' ? body.clientID : ''
+          this.#pulling.add(clientID)
+          try {
+            const txStarted = performance.now()
+            const duringFault = this.#takeFault('pull_during_tx')
+            response = this.ctx.storage.transactionSync(() => {
+              const result = this.#wasm(() =>
+                queryAware
+                  ? engine_handle_query_pull(
+                      this.#engineDb,
+                      config.schema,
+                      this.#retainChanges(),
+                      body,
+                      claims.userID
+                    )
+                  : engine_handle_pull(
+                      this.#engineDb,
+                      config.schema,
+                      this.#visibility(claims),
+                      caps,
+                      this.#retainChanges(),
+                      body,
+                      claims.userID
+                    )
+              ) as Record<string, unknown>
+              if (duringFault) throw this.#faultError(duringFault, 'pull_during_tx')
+              return result
+            })
+            transactionMs = performance.now() - txStarted
+          } finally {
+            this.#pulling.delete(clientID)
+          }
         } finally {
-          this.#pulling.delete(clientID)
+          releaseQueryPull?.()
         }
         const afterPullFault = this.#takeFault('pull_after_commit')
         if (afterPullFault) throw this.#faultError(afterPullFault, 'pull_after_commit')

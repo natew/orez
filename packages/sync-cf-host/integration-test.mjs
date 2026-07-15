@@ -202,6 +202,50 @@ try {
     [{ transformVersion: 1 }],
     'query transform version is server-authored'
   )
+
+  const slowQueryPull = post('/pull', {
+    clientID: 'ordered-query-client',
+    clientGroupID: 'ordered-query-group',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [
+        {
+          op: 'put',
+          hash: 'ordered-tasks',
+          name: 'tasksInProjects',
+          args: [{ projectIds: ['p1'], delayMs: 200 }],
+        },
+      ],
+    },
+  })
+  await Bun.sleep(25)
+  const clearQueryPull = post('/pull', {
+    clientID: 'ordered-query-client',
+    clientGroupID: 'ordered-query-group',
+    cookie: null,
+    queries: { version: 2, patch: [{ op: 'clear' }] },
+  })
+  const [slowQueryResponse, clearQueryResponse] = await Promise.all([
+    slowQueryPull,
+    clearQueryPull,
+  ])
+  equal(slowQueryResponse.status, 200, 'slow query pull status')
+  equal(clearQueryResponse.status, 200, 'clear query pull status')
+  const orderedQueryState = await admin('/admin/sql', {
+    query: `SELECT
+      (SELECT COUNT(*) FROM _zsync_desires
+       WHERE clientGroupID = 'ordered-query-group') AS desires,
+      (SELECT version FROM _zsync_query_ack
+       WHERE clientGroupID = 'ordered-query-group'
+       AND clientID = 'ordered-query-client') AS version`,
+  })
+  equal(
+    orderedQueryState.rows,
+    [{ desires: 0, version: 2 }],
+    'query resolution and desired-query apply preserve arrival order'
+  )
+
   const queryFollowup = await post('/pull', {
     clientID: 'query-client',
     clientGroupID: 'query-group',

@@ -4,7 +4,7 @@
 // the SyncNativeConfig passed at construction time.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
@@ -39,7 +39,7 @@ pub struct AppState {
     pub ctx: Arc<EngineContext>,
     pub authenticate: crate::AuthFn,
     query_resolution: Option<crate::QueryResolution>,
-    query_pull_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    query_pull_locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
     admin_token: String,
     allowed_origins: HashSet<String>,
     boot_id: String,
@@ -83,15 +83,20 @@ impl AppState {
     fn take_drop_push(&self, ns: &str) -> bool {
         self.drop_push.lock().unwrap().remove(ns)
     }
+}
 
-    fn query_pull_lock(&self, ns: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.query_pull_locks
-            .lock()
-            .unwrap()
-            .entry(ns.to_string())
-            .or_default()
-            .clone()
+fn query_pull_lock(
+    locks: &Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    ns: &str,
+) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = locks.lock().unwrap();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(ns).and_then(Weak::upgrade) {
+        return lock;
     }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(ns.to_string(), Arc::downgrade(&lock));
+    lock
 }
 
 fn boot_id() -> String {
@@ -241,7 +246,11 @@ async fn pull(
         Err(e) => return json_status(400, json!({ "error": e })),
     };
     let _query_pull_guard = if state.ctx.query_aware && state.query_resolution.is_some() {
-        Some(state.query_pull_lock(&ns).lock_owned().await)
+        Some(
+            query_pull_lock(&state.query_pull_locks, &ns)
+                .lock_owned()
+                .await,
+        )
     } else {
         None
     };
@@ -813,5 +822,28 @@ async fn wake_socket(mut socket: WebSocket, state: Arc<AppState>, ns: String, cl
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_pull_locks_share_active_namespaces_and_collect_finished_ones() {
+        let locks = Mutex::new(HashMap::new());
+        let first = query_pull_lock(&locks, "first");
+        let first_again = query_pull_lock(&locks, "first");
+        assert!(Arc::ptr_eq(&first, &first_again));
+        assert_eq!(locks.lock().unwrap().len(), 1);
+
+        drop(first);
+        drop(first_again);
+        let second = query_pull_lock(&locks, "second");
+        let locks = locks.lock().unwrap();
+        assert!(!locks.contains_key("first"));
+        assert!(locks.contains_key("second"));
+        drop(locks);
+        drop(second);
     }
 }

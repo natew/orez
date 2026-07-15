@@ -336,7 +336,9 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
     mutators: harnessMutators,
     queryAware: false,
     queryTransformVersion: 1,
-    resolveQuery(name, args) {
+    async resolveQuery(name, args) {
+      const delayMs = Number((args[0] as { delayMs?: unknown } | undefined)?.delayMs ?? 0)
+      if (delayMs > 0) await scheduler.wait(delayMs)
       return queryNameToAst(name, args) as never
     },
     initialize: initializeHarness,
