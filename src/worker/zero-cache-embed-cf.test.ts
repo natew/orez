@@ -56,6 +56,9 @@ const harness = vi.hoisted(() => ({
 }))
 
 vi.mock('./zero-cache-run-worker.js', () => ({
+  abandonWorkerTree: () => {
+    harness.events.push('worker-tree-abandoned')
+  },
   runWorker: (
     parent: {
       once(type: string, listener: () => void): void
@@ -225,11 +228,17 @@ let originalExit: typeof process.exit
 let originalFetch: typeof fetch
 let originalGlobals: Map<string, GlobalSnapshot>
 let originalKill: typeof process.kill
+let doSqliteByInstance = new Map<string, object>()
 
 function options(readyTimeout = 1_000, instanceId = 'test-instance') {
+  let doSqlite = doSqliteByInstance.get(instanceId)
+  if (!doSqlite) {
+    doSqlite = {}
+    doSqliteByInstance.set(instanceId, doSqlite)
+  }
   return {
     backendFetch: async () => new Response('ok'),
-    doSqlite: {},
+    doSqlite,
     instanceId,
     readyTimeout,
   }
@@ -242,6 +251,7 @@ async function turn(): Promise<void> {
 
 describe('startZeroCacheEmbedCF lifecycle', () => {
   beforeEach(() => {
+    doSqliteByInstance = new Map()
     harness.activeGenerations = 0
     harness.backendCloseError = null
     harness.backendCloses = 0
@@ -726,6 +736,31 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     expect(harness.activeGenerations).toBe(1)
     expect(harness.maxActiveGenerations).toBe(1)
     await replacement.stop()
+  })
+
+  it('abandons a worker tree canceled by a Durable Object reset', async () => {
+    harness.modes = ['never-stop', 'ready']
+    const reset = await startZeroCacheEmbedCF(options(1_000, 'platform-reset-instance'))
+
+    const replacement = await startZeroCacheEmbedCF({
+      ...options(1_000, 'platform-reset-instance'),
+      doSqlite: { replacement: true },
+    })
+
+    expect(reset.ready).toBe(false)
+    expect(replacement.ready).toBe(true)
+    expect(harness.events).toContain('worker-tree-abandoned')
+    expect(harness.events).not.toContain('sigterm')
+    expect(harness.activeGenerations).toBe(2)
+
+    // a late settlement from the canceled generation must not release the
+    // replacement's routing or process-environment lease.
+    harness.workerReleases[0]()
+    await turn()
+    expect(replacement.ready).toBe(true)
+    await replacement.stop()
+    expect(harness.activeGenerations).toBe(0)
+    expect(process.env.SINGLE_PROCESS).toBe(originalEnv.SINGLE_PROCESS)
   })
 
   it('bounds replacement cleanup and remains fail-closed until it finishes', async () => {

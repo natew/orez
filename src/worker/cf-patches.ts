@@ -297,6 +297,7 @@ function patchProcesses(zcBase: string): void {
 
   if (code.includes('__zc_workers')) {
     for (const marker of [
+      'abandonOrezZeroWorkers',
       'waitForOrezZeroWorkersStopped',
       '__orez_latched_signal',
       '__orez_track_worker',
@@ -338,9 +339,14 @@ function __orez_track_worker(task, execution) {
   active.add(execution);
   void execution.finally(() => {
     active.delete(execution);
-    if (active.size === 0) __orez_worker_executions.delete(task);
+    if (active.size === 0 && __orez_worker_executions.get(task) === active) {
+      __orez_worker_executions.delete(task);
+    }
   }).catch(() => {});
   return execution;
+}
+function abandonOrezZeroWorkers(task) {
+  __orez_worker_executions.delete(task);
 }
 async function waitForOrezZeroWorkersStopped(task) {
   for (;;) {
@@ -414,7 +420,7 @@ async function waitForOrezZeroWorkersStopped(task) {
   }
   code = code.replace(
     exportAnchor,
-    'export { childWorker, parentWorker, singleProcessMode, waitForOrezZeroWorkersStopped };'
+    'export { abandonOrezZeroWorkers, childWorker, parentWorker, singleProcessMode, waitForOrezZeroWorkersStopped };'
   )
   code = workerImports + code
   writeFileSync(processesPath, code)
@@ -744,8 +750,14 @@ function patchCustomFetch(zcBase: string): void {
 // accepts thousands of bound parameters, but Cloudflare DO SQLite caps a
 // statement at 100 — the prepare alone throws "too many SQL variables" for
 // any table wider than 2 columns, killing initial sync before the first row.
-// derive the batch row count from the column count under a 96-param budget:
-// identical inserts, smaller batches.
+// derive the batch row count from the column count under a 96-param budget.
+//
+// upstream also buffers 10,000 rows before calling its synchronous flush().
+// on a DO every sql.exec in one synchronous turn is coalesced into one implicit
+// transaction. a single COPY chunk can therefore submit roughly 10k
+// application rows (about 21k including indexes) before the storage engine can
+// flush. keep each stream callback's storage burst small; postgres COPY still
+// streams the whole table.
 function patchInitialSyncBatchParams(zcBase: string): void {
   const initialSyncPath = resolve(
     zcBase,
@@ -759,6 +771,17 @@ function patchInitialSyncBatchParams(zcBase: string): void {
   }
   let code = readFileSync(initialSyncPath, 'utf-8')
   if (code.includes('orezRowsPerBatch')) return
+  const bufferAnchor = 'var MAX_BUFFERED_ROWS = 1e4;'
+  const bufferAnchorCount = code.split(bufferAnchor).length - 1
+  if (bufferAnchorCount !== 1) {
+    throw new Error(
+      `orez CF overlay: expected 1 initial-sync buffer anchor, found ${bufferAnchorCount}`
+    )
+  }
+  code = code.replace(
+    bufferAnchor,
+    'var MAX_BUFFERED_ROWS = 256; /* orez-cf-storage-burst-cap */'
+  )
   // each pattern appears once in copyBinary and once in copyText
   const replacements: Array<[string, string]> = [
     [

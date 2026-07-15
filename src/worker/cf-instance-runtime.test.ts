@@ -12,7 +12,10 @@ import {
   routeCFPostgresHost,
   routeCFPostgresURL,
   routeCFSqlitePath,
+  setCFInstanceRuntimeAbandon,
+  setCFInstanceRuntimeStop,
   sqlitePathForCFInstance,
+  stopCFInstanceRuntimeForReplacement,
 } from './cf-instance-runtime.js'
 
 function runtimeInput(instanceId: string, apiFetch?: typeof fetch) {
@@ -128,5 +131,37 @@ describe('CF instance runtime routing', () => {
 
     expect(() => routeCFSqlitePath(sqlitePath)).toThrow('no active runtime')
     expect(() => routeCFPostgresURL(postgresURL)).toThrow('no active runtime')
+  })
+
+  it('joins a replacement in the same Durable Object incarnation', async () => {
+    const runtime = registerCFInstanceRuntime(runtimeInput('same-incarnation'))
+    const stop = vi.fn(async () => releaseCFInstanceRuntime(runtime))
+    const abandon = vi.fn()
+    setCFInstanceRuntimeStop(runtime, stop)
+    setCFInstanceRuntimeAbandon(runtime, abandon)
+
+    await expect(
+      stopCFInstanceRuntimeForReplacement(runtime.instanceId, runtime.doSqlite)
+    ).resolves.toBe('stopped')
+    expect(stop).toHaveBeenCalledOnce()
+    expect(abandon).not.toHaveBeenCalled()
+  })
+
+  it('abandons a runtime retained from a reset Durable Object', async () => {
+    const runtime = registerCFInstanceRuntime(runtimeInput('reset-incarnation'))
+    const stop = vi.fn(async () => {})
+    const abandon = vi.fn()
+    setCFInstanceRuntimeStop(runtime, stop)
+    setCFInstanceRuntimeAbandon(runtime, abandon)
+
+    await expect(
+      stopCFInstanceRuntimeForReplacement(runtime.instanceId, {
+        replacement: true,
+      })
+    ).resolves.toBe('abandoned')
+    expect(abandon).toHaveBeenCalledOnce()
+    expect(stop).not.toHaveBeenCalled()
+    const replacement = registerCFInstanceRuntime(runtimeInput('reset-incarnation'))
+    releaseCFInstanceRuntime(replacement)
   })
 })

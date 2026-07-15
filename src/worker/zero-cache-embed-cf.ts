@@ -54,6 +54,7 @@ import {
   releaseCFInstanceRuntime,
   setCFInstanceEnv,
   setCFInstanceProxy,
+  setCFInstanceRuntimeAbandon,
   setCFInstanceRuntimeStop,
   sqliteDirectoryForCFInstance,
   sqlitePathForCFInstance,
@@ -68,14 +69,19 @@ import {
 } from './durable-object-websocket-handoff.js'
 import { sweepCFInstanceSqliteHandles } from './embed-generation.js'
 import { createLocalSqlBackend } from './local-sql-backend.js'
+import { cleanupInactiveSnapshotTablesForCFInstance } from './shims/sqlite.js'
 import { acquireZeroProcessEnv } from './shims/zero-process-env.js'
 // static import so wrangler follows zero-cache's dependency tree and shim aliases.
-import { runWorker as _runWorker } from './zero-cache-run-worker.js'
+import {
+  abandonWorkerTree as _abandonWorkerTree,
+  runWorker as _runWorker,
+} from './zero-cache-run-worker.js'
 
 const runWorkerFn = _runWorker as (
   parent: unknown,
   env: Record<string, string>
 ) => Promise<void>
+const abandonWorkerTreeFn = _abandonWorkerTree as (taskId: string) => void
 
 const WORKER_SHUTDOWN_TIMEOUT_MS = 5_000
 const WORKER_FORCE_SHUTDOWN_TIMEOUT_MS = 5_000
@@ -83,6 +89,7 @@ const STARTUP_CLEANUP_TIMEOUT_MS = 15_000
 const ZERO_STARTUP_STOPPED_ERROR = 'OrezZeroStartupStoppedError'
 
 type GenerationState = {
+  abandoned: boolean
   cleanupDone: boolean
   cleanupFailed: boolean
   runtime: CFInstanceRuntime
@@ -96,6 +103,7 @@ type EmbedParent = EventEmitter & {
 }
 
 function releaseGenerationWhenComplete(generation: GenerationState): void {
+  if (generation.abandoned) return
   if (generation.workerDone && generation.cleanupDone && !generation.cleanupFailed) {
     deleteReplicationState(generation.runtime.instanceId)
     releaseCFInstanceRuntime(generation.runtime)
@@ -354,7 +362,7 @@ export async function startZeroCacheEmbedCF(
   let registeredRuntime: CFInstanceRuntime | undefined
   try {
     await runStartupPhase('replacement-stop', () =>
-      stopCFInstanceRuntimeForReplacement(opts.instanceId)
+      stopCFInstanceRuntimeForReplacement(opts.instanceId, opts.doSqlite)
     )
     await runStartupPhase('runtime-registration', async () => {
       registeredRuntime = registerCFInstanceRuntime({
@@ -379,12 +387,14 @@ export async function startZeroCacheEmbedCF(
   const runtime = registeredRuntime
 
   const generation: GenerationState = {
+    abandoned: false,
     cleanupDone: false,
     cleanupFailed: false,
     runtime,
     workerDone: true,
   }
   const instanceId = runtime.instanceId
+  const zeroTaskId = `orez-cf-${runtime.encodedId}`
 
   const globalRecord = globalThis as Record<PropertyKey, unknown>
   let processRecord: Record<PropertyKey, unknown>
@@ -412,6 +422,7 @@ export async function startZeroCacheEmbedCF(
   }
 
   const shutdown = (): Promise<void> => {
+    if (generation.abandoned) return Promise.resolve()
     if (shutdownPromise) return shutdownPromise
     stopping = true
     isReady = false
@@ -465,6 +476,7 @@ export async function startZeroCacheEmbedCF(
           }
         }
       }
+      if (generation.abandoned) return
       if (
         workerFailed &&
         workerError !== startupFailure &&
@@ -545,10 +557,30 @@ export async function startZeroCacheEmbedCF(
   }
 
   setCFInstanceRuntimeStop(runtime, shutdown)
+  setCFInstanceRuntimeAbandon(runtime, () => {
+    generation.abandoned = true
+    generation.cleanupDone = true
+    stopping = true
+    isReady = false
+    abandonWorkerTreeFn(zeroTaskId)
+    if (releaseProcessEnv) {
+      releaseProcessEnv()
+      releaseProcessEnv = null
+    }
+    deleteReplicationState(instanceId)
+    releaseDoBackendInstanceCaches(instanceId)
+    runtime.sqliteHandles.clear()
+    parentEmitter?.removeAllListeners()
+    parent?.removeAllListeners()
+  })
 
   try {
     releaseProcessEnv = acquireZeroProcessEnv()
     processRecord = globalRecord.process as Record<PropertyKey, unknown>
+
+    await runStartupPhase('stale-snapshot-cleanup', () =>
+      cleanupInactiveSnapshotTablesForCFInstance(runtime)
+    )
 
     const localSql = createLocalSqlBackend(opts.doSqlite)
     const txOwner = `${EMBED_TX_OWNER}:${runtime.encodedId}`
@@ -687,7 +719,7 @@ export async function startZeroCacheEmbedCF(
       ZERO_REPLICA_FILE: sqlitePathForCFInstance(instanceId),
       ZERO_STORAGE_DB_TMP_DIR: sqliteDirectoryForCFInstance(instanceId),
       ZERO_PORT: String(runtime.basePort),
-      ZERO_TASK_ID: `orez-cf-${runtime.encodedId}`,
+      ZERO_TASK_ID: zeroTaskId,
       ZERO_SHADOW_SYNC_ENABLED: 'false',
     }
     if (opts.apiFetch) {

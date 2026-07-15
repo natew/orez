@@ -42,6 +42,8 @@ export interface SqlStorageCursor {
 
 export interface SqlStorageLike {
   exec(query: string, ...bindings: SqlStorageValue[]): SqlStorageCursor
+  /** flush pending writes so the next mutation starts a new implicit transaction */
+  sync?(): Promise<void>
   /** DO transaction API — if available, used instead of raw BEGIN/COMMIT */
   transactionSync?<T>(fn: () => T): T
 }
@@ -519,30 +521,81 @@ function isActiveSnapshotTable(name: string, routingKey: object): boolean {
   return false
 }
 
-function cleanupInactiveSnapshotTables(sql: SqlStorageLike, routingKey: object): void {
-  try {
-    const rows = execSql(
-      sql,
-      `SELECT name FROM sqlite_master
-         WHERE type = 'table'
-           AND name LIKE '_orez_snapshot_%'`,
-      [],
-      'cleanup.snapshot-list'
-    ).toArray()
-    for (const row of rows) {
+const SNAPSHOT_CLEANUP_BATCH_ROWS = 256
+
+/**
+ * reclaim snapshots left by a reset Durable Object without one giant DROP.
+ * deletes and their index updates are billable writes, so flush every bounded
+ * batch before dropping the now-empty table.
+ */
+export async function cleanupInactiveSnapshotTablesForCFInstance(
+  runtime: CFInstanceRuntime
+): Promise<void> {
+  const sql = runtime.doSqlite as SqlStorageLike | undefined
+  if (!sql?.exec) return
+  const rows = execSql(
+    sql,
+    `SELECT name FROM sqlite_master
+       WHERE type = 'table'
+         AND name LIKE '_orez_snapshot_%'`,
+    [],
+    'cleanup.snapshot-list'
+  )
+    .toArray()
+    .filter((row) => {
       const name = String(row.name ?? '')
-      if (!isSnapshotInternalTable(name) || isActiveSnapshotTable(name, routingKey))
-        continue
-      try {
-        execSql(
+      return isSnapshotInternalTable(name) && !isActiveSnapshotTable(name, runtime)
+    })
+  const sync = sql.sync?.bind(sql)
+  if (rows.length > 0 && !sync) {
+    throw new Error(
+      'sqlite shim: stale snapshot cleanup requires the doSqliteStorage() adapter'
+    )
+  }
+  if (!sync) return
+  for (const row of rows) {
+    const name = String(row.name ?? '')
+    let rowsWritten = 0
+    try {
+      for (;;) {
+        const cursor = execSql(
           sql,
-          `DROP TABLE IF EXISTS ${quoteIdentifier(name)}`,
+          `DELETE FROM ${quoteIdentifier(name)}
+             WHERE rowid IN (
+               SELECT rowid FROM ${quoteIdentifier(name)}
+               LIMIT ${SNAPSHOT_CLEANUP_BATCH_ROWS}
+             )`,
           [],
-          'cleanup.snapshot-drop'
+          'cleanup.snapshot-delete'
         )
-      } catch {}
+        if (cursor.rowsWritten === 0) break
+        rowsWritten += cursor.rowsWritten
+        await sync()
+      }
+      execSql(
+        sql,
+        `DROP TABLE IF EXISTS ${quoteIdentifier(name)}`,
+        [],
+        'cleanup.snapshot-drop'
+      )
+      await sync()
+      logCFInstance(runtime, {
+        component: 'sqlite',
+        event: 'inactive-snapshot-cleanup',
+        rowsWritten,
+        table: name,
+      })
+    } catch (error) {
+      logCFInstance(runtime, {
+        component: 'sqlite',
+        error,
+        event: 'inactive-snapshot-cleanup-failed',
+        rowsWritten,
+        table: name,
+      })
+      throw error
     }
-  } catch {}
+  }
 }
 
 function shouldSnapshotTable(name: string): boolean {
@@ -953,7 +1006,6 @@ export class Database {
     this.#snapshotPrefixActive = this.#snapshotPrefix
     this.#snapshotCounter = 0
     snapshotPrefixesFor(this.#routingKey).add(this.#snapshotPrefix)
-    cleanupInactiveSnapshotTables(this.#sql, this.#routingKey)
 
     // expose storage for StatementRunner to access transactionSync
     ;(this as any).__orez_sql = this.#sql

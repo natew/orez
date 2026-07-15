@@ -8,7 +8,7 @@
 // @ts-expect-error - CJS module
 import BedrockSqlite from 'bedrock-sqlite'
 const BetterSqlite3 = BedrockSqlite.Database
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   registerCFInstanceRuntime,
@@ -19,6 +19,7 @@ import {
 import { sweepCFInstanceSqliteHandles } from '../embed-generation.js'
 import {
   Database,
+  cleanupInactiveSnapshotTablesForCFInstance,
   Statement,
   StatementRunner,
   SqliteError,
@@ -634,6 +635,7 @@ describe('DO snapshot transactions', () => {
       transactionSync: <T>(fn: () => T) => T
     }
     mock.transactionSync = (fn) => fn()
+    mock.sync = vi.fn(async () => {})
     // `live` models the replica-writer — in production it is the only connection
     // that mutates the live replica tables, and copy-on-write snapshots only
     // freeze a table when the replica-writer is about to write to it.
@@ -779,27 +781,29 @@ describe('DO snapshot transactions', () => {
     ).toEqual({ table_name: '"todo"' })
   })
 
-  it('cleans inactive snapshot tables when opening a database', () => {
+  it('cleans inactive snapshot tables in bounded flushed batches', async () => {
     mock.exec('CREATE TABLE _orez_snapshot_1_todo AS SELECT * FROM todo')
+    const insert = mock._nativeDb.prepare(
+      'INSERT INTO _orez_snapshot_1_todo VALUES (?, ?, ?)'
+    )
+    for (let i = 0; i < 600; i++) insert.run(String(i + 2), `row ${i}`, '02')
     expect(
       mock
         .exec("SELECT name FROM sqlite_master WHERE name = '_orez_snapshot_1_todo'")
         .toArray()
     ).toEqual([{ name: '_orez_snapshot_1_todo' }])
 
-    const reopened = new Database(sqlitePathForCFInstance(runtime.instanceId))
-    try {
-      expect(
-        mock
-          .exec("SELECT name FROM sqlite_master WHERE name = '_orez_snapshot_1_todo'")
-          .toArray()
-      ).toEqual([])
-    } finally {
-      reopened.close()
-    }
+    await cleanupInactiveSnapshotTablesForCFInstance(runtime)
+
+    expect(
+      mock
+        .exec("SELECT name FROM sqlite_master WHERE name = '_orez_snapshot_1_todo'")
+        .toArray()
+    ).toEqual([])
+    expect(mock.sync).toHaveBeenCalledTimes(4)
   })
 
-  it('does not remove another open connection snapshot', () => {
+  it('does not remove another open connection snapshot', async () => {
     snapshot.prepare('BEGIN CONCURRENT').run()
     // first writer touch on todo copies it into snapshot's namespace (lazy COW).
     live
@@ -809,6 +813,8 @@ describe('DO snapshot transactions', () => {
       .exec("SELECT name FROM sqlite_master WHERE name LIKE '_orez_snapshot_%'")
       .toArray()
     expect(snapshotTables).toHaveLength(1)
+
+    await cleanupInactiveSnapshotTablesForCFInstance(runtime)
 
     // opening another connection must not drop the still-open snapshot's copy.
     const other = new Database(sqlitePathForCFInstance(runtime.instanceId))

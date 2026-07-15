@@ -18,6 +18,7 @@ interface DoExecSql {
 interface DoStorageCtx {
   storage: {
     sql: DoExecSql
+    sync?: () => Promise<void>
     transactionSync?: (...args: unknown[]) => unknown
   }
 }
@@ -31,6 +32,14 @@ export function isDoForbiddenSqlite(sql: unknown): boolean {
 }
 
 const GUARD_MARK = '__orezDoSqliteGuarded'
+const DO_SQLITE_INCARNATION = Symbol('orez-do-sqlite-incarnation')
+
+type DoSqliteStorage = {
+  exec: (sql: string, ...params: unknown[]) => unknown
+  sync: (() => Promise<void>) | undefined
+  transactionSync: ((...args: unknown[]) => unknown) | undefined
+  [DO_SQLITE_INCARNATION]: object
+}
 
 /**
  * patch `sql.exec` in place so EVERY caller (the embed, its sqlite shim,
@@ -59,10 +68,7 @@ export function installDoForbiddenSqliteGuard(sql: DoExecSql): void {
  * wrap a DO's `storage.sql` for the zero-cache embed: DO-forbidden statements
  * no-op, and `transactionSync` is bound through when the platform exposes it.
  */
-export function doSqliteStorage(ctx: DoStorageCtx): {
-  exec: (sql: string, ...params: unknown[]) => unknown
-  transactionSync: ((...args: unknown[]) => unknown) | undefined
-} {
+export function doSqliteStorage(ctx: DoStorageCtx): DoSqliteStorage {
   const rawExec = (
     ctx.storage.sql.exec as (sql: string, ...params: unknown[]) => unknown
   ).bind(ctx.storage.sql)
@@ -76,11 +82,40 @@ export function doSqliteStorage(ctx: DoStorageCtx): {
     }
     return rawExec(sql, ...params)
   }
-  return {
+  const wrapped = {
     exec,
+    sync:
+      typeof ctx.storage.sync === 'function'
+        ? ctx.storage.sync.bind(ctx.storage)
+        : undefined,
     transactionSync:
       typeof ctx.storage.transactionSync === 'function'
         ? ctx.storage.transactionSync.bind(ctx.storage)
         : undefined,
   }
+  Object.defineProperty(wrapped, DO_SQLITE_INCARNATION, {
+    value: ctx.storage,
+  })
+  return wrapped as DoSqliteStorage
+}
+
+/**
+ * identify the Durable Object incarnation that owns a SQLite adapter.
+ *
+ * repeated calls to `doSqliteStorage()` return new adapters, but adapters made
+ * from one `DurableObjectState.storage` share this identity. Cloudflare creates
+ * a new state/storage object after resetting a Durable Object, while module
+ * globals in the isolate can survive that reset.
+ */
+export function doSqliteStorageIncarnation(storage: unknown): unknown {
+  if ((typeof storage !== 'object' && typeof storage !== 'function') || !storage) {
+    return storage
+  }
+  return (
+    (
+      storage as {
+        [DO_SQLITE_INCARNATION]?: object
+      }
+    )[DO_SQLITE_INCARNATION] ?? storage
+  )
 }

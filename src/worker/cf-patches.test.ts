@@ -40,7 +40,9 @@ describe('prepareZeroCacheForCF', () => {
     expect(processes).not.toContain('shadow-syncer')
     expect(processes).toContain('const runWorkerImpl = __zc_workers[_name];')
     expect(processes).toContain('env.ZERO_TASK_ID')
+    expect(processes).toContain('abandonOrezZeroWorkers')
     expect(processes).toContain('waitForOrezZeroWorkersStopped')
+    expect(processes).toContain('__orez_worker_executions.get(task) === active')
     expect(processes).toContain('__orez_latched_signal')
     expect(processes).toContain('result === target ? receiver : result')
     expect(processes).not.toContain('__OREZ_DEBUG_WIRE__')
@@ -97,10 +99,16 @@ describe('prepareZeroCacheForCF', () => {
     expect(initialSync).not.toContain('.repeat(49)')
     expect(initialSync).not.toContain('valuesPerRow * 50')
     expect(initialSync).not.toContain('pendingRows > 50')
+    expect(initialSync).toContain(
+      'var MAX_BUFFERED_ROWS = 256; /* orez-cf-storage-burst-cap */'
+    )
     expect(initialSync.match(/orezRowsPerBatch - 1/g)).toHaveLength(2)
     expect(initialSync.match(/pendingRows > orezRowsPerBatch/g)).toHaveLength(2)
     expect(readText(sourceBase, 'services/change-source/pg/initial-sync.js')).toContain(
       '.repeat(49)'
+    )
+    expect(readText(sourceBase, 'services/change-source/pg/initial-sync.js')).toContain(
+      'var MAX_BUFFERED_ROWS = 1e4;'
     )
 
     const changeStreamerService = readText(
@@ -219,7 +227,7 @@ export const WRITE_WORKER_URL = u("write-worker");
     )
 
     expect(() => prepareZeroCacheForCF({ nodeModulesPath: nodeModules })).toThrow(
-      'existing processes patch missing waitForOrezZeroWorkersStopped'
+      'existing processes patch missing abandonOrezZeroWorkers'
     )
   })
 })
@@ -449,7 +457,8 @@ export class ThreadWriteWorkerClient {}
   writeText(
     zcBase,
     'services/change-source/pg/initial-sync.js',
-    `async function copyBinary() {
+    `var MAX_BUFFERED_ROWS = 1e4;
+async function copyBinary() {
 ${copyVariant}}
 async function copyText() {
 ${copyVariant}}

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   doSqliteStorage,
+  doSqliteStorageIncarnation,
   installDoForbiddenSqliteGuard,
   isDoForbiddenSqlite,
 } from './zero-cache-do-sqlite.js'
@@ -63,7 +64,7 @@ describe('installDoForbiddenSqliteGuard', () => {
 })
 
 describe('doSqliteStorage', () => {
-  it('no-ops forbidden statements, forwards the rest, and binds transactionSync', () => {
+  it('no-ops forbidden statements and binds storage methods', async () => {
     const calls: string[] = []
     const ctx = {
       storage: {
@@ -73,6 +74,7 @@ describe('doSqliteStorage', () => {
             return { rows: [sql] }
           },
         },
+        sync: async function (this: unknown) {},
         transactionSync: function (this: unknown, fn: () => unknown) {
           return fn()
         },
@@ -82,12 +84,28 @@ describe('doSqliteStorage', () => {
     expect((wrapped.exec('VACUUM') as { toArray(): unknown[] }).toArray()).toEqual([])
     expect(calls).toEqual([]) // VACUUM never reached the raw exec
     expect(wrapped.exec('SELECT 2')).toEqual({ rows: ['SELECT 2'] })
+    expect(typeof wrapped.sync).toBe('function')
+    await expect(wrapped.sync!()).resolves.toBeUndefined()
     expect(typeof wrapped.transactionSync).toBe('function')
     expect(wrapped.transactionSync!(() => 'ran')).toBe('ran')
   })
 
-  it('leaves transactionSync undefined when the platform lacks it', () => {
+  it('leaves optional storage methods undefined when the platform lacks them', () => {
     const ctx = { storage: { sql: { exec: (s: string) => s } } }
-    expect(doSqliteStorage(ctx as never).transactionSync).toBeUndefined()
+    const wrapped = doSqliteStorage(ctx as never)
+    expect(wrapped.sync).toBeUndefined()
+    expect(wrapped.transactionSync).toBeUndefined()
+  })
+
+  it('carries a stable identity for one Durable Object incarnation', () => {
+    const firstCtx = { storage: { sql: { exec: (s: string) => s } } }
+    const secondCtx = { storage: { sql: { exec: (s: string) => s } } }
+    const first = doSqliteStorage(firstCtx as never)
+    const firstAgain = doSqliteStorage(firstCtx as never)
+    const second = doSqliteStorage(secondCtx as never)
+
+    expect(firstAgain).not.toBe(first)
+    expect(doSqliteStorageIncarnation(firstAgain)).toBe(doSqliteStorageIncarnation(first))
+    expect(doSqliteStorageIncarnation(second)).not.toBe(doSqliteStorageIncarnation(first))
   })
 })

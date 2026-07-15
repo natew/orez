@@ -8,6 +8,8 @@
  * hosts, and Fastify ports.
  */
 
+import { doSqliteStorageIncarnation } from './zero-cache-do-sqlite.js'
+
 export interface CFInstanceRuntimeInput {
   apiFetch?: typeof fetch
   doSqlite: unknown
@@ -47,6 +49,7 @@ const runtimesByEncodedId = new Map<string, CFInstanceRuntime>()
 const runtimesByPort = new Map<number, CFInstanceRuntime>()
 const apiRoutesByHost = new Map<string, { origin: string; runtime: CFInstanceRuntime }>()
 const runtimeStops = new WeakMap<CFInstanceRuntime, () => Promise<void>>()
+const runtimeAbandons = new WeakMap<CFInstanceRuntime, () => void>()
 
 function requireInstanceId(instanceId: string | undefined): string {
   if (typeof instanceId !== 'string') {
@@ -165,12 +168,43 @@ export function setCFInstanceRuntimeStop(
   runtimeStops.set(runtime, stop)
 }
 
+export function setCFInstanceRuntimeAbandon(
+  runtime: CFInstanceRuntime,
+  abandon: () => void
+): void {
+  if (runtimesById.get(runtime.instanceId) !== runtime) {
+    throw new Error('zero-cache CF embed: runtime is not active')
+  }
+  runtimeAbandons.set(runtime, abandon)
+}
+
+export type CFInstanceReplacementResult = 'absent' | 'stopped' | 'abandoned'
+
 export async function stopCFInstanceRuntimeForReplacement(
-  instanceId: string
-): Promise<void> {
+  instanceId: string,
+  doSqlite: unknown
+): Promise<CFInstanceReplacementResult> {
   const normalized = requireInstanceId(instanceId)
   const runtime = runtimesById.get(normalized)
-  if (!runtime) return
+  if (!runtime) return 'absent'
+  if (
+    doSqliteStorageIncarnation(runtime.doSqlite) !== doSqliteStorageIncarnation(doSqlite)
+  ) {
+    logCFInstance(runtime, { event: 'runtime-abandon-after-do-reset' })
+    try {
+      runtimeAbandons.get(runtime)?.()
+    } catch (error) {
+      logCFInstance(runtime, {
+        error,
+        event: 'runtime-abandon-cleanup-failed',
+      })
+    }
+    // handles belong to the canceled state.storage object. Calling close()
+    // would issue more I/O against the reset object, so only sever references.
+    runtime.sqliteHandles.clear()
+    releaseCFInstanceRuntime(runtime)
+    return 'abandoned'
+  }
   const stop = runtimeStops.get(runtime)
   if (!stop) {
     throw new Error(
@@ -200,6 +234,7 @@ export async function stopCFInstanceRuntimeForReplacement(
       event: 'runtime-replacement-cleanup-failed',
     })
   }
+  return 'stopped'
 }
 
 export function releaseCFInstanceRuntime(runtime: CFInstanceRuntime): void {
@@ -215,6 +250,7 @@ export function releaseCFInstanceRuntime(runtime: CFInstanceRuntime): void {
   runtime.fastifyByPort.clear()
   runtime.fastifyInstances.clear()
   runtimeStops.delete(runtime)
+  runtimeAbandons.delete(runtime)
   for (const host of runtime.apiOriginByHost.keys()) apiRoutesByHost.delete(host)
   runtime.apiOriginByHost.clear()
 }
