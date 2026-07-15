@@ -46,21 +46,35 @@ host stops using it by default.
 
 ### 2. Destination: generation-staged apply with durable progress
 
-The engine gains three entry points (wasm-exported like the existing ones):
+The engine gains four entry points (wasm-exported like the existing ones):
 
-- `engine_begin_snapshot_generation(db, tables) -> generation` — creates
-  `_zsync_stage_<g>_<table>` tables from the modeled schema and a durable
-  progress row in `_zsync_snapshot_progress` (generation, startWatermark,
-  table, cursor, state = 'paging').
-- `engine_apply_snapshot_page(db, tables, g, table, rows)` — validates rows
-  through the same `upsert_row` path as today but targeted at the staging
-  table, then advances the durable cursor. Called once per fetched page, each
-  call inside ITS OWN `transactionSync` (bounded rows, far under the
-  breaker).
+- `engine_begin_snapshot_generation(db, tables, startWatermark) -> generation`
+  — creates `_zsync_stage_<g>_<table>` tables from the modeled schema and a
+  durable progress row in `_zsync_snapshot_progress` (generation,
+  startWatermark, table, cursor, state = 'paging'). `startWatermark` is a
+  SOURCE-side fact the host captures from the FIRST page response — the
+  engine cannot derive it (live `upstream_watermark` is exactly wrong after
+  a 410-triggered restart).
+- `engine_apply_snapshot_page(db, tables, g, table, rows, nextCursor)` —
+  validates rows through the same `upsert_row` path as today but targeted at
+  the staging table, then durably records `nextCursor` with the same commit.
+  The cursor is an OPAQUE source-owned token; the engine stores it verbatim
+  and never interprets it. `nextCursor = null` advances progress to the next
+  table (tables are paged one at a time in sorted-name order, which the
+  progress row encodes). Called once per fetched page, each call inside ITS
+  OWN `transactionSync` (bounded rows, far under the breaker).
+- `engine_apply_snapshot_changes(db, tables, g, batch)` — catch-up: applies a
+  changes batch through the same internal change/upsert/delete logic as
+  `apply_upstream` but targeted at the STAGING tables, advancing a
+  generation-local catch-up cursor in the progress row. It must not touch
+  live tables or live `_zsync_meta.upstream_watermark`. A delete for a row
+  the staging copy never saw is an idempotent no-op — replaying deletes is
+  what makes the fuzzy page reads safe.
 - `engine_finalize_snapshot_generation(db, tables, g, watermark)` — the
   cutover: per table `DROP` live + `ALTER TABLE ... RENAME` staging to live
-  (metadata-only, cheap), set `upstream_watermark`, mark the generation
-  complete, delete the progress row. One small transaction.
+  (metadata-only, cheap), set `upstream_watermark` to the catch-up DRAIN
+  watermark (the last replayed change, not the page-time watermark), mark
+  the generation complete, delete the progress row. One small transaction.
 
 Host orchestration (`#ingest` snapshot branch):
 
