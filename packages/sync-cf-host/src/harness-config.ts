@@ -357,7 +357,9 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
       )
     },
     authorizeNotify(request, env) {
-      return Boolean(env.ADMIN_KEY) && request.headers.get('x-admin-key') === env.ADMIN_KEY
+      return (
+        Boolean(env.ADMIN_KEY) && request.headers.get('x-admin-key') === env.ADMIN_KEY
+      )
     },
     visibility: {
       rowLocal: false,

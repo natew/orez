@@ -570,7 +570,10 @@ try {
     emptyWake.addEventListener('error', reject, { once: true })
   })
   const emptyWakeMessage = new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('empty resnapshot did not wake')), 500)
+    const timeout = setTimeout(
+      () => reject(new Error('empty resnapshot did not wake')),
+      500
+    )
     emptyWake.addEventListener(
       'message',
       (event) => {
@@ -700,7 +703,8 @@ try {
       'x-admin-key': 'ingest-harness-admin',
     },
     body: JSON.stringify({
-      query: 'SELECT upstream_watermark AS upstreamWatermark FROM _zsync_meta WHERE lock = 1',
+      query:
+        'SELECT upstream_watermark AS upstreamWatermark FROM _zsync_meta WHERE lock = 1',
     }),
   }).then((response) => response.json())
   assert.deepEqual(persistedUnreadableState.rows, [{ upstreamWatermark: 'unreadable' }])
