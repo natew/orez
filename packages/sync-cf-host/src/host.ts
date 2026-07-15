@@ -526,9 +526,13 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       )
     }
 
-    #engineState(): EngineState | null {
+    #engineState(): EngineState {
+      return this.#wasm(() => engine_state(this.#engineDb)) as EngineState
+    }
+
+    #engineStateBestEffort(): EngineState | null {
       try {
-        return this.#wasm(() => engine_state(this.#engineDb)) as EngineState
+        return this.#engineState()
       } catch {
         return null
       }
@@ -651,7 +655,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         )
       ) as ApplyUpstreamResult
       this.#recordIngestLogicalRows(rebuilt.applied)
-      const nextCursor = this.#engineState()?.upstreamWatermark ?? cursor
+      const nextCursor = this.#engineState().upstreamWatermark
       if (!allowSameCursor && String(nextCursor) === String(cursor)) {
         this.#tripIngest('ingestCursorStalled', {
           phase: 'snapshot',
@@ -682,10 +686,10 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           : Promise.resolve(0)
       }
       this.#ingestPromise = (async () => {
-        const startingWatermark = this.#engineState()?.watermark ?? null
+        const startingWatermark = this.#engineState().watermark
         let total = 0
         for (;;) {
-          const cursor = this.#engineState()?.upstreamWatermark ?? '0'
+          const cursor = this.#engineState().upstreamWatermark
           if (forceSnapshot) {
             forceSnapshot = false
             const rebuilt = await this.#applyUpstreamSnapshot(path, cursor, true)
@@ -726,7 +730,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           ) as ApplyUpstreamResult
           total += result.applied
           this.#recordIngestLogicalRows(result.applied)
-          const nextCursor = this.#engineState()?.upstreamWatermark ?? cursor
+          const nextCursor = this.#engineState().upstreamWatermark
           if (batch.changes.length > 0 && String(nextCursor) === String(cursor)) {
             this.#tripIngest('ingestCursorStalled', {
               phase: 'changes',
@@ -752,13 +756,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           }
         }
         this.#recoverIngestBreaker()
-        const endingWatermark = this.#engineState()?.watermark ?? null
-        if (
-          total > 0 ||
-          (startingWatermark !== null &&
-            endingWatermark !== null &&
-            endingWatermark !== startingWatermark)
-        ) {
+        const endingWatermark = this.#engineState().watermark
+        if (total > 0 || endingWatermark !== startingWatermark) {
           await this.#enqueueWake('__upstream__')
         }
         return total
@@ -1035,7 +1034,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
               ).length
             : 0
         this.#counters.queryRecompilations += queryPuts
-        const state = this.#engineState()
+        const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
           requestKind: 'pull',
@@ -1061,14 +1060,15 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         const status = statusOf(error)
         if (status === 409) this.#counters.resets++
         if (status === 500) this.#counters.invariantFailures++
+        const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
           requestKind: 'pull',
           resultClass: status === 409 ? 'reset' : 'error',
           inputCookie: body?.cookie ?? null,
           outputCookie: null,
-          retainedFloor: this.#engineState()?.floor ?? null,
-          currentWatermark: this.#engineState()?.watermark ?? null,
+          retainedFloor: state?.floor ?? null,
+          currentWatermark: state?.watermark ?? null,
           changeRowsScanned: null,
           changeRowsIncluded: 0,
           queriesRecomputed: 0,
@@ -1099,7 +1099,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         // Workerd requires the request stream to be consumed before the DO
         // returns a response. Discard it without parsing or logging payloads.
         await request.arrayBuffer()
-        const state = this.#engineState()
+        const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
           requestKind: 'push',
@@ -1145,7 +1145,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             endpoint,
             headers,
             bytes,
-            this.#engineState()?.upstreamWatermark === '0'
+            this.#engineState().upstreamWatermark === '0'
           )
           if (!upstreamResponse.ok) {
             return new Response(upstreamResponse.body, upstreamResponse)
@@ -1341,7 +1341,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           throw this.#faultError(afterCommitFault, 'push_after_commit_before_response')
 
         const response = this.#wasm(() => engine_assemble_push_response(results))
-        const state = this.#engineState()
+        const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
           requestKind: 'push',
@@ -1370,14 +1370,15 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       } catch (error) {
         const status = statusOf(error)
         if (status === 500) this.#counters.invariantFailures++
+        const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
           requestKind: 'push',
           resultClass: 'error',
           inputCookie: null,
           outputCookie: null,
-          retainedFloor: this.#engineState()?.floor ?? null,
-          currentWatermark: this.#engineState()?.watermark ?? null,
+          retainedFloor: state?.floor ?? null,
+          currentWatermark: state?.watermark ?? null,
           changeRowsScanned: 0,
           changeRowsIncluded: 0,
           queriesRecomputed: 0,
@@ -1442,7 +1443,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             heapUsedBytes: heap?.usedJSHeapSize ?? null,
             heapTotalBytes: heap?.totalJSHeapSize ?? null,
             heapLimitBytes: heap?.jsHeapSizeLimit ?? null,
-            engine: this.#engineState(),
+            engine: this.#engineStateBestEffort(),
             counters: this.#counters,
             ingestBreaker: this.#ingestBreaker.status(),
           })
@@ -1477,14 +1478,14 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         }
         return (async () => {
           try {
-            const beforeUpstreamWatermark = this.#engineState()?.upstreamWatermark ?? null
+            const beforeUpstreamWatermark = this.#engineState().upstreamWatermark
             const applied = await this.#ingest(upstreamPath, true)
             const engine = this.#engineState()
             return json({
               ok: true,
               applied,
               beforeUpstreamWatermark,
-              afterUpstreamWatermark: engine?.upstreamWatermark ?? null,
+              afterUpstreamWatermark: engine.upstreamWatermark,
               engine,
             })
           } catch (error) {

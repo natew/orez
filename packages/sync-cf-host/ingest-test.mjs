@@ -604,6 +604,107 @@ try {
   assert.deepEqual(emptyRows.rows, [{ count: 0 }])
   emptyWake.close()
 
+  // an unreadable engine cursor must fail before requesting cursor zero and
+  // repairing itself through an unnecessary retention-gap snapshot.
+  const strictNamespace = `strict-engine-state-${crypto.randomUUID()}`
+  const strictOrigin = `${base}/${strictNamespace}`
+  const strictUpstream = `${base}/upstream/${strictNamespace}`
+  const strictSeed = await fetch(`${strictUpstream}/api/zero/push`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      clientGroupID: 'strict-upstream',
+      mutations: [
+        {
+          type: 'custom',
+          clientID: 'strict-seed',
+          id: 1,
+          name: 'item.insert',
+          args: [
+            {
+              id: 'strict-one',
+              label: 'one',
+              rank: 1,
+              done: false,
+              meta: null,
+            },
+          ],
+        },
+        {
+          type: 'custom',
+          clientID: 'strict-seed',
+          id: 2,
+          name: 'item.insert',
+          args: [
+            {
+              id: 'strict-two',
+              label: 'two',
+              rank: 2,
+              done: false,
+              meta: null,
+            },
+          ],
+        },
+      ],
+    }),
+  })
+  assert.equal(strictSeed.status, 200)
+  const strictPrune = await fetch(`${strictUpstream}/exec`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sql: 'DELETE FROM _zero_changes WHERE watermark = 1' }),
+  })
+  assert.equal(strictPrune.status, 200)
+  const strictInitial = await fetch(`${strictOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'strict-reader',
+      clientGroupID: 'strict-group',
+      cookie: null,
+    }),
+  })
+  assert.equal(strictInitial.status, 200)
+  const strictInitialBody = await strictInitial.json()
+  const corruptEngineState = await fetch(`${strictOrigin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query: "UPDATE _zsync_meta SET upstream_watermark = 'unreadable' WHERE lock = 1",
+    }),
+  })
+  assert.equal(corruptEngineState.status, 200)
+  const strictPull = await fetch(`${strictOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'strict-reader',
+      clientGroupID: 'strict-group',
+      cookie: strictInitialBody.cookie,
+    }),
+  })
+  assert.equal(strictPull.status, 500)
+  const persistedUnreadableState = await fetch(`${strictOrigin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query: 'SELECT upstream_watermark AS upstreamWatermark FROM _zsync_meta WHERE lock = 1',
+    }),
+  }).then((response) => response.json())
+  assert.deepEqual(persistedUnreadableState.rows, [{ upstreamWatermark: 'unreadable' }])
+
   // Production timestamp columns are Zero `number`s, but SQLite returns their
   // SQL timestamp representation as TEXT. Prove the real ingest -> incremental
   // pull path converts it to epoch milliseconds on the wire.
