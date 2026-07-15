@@ -645,6 +645,213 @@ try {
   assert.deepEqual(emptyRows.rows, [{ count: 0 }])
   emptyWake.close()
 
+  // a generation larger than the configured 600-row breaker must shrink its
+  // page, persist a cursor, survive a real object abort, and resume without
+  // rebuilding the committed prefix. the connected client then consumes the
+  // cutover wake with its old cookie and receives the complete new snapshot.
+  const pagedNamespace = `paged-restart-${crypto.randomUUID()}`
+  const pagedOrigin = `${base}/${pagedNamespace}`
+  const pagedUpstream = `${base}/upstream/${pagedNamespace}`
+  const pagedBaselineSeed = await fetch(`${pagedUpstream}/api/zero/push`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      clientGroupID: 'paged-upstream',
+      mutations: [
+        {
+          type: 'custom',
+          clientID: 'paged-seed',
+          id: 1,
+          name: 'item.insert',
+          args: [
+            {
+              id: 'paged-baseline',
+              label: 'visible before rebuild',
+              rank: -1,
+              done: false,
+              meta: null,
+            },
+          ],
+        },
+      ],
+    }),
+  })
+  assert.equal(pagedBaselineSeed.status, 200)
+  const pagedInitialPull = await fetch(`${pagedOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'paged-reader',
+      clientGroupID: 'paged-group',
+      cookie: null,
+    }),
+  })
+  assert.equal(pagedInitialPull.status, 200)
+  const pagedInitialBody = await pagedInitialPull.json()
+  assert.equal(Number.isSafeInteger(pagedInitialBody.cookie), true)
+
+  const pagedBulkSeed = await fetch(`${pagedUpstream}/exec`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      sql: `WITH digits(n) AS (
+        VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+      ), seq(value) AS (
+        SELECT a.n * 1000 + b.n * 100 + c.n * 10 + d.n
+        FROM digits AS a, digits AS b, digits AS c, digits AS d
+      )
+      INSERT INTO item (id, label, rank, done, meta)
+      SELECT 'paged-' || printf('%04d', value), 'paged snapshot ' || value,
+             value, 0, NULL
+      FROM seq WHERE value < 1250`,
+    }),
+  })
+  assert.equal(pagedBulkSeed.status, 200)
+
+  const pagedBeforeRestart = await fetch(`${pagedOrigin}/admin/status`, {
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  }).then((response) => response.json())
+  const holdPagedSnapshot = await fetch(`${base}/snapshot-control/${pagedNamespace}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hold: true, afterCursor: true, reset: true }),
+  })
+  assert.equal(holdPagedSnapshot.status, 200)
+  const interruptedResnapshot = fetch(`${pagedOrigin}/admin/resnapshot`, {
+    method: 'POST',
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+    signal: AbortSignal.timeout(15_000),
+  }).catch((error) => error)
+  let heldPagedState
+  for (let attempt = 0; ; attempt++) {
+    heldPagedState = await fetch(`${base}/snapshot-control/${pagedNamespace}`).then(
+      (response) => response.json()
+    )
+    if (heldPagedState.active === true) break
+    if (attempt >= 500) throw new Error('paged snapshot did not reach a durable cursor')
+    await Bun.sleep(10)
+  }
+  assert.deepEqual(heldPagedState.limits.slice(0, 2), [2000, 1000])
+  assert.ok(heldPagedState.limits.some((limit) => limit <= 500))
+  const durableProgress = await fetch(`${pagedOrigin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query:
+        'SELECT tableName, cursor, state FROM _zsync_snapshot_progress WHERE active = 1',
+    }),
+  }).then((response) => response.json())
+  assert.equal(durableProgress.rows.length, 1)
+  assert.equal(durableProgress.rows[0].tableName, 'item')
+  assert.equal(durableProgress.rows[0].state, 'paging')
+  assert.equal(typeof durableProgress.rows[0].cursor, 'string')
+
+  await fetch(`${pagedOrigin}/admin/restart`, {
+    method: 'POST',
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+    signal: AbortSignal.timeout(5_000),
+  }).catch(() => null)
+  const releasePagedSnapshot = await fetch(`${base}/snapshot-control/${pagedNamespace}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hold: false }),
+  })
+  assert.equal(releasePagedSnapshot.status, 200)
+  const interruptedResult = await interruptedResnapshot
+  assert.equal(interruptedResult instanceof Response && interruptedResult.ok, false)
+
+  let pagedAfterRestart
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await fetch(`${pagedOrigin}/admin/status`, {
+        headers: { 'x-admin-key': 'ingest-harness-admin' },
+      })
+      if (response.ok) {
+        const status = await response.json()
+        if (status.bootID !== pagedBeforeRestart.bootID) {
+          pagedAfterRestart = status
+          break
+        }
+      }
+    } catch {}
+    if (attempt >= 300) throw new Error('paged snapshot object did not restart')
+    await Bun.sleep(10)
+  }
+  assert.notEqual(pagedAfterRestart.bootID, pagedBeforeRestart.bootID)
+
+  const pagedWake = new WebSocket(
+    `${pagedOrigin.replace('http://', 'ws://')}/wake?clientID=paged-reader&wakeToken=ingest-harness-wake`
+  )
+  await new Promise((resolve, reject) => {
+    pagedWake.addEventListener('open', resolve, { once: true })
+    pagedWake.addEventListener('error', reject, { once: true })
+  })
+  const pagedWakeMessage = new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error('resumed paged snapshot did not wake')),
+      5_000
+    )
+    pagedWake.addEventListener(
+      'message',
+      (event) => {
+        clearTimeout(timeout)
+        resolve(String(event.data))
+      },
+      { once: true }
+    )
+  })
+  const resumedPagedSnapshot = await fetch(`${pagedOrigin}/admin/resnapshot`, {
+    method: 'POST',
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  })
+  assert.equal(resumedPagedSnapshot.status, 200)
+  assert.equal((await resumedPagedSnapshot.json()).ok, true)
+  assert.equal(await pagedWakeMessage, 'wake')
+
+  const staleCookiePull = await fetch(`${pagedOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'paged-reader',
+      clientGroupID: 'paged-group',
+      cookie: pagedInitialBody.cookie,
+    }),
+  })
+  assert.equal(staleCookiePull.status, 200)
+  const staleCookieBody = await staleCookiePull.json()
+  const rebuiltRows = staleCookieBody.rowsPatch.filter(
+    (entry) => entry.op === 'put' && entry.tableName === 'item'
+  )
+  assert.equal(rebuiltRows.length, 1251)
+  assert.ok(rebuiltRows.some((entry) => entry.value.id === 'paged-baseline'))
+  assert.ok(rebuiltRows.some((entry) => entry.value.id === 'paged-1249'))
+
+  const completedPagedState = await fetch(`${pagedOrigin}/admin/status`, {
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  }).then((response) => response.json())
+  assert.equal(completedPagedState.counters.wakeFrames, 1)
+  const completedProgress = await fetch(`${pagedOrigin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query: 'SELECT COUNT(*) AS count FROM _zsync_snapshot_progress WHERE active = 1',
+    }),
+  }).then((response) => response.json())
+  assert.deepEqual(completedProgress.rows, [{ count: 0 }])
+  pagedWake.close()
+
   // an unreadable engine cursor must fail before requesting cursor zero and
   // repairing itself through an unnecessary retention-gap snapshot.
   const strictNamespace = `strict-engine-state-${crypto.randomUUID()}`

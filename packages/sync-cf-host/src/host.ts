@@ -2,11 +2,14 @@ import { DurableObject } from 'cloudflare:workers'
 
 import { validatePullCaps, validateSyncHostConfig } from './config.js'
 import {
+  engine_apply_snapshot_changes,
+  engine_apply_snapshot_page,
   engine_apply_upstream,
-  engine_apply_upstream_snapshot,
   engine_assemble_push_response,
+  engine_begin_snapshot_generation,
   engine_compile_query,
   engine_finalize,
+  engine_finalize_snapshot_generation,
   engine_handle_pull,
   engine_handle_query_pull,
   engine_init_query_schema,
@@ -16,6 +19,7 @@ import {
   engine_preflight,
   engine_prune,
   engine_push_validate,
+  engine_read_snapshot_progress,
   engine_record_app_error,
   engine_state,
   engine_version,
@@ -49,6 +53,8 @@ initSync({ module: wasmModule })
 const CLAIMS_HEADER = 'x-orez-sync-claims'
 const NAMESPACE_HEADER = 'x-orez-sync-namespace'
 const UPSTREAM_PATH_HEADER = 'x-orez-sync-upstream-path'
+const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
+const MIN_SNAPSHOT_PAGE_ROWS = 100
 const DEFAULT_CAPS: PullCaps = {
   maxChangeRows: 10_000,
   maxChangeBytes: 2_000_000,
@@ -95,6 +101,19 @@ type ApplyUpstreamResult = {
   watermark: number | string
   applied: number
   caughtUp: boolean
+}
+type SnapshotProgress = {
+  generation: string
+  startWatermark: string
+  table: string | null
+  cursor: string | null
+  state: 'paging' | 'catching_up'
+  catchupWatermark: string
+}
+type SnapshotPage = {
+  watermark: number
+  rows: Record<string, unknown>[]
+  nextCursor: string | null
 }
 type SocketAttachment = { clientID: string }
 type FaultPoint =
@@ -616,9 +635,14 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         return apply()
       } catch (error) {
         this.#recordingIngestBillable = false
-        if (error instanceof IngestBreakerError) {
+        const status = this.#ingestBreaker.status()
+        // a breaker thrown by the sql adapter crosses rust as an engine error,
+        // so the durable breaker state is the authoritative classification.
+        if (
+          error instanceof IngestBreakerError ||
+          (status.tripped && status.reason === 'ingestBudgetExceeded')
+        ) {
           this.#persistIngestBreaker()
-          const status = this.#ingestBreaker.status()
           console.error(
             JSON.stringify({
               event: 'sync_upstream_ingest_breaker_tripped',
@@ -634,37 +658,124 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       }
     }
 
-    async #applyUpstreamSnapshot(
+    #snapshotProgress(): SnapshotProgress | null {
+      return this.#wasm(() =>
+        engine_read_snapshot_progress(this.#engineDb)
+      ) as SnapshotProgress | null
+    }
+
+    #resetSnapshotBillingWindow(): void {
+      // every page is an independently committed write unit. metering it in a
+      // fresh window keeps a rebuild larger than the breaker ceiling resumable
+      // while preserving the ceiling for each transaction.
+      this.#ingestBreaker.reopen()
+      this.#controlDelete(
+        'ingestBreakerReason',
+        'ingestBreakerRetryAt',
+        'ingestBreakerTrips'
+      )
+    }
+
+    #snapshotRetryLimit(
+      error: unknown,
+      limit: number,
+      fields: Record<string, unknown>
+    ): number {
+      const status = statusOf(error)
+      if (!(error instanceof IngestBreakerError) && status < 500) throw error
+      if (limit <= MIN_SNAPSHOT_PAGE_ROWS) {
+        throw Object.assign(
+          new Error(
+            `snapshot page failed at minimum limit ${MIN_SNAPSHOT_PAGE_ROWS}: ${errorMessage(error)}`
+          ),
+          { status, cause: error }
+        )
+      }
+      const nextLimit = Math.max(MIN_SNAPSHOT_PAGE_ROWS, Math.floor(limit / 2))
+      console.warn(
+        JSON.stringify({
+          event: 'sync_upstream_snapshot_page_retry',
+          ...fields,
+          limit,
+          nextLimit,
+          status,
+          error: errorMessage(error),
+        })
+      )
+      return nextLimit
+    }
+
+    async #fetchSnapshotPage(
       path: string,
-      cursor: string,
-      allowSameCursor: boolean
-    ): Promise<ApplyUpstreamResult> {
+      table: string,
+      cursor: string | null,
+      limit: number
+    ): Promise<SnapshotPage> {
       const endpoint = new URL(`${path}/snapshot`, 'https://upstream.invalid')
+      endpoint.searchParams.set('table', table)
+      endpoint.searchParams.set('limit', String(limit))
+      if (cursor !== null) endpoint.searchParams.set('cursor', cursor)
       const response = await this.#serviceBinding().fetch(endpoint.toString(), {
         headers: { host: endpoint.host },
       })
       if (!response.ok) {
-        throw new Error(`upstream snapshot returned ${response.status}`)
-      }
-      const snapshot = await response.json()
-      const rebuilt = this.#withIngestBilling({ phase: 'snapshot', cursor }, () =>
-        this.ctx.storage.transactionSync(() =>
-          this.#wasm(() =>
-            engine_apply_upstream_snapshot(this.#engineDb, config.schema, snapshot)
-          )
+        throw requestError(
+          `upstream snapshot page returned ${response.status}`,
+          response.status >= 500 ? 502 : response.status
         )
-      ) as ApplyUpstreamResult
-      this.#recordIngestLogicalRows(rebuilt.applied)
-      const nextCursor = this.#engineState().upstreamWatermark
-      if (!allowSameCursor && String(nextCursor) === String(cursor)) {
-        this.#tripIngest('ingestCursorStalled', {
-          phase: 'snapshot',
-          cursor,
-          resultWatermark: rebuilt.watermark,
-          applied: rebuilt.applied,
-        })
       }
-      return rebuilt
+      const page = (await response.json()) as Partial<SnapshotPage>
+      if (
+        !Number.isSafeInteger(page.watermark) ||
+        Number(page.watermark) < 0 ||
+        !Array.isArray(page.rows) ||
+        (page.nextCursor !== null && typeof page.nextCursor !== 'string')
+      ) {
+        throw new Error('invalid upstream snapshot page response')
+      }
+      return page as SnapshotPage
+    }
+
+    async #beginSnapshotGeneration(path: string): Promise<{
+      progress: SnapshotProgress
+      page: SnapshotPage
+      pageLimit: number
+    }> {
+      const table = Object.keys(config.schema.tables).sort()[0]
+      if (!table) throw requestError('paged snapshots require a modeled table', 500)
+      let pageLimit = DEFAULT_SNAPSHOT_PAGE_ROWS
+      let page: SnapshotPage
+      for (;;) {
+        try {
+          page = await this.#fetchSnapshotPage(path, table, null, pageLimit)
+          break
+        } catch (error) {
+          pageLimit = this.#snapshotRetryLimit(error, pageLimit, {
+            phase: 'snapshot_page_fetch',
+            table,
+            cursor: null,
+          })
+        }
+      }
+      this.#resetSnapshotBillingWindow()
+      const progress = this.#withIngestBilling(
+        {
+          phase: 'snapshot_begin',
+          table,
+          startWatermark: page.watermark,
+        },
+        () =>
+          this.ctx.storage.transactionSync(() =>
+            this.#wasm(() =>
+              engine_begin_snapshot_generation(
+                this.#engineDb,
+                config.schema,
+                String(page.watermark)
+              )
+            )
+          )
+      ) as SnapshotProgress
+      return { progress, page, pageLimit }
     }
 
     #ingest(upstreamPath?: string | null, forceSnapshot = false): Promise<number> {
@@ -678,7 +789,6 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           ? this.#ingestPromise.then(() => this.#ingest(upstreamPath, true))
           : this.#ingestPromise
       }
-      this.#ingestBreaker.assertReady()
       const path = upstreamPath ?? this.#controlGet('upstreamPath')
       if (path === null) {
         return forceSnapshot
@@ -686,14 +796,165 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           : Promise.resolve(0)
       }
       this.#ingestPromise = (async () => {
+        let progress = this.#snapshotProgress()
+        this.#ingestBreaker.assertReady()
         const startingWatermark = this.#engineState().watermark
         let total = 0
+        let pendingPage: SnapshotPage | null = null
+        let snapshotPageLimit = DEFAULT_SNAPSHOT_PAGE_ROWS
+        let snapshotCompleted = false
         for (;;) {
+          if (progress?.state === 'paging') {
+            const activeProgress = progress
+            const table = activeProgress.table
+            if (table === null) {
+              throw new Error(
+                `snapshot generation ${activeProgress.generation} is paging without a table`
+              )
+            }
+            let page: SnapshotPage | null = pendingPage
+            try {
+              page ??= await this.#fetchSnapshotPage(
+                path,
+                table,
+                activeProgress.cursor,
+                snapshotPageLimit
+              )
+              const pageToApply = page
+              this.#resetSnapshotBillingWindow()
+              const nextProgress = this.#withIngestBilling(
+                {
+                  phase: 'snapshot_page_apply',
+                  generation: activeProgress.generation,
+                  table,
+                  cursor: activeProgress.cursor,
+                  pageRows: pageToApply.rows.length,
+                  pageLimit: snapshotPageLimit,
+                },
+                () =>
+                  this.ctx.storage.transactionSync(() =>
+                    this.#wasm(() =>
+                      engine_apply_snapshot_page(
+                        this.#engineDb,
+                        config.schema,
+                        activeProgress.generation,
+                        table,
+                        pageToApply.rows,
+                        pageToApply.nextCursor
+                      )
+                    )
+                  )
+              ) as SnapshotProgress
+              total += pageToApply.rows.length
+              this.#recordIngestLogicalRows(pageToApply.rows.length)
+              progress = nextProgress
+              pendingPage = null
+            } catch (error) {
+              snapshotPageLimit = this.#snapshotRetryLimit(error, snapshotPageLimit, {
+                phase: page === null ? 'snapshot_page_fetch' : 'snapshot_page_apply',
+                generation: activeProgress.generation,
+                table,
+                cursor: activeProgress.cursor,
+              })
+              pendingPage = null
+            }
+            continue
+          }
+
+          if (progress?.state === 'catching_up') {
+            const activeProgress = progress
+            const cursor = activeProgress.catchupWatermark
+            const endpoint = new URL(`${path}/changes`, 'https://upstream.invalid')
+            endpoint.searchParams.set('since', cursor)
+            endpoint.searchParams.set('limit', String(upstreamLimit))
+            const response = await this.#serviceBinding().fetch(endpoint.toString(), {
+              headers: { host: endpoint.host },
+            })
+            if (response.status === 410) {
+              const begun = await this.#beginSnapshotGeneration(path)
+              progress = begun.progress
+              pendingPage = begun.page
+              snapshotPageLimit = begun.pageLimit
+              continue
+            }
+            if (!response.ok) {
+              throw new Error(`upstream snapshot catch-up returned ${response.status}`)
+            }
+            const batch = (await response.json()) as UpstreamBatch
+            if (!Number.isSafeInteger(batch.watermark) || !Array.isArray(batch.changes)) {
+              throw new Error('invalid upstream changes response')
+            }
+            this.#resetSnapshotBillingWindow()
+            const result = this.#withIngestBilling(
+              {
+                phase: 'snapshot_catchup',
+                generation: activeProgress.generation,
+                cursor,
+                batchWatermark: batch.watermark,
+                changeRows: batch.changes.length,
+              },
+              () =>
+                this.ctx.storage.transactionSync(() =>
+                  this.#wasm(() =>
+                    engine_apply_snapshot_changes(
+                      this.#engineDb,
+                      config.schema,
+                      activeProgress.generation,
+                      batch
+                    )
+                  )
+                )
+            ) as ApplyUpstreamResult
+            total += result.applied
+            this.#recordIngestLogicalRows(result.applied)
+            if (result.caughtUp) {
+              this.#resetSnapshotBillingWindow()
+              this.#withIngestBilling(
+                {
+                  phase: 'snapshot_finalize',
+                  generation: activeProgress.generation,
+                  watermark: result.watermark,
+                },
+                () =>
+                  this.ctx.storage.transactionSync(() =>
+                    this.#wasm(() =>
+                      engine_finalize_snapshot_generation(
+                        this.#engineDb,
+                        config.schema,
+                        activeProgress.generation,
+                        String(result.watermark)
+                      )
+                    )
+                  )
+              )
+              progress = null
+              snapshotCompleted = true
+              break
+            }
+            if (String(result.watermark) === cursor) {
+              this.#tripIngest('ingestCursorStalled', {
+                phase: 'snapshot_catchup',
+                generation: activeProgress.generation,
+                cursor,
+                batchWatermark: batch.watermark,
+                changeRows: batch.changes.length,
+                applied: result.applied,
+              })
+            }
+            progress = {
+              ...progress,
+              catchupWatermark: String(result.watermark),
+            }
+            continue
+          }
+
           const cursor = this.#engineState().upstreamWatermark
           if (forceSnapshot) {
             forceSnapshot = false
-            const rebuilt = await this.#applyUpstreamSnapshot(path, cursor, true)
-            total += rebuilt.applied
+            const begun = await this.#beginSnapshotGeneration(path)
+            progress = begun.progress
+            pendingPage = begun.page
+            snapshotPageLimit = begun.pageLimit
             continue
           }
           const endpoint = new URL(`${path}/changes`, 'https://upstream.invalid')
@@ -703,8 +964,10 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             headers: { host: endpoint.host },
           })
           if (response.status === 410) {
-            const rebuilt = await this.#applyUpstreamSnapshot(path, cursor, false)
-            total += rebuilt.applied
+            const begun = await this.#beginSnapshotGeneration(path)
+            progress = begun.progress
+            pendingPage = begun.page
+            snapshotPageLimit = begun.pageLimit
             continue
           }
           if (!response.ok) {
@@ -757,7 +1020,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         }
         this.#recoverIngestBreaker()
         const endingWatermark = this.#engineState().watermark
-        if (total > 0 || endingWatermark !== startingWatermark) {
+        if (snapshotCompleted || total > 0 || endingWatermark !== startingWatermark) {
           await this.#enqueueWake('__upstream__')
         }
         return total
@@ -1498,12 +1761,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         return json({ ok: true })
       }
       if (route === '/admin/restart') {
-        this.#bootID = crypto.randomUUID()
-        this.#hibernations++
-        this.#counters = freshCounters()
-        this.#pulling.clear()
-        this.#wakeOrigins.clear()
-        this.#wakeRecipients.clear()
+        this.ctx.abort('admin requested durable object restart')
         return json({ ok: true, bootID: this.#bootID })
       }
       if (route === '/admin/visibility') {

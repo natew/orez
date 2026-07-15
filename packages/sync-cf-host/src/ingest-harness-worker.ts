@@ -32,7 +32,9 @@ const numericTextNamespaces = new Set<string>()
 const jsonValueNamespaces = new Set<string>()
 const hydratedNamespaces = new Set<string>()
 const heldSnapshots = new Set<string>()
+const holdSnapshotsAfterCursor = new Set<string>()
 const activeSnapshots = new Set<string>()
+const snapshotLimits = new Map<string, number[]>()
 let delegatedFailuresRemaining = 0
 let delegatedAttempts = 0
 let delegatedPushFailedRemaining = 0
@@ -56,6 +58,7 @@ const config: SyncHostConfig<Env> = {
       namespace.startsWith('root-mount-') ? '/' : `/${namespace}`,
     changeLimit: 2,
     intervalMs: 1_000,
+    ingestBudgetRows: 600,
   },
   initialize(sql) {
     sql.exec(
@@ -249,10 +252,24 @@ export class DataService extends WorkerEntrypoint<Env> {
     }
     const response = await upstreamFetch(request, this.env)
     if (pathname.endsWith('/snapshot')) {
-      if (heldSnapshots.has(namespace)) {
+      const limit = Number(url.searchParams.get('limit'))
+      if (Number.isSafeInteger(limit)) {
+        const limits = snapshotLimits.get(namespace) ?? []
+        limits.push(limit)
+        snapshotLimits.set(namespace, limits)
+      }
+      const shouldHold =
+        heldSnapshots.has(namespace) &&
+        (!holdSnapshotsAfterCursor.has(namespace) || url.searchParams.has('cursor'))
+      if (shouldHold) {
         activeSnapshots.add(namespace)
         try {
-          while (heldSnapshots.has(namespace)) await scheduler.wait(10)
+          while (
+            heldSnapshots.has(namespace) &&
+            (!holdSnapshotsAfterCursor.has(namespace) || url.searchParams.has('cursor'))
+          ) {
+            await scheduler.wait(10)
+          }
         } finally {
           activeSnapshots.delete(namespace)
         }
@@ -311,6 +328,8 @@ export default {
           Response.json({
             active: activeSnapshots.has(namespace),
             held: heldSnapshots.has(namespace),
+            afterCursor: holdSnapshotsAfterCursor.has(namespace),
+            limits: snapshotLimits.get(namespace) ?? [],
           })
         )
       }
@@ -320,12 +339,22 @@ export default {
         .then((body) => {
           if ((body as { hold?: unknown }).hold === true) {
             heldSnapshots.add(namespace)
+            if ((body as { afterCursor?: unknown }).afterCursor === true) {
+              holdSnapshotsAfterCursor.add(namespace)
+            } else {
+              holdSnapshotsAfterCursor.delete(namespace)
+            }
           } else {
             heldSnapshots.delete(namespace)
+            holdSnapshotsAfterCursor.delete(namespace)
           }
+          if ((body as { reset?: unknown }).reset === true)
+            snapshotLimits.set(namespace, [])
           return Response.json({
             active: activeSnapshots.has(namespace),
             held: heldSnapshots.has(namespace),
+            afterCursor: holdSnapshotsAfterCursor.has(namespace),
+            limits: snapshotLimits.get(namespace) ?? [],
           })
         })
     }
