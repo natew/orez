@@ -38,3 +38,33 @@ export function orderReleasePackages<T extends { pkg: PackageManifest }>(
   for (const item of packages) visit(item)
   return ordered
 }
+
+/**
+ * include installed packages and every local dependency they need, then put
+ * dependencies first so a local release never installs a broken consumer.
+ */
+export function selectLocalReleasePackages<T extends { pkg: PackageManifest }>(
+  packages: T[],
+  installed: ReadonlySet<string>
+): T[] {
+  const byName = new Map(packages.map((item) => [item.pkg.name, item]))
+  const selected = new Set<string>()
+
+  const visit = (item: T) => {
+    if (selected.has(item.pkg.name)) return
+    selected.add(item.pkg.name)
+    const dependencies = {
+      ...item.pkg.dependencies,
+      ...item.pkg.optionalDependencies,
+    }
+    for (const dependency of Object.keys(dependencies)) {
+      const local = byName.get(dependency)
+      if (local) visit(local)
+    }
+  }
+
+  for (const item of packages) {
+    if (installed.has(item.pkg.name)) visit(item)
+  }
+  return orderReleasePackages(packages.filter((item) => selected.has(item.pkg.name)))
+}

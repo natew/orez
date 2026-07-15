@@ -26,6 +26,7 @@ import {
   initSync,
 } from './generated/sync_wasm.js'
 import wasmModule from './generated/sync_wasm_bg.wasm'
+import { createPostCommitEffects } from './post-commit.js'
 import {
   SqlStorageDirect,
   SqlStorageMutatorTransaction,
@@ -40,7 +41,6 @@ import {
 } from './write-safeguards.js'
 
 import type {
-  DeferredEffect,
   JsonValue,
   NormalizedClaims,
   PullCaps,
@@ -1096,23 +1096,6 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       )
     }
 
-    async #runEffects(effects: DeferredEffect[]): Promise<void> {
-      for (const effect of effects) {
-        try {
-          await effect()
-        } catch (error) {
-          this.#counters.externalEffectFailures++
-          console.error(
-            JSON.stringify({
-              event: 'sync_external_effect_error',
-              hostVersion: config.hostVersion,
-              error: errorMessage(error),
-            })
-          )
-        }
-      }
-    }
-
     #enqueueWake(originClientID: string): Promise<void> {
       this.#wakeOrigins.add(originClientID)
       for (const socket of this.ctx.getWebSockets()) {
@@ -1483,7 +1466,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
 
         const results: MutationResult[] = []
         for (const mutation of plan.mutations) {
-          const deferred: DeferredEffect[] = []
+          const deferred = createPostCommitEffects()
           try {
             const txStarted = performance.now()
             // consume the before-commit fault OUTSIDE the transaction it is
@@ -1494,7 +1477,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             const preflight = await this.ctx.storage.transaction(async () => {
               // Storage transactions may retry their closure. Never carry a
               // deferred effect from an abandoned attempt into the commit.
-              deferred.length = 0
+              deferred.beginAttempt()
               const decision = this.#wasm(() =>
                 engine_preflight(
                   this.#engineDb,
@@ -1511,9 +1494,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                 claims,
                 clientID: mutation.clientID,
                 mutationID: mutation.id,
-                defer(effect) {
-                  deferred.push(effect)
-                },
+                defer: deferred.defer,
               })
               if (beforeCommitFault)
                 throw this.#faultError(
@@ -1556,7 +1537,16 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             // waitUntil anchors the coalescing timer across request completion,
             // while the next serialized client push can join the same batch.
             this.ctx.waitUntil(this.#enqueueWake(mutation.clientID))
-            await this.#runEffects(deferred)
+            await deferred.runAfterCommit((error) => {
+              this.#counters.externalEffectFailures++
+              console.error(
+                JSON.stringify({
+                  event: 'sync_external_effect_error',
+                  hostVersion: config.hostVersion,
+                  error: errorMessage(error),
+                })
+              )
+            })
           } catch (error) {
             const isAppError = error instanceof MutationApplicationError
             if (!isAppError) throw error

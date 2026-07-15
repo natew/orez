@@ -1,5 +1,9 @@
 // @ts-nocheck — cloudflare:workers types not available in orez
 import { DurableObject } from 'cloudflare:workers'
+import {
+  createPostCommitEffects,
+  type DeferredEffect,
+} from 'orez-sync-cf-host/post-commit'
 
 import {
   isSqlMutation,
@@ -113,6 +117,28 @@ interface SqlWriteMeasurement {
   sql: string
   rowsWritten: number
 }
+
+export type ZeroDOCompiledQuery = {
+  sql: string
+  params?: readonly unknown[]
+}
+
+export type ZeroDOQueryCompiler = (ast: unknown) => ZeroDOCompiledQuery
+
+export type ZeroDOTransactionExecutor = {
+  exec(sql: string, params?: readonly unknown[]): Promise<void>
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params?: readonly unknown[]
+  ): Promise<Row[]>
+  queryAst<Row extends Record<string, unknown> = Record<string, unknown>>(
+    ast: unknown
+  ): Promise<Row[]>
+}
+
+export type ZeroDOTransactionContext = {
+  defer(effect: DeferredEffect): void
+}
 interface SocketAttachment {
   clientID: string
   clientGroupID: string
@@ -137,6 +163,8 @@ const SCHEMA_PROVISIONING_WAIT_MS = 20_000
 const SCHEMA_PROVISIONING_MAX_DELAY_MS = 500
 const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
 const MAX_SNAPSHOT_PAGE_ROWS = 10_000
+const TRANSACTION_CONTROL_SQL =
+  /^\s*(?:BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)(?=\s|;|$)/i
 
 function positiveEnvInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value)
@@ -184,6 +212,12 @@ function sqlErrorSnippet(sql: string, message: string): string {
   }
   if (sql.length <= SQL_ERROR_FALLBACK_LIMIT) return sql
   return `${sql.slice(0, SQL_ERROR_FALLBACK_LIMIT)}...`
+}
+
+function assertApplicationTransactionSQL(sql: string): void {
+  if (TRANSACTION_CONTROL_SQL.test(sql)) {
+    throw new TypeError('transaction SQL is owned by ZeroDO')
+  }
 }
 
 export class ZeroDO extends DurableObject {
@@ -1032,6 +1066,59 @@ export class ZeroDO extends DurableObject {
       this.invalidateSchemaCaches()
       throw error
     }
+  }
+
+  /**
+   * execute trusted subclass work in this object's SQLite transaction.
+   *
+   * the method is protected so the base public fetch surface cannot invoke it.
+   * every SQL cursor is consumed before an executor promise is returned, and
+   * external effects run only after the storage transaction commits.
+   */
+  protected async runApplicationTransaction<T>(
+    compileQuery: ZeroDOQueryCompiler,
+    work: (
+      tx: ZeroDOTransactionExecutor,
+      context: ZeroDOTransactionContext
+    ) => T | Promise<T>
+  ): Promise<T> {
+    const effects = createPostCommitEffects()
+    const execute = (sql: string, params: readonly unknown[] = []) => {
+      assertApplicationTransactionSQL(sql)
+      return this.executeSQL(sql, [...params])
+    }
+    const tx: ZeroDOTransactionExecutor = {
+      async exec(sql, params = []) {
+        execute(sql, params)
+      },
+      async query<Row extends Record<string, unknown>>(sql, params = []) {
+        return execute(sql, params).rows as Row[]
+      },
+      async queryAst<Row extends Record<string, unknown>>(ast: unknown) {
+        const compiled = compileQuery(ast)
+        if (!compiled || typeof compiled.sql !== 'string') {
+          throw new TypeError('query compiler returned an invalid SQL statement')
+        }
+        return execute(compiled.sql, compiled.params ?? []).rows as Row[]
+      },
+    }
+
+    const value = await this.withSchemaProvisioningWait(() =>
+      this.atomically(async () => {
+        effects.beginAttempt()
+        return work(tx, { defer: effects.defer })
+      })
+    )
+
+    await effects.runAfterCommit((error) => {
+      console.error(
+        JSON.stringify({
+          event: 'orez_do_external_effect_error',
+          error: error instanceof Error ? error.message : String(error),
+        })
+      )
+    })
+    return value
   }
 
   private atomicallySync<T>(work: () => T): T {

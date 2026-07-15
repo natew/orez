@@ -69,6 +69,7 @@
     "test:integration:native": "bun run test:native:guard && vitest run src/integration/native-startup.test.ts",
     "test:wasm": "vitest run src/wasm-sqlite.test.ts",
     "test:sync-browser-host": "bun run --cwd packages/sync-browser-host test",
+    "test:sync-cf-host": "bun run --cwd packages/sync-cf-host test",
     "test:all": "vitest run",
     "test:watch": "vitest",
     "test:compiler": "vitest run src/pg-sqlite-compiler/",
@@ -78,7 +79,7 @@
     "lint": "oxlint --import-plugin --ignore-pattern sqlite-wasm/",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
-    "check": "tsc --noEmit && bun run --cwd packages/sync-browser-host typecheck && bun run --cwd packages/drizzle-zero-sqlite typecheck",
+    "check": "tsc --noEmit && bun run --cwd packages/sync-browser-host typecheck && bun run --cwd packages/sync-cf-host typecheck && bun run --cwd packages/drizzle-zero-sqlite typecheck",
     "demo:test": "bun demo/src/test/run-e2e.ts",
     "check:all": "bun run lint && bun run format:check && bun run check && bun run test",
     "test:chat": "bun scripts/test-chat-integration.ts",
@@ -105,6 +106,7 @@
     "@pgsql/traverse": "17.2.6",
     "bedrock-sqlite": "workspace:*",
     "citty": "^0.2.0",
+    "orez-sync-cf-host": "workspace:*",
     "pg-gateway": "0.3.0-beta.4",
     "pgsql-parser": "^17.9.11",
     "postgres": "^3.4.5"
@@ -145,6 +147,7 @@
     "pg-to-sqlite",
     "sqlite-wasm",
     "packages/drizzle-zero-sqlite",
+    "packages/sync-cf-host",
     "packages/sync-browser-host"
   ],
   "trustedDependencies": [

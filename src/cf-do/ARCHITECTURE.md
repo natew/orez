@@ -78,7 +78,11 @@ same zero-cache process and durable SQLite state.
 - `src/cf-do/worker.ts` - `ZeroDO`, the generic DO SQL backend. It also still
   contains a bespoke Zero sync protocol handler used for development and
   protocol experiments, but the production Soot deploy path uses real
-  zero-cache through `startZeroCacheEmbedCF()`.
+  zero-cache through `startZeroCacheEmbedCF()`. Trusted subclasses can call its
+  protected `runApplicationTransaction()` method to execute custom application
+  work in the owning SQLite transaction. The method always passes through
+  `atomically()`, exposes materialized row arrays instead of cursors, and runs
+  deferred external effects after commit. It is not a public `fetch()` route.
 - `src/do-sql-tracking.ts` - billable/logical write metering and the 150k
   rolling write circuit. `src/replication/*` streams committed
   `_zero_changes`; neither is the source of row capture.

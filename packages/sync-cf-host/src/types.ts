@@ -1,3 +1,7 @@
+import type { DeferredEffect } from './post-commit.js'
+
+export type { DeferredEffect } from './post-commit.js'
+
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
 
@@ -38,8 +42,6 @@ export interface MutatorSql {
     ast: JsonValue
   ): Promise<Row[]>
 }
-
-export type DeferredEffect = () => void | Promise<void>
 
 export type MutatorContext = {
   claims: NormalizedClaims

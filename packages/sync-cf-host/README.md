@@ -17,6 +17,10 @@ Every SQL cursor is materialized before an await. Mutators may await only their
 `context.defer`, which runs only after commit. Application failures use the
 required second transaction to advance the LMID marker.
 
+The root `orez/cf-do` executor and this host consume the same `post-commit`
+module, so transaction retries discard effects from abandoned attempts in both
+paths.
+
 ## Wake channel and eviction
 
 `GET /<namespace>/wake?clientID=<id>&wakeToken=<capability>` upgrades to a

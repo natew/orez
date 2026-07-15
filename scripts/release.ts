@@ -21,7 +21,10 @@ import { resolve, join } from 'node:path'
 import { stdin as input, stdout as output } from 'node:process'
 import { createInterface } from 'node:readline/promises'
 
-import { orderReleasePackages } from './release-package-order.js'
+import {
+  orderReleasePackages,
+  selectLocalReleasePackages,
+} from './release-package-order.js'
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
@@ -188,28 +191,28 @@ if (into) {
   const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
 
   // gather packages the same way the normal flow does
-  const pkgDirs: { name: string; dir: string }[] = []
+  const pkgDirs: { name: string; dir: string; pkg: any }[] = []
   const rootPkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf-8'))
-  pkgDirs.push({ name: rootPkg.name, dir: root })
+  pkgDirs.push({ name: rootPkg.name, dir: root, pkg: rootPkg })
   const compilerDir = resolve(root, 'pg-to-sqlite')
   const compilerPkgPath = resolve(compilerDir, 'package.json')
   if (existsSync(compilerPkgPath)) {
     const compilerPkg = JSON.parse(readFileSync(compilerPkgPath, 'utf-8'))
-    pkgDirs.push({ name: compilerPkg.name, dir: compilerDir })
+    pkgDirs.push({ name: compilerPkg.name, dir: compilerDir, pkg: compilerPkg })
   }
 
   const sqlDir = resolve(root, 'sqlite-wasm')
   const sqlPkgPath = resolve(sqlDir, 'package.json')
   if (existsSync(sqlPkgPath)) {
     const sqlPkg = JSON.parse(readFileSync(sqlPkgPath, 'utf-8'))
-    pkgDirs.push({ name: sqlPkg.name, dir: sqlDir })
+    pkgDirs.push({ name: sqlPkg.name, dir: sqlDir, pkg: sqlPkg })
   }
 
   const syncHostDir = resolve(root, 'packages', 'sync-cf-host')
   const syncHostPkgPath = resolve(syncHostDir, 'package.json')
   if (existsSync(syncHostPkgPath)) {
     const syncHostPkg = JSON.parse(readFileSync(syncHostPkgPath, 'utf-8'))
-    pkgDirs.push({ name: syncHostPkg.name, dir: syncHostDir })
+    pkgDirs.push({ name: syncHostPkg.name, dir: syncHostDir, pkg: syncHostPkg })
   }
 
   const drizzleZeroSqliteDir = resolve(root, 'packages', 'drizzle-zero-sqlite')
@@ -218,39 +221,40 @@ if (into) {
     const drizzleZeroSqlitePkg = JSON.parse(
       readFileSync(drizzleZeroSqlitePkgPath, 'utf-8')
     )
-    pkgDirs.push({ name: drizzleZeroSqlitePkg.name, dir: drizzleZeroSqliteDir })
+    pkgDirs.push({
+      name: drizzleZeroSqlitePkg.name,
+      dir: drizzleZeroSqliteDir,
+      pkg: drizzleZeroSqlitePkg,
+    })
   }
+
+  const installed = new Set(
+    pkgDirs
+      .filter(({ name }) => existsSync(join(targetDir, 'node_modules', name)))
+      .map(({ name }) => name)
+  )
+  const selectedPkgDirs = selectLocalReleasePackages(pkgDirs, installed)
 
   let released = 0
   try {
-    for (const { name, dir } of pkgDirs) {
+    for (const { name, dir } of selectedPkgDirs) {
       const destDir = join(targetDir, 'node_modules', name)
-      if (!existsSync(destDir)) {
-        console.info(`  skip ${name} (not in target node_modules)`)
-        continue
-      }
+      mkdirSync(destDir, { recursive: true })
 
-      try {
-        run(`npm pack --pack-destination ${tmpDir}`, { cwd: dir, silent: true })
+      run(`npm pack --pack-destination ${tmpDir}`, { cwd: dir, silent: true })
 
-        const files = readdirSync(tmpDir)
-        const prefix = name.replace('@', '').replace('/', '-')
-        const packed = files.find((f) => f.startsWith(prefix) && f.endsWith('.tgz'))
+      const files = readdirSync(tmpDir)
+      const prefix = name.replace('@', '').replace('/', '-')
+      const packed = files.find((f) => f.startsWith(prefix) && f.endsWith('.tgz'))
 
-        if (!packed) {
-          console.warn(`  skip ${name}: pack produced no tgz`)
-          continue
-        }
+      if (!packed) throw new Error(`${name}: pack produced no tgz`)
 
-        const tgzPath = join(tmpDir, packed)
-        rmSync(join(destDir, 'dist'), { recursive: true, force: true })
-        run(`tar -xzf ${tgzPath} -C ${destDir} --strip-components=1`, { silent: true })
-        rmSync(tgzPath)
-        released++
-        console.info(`  ✓ ${name}`)
-      } catch (err) {
-        console.warn(`  ✗ ${name}: ${err}`)
-      }
+      const tgzPath = join(tmpDir, packed)
+      rmSync(join(destDir, 'dist'), { recursive: true, force: true })
+      run(`tar -xzf ${tgzPath} -C ${destDir} --strip-components=1`, { silent: true })
+      rmSync(tgzPath)
+      released++
+      console.info(`  ✓ ${name}`)
     }
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
@@ -374,6 +378,7 @@ if (!packOnly) {
   if (!skipTest) {
     run('bun run test')
     run('bun run test:sync-browser-host')
+    run('bun run test:sync-cf-host')
     if (packages.length > 1) {
       run('bun install', { cwd: sqliteWasmDir })
       run('bun run test', { cwd: sqliteWasmDir })

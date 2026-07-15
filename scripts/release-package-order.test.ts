@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'bun:test'
 
-import { orderReleasePackages } from './release-package-order.js'
+import {
+  orderReleasePackages,
+  selectLocalReleasePackages,
+} from './release-package-order.js'
 
 const pkg = (name: string, dependencies?: Record<string, string>) => ({
   pkg: { name, dependencies },
@@ -9,7 +12,10 @@ const pkg = (name: string, dependencies?: Record<string, string>) => ({
 describe('orderReleasePackages', () => {
   it('publishes exact workspace dependencies before their consumers', () => {
     const packages = [
-      pkg('orez', { 'bedrock-sqlite': 'workspace:*' }),
+      pkg('orez', {
+        'bedrock-sqlite': 'workspace:*',
+        'orez-sync-cf-host': 'workspace:*',
+      }),
       pkg('bedrock-sqlite'),
       pkg('pg-to-sqlite'),
       pkg('orez-sync-cf-host'),
@@ -17,9 +23,9 @@ describe('orderReleasePackages', () => {
 
     expect(orderReleasePackages(packages).map((item) => item.pkg.name)).toEqual([
       'bedrock-sqlite',
+      'orez-sync-cf-host',
       'orez',
       'pg-to-sqlite',
-      'orez-sync-cf-host',
     ])
   })
 
@@ -30,5 +36,17 @@ describe('orderReleasePackages', () => {
         pkg('b', { a: 'workspace:*' }),
       ])
     ).toThrow('release package dependency cycle')
+  })
+
+  it('adds a missing local dependency required by an installed package', () => {
+    const packages = [
+      pkg('orez', { 'orez-sync-cf-host': 'workspace:*' }),
+      pkg('orez-sync-cf-host'),
+      pkg('unrelated'),
+    ]
+
+    expect(
+      selectLocalReleasePackages(packages, new Set(['orez'])).map((item) => item.pkg.name)
+    ).toEqual(['orez-sync-cf-host', 'orez'])
   })
 })
