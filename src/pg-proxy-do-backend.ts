@@ -11,7 +11,7 @@ import {
   type FkChild,
 } from './fk-cascade.js'
 import { Mutex } from './mutex.js'
-import { compile as compilePgToSqlite } from './pg-sqlite-compiler/index.js'
+import { compile as compilePgToSqlite } from './pg-sqlite-compiler/compiler.js'
 import {
   foldCountMarkerResult,
   transformCountedDeleteCte,
