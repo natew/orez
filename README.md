@@ -16,6 +16,10 @@ oreZ makes Zero work on [PGlite](https://pglite.dev) (Postgres in WASM) and [bed
 - **Bun** 1.0+ or **Node.js** 20+
 - **Zero** 0.18+ (tested with 0.18.x)
 
+Repository development uses the exact Node and Bun versions in `mise.toml`.
+Run checks through `mise exec -- bun run check:all` so native test dependencies
+use the matching Node ABI.
+
 ## Limitations
 
 This is a **development tool only**. Not suitable for production.
