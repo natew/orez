@@ -84,6 +84,14 @@ The engine gains five entry points (wasm-exported like the existing ones):
   (metadata-only, cheap), set `upstream_watermark` to the catch-up DRAIN
   watermark (the last replayed change, not the page-time watermark), mark
   the generation complete, delete the progress row. One small transaction.
+  RENAME emits no DML triggers, so the change log records nothing about the
+  rebuild — finalize therefore also bumps the sync-core epoch
+  (store/pull invalidation) INSIDE the same cutover transaction, so every
+  pre-cutover client cookie is invalidated and the next pull returns a full
+  snapshot of the new live generation. A client full-resync after a
+  resnapshot is semantically required anyway (old cookies belong to a
+  change-log lineage the rebuild replaced); synthesizing per-row diffs at
+  cutover would recreate the giant-transaction problem this design removes.
 
 Host orchestration (`#ingest` snapshot branch):
 
