@@ -434,16 +434,17 @@ class TestPgClient {
     if (queued) return Promise.resolve(queued)
 
     return new Promise<PgMessage>((resolve, reject) => {
+      const waiter = (msg: PgMessage) => {
+        clearTimeout(timer)
+        resolve(msg)
+      }
       const timer = setTimeout(() => {
-        const idx = this.waiters.indexOf(resolve)
+        const idx = this.waiters.indexOf(waiter)
         if (idx >= 0) this.waiters.splice(idx, 1)
         reject(new Error(`timeout waiting for message (${timeoutMs}ms)`))
       }, timeoutMs)
 
-      this.waiters.push((msg) => {
-        clearTimeout(timer)
-        resolve(msg)
-      })
+      this.waiters.push(waiter)
     })
   }
 }
