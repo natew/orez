@@ -97,6 +97,15 @@ const cacheRequestProfile = `  async fetch(request) {
       this.__profileForcedFailures = Number(__profileUrl.searchParams.get('count') || 0)
       return Response.json({ ok: true, count: this.__profileForcedFailures })
     }
+    if (__profileUrl.pathname === '/__profile_fail_cache_initial_sync') {
+      this.__profileCacheInitialSyncFailures = Number(
+        __profileUrl.searchParams.get('count') || 0
+      )
+      return Response.json({
+        ok: true,
+        count: this.__profileCacheInitialSyncFailures,
+      })
+    }
     if (__profileUrl.pathname === '/__profile_skip_rank_heal') {
       this.__profileSkipRankHeal = true
       return Response.json({ ok: true })
@@ -174,7 +183,21 @@ export function instrumentChatDataWorker(source: string): {
     CACHE_RANGE_START,
     CACHE_RANGE_END,
     '  constructor(ctx, env) {\n    super(ctx, env)\n',
-    "  constructor(ctx, env) {\n    super(ctx, env)\n    this.__profile = installSqlProfiler(ctx.storage.sql, 'cache:' + ctx.id.toString())\n",
+    `  constructor(ctx, env) {
+    super(ctx, env)
+    this.__profile = installSqlProfiler(ctx.storage.sql, 'cache:' + ctx.id.toString())
+    const __profileCacheExec = ctx.storage.sql.exec.bind(ctx.storage.sql)
+    ctx.storage.sql.exec = (sql, ...params) => {
+      if (
+        this.__profileCacheInitialSyncFailures > 0 &&
+        /^\\s*INSERT INTO "reaction"/i.test(String(sql))
+      ) {
+        this.__profileCacheInitialSyncFailures--
+        throw new Error('profile forced cache initial-sync write failure')
+      }
+      return __profileCacheExec(sql, ...params)
+    }
+`,
     'ZeroCacheDO constructor'
   )
   next = replaceInRange(

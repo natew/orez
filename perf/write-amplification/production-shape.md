@@ -192,6 +192,38 @@ failure, so deploy warm polling cannot drive this repeated-attempt schedule.
 The schedule is temporally possible through ordinary client reconnects, but
 its measured source total rules it out as the incident writer.
 
+### Mid-initial-sync failure profile
+
+The wrapper harness can also fail the first `reaction` replica insert. This is
+late enough that Zero has completed the source-side metadata and rollback work,
+but early enough that only a small part of the replica has materialized. Two
+failures followed by a healthy recovery measured:
+
+| Rollback guard       | Attempt        | Source rows | Cache rows | Elapsed |
+| -------------------- | -------------- | ----------: | ---------: | ------: |
+| Orez 0.5.9 all-table | first failure  |      13,064 |      3,472 | 35.36 s |
+| Orez 0.5.9 all-table | second failure |       6,722 |      3,470 | 35.25 s |
+| Orez 0.5.9 all-table | recovery       |       8,230 |     25,819 | 15.43 s |
+| Targeted snapshots   | first failure  |       2,715 |      3,472 | 35.36 s |
+| Targeted snapshots   | second failure |       1,523 |      3,470 | 35.25 s |
+| Targeted snapshots   | recovery       |       3,023 |     25,819 | 15.92 s |
+
+This proves a mid-sync failure can produce the source-heavy shape missing from
+the pre-embed fault schedule. It still cannot reproduce the production window
+as one sequential wrapper. A continuous fit to the 0.5.9 measurements needs
+62.82 failures and 10.41 recoveries, or 73.24 attempts. The failed attempts
+alone take 36.89 minutes with the harness's 30-second ready deadline, already
+longer than the 25-minute incident. Production used a much longer internal
+deadline. Explaining the totals through this path therefore requires concurrent
+or reset generations, or another source-side writer. Retained production logs
+cannot distinguish those cases.
+
+Targeted rollback snapshots cut the first two failed attempts' source writes by
+79.2% and 77.3%, and the recovery by 63.3%. Their measured ratios have no
+nonnegative combination that matches the production source and cache totals.
+The optimization bounds this failure class even though teardown and
+per-instance routing are still required to prevent concurrent generations.
+
 The SQL totals are comparable to Cloudflare billing because they use the
 runtime's billing counter. Neither harness meters Durable Object key-value
 methods or alarms. The production wrapper uses those for small tags, instance
