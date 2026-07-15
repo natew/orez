@@ -385,7 +385,7 @@ async function startGeneration(opts: {
     async stop() {
       await embed.stop().catch(() => {})
       bridge.server.close()
-      proxy.close()
+      await proxy.close()
       await Promise.all([
         backends.postgres.close().catch(() => {}),
         backends.cvr.close().catch(() => {}),

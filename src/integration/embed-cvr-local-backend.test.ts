@@ -563,7 +563,7 @@ describe('zero-cache embed on the CF data plane (ZeroDO upstream, local cvr/cdb)
   afterAll(async () => {
     if (embed) await embed.stop().catch(() => {})
     if (bridge) bridge.server.close()
-    if (proxy) proxy.close()
+    if (proxy) await proxy.close()
     try {
       rmSync(dataDir, { recursive: true, force: true })
     } catch {}

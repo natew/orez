@@ -36,8 +36,6 @@
  * `shouldHibernateIdleZeroCache` in ./zero-cache-do-idle.ts.
  */
 
-import './shims/zero-process-env.js'
-
 import { EventEmitter } from 'node:events'
 
 import { setLogLevel } from '../log.js'
@@ -53,6 +51,7 @@ import {
 import { sweepLeakedSqliteHandles } from './embed-generation.js'
 import { createLocalSqlBackend } from './local-sql-backend.js'
 import { resetFastifyRegistry } from './shims/fastify.js'
+import { acquireZeroProcessEnv } from './shims/zero-process-env.js'
 // static import so wrangler follows zero-cache's dependency tree and shim aliases.
 import { runWorker as _runWorker } from './zero-cache-run-worker.js'
 
@@ -60,6 +59,111 @@ const runWorkerFn = _runWorker as (
   parent: unknown,
   env: Record<string, string>
 ) => Promise<void>
+
+const WORKER_SHUTDOWN_TIMEOUT_MS = 5_000
+
+type GenerationState = {
+  cleanupDone: boolean
+  cleanupFailed: boolean
+  token: symbol
+  workerDone: boolean
+}
+
+type OwnedMutation = {
+  hadValue: boolean
+  installedValue: unknown
+  key: PropertyKey
+  previousValue: unknown
+  target: Record<PropertyKey, unknown>
+}
+
+type EmbedParent = EventEmitter & {
+  send: (msg: unknown, sendHandle?: unknown) => boolean
+  kill: (signal?: string) => void
+  pid: number
+}
+
+// zero-cache's in-process worker graph and the CF shims still contain
+// process-wide module state. keep one embed per isolate until those upstream
+// globals are instance-routed; rejecting a second generation is safer than
+// cross-routing one durable object's sql or process events into another.
+let activeGeneration: GenerationState | null = null
+const propertyOwners = new WeakMap<object, Map<PropertyKey, symbol>>()
+
+function releaseGenerationWhenComplete(generation: GenerationState): void {
+  if (
+    activeGeneration === generation &&
+    generation.workerDone &&
+    generation.cleanupDone &&
+    !generation.cleanupFailed
+  ) {
+    activeGeneration = null
+  }
+}
+
+function setOwnedProperty(
+  mutations: OwnedMutation[],
+  generation: GenerationState,
+  target: Record<PropertyKey, unknown>,
+  key: PropertyKey,
+  value: unknown
+): void {
+  const mutation = mutations.find(
+    (candidate) => candidate.target === target && candidate.key === key
+  )
+  if (mutation) {
+    mutation.installedValue = value
+  } else {
+    mutations.push({
+      hadValue: Object.prototype.hasOwnProperty.call(target, key),
+      installedValue: value,
+      key,
+      previousValue: target[key],
+      target,
+    })
+  }
+
+  let owners = propertyOwners.get(target)
+  if (!owners) {
+    owners = new Map()
+    propertyOwners.set(target, owners)
+  }
+  owners.set(key, generation.token)
+  target[key] = value
+}
+
+function updateOwnedProperty(
+  mutations: OwnedMutation[],
+  generation: GenerationState,
+  target: Record<PropertyKey, unknown>,
+  key: PropertyKey
+): void {
+  const mutation = mutations.find(
+    (candidate) => candidate.target === target && candidate.key === key
+  )
+  if (!mutation) return
+  const owners = propertyOwners.get(target)
+  if (owners?.get(key) !== generation.token) return
+  mutation.installedValue = target[key]
+}
+
+function restoreOwnedProperties(
+  mutations: OwnedMutation[],
+  generation: GenerationState
+): void {
+  for (let index = mutations.length - 1; index >= 0; index--) {
+    const mutation = mutations[index]
+    const owners = propertyOwners.get(mutation.target)
+    if (owners?.get(mutation.key) !== generation.token) continue
+    owners.delete(mutation.key)
+    if (mutation.target[mutation.key] !== mutation.installedValue) continue
+    if (mutation.hadValue) {
+      mutation.target[mutation.key] = mutation.previousValue
+    } else {
+      delete mutation.target[mutation.key]
+    }
+  }
+}
 
 export interface ZeroCacheEmbedCFOptions {
   /** DO SQLite storage (also registered on globalThis.__orez_do_sqlite) */
@@ -166,348 +270,425 @@ function addProtocolSessionFactory(
 export async function startZeroCacheEmbedCF(
   opts: ZeroCacheEmbedCFOptions
 ): Promise<ZeroCacheEmbedCF> {
-  // wire orez's own logger from env, mirroring the node path's setLogLevel
-  // (index.ts). without this, OREZ_LOG_LEVEL=debug on a CF deploy is silently
-  // ignored and the replication poll loop is undebuggable in tails.
-  setLogLevel((opts.env?.OREZ_LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'warn')
-
-  // generation hermeticity: the isolate (module state) outlives a stop() —
-  // CF reuses it across DO instance recreation after idle-hibernation
-  // teardown. a fresh embed must start from the replication-handler state a
-  // fresh isolate would have (lsn floor, stream watermark, schema caches);
-  // the reconnect reconciliation in handleStartReplication is designed to
-  // resume from durable state, not from a prior generation's module vars.
-  resetReplicationState()
-
-  // embed restart contract (see ./embed-generation.ts): reclaim what process
-  // death would have — sqlite handles the dead generation never closed
-  // (zero-cache relies on process-per-worker exit for these), and the
-  // fastify/ws shim instance registry (a dead change-streamer otherwise
-  // captures the new generation's replicator subscription and boot hangs).
-  const leakedHandles = sweepLeakedSqliteHandles()
-  if (leakedHandles > 0) {
-    console.warn(
-      `[orez-zero-cache-cf] closed ${leakedHandles} sqlite handles leaked by the previous embed generation`
+  if (activeGeneration) {
+    throw new Error(
+      'zero-cache CF embed: another generation is active or still tearing down'
     )
   }
-  resetFastifyRegistry()
 
-  const appId = opts.appId || 'zero'
-  const publications = opts.publications?.join(',') || `orez_${appId}_public`
-  const readyTimeout = opts.readyTimeout ?? 30000
-  const pgUser = opts.pgUser || 'user'
-  const pgPassword = opts.pgPassword || ''
-  const backendUrl = opts.backendUrl || 'https://orez-do-backend.local'
-  const backendNamespace = opts.backendNamespace || appId
-
-  // zero-cache's CVR and change DBs are embed-private state; they live in
-  // THIS Durable Object's SQLite so their pg sessions never pay a cross-DO
-  // round-trip. only the shared upstream `postgres` db routes to ZeroSqlDO.
-  const localSql = createLocalSqlBackend(opts.doSqlite)
-
-  const createBackend = (dbName: string) =>
-    new DoBackend(backendUrl, dbName, backendNamespace, {
-      fetch: dbName === 'postgres' ? opts.backendFetch : localSql.fetch,
-      txOwner: EMBED_TX_OWNER,
-    })
-
-  // crash recovery: this embed boot proves the previous embed generation is
-  // dead, so any journaled transaction it left mid-flight (DO eviction,
-  // deploy upgrade-kill) is rolled back BEFORE any pg session opens. without
-  // this, a partially-persisted tx (e.g. the change-streamer's cdc changeLog
-  // write) wedges replication on every subsequent boot.
-  localSql.recoverOrphanedTransactions()
-  await recoverRemoteTransactions(
-    `${backendUrl.replace(/\/+$/, '')}/recover-txs?db=postgres&ns=${encodeURIComponent(backendNamespace)}`,
-    opts.backendFetch
-  )
-
-  const backends = {
-    postgres: createBackend('postgres'),
-    cvr: createBackend('zero_cvr'),
-    cdb: createBackend('zero_cdb'),
+  const generation: GenerationState = {
+    cleanupDone: false,
+    cleanupFailed: false,
+    token: Symbol('zero-cache-cf-generation'),
+    workerDone: true,
   }
+  activeGeneration = generation
 
-  const proxyBackends = {
-    postgres: addProtocolSessionFactory(backends.postgres, () =>
-      createBackend('postgres')
-    ),
-    cvr: addProtocolSessionFactory(backends.cvr, () => createBackend('zero_cvr')),
-    cdb: addProtocolSessionFactory(backends.cdb, () => createBackend('zero_cdb')),
-  }
-
-  await Promise.all([
-    backends.postgres.waitReady,
-    backends.cvr.waitReady,
-    backends.cdb.waitReady,
-  ])
-
-  const proxy: BrowserProxy = await createBrowserProxy(
-    {
-      postgres: proxyBackends.postgres as any,
-      cvr: proxyBackends.cvr as any,
-      cdb: proxyBackends.cdb as any,
-      postgresReplicas: [],
-    } as any,
-    {
-      pgUser,
-      pgPassword,
-      singleDb: false,
-      logLevel: opts.env?.ZERO_LOG_LEVEL || 'info',
-    }
-  )
-
-  // ensure globals are set for shims
-  ;(globalThis as any).__orez_do_sqlite = opts.doSqlite
-  ;(globalThis as any).__orez_proxy_connect = (port: MessagePort) => {
-    proxy.handleConnection(port)
-  }
-  ;(globalThis as any).__orez_proxy_user = pgUser
-  ;(globalThis as any).__orez_proxy_password = pgPassword
-
-  // ensure process.env exists (CF Workers doesn't have it natively)
-  ;(globalThis as any).process ??= {}
-  ;(globalThis as any).process.env ??= {}
-  ;(globalThis as any).process.pid ??= 1
-  ;(globalThis as any).process.argv ??= []
-
-  // CRITICAL: set SINGLE_PROCESS before importing zero-cache.
-  // zero-cache's childWorker() checks process.env.SINGLE_PROCESS directly.
-  ;(globalThis as any).process.env.SINGLE_PROCESS = '1'
-  ;(globalThis as any).process.env.NODE_ENV = 'development'
-
-  // shim process.kill (used by HeartbeatMonitor) to be a no-op
-  ;(globalThis as any).process.kill ??= () => {}
-
-  // create fake parent EventEmitter for zero-cache's runWorker()
-  // must be declared before process.exit shim (which references it)
-  const parent = new EventEmitter() as EventEmitter & {
-    send: (msg: unknown) => boolean
-    kill: (signal?: string) => void
-    pid: number
-  }
-
-  const parentEmitter = new EventEmitter()
-
-  parent.send = (message: unknown, sendHandle?: unknown) => {
-    parentEmitter.emit('message', message, sendHandle)
-    return true
-  }
-  parent.kill = (signal = 'SIGTERM') => {
-    parent.emit(signal, signal)
-  }
-  parent.pid = (globalThis as any).process.pid ?? 1
-
-  // shim process.exit to emit on parent instead of actually exiting
-  const origExit = (globalThis as any).process.exit
-  const origNodeEnv = (globalThis as any).process.env.NODE_ENV
-  const origKill = (globalThis as any).process.kill
-  const origFetch = (globalThis as any).fetch
-  ;(globalThis as any).process.exit = (code?: number) => {
-    parent.emit('exit', code ?? 0)
-  }
-  if (opts.apiFetch) {
-    ;(globalThis as any).fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-      const request = new Request(input, init)
-      const url = new URL(request.url)
-      if (url.hostname === 'orez-zero-api.local') return opts.apiFetch!(request)
-      return origFetch(input as any, init as any)
-    }
-  }
-
-  // build env for zero-cache
-  const env: Record<string, string> = {
-    ...((globalThis as any).process.env as Record<string, string>),
-    SINGLE_PROCESS: '1',
-    NODE_ENV: 'development',
-    // postgres-browser intercepts these URLs and routes PG wire over
-    // MessagePort to the DoBackend-backed proxy above.
-    ZERO_UPSTREAM_DB: `postgres://${pgUser}:ignored@127.0.0.1/postgres`,
-    ZERO_CVR_DB: `postgres://${pgUser}:ignored@127.0.0.1/zero_cvr`,
-    ZERO_CHANGE_DB: `postgres://${pgUser}:ignored@127.0.0.1/zero_cdb`,
-    // this path is intercepted by the sqlite shim
-    ZERO_REPLICA_FILE: ':do-sqlite:',
-    // don't bind a port — we route via inject/handoff
-    ZERO_PORT: '0',
-    ZERO_APP_ID: appId,
-    ZERO_APP_PUBLICATIONS: publications,
-    ZERO_ADMIN_PASSWORD: opts.env?.ZERO_ADMIN_PASSWORD || crypto.randomUUID(),
-    ZERO_NUM_SYNC_WORKERS: opts.env?.ZERO_NUM_SYNC_WORKERS || '1',
-    ZERO_ENABLE_QUERY_PLANNER: 'false',
-    // one isolate, one sync worker — zero-cache's default pg pools (upstream 20,
-    // cvr 30, change 5) would let ~50 DoBackend protocol sessions accumulate
-    // inside the single 128MB DO isolate, each carrying its own rewrite cache +
-    // protocol/schema state. cap all three hard: with SINGLE_PROCESS + one sync
-    // worker a couple connections per db is plenty, and the freed heap is what
-    // keeps cold-boot view-syncer hydration from tipping the isolate over its
-    // memory limit. (these are the max=N pools; zero also opens fixed max=1/max=2
-    // pools per db for the replication stream + initial-sync that we can't cap.)
-    ZERO_UPSTREAM_MAX_CONNS: opts.env?.ZERO_UPSTREAM_MAX_CONNS || '2',
-    ZERO_CVR_MAX_CONNS: opts.env?.ZERO_CVR_MAX_CONNS || '2',
-    ZERO_CHANGE_MAX_CONNS: opts.env?.ZERO_CHANGE_MAX_CONNS || '2',
-    // 'info' dumps the full table schema as JSON on every replication-status
-    // event; during cold-boot hydration + the reconnect loop that string churn
-    // is pure heap pressure in the 128MB isolate. 'warn' keeps errors visible.
-    ZERO_LOG_LEVEL: opts.env?.ZERO_LOG_LEVEL || 'warn',
-    ...opts.env,
-    // shadow sync is an optional upstream canary that imports the initial-sync
-    // copy path. keep it disabled in the CF embed to avoid bundling unused
-    // worker code and storage paths into Durable Objects.
-    ZERO_SHADOW_SYNC_ENABLED: 'false',
-  }
-  Object.assign((globalThis as any).process.env, env)
-
-  const debugEmbed =
-    env.OREZ_DEBUG_EMBED === '1' || (globalThis as any).__OREZ_DEBUG_EMBED__ === true
-
-  // wrap parent with onMessageType/onceMessageType helpers
-  // must forward sendHandle (second arg) for WebSocket handoff
-  const wrappedParent = new Proxy(parent, {
-    get(target, prop, receiver) {
-      if (prop === 'onMessageType') {
-        return (type: string, handler: (msg: unknown, sendHandle?: unknown) => void) => {
-          target.on('message', (data: unknown, sendHandle?: unknown) => {
-            if (Array.isArray(data) && data.length === 2 && data[0] === type) {
-              handler(data[1], sendHandle)
-            }
-          })
-          return receiver
-        }
-      }
-      if (prop === 'onceMessageType') {
-        return (type: string, handler: (msg: unknown, sendHandle?: unknown) => void) => {
-          const listener = (data: unknown, sendHandle?: unknown) => {
-            if (Array.isArray(data) && data.length === 2 && data[0] === type) {
-              target.off('message', listener)
-              handler(data[1], sendHandle)
-            }
-          }
-          target.on('message', listener)
-          return receiver
-        }
-      }
-      return Reflect.get(target, prop, receiver)
-    },
-  })
-
-  // track state
+  const globalRecord = globalThis as Record<PropertyKey, unknown>
+  let processRecord: Record<PropertyKey, unknown>
+  let processEnv: Record<PropertyKey, unknown>
+  let releaseProcessEnv: (() => void) | null = null
+  const mutations: OwnedMutation[] = []
+  const backendRoots: DoBackend[] = []
+  let proxy: BrowserProxy | null = null
+  let parent: EmbedParent | null = null
+  let parentEmitter: EventEmitter | null = null
+  let wrappedParent: unknown = null
   let isReady = false
+  let stopping = false
   let runWorkerPromise: Promise<void> | null = null
+  let workerSettledPromise: Promise<void> | null = null
+  let workerError: unknown
+  let workerFailed = false
+  let startupFailure: unknown
   let shutdownPromise: Promise<void> | null = null
-
-  // capture the Fastify shim instance from zero-cache's HttpService.
-  // the fastify shim stores itself on globalThis when created.
   let fastifyInstance: any = null
   let readyTimer: ReturnType<typeof setTimeout> | undefined
+  let debugEmbed = false
   const webSocketHandoff = new DurableObjectWebSocketHandoff(() => fastifyInstance)
+
+  const updateOwnedFastifyInstance = () => {
+    const instancesMutation = mutations.find(
+      (mutation) =>
+        mutation.target === globalRecord && mutation.key === '__orez_fastify_instances'
+    )
+    const currentInstance = globalRecord.__orez_fastify_instance
+    if (
+      Array.isArray(instancesMutation?.installedValue) &&
+      instancesMutation.installedValue.includes(currentInstance)
+    ) {
+      updateOwnedProperty(mutations, generation, globalRecord, '__orez_fastify_instance')
+    }
+  }
 
   const shutdown = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise
+    stopping = true
     isReady = false
+    if (readyTimer) clearTimeout(readyTimer)
+
     shutdownPromise = (async () => {
       const cleanupErrors: unknown[] = []
-      try {
-        wrappedParent.kill('SIGTERM')
-      } catch (err) {
-        cleanupErrors.push(err)
+      let resourceCleanupFailed = false
+
+      if (wrappedParent && runWorkerPromise && !generation.workerDone) {
+        try {
+          ;(wrappedParent as { kill(signal?: string): void }).kill('SIGTERM')
+        } catch (err) {
+          cleanupErrors.push(err)
+        }
       }
-      if (runWorkerPromise) {
-        const worker = runWorkerPromise
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, 5000)
-          worker
-            .catch(() => {})
-            .then(() => {
-              clearTimeout(timer)
-              resolve()
-            })
-        })
+
+      if (workerSettledPromise && !generation.workerDone) {
+        let timeout: ReturnType<typeof setTimeout> | undefined
+        const workerStopped = await Promise.race([
+          workerSettledPromise.then(() => true),
+          new Promise<false>((resolve) => {
+            timeout = setTimeout(() => resolve(false), WORKER_SHUTDOWN_TIMEOUT_MS)
+          }),
+        ])
+        if (timeout) clearTimeout(timeout)
+        if (!workerStopped) {
+          cleanupErrors.push(
+            new Error(
+              `zero-cache CF embed: worker did not terminate within ${WORKER_SHUTDOWN_TIMEOUT_MS}ms`
+            )
+          )
+        }
       }
-      await new Promise((resolve) => setTimeout(resolve, 200))
-      try {
-        proxy.close()
-      } catch (err) {
-        cleanupErrors.push(err)
+      if (workerFailed && workerError !== startupFailure) {
+        cleanupErrors.push(workerError)
       }
+
+      if (proxy) {
+        try {
+          await proxy.close()
+        } catch (err) {
+          resourceCleanupFailed = true
+          cleanupErrors.push(err)
+        }
+      }
+
       const backendResults = await Promise.allSettled(
-        [backends.postgres, backends.cvr, backends.cdb].map((backend) =>
-          Promise.resolve().then(() => backend.close())
-        )
+        backendRoots.map((backend) => Promise.resolve().then(() => backend.close()))
       )
       for (const result of backendResults) {
-        if (result.status === 'rejected') cleanupErrors.push(result.reason)
+        if (result.status === 'rejected') {
+          resourceCleanupFailed = true
+          cleanupErrors.push(result.reason)
+        }
       }
-      // restore all modified globals even when worker or resource teardown fails.
-      if (origExit) {
-        ;(globalThis as any).process.exit = origExit
+
+      updateOwnedFastifyInstance()
+
+      restoreOwnedProperties(mutations, generation)
+      releaseProcessEnv?.()
+      parentEmitter?.removeAllListeners()
+      if (generation.workerDone) parent?.removeAllListeners()
+
+      generation.cleanupDone = true
+      generation.cleanupFailed = resourceCleanupFailed
+      releaseGenerationWhenComplete(generation)
+
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(cleanupErrors, 'zero-cache CF embed: teardown failed')
       }
-      if (origNodeEnv !== undefined) {
-        ;(globalThis as any).process.env.NODE_ENV = origNodeEnv
-      }
-      if (origKill) {
-        ;(globalThis as any).process.kill = origKill
-      }
-      if (opts.apiFetch) {
-        ;(globalThis as any).fetch = origFetch
-      }
-      delete (globalThis as any).process.env.SINGLE_PROCESS
-      delete (globalThis as any).__orez_proxy_connect
-      delete (globalThis as any).__orez_proxy_user
-      delete (globalThis as any).__orez_proxy_password
-      if (cleanupErrors.length > 0) throw cleanupErrors[0]
     })()
     return shutdownPromise
   }
 
-  // wait for "ready" message
-  const readyPromise = new Promise<void>((resolve, reject) => {
-    readyTimer = setTimeout(() => {
-      reject(
-        new Error(
-          `zero-cache CF embed: timed out waiting for ready after ${readyTimeout}ms`
-        )
+  const handleUnexpectedWorkerExit = () => {
+    if (!isReady || stopping) return
+    isReady = false
+    if (!workerFailed) {
+      workerFailed = true
+      workerError = new Error(
+        'zero-cache CF embed: runWorker exited after becoming ready'
       )
-    }, readyTimeout)
-
-    parentEmitter.on('message', (msg: unknown) => {
-      if (debugEmbed) console.debug('[orez-zero-cache-cf] parent message', msg)
-      if (Array.isArray(msg) && msg[0] === 'ready') {
-        if (readyTimer) clearTimeout(readyTimer)
-        isReady = true
-        resolve()
-      }
+    }
+    void shutdown().catch((error) => {
+      console.error('[orez-zero-cache-cf] unexpected worker exit cleanup failed', error)
     })
-  })
+  }
 
   try {
-    // start zero-cache and wait for ready.
-    runWorkerPromise = runWorkerFn(wrappedParent, env).catch((err) => {
-      if (debugEmbed) console.error('[orez-zero-cache-cf] runWorker error', err)
-      if (!isReady) {
-        throw err
+    releaseProcessEnv = acquireZeroProcessEnv()
+    processRecord = globalRecord.process as Record<PropertyKey, unknown>
+    processEnv = processRecord.env as Record<PropertyKey, unknown>
+
+    // wire orez's own logger from env, mirroring the node path's setLogLevel.
+    setLogLevel(
+      (opts.env?.OREZ_LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'warn'
+    )
+
+    resetReplicationState()
+    const leakedHandles = sweepLeakedSqliteHandles()
+    if (leakedHandles > 0) {
+      console.warn(
+        `[orez-zero-cache-cf] closed ${leakedHandles} sqlite handles leaked by the previous embed generation`
+      )
+    }
+
+    setOwnedProperty(
+      mutations,
+      generation,
+      globalRecord,
+      '__orez_fastify_instance',
+      undefined
+    )
+    delete globalRecord.__orez_fastify_instance
+    setOwnedProperty(mutations, generation, globalRecord, '__orez_fastify_instances', [])
+    resetFastifyRegistry()
+    updateOwnedProperty(mutations, generation, globalRecord, '__orez_fastify_instances')
+
+    const appId = opts.appId || 'zero'
+    const publications = opts.publications?.join(',') || `orez_${appId}_public`
+    const readyTimeout = opts.readyTimeout ?? 30000
+    const pgUser = opts.pgUser || 'user'
+    const pgPassword = opts.pgPassword || ''
+    const backendUrl = opts.backendUrl || 'https://orez-do-backend.local'
+    const backendNamespace = opts.backendNamespace || appId
+    const localSql = createLocalSqlBackend(opts.doSqlite)
+
+    const instantiateBackend = (dbName: string) =>
+      new DoBackend(backendUrl, dbName, backendNamespace, {
+        fetch: dbName === 'postgres' ? opts.backendFetch : localSql.fetch,
+        txOwner: EMBED_TX_OWNER,
+      })
+
+    const createRootBackend = (dbName: string) => {
+      const backend = instantiateBackend(dbName)
+      backendRoots.push(backend)
+      return backend
+    }
+
+    localSql.recoverOrphanedTransactions()
+    await recoverRemoteTransactions(
+      `${backendUrl.replace(/\/+$/, '')}/recover-txs?db=postgres&ns=${encodeURIComponent(backendNamespace)}`,
+      opts.backendFetch
+    )
+
+    const backends = {
+      postgres: createRootBackend('postgres'),
+      cvr: createRootBackend('zero_cvr'),
+      cdb: createRootBackend('zero_cdb'),
+    }
+    const proxyBackends = {
+      postgres: addProtocolSessionFactory(backends.postgres, () =>
+        instantiateBackend('postgres')
+      ),
+      cvr: addProtocolSessionFactory(backends.cvr, () => instantiateBackend('zero_cvr')),
+      cdb: addProtocolSessionFactory(backends.cdb, () => instantiateBackend('zero_cdb')),
+    }
+
+    const backendReadyResults = await Promise.allSettled([
+      backends.postgres.waitReady,
+      backends.cvr.waitReady,
+      backends.cdb.waitReady,
+    ])
+    const backendReadyErrors = backendReadyResults.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : []
+    )
+    if (backendReadyErrors.length === 1) throw backendReadyErrors[0]
+    if (backendReadyErrors.length > 1) {
+      throw new AggregateError(
+        backendReadyErrors,
+        'zero-cache CF embed: backend setup failed'
+      )
+    }
+
+    proxy = await createBrowserProxy(
+      {
+        postgres: proxyBackends.postgres as any,
+        cvr: proxyBackends.cvr as any,
+        cdb: proxyBackends.cdb as any,
+        postgresReplicas: [],
+      } as any,
+      {
+        pgUser,
+        pgPassword,
+        singleDb: false,
+        logLevel: opts.env?.ZERO_LOG_LEVEL || 'info',
       }
-      // after ready, errors during shutdown are expected
+    )
+
+    setOwnedProperty(
+      mutations,
+      generation,
+      globalRecord,
+      '__orez_do_sqlite',
+      opts.doSqlite
+    )
+    setOwnedProperty(
+      mutations,
+      generation,
+      globalRecord,
+      '__orez_proxy_connect',
+      (port: MessagePort) => proxy?.handleConnection(port)
+    )
+    setOwnedProperty(mutations, generation, globalRecord, '__orez_proxy_user', pgUser)
+    setOwnedProperty(
+      mutations,
+      generation,
+      globalRecord,
+      '__orez_proxy_password',
+      pgPassword
+    )
+
+    const createdParent = new EventEmitter() as EmbedParent
+    parent = createdParent
+    parentEmitter = new EventEmitter()
+    createdParent.send = (message: unknown, sendHandle?: unknown) => {
+      parentEmitter?.emit('message', message, sendHandle)
+      return true
+    }
+    createdParent.kill = (signal = 'SIGTERM') => {
+      createdParent.emit(signal, signal)
+    }
+    createdParent.pid = (processRecord.pid as number | undefined) ?? 1
+
+    const originalFetch = globalRecord.fetch as typeof fetch
+    setOwnedProperty(mutations, generation, processRecord, 'exit', (code?: number) =>
+      parent?.emit('exit', code ?? 0)
+    )
+    if (opts.apiFetch) {
+      setOwnedProperty(
+        mutations,
+        generation,
+        globalRecord,
+        'fetch',
+        (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = new Request(input, init)
+          const url = new URL(request.url)
+          if (url.hostname === 'orez-zero-api.local') return opts.apiFetch!(request)
+          return originalFetch(input as any, init as any)
+        }
+      )
+    }
+
+    const env: Record<string, string> = {
+      ...(processEnv as Record<string, string>),
+      SINGLE_PROCESS: '1',
+      NODE_ENV: 'development',
+      ZERO_UPSTREAM_DB: `postgres://${pgUser}:ignored@127.0.0.1/postgres`,
+      ZERO_CVR_DB: `postgres://${pgUser}:ignored@127.0.0.1/zero_cvr`,
+      ZERO_CHANGE_DB: `postgres://${pgUser}:ignored@127.0.0.1/zero_cdb`,
+      ZERO_REPLICA_FILE: ':do-sqlite:',
+      ZERO_PORT: '0',
+      ZERO_APP_ID: appId,
+      ZERO_APP_PUBLICATIONS: publications,
+      ZERO_ADMIN_PASSWORD: opts.env?.ZERO_ADMIN_PASSWORD || crypto.randomUUID(),
+      ZERO_NUM_SYNC_WORKERS: opts.env?.ZERO_NUM_SYNC_WORKERS || '1',
+      ZERO_ENABLE_QUERY_PLANNER: 'false',
+      ZERO_UPSTREAM_MAX_CONNS: opts.env?.ZERO_UPSTREAM_MAX_CONNS || '2',
+      ZERO_CVR_MAX_CONNS: opts.env?.ZERO_CVR_MAX_CONNS || '2',
+      ZERO_CHANGE_MAX_CONNS: opts.env?.ZERO_CHANGE_MAX_CONNS || '2',
+      ZERO_LOG_LEVEL: opts.env?.ZERO_LOG_LEVEL || 'warn',
+      ...opts.env,
+      ZERO_SHADOW_SYNC_ENABLED: 'false',
+    }
+    for (const [key, value] of Object.entries(env)) {
+      setOwnedProperty(mutations, generation, processEnv, key, value)
+    }
+
+    debugEmbed =
+      env.OREZ_DEBUG_EMBED === '1' || globalRecord.__OREZ_DEBUG_EMBED__ === true
+
+    wrappedParent = new Proxy(createdParent, {
+      get(target, prop, receiver) {
+        if (prop === 'onMessageType') {
+          return (
+            type: string,
+            handler: (msg: unknown, sendHandle?: unknown) => void
+          ) => {
+            target.on('message', (data: unknown, sendHandle?: unknown) => {
+              if (Array.isArray(data) && data.length === 2 && data[0] === type) {
+                handler(data[1], sendHandle)
+              }
+            })
+            return receiver
+          }
+        }
+        if (prop === 'onceMessageType') {
+          return (
+            type: string,
+            handler: (msg: unknown, sendHandle?: unknown) => void
+          ) => {
+            const listener = (data: unknown, sendHandle?: unknown) => {
+              if (Array.isArray(data) && data.length === 2 && data[0] === type) {
+                target.off('message', listener)
+                handler(data[1], sendHandle)
+              }
+            }
+            target.on('message', listener)
+            return receiver
+          }
+        }
+        return Reflect.get(target, prop, receiver)
+      },
     })
+
+    const readyPromise = new Promise<void>((resolve, reject) => {
+      readyTimer = setTimeout(() => {
+        reject(
+          new Error(
+            `zero-cache CF embed: timed out waiting for ready after ${readyTimeout}ms`
+          )
+        )
+      }, readyTimeout)
+      parentEmitter?.on('message', (msg: unknown) => {
+        if (debugEmbed) console.debug('[orez-zero-cache-cf] parent message', msg)
+        if (!stopping && Array.isArray(msg) && msg[0] === 'ready') {
+          if (readyTimer) clearTimeout(readyTimer)
+          isReady = true
+          resolve()
+        }
+      })
+    })
+
+    generation.workerDone = false
+    runWorkerPromise = Promise.resolve().then(() => runWorkerFn(wrappedParent, env))
+    void runWorkerPromise.catch((err) => {
+      if (debugEmbed) console.error('[orez-zero-cache-cf] runWorker error', err)
+    })
+    workerSettledPromise = runWorkerPromise.then(
+      () => {
+        generation.workerDone = true
+        handleUnexpectedWorkerExit()
+        if (generation.cleanupDone) parent?.removeAllListeners()
+        releaseGenerationWhenComplete(generation)
+      },
+      (error) => {
+        workerError = error
+        workerFailed = true
+        generation.workerDone = true
+        handleUnexpectedWorkerExit()
+        if (generation.cleanupDone) parent?.removeAllListeners()
+        releaseGenerationWhenComplete(generation)
+      }
+    )
     const workerStartupPromise = runWorkerPromise.then(() => {
       if (!isReady) {
         throw new Error('zero-cache CF embed: runWorker exited before ready')
       }
     })
     await Promise.race([readyPromise, workerStartupPromise])
-  } catch (err) {
-    if (readyTimer) clearTimeout(readyTimer)
+
+    fastifyInstance = globalRecord.__orez_fastify_instance
+    updateOwnedFastifyInstance()
+  } catch (startupError) {
+    startupFailure = startupError
     try {
       await shutdown()
-    } catch (shutdownError) {
-      if (debugEmbed) {
-        console.error('[orez-zero-cache-cf] startup cleanup error', shutdownError)
-      }
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [startupError, cleanupError],
+        'zero-cache CF embed: startup failed and teardown also failed',
+        { cause: startupError }
+      )
     }
-    throw err
+    throw startupError
   }
-
-  // get the fastify instance (set by our shim during init)
-  fastifyInstance = (globalThis as any).__orez_fastify_instance
 
   return {
     get ready() {

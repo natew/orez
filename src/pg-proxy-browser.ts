@@ -751,7 +751,7 @@ export type BrowserProxyDbName = 'postgres' | 'zero_cvr' | 'zero_cdb'
 
 export interface BrowserProxy {
   handleConnection(port: MessagePort): void
-  close(): void
+  close(): Promise<void>
   createExternalSession(dbName?: BrowserProxyDbName): BrowserProxyExternalSession
   /**
    * mutex-coordinated query for out-of-band JSON callers (e.g. soot's
@@ -978,13 +978,20 @@ export async function createBrowserProxy(
   }
 
   let closed = false
+  let closePromise: Promise<void> | null = null
   const activeConnectionClosers = new Set<() => Promise<void>>()
+  const unreportedConnectionCleanupErrors = new Set<unknown>()
 
   function handleConnection(port: MessagePort) {
     if (closed) {
       port.close()
       return
     }
+
+    const closePendingConnection = async () => {
+      port.close()
+    }
+    activeConnectionClosers.add(closePendingConnection)
 
     port.start()
 
@@ -997,6 +1004,10 @@ export async function createBrowserProxy(
     let handlerInstalled = false
 
     port.onmessage = (ev: MessageEvent) => {
+      if (closed) {
+        port.close()
+        return
+      }
       if (handlerInstalled) return // shouldn't happen — handler replaced port.onmessage
       buffered.push(ev)
       if (buffered.length > 1) return // only process first message
@@ -1005,6 +1016,7 @@ export async function createBrowserProxy(
       if (!(data instanceof Uint8Array) || data.length < 8) {
         handlerInstalled = true
         handleRegularConnection(port, ev)
+        activeConnectionClosers.delete(closePendingConnection)
         // flush buffered messages to the new handler
         for (let i = 1; i < buffered.length; i++) {
           port.onmessage?.(buffered[i])
@@ -1024,6 +1036,7 @@ export async function createBrowserProxy(
         // in browser Web Workers (same root cause as patches #9, #18, #20).
         handleRawConnection(port, data, params, getDbContext(dbName), isRepl)
         handlerInstalled = true
+        activeConnectionClosers.delete(closePendingConnection)
         // flush any messages that arrived while we were processing the startup
         for (let i = 1; i < buffered.length; i++) {
           if (port.onmessage) {
@@ -1069,41 +1082,53 @@ export async function createBrowserProxy(
     const connId = {}
     const dbName = params.database || 'postgres'
     let connClosed = false
-    let sessionClosed = false
+    let closeSessionPromise: Promise<void> | null = null
 
-    const closeSession = async () => {
-      if (sessionClosed) return
-      sessionClosed = true
-      activeConnectionClosers.delete(closeSession)
-      // a connection torn down mid-pipeline still OWNS the db mutex. a dead
-      // pipeline can never send its Sync, so without this release the mutex
-      // is leaked forever and every later connection on this db (including
-      // the next embed generation after an idle-hibernation teardown) blocks
-      // in mutex.acquire() before its first statement. when a statement is
-      // still executing, the pipeline continuation performs this cleanup
-      // after it settles instead (pipelineExecInFlight).
-      if (pipelineMutexHeld && !pipelineExecInFlight) {
-        pipelineMutexHeld = false
-        try {
-          await rollbackOwnTransaction()
-        } finally {
-          mutex.release()
+    const closeSession = () => {
+      if (closeSessionPromise) return closeSessionPromise
+      connClosed = true
+      closeSessionPromise = (async () => {
+        port.close()
+        // a connection torn down mid-pipeline still OWNS the db mutex. a dead
+        // pipeline can never send its Sync, so without this release the mutex
+        // is leaked forever and every later connection on this db (including
+        // the next embed generation after an idle-hibernation teardown) blocks
+        // in mutex.acquire() before its first statement. when a statement is
+        // still executing, the pipeline continuation performs this cleanup
+        // after it settles instead (pipelineExecInFlight).
+        if (pipelineExecInFlight) await pipelineIdlePromise
+        if (pipelineMutexHeld) {
+          pipelineMutexHeld = false
+          try {
+            await rollbackOwnTransaction()
+          } finally {
+            mutex.release()
+          }
+        } else {
+          await mutex.acquire()
+          try {
+            await rollbackOwnTransaction()
+          } finally {
+            mutex.release()
+          }
         }
-      }
-      try {
         await scopedContext.close()
-      } catch {}
+      })()
+      void closeSessionPromise.then(
+        () => activeConnectionClosers.delete(closeSession),
+        (error) => {
+          activeConnectionClosers.delete(closeSession)
+          unreportedConnectionCleanupErrors.add(error)
+        }
+      )
+      return closeSessionPromise
     }
     activeConnectionClosers.add(closeSession)
 
     // roll back this connection's open transaction. caller must hold the mutex.
     const rollbackOwnTransaction = async () => {
       if (txState.owner === connId && txState.status !== 0x49) {
-        try {
-          await db.exec('ROLLBACK')
-        } catch {
-          // db is closed or rollback failed — ignore
-        }
+        await db.exec('ROLLBACK')
         txState.status = 0x49
         txState.owner = null
       }
@@ -1187,6 +1212,18 @@ export async function createBrowserProxy(
     // statement currently executing inside the held pipeline — closeSession
     // must not release the mutex under it (see closeSession above)
     let pipelineExecInFlight = false
+    let resolvePipelineIdle = () => {}
+    let pipelineIdlePromise = Promise.resolve()
+    const beginPipelineExec = () => {
+      pipelineExecInFlight = true
+      pipelineIdlePromise = new Promise<void>((resolve) => {
+        resolvePipelineIdle = resolve
+      })
+    }
+    const endPipelineExec = () => {
+      pipelineExecInFlight = false
+      resolvePipelineIdle()
+    }
     let extWritePending = false
     let pipelineBuffer: Uint8Array[] = []
     // remember the most recent Parse / SimpleQuery for diagnostic logging when
@@ -1407,7 +1444,7 @@ export async function createBrowserProxy(
               const combined = concatUint8Arrays(pipelineBuffer)
               pipelineBuffer = []
               let flushResult: Uint8Array
-              pipelineExecInFlight = true
+              beginPipelineExec()
               try {
                 flushResult = await db.execProtocolRaw(combined, { syncToFs: false })
               } catch (err) {
@@ -1418,18 +1455,7 @@ export async function createBrowserProxy(
                 pipelineMutexHeld = false
                 return
               } finally {
-                pipelineExecInFlight = false
-              }
-              if (sessionClosed && pipelineMutexHeld) {
-                // session torn down while this statement was executing —
-                // closeSession skipped its cleanup, finish it here
-                pipelineMutexHeld = false
-                try {
-                  await rollbackOwnTransaction()
-                } finally {
-                  mutex.release()
-                }
-                return
+                endPipelineExec()
               }
               flushResult = stripResponseMessages(flushResult, true)
               write(flushResult)
@@ -1444,7 +1470,7 @@ export async function createBrowserProxy(
 
           let result: Uint8Array
           const t0 = performance.now()
-          pipelineExecInFlight = true
+          beginPipelineExec()
           try {
             result = await db.execProtocolRaw(combined, { syncToFs: false })
           } catch (err) {
@@ -1455,7 +1481,7 @@ export async function createBrowserProxy(
             pipelineMutexHeld = false
             return
           } finally {
-            pipelineExecInFlight = false
+            endPipelineExec()
           }
           const dt = performance.now() - t0
           if (isDebugWire() && dt > 100)
@@ -1579,17 +1605,26 @@ export async function createBrowserProxy(
     // not release the mutex under it; the pipeline continuation finishes the
     // cleanup after the statement settles.
     let pipelineExecInFlight = false
+    let resolvePipelineIdle = () => {}
+    let pipelineIdlePromise = Promise.resolve()
+    const beginPipelineExec = () => {
+      pipelineExecInFlight = true
+      pipelineIdlePromise = new Promise<void>((resolve) => {
+        resolvePipelineIdle = resolve
+      })
+    }
+    const endPipelineExec = () => {
+      pipelineExecInFlight = false
+      resolvePipelineIdle()
+    }
     // connection closed flag
     let connClosed = false
+    let cleanupPromise: Promise<void> | null = null
 
     // roll back this connection's open transaction. caller must hold the mutex.
     const rollbackOwnTransaction = async (db: PGlite, txState: PgLiteTxState) => {
       if (txState.owner === connId && txState.status !== 0x49) {
-        try {
-          await db.exec('ROLLBACK')
-        } catch {
-          // db is closed or rollback failed — ignore
-        }
+        await db.exec('ROLLBACK')
         txState.status = 0x49
         txState.owner = null
       }
@@ -1603,29 +1638,26 @@ export async function createBrowserProxy(
     // pollution that 2eb1873 fixed on the node side. browser cleanup was
     // missed and showed up as "current transaction is aborted, commands
     // ignored" when a foreign connection closed mid-someone-else's-txn.
-    const cleanup = async () => {
-      if (connClosed) return
+    const cleanup = () => {
+      if (cleanupPromise) return cleanupPromise
       connClosed = true
-      activeConnectionClosers.delete(cleanup)
-      // replication connections don't own a transaction — skip ROLLBACK
-      if (isReplicationConnection) return
-      try {
+      cleanupPromise = (async () => {
+        port.close()
+        // replication connections don't own a transaction — skip ROLLBACK
+        if (isReplicationConnection) return
         const { db, mutex, txState } = getDbContext(dbName)
+        if (pipelineExecInFlight) await pipelineIdlePromise
         if (pipelineMutexHeld) {
           // this connection died mid-pipeline and still OWNS the mutex. a
           // dead pipeline can never send its Sync, so without this release
           // the mutex is leaked forever and every later connection on this
           // db (including the next embed generation after idle-hibernation
           // teardown) blocks in mutex.acquire() before its first statement.
-          // when a statement is in flight, the pipeline continuation does
-          // this exact cleanup after it settles.
-          if (!pipelineExecInFlight) {
-            pipelineMutexHeld = false
-            try {
-              await rollbackOwnTransaction(db, txState)
-            } finally {
-              mutex.release()
-            }
+          pipelineMutexHeld = false
+          try {
+            await rollbackOwnTransaction(db, txState)
+          } finally {
+            mutex.release()
           }
           return
         }
@@ -1635,9 +1667,15 @@ export async function createBrowserProxy(
         } finally {
           mutex.release()
         }
-      } catch {
-        // instance may have been replaced during reset, ignore
-      }
+      })()
+      void cleanupPromise.then(
+        () => activeConnectionClosers.delete(cleanup),
+        (error) => {
+          activeConnectionClosers.delete(cleanup)
+          unreportedConnectionCleanupErrors.add(error)
+        }
+      )
+      return cleanupPromise
     }
     activeConnectionClosers.add(cleanup)
 
@@ -1765,7 +1803,7 @@ export async function createBrowserProxy(
 
             const t1 = performance.now()
             let result: Uint8Array
-            pipelineExecInFlight = true
+            beginPipelineExec()
             try {
               result = await db.execProtocolRaw(data, { syncToFs: false })
             } catch (err) {
@@ -1773,7 +1811,7 @@ export async function createBrowserProxy(
               pipelineMutexHeld = false
               throw err
             } finally {
-              pipelineExecInFlight = false
+              endPipelineExec()
             }
             const t2 = performance.now()
             proxyStats.totalExecMs += t2 - t1
@@ -1796,16 +1834,6 @@ export async function createBrowserProxy(
               if (dbName === 'postgres' && extWritePending) {
                 extWritePending = false
                 signalWrite()
-              }
-            } else if (connClosed) {
-              // the connection died while this statement was executing, so
-              // cleanup skipped its release (pipelineExecInFlight). no Sync
-              // can ever arrive — roll back and release here instead.
-              pipelineMutexHeld = false
-              try {
-                await rollbackOwnTransaction(db, txState)
-              } finally {
-                mutex.release()
               }
             } else {
               // strip ReadyForQuery from non-Sync pipeline messages
@@ -2007,6 +2035,55 @@ export async function createBrowserProxy(
   }
 
   const defaultExternalOwner = {}
+  const closedExternalOwners = new WeakSet<object>()
+
+  function createExternalOwnerCloser(owner: object, dbNames: BrowserProxyDbName[]) {
+    let closing: Promise<void> | null = null
+    const closeOwner = () => {
+      if (closing) return closing
+      closedExternalOwners.add(owner)
+      closing = (async () => {
+        const contexts = new Map<PgLiteTxState, ReturnType<typeof getDbContext>>()
+        for (const dbName of dbNames) {
+          const context = getDbContext(dbName)
+          contexts.set(context.txState, context)
+        }
+        const results = await Promise.allSettled(
+          [...contexts.values()].map(async ({ db, mutex, txState }) => {
+            await mutex.acquire()
+            try {
+              if (txState.owner === owner && txState.status !== 0x49) {
+                await db.exec('ROLLBACK')
+                txState.status = 0x49
+                txState.owner = null
+              }
+            } finally {
+              mutex.release()
+            }
+          })
+        )
+        const errors = results.flatMap((result) =>
+          result.status === 'rejected' ? [result.reason] : []
+        )
+        if (errors.length === 1) throw errors[0]
+        if (errors.length > 1) {
+          throw new AggregateError(errors, 'browser proxy external cleanup failed')
+        }
+      })()
+      void closing.then(
+        () => activeConnectionClosers.delete(closeOwner),
+        (error) => {
+          activeConnectionClosers.delete(closeOwner)
+          unreportedConnectionCleanupErrors.add(error)
+        }
+      )
+      return closing
+    }
+    activeConnectionClosers.add(closeOwner)
+    return closeOwner
+  }
+
+  createExternalOwnerCloser(defaultExternalOwner, ['postgres', 'zero_cvr', 'zero_cdb'])
 
   async function externalQuery(
     dbName: string,
@@ -2014,9 +2091,15 @@ export async function createBrowserProxy(
     params?: unknown[],
     owner: object = defaultExternalOwner
   ) {
-    if (closed) throw new Error('pg-proxy is closed')
+    if (closed || closedExternalOwners.has(owner)) {
+      throw new Error('pg-proxy is closed')
+    }
     const { db, mutex, txState } = getDbContext(dbName)
     await acquireForOwner(db, mutex, txState, owner)
+    if (closed || closedExternalOwners.has(owner)) {
+      mutex.release()
+      throw new Error('pg-proxy is closed')
+    }
     try {
       const result = await db.query(sql, params as Array<unknown> | undefined)
       updateExternalTxStateAfterSuccess(txState, owner, sql)
@@ -2038,9 +2121,15 @@ export async function createBrowserProxy(
     sql: string,
     owner: object = defaultExternalOwner
   ) {
-    if (closed) throw new Error('pg-proxy is closed')
+    if (closed || closedExternalOwners.has(owner)) {
+      throw new Error('pg-proxy is closed')
+    }
     const { db, mutex, txState } = getDbContext(dbName)
     await acquireForOwner(db, mutex, txState, owner)
+    if (closed || closedExternalOwners.has(owner)) {
+      mutex.release()
+      throw new Error('pg-proxy is closed')
+    }
     try {
       const result = await db.exec(sql)
       updateExternalTxStateAfterSuccess(txState, owner, sql)
@@ -2060,27 +2149,20 @@ export async function createBrowserProxy(
     dbName: BrowserProxyDbName = 'postgres'
   ): BrowserProxyExternalSession {
     const owner = {}
+    let sessionClosed = false
+    const closeOwner = createExternalOwnerCloser(owner, [dbName])
     return {
       query(sql: string, params?: unknown[]) {
+        if (sessionClosed) return Promise.reject(new Error('pg-proxy session is closed'))
         return externalQuery(dbName, sql, params, owner)
       },
       exec(sql: string) {
+        if (sessionClosed) return Promise.reject(new Error('pg-proxy session is closed'))
         return externalExec(dbName, sql, owner)
       },
-      async close() {
-        const { db, mutex, txState } = getDbContext(dbName)
-        await mutex.acquire()
-        try {
-          if (txState.owner === owner && txState.status !== 0x49) {
-            try {
-              await db.exec('ROLLBACK')
-            } catch {}
-            txState.status = 0x49
-            txState.owner = null
-          }
-        } finally {
-          mutex.release()
-        }
+      close() {
+        sessionClosed = true
+        return closeOwner()
       },
     }
   }
@@ -2088,11 +2170,25 @@ export async function createBrowserProxy(
   return {
     handleConnection,
     close() {
+      if (closePromise) return closePromise
       closed = true
       signalPending = false
-      for (const closeConnection of activeConnectionClosers) {
-        void closeConnection()
-      }
+      closePromise = (async () => {
+        const results = await Promise.allSettled(
+          [...activeConnectionClosers].map((closeConnection) =>
+            Promise.resolve().then(() => closeConnection())
+          )
+        )
+        const errors = new Set(unreportedConnectionCleanupErrors)
+        for (const result of results) {
+          if (result.status === 'rejected') errors.add(result.reason)
+        }
+        unreportedConnectionCleanupErrors.clear()
+        if (errors.size > 0) {
+          throw new AggregateError([...errors], 'browser proxy connection cleanup failed')
+        }
+      })()
+      return closePromise
     },
     createExternalSession,
     query: externalQuery,

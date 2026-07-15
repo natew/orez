@@ -195,7 +195,7 @@ export async function startOrezBrowser(
 
     async stop() {
       await zc.stop()
-      proxy.close()
+      await proxy.close()
       resetReplicationState()
       await Promise.all([pgPostgres.close(), pgCvr.close(), pgCdb.close()])
     },

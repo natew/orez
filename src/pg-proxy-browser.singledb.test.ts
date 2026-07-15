@@ -105,7 +105,7 @@ describe('createBrowserProxy singleDb mutex coalescing', () => {
     // smoke: it constructs without error. proper concurrency proof requires
     // pg-wire client; covered by integration tests. this guards the legacy path.
     expect(proxy).toBeTruthy()
-    proxy.close()
+    await proxy.close()
   })
 
   test('distinct façades + singleDb=true coalesces; without flag they would split', async () => {
@@ -132,7 +132,7 @@ describe('createBrowserProxy singleDb mutex coalescing', () => {
       singleDb: true,
     })
     expect(proxy).toBeTruthy()
-    proxy.close()
+    await proxy.close()
   })
 
   test('coordinated query/exec runs through the same per-db mutex', async () => {
@@ -164,7 +164,7 @@ describe('createBrowserProxy singleDb mutex coalescing', () => {
     )
     expect(Array.isArray(r2)).toBe(true)
 
-    proxy.close()
+    await proxy.close()
   })
 
   test('singleDb waits for the owning transaction before serving another client', async () => {
@@ -212,7 +212,7 @@ describe('createBrowserProxy singleDb mutex coalescing', () => {
 
     await sql1.end({ timeout: 1 }).catch(() => {})
     await sql2.end({ timeout: 1 }).catch(() => {})
-    proxy.close()
+    await proxy.close()
   }, 10_000)
 
   test('protocol session factories isolate each wire connection transaction state', async () => {
@@ -266,7 +266,7 @@ describe('createBrowserProxy singleDb mutex coalescing', () => {
       if (tx) await tx.catch(() => {})
       await sql1.end({ timeout: 1 }).catch(() => {})
       await sql2.end({ timeout: 1 }).catch(() => {})
-      proxy.close()
+      await proxy.close()
       await Promise.all(sessions.map((session) => session.close().catch(() => {})))
     }
   }, 10_000)
@@ -294,6 +294,6 @@ describe('createBrowserProxy singleDb mutex coalescing', () => {
       // singleDb omitted — defaults to false
     })
     expect(proxy).toBeTruthy()
-    proxy.close()
+    await proxy.close()
   })
 })
