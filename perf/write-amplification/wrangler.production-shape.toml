@@ -1,0 +1,21 @@
+name = "orez-production-shape-profile"
+main = ".generated/production-shape-worker.js"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "ZERO_SQL_DO"
+class_name = "ProfileZeroSqlDO"
+
+[[durable_objects.bindings]]
+name = "ZERO_CACHE_DO"
+class_name = "ProfileZeroCacheDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ProfileZeroSqlDO", "ProfileZeroCacheDO"]
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true

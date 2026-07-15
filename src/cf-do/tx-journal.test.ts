@@ -120,6 +120,90 @@ describe('tx-journal core', () => {
     expect(hiddenIntrospection).toBe(0)
   })
 
+  it('snapshots only transitive trigger and foreign-key targets', () => {
+    const storage = createSqliteStorage()
+    storage.exec('PRAGMA foreign_keys = ON')
+    storage.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, body TEXT)')
+    storage.exec('CREATE TABLE audit (id INTEGER PRIMARY KEY, item_id INTEGER)')
+    storage.exec('CREATE TABLE stats (id INTEGER PRIMARY KEY, writes INTEGER)')
+    storage.exec(
+      'CREATE TABLE child (' +
+        'id INTEGER PRIMARY KEY, item_id INTEGER REFERENCES item(id) ON DELETE CASCADE)'
+    )
+    storage.exec('CREATE TABLE unrelated (id INTEGER PRIMARY KEY, body TEXT)')
+    storage.exec(
+      `CREATE TRIGGER item_audit AFTER INSERT ON item BEGIN
+         INSERT INTO audit (id, item_id) VALUES (NEW.id, NEW.id)
+           ON CONFLICT (id) DO UPDATE SET item_id = excluded.item_id;
+       END`
+    )
+    storage.exec(
+      `CREATE TRIGGER audit_stats AFTER INSERT ON audit BEGIN
+         UPDATE stats SET writes = writes + 1 WHERE id = 1;
+       END`
+    )
+    storage.exec(TX_MANIFEST_DDL)
+    storage.exec(
+      `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, ?, ?, '')`,
+      'tx-targeted',
+      'orez-embed',
+      'item'
+    )
+
+    expect(snapshotSideEffectWriteTables(storage.journal, 'tx-targeted', 'item')).toBe(
+      true
+    )
+    const manifest = storage
+      .exec(
+        `SELECT original, snapshot FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ? ORDER BY original`,
+        'tx-targeted'
+      )
+      .toArray()
+    expect(manifest.map((row) => String(row.original))).toEqual([
+      'audit',
+      'child',
+      'item',
+      'stats',
+    ])
+    expect(manifest.every((row) => String(row.snapshot).startsWith('_orez_tx_'))).toBe(
+      true
+    )
+    expect(storage.tables()).toContain('unrelated')
+    expect(manifest.some((row) => String(row.original) === 'unrelated')).toBe(false)
+  })
+
+  it('falls back to all tables for a trigger target it cannot parse', () => {
+    const storage = createSqliteStorage()
+    storage.exec('CREATE TABLE item (id INTEGER PRIMARY KEY)')
+    storage.exec('CREATE TABLE audit (id INTEGER PRIMARY KEY)')
+    storage.exec('CREATE TABLE unrelated (id INTEGER PRIMARY KEY)')
+    storage.exec(
+      `CREATE TRIGGER item_audit AFTER INSERT ON item BEGIN
+         INSERT INTO 'audit' VALUES (NEW.id);
+       END`
+    )
+    storage.exec(TX_MANIFEST_DDL)
+    storage.exec(
+      `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, ?, ?, '')`,
+      'tx-fallback',
+      'orez-embed',
+      'item'
+    )
+
+    expect(snapshotSideEffectWriteTables(storage.journal, 'tx-fallback', 'item')).toBe(
+      true
+    )
+    expect(
+      storage
+        .exec(
+          `SELECT original FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ? ORDER BY original`,
+          'tx-fallback'
+        )
+        .toArray()
+        .map((row) => String(row.original))
+    ).toEqual(['audit', 'item', 'unrelated'])
+  })
+
   it('restores tables, data, indexes, triggers, and views after transactional DDL', () => {
     const storage = createSqliteStorage()
     storage.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT NOT NULL)')
