@@ -54,8 +54,10 @@ import {
   releaseCFInstanceRuntime,
   setCFInstanceEnv,
   setCFInstanceProxy,
+  setCFInstanceRuntimeStop,
   sqliteDirectoryForCFInstance,
   sqlitePathForCFInstance,
+  stopCFInstanceRuntimeForReplacement,
   type CFInstanceRuntime,
 } from './cf-instance-runtime.js'
 import {
@@ -76,6 +78,7 @@ const runWorkerFn = _runWorker as (
 ) => Promise<void>
 
 const WORKER_SHUTDOWN_TIMEOUT_MS = 5_000
+const WORKER_FORCE_SHUTDOWN_TIMEOUT_MS = 5_000
 
 type GenerationState = {
   cleanupDone: boolean
@@ -221,6 +224,7 @@ export async function startZeroCacheEmbedCF(
       'zero-cache CF embed: apiFetch is required with ZERO_MUTATE_URL or ZERO_QUERY_URL'
     )
   }
+  await stopCFInstanceRuntimeForReplacement(opts.instanceId)
   const runtime = registerCFInstanceRuntime({
     apiFetch: opts.apiFetch,
     doSqlite: opts.doSqlite,
@@ -285,7 +289,7 @@ export async function startZeroCacheEmbedCF(
 
       if (workerSettledPromise && !generation.workerDone) {
         let timeout: ReturnType<typeof setTimeout> | undefined
-        const workerStopped = await Promise.race([
+        let workerStopped = await Promise.race([
           workerSettledPromise.then(() => true),
           new Promise<false>((resolve) => {
             timeout = setTimeout(() => resolve(false), WORKER_SHUTDOWN_TIMEOUT_MS)
@@ -293,11 +297,31 @@ export async function startZeroCacheEmbedCF(
         ])
         if (timeout) clearTimeout(timeout)
         if (!workerStopped) {
-          cleanupErrors.push(
-            new Error(
-              `zero-cache CF embed: worker did not terminate within ${WORKER_SHUTDOWN_TIMEOUT_MS}ms`
+          logCFInstance(runtime, {
+            component: 'embed',
+            event: 'worker-force-stop',
+            timeoutMs: WORKER_SHUTDOWN_TIMEOUT_MS,
+          })
+          try {
+            ;(wrappedParent as { kill(signal?: string): void }).kill('SIGQUIT')
+          } catch (err) {
+            cleanupErrors.push(err)
+          }
+          timeout = undefined
+          workerStopped = await Promise.race([
+            workerSettledPromise.then(() => true),
+            new Promise<false>((resolve) => {
+              timeout = setTimeout(() => resolve(false), WORKER_FORCE_SHUTDOWN_TIMEOUT_MS)
+            }),
+          ])
+          if (timeout) clearTimeout(timeout)
+          if (!workerStopped) {
+            cleanupErrors.push(
+              new Error(
+                `zero-cache CF embed: worker did not terminate after SIGTERM (${WORKER_SHUTDOWN_TIMEOUT_MS}ms) and SIGQUIT (${WORKER_FORCE_SHUTDOWN_TIMEOUT_MS}ms)`
+              )
             )
-          )
+          }
         }
       }
       if (workerFailed && workerError !== startupFailure) {
@@ -372,6 +396,8 @@ export async function startZeroCacheEmbedCF(
       )
     })
   }
+
+  setCFInstanceRuntimeStop(runtime, shutdown)
 
   try {
     releaseProcessEnv = acquireZeroProcessEnv()

@@ -46,6 +46,7 @@ const runtimesById = new Map<string, CFInstanceRuntime>()
 const runtimesByEncodedId = new Map<string, CFInstanceRuntime>()
 const runtimesByPort = new Map<number, CFInstanceRuntime>()
 const apiRoutesByHost = new Map<string, { origin: string; runtime: CFInstanceRuntime }>()
+const runtimeStops = new WeakMap<CFInstanceRuntime, () => Promise<void>>()
 
 function requireInstanceId(instanceId: string | undefined): string {
   if (typeof instanceId !== 'string') {
@@ -154,6 +155,53 @@ export function setCFInstanceEnv(
   runtime.env = Object.freeze({ ...env })
 }
 
+export function setCFInstanceRuntimeStop(
+  runtime: CFInstanceRuntime,
+  stop: () => Promise<void>
+): void {
+  if (runtimesById.get(runtime.instanceId) !== runtime) {
+    throw new Error('zero-cache CF embed: runtime is not active')
+  }
+  runtimeStops.set(runtime, stop)
+}
+
+export async function stopCFInstanceRuntimeForReplacement(
+  instanceId: string
+): Promise<void> {
+  const normalized = requireInstanceId(instanceId)
+  const runtime = runtimesById.get(normalized)
+  if (!runtime) return
+  const stop = runtimeStops.get(runtime)
+  if (!stop) {
+    throw new Error(
+      `zero-cache CF embed: instance ${JSON.stringify(normalized)} is active or still tearing down`
+    )
+  }
+  let stopError: unknown
+  try {
+    await stop()
+  } catch (error) {
+    stopError = error
+  }
+  if (runtimesById.get(normalized) === runtime) {
+    const activeError = new Error(
+      `zero-cache CF embed: instance ${JSON.stringify(normalized)} is active or still tearing down`
+    )
+    if (stopError) {
+      throw new AggregateError([activeError, stopError], activeError.message, {
+        cause: stopError,
+      })
+    }
+    throw activeError
+  }
+  if (stopError) {
+    logCFInstance(runtime, {
+      error: stopError,
+      event: 'runtime-replacement-cleanup-failed',
+    })
+  }
+}
+
 export function releaseCFInstanceRuntime(runtime: CFInstanceRuntime): void {
   if (runtimesById.get(runtime.instanceId) !== runtime) return
   logCFInstance(runtime, { event: 'runtime-release' })
@@ -166,6 +214,7 @@ export function releaseCFInstanceRuntime(runtime: CFInstanceRuntime): void {
   }
   runtime.fastifyByPort.clear()
   runtime.fastifyInstances.clear()
+  runtimeStops.delete(runtime)
   for (const host of runtime.apiOriginByHost.keys()) apiRoutesByHost.delete(host)
   runtime.apiOriginByHost.clear()
 }

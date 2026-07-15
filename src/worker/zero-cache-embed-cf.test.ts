@@ -7,6 +7,7 @@ type RunMode =
   | 'never-stop'
   | 'ready'
   | 'reject'
+  | 'sigquit-stop'
   | 'stop-reject'
   | 'timeout'
 
@@ -82,12 +83,17 @@ vi.mock('./zero-cache-run-worker.js', () => ({
         mode === 'delayed-stop' ||
         mode === 'exit-after-ready' ||
         mode === 'never-ready-never-stop' ||
-        mode === 'never-stop'
+        mode === 'never-stop' ||
+        mode === 'sigquit-stop'
       ) {
         harness.workerReleases.push(release)
         parent.once('SIGTERM', () => {
           harness.events.push('sigterm')
           if (mode === 'exit-after-ready') release()
+        })
+        parent.once('SIGQUIT', () => {
+          harness.events.push('sigquit')
+          if (mode === 'sigquit-stop') release()
         })
       } else if (mode === 'stop-reject') {
         parent.once('SIGTERM', () => finish(() => reject(harness.stopError)))
@@ -100,6 +106,7 @@ vi.mock('./zero-cache-run-worker.js', () => ({
         mode === 'delayed-stop' ||
         mode === 'exit-after-ready' ||
         mode === 'never-stop' ||
+        mode === 'sigquit-stop' ||
         mode === 'stop-reject'
       ) {
         queueMicrotask(() => {
@@ -532,14 +539,14 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     const embed = await startZeroCacheEmbedCF(options(1_000, 'wedged-instance'))
 
     const stopResult = embed.stop().catch((error) => error)
-    await vi.advanceTimersByTimeAsync(5_000)
+    await vi.advanceTimersByTimeAsync(10_000)
     const stopError = await stopResult
 
     expect(stopError).toBeInstanceOf(AggregateError)
     expect(String(stopError)).toContain('teardown failed')
     expect(
       (stopError as AggregateError).errors.some((error) =>
-        String(error).includes('did not terminate within 5000ms')
+        String(error).includes('did not terminate after SIGTERM')
       )
     ).toBe(true)
     expect(process.env.SINGLE_PROCESS).toBe('1')
@@ -558,6 +565,37 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     expect(harness.maxActiveGenerations).toBe(1)
   })
 
+  it('force-stops a worker that ignores graceful termination before retrying', async () => {
+    vi.useFakeTimers()
+    harness.modes = ['sigquit-stop', 'ready']
+    const embed = await startZeroCacheEmbedCF(options(1_000, 'force-stop-instance'))
+
+    const stopping = embed.stop()
+    await vi.advanceTimersByTimeAsync(5_000)
+    await stopping
+
+    expect(harness.events).toContain('sigterm')
+    expect(harness.events).toContain('sigquit')
+    expect(harness.activeGenerations).toBe(0)
+
+    const retry = await startZeroCacheEmbedCF(options(1_000, 'force-stop-instance'))
+    await retry.stop()
+    expect(harness.maxActiveGenerations).toBe(1)
+  })
+
+  it('stops an abandoned logical instance before starting its replacement', async () => {
+    harness.modes = ['ready', 'ready']
+    const abandoned = await startZeroCacheEmbedCF(options(1_000, 'reset-instance'))
+
+    const replacement = await startZeroCacheEmbedCF(options(1_000, 'reset-instance'))
+
+    expect(abandoned.ready).toBe(false)
+    expect(harness.events).toContain('worker-terminated')
+    expect(harness.activeGenerations).toBe(1)
+    expect(harness.maxActiveGenerations).toBe(1)
+    await replacement.stop()
+  })
+
   it('releases a startup-timeout claim after the worker eventually terminates', async () => {
     vi.useFakeTimers()
     harness.modes = ['never-ready-never-stop', 'ready']
@@ -565,7 +603,7 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
       options(1_000, 'startup-timeout-instance')
     ).catch((error) => error)
 
-    await vi.advanceTimersByTimeAsync(6_000)
+    await vi.advanceTimersByTimeAsync(11_000)
     const startupError = await starting
 
     expect(startupError).toBeInstanceOf(AggregateError)
