@@ -122,6 +122,76 @@ Chat's rank repair, and reached ready with the intact-restart signature. This is
 consistent with that crash belonging to the older dependency release rather
 than the current stack.
 
+### Historical all-table rollback guard
+
+Set `OREZ_PROFILE_ROLLBACK_MODE=historical-all-table` to replace only the
+copied profile build's rollback guard with the exact implementation from
+`478bd9b54ea69fdc01f5fa972e4234a52aadd51e`, the Orez 0.5.9 commit immediately
+before `d66e626`. The regular checkout and package output remain unchanged.
+This isolates the old all-published-table snapshots while retaining the current
+Chat wrapper, Zero 1.7.0, cleanup, and generation-recovery code.
+
+```sh
+OREZ_PROFILE_ROLLBACK_MODE=historical-all-table \
+  OREZ_CHAT_PROFILE_REPO=~/chat \
+  bun run perf:write-wrapper-profile
+```
+
+The incident replay used Chat commit `632f07122`, including its local terminal
+deploy-probe change on top of failed-rollout commit `5c20c203d`. Its generated
+data-shim source hash remained
+`f33b3333e13571cf77b50f5315217152838df5f72c8f56997b73cca38f2b9089`.
+The terminal-probe change only makes `/keepalive?deploy=1` return 409 after a
+persisted boot failure. It does not change migrations, embed startup, replica
+repair, or their SQL writes.
+
+The full historical-guard scenario costs were:
+
+| Wrapper phase                  | Source rows | Cache rows |
+| ------------------------------ | ----------: | ---------: |
+| First migration and clean boot |      14,561 |     25,821 |
+| Intact replica restart         |       1,494 |      2,559 |
+| Four destructive repair paths  | 8,219–8,224 |     25,817 |
+
+The attempted 47-boot and 19-materialization incident schedule records each
+attempt separately:
+
+| Cycle and attempt               | Boot result | Source rows | Cache rows | Elapsed |
+| ------------------------------- | ----------- | ----------: | ---------: | ------: |
+| First cycle, forced failure 1   | failed      |       1,090 |          0 |  124 ms |
+| First cycle, forced failure 2   | failed      |           0 |          0 |   13 ms |
+| First cycle, recovery           | ready       |      13,473 |     25,821 | 16.25 s |
+| Later reset, forced failure 1   | failed      |           0 |          0 |   10 ms |
+| Later reset, forced failure 2   | failed      |           0 |          0 |    6 ms |
+| Later reset, recovery           | ready       |       8,226 |     25,817 | 15.79 s |
+| Later reset, one forced failure | failed      |           0 |          0 |    4 ms |
+| Later reset, recovery           | ready       |       8,219 |     25,817 |  687 ms |
+
+The recovery elapsed times after two failures include the persisted 15-second
+backoff. The first forced failure applies the initial migration and publication
+work. Once that is durable, a forced failure immediately before embed startup
+writes no SQL rows. The old 10,888-source direct-embed signature occurs during
+the embed attempt that also materializes the cache. Fast wrapper failures do
+not pay that source cost independently.
+
+The nearest integer incident model uses 28 fast failures and 19 recoveries:
+nine cycles with two failures and ten cycles with one. The measured attempts
+project 162,561 source rows and 490,527 cache rows in 153.8 seconds. Matching
+the production cache total fractionally gives 18.86 materializations and about
+161,343 source rows, leaving about 353,003 source rows unexplained. The proposed
+47.24 × 10,888 source calculation assigns full-embed metadata writes to fast
+failures that produce zero rows in the wrapper profile.
+
+Forty-seven attempts can fit inside 25 minutes only when successful
+materializations repeatedly reset the failure counter. A single uninterrupted
+failure streak reaches at most ten attempts in 25 minutes under the 15-second,
+30-second, 60-second, 120-second, 240-second, then five-minute backoff. A failed
+alarm does not re-arm another boot by itself; another ordinary client request
+must call `ensureReady`. The deploy terminal probe stops at the first persisted
+failure, so deploy warm polling cannot drive this repeated-attempt schedule.
+The schedule is temporally possible through ordinary client reconnects, but
+its measured source total rules it out as the incident writer.
+
 The SQL totals are comparable to Cloudflare billing because they use the
 runtime's billing counter. Neither harness meters Durable Object key-value
 methods or alarms. The production wrapper uses those for small tags, instance
