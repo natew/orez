@@ -216,6 +216,11 @@ export async function startZeroCacheEmbedCF(
   const pgPassword = opts.pgPassword || ''
   const backendUrl = opts.backendUrl || 'https://orez-do-backend.local'
   const backendNamespace = opts.backendNamespace || appId
+  if (!opts.apiFetch && (opts.env?.ZERO_MUTATE_URL || opts.env?.ZERO_QUERY_URL)) {
+    throw new Error(
+      'zero-cache CF embed: apiFetch is required with ZERO_MUTATE_URL or ZERO_QUERY_URL'
+    )
+  }
   const runtime = registerCFInstanceRuntime({
     apiFetch: opts.apiFetch,
     doSqlite: opts.doSqlite,
@@ -478,11 +483,6 @@ export async function startZeroCacheEmbedCF(
       ZERO_PORT: String(runtime.basePort),
       ZERO_TASK_ID: `orez-cf-${runtime.encodedId}`,
       ZERO_SHADOW_SYNC_ENABLED: 'false',
-    }
-    if (!opts.apiFetch && (env.ZERO_MUTATE_URL || env.ZERO_QUERY_URL)) {
-      throw new Error(
-        'zero-cache CF embed: apiFetch is required with ZERO_MUTATE_URL or ZERO_QUERY_URL'
-      )
     }
     if (opts.apiFetch) {
       for (const key of ['ZERO_MUTATE_URL', 'ZERO_QUERY_URL'] as const) {

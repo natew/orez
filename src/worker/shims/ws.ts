@@ -83,22 +83,23 @@ class WebSocket extends EventEmitter {
       const isInProcess = parsedUrl.hostname === 'localhost'
 
       if (isInProcess) {
-        let fastifyInstance: any
+        let initialRoute: ReturnType<typeof routeCFInstanceFastifyURL>
         try {
-          const route = routeCFInstanceFastifyURL(urlOrSocket)
-          fastifyInstance = route.instance
+          initialRoute = routeCFInstanceFastifyURL(urlOrSocket)
           this.#debug = (event) =>
-            logCFInstance(route.runtime, { component: 'websocket', ...event })
+            logCFInstance(initialRoute.runtime, { component: 'websocket', ...event })
         } catch (error) {
           throw new Error(`ws shim: ${String(error)}`)
         }
+        const fastifyInstance = initialRoute.instance as any
         if (fastifyInstance?.server) {
           // create paired message channels for bidirectional communication
           // the client-side WS (this) and serverWs are cross-linked so
           // ping/pong, messages, and close propagate between them
           const clientSide = this
+          let clientReadyState = CONNECTING
           const serverWs: any = {
-            readyState: 1,
+            readyState: OPEN,
             _listeners: {} as Record<string, Function[]>,
             send: (data: string | ArrayBuffer) => {
               // deliver to client side
@@ -106,7 +107,8 @@ class WebSocket extends EventEmitter {
               queueMicrotask(() => clientSide.emit('message', { data }))
             },
             close: (code?: number, reason?: string) => {
-              serverWs.readyState = 3
+              serverWs.readyState = CLOSED
+              clientReadyState = CLOSED
               queueMicrotask(() => clientSide.emit('close', code || 1000, reason || ''))
             },
             ping: () => {
@@ -138,8 +140,12 @@ class WebSocket extends EventEmitter {
               for (const h of handlers) h({ data })
             },
             close: (code?: number, reason?: string) => {
+              if (clientReadyState === CLOSED) return
+              clientReadyState = CLOSING
               const handlers = serverWs._listeners['close'] || []
               for (const h of handlers) h({ code, reason })
+              clientReadyState = CLOSED
+              serverWs.readyState = CLOSED
             },
             addEventListener: (type: string, handler: Function) => {
               if (!clientWsListeners[type]) clientWsListeners[type] = []
@@ -153,7 +159,7 @@ class WebSocket extends EventEmitter {
               }
             },
             get readyState() {
-              return 1
+              return clientReadyState
             },
           } as CFWebSocket
 
@@ -172,11 +178,32 @@ class WebSocket extends EventEmitter {
             message: { url: path, headers: {}, method: 'GET' },
             head: new Uint8Array(0),
           }
+          const failHandoff = (reason: string) => {
+            clientReadyState = CLOSED
+            serverWs.readyState = CLOSED
+            this.emit('close', 1006, reason)
+          }
           queueMicrotask(() => {
+            let currentRoute: ReturnType<typeof routeCFInstanceFastifyURL>
+            try {
+              currentRoute = routeCFInstanceFastifyURL(urlOrSocket)
+            } catch {
+              failHandoff('fastify runtime released before websocket handoff')
+              return
+            }
+            if (
+              currentRoute.runtime !== initialRoute.runtime ||
+              currentRoute.instance !== initialRoute.instance
+            ) {
+              failHandoff('fastify runtime changed before websocket handoff')
+              return
+            }
             const handled = fastifyInstance.tryHandoff?.(handoffMsg, serverWs) === true
             if (!handled) {
-              fastifyInstance.server.emit('message', ['handoff', handoffMsg], serverWs)
+              failHandoff('no fastify websocket route')
+              return
             }
+            clientReadyState = OPEN
             this.emit('open')
           })
         } else {

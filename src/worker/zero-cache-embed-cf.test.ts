@@ -421,6 +421,19 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     await embed.stop()
   })
 
+  it('rejects API routes without an instance fetch handler before starting', async () => {
+    await expect(
+      startZeroCacheEmbedCF({
+        ...options(1_000, 'missing-api-fetch'),
+        env: { ZERO_MUTATE_URL: 'https://api.example/mutate' },
+      })
+    ).rejects.toThrow('apiFetch is required')
+
+    expect(harness.runCalls).toBe(0)
+    expect(harness.backendOpens).toBe(0)
+    expect(harness.proxyOpens).toBe(0)
+  })
+
   it('waits for delayed SIGTERM completion before closing proxy and backends', async () => {
     harness.modes = ['delayed-stop']
     const embed = await startZeroCacheEmbedCF(options())
