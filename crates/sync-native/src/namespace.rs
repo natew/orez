@@ -575,10 +575,10 @@ fn replica_footprint(dir: &Path, key: &str) -> (u64, SystemTime) {
         let path = dir.join(format!("{key}.sqlite{suffix}"));
         if let Ok(meta) = std::fs::metadata(&path) {
             size += meta.len();
-            if let Ok(modified) = meta.modified() {
-                if modified > mtime {
-                    mtime = modified;
-                }
+            if let Ok(modified) = meta.modified()
+                && modified > mtime
+            {
+                mtime = modified;
             }
         }
     }
