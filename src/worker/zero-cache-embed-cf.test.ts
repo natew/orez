@@ -38,6 +38,7 @@ const harness = vi.hoisted(() => ({
   backendWaitReadyError: new Error('backend waitReady failed'),
   backendWaitReadyGates: new Map<number, Gate>(),
   backendWaitReadyRejectAt: -1,
+  descendantReleases: [] as Array<() => void>,
   envs: [] as Array<Record<string, string>>,
   events: [] as string[],
   maxActiveGenerations: 0,
@@ -102,7 +103,7 @@ vi.mock('./zero-cache-run-worker.js', () => ({
               'zero-cache startup stopped before workers became ready'
             )
             error.name = 'OrezZeroStartupStoppedError'
-            finish(() => reject(error))
+            harness.descendantReleases.push(() => finish(() => reject(error)))
           }
         })
       } else if (mode === 'stop-reject') {
@@ -248,6 +249,7 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     harness.backendOpens = 0
     harness.backendWaitReadyGates = new Map()
     harness.backendWaitReadyRejectAt = -1
+    harness.descendantReleases = []
     harness.envs = []
     harness.events = []
     harness.maxActiveGenerations = 0
@@ -697,9 +699,13 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     ).catch((error) => error)
 
     await vi.advanceTimersByTimeAsync(6_000)
-    expect(String(await starting)).toContain('phase worker-readiness')
     expect(harness.events).toContain('sigterm')
     expect(harness.events).toContain('sigquit')
+    expect(harness.activeGenerations).toBe(1)
+
+    harness.descendantReleases[0]?.()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(String(await starting)).toContain('phase worker-readiness')
     expect(harness.activeGenerations).toBe(0)
 
     const retry = await startZeroCacheEmbedCF(

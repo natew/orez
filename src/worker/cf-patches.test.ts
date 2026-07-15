@@ -38,8 +38,10 @@ describe('prepareZeroCacheForCF', () => {
 
     const processes = readText(overlayBase, 'types/processes.js')
     expect(processes).not.toContain('shadow-syncer')
-    expect(processes).toContain('const runWorker = __zc_workers[_name];')
+    expect(processes).toContain('const runWorkerImpl = __zc_workers[_name];')
     expect(processes).toContain('env.ZERO_TASK_ID')
+    expect(processes).toContain('waitForOrezZeroWorkersStopped')
+    expect(processes).toContain('__orez_latched_signal')
     expect(processes).toContain('result === target ? receiver : result')
     expect(processes).not.toContain('__OREZ_DEBUG_WIRE__')
     expect(readText(sourceBase, 'types/processes.js')).toContain('import(moduleUrl.href)')
@@ -47,9 +49,11 @@ describe('prepareZeroCacheForCF', () => {
     const lifecycle = readText(overlayBase, 'services/life-cycle.js')
     expect(lifecycle).toContain('OrezZeroStartupStoppedError')
     expect(lifecycle).toContain('this.#runningState.stopped()')
+    expect(lifecycle).toContain('if (stopPromise) await stopPromise')
     expect(readText(sourceBase, 'services/life-cycle.js')).not.toContain(
       'OrezZeroStartupStoppedError'
     )
+    expect(readText(overlayBase, 'server/main.js')).toContain('__orezAwaitStartup')
 
     for (const entrypoint of ENTRYPOINTS) {
       const worker = readText(overlayBase, `server/${entrypoint}.js`)
@@ -138,6 +142,9 @@ describe('prepareZeroCacheForCF', () => {
     expect(
       result.aliases['@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js']
     ).toBe(resolve(overlayBase, 'server', 'runner', 'run-worker.js'))
+    expect(result.aliases['@rocicorp/zero/out/zero-cache/src/types/processes.js']).toBe(
+      resolve(overlayBase, 'types', 'processes.js')
+    )
   })
 
   it('rejects an unverified Zero version before generating an overlay', () => {
@@ -193,36 +200,6 @@ export const WRITE_WORKER_URL = u("write-worker");
 
   it('does not bundle the optional shadow-syncer worker', () => {
     const nodeModules = makeFakeNodeModules()
-    const zcBase = zeroCacheBase(nodeModules)
-    writeText(
-      zcBase,
-      'types/processes.js',
-      `import { default as __zc_main } from "../server/main.js";
-import { default as __zc_change_streamer } from "../server/change-streamer.js";
-import { default as __zc_reaper } from "../server/reaper.js";
-import { default as __zc_replicator } from "../server/replicator.js";
-import { default as __zc_syncer } from "../server/syncer.js";
-const __zc_workers = {
-  "main": __zc_main,
-  "change-streamer": __zc_change_streamer,
-  "reaper": __zc_reaper,
-  "replicator": __zc_replicator,
-  "syncer": __zc_syncer,
-};
-function childWorker(moduleUrl, env, ...args) {
-  ((async () => {
-    const _name = moduleUrl.hostname || moduleUrl.pathname.split("/").pop()?.replace(".js","");
-    const runWorker = __zc_workers[_name];
-    return { default: runWorker, name: _name };
-  })()).then(async ({ default: runWorker, name }) => runWorker);
-}
-function wrap(target) {
-  return new Proxy(target, { get(target, prop, receiver) {
-    return Reflect.get(target, prop, receiver);
-  }});
-}
-`
-    )
 
     const result = prepareZeroCacheForCF({ nodeModulesPath: nodeModules })
 
@@ -231,6 +208,19 @@ function wrap(target) {
     expect(processes).not.toContain('"shadow-syncer"')
     expect(processes).toContain('result === target ? receiver : result')
     expect(processes).not.toContain('Reflect.get(target, prop, receiver)')
+  })
+
+  it('rejects an incomplete existing process overlay', () => {
+    const nodeModules = makeFakeNodeModules()
+    writeText(
+      zeroCacheBase(nodeModules),
+      'types/processes.js',
+      'const __zc_workers = {};\nfunction wrap(target) { return target; }\n'
+    )
+
+    expect(() => prepareZeroCacheForCF({ nodeModulesPath: nodeModules })).toThrow(
+      'existing processes patch missing waitForOrezZeroWorkersStopped'
+    )
   })
 })
 
@@ -312,6 +302,28 @@ export { runWorker as default };
     )
   }
 
+  writeText(
+    zcBase,
+    'server/main.js',
+    `import { parentWorker, singleProcessMode } from "../types/processes.js";
+import { exitAfter } from "../services/life-cycle.js";
+var lc = new LogContext("info", {}, consoleLogSink);
+async function runWorker(parent) {
+\tlc = createLogContext(config, "main");
+\tconst processes = new ProcessManager(lc, parent);
+\tif (litestream.executable) await restoreReplica(lc, config, null);
+\tawait changeStreamerReady;
+\tawait backupReady;
+\tawait reaperReady;
+\tawait shadowReady;
+\tawait replicaReady;
+\tawait processes.allWorkersReady();
+}
+${AUTO_START}
+export { runWorker as default };
+`
+  )
+
   writeText(zcBase, 'observability/events.js', 'export function initEventSink() {}\n')
   writeText(zcBase, 'server/otel-start.js', 'export function startOtelAuto() {}\n')
   writeText(
@@ -324,15 +336,27 @@ export { runWorker as default };
     zcBase,
     'types/processes.js',
     `function childWorker(moduleUrl, env, ...args) {
+  const [parent, child] = inProcChannel();
   import(moduleUrl.href).then(async ({ default: runWorker }) => {
     await runWorker();
   });
+  return child;
 }
 function wrap(target) {
   return new Proxy(target, { get(target, prop, receiver) {
+    switch (prop) {
+      case "onMessageType": return () => receiver;
+    }
     return Reflect.get(target, prop, receiver);
   }});
 }
+function inProcChannel() {
+  const worker1 = new EventEmitter();
+  const worker2 = new EventEmitter();
+  const kill = (dest) => (signal = "SIGTERM") => dest.emit(signal, signal);
+  return [wrap(Object.assign(worker1, { kill: kill(worker2) })), wrap(Object.assign(worker2, { kill: kill(worker1) }))];
+}
+export { childWorker, parentWorker, singleProcessMode };
 `
   )
 
@@ -369,14 +393,37 @@ export { BackupNotFoundException, restoreReplica };
   writeText(
     zcBase,
     'services/life-cycle.js',
-    `class ProcessManager {
+    `const GRACEFUL_SHUTDOWN = ["SIGTERM", "SIGINT"];
+const FORCEFUL_SHUTDOWN = ["SIGQUIT", "SIGABRT"];
+class ProcessManager {
 \t#ready = [];
 \t#runningState;
+\tdone() { return this.#runningState.stopped(); }
 \tasync allWorkersReady() {
 \t\tawait Promise.all(this.#ready);
 \t}
 }
-export { ProcessManager };
+async function runUntilKilled(lc, parent, ...services) {
+\tif (services.length === 0) return;
+\tfor (const signal of [...GRACEFUL_SHUTDOWN, ...FORCEFUL_SHUTDOWN]) parent.once(signal, () => {
+\t\tconst GRACEFUL_SIGNALS = GRACEFUL_SHUTDOWN;
+\t\tservices.forEach(async (svc) => {
+\t\t\tif (GRACEFUL_SIGNALS.includes(signal) && svc.drain) {
+\t\t\t\tlc.info?.(\`draining \${svc.constructor.name} \${svc.id} (\${signal})\`);
+\t\t\t\tawait svc.drain();
+\t\t\t}
+\t\t\tlc.info?.(\`stopping \${svc.constructor.name} \${svc.id} (\${signal})\`);
+\t\t\tawait svc.stop();
+\t\t});
+\t});
+\ttry {
+\t\tconst svc = await Promise.race(services.map((svc) => svc.run().then(() => svc)));
+\t\tlc.info?.(\`\${svc.constructor.name} (\${svc.id}) stopped\`);
+\t} catch (e) {
+\t\tthrow e;
+\t}
+}
+export { ProcessManager, runUntilKilled };
 `
   )
 

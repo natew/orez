@@ -10,7 +10,7 @@
  * 2. server worker entrypoints — disable CLI auto-start blocks
  * 3. worker state — localize log contexts and disable process-global telemetry
  * 4. processes.js — replace dynamic import() with static worker module lookup
- * 5. life-cycle.js — cancel a force-stopped worker that is still initializing
+ * 5. process lifecycle — stop and join a cancelled in-process worker tree
  * 6. write-worker-client.js — run zero-cache's replica writer in-process
  * 7. custom/fetch.js — route mutate/query fetches by logical DO identity
  * 8. initial-sync.js — cap DO batch parameter counts
@@ -148,6 +148,13 @@ export function prepareZeroCacheForCF(
         'server',
         'runner',
         'run-worker.js'
+      ),
+      '@rocicorp/zero/out/zero-cache/src/types/processes.js': resolve(
+        zeroOutDir,
+        'zero-cache',
+        'src',
+        'types',
+        'processes.js'
       ),
       ...packageAliases,
       ...parserAliases,
@@ -289,6 +296,15 @@ function patchProcesses(zcBase: string): void {
   }
 
   if (code.includes('__zc_workers')) {
+    for (const marker of [
+      'waitForOrezZeroWorkersStopped',
+      '__orez_latched_signal',
+      '__orez_track_worker',
+    ]) {
+      if (!code.includes(marker)) {
+        throw new Error(`orez CF overlay: existing processes patch missing ${marker}`)
+      }
+    }
     const patched = patchProcessWrapperProxy(code)
     if (patched !== code) writeFileSync(processesPath, patched)
     return
@@ -313,6 +329,26 @@ const __zc_workers = {
   "replicator": __zc_replicator,
   "syncer": __zc_syncer,
 };
+const __orez_shutdown_signals = new Set(["SIGINT", "SIGTERM", "SIGQUIT", "SIGABRT"]);
+const __orez_latched_signal = Symbol("orez-latched-signal");
+const __orez_worker_executions = new Map();
+function __orez_track_worker(task, execution) {
+  let active = __orez_worker_executions.get(task);
+  if (!active) __orez_worker_executions.set(task, active = new Set());
+  active.add(execution);
+  void execution.finally(() => {
+    active.delete(execution);
+    if (active.size === 0) __orez_worker_executions.delete(task);
+  }).catch(() => {});
+  return execution;
+}
+async function waitForOrezZeroWorkersStopped(task) {
+  for (;;) {
+    const active = __orez_worker_executions.get(task);
+    if (!active?.size) return;
+    await Promise.allSettled([...active]);
+  }
+}
 `
 
   // replace the dynamic import in childWorker with a synchronous lookup.
@@ -331,8 +367,9 @@ const __zc_workers = {
     'child.on("error", (err) => console.error("[orez-zc-worker] error", _task, _name, err)); ' +
     'child.on("close", (code, signal) => console.debug("[orez-zc-worker] close", _task, _name, code, signal)); ' +
     '} ' +
-    'const runWorker = __zc_workers[_name]; ' +
-    'if (!runWorker) throw new Error("orez: unknown zero-cache worker: " + _name + " (available: " + Object.keys(__zc_workers).join(", ") + ")"); ' +
+    'const runWorkerImpl = __zc_workers[_name]; ' +
+    'if (!runWorkerImpl) throw new Error("orez: unknown zero-cache worker: " + _name + " (available: " + Object.keys(__zc_workers).join(", ") + ")"); ' +
+    'const runWorker = (...runArgs) => __orez_track_worker(_task, Promise.resolve().then(() => runWorkerImpl(...runArgs))); ' +
     'return { default: runWorker, name: _name }; ' +
     '})()).then(async ({ default: runWorker, name })'
 
@@ -340,9 +377,46 @@ const __zc_workers = {
     throw new Error('orez CF overlay: dynamic import anchor missing in processes.js')
   }
 
-  code =
-    workerImports +
-    patchProcessWrapperProxy(code.replace(dynamicImportPattern, staticLookup))
+  code = patchProcessWrapperProxy(code.replace(dynamicImportPattern, staticLookup))
+
+  const signalKill =
+    'const kill = (dest) => (signal = "SIGTERM") => dest.emit(signal, signal);'
+  const latchedSignalKill = `const kill = (dest) => (signal = "SIGTERM") => {
+  dest[__orez_latched_signal] = signal;
+  dest.emit(signal, signal);
+};`
+  if (!code.includes(signalKill)) {
+    throw new Error('orez CF overlay: in-process signal anchor missing')
+  }
+  code = code.replace(signalKill, latchedSignalKill)
+
+  const wrapSwitch = 'switch (prop) {'
+  const wrapSwitchReplacement = `switch (prop) {
+      case "on":
+      case "once": return (type, handler) => {
+        target[prop](type, handler);
+        if (__orez_shutdown_signals.has(type) && target[__orez_latched_signal] === type) {
+          queueMicrotask(() => {
+            if (prop === "once") target.off(type, handler);
+            handler(type);
+          });
+        }
+        return receiver;
+      };`
+  if (code.split(wrapSwitch).length - 1 !== 1) {
+    throw new Error('orez CF overlay: process wrapper switch anchor missing')
+  }
+  code = code.replace(wrapSwitch, wrapSwitchReplacement)
+
+  const exportAnchor = 'export { childWorker, parentWorker, singleProcessMode };'
+  if (!code.includes(exportAnchor)) {
+    throw new Error('orez CF overlay: process export anchor missing')
+  }
+  code = code.replace(
+    exportAnchor,
+    'export { childWorker, parentWorker, singleProcessMode, waitForOrezZeroWorkersStopped };'
+  )
+  code = workerImports + code
   writeFileSync(processesPath, code)
   console.log('[orez] patched zero-cache processes.js (static worker imports)')
 }
@@ -355,7 +429,13 @@ function patchStartupShutdown(zcBase: string): void {
 
   const marker = 'OrezZeroStartupStoppedError'
   let code = readFileSync(lifecyclePath, 'utf-8')
-  if (code.includes(marker)) return
+  if (code.includes(marker)) {
+    if (!code.includes('if (stopPromise) await stopPromise')) {
+      throw new Error('orez CF overlay: existing lifecycle patch does not join shutdown')
+    }
+    patchMainStartupShutdown(zcBase)
+    return
+  }
 
   const previous = `\tasync allWorkersReady() {
 \t\tawait Promise.all(this.#ready);
@@ -375,8 +455,92 @@ function patchStartupShutdown(zcBase: string): void {
   }
 
   code = code.replace(previous, patched)
+
+  const runUntilKilledStart = `async function runUntilKilled(lc, parent, ...services) {
+\tif (services.length === 0) return;
+\tfor (const signal of [...GRACEFUL_SHUTDOWN, ...FORCEFUL_SHUTDOWN]) parent.once(signal, () => {
+\t\tconst GRACEFUL_SIGNALS = GRACEFUL_SHUTDOWN;
+\t\tservices.forEach(async (svc) => {
+\t\t\tif (GRACEFUL_SIGNALS.includes(signal) && svc.drain) {
+\t\t\t\tlc.info?.(\`draining \${svc.constructor.name} \${svc.id} (\${signal})\`);
+\t\t\t\tawait svc.drain();
+\t\t\t}
+\t\t\tlc.info?.(\`stopping \${svc.constructor.name} \${svc.id} (\${signal})\`);
+\t\t\tawait svc.stop();
+\t\t});
+\t});`
+  const joinedRunUntilKilledStart = `async function runUntilKilled(lc, parent, ...services) {
+\tif (services.length === 0) return;
+\tlet stopPromise;
+\tfor (const signal of [...GRACEFUL_SHUTDOWN, ...FORCEFUL_SHUTDOWN]) parent.once(signal, () => {
+\t\tconst GRACEFUL_SIGNALS = GRACEFUL_SHUTDOWN;
+\t\tstopPromise ??= Promise.all(services.map(async (svc) => {
+\t\t\tif (GRACEFUL_SIGNALS.includes(signal) && svc.drain) {
+\t\t\t\tlc.info?.(\`draining \${svc.constructor.name} \${svc.id} (\${signal})\`);
+\t\t\t\tawait svc.drain();
+\t\t\t}
+\t\t\tlc.info?.(\`stopping \${svc.constructor.name} \${svc.id} (\${signal})\`);
+\t\t\tawait svc.stop();
+\t\t}));
+\t});`
+  if (!code.includes(runUntilKilledStart)) {
+    throw new Error('orez CF overlay: runUntilKilled shutdown anchor missing')
+  }
+  code = code.replace(runUntilKilledStart, joinedRunUntilKilledStart)
+
+  const serviceStopped =
+    '\t\tconst svc = await Promise.race(services.map((svc) => svc.run().then(() => svc)));\n\t\tlc.info?.(`${svc.constructor.name} (${svc.id}) stopped`);'
+  const serviceCleanupJoined =
+    '\t\tconst svc = await Promise.race(services.map((svc) => svc.run().then(() => svc)));\n\t\tif (stopPromise) await stopPromise;\n\t\tlc.info?.(`${svc.constructor.name} (${svc.id}) stopped`);'
+  if (!code.includes(serviceStopped)) {
+    throw new Error('orez CF overlay: runUntilKilled completion anchor missing')
+  }
+  code = code.replace(serviceStopped, serviceCleanupJoined)
   writeFileSync(lifecyclePath, code)
+
+  patchMainStartupShutdown(zcBase)
   console.log('[orez] patched zero-cache startup shutdown')
+}
+
+function patchMainStartupShutdown(zcBase: string): void {
+  const mainPath = resolve(zcBase, 'server', 'main.js')
+  let code = readFileSync(mainPath, 'utf-8')
+  const marker = '__orezAwaitStartup'
+  if (code.includes(marker)) return
+
+  const manager = '\tconst processes = new ProcessManager(lc, parent);'
+  const managerWithBarrier = `${manager}
+\tconst ${marker} = (promise) => Promise.race([promise, processes.done().then(() => {
+\t\tconst error = new Error("zero-cache startup stopped before workers became ready");
+\t\terror.name = "OrezZeroStartupStoppedError";
+\t\tthrow error;
+\t})]);`
+  if (!code.includes(manager)) {
+    throw new Error('orez CF overlay: main process manager anchor missing')
+  }
+  code = code.replace(manager, managerWithBarrier)
+
+  const startupAwaits = [
+    [
+      'await restoreReplica(lc, config, null)',
+      `${marker}(restoreReplica(lc, config, null))`,
+    ],
+    ['await changeStreamerReady', `${marker}(changeStreamerReady)`],
+    ['await backupReady', `${marker}(backupReady)`],
+    ['await reaperReady', `${marker}(reaperReady)`],
+    ['await shadowReady', `${marker}(shadowReady)`],
+    ['await replicaReady', `${marker}(replicaReady)`],
+  ] as const
+  for (const [previousAwait, nextAwait] of startupAwaits) {
+    const count = code.split(previousAwait).length - 1
+    if (count !== 1) {
+      throw new Error(
+        `orez CF overlay: expected one main startup await anchor for ${previousAwait}`
+      )
+    }
+    code = code.replace(previousAwait, `await ${nextAwait}`)
+  }
+  writeFileSync(mainPath, code)
 }
 
 function patchWriteWorkerClient(zcBase: string): void {
