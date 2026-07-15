@@ -112,6 +112,27 @@ Host orchestration (`#ingest` snapshot branch):
 4. finalize (cutover) + send a wake frame unconditionally (also resolves the
    empty-resnapshot wake gap, `t-mrmiwh6h-7da0`).
 
+### 2b. Foreign keys: derived replicas do not enforce them
+
+workerd DO SQLite runs with `foreign_keys=1`, and no per-page mechanism can
+correctly enforce FKs across a multi-commit rebuild (defer_foreign_keys
+checks at every commit; cloned FKs reference the old live parents; rewritten
+FKs still break on ordering, cycles, and self-references whose parent row is
+in a later page). The resolution is a policy, not a mechanism: the sync
+host's tables are a DERIVED replica of upstream-authoritative data, and
+referential integrity is enforced at the SOURCE — replica-side FK
+enforcement can only produce false failures, because replication order is
+never dependency order. zero-cache's own replica strips FK constraints for
+the same reason.
+
+`engine_begin_snapshot_generation` therefore FAILS LOUDLY if any modeled
+table's live DDL carries a foreign-key clause, naming the offending tables
+and directing the consumer to remove FK clauses from sync-host DDL. Neither
+chat's nor soot's sync schemas carry FKs today, so this costs nothing in
+practice. If a consumer ever genuinely needs replica-side FKs, that is a
+deliberate future extension (probe-verified pragma toggling inside the
+synchronous page window), not a silent default.
+
 ### 3. Cleanup and invariants
 
 - abandoned/complete generations are swept lazily in bounded delete batches
