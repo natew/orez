@@ -525,11 +525,16 @@ function triggerWriteTargets(sql: string | null): string[] | null {
   return targets
 }
 
+// sqlite's built-in identifier comparison folds ASCII case only.
+function sqliteNoCase(identifier: string): string {
+  return identifier.replace(/[A-Z]/g, (character) => character.toLowerCase())
+}
+
 /**
  * snapshot the source table and the transitive targets of its business
- * triggers and cascading/SET foreign keys. Trigger SQL and FK metadata name
+ * triggers and cascading/SET foreign keys. trigger SQL and FK metadata name
  * every table SQLite can mutate implicitly, so copying unrelated published
- * tables only multiplies billable writes during zero-cache startup. If a
+ * tables only multiplies billable writes during zero-cache startup. if a
  * reachable trigger cannot be understood, retain the conservative all-table
  * fallback.
  */
@@ -538,25 +543,32 @@ export function snapshotSideEffectWriteTables(
   txID: string,
   sourceTable: string
 ): boolean {
-  const allTables = sql
+  const relations = sql
     .exec(
-      "SELECT name FROM sqlite_master WHERE type = 'table' " +
+      "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') " +
         "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY name"
     )
     .toArray()
-    .map((row) => String(row.name ?? ''))
-    .filter(Boolean)
-  const snapshotTables = new Set(
-    allTables.filter(
-      (table) => !table.startsWith('_orez_') && !table.startsWith('_zero_')
-    )
+    .map((row) => ({ name: String(row.name ?? ''), type: String(row.type ?? '') }))
+    .filter((relation) => relation.name)
+  const knownRelations = new Set(relations.map((relation) => sqliteNoCase(relation.name)))
+  const snapshotTables = new Map(
+    relations
+      .filter(
+        (relation) =>
+          relation.type === 'table' &&
+          !relation.name.startsWith('_orez_') &&
+          !relation.name.startsWith('_zero_')
+      )
+      .map((relation) => [sqliteNoCase(relation.name), relation.name])
   )
   const edges = new Map<string, Set<string>>()
   const unsafeTriggerSources = new Set<string>()
   const addEdge = (from: string, to: string) => {
-    const targets = edges.get(from) ?? new Set<string>()
-    targets.add(to)
-    edges.set(from, targets)
+    const fromKey = sqliteNoCase(from)
+    const targets = edges.get(fromKey) ?? new Set<string>()
+    targets.add(sqliteNoCase(to))
+    edges.set(fromKey, targets)
   }
 
   const triggers = sql
@@ -570,25 +582,34 @@ export function snapshotSideEffectWriteTables(
     const targets = triggerWriteTargets(
       row.sql === null || row.sql === undefined ? null : String(row.sql)
     )
-    if (!targets) unsafeTriggerSources.add(from)
-    else for (const target of targets) addEdge(from, target)
+    if (!targets) unsafeTriggerSources.add(sqliteNoCase(from))
+    else {
+      for (const target of targets) {
+        if (!knownRelations.has(sqliteNoCase(target))) {
+          unsafeTriggerSources.add(sqliteNoCase(from))
+        } else {
+          addEdge(from, target)
+        }
+      }
+    }
   }
 
-  for (const child of allTables) {
+  for (const child of relations) {
+    if (child.type !== 'table') continue
     for (const row of sql
-      .exec(`PRAGMA foreign_key_list(${quoteIdent(child)})`)
+      .exec(`PRAGMA foreign_key_list(${quoteIdent(child.name)})`)
       .toArray()) {
       const parent = String(row.table ?? '')
       const hasAction = [row.on_update, row.on_delete].some((action) => {
         const normalized = String(action ?? 'NO ACTION').toUpperCase()
         return normalized !== 'NO ACTION' && normalized !== 'RESTRICT'
       })
-      if (parent && hasAction) addEdge(parent, child)
+      if (parent && hasAction) addEdge(parent, child.name)
     }
   }
 
   const reachable = new Set<string>()
-  const pending = [sourceTable]
+  const pending = [sqliteNoCase(sourceTable)]
   let hasSideEffect = false
   let mustSnapshotAll = false
   while (pending.length > 0) {
@@ -604,8 +625,10 @@ export function snapshotSideEffectWriteTables(
   if (!hasSideEffect && !mustSnapshotAll) return false
 
   const selected = mustSnapshotAll
-    ? [...snapshotTables]
-    : [...reachable].filter((table) => snapshotTables.has(table))
+    ? [...snapshotTables.values()]
+    : [...reachable]
+        .map((table) => snapshotTables.get(table))
+        .filter((table): table is string => table !== undefined)
   for (const table of selected.sort()) upgradeToTableSnapshot(sql, txID, table)
   return true
 }
