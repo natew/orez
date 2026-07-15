@@ -126,7 +126,14 @@ function resolveDumpFile(): { path: string; cleanup: boolean } {
   return { path: tmpDump, cleanup: true }
 }
 
-describe('restore/reset integration regression', { timeout: 150_000 }, () => {
+// quarantine decision t-mrmn6mvj-x10: this legacy startZeroLite zero-cache
+// restore/reset path is being retired. its post-SIGUSR1 health poll can observe
+// the old server, making the later reset either a no-op or an unintended second
+// full reset; CI took the second path and left replication in an aborted state.
+const LEGACY_RESTORE_RESET_SUNSET =
+  'restore/reset integration regression [sunset decision t-mrmn6mvj-x10: retire the legacy startZeroLite zero-cache restore/reset path]'
+
+describe.skip(LEGACY_RESTORE_RESET_SUNSET, { timeout: 150_000 }, () => {
   let db: PGlite
   let pgPort: number
   let zeroPort: number
