@@ -5405,7 +5405,7 @@ export class DoBackend {
       }
     }
     this.httpClient = new HttpClient(opts?.fetch, this.lifecycleAbort.signal)
-    // Transaction rollback is part of close itself. It must remain usable after
+    // transaction rollback is part of close itself. it must remain usable after
     // lifecycleAbort stops ordinary queries, and close joins this request before
     // allowing the owning runtime generation to be released.
     this.cleanupHttpClient = new HttpClient(opts?.fetch)
@@ -5754,11 +5754,7 @@ export class DoBackend {
         await initialization?.catch(() => {})
         await this.runExclusive(async () => {
           if (this.inTransaction) {
-            try {
-              await this.rollbackTransaction(this.cleanupHttpClient, true)
-            } catch {
-              this.clearTransactionState()
-            }
+            await this.rollbackTransaction(this.cleanupHttpClient, true)
           }
         })
       } finally {
@@ -5934,7 +5930,7 @@ export class DoBackend {
       }
     } finally {
       if (snapshot) this.restoreTransactionMetadataSnapshot(snapshot)
-      // A closing backend is being discarded. The atomic remote rollback above
+      // a closing backend is being discarded. the atomic remote rollback above
       // is the required cleanup; post-rollback metadata/cache refreshes are only
       // useful to a backend that will continue serving queries.
       if (!closing) await this.persistDurableMetadata()

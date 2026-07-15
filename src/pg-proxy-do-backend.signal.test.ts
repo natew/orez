@@ -105,4 +105,30 @@ describe('DoBackend cancellation', () => {
     await closing
     expect(closeSettled).toBe(true)
   })
+
+  test('close rejects when remote rollback cleanup rejects', async () => {
+    const rollbackError = new Error('rollback request failed')
+    const paths: string[] = []
+    const backendFetch = (async (input) => {
+      const url = new URL(
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      )
+      paths.push(url.pathname)
+      if (url.pathname === '/rollback-tx') throw rollbackError
+      return Response.json({ rows: [], columns: [], affectedRows: 1 })
+    }) as typeof fetch
+    const backend = new DoBackend(
+      'https://orez-do-backend.local',
+      'zero_cdb',
+      'close-rollback-rejection-test',
+      { fetch: backendFetch }
+    )
+    await backend.waitReady
+    await backend.exec('BEGIN')
+    await backend.exec('INSERT INTO message (id) VALUES (1)')
+
+    await expect(backend.close()).rejects.toBe(rollbackError)
+    expect(paths).toContain('/rollback-tx')
+    expect(backend.closed).toBe(true)
+  })
 })
