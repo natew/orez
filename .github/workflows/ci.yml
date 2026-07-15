@@ -632,5 +632,7 @@ jobs:
         working-directory: site
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: 6afff1f79e2fd12f1cfd1bfe1dfd08d1
+          # must match the account the CLOUDFLARE_API_TOKEN repo secret is
+          # scoped to (currently borrowed from soot per Nate, 2026-07-15)
+          CLOUDFLARE_ACCOUNT_ID: aa20b480cc813f2131bc005e2b7fd140
         run: bunx wrangler@4.110.0 deploy --name orez-docs
