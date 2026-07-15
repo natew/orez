@@ -497,49 +497,116 @@ export function upgradeToTableSnapshot(
   sql.exec(`UPDATE "${TX_MANIFEST_TABLE}" SET snapshot = ? WHERE seq = ?`, snapshot, seq)
 }
 
+const TRIGGER_WRITE =
+  /\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE(?:\s+OR\s+\w+)?\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+(?:"((?:[^"]|"")+)"|`((?:[^`]|``)+)`|\[([^\]]+)\]|([A-Za-z_][\w$]*))(?:\s*\.\s*(?:"((?:[^"]|"")+)"|`((?:[^`]|``)+)`|\[([^\]]+)\]|([A-Za-z_][\w$]*)))?/i
+
+function triggerWriteTargets(sql: string | null): string[] | null {
+  if (!sql) return null
+  const begin = sql.search(/\bBEGIN\b/i)
+  const end = sql.search(/\bEND\s*$/i)
+  if (begin < 0 || end < begin) return null
+  const targets: string[] = []
+  for (const statement of sql.slice(begin + 5, end).split(';')) {
+    if (!/\b(?:INSERT|REPLACE|UPDATE|DELETE)\b/i.test(statement)) continue
+    const match = TRIGGER_WRITE.exec(statement)
+    if (!match) return null
+    const target =
+      match[5] ??
+      match[6] ??
+      match[7] ??
+      match[8] ??
+      match[1] ??
+      match[2] ??
+      match[3] ??
+      match[4]
+    if (!target) return null
+    targets.push(target.replaceAll('""', '"').replaceAll('``', '`'))
+  }
+  return targets
+}
+
 /**
- * Snapshot every user table before a statement whose source table has a
- * business trigger or is the parent of a cascading/SET foreign-key action.
- * Those effects can reach unregistered tables, and SQLite's trigger staging
- * order is not causal DML order. This conservative fallback is paid only by
- * side-effecting writes and makes table snapshots authoritative for them.
+ * snapshot the source table and the transitive targets of its business
+ * triggers and cascading/SET foreign keys. Trigger SQL and FK metadata name
+ * every table SQLite can mutate implicitly, so copying unrelated published
+ * tables only multiplies billable writes during zero-cache startup. If a
+ * reachable trigger cannot be understood, retain the conservative all-table
+ * fallback.
  */
 export function snapshotSideEffectWriteTables(
   sql: DurableSqlStorage,
   txID: string,
   sourceTable: string
 ): boolean {
-  const hasBusinessTrigger =
-    sql
-      .exec(
-        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? AND name NOT GLOB '_orez_cdc_*' LIMIT 1",
-        sourceTable
-      )
-      .toArray().length > 0
-  const tables = sql
+  const allTables = sql
     .exec(
       "SELECT name FROM sqlite_master WHERE type = 'table' " +
-        "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_orez_*' " +
-        "AND name NOT GLOB '_zero_*' AND name NOT GLOB '_cf_*' ORDER BY name"
+        "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY name"
     )
     .toArray()
     .map((row) => String(row.name ?? ''))
     .filter(Boolean)
-  const hasReferentialAction = tables.some((child) =>
-    sql
-      .exec(`PRAGMA foreign_key_list(${quoteIdent(child)})`)
-      .toArray()
-      .some((row) => {
-        if (String(row.table ?? '') !== sourceTable) return false
-        return [row.on_update, row.on_delete].some((action) => {
-          const normalized = String(action ?? 'NO ACTION').toUpperCase()
-          return normalized !== 'NO ACTION' && normalized !== 'RESTRICT'
-        })
-      })
+  const snapshotTables = new Set(
+    allTables.filter(
+      (table) => !table.startsWith('_orez_') && !table.startsWith('_zero_')
+    )
   )
-  if (!hasBusinessTrigger && !hasReferentialAction) return false
+  const edges = new Map<string, Set<string>>()
+  const unsafeTriggerSources = new Set<string>()
+  const addEdge = (from: string, to: string) => {
+    const targets = edges.get(from) ?? new Set<string>()
+    targets.add(to)
+    edges.set(from, targets)
+  }
 
-  for (const table of tables) upgradeToTableSnapshot(sql, txID, table)
+  const triggers = sql
+    .exec(
+      "SELECT tbl_name, sql FROM sqlite_master WHERE type = 'trigger' " +
+        "AND name NOT GLOB '_orez_cdc_*'"
+    )
+    .toArray()
+  for (const row of triggers) {
+    const from = String(row.tbl_name ?? '')
+    const targets = triggerWriteTargets(
+      row.sql === null || row.sql === undefined ? null : String(row.sql)
+    )
+    if (!targets) unsafeTriggerSources.add(from)
+    else for (const target of targets) addEdge(from, target)
+  }
+
+  for (const child of allTables) {
+    for (const row of sql
+      .exec(`PRAGMA foreign_key_list(${quoteIdent(child)})`)
+      .toArray()) {
+      const parent = String(row.table ?? '')
+      const hasAction = [row.on_update, row.on_delete].some((action) => {
+        const normalized = String(action ?? 'NO ACTION').toUpperCase()
+        return normalized !== 'NO ACTION' && normalized !== 'RESTRICT'
+      })
+      if (parent && hasAction) addEdge(parent, child)
+    }
+  }
+
+  const reachable = new Set<string>()
+  const pending = [sourceTable]
+  let hasSideEffect = false
+  let mustSnapshotAll = false
+  while (pending.length > 0) {
+    const table = pending.pop()!
+    if (reachable.has(table)) continue
+    reachable.add(table)
+    if (unsafeTriggerSources.has(table)) mustSnapshotAll = true
+    for (const target of edges.get(table) ?? []) {
+      hasSideEffect = true
+      pending.push(target)
+    }
+  }
+  if (!hasSideEffect && !mustSnapshotAll) return false
+
+  const selected = mustSnapshotAll
+    ? [...snapshotTables]
+    : [...reachable].filter((table) => snapshotTables.has(table))
+  for (const table of selected.sort()) upgradeToTableSnapshot(sql, txID, table)
   return true
 }
 
