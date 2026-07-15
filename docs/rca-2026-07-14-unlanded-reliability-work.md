@@ -33,25 +33,30 @@ The task lifecycle had no landing step. "Reviewed" was treated as terminal; noth
 
 3. **A red main removed the signal that landing matters.** `origin/main`'s `test` and `rust` CI jobs were already failing (and had been for several releases). With no green main to protect, there is no feedback that a branch has drifted out of mergeability and no pressure to keep it landable. Branches diverged 67 commits with nobody noticing.
 
-4. **The divergence tax compounded.** Every day main moved, the merge got scarier and landing felt more optional. The `rescue/worktree-hygiene-*` branches are evidence the team already felt this: a prior hygiene pass *preserved* the work into more branches instead of *landing* it, which added clutter without closing the loop.
+4. **The divergence tax compounded.** Every day main moved, the merge got scarier and landing felt more optional. The `rescue/worktree-hygiene-*` branches are evidence the team already felt this: a prior hygiene pass _preserved_ the work into more branches instead of _landing_ it, which added clutter without closing the loop.
 
 The agentbus task state is the clearest single signal that was present but unwired: an `urgent` task stayed `open` while its deliverable sat done-but-parked. Nobody connected "open task + finished branch not on main" to "land it now."
 
 ## Prevention
 
 ### 1. Land-or-kill discipline
+
 A task is done only when its diff is on `main` or explicitly discarded with a reason. "Reviewed and parked in a worktree" is not a terminal state. When an agentbus session ends, its branch is either landed, handed off with an owner, or closed as discarded.
 
 ### 2. Keep main green and mergeable
+
 A green main is the cheapest prevention lever. It makes landing safe and makes divergence visible: a branch that stops merging cleanly is a bug to fix that day, not a someday-merge. Two pre-existing reds are now tracked: the `test`-job DDL/oracle failures (`t-mrlmp239-8ya0`) and the `rust` fmt blocker (fixed in this landing).
 
 ### 3. Prefer same-checkout branches over worktrees
+
 Worktrees are for genuinely concurrent, heavily-overlapping work. For sequential work they trade a small convenience for a large "out of sight, out of mind" cost. Fewer worktrees means fewer parked-and-forgotten branches. This matches the standing guidance to not use a worktree by default.
 
 ### 4. Short branch lifetimes
+
 Land within a day or two. If a branch cannot land that soon, that is the signal to finish or drop it, not to let it accrue divergence tax.
 
 ### 5. Agentbus auto-scan for landing debt
+
 The coordinator should surface parked work automatically instead of relying on a human to remember it. Two pieces:
 
 **a. `scripts/landing-debt.sh`** (added in this change) — read-only, repo-agnostic. For every local and `origin` branch it reports commits-not-on-main, age since last commit, whether it is checked out in a worktree, and whether it still merges cleanly. A row with `WORKTREE=no`, a high age, and `MERGE=clean` is almost always forgotten, mergeable work. Sample after this cleanup:
