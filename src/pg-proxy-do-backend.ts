@@ -5340,6 +5340,7 @@ export class DoBackend {
   private instanceId: string
   private allowTransactionalDDL: boolean
   private signalReplication: () => void
+  private log?: (event: Record<string, unknown>) => void
 
   // Transaction state. The Durable Object refuses raw SQL BEGIN/COMMIT/SAVEPOINT
   // (Cloudflare requires ctx.storage.transaction()), so PG-style multi-call
@@ -5381,6 +5382,7 @@ export class DoBackend {
       allowTransactionalDDL?: boolean
       fetch?: typeof fetch
       instanceId?: string
+      log?: (event: Record<string, unknown>) => void
       signal?: AbortSignal
       signalReplication?: () => void
       txOwner?: string
@@ -5391,6 +5393,7 @@ export class DoBackend {
     this.namespace = namespace
     this.instanceId = opts?.instanceId ?? ''
     this.allowTransactionalDDL = opts?.allowTransactionalDDL === true
+    this.log = opts?.log
     this.txOwner = opts?.txOwner || 'default'
     this.signalReplication = opts?.signalReplication ?? signalReplicationChange
     if (opts?.signal) {
@@ -5446,12 +5449,50 @@ export class DoBackend {
     this.lifecycleAbort.signal.throwIfAborted()
   }
 
+  private emitInitEvent(event: Record<string, unknown>): void {
+    try {
+      this.log?.({
+        component: 'do-backend',
+        database: this.dbName,
+        instanceId: this.instanceId,
+        namespace: this.namespace,
+        ...event,
+      })
+    } catch {
+      // diagnostics cannot break initialization
+    }
+  }
+
+  private async runInitPhase<T>(phase: string, run: () => Promise<T>): Promise<T> {
+    const startedAt = Date.now()
+    this.emitInitEvent({ event: 'do-backend-init-phase-start', phase })
+    try {
+      const result = await run()
+      this.emitInitEvent({
+        event: 'do-backend-init-phase-complete',
+        phase,
+        phaseElapsedMs: Date.now() - startedAt,
+      })
+      return result
+    } catch (error) {
+      this.emitInitEvent({
+        error: error instanceof Error ? error.message : String(error),
+        event: 'do-backend-init-phase-failed',
+        phase,
+        phaseElapsedMs: Date.now() - startedAt,
+      })
+      throw error
+    }
+  }
+
   private async init() {
     this.assertOpen()
-    await loadModule()
+    await this.runInitPhase('module-load', loadModule)
     this.assertOpen()
     try {
-      await this.httpClient.post(this.url('/exec'), JSON.stringify({ sql: 'SELECT 1' }))
+      await this.runInitPhase('connection-probe', () =>
+        this.httpClient.post(this.url('/exec'), JSON.stringify({ sql: 'SELECT 1' }))
+      )
     } catch {}
     this.assertOpen()
     if (this.dbName === 'postgres') await this.ensureChangeTrackingTables()
@@ -5462,27 +5503,40 @@ export class DoBackend {
   }
 
   private async ensureChangeTrackingTables(): Promise<void> {
-    await this.doExecResult(
-      "CREATE TABLE IF NOT EXISTS \"_zero_changes\" (watermark INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, op TEXT NOT NULL CHECK (op IN ('INSERT', 'UPDATE', 'DELETE')), row_data TEXT, old_data TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()))"
-    )
-    await this.doExecResult(
-      'CREATE TABLE IF NOT EXISTS "_zero_change_state" (id INTEGER PRIMARY KEY CHECK (id = 1), last_value INTEGER NOT NULL DEFAULT 0)'
-    )
-    await this.doExecResult(
-      'INSERT OR IGNORE INTO "_zero_change_state" (id, last_value) VALUES (1, 0)'
-    )
-    await this.doExecResult(
-      'CREATE TABLE IF NOT EXISTS "_orez___zero_watermark" (dummy INTEGER PRIMARY KEY DEFAULT 1, last_value INTEGER NOT NULL DEFAULT 1, is_called INTEGER NOT NULL DEFAULT 0)'
-    )
-    await this.doExecResult(
-      'INSERT OR IGNORE INTO "_orez___zero_watermark" (dummy, last_value, is_called) VALUES (1, 1, 0)'
-    )
-    await this.doExecResult(
-      "CREATE TABLE IF NOT EXISTS \"_orez__zero_replication_slots\" (slot_name TEXT PRIMARY KEY, restart_lsn TEXT NOT NULL DEFAULT '0/1000000', confirmed_flush_lsn TEXT NOT NULL DEFAULT '0/1000000', wal_status TEXT NOT NULL DEFAULT 'reserved', plugin TEXT NOT NULL DEFAULT 'pgoutput', slot_type TEXT NOT NULL DEFAULT 'logical', active INTEGER NOT NULL DEFAULT 0, active_pid INTEGER DEFAULT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()))"
-    )
-    await this.doExecResult(
-      'CREATE TABLE IF NOT EXISTS "_orez___zero_streamed_batches" (batch_lsn INTEGER PRIMARY KEY, batch_end INTEGER NOT NULL)'
-    )
+    const statements = [
+      [
+        'change-tracking-log-table',
+        "CREATE TABLE IF NOT EXISTS \"_zero_changes\" (watermark INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT NOT NULL, op TEXT NOT NULL CHECK (op IN ('INSERT', 'UPDATE', 'DELETE')), row_data TEXT, old_data TEXT, created_at INTEGER NOT NULL DEFAULT (unixepoch()))",
+      ],
+      [
+        'change-tracking-state-table',
+        'CREATE TABLE IF NOT EXISTS "_zero_change_state" (id INTEGER PRIMARY KEY CHECK (id = 1), last_value INTEGER NOT NULL DEFAULT 0)',
+      ],
+      [
+        'change-tracking-state-seed',
+        'INSERT OR IGNORE INTO "_zero_change_state" (id, last_value) VALUES (1, 0)',
+      ],
+      [
+        'change-tracking-watermark-table',
+        'CREATE TABLE IF NOT EXISTS "_orez___zero_watermark" (dummy INTEGER PRIMARY KEY DEFAULT 1, last_value INTEGER NOT NULL DEFAULT 1, is_called INTEGER NOT NULL DEFAULT 0)',
+      ],
+      [
+        'change-tracking-watermark-seed',
+        'INSERT OR IGNORE INTO "_orez___zero_watermark" (dummy, last_value, is_called) VALUES (1, 1, 0)',
+      ],
+      [
+        'change-tracking-replication-slots-table',
+        "CREATE TABLE IF NOT EXISTS \"_orez__zero_replication_slots\" (slot_name TEXT PRIMARY KEY, restart_lsn TEXT NOT NULL DEFAULT '0/1000000', confirmed_flush_lsn TEXT NOT NULL DEFAULT '0/1000000', wal_status TEXT NOT NULL DEFAULT 'reserved', plugin TEXT NOT NULL DEFAULT 'pgoutput', slot_type TEXT NOT NULL DEFAULT 'logical', active INTEGER NOT NULL DEFAULT 0, active_pid INTEGER DEFAULT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()))",
+      ],
+      [
+        'change-tracking-streamed-batches-table',
+        'CREATE TABLE IF NOT EXISTS "_orez___zero_streamed_batches" (batch_lsn INTEGER PRIMARY KEY, batch_end INTEGER NOT NULL)',
+      ],
+    ] as const
+
+    for (const [phase, sql] of statements) {
+      await this.runInitPhase(phase, () => this.doExecResult(sql))
+    }
   }
 
   private async ensureMetadataTable(): Promise<void> {
@@ -5541,9 +5595,11 @@ export class DoBackend {
 
   private async loadDurableMetadata(): Promise<void> {
     try {
-      await this.ensureMetadataTable()
-      const result = await this.doExecResult(
-        `SELECT kind, key, subkey, value FROM ${quoteIdentifier(METADATA_TABLE)}`
+      await this.runInitPhase('durable-metadata-table', () => this.ensureMetadataTable())
+      const result = await this.runInitPhase('durable-metadata-read', () =>
+        this.doExecResult(
+          `SELECT kind, key, subkey, value FROM ${quoteIdentifier(METADATA_TABLE)}`
+        )
       )
       this.lastPersistedMetadata = new Map()
       for (const row of result.rows) {
@@ -5561,8 +5617,13 @@ export class DoBackend {
           this.fkRegistry.add(key, JSON.parse(value) as FkChild)
         }
       }
-      if (await this.repairShardMetadataPublications()) {
-        await this.persistDurableMetadata()
+      const repaired = await this.runInitPhase('shard-metadata-repair', () =>
+        this.repairShardMetadataPublications()
+      )
+      if (repaired) {
+        await this.runInitPhase('durable-metadata-persist', () =>
+          this.persistDurableMetadata()
+        )
       }
     } catch {}
   }

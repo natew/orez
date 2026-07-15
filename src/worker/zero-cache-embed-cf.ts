@@ -590,6 +590,7 @@ export async function startZeroCacheEmbedCF(
         allowTransactionalDDL: true,
         fetch: dbName === 'postgres' ? opts.backendFetch : localSql.fetch,
         instanceId,
+        log: opts.log,
         signal: startupAbort.signal,
         signalReplication: () => signalReplicationChange(instanceId),
         txOwner,

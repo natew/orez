@@ -3,6 +3,45 @@ import { describe, expect, test, vi } from 'vitest'
 import { DoBackend } from './pg-proxy-do-backend.js'
 
 describe('DoBackend cancellation', () => {
+  test('reports the exact initialization phase around an abort-ignoring request', async () => {
+    const controller = new AbortController()
+    const events: Array<Record<string, unknown>> = []
+    let releaseMetadata!: () => void
+    const metadataGate = new Promise<void>((resolve) => {
+      releaseMetadata = resolve
+    })
+    let requestCount = 0
+    const backendFetch = (async () => {
+      requestCount++
+      if (requestCount === 2) await metadataGate
+      return Response.json({ rows: [], columns: [] })
+    }) as typeof fetch
+    const backend = new DoBackend(
+      'https://orez-do-backend.local',
+      'zero_cdb',
+      'init-phase-test',
+      {
+        fetch: backendFetch,
+        log: (event) => events.push(event),
+        signal: controller.signal,
+      }
+    )
+    const initializing = backend.waitReady.catch((error) => error)
+
+    await vi.waitFor(() =>
+      expect(events.at(-1)).toMatchObject({
+        database: 'zero_cdb',
+        event: 'do-backend-init-phase-start',
+        phase: 'durable-metadata-table',
+      })
+    )
+
+    controller.abort(new Error('startup deadline reached'))
+    releaseMetadata()
+    await expect(initializing).resolves.toBeInstanceOf(Error)
+    await backend.close()
+  })
+
   test('threads one signal through every durable object request', async () => {
     const controller = new AbortController()
     const signals: Array<AbortSignal | null | undefined> = []
@@ -45,7 +84,7 @@ describe('DoBackend cancellation', () => {
       { fetch: backendFetch }
     )
     const initializing = backend.waitReady.catch((error) => error)
-    await Promise.resolve()
+    await vi.waitFor(() => expect(fetchCalls).toBe(1))
 
     let closeSettled = false
     const closing = backend.close().then(() => {
