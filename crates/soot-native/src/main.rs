@@ -13,6 +13,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::HeaderMap;
 use serde::Deserialize;
@@ -21,6 +22,7 @@ use sync_core::SyncDb;
 use sync_core::schema::{TableSpec, Tables};
 use sync_core::value::ZeroColumnType;
 use sync_native::engine::{InitFn, MutateFn};
+use sync_native::retain::RetentionPolicy;
 use sync_native::{AuthFn, SyncNativeConfig, SyncNativeHost, SyncNativeSecurity};
 
 // ---- config file shapes ---------------------------------------------------
@@ -37,6 +39,20 @@ struct ConfigFile {
     query_aware: bool,
     #[serde(default)]
     visibility_enabled: bool,
+    // on-disk replica retention. absent from an existing config -> the defaults
+    // below apply, so retention is on without any soot-side config change. one
+    // replica accretes per project and nothing else prunes them, so this is what
+    // bounds `.orez/sync-native` growth.
+    #[serde(default = "default_retention_enabled")]
+    retention_enabled: bool,
+    #[serde(default = "default_retention_max_age_hours")]
+    retention_max_age_hours: u64,
+    #[serde(default = "default_retention_max_bytes")]
+    retention_max_bytes: u64,
+    #[serde(default = "default_retention_idle_minutes")]
+    retention_idle_minutes: u64,
+    #[serde(default = "default_retention_interval_minutes")]
+    retention_interval_minutes: u64,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +72,34 @@ struct ColumnDef {
 
 fn default_retain() -> i64 {
     4096
+}
+
+// retention defaults mirror sync_native::retain::RetentionPolicy::default().
+fn default_retention_enabled() -> bool {
+    true
+}
+fn default_retention_max_age_hours() -> u64 {
+    72 // 3 days
+}
+fn default_retention_max_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024 // 2 GiB
+}
+fn default_retention_idle_minutes() -> u64 {
+    30
+}
+fn default_retention_interval_minutes() -> u64 {
+    10
+}
+
+fn build_retention(cfg: &ConfigFile) -> RetentionPolicy {
+    RetentionPolicy {
+        enabled: cfg.retention_enabled,
+        max_age: Duration::from_secs(cfg.retention_max_age_hours.saturating_mul(3600)),
+        max_bytes: cfg.retention_max_bytes,
+        idle_ttl: Duration::from_secs(cfg.retention_idle_minutes.saturating_mul(60)),
+        // never let a misconfigured 0 spin the sweep tightly.
+        interval: Duration::from_secs(cfg.retention_interval_minutes.max(1).saturating_mul(60)),
+    }
 }
 
 // ---- helpers ---------------------------------------------------------------
@@ -207,6 +251,7 @@ async fn main() {
         serde_json::from_str(&raw).unwrap_or_else(|e| panic!("invalid config: {e}"));
 
     let tables = build_tables(&cfg.tables);
+    let retention = build_retention(&cfg);
     let initialize = make_init(cfg.ddl);
     let mutate = make_mutate();
     let authenticate = make_auth();
@@ -222,6 +267,7 @@ async fn main() {
         query_aware: cfg.query_aware,
         query_resolution: None,
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
+        retention,
     };
 
     let mut security = args

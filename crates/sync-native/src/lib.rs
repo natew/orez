@@ -16,6 +16,7 @@ pub mod fault;
 pub mod fixture;
 pub mod namespace;
 pub mod obs;
+pub mod retain;
 pub mod seed;
 pub mod server;
 pub mod wake;
@@ -24,7 +25,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use axum::Router;
 use axum::http::HeaderMap;
@@ -230,6 +231,16 @@ pub struct SyncNativeConfig {
     /// rolls the transaction back and unblocks pull/push. Use
     /// [`DEFAULT_ADMIN_TX_LEASE`] unless you have a reason to tune it.
     pub admin_tx_lease: Duration,
+
+    /// On-disk retention for per-namespace replica files. The host evicts idle
+    /// namespace workers and deletes replicas that are abandoned (untouched past
+    /// `max_age`) or over the total-size budget (oldest first), once at startup
+    /// and then on a background timer. Replicas are derived caches, so a deleted
+    /// one is rebuilt on the next request via a full snapshot. Use
+    /// [`retain::RetentionPolicy::default`], or
+    /// [`retain::RetentionPolicy::disabled`] to turn it off. The background timer
+    /// only runs when the host is started with [`SyncNativeHost::run`].
+    pub retention: retain::RetentionPolicy,
 }
 
 // ---- host ----------------------------------------------------------------
@@ -243,6 +254,8 @@ pub struct SyncNativeConfig {
 pub struct SyncNativeHost {
     router: Router,
     admin_token: String,
+    manager: Arc<Manager>,
+    retention: retain::RetentionPolicy,
 }
 
 impl SyncNativeHost {
@@ -276,8 +289,14 @@ impl SyncNativeHost {
             Arc::new(move |db: &mut dyn sync_core::SyncDb| engine::init_namespace(db, &init_ctx));
         let manager = Arc::new(Manager::new(data_dir.clone(), init, config.admin_tx_lease));
 
+        // startup sweep: no namespaces are open yet, so this is a pure on-disk
+        // reclamation with nothing to race. it clears replicas left behind by
+        // prior runs (abandoned or over budget) before serving begins.
+        let retention = config.retention;
+        manager.retain(&retention, SystemTime::now()).emit();
+
         let state = Arc::new(server::AppState::new(
-            manager,
+            manager.clone(),
             wake::WakeRegistry::new(),
             ctx,
             config.authenticate,
@@ -291,6 +310,8 @@ impl SyncNativeHost {
         Self {
             router,
             admin_token: security.admin_token,
+            manager,
+            retention,
         }
     }
 
@@ -314,6 +335,22 @@ impl SyncNativeHost {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .expect("failed to bind");
+
+        // background retention: on each tick, evict idle namespace workers and
+        // reclaim disk. the startup sweep already ran in the constructor; this
+        // keeps a long-lived process bounded without waiting for a restart.
+        if self.retention.enabled {
+            let manager = self.manager.clone();
+            let policy = self.retention;
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(policy.interval);
+                ticker.tick().await; // the first tick fires immediately; skip it
+                loop {
+                    ticker.tick().await;
+                    manager.retain(&policy, SystemTime::now()).emit();
+                }
+            });
+        }
 
         axum::serve(listener, self.router)
             .with_graceful_shutdown(server::shutdown_signal())

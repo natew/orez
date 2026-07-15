@@ -128,6 +128,9 @@ fn custom_config_with_lease(admin_tx_lease: std::time::Duration) -> SyncNativeCo
         query_aware: false,
         query_resolution: None,
         admin_tx_lease,
+        // tests drive retention directly (namespace.rs unit tests); keep it off
+        // here so no background sweep races the fixtures.
+        retention: sync_native::retain::RetentionPolicy::disabled(),
     }
 }
 
@@ -1352,6 +1355,7 @@ async fn fixture_config_still_works() {
         query_aware: false,
         query_resolution: None,
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
+        retention: sync_native::retain::RetentionPolicy::disabled(),
     };
     let host = test_host(config, tmp.path().to_path_buf());
     let router = host.into_router();

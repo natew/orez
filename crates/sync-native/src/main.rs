@@ -143,6 +143,10 @@ async fn main() {
         query_aware: cli.query_aware,
         query_resolution: None,
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
+        // the fixture harness server manages its own short-lived data dirs; leave
+        // replica retention to real consumers (soot-native) so harness runs never
+        // race a background sweep.
+        retention: sync_native::retain::RetentionPolicy::disabled(),
     };
 
     let mut security = cli

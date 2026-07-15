@@ -17,11 +17,12 @@
 // channel closes, or it stalls past the lease) is rolled back and unblocks the
 // namespace.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime};
 
 use rusqlite::Connection;
 use tokio::sync::oneshot;
@@ -29,6 +30,7 @@ use tokio::sync::oneshot;
 use sync_core::{DbError, Row, SyncDb};
 
 use crate::db::RusqliteDb;
+use crate::retain::{plan_deletions, ReplicaFile, RetentionPolicy, SweepOutcome};
 
 // how an admin transaction ends. the worker runs the real COMMIT or ROLLBACK;
 // the client only names the outcome (never the raw SQL), so scheduler state and
@@ -166,9 +168,14 @@ impl Namespace {
 fn open_connection(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
     conn.execute_batch(
+        // journal_size_limit truncates the WAL back to at most this size after a
+        // checkpoint instead of leaving it at its high-water mark, so an
+        // occasional large transaction cannot permanently bloat a replica's
+        // `-wal`. it composes with the default wal_autocheckpoint (1000 pages).
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = FULL;
          PRAGMA busy_timeout = 5000;
+         PRAGMA journal_size_limit = 8388608;
          PRAGMA foreign_keys = OFF;",
     )
     .map_err(|e| e.to_string())?;
@@ -354,10 +361,20 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
     }
 }
 
-fn spawn(name: &str, path: PathBuf, init: InitFn, lease: Duration) -> Result<Namespace, String> {
+// spawn a namespace's worker thread. returns both the Namespace handle (the send
+// side callers use) and the thread's JoinHandle, which the Manager keeps so it
+// can join on eviction: dropping the Namespace closes the channel and the worker
+// exits, and joining guarantees the connection is closed before the same file is
+// reopened.
+fn spawn(
+    name: &str,
+    path: PathBuf,
+    init: InitFn,
+    lease: Duration,
+) -> Result<(Namespace, JoinHandle<()>), String> {
     let (sender, receiver) = std::sync::mpsc::channel::<Job>();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name(format!("ns-{name}"))
         .spawn(move || {
             let conn = match open_connection(&path) {
@@ -383,7 +400,7 @@ fn spawn(name: &str, path: PathBuf, init: InitFn, lease: Duration) -> Result<Nam
     ready_rx
         .recv()
         .map_err(|e| format!("namespace worker failed to start: {e}"))??;
-    Ok(Namespace { sender })
+    Ok((Namespace { sender }, handle))
 }
 
 // a namespace name must be a safe filename component (no path traversal, no
@@ -403,9 +420,17 @@ fn sanitize(ns: &str) -> Result<String, String> {
     }
 }
 
+// a live namespace worker plus the bookkeeping retention needs: the join handle
+// to tear it down on eviction, and the last time a request touched it.
+struct Entry {
+    ns: Arc<Namespace>,
+    handle: JoinHandle<()>,
+    last_access: Instant,
+}
+
 pub struct Manager {
     data_dir: PathBuf,
-    namespaces: Mutex<HashMap<String, Arc<Namespace>>>,
+    namespaces: Mutex<HashMap<String, Entry>>,
     init: InitFn,
     // idle-between-steps budget for an admin transaction before the worker
     // reclaims the namespace (see worker_loop).
@@ -424,17 +449,155 @@ impl Manager {
 
     // get-or-create the namespace's worker. creation opens the file and seeds
     // it, which is quick and only happens once per namespace per process.
+    // holding the lock across spawn (which opens the connection) makes get,
+    // eviction, and the file sweep mutually exclusive, so a namespace's file is
+    // never open by two connections at once.
     pub fn get(&self, ns: &str) -> Result<Arc<Namespace>, String> {
         let key = sanitize(ns)?;
         let mut map = self.namespaces.lock().unwrap();
-        if let Some(existing) = map.get(&key) {
-            return Ok(existing.clone());
+        if let Some(entry) = map.get_mut(&key) {
+            entry.last_access = Instant::now();
+            return Ok(entry.ns.clone());
         }
         let path = self.data_dir.join(format!("{key}.sqlite"));
-        let namespace = Arc::new(spawn(&key, path, self.init.clone(), self.admin_tx_lease)?);
-        map.insert(key, namespace.clone());
+        let (namespace, handle) = spawn(&key, path, self.init.clone(), self.admin_tx_lease)?;
+        let namespace = Arc::new(namespace);
+        map.insert(
+            key,
+            Entry {
+                ns: namespace.clone(),
+                handle,
+                last_access: Instant::now(),
+            },
+        );
         Ok(namespace)
     }
+
+    // run one retention pass: evict idle workers, then delete on-disk replicas
+    // that are abandoned (older than max_age) or over the total-size budget
+    // (oldest first). safe to call at startup (empty map -> pure on-disk sweep)
+    // and on a timer. `now` is injected for testing.
+    pub fn retain(&self, policy: &RetentionPolicy, now: SystemTime) -> SweepOutcome {
+        if !policy.enabled {
+            return SweepOutcome::default();
+        }
+        let evicted = self.evict_idle(policy.idle_ttl);
+        let (deleted, bytes_freed) = self.sweep_files(policy, now);
+        SweepOutcome {
+            evicted,
+            deleted,
+            bytes_freed,
+        }
+    }
+
+    // drop workers idle past the ttl and referenced only by the map (no in-flight
+    // request holds an Arc). dropping the Arc closes the worker's channel; joining
+    // under the lock guarantees the connection is closed before any get() can
+    // reopen the same file. returns how many were evicted.
+    fn evict_idle(&self, idle_ttl: Duration) -> usize {
+        let now = Instant::now();
+        let mut map = self.namespaces.lock().unwrap();
+        let stale: Vec<String> = map
+            .iter()
+            .filter(|(_, e)| {
+                Arc::strong_count(&e.ns) == 1 && now.duration_since(e.last_access) >= idle_ttl
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut evicted = 0;
+        for key in stale {
+            if let Some(entry) = map.remove(&key) {
+                drop(entry.ns);
+                let _ = entry.handle.join();
+                evicted += 1;
+            }
+        }
+        evicted
+    }
+
+    // delete replica files for namespaces no live worker holds open. a namespace
+    // in the map is skipped: its file is in use and, being live, is by definition
+    // recently touched. returns (files deleted, bytes freed).
+    fn sweep_files(&self, policy: &RetentionPolicy, now: SystemTime) -> (usize, u64) {
+        let live = self.live_keys();
+        let Ok(dir) = std::fs::read_dir(&self.data_dir) else {
+            return (0, 0);
+        };
+        // one candidate per namespace: its main `.sqlite` file. `-wal`/`-shm`
+        // sidecars and any non-sqlite files are folded in or skipped.
+        let mut keys: Vec<String> = Vec::new();
+        let mut files: Vec<ReplicaFile> = Vec::new();
+        for entry in dir.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(key) = name.strip_suffix(".sqlite") else {
+                continue;
+            };
+            if live.contains(key) {
+                continue;
+            }
+            let (size, mtime) = replica_footprint(&self.data_dir, key);
+            keys.push(key.to_string());
+            files.push(ReplicaFile { size, mtime });
+        }
+
+        let mut deleted = 0;
+        let mut bytes_freed = 0;
+        for idx in plan_deletions(&files, policy, now) {
+            let key = &keys[idx];
+            // re-check liveness under the lock right before unlinking: a get()
+            // may have recreated this namespace since the scan. holding the lock
+            // across the unlink keeps a racing get() from reopening mid-delete.
+            let map = self.namespaces.lock().unwrap();
+            if map.contains_key(key) {
+                continue;
+            }
+            let freed = delete_replica(&self.data_dir, key);
+            drop(map);
+            if freed > 0 {
+                deleted += 1;
+                bytes_freed += freed;
+            }
+        }
+        (deleted, bytes_freed)
+    }
+
+    fn live_keys(&self) -> HashSet<String> {
+        self.namespaces.lock().unwrap().keys().cloned().collect()
+    }
+}
+
+// (total bytes, newest mtime) across a replica's main + `-wal` + `-shm` files.
+fn replica_footprint(dir: &Path, key: &str) -> (u64, SystemTime) {
+    let mut size = 0;
+    let mut mtime = SystemTime::UNIX_EPOCH;
+    for suffix in ["", "-wal", "-shm"] {
+        let path = dir.join(format!("{key}.sqlite{suffix}"));
+        if let Ok(meta) = std::fs::metadata(&path) {
+            size += meta.len();
+            if let Ok(modified) = meta.modified() {
+                if modified > mtime {
+                    mtime = modified;
+                }
+            }
+        }
+    }
+    (size, mtime)
+}
+
+// unlink a replica's main + sidecar files. returns bytes actually removed.
+fn delete_replica(dir: &Path, key: &str) -> u64 {
+    let mut freed = 0;
+    for suffix in ["", "-wal", "-shm"] {
+        let path = dir.join(format!("{key}.sqlite{suffix}"));
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let len = meta.len();
+            if std::fs::remove_file(&path).is_ok() {
+                freed += len;
+            }
+        }
+    }
+    freed
 }
 
 #[cfg(test)]
@@ -460,8 +623,85 @@ mod tests {
     fn namespace_with_init(lease: Duration, init: InitFn) -> (tempfile::TempDir, Namespace) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.sqlite");
-        let ns = spawn("test", path, init, lease).unwrap();
+        let (ns, _handle) = spawn("test", path, init, lease).unwrap();
         (dir, ns)
+    }
+
+    fn test_manager() -> (tempfile::TempDir, Manager) {
+        let dir = tempfile::tempdir().unwrap();
+        let init: InitFn = Arc::new(|db: &mut dyn SyncDb| {
+            db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY)", &[])
+                .map_err(|e| e.0)
+        });
+        let manager = Manager::new(dir.path().to_path_buf(), init, Duration::from_secs(5));
+        (dir, manager)
+    }
+
+    fn sqlite_count(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.ends_with(".sqlite"))
+            })
+            .count()
+    }
+
+    // a policy that would evict and delete everything, used to prove the guards
+    // (liveness, strong-count) are what spare a namespace, not a lenient policy.
+    fn aggressive_policy() -> RetentionPolicy {
+        RetentionPolicy {
+            enabled: true,
+            max_age: Duration::ZERO,
+            max_bytes: 0,
+            idle_ttl: Duration::ZERO,
+            interval: Duration::from_secs(600),
+        }
+    }
+
+    #[test]
+    fn retain_evicts_idle_and_sweeps_files() {
+        let (dir, manager) = test_manager();
+        // create three replicas; drop each Arc so only the map references them.
+        for ns in ["proj-a", "proj-b", "proj-c"] {
+            let _ = manager.get(ns).unwrap();
+        }
+        assert_eq!(sqlite_count(dir.path()), 3);
+
+        // a future `now` so every replica's mtime is unambiguously in the past.
+        let outcome = manager.retain(&aggressive_policy(), SystemTime::now() + Duration::from_secs(10));
+        assert_eq!(outcome.evicted, 3);
+        assert_eq!(outcome.deleted, 3);
+        assert!(outcome.bytes_freed > 0);
+        assert_eq!(sqlite_count(dir.path()), 0, "all sidecars removed too");
+        assert!(manager.live_keys().is_empty());
+    }
+
+    #[test]
+    fn retain_spares_a_live_namespace() {
+        let (dir, manager) = test_manager();
+        // hold the Arc: the namespace is referenced (strong_count > 1) and live in
+        // the map, so neither eviction nor the file sweep may touch it, even under
+        // the most aggressive policy.
+        let held = manager.get("proj-live").unwrap();
+        let outcome = manager.retain(&aggressive_policy(), SystemTime::now() + Duration::from_secs(10));
+        assert_eq!(outcome.evicted, 0);
+        assert_eq!(outcome.deleted, 0);
+        assert_eq!(sqlite_count(dir.path()), 1);
+        assert!(manager.live_keys().contains("proj-live"));
+        drop(held);
+    }
+
+    #[test]
+    fn retain_disabled_is_a_noop() {
+        let (dir, manager) = test_manager();
+        let _ = manager.get("proj-a").unwrap();
+        let outcome = manager.retain(&RetentionPolicy::disabled(), SystemTime::now());
+        assert!(outcome.is_empty());
+        assert_eq!(sqlite_count(dir.path()), 1);
+        assert!(manager.live_keys().contains("proj-a"));
     }
 
     fn count(rows: &[Row]) -> i64 {
