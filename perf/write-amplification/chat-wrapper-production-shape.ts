@@ -197,6 +197,13 @@ async function forceBootFailures(instance: string, count: number) {
   })
 }
 
+async function forceCacheInitialSyncFailures(instance: string, count: number) {
+  await json(
+    profilePath('cache', instance, `/__profile_fail_cache_initial_sync?count=${count}`),
+    { method: 'POST' }
+  )
+}
+
 async function report(instance: string, phase: string) {
   const [source, cache] = await Promise.all([
     json<ProfileReport>(profilePath('source', instance, '/__profile_report')),
@@ -447,6 +454,60 @@ async function alarmRetryScenario() {
   return { firstFailure, withoutRequest, secondFailure, ready, measurements }
 }
 
+async function midEmbedInitialSyncFailureScenario() {
+  const instance = 'wrapper-mid-embed-failure'
+  await setPhase(instance, 'seed')
+  await seed(instance)
+  await forceCacheInitialSyncFailures(instance, 2)
+
+  const first = await failedScheduleAttempt(instance, 'midEmbed.failed1')
+  const second = await failedScheduleAttempt(instance, 'midEmbed.failed2')
+  const recovery = await readyScheduleAttempt(instance, 'midEmbed.recovery')
+  const allMeasurements = await fullReport(instance)
+
+  const firstRows = phaseRows(first.measurements)
+  const secondRows = phaseRows(second.measurements)
+  const recoveryRows = phaseRows(recovery.measurements)
+  if (
+    firstRows.cache >= 10_000 ||
+    secondRows.cache >= 10_000 ||
+    recoveryRows.cache < 20_000
+  ) {
+    throw new Error(
+      `mid-embed fault missed the initial-sync boundary: ${JSON.stringify({ firstRows, secondRows, recoveryRows })}`
+    )
+  }
+
+  const incidentRows = { source: 514_346, cache: 486_876 }
+  const sourceRemaining = incidentRows.source - firstRows.source
+  const cacheRemaining = incidentRows.cache - firstRows.cache
+  const determinant =
+    secondRows.source * recoveryRows.cache - recoveryRows.source * secondRows.cache
+  const additionalFailures =
+    (sourceRemaining * recoveryRows.cache - recoveryRows.source * cacheRemaining) /
+    determinant
+  const recoveries =
+    (secondRows.source * cacheRemaining - sourceRemaining * secondRows.cache) /
+    determinant
+
+  await setPhase(instance, 'cleanup')
+  await stop(instance)
+  return {
+    first,
+    second,
+    recovery,
+    allMeasurements,
+    incidentModel: {
+      incidentRows,
+      failures: additionalFailures + 1,
+      recoveries,
+      totalAttempts: additionalFailures + 1 + recoveries,
+      sequentialFailureDurationMs:
+        first.durationMs + additionalFailures * second.durationMs,
+    },
+  }
+}
+
 function phaseRows(measurements: PhaseMeasurements) {
   return {
     source: measurements.source?.rowsWritten ?? 0,
@@ -649,6 +710,7 @@ try {
     nullReplicaRankRepair: nullReplicaRankScenario,
     unhealedNullRankProbe: unhealedNullRankProbeScenario,
     alarmRetry: alarmRetryScenario,
+    midEmbedInitialSyncFailure: midEmbedInitialSyncFailureScenario,
     historicalAttemptSchedule: historicalAttemptScheduleScenario,
   }
   const requestedScenario = process.env.OREZ_PROFILE_SCENARIO
