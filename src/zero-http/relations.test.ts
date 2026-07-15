@@ -112,11 +112,9 @@ test('related project members appear, update, and vanish with visibility', async
 
 function captureProjectEmissions(
   view: {
-    addListener(
-      listener: (data: ProjectWithMembers[], resultType: string) => void
-    ): () => void
+    addListener(listener: (data: any, resultType: string) => void): () => void
   },
-  emissions: ProjectWithMembers[][]
+  emissions: ProjectWithMembers[][],
 ) {
   return view.addListener((data) => {
     emissions.push(normalizeProjects(data))

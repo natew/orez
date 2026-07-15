@@ -31,6 +31,10 @@
       "types": "./dist/sync-server/sync-server.d.ts",
       "import": "./dist/sync-server/sync-server.js"
     },
+    "./zero-http": {
+      "types": "./dist/zero-http/transport.d.ts",
+      "import": "./dist/zero-http/transport.js"
+    },
     "./worker/*": {
       "types": "./dist/worker/*.d.ts",
       "import": "./dist/worker/*.js"

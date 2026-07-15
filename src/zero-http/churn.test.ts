@@ -44,7 +44,7 @@ test('mutation burst converges while explicit pulls churn', async () => {
         id: `p${index + 1}`,
         ownerId: 'u1',
         name: `project ${index + 1}`,
-      })
+      }),
     )
     await Promise.all(mutations.map((mutation) => mutation.client))
     await Promise.all(mutations.map((mutation) => mutation.server))
@@ -52,7 +52,7 @@ test('mutation burst converges while explicit pulls churn', async () => {
 
     await eventually(() => {
       expect(projectIDs(view.data)).toEqual(
-        Array.from({ length: 15 }, (_, index) => `p${index + 1}`).sort()
+        Array.from({ length: 15 }, (_, index) => `p${index + 1}`).sort(),
       )
     })
   } finally {
@@ -65,7 +65,7 @@ test('mutation burst converges while explicit pulls churn', async () => {
     harness.server
       .rows('project')
       .map((row) => row.id)
-      .sort()
+      .sort(),
   ).toEqual(Array.from({ length: 15 }, (_, index) => `p${index + 1}`).sort())
 
   const pull = await rawPull(harness, clientGroupID)

@@ -2,7 +2,7 @@ import { Zero } from '@rocicorp/zero'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { zeroHttpFixtureMutators, zeroHttpFixtureSchema } from './fixture-schema.js'
-import { installZeroHttpTransport } from './transport.js'
+import { ensureHttpPullTransport, installHttpPullTransport } from './transport.js'
 
 const ORIGIN = 'https://zero-http.local'
 
@@ -27,7 +27,7 @@ describe('zero-http transport', () => {
   test('connect + complete hydrates a stock Zero materialized query', async () => {
     const requests: RequestRecord[] = []
     let cookie = 0
-    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
       requests.push(request)
       expect(request.path).toBe('/pull')
@@ -74,7 +74,7 @@ describe('zero-http transport', () => {
 
   test('push frames POST to /push, resolve server promises, and schedule a follow-up pull', async () => {
     const requests: RequestRecord[] = []
-    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
       requests.push(request)
 
@@ -99,7 +99,7 @@ describe('zero-http transport', () => {
     const zero = createZero()
 
     await eventually(() =>
-      expect(requests.filter((request) => request.path === '/pull').length).toBe(1)
+      expect(requests.filter((request) => request.path === '/pull').length).toBe(1),
     )
     const pullsBeforePush = requests.filter((request) => request.path === '/pull').length
 
@@ -129,14 +129,60 @@ describe('zero-http transport', () => {
     })
     await eventually(() =>
       expect(requests.filter((request) => request.path === '/pull').length).toBe(
-        pullsBeforePush + 1
-      )
+        pullsBeforePush + 1,
+      ),
+    )
+  })
+
+  test('pushOrigin routes mutations through the authoritative application server', async () => {
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      if (request.path === '/pull') {
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      const mutation = request.body.mutations[0]
+      return jsonResponse({
+        pushResponse: {
+          mutations: [
+            {
+              id: { clientID: mutation.clientID, id: mutation.id },
+              result: {},
+            },
+          ],
+        },
+      })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      pushOrigin: 'https://app.local/zero-http',
+      fetch,
+    })
+    transports.push(transport)
+    const zero = createZero()
+
+    await eventually(() =>
+      expect(requests.some((request) => request.path === '/pull')).toBe(true),
+    )
+    const mutation = zero.mutate.project.create({
+      id: 'p1',
+      ownerId: 'u1',
+      name: 'created',
+    })
+    await mutation.client
+    await mutation.server
+
+    const push = requests.find((request) => request.path.endsWith('/push'))
+    expect(push?.url).toBe('https://app.local/zero-http/push')
+    expect(requests.find((request) => request.path === '/pull')?.url).toBe(
+      'https://zero-http.local/pull',
     )
   })
 
   test('updateAuth frame updates bearer headers for later requests', async () => {
     const requests: RequestRecord[] = []
-    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
       requests.push(request)
       expect(request.path).toBe('/pull')
@@ -158,7 +204,7 @@ describe('zero-http transport', () => {
     const firstPushStarted = defer<void>()
     const releaseFirstPush = defer<void>()
     const pushIDs: number[] = []
-    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
       if (request.path === '/pull') {
         return jsonResponse({ cookie: request.body.cookie, unchanged: true })
@@ -184,7 +230,7 @@ describe('zero-http transport', () => {
     const { messages, socket } = openRawSocketWithMessages()
 
     await eventually(() =>
-      expect(messages.some((message) => message[0] === 'connected')).toBe(true)
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true),
     )
     socket.send(JSON.stringify(['push', pushBody(1)]))
     await firstPushStarted.promise
@@ -195,12 +241,12 @@ describe('zero-http transport', () => {
     releaseFirstPush.resolve()
     await eventually(() => expect(pushIDs).toEqual([1, 2]))
     await eventually(() =>
-      expect(messages.filter((message) => message[0] === 'pushResponse')).toHaveLength(2)
+      expect(messages.filter((message) => message[0] === 'pushResponse')).toHaveLength(2),
     )
     expect(
       messages
         .filter((message) => message[0] === 'pushResponse')
-        .map((message) => message[1].mutations[0].id.id)
+        .map((message) => message[1].mutations[0].id.id),
     ).toEqual([1, 2])
   })
 
@@ -243,7 +289,7 @@ describe('zero-http transport', () => {
 
     let inFlight = 0
     let maxInFlight = 0
-    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       inFlight++
       maxInFlight = Math.max(maxInFlight, inFlight)
       try {
@@ -260,7 +306,7 @@ describe('zero-http transport', () => {
     const messages = openRawSocket()
 
     await eventually(() =>
-      expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true)
+      expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true),
     )
     expect(requests[0].body.cookie).toBeNull()
     expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBeNull()
@@ -301,7 +347,7 @@ describe('zero-http transport', () => {
 
   test('unchanged pull flushes late query registration to complete', async () => {
     const requests: RequestRecord[] = []
-    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
       requests.push(request)
       expect(request.path).toBe('/pull')
@@ -340,7 +386,7 @@ describe('zero-http transport', () => {
   })
 
   test('ping is answered locally and the stock Zero connection survives idle ping', async () => {
-    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
       expect(request.path).toBe('/pull')
       return jsonResponse({ cookie: request.body.cookie, unchanged: true })
@@ -357,7 +403,7 @@ describe('zero-http transport', () => {
 
   test('401 pull failure closes the fake socket without materializing data', async () => {
     const requests: RequestRecord[] = []
-    const fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
       requests.push(request)
       expect(request.path).toBe('/pull')
@@ -367,7 +413,7 @@ describe('zero-http transport', () => {
     const zero = createZero()
     const view = zero.query.project.materialize()
     const emissions: Array<{ data: any[]; resultType: string }> = []
-    const cleanup = view.addListener((data: any[], resultType) => {
+    const cleanup = view.addListener((data: any, resultType) => {
       emissions.push({ data: JSON.parse(JSON.stringify(data)), resultType })
     })
 
@@ -382,6 +428,25 @@ describe('zero-http transport', () => {
     view.destroy()
   })
 
+  test('transient pull failures back off reconnect attempts', async () => {
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      expect(request.path).toBe('/pull')
+      throw new TypeError('Failed to fetch')
+    })
+    install(fetch)
+    createZero()
+
+    await eventually(() => expect(requests.length).toBe(1))
+    await sleep(150)
+    expect(requests.length).toBe(1)
+    await eventually(() => expect(requests.length).toBe(2), 1_500)
+    await sleep(150)
+    expect(requests.length).toBe(2)
+  })
+
   test('non-origin WebSockets pass through to the native implementation', () => {
     const previous = globalThis.WebSocket
     class NativeWebSocket {
@@ -391,32 +456,108 @@ describe('zero-http transport', () => {
       static CLOSED = 3
       constructor(
         readonly url: string | URL,
-        readonly protocols?: string | string[]
+        readonly protocols?: string | string[],
       ) {}
     }
     globalThis.WebSocket = NativeWebSocket as unknown as typeof WebSocket
 
-    const transport = installZeroHttpTransport({ origin: ORIGIN, fetch: vi.fn() })
+    const transport = installHttpPullTransport({ origin: ORIGIN, fetch: vi.fn() })
     const socket = new WebSocket('wss://elsewhere.local/socket', 'native')
 
     expect(socket).toBeInstanceOf(NativeWebSocket)
     expect((socket as unknown as NativeWebSocket).url).toBe(
-      'wss://elsewhere.local/socket'
+      'wss://elsewhere.local/socket',
     )
 
     transport.uninstall()
     expect(globalThis.WebSocket).toBe(NativeWebSocket)
     globalThis.WebSocket = previous
   })
+
+  test('ensureHttpPullTransport installs once per origin', () => {
+    // unique origin: the ensure registry is module-global and page-lifetime
+    const origin = 'http://127.0.0.1:65501'
+    const first = ensureHttpPullTransport({ origin, fetch: vi.fn() })
+    const second = ensureHttpPullTransport({ origin, fetch: vi.fn() })
+    expect(second).toBe(first)
+    first.uninstall()
+  })
+
+  test('push responses are filtered to this client — foreign (recovery) results are dropped', async () => {
+    // a mutation-RECOVERY push carries a previous client's pending mutations
+    // and the server echoes that old clientID in the response. zero-cache only
+    // delivers a client its own results; forwarding the raw response trips
+    // zero's "received mutation for the wrong client" assert and kills the
+    // connection (reproduced against soot's ultimate e2e, 2026-06-12).
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      const mutation = request.body.mutations[0]
+      return jsonResponse({
+        pushResponse: {
+          mutations: [
+            {
+              id: { clientID: 'previous-session-client', id: 7 },
+              result: {
+                error: 'alreadyProcessed',
+                details: 'recovered mutation already applied',
+              },
+            },
+            {
+              id: { clientID: mutation.clientID, id: mutation.id },
+              result: {},
+            },
+          ],
+        },
+      })
+    })
+    install(fetch)
+    const zero = createZero()
+
+    const mutation = zero.mutate.project.create({
+      id: 'p-recovery',
+      ownerId: 'u1',
+      name: 'recovered',
+    })
+    // the client's own result must resolve; the foreign result must be
+    // dropped instead of asserting the connection dead.
+    await mutation.client
+    await mutation.server
+  })
+
+  test('pull 409 (client cookie ahead of server) resets client state instead of reconnect-looping', async () => {
+    // a 409 means the server's change-tracking watermark is BEHIND the
+    // client's cookie — the server lost/reset its state (replica reset). the
+    // transport must surface zero-cache's InvalidConnectionRequestBaseCookie
+    // error so the stock client drops local state and calls
+    // onClientStateNotFound, instead of failing the socket and retrying the
+    // same future cookie forever.
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      expect(request.path).toBe('/pull')
+      return jsonResponse(
+        { error: 'future cookie 299 is ahead of server cookie 66' },
+        { status: 409 },
+      )
+    })
+    install(fetch)
+    const onClientStateNotFound = vi.fn()
+    createZero({ onClientStateNotFound })
+    await eventually(() => expect(onClientStateNotFound).toHaveBeenCalled(), 5_000)
+  })
 })
 
 function install(fetch: typeof globalThis.fetch) {
-  const transport = installZeroHttpTransport({ origin: ORIGIN, fetch })
+  const transport = installHttpPullTransport({ origin: ORIGIN, fetch })
   transports.push(transport)
   return transport
 }
 
-function createZero(options: { pingTimeoutMs?: number } = {}) {
+function createZero(
+  options: { pingTimeoutMs?: number; onClientStateNotFound?: () => void } = {},
+) {
   const zero = new Zero({
     server: ORIGIN,
     userID: 'u1',
@@ -426,17 +567,18 @@ function createZero(options: { pingTimeoutMs?: number } = {}) {
     storageKey: `zero-http-test-${++storageID}`,
     mutators: zeroHttpFixtureMutators,
     pingTimeoutMs: options.pingTimeoutMs,
+    onClientStateNotFound: options.onClientStateNotFound,
   })
   zeros.push(zero)
   return zero
 }
 
-function recordRequest(input: string | URL, init?: RequestInit): RequestRecord {
+function recordRequest(input: RequestInfo | URL, init?: RequestInit): RequestRecord {
   const url = new URL(String(input))
   const headers = Object.fromEntries(
     Object.entries((init?.headers ?? {}) as Record<string, string>).map(
-      ([key, value]) => [key.toLowerCase(), value]
-    )
+      ([key, value]) => [key.toLowerCase(), value],
+    ),
   )
   return {
     url: url.toString(),
@@ -458,12 +600,12 @@ function jsonResponse(body: unknown, init?: ResponseInit) {
 }
 
 async function waitForComplete<T>(view: {
-  addListener(listener: (data: T, resultType: string) => void): () => void
+  addListener(listener: (data: any, resultType: string) => void): () => void
 }): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timeout = setTimeout(
       () => reject(new Error('timed out waiting for complete query')),
-      5_000
+      5_000,
     )
     let cleanup = () => {}
     cleanup = view.addListener((data, resultType) => {
@@ -515,8 +657,8 @@ function openRawSocketWithMessages(opts?: {
     url,
     encodeSecProtocol(
       ['initConnection', { desiredQueriesPatch: opts?.desiredQueriesPatch ?? [] }],
-      opts?.authToken ?? 'token-u1'
-    )
+      opts?.authToken ?? 'token-u1',
+    ),
   )
   socket.addEventListener('message', (event) => {
     messages.push(JSON.parse(String(event.data)))
@@ -550,10 +692,10 @@ function findMessage(messages: Array<[string, any]>, type: string) {
 
 function encodeSecProtocol(
   initConnectionMessage: [string, Record<string, unknown>],
-  authToken: string
+  authToken: string,
 ) {
   return encodeURIComponent(
-    Buffer.from(JSON.stringify({ initConnectionMessage, authToken })).toString('base64')
+    Buffer.from(JSON.stringify({ initConnectionMessage, authToken })).toString('base64'),
   )
 }
 
@@ -566,3 +708,137 @@ function defer<T>() {
   })
   return { promise, resolve, reject }
 }
+
+// installs the transport with the query-aware extension on (a queryTransform
+// resolver), pushing it for afterEach cleanup.
+function installWithQueries(
+  fetch: typeof globalThis.fetch,
+  queryTransform: (name: string, args: readonly unknown[]) => unknown,
+) {
+  const transport = installHttpPullTransport({ origin: ORIGIN, fetch, queryTransform })
+  transports.push(transport)
+  return transport
+}
+
+describe('zero-http query-aware extension', () => {
+  test('ships desired queries with pull state (transformed AST) and emits server got-query ack', async () => {
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      requests.push(request)
+      return jsonResponse({
+        cookie: 1,
+        lastMutationIDChanges: {},
+        rowsPatch: [{ op: 'clear' }],
+        gotQueries: { version: 1, patch: [{ op: 'put', hash: 'h1' }] },
+      })
+    })
+    installWithQueries(fetch, (name, args) => ({ resolved: name, args }))
+
+    const { messages } = openRawSocketWithMessages({
+      desiredQueriesPatch: [
+        { op: 'put', hash: 'h1', name: 'byOwner', args: [{ ownerId: 'u1' }] },
+      ],
+    })
+
+    await eventually(() => expect(requests.length).toBeGreaterThan(0))
+    // the pull body ships {queries:{version, patch:[{op:'put',hash,ast}]}} with
+    // name+args resolved to the AST by the transform
+    expect(requests[0].body.queries).toEqual({
+      version: 1,
+      patch: [
+        {
+          op: 'put',
+          hash: 'h1',
+          ast: { resolved: 'byOwner', args: [{ ownerId: 'u1' }] },
+        },
+      ],
+    })
+    // the server's got-query ack is emitted to the client (not synthesized)
+    await eventually(() => {
+      const poke = messages.find(
+        (m) => m[0] === 'pokePart' && Array.isArray(m[1].gotQueriesPatch),
+      )
+      expect(poke?.[1].gotQueriesPatch).toEqual([{ op: 'put', hash: 'h1' }])
+    })
+  })
+
+  test('an ad-hoc put with an inline ast ships that ast unchanged', async () => {
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(recordRequest(input, init))
+      return jsonResponse({ cookie: 1, unchanged: true })
+    })
+    // a transform that would throw if called — an inline ast must bypass it
+    installWithQueries(fetch, () => {
+      throw new Error('transform should not run for an inline ast')
+    })
+
+    openRawSocketWithMessages({
+      desiredQueriesPatch: [{ op: 'put', hash: 'h2', ast: { inline: true } }],
+    })
+
+    await eventually(() => expect(requests.length).toBeGreaterThan(0))
+    expect(requests[0].body.queries.patch).toEqual([
+      { op: 'put', hash: 'h2', ast: { inline: true } },
+    ])
+  })
+
+  test('reconnect re-ships the desired set', async () => {
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(recordRequest(input, init))
+      // never ack the query version, so the desire stays un-acked
+      return jsonResponse({ cookie: 1, unchanged: true })
+    })
+    installWithQueries(fetch, (name) => ({ resolved: name }))
+
+    const desired = [{ op: 'put', hash: 'h1', name: 'byOwner', args: [] }]
+    const first = openRawSocketWithMessages({ desiredQueriesPatch: desired })
+    await eventually(() => expect(requests.length).toBeGreaterThan(0))
+    first.socket.close()
+
+    const before = requests.length
+    openRawSocketWithMessages({ desiredQueriesPatch: desired })
+    await eventually(() => expect(requests.length).toBeGreaterThan(before))
+    // the reconnected socket re-ships the (still un-acked) desired query
+    const replay = requests[requests.length - 1].body.queries
+    expect(replay.patch).toEqual([
+      { op: 'put', hash: 'h1', ast: { resolved: 'byOwner' } },
+    ])
+  })
+
+  test('queryForward ships name+args for the server to resolve (no client transform)', async () => {
+    const requests: RequestRecord[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(recordRequest(input, init))
+      return jsonResponse({ cookie: 1, unchanged: true })
+    })
+    // queryForward on, no transform: the permission transform stays server-side
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      queryForward: true,
+    })
+    transports.push(transport)
+
+    openRawSocketWithMessages({
+      desiredQueriesPatch: [
+        {
+          op: 'put',
+          hash: 'h3',
+          name: 'byOwner',
+          args: [{ ownerId: 'u1' }],
+          // Zero may include a locally evaluable AST on a named query put.
+          // queryForward must discard it so the server remains authoritative.
+          ast: { table: 'secret' },
+        },
+      ],
+    })
+
+    await eventually(() => expect(requests.length).toBeGreaterThan(0))
+    expect(requests[0].body.queries.patch).toEqual([
+      { op: 'put', hash: 'h3', name: 'byOwner', args: [{ ownerId: 'u1' }] },
+    ])
+  })
+})

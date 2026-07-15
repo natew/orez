@@ -1,6 +1,9 @@
 name = "orez-rust-sync"
 main = "src/harness-worker.ts"
 compatibility_date = "2026-06-01"
+# harness-worker imports node:util; without this the packaged integration and
+# restart tests fail to boot workerd.
+compatibility_flags = ["nodejs_compat"]
 account_id = "6afff1f79e2fd12f1cfd1bfe1dfd08d1"
 workers_dev = true
 

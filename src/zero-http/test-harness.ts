@@ -2,7 +2,7 @@ import { Zero } from '@rocicorp/zero'
 
 import { zeroHttpFixtureMutators, zeroHttpFixtureSchema } from './fixture-schema.js'
 import { startZeroHttpServer, type Row } from './server.js'
-import { installZeroHttpTransport } from './transport.js'
+import { installHttpPullTransport } from './transport.js'
 
 let storageID = 0
 
@@ -20,7 +20,7 @@ export async function startZeroHttpHarness(opts?: {
   const server = await startZeroHttpServer({ seed: opts?.seed })
   const baseFetch: typeof fetch = (input, init) => globalThis.fetch(input, init)
   const transportFetch = opts?.interceptFetch ? opts.interceptFetch(baseFetch) : baseFetch
-  const transport = installZeroHttpTransport({
+  const transport = installHttpPullTransport({
     origin: server.url,
     fetch: transportFetch,
   })
@@ -31,7 +31,7 @@ export async function startZeroHttpHarness(opts?: {
     transport,
     createZero(
       userID: string,
-      createOpts?: { storageKey?: string; pingTimeoutMs?: number }
+      createOpts?: { storageKey?: string; pingTimeoutMs?: number },
     ): FixtureZero {
       const zero = new Zero({
         server: server.url,
@@ -55,13 +55,15 @@ export async function startZeroHttpHarness(opts?: {
   }
 }
 
+// the view's listener data is Immutable<T>; results are deep-cloned to a
+// plain mutable T for assertions, so the listener param is typed loosely
 export function waitForComplete<T>(view: {
-  addListener(listener: (data: T, resultType: string) => void): () => void
+  addListener(listener: (data: any, resultType: string) => void): () => void
 }): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timeout = setTimeout(
       () => reject(new Error('timed out waiting for complete query')),
-      5_000
+      5_000,
     )
     let cleanup = () => {}
     cleanup = view.addListener((data, resultType) => {
