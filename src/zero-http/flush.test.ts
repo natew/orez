@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'vitest'
+
 import { installHttpPullTransport } from './transport.js'
 
 const ORIGIN = 'https://chat-zero-flush.test'
@@ -84,7 +85,7 @@ describe('http pull transport flush', () => {
       ['c1', 'c2', 'c3'].map((clientID) => [
         clientID,
         { started: deferred<void>(), release: deferred<void>() },
-      ]),
+      ])
     )
     const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
@@ -226,9 +227,9 @@ function openSocket(clientID = 'c1') {
         JSON.stringify({
           initConnectionMessage: ['initConnection', { desiredQueriesPatch: [] }],
           authToken: 'token-u1',
-        }),
-      ).toString('base64'),
-    ),
+        })
+      ).toString('base64')
+    )
   )
 }
 

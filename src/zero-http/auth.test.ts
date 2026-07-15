@@ -147,7 +147,7 @@ describe('zero-http auth parity', () => {
 
     try {
       await eventually(() =>
-        expect(unknown.connection.state.current.name).toBe('needs-auth'),
+        expect(unknown.connection.state.current.name).toBe('needs-auth')
       )
       await sleep(50)
 
@@ -164,7 +164,7 @@ describe('zero-http auth parity', () => {
 function captureRows<T>(
   view: { addListener(listener: (data: any, resultType: string) => void): () => void },
   emissions: T[],
-  normalize: (data: T) => T,
+  normalize: (data: T) => T
 ) {
   return view.addListener((data) => {
     emissions.push(normalize(data))
@@ -180,12 +180,12 @@ function assertNoUserEmission(emissions: UserRow[][], privateUserID: string) {
 function assertNoProjectEmission(
   emissions: ProjectWithMembers[][],
   privateProjectID: string,
-  privateMemberID: string,
+  privateMemberID: string
 ) {
   for (const emission of emissions) {
     expect(emission.map((row) => row.id)).not.toContain(privateProjectID)
     expect(
-      emission.flatMap((row) => row.members.map((member) => member.id)),
+      emission.flatMap((row) => row.members.map((member) => member.id))
     ).not.toContain(privateMemberID)
   }
 }

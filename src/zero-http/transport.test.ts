@@ -137,7 +137,7 @@ describe('zero-http transport', () => {
     const zero = createZero()
 
     await eventually(() =>
-      expect(requests.filter((request) => request.path === '/pull').length).toBe(1),
+      expect(requests.filter((request) => request.path === '/pull').length).toBe(1)
     )
     const pullsBeforePush = requests.filter((request) => request.path === '/pull').length
 
@@ -167,8 +167,8 @@ describe('zero-http transport', () => {
     })
     await eventually(() =>
       expect(requests.filter((request) => request.path === '/pull').length).toBe(
-        pullsBeforePush + 1,
-      ),
+        pullsBeforePush + 1
+      )
     )
   })
 
@@ -201,7 +201,7 @@ describe('zero-http transport', () => {
     const zero = createZero()
 
     await eventually(() =>
-      expect(requests.some((request) => request.path === '/pull')).toBe(true),
+      expect(requests.some((request) => request.path === '/pull')).toBe(true)
     )
     const mutation = zero.mutate.project.create({
       id: 'p1',
@@ -214,11 +214,9 @@ describe('zero-http transport', () => {
     const push = requests.find((request) => request.path.endsWith('/push'))
     // push always carries the schema-shard routing params (native hosts route
     // by them; other servers ignore unknown query params)
-    expect(push?.url).toBe(
-      'https://app.local/zero-http/push?schema=zero_0&appID=zero',
-    )
+    expect(push?.url).toBe('https://app.local/zero-http/push?schema=zero_0&appID=zero')
     expect(requests.find((request) => request.path === '/pull')?.url).toBe(
-      'https://zero-http.local/pull',
+      'https://zero-http.local/pull'
     )
   })
 
@@ -272,7 +270,7 @@ describe('zero-http transport', () => {
     const { messages, socket } = openRawSocketWithMessages()
 
     await eventually(() =>
-      expect(messages.some((message) => message[0] === 'connected')).toBe(true),
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true)
     )
     socket.send(JSON.stringify(['push', pushBody(1)]))
     await firstPushStarted.promise
@@ -283,12 +281,12 @@ describe('zero-http transport', () => {
     releaseFirstPush.resolve()
     await eventually(() => expect(pushIDs).toEqual([1, 2]))
     await eventually(() =>
-      expect(messages.filter((message) => message[0] === 'pushResponse')).toHaveLength(2),
+      expect(messages.filter((message) => message[0] === 'pushResponse')).toHaveLength(2)
     )
     expect(
       messages
         .filter((message) => message[0] === 'pushResponse')
-        .map((message) => message[1].mutations[0].id.id),
+        .map((message) => message[1].mutations[0].id.id)
     ).toEqual([1, 2])
   })
 
@@ -348,7 +346,7 @@ describe('zero-http transport', () => {
     const messages = openRawSocket()
 
     await eventually(() =>
-      expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true),
+      expect(messages.some((message) => message[0] === 'pokeEnd')).toBe(true)
     )
     expect(requests[0].body.cookie).toBeNull()
     expect(findMessage(messages, 'pokeStart')[1].baseCookie).toBeNull()
@@ -498,7 +496,7 @@ describe('zero-http transport', () => {
       static CLOSED = 3
       constructor(
         readonly url: string | URL,
-        readonly protocols?: string | string[],
+        readonly protocols?: string | string[]
       ) {}
     }
     globalThis.WebSocket = NativeWebSocket as unknown as typeof WebSocket
@@ -508,7 +506,7 @@ describe('zero-http transport', () => {
 
     expect(socket).toBeInstanceOf(NativeWebSocket)
     expect((socket as unknown as NativeWebSocket).url).toBe(
-      'wss://elsewhere.local/socket',
+      'wss://elsewhere.local/socket'
     )
 
     transport.uninstall()
@@ -581,7 +579,7 @@ describe('zero-http transport', () => {
       expect(request.path).toBe('/pull')
       return jsonResponse(
         { error: 'future cookie 299 is ahead of server cookie 66' },
-        { status: 409 },
+        { status: 409 }
       )
     })
     install(fetch)
@@ -598,7 +596,7 @@ function install(fetch: typeof globalThis.fetch) {
 }
 
 function createZero(
-  options: { pingTimeoutMs?: number; onClientStateNotFound?: () => void } = {},
+  options: { pingTimeoutMs?: number; onClientStateNotFound?: () => void } = {}
 ) {
   const zero = new Zero({
     server: ORIGIN,
@@ -619,8 +617,8 @@ function recordRequest(input: RequestInfo | URL, init?: RequestInit): RequestRec
   const url = new URL(String(input))
   const headers = Object.fromEntries(
     Object.entries((init?.headers ?? {}) as Record<string, string>).map(
-      ([key, value]) => [key.toLowerCase(), value],
-    ),
+      ([key, value]) => [key.toLowerCase(), value]
+    )
   )
   return {
     url: url.toString(),
@@ -647,7 +645,7 @@ async function waitForComplete<T>(view: {
   return new Promise<T>((resolve, reject) => {
     const timeout = setTimeout(
       () => reject(new Error('timed out waiting for complete query')),
-      5_000,
+      5_000
     )
     let cleanup = () => {}
     cleanup = view.addListener((data, resultType) => {
@@ -699,8 +697,8 @@ function openRawSocketWithMessages(opts?: {
     url,
     encodeSecProtocol(
       ['initConnection', { desiredQueriesPatch: opts?.desiredQueriesPatch ?? [] }],
-      opts?.authToken ?? 'token-u1',
-    ),
+      opts?.authToken ?? 'token-u1'
+    )
   )
   socket.addEventListener('message', (event) => {
     messages.push(JSON.parse(String(event.data)))
@@ -734,10 +732,10 @@ function findMessage(messages: Array<[string, any]>, type: string) {
 
 function encodeSecProtocol(
   initConnectionMessage: [string, Record<string, unknown>],
-  authToken: string,
+  authToken: string
 ) {
   return encodeURIComponent(
-    Buffer.from(JSON.stringify({ initConnectionMessage, authToken })).toString('base64'),
+    Buffer.from(JSON.stringify({ initConnectionMessage, authToken })).toString('base64')
   )
 }
 
@@ -755,7 +753,7 @@ function defer<T>() {
 // resolver), pushing it for afterEach cleanup.
 function installWithQueries(
   fetch: typeof globalThis.fetch,
-  queryTransform: (name: string, args: readonly unknown[]) => unknown,
+  queryTransform: (name: string, args: readonly unknown[]) => unknown
 ) {
   const transport = installHttpPullTransport({ origin: ORIGIN, fetch, queryTransform })
   transports.push(transport)
@@ -799,7 +797,7 @@ describe('zero-http query-aware extension', () => {
     // the server's got-query ack is emitted to the client (not synthesized)
     await eventually(() => {
       const poke = messages.find(
-        (m) => m[0] === 'pokePart' && Array.isArray(m[1].gotQueriesPatch),
+        (m) => m[0] === 'pokePart' && Array.isArray(m[1].gotQueriesPatch)
       )
       expect(poke?.[1].gotQueriesPatch).toEqual([{ op: 'put', hash: 'h1' }])
     })

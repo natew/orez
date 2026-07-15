@@ -113,20 +113,20 @@ test('pull-then-ack rebases optimistic rows over a newer snapshot', async () => 
   await harness.transport.pull()
 
   await eventually(() =>
-    expect(projectIDs(view.data).sort()).toEqual(['p-server', 'p1', 'p2']),
+    expect(projectIDs(view.data).sort()).toEqual(['p-server', 'p1', 'p2'])
   )
   expect(
     harness.server
       .rows('project')
       .map((row) => row.id)
-      .sort(),
+      .sort()
   ).toEqual(['p-server', 'p1'])
 
   pushGate.resolve()
   await mutation.server
   await harness.transport.pull()
   await eventually(() =>
-    expect(projectIDs(view.data).sort()).toEqual(['p-server', 'p1', 'p2']),
+    expect(projectIDs(view.data).sort()).toEqual(['p-server', 'p1', 'p2'])
   )
 
   expectNeverDisappearsAfterFirstSeen(emissions, 'p2')
@@ -254,7 +254,7 @@ test('app-error rollback removes phantom optimistic create after pull', async ()
   await harness.transport.pull()
   await eventually(() => expect(projectIDs(view.data)).not.toContain('p-phantom'))
   expect(emissions.values.some((rows) => projectIDs(rows).includes('p-phantom'))).toBe(
-    true,
+    true
   )
   expect(emissions.values.at(-1)).toEqual([])
   expect(harness.server.rows('project')).toEqual([])
@@ -273,7 +273,7 @@ async function rawPush(
     id: number
     name: string
     args: Record<string, string>
-  },
+  }
 ) {
   const response = await fetch(`${harness.server.url}/push`, {
     method: 'POST',
@@ -304,7 +304,7 @@ async function rawPush(
 async function rawPull(
   harness: ZeroHttpHarness,
   userID: string,
-  body: { clientGroupID: string },
+  body: { clientGroupID: string }
 ) {
   const response = await fetch(`${harness.server.url}/pull`, {
     method: 'POST',

@@ -126,7 +126,7 @@ export type HttpPullTransportOptions = {
 }
 
 export function installHttpPullTransport(
-  opts: HttpPullTransportOptions,
+  opts: HttpPullTransportOptions
 ): HttpPullTransport {
   const previousWebSocket = globalThis.WebSocket as WebSocketConstructor | undefined
   const fetchImpl = opts.fetch ?? globalThis.fetch
@@ -139,7 +139,7 @@ export function installHttpPullTransport(
     origin: new URL(opts.origin),
     originString: trimTrailingSlash(new URL(opts.origin).toString()),
     pushOriginString: trimTrailingSlash(
-      new URL(opts.pushOrigin ?? opts.origin).toString(),
+      new URL(opts.pushOrigin ?? opts.origin).toString()
     ),
     // the transport invokes this as `state.fetch(...)` — without binding,
     // window.fetch sees `state` as its receiver and browsers throw
@@ -210,7 +210,7 @@ export function installHttpPullTransport(
 const transportsByOrigin = new Map<string, HttpPullTransport>()
 
 export function ensureHttpPullTransport(
-  opts: HttpPullTransportOptions,
+  opts: HttpPullTransportOptions
 ): HttpPullTransport {
   const key = trimTrailingSlash(new URL(opts.origin).toString())
   const existing = transportsByOrigin.get(key)
@@ -222,7 +222,7 @@ export function ensureHttpPullTransport(
 
 export async function flushHttpPullTransports() {
   await Promise.all(
-    [...transportsByOrigin.values()].map((transport) => transport.flush()),
+    [...transportsByOrigin.values()].map((transport) => transport.flush())
   )
 }
 
@@ -277,7 +277,7 @@ class ZeroHttpSocket {
   constructor(
     private readonly state: TransportState,
     url: string | URL,
-    protocols?: WebSocketProtocols,
+    protocols?: WebSocketProtocols
   ) {
     this.connectURL = toHttpURL(url)
     this.url = String(url)
@@ -533,7 +533,7 @@ class ZeroHttpSocket {
       'pushResponse',
       filterMutationResultsToClient(
         'pushResponse' in response ? response.pushResponse : response,
-        this.clientID,
+        this.clientID
       ),
     ])
     this.requestPullAfterCurrent()
@@ -555,7 +555,7 @@ class ZeroHttpSocket {
     this.pendingUpstream.add(promise)
     void promise.then(
       () => this.pendingUpstream.delete(promise),
-      () => this.pendingUpstream.delete(promise),
+      () => this.pendingUpstream.delete(promise)
     )
   }
 
@@ -605,7 +605,7 @@ class ZeroHttpSocket {
   private async fetchPull(
     clientGroupID: string,
     cookie: string | null,
-    includeQueries: boolean,
+    includeQueries: boolean
   ) {
     const body: Record<string, unknown> = {
       clientID: this.clientID,
@@ -694,7 +694,7 @@ class ZeroHttpSocket {
       // the server watermark is BEHIND the client: a real reset/restore. mirror
       // the 409 stale path instead of poking the client backwards.
       throw new Error(
-        `zero-http pull returned stale cookie ${response.cookie} for ${this.cookie}`,
+        `zero-http pull returned stale cookie ${response.cookie} for ${this.cookie}`
       )
     } else if (currentServer !== null && response.cookie === currentServer) {
       // same server watermark but a non-empty patch: a query-aware membership
@@ -839,7 +839,7 @@ function decodeSecProtocol(protocols: WebSocketProtocols):
   try {
     const decoded = decodeURIComponent(protocol)
     const json = new TextDecoder().decode(
-      Uint8Array.from(globalThis.atob(decoded), (char) => char.charCodeAt(0)),
+      Uint8Array.from(globalThis.atob(decoded), (char) => char.charCodeAt(0))
     )
     const parsed = JSON.parse(json) as {
       authToken?: string
@@ -904,7 +904,7 @@ function toWebSocketCookie(cookie: number | null): string | null {
 function toLocalWebSocketCookie(cookie: number, localID: number): string {
   return `${String(cookie).padStart(COOKIE_WIDTH, '0')}#${String(localID).padStart(
     6,
-    '0',
+    '0'
   )}`
 }
 
@@ -915,7 +915,7 @@ function errorMessage(error: unknown) {
 class ZeroHttpResponseError extends Error {
   constructor(
     readonly path: '/pull' | '/push',
-    readonly status: number,
+    readonly status: number
   ) {
     super(`zero-http ${path} failed with ${status}`)
   }
@@ -939,7 +939,7 @@ function filterMutationResultsToClient(pushResponse: unknown, clientID: string) 
   return {
     ...pushResponse,
     mutations: mutations.filter(
-      (m) => (m as { id?: { clientID?: string } })?.id?.clientID === clientID,
+      (m) => (m as { id?: { clientID?: string } })?.id?.clientID === clientID
     ),
   }
 }
@@ -956,17 +956,17 @@ function reconnectDelayMs(state: TransportState) {
   if (state.transientFailureCount === 0) return 0
   return Math.min(
     TRANSIENT_RECONNECT_BACKOFF_BASE_MS * 2 ** (state.transientFailureCount - 1),
-    TRANSIENT_RECONNECT_BACKOFF_MAX_MS,
+    TRANSIENT_RECONNECT_BACKOFF_MAX_MS
   )
 }
 
 function recordTransientFailure(state: TransportState) {
   const maxExponent = Math.log2(
-    TRANSIENT_RECONNECT_BACKOFF_MAX_MS / TRANSIENT_RECONNECT_BACKOFF_BASE_MS,
+    TRANSIENT_RECONNECT_BACKOFF_MAX_MS / TRANSIENT_RECONNECT_BACKOFF_BASE_MS
   )
   state.transientFailureCount = Math.min(
     state.transientFailureCount + 1,
-    Math.ceil(maxExponent) + 1,
+    Math.ceil(maxExponent) + 1
   )
 }
 

@@ -114,7 +114,7 @@ function captureProjectEmissions(
   view: {
     addListener(listener: (data: any, resultType: string) => void): () => void
   },
-  emissions: ProjectWithMembers[][],
+  emissions: ProjectWithMembers[][]
 ) {
   return view.addListener((data) => {
     emissions.push(normalizeProjects(data))

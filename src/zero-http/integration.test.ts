@@ -51,7 +51,7 @@ test('e2e smoke: stock zero client syncs over http against the fixture server', 
     harness.server
       .rows('project')
       .map((row) => row.id)
-      .sort(),
+      .sort()
   ).toEqual(['p1', 'p2'])
   view.destroy()
 })

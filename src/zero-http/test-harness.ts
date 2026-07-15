@@ -31,7 +31,7 @@ export async function startZeroHttpHarness(opts?: {
     transport,
     createZero(
       userID: string,
-      createOpts?: { storageKey?: string; pingTimeoutMs?: number },
+      createOpts?: { storageKey?: string; pingTimeoutMs?: number }
     ): FixtureZero {
       const zero = new Zero({
         server: server.url,
@@ -63,7 +63,7 @@ export function waitForComplete<T>(view: {
   return new Promise<T>((resolve, reject) => {
     const timeout = setTimeout(
       () => reject(new Error('timed out waiting for complete query')),
-      5_000,
+      5_000
     )
     let cleanup = () => {}
     cleanup = view.addListener((data, resultType) => {
