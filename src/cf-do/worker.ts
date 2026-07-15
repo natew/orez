@@ -854,6 +854,7 @@ export class ZeroDO extends DurableObject {
       }
       if (!Number.isFinite(watermark) || watermark < 0) watermark = 0
       if (!Number.isFinite(limit) || limit <= 0) limit = 1000
+      const changeLimit = Math.trunc(Math.min(limit, 10_000))
       const head = this.watermark()
       const first = this.sql
         .exec('SELECT MIN(watermark) AS watermark FROM _zero_changes')
@@ -867,7 +868,7 @@ export class ZeroDO extends DurableObject {
       }
       return Response.json({
         watermark: head,
-        changes: this.readChangesSince(watermark).slice(0, Math.min(limit, 10_000)),
+        changes: this.readChangesSince(watermark, changeLimit),
       })
     } catch (err: any) {
       const budgetResponse = await this.writeBudgetErrorResponse(err)
@@ -1523,13 +1524,14 @@ export class ZeroDO extends DurableObject {
     return deletePendingChanges(this.sql, transactionID)
   }
 
-  private readChangesSince(watermark: number) {
+  private readChangesSince(watermark: number, limit?: number) {
     this.watermarks.ensureTables()
+    const statement =
+      'SELECT watermark, table_name, op, row_data, old_data FROM _zero_changes WHERE watermark > ? ORDER BY watermark' +
+      (limit === undefined ? '' : ' LIMIT ?')
+    const params = limit === undefined ? [watermark] : [watermark, limit]
     return this.sql
-      .exec(
-        'SELECT watermark, table_name, op, row_data, old_data FROM _zero_changes WHERE watermark > ? ORDER BY watermark',
-        watermark
-      )
+      .exec(statement, ...params)
       .toArray()
       .map((row: any) => ({
         watermark: Number(row.watermark),
@@ -1627,14 +1629,10 @@ export class ZeroDO extends DurableObject {
   }
 
   private readAllRows(tn: string): Record<string, unknown>[] {
-    try {
-      return this.sql
-        .exec(`SELECT * FROM ${quoteIdent(tn)}`)
-        .toArray()
-        .map((row: any) => this.normalizeRow(tn, row))
-    } catch {
-      return []
-    }
+    return this.sql
+      .exec(`SELECT * FROM ${quoteIdent(tn)}`)
+      .toArray()
+      .map((row: any) => this.normalizeRow(tn, row))
   }
 
   private readRowByPrimaryKey(

@@ -613,6 +613,91 @@ describe('ZeroDO snapshot feed timestamp fidelity', () => {
   })
 })
 
+describe('ZeroDO legacy snapshot feed', () => {
+  it('fails closed when a table read errors', async () => {
+    const { sql, zero } = await createWorkerCore()
+    zero.ensureSchemaTables({
+      tables: {
+        item: {
+          primaryKey: ['id'],
+          columns: { id: { type: 'string' } },
+        },
+      },
+    })
+    const exec = sql.exec
+    sql.exec = (statement: string, ...params: unknown[]) => {
+      if (statement === 'SELECT * FROM "item"')
+        throw new Error('injected legacy snapshot read failure')
+      return exec(statement, ...params)
+    }
+
+    const response = await zero.fetch(new Request('http://do/snapshot'))
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({
+      error: 'injected legacy snapshot read failure',
+    })
+  })
+})
+
+describe('ZeroDO changes feed', () => {
+  it('bounds the SQL read with the requested limit and preserves the response shape', async () => {
+    const { sql, zero } = await createWorkerCore()
+    for (const id of ['a', 'b', 'c']) {
+      zero.appendTrackedChange({
+        tableName: 'item',
+        op: 'INSERT',
+        rowData: { id },
+        oldData: null,
+      })
+    }
+    const changeReads: Array<{ statement: string; params: unknown[] }> = []
+    const exec = sql.exec
+    sql.exec = (statement: string, ...params: unknown[]) => {
+      if (
+        statement.startsWith(
+          'SELECT watermark, table_name, op, row_data, old_data FROM _zero_changes'
+        )
+      ) {
+        changeReads.push({ statement, params })
+      }
+      return exec(statement, ...params)
+    }
+
+    const response = await zero.fetch(
+      new Request('http://do/changes?watermark=0&limit=2')
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      watermark: 3,
+      changes: [
+        {
+          watermark: 1,
+          tableName: 'item',
+          op: 'INSERT',
+          rowData: { id: 'a' },
+          oldData: null,
+        },
+        {
+          watermark: 2,
+          tableName: 'item',
+          op: 'INSERT',
+          rowData: { id: 'b' },
+          oldData: null,
+        },
+      ],
+    })
+    expect(changeReads).toEqual([
+      {
+        statement:
+          'SELECT watermark, table_name, op, row_data, old_data FROM _zero_changes WHERE watermark > ? ORDER BY watermark LIMIT ?',
+        params: [0, 2],
+      },
+    ])
+  })
+})
+
 describe('ZeroDO paged snapshot feed', () => {
   async function page(
     zero: any,
