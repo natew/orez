@@ -135,6 +135,8 @@ const DEFAULT_WRITE_BUDGET_WINDOW_MS = 5 * 60 * 1000
 const WRITE_BUDGET_TRIPPED_KEY = '_orez_write_budget_tripped_at'
 const SCHEMA_PROVISIONING_WAIT_MS = 20_000
 const SCHEMA_PROVISIONING_MAX_DELAY_MS = 500
+const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
+const MAX_SNAPSHOT_PAGE_ROWS = 10_000
 
 function positiveEnvInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value)
@@ -326,7 +328,7 @@ export class ZeroDO extends DurableObject {
     )
       return this.handleChanges(request, url)
     if (url.pathname === '/snapshot' && request.method === 'GET')
-      return this.handleSnapshot()
+      return this.handleSnapshot(url)
     if (url.pathname === '/notify' && request.method === 'POST')
       return Response.json({ ok: true, cookie: this.cookie() })
     return new Response('not found', { status: 404 })
@@ -874,8 +876,126 @@ export class ZeroDO extends DurableObject {
     }
   }
 
-  private async handleSnapshot(): Promise<Response> {
+  private async handleSnapshot(url?: URL): Promise<Response> {
     try {
+      const paged =
+        url &&
+        ['table', 'cursor', 'limit'].some((parameter) => url.searchParams.has(parameter))
+      if (paged) {
+        const table = url.searchParams.get('table')
+        if (!table)
+          return Response.json(
+            { error: 'paged snapshot requires a table parameter' },
+            { status: 400 }
+          )
+        const limitValue = url.searchParams.get('limit')
+        const limit =
+          limitValue === null ? DEFAULT_SNAPSHOT_PAGE_ROWS : Number(limitValue)
+        if (
+          !Number.isSafeInteger(limit) ||
+          limit <= 0 ||
+          limit > MAX_SNAPSHOT_PAGE_ROWS
+        ) {
+          return Response.json(
+            {
+              error: `snapshot limit must be an integer from 1 to ${MAX_SNAPSHOT_PAGE_ROWS}`,
+            },
+            { status: 400 }
+          )
+        }
+
+        return this.atomicallySync(() => {
+          this.ensureSchemaMetadataTable()
+          const schemaRow = this.sql
+            .exec('SELECT schema_json FROM _zero_schema_tables WHERE name = ?', table)
+            .one()
+          if (!schemaRow?.schema_json)
+            return Response.json(
+              { error: `snapshot table ${JSON.stringify(table)} is not modeled` },
+              { status: 400 }
+            )
+          const schema = JSON.parse(String(schemaRow.schema_json)) as SchemaTable
+          if (
+            !Array.isArray(schema.primaryKey) ||
+            !schema.primaryKey.length ||
+            schema.primaryKey.some((column) => typeof column !== 'string' || !column)
+          ) {
+            throw new Error(
+              `snapshot table ${JSON.stringify(table)} has no valid primary key`
+            )
+          }
+          this.tableSchemas.set(table, schema)
+
+          const cursor = url.searchParams.get('cursor')
+          let cursorValues: unknown[] | null = null
+          if (cursor !== null) {
+            try {
+              const decoded = JSON.parse(cursor)
+              if (
+                !Array.isArray(decoded) ||
+                decoded.length !== schema.primaryKey.length ||
+                decoded.some(
+                  (value) =>
+                    !['string', 'number', 'boolean'].includes(typeof value) ||
+                    (typeof value === 'number' && !Number.isFinite(value))
+                )
+              ) {
+                return Response.json(
+                  { error: 'snapshot cursor does not match the table primary key' },
+                  { status: 400 }
+                )
+              }
+              cursorValues = decoded
+            } catch {
+              return Response.json(
+                { error: 'snapshot cursor is invalid' },
+                { status: 400 }
+              )
+            }
+          }
+
+          const primaryKey = schema.primaryKey.map(quoteIdent)
+          const keyColumns =
+            primaryKey.length === 1 ? primaryKey[0] : `(${primaryKey.join(', ')})`
+          const keyParams =
+            primaryKey.length === 1 ? '?' : `(${primaryKey.map(() => '?').join(', ')})`
+          const where = cursorValues ? ` WHERE ${keyColumns} > ${keyParams}` : ''
+          // one look-ahead row distinguishes an exact final page from a page
+          // with more data without issuing an unbounded count or second read.
+          const page = this.sql
+            .exec(
+              `SELECT * FROM ${quoteIdent(table)}${where} ORDER BY ${primaryKey.join(', ')} LIMIT ?`,
+              ...(cursorValues ?? []),
+              limit + 1
+            )
+            .toArray() as Record<string, unknown>[]
+          const hasMore = page.length > limit
+          const rawRows = hasMore ? page.slice(0, limit) : page
+          let nextCursor: string | null = null
+          if (hasMore) {
+            const last = rawRows[rawRows.length - 1]
+            const values = schema.primaryKey.map((column) => last[column])
+            if (
+              values.some(
+                (value) =>
+                  !['string', 'number', 'boolean'].includes(typeof value) ||
+                  (typeof value === 'number' && !Number.isFinite(value))
+              )
+            ) {
+              throw new Error(
+                `snapshot table ${JSON.stringify(table)} returned an invalid primary key`
+              )
+            }
+            nextCursor = JSON.stringify(values)
+          }
+          return Response.json({
+            watermark: this.watermark(),
+            rows: rawRows.map((row) => this.normalizeRow(table, row)),
+            nextCursor,
+          })
+        })
+      }
+
       return this.atomicallySync(() => {
         this.ensureSchemaMetadataTable()
         const names = this.sql

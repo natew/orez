@@ -357,7 +357,9 @@ const PROGRESS_SELECT: &str = "SELECT
 FROM _zsync_snapshot_progress";
 
 /// Strictly read the active resumable generation. A storage or shape error is
-/// never treated as an absent generation.
+/// never treated as an absent generation. a corrupt row intentionally blocks
+/// new generations; after investigating, an operator can delete that row
+/// through the host's authenticated admin SQL before retrying the snapshot.
 pub fn read_snapshot_progress(
     db: &mut dyn SyncDb,
 ) -> Result<Option<SnapshotProgress>, EngineError> {
@@ -557,6 +559,9 @@ fn table_create_sql(db: &mut dyn SyncDb, table: &str) -> Result<String, EngineEr
 }
 
 fn clone_index_sql(sql: &str, stage: &str, stage_index: &str) -> Result<String, EngineError> {
+    // this narrow parser assumes the CREATE INDEX prefix has no quoted
+    // identifier containing the token " on "; host-generated index names
+    // satisfy that constraint.
     let upper = sql.to_ascii_uppercase();
     let on = upper
         .find(" ON ")

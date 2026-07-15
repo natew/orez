@@ -37,8 +37,11 @@ exhausted) and the CURRENT watermark. A bare `/snapshot` (no params) keeps the
 legacy whole-dataset response for small datasets and existing tests, but the
 host stops using it by default.
 
-- each page is one bounded `SELECT ... WHERE pk > ? ORDER BY pk LIMIT n` —
-  no cross-request snapshot is needed and source memory stays O(page).
+- each page is one bounded
+  `SELECT ... WHERE pk > ? ORDER BY pk LIMIT (n + 1)` and returns at most `n`
+  rows; the one-row lookahead distinguishes an exact final page from a page
+  with more data without an unbounded count or second read. No cross-request
+  snapshot is needed and source memory stays O(page).
 - no consistency pinning: concurrent writes during paging are EXPECTED and
   reconciled by the catch-up phase.
 - source read errors fail closed (HTTP 5xx), never an empty table
@@ -153,6 +156,10 @@ synchronous page window), not a silent default.
 - small datasets behave identically apart from extra page-boundary commits.
 - the legacy single-shot `/snapshot` response stays for compatibility and
   harness use; remove it only after all hosts run the paged flow.
+- secondary-index definitions and enforcement survive cutover, but their
+  SQLite names become generation-prefixed because index names are global and
+  the staged copy must build them while the live indexes still exist.
+  Sync-host DDL must not depend on `INDEXED BY <original-name>`.
 
 ## Validation plan
 
@@ -169,4 +176,6 @@ synchronous page window), not a silent default.
 150k billable rows per transaction is the hard ceiling; billable writes
 amplify per index, so the default 2 000-row page keeps a wide margin even on
 heavily indexed tables. Catch-up batches reuse the changes `limit` (SQL-side
-after `t-mrmjcydx-1ht00`).
+after `t-mrmjcydx-1ht00`). A page transaction may also sweep up to 2 000 rows
+from one abandoned generation, so host breaker guidance must budget for both
+the incoming page's indexed writes and that bounded cleanup work.

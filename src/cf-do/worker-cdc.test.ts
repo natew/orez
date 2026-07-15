@@ -33,6 +33,8 @@ async function createWorkerCore() {
   zero.cdc = new TransactionalCdc(storage.sql)
   zero.watermarks = new DurableWatermarkState(storage.sql)
   zero.writeBudget = { recordLogical() {} }
+  zero.tableSchemas = new Map()
+  zero.schemaTables = new Set<string>()
   zero.pendingChangesSchemaReady = false
   // A real transaction boundary: an abort has to roll the SQLite side back, or
   // the cache-staleness regressions below cannot be observed at all.
@@ -608,5 +610,180 @@ describe('ZeroDO snapshot feed timestamp fidelity', () => {
   it('still coerces a genuine numeric timestamp to a number', async () => {
     const rows = await snapshotFor([{ id: 'm3', createdAt: 1_783_776_886_000 }])
     expect(rows).toEqual([{ id: 'm3', createdAt: 1_783_776_886_000 }])
+  })
+})
+
+describe('ZeroDO paged snapshot feed', () => {
+  async function page(
+    zero: any,
+    table: string,
+    limit: number,
+    cursor?: string
+  ): Promise<{
+    status: number
+    body: {
+      watermark?: number
+      rows?: Array<Record<string, unknown>>
+      nextCursor?: string | null
+      error?: string
+    }
+  }> {
+    const url = new URL('http://do/snapshot')
+    url.searchParams.set('table', table)
+    url.searchParams.set('limit', String(limit))
+    if (cursor !== undefined) url.searchParams.set('cursor', cursor)
+    const response = await zero.fetch(new Request(url))
+    return { status: response.status, body: await response.json() }
+  }
+
+  it('returns bounded single-key pages with an opaque resume cursor and current watermark', async () => {
+    const { sql, zero } = await createWorkerCore()
+    zero.ensureSchemaTables({
+      tables: {
+        item: {
+          primaryKey: ['id'],
+          columns: { id: { type: 'string' }, label: { type: 'string' } },
+        },
+      },
+    })
+    for (const id of ['e', 'a', 'd', 'b', 'c']) {
+      sql.exec('INSERT INTO item (id, label) VALUES (?, ?)', id, `label-${id}`)
+    }
+    zero.watermarks.ensureTables()
+    zero.watermarks.mark(37)
+
+    const legacyResponse = await zero.fetch(new Request('http://do/snapshot'))
+    expect(legacyResponse.status).toBe(200)
+    expect(await legacyResponse.json()).toMatchObject({
+      watermark: 37,
+      tables: { item: expect.arrayContaining([{ id: 'a', label: 'label-a' }]) },
+    })
+
+    const first = await page(zero, 'item', 2)
+    expect(first).toEqual({
+      status: 200,
+      body: {
+        watermark: 37,
+        rows: [
+          { id: 'a', label: 'label-a' },
+          { id: 'b', label: 'label-b' },
+        ],
+        nextCursor: JSON.stringify(['b']),
+      },
+    })
+
+    const second = await page(zero, 'item', 2, first.body.nextCursor!)
+    expect(second.body.rows).toEqual([
+      { id: 'c', label: 'label-c' },
+      { id: 'd', label: 'label-d' },
+    ])
+    expect(second.body.nextCursor).toBe(JSON.stringify(['d']))
+
+    const last = await page(zero, 'item', 2, second.body.nextCursor!)
+    expect(last).toEqual({
+      status: 200,
+      body: {
+        watermark: 37,
+        rows: [{ id: 'e', label: 'label-e' }],
+        nextCursor: null,
+      },
+    })
+  })
+
+  it('uses lexicographic keyset paging for composite primary keys', async () => {
+    const { sql, zero } = await createWorkerCore()
+    zero.ensureSchemaTables({
+      tables: {
+        pair: {
+          primaryKey: ['group', 'id'],
+          columns: {
+            group: { type: 'string' },
+            id: { type: 'number' },
+            value: { type: 'string' },
+          },
+        },
+      },
+    })
+    for (const [group, id] of [
+      ['b', 2],
+      ['a', 2],
+      ['b', 1],
+      ['a', 1],
+    ] as const) {
+      sql.exec(
+        'INSERT INTO pair ("group", id, value) VALUES (?, ?, ?)',
+        group,
+        id,
+        `${group}${id}`
+      )
+    }
+
+    const first = await page(zero, 'pair', 2)
+    expect(first.body.rows).toEqual([
+      { group: 'a', id: 1, value: 'a1' },
+      { group: 'a', id: 2, value: 'a2' },
+    ])
+    expect(first.body.nextCursor).toBe(JSON.stringify(['a', 2]))
+    const second = await page(zero, 'pair', 2, first.body.nextCursor!)
+    expect(second.body.rows).toEqual([
+      { group: 'b', id: 1, value: 'b1' },
+      { group: 'b', id: 2, value: 'b2' },
+    ])
+    expect(second.body.nextCursor).toBeNull()
+  })
+
+  it('rejects malformed page requests and unknown tables', async () => {
+    const { zero } = await createWorkerCore()
+    zero.ensureSchemaTables({
+      tables: {
+        item: {
+          primaryKey: ['id'],
+          columns: { id: { type: 'string' } },
+        },
+      },
+    })
+
+    const cases = [
+      new URL('http://do/snapshot?limit=2'),
+      new URL('http://do/snapshot?table=item&limit=0'),
+      new URL('http://do/snapshot?table=item&limit=1.5'),
+      new URL('http://do/snapshot?table=item&limit=10001'),
+      new URL('http://do/snapshot?table=item&limit=2&cursor=not-json'),
+      new URL(
+        `http://do/snapshot?table=item&limit=2&cursor=${encodeURIComponent(JSON.stringify(['a', 'extra']))}`
+      ),
+      new URL('http://do/snapshot?table=missing&limit=2'),
+    ]
+    for (const url of cases) {
+      const response = await zero.fetch(new Request(url))
+      expect(response.status, url.toString()).toBe(400)
+      expect((await response.json()).error, url.toString()).toBeTypeOf('string')
+    }
+  })
+
+  it('fails closed when the bounded SELECT errors', async () => {
+    const { sql, zero } = await createWorkerCore()
+    zero.ensureSchemaTables({
+      tables: {
+        item: {
+          primaryKey: ['id'],
+          columns: { id: { type: 'string' } },
+        },
+      },
+    })
+    const exec = sql.exec
+    sql.exec = (statement: string, ...params: unknown[]) => {
+      if (statement.startsWith('SELECT * FROM "item"'))
+        throw new Error('injected paged snapshot read failure')
+      return exec(statement, ...params)
+    }
+
+    const response = await zero.fetch(
+      new Request('http://do/snapshot?table=item&limit=2')
+    )
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({
+      error: 'injected paged snapshot read failure',
+    })
   })
 })
