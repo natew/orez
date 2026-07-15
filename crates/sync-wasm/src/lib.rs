@@ -468,6 +468,117 @@ pub fn engine_apply_upstream_snapshot(
     to_js(&result)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotProgressWire {
+    generation: String,
+    start_watermark: String,
+    table: Option<String>,
+    cursor: Option<String>,
+    state: sync_core::SnapshotState,
+    catchup_watermark: String,
+}
+
+impl From<sync_core::SnapshotProgress> for SnapshotProgressWire {
+    fn from(progress: sync_core::SnapshotProgress) -> Self {
+        Self {
+            generation: progress.generation.to_string(),
+            start_watermark: progress.start_watermark.to_string(),
+            table: progress.table,
+            cursor: progress.cursor,
+            state: progress.state,
+            catchup_watermark: progress.catchup_watermark.to_string(),
+        }
+    }
+}
+
+/// Strictly read resumable snapshot progress. Storage and row-shape failures
+/// are errors; only a successful query with no active row returns null.
+#[wasm_bindgen]
+pub fn engine_read_snapshot_progress(db: &JsSyncDb) -> Result<JsValue, JsValue> {
+    let progress = sync_core::read_snapshot_progress(&mut WasmDb(db)).map_err(engine_error)?;
+    to_js(&progress.map(SnapshotProgressWire::from))
+}
+
+/// Create a new staged generation. `start_watermark` is captured by the host
+/// from the first source snapshot-page response. The host owns the transaction.
+#[wasm_bindgen]
+pub fn engine_begin_snapshot_generation(
+    db: &JsSyncDb,
+    schema: JsValue,
+    start_watermark: &str,
+) -> Result<JsValue, JsValue> {
+    let mut db = WasmDb(db);
+    let tables = tables_from_js(schema)?;
+    let start_watermark = parse_counter(start_watermark, "snapshot start watermark")?;
+    let progress = sync_core::begin_snapshot_generation(&mut db, &tables, start_watermark)
+        .map_err(engine_error)?;
+    to_js(&SnapshotProgressWire::from(progress))
+}
+
+/// Apply one bounded source page to staging and commit its opaque cursor with
+/// the rows. The host owns one transaction per call.
+#[wasm_bindgen]
+pub fn engine_apply_snapshot_page(
+    db: &JsSyncDb,
+    schema: JsValue,
+    generation: &str,
+    table: &str,
+    rows: JsValue,
+    next_cursor: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let mut db = WasmDb(db);
+    let tables = tables_from_js(schema)?;
+    let generation = parse_counter(generation, "snapshot generation")?;
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = from_js(rows)?;
+    let progress = sync_core::apply_snapshot_page(
+        &mut db,
+        &tables,
+        generation,
+        table,
+        &rows,
+        next_cursor.as_deref(),
+    )
+    .map_err(engine_error)?;
+    to_js(&SnapshotProgressWire::from(progress))
+}
+
+/// Apply one ordered catch-up page to staging without touching the live table
+/// namespace or live upstream watermark.
+#[wasm_bindgen]
+pub fn engine_apply_snapshot_changes(
+    db: &JsSyncDb,
+    schema: JsValue,
+    generation: &str,
+    batch: JsValue,
+) -> Result<JsValue, JsValue> {
+    let mut db = WasmDb(db);
+    let tables = tables_from_js(schema)?;
+    let generation = parse_counter(generation, "snapshot generation")?;
+    let batch: sync_core::UpstreamBatch = from_js(batch)?;
+    let result = sync_core::apply_snapshot_changes(&mut db, &tables, generation, &batch)
+        .map_err(engine_error)?;
+    to_js(&result)
+}
+
+/// Atomically rename a drained staged generation into the live namespace,
+/// invalidate pre-cutover client cookies, and advance the live source cursor.
+#[wasm_bindgen]
+pub fn engine_finalize_snapshot_generation(
+    db: &JsSyncDb,
+    schema: JsValue,
+    generation: &str,
+    watermark: &str,
+) -> Result<JsValue, JsValue> {
+    let mut db = WasmDb(db);
+    let tables = tables_from_js(schema)?;
+    let generation = parse_counter(generation, "snapshot generation")?;
+    let watermark = parse_counter(watermark, "snapshot drain watermark")?;
+    let result = sync_core::finalize_snapshot_generation(&mut db, &tables, generation, watermark)
+        .map_err(engine_error)?;
+    to_js(&result)
+}
+
 /// Initialize the additive query-aware durable tables. The host owns the
 /// transaction boundary, exactly as it does for the baseline schema.
 #[wasm_bindgen]

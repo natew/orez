@@ -45,7 +45,9 @@ pub use push::{
 };
 pub use schema::{TableSpec, Tables, init_schema, trigger_ddl};
 pub use upstream::{
-    ApplyUpstreamResult, UpstreamBatch, UpstreamChange, UpstreamSnapshot, apply_upstream,
-    apply_upstream_snapshot, upstream_watermark,
+    ApplyUpstreamResult, SnapshotProgress, SnapshotState, UpstreamBatch, UpstreamChange,
+    UpstreamSnapshot, apply_snapshot_changes, apply_snapshot_page, apply_upstream,
+    apply_upstream_snapshot, begin_snapshot_generation, finalize_snapshot_generation,
+    read_snapshot_progress, upstream_watermark,
 };
 pub use value::{ZeroColumnType, to_zero_value, to_zero_value_json};

@@ -228,6 +228,38 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
         )",
         &[],
     )?;
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _zsync_snapshot_generation (
+            lock INTEGER PRIMARY KEY CHECK (lock = 1),
+            nextGeneration INTEGER NOT NULL CHECK (nextGeneration > 0)
+        )",
+        &[],
+    )?;
+    db.exec(
+        "INSERT INTO _zsync_snapshot_generation (lock, nextGeneration) VALUES (1, 1)
+         ON CONFLICT (lock) DO NOTHING",
+        &[],
+    )?;
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _zsync_snapshot_progress (
+            generation INTEGER PRIMARY KEY,
+            startWatermark INTEGER NOT NULL CHECK (startWatermark >= 0),
+            tableName TEXT,
+            cursor TEXT,
+            state TEXT NOT NULL CHECK (state IN ('paging', 'catching_up', 'complete', 'abandoned')),
+            catchupWatermark INTEGER NOT NULL CHECK (catchupWatermark >= 0),
+            active INTEGER UNIQUE CHECK (active IS NULL OR active = 1)
+        )",
+        &[],
+    )?;
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _zsync_snapshot_cleanup (
+            generation INTEGER NOT NULL,
+            stageName TEXT NOT NULL,
+            PRIMARY KEY (generation, stageName)
+        )",
+        &[],
+    )?;
 
     for sql in trigger_ddl(tables) {
         db.exec(&sql, &[])?;
