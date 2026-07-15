@@ -147,7 +147,23 @@ export async function startRustCf(opts?: {
     },
 
     async restart() {
-      await admin('/admin/restart', {})
+      const before = await admin<RustCfStatus>('/admin/status')
+      await fetch(`${origin}/admin/restart`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-admin-key': adminKey,
+        },
+        body: '{}',
+      }).catch(() => null)
+      for (let attempt = 0; attempt < 100; attempt++) {
+        try {
+          const after = await admin<RustCfStatus>('/admin/status')
+          if (after.bootID !== before.bootID) return
+        } catch {}
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      throw new Error('rust-cf durable object did not restart')
     },
 
     async close() {
