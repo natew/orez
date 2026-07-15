@@ -22,6 +22,11 @@
  *   }
  */
 
+import {
+  logCFInstance,
+  routeCFSqlitePath,
+  type CFInstanceRuntime,
+} from '../cf-instance-runtime.js'
 import { openSqliteHandleRegistry } from '../embed-generation.js'
 
 // -- abstract interface for DO SqlStorage --
@@ -42,7 +47,26 @@ export interface SqlStorageLike {
 }
 
 type SqliteConnectionRole = 'default' | 'replica-writer'
-const activeSnapshotPrefixes = new Set<string>()
+const activeSnapshotPrefixes = new WeakMap<object, Set<string>>()
+const openReaderSnapshots = new WeakMap<object, Set<Database>>()
+
+function snapshotPrefixesFor(key: object): Set<string> {
+  let prefixes = activeSnapshotPrefixes.get(key)
+  if (!prefixes) {
+    prefixes = new Set()
+    activeSnapshotPrefixes.set(key, prefixes)
+  }
+  return prefixes
+}
+
+function readerSnapshotsFor(key: object): Set<Database> {
+  let readers = openReaderSnapshots.get(key)
+  if (!readers) {
+    readers = new Set()
+    openReaderSnapshots.set(key, readers)
+  }
+  return readers
+}
 
 // -- SqliteError --
 
@@ -488,14 +512,14 @@ function createSnapshotPrefix(): string {
   return `_orez_snapshot_${Date.now().toString(36)}_${uuid}`
 }
 
-function isActiveSnapshotTable(name: string): boolean {
-  for (const prefix of activeSnapshotPrefixes) {
+function isActiveSnapshotTable(name: string, routingKey: object): boolean {
+  for (const prefix of snapshotPrefixesFor(routingKey)) {
     if (name.startsWith(`${prefix}_`)) return true
   }
   return false
 }
 
-function cleanupInactiveSnapshotTables(sql: SqlStorageLike): void {
+function cleanupInactiveSnapshotTables(sql: SqlStorageLike, routingKey: object): void {
   try {
     const rows = execSql(
       sql,
@@ -507,7 +531,8 @@ function cleanupInactiveSnapshotTables(sql: SqlStorageLike): void {
     ).toArray()
     for (const row of rows) {
       const name = String(row.name ?? '')
-      if (!isSnapshotInternalTable(name) || isActiveSnapshotTable(name)) continue
+      if (!isSnapshotInternalTable(name) || isActiveSnapshotTable(name, routingKey))
+        continue
       try {
         execSql(
           sql,
@@ -547,8 +572,6 @@ function shouldSnapshotTable(name: string): boolean {
 // do we copy X (with its schema + indexes) into each open reader's snapshot so
 // that reader keeps seeing X's pre-write rows. since writes are rare during a
 // hydration, readers almost always hit the live indexed tables.
-const openReaderSnapshots = new Set<Database>()
-
 // parse the target table of a writer DML/DDL statement so the writer can
 // copy-on-write that table for open readers before mutating it. matches the
 // statement shapes zero's change-processor emits (INSERT OR REPLACE INTO,
@@ -567,15 +590,10 @@ function writeTargetTable(sql: string): string | undefined {
 
 // before the writer mutates `table`, freeze its current rows for every open
 // reader snapshot that hasn't already copied it.
-function cowOpenReadersBeforeWrite(table: string): void {
-  if (openReaderSnapshots.size === 0) return
-  for (const reader of openReaderSnapshots) reader._cowTable(table)
-}
-
-function currentConnectionRole(): SqliteConnectionRole {
-  return (globalThis as any).__orez_zero_sqlite_role === 'replica-writer'
-    ? 'replica-writer'
-    : 'default'
+function cowOpenReadersBeforeWrite(routingKey: object, table: string): void {
+  const readers = readerSnapshotsFor(routingKey)
+  if (readers.size === 0) return
+  for (const reader of readers) reader._cowTable(table)
 }
 
 function isSqliteCatalogQuery(sql: string): boolean {
@@ -898,29 +916,34 @@ export class Database {
   #snapshotPrefixActive: string
   #snapshotCounter: number
   #connectionRole: SqliteConnectionRole
+  #routingKey: object
+  #runtime: CFInstanceRuntime | undefined
 
   constructor(sqlOrFilename: SqlStorageLike | string, _options?: { readonly?: boolean }) {
     if (typeof sqlOrFilename === 'string') {
-      // when used as a bundler alias for @rocicorp/zero-sqlite3,
-      // zero-cache passes a file path. look up DO storage from globalThis.
-      const storage = (globalThis as any).__orez_do_sqlite as SqlStorageLike | undefined
-      if (!storage) {
+      const route = routeCFSqlitePath(sqlOrFilename)
+      const storage = route.runtime.doSqlite as SqlStorageLike | undefined
+      if (!storage?.exec) {
         throw new SqliteError(
-          'sqlite shim: no DO storage on globalThis.__orez_do_sqlite. ' +
-            'register DO storage before importing zero-cache.',
+          `sqlite shim: runtime ${JSON.stringify(route.runtime.instanceId)} has no DO storage`,
           'SQLITE_ERROR'
         )
       }
       this.#sql = storage
+      this.#runtime = route.runtime
+      this.#routingKey = route.runtime
+      this.#connectionRole = route.role
       this.name = sqlOrFilename
-      // string-path construction only happens through zero-cache (the alias
-      // for @rocicorp/zero-sqlite3); register the handle so the next embed
-      // generation can reclaim it if this generation dies without closing
-      // (the embed restart contract — see ../embed-generation.ts). app DOs
-      // construct with a storage object and are never swept.
-      openSqliteHandleRegistry().add(this)
+      route.runtime.sqliteHandles.add(this)
+      logCFInstance(route.runtime, {
+        component: 'sqlite',
+        event: 'open',
+        role: route.role,
+      })
     } else {
       this.#sql = sqlOrFilename
+      this.#routingKey = sqlOrFilename
+      this.#connectionRole = 'default'
       this.name = ':do-storage:'
     }
     this.#open = true
@@ -929,9 +952,8 @@ export class Database {
     this.#snapshotPrefix = createSnapshotPrefix()
     this.#snapshotPrefixActive = this.#snapshotPrefix
     this.#snapshotCounter = 0
-    this.#connectionRole = currentConnectionRole()
-    activeSnapshotPrefixes.add(this.#snapshotPrefix)
-    cleanupInactiveSnapshotTables(this.#sql)
+    snapshotPrefixesFor(this.#routingKey).add(this.#snapshotPrefix)
+    cleanupInactiveSnapshotTables(this.#sql, this.#routingKey)
 
     // expose storage for StatementRunner to access transactionSync
     ;(this as any).__orez_sql = this.#sql
@@ -1053,7 +1075,7 @@ export class Database {
     this.#dropSnapshot()
     this.#snapshotPrefixActive = `${this.#snapshotPrefix}_${++this.#snapshotCounter}`
     this.#snapshotTables = new Map<string, string>()
-    openReaderSnapshots.add(this)
+    readerSnapshotsFor(this.#routingKey).add(this)
   }
 
   // copy `table`'s current rows into this reader's snapshot the first time the
@@ -1075,7 +1097,7 @@ export class Database {
   }
 
   #dropSnapshot(): void {
-    openReaderSnapshots.delete(this)
+    readerSnapshotsFor(this.#routingKey).delete(this)
     const tables = this.#snapshotTables
     if (!tables) return
     this.#snapshotTables = null
@@ -1100,11 +1122,14 @@ export class Database {
   // reader snapshot first (copy-on-write). reader connections never mutate live
   // tables, so this only fires from the writer's connection.
   _cowForWrite(sql: string): void {
-    if (this.#connectionRole !== 'replica-writer' || openReaderSnapshots.size === 0) {
+    if (
+      this.#connectionRole !== 'replica-writer' ||
+      readerSnapshotsFor(this.#routingKey).size === 0
+    ) {
       return
     }
     const table = writeTargetTable(sql)
-    if (table) cowOpenReadersBeforeWrite(table)
+    if (table) cowOpenReadersBeforeWrite(this.#routingKey, table)
   }
 
   /** prepare a statement */
@@ -1315,9 +1340,10 @@ export class Database {
 
   /** close the database connection */
   close(): this {
-    openSqliteHandleRegistry().delete(this)
+    if (this.#runtime) this.#runtime.sqliteHandles.delete(this)
+    else openSqliteHandleRegistry().delete(this)
     this.#dropSnapshot()
-    activeSnapshotPrefixes.delete(this.#snapshotPrefix)
+    snapshotPrefixesFor(this.#routingKey).delete(this.#snapshotPrefix)
     this.#open = false
     return this
   }

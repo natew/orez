@@ -12,7 +12,7 @@
  *   const SQL = await initSqlJs()
  *   const db = new SQL.Database()
  *   const storage = createSqlJsStorage(db)
- *   globalThis.__orez_do_sqlite = storage
+ *   const sqlite = new Database(storage)
  */
 
 import type { SqlStorageLike, SqlStorageCursor, SqlStorageValue } from './sqlite.js'
@@ -44,8 +44,7 @@ interface SqlJsStatement {
 /**
  * create a SqlStorageLike adapter around a sql.js Database.
  *
- * the returned object can be set on `globalThis.__orez_do_sqlite`
- * or passed directly to the sqlite shim's Database constructor.
+ * pass the returned object directly to the sqlite shim's Database constructor.
  */
 export function createSqlJsStorage(sqlJsDb: SqlJsDatabase): SqlStorageLike {
   return {

@@ -34,6 +34,7 @@ const harness = vi.hoisted(() => ({
   backendWaitReadyError: new Error('backend waitReady failed'),
   backendWaitReadyGates: new Map<number, Gate>(),
   backendWaitReadyRejectAt: -1,
+  envs: [] as Array<Record<string, string>>,
   events: [] as string[],
   maxActiveGenerations: 0,
   modes: [] as RunMode[],
@@ -45,14 +46,19 @@ const harness = vi.hoisted(() => ({
   rejectedError: new Error('runWorker failed before ready'),
   runCalls: 0,
   stopError: new Error('runWorker failed during termination'),
+  sweepError: null as Error | null,
   workerReleases: [] as Array<() => void>,
 }))
 
 vi.mock('./zero-cache-run-worker.js', () => ({
-  runWorker: (parent: {
-    once(type: string, listener: () => void): void
-    send(message: unknown): boolean
-  }) => {
+  runWorker: (
+    parent: {
+      once(type: string, listener: () => void): void
+      send(message: unknown): boolean
+    },
+    env: Record<string, string>
+  ) => {
+    harness.envs.push(env)
     const mode = harness.modes[harness.runCalls++]
     harness.activeGenerations++
     harness.maxActiveGenerations = Math.max(
@@ -95,11 +101,6 @@ vi.mock('./zero-cache-run-worker.js', () => ({
         mode === 'stop-reject'
       ) {
         queueMicrotask(() => {
-          const instance = { generation: harness.runCalls }
-          ;(globalThis as Record<string, unknown>).__orez_fastify_instance = instance
-          const instances = (globalThis as Record<string, unknown>)
-            .__orez_fastify_instances as unknown[]
-          instances.push(instance)
           parent.send(['ready'])
         })
       } else if (mode === 'reject') {
@@ -110,7 +111,11 @@ vi.mock('./zero-cache-run-worker.js', () => ({
 }))
 
 vi.mock('../log.js', () => ({ setLogLevel: () => {} }))
-vi.mock('../replication/handler.js', () => ({ resetReplicationState: () => {} }))
+vi.mock('../replication/handler.js', () => ({
+  deleteReplicationState: () => {},
+  resetReplicationState: () => {},
+  signalReplicationChange: () => {},
+}))
 vi.mock('../pg-proxy-browser.js', () => ({
   createBrowserProxy: async () => {
     if (harness.proxyCreateError) throw harness.proxyCreateError
@@ -127,6 +132,7 @@ vi.mock('../pg-proxy-browser.js', () => ({
   },
 }))
 vi.mock('../pg-proxy-do-backend.js', () => ({
+  releaseDoBackendInstanceCaches: () => {},
   DoBackend: class {
     readonly index: number
     readonly waitReady: Promise<void>
@@ -154,21 +160,28 @@ vi.mock('../pg-proxy-do-backend.js', () => ({
 vi.mock('./durable-object-websocket-handoff.js', () => ({
   DurableObjectWebSocketHandoff: class {
     readonly activeConnections = 0
+    closeAll() {}
   },
 }))
-vi.mock('./embed-generation.js', () => ({ sweepLeakedSqliteHandles: () => 0 }))
+vi.mock('./embed-generation.js', () => ({
+  sweepCFInstanceSqliteHandles: () => {
+    if (harness.sweepError) throw harness.sweepError
+    return 0
+  },
+}))
 vi.mock('./local-sql-backend.js', () => ({
   createLocalSqlBackend: () => ({
     fetch: async () => new Response('ok'),
     recoverOrphanedTransactions: () => {},
   }),
 }))
-vi.mock('./shims/fastify.js', () => ({
-  resetFastifyRegistry: () => {
-    delete (globalThis as Record<string, unknown>).__orez_fastify_instance
-    ;(globalThis as Record<string, unknown>).__orez_fastify_instances = []
-  },
-}))
+vi.mock('./cf-instance-runtime.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./cf-instance-runtime.js')>()
+  return {
+    ...actual,
+    dispatcherFastifyForCFInstance: () => ({ generation: harness.runCalls }),
+  }
+})
 
 import { startZeroCacheEmbedCF } from './zero-cache-embed-cf.js'
 
@@ -192,10 +205,11 @@ let originalFetch: typeof fetch
 let originalGlobals: Map<string, GlobalSnapshot>
 let originalKill: typeof process.kill
 
-function options(readyTimeout = 1_000) {
+function options(readyTimeout = 1_000, instanceId = 'test-instance') {
   return {
     backendFetch: async () => new Response('ok'),
     doSqlite: {},
+    instanceId,
     readyTimeout,
   }
 }
@@ -213,6 +227,7 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     harness.backendOpens = 0
     harness.backendWaitReadyGates = new Map()
     harness.backendWaitReadyRejectAt = -1
+    harness.envs = []
     harness.events = []
     harness.maxActiveGenerations = 0
     harness.modes = []
@@ -222,6 +237,7 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     harness.proxyCreateError = null
     harness.proxyOpens = 0
     harness.runCalls = 0
+    harness.sweepError = null
     harness.workerReleases = []
 
     originalEnv = { ...process.env }
@@ -372,6 +388,39 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     ;(globalThis as Record<string, unknown>).__orez_proxy_user = previousUser
   })
 
+  it('does not let additional env replace instance routing fields', async () => {
+    harness.modes = ['ready']
+    const embed = await startZeroCacheEmbedCF({
+      ...options(1_000, 'protected-routes'),
+      env: {
+        ZERO_CHANGE_DB: 'postgres://wrong/change',
+        ZERO_CVR_DB: 'postgres://wrong/cvr',
+        ZERO_PORT: '1',
+        ZERO_REPLICA_FILE: '/wrong/replica.db',
+        ZERO_STORAGE_DB_TMP_DIR: '/wrong/tmp',
+        ZERO_TASK_ID: 'wrong-task',
+        ZERO_UPSTREAM_DB: 'postgres://wrong/upstream',
+      },
+    })
+
+    const env = harness.envs[0]
+    expect(env.ZERO_UPSTREAM_DB).toContain(
+      '70726f7465637465642d726f75746573.orez-pg.local'
+    )
+    expect(env.ZERO_CVR_DB).toContain('70726f7465637465642d726f75746573.orez-pg.local')
+    expect(env.ZERO_CHANGE_DB).toContain('70726f7465637465642d726f75746573.orez-pg.local')
+    expect(env.ZERO_REPLICA_FILE).toContain(
+      '/__orez_cf_instance__/70726f7465637465642d726f75746573/'
+    )
+    expect(env.ZERO_STORAGE_DB_TMP_DIR).toBe(
+      '/__orez_cf_instance__/70726f7465637465642d726f75746573'
+    )
+    expect(env.ZERO_PORT).not.toBe('1')
+    expect(env.ZERO_TASK_ID).toBe('orez-cf-70726f7465637465642d726f75746573')
+
+    await embed.stop()
+  })
+
   it('waits for delayed SIGTERM completion before closing proxy and backends', async () => {
     harness.modes = ['delayed-stop']
     const embed = await startZeroCacheEmbedCF(options())
@@ -462,10 +511,10 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     await retry.stop()
   })
 
-  it('surfaces a termination timeout and prohibits retry while the worker lives', async () => {
+  it('fails closed for one logical instance after a termination timeout', async () => {
     vi.useFakeTimers()
     harness.modes = ['never-stop', 'ready']
-    const embed = await startZeroCacheEmbedCF(options())
+    const embed = await startZeroCacheEmbedCF(options(1_000, 'wedged-instance'))
 
     const stopResult = embed.stop().catch((error) => error)
     await vi.advanceTimersByTimeAsync(5_000)
@@ -478,15 +527,39 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
         String(error).includes('did not terminate within 5000ms')
       )
     ).toBe(true)
-    await expect(startZeroCacheEmbedCF(options())).rejects.toThrow(
-      'another generation is active or still tearing down'
-    )
+    expect(process.env.SINGLE_PROCESS).toBe('1')
+    await expect(
+      startZeroCacheEmbedCF(options(1_000, 'wedged-instance'))
+    ).rejects.toThrow('instance "wedged-instance" is active or still tearing down')
 
     harness.workerReleases[0]()
     await turn()
-    const retry = await startZeroCacheEmbedCF(options())
-    await retry.stop()
+    expect(process.env.SINGLE_PROCESS).toBe(originalEnv.SINGLE_PROCESS)
+    await expect(
+      startZeroCacheEmbedCF(options(1_000, 'wedged-instance'))
+    ).rejects.toThrow('instance "wedged-instance" is active or still tearing down')
+
+    const other = await startZeroCacheEmbedCF(options(1_000, 'other-instance'))
+    await other.stop()
     expect(harness.maxActiveGenerations).toBe(1)
+  })
+
+  it('fails closed for one logical instance after SQLite teardown fails', async () => {
+    harness.modes = ['ready', 'ready']
+    const embed = await startZeroCacheEmbedCF(options(1_000, 'sqlite-close-failed'))
+    harness.sweepError = new Error('sqlite close failed')
+
+    const error = await embed.stop().catch((reason) => reason)
+
+    expect(error).toBeInstanceOf(AggregateError)
+    expect(String(error)).toContain('teardown failed')
+    await expect(
+      startZeroCacheEmbedCF(options(1_000, 'sqlite-close-failed'))
+    ).rejects.toThrow('instance "sqlite-close-failed" is active or still tearing down')
+
+    harness.sweepError = null
+    const other = await startZeroCacheEmbedCF(options(1_000, 'sqlite-close-other'))
+    await other.stop()
   })
 
   it('preserves the startup error when resource cleanup also rejects', async () => {

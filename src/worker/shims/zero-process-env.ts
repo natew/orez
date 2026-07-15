@@ -72,10 +72,32 @@ const bootstrapEnv = bootstrapProcess.env as Record<PropertyKey, unknown>
 installValue(bootstrapSnapshots, bootstrapEnv, 'SINGLE_PROCESS', '1')
 installIfMissing(bootstrapSnapshots, bootstrapEnv, 'NODE_ENV', 'development')
 let bootstrapAvailable = true
+let activeSnapshots: PropertySnapshot[] | null = null
+let leaseCount = 0
 
 export function acquireZeroProcessEnv(): () => void {
-  const snapshots = bootstrapAvailable ? bootstrapSnapshots : []
-  bootstrapAvailable = false
-  prepareProcess(snapshots)
-  return () => restoreProcess(snapshots)
+  if (leaseCount === 0) {
+    const snapshots = bootstrapAvailable ? bootstrapSnapshots : []
+    bootstrapAvailable = false
+    prepareProcess(snapshots)
+    const processRecord = (globalThis as Record<PropertyKey, unknown>).process as Record<
+      PropertyKey,
+      unknown
+    >
+    const env = processRecord.env as Record<PropertyKey, unknown>
+    installValue(snapshots, env, 'SINGLE_PROCESS', '1')
+    installIfMissing(snapshots, env, 'NODE_ENV', 'development')
+    activeSnapshots = snapshots
+  }
+  leaseCount++
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    leaseCount--
+    if (leaseCount !== 0 || !activeSnapshots) return
+    const snapshots = activeSnapshots
+    activeSnapshots = null
+    restoreProcess(snapshots)
+  }
 }

@@ -203,6 +203,13 @@ export class DurableObjectWebSocketHandoff {
     return this.#bridges.size
   }
 
+  /** close every bridge owned by this logical Durable Object runtime. */
+  closeAll(code = 1001, reason = 'zero-cache embed stopped'): void {
+    for (const bridge of [...this.#bridges.values()]) {
+      bridge.socket.close(code, reason)
+    }
+  }
+
   accept(
     server: DurableObjectWebSocket,
     message: HandoffRequestMessage,
@@ -283,57 +290,27 @@ export class DurableObjectWebSocketHandoff {
 
   #handoff(bridge: Bridge): boolean {
     const handoffMsg = { message: bridge.message, head: new Uint8Array(0) }
-    const g = globalThis as unknown as {
-      __orez_fastify_instances?: FastifyHandoffTarget[]
-      __orez_fastify_instance?: FastifyHandoffTarget
-    }
-    const fallback = this.getFastify() ?? g.__orez_fastify_instance
-    const instances = [
-      ...(g.__orez_fastify_instances ?? []),
-      ...(fallback ? [fallback] : []),
-      ...(g.__orez_fastify_instance ? [g.__orez_fastify_instance] : []),
-    ]
+    const instance = this.getFastify()
+    if (!instance) return false
 
     // 1. {websocket:true} routes (e.g. /replication/*/changes) are matched by
-    //    the fastify shim's tryHandoff. iterate every instance, stop at first.
-    for (const inst of instances) {
-      if (inst?.tryHandoff?.(handoffMsg, bridge.socket)) return true
-    }
+    //    the exact fastify dispatcher owned by this Durable Object runtime.
+    if (instance.tryHandoff?.(handoffMsg, bridge.socket)) return true
 
     // 2. the /sync/v*/connect path is served by the ZeroDispatcher's
     //    server.onMessageType('handoff') listener, NOT a {websocket:true} route,
     //    so tryHandoff never matches it. emit the handoff on the dispatcher's
-    //    server — mirroring the in-process ws shim (shims/ws.ts). Zero's runner
-    //    sends "ready" before constructing the dispatcher, so the captured
-    //    fallback instance can be stale; use the registered Fastify servers and
-    //    pick those with an extra handoff listener beyond the shim's own
-    //    websocket-route listener.
-    const servers = new Set<HandoffServer>()
-    for (const inst of instances) {
-      const server = inst?.server
-      const handoffListeners = server?.listenerCount?.('message') ?? 0
-      if (typeof server?.emit === 'function' && handoffListeners > 1) {
-        servers.add(server as HandoffServer)
-      }
-    }
-    if (!servers.size && typeof fallback?.server?.emit === 'function') {
-      const handoffListeners = fallback.server.listenerCount?.('message')
-      if (handoffListeners === undefined || handoffListeners > 1) {
-        servers.add(fallback.server as HandoffServer)
-      }
-    }
-
-    let emittedAny = false
-    let maxListeners = -1
-    for (const server of servers) {
-      const listeners = server.listenerCount?.('message') ?? -1
-      const emitted = server.emit('message', ['handoff', handoffMsg], bridge.socket)
-      emittedAny ||= Boolean(emitted)
-      maxListeners = Math.max(maxListeners, listeners)
-    }
-    console.log(
-      `[orez-ws] dispatcher emit candidates=${servers.size} emitted=${emittedAny} listeners=${maxListeners}`
+    //    server — mirroring the in-process ws shim (shims/ws.ts).
+    const server = instance.server
+    if (typeof server?.emit !== 'function') return false
+    const listeners = server.listenerCount?.('message')
+    if (listeners !== undefined && listeners <= 1) return false
+    const emitted = Boolean(
+      (server as HandoffServer).emit('message', ['handoff', handoffMsg], bridge.socket)
     )
-    return emittedAny
+    console.log(
+      `[orez-ws] dispatcher emit emitted=${emitted} listeners=${listeners ?? -1}`
+    )
+    return emitted
   }
 }

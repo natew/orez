@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
 
+import {
+  registerCFInstanceRuntime,
+  releaseCFInstanceRuntime,
+  sqlitePathForCFInstance,
+} from '../cf-instance-runtime.js'
 import { createSqlJsStorage, createInMemoryStorage } from './sqlite-browser.js'
 import { Database, StatementRunner } from './sqlite.js'
 
@@ -190,17 +195,21 @@ describe('createSqlJsStorage', () => {
   it('works with sqlite shim Database', () => {
     const sqlJs = createMockSqlJsDb()
     const storage = createSqlJsStorage(sqlJs as any)
-
-    // set on globalThis for the Database constructor
-    const prev = (globalThis as any).__orez_do_sqlite
-    ;(globalThis as any).__orez_do_sqlite = storage
+    const runtime = registerCFInstanceRuntime({
+      doSqlite: storage,
+      env: {},
+      instanceId: 'browser-sqlite-test',
+      pgPassword: '',
+      pgUser: 'user',
+    })
+    const path = sqlitePathForCFInstance(runtime.instanceId)
     try {
-      const db = new Database(':browser-sqlite:')
+      const db = new Database(path)
       expect(db.open).toBe(true)
-      expect(db.name).toBe(':browser-sqlite:')
+      expect(db.name).toBe(path)
+      db.close()
     } finally {
-      if (prev) (globalThis as any).__orez_do_sqlite = prev
-      else delete (globalThis as any).__orez_do_sqlite
+      releaseCFInstanceRuntime(runtime)
     }
   })
 })

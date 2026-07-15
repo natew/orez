@@ -122,7 +122,6 @@ describe('DurableObjectWebSocketHandoff', () => {
     // server.onMessageType('handoff') listener, NOT a fastify {websocket:true}
     // route — so tryHandoff returns false for it. without the server.emit
     // fallback the socket is accepted but never reaches zero-cache.
-    delete (globalThis as any).__orez_fastify_instances
     const cfSocket = createMockSocket()
     const dispatcher = {
       tryHandoff: vi.fn(() => false),
@@ -145,7 +144,6 @@ describe('DurableObjectWebSocketHandoff', () => {
     // attaches its handoff listener. that server has only the shim's route
     // listener, so emitting there would accept the browser socket without ever
     // delivering it to zero-cache.
-    const previousInstances = (globalThis as any).__orez_fastify_instances
     const cfSocket = createMockSocket()
     const staleServer = {
       emit: vi.fn(() => false),
@@ -155,57 +153,33 @@ describe('DurableObjectWebSocketHandoff', () => {
       tryHandoff: vi.fn(() => false),
       server: staleServer,
     }
-    ;(globalThis as any).__orez_fastify_instances = [stale]
     const handoff = new DurableObjectWebSocketHandoff(() => stale)
 
-    try {
-      expect(handoff.accept(cfSocket, requestMessage)).toBe(false)
-      expect(staleServer.emit).not.toHaveBeenCalled()
-      expect(cfSocket.closedWith).toBeUndefined()
-    } finally {
-      ;(globalThis as any).__orez_fastify_instances = previousInstances
-    }
+    expect(handoff.accept(cfSocket, requestMessage)).toBe(false)
+    expect(staleServer.emit).not.toHaveBeenCalled()
+    expect(cfSocket.closedWith).toBeUndefined()
   })
 
-  it('routes /sync through the dispatcher server when the captured fallback is stale', () => {
-    // Zero's runner sends "ready" before constructing ZeroDispatcher, so the
-    // embed can capture a Fastify instance that is not the dispatcher. The
-    // dispatcher server is distinguishable because installWebSocketHandoff adds
-    // a second handoff message listener beyond the shim's route listener.
-    const previousInstances = (globalThis as any).__orez_fastify_instances
+  it('routes /sync only through the explicitly selected dispatcher', () => {
     const cfSocket = createMockSocket()
-    const staleServer = {
-      emit: vi.fn(),
-      listenerCount: vi.fn(() => 1),
-    }
     const dispatcherServer = {
       emit: vi.fn(() => true),
       listenerCount: vi.fn(() => 2),
-    }
-    const stale = {
-      tryHandoff: vi.fn(() => false),
-      server: staleServer,
     }
     const dispatcher = {
       tryHandoff: vi.fn(() => false),
       server: dispatcherServer,
     }
-    ;(globalThis as any).__orez_fastify_instances = [stale, dispatcher]
-    const handoff = new DurableObjectWebSocketHandoff(() => stale)
+    const handoff = new DurableObjectWebSocketHandoff(() => dispatcher)
 
-    try {
-      expect(handoff.accept(cfSocket, requestMessage)).toBe(true)
+    expect(handoff.accept(cfSocket, requestMessage)).toBe(true)
 
-      expect(staleServer.emit).not.toHaveBeenCalled()
-      expect(dispatcherServer.emit).toHaveBeenCalledWith(
-        'message',
-        ['handoff', { message: requestMessage, head: expect.any(Uint8Array) }],
-        expect.any(Object)
-      )
-      expect(cfSocket.closedWith).toBeUndefined()
-    } finally {
-      ;(globalThis as any).__orez_fastify_instances = previousInstances
-    }
+    expect(dispatcherServer.emit).toHaveBeenCalledWith(
+      'message',
+      ['handoff', { message: requestMessage, head: expect.any(Uint8Array) }],
+      expect.any(Object)
+    )
+    expect(cfSocket.closedWith).toBeUndefined()
   })
 
   it('routes peer messages into the local zero-cache socket', () => {
@@ -246,10 +220,30 @@ describe('DurableObjectWebSocketHandoff', () => {
     expect(handoff.activeConnections).toBe(0)
   })
 
+  it('closes only the bridges owned by this handoff', () => {
+    const alpha = new DurableObjectWebSocketHandoff(() => ({
+      tryHandoff: vi.fn(() => true),
+    }))
+    const bravo = new DurableObjectWebSocketHandoff(() => ({
+      tryHandoff: vi.fn(() => true),
+    }))
+    const alphaSocket = createMockSocket()
+    const bravoSocket = createMockSocket()
+    alpha.accept(alphaSocket, requestMessage)
+    bravo.accept(bravoSocket, requestMessage)
+
+    alpha.closeAll()
+
+    expect(alphaSocket.close).toHaveBeenCalledWith(1001, 'zero-cache embed stopped')
+    expect(bravoSocket.close).not.toHaveBeenCalled()
+    expect(alpha.activeConnections).toBe(0)
+    expect(bravo.activeConnections).toBe(1)
+    bravo.closeAll()
+  })
+
   it('does not retain a connection when the handoff is not consumed', () => {
     // a socket that no fastify instance claims is closed immediately, so it must
     // not leave a phantom live connection that would block idle hibernation.
-    delete (globalThis as any).__orez_fastify_instances
     const handoff = new DurableObjectWebSocketHandoff(() => ({
       tryHandoff: vi.fn(() => false),
     }))

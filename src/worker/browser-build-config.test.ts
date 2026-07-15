@@ -20,6 +20,7 @@ describe('browser build config', () => {
       expect(aliases.postgres).toBe('orez/worker/shims/postgres-browser')
       expect(aliases['@rocicorp/zero-sqlite3']).toBe('orez/worker/shims/sqlite')
       expect(aliases.fastify).toBe('orez/worker/shims/fastify')
+      expect(aliases['@fastify/websocket']).toBe('orez/worker/shims/fastify-websocket')
       expect(aliases.ws).toBe('orez/worker/shims/ws')
       expect(aliases.oxfmt).toBe('orez/worker/shims/oxfmt')
     })

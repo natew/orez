@@ -68,7 +68,7 @@ try {
   if (!ready) throw new Error('workerd did not become reachable within 30s')
 
   const response = await fetch(`http://127.0.0.1:${port}/prove`, {
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(120_000),
   })
   const body = await response.text()
   if (!response.ok) {

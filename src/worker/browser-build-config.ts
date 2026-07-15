@@ -50,6 +50,7 @@ export function getBrowserAliases(
     postgres: 'orez/worker/shims/postgres-browser',
     '@rocicorp/zero-sqlite3': 'orez/worker/shims/sqlite',
     fastify: 'orez/worker/shims/fastify',
+    '@fastify/websocket': 'orez/worker/shims/fastify-websocket',
     ws: 'orez/worker/shims/ws',
     oxfmt: 'orez/worker/shims/oxfmt',
 

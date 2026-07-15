@@ -113,29 +113,61 @@ function lsnFloorFromTime(): bigint {
 // use a large stride because zero-cache's initial backfill can reserve
 // watermarks after slot creation while app writes are already queued; the next
 // streamed transaction still has to land beyond that warmup range.
-let currentLsn = lsnFloorFromTime()
-// persistent watermark across handler restarts so new handlers
-// don't replay already-streamed changes
-let lastStreamedWatermark = 0
+interface ReplicationRuntimeState {
+  cachedColumnTypeOids: Map<string, Map<string, number>> | null
+  cachedColumns: Map<string, ReturnType<typeof inferColumns>>
+  cachedExcludedColumns: Map<string, Set<string>> | null
+  cachedTableKeyColumns: Map<string, Set<string>> | null
+  currentLsn: bigint
+  instanceId?: string
+  lastConfirmProgressAt: number
+  lastFeedbackAtPerf: number
+  lastStreamActivityAt: number
+  lastStreamedWatermark: number
+  lastWriteSignalAt: number
+  log?: (event: Record<string, unknown>) => void
+  pendingConfirmLsn: bigint
+  processedConfirmLsn: bigint
+  publications?: string
+  replicationWakeup: (() => void) | null
+  unconfirmedReconnectMs?: string
+}
 
-// confirmed-flush feedback from the consumer (standby status updates).
-// the poll loop purges _zero_changes for confirmed batches; until then the
-// table is the durable record so a consumer death mid-store re-streams the
-// transaction instead of silently losing it.
-let pendingConfirmLsn = 0n
-let processedConfirmLsn = 0n
-// performance.now() of the last standby status update received from the
-// consumer (0 = never). liveness signal for the stale-unconfirmed reconnect.
-let lastFeedbackAtPerf = 0
+const DEFAULT_REPLICATION_INSTANCE = '__orez_default_replication__'
+const replicationStates = new Map<string, ReplicationRuntimeState>()
 
-// ── replication pipeline health gauges ──────────────────────────────────────
-// plain module state read by the supervisor's bankruptcy monitor
-// (isReplicationBankrupt in recovery.ts). deliberately no db access: the
-// monitor must be able to see a wedged pipeline without queueing on the very
-// mutex that is wedged. timestamps are Date.now() ms; 0 = never.
-let lastWriteSignalAt = 0 // a proxy write signaled new changes
-let lastConfirmProgressAt = 0 // consumer durably confirmed (or a fresh slot reset the log)
-let lastStreamActivityAt = 0 // a replication stream started or streamed a batch
+function newReplicationState(
+  instanceId?: string,
+  instanceLog?: (event: Record<string, unknown>) => void
+): ReplicationRuntimeState {
+  return {
+    cachedColumnTypeOids: null,
+    cachedColumns: new Map(),
+    cachedExcludedColumns: null,
+    cachedTableKeyColumns: null,
+    currentLsn: lsnFloorFromTime(),
+    instanceId,
+    lastConfirmProgressAt: 0,
+    lastFeedbackAtPerf: 0,
+    lastStreamActivityAt: 0,
+    lastStreamedWatermark: 0,
+    lastWriteSignalAt: 0,
+    log: instanceLog,
+    pendingConfirmLsn: 0n,
+    processedConfirmLsn: 0n,
+    replicationWakeup: null,
+  }
+}
+
+function replicationState(instanceId?: string): ReplicationRuntimeState {
+  const key = instanceId ?? DEFAULT_REPLICATION_INSTANCE
+  let state = replicationStates.get(key)
+  if (!state) {
+    state = newReplicationState(instanceId)
+    replicationStates.set(key, state)
+  }
+  return state
+}
 
 export interface ReplicationHealth {
   lastWriteSignalAt: number
@@ -143,30 +175,36 @@ export interface ReplicationHealth {
   lastStreamActivityAt: number
 }
 
-export function getReplicationHealth(): ReplicationHealth {
-  return { lastWriteSignalAt, lastConfirmProgressAt, lastStreamActivityAt }
+export function getReplicationHealth(instanceId?: string): ReplicationHealth {
+  const state = replicationState(instanceId)
+  return {
+    lastWriteSignalAt: state.lastWriteSignalAt,
+    lastConfirmProgressAt: state.lastConfirmProgressAt,
+    lastStreamActivityAt: state.lastStreamActivityAt,
+  }
 }
 
 /** record durable consumer progress (confirm purge, fresh slot, or a
  *  completed zero reset — all mean the backlog is not stuck). */
-export function markReplicationProgress(): void {
-  lastConfirmProgressAt = Date.now()
+export function markReplicationProgress(instanceId?: string): void {
+  replicationState(instanceId).lastConfirmProgressAt = Date.now()
 }
 
 /**
  * note a confirmed-flush LSN from the consumer's standby status update and
  * wake the replication loop so it purges the confirmed batches.
  */
-export function noteConfirmedFlushLsn(lsn: bigint): void {
+export function noteConfirmedFlushLsn(lsn: bigint, instanceId?: string): void {
+  const state = replicationState(instanceId)
   // any standby status update — even one that doesn't advance the LSN — is
   // proof the consumer is alive on the wire. the stale-unconfirmed reconnect
   // must not kill a stream whose consumer is still chewing a large backlog
   // (2026-07 CF incident: the 60s reconnect kept beating the consumer's first
   // ack, so a 10k-row backlog re-streamed on every cycle, forever).
-  lastFeedbackAtPerf = performance.now()
-  if (lsn <= pendingConfirmLsn) return
-  pendingConfirmLsn = lsn
-  _replicationWakeup?.()
+  state.lastFeedbackAtPerf = performance.now()
+  if (lsn <= state.pendingConfirmLsn) return
+  state.pendingConfirmLsn = lsn
+  state.replicationWakeup?.()
 }
 
 /**
@@ -215,15 +253,15 @@ export function createReplicationFeedbackParser(
 }
 
 // direct wakeup from proxy — bypasses pg_notify for instant replication
-let _replicationWakeup: (() => void) | null = null
-
 /** signal the replication handler that changes may be available.
  *  called by the proxy after executing writes on the postgres instance. */
-export function signalReplicationChange() {
-  lastWriteSignalAt = Date.now()
-  _replicationWakeup?.()
-  const globalWakeup = (globalThis as any).__orez_signal_replication
-  if (typeof globalWakeup === 'function' && globalWakeup !== _replicationWakeup) {
+export function signalReplicationChange(instanceId?: string) {
+  const state = replicationState(instanceId)
+  state.lastWriteSignalAt = Date.now()
+  state.replicationWakeup?.()
+  const globalWakeup =
+    instanceId === undefined ? (globalThis as any).__orez_signal_replication : undefined
+  if (typeof globalWakeup === 'function' && globalWakeup !== state.replicationWakeup) {
     globalWakeup()
   }
 }
@@ -232,37 +270,35 @@ export function signalReplicationChange() {
 // zero-cache reconnects the replication stream after initial sync, and if setup
 // takes too long (holding the mutex, blocking proxy queries), zero-cache's
 // queries timeout and it kills the connection.
-let cachedTableKeyColumns: Map<string, Set<string>> | null = null
-let cachedExcludedColumns: Map<string, Set<string>> | null = null
-let cachedColumnTypeOids: Map<string, Map<string, number>> | null = null
-
-function unconfirmedReconnectMs(): number {
-  const raw = process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS
+function unconfirmedReconnectMs(state: ReplicationRuntimeState): number {
+  const raw =
+    state.unconfirmedReconnectMs ?? process.env.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS
   if (!raw) return DEFAULT_UNCONFIRMED_RECONNECT_MS
   const parsed = Number(raw)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_UNCONFIRMED_RECONNECT_MS
 }
 
 /** reset module state (for tests) */
-export function resetReplicationState(): void {
-  currentLsn = lsnFloorFromTime()
-  lastStreamedWatermark = 0
-  pendingConfirmLsn = 0n
-  processedConfirmLsn = 0n
-  lastFeedbackAtPerf = 0
-  lastWriteSignalAt = 0
-  lastConfirmProgressAt = 0
-  lastStreamActivityAt = 0
-  cachedTableKeyColumns = null
-  cachedExcludedColumns = null
-  cachedColumnTypeOids = null
-  cachedColumns.clear()
+export function resetReplicationState(
+  instanceId?: string,
+  env?: Readonly<Record<string, string>>,
+  instanceLog?: (event: Record<string, unknown>) => void
+): void {
+  const state = newReplicationState(instanceId, instanceLog)
+  const runtimeEnv = env ?? (instanceId === undefined ? process.env : undefined)
+  state.publications = runtimeEnv?.ZERO_APP_PUBLICATIONS?.trim()
+  state.unconfirmedReconnectMs = runtimeEnv?.OREZ_REPLICATION_UNCONFIRMED_RECONNECT_MS
+  replicationStates.set(instanceId ?? DEFAULT_REPLICATION_INSTANCE, state)
 }
-function nextLsn(): bigint {
+
+export function deleteReplicationState(instanceId: string): void {
+  replicationStates.delete(instanceId)
+}
+function nextLsn(state: ReplicationRuntimeState): bigint {
   const floor = lsnFloorFromTime()
-  if (currentLsn < floor) currentLsn = floor
-  currentLsn += LSN_INCREMENT
-  return currentLsn
+  if (state.currentLsn < floor) state.currentLsn = floor
+  state.currentLsn += LSN_INCREMENT
+  return state.currentLsn
 }
 
 function lsnToString(lsn: bigint): string {
@@ -433,13 +469,15 @@ function buildErrorResponse(message: string): Uint8Array {
  */
 export async function handleReplicationQuery(
   query: string,
-  db: PGlite
+  db: PGlite,
+  instanceId?: string
 ): Promise<Uint8Array | null> {
+  const state = replicationState(instanceId)
   const trimmed = query.trim().replace(/;$/, '').trim()
   const upper = trimmed.toUpperCase()
 
   if (upper === 'IDENTIFY_SYSTEM') {
-    const lsn = lsnToString(currentLsn)
+    const lsn = lsnToString(state.currentLsn)
     return buildSimpleResponse(
       ['systemid', 'timeline', 'xlogpos', 'dbname'],
       ['1234567890', '1', lsn, 'postgres']
@@ -451,7 +489,7 @@ export async function handleReplicationQuery(
       /CREATE_REPLICATION_SLOT\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i
     )
     const slotName = match?.[1] || match?.[2] || match?.[3] || 'zero_slot'
-    const lsn = lsnToString(nextLsn())
+    const lsn = lsnToString(nextLsn(state))
     const snapshotName = `00000003-00000001-1`
 
     // set watermark to current DB state so replication only delivers changes
@@ -461,8 +499,8 @@ export async function handleReplicationQuery(
     // on reconnect this is effectively a no-op since the watermark is already
     // at or past the current DB state.
     const currentWm = await getCurrentWatermark(db)
-    if (currentWm > lastStreamedWatermark) {
-      lastStreamedWatermark = currentWm
+    if (currentWm > state.lastStreamedWatermark) {
+      state.lastStreamedWatermark = currentWm
     }
     // a new slot means the consumer re-initializes from a fresh snapshot:
     // rows up to the snapshot point are covered by the initial copy, and any
@@ -470,7 +508,7 @@ export async function handleReplicationQuery(
     await purgeConsumedChanges(db, currentWm)
     await clearStreamedBatches(db)
     // the log was just cut to the snapshot point — the backlog is not stuck.
-    markReplicationProgress()
+    markReplicationProgress(instanceId)
 
     // persist slot so pg_replication_slots queries find it
     await db.query(
@@ -529,10 +567,12 @@ export async function handleStartReplication(
   query: string,
   writer: ReplicationWriter,
   db: PGlite,
-  mutex: Mutex
+  mutex: Mutex,
+  instanceId?: string
 ): Promise<void> {
+  const state = replicationState(instanceId)
   log.debug.repl('entering streaming mode')
-  lastStreamActivityAt = Date.now()
+  state.lastStreamActivityAt = Date.now()
 
   // honor zero-cache's resume LSN. without this, after a page reload the
   // in-memory currentLsn / lastStreamedWatermark are reset to defaults but
@@ -544,11 +584,11 @@ export async function handleStartReplication(
   // lastStreamedWatermark to the current sequence value we skip already-
   // streamed _zero_changes rows.
   const clientStartLsn = extractStartLsn(query)
-  if (clientStartLsn !== null && clientStartLsn > currentLsn) {
+  if (clientStartLsn !== null && clientStartLsn > state.currentLsn) {
     log.debug.repl(
-      `advancing currentLsn ${lsnToString(currentLsn)} → ${lsnToString(clientStartLsn)} from client START_REPLICATION`
+      `advancing currentLsn ${lsnToString(state.currentLsn)} → ${lsnToString(clientStartLsn)} from client START_REPLICATION`
     )
-    currentLsn = clientStartLsn
+    state.currentLsn = clientStartLsn
   }
 
   // send CopyBothResponse to enter streaming mode
@@ -591,14 +631,14 @@ export async function handleStartReplication(
       // only real progress counts: a reconnect that purges nothing must not
       // feed the bankruptcy monitor's confirm gauge, or a reconnect livelock
       // (stream → no confirm → reconnect → repeat) looks healthy forever.
-      if (purged > 0) markReplicationProgress()
+      if (purged > 0) markReplicationProgress(instanceId)
       await clearStreamedBatches(db)
       const resumeWm = await getStreamResumeWatermark(db)
-      if (resumeWm !== lastStreamedWatermark) {
+      if (resumeWm !== state.lastStreamedWatermark) {
         log.debug.repl(
-          `moving lastStreamedWatermark ${lastStreamedWatermark} → ${resumeWm} on reconnect`
+          `moving lastStreamedWatermark ${state.lastStreamedWatermark} → ${resumeWm} on reconnect`
         )
-        lastStreamedWatermark = resumeWm
+        state.lastStreamedWatermark = resumeWm
       }
     } catch (err) {
       log.repl(
@@ -608,7 +648,7 @@ export async function handleStartReplication(
       mutex.release()
     }
   }
-  let lastWatermark = lastStreamedWatermark
+  let lastWatermark = state.lastStreamedWatermark
 
   // use cached setup results on reconnect to avoid holding the mutex
   // for seconds doing trigger installation + schema queries. zero-cache
@@ -617,11 +657,15 @@ export async function handleStartReplication(
   let excludedColumns: Map<string, Set<string>>
   let columnTypeOids: Map<string, Map<string, number>>
 
-  if (cachedTableKeyColumns && cachedExcludedColumns && cachedColumnTypeOids) {
+  if (
+    state.cachedTableKeyColumns &&
+    state.cachedExcludedColumns &&
+    state.cachedColumnTypeOids
+  ) {
     log.debug.repl('reconnect: using cached setup (skipping mutex)')
-    tableKeyColumns = cachedTableKeyColumns
-    excludedColumns = cachedExcludedColumns
-    columnTypeOids = cachedColumnTypeOids
+    tableKeyColumns = state.cachedTableKeyColumns
+    excludedColumns = state.cachedExcludedColumns
+    columnTypeOids = state.cachedColumnTypeOids
   } else {
     tableKeyColumns = new Map()
     excludedColumns = new Map()
@@ -640,7 +684,7 @@ export async function handleStartReplication(
       await installTriggersOnShardTables(db)
 
       // set up LISTEN + install notify triggers in one batch
-      const pubName = process.env.ZERO_APP_PUBLICATIONS?.trim()
+      const pubName = state.publications
       let tables: { tablename: string }[]
       if (pubName) {
         const result = await db.query<{ tablename: string }>(
@@ -795,9 +839,9 @@ export async function handleStartReplication(
       }
 
       // cache for subsequent reconnects
-      cachedTableKeyColumns = tableKeyColumns
-      cachedExcludedColumns = excludedColumns
-      cachedColumnTypeOids = columnTypeOids
+      state.cachedTableKeyColumns = tableKeyColumns
+      state.cachedExcludedColumns = excludedColumns
+      state.cachedColumnTypeOids = columnTypeOids
     } finally {
       mutex.release()
     }
@@ -847,13 +891,13 @@ export async function handleStartReplication(
     })
   }
   const flushConfirmedBatches = async () => {
-    if (pendingConfirmLsn <= processedConfirmLsn) return
+    if (state.pendingConfirmLsn <= state.processedConfirmLsn) return
     await mutex.acquire()
-    const target = pendingConfirmLsn
+    const target = state.pendingConfirmLsn
     try {
       const purged = await confirmStreamedBatches(db, target)
-      processedConfirmLsn = target
-      markReplicationProgress()
+      state.processedConfirmLsn = target
+      markReplicationProgress(instanceId)
       if (newestUnconfirmedLsn > 0n && target >= newestUnconfirmedLsn) {
         oldestUnconfirmedAt = 0
         oldestUnconfirmedLsn = 0n
@@ -888,8 +932,8 @@ export async function handleStartReplication(
     // reconnect livelock that burned $50-65/day of DO rows-written on the
     // 2026-07 CF incident. reconnect is for a dead wire, not a slow consumer.
     const sinceSignal =
-      performance.now() - Math.max(oldestUnconfirmedAt, lastFeedbackAtPerf)
-    const timeoutMs = unconfirmedReconnectMs()
+      performance.now() - Math.max(oldestUnconfirmedAt, state.lastFeedbackAtPerf)
+    const timeoutMs = unconfirmedReconnectMs(state)
     if (sinceSignal < timeoutMs) return false
 
     log.repl(
@@ -901,11 +945,11 @@ export async function handleStartReplication(
   }
 
   // register direct wakeup so the proxy can signal us immediately
-  _replicationWakeup = wakeup
+  state.replicationWakeup = wakeup
 
   // expose on globalThis so external code (e.g. pglite-pool) can signal
   // without importing from this module (works across separate bundles)
-  ;(globalThis as any).__orez_signal_replication = wakeup
+  if (instanceId === undefined) (globalThis as any).__orez_signal_replication = wakeup
 
   // also set up LISTEN as secondary signal
   let unsubscribe: (() => Promise<void>) | null = null
@@ -952,7 +996,7 @@ export async function handleStartReplication(
               // cadence — without this the first ack routinely lost the race
               // against the stale-unconfirmed reconnect (2026-07 CF incident).
               writer.write(
-                encodeKeepalive(currentLsn, nowMicros(), newestUnconfirmedLsn > 0n)
+                encodeKeepalive(state.currentLsn, nowMicros(), newestUnconfirmedLsn > 0n)
               )
               log.debug.repl(`idle keepalive (lastWatermark=${lastWatermark})`)
               // re-scan for new shard schemas during idle
@@ -1084,7 +1128,7 @@ export async function handleStartReplication(
 
           if (changes.length === 0) {
             lastWatermark = batchEnd
-            lastStreamedWatermark = batchEnd
+            state.lastStreamedWatermark = batchEnd
             // all changes were filtered out (e.g. shard internal tables).
             // they never reach the consumer by design, so no confirmation
             // will ever cover them — purge directly.
@@ -1107,7 +1151,8 @@ export async function handleStartReplication(
             changes,
             tableKeyColumns,
             excludedColumns,
-            columnTypeOids
+            columnTypeOids,
+            state
           )
 
           // allocate the batch's commit LSN and durably record the
@@ -1115,8 +1160,8 @@ export async function handleStartReplication(
           // consumer commits the batch and this process dies before
           // persisting the mapping, the reconnect reconciliation would
           // re-stream an already-committed transaction (duplicate apply).
-          const batchLsn = nextLsn()
-          const batchEndLsn = nextLsn()
+          const batchLsn = nextLsn(state)
+          const batchEndLsn = nextLsn(state)
           await mutex.acquire()
           try {
             await recordStreamedBatch(db, batchLsn, batchEnd)
@@ -1134,12 +1179,13 @@ export async function handleStartReplication(
             batchEndLsn,
             tableKeyColumns,
             excludedColumns,
-            columnTypeOids
+            columnTypeOids,
+            state
           )
           markBatchAwaitingConfirmation(batchLsn)
-          lastStreamActivityAt = Date.now()
+          state.lastStreamActivityAt = Date.now()
           lastWatermark = batchEnd
-          lastStreamedWatermark = batchEnd
+          state.lastStreamedWatermark = batchEnd
           log.debug.repl(`streamed ok, watermark=${batchEnd}`)
           hasStreamedOnce = true
 
@@ -1151,7 +1197,7 @@ export async function handleStartReplication(
         // no changes: send keepalive (reply requested while batches await
         // confirmation — see the idle-timeout keepalive above)
         const ts = nowMicros()
-        writer.write(encodeKeepalive(currentLsn, ts, newestUnconfirmedLsn > 0n))
+        writer.write(encodeKeepalive(state.currentLsn, ts, newestUnconfirmedLsn > 0n))
         log.debug.repl(`idle (lastWatermark=${lastWatermark})`)
         // next iteration will wait for signal at the top
       } catch (err: unknown) {
@@ -1176,8 +1222,8 @@ export async function handleStartReplication(
     await poll()
   } finally {
     // only clear if still pointing to our wakeup (a new handler may have replaced it)
-    if (_replicationWakeup === wakeup) {
-      _replicationWakeup = null
+    if (state.replicationWakeup === wakeup) {
+      state.replicationWakeup = null
     }
     if (unsubscribe) {
       await unsubscribe().catch(() => {})
@@ -1192,7 +1238,8 @@ async function ensureMetadataForChangedTables(
   changes: ChangeRecord[],
   tableKeyColumns: Map<string, Set<string>>,
   excludedColumns: Map<string, Set<string>>,
-  columnTypeOids: Map<string, Map<string, number>>
+  columnTypeOids: Map<string, Map<string, number>>,
+  state: ReplicationRuntimeState
 ): Promise<void> {
   const missing = new Map<string, { schema: string; table: string }>()
 
@@ -1280,14 +1327,11 @@ async function ensureMetadataForChangedTables(
     log.debug.repl(
       `refreshed metadata for ${missing.size} late table(s): ${[...missing.keys()].join(',')}`
     )
-    for (const key of missing.keys()) cachedColumns.delete(key)
+    for (const key of missing.keys()) state.cachedColumns.delete(key)
   } finally {
     mutex.release()
   }
 }
-
-// cache column info per table to avoid per-change allocation
-const cachedColumns = new Map<string, ReturnType<typeof inferColumns>>()
 
 async function streamChanges(
   changes: ChangeRecord[],
@@ -1300,7 +1344,8 @@ async function streamChanges(
   endLsn: bigint,
   tableKeyColumns: Map<string, Set<string>>,
   excludedColumns: Map<string, Set<string>>,
-  columnTypeOids: Map<string, Map<string, number>>
+  columnTypeOids: Map<string, Map<string, number>>,
+  state: ReplicationRuntimeState
 ): Promise<void> {
   const ts = nowMicros()
 
@@ -1348,7 +1393,7 @@ async function streamChanges(
     if (!row) continue
 
     // use cached columns or build and cache them
-    let columns = cachedColumns.get(qualifiedKey)
+    let columns = state.cachedColumns.get(qualifiedKey)
     if (!columns) {
       const keySet = tableKeyColumns.get(qualifiedKey)
       const typeOids = columnTypeOids.get(qualifiedKey)
@@ -1357,7 +1402,7 @@ async function streamChanges(
         typeOid: typeOids?.get(col.name) ?? col.typeOid,
         isKey: keySet?.has(col.name) ?? false,
       }))
-      cachedColumns.set(qualifiedKey, columns)
+      state.cachedColumns.set(qualifiedKey, columns)
     }
 
     // send RELATION if not yet sent
@@ -1406,9 +1451,30 @@ async function streamChanges(
 
   // hook for arch instrumentation (soot-arch sq-write events)
   const hook = (globalThis as any).__orez_on_repl_commit
+  const tables = new Set(changes.map((change) => change.table_name))
+  try {
+    state.log?.({
+      changes: changes.length,
+      component: 'replication',
+      event: 'commit',
+      instanceId: state.instanceId,
+      tables: [...tables],
+      txId,
+    })
+  } catch {
+    // diagnostics cannot break replication
+  }
   if (hook) {
-    const tables = new Set(changes.map((c) => c.table_name))
-    hook({ changes: changes.length, tables: [...tables], txId })
+    try {
+      hook({
+        changes: changes.length,
+        instanceId: state.instanceId,
+        tables: [...tables],
+        txId,
+      })
+    } catch {
+      // instrumentation cannot break replication
+    }
   }
 }
 

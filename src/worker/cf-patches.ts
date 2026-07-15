@@ -5,14 +5,17 @@
  * applies CF Worker patches there. the installed package in node_modules is
  * never modified.
  *
- * seven patches:
+ * ten patches:
  * 1. worker-urls.js — replace file:// URLs with zero-worker:// identifiers
  * 2. server worker entrypoints — disable CLI auto-start blocks
- * 3. processes.js — replace dynamic import() with static worker module lookup
- * 4. write-worker-client.js — run zero-cache's replica writer in-process
- * 5. initial-sync.js — cap DO batch parameter counts
- * 6. change-streamer-service.js — keep cleanup alive after no-subscriber ticks
- * 7. pgsql-parser — embed libpg-query wasm bytes for Workers
+ * 3. worker state — localize log contexts and disable process-global telemetry
+ * 4. processes.js — replace dynamic import() with static worker module lookup
+ * 5. write-worker-client.js — run zero-cache's replica writer in-process
+ * 6. custom/fetch.js — route mutate/query fetches by logical DO identity
+ * 7. initial-sync.js — cap DO batch parameter counts
+ * 8. litestream commands.js — retain the durable replica on restart
+ * 9. change-streamer-service.js — keep cleanup alive after no-subscriber ticks
+ * 10. pgsql-parser — load libpg-query as a precompiled Worker wasm module
  *
  * usage in a worker build script:
  *
@@ -49,6 +52,7 @@ const ZERO_CACHE_WORKERS = [
   'replicator',
   'syncer',
 ] as const
+const CF_ZERO_VERSION = '1.7.0'
 
 // the stable prefix of every zero-cache worker's import-time auto-start guard.
 // flipping the condition to `false` neutralizes the call without depending on
@@ -88,6 +92,14 @@ export function prepareZeroCacheForCF(
       `@rocicorp/zero compiled out/ directory not found at ${sourceZeroOut}`
     )
   }
+  const installedZeroVersion = JSON.parse(
+    readFileSync(sourceZeroPackageJson, 'utf8')
+  ).version
+  if (installedZeroVersion !== CF_ZERO_VERSION) {
+    throw new Error(
+      `orez CF overlay supports @rocicorp/zero ${CF_ZERO_VERSION}, found ${String(installedZeroVersion)}`
+    )
+  }
 
   rmSync(outDir, { recursive: true, force: true })
   mkdirSync(dirname(zeroOutDir), { recursive: true })
@@ -111,8 +123,10 @@ export function prepareZeroCacheForCF(
 
   patchWorkerUrls(zcBase)
   patchWorkerEntrypoints(zcBase)
+  patchInstanceIsolation(zcBase)
   patchProcesses(zcBase)
   patchWriteWorkerClient(zcBase)
+  patchCustomFetch(zcBase)
   patchInitialSyncBatchParams(zcBase)
   patchLitestreamRestore(zcBase)
   patchChangeLogCleanupRetry(zcBase)
@@ -142,13 +156,12 @@ export function prepareZeroCacheForCF(
 function patchWorkerUrls(zcBase: string): void {
   const workerUrlsPath = resolve(zcBase, 'server', 'worker-urls.js')
   if (!existsSync(workerUrlsPath)) {
-    console.warn('[orez] worker-urls.js not found at', workerUrlsPath)
-    return
+    throw new Error(`orez CF overlay: worker-urls.js missing at ${workerUrlsPath}`)
   }
 
   const content = readFileSync(workerUrlsPath, 'utf-8')
 
-  // skip only when the current Zero 1.5 worker graph is already present.
+  // skip only when the verified Zero 1.7 worker graph is already present.
   if (content.includes('zero-worker://') && content.includes('SHADOW_SYNCER_URL')) {
     return
   }
@@ -176,8 +189,7 @@ function patchWorkerEntrypoints(zcBase: string): void {
   for (const entrypoint of ZERO_CACHE_WORKERS) {
     const entrypointPath = resolve(zcBase, 'server', `${entrypoint}.js`)
     if (!existsSync(entrypointPath)) {
-      console.warn('[orez] zero-cache worker entrypoint not found at', entrypointPath)
-      continue
+      throw new Error(`orez CF overlay: worker entrypoint missing at ${entrypointPath}`)
     }
 
     const code = readFileSync(entrypointPath, 'utf-8')
@@ -195,11 +207,7 @@ function patchWorkerEntrypoints(zcBase: string): void {
     // entire statement into dead code regardless of its arguments. CF embeds run
     // runWorker explicitly via childWorker, so nothing is lost.
     if (!code.includes(WORKER_AUTOSTART_PREFIX)) {
-      console.warn(
-        `[orez] could not find auto-start guard in ${entrypoint}.js. ` +
-          'zero-cache version may have changed — check compatibility.'
-      )
-      continue
+      throw new Error(`orez CF overlay: auto-start guard missing in ${entrypoint}.js`)
     }
 
     const next = code.split(WORKER_AUTOSTART_PREFIX).join(WORKER_AUTOSTART_DISABLED)
@@ -208,16 +216,79 @@ function patchWorkerEntrypoints(zcBase: string): void {
   }
 }
 
+function patchInstanceIsolation(zcBase: string): void {
+  for (const entrypoint of ZERO_CACHE_WORKERS) {
+    const entrypointPath = resolve(zcBase, 'server', `${entrypoint}.js`)
+    let code = readFileSync(entrypointPath, 'utf8')
+    if (code.includes('orez-instance-local-log-context')) continue
+    const declaration = 'var lc = new LogContext("info", {}, consoleLogSink);'
+    const assignment = '\tlc = createLogContext('
+    if (code.split(declaration).length - 1 !== 1) {
+      throw new Error(
+        `orez CF overlay: expected one log context declaration in ${entrypoint}.js`
+      )
+    }
+    if (code.split(assignment).length - 1 !== 1) {
+      throw new Error(
+        `orez CF overlay: expected one log context assignment in ${entrypoint}.js`
+      )
+    }
+    code = code
+      .replace(
+        declaration,
+        '/* orez-instance-local-log-context */\nconst lc = new LogContext("info", {}, consoleLogSink);'
+      )
+      .replace(assignment, '\tconst lc = createLogContext(')
+    writeFileSync(entrypointPath, code)
+  }
+
+  const eventsPath = resolve(zcBase, 'observability', 'events.js')
+  const otelPath = resolve(zcBase, 'server', 'otel-start.js')
+  const anonymousPath = resolve(zcBase, 'server', 'anonymous-otel-start.js')
+  const dotenvPath = resolve(zcBase, '..', '..', 'shared', 'src', 'dotenv.js')
+  for (const path of [eventsPath, otelPath, anonymousPath, dotenvPath]) {
+    if (!existsSync(path)) {
+      throw new Error(`orez CF overlay: telemetry module missing at ${path}`)
+    }
+  }
+  writeFileSync(
+    eventsPath,
+    `// orez-instance-isolated-events: CF embeds do not share process event sinks.\nfunction initEventSink() {}\nasync function publishCriticalEvent(lc, event) {\n  lc.info?.(\`ZeroEvent: \${event.type}\`, event);\n}\nfunction makeErrorDetails(value) {\n  const error = value instanceof Error ? value : new Error(String(value));\n  return { name: error.name, message: error.message, stack: error.stack };\n}\nexport { initEventSink, makeErrorDetails, publishCriticalEvent };\n`
+  )
+  writeFileSync(
+    otelPath,
+    `// orez-instance-isolated-otel: process-global OTel is disabled in CF embeds.\nfunction startOtelAuto() {}\nexport { startOtelAuto };\n`
+  )
+  writeFileSync(
+    anonymousPath,
+    `// orez-instance-isolated-anonymous-telemetry: process singleton disabled in CF embeds.\nconst noop = () => {};\nexport { noop as recordConnectionAttempted, noop as recordConnectionSuccess, noop as recordMutation, noop as recordQuery, noop as recordRowsSynced, noop as setActiveClientGroupsGetter, noop as setActiveUsersGetter, noop as startAnonymousTelemetry };\n`
+  )
+  writeFileSync(dotenvPath, '// orez-cf-dotenv-disabled: env is passed explicitly.\n')
+}
+
 function patchProcesses(zcBase: string): void {
   const processesPath = resolve(zcBase, 'types', 'processes.js')
   if (!existsSync(processesPath)) {
-    console.warn('[orez] processes.js not found at', processesPath)
-    return
+    throw new Error(`orez CF overlay: processes.js missing at ${processesPath}`)
   }
 
   let code = readFileSync(processesPath, 'utf-8')
+  const proxyGetAnchor = 'return Reflect.get(target, prop, receiver);'
+  const proxyGetReplacement =
+    'const value = Reflect.get(target, prop, target); ' +
+    'if (typeof value !== "function") return value; ' +
+    'return (...args) => { const result = value.apply(target, args); ' +
+    'return result === target ? receiver : result; };'
+  const patchProcessWrapperProxy = (source: string): string => {
+    const anchorCount = source.split(proxyGetAnchor).length - 1
+    if (anchorCount === 1) return source.replace(proxyGetAnchor, proxyGetReplacement)
+    if (anchorCount === 0 && source.includes(proxyGetReplacement)) return source
+    throw new Error('orez CF overlay: process wrapper proxy anchor missing')
+  }
 
   if (code.includes('__zc_workers')) {
+    const patched = patchProcessWrapperProxy(code)
+    if (patched !== code) writeFileSync(processesPath, patched)
     return
   }
 
@@ -250,12 +321,13 @@ const __zc_workers = {
   const staticLookup =
     '((async () => { ' +
     'const _name = moduleUrl.hostname || moduleUrl.pathname.split("/").pop()?.replace(".js",""); ' +
-    'const _debug = process.env.OREZ_DEBUG_WIRE === "1" || globalThis.__OREZ_DEBUG_WIRE__ === true; ' +
+    'const _debug = env.OREZ_DEBUG_WIRE === "1"; ' +
+    'const _task = env.ZERO_TASK_ID || _name; ' +
     'if (_debug) { ' +
-    'console.debug("[orez-zc-worker] start", _name, args); ' +
-    'child.on("message", (msg) => console.debug("[orez-zc-worker] message", _name, msg)); ' +
-    'child.on("error", (err) => console.error("[orez-zc-worker] error", _name, err)); ' +
-    'child.on("close", (code, signal) => console.debug("[orez-zc-worker] close", _name, code, signal)); ' +
+    'console.debug("[orez-zc-worker] start", _task, _name, args); ' +
+    'child.on("message", (msg) => console.debug("[orez-zc-worker] message", _task, _name, msg)); ' +
+    'child.on("error", (err) => console.error("[orez-zc-worker] error", _task, _name, err)); ' +
+    'child.on("close", (code, signal) => console.debug("[orez-zc-worker] close", _task, _name, code, signal)); ' +
     '} ' +
     'const runWorker = __zc_workers[_name]; ' +
     'if (!runWorker) throw new Error("orez: unknown zero-cache worker: " + _name + " (available: " + Object.keys(__zc_workers).join(", ") + ")"); ' +
@@ -263,14 +335,12 @@ const __zc_workers = {
     '})()).then(async ({ default: runWorker, name })'
 
   if (!code.includes(dynamicImportPattern)) {
-    console.warn(
-      '[orez] could not find dynamic import pattern in processes.js. ' +
-        'zero-cache version may have changed — check compatibility.'
-    )
-    return
+    throw new Error('orez CF overlay: dynamic import anchor missing in processes.js')
   }
 
-  code = workerImports + code.replace(dynamicImportPattern, staticLookup)
+  code =
+    workerImports +
+    patchProcessWrapperProxy(code.replace(dynamicImportPattern, staticLookup))
   writeFileSync(processesPath, code)
   console.log('[orez] patched zero-cache processes.js (static worker imports)')
 }
@@ -278,14 +348,13 @@ const __zc_workers = {
 function patchWriteWorkerClient(zcBase: string): void {
   const clientPath = resolve(zcBase, 'services', 'replicator', 'write-worker-client.js')
   if (!existsSync(clientPath)) {
-    console.warn('[orez] write-worker-client.js not found at', clientPath)
-    return
+    throw new Error(`orez CF overlay: write-worker-client.js missing at ${clientPath}`)
   }
 
   let code = readFileSync(clientPath, 'utf-8')
   if (
     code.includes('orez-inline-write-worker') &&
-    code.includes('__orez_zero_sqlite_role')
+    code.includes('orezRole=replica-writer')
   ) {
     return
   }
@@ -294,11 +363,9 @@ function patchWriteWorkerClient(zcBase: string): void {
     !code.includes('orez-inline-write-worker') &&
     !code.includes('import { Worker } from "node:worker_threads";')
   ) {
-    console.warn(
-      '[orez] could not find node:worker_threads import in write-worker-client.js. ' +
-        'zero-cache version may have changed — check compatibility.'
+    throw new Error(
+      'orez CF overlay: node:worker_threads anchor missing in write-worker-client.js'
     )
-    return
   }
 
   writeFileSync(
@@ -361,17 +428,8 @@ function createAPI(onWriteError) {
   return {
     init(dbPath, cpMode, pragmas, logConfig) {
       lc = createLogContext({ log: logConfig }, "write-worker");
-      const previousRole = globalThis.__orez_zero_sqlite_role;
-      globalThis.__orez_zero_sqlite_role = "replica-writer";
-      try {
-        db = new Database(lc, dbPath);
-      } finally {
-        if (previousRole === void 0) {
-          delete globalThis.__orez_zero_sqlite_role;
-        } else {
-          globalThis.__orez_zero_sqlite_role = previousRole;
-        }
-      }
+      const separator = dbPath.includes("?") ? "&" : "?";
+      db = new Database(lc, dbPath + separator + "orezRole=replica-writer");
       applyPragmas(db, pragmas);
       runner = new StatementRunner(db);
       mode = cpMode;
@@ -455,6 +513,34 @@ export { ThreadWriteWorkerClient, applyPragmas, serializeError };
   console.log('[orez] patched zero-cache write-worker-client.js (inline writer)')
 }
 
+function patchCustomFetch(zcBase: string): void {
+  const customFetchPath = resolve(zcBase, 'custom', 'fetch.js')
+  if (!existsSync(customFetchPath)) {
+    throw new Error(`orez CF overlay: custom/fetch.js missing at ${customFetchPath}`)
+  }
+  let code = readFileSync(customFetchPath, 'utf8')
+  if (code.includes('__orezFetchCFInstanceAPI')) {
+    if (
+      code.includes('fetchCFInstanceAPI as __orezFetchCFInstanceAPI') &&
+      code.includes('await __orezFetchCFInstanceAPI(finalUrl, {')
+    ) {
+      return
+    }
+    throw new Error('orez CF overlay: custom fetch patch is incomplete')
+  }
+
+  const anchor = 'const response = await fetch(finalUrl, {'
+  const count = code.split(anchor).length - 1
+  if (count !== 1) {
+    throw new Error(`orez CF overlay: expected one custom fetch anchor, found ${count}`)
+  }
+  code =
+    'import { fetchCFInstanceAPI as __orezFetchCFInstanceAPI } from "orez/worker/cf-instance-runtime";\n' +
+    code.replace(anchor, 'const response = await __orezFetchCFInstanceAPI(finalUrl, {')
+  writeFileSync(customFetchPath, code)
+  console.log('[orez] patched zero-cache custom fetch (instance-routed API host)')
+}
+
 // zero-cache's initial sync prepares a fixed 50-row multi-row INSERT per
 // copied table (insertSql + `,${valuesSql}`.repeat(49)). better-sqlite3
 // accepts thousands of bound parameters, but Cloudflare DO SQLite caps a
@@ -471,8 +557,7 @@ function patchInitialSyncBatchParams(zcBase: string): void {
     'initial-sync.js'
   )
   if (!existsSync(initialSyncPath)) {
-    console.warn('[orez] initial-sync.js not found at', initialSyncPath)
-    return
+    throw new Error(`orez CF overlay: initial-sync.js missing at ${initialSyncPath}`)
   }
   let code = readFileSync(initialSyncPath, 'utf-8')
   if (code.includes('orezRowsPerBatch')) return
@@ -494,12 +579,9 @@ function patchInitialSyncBatchParams(zcBase: string): void {
   for (const [from, to] of replacements) {
     const count = code.split(from).length - 1
     if (count !== 2) {
-      console.warn(
-        `[orez] expected 2 occurrences of initial-sync batch pattern, found ${count} — ` +
-          'zero-cache version may have changed; skipping the DO bound-parameter batch patch. ' +
-          'initial sync of tables with rows WILL fail on Cloudflare DOs until this is fixed.'
+      throw new Error(
+        `orez CF overlay: expected 2 initial-sync batch anchors, found ${count}`
       )
-      return
     }
     code = code.replaceAll(from, to)
   }
@@ -518,8 +600,7 @@ function patchInitialSyncBatchParams(zcBase: string): void {
 function patchLitestreamRestore(zcBase: string): void {
   const commandsPath = resolve(zcBase, 'services', 'litestream', 'commands.js')
   if (!existsSync(commandsPath)) {
-    console.warn('[orez] litestream commands.js not found at', commandsPath)
-    return
+    throw new Error(`orez CF overlay: litestream commands.js missing at ${commandsPath}`)
   }
   applyLitestreamRestoreGuard(commandsPath)
   console.log('[orez] patched zero-cache litestream commands.js (no-op restore)')
@@ -533,8 +614,7 @@ function patchChangeLogCleanupRetry(zcBase: string): void {
     'change-streamer-service.js'
   )
   if (!existsSync(servicePath)) {
-    console.warn('[orez] change-streamer-service.js not found at', servicePath)
-    return
+    throw new Error(`orez CF overlay: change-streamer service missing at ${servicePath}`)
   }
   applyChangeLogCleanupRetryPatch(servicePath)
   console.log('[orez] patched zero-cache changeLog cleanup retry')
@@ -546,7 +626,7 @@ function patchPgsqlParserWasm(
 ): Record<string, string> {
   const sourcePackagePath = findPackageRoot(nodeModulesPath, 'libpg-query')
   if (!sourcePackagePath) {
-    return {}
+    throw new Error('orez CF overlay: libpg-query package is missing')
   }
   const targetPackagePath = resolve(outDir, 'node_modules', 'libpg-query')
   const parserIndexPath = resolve(targetPackagePath, 'wasm', 'index.js')
@@ -557,7 +637,7 @@ function patchPgsqlParserWasm(
   cpSync(sourcePackagePath, targetPackagePath, { recursive: true, dereference: true })
 
   if (!existsSync(parserIndexPath) || !existsSync(wasmPath)) {
-    return {}
+    throw new Error('orez CF overlay: libpg-query wasm files are missing')
   }
 
   let code = readFileSync(parserIndexPath, 'utf-8')
@@ -572,20 +652,16 @@ function patchPgsqlParserWasm(
     }
   }
   if (code.includes('orez-libpg-query-wasm-binary')) {
-    console.warn(
-      '[orez] libpg-query wasm loader already patched with an older shape. ' +
-        'Regenerate the overlay from an unpatched libpg-query install.'
+    throw new Error(
+      'orez CF overlay: libpg-query wasm loader has an unsupported older patch'
     )
-    return {}
   }
 
   const pattern = 'const initPromise = PgQueryModule().then((module) => {'
   if (!code.includes(pattern)) {
-    console.warn(
-      '[orez] could not find PgQueryModule init in libpg-query wasm index. ' +
-        'pgsql-parser version may have changed — check compatibility.'
+    throw new Error(
+      'orez CF overlay: PgQueryModule init anchor missing in libpg-query wasm index'
     )
-    return {}
   }
 
   // workerd forbids compiling wasm from bytes at runtime (WebAssembly.instantiate

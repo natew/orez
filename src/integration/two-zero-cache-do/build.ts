@@ -27,6 +27,8 @@ for (const streamModule of [
   'node:stream/promises',
   'stream/promises',
   'readable-stream',
+  'node:crypto',
+  'crypto',
 ]) {
   delete aliases[streamModule]
 }
@@ -73,11 +75,6 @@ function fixtureAliases(): Plugin {
   return {
     name: 'orez-two-do-fixture-aliases',
     setup(api) {
-      api.onResolve({ filter: /zero-cache-run-worker\.js$/ }, (args) => {
-        if (!args.importer.endsWith('/worker/zero-cache-embed-cf.ts')) return undefined
-        return { path: join(fixtureDir, 'probe-run-worker.ts') }
-      })
-
       api.onResolve({ filter: /^libpg-query\/wasm\/libpg-query\.wasm$/ }, () => {
         const source = resolve(
           overlay.outDir,
@@ -100,6 +97,8 @@ function fixtureAliases(): Plugin {
               : resolved
           return { path: extname(path) ? path : packageEntry(path) }
         }
+        const source = orezSource(args.path)
+        if (source) return { path: source }
         return undefined
       })
     },
@@ -125,6 +124,8 @@ await build({
     'stream',
     'node:stream/promises',
     'stream/promises',
+    'node:crypto',
+    'crypto',
   ],
   format: 'esm',
   logLevel: 'info',
@@ -133,3 +134,42 @@ await build({
   plugins: [fixtureAliases()],
   target: 'es2022',
 })
+
+const bundle = readFileSync(join(outDir, 'worker.js'), 'utf8')
+for (const ambientRoute of [
+  '__orez_do_sqlite',
+  '__orez_fastify_instance',
+  '__orez_fastify_instances',
+  '__orez_proxy_connect',
+  '__orez_proxy_password',
+  '__orez_proxy_user',
+  '__orez_ws_debug_log',
+  '__orez_zero_sqlite_role',
+  '__OREZ_DEBUG_WIRE__',
+]) {
+  if (bundle.includes(ambientRoute)) {
+    throw new Error(`two-DO fixture bundle contains ambient route ${ambientRoute}`)
+  }
+}
+for (const explicitRoute of [
+  '/__orez_cf_instance__/',
+  '.orez-pg.local',
+  '.orez-zero-api.local',
+  'orezRole',
+  'replica-writer',
+]) {
+  if (!bundle.includes(explicitRoute)) {
+    throw new Error(`two-DO fixture bundle is missing explicit route ${explicitRoute}`)
+  }
+}
+
+const writerOverlay = readFileSync(
+  join(overlay.zeroCacheSrcDir, 'services', 'replicator', 'write-worker-client.js'),
+  'utf8'
+)
+if (
+  !writerOverlay.includes('orezRole=replica-writer') ||
+  writerOverlay.includes('__orez_zero_sqlite_role')
+) {
+  throw new Error('two-DO fixture overlay does not use the instance-routed writer role')
+}

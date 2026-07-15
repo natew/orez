@@ -21,7 +21,7 @@ afterEach(() => {
 })
 
 describe('prepareZeroCacheForCF', () => {
-  it('patches a Zero 1.5 overlay for Cloudflare Workers without mutating node_modules', () => {
+  it('patches a Zero 1.7 overlay for Cloudflare Workers without mutating node_modules', () => {
     const nodeModules = makeFakeNodeModules()
 
     const result = prepareZeroCacheForCF({ nodeModulesPath: nodeModules })
@@ -39,13 +39,44 @@ describe('prepareZeroCacheForCF', () => {
     const processes = readText(overlayBase, 'types/processes.js')
     expect(processes).not.toContain('shadow-syncer')
     expect(processes).toContain('const runWorker = __zc_workers[_name];')
+    expect(processes).toContain('env.ZERO_TASK_ID')
+    expect(processes).toContain('result === target ? receiver : result')
+    expect(processes).not.toContain('__OREZ_DEBUG_WIRE__')
     expect(readText(sourceBase, 'types/processes.js')).toContain('import(moduleUrl.href)')
+
+    for (const entrypoint of ENTRYPOINTS) {
+      const worker = readText(overlayBase, `server/${entrypoint}.js`)
+      expect(worker).toContain('orez-instance-local-log-context')
+      expect(worker).toContain('const lc = createLogContext(')
+      expect(worker).not.toContain('\tlc = createLogContext(')
+    }
+    expect(readText(overlayBase, 'observability/events.js')).toContain(
+      'orez-instance-isolated-events'
+    )
+    expect(readText(overlayBase, 'server/otel-start.js')).toContain(
+      'orez-instance-isolated-otel'
+    )
+    expect(readText(overlayBase, 'server/anonymous-otel-start.js')).toContain(
+      'orez-instance-isolated-anonymous-telemetry'
+    )
+    expect(
+      readFileSync(resolve(overlayBase, '..', '..', 'shared', 'src', 'dotenv.js'), 'utf8')
+    ).toContain('orez-cf-dotenv-disabled')
+
+    const customFetch = readText(overlayBase, 'custom/fetch.js')
+    expect(customFetch).toContain('fetchCFInstanceAPI as __orezFetchCFInstanceAPI')
+    expect(customFetch).toContain('await __orezFetchCFInstanceAPI(finalUrl, {')
+    expect(readText(sourceBase, 'custom/fetch.js')).toContain(
+      'const response = await fetch(finalUrl, {'
+    )
 
     const writeWorkerClient = readText(
       overlayBase,
       'services/replicator/write-worker-client.js'
     )
     expect(writeWorkerClient).toContain('orez-inline-write-worker')
+    expect(writeWorkerClient).toContain('orezRole=replica-writer')
+    expect(writeWorkerClient).not.toContain('__orez_zero_sqlite_role')
     expect(writeWorkerClient).toContain('class ThreadWriteWorkerClient')
     expect(readText(sourceBase, 'services/replicator/write-worker-client.js')).toContain(
       'import { Worker } from "node:worker_threads";'
@@ -100,6 +131,18 @@ describe('prepareZeroCacheForCF', () => {
     expect(
       result.aliases['@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js']
     ).toBe(resolve(overlayBase, 'server', 'runner', 'run-worker.js'))
+  })
+
+  it('rejects an unverified Zero version before generating an overlay', () => {
+    const nodeModules = makeFakeNodeModules()
+    writeFileSync(
+      resolve(nodeModules, '@rocicorp', 'zero', 'package.json'),
+      JSON.stringify({ name: '@rocicorp/zero', version: '1.7.1' })
+    )
+
+    expect(() => prepareZeroCacheForCF({ nodeModulesPath: nodeModules })).toThrow(
+      'supports @rocicorp/zero 1.7.0, found 1.7.1'
+    )
   })
 
   it('upgrades an older patched worker-urls file to include shadow-syncer', () => {
@@ -166,6 +209,11 @@ function childWorker(moduleUrl, env, ...args) {
     return { default: runWorker, name: _name };
   })()).then(async ({ default: runWorker, name }) => runWorker);
 }
+function wrap(target) {
+  return new Proxy(target, { get(target, prop, receiver) {
+    return Reflect.get(target, prop, receiver);
+  }});
+}
 `
     )
 
@@ -174,6 +222,8 @@ function childWorker(moduleUrl, env, ...args) {
     const processes = readText(result.zeroCacheSrcDir, 'types/processes.js')
     expect(processes).not.toContain('__zc_shadow_syncer')
     expect(processes).not.toContain('"shadow-syncer"')
+    expect(processes).toContain('result === target ? receiver : result')
+    expect(processes).not.toContain('Reflect.get(target, prop, receiver)')
   })
 })
 
@@ -190,10 +240,35 @@ function makeFakeNodeModules(
       : resolve(nodeModules, 'libpg-query')
 
   mkdirSync(resolve(zcBase, 'server'), { recursive: true })
+  mkdirSync(resolve(zcBase, 'custom'), { recursive: true })
+  mkdirSync(resolve(zcBase, 'observability'), { recursive: true })
   mkdirSync(resolve(zcBase, 'types'), { recursive: true })
   mkdirSync(resolve(zcBase, 'services', 'change-streamer'), { recursive: true })
+  mkdirSync(resolve(zcBase, 'services', 'litestream'), { recursive: true })
   mkdirSync(resolve(zcBase, 'services', 'replicator'), { recursive: true })
+  mkdirSync(resolve(zcBase, '..', '..', 'shared', 'src'), { recursive: true })
   mkdirSync(resolve(libPgQueryRoot, 'wasm'), { recursive: true })
+
+  writeFileSync(
+    resolve(nodeModules, '@rocicorp', 'zero', 'package.json'),
+    JSON.stringify({ name: '@rocicorp/zero', version: '1.7.0' })
+  )
+
+  writeText(
+    zcBase,
+    'custom/fetch.js',
+    `export async function customFetch(finalUrl) {
+  const response = await fetch(finalUrl, {
+    method: "POST",
+  });
+  return response;
+}
+`
+  )
+  writeFileSync(
+    resolve(zcBase, '..', '..', 'shared', 'src', 'dotenv.js'),
+    'import { config } from "@dotenvx/dotenvx"; config();\n'
+  )
 
   writeText(
     zcBase,
@@ -220,12 +295,23 @@ export const WRITE_WORKER_URL = resolve("./write-worker.ts");
       `server/${entrypoint}.js`,
       `import { parentWorker, singleProcessMode } from "../types/processes.js";
 import { exitAfter } from "../services/life-cycle.js";
-function runWorker() {}
+var lc = new LogContext("info", {}, consoleLogSink);
+function runWorker() {
+\tlc = createLogContext(config, "${entrypoint}");
+}
 ${AUTO_START}
 export { runWorker as default };
 `
     )
   }
+
+  writeText(zcBase, 'observability/events.js', 'export function initEventSink() {}\n')
+  writeText(zcBase, 'server/otel-start.js', 'export function startOtelAuto() {}\n')
+  writeText(
+    zcBase,
+    'server/anonymous-otel-start.js',
+    'export function startAnonymousTelemetry() {}\n'
+  )
 
   writeText(
     zcBase,
@@ -234,6 +320,11 @@ export { runWorker as default };
   import(moduleUrl.href).then(async ({ default: runWorker }) => {
     await runWorker();
   });
+}
+function wrap(target) {
+  return new Proxy(target, { get(target, prop, receiver) {
+    return Reflect.get(target, prop, receiver);
+  }});
 }
 `
   )
@@ -254,6 +345,17 @@ async function purgeOldChanges() {
 \t\t\tif (this.#initialWatermarks.size) this.#state.setTimeout(() => this.#purgeOldChanges(), CLEANUP_DELAY_MS);
 \t\t}
 }
+`
+  )
+
+  writeText(
+    zcBase,
+    'services/litestream/commands.js',
+    `class BackupNotFoundException extends Error {}
+async function restoreReplica(lc, config, replicaConstraints) {
+  return [lc, config, replicaConstraints];
+}
+export { BackupNotFoundException, restoreReplica };
 `
   )
 
