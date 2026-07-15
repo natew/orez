@@ -5377,6 +5377,7 @@ export class DoBackend {
       allowTransactionalDDL?: boolean
       fetch?: typeof fetch
       instanceId?: string
+      signal?: AbortSignal
       signalReplication?: () => void
       txOwner?: string
     }
@@ -5388,7 +5389,7 @@ export class DoBackend {
     this.allowTransactionalDDL = opts?.allowTransactionalDDL === true
     this.txOwner = opts?.txOwner || 'default'
     this.signalReplication = opts?.signalReplication ?? signalReplicationChange
-    this.httpClient = new HttpClient(opts?.fetch)
+    this.httpClient = new HttpClient(opts?.fetch, opts?.signal)
     this.skippedFunctionNames = getSkippedFunctionNames(
       dbName,
       namespace,
@@ -8905,9 +8906,11 @@ export class DoBackend {
 
 class HttpClient {
   private fetcher: typeof fetch
+  private signal?: AbortSignal
 
-  constructor(fetcher: typeof fetch = fetch) {
+  constructor(fetcher: typeof fetch = fetch, signal?: AbortSignal) {
     this.fetcher = fetcher
+    this.signal = signal
   }
 
   async post(
@@ -8919,6 +8922,7 @@ class HttpClient {
       method: 'POST',
       headers: headers ?? { 'Content-Type': 'application/json' },
       body,
+      signal: this.signal,
     })
     if (!resp.ok) {
       const text = await resp.text().catch(() => '')

@@ -328,6 +328,65 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     expect(harness.backendCloses).toBe(3)
   })
 
+  it('bounds remote transaction recovery from the entry deadline and aborts its fetch', async () => {
+    vi.useFakeTimers()
+    const logs: Array<Record<string, unknown>> = []
+    let recoverySignal: AbortSignal | null = null
+    const starting = startZeroCacheEmbedCF({
+      ...options(1_000, 'recovery-timeout-instance'),
+      backendFetch: (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          recoverySignal = init?.signal ?? null
+          recoverySignal?.addEventListener(
+            'abort',
+            () => reject(recoverySignal?.reason),
+            {
+              once: true,
+            }
+          )
+        }),
+      log: (event) => logs.push(event),
+    }).catch((error) => error)
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    const error = await starting
+
+    expect(error).toBeInstanceOf(Error)
+    expect(String(error)).toContain('phase remote-transaction-recovery')
+    expect(recoverySignal?.aborted).toBe(true)
+    expect(harness.backendOpens).toBe(0)
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: 'startup-phase-timeout',
+        phase: 'remote-transaction-recovery',
+      })
+    )
+
+    harness.modes = ['ready']
+    const retry = await startZeroCacheEmbedCF(options(1_000, 'recovery-timeout-instance'))
+    await retry.stop()
+  })
+
+  it('bounds backend initialization before the worker readiness timer would begin', async () => {
+    vi.useFakeTimers()
+    harness.backendWaitReadyGates.set(0, gate())
+    const starting = startZeroCacheEmbedCF(
+      options(1_000, 'backend-timeout-instance')
+    ).catch((error) => error)
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    const error = await starting
+
+    expect(error).toBeInstanceOf(Error)
+    expect(String(error)).toContain('phase backend-initialization')
+    expect(harness.backendCloses).toBe(3)
+    expect(harness.runCalls).toBe(0)
+
+    harness.modes = ['ready']
+    const retry = await startZeroCacheEmbedCF(options(1_000, 'backend-timeout-instance'))
+    await retry.stop()
+  })
+
   it('closes every backend when proxy setup rejects', async () => {
     harness.proxyCreateError = new Error('proxy setup failed')
 
@@ -523,7 +582,7 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     harness.modes = ['timeout', 'ready']
 
     await expect(startZeroCacheEmbedCF(options(1))).rejects.toThrow(
-      'timed out waiting for ready'
+      'phase worker-readiness'
     )
     const retry = await startZeroCacheEmbedCF(options())
 
@@ -596,6 +655,38 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     await replacement.stop()
   })
 
+  it('bounds replacement cleanup and remains fail-closed until it finishes', async () => {
+    vi.useFakeTimers()
+    harness.modes = ['ready', 'ready']
+    harness.proxyCloseGate = gate()
+    const abandoned = await startZeroCacheEmbedCF(
+      options(1_000, 'replacement-timeout-instance')
+    )
+
+    const replacing = startZeroCacheEmbedCF(
+      options(1_000, 'replacement-timeout-instance')
+    ).catch((error) => error)
+    await vi.advanceTimersByTimeAsync(1_000)
+    const replacementError = await replacing
+
+    expect(replacementError).toBeInstanceOf(Error)
+    expect(String(replacementError)).toContain('phase replacement-stop')
+    expect(abandoned.ready).toBe(false)
+    const stillReplacing = startZeroCacheEmbedCF(
+      options(1_000, 'replacement-timeout-instance')
+    ).catch((error) => error)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(String(await stillReplacing)).toContain('phase replacement-stop')
+
+    harness.proxyCloseGate.resolve()
+    await turn()
+    harness.proxyCloseGate = null
+    const replacement = await startZeroCacheEmbedCF(
+      options(1_000, 'replacement-timeout-instance')
+    )
+    await replacement.stop()
+  })
+
   it('releases a startup-timeout claim after the worker eventually terminates', async () => {
     vi.useFakeTimers()
     harness.modes = ['never-ready-never-stop', 'ready']
@@ -649,5 +740,29 @@ describe('startZeroCacheEmbedCF lifecycle', () => {
     expect((error as AggregateError).cause).toBe(harness.rejectedError)
     expect((error as AggregateError).errors[0]).toBe(harness.rejectedError)
     expect((error as AggregateError).errors[1]).toBeInstanceOf(AggregateError)
+  })
+
+  it('bounds startup cleanup when a resource close never settles', async () => {
+    vi.useFakeTimers()
+    harness.modes = ['reject', 'ready']
+    harness.proxyCloseGate = gate()
+    const starting = startZeroCacheEmbedCF(
+      options(60_000, 'cleanup-timeout-instance')
+    ).catch((error) => error)
+
+    await vi.waitFor(() => expect(harness.proxyCloses).toBe(1))
+    await vi.advanceTimersByTimeAsync(15_000)
+    const error = await starting
+
+    expect(error).toBeInstanceOf(AggregateError)
+    expect(String((error as AggregateError).errors[1])).toContain(
+      'startup cleanup timed out after 15000ms'
+    )
+
+    harness.proxyCloseGate.resolve()
+    await turn()
+    harness.proxyCloseGate = null
+    const retry = await startZeroCacheEmbedCF(options(1_000, 'cleanup-timeout-instance'))
+    await retry.stop()
   })
 })
