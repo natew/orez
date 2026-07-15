@@ -11,7 +11,7 @@ import {
   type FkChild,
 } from './fk-cascade.js'
 import { Mutex } from './mutex.js'
-import { compile as compilePgToSqlite } from './pg-sqlite-compiler/index.js'
+import { compile as compilePgToSqlite } from './pg-sqlite-compiler/compiler.js'
 import {
   foldCountMarkerResult,
   transformCountedDeleteCte,
@@ -5279,14 +5279,29 @@ function emptyCatalogResultFromSelect(select: any): CatalogResult {
   }
 }
 
-function getSkippedFunctionNames(dbName: string, namespace: string): Set<string> {
-  const key = `${namespace}\0${dbName}`
+function getSkippedFunctionNames(
+  dbName: string,
+  namespace: string,
+  instanceId = ''
+): Set<string> {
+  const key = `${instanceId}\0${namespace}\0${dbName}`
   let names = skippedFunctionNamesByTarget.get(key)
   if (!names) {
     names = new Set()
     skippedFunctionNamesByTarget.set(key, names)
   }
   return names
+}
+
+/** release isolate-local caches after one logical CF runtime fully stops. */
+export function releaseDoBackendInstanceCaches(instanceId: string): void {
+  const prefix = `${instanceId}\0`
+  for (const key of skippedFunctionNamesByTarget.keys()) {
+    if (key.startsWith(prefix)) skippedFunctionNamesByTarget.delete(key)
+  }
+  for (const key of cdcRegistrationSyncs.keys()) {
+    if (key.startsWith(prefix)) cdcRegistrationSyncs.delete(key)
+  }
 }
 
 // ── DoBackend class ───────────────────────────────────────────────────────
@@ -5318,6 +5333,9 @@ export class DoBackend {
   private cdcRegistrationDirty = false
   private readyPromise: Promise<void> | null = null
   private operationMutex = new Mutex()
+  private instanceId: string
+  private allowTransactionalDDL: boolean
+  private signalReplication: () => void
 
   // Transaction state. The Durable Object refuses raw SQL BEGIN/COMMIT/SAVEPOINT
   // (Cloudflare requires ctx.storage.transaction()), so PG-style multi-call
@@ -5355,14 +5373,27 @@ export class DoBackend {
     doUrl: string,
     dbName: string = 'postgres',
     namespace = 'default',
-    opts?: { fetch?: typeof fetch; txOwner?: string }
+    opts?: {
+      allowTransactionalDDL?: boolean
+      fetch?: typeof fetch
+      instanceId?: string
+      signalReplication?: () => void
+      txOwner?: string
+    }
   ) {
     this.doUrl = doUrl.replace(/\/+$/, '')
     this.dbName = dbName
     this.namespace = namespace
+    this.instanceId = opts?.instanceId ?? ''
+    this.allowTransactionalDDL = opts?.allowTransactionalDDL === true
     this.txOwner = opts?.txOwner || 'default'
+    this.signalReplication = opts?.signalReplication ?? signalReplicationChange
     this.httpClient = new HttpClient(opts?.fetch)
-    this.skippedFunctionNames = getSkippedFunctionNames(dbName, namespace)
+    this.skippedFunctionNames = getSkippedFunctionNames(
+      dbName,
+      namespace,
+      this.instanceId
+    )
     this.triggerFunctions = new Map()
     this.schemaMetadata = new Map()
     this.publications = new Map()
@@ -5782,7 +5813,7 @@ export class DoBackend {
       this.txHasTrackedWrite = true
       return
     }
-    signalReplicationChange()
+    this.signalReplication()
   }
 
   private newTransactionID(): string {
@@ -5824,7 +5855,7 @@ export class DoBackend {
       await this.persistDurableMetadata()
       await this.ensureCdcRegistration()
     }
-    if (shouldSignal) signalReplicationChange()
+    if (shouldSignal) this.signalReplication()
   }
 
   private async rollbackTransaction(): Promise<void> {
@@ -6218,7 +6249,7 @@ export class DoBackend {
   }
 
   private cdcRegistrationKey(): string {
-    return this.url('/cdc-registration')
+    return `${this.instanceId}\0${this.url('/cdc-registration')}`
   }
 
   private invalidateCdcRegistration(): void {
@@ -6845,7 +6876,7 @@ export class DoBackend {
     const arrayParamNumbers = new Set<number>()
     const jsonParamNumbers = new Set<number>()
     const epochMillisParamNumbers = new Set<number>()
-    const rejectsTransactionalDDL = this.inTransaction && this.txOwner !== 'orez-embed'
+    const rejectsTransactionalDDL = this.inTransaction && !this.allowTransactionalDDL
     const statements = rewriteSQLStatements(sql, {
       skippedFunctionNames: rejectsTransactionalDDL
         ? new Set(this.skippedFunctionNames)
@@ -7123,7 +7154,7 @@ export class DoBackend {
 
   private async snapshotTransactionDDL(statement: RewrittenStatement): Promise<void> {
     if (!this.inTransaction || !statement.isDDL) return
-    if (this.txOwner !== 'orez-embed') {
+    if (!this.allowTransactionalDDL) {
       throw new Error('DDL statements are not supported inside emulated transactions')
     }
     const txID = this.currentTransactionID()

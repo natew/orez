@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
+import {
+  registerCFInstanceFastify,
+  registerCFInstanceRuntime,
+  releaseCFInstanceRuntime,
+} from '../cf-instance-runtime.js'
 import WebSocket, { WebSocketServer, createWebSocketStream } from './ws.js'
 
 /** mock CF WebSocket — mimics the server side of a WebSocketPair */
@@ -48,11 +53,101 @@ describe('WebSocket shim', () => {
       expect(ws).toBeInstanceOf(WebSocket)
     })
 
-    it('handles string URL for localhost (in-process)', () => {
-      // no longer throws — localhost URLs use the in-process path
-      // without a fastify instance it emits close instead of throwing
-      const ws = new WebSocket('ws://localhost')
-      expect(ws).toBeInstanceOf(WebSocket)
+    it('routes a localhost URL through its exact runtime port', async () => {
+      const runtime = registerCFInstanceRuntime({
+        doSqlite: {},
+        env: {},
+        instanceId: 'ws-test',
+        pgPassword: '',
+        pgUser: 'user',
+      })
+      const fastify = {
+        server: { emit: vi.fn() },
+        tryHandoff: vi.fn(() => true),
+      }
+      registerCFInstanceFastify(runtime.basePort, fastify)
+      try {
+        const routed = new WebSocket(`ws://localhost:${runtime.basePort}/replication`)
+        const opened = vi.fn()
+        routed.on('open', opened)
+        await Promise.resolve()
+
+        expect(routed).toBeInstanceOf(WebSocket)
+        expect(fastify.tryHandoff).toHaveBeenCalledOnce()
+        expect(opened).toHaveBeenCalledOnce()
+        expect(routed.readyState).toBe(WebSocket.OPEN)
+      } finally {
+        releaseCFInstanceRuntime(runtime)
+      }
+    })
+
+    it('rejects a handoff after its runtime is released', async () => {
+      const runtime = registerCFInstanceRuntime({
+        doSqlite: {},
+        env: {},
+        instanceId: 'ws-released-runtime',
+        pgPassword: '',
+        pgUser: 'user',
+      })
+      const fastify = {
+        server: { emit: vi.fn(() => true) },
+        tryHandoff: vi.fn(() => true),
+      }
+      registerCFInstanceFastify(runtime.basePort, fastify)
+
+      const routed = new WebSocket(`ws://localhost:${runtime.basePort}/replication`)
+      const opened = vi.fn()
+      const closed = vi.fn()
+      routed.on('open', opened)
+      routed.on('close', closed)
+      releaseCFInstanceRuntime(runtime)
+      await Promise.resolve()
+
+      expect(fastify.tryHandoff).not.toHaveBeenCalled()
+      expect(fastify.server.emit).not.toHaveBeenCalled()
+      expect(opened).not.toHaveBeenCalled()
+      expect(closed).toHaveBeenCalledWith(
+        1006,
+        'fastify runtime released before websocket handoff'
+      )
+      expect(routed.readyState).toBe(WebSocket.CLOSED)
+    })
+
+    it('closes when no Fastify websocket route accepts the handoff', async () => {
+      const runtime = registerCFInstanceRuntime({
+        doSqlite: {},
+        env: {},
+        instanceId: 'ws-unhandled-route',
+        pgPassword: '',
+        pgUser: 'user',
+      })
+      const fastify = {
+        server: { emit: vi.fn(() => false) },
+        tryHandoff: vi.fn(() => false),
+      }
+      registerCFInstanceFastify(runtime.basePort, fastify)
+      try {
+        const routed = new WebSocket(`ws://localhost:${runtime.basePort}/missing`)
+        const opened = vi.fn()
+        const closed = vi.fn()
+        routed.on('open', opened)
+        routed.on('close', closed)
+        await Promise.resolve()
+
+        expect(fastify.tryHandoff).toHaveBeenCalledOnce()
+        expect(fastify.server.emit).not.toHaveBeenCalled()
+        expect(opened).not.toHaveBeenCalled()
+        expect(closed).toHaveBeenCalledWith(1006, 'no fastify websocket route')
+        expect(routed.readyState).toBe(WebSocket.CLOSED)
+      } finally {
+        releaseCFInstanceRuntime(runtime)
+      }
+    })
+
+    it('rejects a localhost URL without an explicit runtime port', () => {
+      expect(() => new WebSocket('ws://localhost')).toThrow(
+        'no Fastify runtime for port 0'
+      )
     })
 
     it('sets up event listeners on CF WebSocket', () => {

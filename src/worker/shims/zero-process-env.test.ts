@@ -26,4 +26,22 @@ describe('acquireZeroProcessEnv', () => {
     expect(process.env.NODE_ENV).toBe('production-sentinel')
     expect(process.env.SINGLE_PROCESS).toBe('disabled-sentinel')
   })
+
+  it('keeps the process environment until every lease is released', async () => {
+    process.env.NODE_ENV = 'production-sentinel'
+    process.env.SINGLE_PROCESS = 'disabled-sentinel'
+    vi.resetModules()
+
+    const { acquireZeroProcessEnv } = await import('./zero-process-env.js')
+    const releaseFirst = acquireZeroProcessEnv()
+    const releaseSecond = acquireZeroProcessEnv()
+
+    releaseFirst()
+    expect(process.env.NODE_ENV).toBe('production-sentinel')
+    expect(process.env.SINGLE_PROCESS).toBe('1')
+
+    releaseSecond()
+    expect(process.env.NODE_ENV).toBe('production-sentinel')
+    expect(process.env.SINGLE_PROCESS).toBe('disabled-sentinel')
+  })
 })

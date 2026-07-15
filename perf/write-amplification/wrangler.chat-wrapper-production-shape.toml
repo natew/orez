@@ -1,0 +1,29 @@
+name = "orez-chat-wrapper-production-shape-profile"
+main = ".generated-chat-wrapper/chat-wrapper-bundle.js"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ZERO_APP_ID = "chat"
+ZERO_APP_PUBLICATIONS = "profile_publication"
+ZERO_LOG_LEVEL = "warn"
+OREZ_LOG_LEVEL = "warn"
+ZERO_LITESTREAM_ENABLED = "false"
+OREZ_PROFILE_READY_TIMEOUT = "30000"
+
+[[durable_objects.bindings]]
+name = "ZERO_SQL_DO"
+class_name = "ZeroSqlDO"
+
+[[durable_objects.bindings]]
+name = "ZERO_CACHE_DO"
+class_name = "ZeroCacheDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ZeroSqlDO", "ZeroCacheDO"]
+
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true

@@ -20,6 +20,7 @@ import {
   createReplicationFeedbackParser,
   handleReplicationQuery,
   handleStartReplication,
+  noteConfirmedFlushLsn,
   signalReplicationChange,
 } from './replication/handler.js'
 
@@ -29,23 +30,6 @@ import type { PGlite } from '@electric-sql/pglite'
 // shared encoder/decoder instances
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
-
-// verbose wire-protocol logging. off by default — every postgres message hits
-// the hot path, so unconditional console.debug calls are surprisingly expensive
-// even when devtools is set to hide them (the interpolated strings still get
-// built, and devtools retains them).
-//
-// re-evaluated on every call so you can flip it at runtime from any iframe,
-// worker, or console without restarting. toggle via either:
-//   - env:    OREZ_DEBUG_WIRE=1 (picked up at process start)
-//   - global: globalThis.__OREZ_DEBUG_WIRE__ = true (works anywhere, anytime)
-function isDebugWire(): boolean {
-  try {
-    if ((globalThis as any).__OREZ_DEBUG_WIRE__ === true) return true
-    if (typeof process !== 'undefined' && process.env?.OREZ_DEBUG_WIRE) return true
-  } catch {}
-  return false
-}
 
 // postgres frontend/backend message type bytes — only used for debug-wire logging
 const PG_MSG_TYPE_NAMES: Record<number, string> = {
@@ -134,9 +118,6 @@ function extractQueryText(data: Uint8Array): string | null {
   }
   return null
 }
-
-// abort previous replication handler when a new one starts
-let abortPreviousReplication: (() => void) | null = null
 
 // clean version string: strip emscripten compiler info that breaks pg_restore/pg_dump
 const PG_VERSION_STRING =
@@ -629,7 +610,6 @@ function stripResponseMessages(data: Uint8Array, stripRfq: boolean): Uint8Array 
  * readable receives Uint8Array messages from the port.
  * writable sends Uint8Array messages via the port.
  */
-let _globalWriteCount = 0
 function messagePortToDuplexWithInject(port: MessagePort): {
   duplex: DuplexStream<Uint8Array>
   rawWrite: (data: Uint8Array) => void
@@ -682,65 +662,6 @@ function messagePortToDuplexWithInject(port: MessagePort): {
   }
 
   return { duplex: { readable, writable }, rawWrite, injectMessage }
-}
-
-function messagePortToDuplex(port: MessagePort): {
-  duplex: DuplexStream<Uint8Array>
-  rawWrite: (data: Uint8Array) => void
-} {
-  let msgCount = 0
-  const readable = new ReadableStream<Uint8Array>({
-    start(controller) {
-      port.onmessage = (ev: MessageEvent) => {
-        msgCount++
-        if (isDebugWire() && msgCount <= 3) {
-          console.debug(
-            `[pg-proxy-duplex] msg#${msgCount} type=${typeof ev.data} isAB=${ev.data instanceof ArrayBuffer} isU8=${ev.data instanceof Uint8Array} len=${ev.data?.byteLength ?? ev.data?.length ?? '?'}`
-          )
-        }
-        if (ev.data instanceof ArrayBuffer) {
-          controller.enqueue(new Uint8Array(ev.data))
-        } else if (ev.data instanceof Uint8Array) {
-          controller.enqueue(ev.data)
-        } else {
-          console.warn(`[pg-proxy-duplex] unexpected data type:`, typeof ev.data, ev.data)
-        }
-      }
-    },
-    cancel() {
-      port.close()
-    },
-  })
-
-  const writable = new WritableStream<Uint8Array>({
-    write(chunk) {
-      _globalWriteCount++
-      if (isDebugWire() && _globalWriteCount <= 200) {
-        console.debug(`[pg-proxy-ws-write] #${_globalWriteCount} len=${chunk.byteLength}`)
-      }
-      // CF workerd MessagePort does not support transfer lists.
-      const buf = chunk.buffer.slice(
-        chunk.byteOffset,
-        chunk.byteOffset + chunk.byteLength
-      ) as ArrayBuffer
-      port.postMessage(buf)
-    },
-    close() {
-      port.close()
-    },
-  })
-
-  // raw write function for injecting data outside of pg-gateway's stream
-  // (e.g. parameter status messages during onAuthenticated)
-  const rawWrite = (data: Uint8Array) => {
-    const buf = data.buffer.slice(
-      data.byteOffset,
-      data.byteOffset + data.byteLength
-    ) as ArrayBuffer
-    port.postMessage(buf)
-  }
-
-  return { duplex: { readable, writable }, rawWrite }
 }
 
 /**
@@ -824,6 +745,8 @@ function createConnectionContext(ctx: {
 export async function createBrowserProxy(
   dbInput: PGlite | PGliteInstances,
   config: {
+    debugWire?: boolean
+    instanceId?: string
     pgPassword: string
     pgUser: string
     pgPort?: number
@@ -840,6 +763,8 @@ export async function createBrowserProxy(
     singleDb?: boolean
   }
 ): Promise<BrowserProxy> {
+  const debugWire = config.debugWire === true
+  const isDebugWire = () => debugWire
   // normalize input: single PGlite instance = use it for all databases (backwards compat for tests)
   const instances: PGliteInstances =
     'postgres' in dbInput
@@ -973,7 +898,7 @@ export async function createBrowserProxy(
     signalPending = true
     queueMicrotask(() => {
       signalPending = false
-      signalReplicationChange()
+      signalReplicationChange(config.instanceId)
     })
   }
 
@@ -981,6 +906,22 @@ export async function createBrowserProxy(
   let closePromise: Promise<void> | null = null
   const activeConnectionClosers = new Set<() => Promise<void>>()
   const unreportedConnectionCleanupErrors = new Set<unknown>()
+  let abortPreviousReplication: (() => void) | null = null
+  const activeReplicationTasks = new Set<Promise<void>>()
+  const replicationRuntime = {
+    replace(abort: () => void) {
+      abortPreviousReplication?.()
+      abortPreviousReplication = abort
+    },
+    track(promise: Promise<void>, abort: () => void, onError: (error: unknown) => void) {
+      let tracked!: Promise<void>
+      tracked = promise.catch(onError).finally(() => {
+        activeReplicationTasks.delete(tracked)
+        if (abortPreviousReplication === abort) abortPreviousReplication = null
+      })
+      activeReplicationTasks.add(tracked)
+    },
+  }
 
   function handleConnection(port: MessagePort) {
     if (closed) {
@@ -1302,8 +1243,14 @@ export async function createBrowserProxy(
           const upper = query.trim().toUpperCase()
 
           if (upper.startsWith('START_REPLICATION')) {
-            if (abortPreviousReplication) abortPreviousReplication()
             let aborted = false
+            const abort = () => {
+              if (aborted) return
+              aborted = true
+              connClosed = true
+              port.close()
+              void closeSession()
+            }
             const writer = {
               write(chunk: Uint8Array) {
                 if (!connClosed && !aborted) {
@@ -1318,20 +1265,17 @@ export async function createBrowserProxy(
                 return connClosed || aborted
               },
               close() {
-                abortPreviousReplication?.()
+                abort()
               },
             }
-            abortPreviousReplication = () => {
-              aborted = true
-              connClosed = true
-              port.close()
-              void closeSession()
-            }
+            replicationRuntime.replace(abort)
             // client→server traffic on a replication connection carries
             // standby status updates: the consumer's confirmed-flush LSN
             // drives purging of _zero_changes (rows are retained until the
             // consumer durably commits them, like real pg WAL retention).
-            const feedbackParser = createReplicationFeedbackParser()
+            const feedbackParser = createReplicationFeedbackParser((lsn) =>
+              noteConfirmedFlushLsn(lsn, config.instanceId)
+            )
             port.onmessage = (ev: MessageEvent) => {
               const incoming =
                 ev.data instanceof ArrayBuffer
@@ -1339,12 +1283,17 @@ export async function createBrowserProxy(
                   : (ev.data as Uint8Array)
               if (incoming instanceof Uint8Array) feedbackParser(incoming)
             }
-            handleStartReplication(
-              query,
-              writer,
-              db,
-              transactionAwareMutex(db, mutex, txState, null)
-            ).catch(() => {})
+            replicationRuntime.track(
+              handleStartReplication(
+                query,
+                writer,
+                db,
+                transactionAwareMutex(db, mutex, txState, null),
+                config.instanceId
+              ),
+              abort,
+              () => {}
+            )
             return
           }
 
@@ -1363,7 +1312,7 @@ export async function createBrowserProxy(
           // open tx and commits with it.
           await mutex.acquire()
           try {
-            const response = await handleReplicationQuery(query, db)
+            const response = await handleReplicationQuery(query, db, config.instanceId)
             if (response) {
               write(response)
               return
@@ -1568,7 +1517,9 @@ export async function createBrowserProxy(
           // signal writes
           if (dbName === 'postgres' && msgType === 0x51) {
             const qn = extractQueryText(data)?.trimStart().toLowerCase()
-            if (qn && isWriteNormalized(qn)) signalReplicationChange()
+            if (qn && isWriteNormalized(qn)) {
+              signalReplicationChange(config.instanceId)
+            }
           }
           write(result)
         } finally {
@@ -1761,7 +1712,10 @@ export async function createBrowserProxy(
               },
               instances.postgres,
               mutexes.postgres,
-              connection
+              connection,
+              config.instanceId,
+              replicationRuntime,
+              debugWire
             )
           }
 
@@ -1945,7 +1899,7 @@ export async function createBrowserProxy(
 
           // signal replication handler on postgres writes for instant sync
           if (dbName === 'postgres' && queryNorm && isWriteNormalized(queryNorm)) {
-            signalReplicationChange()
+            signalReplicationChange(config.instanceId)
           }
 
           return result
@@ -2174,6 +2128,9 @@ export async function createBrowserProxy(
       closed = true
       signalPending = false
       closePromise = (async () => {
+        abortPreviousReplication?.()
+        abortPreviousReplication = null
+        signalReplicationChange(config.instanceId)
         const results = await Promise.allSettled(
           [...activeConnectionClosers].map((closeConnection) =>
             Promise.resolve().then(() => closeConnection())
@@ -2183,6 +2140,7 @@ export async function createBrowserProxy(
         for (const result of results) {
           if (result.status === 'rejected') errors.add(result.reason)
         }
+        await Promise.all([...activeReplicationTasks])
         unreportedConnectionCleanupErrors.clear()
         if (errors.size > 0) {
           throw new AggregateError([...errors], 'browser proxy connection cleanup failed')
@@ -2203,9 +2161,19 @@ async function handleReplicationMessageBrowser(
   closeConn: () => void,
   db: PGlite,
   mutex: Mutex,
-  connection: PostgresConnection
+  connection: PostgresConnection,
+  instanceId: string | undefined,
+  replicationRuntime: {
+    replace(abort: () => void): void
+    track(
+      promise: Promise<void>,
+      abort: () => void,
+      onError: (error: unknown) => void
+    ): void
+  },
+  debugWire: boolean
 ): Promise<Uint8Array | undefined> {
-  if (isDebugWire()) {
+  if (debugWire) {
     console.debug(
       `[pg-proxy-repl] ENTRY type=0x${data[0].toString(16)} len=${data.length}`
     )
@@ -2213,7 +2181,7 @@ async function handleReplicationMessageBrowser(
 
   // for non-SimpleQuery messages (extended protocol), execute against PGlite directly.
   if (data[0] !== 0x51) {
-    if (isDebugWire()) {
+    if (debugWire) {
       console.debug(
         `[pg-proxy-repl] ext protocol msg type=0x${data[0].toString(16)} len=${data.length}`
       )
@@ -2221,7 +2189,7 @@ async function handleReplicationMessageBrowser(
     await mutex.acquire()
     try {
       const result = await db.execProtocolRaw(data, { syncToFs: false })
-      if (isDebugWire()) {
+      if (debugWire) {
         console.debug(`[pg-proxy-repl] ext protocol result len=${result.length}`)
       }
       return result
@@ -2238,12 +2206,6 @@ async function handleReplicationMessageBrowser(
   // check if this is a START_REPLICATION command
   if (upper.startsWith('START_REPLICATION')) {
     await connection.detach()
-
-    // abort any previous replication handler to prevent zombies
-    if (abortPreviousReplication) {
-      log.proxy('aborting previous replication handler')
-      abortPreviousReplication()
-    }
 
     let aborted = false
     const writer = {
@@ -2266,31 +2228,36 @@ async function handleReplicationMessageBrowser(
     }
 
     const abort = () => {
+      if (aborted) return
       aborted = true
       closeConn()
     }
-    abortPreviousReplication = abort
+    replicationRuntime.replace(abort)
 
-    handleStartReplication(query, writer, db, mutex).catch((err) => {
-      log.proxy(`replication stream ended: ${err}`)
-    })
+    replicationRuntime.track(
+      handleStartReplication(query, writer, db, mutex, instanceId),
+      abort,
+      (err) => {
+        log.proxy(`replication stream ended: ${err}`)
+      }
+    )
     return undefined
   }
 
   // handle replication queries + fallthrough to pglite, all under mutex
-  if (isDebugWire()) {
+  if (debugWire) {
     console.debug(`[pg-proxy-repl] query: ${query.slice(0, 100)}`)
     console.debug(`[pg-proxy-repl] acquiring mutex...`)
   }
   await mutex.acquire()
-  if (isDebugWire()) console.debug(`[pg-proxy-repl] mutex acquired, testing db access...`)
+  if (debugWire) console.debug(`[pg-proxy-repl] mutex acquired, testing db access...`)
   try {
     const testResult = await db.query('SELECT 1 as test')
-    if (isDebugWire()) {
+    if (debugWire) {
       console.debug(`[pg-proxy-repl] db.query works: ${JSON.stringify(testResult.rows)}`)
     }
-    const response = await handleReplicationQuery(query, db)
-    if (isDebugWire()) {
+    const response = await handleReplicationQuery(query, db, instanceId)
+    if (debugWire) {
       console.debug(
         `[pg-proxy-repl] handleReplicationQuery result: ${response ? 'bytes(' + response.length + ')' : 'null'}`
       )

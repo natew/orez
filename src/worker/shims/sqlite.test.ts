@@ -11,9 +11,12 @@ const BetterSqlite3 = BedrockSqlite.Database
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
 import {
-  openSqliteHandleRegistry,
-  sweepLeakedSqliteHandles,
-} from '../embed-generation.js'
+  registerCFInstanceRuntime,
+  releaseCFInstanceRuntime,
+  sqlitePathForCFInstance,
+  type CFInstanceRuntime,
+} from '../cf-instance-runtime.js'
+import { sweepCFInstanceSqliteHandles } from '../embed-generation.js'
 import {
   Database,
   Statement,
@@ -153,17 +156,10 @@ describe('Database', () => {
     expect(db.inTransaction).toBe(false)
   })
 
-  it('throws when constructed with a string and no globalThis storage', () => {
-    // clear any global DO storage
-    const prev = (globalThis as any).__orez_do_sqlite
-    delete (globalThis as any).__orez_do_sqlite
-    try {
-      expect(() => new Database('/path/to/db' as unknown as SqlStorageLike)).toThrow(
-        'no DO storage on globalThis.__orez_do_sqlite'
-      )
-    } finally {
-      if (prev) (globalThis as any).__orez_do_sqlite = prev
-    }
+  it('rejects a string path without an explicit instance route', () => {
+    expect(() => new Database('/path/to/db' as unknown as SqlStorageLike)).toThrow(
+      'unroutable zero-cache path'
+    )
   })
 
   it('close sets open to false', () => {
@@ -189,39 +185,47 @@ describe('Database', () => {
 // object construction (app DOs) must never be registered or swept.
 describe('Database embed handle registry', () => {
   let mock: SqlStorageLike & { _nativeDb: any }
+  let runtime: CFInstanceRuntime
+  let sqlitePath: string
 
   beforeEach(() => {
     mock = createMockSqlStorage() as SqlStorageLike & { _nativeDb: any }
-    ;(globalThis as any).__orez_do_sqlite = mock
-    sweepLeakedSqliteHandles() // start each test from an empty registry
+    runtime = registerCFInstanceRuntime({
+      doSqlite: mock,
+      env: {},
+      instanceId: 'sqlite-registry-test',
+      pgPassword: '',
+      pgUser: 'user',
+    })
+    sqlitePath = sqlitePathForCFInstance(runtime.instanceId)
   })
 
   afterEach(() => {
-    sweepLeakedSqliteHandles()
-    delete (globalThis as any).__orez_do_sqlite
+    sweepCFInstanceSqliteHandles(runtime)
+    releaseCFInstanceRuntime(runtime)
     mock._nativeDb.close()
   })
 
   it('registers string-path handles and deregisters on close', () => {
-    const db = new Database(':do-sqlite:' as unknown as SqlStorageLike)
-    expect(openSqliteHandleRegistry().has(db)).toBe(true)
+    const db = new Database(sqlitePath)
+    expect(runtime.sqliteHandles.has(db)).toBe(true)
     db.close()
-    expect(openSqliteHandleRegistry().has(db)).toBe(false)
-    expect(openSqliteHandleRegistry().size).toBe(0)
+    expect(runtime.sqliteHandles.has(db)).toBe(false)
+    expect(runtime.sqliteHandles.size).toBe(0)
   })
 
   it('does not register object-storage handles (app DO usage)', () => {
     const db = new Database(mock)
-    expect(openSqliteHandleRegistry().size).toBe(0)
+    expect(runtime.sqliteHandles.size).toBe(0)
     db.close()
   })
 
   it('sweep closes leaked handles from a dead generation', () => {
-    const leaked = new Database(':do-sqlite:' as unknown as SqlStorageLike)
+    const leaked = new Database(sqlitePath)
     expect(leaked.open).toBe(true)
-    expect(sweepLeakedSqliteHandles()).toBe(1)
+    expect(sweepCFInstanceSqliteHandles(runtime)).toBe(1)
     expect(leaked.open).toBe(false)
-    expect(openSqliteHandleRegistry().size).toBe(0)
+    expect(runtime.sqliteHandles.size).toBe(0)
   })
 })
 
@@ -621,6 +625,7 @@ describe('StatementRunner', () => {
 describe('DO snapshot transactions', () => {
   let mock: SqlStorageLike & { _nativeDb: any; transactionSync: <T>(fn: () => T) => T }
   let live: Database
+  let runtime: CFInstanceRuntime
   let snapshot: Database
 
   beforeEach(() => {
@@ -632,16 +637,17 @@ describe('DO snapshot transactions', () => {
     // `live` models the replica-writer — in production it is the only connection
     // that mutates the live replica tables, and copy-on-write snapshots only
     // freeze a table when the replica-writer is about to write to it.
-    const globalObject = globalThis as any
-    const previousRole = globalObject.__orez_zero_sqlite_role
-    globalObject.__orez_zero_sqlite_role = 'replica-writer'
-    try {
-      live = new Database(mock)
-    } finally {
-      if (previousRole === undefined) delete globalObject.__orez_zero_sqlite_role
-      else globalObject.__orez_zero_sqlite_role = previousRole
-    }
-    snapshot = new Database(mock)
+    runtime = registerCFInstanceRuntime({
+      doSqlite: mock,
+      env: {},
+      instanceId: 'sqlite-snapshot-test',
+      pgPassword: '',
+      pgUser: 'user',
+    })
+    live = new Database(
+      `${sqlitePathForCFInstance(runtime.instanceId)}?orezRole=replica-writer`
+    )
+    snapshot = new Database(sqlitePathForCFInstance(runtime.instanceId))
     live.exec('CREATE TABLE todo (id TEXT PRIMARY KEY, title TEXT, _0_version TEXT)')
     live.prepare('INSERT INTO todo VALUES (?, ?, ?)').run('1', 'old', '01')
   })
@@ -649,6 +655,7 @@ describe('DO snapshot transactions', () => {
   afterEach(() => {
     live.close()
     snapshot.close()
+    releaseCFInstanceRuntime(runtime)
     mock._nativeDb.close()
   })
 
@@ -780,7 +787,7 @@ describe('DO snapshot transactions', () => {
         .toArray()
     ).toEqual([{ name: '_orez_snapshot_1_todo' }])
 
-    const reopened = new Database(mock)
+    const reopened = new Database(sqlitePathForCFInstance(runtime.instanceId))
     try {
       expect(
         mock
@@ -804,7 +811,7 @@ describe('DO snapshot transactions', () => {
     expect(snapshotTables).toHaveLength(1)
 
     // opening another connection must not drop the still-open snapshot's copy.
-    const other = new Database(mock)
+    const other = new Database(sqlitePathForCFInstance(runtime.instanceId))
     try {
       expect(snapshot.prepare('SELECT title FROM todo WHERE id = ?').get('1')).toEqual({
         title: 'old',
@@ -815,19 +822,9 @@ describe('DO snapshot transactions', () => {
   })
 
   it('persists BEGIN CONCURRENT writes for the zero-cache replica writer', () => {
-    const globalObject = globalThis as any
-    const previousRole = globalObject.__orez_zero_sqlite_role
-    globalObject.__orez_zero_sqlite_role = 'replica-writer'
-    let writer: Database
-    try {
-      writer = new Database(mock)
-    } finally {
-      if (previousRole === undefined) {
-        delete globalObject.__orez_zero_sqlite_role
-      } else {
-        globalObject.__orez_zero_sqlite_role = previousRole
-      }
-    }
+    const writer = new Database(
+      `${sqlitePathForCFInstance(runtime.instanceId)}?orezRole=replica-writer`
+    )
 
     writer.prepare('BEGIN CONCURRENT').run()
     writer.prepare('INSERT INTO todo VALUES (?, ?, ?)').run('2', 'writer row', '02')
@@ -841,6 +838,7 @@ describe('DO snapshot transactions', () => {
         .prepare("SELECT name FROM sqlite_master WHERE name LIKE '_orez_snapshot_%'")
         .all()
     ).toEqual([])
+    writer.close()
   })
 
   it('does not send raw transaction control SQL to DO storage', () => {

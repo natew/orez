@@ -663,7 +663,10 @@ describe('kill-mid-tx crash recovery (DoBackend over HTTP)', () => {
     // changeLog entries plus the watermark advance — then the DO is killed
     // before COMMIT (deploy upgrade-kill). writes apply eagerly, so without
     // recovery the partial tx persists and poisons catchup.
-    const gen1 = new DoBackend(url, 'zero_cdb', 'zero', { txOwner: 'orez-embed' })
+    const gen1 = new DoBackend(url, 'zero_cdb', 'zero', {
+      allowTransactionalDDL: true,
+      txOwner: 'orez-embed',
+    })
     await gen1.waitReady
     await gen1.exec('BEGIN')
     await gen1.query(
@@ -698,7 +701,10 @@ describe('kill-mid-tx crash recovery (DoBackend over HTTP)', () => {
     ).toEqual([])
 
     // generation 2 re-applies the tx and commits — this time it sticks
-    const gen2 = new DoBackend(url, 'zero_cdb', 'zero', { txOwner: 'orez-embed' })
+    const gen2 = new DoBackend(url, 'zero_cdb', 'zero', {
+      allowTransactionalDDL: true,
+      txOwner: 'orez-embed',
+    })
     await gen2.waitReady
     await gen2.exec('BEGIN')
     await gen2.query(
@@ -739,6 +745,7 @@ describe('kill-mid-tx crash recovery (embed-local backend)', () => {
       transactionSync: storage.transactionSync,
     })
     const backend = new DoBackend('https://orez-do-backend.local', 'zero_cvr', 'zero', {
+      allowTransactionalDDL: true,
       fetch: local.fetch,
       txOwner: 'orez-embed',
     })
@@ -780,6 +787,7 @@ describe('kill-mid-tx crash recovery (embed-local backend)', () => {
       transactionSync: storage.transactionSync,
     })
     const backend = new DoBackend('https://orez-do-backend.local', 'zero_cvr', 'zero', {
+      allowTransactionalDDL: true,
       fetch: local.fetch,
       txOwner: 'orez-embed',
     })
@@ -862,6 +870,7 @@ describe('kill-mid-tx crash recovery (embed-local backend)', () => {
     })
 
     const gen1 = new DoBackend('https://orez-do-backend.local', 'zero_cvr', 'zero', {
+      allowTransactionalDDL: true,
       fetch: local.fetch,
       txOwner: 'orez-embed',
     })
@@ -878,6 +887,7 @@ describe('kill-mid-tx crash recovery (embed-local backend)', () => {
 
     // a clean commit afterwards persists
     const gen2 = new DoBackend('https://orez-do-backend.local', 'zero_cvr', 'zero', {
+      allowTransactionalDDL: true,
       fetch: local.fetch,
       txOwner: 'orez-embed',
     })

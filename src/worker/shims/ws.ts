@@ -15,6 +15,8 @@
 import { EventEmitter } from 'node:events'
 import { Duplex } from 'node:stream'
 
+import { logCFInstance, routeCFInstanceFastifyURL } from '../cf-instance-runtime.js'
+
 // -- readyState constants --
 const CONNECTING = 0
 const OPEN = 1
@@ -29,15 +31,6 @@ interface CFWebSocket {
   removeEventListener(type: string, handler: (event: any) => void): void
   readyState: number
   accept?(): void
-}
-
-function debugWS(event: Record<string, unknown>): void {
-  try {
-    const log = (globalThis as any).__orez_ws_debug_log
-    if (typeof log === 'function') log(event)
-  } catch {
-    // debug logging must never affect websocket behavior
-  }
 }
 
 function summarizeWSData(data: unknown): Record<string, unknown> {
@@ -76,6 +69,7 @@ class WebSocket extends EventEmitter {
 
   #ws!: CFWebSocket
   #url: string
+  #debug: (event: Record<string, unknown>) => void = () => {}
   #listeners = new Map<string, (event: any) => void>()
 
   constructor(urlOrSocket: string | CFWebSocket, _protocols?: unknown, _opts?: unknown) {
@@ -83,25 +77,29 @@ class WebSocket extends EventEmitter {
 
     if (typeof urlOrSocket === 'string') {
       this.#url = urlOrSocket
-      // check for in-process connections (fastify shim uses port 0 or 1)
+      // zero-cache connects its in-process workers over the synthetic Fastify
+      // ports allocated to this Durable Object runtime.
       const parsedUrl = new URL(urlOrSocket, 'http://localhost')
-      const isInProcess =
-        parsedUrl.port === '0' ||
-        parsedUrl.port === '1' ||
-        parsedUrl.hostname === 'localhost'
+      const isInProcess = parsedUrl.hostname === 'localhost'
 
       if (isInProcess) {
-        // in-process: connect via fastify server's handoff mechanism
-        // try all registered fastify instances via tryHandoff, stop at first match
-        const instances: any[] = (globalThis as any).__orez_fastify_instances || []
-        const fallbackInstance = (globalThis as any).__orez_fastify_instance
-        if (instances.length > 0 || fallbackInstance?.server) {
+        let initialRoute: ReturnType<typeof routeCFInstanceFastifyURL>
+        try {
+          initialRoute = routeCFInstanceFastifyURL(urlOrSocket)
+          this.#debug = (event) =>
+            logCFInstance(initialRoute.runtime, { component: 'websocket', ...event })
+        } catch (error) {
+          throw new Error(`ws shim: ${String(error)}`)
+        }
+        const fastifyInstance = initialRoute.instance as any
+        if (fastifyInstance?.server) {
           // create paired message channels for bidirectional communication
           // the client-side WS (this) and serverWs are cross-linked so
           // ping/pong, messages, and close propagate between them
           const clientSide = this
+          let clientReadyState = CONNECTING
           const serverWs: any = {
-            readyState: 1,
+            readyState: OPEN,
             _listeners: {} as Record<string, Function[]>,
             send: (data: string | ArrayBuffer) => {
               // deliver to client side
@@ -109,7 +107,8 @@ class WebSocket extends EventEmitter {
               queueMicrotask(() => clientSide.emit('message', { data }))
             },
             close: (code?: number, reason?: string) => {
-              serverWs.readyState = 3
+              serverWs.readyState = CLOSED
+              clientReadyState = CLOSED
               queueMicrotask(() => clientSide.emit('close', code || 1000, reason || ''))
             },
             ping: () => {
@@ -141,8 +140,12 @@ class WebSocket extends EventEmitter {
               for (const h of handlers) h({ data })
             },
             close: (code?: number, reason?: string) => {
+              if (clientReadyState === CLOSED) return
+              clientReadyState = CLOSING
               const handlers = serverWs._listeners['close'] || []
               for (const h of handlers) h({ code, reason })
+              clientReadyState = CLOSED
+              serverWs.readyState = CLOSED
             },
             addEventListener: (type: string, handler: Function) => {
               if (!clientWsListeners[type]) clientWsListeners[type] = []
@@ -156,7 +159,7 @@ class WebSocket extends EventEmitter {
               }
             },
             get readyState() {
-              return 1
+              return clientReadyState
             },
           } as CFWebSocket
 
@@ -169,24 +172,38 @@ class WebSocket extends EventEmitter {
             queueMicrotask(() => clientSide.emit('message', { data }))
           }
 
-          // try handoff against all fastify instances, stop at first match
+          // hand off to the exact Fastify service named by the URL port.
           const path = parsedUrl.pathname + parsedUrl.search
           const handoffMsg = {
             message: { url: path, headers: {}, method: 'GET' },
             head: new Uint8Array(0),
           }
+          const failHandoff = (reason: string) => {
+            clientReadyState = CLOSED
+            serverWs.readyState = CLOSED
+            this.emit('close', 1006, reason)
+          }
           queueMicrotask(() => {
-            let handled = false
-            for (const inst of instances) {
-              if (inst?.tryHandoff?.(handoffMsg, serverWs)) {
-                handled = true
-                break
-              }
+            let currentRoute: ReturnType<typeof routeCFInstanceFastifyURL>
+            try {
+              currentRoute = routeCFInstanceFastifyURL(urlOrSocket)
+            } catch {
+              failHandoff('fastify runtime released before websocket handoff')
+              return
             }
-            // fallback: if no instance handled it and we have a fallback, emit directly
-            if (!handled && fallbackInstance?.server) {
-              fallbackInstance.server.emit('message', ['handoff', handoffMsg], serverWs)
+            if (
+              currentRoute.runtime !== initialRoute.runtime ||
+              currentRoute.instance !== initialRoute.instance
+            ) {
+              failHandoff('fastify runtime changed before websocket handoff')
+              return
             }
+            const handled = fastifyInstance.tryHandoff?.(handoffMsg, serverWs) === true
+            if (!handled) {
+              failHandoff('no fastify websocket route')
+              return
+            }
+            clientReadyState = OPEN
             this.emit('open')
           })
         } else {
@@ -227,7 +244,7 @@ class WebSocket extends EventEmitter {
     } else {
       this.#ws = urlOrSocket
       this.#url = ''
-      debugWS({ event: 'wrap-cf-socket', readyState: this.#ws.readyState })
+      this.#debug({ event: 'wrap-cf-socket', readyState: this.#ws.readyState })
       this.#setupListeners()
     }
   }
@@ -245,7 +262,7 @@ class WebSocket extends EventEmitter {
     cb?: (err?: Error) => void
   ): void {
     try {
-      debugWS({ event: 'send', url: this.#url, ...summarizeWSData(data) })
+      this.#debug({ event: 'send', url: this.#url, ...summarizeWSData(data) })
       if (typeof data === 'string') {
         this.#ws.send(data)
       } else if (Buffer.isBuffer(data)) {
@@ -330,11 +347,11 @@ class WebSocket extends EventEmitter {
     //   error: (err: Error)
     const onMessage = (event: any) => {
       const data = event.data
-      debugWS({ event: 'message', url: this.#url, ...summarizeWSData(data) })
+      this.#debug({ event: 'message', url: this.#url, ...summarizeWSData(data) })
       this.emit('message', data, typeof data !== 'string')
     }
     const onClose = (event: any) => {
-      debugWS({
+      this.#debug({
         event: 'close',
         url: this.#url,
         code: event.code ?? 1000,
@@ -343,7 +360,7 @@ class WebSocket extends EventEmitter {
       this.emit('close', event.code ?? 1000, event.reason ?? '')
     }
     const onError = (event: any) => {
-      debugWS({
+      this.#debug({
         event: 'error',
         url: this.#url,
         message: event?.message ?? event?.error?.message ?? 'WebSocket error',
@@ -351,7 +368,7 @@ class WebSocket extends EventEmitter {
       this.emit('error', event.error ?? new Error(event.message ?? 'WebSocket error'))
     }
     const onOpen = () => {
-      debugWS({ event: 'open', url: this.#url })
+      this.#debug({ event: 'open', url: this.#url })
       this.emit('open')
     }
 
@@ -396,7 +413,6 @@ class WebSocketServer extends EventEmitter {
     callback: (ws: WebSocket) => void
   ): void {
     // wrap the CF WebSocket in our shim
-    debugWS({ event: 'handle-upgrade' })
     const ws = new WebSocket(socket as CFWebSocket)
     callback(ws)
   }

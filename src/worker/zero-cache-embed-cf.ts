@@ -38,19 +38,34 @@
 
 import { EventEmitter } from 'node:events'
 
-import { setLogLevel } from '../log.js'
 import { createBrowserProxy, type BrowserProxy } from '../pg-proxy-browser.js'
-import { DoBackend } from '../pg-proxy-do-backend.js'
-import { resetReplicationState } from '../replication/handler.js'
+import { DoBackend, releaseDoBackendInstanceCaches } from '../pg-proxy-do-backend.js'
+import {
+  deleteReplicationState,
+  resetReplicationState,
+  signalReplicationChange,
+} from '../replication/handler.js'
+import {
+  apiURLForCFInstance,
+  dispatcherFastifyForCFInstance,
+  logCFInstance,
+  postgresURLForCFInstance,
+  registerCFInstanceRuntime,
+  releaseCFInstanceRuntime,
+  setCFInstanceEnv,
+  setCFInstanceProxy,
+  sqliteDirectoryForCFInstance,
+  sqlitePathForCFInstance,
+  type CFInstanceRuntime,
+} from './cf-instance-runtime.js'
 import {
   DurableObjectWebSocketHandoff,
   type DurableObjectWebSocket,
   type DurableObjectWebSocketHandoffContext,
   type HandoffRequestMessage,
 } from './durable-object-websocket-handoff.js'
-import { sweepLeakedSqliteHandles } from './embed-generation.js'
+import { sweepCFInstanceSqliteHandles } from './embed-generation.js'
 import { createLocalSqlBackend } from './local-sql-backend.js'
-import { resetFastifyRegistry } from './shims/fastify.js'
 import { acquireZeroProcessEnv } from './shims/zero-process-env.js'
 // static import so wrangler follows zero-cache's dependency tree and shim aliases.
 import { runWorker as _runWorker } from './zero-cache-run-worker.js'
@@ -65,16 +80,8 @@ const WORKER_SHUTDOWN_TIMEOUT_MS = 5_000
 type GenerationState = {
   cleanupDone: boolean
   cleanupFailed: boolean
-  token: symbol
+  runtime: CFInstanceRuntime
   workerDone: boolean
-}
-
-type OwnedMutation = {
-  hadValue: boolean
-  installedValue: unknown
-  key: PropertyKey
-  previousValue: unknown
-  target: Record<PropertyKey, unknown>
 }
 
 type EmbedParent = EventEmitter & {
@@ -83,90 +90,18 @@ type EmbedParent = EventEmitter & {
   pid: number
 }
 
-// zero-cache's in-process worker graph and the CF shims still contain
-// process-wide module state. keep one embed per isolate until those upstream
-// globals are instance-routed; rejecting a second generation is safer than
-// cross-routing one durable object's sql or process events into another.
-let activeGeneration: GenerationState | null = null
-const propertyOwners = new WeakMap<object, Map<PropertyKey, symbol>>()
-
 function releaseGenerationWhenComplete(generation: GenerationState): void {
-  if (
-    activeGeneration === generation &&
-    generation.workerDone &&
-    generation.cleanupDone &&
-    !generation.cleanupFailed
-  ) {
-    activeGeneration = null
-  }
-}
-
-function setOwnedProperty(
-  mutations: OwnedMutation[],
-  generation: GenerationState,
-  target: Record<PropertyKey, unknown>,
-  key: PropertyKey,
-  value: unknown
-): void {
-  const mutation = mutations.find(
-    (candidate) => candidate.target === target && candidate.key === key
-  )
-  if (mutation) {
-    mutation.installedValue = value
-  } else {
-    mutations.push({
-      hadValue: Object.prototype.hasOwnProperty.call(target, key),
-      installedValue: value,
-      key,
-      previousValue: target[key],
-      target,
-    })
-  }
-
-  let owners = propertyOwners.get(target)
-  if (!owners) {
-    owners = new Map()
-    propertyOwners.set(target, owners)
-  }
-  owners.set(key, generation.token)
-  target[key] = value
-}
-
-function updateOwnedProperty(
-  mutations: OwnedMutation[],
-  generation: GenerationState,
-  target: Record<PropertyKey, unknown>,
-  key: PropertyKey
-): void {
-  const mutation = mutations.find(
-    (candidate) => candidate.target === target && candidate.key === key
-  )
-  if (!mutation) return
-  const owners = propertyOwners.get(target)
-  if (owners?.get(key) !== generation.token) return
-  mutation.installedValue = target[key]
-}
-
-function restoreOwnedProperties(
-  mutations: OwnedMutation[],
-  generation: GenerationState
-): void {
-  for (let index = mutations.length - 1; index >= 0; index--) {
-    const mutation = mutations[index]
-    const owners = propertyOwners.get(mutation.target)
-    if (owners?.get(mutation.key) !== generation.token) continue
-    owners.delete(mutation.key)
-    if (mutation.target[mutation.key] !== mutation.installedValue) continue
-    if (mutation.hadValue) {
-      mutation.target[mutation.key] = mutation.previousValue
-    } else {
-      delete mutation.target[mutation.key]
-    }
+  if (generation.workerDone && generation.cleanupDone && !generation.cleanupFailed) {
+    deleteReplicationState(generation.runtime.instanceId)
+    releaseCFInstanceRuntime(generation.runtime)
   }
 }
 
 export interface ZeroCacheEmbedCFOptions {
-  /** DO SQLite storage (also registered on globalThis.__orez_do_sqlite) */
+  /** stable logical Durable Object identity. required for isolate-safe routing. */
+  instanceId: string
+
+  /** DO SQLite storage owned by this logical Durable Object. */
   doSqlite: unknown
 
   /** base URL for the DO SQL execution endpoints (`/exec`, `/batch`). */
@@ -193,6 +128,9 @@ export interface ZeroCacheEmbedCFOptions {
 
   /** fetch implementation for Worker-local mutate/query API URLs. */
   apiFetch?: typeof fetch
+
+  /** optional instance-scoped diagnostic sink. */
+  log?: (event: Record<string, unknown>) => void
 
   /** timeout in ms waiting for zero-cache ready (default: 30000) */
   readyTimeout?: number
@@ -234,13 +172,14 @@ const EMBED_TX_OWNER = 'orez-embed'
 // remote SQL DO (upstream db sessions killed mid-transaction).
 async function recoverRemoteTransactions(
   url: string,
+  owner: string,
   backendFetch?: typeof fetch
 ): Promise<void> {
   const fetcher = backendFetch ?? fetch
   const resp = await fetcher(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ owner: EMBED_TX_OWNER }),
+    body: JSON.stringify({ owner }),
   })
   if (!resp.ok) {
     const text = await resp.text().catch(() => '')
@@ -270,25 +209,39 @@ function addProtocolSessionFactory(
 export async function startZeroCacheEmbedCF(
   opts: ZeroCacheEmbedCFOptions
 ): Promise<ZeroCacheEmbedCF> {
-  if (activeGeneration) {
+  const appId = opts.appId || 'zero'
+  const publications = opts.publications?.join(',') || `orez_${appId}_public`
+  const readyTimeout = opts.readyTimeout ?? 30000
+  const pgUser = opts.pgUser || 'user'
+  const pgPassword = opts.pgPassword || ''
+  const backendUrl = opts.backendUrl || 'https://orez-do-backend.local'
+  const backendNamespace = opts.backendNamespace || appId
+  if (!opts.apiFetch && (opts.env?.ZERO_MUTATE_URL || opts.env?.ZERO_QUERY_URL)) {
     throw new Error(
-      'zero-cache CF embed: another generation is active or still tearing down'
+      'zero-cache CF embed: apiFetch is required with ZERO_MUTATE_URL or ZERO_QUERY_URL'
     )
   }
+  const runtime = registerCFInstanceRuntime({
+    apiFetch: opts.apiFetch,
+    doSqlite: opts.doSqlite,
+    env: opts.env ?? {},
+    instanceId: opts.instanceId,
+    log: opts.log,
+    pgPassword,
+    pgUser,
+  })
 
   const generation: GenerationState = {
     cleanupDone: false,
     cleanupFailed: false,
-    token: Symbol('zero-cache-cf-generation'),
+    runtime,
     workerDone: true,
   }
-  activeGeneration = generation
+  const instanceId = runtime.instanceId
 
   const globalRecord = globalThis as Record<PropertyKey, unknown>
   let processRecord: Record<PropertyKey, unknown>
-  let processEnv: Record<PropertyKey, unknown>
   let releaseProcessEnv: (() => void) | null = null
-  const mutations: OwnedMutation[] = []
   const backendRoots: DoBackend[] = []
   let proxy: BrowserProxy | null = null
   let parent: EmbedParent | null = null
@@ -306,19 +259,10 @@ export async function startZeroCacheEmbedCF(
   let readyTimer: ReturnType<typeof setTimeout> | undefined
   let debugEmbed = false
   const webSocketHandoff = new DurableObjectWebSocketHandoff(() => fastifyInstance)
-
-  const updateOwnedFastifyInstance = () => {
-    const instancesMutation = mutations.find(
-      (mutation) =>
-        mutation.target === globalRecord && mutation.key === '__orez_fastify_instances'
-    )
-    const currentInstance = globalRecord.__orez_fastify_instance
-    if (
-      Array.isArray(instancesMutation?.installedValue) &&
-      instancesMutation.installedValue.includes(currentInstance)
-    ) {
-      updateOwnedProperty(mutations, generation, globalRecord, '__orez_fastify_instance')
-    }
+  const releaseProcessEnvWhenWorkerDone = () => {
+    if (!generation.workerDone || !releaseProcessEnv) return
+    releaseProcessEnv()
+    releaseProcessEnv = null
   }
 
   const shutdown = (): Promise<void> => {
@@ -349,6 +293,7 @@ export async function startZeroCacheEmbedCF(
         ])
         if (timeout) clearTimeout(timeout)
         if (!workerStopped) {
+          resourceCleanupFailed = true
           cleanupErrors.push(
             new Error(
               `zero-cache CF embed: worker did not terminate within ${WORKER_SHUTDOWN_TIMEOUT_MS}ms`
@@ -378,11 +323,21 @@ export async function startZeroCacheEmbedCF(
           cleanupErrors.push(result.reason)
         }
       }
+      releaseDoBackendInstanceCaches(instanceId)
 
-      updateOwnedFastifyInstance()
-
-      restoreOwnedProperties(mutations, generation)
-      releaseProcessEnv?.()
+      try {
+        webSocketHandoff.closeAll()
+      } catch (err) {
+        resourceCleanupFailed = true
+        cleanupErrors.push(err)
+      }
+      try {
+        sweepCFInstanceSqliteHandles(runtime)
+      } catch (err) {
+        resourceCleanupFailed = true
+        cleanupErrors.push(err)
+      }
+      releaseProcessEnvWhenWorkerDone()
       parentEmitter?.removeAllListeners()
       if (generation.workerDone) parent?.removeAllListeners()
 
@@ -407,53 +362,32 @@ export async function startZeroCacheEmbedCF(
       )
     }
     void shutdown().catch((error) => {
-      console.error('[orez-zero-cache-cf] unexpected worker exit cleanup failed', error)
+      logCFInstance(runtime, {
+        component: 'embed',
+        error,
+        event: 'unexpected-worker-exit-cleanup-failed',
+      })
+      console.error(
+        `[orez-zero-cache-cf:${runtime.instanceId}] unexpected worker exit cleanup failed`,
+        error
+      )
     })
   }
 
   try {
     releaseProcessEnv = acquireZeroProcessEnv()
     processRecord = globalRecord.process as Record<PropertyKey, unknown>
-    processEnv = processRecord.env as Record<PropertyKey, unknown>
 
-    // wire orez's own logger from env, mirroring the node path's setLogLevel.
-    setLogLevel(
-      (opts.env?.OREZ_LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'warn'
-    )
-
-    resetReplicationState()
-    const leakedHandles = sweepLeakedSqliteHandles()
-    if (leakedHandles > 0) {
-      console.warn(
-        `[orez-zero-cache-cf] closed ${leakedHandles} sqlite handles leaked by the previous embed generation`
-      )
-    }
-
-    setOwnedProperty(
-      mutations,
-      generation,
-      globalRecord,
-      '__orez_fastify_instance',
-      undefined
-    )
-    delete globalRecord.__orez_fastify_instance
-    setOwnedProperty(mutations, generation, globalRecord, '__orez_fastify_instances', [])
-    resetFastifyRegistry()
-    updateOwnedProperty(mutations, generation, globalRecord, '__orez_fastify_instances')
-
-    const appId = opts.appId || 'zero'
-    const publications = opts.publications?.join(',') || `orez_${appId}_public`
-    const readyTimeout = opts.readyTimeout ?? 30000
-    const pgUser = opts.pgUser || 'user'
-    const pgPassword = opts.pgPassword || ''
-    const backendUrl = opts.backendUrl || 'https://orez-do-backend.local'
-    const backendNamespace = opts.backendNamespace || appId
     const localSql = createLocalSqlBackend(opts.doSqlite)
+    const txOwner = `${EMBED_TX_OWNER}:${runtime.encodedId}`
 
     const instantiateBackend = (dbName: string) =>
       new DoBackend(backendUrl, dbName, backendNamespace, {
+        allowTransactionalDDL: true,
         fetch: dbName === 'postgres' ? opts.backendFetch : localSql.fetch,
-        txOwner: EMBED_TX_OWNER,
+        instanceId,
+        signalReplication: () => signalReplicationChange(instanceId),
+        txOwner,
       })
 
     const createRootBackend = (dbName: string) => {
@@ -465,6 +399,7 @@ export async function startZeroCacheEmbedCF(
     localSql.recoverOrphanedTransactions()
     await recoverRemoteTransactions(
       `${backendUrl.replace(/\/+$/, '')}/recover-txs?db=postgres&ns=${encodeURIComponent(backendNamespace)}`,
+      txOwner,
       opts.backendFetch
     )
 
@@ -505,35 +440,15 @@ export async function startZeroCacheEmbedCF(
         postgresReplicas: [],
       } as any,
       {
+        debugWire: opts.env?.OREZ_DEBUG_WIRE === '1',
+        instanceId,
         pgUser,
         pgPassword,
         singleDb: false,
         logLevel: opts.env?.ZERO_LOG_LEVEL || 'info',
       }
     )
-
-    setOwnedProperty(
-      mutations,
-      generation,
-      globalRecord,
-      '__orez_do_sqlite',
-      opts.doSqlite
-    )
-    setOwnedProperty(
-      mutations,
-      generation,
-      globalRecord,
-      '__orez_proxy_connect',
-      (port: MessagePort) => proxy?.handleConnection(port)
-    )
-    setOwnedProperty(mutations, generation, globalRecord, '__orez_proxy_user', pgUser)
-    setOwnedProperty(
-      mutations,
-      generation,
-      globalRecord,
-      '__orez_proxy_password',
-      pgPassword
-    )
+    setCFInstanceProxy(runtime, (port) => proxy?.handleConnection(port))
 
     const createdParent = new EventEmitter() as EmbedParent
     parent = createdParent
@@ -547,34 +462,9 @@ export async function startZeroCacheEmbedCF(
     }
     createdParent.pid = (processRecord.pid as number | undefined) ?? 1
 
-    const originalFetch = globalRecord.fetch as typeof fetch
-    setOwnedProperty(mutations, generation, processRecord, 'exit', (code?: number) =>
-      parent?.emit('exit', code ?? 0)
-    )
-    if (opts.apiFetch) {
-      setOwnedProperty(
-        mutations,
-        generation,
-        globalRecord,
-        'fetch',
-        (input: RequestInfo | URL, init?: RequestInit) => {
-          const request = new Request(input, init)
-          const url = new URL(request.url)
-          if (url.hostname === 'orez-zero-api.local') return opts.apiFetch!(request)
-          return originalFetch(input as any, init as any)
-        }
-      )
-    }
-
     const env: Record<string, string> = {
-      ...(processEnv as Record<string, string>),
       SINGLE_PROCESS: '1',
       NODE_ENV: 'development',
-      ZERO_UPSTREAM_DB: `postgres://${pgUser}:ignored@127.0.0.1/postgres`,
-      ZERO_CVR_DB: `postgres://${pgUser}:ignored@127.0.0.1/zero_cvr`,
-      ZERO_CHANGE_DB: `postgres://${pgUser}:ignored@127.0.0.1/zero_cdb`,
-      ZERO_REPLICA_FILE: ':do-sqlite:',
-      ZERO_PORT: '0',
       ZERO_APP_ID: appId,
       ZERO_APP_PUBLICATIONS: publications,
       ZERO_ADMIN_PASSWORD: opts.env?.ZERO_ADMIN_PASSWORD || crypto.randomUUID(),
@@ -585,14 +475,24 @@ export async function startZeroCacheEmbedCF(
       ZERO_CHANGE_MAX_CONNS: opts.env?.ZERO_CHANGE_MAX_CONNS || '2',
       ZERO_LOG_LEVEL: opts.env?.ZERO_LOG_LEVEL || 'warn',
       ...opts.env,
+      ZERO_UPSTREAM_DB: postgresURLForCFInstance(instanceId, 'postgres', pgUser),
+      ZERO_CVR_DB: postgresURLForCFInstance(instanceId, 'zero_cvr', pgUser),
+      ZERO_CHANGE_DB: postgresURLForCFInstance(instanceId, 'zero_cdb', pgUser),
+      ZERO_REPLICA_FILE: sqlitePathForCFInstance(instanceId),
+      ZERO_STORAGE_DB_TMP_DIR: sqliteDirectoryForCFInstance(instanceId),
+      ZERO_PORT: String(runtime.basePort),
+      ZERO_TASK_ID: `orez-cf-${runtime.encodedId}`,
       ZERO_SHADOW_SYNC_ENABLED: 'false',
     }
-    for (const [key, value] of Object.entries(env)) {
-      setOwnedProperty(mutations, generation, processEnv, key, value)
+    if (opts.apiFetch) {
+      for (const key of ['ZERO_MUTATE_URL', 'ZERO_QUERY_URL'] as const) {
+        if (env[key]) env[key] = apiURLForCFInstance(instanceId, env[key])
+      }
     }
+    setCFInstanceEnv(runtime, env)
+    resetReplicationState(instanceId, env, opts.log)
 
-    debugEmbed =
-      env.OREZ_DEBUG_EMBED === '1' || globalRecord.__OREZ_DEBUG_EMBED__ === true
+    debugEmbed = env.OREZ_DEBUG_EMBED === '1'
 
     wrappedParent = new Proxy(createdParent, {
       get(target, prop, receiver) {
@@ -624,7 +524,12 @@ export async function startZeroCacheEmbedCF(
             return receiver
           }
         }
-        return Reflect.get(target, prop, receiver)
+        const value = Reflect.get(target, prop, target)
+        if (typeof value !== 'function') return value
+        return (...args: unknown[]) => {
+          const result = value.apply(target, args)
+          return result === target ? receiver : result
+        }
       },
     })
 
@@ -637,7 +542,13 @@ export async function startZeroCacheEmbedCF(
         )
       }, readyTimeout)
       parentEmitter?.on('message', (msg: unknown) => {
-        if (debugEmbed) console.debug('[orez-zero-cache-cf] parent message', msg)
+        if (debugEmbed) {
+          logCFInstance(runtime, {
+            component: 'embed',
+            event: 'parent-message',
+            message: msg,
+          })
+        }
         if (!stopping && Array.isArray(msg) && msg[0] === 'ready') {
           if (readyTimer) clearTimeout(readyTimer)
           isReady = true
@@ -649,11 +560,18 @@ export async function startZeroCacheEmbedCF(
     generation.workerDone = false
     runWorkerPromise = Promise.resolve().then(() => runWorkerFn(wrappedParent, env))
     void runWorkerPromise.catch((err) => {
-      if (debugEmbed) console.error('[orez-zero-cache-cf] runWorker error', err)
+      if (debugEmbed) {
+        logCFInstance(runtime, {
+          component: 'embed',
+          error: err,
+          event: 'worker-error',
+        })
+      }
     })
     workerSettledPromise = runWorkerPromise.then(
       () => {
         generation.workerDone = true
+        releaseProcessEnvWhenWorkerDone()
         handleUnexpectedWorkerExit()
         if (generation.cleanupDone) parent?.removeAllListeners()
         releaseGenerationWhenComplete(generation)
@@ -662,6 +580,7 @@ export async function startZeroCacheEmbedCF(
         workerError = error
         workerFailed = true
         generation.workerDone = true
+        releaseProcessEnvWhenWorkerDone()
         handleUnexpectedWorkerExit()
         if (generation.cleanupDone) parent?.removeAllListeners()
         releaseGenerationWhenComplete(generation)
@@ -674,8 +593,7 @@ export async function startZeroCacheEmbedCF(
     })
     await Promise.race([readyPromise, workerStartupPromise])
 
-    fastifyInstance = globalRecord.__orez_fastify_instance
-    updateOwnedFastifyInstance()
+    fastifyInstance = dispatcherFastifyForCFInstance(instanceId)
   } catch (startupError) {
     startupFailure = startupError
     try {

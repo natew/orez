@@ -4702,10 +4702,10 @@ describe('DoBackend', () => {
 
     const sent = compactSQL(http.sqls.at(-1) || '')
     expect(sent).toContain(
-      'CREATE INDEX IF NOT EXISTS queries_patch_version ON "chat_0/cvr_queries" ("patchVersion")'
+      'CREATE INDEX IF NOT EXISTS queries_patch_version ON chat_0_cvr_queries ("patchVersion")'
     )
     expect(sent).not.toContain('NULLS FIRST')
-    expect(sent).not.toContain('"chat_0/cvr".')
+    expect(sent).not.toContain('chat_0/cvr')
   })
 
   test('materializes ALTER TABLE ADD UNIQUE CONSTRAINT as a SQLite index', async () => {
@@ -4949,13 +4949,13 @@ describe('DoBackend', () => {
     `)
 
     const sent = compactSQL(
-      sqlContaining(http.sqls, 'CREATE TABLE IF NOT EXISTS "chat_0/cvr_rows"')
+      sqlContaining(http.sqls, 'CREATE TABLE IF NOT EXISTS chat_0_cvr_rows')
     )
-    expect(sent).toContain('CREATE TABLE IF NOT EXISTS "chat_0/cvr_rows"')
+    expect(sent).toContain('CREATE TABLE IF NOT EXISTS chat_0_cvr_rows')
     expect(sent).toContain('"rowKey" text')
     expect(sent).not.toContain('FOREIGN KEY')
     expect(sent).not.toContain('REFERENCES')
-    expect(sent).not.toContain('"chat_0/cvr".')
+    expect(sent).not.toContain('chat_0/cvr')
   })
 
   test('rewrites temporary create-table-as statements to persistent SQLite tables', async () => {
@@ -5478,7 +5478,7 @@ describe('DoBackend', () => {
 
   test('executes zero-cache DELETE RETURNING count CTEs as SQLite deletes', async () => {
     const http = await startDoHttp((sql) => {
-      if (compactSQL(sql).startsWith('DELETE FROM "todo_0/cdc_changeLog"')) {
+      if (compactSQL(sql).startsWith('DELETE FROM "todo_0_cdc_changeLog"')) {
         return {
           rows: [{ __orez_count__deleted: 1 }, { __orez_count__deleted: 1 }],
           columns: ['__orez_count__deleted'],
@@ -5505,7 +5505,7 @@ describe('DoBackend', () => {
 
     expect(dataRowValues(result)).toEqual([['2']])
     expect(compactSQL(http.sqls.at(-1) || '')).toBe(
-      'DELETE FROM "todo_0/cdc_changeLog" WHERE watermark < ? RETURNING 1 AS __orez_count__deleted'
+      'DELETE FROM "todo_0_cdc_changeLog" WHERE watermark < ? RETURNING 1 AS __orez_count__deleted'
     )
     expect(http.params.at(-1)).toEqual(['a1zs3dw2usxs'])
   })
