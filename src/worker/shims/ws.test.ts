@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
+import {
+  registerCFInstanceFastify,
+  registerCFInstanceRuntime,
+  releaseCFInstanceRuntime,
+} from '../cf-instance-runtime.js'
 import WebSocket, { WebSocketServer, createWebSocketStream } from './ws.js'
 
 /** mock CF WebSocket — mimics the server side of a WebSocketPair */
@@ -48,11 +53,30 @@ describe('WebSocket shim', () => {
       expect(ws).toBeInstanceOf(WebSocket)
     })
 
-    it('handles string URL for localhost (in-process)', () => {
-      // no longer throws — localhost URLs use the in-process path
-      // without a fastify instance it emits close instead of throwing
-      const ws = new WebSocket('ws://localhost')
-      expect(ws).toBeInstanceOf(WebSocket)
+    it('routes a localhost URL through its exact runtime port', () => {
+      const runtime = registerCFInstanceRuntime({
+        doSqlite: {},
+        env: {},
+        instanceId: 'ws-test',
+        pgPassword: '',
+        pgUser: 'user',
+      })
+      registerCFInstanceFastify(runtime.basePort, {
+        server: { emit: vi.fn() },
+        tryHandoff: vi.fn(() => true),
+      })
+      try {
+        const routed = new WebSocket(`ws://localhost:${runtime.basePort}/replication`)
+        expect(routed).toBeInstanceOf(WebSocket)
+      } finally {
+        releaseCFInstanceRuntime(runtime)
+      }
+    })
+
+    it('rejects a localhost URL without an explicit runtime port', () => {
+      expect(() => new WebSocket('ws://localhost')).toThrow(
+        'no Fastify runtime for port 0'
+      )
     })
 
     it('sets up event listeners on CF WebSocket', () => {

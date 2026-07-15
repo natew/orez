@@ -5,7 +5,7 @@
  * with a custom socket factory that speaks wire protocol over MessagePort
  * to pg-proxy-browser.
  *
- * setup: set globalThis.__orez_proxy_connect before importing.
+ * every connection URL contains its CF embed runtime identity.
  */
 
 // import the REAL postgres package — the bundler aliases 'postgres-real' to the
@@ -14,34 +14,40 @@
 // @ts-expect-error — resolved by bundler alias
 import postgres from 'postgres-real'
 
+import {
+  logCFInstance,
+  routeCFPostgresHost,
+  routeCFPostgresURL,
+} from '../cf-instance-runtime.js'
 import { createSocketFactory } from './postgres-socket.js'
 
-const getProxyConnect = (): ((port: MessagePort) => void) => {
-  const fn = (globalThis as any).__orez_proxy_connect
-  if (!fn) throw new Error('__orez_proxy_connect not set')
-  return fn
-}
-
 function browserPostgres(urlOrOptions?: any, options?: any) {
-  const opts: any =
-    typeof urlOrOptions === 'string'
-      ? { ...(options || {}), host: urlOrOptions }
-      : { ...(urlOrOptions || {}) }
-
-  opts.socket = createSocketFactory(getProxyConnect())
-
+  let runtime
+  let opts: any
   if (typeof urlOrOptions === 'string') {
-    try {
-      const parsed = new URL(urlOrOptions.replace('pglite://', 'http://'))
-      opts.database = parsed.pathname.replace(/^\//, '') || 'postgres'
-      opts.host = '127.0.0.1'
-      opts.port = 0
-    } catch {}
+    runtime = routeCFPostgresURL(urlOrOptions)
+    opts = { ...(options || {}) }
+    const parsed = new URL(urlOrOptions.replace('pglite://', 'http://'))
+    opts.database = parsed.pathname.replace(/^\//, '') || 'postgres'
+    opts.host = parsed.hostname
+  } else if (urlOrOptions && typeof urlOrOptions === 'object') {
+    opts = { ...urlOrOptions }
+    const host = Array.isArray(opts.host) ? opts.host[0] : opts.host
+    if (typeof host !== 'string') {
+      throw new Error('postgres-browser: an instance-routed postgres host is required')
+    }
+    runtime = routeCFPostgresHost(host)
+  } else {
+    throw new Error('postgres-browser: an instance-routed postgres URL is required')
   }
 
+  opts.socket = createSocketFactory((port) => runtime.proxyConnect(port))
+
+  opts.port = 0
+
   opts.ssl = false
-  opts.password = (globalThis as any).__orez_proxy_password || ''
-  opts.username = (globalThis as any).__orez_proxy_user || 'user'
+  opts.password = runtime.pgPassword
+  opts.username = runtime.pgUser
   // disable auto-subscribe
   if (opts.no_subscribe === undefined) opts.no_subscribe = true
   // default pool size 2 — many concurrent connections can overwhelm the
@@ -51,9 +57,12 @@ function browserPostgres(urlOrOptions?: any, options?: any) {
   // for win32 node), and silently clamping it re-introduces the hang.
   if (!opts.max) opts.max = 2
 
-  console.debug(
-    `[postgres-browser] creating client db=${opts.database} repl=${!!opts.connection?.replication} fetch_types=${opts.fetch_types} max=${opts.max} keys=${Object.keys(opts).sort().join(',')}`
-  )
+  logCFInstance(runtime, {
+    component: 'postgres-browser',
+    database: opts.database,
+    event: 'client-create',
+    replication: !!opts.connection?.replication,
+  })
   const client = postgres(opts)
   return client
 }

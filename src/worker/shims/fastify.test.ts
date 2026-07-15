@@ -1,22 +1,31 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 
-import Fastify, { resetFastifyRegistry, type FastifyShim } from './fastify.js'
+import {
+  dispatcherFastifyForCFInstance,
+  registerCFInstanceRuntime,
+  releaseCFInstanceRuntime,
+  type CFInstanceRuntime,
+} from '../cf-instance-runtime.js'
+import Fastify, { type FastifyShim } from './fastify.js'
 
 describe('Fastify shim', () => {
   let app: FastifyShim
-  let origGlobal: unknown
+  let runtime: CFInstanceRuntime
 
   beforeEach(() => {
-    origGlobal = (globalThis as any).__orez_fastify_instance
+    runtime = registerCFInstanceRuntime({
+      doSqlite: {},
+      env: {},
+      instanceId: 'fastify-test',
+      pgPassword: '',
+      pgUser: 'user',
+    })
     app = Fastify()
   })
 
-  afterEach(() => {
-    if (origGlobal !== undefined) {
-      ;(globalThis as any).__orez_fastify_instance = origGlobal
-    } else {
-      delete (globalThis as any).__orez_fastify_instance
-    }
+  afterEach(async () => {
+    await app.close()
+    releaseCFInstanceRuntime(runtime)
   })
 
   describe('constructor', () => {
@@ -25,31 +34,9 @@ describe('Fastify shim', () => {
       expect(app.server).toBeDefined()
     })
 
-    it('registers itself on globalThis', () => {
-      expect((globalThis as any).__orez_fastify_instance).toBe(app)
-      expect((globalThis as any).__orez_fastify_instances).toContain(app)
-    })
-  })
-
-  // embed restart contract: a new embed generation drops the dead
-  // generation's instances so the ws shim's handoff loop can't route a
-  // fresh replicator subscription to a dead change-streamer.
-  describe('resetFastifyRegistry', () => {
-    it('clears all registered instances', () => {
-      const second = Fastify()
-      expect((globalThis as any).__orez_fastify_instances.length).toBeGreaterThanOrEqual(
-        2
-      )
-
-      resetFastifyRegistry()
+    it('does not publish an ambient instance', () => {
       expect((globalThis as any).__orez_fastify_instance).toBeUndefined()
-      expect((globalThis as any).__orez_fastify_instances).toEqual([])
-
-      // the next generation registers fresh
-      const next = Fastify()
-      expect((globalThis as any).__orez_fastify_instance).toBe(next)
-      expect((globalThis as any).__orez_fastify_instances).toEqual([next])
-      expect((globalThis as any).__orez_fastify_instances).not.toContain(second)
+      expect((globalThis as any).__orez_fastify_instances).toBeUndefined()
     })
   })
 
@@ -212,8 +199,9 @@ describe('Fastify shim', () => {
 
   describe('lifecycle', () => {
     it('listen() resolves to an address string', async () => {
-      const addr = await app.listen({ host: '::', port: 4848 })
-      expect(typeof addr).toBe('string')
+      const addr = await app.listen({ host: '::', port: runtime.basePort })
+      expect(addr).toBe(`0.0.0.0:${runtime.basePort}`)
+      expect(dispatcherFastifyForCFInstance(runtime.instanceId)).toBe(app)
     })
 
     it('ready() resolves', async () => {

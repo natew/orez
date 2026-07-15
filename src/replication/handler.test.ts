@@ -6,10 +6,13 @@ import { usePublicationsEnv } from '../test-env'
 import { installChangeTracking } from './change-tracker'
 import {
   createReplicationFeedbackParser,
+  deleteReplicationState,
   extractStartLsn,
+  getReplicationHealth,
   handleReplicationQuery,
   handleStartReplication,
   lsnFromString,
+  markReplicationProgress,
   noteConfirmedFlushLsn,
   REPLICATION_BATCH_SIZE,
   resetReplicationState,
@@ -18,6 +21,28 @@ import {
 } from './handler'
 
 usePublicationsEnv(undefined)
+
+describe('instance-scoped replication state', () => {
+  it('isolates wake signals and confirmation progress by logical instance', () => {
+    resetReplicationState('alpha')
+    resetReplicationState('bravo')
+    try {
+      signalReplicationChange('alpha')
+      markReplicationProgress('bravo')
+
+      expect(getReplicationHealth('alpha')).toMatchObject({
+        lastConfirmProgressAt: 0,
+        lastWriteSignalAt: expect.any(Number),
+      })
+      expect(getReplicationHealth('alpha').lastWriteSignalAt).toBeGreaterThan(0)
+      expect(getReplicationHealth('bravo').lastWriteSignalAt).toBe(0)
+      expect(getReplicationHealth('bravo').lastConfirmProgressAt).toBeGreaterThan(0)
+    } finally {
+      deleteReplicationState('alpha')
+      deleteReplicationState('bravo')
+    }
+  })
+})
 
 // parse wire protocol RowDescription+DataRow response into columns/values
 function parseResponse(buf: Uint8Array): { columns: string[]; values: string[] } | null {

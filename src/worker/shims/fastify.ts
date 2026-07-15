@@ -18,6 +18,10 @@
 
 import { EventEmitter } from 'node:events'
 
+import {
+  registerCFInstanceFastify,
+  unregisterCFInstanceFastify,
+} from '../cf-instance-runtime.js'
 import { WebSocket as WsShim, WebSocketServer as WsServerShim } from './ws.js'
 
 // -- types matching fastify's minimal surface used by zero-cache --
@@ -66,6 +70,10 @@ class FakeHttpServer extends EventEmitter {
 
   address() {
     return this.#address
+  }
+
+  setPort(port: number): void {
+    this.#address = { ...this.#address, port }
   }
 
   /** match the onMessageType pattern from zero-cache processes.js */
@@ -196,13 +204,19 @@ class FastifyShim {
     this.#readyResolvers = []
   }
 
-  async listen(_opts?: { host?: string; port?: number }): Promise<string> {
+  async listen(opts?: { host?: string; port?: number }): Promise<string> {
+    const port = opts?.port
+    if (!Number.isInteger(port) || !port || port < 1) {
+      throw new Error(`fastify shim: an instance routing port is required`)
+    }
+    registerCFInstanceFastify(port, this)
+    this.server.setPort(port)
     await this.ready()
-    return '0.0.0.0:0'
+    return `0.0.0.0:${port}`
   }
 
   async close(): Promise<void> {
-    // no-op on CF
+    unregisterCFInstanceFastify(this)
   }
 
   // inject — process a request through registered routes
@@ -291,28 +305,7 @@ function tryParseJson(str: string): unknown {
 // -- default export matching fastify's API --
 
 function Fastify(_opts?: unknown): FastifyShim {
-  const instance = new FastifyShim()
-  // always overwrite — the ZeroDispatcher (which has the WS handoff routes)
-  // is created LAST, so the final instance is the one handleWebSocket needs.
-  ;(globalThis as any).__orez_fastify_instance = instance
-  // track all instances so callers can try handoff against each one
-  ;(globalThis as any).__orez_fastify_instances =
-    (globalThis as any).__orez_fastify_instances || []
-  ;(globalThis as any).__orez_fastify_instances.push(instance)
-  return instance
-}
-
-/**
- * drop every registered fastify instance. called at embed generation begin
- * (the embed restart contract — see ../embed-generation.ts): a dead
- * generation's instances otherwise stay in the registry, and the ws shim's
- * handoff loop matches the dead change-streamer's routes first — the new
- * generation's replicator then subscribes to a server that never answers
- * and boot hangs silently.
- */
-export function resetFastifyRegistry(): void {
-  delete (globalThis as any).__orez_fastify_instance
-  ;(globalThis as any).__orez_fastify_instances = []
+  return new FastifyShim()
 }
 
 export default Fastify

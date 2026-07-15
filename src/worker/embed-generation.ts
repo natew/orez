@@ -15,13 +15,15 @@
  * the contract: starting a new embed generation proves the previous one is
  * dead, so the embed reclaims at START exactly what process death would have
  * reclaimed — no more, no less. every sqlite handle zero-cache opens is
- * registered in `globalThis.__orez_open_sqlite_dbs` at the platform's native
- * seam (node: a pure-tracking patch in zqlite's Database, see
- * zero-sqlite-handle-patch.ts; CF: the DO sqlite shim registers its own
- * instances), and `sweepLeakedSqliteHandles()` closes the leftovers. doing
- * this at start (not stop) also covers generations that crashed without
- * running stop(), exactly like a process supervisor restarting a dead worker.
+ * registered at the platform's native seam. node uses
+ * `globalThis.__orez_open_sqlite_dbs` through the pure-tracking zqlite patch
+ * (see zero-sqlite-handle-patch.ts). CF stores handles on the explicit Durable
+ * Object runtime. doing this at start (not stop) also covers generations that
+ * crashed without running stop(), exactly like a process supervisor restarting
+ * a dead worker.
  */
+
+import type { CFInstanceRuntime } from './cf-instance-runtime.js'
 
 interface CloseableDb {
   close(): unknown
@@ -49,5 +51,25 @@ export function sweepLeakedSqliteHandles(): number {
     closed++
   }
   dbs.clear()
+  return closed
+}
+
+/** close only the sqlite handles owned by one CF Durable Object runtime. */
+export function sweepCFInstanceSqliteHandles(runtime: CFInstanceRuntime): number {
+  let closed = 0
+  const errors: unknown[] = []
+  for (const db of [...runtime.sqliteHandles]) {
+    try {
+      db.close()
+      runtime.sqliteHandles.delete(db)
+    } catch (error) {
+      errors.push(error)
+    }
+    closed++
+  }
+  if (errors.length === 1) throw errors[0]
+  if (errors.length > 1) {
+    throw new AggregateError(errors, 'zero-cache CF embed: sqlite teardown failed')
+  }
   return closed
 }
