@@ -46,7 +46,14 @@ host stops using it by default.
 
 ### 2. Destination: generation-staged apply with durable progress
 
-The engine gains four entry points (wasm-exported like the existing ones):
+The engine gains five entry points (wasm-exported like the existing ones):
+
+- `engine_read_snapshot_progress(db) -> Progress | null` — STRICT read-only
+  resume lookup. `null` means genuinely no active generation; an unreadable
+  or corrupt progress row is an error, never `null` — defaulting a failed
+  read to "no progress" would silently discard resumable work. The host
+  calls this first on every ingest entry; an active generation resumes from
+  its stored table+cursor without touching the source's page-1 watermark.
 
 - `engine_begin_snapshot_generation(db, tables, startWatermark) -> generation`
   — creates `_zsync_stage_<g>_<table>` tables from the modeled schema and a
@@ -54,7 +61,9 @@ The engine gains four entry points (wasm-exported like the existing ones):
   startWatermark, table, cursor, state = 'paging'). `startWatermark` is a
   SOURCE-side fact the host captures from the FIRST page response — the
   engine cannot derive it (live `upstream_watermark` is exactly wrong after
-  a 410-triggered restart).
+  a 410-triggered restart). `begin` always creates a NEW generation, first
+  marking any active one abandoned (lazy sweep); resume is
+  `engine_read_snapshot_progress`'s job, never `begin`'s.
 - `engine_apply_snapshot_page(db, tables, g, table, rows, nextCursor)` —
   validates rows through the same `upsert_row` path as today but targeted at
   the staging table, then durably records `nextCursor` with the same commit.
