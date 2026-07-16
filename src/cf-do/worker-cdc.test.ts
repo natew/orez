@@ -5,7 +5,13 @@ import { describe, expect, it, vi } from 'vitest'
 import { TransactionalCdc } from './cdc.js'
 import { DurableWatermarkState } from './watermark.js'
 
-vi.mock('cloudflare:workers', () => ({ DurableObject: class {} }))
+vi.mock('cloudflare:workers', () => ({
+  DurableObject: class {
+    constructor(ctx: unknown) {
+      this.ctx = ctx
+    }
+  },
+}))
 
 const BetterSqlite3 = BedrockSqlite.Database
 
@@ -209,6 +215,83 @@ describe('ZeroDO transactional CDC integration', () => {
       { id: 'n1', body: 'private' },
     ])
     expect(zero.readChangesSince(0)).toEqual([])
+  })
+
+  it('rolls back an unannotated write to a registered private application table', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE private_note (id TEXT PRIMARY KEY, body TEXT)')
+
+    await zero.applicationSqlRegisterTables([
+      { table: 'private_note', publicTable: 'private.private_note', publish: false },
+    ])
+    await zero.applicationSqlBegin('application-private-rollback')
+    await zero.applicationSqlSessionExec(
+      'application-private-rollback',
+      "INSERT INTO private_note VALUES ('n1', 'discarded')"
+    )
+    await zero.applicationSqlRollback('application-private-rollback')
+
+    expect(sql.exec('SELECT * FROM private_note').toArray()).toEqual([])
+    expect(zero.readChangesSince(0)).toEqual([])
+  })
+
+  it('snapshots application schema without copying every table at session begin', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
+
+    await zero.applicationSqlBegin('application-schema-only')
+
+    expect(
+      sql
+        .exec(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '_orez_tx_application-schema-only_%'"
+        )
+        .toArray()
+    ).toEqual([])
+    await zero.applicationSqlRollback('application-schema-only')
+  })
+
+  it('recovers an interrupted application session when the Durable Object is recreated', async () => {
+    const { sql, nativeDb, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE private_note (id TEXT PRIMARY KEY, body TEXT)')
+    await zero.applicationSqlRegisterTables([
+      { table: 'private_note', publicTable: 'private.private_note', publish: false },
+    ])
+    await zero.applicationSqlBegin('application-restart')
+    await zero.applicationSqlSessionExec(
+      'application-restart',
+      "INSERT INTO private_note VALUES ('n1', 'interrupted')"
+    )
+
+    const { ZeroDO } = await import('./worker.js')
+    let recovery: Promise<void> | undefined
+    const transaction = <T>(work: () => T): T => {
+      nativeDb.exec('BEGIN')
+      try {
+        const value = work()
+        nativeDb.exec('COMMIT')
+        return value
+      } catch (error) {
+        nativeDb.exec('ROLLBACK')
+        throw error
+      }
+    }
+    new ZeroDO(
+      {
+        storage: {
+          sql,
+          transaction: async <T>(work: () => T) => transaction(work),
+          transactionSync: transaction,
+        },
+        blockConcurrencyWhile(work: () => Promise<void>) {
+          recovery = work()
+        },
+      } as any,
+      { OREZ_DO_WRITE_BUDGET_DISABLED: 'true' } as any
+    )
+    await recovery
+
+    expect(sql.exec('SELECT * FROM private_note').toArray()).toEqual([])
   })
 
   it('captures a published side effect even when the initiating table is private', async () => {
