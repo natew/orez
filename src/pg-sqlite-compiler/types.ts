@@ -36,6 +36,13 @@ export interface CompileWarning {
 export interface CompileResult {
   sql: string
   warnings: CompileWarning[]
+  /**
+   * 1-based numbers of the `$n` slots that were an array operand of ANY/ALL.
+   * The emitted SQL reads them with json_each(), so the caller must bind these
+   * as JSON array text (`JSON.stringify(value)`) instead of a PG array literal.
+   * Empty when the statement binds no array params.
+   */
+  arrayParamNumbers: number[]
 }
 
 export interface CompileOptions {
@@ -51,6 +58,9 @@ export interface CompileOptions {
 export interface PassContext {
   schema: SchemaInfo
   warnings: CompileWarning[]
+  /** Collects bind slots that must be encoded as JSON array text. */
+  arrayParamNumbers?: Set<number>
+
   /**
    * Optional pass list — if set, runPasses uses these instead of the default
    * pipeline. Otherwise the full default pipeline runs.

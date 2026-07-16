@@ -64,9 +64,10 @@ export function compile(pgSql: string, opts: CompileOptions = {}): CompileResult
   const version = opts.pgVersion ?? DEFAULT_VERSION
   const passes = opts.passes
   const warnings: CompileResult['warnings'] = []
+  const arrayParamNumbers = new Set<number>()
 
   const trimmed = stripTrailingSemicolon(pgSql.trim())
-  if (!trimmed) return { sql: '', warnings }
+  if (!trimmed) return { sql: '', warnings, arrayParamNumbers: [] }
 
   // parseSync returns a ParseResult: { version, stmts: [{ stmt: {...} }, ...] }
   const parsed = parseSync(trimmed) as { version?: number; stmts?: any[] } | any
@@ -75,6 +76,7 @@ export function compile(pgSql: string, opts: CompileOptions = {}): CompileResult
     const result = {
       sql: trimmed,
       warnings: [{ kind: 'parse-empty', message: 'no statements parsed' }],
+      arrayParamNumbers: [],
     }
     throwIfStrict(opts, result.warnings, result.sql)
     return result
@@ -82,7 +84,7 @@ export function compile(pgSql: string, opts: CompileOptions = {}): CompileResult
 
   // Run all passes on each top-level RawStmt entry (so passes can walk from root).
   for (let i = 0; i < stmts.length; i++) {
-    runPasses(stmts[i], { schema, warnings, passes })
+    runPasses(stmts[i], { schema, warnings, passes, arrayParamNumbers })
   }
   throwIfStrict(opts, warnings, trimmed)
 
@@ -95,7 +97,11 @@ export function compile(pgSql: string, opts: CompileOptions = {}): CompileResult
   )
   const sql = stripTrailingSemicolon(emitted.trim())
   throwIfStrict(opts, warnings, sql)
-  return { sql, warnings }
+  return {
+    sql,
+    warnings,
+    arrayParamNumbers: [...arrayParamNumbers].sort((a, b) => a - b),
+  }
 }
 
 export function compileMany(

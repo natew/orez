@@ -21,15 +21,38 @@ PG SQL ──► parseSync()       (libpg-query WASM, real PG parser)
 
 ## Passes
 
-Each pass is a focused visitor for one PG → SQLite concern:
+Each pass is a focused visitor for one PG → SQLite concern. They run in the
+order listed by `passes/index.ts`:
 
+- `passes/dml-cte.ts` — data-modifying CTEs
+- `passes/array.ts` — `= ANY(…)` / `<> ALL(…)` → `IN (SELECT value FROM json_each(…))`
+- `passes/types.ts` — `::type`, CAST chains, PG → SQLite type names, BIGSERIAL
 - `passes/datetime.ts` — NOW(), CURRENT_TIMESTAMP, EXTRACT, DATE_TRUNC, INTERVAL
-- `passes/array.ts` — ARRAY[…], @>, <@, unnest, array literals
-- `passes/cast.ts` — `::type`, CAST chains, PG → SQLite type names
-- `passes/json.ts` — `->`, `->>`, jsonb_set/get/path
-- `passes/create_table.ts` — type mappings, BIGSERIAL → INTEGER, defaults
-- `passes/insert.ts` — ON CONFLICT semantics, RETURNING (mostly native)
+- `passes/string-functions.ts` — PG string builtins → SQLite equivalents
+- `passes/json-functions.ts` — json_agg/json_build_object → json_group_array/json_object
+- `passes/row-json.ts` — row_to_json and friends
 - `passes/catalog.ts` — pg_class / pg_attribute / information_schema rewrites
+- `passes/schema.ts` — schema-qualified name flattening
+- `passes/unsupported.ts` — warns on constructs with no SQLite equivalent
+
+## Array params
+
+`col = ANY($1::text[])` compiles to `json_each($1)`, which reads a **JSON array
+string** — not a PG array literal. `compile()` returns the bind slots this
+applies to so the caller can encode them:
+
+```ts
+const { sql, arrayParamNumbers } = compile(`SELECT id FROM t WHERE id = ANY($1::text[])`)
+// arrayParamNumbers === [1]
+const bound = params.map((v, i) =>
+  arrayParamNumbers.includes(i + 1) ? JSON.stringify(v) : v
+)
+```
+
+Only `= ANY` and `<> ALL` translate. Other operators (`> ANY`, `<= ALL`, …)
+have no order-preserving json_each form and raise an `unsupported-array-operator`
+warning, so `strict: true` callers reject them instead of shipping SQL that dies
+at prepare.
 
 ## Testing
 

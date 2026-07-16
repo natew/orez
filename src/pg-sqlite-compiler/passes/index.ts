@@ -1,3 +1,4 @@
+import { arrayPass } from './array.js'
 import { catalogPass } from './catalog.js'
 import { datetimePass } from './datetime.js'
 import { dmlCtePass } from './dml-cte.js'
@@ -16,12 +17,16 @@ import { unsupportedPass } from './unsupported.js'
  * first (so other passes see SQLite-native type names), datetime runs after
  * (function-form → SQLValueFunction), catalog rewrites last (after every
  * other pass has stabilized).
+ *
+ * array runs ahead of types: it reads the operand's original `$1::text[]` cast
+ * to find the bind slot, and types would have already flattened that cast.
  */
 import type { Pass, PassContext } from '../types.js'
 
 export const DEFAULT_PASSES: Pass[] = [
   // structural rewrites first so later passes see the final statement shape
   dmlCtePass,
+  arrayPass,
   typesPass,
   datetimePass,
   stringFunctionsPass,
@@ -32,7 +37,6 @@ export const DEFAULT_PASSES: Pass[] = [
   unsupportedPass,
   // future:
   //   castPass,
-  //   arrayPass,
   //   insertPass,
 ]
 

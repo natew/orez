@@ -93,6 +93,47 @@ describe('DoBackend PG/SQLite parity corpus', () => {
     expect(doRows[0].createdAt).toBeInstanceOf(Date)
   })
 
+  // `col = ANY($1::text[])` is how a driver writes a variable-length IN list
+  // against PG. It reaches sqlite as json_each(), which only works if the bind
+  // slot is re-encoded as JSON — so cover both wire shapes a driver can send
+  // (JS array, and the '{a,c}' array literal the text protocol delivers), at 0,
+  // 1 and N values. The empty case is the one that silently returns everything
+  // if the rewrite degrades to a scalar comparison.
+  const ANY_SELECT = `SELECT id FROM deck WHERE id = ANY($1::text[]) ORDER BY id`
+
+  async function seedDeck(): Promise<void> {
+    const ddl = `CREATE TABLE deck (id text PRIMARY KEY, label text NOT NULL)`
+    const seed = `INSERT INTO deck VALUES ('a','one'), ('b','two'), ('c','three')`
+    await pg.query(ddl)
+    await backend.exec(ddl)
+    await pg.query(seed)
+    await backend.exec(seed)
+  }
+
+  for (const [shape, values] of [
+    ['js array', [['a', 'c'], ['b'], []]],
+    ['array literal', ['{a,c}', '{b}', '{}']],
+  ] as Array<[string, unknown[]]>) {
+    test(`= ANY($1::text[]) matches PG for 0/1/N values (${shape})`, async () => {
+      await seedDeck()
+      for (const value of values) {
+        expectSameRows(
+          (await backend.query(ANY_SELECT, [value])).rows,
+          (await pg.query(ANY_SELECT, [value])).rows
+        )
+      }
+    })
+  }
+
+  test('DELETE ... WHERE NOT (id = ANY($1::text[])) matches PG', async () => {
+    await seedDeck()
+    const del = `DELETE FROM deck WHERE NOT (id = ANY($1::text[]))`
+    await pg.query(del, [['a', 'b']])
+    await backend.query(del, [['a', 'b']])
+    const read = 'SELECT id FROM deck ORDER BY id'
+    expectSameRows((await backend.query(read)).rows, (await pg.query(read)).rows)
+  })
+
   test('schema-qualified upserts match PG after sqlite table flattening', async () => {
     await pg.query('CREATE SCHEMA chat_0')
     await pg.query(
