@@ -21,7 +21,7 @@ import {
   BedrockSyncDb,
   type BedrockBrowserModule,
 } from './sqlite-adapter.js'
-import { MutationApplicationError } from './types.js'
+import { isMutationApplicationError } from './types.js'
 
 import type {
   BrowserSyncHost,
@@ -462,7 +462,7 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
             results.push({ clientID: mutation.clientID, id: mutation.id, result: {} })
             await this.#runEffects(deferred)
           } catch (error) {
-            if (!(error instanceof MutationApplicationError)) throw error
+            if (!isMutationApplicationError(error)) throw error
             await this.#writeTransaction('mutation', () =>
               engine_record_app_error(
                 this.#engineDb,

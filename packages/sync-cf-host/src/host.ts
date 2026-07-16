@@ -32,7 +32,7 @@ import {
   SqlStorageMutatorTransaction,
   SqlStorageSyncDb,
 } from './sql-storage-adapter.js'
-import { MutationApplicationError } from './types.js'
+import { isMutationApplicationError } from './types.js'
 import {
   IngestBreakerError,
   IngestCircuitBreaker,
@@ -1565,7 +1565,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
               )
             })
           } catch (error) {
-            const isAppError = error instanceof MutationApplicationError
+            const isAppError = isMutationApplicationError(error)
             if (!isAppError) throw error
             this.#counters.applicationErrors++
             resultClass = 'application_error'

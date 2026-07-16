@@ -1,5 +1,5 @@
 export { createSyncDurableObject, createSyncWorker } from './host.js'
-export { MutationApplicationError, registerMutators } from './types.js'
+export { MutationApplicationError, isMutationApplicationError, registerMutators } from './types.js'
 export type {
   DeferredEffect,
   JsonPrimitive,

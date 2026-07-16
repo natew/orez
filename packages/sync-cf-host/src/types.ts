@@ -66,15 +66,7 @@ export function registerMutators<
   return Object.freeze({ ...registry })
 }
 
-export class MutationApplicationError extends Error {
-  constructor(
-    readonly details: string,
-    message = details
-  ) {
-    super(message)
-    this.name = 'MutationApplicationError'
-  }
-}
+export { MutationApplicationError, isMutationApplicationError } from './mutation-error.js'
 
 export type VisibilityFilter = {
   /** SQL WHERE fragment only, without the WHERE keyword. */

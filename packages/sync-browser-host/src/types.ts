@@ -60,15 +60,7 @@ export function registerMutators<
   return Object.freeze({ ...registry })
 }
 
-export class MutationApplicationError extends Error {
-  constructor(
-    readonly details: string,
-    message = details
-  ) {
-    super(message)
-    this.name = 'MutationApplicationError'
-  }
-}
+export { MutationApplicationError, isMutationApplicationError } from 'orez-sync-cf-host/mutation-error'
 
 export type VisibilityFilter = {
   sql: string

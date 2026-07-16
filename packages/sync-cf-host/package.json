@@ -4,7 +4,11 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./post-commit": "./src/post-commit.ts"
+    "./post-commit": "./src/post-commit.ts",
+    "./mutation-error": {
+      "types": "./src/mutation-error.ts",
+      "import": "./src/mutation-error.ts"
+    }
   },
   "scripts": {
     "build:wasm": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm && rm -f src/generated/.gitignore && bun scripts/write-wasm-module-type.ts",
@@ -12,7 +16,7 @@
     "bundle": "bun run build:wasm && wrangler deploy --dry-run --outdir dist",
     "measure": "bun run build:wasm && bun measure.mjs",
     "test": "bun run test:config && bun run test:platform && bun run test:integration && bun run test:ingest && bun run test:restart",
-    "test:config": "bun test post-commit.test.mjs config.test.mjs write-safeguards.test.mjs",
+    "test:config": "bun test config.test.mjs write-safeguards.test.mjs mutation-error.test.mjs",
     "test:integration": "bun run build:wasm && bun integration-test.mjs",
     "test:ingest": "bun run build:wasm && bun ingest-test.mjs",
     "test:restart": "bun restart-test.mjs",

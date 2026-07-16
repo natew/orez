@@ -13,7 +13,8 @@
     "test": "bun run typecheck && bun test test/unit && bun test/browser/run.ts"
   },
   "dependencies": {
-    "bedrock-sqlite": "workspace:*"
+    "bedrock-sqlite": "workspace:*",
+    "orez-sync-cf-host": "workspace:*"
   },
   "devDependencies": {
     "esbuild": "0.25.12",
