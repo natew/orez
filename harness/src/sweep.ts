@@ -274,18 +274,30 @@ function genSpec(): GenSpec {
     spec.exists = [{ rel: e.rel, where: chance(0.7) ? genWhere(e.to, 1) : undefined }]
   }
   spec.orderBy = genOrderBy(table)
-  // start() cursor: seek past a real seed row in (rank, id) order — the
-  // pagination shape chat leans on; churned/deleted cursors are still valid
-  // seek values
+  // start() cursor: seek past a real seed row. Generate both the numeric rank
+  // shape and a nullable dueAt cursor so NULL ordering remains in the ordinary
+  // differential corpus instead of being reachable only by metamorphic tests.
   if (table === 'task' && chance(0.25)) {
-    const cursor = pick(SEED.task)
-    spec.orderBy = [
-      ['rank', pick(['asc', 'desc'] as const)],
-      ['id', 'asc'],
-    ]
-    spec.start = {
-      row: { rank: cursor.rank, id: cursor.id },
-      inclusive: chance(0.3) || undefined,
+    if (chance(0.35)) {
+      const cursor = pick(SEED.task.filter((row) => row.dueAt === null))
+      spec.orderBy = [
+        ['dueAt', pick(['asc', 'desc'] as const)],
+        ['id', 'asc'],
+      ]
+      spec.start = {
+        row: { dueAt: null, id: cursor.id },
+        inclusive: chance(0.3) || undefined,
+      }
+    } else {
+      const cursor = pick(SEED.task)
+      spec.orderBy = [
+        ['rank', pick(['asc', 'desc'] as const)],
+        ['id', 'asc'],
+      ]
+      spec.start = {
+        row: { rank: cursor.rank, id: cursor.id },
+        inclusive: chance(0.3) || undefined,
+      }
     }
   }
   if (chance(0.4)) spec.limit = int(1, 8)
