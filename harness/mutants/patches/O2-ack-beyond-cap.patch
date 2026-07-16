@@ -1,0 +1,27 @@
+diff --git a/crates/sync-core/src/pull.rs b/crates/sync-core/src/pull.rs
+index 691faa9..0795e9d 100644
+--- a/crates/sync-core/src/pull.rs
++++ b/crates/sync-core/src/pull.rs
+@@ -283,6 +283,22 @@ fn diff(
+     let mut cut_watermark = cookie;
+     let mut byte_capped = false;
+ 
++    // mutant o2: derive acks from the full raw scan, beyond any cap or cut
++    for row in raw.iter() {
++        if text_col(row.get("op")) == "lmid"
++            && let Some(SqlValue::Text(s)) = row.get("pk")
++            && let Ok(pk) = serde_json::from_str::<Value>(s)
++            && pk.get("clientGroupID").and_then(Value::as_str) == Some(group)
++            && let (Some(client), Some(lmid)) = (
++                pk.get("clientID").and_then(Value::as_str),
++                pk.get("lmid").and_then(parse_lmid_field),
++            )
++            && lmid > lmids.get(client).copied().unwrap_or(0)
++        {
++            lmids.insert(client.to_string(), lmid);
++        }
++    }
++
+     for change in &changes {
+         // compute this change row's contribution WITHOUT committing it, so a
+         // budget overflow can cut before it.

@@ -1,0 +1,13 @@
+diff --git a/crates/sync-core/src/pull.rs b/crates/sync-core/src/pull.rs
+index 691faa9..8b7dadb 100644
+--- a/crates/sync-core/src/pull.rs
++++ b/crates/sync-core/src/pull.rs
+@@ -310,7 +310,7 @@ fn diff(
+                     let op =
+                         resolve_row(db, tables, &change.table_name, spec, pk, visible, user_id)?;
+                     delta = serde_json::to_string(&op).map(|s| s.len()).unwrap_or(0);
+-                    pending_op = Some(op);
++                    pending_op = if seen.is_empty() { None } else { Some(op) };
+                     pending_key = Some(key);
+                 }
+                 // an already-seen pk contributes no bytes (identical live

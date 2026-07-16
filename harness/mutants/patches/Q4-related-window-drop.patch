@@ -1,0 +1,13 @@
+diff --git a/crates/sync-core/src/query/compile.rs b/crates/sync-core/src/query/compile.rs
+index a3e7c59..3a2af02 100644
+--- a/crates/sync-core/src/query/compile.rs
++++ b/crates/sync-core/src/query/compile.rs
+@@ -671,7 +671,7 @@ pub fn compile_related_of(
+         params.push(SqlValue::Integer(limit));
+         format!(
+             "SELECT {logical_projection} FROM (SELECT {child_projection}, ROW_NUMBER() OVER (PARTITION BY {part}{order}) AS {rank_alias} \
+-             FROM {ct} AS {rc} WHERE {where_clause}) AS {rc}_w WHERE {rc}_w.{rank_alias} <= ?",
++             FROM {ct} AS {rc} WHERE {where_clause}) AS {rc}_w WHERE {rc}_w.{rank_alias} < ?",
+             part = partition.join(", "),
+             order = order_sql,
+         )

@@ -1,0 +1,16 @@
+diff --git a/crates/sync-core/src/push.rs b/crates/sync-core/src/push.rs
+index daa208a..bf6376b 100644
+--- a/crates/sync-core/src/push.rs
++++ b/crates/sync-core/src/push.rs
+@@ -356,8 +356,9 @@ pub fn handle_push(
+                         finalize(db, group, &m.client_id, m.id)?;
+                         Ok(Tx1Ok::Applied)
+                     }
+-                    Err(MutateError::App { details, message }) => {
+-                        Err(Tx1Error::App { details, message })
++                    Err(MutateError::App { .. }) => {
++                        finalize(db, group, &m.client_id, m.id)?;
++                        Ok(Tx1Ok::Applied)
+                     }
+                     Err(MutateError::Other(e)) => Err(Tx1Error::Other(e)),
+                 },

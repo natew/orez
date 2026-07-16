@@ -1,0 +1,13 @@
+diff --git a/crates/sync-core/src/push.rs b/crates/sync-core/src/push.rs
+index daa208a..c360abe 100644
+--- a/crates/sync-core/src/push.rs
++++ b/crates/sync-core/src/push.rs
+@@ -157,7 +157,7 @@ pub fn preflight(
+ ) -> Result<Preflight, EngineError> {
+     store::claim_client(db, client_group_id, client_id, user_id)?;
+     let lmid = store::read_lmid(db, client_group_id, client_id)?;
+-    if mutation_id <= lmid {
++    if mutation_id < lmid {
+         return Ok(Preflight::Replay { expected: lmid + 1 });
+     }
+     if mutation_id > lmid + 1 {

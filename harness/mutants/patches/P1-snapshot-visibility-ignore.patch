@@ -1,0 +1,21 @@
+diff --git a/crates/sync-core/src/pull.rs b/crates/sync-core/src/pull.rs
+index 691faa9..de54cd0 100644
+--- a/crates/sync-core/src/pull.rs
++++ b/crates/sync-core/src/pull.rs
+@@ -171,15 +171,7 @@ fn snapshot(
+                 .expect("iterated table has projected columns");
+             let base = format!("SELECT {projection} FROM {}", quote_ident(physical_table));
+             let (sql, params) = match visible.and_then(|v| v.of(table, user_id)) {
+-                Some(filter) => (
+-                    format!(
+-                        "WITH {} SELECT * FROM {} WHERE {}",
+-                        tables.logical_ctes(),
+-                        quote_ident(table),
+-                        filter.sql
+-                    ),
+-                    filter.params,
+-                ),
++                Some(_) => (base.clone(), Vec::new()),
+                 None => (base, Vec::new()),
+             };
+             (table.to_string(), sql, params)

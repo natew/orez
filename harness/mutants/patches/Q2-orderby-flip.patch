@@ -1,0 +1,13 @@
+diff --git a/crates/sync-core/src/query/compile.rs b/crates/sync-core/src/query/compile.rs
+index a3e7c59..4628def 100644
+--- a/crates/sync-core/src/query/compile.rs
++++ b/crates/sync-core/src/query/compile.rs
+@@ -183,7 +183,7 @@ impl<'a> Compiler<'a> {
+                 "{}.{} {}",
+                 quote_ident(alias),
+                 quote_ident(self.physical_column(&ast.table, column)?),
+-                if *desc { "DESC" } else { "ASC" }
++                if *desc { "ASC" } else { "DESC" }
+             ));
+         }
+         // stable tie-breaker: append pk columns not already ordered, ascending

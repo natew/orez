@@ -1,0 +1,16 @@
+diff --git a/crates/sync-core/src/push.rs b/crates/sync-core/src/push.rs
+index daa208a..657c963 100644
+--- a/crates/sync-core/src/push.rs
++++ b/crates/sync-core/src/push.rs
+@@ -352,10 +352,7 @@ pub fn handle_push(
+             match preflight(db, group, &m.client_id, m.id, user_id)? {
+                 Preflight::Replay { expected } => Ok(Tx1Ok::Replay { expected }),
+                 Preflight::Applied => match mutator.mutate(db, &m.name, &arg, user_id) {
+-                    Ok(()) => {
+-                        finalize(db, group, &m.client_id, m.id)?;
+-                        Ok(Tx1Ok::Applied)
+-                    }
++                    Ok(()) => Ok(Tx1Ok::Applied),
+                     Err(MutateError::App { details, message }) => {
+                         Err(Tx1Error::App { details, message })
+                     }
