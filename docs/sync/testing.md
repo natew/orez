@@ -230,14 +230,19 @@ State this plainly rather than implying blanket coverage.
    admin-transaction scheduler. What those do not cover is the running binary
    over a real TCP socket, graceful shutdown, and the wake WebSocket under load;
    that behavior is exercised only by the `rust-local` harness lanes.
-4. **There is no jepsen or elle-level checker.** The generated state machine
-   (`state-machine.ts`) is a seeded lifecycle model that compares client views
-   to a SQL oracle and shrinks failing traces, but it is not a linearizability
-   or transactional-anomaly checker: there is no operation-history export for an
-   external consistency checker and no network fault injection (no partition,
-   latency, or packet-drop lanes). Faults in the real harness are process-kill,
-   injected DO storage faults (`storage-faults.ts`), eviction (`eviction.ts`),
-   and the admin-transaction lease and rollback paths only.
+4. **The consistency checkers exist but Elle never runs on a real workload.**
+   An operation-history export now exists: `src/consistency/history.ts` defines
+   the recorded history schema, `recorder.ts` captures it from live lanes, and
+   `projectElleListAppend` projects it to Jepsen/Elle list-append JSON. Real
+   checkers (`atomic-visibility.ts`, `exactly-once-lmid.ts`,
+   `permission-transition.ts`) consume recorded histories. What is still
+   missing: `scripts/elle/self-test.sh` checks only toy fixtures (its own
+   header says it does not check an Orez workload), `projectElleListAppend`
+   is called by nothing but its test, and there is no network fault injection
+   (no partition, latency, or packet-drop lanes). Faults in the real harness
+   are process-kill, injected DO storage faults (`storage-faults.ts`),
+   eviction (`eviction.ts`), and the admin-transaction lease and rollback
+   paths only.
 5. **The upstream IVM fuzzer was not ported.** `protocol-fuzz.ts` fuzzes
    malformed input structurally (every case must 4xx); it does not fuzz
    semantically valid query shapes for correctness. The real IVM fuzzer still
