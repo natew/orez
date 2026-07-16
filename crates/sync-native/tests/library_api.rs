@@ -213,6 +213,28 @@ fn admin_sql_req(
         .unwrap()
 }
 
+fn admin_settle_push_req(
+    ns: &str,
+    push: &Value,
+    response: &Value,
+    user_id: &str,
+) -> Request<axum::body::Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/{ns}/admin/settle-push"))
+        .header("content-type", "application/json")
+        .header("x-admin-key", ADMIN_TOKEN)
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&json!({
+                "push": push,
+                "response": response,
+                "userID": user_id,
+            }))
+            .unwrap(),
+        ))
+        .unwrap()
+}
+
 fn patch_count(resp: &Value, table: &str, op: &str) -> usize {
     resp["rowsPatch"]
         .as_array()
@@ -759,6 +781,32 @@ async fn admin_requires_token_and_rejects_browser_origins() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["rows"][0]["value"], json!(1));
 
+    let push = push_body(json!([mutation(
+        1,
+        "item.create",
+        json!([{"id": "settle-auth", "label": "settle-auth"}]),
+        "client-a",
+    )]));
+    let response = json!({
+        "pushResponse": {
+            "mutations": [{
+                "id": { "clientID": "client-a", "id": 1 },
+                "result": {},
+            }],
+        },
+    });
+    let mut missing = admin_settle_push_req("test-ns", &push, &response, "user-1");
+    missing.headers_mut().remove("x-admin-key");
+    let (status, _) = send(&router, missing).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let mut browser_settle = admin_settle_push_req("test-ns", &push, &response, "user-1");
+    browser_settle
+        .headers_mut()
+        .insert("origin", ALLOWED_ORIGIN.parse().unwrap());
+    let (status, _) = send(&router, browser_settle).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
     let mut browser = admin_sql_req(
         "test-ns",
         "INSERT INTO item (id, label) VALUES ('browser-write', 'blocked')",
@@ -905,6 +953,175 @@ async fn push_applies_mutation_and_pull_sees_it() {
     let (_status, pull_resp) = send(&router, req).await;
     let item_puts = patch_count(&pull_resp, "item", "put");
     assert_eq!(item_puts, 2, "should see both seed + pushed item");
+}
+
+#[tokio::test]
+async fn delegated_push_settlement_is_pull_visible_after_its_effects_and_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    let client_b_pull = json!({
+        "clientID": "client-b",
+        "clientGroupID": "shared-group",
+        "cookie": null,
+    });
+    let (status, before) = send(
+        &router,
+        pull_req("settle-ns", &client_b_pull, "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req(
+            "settle-ns",
+            "INSERT INTO item (id, label) VALUES ('delegated', 'committed by app')",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let push = json!({
+        "clientGroupID": "shared-group",
+        "mutations": [mutation(
+            3,
+            "item.create",
+            json!([{"id": "delegated", "label": "committed by app"}]),
+            "client-a",
+        )],
+        "pushVersion": 1,
+    });
+    let response = json!({
+        "pushResponse": {
+            "mutations": [{
+                "id": { "clientID": "client-a", "id": 3 },
+                "result": {
+                    "error": "alreadyProcessed",
+                    "details": "application lmid is already past mutation 3",
+                },
+            }],
+        },
+    });
+    let (status, settled) = send(
+        &router,
+        admin_settle_push_req("settle-ns", &push, &response, "user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settled, json!({ "settled": 1 }));
+
+    let diff_pull = json!({
+        "clientID": "client-b",
+        "clientGroupID": "shared-group",
+        "cookie": before["cookie"],
+    });
+    let (status, diff) = send(&router, pull_req("settle-ns", &diff_pull, "Bearer user-1")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(patch_count(&diff, "item", "put"), 1);
+    assert_eq!(diff["lastMutationIDChanges"]["client-a"], json!(3));
+
+    let snapshot_pull = json!({
+        "clientID": "client-c",
+        "clientGroupID": "shared-group",
+        "cookie": null,
+    });
+    let (status, snapshot) = send(
+        &router,
+        pull_req("settle-ns", &snapshot_pull, "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(snapshot["lastMutationIDChanges"]["client-a"], json!(3));
+
+    let (status, replayed) = send(
+        &router,
+        admin_settle_push_req("settle-ns", &push, &response, "user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replayed, json!({ "settled": 0 }));
+
+    let (status, stored) = send(
+        &router,
+        admin_sql_req(
+            "settle-ns",
+            "SELECT c.lastMutationID, \
+                    (SELECT count(*) FROM _zsync_changes z \
+                     WHERE z.tableName = '_zsync_clients' AND z.op = 'lmid') AS lmidRows, \
+                    (SELECT watermark FROM _zsync_changes z \
+                     WHERE z.tableName = 'item' ORDER BY watermark DESC LIMIT 1) AS effectWatermark, \
+                    (SELECT watermark FROM _zsync_changes z \
+                     WHERE z.tableName = '_zsync_clients' AND z.op = 'lmid' \
+                     ORDER BY watermark DESC LIMIT 1) AS lmidWatermark \
+             FROM _zsync_clients c \
+             WHERE c.clientGroupID = 'shared-group' AND c.clientID = 'client-a'",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["rows"][0]["lastMutationID"], json!(3));
+    assert_eq!(stored["rows"][0]["lmidRows"], json!(1));
+    assert!(
+        stored["rows"][0]["effectWatermark"].as_i64().unwrap()
+            < stored["rows"][0]["lmidWatermark"].as_i64().unwrap(),
+        "the app effect must be journaled before its lmid"
+    );
+}
+
+#[tokio::test]
+async fn delegated_push_settlement_rejects_a_mismatched_ack_without_advancing_lmid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+    let push = json!({
+        "clientGroupID": "shared-group",
+        "mutations": [mutation(
+            1,
+            "item.create",
+            json!([{"id": "delegated", "label": "committed by app"}]),
+            "client-a",
+        )],
+        "pushVersion": 1,
+    });
+    let response = json!({
+        "pushResponse": {
+            "mutations": [{
+                "id": { "clientID": "different-client", "id": 1 },
+                "result": {},
+            }],
+        },
+    });
+    let (status, rejected) = send(
+        &router,
+        admin_settle_push_req("settle-validation-ns", &push, &response, "user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        rejected["error"],
+        json!("push response mutation at index 0 does not match the original push")
+    );
+
+    let (status, stored) = send(
+        &router,
+        admin_sql_req(
+            "settle-validation-ns",
+            "SELECT (SELECT count(*) FROM _zsync_clients) AS clients, \
+                    (SELECT count(*) FROM _zsync_changes WHERE op = 'lmid') AS lmidRows",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["rows"][0]["clients"], json!(0));
+    assert_eq!(stored["rows"][0]["lmidRows"], json!(0));
 }
 
 #[tokio::test]

@@ -91,7 +91,11 @@ hosts mint distinct 256-bit admin
 tokens, missing or incorrect credentials cannot execute admin SQL, every
 browser-origin admin request is denied, unknown browser origins cannot sync,
 and the exact allowed origin completes both preflight and pull with restricted
-CORS headers. `crates/sync-native/src/namespace.rs` adds
+CORS headers. The same router suite covers application-owned push settlement:
+exact acknowledgement validation, admin gating, cross-client diff and snapshot
+visibility, effects-before-LMID watermark order, and idempotent
+`alreadyProcessed` recovery without a duplicate LMID row.
+`crates/sync-native/src/namespace.rs` adds
 worker-level unit tests for the same scheduler where the lease and connection are
 directly controllable: a failed begin or failed commit that recovers instead of
 wedging, lease reclaim of a lost client, disconnect mid-step, and a plain-job

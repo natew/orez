@@ -12,6 +12,7 @@
 //   POST /<ns>/pull, /<ns>/push        the http-pull dialect (engine)
 //   GET  /<ns>/wake                     wake WebSocket ("pull now" only)
 //   POST /<ns>/admin/sql                oracle reads + upstream writes
+//   POST /<ns>/admin/settle-push        settle an app-owned committed push
 //   GET  /<ns>/admin/status            { ok, bootID, pid, versions, counters }
 //   POST /<ns>/admin/invalidate         epoch bump
 //   POST /<ns>/admin/reset-cursor       restored/behind-server fault

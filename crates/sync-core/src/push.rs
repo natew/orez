@@ -196,6 +196,73 @@ pub fn assemble_push_response(results: Vec<MutationResult>) -> Value {
     json!({ "pushResponse": { "mutations": mutations } })
 }
 
+// settle an application-owned push after its database transaction committed.
+// the response must acknowledge exactly the mutations in the original push,
+// in order, before any lmid is touched. callers must run this in a transaction
+// that starts after the application effects committed, so their trigger rows
+// precede the lmid rows in the shared change log.
+pub fn settle_delegated_push(
+    db: &mut dyn SyncDb,
+    push: &Value,
+    response: &Value,
+    user_id: &str,
+) -> Result<usize, EngineError> {
+    let plan = match push_validate(push)? {
+        PushPlan::Process(plan) => plan,
+        PushPlan::Respond(_) => {
+            return Err(EngineError::bad_request(
+                "unsupported push version cannot be settled",
+            ));
+        }
+    };
+    let response = response.get("pushResponse").unwrap_or(response);
+    let acknowledged = response
+        .get("mutations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| EngineError::bad_request("push response has no mutation results"))?;
+    if acknowledged.len() != plan.mutations.len() {
+        return Err(EngineError::bad_request(format!(
+            "push response acknowledged {} mutations, expected {}",
+            acknowledged.len(),
+            plan.mutations.len()
+        )));
+    }
+    for (index, (mutation, acknowledgement)) in plan.mutations.iter().zip(acknowledged).enumerate()
+    {
+        let acknowledged_client_id = acknowledgement
+            .get("id")
+            .and_then(|id| id.get("clientID"))
+            .and_then(Value::as_str);
+        let acknowledged_mutation_id = acknowledgement
+            .get("id")
+            .and_then(|id| id.get("id"))
+            .and_then(|id| wire::parse_cookie(Some(id)).ok().flatten());
+        if acknowledged_client_id != Some(mutation.client_id.as_str())
+            || acknowledged_mutation_id != Some(mutation.id)
+            || acknowledgement.get("result").is_none()
+        {
+            return Err(EngineError::bad_request(format!(
+                "push response mutation at index {index} does not match the original push"
+            )));
+        }
+    }
+
+    let mut settled = 0;
+    for mutation in &plan.mutations {
+        store::claim_client(db, &plan.client_group_id, &mutation.client_id, user_id)?;
+        let lmid = store::read_lmid(db, &plan.client_group_id, &mutation.client_id)?;
+        // the application store is authoritative for delegated pushes. it may
+        // already be ahead when a host first adopts an existing sqlite file, so
+        // catch up monotonically to the acknowledged id without manufacturing
+        // intermediate settlements. an equal or older replay is a no-op.
+        if mutation.id > lmid {
+            finalize(db, &plan.client_group_id, &mutation.client_id, mutation.id)?;
+            settled += 1;
+        }
+    }
+    Ok(settled)
+}
+
 // the idempotent already-processed result for a replayed mutation
 fn replay_result(client_id: &str, id: i64, expected: i64) -> Value {
     json!({

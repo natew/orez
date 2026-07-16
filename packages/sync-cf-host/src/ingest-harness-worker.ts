@@ -24,6 +24,7 @@ type Fetcher = { fetch(input: string | Request, init?: RequestInit): Promise<Res
 interface Env extends SyncHostEnv {
   DATA: Fetcher
   APP: Fetcher
+  CAPPED_SYNC_DO: DurableObjectNamespace
   UPSTREAM_DO: DurableObjectNamespace
 }
 
@@ -35,6 +36,11 @@ const heldSnapshots = new Set<string>()
 const holdSnapshotsAfterCursor = new Set<string>()
 const activeSnapshots = new Set<string>()
 const snapshotLimits = new Map<string, number[]>()
+const heldDelegatedPushes = new Set<string>()
+const activeDelegatedPushes = new Set<string>()
+const completedDelegatedPushes = new Set<string>()
+const heldChangeResponses = new Set<string>()
+const activeHeldChangeResponses = new Set<string>()
 let delegatedFailuresRemaining = 0
 let delegatedAttempts = 0
 let delegatedPushFailedRemaining = 0
@@ -81,6 +87,11 @@ const config: SyncHostConfig<Env> = {
 }
 
 export const SyncDurableObject = createSyncDurableObject(config)
+const cappedConfig: SyncHostConfig<Env> = {
+  ...config,
+  caps: { maxChangeRows: 10_000, maxChangeBytes: 1 },
+}
+export const CappedSyncDurableObject = createSyncDurableObject(cappedConfig)
 export { ZeroDO }
 
 async function upstreamFetch(request: Request, env: Env): Promise<Response> {
@@ -251,6 +262,14 @@ export class DataService extends WorkerEntrypoint<Env> {
       )
     }
     const response = await upstreamFetch(request, this.env)
+    if (pathname.endsWith('/changes') && heldChangeResponses.has(namespace)) {
+      activeHeldChangeResponses.add(namespace)
+      try {
+        while (heldChangeResponses.has(namespace)) await scheduler.wait(10)
+      } finally {
+        activeHeldChangeResponses.delete(namespace)
+      }
+    }
     if (pathname.endsWith('/snapshot')) {
       const limit = Number(url.searchParams.get('limit'))
       if (Number.isSafeInteger(limit)) {
@@ -281,7 +300,7 @@ export class DataService extends WorkerEntrypoint<Env> {
 }
 
 export class AppService extends WorkerEntrypoint<Env> {
-  fetch(request: Request): Promise<Response> {
+  async fetch(request: Request): Promise<Response> {
     delegatedUrl = request.url
     if (!new URL(request.url).pathname.endsWith('/api/zero/push')) {
       return Promise.resolve(
@@ -313,14 +332,56 @@ export class AppService extends WorkerEntrypoint<Env> {
         Response.json({ error: 'synthetic delegated push failure' }, { status: 503 })
       )
     }
-    return upstreamFetch(request, this.env)
+    if (heldDelegatedPushes.has(namespace)) {
+      activeDelegatedPushes.add(namespace)
+      try {
+        while (heldDelegatedPushes.has(namespace)) await scheduler.wait(10)
+      } finally {
+        activeDelegatedPushes.delete(namespace)
+      }
+    }
+    const response = await upstreamFetch(request, this.env)
+    completedDelegatedPushes.add(namespace)
+    return response
   }
 }
 
 const syncWorker = createSyncWorker(config)
+const cappedSyncWorker = createSyncWorker(cappedConfig)
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
+    if (url.pathname.startsWith('/delegated-ingest-control/')) {
+      const namespace = url.pathname.slice('/delegated-ingest-control/'.length)
+      if (request.method === 'GET') {
+        return Promise.resolve(
+          Response.json({
+            appHeld: heldDelegatedPushes.has(namespace),
+            appActive: activeDelegatedPushes.has(namespace),
+            appCompleted: completedDelegatedPushes.has(namespace),
+            changesHeld: heldChangeResponses.has(namespace),
+            changesActive: activeHeldChangeResponses.has(namespace),
+          })
+        )
+      }
+      return request
+        .json()
+        .catch(() => ({}))
+        .then((body) => {
+          if ((body as { appHeld?: unknown }).appHeld === true) {
+            heldDelegatedPushes.add(namespace)
+            completedDelegatedPushes.delete(namespace)
+          } else if ((body as { appHeld?: unknown }).appHeld === false) {
+            heldDelegatedPushes.delete(namespace)
+          }
+          if ((body as { changesHeld?: unknown }).changesHeld === true) {
+            heldChangeResponses.add(namespace)
+          } else if ((body as { changesHeld?: unknown }).changesHeld === false) {
+            heldChangeResponses.delete(namespace)
+          }
+          return Response.json({ ok: true, namespace })
+        })
+    }
     if (url.pathname.startsWith('/snapshot-control/')) {
       const namespace = url.pathname.slice('/snapshot-control/'.length)
       if (request.method === 'GET') {
@@ -430,6 +491,15 @@ export default {
             delegatedUrl,
           })
         })
+    }
+    if (url.pathname.startsWith('/capped/')) {
+      url.pathname = url.pathname.slice('/capped'.length)
+      const cappedEnv = { ...env, SYNC_DO: env.CAPPED_SYNC_DO }
+      return cappedSyncWorker.fetch!(
+        new Request(url, request) as never,
+        cappedEnv,
+        ctx
+      ) as Promise<Response>
     }
     if (url.pathname.startsWith('/upstream/')) {
       url.pathname = url.pathname.slice('/upstream'.length)

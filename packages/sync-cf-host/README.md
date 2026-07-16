@@ -130,6 +130,19 @@ and the authoritative upstream database are preserved. The JSON response
 includes before/after upstream watermarks and the number of snapshot plus
 catch-up rows applied.
 
+A successful delegated mutation response has a hard causality contract: its
+committed application effects must already be readable from the configured
+upstream `/changes` feed before the application worker returns. The sync host
+then ingests through those effects, journals the acknowledged LMID after them,
+and only then returns the push response. This keeps every capped change-log
+prefix ordered so an acknowledgement cannot reach a client before its effects.
+Chat and Soot use an application-to-data service path that provides this
+ordering today. A future topology that cannot provide it must extend the
+delegated response with an upstream watermark receipt and make the host ingest
+through that receipt before finalization. Do not add a second best-effort path.
+The ordering does not add another ingest round: delegated pushes already waited
+for post-mutation ingest before returning, and now finalize after that wait.
+
 ## Counter and HTTP wire representation
 
 Inside the wasm/JavaScript engine boundary, cookies, watermarks, and LMIDs are

@@ -124,6 +124,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let admin = Router::new()
         .route("/admin/health", get(health))
         .route("/{ns}/admin/sql", post(admin_sql))
+        .route("/{ns}/admin/settle-push", post(admin_settle_push))
         .route("/{ns}/admin/status", get(admin_status))
         .route("/{ns}/admin/invalidate", post(admin_invalidate))
         .route("/{ns}/admin/reset-cursor", post(admin_reset_cursor))
@@ -623,6 +624,47 @@ async fn admin_sql(
                 Err(e) => json_status(500, json!({ "error": e.0 })),
             }
         }
+    }
+}
+
+async fn admin_settle_push(
+    State(state): State<Arc<AppState>>,
+    Path(ns): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Ok(value) = serde_json::from_slice::<Value>(&body) else {
+        return json_status(400, json!({ "error": "invalid json" }));
+    };
+    let Some(push) = value.get("push").cloned() else {
+        return json_status(400, json!({ "error": "missing push" }));
+    };
+    let Some(response) = value.get("response").cloned() else {
+        return json_status(400, json!({ "error": "missing response" }));
+    };
+    let Some(user_id) = value
+        .get("userID")
+        .and_then(Value::as_str)
+        .filter(|user_id| !user_id.is_empty())
+        .map(str::to_string)
+    else {
+        return json_status(400, json!({ "error": "missing userID" }));
+    };
+    let namespace = match state.manager.get(&ns) {
+        Ok(namespace) => namespace,
+        Err(error) => return json_status(400, json!({ "error": error })),
+    };
+    let ctx = state.ctx.clone();
+    let result = namespace
+        .run(move |conn| engine::settle_delegated_push(conn, &ctx, &push, &response, &user_id))
+        .await;
+    match result {
+        Ok(settled) => {
+            if settled > 0 {
+                state.wake.wake(&ns, "");
+            }
+            json_status(200, json!({ "settled": settled }))
+        }
+        Err(error) => json_status(error.status, json!({ "error": error.message })),
     }
 }
 

@@ -1030,6 +1030,13 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       return this.#ingestPromise
     }
 
+    #ingestAfterCurrent(upstreamPath: string | null): Promise<number> {
+      const current = this.#ingestPromise
+      return current
+        ? current.then(() => this.#ingest(upstreamPath))
+        : this.#ingest(upstreamPath)
+    }
+
     async #fetchDelegatedPush(
       endpoint: URL,
       headers: Headers,
@@ -1420,7 +1427,18 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
                 result.id?.clientID === mutation.clientID &&
                 String(result.id?.id) === mutation.id
             )
-            if (!ack) continue
+            if (!ack) {
+              throw new Error(
+                `delegated push did not acknowledge ${mutation.clientID}:${mutation.id}`
+              )
+            }
+          }
+          // the delegated app response is causally visible through DATA by
+          // contract. start an ingest round after that response, even if an
+          // older round is still in flight, then journal lmids. every capped
+          // log prefix therefore preserves effects-before-ack.
+          await this.#ingestAfterCurrent(upstreamPath)
+          for (const mutation of plan.mutations) {
             this.ctx.storage.transactionSync(() => {
               const decision = this.#wasm(() =>
                 engine_preflight(
@@ -1449,7 +1467,6 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
               this.#wasm(() => engine_prune(this.#engineDb, this.#retainChanges()))
             )
           }
-          await this.#ingest(upstreamPath)
           return json({ pushResponse: delegatedResponse })
         } catch (error) {
           const status = statusOf(error)

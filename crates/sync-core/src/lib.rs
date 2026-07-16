@@ -42,6 +42,7 @@ pub use pull::{Caps, Visibility, VisibleFilter, handle_pull, invalidate, prune, 
 pub use push::{
     MutationResult, Mutator, Preflight, PushBody, PushMutation, PushPlan, Transactor,
     assemble_push_response, finalize, handle_push, preflight, push_validate, record_app_error,
+    settle_delegated_push,
 };
 pub use schema::{TableSpec, Tables, init_schema, trigger_ddl};
 pub use upstream::{
