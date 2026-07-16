@@ -52,3 +52,4 @@ pub use upstream::{
     read_snapshot_progress, upstream_watermark,
 };
 pub use value::{ZeroColumnType, to_zero_value, to_zero_value_json};
+pub use wire::WireValue;

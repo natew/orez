@@ -22,7 +22,7 @@ use subtle::ConstantTimeEq;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use sync_core::value::f64_to_json;
-use sync_core::{Row, SqlValue, SyncDb};
+use sync_core::{Row, SqlValue, SyncDb, WireValue};
 
 use crate::db::RusqliteDb;
 use crate::engine::{self, EngineContext};
@@ -218,6 +218,19 @@ fn row_to_json(row: &Row) -> Value {
         object.insert(col.clone(), value);
     }
     Value::Object(object)
+}
+
+fn admin_sql_params(value: &Value) -> Result<Vec<SqlValue>, String> {
+    let Some(params) = value.get("params") else {
+        return Ok(Vec::new());
+    };
+    let params: Vec<WireValue> = serde_json::from_value(params.clone())
+        .map_err(|error| format!("invalid params: {error}"))?;
+    params
+        .into_iter()
+        .map(SqlValue::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("invalid params: {error}"))
 }
 
 // ---- http handlers -------------------------------------------------------
@@ -535,6 +548,10 @@ async fn admin_sql(
         .and_then(Value::as_str)
         .map(str::to_string);
     let transaction_step = value.get("transactionStep").and_then(Value::as_str);
+    let params = match admin_sql_params(&value) {
+        Ok(params) => params,
+        Err(error) => return json_status(400, json!({ "error": error })),
+    };
 
     // an admin transaction step carries both an id and a step; a one-shot query
     // carries neither. anything half-specified is malformed. the transaction is
@@ -550,6 +567,9 @@ async fn admin_sql(
                     400,
                     json!({ "error": "transaction begin requires a canonical BEGIN statement" }),
                 );
+            }
+            if !params.is_empty() {
+                return json_status(400, json!({ "error": "transaction begin forbids params" }));
             }
             match namespace.tx_begin(id).await {
                 Ok(()) => json_status(200, json!({ "rows": [] })),
@@ -568,7 +588,7 @@ async fn admin_sql(
             let result = namespace
                 .tx_query(id, move |conn| {
                     let mut db = RusqliteDb::new(conn);
-                    db.query(&query, &[])
+                    db.query(&query, &params)
                 })
                 .await;
             match result {
@@ -587,6 +607,9 @@ async fn admin_sql(
                     json!({ "error": "transaction end requires COMMIT or ROLLBACK" }),
                 );
             };
+            if !params.is_empty() {
+                return json_status(400, json!({ "error": "transaction end forbids params" }));
+            }
             match namespace.tx_end(id, end).await {
                 Ok(()) => {
                     // a committed transaction publishes its rows; wake every
@@ -609,7 +632,7 @@ async fn admin_sql(
             let result = namespace
                 .run(move |conn| {
                     let mut db = RusqliteDb::new(conn);
-                    db.query(&query, &[])
+                    db.query(&query, &params)
                 })
                 .await;
             match result {

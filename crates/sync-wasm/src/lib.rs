@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use sync_core::{DbError, Row, SqlValue, SyncDb};
+use sync_core::{DbError, Row, SqlValue, SyncDb, WireValue};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -20,45 +20,6 @@ extern "C" {
 
     #[wasm_bindgen(method, catch, js_name = query)]
     fn js_query(this: &JsSyncDb, sql: &str, params: JsValue) -> Result<JsValue, JsValue>;
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-enum WireValue {
-    Null,
-    Integer(String),
-    Real(f64),
-    Text(String),
-    Blob(Vec<u8>),
-}
-
-impl From<&SqlValue> for WireValue {
-    fn from(value: &SqlValue) -> Self {
-        match value {
-            SqlValue::Null => Self::Null,
-            SqlValue::Integer(value) => Self::Integer(value.to_string()),
-            SqlValue::Real(value) => Self::Real(*value),
-            SqlValue::Text(value) => Self::Text(value.clone()),
-            SqlValue::Blob(value) => Self::Blob(value.clone()),
-        }
-    }
-}
-
-impl TryFrom<WireValue> for SqlValue {
-    type Error = DbError;
-
-    fn try_from(value: WireValue) -> Result<Self, Self::Error> {
-        match value {
-            WireValue::Null => Ok(Self::Null),
-            WireValue::Integer(value) => value
-                .parse()
-                .map(Self::Integer)
-                .map_err(|error| DbError(format!("invalid i64 {value:?}: {error}"))),
-            WireValue::Real(value) => Ok(Self::Real(value)),
-            WireValue::Text(value) => Ok(Self::Text(value)),
-            WireValue::Blob(value) => Ok(Self::Blob(value)),
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

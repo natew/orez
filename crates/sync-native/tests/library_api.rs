@@ -197,7 +197,20 @@ fn admin_sql_req(
     transaction_id: Option<&str>,
     transaction_step: Option<&str>,
 ) -> Request<axum::body::Body> {
+    admin_sql_params_req(ns, query, None, transaction_id, transaction_step)
+}
+
+fn admin_sql_params_req(
+    ns: &str,
+    query: &str,
+    params: Option<Value>,
+    transaction_id: Option<&str>,
+    transaction_step: Option<&str>,
+) -> Request<axum::body::Body> {
     let mut body = json!({ "query": query });
+    if let Some(params) = params {
+        body["params"] = params;
+    }
     if let Some(transaction_id) = transaction_id {
         body["transactionId"] = json!(transaction_id);
     }
@@ -848,6 +861,195 @@ async fn admin_requires_token_and_rejects_browser_origins() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["rows"][0]["count"], json!(0));
+}
+
+#[tokio::test]
+async fn admin_sql_binds_typed_params_and_rejects_ambiguous_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+
+    let (status, values) = send(
+        &router,
+        admin_sql_params_req(
+            "test-ns",
+            "SELECT ? AS integer_value, ? AS real_value, ? AS text_value, ? AS null_value, hex(?) AS blob_value",
+            Some(json!([
+                { "kind": "integer", "value": "42" },
+                { "kind": "real", "value": 1.5 },
+                { "kind": "text", "value": "bound" },
+                { "kind": "null" },
+                { "kind": "blob", "value": [0, 255] },
+            ])),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        values["rows"],
+        json!([{
+            "integer_value": 42,
+            "real_value": 1.5,
+            "text_value": "bound",
+            "null_value": null,
+            "blob_value": "00FF",
+        }])
+    );
+
+    let transaction_id = "tx-params";
+    let (status, invalid_begin) = send(
+        &router,
+        admin_sql_params_req(
+            "test-ns",
+            "BEGIN",
+            Some(json!([{ "kind": "null" }])),
+            Some(transaction_id),
+            Some("begin"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_begin["error"], "transaction begin forbids params");
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "BEGIN", Some(transaction_id), Some("begin")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &router,
+        admin_sql_params_req(
+            "test-ns",
+            "INSERT INTO item (id, label) VALUES (?, ?)",
+            Some(json!([
+                { "kind": "text", "value": "bound-item" },
+                { "kind": "text", "value": "committed" },
+            ])),
+            Some(transaction_id),
+            Some("query"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "COMMIT", Some(transaction_id), Some("end")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, stored) = send(
+        &router,
+        admin_sql_params_req(
+            "test-ns",
+            "SELECT label FROM item WHERE id = ?",
+            Some(json!([{ "kind": "text", "value": "bound-item" }])),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["rows"], json!([{ "label": "committed" }]));
+
+    let (status, invalid) = send(
+        &router,
+        admin_sql_params_req("test-ns", "SELECT ?", Some(json!([1])), None, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        invalid["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid params")
+    );
+
+    let (status, invalid) = send(
+        &router,
+        admin_sql_params_req(
+            "test-ns",
+            "SELECT ?",
+            Some(json!([{ "kind": "integer", "value": "not-an-integer" }])),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        invalid["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid params")
+    );
+}
+
+#[tokio::test]
+async fn admin_sql_binds_params_through_transaction_rollback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+    let transaction_id = "tx-bound-rollback";
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "BEGIN", Some(transaction_id), Some("begin")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &router,
+        admin_sql_params_req(
+            "test-ns",
+            "INSERT INTO item (id, label) VALUES (?, ?)",
+            Some(json!([
+                { "kind": "text", "value": "bound-rolled-back" },
+                { "kind": "text", "value": "pending" },
+            ])),
+            Some(transaction_id),
+            Some("query"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, invalid_end) = send(
+        &router,
+        admin_sql_params_req(
+            "test-ns",
+            "ROLLBACK",
+            Some(json!([{ "kind": "null" }])),
+            Some(transaction_id),
+            Some("end"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_end["error"], "transaction end forbids params");
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "ROLLBACK", Some(transaction_id), Some("end")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, stored) = send(
+        &router,
+        admin_sql_params_req(
+            "test-ns",
+            "SELECT count(*) AS count FROM item WHERE id = ?",
+            Some(json!([{ "kind": "text", "value": "bound-rolled-back" }])),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["rows"][0]["count"], json!(0));
 }
 
 #[tokio::test]

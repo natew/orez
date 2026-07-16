@@ -4,6 +4,7 @@ import { validatePullCaps, validateSyncHostConfig } from './config.js'
 import { createPostCommitEffects } from './post-commit.js'
 import { createQueryCompiler } from './query-compiler.js'
 import {
+  decodeSqlParams,
   SqlStorageDirect,
   SqlStorageMutatorTransaction,
   SqlStorageSyncDb,
@@ -1720,11 +1721,14 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       }
       if (route === '/admin/sql') {
         return request.json().then((body) => {
-          const { query } = body as { query?: string }
+          const { params, query } = body as { params?: unknown; query?: string }
           if (typeof query !== 'string') return json({ error: 'query is required' }, 400)
           try {
-            return json({ rows: this.#directSql.query(query) })
+            return json({ rows: this.#directSql.query(query, decodeSqlParams(params)) })
           } catch (error) {
+            if (error instanceof TypeError && error.message.startsWith('params')) {
+              return json({ error: `invalid params: ${error.message}` }, 400)
+            }
             if (
               error instanceof TypeError &&
               error.message === 'transaction SQL is host-owned and forbidden'

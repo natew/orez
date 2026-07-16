@@ -44,22 +44,77 @@ export function assertHostSql(sql: string): void {
   }
 }
 
-function decodeBinding(value: WireValue): unknown {
-  switch (value.kind) {
+function decodeBinding(value: unknown, path = 'binding'): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${path} must be a typed SQL value`)
+  }
+  const binding = value as { kind?: unknown; value?: unknown }
+  const keys = Object.keys(binding)
+  const assertValueShape = () => {
+    if (keys.length !== 2 || !keys.includes('kind') || !keys.includes('value')) {
+      throw new TypeError(`${path} must contain only kind and value`)
+    }
+  }
+  switch (binding.kind) {
     case 'null':
+      if (keys.length !== 1 || keys[0] !== 'kind') {
+        throw new TypeError(`${path} null binding must contain only kind`)
+      }
       return null
     case 'integer': {
-      const exact = BigInt(value.value)
+      assertValueShape()
+      if (typeof binding.value !== 'string') {
+        throw new TypeError(`${path}.value must be an i64 decimal string`)
+      }
+      if (!/^-?\d+$/.test(binding.value)) {
+        throw new TypeError(`${path}.value must be an i64 decimal string`)
+      }
+      let exact: bigint
+      try {
+        exact = BigInt(binding.value)
+      } catch {
+        throw new TypeError(`${path}.value must be an i64 decimal string`)
+      }
+      if (exact < -(1n << 63n) || exact > (1n << 63n) - 1n) {
+        throw new TypeError(`${path}.value is outside the i64 range`)
+      }
       // SqlStorage does not accept bigint. Safe values can use Number; unsafe
       // values use decimal text and rely on the destination's INTEGER affinity.
-      return exact >= MIN_SAFE && exact <= MAX_SAFE ? Number(exact) : value.value
+      return exact >= MIN_SAFE && exact <= MAX_SAFE ? Number(exact) : binding.value
     }
-    case 'real':
-    case 'text':
-      return value.value
-    case 'blob':
-      return Uint8Array.from(value.value).buffer
+    case 'real': {
+      assertValueShape()
+      if (typeof binding.value !== 'number' || !Number.isFinite(binding.value)) {
+        throw new TypeError(`${path}.value must be a finite number`)
+      }
+      return binding.value
+    }
+    case 'text': {
+      assertValueShape()
+      if (typeof binding.value !== 'string') {
+        throw new TypeError(`${path}.value must be a string`)
+      }
+      return binding.value
+    }
+    case 'blob': {
+      assertValueShape()
+      if (
+        !Array.isArray(binding.value) ||
+        binding.value.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)
+      ) {
+        throw new TypeError(`${path}.value must be an array of bytes`)
+      }
+      return Uint8Array.from(binding.value).buffer
+    }
+    default:
+      throw new TypeError(`${path}.kind must be null, integer, real, text, or blob`)
   }
+}
+
+export function decodeSqlParams(value: unknown): unknown[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new TypeError('params must be an array')
+  return value.map((binding, index) => decodeBinding(binding, `params[${index}]`))
 }
 
 function encodeResult(value: unknown): WireValue {
@@ -107,7 +162,7 @@ export class SqlStorageSyncDb implements JsSyncDb {
     assertHostSql(sql)
     const start = performance.now()
     trackBillableCursorRows(
-      this.sql.exec(sql, ...params.map(decodeBinding)),
+      this.sql.exec(sql, ...params.map((value) => decodeBinding(value))),
       this.recordRowsWritten
     )
     this.stats.execCalls++
@@ -118,7 +173,7 @@ export class SqlStorageSyncDb implements JsSyncDb {
     assertHostSql(sql)
     const start = performance.now()
     const cursor = trackBillableCursorRows(
-      this.sql.exec(sql, ...params.map(decodeBinding)),
+      this.sql.exec(sql, ...params.map((value) => decodeBinding(value))),
       this.recordRowsWritten
     )
     const columns = [...cursor.columnNames]

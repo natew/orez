@@ -10,9 +10,62 @@
 // (always well below 2^53), byte-compatible with the vendored transport, and
 // matches the v51 poke's numeric lastMutationIDChanges.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 
+use crate::db::{DbError, SqlValue};
 use crate::error::EngineError;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum WireValue {
+    Null,
+    Integer(String),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+impl From<&SqlValue> for WireValue {
+    fn from(value: &SqlValue) -> Self {
+        match value {
+            SqlValue::Null => Self::Null,
+            SqlValue::Integer(value) => Self::Integer(value.to_string()),
+            SqlValue::Real(value) => Self::Real(*value),
+            SqlValue::Text(value) => Self::Text(value.clone()),
+            SqlValue::Blob(value) => Self::Blob(value.clone()),
+        }
+    }
+}
+
+impl TryFrom<WireValue> for SqlValue {
+    type Error = DbError;
+
+    fn try_from(value: WireValue) -> Result<Self, Self::Error> {
+        match value {
+            WireValue::Null => Ok(Self::Null),
+            WireValue::Integer(value) => {
+                let digits = value.strip_prefix('-').unwrap_or(&value);
+                if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(DbError(format!(
+                        "integer value {value:?} must be an i64 decimal string"
+                    )));
+                }
+                value.parse().map(Self::Integer).map_err(|_| {
+                    DbError(format!("integer value {value:?} is outside the i64 range"))
+                })
+            }
+            WireValue::Real(value) => Ok(Self::Real(value)),
+            WireValue::Text(value) => Ok(Self::Text(value)),
+            WireValue::Blob(value) => Ok(Self::Blob(value)),
+        }
+    }
+}
 
 // JavaScript's Number.MAX_SAFE_INTEGER — the reference core's isNonNegativeInteger
 // ceiling for a JSON-number cookie.
@@ -84,6 +137,40 @@ fn parse_canonical_u63(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sql_values_use_the_typed_wire_envelope() {
+        for (sql, expected) in [
+            (SqlValue::Null, json!({ "kind": "null" })),
+            (
+                SqlValue::Integer(42),
+                json!({ "kind": "integer", "value": "42" }),
+            ),
+            (SqlValue::Real(1.5), json!({ "kind": "real", "value": 1.5 })),
+            (
+                SqlValue::Text("bound".into()),
+                json!({ "kind": "text", "value": "bound" }),
+            ),
+            (
+                SqlValue::Blob(vec![0, 255]),
+                json!({ "kind": "blob", "value": [0, 255] }),
+            ),
+        ] {
+            let encoded = serde_json::to_value(WireValue::from(&sql)).unwrap();
+            assert_eq!(encoded, expected);
+            let wire: WireValue = serde_json::from_value(encoded).unwrap();
+            assert_eq!(SqlValue::try_from(wire).unwrap(), sql);
+        }
+    }
+
+    #[test]
+    fn integer_wire_values_reject_non_decimal_and_out_of_range_strings() {
+        for value in ["+1", "0x10", "9223372036854775808"] {
+            let error = SqlValue::try_from(WireValue::Integer(value.into())).unwrap_err();
+            assert!(error.0.contains("integer value"));
+        }
+    }
 
     #[test]
     fn counter_to_json_is_byte_compatible_below_the_safe_bound() {

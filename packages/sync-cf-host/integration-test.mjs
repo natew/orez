@@ -159,6 +159,44 @@ try {
     'raw BEGIN rejection is explicit'
   )
 
+  const boundAdminValues = await admin('/admin/sql', {
+    query:
+      'SELECT ? AS integerValue, ? AS realValue, ? AS textValue, ? AS nullValue, hex(?) AS blobValue',
+    params: [
+      { kind: 'integer', value: '42' },
+      { kind: 'real', value: 1.5 },
+      { kind: 'text', value: 'bound' },
+      { kind: 'null' },
+      { kind: 'blob', value: [0, 255] },
+    ],
+  })
+  equal(
+    boundAdminValues.rows,
+    [
+      {
+        integerValue: 42,
+        realValue: 1.5,
+        textValue: 'bound',
+        nullValue: null,
+        blobValue: '00FF',
+      },
+    ],
+    'admin SQL binds the typed parameter envelope'
+  )
+
+  const ambiguousAdminParams = await fetch(`${origin}/admin/sql`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-admin-key': adminKey },
+    body: JSON.stringify({ query: 'SELECT ?', params: [1] }),
+  })
+  equal(ambiguousAdminParams.status, 400, 'admin SQL rejects ambiguous raw params')
+  assert.match(
+    (await ambiguousAdminParams.json()).error,
+    /^invalid params:/,
+    'ambiguous param rejection is diagnostic'
+  )
+  assertions++
+
   const firstPull = await post('/pull', {
     clientID: 'client-a',
     clientGroupID: 'group-client-a',
