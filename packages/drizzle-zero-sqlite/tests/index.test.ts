@@ -1,4 +1,4 @@
-import { string as zeroString } from '@rocicorp/zero'
+import { string as zeroString, type Row } from '@rocicorp/zero'
 import { defineRelations } from 'drizzle-orm'
 import { pgTable, text as pgText } from 'drizzle-orm/pg-core'
 import {
@@ -10,13 +10,14 @@ import {
   text,
 } from 'drizzle-orm/sqlite-core'
 import { describe, expect, test } from 'vitest'
-import type { Schema } from '@rocicorp/zero'
 
 import {
   drizzleZeroConfig,
   generateDrizzleZeroSqliteSchemaFile,
   type ZeroCustomType,
 } from '../src/index'
+
+import type { Schema } from '@rocicorp/zero'
 
 const users = sqliteTable('user_records', {
   id: text().primaryKey(),
@@ -116,6 +117,7 @@ describe('drizzleZeroConfig', () => {
       }
     )
     const zeroSchema: Schema = schema
+    const nullableMetadata: Row<(typeof schema)['tables']['users']>['metadata'] = null
 
     expect(zeroSchema.tables.users).toMatchObject({
       name: 'users',
@@ -130,6 +132,7 @@ describe('drizzleZeroConfig', () => {
         score: { type: 'number', optional: true },
       },
     })
+    expect(nullableMetadata).toBeNull()
     expect(schema.tables.users.columns).not.toHaveProperty('avatar')
     expect(schema.tables.memberships.primaryKey).toEqual(['userId', 'groupId'])
   })

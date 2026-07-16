@@ -118,6 +118,17 @@ type ResolveCustomType<TColumn> =
               | Extract<ColumnData<TColumn>, Nullish>
           : unknown
 
+type ResolveColumnOptional<TColumn> =
+  ColumnMetadata<TColumn> extends {
+    isPrimaryKey: true
+  }
+    ? false
+    : ColumnMetadata<TColumn> extends { hasDefault: true }
+      ? true
+      : ColumnMetadata<TColumn> extends { notNull: true }
+        ? false
+        : true
+
 type PrimaryKeyColumns<TTable extends Table> = {
   [K in keyof Columns<TTable>]: ColumnMetadata<Columns<TTable>[K]> extends {
     isPrimaryKey: true
@@ -177,7 +188,7 @@ type ZeroColumnDefinition<
   TTable extends Table,
   KColumn extends ColumnNames<TTable>,
 > = Flatten<{
-  optional: boolean
+  optional: ResolveColumnOptional<Columns<TTable>[KColumn]>
   type: ResolveColumnZeroType<Columns<TTable>[KColumn]>
   customType: ResolveCustomType<Columns<TTable>[KColumn]>
   serverName?: string
