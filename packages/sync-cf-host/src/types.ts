@@ -44,12 +44,16 @@ export type SqlStatementMetadata = {
   kind: 'insert' | 'update' | 'delete' | 'upsert'
 }
 
+export type SQLiteExecResult = {
+  changes: number
+}
+
 export interface SyncSql {
   exec(
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
-  ): void
+  ): SQLiteExecResult
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -61,7 +65,7 @@ export interface MutatorSql {
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
-  ): Promise<void>
+  ): Promise<SQLiteExecResult>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]

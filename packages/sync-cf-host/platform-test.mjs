@@ -83,6 +83,7 @@ try {
   check(result.body.result.balance, 105, 'transaction query singular root')
   check(result.body.result.entries.length, 2, 'transaction query related rows')
   check(result.body.result.entries[0].note, 'read-then-write', 'related row order')
+  check(result.body.execResult, { changes: 1 }, 'sync host reports changed rows')
   check(result.body.plan.root.relationships.length, 1, 'recursive plan crosses wasm')
   check(result.body.malformedFormatStatus, 400, 'malformed format is a 400')
 

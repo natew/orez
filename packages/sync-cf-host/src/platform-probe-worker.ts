@@ -405,13 +405,16 @@ export class ProbeDurableObject extends ZeroDO {
         transactionQueryFormat,
         'platformTransactionQuery'
       )
+      const execResult = await tx.exec(
+        "UPDATE accounts SET balance = balance WHERE id = 'primary'"
+      )
       let malformedFormatStatus: unknown
       try {
         await tx.queryAst(transactionQueryAst, undefined as never)
       } catch (error) {
         malformedFormatStatus = (error as { status?: unknown }).status
       }
-      return json({ result, malformedFormatStatus, plan })
+      return json({ result, execResult, malformedFormatStatus, plan })
     }
 
     if (route === '/application-transaction-query') {
