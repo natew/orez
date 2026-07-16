@@ -22,6 +22,14 @@ const schema = {
       },
       primaryKey: ['id'],
     },
+    todoTag: {
+      columns: {
+        id: { type: 'string' },
+        todoId: { type: 'string' },
+        label: { type: 'string' },
+      },
+      primaryKey: ['id'],
+    },
   },
 } as const
 
@@ -54,6 +62,53 @@ const mutators = registerMutators({
     context.defer(() => {
       self.postMessage({ type: 'effect-complete', id: value.id })
     })
+  },
+  async 'todo.addTag'(tx, args) {
+    const value = args as { id: string; todoId: string; label: string }
+    await tx.exec('INSERT INTO todoTag (id, todoId, label) VALUES (?, ?, ?)', [
+      value.id,
+      value.todoId,
+      value.label,
+    ])
+  },
+  async 'todo.copyFromQuery'(tx, args) {
+    const value = args as { sourceId: string; targetId: string }
+    const source = await tx.queryAst<
+      | {
+          id: string
+          title: string
+          done: boolean
+          tags: Array<{ id: string; todoId: string; label: string }>
+        }
+      | undefined
+    >(
+      {
+        table: 'todo',
+        where: {
+          type: 'simple',
+          op: '=',
+          left: { type: 'column', name: 'id' },
+          right: { type: 'literal', value: value.sourceId },
+        },
+        related: [
+          {
+            correlation: { parentField: ['id'], childField: ['todoId'] },
+            subquery: { table: 'todoTag', alias: 'tags', orderBy: [['id', 'asc']] },
+          },
+        ],
+      },
+      {
+        singular: true,
+        relationships: { tags: { singular: false, relationships: {} } },
+      },
+      'todoWithTags'
+    )
+    if (!source) throw new MutationApplicationError('source does not exist')
+    await tx.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
+      value.targetId,
+      `${source.title}:${source.tags.map((tag) => tag.label).join(',')}`,
+      source.done ? 1 : 0,
+    ])
   },
 })
 
@@ -95,6 +150,9 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
       initialize(sql) {
         sql.exec(
           'CREATE TABLE IF NOT EXISTS todo (id TEXT PRIMARY KEY, title TEXT NOT NULL, done INTEGER NOT NULL)'
+        )
+        sql.exec(
+          'CREATE TABLE IF NOT EXISTS todoTag (id TEXT PRIMARY KEY, todoId TEXT NOT NULL, label TEXT NOT NULL)'
         )
       },
       authenticate(request) {

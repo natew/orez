@@ -8,6 +8,23 @@ describe('sync host config', () => {
       validatePullCaps({ maxChangeRows: 0, maxChangeBytes: 2_000_000 })
     ).toThrow('positive safe integer')
   })
+
+  test('validates transaction query execution budgets', () => {
+    expect(() =>
+      validateSyncHostConfig({
+        ...base,
+        mutators: {},
+        transactionQueryBudget: { maxSelects: 0 },
+      })
+    ).toThrow('transactionQueryBudget.maxSelects')
+    expect(() =>
+      validateSyncHostConfig({
+        ...base,
+        mutators: {},
+        transactionQueryBudget: { maxRows: 500 },
+      })
+    ).not.toThrow()
+  })
 })
 
 const base = {

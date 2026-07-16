@@ -1,5 +1,11 @@
+import { executeTransactionQueryPlan } from './transaction-query.js'
 import { trackBillableCursorRows } from './write-safeguards.js'
 
+import type {
+  CompiledTransactionQueryPlan,
+  TransactionQueryBudget,
+  TransactionQueryFormat,
+} from './transaction-query.js'
 import type { MutatorSql, SyncSql } from './types.js'
 
 type WireValue =
@@ -15,8 +21,6 @@ interface JsSyncDb {
   exec(sql: string, params: WireValue[]): void
   query(sql: string, params: WireValue[]): WireRow[]
 }
-
-export type CompiledQuery = { sql: string; params: WireValue[] }
 
 export type AdapterStats = {
   execCalls: number
@@ -162,7 +166,11 @@ export class SqlStorageDirect implements SyncSql {
 export class SqlStorageMutatorTransaction implements MutatorSql {
   constructor(
     private readonly direct: SqlStorageDirect,
-    private readonly compileQuery: (ast: unknown) => CompiledQuery
+    private readonly compileQuery: (
+      ast: unknown,
+      format: TransactionQueryFormat
+    ) => CompiledTransactionQueryPlan,
+    private readonly queryBudget?: Partial<TransactionQueryBudget>
   ) {}
 
   async exec(sql: string, params: readonly unknown[] = []): Promise<void> {
@@ -176,10 +184,16 @@ export class SqlStorageMutatorTransaction implements MutatorSql {
     return this.direct.query<Row>(sql, params)
   }
 
-  async queryAst<Row extends Record<string, unknown> = Record<string, unknown>>(
-    ast: unknown
-  ): Promise<Row[]> {
-    const compiled = this.compileQuery(ast)
-    return this.direct.query<Row>(compiled.sql, compiled.params.map(decodeBinding))
+  async queryAst<Result = unknown>(
+    ast: unknown,
+    format: TransactionQueryFormat,
+    queryName?: string
+  ): Promise<Result> {
+    const compiled = this.compileQuery(ast, format)
+    return executeTransactionQueryPlan<Result>(
+      compiled,
+      (sql, params) => this.direct.query(sql, params),
+      { queryName, budget: this.queryBudget }
+    )
   }
 }

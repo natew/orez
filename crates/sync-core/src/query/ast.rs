@@ -189,7 +189,10 @@ pub fn parse_ast(value: &Value) -> Result<Ast, EngineError> {
         .ok_or_else(|| reject("query AST must be an object"))?;
     assert_only_keys(obj, AST_KEYS, "query")?;
 
-    // `schema` is accepted (single-namespace engine) but ignored
+    // `schema` is accepted (single-namespace engine) but ignored.
+    if obj.get("schema").is_some_and(|value| !value.is_string()) {
+        return Err(reject("query schema must be a string"));
+    }
     let table = obj
         .get("table")
         .and_then(Value::as_str)
@@ -382,7 +385,19 @@ fn parse_condition(value: &Value) -> Result<Condition, EngineError> {
                 obj.get("related")
                     .ok_or_else(|| reject("correlatedSubquery requires related"))?,
             )?;
-            // `flip`/`scalar` are accepted but not needed for EXISTS compilation
+            if obj.get("flip").is_some_and(|value| !value.is_boolean()) {
+                return Err(reject("correlatedSubquery flip must be a boolean"));
+            }
+            match obj.get("scalar") {
+                Some(Value::Bool(true)) => {
+                    return Err(reject("scalar correlated subqueries are unsupported"));
+                }
+                Some(Value::Bool(false)) | None => {}
+                Some(_) => {
+                    return Err(reject("correlatedSubquery scalar must be a boolean"));
+                }
+            }
+            // `flip` is a planning hint and does not change SQL semantics.
             Ok(Condition::Exists { negated, related })
         }
         other => Err(reject(format!("unsupported condition type '{other}'"))),
@@ -412,9 +427,22 @@ fn parse_correlated_subquery(value: &Value) -> Result<CorrelatedSubquery, Engine
         obj.get("subquery")
             .ok_or_else(|| reject("related requires a subquery"))?,
     )?);
-    let hidden = obj.get("hidden").and_then(Value::as_bool).unwrap_or(false);
-    // `system` (permissions/client/test) is accepted but ignored — the AST is
-    // already the resolved, transformed query.
+    let hidden = match obj.get("hidden") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(reject("related hidden must be a boolean")),
+    };
+    match obj.get("system") {
+        None => {}
+        Some(Value::String(value))
+            if matches!(value.as_str(), "permissions" | "client" | "test") => {}
+        Some(_) => {
+            return Err(reject(
+                "related system must be permissions, client, or test",
+            ));
+        }
+    }
+    // `system` is metadata after the query has been transformed.
     Ok(CorrelatedSubquery {
         parent_field,
         child_field,

@@ -70,6 +70,7 @@
     "test:wasm": "vitest run src/wasm-sqlite.test.ts",
     "test:sync-browser-host": "bun run --cwd packages/sync-browser-host test",
     "test:sync-cf-host": "bun run --cwd packages/sync-cf-host test",
+    "test:transaction-query:chat": "bun run --cwd packages/sync-cf-host build:wasm && bun harness/src/chat-transaction-query-diff.ts",
     "test:all": "vitest run",
     "test:watch": "vitest",
     "test:compiler": "vitest run src/pg-sqlite-compiler/",

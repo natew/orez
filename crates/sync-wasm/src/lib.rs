@@ -396,6 +396,14 @@ fn engine_error(error: sync_core::EngineError) -> JsValue {
     js_error.into()
 }
 
+fn query_json_from_js(value: JsValue, name: &str) -> Result<serde_json::Value, JsValue> {
+    serde_wasm_bindgen::from_value(value).map_err(|error| {
+        engine_error(sync_core::EngineError::bad_request(format!(
+            "query {name} is malformed: {error}"
+        )))
+    })
+}
+
 fn tables_from_js(schema: JsValue) -> Result<sync_core::Tables, JsValue> {
     let schema: serde_json::Value = from_js(schema)?;
     sync_core::Tables::from_zero_schema(&schema).map_err(js_err)
@@ -587,22 +595,112 @@ pub fn engine_init_query_schema(db: &JsSyncDb) -> Result<(), JsValue> {
 }
 
 #[derive(Serialize)]
-struct CompiledQueryWire {
+#[serde(rename_all = "camelCase")]
+struct CompiledQueryPlanWire {
+    root_table: String,
+    plan_hash: String,
+    root: CompiledQueryNodeWire,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompiledQueryNodeWire {
+    table: String,
+    singular: bool,
     sql: String,
-    params: Vec<WireValue>,
+    bindings: Vec<QueryBindingWire>,
+    columns: Vec<QueryColumnWire>,
+    relationships: Vec<CompiledRelationshipWire>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompiledRelationshipWire {
+    name: String,
+    node: CompiledQueryNodeWire,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryColumnWire {
+    name: String,
+    column_type: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum QueryBindingWire {
+    Literal { value: WireValue },
+    ParentField { field: String },
+}
+
+fn query_column_type(column_type: sync_core::value::ZeroColumnType) -> &'static str {
+    use sync_core::value::ZeroColumnType;
+    match column_type {
+        ZeroColumnType::String => "string",
+        ZeroColumnType::Number => "number",
+        ZeroColumnType::Boolean => "boolean",
+        ZeroColumnType::Json => "json",
+        ZeroColumnType::Null => "null",
+    }
+}
+
+fn query_node_wire(node: sync_core::query::CompiledQueryNode) -> CompiledQueryNodeWire {
+    CompiledQueryNodeWire {
+        table: node.table,
+        singular: node.singular,
+        sql: node.sql,
+        bindings: node
+            .bindings
+            .into_iter()
+            .map(|binding| match binding {
+                sync_core::query::QueryBinding::Literal(value) => QueryBindingWire::Literal {
+                    value: WireValue::from(&value),
+                },
+                sync_core::query::QueryBinding::ParentField(field) => {
+                    QueryBindingWire::ParentField { field }
+                }
+            })
+            .collect(),
+        columns: node
+            .columns
+            .into_iter()
+            .map(|column| QueryColumnWire {
+                name: column.name,
+                column_type: query_column_type(column.column_type),
+            })
+            .collect(),
+        relationships: node
+            .relationships
+            .into_iter()
+            .map(|relationship| CompiledRelationshipWire {
+                name: relationship.name,
+                node: query_node_wire(relationship.node),
+            })
+            .collect(),
+    }
 }
 
 /// Compile a validated Zero query AST for a consumer mutator's transactional
 /// `tx.run(...)`. Execution remains in the host-owned application transaction.
 #[wasm_bindgen]
-pub fn engine_compile_query(schema: JsValue, ast: JsValue) -> Result<JsValue, JsValue> {
-    let tables = tables_from_js(schema)?;
-    let ast: serde_json::Value = from_js(ast)?;
+pub fn engine_compile_query(
+    schema: JsValue,
+    ast: JsValue,
+    format: JsValue,
+) -> Result<JsValue, JsValue> {
+    let schema = query_json_from_js(schema, "schema")?;
+    let schema = sync_core::query::parse_query_schema(&schema).map_err(engine_error)?;
+    let ast = query_json_from_js(ast, "AST")?;
     let ast = sync_core::query::parse_ast(&ast).map_err(engine_error)?;
-    let compiled = sync_core::query::compile(&ast, &tables).map_err(engine_error)?;
-    to_js(&CompiledQueryWire {
-        sql: compiled.sql,
-        params: compiled.params.iter().map(WireValue::from).collect(),
+    let format = query_json_from_js(format, "format")?;
+    let format = sync_core::query::parse_query_format(&format).map_err(engine_error)?;
+    let compiled = sync_core::query::compile_transaction_query(&schema, &ast, &format)
+        .map_err(engine_error)?;
+    to_js(&CompiledQueryPlanWire {
+        root_table: compiled.root_table,
+        plan_hash: compiled.plan_hash,
+        root: query_node_wire(compiled.root),
     })
 }
 

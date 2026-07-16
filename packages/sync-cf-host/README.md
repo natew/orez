@@ -21,6 +21,9 @@ The root `orez/cf-do` executor and this host consume the same `post-commit`
 module, so transaction retries discard effects from abandoned attempts in both
 paths.
 
+Transaction-query `ILIKE` folding is ASCII-only on Durable Object SQLite;
+non-ASCII case pairs can diverge from PostgreSQL.
+
 ## Wake channel and eviction
 
 `GET /<namespace>/wake?clientID=<id>&wakeToken=<capability>` upgrades to a

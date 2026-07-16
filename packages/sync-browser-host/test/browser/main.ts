@@ -314,6 +314,33 @@ async function runBrowserHostSpike() {
     .map((entry) => (entry.value as { id: string }).id)
   equal(queryRows, ['query-done'], 'query-aware pull includes only matching rows')
 
+  const tag = await post(
+    connection.client,
+    '/push',
+    mutation('query-read', 1, 'todo.addTag', {
+      id: 'tag-1',
+      todoId: 'query-done',
+      label: 'important',
+    })
+  )
+  equal(tag.status, 200, 'transaction query tag seed status')
+  const copied = await post(
+    connection.client,
+    '/push',
+    mutation('query-read', 2, 'todo.copyFromQuery', {
+      sourceId: 'query-done',
+      targetId: 'query-copy',
+    })
+  )
+  equal(copied.status, 200, 'transaction query mutation status')
+  equal(
+    await connection.client.query('SELECT title, done FROM todo WHERE id = ?', [
+      'query-copy',
+    ]),
+    [{ title: 'query member:important', done: 1 }],
+    'browser mutator hydrates a related transaction query'
+  )
+
   const inserted = await connection.client.query(
     'SELECT id, title, done FROM todo WHERE id = ?',
     ['persistent']

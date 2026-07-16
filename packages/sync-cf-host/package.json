@@ -8,7 +8,8 @@
     "./mutation-error": {
       "types": "./src/mutation-error.ts",
       "import": "./src/mutation-error.ts"
-    }
+    },
+    "./transaction-query": "./src/transaction-query.ts"
   },
   "scripts": {
     "build:wasm": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm && rm -f src/generated/.gitignore && bun scripts/write-wasm-module-type.ts",

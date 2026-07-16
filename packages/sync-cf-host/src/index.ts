@@ -4,6 +4,12 @@ export {
   isMutationApplicationError,
   registerMutators,
 } from './types.js'
+export {
+  DEFAULT_TRANSACTION_QUERY_BUDGET,
+  TransactionQueryBudgetError,
+  executeTransactionQueryPlan,
+} from './transaction-query.js'
+
 export type {
   DeferredEffect,
   JsonPrimitive,
@@ -24,3 +30,15 @@ export type {
   VisibilityFilter,
   ZeroSchemaConfig,
 } from './types.js'
+export type {
+  CompiledTransactionQueryNode,
+  CompiledTransactionQueryPlan,
+  CompiledTransactionQueryRelationship,
+  TransactionQueryBinding,
+  TransactionQueryBudget,
+  TransactionQueryColumn,
+  TransactionQueryColumnType,
+  TransactionQueryExecutionOptions,
+  TransactionQueryFormat,
+  TransactionQueryWireValue,
+} from './transaction-query.js'

@@ -43,8 +43,12 @@ function createSqlStorage() {
 async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Promise<T>) {
   const { ZeroDO } = await import('./worker.js')
   class TestZeroDO extends ZeroDO {
-    runTrustedTransaction<T>(compileQuery: any, work: any): Promise<T> {
-      return this.runApplicationTransaction(compileQuery, work)
+    runTrustedTransaction<T>(
+      compileQuery: any,
+      work: any,
+      queryBudget?: any
+    ): Promise<T> {
+      return this.runApplicationTransaction(compileQuery, work, queryBudget)
     }
   }
   const storage = createSqlStorage()
@@ -71,6 +75,44 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
 
 const unusedCompiler = () => {
   throw new Error('query compiler should not run')
+}
+
+const pluralFormat = { singular: false, relationships: {} }
+
+function flatPlan() {
+  return {
+    rootTable: 'item',
+    planHash: '0123456789abcdef',
+    root: {
+      table: 'item',
+      singular: false,
+      sql: 'SELECT id, enabled FROM item WHERE id = ?',
+      bindings: [{ kind: 'literal', value: { kind: 'text', value: 'row-1' } }],
+      columns: [
+        { name: 'id', columnType: 'string' },
+        { name: 'enabled', columnType: 'boolean' },
+      ],
+      relationships: [],
+    },
+  }
+}
+
+function relatedPlan() {
+  const plan = flatPlan()
+  plan.root.relationships = [
+    {
+      name: 'children',
+      node: {
+        table: 'item',
+        singular: false,
+        sql: 'SELECT id, enabled FROM item WHERE id = ?',
+        bindings: [{ kind: 'parent_field', field: 'id' }],
+        columns: plan.root.columns,
+        relationships: [],
+      },
+    },
+  ]
+  return plan
 }
 
 describe('ZeroDO trusted application transaction', () => {
@@ -100,15 +142,14 @@ describe('ZeroDO trusted application transaction', () => {
   it('compiles Zero ASTs and passes decoded bindings to SQLite', async () => {
     const { storage, zero } = await createTestZero(async (work) => await work())
     const ast = { table: 'item' }
-    const compiler = vi.fn(() => ({
-      sql: 'SELECT id, enabled FROM item WHERE id = ?',
-      params: ['row-1'],
-    }))
+    const compiler = vi.fn(() => flatPlan())
 
-    const rows = await zero.runTrustedTransaction(compiler, (tx) => tx.queryAst(ast))
+    const rows = await zero.runTrustedTransaction(compiler, (tx) =>
+      tx.queryAst(ast, pluralFormat)
+    )
 
-    expect(rows).toEqual([{ id: 'row-1', enabled: 1 }])
-    expect(compiler).toHaveBeenCalledWith(ast)
+    expect(rows).toEqual([{ id: 'row-1', enabled: true }])
+    expect(compiler).toHaveBeenCalledWith(ast, pluralFormat)
     expect(storage.lastSql).toContain('FROM item')
     expect(storage.lastParams).toEqual(['row-1'])
   })
@@ -179,6 +220,30 @@ describe('ZeroDO trusted application transaction', () => {
     await expect(
       zero.runTrustedTransaction(unusedCompiler, (tx) => tx.exec('BEGIN'))
     ).rejects.toThrow('transaction SQL is owned by ZeroDO')
+  })
+
+  it('aborts through atomically when a named query exceeds its select budget', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    const invalidateWatermarks = vi.spyOn(zero.watermarks, 'invalidateCache')
+    const reloadCdc = vi.spyOn(zero.cdc, 'reload')
+    const relatedFormat = {
+      singular: false,
+      relationships: { children: { singular: false, relationships: {} } },
+    }
+
+    await expect(
+      zero.runTrustedTransaction(
+        () => relatedPlan(),
+        (tx) => tx.queryAst({ table: 'item' }, relatedFormat, 'itemsWithChildren'),
+        { maxSelects: 1 }
+      )
+    ).rejects.toMatchObject({
+      code: 'transaction_query_budget_exceeded',
+      query: 'itemsWithChildren',
+      selects: 2,
+    })
+    expect(invalidateWatermarks).toHaveBeenCalledOnce()
+    expect(reloadCdc).toHaveBeenCalledOnce()
   })
 
   it('does not expose the executor on the base public fetch surface', async () => {

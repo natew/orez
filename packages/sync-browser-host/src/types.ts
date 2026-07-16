@@ -1,3 +1,8 @@
+import type {
+  TransactionQueryBudget,
+  TransactionQueryFormat,
+} from 'orez-sync-cf-host/transaction-query'
+
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
 
@@ -11,7 +16,11 @@ export type ZeroSchemaConfig = {
     Record<
       string,
       {
-        readonly columns: Readonly<Record<string, { readonly type: string }>>
+        readonly name?: string
+        readonly serverName?: string
+        readonly columns: Readonly<
+          Record<string, { readonly type: string; readonly serverName?: string }>
+        >
         readonly primaryKey: readonly string[]
       }
     >
@@ -32,9 +41,11 @@ export interface MutatorSql {
     sql: string,
     params?: readonly unknown[]
   ): Promise<Row[]>
-  queryAst<Row extends Record<string, unknown> = Record<string, unknown>>(
-    ast: JsonValue
-  ): Promise<Row[]>
+  queryAst<Result = unknown>(
+    ast: JsonValue,
+    format: TransactionQueryFormat,
+    queryName?: string
+  ): Promise<Result>
 }
 
 export type DeferredEffect = () => void | Promise<void>
@@ -106,6 +117,7 @@ export type BrowserSyncHostConfig = {
   queryTransformVersion?: number | ((claims: NormalizedClaims) => number)
   retainChanges?: number
   caps?: Partial<PullCaps>
+  transactionQueryBudget?: Partial<TransactionQueryBudget>
   onDataChanged?: () => void
 }
 

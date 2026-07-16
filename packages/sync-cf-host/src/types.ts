@@ -1,4 +1,8 @@
 import type { DeferredEffect } from './post-commit.js'
+import type {
+  TransactionQueryBudget,
+  TransactionQueryFormat,
+} from './transaction-query.js'
 
 export type { DeferredEffect } from './post-commit.js'
 
@@ -16,7 +20,11 @@ export type ZeroSchemaConfig = {
     Record<
       string,
       {
-        readonly columns: Readonly<Record<string, { readonly type: string }>>
+        readonly name?: string
+        readonly serverName?: string
+        readonly columns: Readonly<
+          Record<string, { readonly type: string; readonly serverName?: string }>
+        >
         readonly primaryKey: readonly string[]
       }
     >
@@ -38,9 +46,11 @@ export interface MutatorSql {
     params?: readonly unknown[]
   ): Promise<Row[]>
   /** Execute a validated Zero AST inside the current application transaction. */
-  queryAst<Row extends Record<string, unknown> = Record<string, unknown>>(
-    ast: JsonValue
-  ): Promise<Row[]>
+  queryAst<Result = unknown>(
+    ast: JsonValue,
+    format: TransactionQueryFormat,
+    queryName?: string
+  ): Promise<Result>
 }
 
 export type MutatorContext = {
@@ -179,5 +189,7 @@ export type SyncHostConfig<Env extends SyncHostEnv = SyncHostEnv> = {
   caps?: Partial<PullCaps>
   idleTeardownMs?: number
   wakeCoalesceMs?: number
+  /** per-query guard for recursive transaction query materialization. */
+  transactionQueryBudget?: Partial<TransactionQueryBudget>
   authorizeAdmin?: (request: Request, env: Env) => boolean | Promise<boolean>
 }

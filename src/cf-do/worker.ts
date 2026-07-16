@@ -4,6 +4,12 @@ import {
   createPostCommitEffects,
   type DeferredEffect,
 } from 'orez-sync-cf-host/post-commit'
+import {
+  executeTransactionQueryPlan,
+  type CompiledTransactionQueryPlan,
+  type TransactionQueryBudget,
+  type TransactionQueryFormat,
+} from 'orez-sync-cf-host/transaction-query'
 
 import {
   isSqlMutation,
@@ -118,12 +124,10 @@ interface SqlWriteMeasurement {
   rowsWritten: number
 }
 
-export type ZeroDOCompiledQuery = {
-  sql: string
-  params?: readonly unknown[]
-}
-
-export type ZeroDOQueryCompiler = (ast: unknown) => ZeroDOCompiledQuery
+export type ZeroDOQueryCompiler = (
+  ast: unknown,
+  format: TransactionQueryFormat
+) => CompiledTransactionQueryPlan
 
 export type ZeroDOTransactionExecutor = {
   exec(sql: string, params?: readonly unknown[]): Promise<void>
@@ -131,9 +135,11 @@ export type ZeroDOTransactionExecutor = {
     sql: string,
     params?: readonly unknown[]
   ): Promise<Row[]>
-  queryAst<Row extends Record<string, unknown> = Record<string, unknown>>(
-    ast: unknown
-  ): Promise<Row[]>
+  queryAst<Result = unknown>(
+    ast: unknown,
+    format: TransactionQueryFormat,
+    queryName?: string
+  ): Promise<Result>
 }
 
 export type ZeroDOTransactionContext = {
@@ -1080,7 +1086,8 @@ export class ZeroDO extends DurableObject {
     work: (
       tx: ZeroDOTransactionExecutor,
       context: ZeroDOTransactionContext
-    ) => T | Promise<T>
+    ) => T | Promise<T>,
+    queryBudget?: Partial<TransactionQueryBudget>
   ): Promise<T> {
     const effects = createPostCommitEffects()
     const execute = (sql: string, params: readonly unknown[] = []) => {
@@ -1094,12 +1101,17 @@ export class ZeroDO extends DurableObject {
       async query<Row extends Record<string, unknown>>(sql, params = []) {
         return execute(sql, params).rows as Row[]
       },
-      async queryAst<Row extends Record<string, unknown>>(ast: unknown) {
-        const compiled = compileQuery(ast)
-        if (!compiled || typeof compiled.sql !== 'string') {
-          throw new TypeError('query compiler returned an invalid SQL statement')
-        }
-        return execute(compiled.sql, compiled.params ?? []).rows as Row[]
+      async queryAst<Result>(
+        ast: unknown,
+        format: TransactionQueryFormat,
+        queryName?: string
+      ) {
+        const compiled = compileQuery(ast, format)
+        return executeTransactionQueryPlan<Result>(
+          compiled,
+          (sql, params) => execute(sql, params).rows,
+          { queryName, budget: queryBudget }
+        )
       },
     }
 

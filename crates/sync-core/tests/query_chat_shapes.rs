@@ -111,7 +111,7 @@ fn ilike_is_case_insensitive() {
 fn like_pattern_matches() {
     let mut db = db();
     db.exec(
-        "INSERT INTO user VALUES ('u1','alice'), ('u2','alfred'), ('u3','bob')",
+        "INSERT INTO user VALUES ('u1','alice'), ('u2','alfred'), ('u3','bob'), ('u4','ALICE')",
         &[],
     )
     .unwrap();

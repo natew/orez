@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers'
 
 import {
+  engine_compile_query,
   initSync,
   init_probe_schema,
   pull_snapshot,
@@ -10,7 +11,11 @@ import {
   value_round_trip,
 } from './generated/sync_wasm.js'
 import wasmModule from './generated/sync_wasm_bg.wasm'
-import { SqlStorageSyncDb } from './sql-storage-adapter.js'
+import {
+  SqlStorageDirect,
+  SqlStorageMutatorTransaction,
+  SqlStorageSyncDb,
+} from './sql-storage-adapter.js'
 
 initSync({ module: wasmModule })
 
@@ -289,6 +294,68 @@ export class ProbeDurableObject extends DurableObject<Env> {
         }
       }
       return json({ errors })
+    }
+
+    if (route === '/transaction-query') {
+      const schema = {
+        tables: {
+          account: {
+            name: 'account',
+            serverName: 'accounts',
+            columns: {
+              id: { type: 'string' },
+              balance: { type: 'number' },
+            },
+            primaryKey: ['id'],
+          },
+          entry: {
+            name: 'entry',
+            serverName: 'ledger',
+            columns: {
+              id: { type: 'number' },
+              accountId: { type: 'string', serverName: 'account_id' },
+              amount: { type: 'number' },
+              note: { type: 'string' },
+            },
+            primaryKey: ['id'],
+          },
+        },
+      }
+      const ast = {
+        table: 'account',
+        where: {
+          type: 'simple',
+          op: '=',
+          left: { type: 'column', name: 'id' },
+          right: { type: 'literal', value: 'primary' },
+        },
+        related: [
+          {
+            correlation: { parentField: ['id'], childField: ['accountId'] },
+            subquery: { table: 'entry', alias: 'entries', orderBy: [['id', 'asc']] },
+          },
+        ],
+      }
+      const format = {
+        singular: true,
+        relationships: { entries: { singular: false, relationships: {} } },
+      }
+      let plan: ReturnType<typeof engine_compile_query> | undefined
+      const tx = new SqlStorageMutatorTransaction(
+        new SqlStorageDirect(this.ctx.storage.sql),
+        (queryAst, queryFormat) => {
+          plan = engine_compile_query(schema, queryAst, queryFormat)
+          return plan
+        }
+      )
+      const result = await tx.queryAst(ast, format, 'platformTransactionQuery')
+      let malformedFormatStatus: unknown
+      try {
+        await tx.queryAst(ast, undefined as never)
+      } catch (error) {
+        malformedFormatStatus = (error as { status?: unknown }).status
+      }
+      return json({ result, malformedFormatStatus, plan })
     }
 
     return json({ error: 'not found', route }, 404)

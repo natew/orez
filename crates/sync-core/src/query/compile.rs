@@ -15,6 +15,7 @@ use crate::schema::{Tables, quote_ident};
 use super::ast::{
     Ast, Condition, CorrelatedSubquery, OrderPart, RightVal, Scalar, SimpleOp, ValueRef,
 };
+use super::transaction::postgres_like_to_glob;
 
 // the SQL operator for the binary comparison ops (not IN/LIKE, which compile
 // to their own shapes)
@@ -333,23 +334,20 @@ impl<'a> Compiler<'a> {
                 let RightVal::Scalar(s) = right else {
                     return Err(reject("LIKE requires a scalar operand"));
                 };
-                self.params.push(scalar_to_sql(s));
+                self.params.push(match s {
+                    Scalar::Text(pattern) => SqlValue::Text(postgres_like_to_glob(pattern)?),
+                    other => scalar_to_sql(other),
+                });
                 let negate = matches!(op, SimpleOp::NotLike | SimpleOp::NotILike);
-                let kw = if negate { "NOT LIKE" } else { "LIKE" };
-                if matches!(op, SimpleOp::ILike | SimpleOp::NotILike) {
-                    // ILIKE: case-insensitive regardless of the host's
-                    // case_sensitive_like pragma, by folding both operands with
-                    // LOWER. SQLite LOWER folds ASCII only, matching Postgres
-                    // ILIKE for ASCII; unicode case differences are not folded
-                    // (documented caveat — search on non-ASCII case pairs can
-                    // diverge from stock zero-cache/Postgres).
-                    Ok(format!("LOWER({left_sql}) {kw} LOWER(?)"))
+                let comparison = if matches!(op, SimpleOp::ILike | SimpleOp::NotILike) {
+                    format!("LOWER({left_sql}) GLOB LOWER(?)")
                 } else {
-                    // LIKE inherits SQLite's LIKE case-folding (ASCII
-                    // case-insensitive by default). a host wanting Postgres's
-                    // case-sensitive LIKE sets `PRAGMA case_sensitive_like = ON`,
-                    // under which the ILIKE branch above stays case-insensitive.
-                    Ok(format!("{left_sql} {kw} ?"))
+                    format!("{left_sql} GLOB ?")
+                };
+                if negate {
+                    Ok(format!("NOT ({comparison})"))
+                } else {
+                    Ok(comparison)
                 }
             }
             _ => {

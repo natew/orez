@@ -76,8 +76,16 @@ try {
   check(result.body.state.ledgerCount, 2, 'multi-table ledger')
   check(result.body.state.outboxCount, 1, 'multi-table outbox')
   check(result.body.state.sideEffectCount, 2, 'multi-table post-commit effect')
-
   const beforeAppError = result.body.state
+
+  result = await call(transactions, '/transaction-query')
+  check(result.status, 200, 'transaction query status')
+  check(result.body.result.balance, 105, 'transaction query singular root')
+  check(result.body.result.entries.length, 2, 'transaction query related rows')
+  check(result.body.result.entries[0].note, 'read-then-write', 'related row order')
+  check(result.body.plan.root.relationships.length, 1, 'recursive plan crosses wasm')
+  check(result.body.malformedFormatStatus, 400, 'malformed format is a 400')
+
   result = await call(transactions, '/push/application-error', { mutationID: 'm3' })
   check(result.status, 409, 'application error status')
   check(result.body.effectsDeferredButNotRun, 1, 'failed mutator deferred an effect')

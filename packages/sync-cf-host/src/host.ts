@@ -368,8 +368,11 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       }
       this.#engineDb = new SqlStorageSyncDb(ctx.storage.sql, recordRowsWritten)
       this.#directSql = new SqlStorageDirect(ctx.storage.sql, recordRowsWritten)
-      this.#mutatorSql = new SqlStorageMutatorTransaction(this.#directSql, (ast) =>
-        this.#wasm(() => engine_compile_query(config.schema, ast))
+      this.#mutatorSql = new SqlStorageMutatorTransaction(
+        this.#directSql,
+        (ast, format) =>
+          this.#wasm(() => engine_compile_query(config.schema, ast, format)),
+        config.transactionQueryBudget
       )
       ctx.blockConcurrencyWhile(async () => {
         ctx.storage.transactionSync(() => {

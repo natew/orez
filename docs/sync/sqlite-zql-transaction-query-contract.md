@@ -64,11 +64,14 @@ The compiler accepts the current Zero AST fields `schema`, `table`, `alias`,
   `IS NOT`, `<`, `>`, `<=`, `>=`, `LIKE`, `NOT LIKE`, `ILIKE`, `NOT ILIKE`,
   `IN`, and `NOT IN`.
 - `LIKE` and `NOT LIKE` are case-sensitive, while `ILIKE` and `NOT ILIKE` are
-  case-insensitive, matching Zero on PostgreSQL. The compiler converts each
-  bound PostgreSQL LIKE pattern to an escaped SQLite GLOB pattern. It emits
-  `GLOB` for LIKE and `LOWER(value) GLOB LOWER(?)` for ILIKE. This is the only
-  pattern-matching path; it does not depend on SQLite's connection-wide
-  `case_sensitive_like` setting.
+  case-insensitive for ASCII, matching Zero on PostgreSQL within that range.
+  The compiler converts each bound PostgreSQL LIKE pattern to an escaped SQLite
+  GLOB pattern. It emits `GLOB` for LIKE and `LOWER(value) GLOB LOWER(?)` for
+  ILIKE. Durable Object SQLite has no ICU case folding or custom SQL functions,
+  so non-ASCII ILIKE can diverge from PostgreSQL's locale-aware behavior. For
+  example, `ILIKE 'é%'` does not match `Émile` on this path. This intentional
+  behavior is pinned by a conformance test. Pattern matching does not depend on
+  SQLite's connection-wide `case_sensitive_like` setting.
 - comparison values are resolved scalar literals. `IN` and `NOT IN` accept
   scalar literal arrays. Every value becomes a positional binding.
 - correlated `EXISTS` and `NOT EXISTS` support compound equality correlations

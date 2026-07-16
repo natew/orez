@@ -1,5 +1,12 @@
+import { executeTransactionQueryPlan } from 'orez-sync-cf-host/transaction-query'
+
 import type { MutatorSql, SyncSql } from './types.js'
 import type { BedrockSqliteModule, Database, Statement } from 'bedrock-sqlite/browser'
+import type {
+  CompiledTransactionQueryPlan,
+  TransactionQueryBudget,
+  TransactionQueryFormat,
+} from 'orez-sync-cf-host/transaction-query'
 
 export type WireValue =
   | { kind: 'null' }
@@ -151,7 +158,11 @@ export class BedrockDirectSql implements SyncSql {
 export class BedrockMutatorSql implements MutatorSql {
   constructor(
     private readonly direct: BedrockDirectSql,
-    private readonly compileQuery: (ast: unknown) => { sql: string; params: WireValue[] }
+    private readonly compileQuery: (
+      ast: unknown,
+      format: TransactionQueryFormat
+    ) => CompiledTransactionQueryPlan,
+    private readonly queryBudget?: Partial<TransactionQueryBudget>
   ) {}
 
   async exec(sql: string, params: readonly unknown[] = []): Promise<void> {
@@ -165,10 +176,16 @@ export class BedrockMutatorSql implements MutatorSql {
     return this.direct.query<Row>(sql, params)
   }
 
-  async queryAst<Row extends Record<string, unknown> = Record<string, unknown>>(
-    ast: unknown
-  ): Promise<Row[]> {
-    const compiled = this.compileQuery(ast)
-    return this.direct.query<Row>(compiled.sql, compiled.params.map(decodeBinding))
+  async queryAst<Result = unknown>(
+    ast: unknown,
+    format: TransactionQueryFormat,
+    queryName?: string
+  ): Promise<Result> {
+    const compiled = this.compileQuery(ast, format)
+    return executeTransactionQueryPlan<Result>(
+      compiled,
+      (sql, params) => this.direct.query(sql, params),
+      { queryName, budget: this.queryBudget }
+    )
   }
 }

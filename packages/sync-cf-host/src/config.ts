@@ -89,5 +89,14 @@ export function validateSyncHostConfig<Env extends SyncHostEnv>(
         throw new TypeError(`delegatedPushRetry.${name} must be a positive safe integer`)
     }
   }
+  if (config.transactionQueryBudget) {
+    for (const [name, value] of Object.entries(config.transactionQueryBudget)) {
+      if (!Number.isSafeInteger(value) || Number(value) < 1) {
+        throw new TypeError(
+          `transactionQueryBudget.${name} must be a positive safe integer`
+        )
+      }
+    }
+  }
   return config
 }

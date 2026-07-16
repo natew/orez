@@ -122,6 +122,15 @@ function validateConfig(config: BrowserSyncHostConfig): PullCaps {
       throw new TypeError(`caps.${name} must be a positive safe integer`)
     }
   }
+  if (config.transactionQueryBudget) {
+    for (const [name, value] of Object.entries(config.transactionQueryBudget)) {
+      if (!Number.isSafeInteger(value) || Number(value) < 1) {
+        throw new TypeError(
+          `transactionQueryBudget.${name} must be a positive safe integer`
+        )
+      }
+    }
+  }
   const retainChanges = config.retainChanges ?? 4_096
   if (!Number.isSafeInteger(retainChanges) || retainChanges < 0) {
     throw new TypeError('retainChanges must be a non-negative safe integer')
@@ -167,8 +176,10 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
   ) {
     this.#directSql = new BedrockDirectSql(db)
     this.#engineDb = new BedrockSyncDb(db)
-    this.#mutatorSql = new BedrockMutatorSql(this.#directSql, (ast) =>
-      engine_compile_query(config.schema, ast)
+    this.#mutatorSql = new BedrockMutatorSql(
+      this.#directSql,
+      (ast, format) => engine_compile_query(config.schema, ast, format),
+      config.transactionQueryBudget
     )
     this.#retainChanges = String(config.retainChanges ?? 4_096)
   }
