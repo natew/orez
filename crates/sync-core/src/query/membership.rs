@@ -937,11 +937,11 @@ pub(crate) fn recompute_group_with_rehydrate(
     }
 
     // re-emit rows whose data changed but whose membership did not (still
-    // referenced, not part of the net delta this round)
+    // referenced, without duplicating a put/del from a membership flip)
     for (table, pk) in changed {
         let key = (table.clone(), pk.clone());
-        if ref_delta.get(&key).copied().unwrap_or(0) != 0 {
-            continue; // already emitted a put/del (or a no-op net) above
+        if emitted.contains(&key) {
+            continue;
         }
         if read_ref(db, group, table, pk)? > 0
             && let Some(value) = values.get(&key)

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use sync_core::query::{handle_query_pull, init_query_schema};
 use sync_core::schema::TableSpec;
 use sync_core::value::ZeroColumnType;
-use sync_core::{SqlValue, SyncDb, Tables, Transactor, init_schema};
+use sync_core::{SqlValue, SyncDb, Tables, Transactor, init_schema, settle_delegated_push};
 
 fn schema() -> Tables {
     use ZeroColumnType::*;
@@ -142,6 +142,99 @@ fn desire_pull_then_data_change_flows_as_membership_delta() {
     h.exec("INSERT INTO issue VALUES ('i4', 't-i4', 0)");
     let r3 = h.pull("c1", c2, None);
     assert_eq!(put_ids(&r3), vec!["i4"]);
+}
+
+#[test]
+fn settled_update_migrating_between_queries_is_reemitted_without_snapshot() {
+    let mut h = QHost::new();
+    let closed_query = json!({ "table": "issue", "where": {
+        "type": "simple", "op": "=",
+        "left": { "type": "column", "name": "closed" },
+        "right": { "type": "literal", "value": true }
+    } });
+    let moved_query = json!({ "table": "issue", "where": {
+        "type": "simple", "op": "=",
+        "left": { "type": "column", "name": "title" },
+        "right": { "type": "literal", "value": "moved" }
+    } });
+    let queries = json!({
+        "version": 1,
+        "patch": [
+            { "op": "put", "hash": "open", "ast": open_query() },
+            { "op": "put", "hash": "closed", "ast": closed_query },
+            { "op": "put", "hash": "moved", "ast": moved_query },
+        ]
+    });
+    let first = h.pull("client-b", json!(null), Some(queries));
+
+    // i1 leaves `open` and enters both `closed` and `moved`: its group
+    // refcount stays positive while its net reference delta is nonzero.
+    h.exec("UPDATE issue SET title = 'moved', closed = 1 WHERE id = 'i1'");
+    h.exec("INSERT INTO issue VALUES ('i4', 'new', 0)");
+    let push = json!({
+        "clientGroupID": "g1",
+        "mutations": [{
+            "type": "custom",
+            "id": 3,
+            "clientID": "client-a",
+            "name": "issue.update",
+            "args": [{ "id": "i1" }],
+            "timestamp": 0,
+        }],
+        "pushVersion": 1,
+    });
+    let response = json!({
+        "pushResponse": { "mutations": [{
+            "id": { "clientID": "client-a", "id": 3 },
+            "result": {},
+        }] }
+    });
+    h.db.transaction(|db| settle_delegated_push(db, &push, &response, "u1"))
+        .unwrap();
+
+    let next = h.pull("client-b", first["cookie"].clone(), None);
+    assert_eq!(next["lastMutationIDChanges"]["client-a"], json!(3));
+    assert_eq!(put_ids(&next), vec!["i1", "i4"]);
+    let updated = next["rowsPatch"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|op| op["op"] == "put" && op["value"]["id"] == "i1")
+        .expect("the incremental patch must carry the updated existing row");
+    assert_eq!(updated["value"]["title"], json!("moved"));
+    assert_eq!(updated["value"]["closed"], json!(true));
+}
+
+#[test]
+fn membership_flips_emit_exactly_one_operation_per_changed_row() {
+    let mut h = QHost::new();
+    let queries =
+        json!({ "version": 1, "patch": [{ "op": "put", "hash": "open", "ast": open_query() }] });
+    let first = h.pull("c1", json!(null), Some(queries));
+
+    h.exec("UPDATE issue SET closed = 1 WHERE id = 'i1'");
+    h.exec("INSERT INTO issue VALUES ('i4', 'new', 0)");
+    let next = h.pull("c1", first["cookie"].clone(), None);
+
+    assert_eq!(put_ids(&next), vec!["i4"]);
+    assert_eq!(del_ids(&next), vec!["i1"]);
+    assert_eq!(next["rowsPatch"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn changed_row_with_stable_membership_reemits_current_content() {
+    let mut h = QHost::new();
+    let queries =
+        json!({ "version": 1, "patch": [{ "op": "put", "hash": "open", "ast": open_query() }] });
+    let first = h.pull("c1", json!(null), Some(queries));
+
+    h.exec("UPDATE issue SET title = 'renamed' WHERE id = 'i1'");
+    let next = h.pull("c1", first["cookie"].clone(), None);
+
+    assert_eq!(put_ids(&next), vec!["i1"]);
+    assert!(del_ids(&next).is_empty());
+    assert_eq!(next["rowsPatch"].as_array().unwrap().len(), 1);
+    assert_eq!(next["rowsPatch"][0]["value"]["title"], json!("renamed"));
 }
 
 #[test]
