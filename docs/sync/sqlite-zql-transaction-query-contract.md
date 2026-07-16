@@ -126,11 +126,21 @@ The implementation is accepted only when all of these agree:
    same materializing host adapter used by mutators, and proves that a missing
    or malformed format fails instead of returning root-only rows.
 4. Chat conformance uses the final seven-batch corpus at Chat commit
-   `cc2d26fa24a88161231f3337c0e0cae9d43ae2d1` as the result oracle: 252
-   caller/query cases across 125 named queries. Compiler fixtures are harvested
+   `cc2d26fa24a88161231f3337c0e0cae9d43ae2d1`: 252
+   caller/query cases across 123 unique query names. This corrects the earlier
+   125 count: the corpus and root-table registry at that commit both contain
+   123 names. Compiler fixtures are harvested
    from Chat's real query builders and normalized with their
    `asQueryInternals(...).format`, rather than manually transcribing ASTs.
-   Current mutation coverage also exercises Chat's 30 direct `tx.run` calls,
+   `exploreTable` is the sole registered query excluded because its runtime
+   table name is unbounded. A concrete dynamic table still goes through normal
+   schema resolution: a known table compiles like any other, while an unknown
+   table receives the same loud status-400 rejection.
+   The corpus's expected IDs are retained unchanged as a sync-membership
+   oracle. They do not define the transaction result because they may contain
+   permission witness rows or identify rows in a related output. Official
+   `z2s` execution supplies the exact materialized result oracle. Current
+   mutation coverage also exercises Chat's 30 direct `tx.run` calls,
    including singular related `app`, nested relations, `IN`, composite keys,
    and list queries.
 5. The same harvested vectors run through Zero's official `z2s` server compiler
