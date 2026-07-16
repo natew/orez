@@ -188,8 +188,8 @@ async function releaseSha(tag: string): Promise<string> {
   return tagObject.object.sha
 }
 
-export function statusForBuild(releaseSha: string | null, buildSha: string): Status {
-  return releaseSha === buildSha ? 'verified' : 'unverified'
+export function statusForQualifiedBuild(buildSha: string | null): Status {
+  return buildSha === null ? 'unverified' : 'verified'
 }
 
 export function validate(evidence: Evidence, expectedSha?: string): void {
@@ -250,13 +250,8 @@ export function validate(evidence: Evidence, expectedSha?: string): void {
 
   if (evidence.status === 'verified') {
     if (!evidence.build.sha) errors.push('verified evidence needs a full build SHA')
-    if (evidence.release.sha !== evidence.build.sha) {
-      errors.push(
-        `verified release SHA ${evidence.release.sha} does not match tested build SHA ${evidence.build.sha}`
-      )
-    }
     if (evidence.supportedContracts.length === 0) {
-      errors.push('verified evidence needs supported contracts')
+      errors.push('verified build evidence needs supported contracts')
     }
     if (evidence.compatibility.some((row) => row.status !== 'pass')) {
       errors.push('every compatibility row must pass')
@@ -289,7 +284,7 @@ async function generate(): Promise<void> {
       `release tag ${pushedTag} does not match package version ${rootPackage.version}`
     )
   }
-  const releaseTag = pushedTag ?? evidence.release.tag
+  const releaseTag = pushedTag ?? packageTag
   const releaseVersion = releaseTag.startsWith('v') ? releaseTag.slice(1) : releaseTag
   const [run, jobsResponse] = await Promise.all([
     githubJson<ActionsRun>(`/repos/${githubRepository}/actions/runs/${runId}`),
@@ -345,8 +340,8 @@ async function generate(): Promise<void> {
   evidence.release.sha = await releaseSha(evidence.release.tag)
   evidence.release.url = `${repositoryUrl}/tree/${evidence.release.tag}`
   evidence.build = { sha, url: `${repositoryUrl}/tree/${sha}` }
-  evidence.status = statusForBuild(evidence.release.sha, sha)
-  if (isReleaseTagBuild && evidence.status !== 'verified') {
+  evidence.status = statusForQualifiedBuild(sha)
+  if (isReleaseTagBuild && evidence.release.sha !== sha) {
     throw new Error(
       `release tag ${releaseTag} resolves to ${evidence.release.sha}, not checkout SHA ${sha}`
     )
@@ -422,9 +417,7 @@ async function generate(): Promise<void> {
     artifactsUrl,
   })
 
-  for (const row of evidence.compatibility) {
-    row.status = evidence.status === 'verified' ? 'pass' : 'awaiting'
-  }
+  for (const row of evidence.compatibility) row.status = 'pass'
   const qualifiedContracts = [
     'snapshot and incremental pull cookies',
     'idempotent custom-mutator push and mutation IDs',
@@ -436,7 +429,7 @@ async function generate(): Promise<void> {
     'local workerd protocol fuzz, recovery faults, backup/restore, and lifecycle state machine',
     'named-query differential against Zero 1.7.0',
   ]
-  evidence.supportedContracts = evidence.status === 'verified' ? qualifiedContracts : []
+  evidence.supportedContracts = qualifiedContracts
 
   const started = Math.min(...required.map((item) => new Date(item.started_at).getTime()))
   const completed = Math.max(
@@ -482,12 +475,12 @@ async function generate(): Promise<void> {
       command.replaceAll('<ledger-seed>', String(seed))
     )
   }
-  const releaseIdentityLimitation =
-    evidence.status === 'verified'
-      ? []
-      : [
-          `Candidate build ${sha} passed the required CI jobs but is not release ${releaseTag}, which resolves to ${evidence.release.sha}. No verified-release claim or supported contract is published for this build.`,
-        ]
+  const isVerifiedRelease = evidence.release.sha === sha
+  const releaseIdentityLimitation = isVerifiedRelease
+    ? []
+    : [
+        `Build ${sha} passed the required CI jobs and is verified at that exact SHA. It is newer than release ${releaseTag}, which resolves to ${evidence.release.sha}, so it is not labeled as a verified release.`,
+      ]
   evidence.knownLimitations = [
     ...releaseIdentityLimitation,
     'The workerd lane is local emulation; deployed Cloudflare isolate memory, quota, eviction, and regional propagation require a separate named deployment qualification.',
@@ -496,13 +489,13 @@ async function generate(): Promise<void> {
     `GitHub Actions logs and artifacts are immutable per run but retained for ${evidence.artifacts.retentionDays} days.`,
   ]
   evidence.unresolvedLanes = [
-    ...(evidence.status === 'verified'
+    ...(isVerifiedRelease
       ? []
       : [
           {
             name: 'Release identity',
-            status: 'unverified',
-            detail: `The tested build SHA ${sha} does not equal ${releaseTag} at ${evidence.release.sha}.`,
+            status: 'awaiting',
+            detail: `The build is CI-verified, but ${releaseTag} names ${evidence.release.sha} rather than ${sha}.`,
             url: `${repositoryUrl}/compare/${evidence.release.tag}...${sha}`,
           },
         ]),
@@ -515,12 +508,13 @@ async function generate(): Promise<void> {
     },
   ]
   evidence.gate.policy =
-    'CI records exact-SHA candidate evidence after every required job succeeds. It publishes a verified release only when the tested build SHA also equals the immutable release-tag SHA; other main-branch builds remain explicitly unverified.'
+    'CI publishes verified build evidence only after every required job succeeds at the exact build SHA. It labels that build a verified release only when the immutable release tag resolves to the same SHA.'
 
   validate(evidence, sha)
   writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`)
+  const identity = evidence.release.sha === sha ? 'release' : 'build'
   console.log(
-    `generated ${evidence.status} Orez Lite ${evidence.status === 'verified' ? 'release' : 'candidate'} evidence for ${sha} from run ${runId}`
+    `generated ${evidence.status} Orez Lite ${identity} evidence for ${sha} from run ${runId}`
   )
 }
 

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "status": "unverified",
   "release": {
-    "version": "0.4.73",
-    "tag": "v0.4.73",
-    "sha": "34f28cc63c741c31270b7b888b8c25d9b22b493c",
-    "url": "https://github.com/natew/orez/tree/v0.4.73"
+    "version": "0.5.18",
+    "tag": "v0.5.18",
+    "sha": "f76e80f080ff0ee78f5c09b479286146b5cd6dcf",
+    "url": "https://github.com/natew/orez/tree/v0.5.18"
   },
   "build": {
     "sha": null,
@@ -176,17 +176,17 @@
     ]
   },
   "knownLimitations": [
-    "There is no all-green main-branch CI run for the current evidence gate yet, so this fallback JSON makes no verified-build claim.",
+    "The checked-in fallback contains no exact-SHA CI result. A qualified main or tag build replaces it during the site build.",
     "The workerd lane is local emulation; deployed Cloudflare isolate memory, quota, eviction, and regional propagation require a separate named deployment qualification.",
     "The compatibility corpus is pinned to Zero 1.7.0 and does not imply compatibility with later Zero releases.",
     "GitHub Actions logs and artifacts are immutable per run but remain subject to the repository's retention policy."
   ],
   "unresolvedLanes": [
     {
-      "name": "Main-branch release gate",
-      "status": "red",
-      "detail": "The latest observed CI run failed in native integration; the gate correctly refuses to publish a verified ledger.",
-      "url": "https://github.com/natew/orez/actions/runs/29267817756"
+      "name": "Exact-SHA CI evidence",
+      "status": "awaiting",
+      "detail": "The repository fallback intentionally contains no generated workflow result.",
+      "url": "https://github.com/natew/orez/actions"
     },
     {
       "name": "Deployed Cloudflare qualification",
@@ -206,8 +206,9 @@
       "rust",
       "rust-local",
       "rust-local-faults",
-      "sync-cf-host"
+      "sync-cf-host",
+      "sync-browser-host"
     ],
-    "policy": "CI records exact-SHA candidate evidence after every required job succeeds. It publishes a verified release only when the tested build SHA also equals the immutable release-tag SHA; other main-branch builds remain explicitly unverified."
+    "policy": "CI publishes verified build evidence only after every required job succeeds at the exact build SHA. It labels that build a verified release only when the immutable release tag resolves to the same SHA."
   }
 }

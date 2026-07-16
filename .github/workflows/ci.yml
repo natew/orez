@@ -547,7 +547,8 @@ jobs:
   # This is the exact-identity evidence gate. GitHub does not start it until
   # every required job above is green. The generator independently checks the
   # run event/ref, job conclusions, build SHA, and immutable release-tag SHA
-  # before it can write "verified"; later main SHAs remain candidates.
+  # before it can write "verified". A main SHA is a verified build; only an
+  # exact tag SHA is also a verified release.
   orez-lite-evidence:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs:

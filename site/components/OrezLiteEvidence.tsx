@@ -45,33 +45,33 @@ function evidenceIdentity() {
     evidence.build.sha
   )
   return {
-    verified: identity === 'verified',
-    candidate: identity === 'candidate',
+    verified: identity !== 'unverified',
+    verifiedRelease: identity === 'verified-release',
   }
 }
 
 export function VerifiedBuildCard() {
-  const { verified, candidate } = evidenceIdentity()
+  const { verified, verifiedRelease } = evidenceIdentity()
   return (
     <aside className="verified-build-card" aria-labelledby="verified-build-title">
       <div className="verified-build-heading">
         <div>
           <span className="evidence-eyebrow">Build evidence</span>
           <h2 id="verified-build-title">
-            {verified
+            {verifiedRelease
               ? 'Verified release'
-              : candidate
-                ? 'Candidate build'
+              : verified
+                ? 'Verified build'
                 : 'Build evidence'}
           </h2>
         </div>
         <span
           className={`evidence-status evidence-status-${verified ? 'pass' : 'awaiting'}`}
         >
-          {verified
+          {verifiedRelease
             ? 'CI verified release'
-            : candidate
-              ? 'Unverified candidate'
+            : verified
+              ? 'CI verified build'
               : 'Awaiting green CI'}
         </span>
       </div>
@@ -85,9 +85,7 @@ export function VerifiedBuildCard() {
           </dd>
         </div>
         <div>
-          <dt>
-            {verified ? 'Release / build SHA' : candidate ? 'Candidate SHA' : 'Build SHA'}
-          </dt>
+          <dt>{verifiedRelease ? 'Release / build SHA' : 'Build SHA'}</dt>
           <dd>
             {evidence.build.url ? (
               <EvidenceLink href={evidence.build.url}>
@@ -111,9 +109,7 @@ export function VerifiedBuildCard() {
         <strong>Supported contracts:</strong>{' '}
         {verified
           ? evidence.supportedContracts.join(' · ')
-          : candidate
-            ? `None advertised for ${evidence.release.tag}: candidate SHA does not match the release-tag SHA.`
-            : 'None advertised until every required job passes at the immutable release-tag SHA.'}
+          : 'None advertised until every required job passes at the exact build SHA.'}
       </p>
       <AppLink
         href="/docs/orez-lite/testing#evidence-ledger"
@@ -126,7 +122,7 @@ export function VerifiedBuildCard() {
 }
 
 export function EvidenceLedger() {
-  const { verified, candidate } = evidenceIdentity()
+  const { verified, verifiedRelease } = evidenceIdentity()
   const lastGreen = evidence.qualification.lastGreen as {
     runId: number
     url: string
@@ -137,18 +133,18 @@ export function EvidenceLedger() {
         className={`evidence-notice evidence-notice-${verified ? 'pass' : 'awaiting'}`}
       >
         <strong>
-          {verified
+          {verifiedRelease
             ? 'Qualified at this exact SHA.'
-            : candidate
-              ? 'Candidate tested, but not a verified release.'
+            : verified
+              ? 'Verified at this exact build SHA.'
               : 'No verified build is published yet.'}
         </strong>
         <span>
-          {verified
+          {verifiedRelease
             ? 'Every required CI job passed on the same commit named by the immutable release tag.'
-            : candidate
-              ? `Every required CI job passed at ${compactSha(evidence.build.sha)}, but ${evidence.release.tag} resolves to ${compactSha(evidence.release.sha)}. This ledger makes no verified-release claim.`
-              : 'The checked-in fallback stays unverified and contains no qualified build SHA. CI replaces it only with exact-SHA candidate or release evidence; it never fabricates provenance.'}
+            : verified
+              ? `Every required CI job passed at ${compactSha(evidence.build.sha)}. ${evidence.release.tag} resolves to ${compactSha(evidence.release.sha)}, so this is a verified build rather than a verified release.`
+              : 'The checked-in fallback stays unverified and contains no qualified build SHA. CI replaces it only with exact-SHA build or release evidence; it never fabricates provenance.'}
         </span>
       </div>
 

@@ -1,4 +1,4 @@
-export type EvidenceIdentity = 'verified' | 'candidate' | 'unverified'
+export type EvidenceIdentity = 'verified-release' | 'verified-build' | 'unverified'
 
 export function classifyEvidenceIdentity(
   status: string,
@@ -6,7 +6,8 @@ export function classifyEvidenceIdentity(
   buildSha: string | null
 ): EvidenceIdentity {
   if (status === 'verified' && releaseSha !== null && releaseSha === buildSha) {
-    return 'verified'
+    return 'verified-release'
   }
-  return buildSha === null ? 'unverified' : 'candidate'
+  if (status === 'verified' && buildSha !== null) return 'verified-build'
+  return 'unverified'
 }

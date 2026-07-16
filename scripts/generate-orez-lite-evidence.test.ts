@@ -3,14 +3,14 @@ import { readFileSync } from 'node:fs'
 
 import { classifyEvidenceIdentity } from '../site/lib/evidence-identity'
 import {
-  statusForBuild,
+  statusForQualifiedBuild,
   validate,
   type Evidence,
   type Status,
 } from './generate-orez-lite-evidence'
 
 const releaseSha = '1111111111111111111111111111111111111111'
-const candidateSha = '2222222222222222222222222222222222222222'
+const mainBuildSha = '2222222222222222222222222222222222222222'
 const fallback = JSON.parse(
   readFileSync(new URL('../site/data/orez-lite-evidence.json', import.meta.url), 'utf8')
 ) as Evidence
@@ -63,38 +63,40 @@ describe('exact-SHA release evidence identity', () => {
     expect(() => validate(structuredClone(fallback))).not.toThrow()
   })
 
-  it('accepts verified evidence only when release and tested build SHAs match', () => {
+  it('classifies an exact release-tag build as a verified release', () => {
     const evidence = fixture('verified', releaseSha)
-    expect(statusForBuild(evidence.release.sha, releaseSha)).toBe('verified')
+    expect(statusForQualifiedBuild(releaseSha)).toBe('verified')
     expect(
       classifyEvidenceIdentity(evidence.status, evidence.release.sha, releaseSha)
-    ).toBe('verified')
+    ).toBe('verified-release')
     expect(() => validate(evidence, releaseSha)).not.toThrow()
   })
 
-  it('rejects a verified release label when the tested SHA differs', () => {
-    const evidence = fixture('verified', candidateSha)
+  it('classifies a green main build newer than the release as verified build evidence', () => {
+    const evidence = fixture('verified', mainBuildSha)
     expect(
-      classifyEvidenceIdentity(evidence.status, evidence.release.sha, candidateSha)
-    ).toBe('candidate')
-    expect(() => validate(evidence, candidateSha)).toThrow(
-      `verified release SHA ${releaseSha} does not match tested build SHA ${candidateSha}`
-    )
+      classifyEvidenceIdentity(evidence.status, evidence.release.sha, mainBuildSha)
+    ).toBe('verified-build')
+    expect(() => validate(evidence, mainBuildSha)).not.toThrow()
   })
 
-  it('accepts a mismatched main build only as an unverified candidate', () => {
-    const evidence = fixture('unverified', candidateSha)
-    expect(statusForBuild(evidence.release.sha, candidateSha)).toBe('unverified')
+  it('does not call an unverified build verified merely because it has a SHA', () => {
+    const evidence = fixture('unverified', mainBuildSha)
+    evidence.supportedContracts = []
     expect(
-      classifyEvidenceIdentity(evidence.status, evidence.release.sha, candidateSha)
-    ).toBe('candidate')
-    expect(() => validate(evidence, candidateSha)).not.toThrow()
+      classifyEvidenceIdentity(evidence.status, evidence.release.sha, mainBuildSha)
+    ).toBe('unverified')
+    expect(() => validate(evidence, mainBuildSha)).not.toThrow()
   })
 
-  it('still requires candidate evidence to identify the expected CI SHA', () => {
-    const evidence = fixture('unverified', candidateSha)
+  it('still requires build evidence to identify the expected CI SHA', () => {
+    const evidence = fixture('verified', mainBuildSha)
     expect(() => validate(evidence, releaseSha)).toThrow(
-      `evidence SHA ${candidateSha} does not match ${releaseSha}`
+      `evidence SHA ${mainBuildSha} does not match ${releaseSha}`
     )
+  })
+
+  it('keeps a missing build unverified', () => {
+    expect(statusForQualifiedBuild(null)).toBe('unverified')
   })
 })
