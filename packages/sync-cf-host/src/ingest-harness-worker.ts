@@ -340,8 +340,33 @@ export class AppService extends WorkerEntrypoint<Env> {
         activeDelegatedPushes.delete(namespace)
       }
     }
+    const push = (await request.clone().json()) as {
+      mutations?: Array<{ clientID?: string; id?: number; name?: string }>
+    }
+    const cleanupIDs = new Set(
+      (push.mutations ?? [])
+        .filter((mutation) => mutation.name === '_zero_cleanupResults')
+        .map((mutation) => `${mutation.clientID}:${mutation.id}`)
+    )
     const response = await upstreamFetch(request, this.env)
     completedDelegatedPushes.add(namespace)
+    if (response.ok && cleanupIDs.size > 0) {
+      const body = (await response.json()) as {
+        mutations?: Array<{ id?: { clientID?: string; id?: number } }>
+        pushResponse?: {
+          mutations?: Array<{ id?: { clientID?: string; id?: number } }>
+        }
+      }
+      const mutations = body.pushResponse?.mutations ?? body.mutations
+      if (Array.isArray(mutations)) {
+        const filtered = mutations.filter(
+          (mutation) => !cleanupIDs.has(`${mutation.id?.clientID}:${mutation.id?.id}`)
+        )
+        if (body.pushResponse) body.pushResponse.mutations = filtered
+        else body.mutations = filtered
+      }
+      return Response.json(body, { status: response.status })
+    }
     return response
   }
 }

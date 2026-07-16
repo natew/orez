@@ -524,6 +524,110 @@ try {
   assert.equal(delegatedUrl.searchParams.get('schema'), 'feed_0')
   assert.equal(delegatedUrl.searchParams.get('appID'), 'feed')
 
+  // Stock Zero processes cleanup mutations internally and omits them from the
+  // mutation results. A mixed delegated push settles only the application
+  // mutation while preserving the exact original push sent to APP.
+  const mixedCleanup = await post('/push', {
+    clientGroupID: 'cleanup-group',
+    pushVersion: 1,
+    mutations: [
+      {
+        type: 'custom',
+        clientID: 'cleanup-writer',
+        id: 1,
+        name: 'item.insert',
+        args: [
+          {
+            id: 'mixed-cleanup-row',
+            label: 'ordinary mutation beside cleanup',
+            rank: 1,
+            done: false,
+            meta: null,
+          },
+        ],
+      },
+      {
+        type: 'custom',
+        clientID: 'cleanup-writer',
+        id: 0,
+        name: '_zero_cleanupResults',
+        args: [
+          {
+            type: 'single',
+            clientGroupID: 'cleanup-group',
+            clientID: 'cleanup-writer',
+            upToMutationID: 1,
+          },
+        ],
+      },
+    ],
+  })
+  assert.equal(mixedCleanup.status, 200)
+  assert.deepEqual(mixedCleanup.body.pushResponse.mutations, [
+    { id: { clientID: 'cleanup-writer', id: 1 }, result: {} },
+  ])
+  const mixedCleanupPull = await post('/pull', {
+    clientID: 'cleanup-reader',
+    clientGroupID: 'cleanup-group',
+    cookie: null,
+  })
+  assert.equal(mixedCleanupPull.status, 200)
+  assert.equal(mixedCleanupPull.body.lastMutationIDChanges['cleanup-writer'], 1)
+  assert.equal(
+    mixedCleanupPull.body.rowsPatch.some(
+      (entry) => entry.op === 'put' && entry.value?.id === 'mixed-cleanup-row'
+    ),
+    true
+  )
+
+  // A cleanup-only push has an empty mutation-result list and must remain a
+  // settlement no-op instead of manufacturing an LMID for the cleanup entry.
+  const cleanupOnlyNamespace = `cleanup-only-${crypto.randomUUID()}`
+  const cleanupOnlyOrigin = `${base}/${cleanupOnlyNamespace}`
+  const cleanupOnlyResponse = await fetch(`${cleanupOnlyOrigin}/push`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientGroupID: 'cleanup-only-group',
+      pushVersion: 1,
+      mutations: [
+        {
+          type: 'custom',
+          clientID: 'cleanup-only-writer',
+          id: 0,
+          name: '_zero_cleanupResults',
+          args: [
+            {
+              type: 'single',
+              clientGroupID: 'cleanup-only-group',
+              clientID: 'cleanup-only-writer',
+              upToMutationID: 1,
+            },
+          ],
+        },
+      ],
+    }),
+  })
+  assert.equal(cleanupOnlyResponse.status, 200)
+  assert.deepEqual(await cleanupOnlyResponse.json(), {
+    pushResponse: { mutations: [] },
+  })
+  const cleanupOnlyState = await fetch(`${cleanupOnlyOrigin}/admin/sql`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-admin-key': 'ingest-harness-admin',
+    },
+    body: JSON.stringify({
+      query:
+        "SELECT (SELECT count(*) FROM _zsync_clients) AS clients, (SELECT count(*) FROM _zsync_changes WHERE op = 'lmid') AS lmidRows",
+    }),
+  }).then((response) => response.json())
+  assert.deepEqual(cleanupOnlyState.rows[0], { clients: 0, lmidRows: 0 })
+
   // A persistently failing endpoint receives exactly maxAttempts requests;
   // the host returns the terminal response instead of spinning a hot loop.
   await fetch(`${base}/delegation-control`, {

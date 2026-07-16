@@ -21,6 +21,8 @@ use crate::schema::Tables;
 use crate::store;
 use crate::wire;
 
+const CLEANUP_RESULTS_MUTATION_NAME: &str = "_zero_cleanupResults";
+
 // a validated push mutation (type:'custom' only)
 #[derive(Debug, Clone)]
 pub struct PushMutation {
@@ -97,9 +99,11 @@ pub fn push_validate(body: &Value) -> Result<PushPlan, EngineError> {
     let mut mutations = Vec::with_capacity(raw_mutations.len());
     for (index, m) in raw_mutations.iter().enumerate() {
         let id = m.get("id").and_then(wire::non_negative_safe_int);
+        let is_cleanup =
+            m.get("name").and_then(Value::as_str) == Some(CLEANUP_RESULTS_MUTATION_NAME);
         let valid = is_record(m)
             && m.get("type").and_then(Value::as_str) == Some("custom")
-            && matches!(id, Some(id) if id != 0)
+            && matches!(id, Some(id) if id != 0 || is_cleanup)
             && m.get("clientID").map(Value::is_string).unwrap_or(false)
             && m.get("name").map(Value::is_string).unwrap_or(false)
             && m.get("args").map(Value::is_array).unwrap_or(false);
@@ -128,6 +132,12 @@ pub fn push_validate(body: &Value) -> Result<PushPlan, EngineError> {
             "pushResponse": { "error": "unsupportedPushVersion", "mutationIDs": ids }
         })));
     }
+
+    // stock Zero processes cleanup mutations internally and deliberately omits
+    // them from MutateResponse.mutations. they carry no application LMID, so
+    // hosts must forward the exact push while excluding cleanup entries from
+    // acknowledgement validation and settlement planning.
+    mutations.retain(|mutation| mutation.name != CLEANUP_RESULTS_MUTATION_NAME);
 
     Ok(PushPlan::Process(PushBody {
         client_group_id,

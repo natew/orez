@@ -1075,6 +1075,111 @@ async fn delegated_push_settlement_is_pull_visible_after_its_effects_and_idempot
 }
 
 #[tokio::test]
+async fn delegated_push_settlement_ignores_unacknowledged_cleanup_mutations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+    let push = json!({
+        "clientGroupID": "cleanup-group",
+        "mutations": [
+            mutation(
+                3,
+                "item.create",
+                json!([{"id": "delegated", "label": "committed by app"}]),
+                "client-a",
+            ),
+            mutation(
+                0,
+                "_zero_cleanupResults",
+                json!([{
+                    "type": "single",
+                    "clientGroupID": "cleanup-group",
+                    "clientID": "client-a",
+                    "upToMutationID": 2,
+                }]),
+                "client-a",
+            ),
+        ],
+        "pushVersion": 1,
+    });
+    let response = json!({
+        "pushResponse": {
+            "mutations": [{
+                "id": { "clientID": "client-a", "id": 3 },
+                "result": {},
+            }],
+        },
+    });
+
+    let (status, settled) = send(
+        &router,
+        admin_settle_push_req("mixed-cleanup-ns", &push, &response, "user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settled, json!({ "settled": 1 }));
+
+    let (status, stored) = send(
+        &router,
+        admin_sql_req(
+            "mixed-cleanup-ns",
+            "SELECT lastMutationID FROM _zsync_clients \
+             WHERE clientGroupID = 'cleanup-group' AND clientID = 'client-a'",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["rows"], json!([{ "lastMutationID": 3 }]));
+}
+
+#[tokio::test]
+async fn delegated_cleanup_only_settlement_needs_no_acknowledgement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router();
+    let push = json!({
+        "clientGroupID": "cleanup-group",
+        "mutations": [mutation(
+            0,
+            "_zero_cleanupResults",
+            json!([{
+                "type": "single",
+                "clientGroupID": "cleanup-group",
+                "clientID": "client-a",
+                "upToMutationID": 3,
+            }]),
+            "client-a",
+        )],
+        "pushVersion": 1,
+    });
+    let response = json!({ "pushResponse": { "mutations": [] } });
+
+    let (status, settled) = send(
+        &router,
+        admin_settle_push_req("cleanup-only-ns", &push, &response, "user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settled, json!({ "settled": 0 }));
+
+    let (status, stored) = send(
+        &router,
+        admin_sql_req(
+            "cleanup-only-ns",
+            "SELECT (SELECT count(*) FROM _zsync_clients) AS clients, \
+                    (SELECT count(*) FROM _zsync_changes WHERE op = 'lmid') AS lmidRows",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["rows"][0], json!({ "clients": 0, "lmidRows": 0 }));
+}
+
+#[tokio::test]
 async fn delegated_push_settlement_rejects_a_mismatched_ack_without_advancing_lmid() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
