@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-vi.mock('cloudflare:workers', () => ({ DurableObject: class {} }))
+vi.mock('cloudflare:workers', () => ({ DurableObject: class {}, RpcTarget: class {} }))
 
 type TransactionWork<T> = () => T | Promise<T>
 
@@ -59,6 +59,7 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
     beginSchemaChange: () => null,
     capturesTable: () => false,
     drain: () => [],
+    ensureTable: vi.fn(() => true),
     finishSchemaChange() {},
     invalidateSchema() {},
     reload() {},
@@ -116,6 +117,55 @@ function relatedPlan() {
 }
 
 describe('ZeroDO trusted application transaction', () => {
+  it('binds the private application client to one Durable Object namespace', async () => {
+    const { createApplicationSqlClient } = await import('./application-sql.js')
+    const calls: unknown[] = []
+    const target = {
+      applicationSqlQuery: async (sql: string, params: readonly unknown[]) => {
+        calls.push(['query', sql, params])
+        return [{ id: 'row-1' }]
+      },
+      applicationSqlExec: async (
+        sql: string,
+        params: readonly unknown[],
+        metadata: unknown
+      ) => {
+        calls.push(['exec', sql, params, metadata])
+      },
+      applicationSqlTransaction: async (_compiler: unknown, work: (tx: unknown) => unknown) =>
+        work(target),
+    }
+    const client = createApplicationSqlClient(
+      {
+        idFromName: (namespace) => `id:${namespace}`,
+        get: (id) => {
+          calls.push(['get', id])
+          return target
+        },
+      },
+      'proj-123'
+    )
+
+    await client.query('SELECT id FROM item WHERE id = ?', ['row-1'])
+    await client.exec('UPDATE item SET enabled = ? WHERE id = ?', [1, 'row-1'], {
+      table: 'item',
+      publicTable: 'public.item',
+      kind: 'update',
+    })
+
+    expect(client.namespace).toBe('proj-123')
+    expect(calls).toEqual([
+      ['get', 'id:proj-123'],
+      ['query', 'SELECT id FROM item WHERE id = ?', ['row-1']],
+      [
+        'exec',
+        'UPDATE item SET enabled = ? WHERE id = ?',
+        [1, 'row-1'],
+        { table: 'item', publicTable: 'public.item', kind: 'update' },
+      ],
+    ])
+  })
+
   it('materializes rows before returning a promise and runs effects after commit', async () => {
     const events: string[] = []
     const { storage, zero } = await createTestZero(async (work) => {
@@ -137,6 +187,44 @@ describe('ZeroDO trusted application transaction', () => {
 
     expect(result).toEqual([{ id: 'row-1', enabled: 1 }])
     expect(events).toEqual(['transaction', 'work', 'commit', 'effect'])
+  })
+
+  it('runs private application RPC work in the owning transaction', async () => {
+    const events: string[] = []
+    const { storage, zero } = await createTestZero(async (work) => {
+      events.push('transaction')
+      const value = await work()
+      events.push('commit')
+      return value
+    })
+
+    const result = await zero.applicationSqlTransaction(
+      () => flatPlan(),
+      async (tx: any, context: any) => {
+        storage.resetCursor()
+        const rows = await tx.queryAst({ table: 'item' }, pluralFormat)
+        context.defer(() => events.push('effect'))
+        return rows
+      }
+    )
+
+    expect(result).toEqual([{ id: 'row-1', enabled: true }])
+    expect(events).toEqual(['transaction', 'commit', 'effect'])
+  })
+
+  it('installs CDC from explicit SQLite write metadata', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+
+    await zero.applicationSqlExec(
+      'INSERT INTO item (id, enabled) VALUES (?, ?)',
+      ['row-1', 1],
+      { table: 'item', publicTable: 'public.item', kind: 'upsert' }
+    )
+
+    expect(zero.cdc.ensureTable).toHaveBeenCalledWith({
+      physicalTableName: 'item',
+      tableName: 'public.item',
+    })
   })
 
   it('compiles Zero ASTs and passes decoded bindings to SQLite', async () => {
@@ -246,12 +334,12 @@ describe('ZeroDO trusted application transaction', () => {
     expect(reloadCdc).toHaveBeenCalledOnce()
   })
 
-  it('does not expose the executor on the base public fetch surface', async () => {
+  it('does not expose private application SQL on the public fetch surface', async () => {
     const { ZeroDO } = await import('./worker.js')
     const zero = Object.create(ZeroDO.prototype) as ZeroDO
 
     const response = await zero.fetch(
-      new Request('http://zero-do/_orez/run-application-transaction', {
+      new Request('http://zero-do/_orez/application-sql', {
         method: 'POST',
       })
     )

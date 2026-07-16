@@ -6,7 +6,7 @@ import type {
   TransactionQueryBudget,
   TransactionQueryFormat,
 } from './transaction-query.js'
-import type { MutatorSql, SyncSql } from './types.js'
+import type { MutatorSql, SqlStatementMetadata, SyncSql } from './types.js'
 
 type WireValue =
   | { kind: 'null' }
@@ -196,7 +196,11 @@ export class SqlStorageDirect implements SyncSql {
     private readonly recordRowsWritten: (rows: number) => void = () => {}
   ) {}
 
-  exec(sql: string, params: readonly unknown[] = []): void {
+  exec(
+    sql: string,
+    params: readonly unknown[] = [],
+    _metadata?: SqlStatementMetadata
+  ): void {
     assertHostSql(sql)
     trackBillableCursorRows(this.sql.exec(sql, ...params), this.recordRowsWritten)
   }
@@ -228,8 +232,12 @@ export class SqlStorageMutatorTransaction implements MutatorSql {
     private readonly queryBudget?: Partial<TransactionQueryBudget>
   ) {}
 
-  async exec(sql: string, params: readonly unknown[] = []): Promise<void> {
-    this.direct.exec(sql, params)
+  async exec(
+    sql: string,
+    params: readonly unknown[] = [],
+    metadata?: SqlStatementMetadata
+  ): Promise<void> {
+    this.direct.exec(sql, params, metadata)
   }
 
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(
