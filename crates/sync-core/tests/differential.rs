@@ -528,7 +528,8 @@ impl QueryHost {
             db.exec(ddl, &[]).unwrap();
         }
         db.exec(
-            "INSERT INTO project VALUES ('p0','u0','A'),('p1','u1','B'),('p2','u0','C')",
+            "INSERT INTO project VALUES
+             ('p0','u0','A'),('p1','u1','B'),('p2','u0','C'),('p3','u0','outside')",
             &[],
         )
         .unwrap();

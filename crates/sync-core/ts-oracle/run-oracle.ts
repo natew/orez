@@ -135,6 +135,7 @@ class QueryOracle {
       { id: 'p0', ownerId: 'u0', name: 'A' },
       { id: 'p1', ownerId: 'u1', name: 'B' },
       { id: 'p2', ownerId: 'u0', name: 'C' },
+      { id: 'p3', ownerId: 'u0', name: 'outside' },
     ])
       this.rows.get('project')!.set(row.id, row)
     for (const row of [
