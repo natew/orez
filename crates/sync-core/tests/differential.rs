@@ -434,7 +434,21 @@ fn fixed_trace(seed: u64, steps: u64) -> Vec<Op> {
 }
 
 fn fixed_query_trace() -> Vec<Op> {
-    let mut ops = Vec::new();
+    // SQLite's default BINARY collation sorts uppercase P before lowercase o.
+    // Keep this in the stable corpus so the independent TS comparator cannot
+    // drift back to locale-sensitive ordering.
+    let mut ops = vec![
+        Op::QueryProject {
+            id: "p0".into(),
+            owner_id: "u0".into(),
+            name: "P0".into(),
+        },
+        Op::QueryProject {
+            id: "p1".into(),
+            owner_id: "u0".into(),
+            name: "P0".into(),
+        },
+    ];
     for (hash, ast, transform_version) in query_specs() {
         ops.push(Op::QueryPut {
             hash,
