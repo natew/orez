@@ -353,14 +353,22 @@ export class ZeroDO extends DurableObject {
         if (!this.writeBudgetDisabled) this.recordWriteBudgetRows(rows)
       })
     }
-    if (!this.writeBudgetDisabled) {
-      ctx.blockConcurrencyWhile(async () => {
-        const trippedAt = await ctx.storage.get<number>(WRITE_BUDGET_TRIPPED_KEY)
-        if (trippedAt) this.writeBudget.restoreTrip(trippedAt)
-      })
-    }
     this.cdc = new TransactionalCdc(this.sql)
     this.watermarks = new DurableWatermarkState(this.sql)
+    ctx.blockConcurrencyWhile(async () => {
+      if (!this.writeBudgetDisabled) {
+        const trippedAt = await ctx.storage.get<number>(WRITE_BUDGET_TRIPPED_KEY)
+        if (trippedAt) this.writeBudget.restoreTrip(trippedAt)
+      }
+      const recovered = await this.atomically(() => {
+        const transactionIDs = recoverTxJournal(this.sql, 'application', (transactionID) => {
+          this.rollbackPendingTrackedChanges(transactionID)
+        })
+        for (const transactionID of transactionIDs) this.deletePendingTrackedChanges(transactionID)
+        return transactionIDs
+      })
+      if (recovered.length) this.invalidateSchemaCaches()
+    })
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -1187,16 +1195,13 @@ export class ZeroDO extends DurableObject {
     }
   }
 
-  private applicationSqlTables(): string[] {
-    return this.sql
-      .exec("SELECT name FROM sqlite_master WHERE type = 'table'")
-      .toArray()
-      .map((row: any) => String(row.name))
-  }
-
   private registerApplicationSqlTables(tables: readonly ApplicationSqlTable[]): void {
     for (const table of tables) {
-      this.cdc.ensureTable({ physicalTableName: table.table, tableName: table.publicTable })
+      this.cdc.ensureTable({
+        physicalTableName: table.table,
+        tableName: table.publicTable,
+        ...(table.publish === false ? { publish: false } : null),
+      })
     }
   }
 
@@ -1239,9 +1244,7 @@ export class ZeroDO extends DurableObject {
   async applicationSqlBegin(sessionID: string): Promise<void> {
     this.assertNoApplicationSqlSession()
     if (!sessionID) throw new TypeError('application SQLite session id is required')
-    await this.atomically(() =>
-      snapshotTxSchema(this.sql, sessionID, 'application', this.applicationSqlTables())
-    )
+    await this.atomically(() => snapshotTxSchema(this.sql, sessionID, 'application'))
     this.applicationSqlSessionID = sessionID
   }
 

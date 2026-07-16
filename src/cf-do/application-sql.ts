@@ -11,7 +11,10 @@ export type ApplicationSqlQueryCompiler = (
   format: TransactionQueryFormat
 ) => CompiledTransactionQueryPlan | Promise<CompiledTransactionQueryPlan>
 
-export type ApplicationSqlTable = Pick<SqlStatementMetadata, 'table' | 'publicTable'>
+export type ApplicationSqlTable = Pick<SqlStatementMetadata, 'table' | 'publicTable'> & {
+  /** capture rollback images without publishing this table to Zero clients */
+  publish?: boolean
+}
 
 export type ApplicationSqlTransaction = {
   exec(sql: string, params?: readonly unknown[], metadata?: SqlStatementMetadata): Promise<void>
