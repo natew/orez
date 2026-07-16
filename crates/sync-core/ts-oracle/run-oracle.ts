@@ -114,7 +114,7 @@ function compareScalar(left: unknown, right: unknown): number {
   if (left === null || left === undefined) return -1
   if (right === null || right === undefined) return 1
   if (typeof left === 'number' && typeof right === 'number') return left < right ? -1 : 1
-  return String(left).localeCompare(String(right))
+  return String(left) < String(right) ? -1 : 1
 }
 
 class QueryOracle {
