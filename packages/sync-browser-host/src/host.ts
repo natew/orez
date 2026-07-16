@@ -1,4 +1,5 @@
 import createSqliteModule from 'bedrock-sqlite/browser'
+import { createPostCommitEffects } from 'orez-sync-cf-host/post-commit'
 
 import {
   engine_assemble_push_response,
@@ -15,7 +16,6 @@ import {
 } from './generated/sync_wasm.js'
 import initSyncWasm from './generated/sync_wasm.js'
 import { IndexedDbSnapshotStore } from './idb-snapshot.js'
-import { createPostCommitEffects } from 'orez-sync-cf-host/post-commit'
 import {
   BedrockDirectSql,
   BedrockMutatorSql,

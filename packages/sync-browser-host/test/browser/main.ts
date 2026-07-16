@@ -341,10 +341,9 @@ async function runBrowserHostSpike() {
     'application transaction drops deferred effects on rollback'
   )
   equal(
-    await connection.client.query(
-      'SELECT id FROM todo WHERE id = ?',
-      ['application-transaction-rollback']
-    ),
+    await connection.client.query('SELECT id FROM todo WHERE id = ?', [
+      'application-transaction-rollback',
+    ]),
     [],
     'application transaction rolls back row writes'
   )

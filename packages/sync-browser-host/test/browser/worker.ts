@@ -139,10 +139,11 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
     }
     void host
       .transaction(async (tx, context) => {
-        await tx.exec(
-          'INSERT INTO todo (id, title, done) VALUES (?, ?, ?)',
-          ['application-transaction-rollback', 'must roll back', 0]
-        )
+        await tx.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
+          'application-transaction-rollback',
+          'must roll back',
+          0,
+        ])
         context.defer(() => {
           self.postMessage({
             type: 'application-transaction-rollback-effect',
@@ -178,13 +179,13 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
     }
     void host
       .transaction(async (tx, context) => {
-        await tx.exec(
-          'INSERT INTO todo (id, title, done) VALUES (?, ?, ?)',
-          ['application-transaction', 'trusted', 0]
-        )
+        await tx.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
+          'application-transaction',
+          'trusted',
+          0,
+        ])
         const row = await tx.queryAst<
-          | { id: string; title: string; done: boolean }
-          | undefined
+          { id: string; title: string; done: boolean } | undefined
         >(
           {
             table: 'todo',
