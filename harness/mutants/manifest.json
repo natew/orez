@@ -1,0 +1,102 @@
+{
+  "mutants": [
+    {
+      "id": "Q1-ignore-and-branch",
+      "property": "query",
+      "file": "crates/sync-core/src/query/compile.rs",
+      "description": "AND junction compiles only its first branch; remaining filters silently dropped",
+      "expectedLanes": ["cargo-sync-core", "sweep", "state-machine"]
+    },
+    {
+      "id": "Q2-orderby-flip",
+      "property": "query",
+      "file": "crates/sync-core/src/query/compile.rs",
+      "description": "orderBy direction inverted (ASC and DESC swapped) on every ordered column",
+      "expectedLanes": ["cargo-sync-core", "sweep"]
+    },
+    {
+      "id": "Q3-limit-off-by-one",
+      "property": "query",
+      "file": "crates/sync-core/src/query/compile.rs",
+      "description": "root LIMIT binds limit+1, returning one extra row",
+      "expectedLanes": ["cargo-sync-core", "sweep"]
+    },
+    {
+      "id": "Q4-related-window-drop",
+      "property": "query",
+      "file": "crates/sync-core/src/query/compile.rs",
+      "description": "related() window keeps rank < limit instead of <=, dropping the last related row per parent",
+      "expectedLanes": ["cargo-sync-core", "sweep"]
+    },
+    {
+      "id": "M1-skip-finalize",
+      "property": "mutator",
+      "file": "crates/sync-core/src/push.rs",
+      "description": "mutator rows commit but finalize is skipped: LMID never advances, every retry re-applies",
+      "expectedLanes": ["cargo-sync-core", "smoke", "state-machine"]
+    },
+    {
+      "id": "M2-replay-double-apply",
+      "property": "mutator",
+      "file": "crates/sync-core/src/push.rs",
+      "description": "preflight treats id == lmid as Applied instead of Replay: an exact replay of the last mutation double-applies",
+      "expectedLanes": ["cargo-sync-core"]
+    },
+    {
+      "id": "M3-swallow-rollback",
+      "property": "mutator",
+      "file": "crates/sync-core/src/push.rs",
+      "description": "app-error mutations commit their partial row effects and ack success instead of rolling back",
+      "expectedLanes": ["cargo-sync-core", "state-machine"]
+    },
+    {
+      "id": "M4-lmid-no-change-row",
+      "property": "mutator",
+      "file": "crates/sync-core/src/store.rs",
+      "description": "advance_lmid updates the counter but appends no lmid change row: acks never ride diffs (invariants 3, 4)",
+      "expectedLanes": ["cargo-sync-core", "smoke"]
+    },
+    {
+      "id": "L1-prune-no-floor",
+      "property": "loss",
+      "file": "crates/sync-core/src/store.rs",
+      "description": "retention deletes change rows without raising the floor: stale cookies diff across a silent gap",
+      "expectedLanes": ["cargo-sync-core", "state-machine", "eviction"]
+    },
+    {
+      "id": "L2-snapshot-skip-row",
+      "property": "loss",
+      "file": "crates/sync-core/src/pull.rs",
+      "description": "snapshot omits the first row of every table",
+      "expectedLanes": ["cargo-sync-core", "smoke", "sweep", "state-machine"]
+    },
+    {
+      "id": "L3-diff-drop-first-entry",
+      "property": "loss",
+      "file": "crates/sync-core/src/pull.rs",
+      "description": "cursor diff resolves but silently omits the first changed row of every response (still marks it seen)",
+      "expectedLanes": ["cargo-sync-core", "smoke", "state-machine"]
+    },
+    {
+      "id": "O1-nondurable-watermark",
+      "property": "ordering",
+      "file": "crates/sync-core/src/store.rs",
+      "description": "watermark ignores the durable high-water and never bumps it: cookie can regress if the log is ever emptied (invariant 7)",
+      "expectedLanes": ["cargo-sync-core", "eviction"]
+    },
+    {
+      "id": "O2-ack-beyond-cap",
+      "property": "ordering",
+      "file": "crates/sync-core/src/pull.rs",
+      "description": "capped diffs include lmid acks from beyond the cut: an ack can precede its row effects (invariant 3)",
+      "expectedLanes": ["cargo-sync-core"]
+    },
+    {
+      "id": "P1-snapshot-visibility-ignore",
+      "property": "permission",
+      "file": "crates/sync-core/src/pull.rs",
+      "description": "snapshot ignores the visible() filter and serves every row of every table",
+      "expectedLanes": ["cargo-sync-core"]
+    }
+  ]
+}
