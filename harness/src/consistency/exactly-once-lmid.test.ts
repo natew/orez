@@ -470,6 +470,25 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
     const lifecycle = history()
     addPendingPullAbort(lifecycle)
     expect(checkExactlyOnceLmid(lifecycle.events, lifecycle.schedule).status).toBe('pass')
+
+    const completedDuringClose = history()
+    addPendingPullAbort(completedDuringClose)
+    const terminal = completedDuringClose.events.find(
+      (event) =>
+        event.exactlyOnce?.type === 'pull' &&
+        event.exactlyOnce.observed?.outcome === 'aborted-by-quiesce-controller'
+    )!
+    terminal.phase = 'ok'
+    if (terminal.exactlyOnce?.type === 'pull') {
+      terminal.exactlyOnce.observed = {
+        outcome: 'pull-lmid-observed',
+        lastMutationId: null,
+      }
+    }
+    expect(
+      checkExactlyOnceLmid(completedDuringClose.events, completedDuringClose.schedule)
+        .status
+    ).toBe('pass')
   })
 
   test('rejects malformed quiescence counts, identities, phases, and late traffic', () => {

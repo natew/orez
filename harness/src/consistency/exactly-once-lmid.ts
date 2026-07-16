@@ -406,12 +406,20 @@ export function checkExactlyOnceLmid(
     )
   )
     violations.push('quiescence-aborted pulls are outside the client close interval')
+  const pullsDrainedDuringQuiesce = pulls.filter(
+    (pair) =>
+      pair.invoke.index < (quiesce?.invoke.index ?? -1) &&
+      pair.terminal !== undefined &&
+      pair.terminal.index > (quiesce?.invoke.index ?? Number.MAX_SAFE_INTEGER) &&
+      pair.terminal.index < (quiesce?.terminal?.index ?? -1)
+  )
   const quiesceObserved = quiesce?.terminal?.exactlyOnce.observed
   if (
     quiesceObserved?.closed === true &&
     (quiesceObserved.pendingPushAtClose !== 0 ||
-      quiesceObserved.pendingPullAtClose !== abortedPulls.length ||
-      quiesceObserved.controllerPullAbortsRequested !== abortedPulls.length ||
+      quiesceObserved.pendingPullAtClose !== pullsDrainedDuringQuiesce.length ||
+      quiesceObserved.controllerPullAbortsRequested !==
+        pullsDrainedDuringQuiesce.length ||
       quiesceObserved.pendingAfterQuiesce !== 0)
   )
     violations.push('client quiesce drain counts do not match recorded operations')
