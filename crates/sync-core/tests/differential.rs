@@ -2,7 +2,9 @@
 // a deterministic PRNG generates a trace of high-level ops; the Rust engine and
 // the TS core (src/sync-server/sync-server.ts, run by ts-oracle/run-oracle.ts
 // under bun) each execute the SAME trace with identical per-client id/cookie
-// bookkeeping, and their pull responses are compared.
+// bookkeeping, and their pull responses are compared. The same trace also
+// drives a multi-table query-aware pull fixture against a pure TypeScript ZQL
+// evaluator, including named-query membership and transform changes.
 //
 // comparison is SEMANTIC where the two cores legitimately differ:
 // - cookie: exact (both are the change-log watermark)
@@ -25,14 +27,15 @@ use std::io::Write;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use common::Host;
+use common::{Host, TestDb};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use sync_core::Transactor;
 use sync_core::pull::Caps;
+use sync_core::query::{handle_query_pull, init_query_schema};
+use sync_core::{SqlValue, SyncDb, Tables, Transactor, init_schema};
 
 const CLIENTS: [&str; 3] = ["c1", "c2", "c3"];
 const POOL: u8 = 6;
@@ -88,6 +91,200 @@ enum Op {
         client: String,
     },
     Invalidate,
+    QueryPut {
+        hash: String,
+        ast: Value,
+        transform_version: i64,
+    },
+    QueryDel {
+        hash: String,
+    },
+    QueryClear,
+    QueryPull,
+    QueryProject {
+        id: String,
+        owner_id: String,
+        name: String,
+    },
+    QueryMember {
+        id: String,
+        project_id: String,
+        user_id: String,
+    },
+    QueryTask {
+        id: String,
+        project_id: String,
+        title: String,
+        rank: i64,
+        done: bool,
+        due_at: Option<i64>,
+    },
+    QueryUser {
+        id: String,
+        name: String,
+    },
+    QueryDelete {
+        table: String,
+        id: String,
+    },
+}
+
+fn cmp(op: &str, column: &str, value: Value) -> Value {
+    json!({
+        "type": "simple",
+        "op": op,
+        "left": { "type": "column", "name": column },
+        "right": { "type": "literal", "value": value },
+    })
+}
+
+// Named, already-transformed ZQL ASTs. The repeated `permission` hash models
+// the trusted host replacing a query's permission transform in place.
+fn query_specs() -> Vec<(String, Value, i64)> {
+    let member_relation = || {
+        json!({
+            "correlation": { "parentField": ["id"], "childField": ["projectId"] },
+            "subquery": { "table": "member", "related": [{
+                "correlation": { "parentField": ["userId"], "childField": ["id"] },
+                "subquery": { "table": "user", "limit": 1 },
+            }] },
+        })
+    };
+    vec![
+        (
+            "and_or".into(),
+            json!({
+                "table": "project",
+                "where": { "type": "and", "conditions": [
+                    cmp("=", "ownerId", json!("u0")),
+                    { "type": "or", "conditions": [
+                        cmp("=", "name", json!("A")),
+                        cmp("=", "name", json!("C")),
+                    ] },
+                ] },
+                "orderBy": [["name", "asc"]],
+            }),
+            0,
+        ),
+        (
+            "top_tasks".into(),
+            json!({ "table": "task", "orderBy": [["rank", "desc"]], "limit": 2 }),
+            0,
+        ),
+        (
+            "first_project".into(),
+            json!({ "table": "project", "orderBy": [["name", "asc"]], "limit": 1 }),
+            0,
+        ),
+        (
+            "project_page".into(),
+            json!({
+                "table": "project",
+                "orderBy": [["name", "asc"]],
+                "limit": 2,
+                "related": [
+                    member_relation(),
+                    {
+                        "correlation": { "parentField": ["id"], "childField": ["projectId"] },
+                        "subquery": {
+                            "table": "task",
+                            "orderBy": [["rank", "desc"]],
+                            "limit": 2,
+                        },
+                    },
+                ],
+            }),
+            0,
+        ),
+        (
+            "done_projects".into(),
+            json!({
+                "table": "project",
+                "where": {
+                    "type": "correlatedSubquery",
+                    "op": "EXISTS",
+                    "related": {
+                        "correlation": { "parentField": ["id"], "childField": ["projectId"] },
+                        "subquery": { "table": "task", "where": cmp("=", "done", json!(true)) },
+                    },
+                },
+                "orderBy": [["id", "asc"]],
+            }),
+            0,
+        ),
+        (
+            "nullable_page".into(),
+            json!({
+                "table": "task",
+                "orderBy": [["dueAt", "asc"], ["id", "asc"]],
+                "start": { "row": { "dueAt": null, "id": "t0" }, "exclusive": true },
+                "limit": 3,
+            }),
+            0,
+        ),
+        (
+            "permission".into(),
+            json!({ "table": "project", "where": cmp("=", "ownerId", json!("u0")) }),
+            1,
+        ),
+        (
+            "permission".into(),
+            json!({ "table": "project", "where": cmp("=", "ownerId", json!("u1")) }),
+            2,
+        ),
+    ]
+}
+
+fn query_op() -> impl Strategy<Value = Op> {
+    let query_put =
+        prop::sample::select(query_specs()).prop_map(|(hash, ast, transform_version)| {
+            Op::QueryPut {
+                hash,
+                ast,
+                transform_version,
+            }
+        });
+    prop_oneof![
+        5 => query_put,
+        2 => prop::sample::select(query_specs()).prop_map(|(hash, _, _)| Op::QueryDel { hash }),
+        1 => Just(Op::QueryClear),
+        4 => Just(Op::QueryPull),
+        2 => (0u8..4, 0u8..3, 0u16..100).prop_map(|(id, owner, name)| Op::QueryProject {
+            id: format!("p{id}"),
+            owner_id: format!("u{owner}"),
+            name: format!("P{name}"),
+        }),
+        2 => (0u8..6, 0u8..4, 0u8..3).prop_map(|(id, project, user)| Op::QueryMember {
+            id: format!("m{id}"),
+            project_id: format!("p{project}"),
+            user_id: format!("u{user}"),
+        }),
+        3 => (0u8..8, 0u8..4, -2i16..12, any::<bool>(), prop::option::of(0i16..30)).prop_map(
+            |(id, project, rank, done, due_at)| Op::QueryTask {
+                id: format!("t{id}"),
+                project_id: format!("p{project}"),
+                title: format!("T{id}"),
+                rank: i64::from(rank),
+                done,
+                due_at: due_at.map(i64::from),
+            },
+        ),
+        1 => (0u8..4, 0u16..100).prop_map(|(id, name)| Op::QueryUser {
+            id: format!("u{id}"),
+            name: format!("U{name}"),
+        }),
+        2 => (prop::sample::select(vec!["project", "member", "task", "user"]), 0u8..8)
+            .prop_map(|(table, id)| {
+                let prefix = match table {
+                    "project" => "p",
+                    "member" => "m",
+                    "task" => "t",
+                    "user" => "u",
+                    _ => unreachable!(),
+                };
+                Op::QueryDelete { table: table.into(), id: format!("{prefix}{id}") }
+            }),
+    ]
 }
 
 fn client() -> impl Strategy<Value = String> {
@@ -125,6 +322,7 @@ fn op() -> impl Strategy<Value = Op> {
         }),
         3 => client().prop_map(|client| Op::Pull { client }),
         1 => Just(Op::Invalidate),
+        8 => query_op(),
     ]
 }
 
@@ -139,6 +337,20 @@ fn trace() -> impl Strategy<Value = Vec<Op>> {
                 client: client.into(),
             });
         }
+        // Always leave two independently useful query observations in the
+        // minimized trace. These make AND and order/limit mutants shrink to a
+        // handful of operations instead of relying on a lucky random suffix.
+        let specs = query_specs();
+        for index in [0, 1] {
+            let (hash, ast, transform_version) = specs[index].clone();
+            ops.push(Op::QueryPut {
+                hash,
+                ast,
+                transform_version,
+            });
+        }
+        ops.push(Op::QueryPull);
+        ops.push(Op::QueryPull);
         ops
     })
 }
@@ -221,9 +433,262 @@ fn fixed_trace(seed: u64, steps: u64) -> Vec<Op> {
     ops
 }
 
+fn fixed_query_trace() -> Vec<Op> {
+    let mut ops = Vec::new();
+    for (hash, ast, transform_version) in query_specs() {
+        ops.push(Op::QueryPut {
+            hash,
+            ast,
+            transform_version,
+        });
+    }
+    ops.extend([
+        Op::QueryTask {
+            id: "t4".into(),
+            project_id: "p0".into(),
+            title: "new top".into(),
+            rank: 10,
+            done: true,
+            due_at: None,
+        },
+        Op::QueryPull,
+        Op::QueryDelete {
+            table: "task".into(),
+            id: "t4".into(),
+        },
+        Op::QueryPull,
+        Op::QueryDel {
+            hash: "top_tasks".into(),
+        },
+        Op::QueryClear,
+        Op::QueryPull,
+        Op::QueryPull,
+    ]);
+    ops
+}
+
+fn query_tables() -> Tables {
+    Tables::from_zero_schema(&json!({
+        "tables": {
+            "project": {
+                "columns": {
+                    "id": { "type": "string" },
+                    "ownerId": { "type": "string" },
+                    "name": { "type": "string" },
+                },
+                "primaryKey": ["id"],
+            },
+            "member": {
+                "columns": {
+                    "id": { "type": "string" },
+                    "projectId": { "type": "string" },
+                    "userId": { "type": "string" },
+                },
+                "primaryKey": ["id"],
+            },
+            "task": {
+                "columns": {
+                    "id": { "type": "string" },
+                    "projectId": { "type": "string" },
+                    "title": { "type": "string" },
+                    "rank": { "type": "number" },
+                    "done": { "type": "boolean" },
+                    "dueAt": { "type": "number" },
+                },
+                "primaryKey": ["id"],
+            },
+            "user": {
+                "columns": {
+                    "id": { "type": "string" },
+                    "name": { "type": "string" },
+                },
+                "primaryKey": ["id"],
+            },
+        },
+    }))
+    .unwrap()
+}
+
+struct QueryHost {
+    db: TestDb,
+    tables: Tables,
+    cookie: Value,
+    version: i64,
+}
+
+impl QueryHost {
+    fn new() -> Self {
+        let mut db = TestDb::memory();
+        for ddl in [
+            "CREATE TABLE project (id TEXT PRIMARY KEY, ownerId TEXT, name TEXT)",
+            "CREATE TABLE member (id TEXT PRIMARY KEY, projectId TEXT, userId TEXT)",
+            "CREATE TABLE task (id TEXT PRIMARY KEY, projectId TEXT, title TEXT, rank INTEGER, done INTEGER, dueAt INTEGER)",
+            "CREATE TABLE user (id TEXT PRIMARY KEY, name TEXT)",
+        ] {
+            db.exec(ddl, &[]).unwrap();
+        }
+        db.exec(
+            "INSERT INTO project VALUES ('p0','u0','A'),('p1','u1','B'),('p2','u0','C')",
+            &[],
+        )
+        .unwrap();
+        db.exec(
+            "INSERT INTO member VALUES ('m0','p0','u0'),('m1','p0','u1'),('m2','p2','u2')",
+            &[],
+        )
+        .unwrap();
+        db.exec(
+            "INSERT INTO task VALUES
+             ('t0','p0','T0',1,0,NULL),('t1','p0','T1',2,1,10),
+             ('t2','p0','T2',3,0,20),('t3','p2','T3',5,1,NULL)",
+            &[],
+        )
+        .unwrap();
+        db.exec(
+            "INSERT INTO user VALUES ('u0','U0'),('u1','U1'),('u2','U2')",
+            &[],
+        )
+        .unwrap();
+        let tables = query_tables();
+        init_schema(&mut db, &tables).unwrap();
+        init_query_schema(&mut db).unwrap();
+        QueryHost {
+            db,
+            tables,
+            cookie: Value::Null,
+            version: 0,
+        }
+    }
+
+    fn pull(&mut self, patch: Option<Vec<Value>>) -> Value {
+        let mut body = json!({
+            "clientID": "query-client",
+            "clientGroupID": "query-group",
+            "cookie": self.cookie,
+        });
+        if let Some(patch) = patch {
+            self.version += 1;
+            body["queries"] = json!({ "version": self.version, "patch": patch });
+        }
+        let tables = self.tables.clone();
+        let response = self
+            .db
+            .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+            .unwrap();
+        self.cookie = response["cookie"].clone();
+        response
+    }
+
+    fn contains(&mut self, table: &str, id: &str) -> bool {
+        let sql = match table {
+            "project" => "SELECT id FROM project WHERE id = ?",
+            "member" => "SELECT id FROM member WHERE id = ?",
+            "task" => "SELECT id FROM task WHERE id = ?",
+            "user" => "SELECT id FROM user WHERE id = ?",
+            _ => unreachable!("generated query table"),
+        };
+        !self
+            .db
+            .query(sql, &[SqlValue::Text(id.into())])
+            .unwrap()
+            .is_empty()
+    }
+
+    fn upsert_project(&mut self, id: &str, owner_id: &str, name: &str) {
+        let sql = if self.contains("project", id) {
+            "UPDATE project SET ownerId = ?, name = ? WHERE id = ?"
+        } else {
+            "INSERT INTO project (ownerId, name, id) VALUES (?, ?, ?)"
+        };
+        self.db
+            .exec(
+                sql,
+                &[
+                    SqlValue::Text(owner_id.into()),
+                    SqlValue::Text(name.into()),
+                    SqlValue::Text(id.into()),
+                ],
+            )
+            .unwrap();
+    }
+
+    fn upsert_member(&mut self, id: &str, project_id: &str, user_id: &str) {
+        let sql = if self.contains("member", id) {
+            "UPDATE member SET projectId = ?, userId = ? WHERE id = ?"
+        } else {
+            "INSERT INTO member (projectId, userId, id) VALUES (?, ?, ?)"
+        };
+        self.db
+            .exec(
+                sql,
+                &[
+                    SqlValue::Text(project_id.into()),
+                    SqlValue::Text(user_id.into()),
+                    SqlValue::Text(id.into()),
+                ],
+            )
+            .unwrap();
+    }
+
+    fn upsert_task(
+        &mut self,
+        id: &str,
+        project_id: &str,
+        title: &str,
+        rank: i64,
+        done: bool,
+        due_at: Option<i64>,
+    ) {
+        let sql = if self.contains("task", id) {
+            "UPDATE task SET projectId = ?, title = ?, rank = ?, done = ?, dueAt = ? WHERE id = ?"
+        } else {
+            "INSERT INTO task (projectId, title, rank, done, dueAt, id) VALUES (?, ?, ?, ?, ?, ?)"
+        };
+        self.db
+            .exec(
+                sql,
+                &[
+                    SqlValue::Text(project_id.into()),
+                    SqlValue::Text(title.into()),
+                    SqlValue::Integer(rank),
+                    SqlValue::Integer(i64::from(done)),
+                    due_at.map_or(SqlValue::Null, SqlValue::Integer),
+                    SqlValue::Text(id.into()),
+                ],
+            )
+            .unwrap();
+    }
+
+    fn upsert_user(&mut self, id: &str, name: &str) {
+        let sql = if self.contains("user", id) {
+            "UPDATE user SET name = ? WHERE id = ?"
+        } else {
+            "INSERT INTO user (name, id) VALUES (?, ?)"
+        };
+        self.db
+            .exec(
+                sql,
+                &[SqlValue::Text(name.into()), SqlValue::Text(id.into())],
+            )
+            .unwrap();
+    }
+
+    fn delete(&mut self, table: &str, id: &str) {
+        let sql = match table {
+            "project" => "DELETE FROM project WHERE id = ?",
+            "member" => "DELETE FROM member WHERE id = ?",
+            "task" => "DELETE FROM task WHERE id = ?",
+            "user" => "DELETE FROM user WHERE id = ?",
+            _ => unreachable!("generated query table"),
+        };
+        self.db.exec(sql, &[SqlValue::Text(id.into())]).unwrap();
+    }
+}
+
 // run the trace through the Rust engine, returning the pull responses in order
 fn run_rust(trace: &[Op]) -> Vec<Value> {
     let mut h = Host::new(true);
+    let mut query = QueryHost::new();
     h.init();
     // uncapped, to mirror the reference core (which has no caps)
     h.caps = Caps {
@@ -289,8 +754,49 @@ fn run_rust(trace: &[Op]) -> Vec<Value> {
                 let cookie = cookies.get(&client).cloned().unwrap_or(json!(null));
                 let resp = h.pull_as(&client, "g1", cookie, None, "u1").unwrap();
                 cookies.insert(client, resp["cookie"].clone());
-                pulls.push(resp);
+                pulls.push(json!({ "lane": "base", "response": resp }));
             }
+            Op::QueryPut {
+                hash,
+                ast,
+                transform_version,
+            } => pulls.push(json!({
+                "lane": "query",
+                "response": query.pull(Some(vec![json!({
+                    "op": "put",
+                    "hash": hash,
+                    "ast": ast,
+                    "transformVersion": transform_version,
+                })])),
+            })),
+            Op::QueryDel { hash } => pulls.push(json!({
+                "lane": "query",
+                "response": query.pull(Some(vec![json!({ "op": "del", "hash": hash })])),
+            })),
+            Op::QueryClear => pulls.push(json!({
+                "lane": "query",
+                "response": query.pull(Some(vec![json!({ "op": "clear" })])),
+            })),
+            Op::QueryPull => pulls.push(json!({
+                "lane": "query",
+                "response": query.pull(None),
+            })),
+            Op::QueryProject { id, owner_id, name } => query.upsert_project(id, owner_id, name),
+            Op::QueryMember {
+                id,
+                project_id,
+                user_id,
+            } => query.upsert_member(id, project_id, user_id),
+            Op::QueryTask {
+                id,
+                project_id,
+                title,
+                rank,
+                done,
+                due_at,
+            } => query.upsert_task(id, project_id, title, *rank, *done, *due_at),
+            Op::QueryUser { id, name } => query.upsert_user(id, name),
+            Op::QueryDelete { table, id } => query.delete(table, id),
         }
     }
     pulls
@@ -337,7 +843,7 @@ fn run_ts(trace: &[Op]) -> Vec<Value> {
 }
 
 // (has_clear, sorted non-clear ops) — rowsPatch order is not semantic
-fn normalize_patch(resp: &Value) -> (bool, Vec<String>) {
+fn normalize_patch(resp: &Value, base_lane: bool) -> (bool, Vec<String>) {
     let patch = resp["rowsPatch"].as_array().cloned().unwrap_or_default();
     let has_clear = patch.first() == Some(&json!({ "op": "clear" }));
     let mut ops: Vec<String> = patch
@@ -347,7 +853,14 @@ fn normalize_patch(resp: &Value) -> (bool, Vec<String>) {
         // differential fixture deliberately exercises serverName mappings.
         // canonicalize the reference response to the physical downstream wire
         // before comparing row semantics.
-        .map(|op| serde_json::to_string(&canonical_json(physical_item_op(op.clone()))).unwrap())
+        .map(|op| {
+            let op = if base_lane {
+                physical_item_op(op.clone())
+            } else {
+                op.clone()
+            };
+            serde_json::to_string(&canonical_json(op)).unwrap()
+        })
         .collect();
     ops.sort();
     (has_clear, ops)
@@ -413,6 +926,12 @@ fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
         ));
     }
     for (i, (r, t)) in rust.iter().zip(ts.iter()).enumerate() {
+        if r["lane"] != t["lane"] {
+            return Err(format!("observation {i}: lane differs\nrust={r}\nts={t}"));
+        }
+        let base_lane = r["lane"] == "base";
+        let r = &r["response"];
+        let t = &t["response"];
         if r["cookie"] != t["cookie"] {
             return Err(format!("pull {i}: cookie differs\nrust={r}\nts={t}"));
         }
@@ -424,8 +943,8 @@ fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
         if r.get("unchanged").is_some() {
             continue;
         }
-        let rust_patch = normalize_patch(r);
-        let ts_patch = normalize_patch(t);
+        let rust_patch = normalize_patch(r, base_lane);
+        let ts_patch = normalize_patch(t, base_lane);
         if rust_patch != ts_patch {
             return Err(format!(
                 "pull {i}: rowsPatch differs\nrust={r}\nts={t}\nnormalized rust={rust_patch:?}\nnormalized ts={ts_patch:?}"
@@ -440,6 +959,9 @@ fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
                     "pull {i}: rust acks {client}->{lmid} not matched by ts {t}"
                 ));
             }
+        }
+        if !base_lane && r["gotQueries"] != t["gotQueries"] {
+            return Err(format!("pull {i}: gotQueries differs\nrust={r}\nts={t}"));
         }
     }
     Ok(())
@@ -482,7 +1004,7 @@ fn failure_envelope(reason: String, ops: &[Op], process_id: u32) -> Value {
         },
         "generator": {
             "name": "sync-core-operation-state-machine",
-            "version": 1,
+            "version": 2,
             "cases": cases,
         },
         "replay": {
@@ -545,7 +1067,8 @@ fn replay_saved_differential_trace() {
 #[test]
 fn rust_matches_the_ts_reference_core_on_fixed_traces() {
     for seed in 0..8 {
-        let ops = fixed_trace(seed, 200);
+        let mut ops = fixed_trace(seed, 200);
+        ops.extend(fixed_query_trace());
         let rust = run_rust(&ops);
         let ts = run_ts(&ops);
         if let Err(reason) = compare(&rust, &ts) {
