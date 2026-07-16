@@ -33,7 +33,6 @@ export type ExactlyOnceEvidence =
       type: 'mutation'
       profileVersion: 1
       identity: ExactlyOnceIdentity
-      observer: ExactlyOnceClientIdentity
       effect: ExactlyOnceEffect
     }
   | {
@@ -53,6 +52,7 @@ export type ExactlyOnceEvidence =
       type: 'client-probe'
       profileVersion: 1
       identity: ExactlyOnceIdentity
+      observer: ExactlyOnceClientIdentity
       effect: ExactlyOnceEffect
       observed: null | { resultType: 'complete'; applicationCount: string }
     }

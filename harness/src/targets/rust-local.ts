@@ -33,6 +33,7 @@ const BINARY = join(REPO_ROOT, 'target', 'release', 'sync-native')
 
 export type RustLocalTarget = SyncTarget & {
   readonly baseUrl: string
+  readonly origin: string
   readonly namespace: string
   readonly databaseFile: string
   readonly adminKey: string
@@ -94,6 +95,7 @@ export async function startRustLocal(opts?: {
   visible?: boolean
   queryAware?: boolean
   onPull?: (observation: HttpPullObservation) => void
+  fetch?: typeof fetch
 }): Promise<RustLocalTarget> {
   await ensureBinaryBuilt()
 
@@ -150,7 +152,7 @@ export async function startRustLocal(opts?: {
 
   const transport = ensureHttpPullTransport({
     origin,
-    fetch: observedPullFetch(opts?.onPull),
+    fetch: observedPullFetch(opts?.onPull, opts?.fetch),
     pullIntervalMs: opts?.pullIntervalMs ?? 100,
     // subscribe to the native wake channel: a push commit wakes the other
     // clients for a push-shaped pull, with the interval poll as safety net.
@@ -186,6 +188,7 @@ export async function startRustLocal(opts?: {
   return {
     name: 'rust-local',
     baseUrl,
+    origin,
     namespace,
     databaseFile,
     adminKey: adminToken,
