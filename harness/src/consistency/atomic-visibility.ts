@@ -7,7 +7,7 @@ import {
 
 export const ATOMIC_VISIBILITY_WORKLOAD_PROFILE = {
   name: 'dedicated-append-only-atomic-visibility',
-  version: 1,
+  version: 2,
   adapterRequirements: {
     mutation: 'authoritative-atomic-append-transaction',
     read: 'complete-full-scope-list-observation',
@@ -17,12 +17,14 @@ export const ATOMIC_VISIBILITY_WORKLOAD_PROFILE = {
 
 type AtomicGroup = {
   opId: string
+  clientId: string | undefined
   effects: AppendMicroOp[]
   keys: Set<string>
 }
 
 type ReadObservation = {
   opId: string
+  clientId: string | undefined
   values: Map<string, number[]>
 }
 
@@ -55,7 +57,7 @@ export function checkAtomicVisibility(events: readonly HistoryEvent[]): CheckRes
   let successfulReads = 0
 
   for (const event of events) {
-    if (event.kind === 'mutation' && event.phase !== 'invoke' && event.phase !== 'fail') {
+    if (event.kind === 'mutation' && event.phase === 'ok') {
       if (!Array.isArray(event.transaction)) {
         violations.push(
           `mutation ${event.opId} terminal ${event.phase} has no transaction array`
@@ -85,6 +87,7 @@ export function checkAtomicVisibility(events: readonly HistoryEvent[]): CheckRes
       if (transaction.length >= 2 && effects.length === transaction.length) {
         groups.push({
           opId: event.opId,
+          clientId: event.clientId,
           effects,
           keys: new Set(effects.map(({ key }) => key)),
         })
@@ -112,16 +115,24 @@ export function checkAtomicVisibility(events: readonly HistoryEvent[]): CheckRes
         }
         values.set(operation.key, operation.value ?? [])
       }
-      reads.push({ opId: event.opId, values })
+      reads.push({ opId: event.opId, clientId: event.clientId, values })
     }
   }
 
   let eligiblePairs = 0
   let completePairs = 0
+  let nonWritingPairs = 0
   for (const group of groups) {
     for (const read of reads) {
       if (![...group.keys].every((key) => read.values.has(key))) continue
       eligiblePairs++
+      if (
+        group.clientId !== undefined &&
+        read.clientId !== undefined &&
+        read.clientId !== group.clientId
+      ) {
+        nonWritingPairs++
+      }
       const missing = group.effects.filter(
         ({ key, value }) => !read.values.get(key)!.includes(value)
       )
@@ -140,6 +151,9 @@ export function checkAtomicVisibility(events: readonly HistoryEvent[]): CheckRes
   }
   if (successfulReads === 0) {
     violations.push('atomic visibility requires at least one successful read')
+  }
+  if (nonWritingPairs === 0) {
+    violations.push('atomic visibility requires at least one non-writing client observation')
   }
   if (eligiblePairs === 0) {
     violations.push('atomic visibility requires at least one eligible group/read pair')

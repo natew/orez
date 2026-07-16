@@ -9,7 +9,7 @@ import type { ConsistencyCheck } from './artifacts.js'
 
 export const EXACTLY_ONCE_LMID_PROFILE = {
   name: 'exactly-once-lost-push-recovery-plus-server-replay',
-  version: 1,
+  version: 2,
 } as const
 
 export type ExactlyOnceLmidResult = Pick<
@@ -446,10 +446,11 @@ export function checkExactlyOnceLmid(
   const clientObserved = clientProbes[0]?.terminal?.exactlyOnce.observed
   if (
     clientProbes.length !== 1 ||
+    clientProbes[0]?.invoke.exactlyOnce.observer.clientId === identity?.clientId ||
     clientObserved?.resultType !== 'complete' ||
     canonicalI64(clientObserved.applicationCount) !== 0n
   ) {
-    violations.push('missing complete client rank-0 probe precondition')
+    violations.push('missing complete non-writing client rank-0 probe precondition')
   }
   if (violations.length > 0) return { status: 'fail', violations }
   if (mutationPhase === 'info') {

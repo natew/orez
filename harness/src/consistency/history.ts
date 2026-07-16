@@ -33,6 +33,7 @@ export type ExactlyOnceEvidence =
       type: 'mutation'
       profileVersion: 1
       identity: ExactlyOnceIdentity
+      observer: ExactlyOnceClientIdentity
       effect: ExactlyOnceEffect
     }
   | {
@@ -269,7 +270,14 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
       'profileVersion',
       'type',
     ],
-    'client-probe': ['effect', 'identity', 'observed', 'profileVersion', 'type'],
+    'client-probe': [
+      'effect',
+      'identity',
+      'observed',
+      'observer',
+      'profileVersion',
+      'type',
+    ],
     'client-quiesce': ['identity', 'observed', 'profileVersion', 'type'],
     push: [
       'attempt',
@@ -310,6 +318,20 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
     raw.identity === null
   ) {
     violations.push(`event ${event.index} has malformed exactly-once evidence`)
+    return false
+  }
+  if (
+    raw.type === 'client-probe' &&
+    (typeof raw.observer !== 'object' ||
+      raw.observer === null ||
+      !exactKeys(raw.observer as Record<string, unknown>, [
+        'clientId',
+        'clientGroupId',
+      ]) ||
+      !nonemptyString((raw.observer as Record<string, unknown>).clientId) ||
+      !nonemptyString((raw.observer as Record<string, unknown>).clientGroupId))
+  ) {
+    violations.push(`event ${event.index} has malformed non-writing observer identity`)
     return false
   }
   if (
@@ -395,10 +417,12 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
     violations.push(`event ${event.index} has malformed fault evidence`)
     return false
   }
-  if (event.clientId !== evidence.identity.clientId) {
+  const eventIdentity =
+    evidence.type === 'client-probe' ? evidence.observer : evidence.identity
+  if (event.clientId !== eventIdentity.clientId) {
     violations.push(`event ${event.index} exactly-once clientId disagrees with top level`)
   }
-  if (event.clientGroupId !== evidence.identity.clientGroupId) {
+  if (event.clientGroupId !== eventIdentity.clientGroupId) {
     violations.push(
       `event ${event.index} exactly-once clientGroupId disagrees with top level`
     )
