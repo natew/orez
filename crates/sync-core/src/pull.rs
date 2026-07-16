@@ -188,16 +188,28 @@ fn snapshot(
 
     for (table, sql, params) in plans {
         let spec = tables.get(&table).expect("table in spec");
+        let physical_table = tables
+            .physical_name(&table)
+            .expect("iterated table has physical mapping");
         for row in db.query(&sql, &params)? {
-            patch.push(json!({ "op": "put", "tableName": table, "value": row_value(spec, &row)? }));
+            patch.push(json!({
+                "op": "put",
+                "tableName": physical_table,
+                "value": row_value(tables, &table, spec, &row)?,
+            }));
         }
     }
     Ok(patch)
 }
 
 // build a zero-typed row object from a live sqlite row
-fn row_value(spec: &TableSpec, row: &Row) -> Result<Value, EngineError> {
-    crate::value::zero_row(spec, row)
+fn row_value(
+    tables: &Tables,
+    table: &str,
+    spec: &TableSpec,
+    row: &Row,
+) -> Result<Value, EngineError> {
+    crate::value::zero_row(tables, table, spec, row)
 }
 
 // (cookie, prefix lmids, rowsPatch) — the diff's result
@@ -404,18 +416,29 @@ fn resolve_row(
         base
     };
     let rows = db.query(&sql, &params)?;
+    let physical_table = tables
+        .physical_name(table)
+        .expect("resolved table has physical mapping");
     match rows.first() {
-        Some(row) => Ok(json!({ "op": "put", "tableName": table, "value": row_value(spec, row)? })),
-        None => Ok(json!({ "op": "del", "tableName": table, "id": pk_id(spec, pk)? })),
+        Some(row) => Ok(json!({
+            "op": "put",
+            "tableName": physical_table,
+            "value": row_value(tables, table, spec, row)?,
+        })),
+        None => Ok(json!({
+            "op": "del",
+            "tableName": physical_table,
+            "id": pk_id(tables, table, spec, pk)?,
+        })),
     }
 }
 
 // del ids carry zero-typed primary-key columns
-fn pk_id(spec: &TableSpec, pk: &Value) -> Result<Value, EngineError> {
-    crate::value::zero_pk_id(spec, pk)
+fn pk_id(tables: &Tables, table: &str, spec: &TableSpec, pk: &Value) -> Result<Value, EngineError> {
+    crate::value::zero_pk_id(tables, table, spec, pk)
 }
 
-// dedup key = client table name + the pk column values, JSON-normalized (the
+// dedup key = logical table name + the pk column values, JSON-normalized (the
 // reference core's `${table} ${JSON.stringify(primaryKey.map(pk))}`)
 fn dedup_key(table: &str, spec: &TableSpec, pk: &Value) -> String {
     let vals: Vec<Value> = spec

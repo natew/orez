@@ -74,17 +74,24 @@ async function push(
 
 function puts(body: { rowsPatch?: Array<Record<string, unknown>> }) {
   expect(body.rowsPatch?.[0]).toEqual({ op: 'clear' })
+  const primaryKeys: Record<string, string> = {
+    user_record: 'user_id',
+    project_record: 'project_id',
+    project_member: 'member_id',
+  }
   return body.rowsPatch
     ?.slice(1)
     .map((op) => ({
       tableName: op.tableName,
       value: op.value,
     }))
-    .sort((a, b) =>
-      `${a.tableName}:${(a.value as { id: string }).id}`.localeCompare(
-        `${b.tableName}:${(b.value as { id: string }).id}`
+    .sort((a, b) => {
+      const aKey = primaryKeys[String(a.tableName)]
+      const bKey = primaryKeys[String(b.tableName)]
+      return `${a.tableName}:${(a.value as Record<string, string>)[aKey]}`.localeCompare(
+        `${b.tableName}:${(b.value as Record<string, string>)[bKey]}`
       )
-    )
+    })
 }
 
 describe('zero-http fixture server', () => {
@@ -105,32 +112,32 @@ describe('zero-http fixture server', () => {
     expect(u1.res.status).toBe(200)
     expect(puts(u1.body)).toEqual([
       {
-        tableName: 'member',
-        value: { id: 'm1', projectId: 'p2', userId: 'u1' },
+        tableName: 'project_member',
+        value: { member_id: 'm1', project_id: 'p2', user_id: 'u1' },
       },
       {
-        tableName: 'project',
-        value: { id: 'p1', ownerId: 'u1', name: 'u1 project' },
+        tableName: 'project_record',
+        value: { project_id: 'p1', owner_id: 'u1', project_name: 'u1 project' },
       },
       {
-        tableName: 'project',
-        value: { id: 'p2', ownerId: 'u2', name: 'u2 shared' },
+        tableName: 'project_record',
+        value: { project_id: 'p2', owner_id: 'u2', project_name: 'u2 shared' },
       },
-      { tableName: 'user', value: { id: 'u1', name: 'ada' } },
+      { tableName: 'user_record', value: { user_id: 'u1', display_name: 'ada' } },
     ])
 
     const u2 = await pull(server, 'token-u2', { clientGroupID: 'cg-u2' })
     expect(u2.res.status).toBe(200)
     expect(puts(u2.body)).toEqual([
       {
-        tableName: 'member',
-        value: { id: 'm1', projectId: 'p2', userId: 'u1' },
+        tableName: 'project_member',
+        value: { member_id: 'm1', project_id: 'p2', user_id: 'u1' },
       },
       {
-        tableName: 'project',
-        value: { id: 'p2', ownerId: 'u2', name: 'u2 shared' },
+        tableName: 'project_record',
+        value: { project_id: 'p2', owner_id: 'u2', project_name: 'u2 shared' },
       },
-      { tableName: 'user', value: { id: 'u2', name: 'ben' } },
+      { tableName: 'user_record', value: { user_id: 'u2', display_name: 'ben' } },
     ])
 
     expect((await pull(server, null, { clientGroupID: 'cg-missing' })).res.status).toBe(
@@ -174,8 +181,8 @@ describe('zero-http fixture server', () => {
     expect(changed.body.cookie).toBeGreaterThan(first.body.cookie)
     expect(changed.body.rowsPatch[0]).toEqual({ op: 'clear' })
     expect(puts(changed.body)).toContainEqual({
-      tableName: 'project',
-      value: { id: 'p1', ownerId: 'u1', name: 'new project' },
+      tableName: 'project_record',
+      value: { project_id: 'p1', owner_id: 'u1', project_name: 'new project' },
     })
   })
 
@@ -317,8 +324,8 @@ describe('zero-http fixture server', () => {
     expect(afterMissing.body.cookie).toBeGreaterThan(beforeVersion)
     expect(afterMissing.body.lastMutationIDChanges).toEqual({ c1: 1 })
     expect(puts(afterMissing.body)).not.toContainEqual({
-      tableName: 'project',
-      value: { id: 'missing', ownerId: 'u1', name: 'ghost' },
+      tableName: 'project_record',
+      value: { project_id: 'missing', owner_id: 'u1', project_name: 'ghost' },
     })
 
     const beforeForbidden = server.version()
@@ -370,7 +377,7 @@ describe('zero-http fixture server', () => {
     const afterGap = await pull(server, 'token-u1', { cookie: beforeVersion - 1 })
     expect(afterGap.body.lastMutationIDChanges).toEqual({})
     expect(puts(afterGap.body)).toEqual([
-      { tableName: 'user', value: { id: 'u1', name: 'ada' } },
+      { tableName: 'user_record', value: { user_id: 'u1', display_name: 'ada' } },
     ])
   })
 

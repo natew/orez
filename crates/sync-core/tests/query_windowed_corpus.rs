@@ -91,12 +91,19 @@ fn setup() -> TestDb {
 }
 
 fn put_ids(resp: &Value, table: &str) -> Vec<String> {
+    let (physical_table, physical_id) = match table {
+        "project" => ("project_record", "project_id"),
+        "member" => ("project_member", "member_id"),
+        "task" => ("project_task", "task_id"),
+        "user" => ("user_record", "user_id"),
+        other => panic!("unknown fixture table {other}"),
+    };
     let mut v: Vec<String> = resp["rowsPatch"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|op| op["op"] == "put" && op["tableName"] == table)
-        .map(|op| op["value"]["id"].as_str().unwrap().to_string())
+        .filter(|op| op["op"] == "put" && op["tableName"] == physical_table)
+        .map(|op| op["value"][physical_id].as_str().unwrap().to_string())
         .collect();
     v.sort();
     v
@@ -185,7 +192,7 @@ fn windowed_corpus_and_all_projects_pull_together() {
     assert_eq!(resp["gotQueries"]["version"], json!(1));
 
     // physical writes are journaled under logical table/pk keys, then the
-    // mapped incremental compiler re-emits logical row objects.
+    // mapped incremental compiler emits physical downstream wire names.
     let cookie = resp["cookie"].clone();
     db.exec(
         "UPDATE project_record SET project_name = 'Z' WHERE project_id = 'p0'",
@@ -200,19 +207,33 @@ fn windowed_corpus_and_all_projects_pull_together() {
         .unwrap();
     assert!(resp2["rowsPatch"].as_array().unwrap().iter().any(|op| {
         op["op"] == "put"
-            && op["tableName"] == "project"
-            && op["value"]["id"] == "p0"
-            && op["value"]["name"] == "Z"
+            && op["tableName"] == "project_record"
+            && op["value"]["project_id"] == "p0"
+            && op["value"]["project_name"] == "Z"
     }));
     assert_eq!(put_ids(&resp2, "task"), vec!["t4"]);
+
+    // a mapped member leaving every query emits a physical table name and
+    // physical primary-key object while durable membership stays logical.
+    db.exec("DELETE FROM project_task WHERE task_id = 't4'", &[])
+        .unwrap();
+    let body3 = json!({ "clientID": "c", "clientGroupID": "g", "cookie": resp2["cookie"] });
+    let resp3 = db
+        .transaction(|d| handle_query_pull(d, &t, 4096, &body3, "u"))
+        .unwrap();
+    assert!(resp3["rowsPatch"].as_array().unwrap().contains(&json!({
+        "op": "del",
+        "tableName": "project_task",
+        "id": { "task_id": "t4" },
+    })));
 
     let caught_up = json!({
         "clientID": "c",
         "clientGroupID": "g",
-        "cookie": resp2["cookie"].clone(),
+        "cookie": resp3["cookie"].clone(),
     });
-    let resp3 = db
+    let resp4 = db
         .transaction(|d| handle_query_pull(d, &t, 4096, &caught_up, "u"))
         .unwrap();
-    assert_eq!(resp3["unchanged"], json!(true));
+    assert_eq!(resp4["unchanged"], json!(true));
 }

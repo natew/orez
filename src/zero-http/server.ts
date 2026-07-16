@@ -6,6 +6,7 @@ export type Row = Record<string, string>
 
 type TableName = 'user' | 'project' | 'member'
 type Tables = Record<TableName, Map<string, Row>>
+type WireTableName = 'user_record' | 'project_record' | 'project_member'
 type ClientMutationResults = Map<string, Map<string, Map<number, MutationResult>>>
 
 interface PullBody {
@@ -30,6 +31,23 @@ interface PushBody {
 type MutationResult = Record<string, never> | { error: 'app'; details: string }
 
 const tableNames: TableName[] = ['user', 'project', 'member']
+const wireNames: Record<
+  TableName,
+  { table: WireTableName; columns: Record<string, string> }
+> = {
+  user: {
+    table: 'user_record',
+    columns: { id: 'user_id', name: 'display_name' },
+  },
+  project: {
+    table: 'project_record',
+    columns: { id: 'project_id', ownerId: 'owner_id', name: 'project_name' },
+  },
+  member: {
+    table: 'project_member',
+    columns: { id: 'member_id', projectId: 'project_id', userId: 'user_id' },
+  },
+}
 
 export async function startZeroHttpServer(opts?: {
   seed?: { user?: Row[]; project?: Row[]; member?: Row[] }
@@ -200,22 +218,37 @@ function bindClientGroup(
 
 function visibleRowsPatch(tables: Tables, userID: string) {
   const visibleProjectIDs = visibleProjectIDSet(tables, userID)
-  const rows: Array<{ op: 'put'; tableName: TableName; value: Row }> = []
+  const rows: Array<{ op: 'put'; tableName: WireTableName; value: Row }> = []
   const user = tables.user.get(userID)
-  if (user) rows.push({ op: 'put', tableName: 'user', value: cloneRow(user) })
+  if (user) rows.push(wirePut('user', user))
 
   for (const project of tables.project.values()) {
     if (visibleProjectIDs.has(project.id)) {
-      rows.push({ op: 'put', tableName: 'project', value: cloneRow(project) })
+      rows.push(wirePut('project', project))
     }
   }
 
   for (const member of tables.member.values()) {
     if (visibleProjectIDs.has(member.projectId)) {
-      rows.push({ op: 'put', tableName: 'member', value: cloneRow(member) })
+      rows.push(wirePut('member', member))
     }
   }
   return rows
+}
+
+function wirePut(table: TableName, row: Row) {
+  const names = wireNames[table]
+  const value: Row = {}
+  for (const [column, columnValue] of Object.entries(row)) {
+    const physicalColumn = names.columns[column]
+    if (!physicalColumn) throw new Error(`missing wire mapping for ${table}.${column}`)
+    value[physicalColumn] = columnValue
+  }
+  return {
+    op: 'put' as const,
+    tableName: names.table,
+    value,
+  }
 }
 
 function visibleProjectIDSet(tables: Tables, userID: string) {

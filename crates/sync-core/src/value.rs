@@ -223,8 +223,11 @@ fn is_truthy(raw: &Value) -> bool {
     }
 }
 
-// build a zero-typed row object (a rowsPatch `value`) from a live SQLite row
+// build a zero-typed rowsPatch `value`: read logical query aliases and emit
+// physical downstream-wire column names
 pub fn zero_row(
+    tables: &crate::schema::Tables,
+    table: &str,
     spec: &crate::schema::TableSpec,
     row: &crate::db::Row,
 ) -> Result<Value, crate::error::EngineError> {
@@ -237,13 +240,21 @@ pub fn zero_row(
                 "cannot convert schema-number column {col} value to number: {raw:?}"
             )));
         }
-        value.insert(col.clone(), converted);
+        let physical = tables.physical_column(table, col).ok_or_else(|| {
+            crate::error::EngineError::internal(format!(
+                "missing physical column mapping for {table}.{col}"
+            ))
+        })?;
+        value.insert(physical.to_string(), converted);
     }
     Ok(Value::Object(value))
 }
 
-// build a zero-typed `id` object (a `del` op's id) from a primary-key JSON map
+// build a zero-typed rowsPatch `id`: read logical journal keys and emit physical
+// downstream-wire column names
 pub fn zero_pk_id(
+    tables: &crate::schema::Tables,
+    table: &str,
     spec: &crate::schema::TableSpec,
     pk: &Value,
 ) -> Result<Value, crate::error::EngineError> {
@@ -257,7 +268,12 @@ pub fn zero_pk_id(
                 "cannot convert schema-number primary key {col} to number"
             )));
         }
-        id.insert(col.clone(), converted);
+        let physical = tables.physical_column(table, col).ok_or_else(|| {
+            crate::error::EngineError::internal(format!(
+                "missing physical column mapping for {table}.{col}"
+            ))
+        })?;
+        id.insert(physical.to_string(), converted);
     }
     Ok(Value::Object(id))
 }
@@ -270,7 +286,7 @@ mod tests {
 
     use super::{ZeroColumnType, to_zero_value_json, zero_row};
     use crate::db::{Row, SqlValue};
-    use crate::schema::TableSpec;
+    use crate::schema::{TableSpec, Tables};
 
     #[test]
     fn zero_number_storage_text_matches_the_shared_host_fixture() {
@@ -302,11 +318,12 @@ mod tests {
             columns: vec![("createdAt".into(), ZeroColumnType::Number)],
             primary_key: vec![],
         };
+        let tables = Tables::new().with("record", spec.clone());
         let row = Row {
             columns: Arc::from(["createdAt".to_string()]),
             values: vec![SqlValue::Text("not-a-number-or-date".into())],
         };
-        let error = zero_row(&spec, &row).unwrap_err();
+        let error = zero_row(&tables, "record", &spec, &row).unwrap_err();
         assert_eq!(error.status, 500);
         assert!(
             error

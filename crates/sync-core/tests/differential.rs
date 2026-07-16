@@ -343,10 +343,65 @@ fn normalize_patch(resp: &Value) -> (bool, Vec<String>) {
     let mut ops: Vec<String> = patch
         .iter()
         .filter(|op| op["op"] != "clear")
-        .map(|op| serde_json::to_string(op).unwrap())
+        // the TS reference core fixture is identity-named while the Rust
+        // differential fixture deliberately exercises serverName mappings.
+        // canonicalize the reference response to the physical downstream wire
+        // before comparing row semantics.
+        .map(|op| serde_json::to_string(&canonical_json(physical_item_op(op.clone()))).unwrap())
         .collect();
     ops.sort();
     (has_clear, ops)
+}
+
+fn physical_item_op(mut op: Value) -> Value {
+    if op["tableName"] == "item" {
+        op["tableName"] = json!("item_record");
+    }
+    for field in ["value", "id", "merge"] {
+        let Some(row) = op.get_mut(field).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for (logical, physical) in [
+            ("id", "item_id"),
+            ("label", "item_label"),
+            ("rank", "sort_rank"),
+            ("done", "is_done"),
+            ("meta", "metadata_json"),
+        ] {
+            if let Some(value) = row.remove(logical) {
+                row.insert(physical.to_string(), value);
+            }
+        }
+    }
+    if let Some(columns) = op.get_mut("constrain").and_then(Value::as_array_mut) {
+        for column in columns {
+            *column = match column.as_str() {
+                Some("id") => json!("item_id"),
+                Some("label") => json!("item_label"),
+                Some("rank") => json!("sort_rank"),
+                Some("done") => json!("is_done"),
+                Some("meta") => json!("metadata_json"),
+                _ => column.clone(),
+            };
+        }
+    }
+    op
+}
+
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut entries = object.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut canonical = serde_json::Map::new();
+            for (key, value) in entries {
+                canonical.insert(key, canonical_json(value));
+            }
+            Value::Object(canonical)
+        }
+        Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+        scalar => scalar,
+    }
 }
 
 fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
@@ -369,8 +424,12 @@ fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
         if r.get("unchanged").is_some() {
             continue;
         }
-        if normalize_patch(r) != normalize_patch(t) {
-            return Err(format!("pull {i}: rowsPatch differs\nrust={r}\nts={t}"));
+        let rust_patch = normalize_patch(r);
+        let ts_patch = normalize_patch(t);
+        if rust_patch != ts_patch {
+            return Err(format!(
+                "pull {i}: rowsPatch differs\nrust={r}\nts={t}\nnormalized rust={rust_patch:?}\nnormalized ts={ts_patch:?}"
+            ));
         }
         // rust lmids must be a subset of ts lmids with identical values
         let rl = r["lastMutationIDChanges"].as_object().unwrap();

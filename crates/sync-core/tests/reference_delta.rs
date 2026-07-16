@@ -186,8 +186,8 @@ fn fresh_pull_is_clear_puts_snapshot_with_typed_values() {
     assert_eq!(patch[0], json!({ "op": "clear" }));
     assert_eq!(
         patch[1],
-        json!({ "op": "put", "tableName": "item",
-                "value": { "id": "seed1", "label": "first", "rank": 1.5, "done": false, "meta": { "tag": "a" } } })
+        json!({ "op": "put", "tableName": "item_record",
+                "value": { "item_id": "seed1", "item_label": "first", "sort_rank": 1.5, "is_done": false, "metadata_json": { "tag": "a" } } })
     );
     assert_eq!(cookie_of(&resp), 0);
 }
@@ -227,10 +227,16 @@ fn insert_arrives_as_put_diff_without_clear_floats_exact() {
     let put = patch.iter().find(|op| op["op"] == "put").unwrap();
     assert_eq!(
         put["value"],
-        json!({ "id": "i2", "label": "two", "rank": rank, "done": true, "meta": [1, "x"] })
+        json!({
+            "item_id": "i2",
+            "item_label": "two",
+            "sort_rank": rank,
+            "is_done": true,
+            "metadata_json": [1, "x"],
+        })
     );
     // exact, not sqlite json's 15-digit form
-    assert_eq!(put["value"]["rank"].as_f64().unwrap(), rank);
+    assert_eq!(put["value"]["sort_rank"].as_f64().unwrap(), rank);
 }
 
 #[test]
@@ -250,8 +256,8 @@ fn update_arrives_as_put_of_only_the_touched_row() {
     let patch = patch_of(&h.pull(json!(cookie), "u1").unwrap()).clone();
     let ps = puts(&patch);
     assert_eq!(ps.len(), 1);
-    assert_eq!(ps[0]["value"]["id"], json!("i2"));
-    assert_eq!(ps[0]["value"]["label"], json!("renamed"));
+    assert_eq!(ps[0]["value"]["item_id"], json!("i2"));
+    assert_eq!(ps[0]["value"]["item_label"], json!("renamed"));
 }
 
 #[test]
@@ -267,7 +273,7 @@ fn delete_arrives_as_del_with_primary_key() {
     let patch = patch_of(&h.pull(json!(cookie), "u1").unwrap()).clone();
     assert_eq!(
         patch,
-        vec![json!({ "op": "del", "tableName": "item", "id": { "id": "i2" } })]
+        vec![json!({ "op": "del", "tableName": "item_record", "id": { "item_id": "i2" } })]
     );
 }
 
@@ -284,8 +290,8 @@ fn delete_then_recreate_collapses_to_put() {
     let patch = patch_of(&h.pull(json!(cookie), "u1").unwrap()).clone();
     assert_eq!(
         patch,
-        vec![json!({ "op": "put", "tableName": "item",
-                     "value": { "id": "seed1", "label": "reborn", "rank": 9, "done": false, "meta": null } })]
+        vec![json!({ "op": "put", "tableName": "item_record",
+                     "value": { "item_id": "seed1", "item_label": "reborn", "sort_rank": 9, "is_done": false, "metadata_json": null } })]
     );
 }
 
@@ -302,7 +308,7 @@ fn insert_then_delete_collapses_to_del() {
     let patch = patch_of(&h.pull(json!(cookie), "u1").unwrap()).clone();
     assert_eq!(
         patch,
-        vec![json!({ "op": "del", "tableName": "item", "id": { "id": "ephemeral" } })]
+        vec![json!({ "op": "del", "tableName": "item_record", "id": { "item_id": "ephemeral" } })]
     );
 }
 
@@ -315,8 +321,8 @@ fn upstream_sql_outside_push_advances_watermark() {
     assert!(cookie_of(&resp) > cookie);
     assert_eq!(
         patch_of(&resp).clone(),
-        vec![json!({ "op": "put", "tableName": "item",
-                     "value": { "id": "seed1", "label": "edited behind zero", "rank": 1.5, "done": false, "meta": { "tag": "a" } } })]
+        vec![json!({ "op": "put", "tableName": "item_record",
+                     "value": { "item_id": "seed1", "item_label": "edited behind zero", "sort_rank": 1.5, "is_done": false, "metadata_json": { "tag": "a" } } })]
     );
 }
 
@@ -326,9 +332,11 @@ fn pk_changing_update_dels_old_and_puts_new() {
     let cookie = cookie_of(&h.pull(json!(null), "u1").unwrap());
     h.exec("UPDATE item SET id = 'seed1-renamed' WHERE id = 'seed1'");
     let patch = patch_of(&h.pull(json!(cookie), "u1").unwrap()).clone();
-    assert!(patch.contains(&json!({ "op": "del", "tableName": "item", "id": { "id": "seed1" } })));
-    assert!(patch.contains(&json!({ "op": "put", "tableName": "item",
-        "value": { "id": "seed1-renamed", "label": "first", "rank": 1.5, "done": false, "meta": { "tag": "a" } } })));
+    assert!(patch.contains(
+        &json!({ "op": "del", "tableName": "item_record", "id": { "item_id": "seed1" } })
+    ));
+    assert!(patch.contains(&json!({ "op": "put", "tableName": "item_record",
+        "value": { "item_id": "seed1-renamed", "item_label": "first", "sort_rank": 1.5, "is_done": false, "metadata_json": { "tag": "a" } } })));
 }
 
 // ---- push semantics -------------------------------------------------------
@@ -488,8 +496,8 @@ fn cookie_below_floor_snapshots_recent_cookies_still_diff() {
     assert!(!fresh_patch.iter().any(|op| op["op"] == "clear")); // still a diff
     assert_eq!(
         fresh_patch,
-        vec![json!({ "op": "put", "tableName": "item",
-                     "value": { "id": "last", "label": "last", "rank": 99, "done": false, "meta": null } })]
+        vec![json!({ "op": "put", "tableName": "item_record",
+                     "value": { "item_id": "last", "item_label": "last", "sort_rank": 99, "is_done": false, "metadata_json": null } })]
     );
 }
 
@@ -517,8 +525,8 @@ fn invalidate_forces_one_snapshot_then_diffs_resume() {
     assert!(!diff_patch.iter().any(|op| op["op"] == "clear"));
     assert_eq!(
         diff_patch,
-        vec![json!({ "op": "put", "tableName": "item",
-                     "value": { "id": "post", "label": "post", "rank": 1, "done": false, "meta": null } })]
+        vec![json!({ "op": "put", "tableName": "item_record",
+                     "value": { "item_id": "post", "item_label": "post", "sort_rank": 1, "is_done": false, "metadata_json": null } })]
     );
 }
 
@@ -562,7 +570,7 @@ fn visible_configs_always_snapshot_filtered_per_user() {
     assert_eq!(patch[0], json!({ "op": "clear" })); // never a diff with visibility filtering
     let ids: Vec<Value> = puts(&patch)
         .iter()
-        .map(|op| op["value"]["id"].clone())
+        .map(|op| op["value"]["item_id"].clone())
         .collect();
     assert!(ids.iter().any(|id| id == &json!("shown")));
     assert!(!ids.iter().any(|id| id == &json!("hidden")));
@@ -598,12 +606,12 @@ fn interleaved_pushes_and_upstream_converge() {
                 Some("clear") => store.clear(),
                 Some("put") => {
                     store.insert(
-                        op["value"]["id"].as_str().unwrap().to_string(),
+                        op["value"]["item_id"].as_str().unwrap().to_string(),
                         op["value"].clone(),
                     );
                 }
                 Some("del") => {
-                    store.remove(op["id"]["id"].as_str().unwrap());
+                    store.remove(op["id"]["item_id"].as_str().unwrap());
                 }
                 _ => {}
             }
@@ -652,7 +660,7 @@ fn interleaved_pushes_and_upstream_converge() {
     for op in oracle_resp["rowsPatch"].as_array().unwrap() {
         if op["op"] == "put" {
             oracle.insert(
-                op["value"]["id"].as_str().unwrap().to_string(),
+                op["value"]["item_id"].as_str().unwrap().to_string(),
                 op["value"].clone(),
             );
         }

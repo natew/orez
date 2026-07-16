@@ -5,9 +5,12 @@
 Zero schema table and column keys are logical names. `serverName`, when present,
 is the physical SQLite identifier; otherwise the logical name is also physical.
 Every SQL reference to an application table or column uses the physical name.
-Every Zero query AST, change-log key, primary-key JSON object, membership key,
-snapshot progress key, upstream feed key, patch `tableName`, row object key, and
-result field uses the logical name.
+The wire direction is logical UP (AST/mutations/queries), physical DOWN
+(patches). Change-log keys, primary-key JSON objects, membership keys, snapshot
+progress keys, and upstream feed keys remain logical. A downstream `rowsPatch`
+uses physical `tableName` values and physical keys in `value`, `id`, `merge`,
+and `constrain`; the stock Zero client maps those names back to logical schema
+keys while ingesting the poke. Transaction-query result fields remain logical.
 
 Internal `_zsync_*` identifiers, compiler aliases, and paged-snapshot stage names
 are engine-owned physical identifiers and do not cross the wire.
@@ -25,7 +28,7 @@ are engine-owned physical identifiers and do not cross the wire.
 - Trigger names are engine-owned names derived from the PHYSICAL table name (schema.rs trigger_key), quoted against identifier injection.
 - `_zsync_changes.tableName` and primary-key JSON object keys remain logical.
   This is required by ordinary diff lookup, query change scanning, membership
-  storage, deduplication, and Zero patches.
+  storage, and deduplication.
 
 ### `pull.rs` and `value.rs`: snapshot and cursor diff reads
 
@@ -34,14 +37,14 @@ are engine-owned physical identifiers and do not cross the wire.
 - Diff change rows and dedup keys remain logical. `_zsync_changes.tableName` is
   used to look up a logical `TableSpec`.
 - `resolve_row` uses the physical table and physical primary-key predicates, then
-  aliases the projection back to logical names. Delete IDs and patch table names
-  remain logical.
+  aliases the projection back to logical names for engine processing. Delete IDs
+  and patch table names are emitted with physical names.
 - Visibility callbacks and their SQL fragments use logical table and column names.
   Snapshot and point-read SQL project every modeled physical table into logical
   CTEs before applying the fragment, so qualified outer references and nested
   visibility subqueries keep working without a second schema compiler.
-- `zero_row`, `zero_pk_id`, and row/PK dedup helpers consume logical aliases and
-  emit logical object keys. They contain no application SQL identifiers.
+- `zero_row` and `zero_pk_id` consume logical aliases and emit physical object
+  keys. Row/PK dedup helpers remain logical. These helpers do not generate SQL.
 
 ### `query/compile.rs`: query-aware pull compiler
 
@@ -50,21 +53,21 @@ are engine-owned physical identifiers and do not cross the wire.
   partition, and predicate-probe column references map logical AST keys to
   physical SQLite columns.
 - Every selected application column is explicitly projected from physical to its
-  logical alias. Membership and patch construction continue to consume logical
-  `Row` fields.
+  logical alias. Membership consumes logical `Row` fields and maps them back to
+  physical keys only when constructing a patch.
 - Parent subqueries expose logical aliases; correlation SQL must distinguish the
   child live-table side (physical) from the projected parent side (logical).
 - Window rank aliases must avoid collisions with both physical and logical column
   names.
 - Compiled dependency tables, related child tables, primary-key lists, query
-  hashes, durable query state, and emitted patches remain logical.
+  hashes, and durable query state remain logical. Emitted patches are physical.
 - `compile_predicate_probe` and `compile_related_of` follow the same mapping.
 
 ### `query/qpull.rs` and `query/membership.rs`: durable query state
 
 - `_zsync_changes.tableName`, changed-row keys, `rootTable`, dependency lists,
-  `rowTable`, serialized row PKs, refcount keys, and patch table names remain
-  logical.
+  `rowTable`, serialized row PKs, and refcount keys remain logical. Patch table
+  names and row keys are physical.
 - These modules execute application-table SQL only through `query/compile.rs`;
   their row decoding depends on the compiler's physical-to-logical projections.
 
@@ -118,9 +121,9 @@ are engine-owned physical identifiers and do not cross the wire.
 2. Add schema validation coverage for fallback-to-logical mapping and ambiguous
    physical names.
 3. Run existing sync-core behavior scenarios in both identity and mapped modes.
-   The mapped mode uses snake_case physical DDL and a schema-derived `Tables`, but
-   asserts the same logical snapshots, diffs, changes, query results, visibility,
-   caps, upstream ingest, and paged-snapshot outcomes.
+   The mapped mode uses snake_case physical DDL and a schema-derived `Tables`,
+   asserts physical snapshots and diffs, and keeps logical internal changes,
+   query state, visibility, caps, upstream ingest, and paged-snapshot outcomes.
 4. Add focused mapped regressions for trigger PK journaling, update/delete diff
    resolution, query predicate/order/related/window compilation, visibility,
    upstream upsert/delete/snapshot, and paged-snapshot clone/catch-up/final swap.

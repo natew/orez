@@ -312,8 +312,8 @@ fn catchup_overlap_and_unseen_delete_converge_then_invalidate_old_clients() {
     let patch = refreshed["rowsPatch"].as_array().unwrap();
     assert_eq!(patch[0], json!({ "op": "clear" }));
     assert_eq!(patch.len(), 2);
-    assert_eq!(patch[1]["value"]["id"], "a");
-    assert_eq!(patch[1]["value"]["label"], "catchup-new");
+    assert_eq!(patch[1]["value"]["item_id"], "a");
+    assert_eq!(patch[1]["value"]["item_label"], "catchup-new");
 
     db.exec(
         &item_sql("INSERT INTO item (id, label, rank, done, meta) VALUES ('after', 'after-cutover', 1, 0, NULL)"),

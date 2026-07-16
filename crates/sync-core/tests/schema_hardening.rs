@@ -116,6 +116,117 @@ fn initializes_triggers_for_soot_server_names() {
 }
 
 #[test]
+fn rows_patch_uses_physical_names_while_journal_stays_logical() {
+    let cases = [
+        (
+            "identity",
+            json!({
+                "tables": {
+                    "userState": {
+                        "columns": {
+                            "userId": { "type": "string" },
+                            "monthlyTokens": { "type": "number" },
+                        },
+                        "primaryKey": ["userId"],
+                    }
+                }
+            }),
+            "CREATE TABLE userState (userId TEXT PRIMARY KEY, monthlyTokens REAL NOT NULL)",
+            "INSERT INTO userState VALUES ('u1', 42)",
+            "DELETE FROM userState WHERE userId = 'u1'",
+            json!({
+                "op": "put",
+                "tableName": "userState",
+                "value": { "userId": "u1", "monthlyTokens": 42 },
+            }),
+            json!({ "op": "del", "tableName": "userState", "id": { "userId": "u1" } }),
+        ),
+        (
+            "mapped",
+            json!({
+                "tables": {
+                    "userState": {
+                        "serverName": "user_state",
+                        "columns": {
+                            "userId": { "type": "string", "serverName": "user_id" },
+                            "monthlyTokens": {
+                                "type": "number",
+                                "serverName": "monthly_tokens",
+                            },
+                        },
+                        "primaryKey": ["userId"],
+                    }
+                }
+            }),
+            "CREATE TABLE user_state (user_id TEXT PRIMARY KEY, monthly_tokens REAL NOT NULL)",
+            "INSERT INTO user_state VALUES ('u1', 42)",
+            "DELETE FROM user_state WHERE user_id = 'u1'",
+            json!({
+                "op": "put",
+                "tableName": "user_state",
+                "value": { "user_id": "u1", "monthly_tokens": 42 },
+            }),
+            json!({ "op": "del", "tableName": "user_state", "id": { "user_id": "u1" } }),
+        ),
+    ];
+
+    for (label, schema, ddl, seed, delete, expected_put, expected_del) in cases {
+        let tables = Tables::from_zero_schema(&schema).unwrap();
+        let mut db = TestDb::memory();
+        db.exec(ddl, &[]).unwrap();
+        db.exec(seed, &[]).unwrap();
+        init_schema(&mut db, &tables).unwrap();
+
+        let snapshot = db
+            .transaction(|database| {
+                handle_pull(
+                    database,
+                    &tables,
+                    4096,
+                    None,
+                    Caps::default(),
+                    &json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": null }),
+                    "u1",
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            snapshot["rowsPatch"],
+            json!([{ "op": "clear" }, expected_put]),
+            "{label}"
+        );
+
+        db.exec(delete, &[]).unwrap();
+        let changes = db
+            .query("SELECT tableName, pk FROM _zsync_changes", &[])
+            .unwrap();
+        assert!(matches!(
+            changes[0].get("tableName"),
+            Some(sync_core::SqlValue::Text(table)) if table == "userState"
+        ));
+        assert!(matches!(
+            changes[0].get("pk"),
+            Some(sync_core::SqlValue::Text(pk)) if pk == r#"{"userId":"u1"}"#
+        ));
+
+        let diff = db
+            .transaction(|database| {
+                handle_pull(
+                    database,
+                    &tables,
+                    4096,
+                    None,
+                    Caps::default(),
+                    &json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": snapshot["cookie"] }),
+                    "u1",
+                )
+            })
+            .unwrap();
+        assert_eq!(diff["rowsPatch"], json!([expected_del]), "{label}");
+    }
+}
+
+#[test]
 fn server_names_fall_back_to_logical_names_and_reject_physical_collisions() {
     let identity = Tables::from_zero_schema(&json!({
         "tables": {
@@ -247,8 +358,13 @@ fn mapped_visibility_fragments_use_logical_tables_and_columns() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|operation| operation["op"] == "put" && operation["tableName"] == "project")
-        .map(|operation| operation["value"]["id"].as_str().unwrap().to_string())
+        .filter(|operation| operation["op"] == "put" && operation["tableName"] == "project_record")
+        .map(|operation| {
+            operation["value"]["project_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
         .collect::<Vec<_>>();
     project_ids.sort();
     assert_eq!(project_ids, vec!["owned", "shared"]);

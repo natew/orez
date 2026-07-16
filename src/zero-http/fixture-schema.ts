@@ -3,25 +3,28 @@ import { createSchema, relationships, string, table } from '@rocicorp/zero'
 import type { Transaction } from '@rocicorp/zero'
 
 const user = table('user')
+  .from('user_record')
   .columns({
-    id: string(),
-    name: string(),
+    id: string().from('user_id'),
+    name: string().from('display_name'),
   })
   .primaryKey('id')
 
 const project = table('project')
+  .from('project_record')
   .columns({
-    id: string(),
-    ownerId: string(),
-    name: string(),
+    id: string().from('project_id'),
+    ownerId: string().from('owner_id'),
+    name: string().from('project_name'),
   })
   .primaryKey('id')
 
 const member = table('member')
+  .from('project_member')
   .columns({
-    id: string(),
-    projectId: string(),
-    userId: string(),
+    id: string().from('member_id'),
+    projectId: string().from('project_id'),
+    userId: string().from('user_id'),
   })
   .primaryKey('id')
 

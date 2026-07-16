@@ -27,7 +27,7 @@ afterEach(async () => {
 })
 
 describe('zero-http transport', () => {
-  test('connect + complete hydrates a stock Zero materialized query', async () => {
+  test('connect + complete maps physical rows into a stock Zero materialized query', async () => {
     const requests: RequestRecord[] = []
     let cookie = 0
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -35,21 +35,27 @@ describe('zero-http transport', () => {
       requests.push(request)
       expect(request.path).toBe('/pull')
       expect(request.headers.authorization).toBe('Bearer token-u1')
+      // sync engines emit physical downstream names; Zero maps them back to
+      // the logical fixture schema while ingesting the poke.
       return jsonResponse({
         cookie: ++cookie,
         lastMutationIDChanges: {},
         rowsPatch: [
           { op: 'clear' },
-          { op: 'put', tableName: 'user', value: { id: 'u1', name: 'ada' } },
           {
             op: 'put',
-            tableName: 'project',
-            value: { id: 'p1', ownerId: 'u1', name: 'control' },
+            tableName: 'user_record',
+            value: { user_id: 'u1', display_name: 'ada' },
           },
           {
             op: 'put',
-            tableName: 'member',
-            value: { id: 'm1', projectId: 'p1', userId: 'u1' },
+            tableName: 'project_record',
+            value: { project_id: 'p1', owner_id: 'u1', project_name: 'control' },
+          },
+          {
+            op: 'put',
+            tableName: 'project_member',
+            value: { member_id: 'm1', project_id: 'p1', user_id: 'u1' },
           },
         ],
       })
@@ -93,11 +99,15 @@ describe('zero-http transport', () => {
         lastMutationIDChanges: {},
         rowsPatch: [
           { op: 'clear' },
-          { op: 'put', tableName: 'user', value: { id: 'u1', name: 'ada' } },
           {
             op: 'put',
-            tableName: 'project',
-            value: { id: 'p1', ownerId: 'u1', name: 'control' },
+            tableName: 'user_record',
+            value: { user_id: 'u1', display_name: 'ada' },
+          },
+          {
+            op: 'put',
+            tableName: 'project_record',
+            value: { project_id: 'p1', owner_id: 'u1', project_name: 'control' },
           },
         ],
       })
@@ -309,8 +319,8 @@ describe('zero-http transport', () => {
           { op: 'clear' },
           {
             op: 'put',
-            tableName: 'project',
-            value: { id: 'p2', ownerId: 'u1', name: 'second' },
+            tableName: 'project_record',
+            value: { project_id: 'p2', owner_id: 'u1', project_name: 'second' },
           },
         ],
       },
@@ -321,8 +331,8 @@ describe('zero-http transport', () => {
           { op: 'clear' },
           {
             op: 'put',
-            tableName: 'project',
-            value: { id: 'p3', ownerId: 'u1', name: 'third' },
+            tableName: 'project_record',
+            value: { project_id: 'p3', owner_id: 'u1', project_name: 'third' },
           },
         ],
       },
@@ -401,11 +411,15 @@ describe('zero-http transport', () => {
           lastMutationIDChanges: {},
           rowsPatch: [
             { op: 'clear' },
-            { op: 'put', tableName: 'user', value: { id: 'u1', name: 'ada' } },
             {
               op: 'put',
-              tableName: 'project',
-              value: { id: 'p1', ownerId: 'u1', name: 'first' },
+              tableName: 'user_record',
+              value: { user_id: 'u1', display_name: 'ada' },
+            },
+            {
+              op: 'put',
+              tableName: 'project_record',
+              value: { project_id: 'p1', owner_id: 'u1', project_name: 'first' },
             },
           ],
         })

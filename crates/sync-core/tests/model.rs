@@ -76,12 +76,12 @@ fn apply_patch(store: &mut HashMap<String, Value>, patch: &[Value]) {
             Some("clear") => store.clear(),
             Some("put") => {
                 store.insert(
-                    op["value"]["id"].as_str().unwrap().to_string(),
+                    op["value"]["item_id"].as_str().unwrap().to_string(),
                     op["value"].clone(),
                 );
             }
             Some("del") => {
-                store.remove(op["id"]["id"].as_str().unwrap());
+                store.remove(op["id"]["item_id"].as_str().unwrap());
             }
             _ => {}
         }
@@ -262,7 +262,7 @@ fn run_trace(seed: u64, steps: u64) {
     for op in oracle_resp["rowsPatch"].as_array().unwrap() {
         if op["op"] == "put" {
             oracle.insert(
-                op["value"]["id"].as_str().unwrap().to_string(),
+                op["value"]["item_id"].as_str().unwrap().to_string(),
                 op["value"].clone(),
             );
         }

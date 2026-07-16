@@ -245,7 +245,7 @@ fn patch_id_list(response: &Value) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter(|op| op["op"] == "put")
-        .filter_map(|op| op["value"]["id"].as_str().map(str::to_owned))
+        .filter_map(|op| op["value"]["item_id"].as_str().map(str::to_owned))
         .collect()
 }
 

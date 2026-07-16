@@ -702,7 +702,10 @@ fn collect_dependent_rows(
             let pk_obj = raw_pk(child_spec, row);
             let key = canonical_pk(&pk_obj);
             live.insert((cr.child_table.clone(), key.clone()));
-            values.insert((cr.child_table.clone(), key), zero_row(child_spec, row)?);
+            values.insert(
+                (cr.child_table.clone(), key),
+                zero_row(tables, &cr.child_table, child_spec, row)?,
+            );
         }
         // the child row-set is the parent for the child's own dependent subqueries
         collect_dependent_rows(
@@ -841,7 +844,10 @@ pub(crate) fn recompute_group_with_rehydrate(
             let pk_obj = raw_pk(spec, row);
             let key = canonical_pk(&pk_obj);
             live.insert((q.root_table.clone(), key.clone()));
-            values.insert((q.root_table.clone(), key), zero_row(spec, row)?);
+            values.insert(
+                (q.root_table.clone(), key),
+                zero_row(tables, &q.root_table, spec, row)?,
+            );
         }
 
         // dependent rows (related output + positive-EXISTS filter subqueries),
@@ -925,13 +931,22 @@ pub(crate) fn recompute_group_with_rehydrate(
                 .get(&(table.clone(), pk.clone()))
                 .cloned()
                 .ok_or_else(|| EngineError::internal("added row missing live value"))?;
-            patch.push(json!({ "op": "put", "tableName": table, "value": value }));
+            let physical_table = tables
+                .physical_name(table)
+                .expect("member table has physical mapping");
+            patch.push(json!({ "op": "put", "tableName": physical_table, "value": value }));
             emitted.insert((table.clone(), pk.clone()));
         } else if old > 0 && new == 0 {
             let spec = tables.get(table).unwrap();
             let pk_obj: Value = serde_json::from_str(pk).unwrap_or(Value::Null);
-            patch
-                .push(json!({ "op": "del", "tableName": table, "id": zero_pk_id(spec, &pk_obj)? }));
+            let physical_table = tables
+                .physical_name(table)
+                .expect("member table has physical mapping");
+            patch.push(json!({
+                "op": "del",
+                "tableName": physical_table,
+                "id": zero_pk_id(tables, table, spec, &pk_obj)?,
+            }));
             emitted.insert((table.clone(), pk.clone()));
         }
     }
@@ -946,7 +961,10 @@ pub(crate) fn recompute_group_with_rehydrate(
         if read_ref(db, group, table, pk)? > 0
             && let Some(value) = values.get(&key)
         {
-            patch.push(json!({ "op": "put", "tableName": table, "value": value }));
+            let physical_table = tables
+                .physical_name(table)
+                .expect("member table has physical mapping");
+            patch.push(json!({ "op": "put", "tableName": physical_table, "value": value }));
             emitted.insert(key);
         }
     }
@@ -964,7 +982,10 @@ pub(crate) fn recompute_group_with_rehydrate(
             .get(&key)
             .cloned()
             .ok_or_else(|| EngineError::internal("rehydrated row missing live value"))?;
-        patch.push(json!({ "op": "put", "tableName": key.0, "value": value }));
+        let physical_table = tables
+            .physical_name(&key.0)
+            .expect("member table has physical mapping");
+        patch.push(json!({ "op": "put", "tableName": physical_table, "value": value }));
     }
 
     Ok(patch)

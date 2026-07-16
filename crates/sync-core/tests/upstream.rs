@@ -91,7 +91,10 @@ fn upstream_json_values_persist_and_hydrate_with_their_original_types() {
                 serde_json::to_string(&expected).unwrap()
             ))
         );
-        assert_eq!(zero_row(spec, row).unwrap()["meta"], expected);
+        assert_eq!(
+            zero_row(&tables, "item", spec, row).unwrap()["metadata_json"],
+            expected
+        );
     }
 }
 
