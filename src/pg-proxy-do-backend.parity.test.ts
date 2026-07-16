@@ -266,6 +266,45 @@ describe('DoBackend PG/SQLite parity corpus', () => {
   // cascade child reaches the DO as a RETURNING-tracked write, identical to a
   // normal delete.
 
+  // ROLLBACK is emulated from CDC row before-images (the DO refuses raw SQL
+  // BEGIN/COMMIT), so it is worth pinning against PG rather than trusting that
+  // the statements merely return OK. A backend that no-ops transaction control
+  // passes a "does BEGIN error?" check and still silently keeps every write —
+  // which is the difference between an atomic billing update and a torn one.
+  test('ROLLBACK restores row before-images like PG, COMMIT keeps them', async () => {
+    const ddl = `CREATE TABLE ledger (id text PRIMARY KEY, balance integer NOT NULL)`
+    const seed = `INSERT INTO ledger VALUES ('acct', 100)`
+    const read = `SELECT id, balance FROM ledger ORDER BY id`
+    for (const sql of [ddl, seed]) {
+      await pg.query(sql)
+      await backend.exec(sql)
+    }
+
+    // rolled back: the UPDATE, an INSERT of a new row, and a DELETE all revert.
+    for (const target of [pg, backend]) {
+      await target.query('BEGIN')
+      await target.query(`UPDATE ledger SET balance = 0 WHERE id = 'acct'`)
+      await target.query(`INSERT INTO ledger VALUES ('temp', 5)`)
+      await target.query(`DELETE FROM ledger WHERE id = 'acct'`)
+      await target.query('ROLLBACK')
+    }
+    expectSameRows((await backend.query(read)).rows, (await pg.query(read)).rows)
+    expect((await backend.query(read)).rows).toEqual([{ id: 'acct', balance: 100 }])
+
+    // committed: the same writes stick.
+    for (const target of [pg, backend]) {
+      await target.query('BEGIN')
+      await target.query(`UPDATE ledger SET balance = 42 WHERE id = 'acct'`)
+      await target.query(`INSERT INTO ledger VALUES ('temp', 5)`)
+      await target.query('COMMIT')
+    }
+    expectSameRows((await backend.query(read)).rows, (await pg.query(read)).rows)
+    expect((await backend.query(read)).rows).toEqual([
+      { id: 'acct', balance: 42 },
+      { id: 'temp', balance: 5 },
+    ])
+  })
+
   test('FOR UPDATE clauses preserve row results while sqlite strips the lock syntax', async () => {
     const ddl = 'CREATE TABLE lock_probe (id text PRIMARY KEY, rank integer NOT NULL)'
     const insert = "INSERT INTO lock_probe VALUES ('a', 1), ('b', 2)"
