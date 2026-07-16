@@ -22,7 +22,7 @@ are engine-owned physical identifiers and do not cross the wire.
   a table, must each be unique under SQLite's case-insensitive identifier rules.
 - `trigger_ddl` targets the physical table. Its `NEW` and `OLD` expressions read
   physical primary-key columns.
-- Trigger names remain engine-owned names derived from the logical table key.
+- Trigger names are engine-owned names derived from the PHYSICAL table name (schema.rs trigger_key), quoted against identifier injection.
 - `_zsync_changes.tableName` and primary-key JSON object keys remain logical.
   This is required by ordinary diff lookup, query change scanning, membership
   storage, deduplication, and Zero patches.

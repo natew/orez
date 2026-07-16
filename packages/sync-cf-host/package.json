@@ -19,7 +19,7 @@
     "bundle": "bun run build:wasm && wrangler deploy --dry-run --outdir dist",
     "measure": "bun run build:wasm && bun measure.mjs",
     "test": "bun run test:config && bun run test:query-compiler && bun run test:platform && bun run test:integration && bun run test:ingest && bun run test:restart",
-    "test:config": "bun test config.test.mjs write-safeguards.test.mjs mutation-error.test.mjs transaction-query.test.mjs",
+    "test:config": "bun test config.test.mjs write-safeguards.test.mjs mutation-error.test.mjs post-commit.test.mjs",
     "test:integration": "bun run build:wasm && bun integration-test.mjs",
     "test:ingest": "bun run build:wasm && bun ingest-test.mjs",
     "test:query-compiler": "bun run build:wasm && bun test --preload orez-sync-cf-host/bun-wasm-loader query-compiler.test.mjs",
