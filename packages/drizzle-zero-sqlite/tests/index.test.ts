@@ -1,4 +1,4 @@
-import { string as zeroString, type Row } from '@rocicorp/zero'
+import { createBuilder, string as zeroString, type Row } from '@rocicorp/zero'
 import { defineRelations } from 'drizzle-orm'
 import { pgTable, text as pgText } from 'drizzle-orm/pg-core'
 import {
@@ -46,6 +46,7 @@ const typedSchema = drizzleZeroConfig(
     suppressDefaultsWarning: true,
   }
 )
+const typedBuilder = createBuilder(typedSchema)
 type Users = Row<(typeof typedSchema)['tables']['users']>
 const typedUser: Users = {
   id: 'user-1',
@@ -55,6 +56,8 @@ const typedUser: Users = {
   metadata: { theme: 'dark' },
   score: 10,
 }
+const typedDisplayName: string = typedUser.displayName
+const typedMetadata: { theme: string } | null = typedUser.metadata
 
 const posts = sqliteTable('posts', {
   id: text().primaryKey(),
@@ -120,7 +123,10 @@ describe('drizzleZeroConfig', () => {
     expect(source).toContain('export const zql = createBuilder(zeroSchema)')
     expect(source).toContain(`declare module '@rocicorp/zero'`)
     expect(source).not.toMatch(/pg-core|drizzle-zero'|postgres/)
+    expect(typedDisplayName).toBe('Ada')
+    expect(typedBuilder.users).toBeDefined()
     expect(typedUser.metadata).toEqual({ theme: 'dark' })
+    expect(typedMetadata).toEqual({ theme: 'dark' })
   })
 
   test('maps SQLite tables, columns, defaults, and composite primary keys', () => {

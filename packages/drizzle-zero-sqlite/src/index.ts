@@ -177,11 +177,20 @@ type ZeroColumnDefinition<
   TTable extends Table,
   KColumn extends ColumnNames<TTable>,
 > = Flatten<{
-  optional: boolean
-  type: ValueType
+  optional: ResolveColumnOptional<TTable, KColumn>
+  type: ResolveColumnZeroType<Columns<TTable>[KColumn]>
   customType: ResolveCustomType<Columns<TTable>[KColumn]>
   serverName?: string
 }>
+
+type ResolveColumnOptional<TTable extends Table, KColumn extends ColumnNames<TTable>> =
+  KColumn extends PrimaryKeyColumnNames<TTable>
+    ? false
+    : ColumnMetadata<Columns<TTable>[KColumn]> extends { hasDefault: true }
+      ? true
+      : ColumnMetadata<Columns<TTable>[KColumn]> extends { notNull: true }
+        ? false
+        : true
 
 export type ZeroColumns<
   TTable extends Table,
@@ -275,7 +284,7 @@ export type DrizzleToZeroSchema<
       ? ZeroTableBuilderSchema<K, TTable, TableConfigFor<TSchema, TColumnConfig, K>>
       : never
   }
-  readonly relationships: Record<string, Record<string, RelationHop[]>>
+  readonly relationships: DrizzleToZeroRelationships<TSchema>
   readonly enableLegacyMutators?: boolean
   readonly enableLegacyQueries?: boolean
 }
@@ -286,6 +295,63 @@ type RelationHop = {
   destSchema: string
   cardinality: 'one' | 'many'
 }
+
+type DrizzleRelationsExport<TSchema extends Record<string, unknown>> = {
+  [K in keyof TSchema]: TSchema[K] extends Record<
+    string,
+    { name: string; relations: Record<string, unknown> }
+  >
+    ? TSchema[K]
+    : never
+}[keyof TSchema]
+
+type DrizzleRelationToZero<TRelation> = TRelation extends {
+  relationType: infer TCardinality extends 'many' | 'one'
+  targetTableName: infer TTarget extends string
+}
+  ?
+      | readonly [
+          {
+            sourceField: readonly string[]
+            destField: readonly string[]
+            destSchema: TTarget
+            cardinality: TCardinality
+          },
+        ]
+      | readonly [
+          {
+            sourceField: readonly string[]
+            destField: readonly string[]
+            destSchema: string
+            cardinality: TCardinality
+          },
+          {
+            sourceField: readonly string[]
+            destField: readonly string[]
+            destSchema: TTarget
+            cardinality: TCardinality
+          },
+        ]
+  : never
+
+type DrizzleToZeroRelationships<TSchema extends Record<string, unknown>> =
+  DrizzleRelationsExport<TSchema> extends infer TRelations
+    ? {
+        readonly [K in keyof TRelations as TRelations[K] extends {
+          relations: Record<string, unknown>
+        }
+          ? K
+          : never]: TRelations[K] extends {
+          relations: infer TTableRelations extends Record<string, unknown>
+        }
+          ? {
+              readonly [R in keyof TTableRelations]: DrizzleRelationToZero<
+                TTableRelations[R]
+              >
+            }
+          : never
+      }
+    : Record<string, never>
 
 type RuntimeColumn = Column & {
   columnType?: string
