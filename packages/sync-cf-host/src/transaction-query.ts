@@ -261,6 +261,63 @@ function bytes(value: unknown): Uint8Array | undefined {
   return undefined
 }
 
+const FINITE_NUMBER_TEXT = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/
+const TIMESTAMP_TEXT =
+  /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:Z|([+-])(\d{2})(?::?(\d{2}))?)?$/
+
+function numberFromStorageText(value: string): number | undefined {
+  if (FINITE_NUMBER_TEXT.test(value)) {
+    const numeric = Number(value)
+    if (Number.isFinite(numeric)) return numeric === 0 ? 0 : numeric
+  }
+
+  const match = TIMESTAMP_TEXT.exec(value)
+  if (!match) return undefined
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth =
+    month === 2
+      ? leap
+        ? 29
+        : 28
+      : [4, 6, 9, 11].includes(month)
+        ? 30
+        : month >= 1 && month <= 12
+          ? 31
+          : 0
+  if (day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59) {
+    return undefined
+  }
+
+  const offsetHours = Number(match[9] ?? 0)
+  const offsetMinutes = Number(match[10] ?? 0)
+  if (offsetHours > 23 || offsetMinutes > 59) return undefined
+  const offsetSign = match[8] === '-' ? -1 : 1
+  const offsetSeconds = offsetSign * (offsetHours * 3_600 + offsetMinutes * 60)
+  const fraction = match[7] ?? ''
+  const milliseconds = Number(`${fraction}00`.slice(0, 3))
+
+  // howard hinnant's civil-date conversion keeps years 0000-0099 exact,
+  // unlike Date.UTC, and matches the Rust sync engine's implementation.
+  const adjustedYear = year - Number(month <= 2)
+  const era = Math.floor(adjustedYear / 400)
+  const yearOfEra = adjustedYear - era * 400
+  const shiftedMonth = month + (month > 2 ? -3 : 9)
+  const dayOfYear = Math.floor((153 * shiftedMonth + 2) / 5) + day - 1
+  const dayOfEra =
+    yearOfEra * 365 + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100) + dayOfYear
+  const days = era * 146_097 + dayOfEra - 719_468
+  return (
+    (days * 86_400 + hour * 3_600 + minute * 60 + second - offsetSeconds) * 1_000 +
+    milliseconds
+  )
+}
+
 function decodeColumn(
   value: unknown,
   columnType: TransactionQueryColumnType,
@@ -275,6 +332,10 @@ function decodeColumn(
       if (typeof value === 'number' && Number.isFinite(value)) return value
       if (typeof value === 'bigint' && value >= MIN_SAFE && value <= MAX_SAFE) {
         return Number(value)
+      }
+      if (typeof value === 'string') {
+        const decoded = numberFromStorageText(value)
+        if (decoded !== undefined) return decoded
       }
       break
     case 'boolean':

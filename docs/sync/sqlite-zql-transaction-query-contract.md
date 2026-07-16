@@ -45,6 +45,10 @@ it. The host returns fully materialized plain objects to the mutation callback.
 This avoids JSON aggregate coercion changing booleans, JSON columns, timestamps,
 or integers.
 
+Logical value decoding must accept exactly the same SQLite storage forms in the
+Rust sync engine and both TypeScript transaction drivers; one shared fixture
+defines those forms so a new Zero type or coercion updates every path together.
+
 Each `tx.run` execution has two host-enforced limits. The defaults are 256
 selects and 10,000 total materialized rows; a consumer may lower or raise them
 in host configuration. The counters include the root select and every related

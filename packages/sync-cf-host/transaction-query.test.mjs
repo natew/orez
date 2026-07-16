@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
+import numberStorageValues from '../../harness/fixtures/zero-number-storage-values.json'
 import {
   executeTransactionQueryPlan,
   executeTransactionQueryPlanAsync,
@@ -40,6 +41,21 @@ function plan({ rootSingular = false, childSingular = false } = {}) {
           },
         },
       ],
+    },
+  }
+}
+
+function numberPlan() {
+  return {
+    rootTable: 'sample',
+    planHash: 'fedcba9876543210',
+    root: {
+      table: 'sample',
+      singular: false,
+      sql: 'numbers',
+      bindings: [],
+      columns: [{ name: 'value', columnType: 'number' }],
+      relationships: [],
     },
   }
 }
@@ -142,6 +158,32 @@ describe('transaction query materializer', () => {
       ['child', ['u1']],
       ['child', ['u2']],
     ])
+  })
+
+  test('matches Rust number storage decoding in both execution drivers', async () => {
+    const storageRows = numberStorageValues.accepted.map(({ input }) => ({
+      value: input,
+    }))
+    const expected = numberStorageValues.accepted.map(({ expected }) => ({
+      value: expected,
+    }))
+
+    const sync = executeTransactionQueryPlan(numberPlan(), () => storageRows)
+    const asyncResult = await executeTransactionQueryPlanAsync(
+      numberPlan(),
+      async () => (await Response.json({ rows: storageRows }).json()).rows
+    )
+
+    expect(sync).toEqual(expected)
+    expect(asyncResult).toEqual(sync)
+    for (const value of numberStorageValues.rejected) {
+      expect(() => executeTransactionQueryPlan(numberPlan(), () => [{ value }])).toThrow(
+        'does not match schema type number'
+      )
+      await expect(
+        executeTransactionQueryPlanAsync(numberPlan(), async () => [{ value }])
+      ).rejects.toThrow('does not match schema type number')
+    }
   })
 
   test('aborts an HTTP execution budget before the next parent select', async () => {

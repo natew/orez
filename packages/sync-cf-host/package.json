@@ -49,7 +49,7 @@
     "bundle": "bun run build:dist && wrangler deploy --dry-run --outdir .wrangler/bundle",
     "measure": "bun run build:dist && bun measure.mjs",
     "test": "bun run test:config && bun run test:query-compiler && bun run test:package && bun run test:platform && bun run test:integration && bun run test:ingest && bun run test:restart",
-    "test:config": "bun test config.test.mjs write-safeguards.test.mjs mutation-error.test.mjs post-commit.test.mjs",
+    "test:config": "bun test config.test.mjs write-safeguards.test.mjs mutation-error.test.mjs post-commit.test.mjs transaction-query.test.mjs",
     "test:integration": "bun run build:dist && bun integration-test.mjs",
     "test:ingest": "bun run build:dist && bun ingest-test.mjs",
     "test:package": "bun run build:dist && node package-runtime-test.mjs",

@@ -266,48 +266,34 @@ pub fn zero_pk_id(
 mod tests {
     use std::sync::Arc;
 
-    use super::{ZeroColumnType, timestamp_text_to_epoch_ms, zero_row};
+    use serde_json::Value;
+
+    use super::{ZeroColumnType, to_zero_value_json, zero_row};
     use crate::db::{Row, SqlValue};
     use crate::schema::TableSpec;
 
     #[test]
-    fn parses_sql_and_iso_timestamps_as_utc_epoch_milliseconds() {
-        assert_eq!(
-            timestamp_text_to_epoch_ms("2026-07-11 13:34:46"),
-            Some(1_783_776_886_000)
-        );
-        assert_eq!(
-            timestamp_text_to_epoch_ms("2026-07-11T13:34:46.123Z"),
-            Some(1_783_776_886_123)
-        );
-        assert_eq!(
-            timestamp_text_to_epoch_ms("2026-07-11 13:34:46.123"),
-            Some(1_783_776_886_123)
-        );
-        assert_eq!(
-            timestamp_text_to_epoch_ms("2026-07-11T03:34:46-10:00"),
-            Some(1_783_776_886_000)
-        );
-    }
-
-    #[test]
-    fn parses_postgres_timestamptz_text_offsets() {
-        // the DO data tier stores pg timestamp/timestamptz columns as postgres
-        // timestamp TEXT (pg-proxy-do-backend `postgresTimestampText`): an
-        // epoch-ms client value becomes `<date> <time>.<ms>+00`, and a
-        // CURRENT_TIMESTAMP default becomes `<date> <time>` with no offset.
-        assert_eq!(
-            timestamp_text_to_epoch_ms("2026-07-11 13:34:46.000+00"),
-            Some(1_783_776_886_000)
-        );
-        assert_eq!(
-            timestamp_text_to_epoch_ms("2026-07-11 13:34:46+00"),
-            Some(1_783_776_886_000)
-        );
-        assert_eq!(
-            timestamp_text_to_epoch_ms("2026-07-11 03:34:46-1000"),
-            Some(1_783_776_886_000)
-        );
+    fn zero_number_storage_text_matches_the_shared_host_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../harness/fixtures/zero-number-storage-values.json"
+        ))
+        .unwrap();
+        for case in fixture["accepted"].as_array().unwrap() {
+            let input = case["input"].as_str().unwrap();
+            assert_eq!(
+                to_zero_value_json(ZeroColumnType::Number, Value::String(input.into())),
+                case["expected"],
+                "accepted storage value {input}"
+            );
+        }
+        for input in fixture["rejected"].as_array().unwrap() {
+            let input = input.as_str().unwrap();
+            assert_eq!(
+                to_zero_value_json(ZeroColumnType::Number, Value::String(input.into())),
+                Value::String(input.into()),
+                "rejected storage value {input}"
+            );
+        }
     }
 
     #[test]
