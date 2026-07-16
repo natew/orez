@@ -7,7 +7,7 @@ mod common;
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use common::{Host, TestDb, item_tables};
+use common::{Host, TestDb, item_sql, item_tables};
 use rusqlite::Connection;
 use serde_json::{Map, Value, json};
 use sync_core::pull::Caps;
@@ -37,7 +37,7 @@ fn change(watermark: i64, id: &str) -> UpstreamChange {
 fn setup() -> (TestDb, sync_core::Tables) {
     let mut db = TestDb::memory();
     db.exec(
-        "CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)",
+        &item_sql("CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)"),
         &[],
     )
     .unwrap();
@@ -49,7 +49,7 @@ fn setup() -> (TestDb, sync_core::Tables) {
 fn count(db: &mut TestDb, table: &str) -> i64 {
     let rows = db
         .query(
-            &format!("SELECT CAST(COUNT(*) AS TEXT) AS n FROM {table}"),
+            &item_sql(&format!("SELECT CAST(COUNT(*) AS TEXT) AS n FROM {table}")),
             &[],
         )
         .unwrap();
@@ -114,7 +114,7 @@ fn no_op_commit_and_rolled_back_write_emit_no_cdc_and_connection_stays_usable() 
     db.transaction::<_, EngineError>(|_| Ok(())).unwrap();
     let rolled_back = db.transaction(|tx| {
         tx.exec(
-            "INSERT INTO item (id, label, rank, done, meta) VALUES ('rolled-back', 'x', 0, 0, NULL)",
+            &item_sql("INSERT INTO item (id, label, rank, done, meta) VALUES ('rolled-back', 'x', 0, 0, NULL)"),
             &[],
         )?;
         Err::<(), _>(EngineError::bad_request("force rollback"))
@@ -124,7 +124,9 @@ fn no_op_commit_and_rolled_back_write_emit_no_cdc_and_connection_stays_usable() 
     assert_eq!(count(&mut db, "_zsync_changes"), 0);
 
     db.exec(
-        "INSERT INTO item (id, label, rank, done, meta) VALUES ('after', 'usable', 0, 0, NULL)",
+        &item_sql(
+            "INSERT INTO item (id, label, rank, done, meta) VALUES ('after', 'usable', 0, 0, NULL)",
+        ),
         &[],
     )
     .unwrap();
@@ -168,7 +170,7 @@ fn trigger_cdc_is_visible_across_independent_connections() {
     };
     first
         .exec(
-            "CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)",
+            &item_sql("CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)"),
             &[],
         )
         .unwrap();
@@ -179,14 +181,14 @@ fn trigger_cdc_is_visible_across_independent_connections() {
     };
     second
         .exec(
-            "INSERT INTO item (id, label, rank, done, meta) VALUES ('second', 'connection', 0, 0, NULL)",
+            &item_sql("INSERT INTO item (id, label, rank, done, meta) VALUES ('second', 'connection', 0, 0, NULL)"),
             &[],
         )
         .unwrap();
     assert_eq!(count(&mut first, "_zsync_changes"), 1);
     first
         .exec(
-            "INSERT INTO item (id, label, rank, done, meta) VALUES ('first', 'connection', 0, 0, NULL)",
+            &item_sql("INSERT INTO item (id, label, rank, done, meta) VALUES ('first', 'connection', 0, 0, NULL)"),
             &[],
         )
         .unwrap();
@@ -202,7 +204,7 @@ fn trigger_cdc_is_visible_across_independent_connections() {
 fn schema_drift_rolls_back_and_legacy_metadata_upgrade_is_idempotent() {
     let mut db = TestDb::memory();
     db.exec(
-        "CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)",
+        &item_sql("CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)"),
         &[],
     )
     .unwrap();
@@ -260,7 +262,9 @@ fn transaction_larger_than_pull_cap_converges_without_loss_or_duplication() {
         .transaction::<_, EngineError>(|tx| {
             for i in 0..37 {
                 tx.exec(
-                    "INSERT INTO item (id, label, rank, done, meta) VALUES (?, ?, ?, 0, NULL)",
+                    &item_sql(
+                        "INSERT INTO item (id, label, rank, done, meta) VALUES (?, ?, ?, 0, NULL)",
+                    ),
                     &[
                         SqlValue::Text(format!("fragment-{i:02}")),
                         SqlValue::Text(format!("row {i}")),

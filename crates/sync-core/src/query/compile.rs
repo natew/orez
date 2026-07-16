@@ -100,15 +100,46 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    // the root query: SELECT <alias>.* FROM "table" AS <alias> WHERE ...
+    fn physical_table(&self, table: &str) -> Result<&str, EngineError> {
+        self.tables
+            .physical_name(table)
+            .ok_or_else(|| reject(format!("unknown table '{table}'")))
+    }
+
+    fn physical_column(&self, table: &str, column: &str) -> Result<&str, EngineError> {
+        self.check_column(table, column)?;
+        self.tables
+            .physical_column(table, column)
+            .ok_or_else(|| reject(format!("unknown column '{table}.{column}'")))
+    }
+
+    fn qualified_column(
+        &self,
+        table: &str,
+        alias: &str,
+        column: &str,
+    ) -> Result<String, EngineError> {
+        Ok(format!(
+            "{}.{}",
+            quote_ident(alias),
+            quote_ident(self.physical_column(table, column)?)
+        ))
+    }
+
+    // the root query: SELECT physical columns AS logical keys FROM the physical
+    // table WHERE ...
     // ORDER BY ... LIMIT ?
     fn compile_root(&mut self, ast: &Ast) -> Result<String, EngineError> {
         self.check_table(&ast.table)?;
         let alias = self.alias();
+        let projection = self
+            .tables
+            .projected_columns(&ast.table, Some(&alias))
+            .expect("validated table has projected columns");
         let mut sql = format!(
-            "SELECT {a}.* FROM {t} AS {a}",
+            "SELECT {projection} FROM {t} AS {a}",
             a = quote_ident(&alias),
-            t = quote_ident(&ast.table)
+            t = quote_ident(self.physical_table(&ast.table)?)
         );
 
         // validate ordering columns up front so start-cursor / order-by can rely
@@ -151,14 +182,18 @@ impl<'a> Compiler<'a> {
             parts.push(format!(
                 "{}.{} {}",
                 quote_ident(alias),
-                quote_ident(column),
+                quote_ident(self.physical_column(&ast.table, column)?),
                 if *desc { "DESC" } else { "ASC" }
             ));
         }
         // stable tie-breaker: append pk columns not already ordered, ascending
         for pk in &spec.primary_key {
             if !seen.contains(pk.as_str()) {
-                parts.push(format!("{}.{} ASC", quote_ident(alias), quote_ident(pk)));
+                parts.push(format!(
+                    "{}.{} ASC",
+                    quote_ident(alias),
+                    quote_ident(self.physical_column(&ast.table, pk)?)
+                ));
             }
         }
         Ok(parts)
@@ -215,7 +250,7 @@ impl<'a> Compiler<'a> {
             let mut ands: Vec<String> = Vec::new();
             // earlier keys equal the cursor (null === null -> IS NULL)
             for (col, _) in keys.iter().take(i) {
-                let colq = format!("{}.{}", quote_ident(alias), quote_ident(col));
+                let colq = self.qualified_column(&ast.table, alias, col)?;
                 match value_for(col).unwrap() {
                     Scalar::Null => ands.push(format!("{colq} IS NULL")),
                     v => {
@@ -226,7 +261,7 @@ impl<'a> Compiler<'a> {
             }
             // key i strictly (or inclusively) past the cursor, null-aware
             let (col, desc) = &keys[i];
-            let colq = format!("{}.{}", quote_ident(alias), quote_ident(col));
+            let colq = self.qualified_column(&ast.table, alias, col)?;
             let inclusive = i == keys.len() - 1 && !bound.exclusive;
             let v = value_for(col).unwrap();
             let cmp = match (*desc, inclusive, matches!(v, Scalar::Null)) {
@@ -304,10 +339,7 @@ impl<'a> Compiler<'a> {
         alias: &str,
     ) -> Result<String, EngineError> {
         let left_sql = match left {
-            ValueRef::Column(col) => {
-                self.check_column(table, col)?;
-                format!("{}.{}", quote_ident(alias), quote_ident(col))
-            }
+            ValueRef::Column(col) => self.qualified_column(table, alias, col)?,
             ValueRef::Literal(s) => {
                 self.params.push(scalar_to_sql(s));
                 "?".to_string()
@@ -389,9 +421,9 @@ impl<'a> Compiler<'a> {
             corr.push(format!(
                 "{}.{} = {}.{}",
                 quote_ident(&child_alias),
-                quote_ident(cf),
+                quote_ident(self.physical_column(&child.table, cf)?),
                 quote_ident(parent_alias),
-                quote_ident(pf)
+                quote_ident(self.physical_column(parent_table, pf)?)
             ));
         }
 
@@ -405,7 +437,7 @@ impl<'a> Compiler<'a> {
         let kw = if negated { "NOT EXISTS" } else { "EXISTS" };
         Ok(format!(
             "{kw} (SELECT 1 FROM {t} AS {a} WHERE {w})",
-            t = quote_ident(&child.table),
+            t = quote_ident(self.physical_table(&child.table)?),
             a = quote_ident(&child_alias),
             w = wheres.join(" AND ")
         ))
@@ -434,11 +466,23 @@ pub fn compile_predicate_probe(
         wheres.push(c.compile_condition(cond, &ast.table, &alias)?);
     }
     for col in &spec.primary_key {
-        wheres.push(format!("{}.{} = ?", quote_ident(&alias), quote_ident(col)));
+        wheres.push(format!(
+            "{}.{} = ?",
+            quote_ident(&alias),
+            quote_ident(
+                tables
+                    .physical_column(&ast.table, col)
+                    .expect("primary key column in table mapping")
+            )
+        ));
     }
     let sql = format!(
         "SELECT 1 FROM {} AS {} WHERE {} LIMIT 1",
-        quote_ident(&ast.table),
+        quote_ident(
+            tables
+                .physical_name(&ast.table)
+                .expect("validated table has physical mapping")
+        ),
         quote_ident(&alias),
         wheres.join(" AND ")
     );
@@ -498,16 +542,40 @@ pub fn compile_related_of(
         corr.push(format!(
             "{}.{} = {}.{}",
             quote_ident(&rc),
-            quote_ident(cf),
+            quote_ident(
+                tables
+                    .physical_column(&child.table, cf)
+                    .expect("validated child column has physical mapping")
+            ),
             quote_ident(&rp),
             quote_ident(pf)
         ));
     }
-    let ct = quote_ident(&child.table);
+    let ct = quote_ident(
+        tables
+            .physical_name(&child.table)
+            .expect("validated child table has physical mapping"),
+    );
     let child_spec = tables
         .get(&child.table)
         .ok_or_else(|| reject(format!("unknown table '{}'", child.table)))?;
     let primary_key = child_spec.primary_key.clone();
+    let child_projection = tables
+        .projected_columns(&child.table, Some(&rc))
+        .expect("validated child table has projected columns");
+    let logical_projection = child_spec
+        .columns
+        .iter()
+        .map(|(logical, _)| {
+            format!(
+                "{}.{} AS {}",
+                quote_ident(&format!("{rc}_w")),
+                quote_ident(logical),
+                quote_ident(logical)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
 
     // an UNBOUNDED related child is a row SET: a plain correlated join (row order
     // is immaterial, the client re-sorts). params: the parent subquery (in the
@@ -520,7 +588,7 @@ pub fn compile_related_of(
         };
         params.extend(c.params);
         let sql = format!(
-            "SELECT DISTINCT {rc}.* FROM {ct} AS {rc} JOIN ({parent_sql}) AS {rp} ON {on}{where_sql}",
+            "SELECT DISTINCT {child_projection} FROM {ct} AS {rc} JOIN ({parent_sql}) AS {rp} ON {on}{where_sql}",
             on = corr.join(" AND "),
         );
         return Ok(CompiledRelated {
@@ -557,7 +625,17 @@ pub fn compile_related_of(
             let partition: Vec<String> = rel
                 .child_field
                 .iter()
-                .map(|cf| format!("{}.{}", quote_ident(&rc), quote_ident(cf)))
+                .map(|cf| {
+                    format!(
+                        "{}.{}",
+                        quote_ident(&rc),
+                        quote_ident(
+                            tables
+                                .physical_column(&child.table, cf)
+                                .expect("validated child column has physical mapping")
+                        )
+                    )
+                })
                 .collect();
             let order_terms = c.order_by_terms(child, &rc)?;
             // the ROW_NUMBER rank alias must NOT collide with a real child column,
@@ -567,11 +645,12 @@ pub fn compile_related_of(
             // case-insensitive, so the absence check must be too (RESIDUAL-2c: a
             // column `_ZSYNC_RN` would otherwise shadow `_zsync_rn`).
             let mut rank_alias = String::from("_zsync_rn");
-            while child_spec
-                .columns
-                .iter()
-                .any(|(col, _)| col.eq_ignore_ascii_case(rank_alias.as_str()))
-            {
+            while child_spec.columns.iter().any(|(col, _)| {
+                col.eq_ignore_ascii_case(rank_alias.as_str())
+                    || tables
+                        .physical_column(&child.table, col)
+                        .is_some_and(|physical| physical.eq_ignore_ascii_case(rank_alias.as_str()))
+            }) {
                 rank_alias.push('_');
             }
             Some((limit, partition, order_terms, rank_alias))
@@ -591,7 +670,7 @@ pub fn compile_related_of(
         };
         params.push(SqlValue::Integer(limit));
         format!(
-            "SELECT * FROM (SELECT {rc}.*, ROW_NUMBER() OVER (PARTITION BY {part}{order}) AS {rank_alias} \
+            "SELECT {logical_projection} FROM (SELECT {child_projection}, ROW_NUMBER() OVER (PARTITION BY {part}{order}) AS {rank_alias} \
              FROM {ct} AS {rc} WHERE {where_clause}) AS {rc}_w WHERE {rc}_w.{rank_alias} <= ?",
             part = partition.join(", "),
             order = order_sql,
@@ -599,7 +678,7 @@ pub fn compile_related_of(
     } else {
         // start cursor with no limit: the cursor already bounds the set, so a
         // deduped correlated select suffices.
-        format!("SELECT DISTINCT {rc}.* FROM {ct} AS {rc} WHERE {where_clause}")
+        format!("SELECT DISTINCT {child_projection} FROM {ct} AS {rc} WHERE {where_clause}")
     };
 
     Ok(CompiledRelated {

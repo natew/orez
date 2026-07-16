@@ -5,7 +5,7 @@ use sync_core::value::zero_row;
 use sync_core::{SyncDb, Transactor, apply_upstream, apply_upstream_snapshot, init_schema};
 use sync_core::{UpstreamBatch, UpstreamChange, UpstreamSnapshot};
 
-use common::{TestDb, item_tables};
+use common::{TestDb, item_sql, item_tables};
 
 fn row(value: Value) -> Map<String, Value> {
     value.as_object().unwrap().clone()
@@ -30,7 +30,7 @@ fn setup() -> (TestDb, sync_core::Tables) {
     let mut db = TestDb::memory();
     let tables = item_tables();
     db.exec(
-        "CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)",
+        &item_sql("CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)"),
         &[],
     )
     .unwrap();
@@ -75,7 +75,14 @@ fn upstream_json_values_persist_and_hydrate_with_their_original_types() {
     )
     .unwrap();
 
-    let rows = db.query("SELECT * FROM item ORDER BY id", &[]).unwrap();
+    let rows = db
+        .query(
+            "SELECT item_id AS id, item_label AS label, sort_rank AS rank,
+             is_done AS done, metadata_json AS meta
+             FROM item_record ORDER BY item_id",
+            &[],
+        )
+        .unwrap();
     let spec = tables.get("item").unwrap();
     for (row, expected) in rows.iter().zip(json_values) {
         assert_eq!(
@@ -149,7 +156,11 @@ fn update_and_delete_use_full_images_and_advance_the_change_log() {
         },
     )
     .unwrap();
-    assert!(db.query("SELECT id FROM item", &[]).unwrap().is_empty());
+    assert!(
+        db.query(&item_sql("SELECT id FROM item"), &[])
+            .unwrap()
+            .is_empty()
+    );
     // insert + update old/new + delete
     assert_eq!(
         db.query("SELECT watermark FROM _zsync_changes", &[])
@@ -173,7 +184,11 @@ fn rejects_out_of_order_and_classifies_schema_drift_as_refresh() {
         .transaction(|db| apply_upstream(db, &tables, &ordered_batch))
         .unwrap_err();
     assert_eq!(err.status, 400);
-    assert!(db.query("SELECT id FROM item", &[]).unwrap().is_empty());
+    assert!(
+        db.query(&item_sql("SELECT id FROM item"), &[])
+            .unwrap()
+            .is_empty()
+    );
 
     let mut unknown = item("x", "drift");
     unknown
@@ -197,7 +212,7 @@ fn rejects_out_of_order_and_classifies_schema_drift_as_refresh() {
 fn init_migrates_legacy_engine_meta() {
     let mut db = TestDb::memory();
     db.exec(
-        "CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)",
+        &item_sql("CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL, rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)"),
         &[],
     )
     .unwrap();
@@ -232,7 +247,12 @@ fn retention_gap_snapshot_replaces_rows_atomically() {
     };
     db.transaction(|db| apply_upstream_snapshot(db, &tables, &snapshot))
         .unwrap();
-    let rows = db.query("SELECT id, label FROM item", &[]).unwrap();
+    let rows = db
+        .query(
+            "SELECT item_id AS id, item_label AS label FROM item_record",
+            &[],
+        )
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].get("id"),
@@ -264,7 +284,9 @@ fn snapshot_ignores_tables_absent_from_host_schema() {
         .unwrap();
     // only the modeled table's row counts as applied; `user` is skipped.
     assert_eq!(result.applied, 1);
-    let rows = db.query("SELECT id FROM item", &[]).unwrap();
+    let rows = db
+        .query("SELECT item_id AS id FROM item_record", &[])
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].get("id"),
@@ -309,6 +331,11 @@ fn changes_skip_tables_absent_from_host_schema() {
         },
     )
     .unwrap();
-    assert_eq!(db.query("SELECT id FROM item", &[]).unwrap().len(), 1);
+    assert_eq!(
+        db.query(&item_sql("SELECT id FROM item"), &[])
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 2);
 }

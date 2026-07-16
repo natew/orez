@@ -36,10 +36,10 @@ are engine-owned physical identifiers and do not cross the wire.
 - `resolve_row` uses the physical table and physical primary-key predicates, then
   aliases the projection back to logical names. Delete IDs and patch table names
   remain logical.
-- Visibility callbacks are selected by logical table name, while the returned SQL
-  fragment is executed against the physical table. The host contract therefore
-  requires visibility fragments to use physical column identifiers. Test fixtures
-  that construct filters from logical schema must resolve them through `Tables`.
+- Visibility callbacks and their SQL fragments use logical table and column names.
+  Snapshot and point-read SQL project physical columns into a logical subquery
+  before applying the fragment, so existing host filters do not need a second
+  schema compiler.
 - `zero_row`, `zero_pk_id`, and row/PK dedup helpers consume logical aliases and
   emit logical object keys. They contain no application SQL identifiers.
 

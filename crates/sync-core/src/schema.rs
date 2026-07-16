@@ -14,6 +14,8 @@
 //   (never acking a mutation whose row effects were cut); op 'marker' carries
 //   nothing and only advances the watermark (epoch invalidation).
 
+use std::collections::BTreeSet;
+
 use crate::db::{DbError, SyncDb};
 use crate::value::ZeroColumnType;
 
@@ -33,10 +35,17 @@ impl TableSpec {
     }
 }
 
-// an ordered map of sync table name -> spec. order is preserved so snapshot
-// row emission matches the reference core's Object.entries() iteration.
+#[derive(Debug, Clone)]
+struct TableMapping {
+    physical_name: String,
+    physical_columns: Vec<(String, String)>,
+}
+
+// an ordered map of logical sync table name -> spec + physical SQLite mapping.
+// order is preserved so snapshot row emission matches the reference core's
+// Object.entries() iteration.
 #[derive(Debug, Clone, Default)]
-pub struct Tables(Vec<(String, TableSpec)>);
+pub struct Tables(Vec<(String, TableSpec, TableMapping)>);
 
 impl Tables {
     pub fn new() -> Self {
@@ -44,20 +53,93 @@ impl Tables {
     }
 
     pub fn with(mut self, name: impl Into<String>, spec: TableSpec) -> Self {
-        self.0.push((name.into(), spec));
+        self.push(name, spec);
         self
     }
 
     pub fn push(&mut self, name: impl Into<String>, spec: TableSpec) {
-        self.0.push((name.into(), spec));
+        let name = name.into();
+        let mapping = TableMapping {
+            physical_name: name.clone(),
+            physical_columns: spec
+                .columns
+                .iter()
+                .map(|(column, _)| (column.clone(), column.clone()))
+                .collect(),
+        };
+        self.0.push((name, spec, mapping));
+    }
+
+    fn push_mapped(
+        &mut self,
+        logical_name: String,
+        physical_name: String,
+        spec: TableSpec,
+        physical_columns: Vec<(String, String)>,
+    ) {
+        self.0.push((
+            logical_name,
+            spec,
+            TableMapping {
+                physical_name,
+                physical_columns,
+            },
+        ));
     }
 
     pub fn get(&self, name: &str) -> Option<&TableSpec> {
-        self.0.iter().find(|(n, _)| n == name).map(|(_, s)| s)
+        self.0
+            .iter()
+            .find(|(logical, _, _)| logical == name)
+            .map(|(_, spec, _)| spec)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &TableSpec)> {
-        self.0.iter().map(|(n, s)| (n.as_str(), s))
+        self.0
+            .iter()
+            .map(|(logical, spec, _)| (logical.as_str(), spec))
+    }
+
+    pub fn physical_name(&self, logical_name: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(logical, _, _)| logical == logical_name)
+            .map(|(_, _, mapping)| mapping.physical_name.as_str())
+    }
+
+    pub fn physical_column(&self, logical_table: &str, logical_column: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(logical, _, _)| logical == logical_table)
+            .and_then(|(_, _, mapping)| {
+                mapping
+                    .physical_columns
+                    .iter()
+                    .find(|(logical, _)| logical == logical_column)
+                    .map(|(_, physical)| physical.as_str())
+            })
+    }
+
+    pub(crate) fn projected_columns(
+        &self,
+        logical_table: &str,
+        source_alias: Option<&str>,
+    ) -> Option<String> {
+        let spec = self.get(logical_table)?;
+        spec.columns
+            .iter()
+            .map(|(logical_column, _)| {
+                let physical_column = self.physical_column(logical_table, logical_column)?;
+                let source = match source_alias {
+                    Some(alias) => {
+                        format!("{}.{}", quote_ident(alias), quote_ident(physical_column))
+                    }
+                    None => quote_ident(physical_column),
+                };
+                Some(format!("{source} AS {}", quote_ident(logical_column)))
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|columns| columns.join(", "))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -79,6 +161,8 @@ impl Tables {
             .and_then(|t| t.as_object())
             .ok_or_else(|| "schema.tables must be an object".to_string())?;
         let mut tables = Tables::new();
+        let mut logical_tables = BTreeSet::new();
+        let mut physical_tables = BTreeSet::new();
         for (name, table) in tables_obj {
             // the consumer schema is trusted, but a malformed or hostile name
             // reaches trigger DDL, so reject anything that is not a plain SQL
@@ -86,20 +170,62 @@ impl Tables {
             if !is_valid_identifier(name) {
                 return Err(format!("table name '{name}' is not a valid identifier"));
             }
+            if !logical_tables.insert(name.to_ascii_lowercase()) {
+                return Err(format!("duplicate logical table name '{name}'"));
+            }
+            let physical_name = match table.get("serverName") {
+                None => name.clone(),
+                Some(serde_json::Value::String(value)) => value.clone(),
+                Some(_) => return Err(format!("table '{name}'.serverName must be a string")),
+            };
+            if !is_valid_identifier(&physical_name) {
+                return Err(format!(
+                    "physical table name '{physical_name}' for '{name}' is not a valid identifier"
+                ));
+            }
+            if !physical_tables.insert(physical_name.to_ascii_lowercase()) {
+                return Err(format!(
+                    "duplicate physical table mapping '{physical_name}'"
+                ));
+            }
             let columns_obj = table
                 .get("columns")
                 .and_then(|c| c.as_object())
                 .ok_or_else(|| format!("table '{name}'.columns must be an object"))?;
             let mut columns = Vec::new();
+            let mut physical_columns = Vec::new();
+            let mut seen_logical_columns = BTreeSet::new();
+            let mut seen_physical_columns = BTreeSet::new();
             for (col, spec) in columns_obj {
                 if !is_valid_identifier(col) {
                     return Err(format!("column '{name}.{col}' is not a valid identifier"));
+                }
+                if !seen_logical_columns.insert(col.to_ascii_lowercase()) {
+                    return Err(format!("duplicate logical column name '{name}.{col}'"));
                 }
                 let ty = spec
                     .get("type")
                     .and_then(|t| t.as_str())
                     .ok_or_else(|| format!("column '{name}.{col}'.type must be a string"))?;
+                let physical_column = match spec.get("serverName") {
+                    None => col.clone(),
+                    Some(serde_json::Value::String(value)) => value.clone(),
+                    Some(_) => {
+                        return Err(format!("column '{name}.{col}'.serverName must be a string"));
+                    }
+                };
+                if !is_valid_identifier(&physical_column) {
+                    return Err(format!(
+                        "physical column name '{physical_column}' for '{name}.{col}' is not a valid identifier"
+                    ));
+                }
+                if !seen_physical_columns.insert(physical_column.to_ascii_lowercase()) {
+                    return Err(format!(
+                        "duplicate physical column mapping '{name}.{physical_column}'"
+                    ));
+                }
                 columns.push((col.clone(), ZeroColumnType::from_type_str(ty)));
+                physical_columns.push((col.clone(), physical_column));
             }
             let primary_key = table
                 .get("primaryKey")
@@ -118,12 +244,30 @@ impl Tables {
                     Ok(col)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            tables.push(
+            if primary_key.is_empty() {
+                return Err(format!("table '{name}'.primaryKey must not be empty"));
+            }
+            let mut seen_primary_key = BTreeSet::new();
+            for column in &primary_key {
+                if !seen_primary_key.insert(column.as_str()) {
+                    return Err(format!(
+                        "table '{name}'.primaryKey contains duplicate '{column}'"
+                    ));
+                }
+                if !columns.iter().any(|(candidate, _)| candidate == column) {
+                    return Err(format!(
+                        "table '{name}'.primaryKey references unknown column '{column}'"
+                    ));
+                }
+            }
+            tables.push_mapped(
                 name.clone(),
+                physical_name,
                 TableSpec {
                     columns,
                     primary_key,
                 },
+                physical_columns,
             );
         }
         Ok(tables)
@@ -156,11 +300,21 @@ fn quote_str(name: &str) -> String {
 }
 
 // json_object('<pk1>', <REF>."<pk1>", ...) expression capturing a row's pk
-fn pk_object(spec: &TableSpec, reference: &str) -> String {
+fn pk_object(tables: &Tables, table: &str, spec: &TableSpec, reference: &str) -> String {
     let parts: Vec<String> = spec
         .primary_key
         .iter()
-        .map(|col| format!("{}, {}.{}", quote_str(col), reference, quote_ident(col)))
+        .map(|col| {
+            let physical = tables
+                .physical_column(table, col)
+                .expect("primary key column in table mapping");
+            format!(
+                "{}, {}.{}",
+                quote_str(col),
+                reference,
+                quote_ident(physical)
+            )
+        })
         .collect();
     format!("json_object({})", parts.join(", "))
 }
@@ -273,18 +427,25 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
 pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
     let mut out = Vec::new();
     for (table, spec) in tables.iter() {
-        let tq = quote_ident(table);
+        let tq = quote_ident(
+            tables
+                .physical_name(table)
+                .expect("iterated table has physical mapping"),
+        );
         let tl = quote_str(table);
         // the trigger NAME embeds the table name, so it must be quoted/escaped
         // just like the target identifier — a raw interpolation lets a table
         // named `x" AFTER INSERT ON "victim" ...` break out of the quoted name
         // and install an injected trigger (from_zero_schema also rejects such
         // names, but the quoting is the actual barrier for any Tables source).
-        let tr_i = quote_ident(&format!("_zsync_tr_{table}_i"));
-        let tr_u = quote_ident(&format!("_zsync_tr_{table}_u"));
-        let tr_d = quote_ident(&format!("_zsync_tr_{table}_d"));
-        let new_pk = pk_object(spec, "NEW");
-        let old_pk = pk_object(spec, "OLD");
+        let trigger_key = tables
+            .physical_name(table)
+            .expect("iterated table has physical mapping");
+        let tr_i = quote_ident(&format!("_zsync_tr_{trigger_key}_i"));
+        let tr_u = quote_ident(&format!("_zsync_tr_{trigger_key}_u"));
+        let tr_d = quote_ident(&format!("_zsync_tr_{trigger_key}_d"));
+        let new_pk = pk_object(tables, table, spec, "NEW");
+        let old_pk = pk_object(tables, table, spec, "OLD");
         out.push(format!(
             "CREATE TRIGGER IF NOT EXISTS {tr_i} AFTER INSERT ON {tq} BEGIN
                 INSERT INTO _zsync_changes (tableName, op, pk) VALUES ({tl}, 'row', {new_pk});

@@ -8,7 +8,7 @@ use sync_core::{
     finalize_snapshot_generation, handle_pull, init_schema, read_snapshot_progress,
 };
 
-use common::{TestDb, item_tables};
+use common::{TestDb, item_sql, item_tables};
 
 fn row(value: Value) -> Map<String, Value> {
     value.as_object().unwrap().clone()
@@ -22,7 +22,8 @@ fn setup() -> (TestDb, Tables) {
     let mut db = TestDb::memory();
     let tables = item_tables();
     db.exec(
-        "CREATE TABLE item (
+        &item_sql(
+            "CREATE TABLE item (
             id TEXT PRIMARY KEY,
             label TEXT NOT NULL,
             rank REAL NOT NULL,
@@ -30,11 +31,15 @@ fn setup() -> (TestDb, Tables) {
             meta TEXT,
             CHECK (rank >= 0)
         ) STRICT",
+        ),
         &[],
     )
     .unwrap();
-    db.exec("CREATE UNIQUE INDEX item_label_unique ON item(label)", &[])
-        .unwrap();
+    db.exec(
+        &item_sql("CREATE UNIQUE INDEX item_label_unique ON item(label)"),
+        &[],
+    )
+    .unwrap();
     init_schema(&mut db, &tables).unwrap();
     (db, tables)
 }
@@ -46,7 +51,7 @@ fn pull(db: &mut TestDb, tables: &Tables, cookie: Value) -> Value {
 }
 
 fn integer(db: &mut TestDb, sql: &str) -> i64 {
-    match db.query(sql, &[]).unwrap()[0].values[0] {
+    match db.query(&item_sql(sql), &[]).unwrap()[0].values[0] {
         SqlValue::Integer(value) => value,
         ref value => panic!("expected integer, got {value:?}"),
     }
@@ -227,7 +232,9 @@ fn invalid_page_rolls_back_rows_and_cursor_together() {
 fn catchup_overlap_and_unseen_delete_converge_then_invalidate_old_clients() {
     let (mut db, tables) = setup();
     db.exec(
-        "INSERT INTO item (id, label, rank, done, meta) VALUES ('old', 'live-old', 1, 0, NULL)",
+        &item_sql(
+            "INSERT INTO item (id, label, rank, done, meta) VALUES ('old', 'live-old', 1, 0, NULL)",
+        ),
         &[],
     )
     .unwrap();
@@ -295,7 +302,7 @@ fn catchup_overlap_and_unseen_delete_converge_then_invalidate_old_clients() {
     assert!(read_snapshot_progress(&mut db).unwrap().is_none());
     assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 102);
     assert_eq!(
-        db.query("SELECT label FROM item WHERE id = 'a'", &[])
+        db.query(&item_sql("SELECT label FROM item WHERE id = 'a'"), &[])
             .unwrap()[0]
             .values[0],
         SqlValue::Text("catchup-new".into())
@@ -309,7 +316,7 @@ fn catchup_overlap_and_unseen_delete_converge_then_invalidate_old_clients() {
     assert_eq!(patch[1]["value"]["label"], "catchup-new");
 
     db.exec(
-        "INSERT INTO item (id, label, rank, done, meta) VALUES ('after', 'after-cutover', 1, 0, NULL)",
+        &item_sql("INSERT INTO item (id, label, rank, done, meta) VALUES ('after', 'after-cutover', 1, 0, NULL)"),
         &[],
     )
     .unwrap();
@@ -318,7 +325,7 @@ fn catchup_overlap_and_unseen_delete_converge_then_invalidate_old_clients() {
         "live-table triggers must be restored after rename"
     );
     let duplicate = db.exec(
-        "INSERT INTO item (id, label, rank, done, meta) VALUES ('duplicate', 'after-cutover', 1, 0, NULL)",
+        &item_sql("INSERT INTO item (id, label, rank, done, meta) VALUES ('duplicate', 'after-cutover', 1, 0, NULL)"),
         &[],
     );
     assert!(

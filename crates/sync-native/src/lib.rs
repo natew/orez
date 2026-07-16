@@ -190,9 +190,9 @@ pub struct SyncNativeConfig {
     /// function. Return `None` if the table has no visibility filter
     /// (fully visible). Return `Some((where_clause, params))` with a
     /// SQL WHERE fragment (without the `WHERE` keyword) and positional
-    /// parameters. The engine composes it as `SELECT * FROM "<table>"
-    /// WHERE <fragment>` for snapshots and `... AND (<fragment>)` for
-    /// diff point-reads.
+    /// parameters. Table and column references in this callback use logical
+    /// Zero schema names. The engine projects physical `serverName` columns
+    /// to logical aliases before applying the fragment.
     ///
     /// Any visibility config forces every pull to a full snapshot
     /// because a permission flip can revoke rows without changing them,

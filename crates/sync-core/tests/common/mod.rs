@@ -10,8 +10,6 @@ use rusqlite::types::{Value as Sqlite, ValueRef};
 use serde_json::{Value, json};
 
 use sync_core::pull::Caps;
-use sync_core::schema::TableSpec;
-use sync_core::value::ZeroColumnType;
 use sync_core::{
     DbError, MutateError, Mutator, Row, SqlValue, SyncDb, Tables, Transactor, Visibility,
     handle_pull, handle_push, init_schema,
@@ -104,19 +102,22 @@ impl Transactor for TestDb {
 
 // the `item` table from the reference delta suite (sync-server.test.ts)
 pub fn item_tables() -> Tables {
-    Tables::new().with(
-        "item",
-        TableSpec {
-            columns: vec![
-                ("id".into(), ZeroColumnType::String),
-                ("label".into(), ZeroColumnType::String),
-                ("rank".into(), ZeroColumnType::Number),
-                ("done".into(), ZeroColumnType::Boolean),
-                ("meta".into(), ZeroColumnType::Json),
-            ],
-            primary_key: vec!["id".into()],
-        },
-    )
+    Tables::from_zero_schema(&json!({
+        "tables": {
+            "item": {
+                "serverName": "item_record",
+                "columns": {
+                    "id": { "type": "string", "serverName": "item_id" },
+                    "label": { "type": "string", "serverName": "item_label" },
+                    "rank": { "type": "number", "serverName": "sort_rank" },
+                    "done": { "type": "boolean", "serverName": "is_done" },
+                    "meta": { "type": "json", "serverName": "metadata_json" },
+                },
+                "primaryKey": ["id"],
+            }
+        }
+    }))
+    .unwrap()
 }
 
 // mutators mirroring the reference suite: item.put upserts, item.del deletes,
@@ -144,9 +145,12 @@ impl Mutator for ItemMutator {
                     Some(v) => SqlValue::Text(serde_json::to_string(v).unwrap()),
                 };
                 db.exec(
-                    "INSERT INTO item (id, label, rank, done, meta) VALUES (?, ?, ?, ?, ?)
-                     ON CONFLICT (id) DO UPDATE SET label = excluded.label, rank = excluded.rank,
-                     done = excluded.done, meta = excluded.meta",
+                    "INSERT INTO item_record
+                     (item_id, item_label, sort_rank, is_done, metadata_json)
+                     VALUES (?, ?, ?, ?, ?)
+                     ON CONFLICT (item_id) DO UPDATE SET
+                     item_label = excluded.item_label, sort_rank = excluded.sort_rank,
+                     is_done = excluded.is_done, metadata_json = excluded.metadata_json",
                     &[
                         json_to_sql(a.get("id")),
                         json_to_sql(a.get("label")),
@@ -159,13 +163,14 @@ impl Mutator for ItemMutator {
             }
             "item.del" => db
                 .exec(
-                    "DELETE FROM item WHERE id = ?",
+                    "DELETE FROM item_record WHERE item_id = ?",
                     &[json_to_sql(args.get("id"))],
                 )
                 .map_err(|e| MutateError::Other(e.0)),
             "item.reject" => {
                 db.exec(
-                    "INSERT INTO item (id, label, rank, done) VALUES ('rejected', 'x', 0, 0)",
+                    "INSERT INTO item_record (item_id, item_label, sort_rank, is_done)
+                     VALUES ('rejected', 'x', 0, 0)",
                     &[],
                 )
                 .map_err(|e| MutateError::Other(e.0))?;
@@ -207,8 +212,8 @@ impl Host {
         let mut db = TestDb::memory();
         if create_item {
             db.exec(
-                "CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL,
-                 rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)",
+                "CREATE TABLE item_record (item_id TEXT PRIMARY KEY, item_label TEXT NOT NULL,
+                 sort_rank REAL NOT NULL, is_done INTEGER NOT NULL, metadata_json TEXT)",
                 &[],
             )
             .unwrap();
@@ -223,7 +228,7 @@ impl Host {
 
     // run arbitrary sql outside the sync path (seed rows / upstream writes)
     pub fn exec(&mut self, sql: &str) {
-        self.db.exec(sql, &[]).unwrap();
+        self.db.exec(&item_sql(sql), &[]).unwrap();
     }
 
     pub fn init(&mut self) {
@@ -354,7 +359,9 @@ impl Host {
         let rows = self
             .db
             .query(
-                "SELECT * FROM item WHERE id = ?",
+                "SELECT item_id AS id, item_label AS label, sort_rank AS rank,
+                 is_done AS done, metadata_json AS meta
+                 FROM item_record WHERE item_id = ?",
                 &[SqlValue::Text(id.to_string())],
             )
             .unwrap();
@@ -365,6 +372,44 @@ impl Host {
         }
         Some(Value::Object(obj))
     }
+}
+
+pub fn item_sql(sql: &str) -> String {
+    let mut mapped = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut in_string = false;
+    while let Some(character) = chars.next() {
+        if character == '\'' {
+            mapped.push(character);
+            if in_string && chars.peek() == Some(&'\'') {
+                mapped.push(chars.next().expect("peeked quote"));
+            } else {
+                in_string = !in_string;
+            }
+            continue;
+        }
+        if !in_string && (character.is_ascii_alphabetic() || character == '_') {
+            let mut identifier = String::from(character);
+            while chars
+                .peek()
+                .is_some_and(|next| next.is_ascii_alphanumeric() || *next == '_')
+            {
+                identifier.push(chars.next().expect("peeked identifier character"));
+            }
+            mapped.push_str(match identifier.as_str() {
+                "item" => "item_record",
+                "id" => "item_id",
+                "label" => "item_label",
+                "rank" => "sort_rank",
+                "done" => "is_done",
+                "meta" => "metadata_json",
+                _ => &identifier,
+            });
+        } else {
+            mapped.push(character);
+        }
+    }
+    mapped
 }
 
 fn sql_to_plain_json(v: &SqlValue) -> Value {

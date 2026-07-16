@@ -68,6 +68,102 @@ fn from_zero_schema_accepts_normal_camelcase_schema() {
 }
 
 #[test]
+fn initializes_triggers_for_soot_server_names() {
+    let schema = json!({
+        "tables": {
+            "userState": {
+                "name": "userState",
+                "serverName": "user_state",
+                "columns": {
+                    "userId": {
+                        "type": "string",
+                        "serverName": "user_id",
+                    },
+                    "monthlyTokens": {
+                        "type": "number",
+                        "serverName": "monthly_tokens",
+                    },
+                },
+                "primaryKey": ["userId"],
+            }
+        }
+    });
+    let tables = Tables::from_zero_schema(&schema).unwrap();
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE user_state (user_id TEXT PRIMARY KEY, monthly_tokens REAL NOT NULL)",
+        &[],
+    )
+    .unwrap();
+
+    init_schema(&mut db, &tables).unwrap();
+    db.exec("INSERT INTO user_state VALUES ('u1', 42)", &[])
+        .unwrap();
+
+    let changes = db
+        .query("SELECT tableName, pk FROM _zsync_changes", &[])
+        .unwrap();
+    assert_eq!(changes.len(), 1);
+    assert!(matches!(
+        changes[0].get("tableName"),
+        Some(sync_core::SqlValue::Text(table)) if table == "userState"
+    ));
+    assert!(matches!(
+        changes[0].get("pk"),
+        Some(sync_core::SqlValue::Text(pk)) if pk == r#"{"userId":"u1"}"#
+    ));
+}
+
+#[test]
+fn server_names_fall_back_to_logical_names_and_reject_physical_collisions() {
+    let identity = Tables::from_zero_schema(&json!({
+        "tables": {
+            "userState": {
+                "columns": { "userId": { "type": "string" } },
+                "primaryKey": ["userId"],
+            }
+        }
+    }))
+    .unwrap();
+    assert_eq!(identity.physical_name("userState"), Some("userState"));
+    assert_eq!(
+        identity.physical_column("userState", "userId"),
+        Some("userId")
+    );
+
+    let duplicate_tables = Tables::from_zero_schema(&json!({
+        "tables": {
+            "first": {
+                "serverName": "record",
+                "columns": { "id": { "type": "string" } },
+                "primaryKey": ["id"],
+            },
+            "second": {
+                "serverName": "RECORD",
+                "columns": { "id": { "type": "string" } },
+                "primaryKey": ["id"],
+            },
+        }
+    }))
+    .unwrap_err();
+    assert!(duplicate_tables.contains("duplicate physical table mapping"));
+
+    let duplicate_columns = Tables::from_zero_schema(&json!({
+        "tables": {
+            "record": {
+                "columns": {
+                    "first": { "type": "string", "serverName": "value" },
+                    "second": { "type": "string", "serverName": "VALUE" },
+                },
+                "primaryKey": ["first"],
+            }
+        }
+    }))
+    .unwrap_err();
+    assert!(duplicate_columns.contains("duplicate physical column mapping"));
+}
+
+#[test]
 fn trigger_name_is_quoted_so_a_hostile_table_cannot_inject() {
     // even when Tables is built directly (bypassing from_zero_schema), the trigger
     // NAME is quote-escaped, so installing triggers for a hostile table name can

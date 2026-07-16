@@ -130,6 +130,7 @@ fn validate_columns(
 
 fn delete_row_from(
     db: &mut dyn SyncDb,
+    tables: &Tables,
     table: &str,
     target: &str,
     spec: &TableSpec,
@@ -151,7 +152,12 @@ fn delete_row_from(
     let predicate = spec
         .primary_key
         .iter()
-        .map(|column| format!("{} IS ?", quote_ident(column)))
+        .map(|column| {
+            let physical = tables
+                .physical_column(table, column)
+                .expect("primary key column in table mapping");
+            format!("{} IS ?", quote_ident(physical))
+        })
         .collect::<Vec<_>>()
         .join(" AND ");
     db.exec(
@@ -169,6 +175,7 @@ fn same_key(spec: &TableSpec, a: &Map<String, Value>, b: &Map<String, Value>) ->
 
 fn upsert_row_into(
     db: &mut dyn SyncDb,
+    tables: &Tables,
     table: &str,
     target: &str,
     spec: &TableSpec,
@@ -191,13 +198,23 @@ fn upsert_row_into(
     }
     let quoted = columns
         .iter()
-        .map(|column| quote_ident(column))
+        .map(|column| {
+            quote_ident(
+                tables
+                    .physical_column(table, column)
+                    .expect("validated column has physical mapping"),
+            )
+        })
         .collect::<Vec<_>>();
     let updates = columns
         .iter()
         .filter(|column| !spec.primary_key.contains(column))
         .map(|column| {
-            let column = quote_ident(column);
+            let column = quote_ident(
+                tables
+                    .physical_column(table, column)
+                    .expect("validated column has physical mapping"),
+            );
             format!("{column} = excluded.{column}")
         })
         .collect::<Vec<_>>();
@@ -214,7 +231,13 @@ fn upsert_row_into(
             vec!["?"; columns.len()].join(", "),
             spec.primary_key
                 .iter()
-                .map(|column| quote_ident(column))
+                .map(|column| {
+                    quote_ident(
+                        tables
+                            .physical_column(table, column)
+                            .expect("primary key column has physical mapping"),
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", "),
         ),
@@ -225,15 +248,20 @@ fn upsert_row_into(
 
 fn upsert_row(
     db: &mut dyn SyncDb,
+    tables: &Tables,
     table: &str,
     spec: &TableSpec,
     row: &Map<String, Value>,
 ) -> Result<(), EngineError> {
-    upsert_row_into(db, table, table, spec, row)
+    let target = tables
+        .physical_name(table)
+        .expect("validated table has physical mapping");
+    upsert_row_into(db, tables, table, target, spec, row)
 }
 
 fn apply_change_to(
     db: &mut dyn SyncDb,
+    tables: &Tables,
     target: &str,
     spec: &TableSpec,
     change: &UpstreamChange,
@@ -241,6 +269,7 @@ fn apply_change_to(
     match change.op.as_str() {
         "INSERT" => upsert_row_into(
             db,
+            tables,
             &change.table_name,
             target,
             spec,
@@ -257,12 +286,13 @@ fn apply_change_to(
             if let Some(old) = &change.old_data
                 && !same_key(spec, old, row)
             {
-                delete_row_from(db, &change.table_name, target, spec, old)?;
+                delete_row_from(db, tables, &change.table_name, target, spec, old)?;
             }
-            upsert_row_into(db, &change.table_name, target, spec, row)
+            upsert_row_into(db, tables, &change.table_name, target, spec, row)
         }
         "DELETE" => delete_row_from(
             db,
+            tables,
             &change.table_name,
             target,
             spec,
@@ -583,8 +613,16 @@ fn clone_index_sql(sql: &str, stage: &str, stage_index: &str) -> Result<String, 
     ))
 }
 
-fn clone_live_table(db: &mut dyn SyncDb, generation: i64, table: &str) -> Result<(), EngineError> {
-    let sql = table_create_sql(db, table)?;
+fn clone_live_table(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+    generation: i64,
+    table: &str,
+) -> Result<(), EngineError> {
+    let physical_table = tables
+        .physical_name(table)
+        .expect("iterated table has physical mapping");
+    let sql = table_create_sql(db, physical_table)?;
     let body = sql.find('(').ok_or_else(|| {
         EngineError::internal(format!(
             "modeled table {table} has invalid CREATE TABLE SQL"
@@ -600,7 +638,7 @@ fn clone_live_table(db: &mut dyn SyncDb, generation: i64, table: &str) -> Result
         "SELECT sql FROM sqlite_schema
          WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL
          ORDER BY name",
-        &[SqlValue::Text(table.to_string())],
+        &[SqlValue::Text(physical_table.to_string())],
     )?;
     for (index, row) in indexes.iter().enumerate() {
         let sql = required_text(row, "sql")?;
@@ -613,9 +651,12 @@ fn clone_live_table(db: &mut dyn SyncDb, generation: i64, table: &str) -> Result
 fn reject_foreign_keys(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), EngineError> {
     let mut foreign_key_tables = Vec::new();
     for table in sorted_table_names(tables) {
+        let physical_table = tables
+            .physical_name(table)
+            .expect("iterated table has physical mapping");
         if !db
             .query(
-                &format!("PRAGMA foreign_key_list({})", quote_ident(table)),
+                &format!("PRAGMA foreign_key_list({})", quote_ident(physical_table)),
                 &[],
             )?
             .is_empty()
@@ -651,7 +692,7 @@ pub fn begin_snapshot_generation(
     let generation = next_generation(db)?;
     let names = sorted_table_names(tables);
     for table in &names {
-        clone_live_table(db, generation, table)?;
+        clone_live_table(db, tables, generation, table)?;
     }
     let (table, state) = match names.first() {
         Some(table) => (SqlValue::Text((*table).to_string()), "paging"),
@@ -700,7 +741,7 @@ pub fn apply_snapshot_page(
         .ok_or_else(|| schema_refresh(format!("snapshot table {table} is not modeled")))?;
     let stage = stage_table_name(generation, table);
     for row in rows {
-        upsert_row_into(db, table, &stage, spec, row)?;
+        upsert_row_into(db, tables, table, &stage, spec, row)?;
     }
 
     if let Some(cursor) = next_cursor {
@@ -773,7 +814,7 @@ pub fn apply_snapshot_changes(
             continue;
         };
         let stage = stage_table_name(generation, &change.table_name);
-        apply_change_to(db, &stage, spec, change)?;
+        apply_change_to(db, tables, &stage, spec, change)?;
         cursor = change.watermark;
         applied += 1;
     }
@@ -829,15 +870,25 @@ pub fn finalize_snapshot_generation(
     let names = sorted_table_names(tables);
     let triggers = names
         .iter()
-        .map(|table| live_trigger_sql(db, table))
+        .map(|table| {
+            live_trigger_sql(
+                db,
+                tables
+                    .physical_name(table)
+                    .expect("iterated table has physical mapping"),
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     for (table, trigger_sql) in names.iter().zip(triggers) {
-        db.exec(&format!("DROP TABLE {}", quote_ident(table)), &[])?;
+        let physical_table = tables
+            .physical_name(table)
+            .expect("iterated table has physical mapping");
+        db.exec(&format!("DROP TABLE {}", quote_ident(physical_table)), &[])?;
         db.exec(
             &format!(
                 "ALTER TABLE {} RENAME TO {}",
                 quote_ident(&stage_table_name(generation, table)),
-                quote_ident(table)
+                quote_ident(physical_table)
             ),
             &[],
         )?;
@@ -892,7 +943,10 @@ pub fn apply_upstream(
             cursor = change.watermark;
             continue;
         };
-        apply_change_to(db, &change.table_name, spec, change)?;
+        let target = tables
+            .physical_name(&change.table_name)
+            .expect("modeled table has physical mapping");
+        apply_change_to(db, tables, target, spec, change)?;
         cursor = change.watermark;
         applied += 1;
     }
@@ -923,7 +977,10 @@ pub fn apply_upstream_snapshot(
     // still rebuilds atomically. column drift on a modeled table stays a hard
     // refresh via upsert_row's validation.
     for (table, _) in tables.iter() {
-        db.exec(&format!("DELETE FROM {}", quote_ident(table)), &[])?;
+        let physical_table = tables
+            .physical_name(table)
+            .expect("iterated table has physical mapping");
+        db.exec(&format!("DELETE FROM {}", quote_ident(physical_table)), &[])?;
     }
     let mut applied = 0;
     for (table, rows) in &snapshot.tables {
@@ -931,7 +988,7 @@ pub fn apply_upstream_snapshot(
             continue;
         };
         for row in rows {
-            upsert_row(db, table, spec, row)?;
+            upsert_row(db, tables, table, spec, row)?;
             applied += 1;
         }
     }

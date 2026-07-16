@@ -15,9 +15,11 @@ use crate::schema::{TableSpec, Tables, quote_ident};
 use crate::store;
 use crate::wire;
 
-// per-user row visibility. `filter` returns a WHERE fragment + params selecting
-// the user's visible rows of a table (or None for "the whole table"). applied
-// to snapshot reads always, and to diff point-reads when `row_local` is true.
+// per-user row visibility. `filter` returns a WHERE fragment over LOGICAL Zero
+// column names + params selecting the user's visible rows of a table (or None
+// for "the whole table"). reads project physical SQLite columns to their
+// logical aliases before applying the fragment. applied to snapshot reads
+// always, and to diff point-reads when `row_local` is true.
 //
 // `row_local` declares whether the predicate depends ONLY on the row's own
 // columns. a row-local predicate is safe to serve through cursor diffs (a
@@ -161,12 +163,22 @@ fn snapshot(
     let plans: Vec<(String, String, Vec<SqlValue>)> = tables
         .iter()
         .map(|(table, _)| {
+            let physical_table = tables
+                .physical_name(table)
+                .expect("iterated table has physical mapping");
+            let projection = tables
+                .projected_columns(table, None)
+                .expect("iterated table has projected columns");
+            let base = format!("SELECT {projection} FROM {}", quote_ident(physical_table));
             let (sql, params) = match visible.and_then(|v| v.of(table, user_id)) {
                 Some(filter) => (
-                    format!("SELECT * FROM {} WHERE {}", quote_ident(table), filter.sql),
+                    format!(
+                        "SELECT * FROM ({base}) AS \"_zsync_visible\" WHERE {}",
+                        filter.sql
+                    ),
                     filter.params,
                 ),
-                None => (format!("SELECT * FROM {}", quote_ident(table)), Vec::new()),
+                None => (base, Vec::new()),
             };
             (table.to_string(), sql, params)
         })
@@ -281,7 +293,8 @@ fn diff(
                     .ok_or_else(|| EngineError::internal("row change missing pk".to_string()))?;
                 let key = dedup_key(&change.table_name, spec, pk);
                 if !seen.contains(&key) {
-                    let op = resolve_row(db, &change.table_name, spec, pk, visible, user_id)?;
+                    let op =
+                        resolve_row(db, tables, &change.table_name, spec, pk, visible, user_id)?;
                     delta = serde_json::to_string(&op).map(|s| s.len()).unwrap_or(0);
                     pending_op = Some(op);
                     pending_key = Some(key);
@@ -336,6 +349,7 @@ fn diff(
 // values, gone (or filtered out by row-local visibility) -> del by pk.
 fn resolve_row(
     db: &mut dyn SyncDb,
+    tables: &Tables,
     table: &str,
     spec: &TableSpec,
     pk: &Value,
@@ -345,7 +359,12 @@ fn resolve_row(
     let where_pk = spec
         .primary_key
         .iter()
-        .map(|col| format!("{} = ?", quote_ident(col)))
+        .map(|col| {
+            let physical = tables
+                .physical_column(table, col)
+                .expect("primary key column in table mapping");
+            format!("{} = ?", quote_ident(physical))
+        })
         .collect::<Vec<_>>()
         .join(" AND ");
     let mut params: Vec<SqlValue> = spec
@@ -353,13 +372,28 @@ fn resolve_row(
         .iter()
         .map(|col| json_pk_to_sql(pk.get(col)))
         .collect();
-    let mut sql = format!("SELECT * FROM {} WHERE {}", quote_ident(table), where_pk);
+    let physical_table = tables
+        .physical_name(table)
+        .expect("resolved table has physical mapping");
+    let projection = tables
+        .projected_columns(table, None)
+        .expect("resolved table has projected columns");
+    let base = format!(
+        "SELECT {projection} FROM {} WHERE {where_pk}",
+        quote_ident(physical_table)
+    );
     // diff only runs under row-local (or absent) visibility, so applying the
     // filter to the point read is safe: an invisible row emits del.
-    if let Some(filter) = visible.and_then(|v| v.of(table, user_id)) {
-        sql.push_str(&format!(" AND ({})", filter.sql));
+    let sql = if let Some(filter) = visible.and_then(|v| v.of(table, user_id)) {
+        let sql = format!(
+            "SELECT * FROM ({base}) AS \"_zsync_visible\" WHERE {}",
+            filter.sql
+        );
         params.extend(filter.params);
-    }
+        sql
+    } else {
+        base
+    };
     let rows = db.query(&sql, &params)?;
     match rows.first() {
         Some(row) => Ok(json!({ "op": "put", "tableName": table, "value": row_value(spec, row)? })),

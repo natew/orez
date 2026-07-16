@@ -8,79 +8,82 @@ use common::TestDb;
 use serde_json::{Value, json};
 
 use sync_core::query::{handle_query_pull, init_query_schema};
-use sync_core::schema::TableSpec;
-use sync_core::value::ZeroColumnType;
 use sync_core::{SyncDb, Tables, Transactor, init_schema};
 
 fn tables() -> Tables {
-    use ZeroColumnType::{Number, String as S};
-    Tables::new()
-        .with(
-            "project",
-            TableSpec {
-                columns: vec![("id".into(), S), ("ownerId".into(), S), ("name".into(), S)],
-                primary_key: vec!["id".into()],
+    Tables::from_zero_schema(&json!({
+        "tables": {
+            "project": {
+                "serverName": "project_record",
+                "columns": {
+                    "id": { "type": "string", "serverName": "project_id" },
+                    "ownerId": { "type": "string", "serverName": "owner_id" },
+                    "name": { "type": "string", "serverName": "project_name" },
+                },
+                "primaryKey": ["id"],
             },
-        )
-        .with(
-            "member",
-            TableSpec {
-                columns: vec![
-                    ("id".into(), S),
-                    ("projectId".into(), S),
-                    ("userId".into(), S),
-                ],
-                primary_key: vec!["id".into()],
+            "member": {
+                "serverName": "project_member",
+                "columns": {
+                    "id": { "type": "string", "serverName": "member_id" },
+                    "projectId": { "type": "string", "serverName": "project_id" },
+                    "userId": { "type": "string", "serverName": "user_id" },
+                },
+                "primaryKey": ["id"],
             },
-        )
-        .with(
-            "task",
-            TableSpec {
-                columns: vec![
-                    ("id".into(), S),
-                    ("projectId".into(), S),
-                    ("rank".into(), Number),
-                ],
-                primary_key: vec!["id".into()],
+            "task": {
+                "serverName": "project_task",
+                "columns": {
+                    "id": { "type": "string", "serverName": "task_id" },
+                    "projectId": { "type": "string", "serverName": "project_id" },
+                    "rank": { "type": "number", "serverName": "sort_rank" },
+                },
+                "primaryKey": ["id"],
             },
-        )
-        .with(
-            "user",
-            TableSpec {
-                columns: vec![("id".into(), S), ("name".into(), S)],
-                primary_key: vec!["id".into()],
+            "user": {
+                "serverName": "user_record",
+                "columns": {
+                    "id": { "type": "string", "serverName": "user_id" },
+                    "name": { "type": "string", "serverName": "display_name" },
+                },
+                "primaryKey": ["id"],
             },
-        )
+        }
+    }))
+    .unwrap()
 }
 
 fn setup() -> TestDb {
     let mut db = TestDb::memory();
     for ddl in [
-        "CREATE TABLE project (id TEXT PRIMARY KEY, ownerId TEXT, name TEXT)",
-        "CREATE TABLE member (id TEXT PRIMARY KEY, projectId TEXT, userId TEXT)",
-        "CREATE TABLE task (id TEXT PRIMARY KEY, projectId TEXT, rank REAL)",
-        "CREATE TABLE user (id TEXT PRIMARY KEY, name TEXT)",
+        "CREATE TABLE project_record (project_id TEXT PRIMARY KEY, owner_id TEXT, project_name TEXT)",
+        "CREATE TABLE project_member (member_id TEXT PRIMARY KEY, project_id TEXT, user_id TEXT)",
+        "CREATE TABLE project_task (task_id TEXT PRIMARY KEY, project_id TEXT, sort_rank REAL)",
+        "CREATE TABLE user_record (user_id TEXT PRIMARY KEY, display_name TEXT)",
     ] {
         db.exec(ddl, &[]).unwrap();
     }
     db.exec(
-        "INSERT INTO project VALUES ('p0','u0','A'), ('p1','u1','B'), ('p2','u0','C')",
+        "INSERT INTO project_record VALUES ('p0','u0','A'), ('p1','u1','B'), ('p2','u0','C')",
         &[],
     )
     .unwrap();
     db.exec(
-        "INSERT INTO member VALUES ('mb0','p0','u0'), ('mb1','p0','u1'), ('mb2','p2','u0')",
+        "INSERT INTO project_member VALUES ('mb0','p0','u0'), ('mb1','p0','u1'), ('mb2','p2','u0')",
         &[],
     )
     .unwrap();
     // p0 has 3 tasks (ranks 1,2,3); p2 has 1 task
     db.exec(
-        "INSERT INTO task VALUES ('t0','p0',1),('t1','p0',2),('t2','p0',3),('t3','p2',5)",
+        "INSERT INTO project_task VALUES ('t0','p0',1),('t1','p0',2),('t2','p0',3),('t3','p2',5)",
         &[],
     )
     .unwrap();
-    db.exec("INSERT INTO user VALUES ('u0','U0'),('u1','U1')", &[])
-        .unwrap();
+    db.exec(
+        "INSERT INTO user_record VALUES ('u0','U0'),('u1','U1')",
+        &[],
+    )
+    .unwrap();
     let t = tables();
     init_schema(&mut db, &t).unwrap();
     init_query_schema(&mut db).unwrap();
@@ -181,11 +184,35 @@ fn windowed_corpus_and_all_projects_pull_together() {
     assert_eq!(put_ids(&resp, "user"), vec!["u0", "u1"]);
     assert_eq!(resp["gotQueries"]["version"], json!(1));
 
-    // caught-up follow-up pull is unchanged (no churn/stall).
+    // physical writes are journaled under logical table/pk keys, then the
+    // mapped incremental compiler re-emits logical row objects.
     let cookie = resp["cookie"].clone();
+    db.exec(
+        "UPDATE project_record SET project_name = 'Z' WHERE project_id = 'p0'",
+        &[],
+    )
+    .unwrap();
+    db.exec("INSERT INTO project_task VALUES ('t4', 'p0', 10)", &[])
+        .unwrap();
     let body2 = json!({ "clientID": "c", "clientGroupID": "g", "cookie": cookie });
     let resp2 = db
         .transaction(|d| handle_query_pull(d, &t, 4096, &body2, "u"))
         .unwrap();
-    assert_eq!(resp2["unchanged"], json!(true));
+    assert!(resp2["rowsPatch"].as_array().unwrap().iter().any(|op| {
+        op["op"] == "put"
+            && op["tableName"] == "project"
+            && op["value"]["id"] == "p0"
+            && op["value"]["name"] == "Z"
+    }));
+    assert_eq!(put_ids(&resp2, "task"), vec!["t4"]);
+
+    let caught_up = json!({
+        "clientID": "c",
+        "clientGroupID": "g",
+        "cookie": resp2["cookie"].clone(),
+    });
+    let resp3 = db
+        .transaction(|d| handle_query_pull(d, &t, 4096, &caught_up, "u"))
+        .unwrap();
+    assert_eq!(resp3["unchanged"], json!(true));
 }
