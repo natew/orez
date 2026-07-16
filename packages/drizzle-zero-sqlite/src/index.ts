@@ -312,9 +312,16 @@ type TypedRelationHop<TRelation extends DrizzleRelation> = Flatten<{
   cardinality: TRelation['relationType']
 }>
 
+type TypedIntermediateRelationHop<TRelation extends DrizzleRelation> = Flatten<{
+  sourceField: string[]
+  destField: string[]
+  destSchema: string
+  cardinality: TRelation['relationType']
+}>
+
 type TypedZeroRelationship<TRelation extends DrizzleRelation> =
   | readonly [TypedRelationHop<TRelation>]
-  | readonly [RelationHop, TypedRelationHop<TRelation>]
+  | readonly [TypedIntermediateRelationHop<TRelation>, TypedRelationHop<TRelation>]
 
 type RelationshipsForTableConfig<
   TConfig,
