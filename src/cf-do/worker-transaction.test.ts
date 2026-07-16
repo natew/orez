@@ -78,6 +78,7 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
   zero.tableSchemas = new Map()
   zero.schemaTables = new Set<string>()
   zero.pendingChangesSchemaReady = false
+  zero.applicationSqlTurnWaiters = []
   zero.ctx = { storage: { transaction } }
   return { storage, zero }
 }

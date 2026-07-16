@@ -42,6 +42,7 @@ async function createWorkerCore() {
   zero.tableSchemas = new Map()
   zero.schemaTables = new Set<string>()
   zero.pendingChangesSchemaReady = false
+  zero.applicationSqlTurnWaiters = []
   // A real transaction boundary: an abort has to roll the SQLite side back, or
   // the cache-staleness regressions below cannot be observed at all.
   const runTransaction = <T>(work: () => T): T => {

@@ -133,6 +133,119 @@ async function runApplicationRpcProbe(
   }
 }
 
+async function runApplicationOverlapProbe(
+  env: Env,
+  namespace: string
+): Promise<Response> {
+  const firstClient = createApplicationSqlClient(env.PROBE_DO, namespace)
+  const secondClient = createApplicationSqlClient(env.PROBE_DO, namespace)
+  const target = env.PROBE_DO.get(env.PROBE_DO.idFromName(namespace))
+  await firstClient.exec(
+    'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)'
+  )
+  await firstClient.exec(
+    'INSERT OR REPLACE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
+    [
+      'accounts',
+      JSON.stringify({
+        columns: transactionQuerySchema.tables.account.columns,
+        primaryKey: transactionQuerySchema.tables.account.primaryKey,
+      }),
+    ]
+  )
+
+  let releaseFirst = () => {}
+  const firstCanFinish = new Promise<void>((resolve) => {
+    releaseFirst = resolve
+  })
+  let markFirstWrite = () => {}
+  const firstWriteFinished = new Promise<void>((resolve) => {
+    markFirstWrite = resolve
+  })
+  const first = firstClient
+    .transaction(compileTransactionQuery, async (tx) => {
+      await tx.exec(
+        "UPDATE accounts SET balance = balance + ? WHERE id = 'primary'",
+        [100],
+        {
+          table: 'accounts',
+          publicTable: 'public.account',
+          kind: 'update',
+        }
+      )
+      markFirstWrite()
+      await firstCanFinish
+      throw new Error('intentional overlapping application rollback')
+    })
+    .then(
+      () => ({ ok: true }),
+      (error) => ({ ok: false, error: String(error) })
+    )
+  await firstWriteFinished
+
+  let snapshotSettled = false
+  const snapshot = target
+    .fetch(new Request('https://orez-probe.local/snapshot'))
+    .then(async (response) => {
+      snapshotSettled = true
+      return { status: response.status, body: await response.json() }
+    })
+  let secondSettled = false
+  const second = secondClient
+    .transaction(compileTransactionQuery, async (tx) => {
+      await tx.exec(
+        "UPDATE accounts SET balance = balance + ? WHERE id = 'primary'",
+        [5],
+        {
+          table: 'accounts',
+          publicTable: 'public.account',
+          kind: 'update',
+        }
+      )
+    })
+    .then(
+      () => {
+        secondSettled = true
+        return { ok: true }
+      },
+      (error) => {
+        secondSettled = true
+        return { ok: false, error: String(error) }
+      }
+    )
+
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  const waitedForFirst = !snapshotSettled && !secondSettled
+  releaseFirst()
+  const [firstResult, snapshotResult, secondResult] = await Promise.all([
+    first,
+    snapshot,
+    second,
+  ])
+  const after = await firstClient.query<{ balance: number }>(
+    "SELECT balance FROM accounts WHERE id = 'primary'"
+  )
+  let snapshotBalance: unknown
+  if (snapshotResult.body && typeof snapshotResult.body === 'object') {
+    const tables = Reflect.get(snapshotResult.body, 'tables')
+    if (tables && typeof tables === 'object') {
+      const accounts = Reflect.get(tables, 'accounts')
+      if (Array.isArray(accounts) && accounts[0] && typeof accounts[0] === 'object') {
+        snapshotBalance = Reflect.get(accounts[0], 'balance')
+      }
+    }
+  }
+
+  return json({
+    waitedForFirst,
+    firstResult,
+    snapshotStatus: snapshotResult.status,
+    snapshotBalance,
+    secondResult,
+    after,
+  })
+}
+
 export class ProbeDurableObject extends ZeroDO {
   readonly #db: SqlStorageSyncDb
   #bootID = crypto.randomUUID()
@@ -297,6 +410,7 @@ export class ProbeDurableObject extends ZeroDO {
   async fetch(request: Request): Promise<Response> {
     this.#maybeReinstantiate(Date.now())
     const url = new URL(request.url)
+    if (url.pathname === '/snapshot') return super.fetch(request)
     const [, , ...routeParts] = url.pathname.split('/')
     const route = `/${routeParts.join('/')}`
 
@@ -465,9 +579,13 @@ export default {
     const url = new URL(request.url)
     const [, first, second, third] = url.pathname.split('/')
     if (first === '_application-rpc') {
-      if (!second || (third !== 'commit' && third !== 'rollback')) {
+      if (
+        !second ||
+        (third !== 'commit' && third !== 'rollback' && third !== 'overlap')
+      ) {
         return json({ error: 'unknown application RPC probe' }, 404)
       }
+      if (third === 'overlap') return runApplicationOverlapProbe(env, second)
       return runApplicationRpcProbe(env, second, third)
     }
     const namespace = first

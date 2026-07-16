@@ -277,6 +277,10 @@ export class ZeroDO extends DurableObject {
   private activeWriteMeasurements: SqlWriteMeasurement[] | null = null
   private pendingChangesSchemaReady = false
   private applicationSqlSessionID: string | null = null
+  private applicationSqlTurnWaiters: Array<{
+    turnID: string
+    resolve: () => void
+  }> = []
 
   private recordWriteBudgetRows(rows: number): void {
     const wasTripped = this.writeBudget.status().tripped
@@ -421,7 +425,7 @@ export class ZeroDO extends DurableObject {
     )
       return this.handleChanges(request, url)
     if (url.pathname === '/snapshot' && request.method === 'GET')
-      return this.handleSnapshot(url)
+      return this.withApplicationSqlTurn(() => this.handleSnapshot(url))
     if (url.pathname === '/notify' && request.method === 'POST')
       return Response.json({ ok: true, cookie: this.cookie() })
     return new Response('not found', { status: 404 })
@@ -1197,9 +1201,34 @@ export class ZeroDO extends DurableObject {
     }
   }
 
-  private assertNoApplicationSqlSession(): void {
-    if (this.applicationSqlSessionID) {
-      throw new Error('application SQLite session is active')
+  private async acquireApplicationSqlTurn(turnID: string): Promise<void> {
+    if (!turnID) throw new TypeError('application SQLite turn id is required')
+    if (this.applicationSqlSessionID === turnID) return
+    if (!this.applicationSqlSessionID) {
+      this.applicationSqlSessionID = turnID
+      return
+    }
+    await new Promise<void>((resolve) => {
+      this.applicationSqlTurnWaiters.push({ turnID, resolve })
+    })
+  }
+
+  private releaseApplicationSqlTurn(turnID: string): void {
+    this.assertApplicationSqlSession(turnID)
+    const next = this.applicationSqlTurnWaiters.shift()
+    this.applicationSqlSessionID = next?.turnID ?? null
+    next?.resolve()
+  }
+
+  private async withApplicationSqlTurn<Value>(
+    work: () => Value | Promise<Value>
+  ): Promise<Value> {
+    const turnID = crypto.randomUUID()
+    await this.acquireApplicationSqlTurn(turnID)
+    try {
+      return await work()
+    } finally {
+      this.releaseApplicationSqlTurn(turnID)
     }
   }
 
@@ -1223,12 +1252,13 @@ export class ZeroDO extends DurableObject {
   async applicationSqlQuery<
     Row extends Record<string, unknown> = Record<string, unknown>,
   >(sql: string, params: readonly unknown[] = []): Promise<Row[]> {
-    this.assertNoApplicationSqlSession()
-    return this.runApplicationTransaction(
-      () => {
-        throw new Error('queryAst requires an application SQLite transaction compiler')
-      },
-      (tx) => tx.query<Row>(sql, params)
+    return this.withApplicationSqlTurn(() =>
+      this.runApplicationTransaction(
+        () => {
+          throw new Error('queryAst requires an application SQLite transaction compiler')
+        },
+        (tx) => tx.query<Row>(sql, params)
+      )
     )
   }
 
@@ -1237,27 +1267,33 @@ export class ZeroDO extends DurableObject {
     params: readonly unknown[] = [],
     metadata?: SqlStatementMetadata
   ): Promise<ApplicationSqlExecResult> {
-    this.assertNoApplicationSqlSession()
-    return this.runApplicationTransaction(
-      () => {
-        throw new Error('queryAst requires an application SQLite transaction compiler')
-      },
-      (tx) => tx.exec(sql, params, metadata)
+    return this.withApplicationSqlTurn(() =>
+      this.runApplicationTransaction(
+        () => {
+          throw new Error('queryAst requires an application SQLite transaction compiler')
+        },
+        (tx) => tx.exec(sql, params, metadata)
+      )
     )
   }
 
   async applicationSqlRegisterTables(
     tables: readonly ApplicationSqlTable[]
   ): Promise<void> {
-    this.assertNoApplicationSqlSession()
-    await this.atomically(() => this.registerApplicationSqlTables(tables))
+    await this.withApplicationSqlTurn(() =>
+      this.atomically(() => this.registerApplicationSqlTables(tables))
+    )
   }
 
   async applicationSqlBegin(sessionID: string): Promise<void> {
-    this.assertNoApplicationSqlSession()
     if (!sessionID) throw new TypeError('application SQLite session id is required')
-    await this.atomically(() => snapshotTxSchema(this.sql, sessionID, 'application'))
-    this.applicationSqlSessionID = sessionID
+    await this.acquireApplicationSqlTurn(sessionID)
+    try {
+      await this.atomically(() => snapshotTxSchema(this.sql, sessionID, 'application'))
+    } catch (error) {
+      this.releaseApplicationSqlTurn(sessionID)
+      throw error
+    }
   }
 
   async applicationSqlSessionQuery<
@@ -1319,7 +1355,7 @@ export class ZeroDO extends DurableObject {
         commitTxJournal(this.sql, sessionID)
       })
     } finally {
-      this.applicationSqlSessionID = null
+      this.releaseApplicationSqlTurn(sessionID)
     }
   }
 
@@ -1333,7 +1369,7 @@ export class ZeroDO extends DurableObject {
       })
       this.invalidateSchemaCaches()
     } finally {
-      this.applicationSqlSessionID = null
+      this.releaseApplicationSqlTurn(sessionID)
     }
   }
 

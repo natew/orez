@@ -136,6 +136,28 @@ try {
   )
   check(result.body.effectRan, false, 'application RPC rollback discards deferred effect')
 
+  const applicationOverlap = ns('application-overlap')
+  result = await call(`_application-rpc/${applicationOverlap}`, '/overlap')
+  check(result.status, 200, 'overlapping application RPC status')
+  check(
+    result.body.waitedForFirst,
+    true,
+    'overlapping transaction and snapshot wait for the active application session'
+  )
+  check(result.body.firstResult.ok, false, 'first overlapping transaction rolls back')
+  check(result.body.snapshotStatus, 200, 'snapshot completes after rollback')
+  assert.ok(
+    result.body.snapshotBalance === 100 || result.body.snapshotBalance === 105,
+    `snapshot observed intermediate balance ${result.body.snapshotBalance}`
+  )
+  assertions++
+  check(result.body.secondResult.ok, true, 'second overlapping transaction commits')
+  check(
+    result.body.after,
+    [{ balance: 105 }],
+    'overlapping transaction result is durable'
+  )
+
   result = await call(transactions, '/application-transaction-query-budget')
   check(result.status, 409, 'application transaction query budget status')
   check(
