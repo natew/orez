@@ -11,7 +11,11 @@ import {
 } from 'drizzle-orm/sqlite-core'
 import { describe, expect, test } from 'vitest'
 
-import { drizzleZeroConfig } from '../src/index'
+import {
+  drizzleZeroConfig,
+  generateDrizzleZeroSqliteSchemaFile,
+  type ZeroCustomType,
+} from '../src/index'
 
 const users = sqliteTable('user_records', {
   id: text().primaryKey(),
@@ -22,6 +26,9 @@ const users = sqliteTable('user_records', {
   score: real(),
   avatar: blob(),
 })
+
+const metadataType: ZeroCustomType<typeof users.metadata> = { theme: 'dark' }
+const updateFieldType: ZeroCustomType<typeof users.displayName> = 'Ada'
 
 const posts = sqliteTable('posts', {
   id: text().primaryKey(),
@@ -63,6 +70,23 @@ const relations = defineRelations({ users, posts, groups, memberships }, (r) => 
 }))
 
 describe('drizzleZeroConfig', () => {
+  test('retains SQLite custom values in the public type utility', () => {
+    expect(metadataType).toEqual({ theme: 'dark' })
+    expect(updateFieldType).toBe('Ada')
+  })
+
+  test('generates a type-preserving SQLite schema module without PostgreSQL imports', () => {
+    const source = generateDrizzleZeroSqliteSchemaFile({
+      importPath: './drizzle-schema.js',
+      schemaName: 'zeroSchema',
+    })
+
+    expect(source).toContain("import { drizzleZeroConfig } from 'drizzle-zero-sqlite'")
+    expect(source).toContain("import * as drizzleSchema from \"./drizzle-schema.js\"")
+    expect(source).toContain('export const zeroSchema = drizzleZeroConfig(drizzleSchema)')
+    expect(source).not.toMatch(/pg-core|drizzle-zero'|postgres/)
+  })
+
   test('maps SQLite tables, columns, defaults, and composite primary keys', () => {
     const schema = drizzleZeroConfig(
       { users, posts, groups, memberships, relations },
