@@ -276,6 +276,29 @@ pub fn push(
     }
 }
 
+// settle an application-owned push in a new transaction after its app effects
+// committed to this shared sqlite file. this ordering makes the lmid served by
+// the next pull a truthful acknowledgement of effects already in the log.
+pub fn settle_delegated_push(
+    conn: &Connection,
+    ctx: &EngineContext,
+    push: &Value,
+    response: &Value,
+    user_id: &str,
+) -> Result<usize, EngineError> {
+    conn.execute_batch("BEGIN").expect("BEGIN failed");
+    let result = (|| {
+        let mut db = RusqliteDb::new(conn);
+        let settled = sync_core::settle_delegated_push(&mut db, push, response, user_id)?;
+        if settled > 0 {
+            sync_core::prune(&mut db, ctx.retain_changes)?;
+        }
+        Ok(settled)
+    })();
+    finish(conn, result.is_ok());
+    result
+}
+
 // epoch invalidation (harness invalidate hook): force every client's next pull
 // to a full snapshot.
 pub fn invalidate(conn: &Connection) -> Result<(), EngineError> {

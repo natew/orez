@@ -319,6 +319,171 @@ try {
   assert.ok(Number.isSafeInteger(upstreamBudget.logicalRows))
   assert.ok(upstreamBudget.billableRows > upstreamBudget.logicalRows)
 
+  // a delegated acknowledgement must follow its ingested row in the engine
+  // log. with a one-byte diff cap, the first pull can carry only the first log
+  // entry. it must expose the effect first and leave the lmid for the next pull.
+  const cappedNamespace = `capped-order-${crypto.randomUUID()}`
+  const cappedOrigin = `${base}/capped/${cappedNamespace}`
+  const cappedPost = async (path, body) => {
+    const response = await fetch(`${cappedOrigin}${path}`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token-user-a',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+    return { status: response.status, body: await response.json() }
+  }
+  const cappedInitial = await cappedPost('/pull', {
+    clientID: 'capped-reader',
+    clientGroupID: 'capped-group',
+    cookie: null,
+  })
+  assert.equal(cappedInitial.status, 200)
+  const cappedPush = await cappedPost('/push', {
+    clientGroupID: 'capped-group',
+    pushVersion: 1,
+    mutations: [
+      {
+        type: 'custom',
+        clientID: 'capped-writer',
+        id: 1,
+        name: 'item.insert',
+        args: [
+          {
+            id: 'capped-effect',
+            label: 'effect before lmid',
+            rank: 1,
+            done: false,
+            meta: null,
+          },
+        ],
+      },
+    ],
+  })
+  assert.equal(cappedPush.status, 200)
+  const cappedEffect = await cappedPost('/pull', {
+    clientID: 'capped-reader',
+    clientGroupID: 'capped-group',
+    cookie: cappedInitial.body.cookie,
+  })
+  assert.equal(cappedEffect.status, 200)
+  assert.equal(cappedEffect.body.lastMutationIDChanges['capped-writer'], undefined)
+  assert.equal(
+    cappedEffect.body.rowsPatch.some(
+      (entry) =>
+        entry.op === 'put' &&
+        entry.tableName === 'item' &&
+        entry.value.id === 'capped-effect'
+    ),
+    true
+  )
+  const cappedSettlement = await cappedPost('/pull', {
+    clientID: 'capped-reader',
+    clientGroupID: 'capped-group',
+    cookie: cappedEffect.body.cookie,
+  })
+  assert.equal(cappedSettlement.status, 200)
+  assert.equal(cappedSettlement.body.lastMutationIDChanges['capped-writer'], 1)
+
+  // a changes request that began before APP committed may still be in flight
+  // when the delegated response arrives. the push must wait through that stale
+  // round and run one new ingest before it journals the lmid.
+  const concurrentNamespace = `capped-concurrent-${crypto.randomUUID()}`
+  const concurrentOrigin = `${base}/capped/${concurrentNamespace}`
+  const concurrentControl = `${base}/delegated-ingest-control/${concurrentNamespace}`
+  const concurrentPost = async (path, body) => {
+    const response = await fetch(`${concurrentOrigin}${path}`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token-user-a',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+    return { status: response.status, body: await response.json() }
+  }
+  const setConcurrentControl = async (body) => {
+    const response = await fetch(concurrentControl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    assert.equal(response.status, 200)
+  }
+  const waitForConcurrentControl = async (field) => {
+    for (let attempt = 0; ; attempt++) {
+      const state = await fetch(concurrentControl).then((response) => response.json())
+      if (state[field] === true) return
+      if (attempt >= 200) throw new Error(`${field} did not become true`)
+      await Bun.sleep(10)
+    }
+  }
+  const concurrentInitial = await concurrentPost('/pull', {
+    clientID: 'concurrent-reader',
+    clientGroupID: 'concurrent-group',
+    cookie: null,
+  })
+  assert.equal(concurrentInitial.status, 200)
+  await setConcurrentControl({ appHeld: true })
+  const concurrentPushPending = concurrentPost('/push', {
+    clientGroupID: 'concurrent-group',
+    pushVersion: 1,
+    mutations: [
+      {
+        type: 'custom',
+        clientID: 'concurrent-writer',
+        id: 1,
+        name: 'item.insert',
+        args: [
+          {
+            id: 'concurrent-effect',
+            label: 'fresh ingest after app response',
+            rank: 2,
+            done: false,
+            meta: null,
+          },
+        ],
+      },
+    ],
+  })
+  await waitForConcurrentControl('appActive')
+  await setConcurrentControl({ changesHeld: true })
+  const staleNotifyPending = fetch(`${concurrentOrigin}/notify`, {
+    method: 'POST',
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  })
+  await waitForConcurrentControl('changesActive')
+  await setConcurrentControl({ appHeld: false })
+  await waitForConcurrentControl('appCompleted')
+  await Bun.sleep(100)
+  await setConcurrentControl({ changesHeld: false })
+  const [concurrentPush, staleNotify] = await Promise.all([
+    concurrentPushPending,
+    staleNotifyPending,
+  ])
+  assert.equal(concurrentPush.status, 200)
+  assert.equal(staleNotify.status, 200)
+  const concurrentEffect = await concurrentPost('/pull', {
+    clientID: 'concurrent-reader',
+    clientGroupID: 'concurrent-group',
+    cookie: concurrentInitial.body.cookie,
+  })
+  assert.equal(
+    concurrentEffect.body.lastMutationIDChanges['concurrent-writer'],
+    undefined
+  )
+  assert.equal(
+    concurrentEffect.body.rowsPatch.some(
+      (entry) =>
+        entry.op === 'put' &&
+        entry.tableName === 'item' &&
+        entry.value.id === 'concurrent-effect'
+    ),
+    true
+  )
+
   const pushBody = {
     clientGroupID: 'group',
     pushVersion: 1,

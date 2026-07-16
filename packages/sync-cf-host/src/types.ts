@@ -143,11 +143,19 @@ export type SyncHostConfig<Env extends SyncHostEnv = SyncHostEnv> = {
   hostVersion: string
   schema: ZeroSchemaConfig
   mutators?: MutatorRegistry
-  /** Absolute app push path on the upstream service binding. */
+  /**
+   * absolute app push path on the delegated mutation service. a successful
+   * response must be causally visible through the configured upstream data
+   * feed before the app returns, because the host ingests effects before it
+   * records the mutation's lmid.
+   */
   mutateUrl?: string
   /** Absolute origin used for delegated push requests through the service binding. */
   mutateOrigin?: string
-  /** Env binding for delegated pushes; defaults to upstream.binding. */
+  /**
+   * env binding for delegated pushes; defaults to upstream.binding. the bound
+   * service and upstream feed must satisfy the mutateUrl causality contract.
+   */
   mutateBinding?: string
   delegatedPushRetry?: DelegatedPushRetryConfig
   /** Required for delegated push; forbidden with local mutators (no dual apply). */

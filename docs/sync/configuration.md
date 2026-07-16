@@ -242,3 +242,34 @@ environment variable so the credential does not appear in the process command
 line. Without either token input, the binary generates an unreported
 process-local token, which intentionally leaves the admin surface unavailable
 to external clients.
+
+### Settling application-owned native pushes
+
+An embedded application may own mutation execution while sharing the same
+namespace SQLite file with `sync-native`. After its application transaction
+commits, and before it returns the successful push response to the client, the
+server must call `POST /<namespace>/admin/settle-push` with the process admin
+token and this body:
+
+```json
+{
+  "push": { "clientGroupID": "...", "pushVersion": 1, "mutations": [] },
+  "response": { "pushResponse": { "mutations": [] } },
+  "userID": "authenticated-user"
+}
+```
+
+`push` is the original client request and `response` is the exact application
+response. The route rejects missing, extra, reordered, or mismatched mutation
+acknowledgements before changing engine state. It then advances each LMID
+monotonically in a new namespace transaction. An `alreadyProcessed` recovery
+response can catch an existing engine file up to the application store, while
+repeating the same settlement is a no-op. Because the application commit runs
+first on the serialized shared SQLite connection, its trigger rows precede the
+LMID row. A pull cannot observe acknowledgement before effects, and a successful
+application response implies the settlement is already pull-visible.
+The coherence guarantee costs one serialized local admin request per
+application-owned push.
+
+This route is a machine-only part of the native admin surface. Browser requests
+remain forbidden even when they carry the admin token.

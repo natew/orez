@@ -10,6 +10,10 @@ name = "SYNC_DO"
 class_name = "SyncDurableObject"
 
 [[durable_objects.bindings]]
+name = "CAPPED_SYNC_DO"
+class_name = "CappedSyncDurableObject"
+
+[[durable_objects.bindings]]
 name = "UPSTREAM_DO"
 class_name = "ZeroDO"
 
@@ -26,3 +30,7 @@ entrypoint = "AppService"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SyncDurableObject", "ZeroDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["CappedSyncDurableObject"]
