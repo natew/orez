@@ -2,8 +2,8 @@
 // cloudflare durable object over ctx.storage.sql (harness/cf/worker.ts,
 // deployed as zharness-sync on the lightstrike account). each harness run
 // gets a fresh namespace → its own DO with a fresh seeded dataset. clients
-// are stock zero over on-zero's production http-pull transport, exactly like
-// orez-local — only the host differs.
+// are the real @rocicorp/zero package through the canonical orez transport,
+// exactly like orez-local — only the host differs.
 //
 // requires ~/.zharness-cf-admin-key (set as the worker's ADMIN_KEY secret)
 // for the oracle/upstream-write channel.

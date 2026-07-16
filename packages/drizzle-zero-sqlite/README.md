@@ -4,9 +4,8 @@ Generate a Zero schema from a Drizzle SQLite schema while keeping Drizzle as the
 
 ```ts
 import { drizzleZeroConfig } from 'drizzle-zero-sqlite'
-import { generateDrizzleSchemaFile } from 'on-zero/drizzle'
 
-const zeroSchema = drizzleZeroConfig(
+export const zeroSchema = drizzleZeroConfig(
   { ...schema, relations },
   {
     tables: {
@@ -15,8 +14,11 @@ const zeroSchema = drizzleZeroConfig(
     },
   }
 )
-
-const source = generateDrizzleSchemaFile(zeroSchema)
 ```
 
-The translator accepts Drizzle `sqliteTable` definitions and beta `defineRelations` exports, including `through(...)` relations. It rejects PostgreSQL tables so a project cannot silently generate the wrong dialect.
+`drizzleZeroConfig()` returns a real Zero schema created with
+`@rocicorp/zero`. Pass it anywhere Zero expects your schema.
+
+The translator accepts Drizzle `sqliteTable` definitions and beta
+`defineRelations` exports, including `through(...)` relations. It rejects
+PostgreSQL tables so a project cannot silently generate the wrong dialect.

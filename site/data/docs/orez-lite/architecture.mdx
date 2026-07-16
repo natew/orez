@@ -1,12 +1,12 @@
 ---
 title: Orez Lite architecture
-description: How standard Zero queries and mutations connect to the SQLite-native sync engine.
+description: How the real Zero client connects to Orez Lite's SQLite-native server.
 ---
 
 # Architecture
 
-Orez Lite changes the synchronization machinery while leaving application
-queries, mutations, authentication, and permissions in the application.
+Orez Lite implements Zero's server side with a deterministic Rust engine and
+SQLite storage. The browser runs the real `@rocicorp/zero` client unchanged.
 
 ## Request and data flow
 
@@ -14,7 +14,7 @@ queries, mutations, authentication, and permissions in the application.
                            query name + args
                       ┌────────────────────────→ app query endpoint
                       │                              │ authorized ZQL
-Zero client ──HTTP──→ Orez Lite sync host ←──────────┘
+@rocicorp/zero client ── Zero protocol ──→ Orez Lite host ←──────┘
    ▲                  │
    │ row patches      │ mutation push
    │                  └────────────────────────→ app mutate endpoint
@@ -34,9 +34,8 @@ endpoint authenticates the request and resolves that name to authorized ZQL.
 Orez tracks the resulting row membership and sends an initial snapshot followed
 by incremental patches.
 
-The engine stores an internal query representation and reference counts, but
-application authors work only with named queries and ZQL. See
-[Queries and permissions](/docs/orez-lite/queries).
+The engine stores an internal query representation and reference counts.
+Application authors continue to use Zero's named queries and ZQL.
 
 ## Mutation path
 
@@ -45,8 +44,7 @@ mutation to the application push endpoint. The endpoint authenticates the
 request and executes the server-side mutator in the authoritative database.
 Committed rows return through the database change feed.
 
-This preserves one mutation implementation and one write authority. See
-[Mutations](/docs/orez-lite/writes).
+This preserves one application mutation path and one write authority.
 
 ## SQLite replica
 

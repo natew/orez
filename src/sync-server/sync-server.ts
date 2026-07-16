@@ -1,8 +1,8 @@
 // sync-server: the sqlite-native zero sync server core (rewrite phase 2 seed,
 // see plans/zero-server-rewrite.md + plans/zero-conformance-harness.md M2).
 //
-// serves the on-zero `transport: 'http-pull'` dialect to STOCK @rocicorp/zero
-// clients: cursor-diff pulls over a trigger-fed change log (with full
+// serves the Zero protocol to real @rocicorp/zero clients through the canonical
+// orez/zero-http integration: cursor-diff pulls over a trigger-fed change log (with full
 // snapshot as the single recovery path) and v51 custom-mutator pushes with
 // LMID bookkeeping, over any sqlite handle. no zero-cache, no CVR, no
 // per-client resident state — durable per-client state is the clients table

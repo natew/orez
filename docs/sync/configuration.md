@@ -12,13 +12,15 @@ immediately rather than failing at request time.
 
 ## Required fields
 
-| Field                        | Type                                          | Meaning                                                                                                                       |
-| ---------------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `hostVersion`                | `string`                                      | Version string emitted in every structured log line. Set it per deployment so logs are attributable.                          |
-| `schema`                     | `ZeroSchemaConfig`                            | Tables, columns (with Zero types), and primary keys. Usually derived from your Zero `createSchema()` result.                  |
-| `initialize(sql)`            | `(sql: SyncSql) => void`                      | Application DDL and optional seed. Runs inside the boot transaction, before sync-core initializes its own schema.             |
-| `authenticate(request, env)` | `=> NormalizedClaims \| null \| Promise<...>` | Edge authentication. Returns normalized claims (a stable `userID` plus anything else) or `null` to reject with 401.           |
-| `namespace(request)`         | `(request) => string \| null`                 | Resolves the Durable Object partition key. Returning `null` makes the worker answer a plain health string instead of routing. |
+| Field                           | Type                                          | Meaning                                                                                                                       |
+| ------------------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `hostVersion`                   | `string`                                      | Version string emitted in every structured log line. Set it per deployment so logs are attributable.                          |
+| `schema`                        | `ZeroSchemaConfig`                            | Tables, columns (with Zero types), and primary keys. Usually derived from your Zero `createSchema()` result.                  |
+| `initialize(sql)`               | `(sql: SyncSql) => void`                      | Application DDL and optional seed. Runs inside the boot transaction, before sync-core initializes its own schema.             |
+| `authenticate(request, env)`    | `=> NormalizedClaims \| null \| Promise<...>` | Edge authentication. Returns normalized claims (a stable `userID` plus anything else) or `null` to reject with 401.           |
+| `namespace(request)`            | `(request) => string \| null`                 | Resolves the Durable Object partition key. Returning `null` makes the worker answer a plain health string instead of routing. |
+| `authorizeWake(request, env)`   | `=> boolean \| Promise<boolean>`              | Authorizes the advisory wake WebSocket before a namespace object is selected. Required and fail-closed.                       |
+| `authorizeNotify(request, env)` | `=> boolean \| Promise<boolean>`              | Authorizes upstream change notifications before a namespace object is selected. Required and fail-closed.                     |
 
 `NormalizedClaims` must carry a non-empty `userID`; it owns client-group
 ownership. Put the raw client token into claims (for example under a
@@ -40,6 +42,7 @@ neither.
 | Field                | Type     | Default              | Meaning                                                                                                                               |
 | -------------------- | -------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `mutateUrl`          | `string` | required (this mode) | Absolute path on the upstream service, for example `/api/zero/push`. Client pushes are forwarded there verbatim. Requires `upstream`. |
+| `mutateOrigin`       | `string` | internal binding URL | Exact absolute HTTP(S) origin used to construct delegated push requests. Set it when the target router depends on the request origin. |
 | `mutateBinding`      | `string` | `upstream.binding`   | Env key of the service binding used for delegated pushes. Must be non-empty. Only valid with `mutateUrl`.                             |
 | `delegatedPushRetry` | object   | see below            | Retry policy for the delegated push subrequest. Only valid with `mutateUrl`.                                                          |
 
@@ -52,16 +55,19 @@ other 4xx returns immediately.
 
 Required for delegated push, forbidden with local mutators.
 
-| Field                           | Type                              | Default  | Meaning                                                                                                  |
-| ------------------------------- | --------------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
-| `upstream.binding`              | `string`                          | required | Env key of the DATA service binding that owns the app write endpoint and the change feed.                |
-| `upstream.namespacePath`        | `string \| (namespace) => string` | required | Path to this namespace on the bound service, for example `/data/<id>`. Must resolve to an absolute path. |
-| `upstream.changeLimit`          | `number`                          | 1000     | Feed page size. The cursor loop continues until the reported head is reached. Valid range 1 to 10000.    |
-| `upstream.intervalMs`           | `number`                          | 15000    | Durable Object alarm safety net between ingest passes. Minimum 1000.                                     |
-| `upstream.ingestBudgetRows`     | `number`                          | 150000   | Billable SQLite rows ingest may write per rolling window before the breaker trips.                       |
-| `upstream.ingestBudgetWindowMs` | `number`                          | 300000   | Rolling ingest budget window (five minutes).                                                             |
-| `upstream.ingestBackoffMs`      | `number`                          | 1000     | Initial breaker cooldown after a trip.                                                                   |
-| `upstream.ingestMaxBackoffMs`   | `number`                          | 60000    | Maximum breaker cooldown.                                                                                |
+| Field                           | Type                              | Default  | Meaning                                                                                                                             |
+| ------------------------------- | --------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `upstream.binding`              | `string`                          | required | Env key of the DATA service binding that owns the app write endpoint and the change feed.                                           |
+| `upstream.namespacePath`        | `string \| (namespace) => string` | required | Path to this namespace on the bound service, for example `/data/<id>`. Must resolve to an absolute path. `/` is a valid root mount. |
+| `upstream.changeLimit`          | `number`                          | 1000     | Feed page size. The cursor loop continues until the reported head is reached. Valid range 1 to 10000.                               |
+| `upstream.intervalMs`           | `number`                          | 15000    | Durable Object alarm safety net between ingest passes. Minimum 1000.                                                                |
+| `upstream.ingestBudgetRows`     | `number`                          | 150000   | Billable SQLite rows ingest may write per rolling window before the breaker trips.                                                  |
+| `upstream.ingestBudgetWindowMs` | `number`                          | 300000   | Rolling ingest budget window (five minutes).                                                                                        |
+| `upstream.ingestBackoffMs`      | `number`                          | 1000     | Initial breaker cooldown after a trip.                                                                                              |
+| `upstream.ingestMaxBackoffMs`   | `number`                          | 60000    | Maximum breaker cooldown.                                                                                                           |
+
+An internal empty path represents the valid `/` root mount. `null` alone means
+the upstream path has not been configured or remembered yet.
 
 The ingest budget knobs are the sync host's half of the write safeguards. The
 data worker has its own independent budget, configured by environment variables
@@ -104,6 +110,11 @@ snapshot.
 | `wakeCoalesceMs`               | `number`     | 25                | Batching window for the wake fan-out. A storm of writes produces one pull wave instead of one per write.                      |
 | `authorizeAdmin(request, env)` | `=> boolean` | `ADMIN_KEY` check | Authorizes `/admin/*` routes. The default requires `env.ADMIN_KEY` set and a matching `x-admin-key` header.                   |
 
+`authorizeWake` and `authorizeNotify` have no permissive default. If an outer
+application router applies its own namespace authorization, bypass only
+`/wake` and `/notify` there so these inner callbacks can validate their
+capabilities. Do not bypass pull, push, or admin routes.
+
 ## The environment (`SyncHostEnv`)
 
 The DO namespace binding is required; the admin key is optional.
@@ -145,8 +156,10 @@ Every route is under `/<namespace>/admin/` and gated by `authorizeAdmin` (or the
   counters, and `ingestBreaker` status.
 - `POST /admin/sql` `{query}`: read a SQL query against the DO storage.
 - `POST /admin/invalidate`: bump the epoch so every client re-snapshots.
-- `POST /admin/resnapshot`: atomically rebuild derived application tables from
-  the authoritative upstream snapshot, then catch up concurrent changes. This
+- `POST /admin/resnapshot`: rebuild derived application tables from bounded
+  keyset pages, durably resume an interrupted generation, catch up concurrent
+  changes, then atomically swap the staged tables into place. Finalization bumps
+  the engine epoch, so every client performs one expected full resync. This
   preserves engine metadata, client mutation IDs, and upstream data.
 - `POST /admin/writer` `{enabled}` (also `GET`): disable or enable the writer.
   A disabled writer answers pushes with 503.
@@ -187,6 +200,27 @@ resolves the `SyncServer` for a database only after the caller has authorized
 `route.databaseID`. It returns `{match(pathname), handle(route, body,
 userID)}`. `match` does routing only; `handle` delegates without translating
 bodies, responses, or errors.
+
+## Native replica-file retention
+
+`SyncNativeConfig.retention` controls deletion of per-namespace SQLite replica
+files. `RetentionPolicy::default()` and `RetentionPolicy::disabled()` never
+evict a namespace worker or delete a file. Deletion is an explicit ownership
+claim through `RetentionPolicy::exclusive(...)`:
+
+```rust
+retention: RetentionPolicy::exclusive(
+    Duration::from_secs(30 * 24 * 60 * 60),
+    10 * 1024 * 1024 * 1024,
+    Duration::from_secs(10 * 60),
+    Duration::from_secs(10 * 60),
+),
+```
+
+Enable this only for derived replica files owned exclusively by sync-native.
+Shared or authoritative SQLite files must keep retention disabled because they
+cannot be safely unlinked while another process or connection pool may hold
+them open.
 
 ## Native host HTTP security
 

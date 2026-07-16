@@ -1,6 +1,6 @@
 // orez-local target: the sqlite-native sync server core (orez
-// src/sync-server) hosted in-process over bun:sqlite, serving STOCK zero
-// clients through on-zero's production http-pull transport. pure sqlite, no
+// src/sync-server) hosted in-process over bun:sqlite, serving real
+// @rocicorp/zero clients through the canonical orez transport. pure sqlite, no
 // postgres, no zero-cache, no docker — this target IS the rewrite's server
 // core under test (plans/zero-server-rewrite.md phase 2).
 import { Database } from 'bun:sqlite'

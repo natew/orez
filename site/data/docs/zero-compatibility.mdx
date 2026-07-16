@@ -1,51 +1,39 @@
 ---
-title: What stays Zero
-description: Orez changes the sync engine while preserving the application-facing Zero model.
+title: The Zero client
+description: Orez changes the server deployment, not the Zero client or application API.
 ---
 
-# What stays Zero
+# The real Zero client, unchanged
 
-Orez applications keep Zero’s client and application APIs. The runtime choice
-changes the server machinery behind them.
+Orez does not provide a client-side reimplementation of Zero. Applications use
+the real `@rocicorp/zero` package, its local cache, ZQL, named queries, custom
+mutators, framework integrations, and optimistic updates.
 
-## Application compatibility
+The difference between the Orez runtimes is entirely on the server:
 
-| Surface                        | Node runtime                     | Orez Lite                             |
-| ------------------------------ | -------------------------------- | ------------------------------------- |
-| `@rocicorp/zero` client        | Stock                            | Stock, using `on-zero` HTTP transport |
-| Named queries and ZQL          | Stock                            | Unchanged                             |
-| Custom mutators                | Stock                            | Unchanged                             |
-| Query endpoint                 | Application-owned                | Same application endpoint             |
-| Mutate endpoint                | Application-owned                | Same application endpoint             |
-| Authentication and permissions | Application queries and mutators | Unchanged                             |
-| Sync engine                    | Stock `zero-cache`               | Orez Lite Rust/SQLite engine          |
-| Change source                  | PostgreSQL logical replication   | Application database change feed      |
+| Surface                                | Node runtime                     | Orez Lite                                      |
+| -------------------------------------- | -------------------------------- | ---------------------------------------------- |
+| Browser package                        | `@rocicorp/zero`                 | `@rocicorp/zero`                               |
+| Client API and local cache             | Zero                             | Zero                                           |
+| Schema, named queries, and mutators    | Zero                             | Zero                                           |
+| Application query and mutate endpoints | Zero                             | Zero                                           |
+| Sync protocol                          | Zero protocol                    | Zero protocol                                  |
+| Server implementation                  | `zero-cache` coordinated by Orez | Orez Lite SQLite-native server                 |
+| Authoritative data                     | Postgres or PGlite               | Application database replicated into Orez Lite |
 
-Orez Lite does not add an application permission language or a second mutator
-registry. Read access remains authenticated ZQL from the query endpoint. Write
-access remains server-side mutator logic from the mutate endpoint.
+## What an application changes
 
-## Client transport
+For Node, point the client at the `zero-cache` address printed by Orez. For
+Orez Lite, point that same client at the Orez Lite server. There is no second
+client dependency and no Orez-specific query or mutation API.
 
-The current Orez Lite host exposes pull, push, and wake over HTTP rather than
-the stock `zero-cache` WebSocket. `on-zero` adapts that transport to the stock
-Zero client, so components continue using the same queries, mutations, and
-reactive local cache.
+Zero's documentation is the source of truth for application development:
 
-## Server implementation
+- [Install Zero](https://zero.rocicorp.dev/docs/install)
+- [Queries](https://zero.rocicorp.dev/docs/queries)
+- [Mutators](https://zero.rocicorp.dev/docs/mutators)
+- [Authentication](https://zero.rocicorp.dev/docs/auth)
 
-The Node runtime runs stock `zero-cache`. Orez Lite implements the sync side
-with its own cookies, mutation acknowledgements, query membership, retention,
-and row patches. Those internals are qualified against real Zero clients and
-observable application behavior.
-
-<Callout title="Versioning boundary">
-  Pin and qualify the exact Orez, `on-zero`, and `@rocicorp/zero` versions used by an
-  application. Orez’s transport follows Zero’s wire protocol, whose internal details can
-  change between Zero releases.
-</Callout>
-
-For application APIs, use Zero’s official [Queries](https://zero.rocicorp.dev/docs/queries),
-[Mutators](https://zero.rocicorp.dev/docs/mutators),
-[Authentication](https://zero.rocicorp.dev/docs/auth), and
-[ZQL](https://zero.rocicorp.dev/docs/zql) documentation.
+Orez documents the server concerns that differ: deployment, SQLite storage,
+replication, retention, recovery, operational controls, and the exact Zero
+versions qualified by its conformance suites.

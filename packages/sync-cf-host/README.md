@@ -54,6 +54,8 @@ every socket attempt, including reconnects, so short-lived tokens are never
 reused after the wake connection drops:
 
 ```ts
+import { ensureHttpPullTransport } from 'orez/zero-http'
+
 ensureHttpPullTransport({
   origin: syncOrigin,
   pullIntervalMs: 5_000,
@@ -109,6 +111,24 @@ service or operator capability. Both `authorizeWake` and `authorizeNotify` run
 before `idFromName`, so rejected requests cannot instantiate namespace Durable
 Objects.
 
+### Consumer routing traps
+
+If an outer application router has its own namespace gate, let only `/wake` and
+`/notify` pass that outer gate. The sync worker's required `authorizeWake` and
+`authorizeNotify` callbacks then enforce the real capability checks. Do not
+bypass pull, push, or admin routes, and do not replace either callback with an
+unconditional allow.
+
+A delegated push must terminate at the application worker whose registry owns
+the named mutator. Routing it to a sync host, control-plane worker, or another
+application server with a different registry produces an authoritative error
+such as `could not find mutator <name>`. The optimistic client write may appear
+briefly, then disappear on reload and never reach peers. Route client pushes to
+the sync host only when its `mutateBinding` and `mutateUrl` delegate to the
+owning application's mutate endpoint. Preview and browser-local transports must
+stay pointed at their in-process project server unless they provide the same
+delegated route.
+
 `POST /admin/writer` with `{ "enabled": false }` durably stops pushes for that
 namespace. A stopped writer consumes and discards the request body, returns 503,
 and performs no engine or application write. Canary rollback drills must stop
@@ -123,12 +143,23 @@ not mutate a production route. These controls are mechanisms, not authorization
 to perform a production cutover.
 
 `POST /admin/resnapshot` is available only when the consumer configured an
-upstream data service. It reads that namespace's authoritative `/snapshot`,
-atomically replaces the derived application tables, then consumes `/changes`
-until caught up. Engine metadata, client last-mutation IDs, operator controls,
-and the authoritative upstream database are preserved. The JSON response
-includes before/after upstream watermarks and the number of snapshot plus
-catch-up rows applied.
+upstream data service. It reads each modeled source table through bounded
+keyset pages and commits them to a staged generation. Progress is durable, so a
+restart resumes at the recorded table and cursor. The host then catches up
+concurrent `/changes`, atomically swaps the generation into place, and bumps the
+engine epoch. Every client performs one expected full resync after cutover.
+Engine metadata, client last-mutation IDs, operator controls, and the
+authoritative upstream database are preserved. The legacy single-response
+`/snapshot` endpoint remains for small datasets and older harnesses.
+
+## Delegated service addresses
+
+`mutateBinding` selects the service binding that owns the application's mutate
+endpoint and defaults to `upstream.binding`. Set `mutateOrigin` to an exact
+absolute HTTP(S) origin when that worker's routing depends on the request
+origin. `upstream.namespacePath` may return `/` for a root-mounted data feed;
+internally that root is an empty path, while `null` alone means no upstream path
+is configured.
 
 ## Counter and HTTP wire representation
 
@@ -216,4 +247,4 @@ absent when the cleanup command was run (Cloudflare returned error 10090), so no
 old probe service remains to receive traffic.
 
 The rust toolchain is pinned at the workspace root in
-[rust-toolchain.toml](/Users/n8/.worktrees/orez-rust-sync/rust-toolchain.toml).
+[`rust-toolchain.toml`](../../rust-toolchain.toml).

@@ -6,13 +6,13 @@ direct SQL for the generated project backend, and a MessagePort client/server
 pair. Every operation is serialized. Every transaction that can write SQLite
 is checkpointed to IndexedDB before its response succeeds.
 
-Generated applications keep their on-zero authoring surface. The on-zero
-adapter supplies this host's mutator registry and named-query resolver; the host
-does not run on-zero's legacy `PushProcessor` or its bookkeeping tables.
+Applications keep the real Zero schema, named queries, mutators, and client API.
+The application adapter supplies this host's mutator registry and named-query
+resolver; the host owns the server-side mutation and sync bookkeeping.
 
-Orez ships the Bedrock and sync-engine WASM assets with the subpath. Consumers
-can override their URLs for a custom asset pipeline, but ordinary Vite workers
-need no asset glue.
+Orez ships the Bedrock and sync-engine WASM assets with the subpath. The
+`assets.sqliteWasmUrl` and `assets.syncWasmUrl` overrides are optional for custom
+asset pipelines; ordinary Vite workers need no asset glue.
 
 ```ts
 const host = await createBrowserSyncHost({

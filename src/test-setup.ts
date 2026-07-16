@@ -3,7 +3,7 @@
 // zero client) feature-detects localStorage by presence and then calls
 // getItem, which throws and permanently stalls query completion. node 24 has
 // no localStorage at all. install a functional in-memory stub in both cases
-// (same approach as takeout's on-zero testSetup) so the zero client sees a
+// install the same in-memory stub used by downstream test setups so Zero sees a
 // working Storage on every node.
 if (typeof globalThis.localStorage?.getItem !== 'function') {
   const store = new Map<string, string>()

@@ -11,22 +11,35 @@ bunx orez
 
 oreZ makes Zero work on [PGlite](https://pglite.dev) (Postgres in WASM) and [bedrock-sqlite](https://www.npmjs.com/package/bedrock-sqlite) (SQLite in WASM), bundled together so local development is as simple as `bun install && bunx orez`.
 
+## Orez Lite
+
+Orez Lite is a SQLite-native Zero server for Cloudflare and other constrained
+hosts. It replaces Zero's server side and speaks the Zero protocol to the real
+`@rocicorp/zero` client. There is no Orez client API or client fork. See the
+[Orez Lite server documentation](docs/sync/README.md).
+
 ## Requirements
 
 - **Bun** 1.0+ or **Node.js** 20+
-- **Zero** 0.18+ (tested with 0.18.x)
+- **Zero** 1.0+ (the conformance suite is pinned to 1.7.0)
 
-Repository development uses the exact Node and Bun versions in `mise.toml`.
-Run checks through `mise exec -- bun run check:all` so native test dependencies
-use the matching Node ABI.
+Repository development uses the exact Node, Bun, and wasm-pack versions in
+`mise.toml`. Run checks through `mise exec -- bun run check:all` so native test
+dependencies use the matching Node ABI. Ambient Node 25 can load an incompatible
+native addon and is not a supported contributor environment.
 
-## Limitations
+## Node runner limitations
 
-This is a **development tool only**. Not suitable for production.
+The Node runner and CLI described below are **development tools only**. They are
+not suitable for production.
 
 - **Single-session per database** (pglite backend) — queries are serialized through a mutex. Fine for development, would bottleneck under load. The `postgres` backend has no such limit.
 - **Trigger overhead** (pglite backend) — every write fires change-tracking triggers.
 - **Local filesystem** — no replication, no HA. Use `orez pg_dump` for backups.
+
+The earlier `src/worker/**` experiment that embeds zero-cache inside a
+Cloudflare Durable Object is frozen for removal and receives security fixes
+only. New Cloudflare server work uses Orez Lite and `orez-sync-cf-host`.
 
 ## Backends
 

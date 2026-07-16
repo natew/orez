@@ -1,9 +1,8 @@
-// VENDORED from ~/takeout/packages/on-zero/src/httpPullTransport.ts
-// (self-contained module, zero imports) so the harness runs on CI
-// machines without the takeout checkout. refresh deliberately with:
-//   cp ~/takeout/packages/on-zero/src/httpPullTransport.ts \
+// VENDORED self-contained transport copy for harness targets. the canonical
+// implementation now lives at ~/orez/src/zero-http/transport.ts; refresh this
+// file only from that source:
+//   cp ~/orez/src/zero-http/transport.ts \
 //      harness/src/vendor/httpPullTransport.ts   (re-add this header)
-// vendored 2026-07-09 from takeout commit dce80b00 (wake + query-aware extension).
 // http-pull transport: runs a stock @rocicorp/zero client over stateless HTTP
 // by intercepting its /sync/v51/connect WebSocket with a shim that translates
 // pull responses into v51 pokes. ported from the orez zero-http spike — the

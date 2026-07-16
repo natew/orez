@@ -33,9 +33,14 @@ Automatic mode falls back to WASM when the native addon is absent. `--disable-wa
 
 One PGlite database exposes one session, so Orez serializes access through it. Use [Embedded Postgres](/docs/node/embedded-postgres) for concurrent connections.
 
-## Orez Lite client receives a snapshot
+## Zero client receives a full snapshot from Orez Lite
 
-A snapshot is expected for a new client, a cookie below the retained floor, or a visibility/query invalidation. Check the namespace watermark, floor, reset counters, transform version, and recent retention activity before treating it as corruption.
+A snapshot is expected for a new client, a cookie below the retained floor, a
+visibility or query invalidation, or a completed upstream resnapshot. A paged
+resnapshot ends with an epoch bump, so every connected client performs one full
+resync against the new live generation. Check the namespace watermark, floor,
+reset counters, transform version, and recent retention or resnapshot activity
+before treating it as corruption.
 
 ## Orez Lite rejects a cookie as ahead
 

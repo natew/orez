@@ -1,68 +1,61 @@
 ---
 title: Orez Lite
-description: Run the standard Zero application model on a compact SQLite-native sync engine.
+description: Replace Zero's server with a compact SQLite-native engine while keeping the real Zero client unchanged.
 ---
 
 # Orez Lite
 
 <Status tone="preview">Preview</Status>
 
-Orez Lite is a SQLite-native synchronization engine for Zero applications. It
-keeps the application-facing Zero model intact: named ZQL queries, custom
-mutators, optimistic local state, authenticated query and mutate endpoints, and
-one authoritative application database.
+Orez Lite is a server for Zero. It speaks the Zero protocol to the real
+`@rocicorp/zero` client and replaces only Zero's server-side sync machinery.
+There is no Orez client, client fork, query model, or mutator model to adopt.
 
-Orez Lite replaces the sync engine behind those endpoints. Application code
-continues to use the stock `@rocicorp/zero` client or `on-zero` helpers.
+Your schema, named queries, custom mutators, optimistic updates, authentication,
+and application query and mutate endpoints remain ordinary Zero. Install and
+use the client exactly as the [Zero documentation](https://zero.rocicorp.dev/docs)
+describes, then point it at the Orez Lite server instead of `zero-cache`.
 
 <VerifiedBuildCard />
 
-## What stays the same
+## What Orez Lite replaces
 
-- Define and call named queries with Zero or `on-zero`.
-- Define custom mutators once and run them optimistically on the client and
-  authoritatively on the server.
-- Authenticate the application query and mutate endpoints.
-- Express read access in authenticated ZQL.
-- Enforce write access in server-side mutators.
-- Keep the application database as the write authority.
-
-Zero’s documentation remains the source of truth for these APIs:
-
-- [Install and set up Zero](https://zero.rocicorp.dev/docs/install)
-- [Queries](https://zero.rocicorp.dev/docs/queries)
-- [Mutators](https://zero.rocicorp.dev/docs/mutators)
-- [Authentication and permission patterns](https://zero.rocicorp.dev/docs/auth)
-- [ZQL](https://zero.rocicorp.dev/docs/zql)
-
-## What Orez Lite changes
-
-Orez Lite replaces `zero-cache`, PostgreSQL logical replication, and the CVR
-implementation with a Rust sync engine backed by SQLite. The current public host
-runs as a Cloudflare Worker and SQLite Durable Object.
+Orez Lite replaces `zero-cache` and the server infrastructure behind it with a
+Rust sync engine backed by SQLite. The current public host runs as a Cloudflare
+Worker and SQLite Durable Object.
 
 ```text
-Zero / on-zero application
-  │ named queries · custom mutators · auth
+real @rocicorp/zero client
+  │ Zero protocol
   ▼
-application query + mutate endpoints
-  │ authoritative database commits
-  ▼
-Orez Lite replication + query tracking
-  │ pull · patches · wake
-  ▼
-stock Zero client cache
+Orez Lite server
+  ├── application query and mutate endpoints
+  └── authoritative database change feed
 ```
 
-The engine owns sync bookkeeping: cookies, mutation acknowledgements,
-replication cursors, query membership, row patches, retention, and wake
-notifications. It does not define application permissions or business logic.
+The server owns cookies, mutation acknowledgements, replication cursors, query
+membership, row patches, retention, and wake notifications. Your application
+continues to own its data model, authentication, permissions, business logic,
+and authoritative database.
+
+## What changes in an application
+
+Only the server deployment and address change. Client components continue to
+use the same Zero queries, mutators, hooks, and local cache. Orez-specific code
+belongs at the server hosting boundary.
+
+For client APIs and application endpoint implementation, use Zero's own docs:
+
+- [Install Zero](https://zero.rocicorp.dev/docs/install)
+- [Queries](https://zero.rocicorp.dev/docs/queries)
+- [Mutators](https://zero.rocicorp.dev/docs/mutators)
+- [Authentication](https://zero.rocicorp.dev/docs/auth)
 
 ## Start here
 
-1. Read [Orez Lite setup](/docs/orez-lite/cloudflare) for the application and
-   deployment boundary.
-2. Read [Queries and permissions](/docs/orez-lite/queries).
-3. Read [Mutations](/docs/orez-lite/writes).
-4. Review [Testing](/docs/orez-lite/testing) and
+1. Read [Cloudflare setup](/docs/orez-lite/cloudflare) for the Orez-specific
+   server boundary.
+2. Read [Architecture](/docs/orez-lite/architecture) for replication and
+   recovery behavior.
+3. Review [Testing](/docs/orez-lite/testing) and
    [Limitations](/docs/orez-lite/limitations) before deployment.

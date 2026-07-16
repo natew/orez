@@ -9,15 +9,18 @@ The table below lists Orez’s public packages and internal implementation packa
 
 ## JavaScript packages
 
-| Package/export         | Purpose                                                           | Status                         |
-| ---------------------- | ----------------------------------------------------------------- | ------------------------------ |
-| `orez`                 | Node all-in-one runner, CLI, configuration, and `startZeroLite()` | Primary                        |
-| `orez/vite`            | Bind the Node runner to a Vite dev-server lifecycle               | Primary                        |
-| `orez/s3`              | Small local S3-compatible server for development                  | Primary, intentionally limited |
-| `orez/change-tracking` | PGlite change-tracking implementation details                     | Internal/advanced              |
-| `orez/cf-do`           | Earlier stock zero-cache Durable Object experiment                | Historical                     |
-| `pg-to-sqlite`         | Standalone PostgreSQL-to-SQLite compiler                          | Public utility                 |
-| `bedrock-sqlite`       | WASM SQLite adapter used by Zero-oriented runtimes                | Workspace package              |
+| Package/export           | Purpose                                                            | Status                         |
+| ------------------------ | ------------------------------------------------------------------ | ------------------------------ |
+| `orez`                   | Node all-in-one runner, CLI, configuration, and `startZeroLite()`  | Primary                        |
+| `orez/vite`              | Bind the Node runner to a Vite dev-server lifecycle                | Primary                        |
+| `orez/s3`                | Small local S3-compatible server for development                   | Primary, intentionally limited |
+| `orez/change-tracking`   | PGlite change-tracking implementation details                      | Internal/advanced              |
+| `orez/zero-http`         | Canonical Orez Lite transport integration for the real Zero client | Preview                        |
+| `orez/sync-browser-host` | Durable browser worker host with Bedrock SQLite and IndexedDB      | Preview                        |
+| `drizzle-zero-sqlite`    | Generate a Zero schema from Drizzle SQLite definitions             | Public utility                 |
+| `orez/cf-do`             | Earlier stock zero-cache Durable Object experiment                 | Frozen for removal             |
+| `pg-to-sqlite`           | Standalone PostgreSQL-to-SQLite compiler                           | Public utility                 |
+| `bedrock-sqlite`         | WASM SQLite adapter used by Zero-oriented runtimes                 | Workspace package              |
 
 ## Orez Lite crates and host
 
@@ -27,6 +30,10 @@ The table below lists Orez’s public packages and internal implementation packa
 | `sync-native`       | Axum and rusqlite native host                                        |
 | `sync-wasm`         | WASM boundary for constrained JavaScript hosts                       |
 | `orez-sync-cf-host` | Cloudflare Worker and Durable Object integration                     |
+
+The `src/worker/**` zero-cache-in-Cloudflare embed and its patch layer are
+frozen for removal. They receive security fixes only. New Cloudflare work uses
+Orez Lite and `orez-sync-cf-host`.
 
 Orez Lite is the public name. The `sync-*` names are current implementation identifiers and may change as packaging is productized.
 

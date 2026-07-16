@@ -5,7 +5,9 @@ description: Compare Node and Orez Lite by compatibility, deployment shape, and 
 
 # Choose a runtime
 
-Node is the recommended starting point. Orez Lite serves Zero applications that need a compact SQLite-native engine on Cloudflare. Both keep the same application queries and mutators.
+Node is the recommended starting point. Orez Lite is a compact SQLite-native
+Zero server for Cloudflare. Both use the same real `@rocicorp/zero` client,
+queries, and mutators.
 
 | Runtime                  | Status      | What runs                                               | Best for                                                        |
 | ------------------------ | ----------- | ------------------------------------------------------- | --------------------------------------------------------------- |
@@ -15,12 +17,15 @@ Node is the recommended starting point. Orez Lite serves Zero applications that 
 
 ## Node
 
-Node runs the stock zero-cache package and coordinates the services around it. The PGlite profile makes the runner portable across local and CI environments, while Embedded Postgres provides concurrent connections and native logical replication. Both use the same application setup.
+Node runs the stock zero-cache package and coordinates the services around it. The PGlite profile makes the runner portable across local and CI environments, while Embedded Postgres provides concurrent connections and native logical replication. Orez Lite is a replacement Zero server. Every runtime uses the same real `@rocicorp/zero` client.
 
 [Explore Node →](/docs/node)
 
 ## Orez Lite
 
-Orez Lite replaces the sync engine with a deterministic Rust/SQLite implementation. The application keeps its named ZQL queries, custom mutators, authenticated query and mutate endpoints, and authoritative database. The current public integration runs on Cloudflare.
+Orez Lite replaces zero-cache with a deterministic Rust and SQLite server. The
+application keeps its named ZQL queries, custom mutators, authenticated query
+and mutate endpoints, and authoritative database. The current public
+integration runs on Cloudflare.
 
 [Explore Orez Lite →](/docs/orez-lite)

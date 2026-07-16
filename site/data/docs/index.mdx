@@ -5,7 +5,10 @@ description: Run Zero as one coordinated system with the Node runner or the SQLi
 
 # Orez documentation
 
-Orez is an easy, all-in-one way to run Zero. The Node runtime manages zero-cache, its databases, replica storage, and local lifecycle from one configuration. Orez Lite replaces the sync engine with a SQLite-native implementation while preserving the application’s Zero queries, mutators, and endpoints.
+Orez is an easy, all-in-one way to run Zero. The Node runtime manages
+zero-cache, its databases, replica storage, and local lifecycle from one
+configuration. Orez Lite is a SQLite-native Zero server that uses the real
+`@rocicorp/zero` client unchanged.
 
 ```sh
 bunx orez
@@ -17,8 +20,8 @@ bunx orez
     profile.
   </DocCard>
   <DocCard href="/docs/orez-lite" title="Orez Lite" badge="Preview">
-    Run Orez’s smaller SQLite-native sync engine in a Cloudflare Durable Object without
-    changing the application’s Zero programming model.
+    Replace zero-cache with Orez's smaller SQLite-native server in a Cloudflare Durable
+    Object. Keep the real Zero client unchanged.
   </DocCard>
   <DocCard href="/docs/runtimes" title="Choose a runtime">
     Compare compatibility, deployment shape, native dependencies, and support status
@@ -32,9 +35,10 @@ bunx orez
 
 The Node runtime is the core Orez experience. It packages stock Zero into one command and one configuration. Built-in admin and recovery tools cover the routine work around the stack.
 
-### Zero, anywhere
+### A smaller Zero server
 
-Orez Lite runs the sync side of the Zero model through a deterministic Rust core. The application still owns queries, mutators, authentication, and permissions.
+Orez Lite implements Zero's server side through a deterministic Rust core. The
+application still owns queries, mutators, authentication, and permissions.
 
 ## Recommended path
 
@@ -45,4 +49,7 @@ Orez Lite runs the sync side of the Zero model through a deterministic Rust core
 
 ## Clear boundaries
 
-Node orchestrates the stock Zero server. Orez Lite implements synchronization in a separate deterministic engine while delegating query and mutation execution to the same application endpoints. Each runtime documents its architecture, operations, compatibility, and test evidence independently.
+Node orchestrates `zero-cache`. Orez Lite replaces it with a deterministic
+SQLite-native Zero server while the real `@rocicorp/zero` client and the same
+application endpoints remain in place. Each runtime documents its server
+architecture, operations, and test evidence independently.

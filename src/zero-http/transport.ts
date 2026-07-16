@@ -2,8 +2,8 @@
 // by intercepting its /sync/v51/connect WebSocket with a shim that translates
 // pull responses into v51 pokes.
 //
-// this file is the CANONICAL copy. takeout's on-zero and chat's
-// httpPullTransport.vendor.ts are downstream snapshots of it — evolve the
+// this file is the CANONICAL copy. takeout and chat transport vendors are
+// downstream snapshots of it — evolve the
 // transport here and refresh them from here, never the other way. the wire
 // contract (lexicographic string cookies, gotQueriesPatch poke-part ordering,
 // FIFO push serialization, updateAuth, 401→Unauthorized frame, teardown

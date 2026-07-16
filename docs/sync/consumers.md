@@ -47,7 +47,7 @@ export const chatConfig: SyncHostConfig = {
 The pieces:
 
 - **Push is delegated.** The host forwards the Zero push to the Chat app's real
-  `/api/zero/push` over the `APP` binding. Chat's on-zero mutators and server
+  `/api/zero/push` over the `APP` binding. Chat's application mutators and server
   actions remain the sole write authority; the host bundles no local mutator
   registry. Committed rows return through **upstream ingest** — the host consumes
   `/snapshot` and `/changes` from the paired data worker over `DATA`, advances

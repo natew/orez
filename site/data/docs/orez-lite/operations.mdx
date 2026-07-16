@@ -30,14 +30,20 @@ The Cloudflare host also caps change rows and serialized bytes per pull. Clients
 
 ## Recovery paths
 
-| Condition                          | Safe behavior                                                     |
-| ---------------------------------- | ----------------------------------------------------------------- |
-| Durable Object evicts              | Reopen SQLite and reconstruct in-memory state                     |
-| Client cookie is too old           | Send a full snapshot                                              |
-| Client cookie is ahead             | Reset it while preserving the durable watermark                   |
-| Database feed cursor expires       | Replace replicated application tables from an authorized snapshot |
-| Push response is lost after commit | Client retries safely using the mutation ID                       |
-| Wake is missed                     | Safety polling eventually triggers pull                           |
+| Condition                          | Safe behavior                                                  |
+| ---------------------------------- | -------------------------------------------------------------- |
+| Durable Object evicts              | Reopen SQLite and reconstruct in-memory state                  |
+| Client cookie is too old           | Send a full snapshot                                           |
+| Client cookie is ahead             | Reset it while preserving the durable watermark                |
+| Database feed cursor expires       | Resume or start a paged replica rebuild, then catch up changes |
+| Push response is lost after commit | Client retries safely using the mutation ID                    |
+| Wake is missed                     | Safety polling eventually triggers pull                        |
+
+An upstream resnapshot reads source tables in keyset pages and stages them as a
+new durable generation. A restart resumes from stored progress. After paging,
+Orez replays concurrent changes, atomically swaps the staged tables into place,
+and bumps the engine epoch. Every client then performs one full resync. That
+reset is expected and ensures old cookies cannot address the new generation.
 
 ## Writer controls and cutover
 

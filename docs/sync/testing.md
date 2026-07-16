@@ -50,10 +50,11 @@ The suites that matter most:
   effects), and check that every client converges to a fresh-client oracle
   snapshot. Their oracle is internal (a fresh snapshot), so these are property
   tests, not a second implementation.
-- **`upstream.rs`** covers the ingest apply path: ordered pages,
-  watermark-idempotency, full-image updates and deletes, out-of-order rejection,
-  schema-drift classification, legacy meta migration, and atomic retention-gap
-  snapshot replacement.
+- **`upstream.rs`** and **`paged_snapshot.rs`** cover the ingest apply path:
+  ordered changes, watermark idempotency, full-image updates and deletes,
+  out-of-order rejection, schema drift, legacy metadata migration, staged
+  snapshot generations, durable resume cursors, catch-up overlap, atomic
+  cutover, and epoch invalidation of pre-cutover clients.
 - **`upstream_corpus.rs`** is 7 behavioral CDC contracts adapted from Turso's
   pinned CDC integration suite and Electric's transaction-fragmentation suite.
   Because Orez captures changes with database-scoped triggers rather than a
@@ -120,10 +121,11 @@ the whole sequence; the lanes:
   filtering, client-authored raw AST rejected, writer enable and disable, fault
   injection at five boundary points, deferred effects running only after commit,
   and wake WebSocket delivery.
-- **`ingest-test.mjs`** covers upstream ingest end to end: retention-gap
-  snapshot recovery, the billable-versus-logical write budget, delegated push
-  with injected transient failures and a bounded retry cap, and the runaway lane
-  where a feed whose cursor stalls trips the breaker to a 429
+- **`ingest-test.mjs`** covers upstream ingest end to end: keyset-paged
+  retention-gap recovery, staged generation resume, adaptive page limits, the
+  billable-versus-logical write budget, delegated push with injected transient
+  failures and a bounded retry cap, and the runaway lane where a feed whose
+  cursor stalls trips the breaker to a 429
   `ingestCursorStalled` and then recovers through the admin route.
 - **`restart-test.mjs`** is a regression for a real bug: admin-set namespace
   knobs must survive a workerd restart, so a query-aware namespace does not

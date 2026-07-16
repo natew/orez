@@ -63,7 +63,8 @@ treated as stale and recompiled, which is how a permission or schema change
 invalidates cached transforms.
 
 Chat shipped this half first. Its query transform was already delegated to the
-app's on-zero endpoint over an APP binding before push delegation existed.
+application's real Zero query endpoint over an APP binding before push
+delegation existed.
 
 ### Writes
 
@@ -109,12 +110,14 @@ Ingest runs on four triggers:
 ### Retention-gap recovery
 
 Retention gaps are explicit, not guessed. When the requested cursor precedes the
-data worker's retained floor, `/changes` returns HTTP 410 `watermarkTooOld`. The
-host then reads `/snapshot`, atomically replaces every configured application
-table in one engine transaction via `engine_apply_upstream_snapshot`, records
-the snapshot watermark, and resumes `/changes` from there to close any writes
-that raced the snapshot. This is the same snapshot-then-stream shape as initial
-replication (`plans/rust-sync-upstream-ingest.md`).
+data worker's retained floor, `/changes` returns HTTP 410 `watermarkTooOld`.
+The host then reads each modeled table through bounded keyset pages into a
+durable staged generation. An interrupted rebuild resumes from its recorded
+table and cursor. After paging, it replays `/changes` from the first page's
+watermark, atomically swaps the staged tables into place, and bumps the engine
+epoch so each client performs one full resync. The legacy single-response
+`/snapshot` remains for small datasets and older harnesses, but it is no longer
+the host's default rebuild path.
 
 ## Last-mutation-id and row arrival are independent
 

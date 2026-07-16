@@ -17,7 +17,7 @@ export const docsSections: DocsSection[] = [
       { title: 'Overview', route: '/docs' },
       { title: 'Get started', route: '/docs/getting-started' },
       { title: 'Choose a runtime', route: '/docs/runtimes' },
-      { title: 'What stays Zero', route: '/docs/zero-compatibility' },
+      { title: 'Unchanged Zero client', route: '/docs/zero-compatibility' },
     ],
   },
   {
@@ -39,9 +39,7 @@ export const docsSections: DocsSection[] = [
     title: 'Orez Lite',
     pages: [
       { title: 'Overview', route: '/docs/orez-lite', status: 'preview' },
-      { title: 'Setup', route: '/docs/orez-lite/cloudflare' },
-      { title: 'Queries & permissions', route: '/docs/orez-lite/queries' },
-      { title: 'Mutations', route: '/docs/orez-lite/writes' },
+      { title: 'Cloudflare setup', route: '/docs/orez-lite/cloudflare' },
       { title: 'Architecture', route: '/docs/orez-lite/architecture' },
       { title: 'Operations', route: '/docs/orez-lite/operations' },
       { title: 'Testing', route: '/docs/orez-lite/testing' },

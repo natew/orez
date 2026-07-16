@@ -1,117 +1,82 @@
 ---
-title: Orez Lite setup
-description: Connect an existing Zero or on-zero application to the Cloudflare Orez Lite sync host.
+title: Orez Lite on Cloudflare
+description: Deploy Orez Lite as the Zero server in a Cloudflare Worker and SQLite Durable Object.
 ---
 
-# Orez Lite setup
+# Cloudflare setup
 
-<Status tone="preview">Cloudflare host · Preview</Status>
+<Status tone="preview">Server host · Preview</Status>
 
-Start with a working Zero or `on-zero` application. Orez Lite replaces the
-`zero-cache` synchronization engine. It does not replace your schema, named ZQL
-queries, custom mutators, authentication, or application endpoints.
+The Cloudflare host runs Orez Lite's Rust/WASM engine inside a SQLite Durable
+Object. It replaces the `zero-cache` deployment. The browser still runs the
+real `@rocicorp/zero` client, and the application still exposes its ordinary
+Zero query and mutate endpoints.
 
-<Callout title="Before you start" tone="note">
-  If the application does not yet have a Zero query endpoint and mutate endpoint, follow
-  Zero’s [installation guide](https://zero.rocicorp.dev/docs/install) first.
+<Callout title="Zero stays the application contract" tone="note">
+  Follow Zero's [installation guide](https://zero.rocicorp.dev/docs/install) for the
+  schema, client, queries, mutators, and application endpoints. This page covers only the
+  Orez Lite server boundary.
 </Callout>
 
-## Application surface
+## Server boundary
 
-The application keeps these pieces:
+The host package exports `createSyncWorker` and `createSyncDurableObject`.
+Application-specific server configuration supplies:
 
-- its Zero schema and relationships;
-- registered named queries that return ZQL;
-- registered custom mutators;
-- an authenticated query endpoint, commonly `/api/zero/pull` in `on-zero` apps;
-- an authenticated mutate endpoint, commonly `/api/zero/push`;
-- one authoritative database.
+- the Zero schema and replica DDL;
+- authentication and namespace resolution;
+- authorization for wake sockets, upstream notifications, and admin routes;
+- the existing application query and mutate endpoints;
+- a change feed from the authoritative database.
 
-Permissions stay in the application. Read permissions are filters in the ZQL
-resolved by the query endpoint. Write permissions are checks in the server-side
-mutator. See [Queries and permissions](/docs/orez-lite/queries) and
-[Mutations](/docs/orez-lite/writes).
+```text
+real Zero client ── Zero protocol ──→ Orez Lite
+                                         │
+                         query and mutate│requests
+                                         ▼
+                                  application server
+                                         │
+                                  authoritative writes
+                                         ▼
+                              database change feed ──→ Orez Lite replica
+```
+
+Orez forwards authenticated query and mutation work to the application rather
+than copying application logic into the sync host. Committed rows return through
+the database change feed.
 
 ## Client connection
 
-The client still uses the stock `@rocicorp/zero` client and the same registered
-queries and mutators. `on-zero` applications install its Orez HTTP transport for
-the deployed namespace, then point the provider at that URL:
+Set the existing Zero client's `cacheURL` to the deployed Orez Lite address.
+There is no Orez client package or alternate query API. Components keep using
+the same `@rocicorp/zero` queries, mutators, hooks, and optimistic local state.
 
-```tsx
-import { ensureHttpPullTransport, ProvideZero } from 'on-zero'
+## Namespaces and authorization
 
-export function OrezRoot({ children, namespace, user, sessionToken }) {
-  const cacheURL = `${OREZ_SYNC_URL}/${namespace}`
+A namespace is a storage and ordering boundary, commonly an organization or
+project. It is not an authorization mechanism. The outer Worker must
+authenticate requests before selecting a Durable Object, and the application
+must still authorize every query and mutation.
 
-  if (typeof window !== 'undefined') {
-    ensureHttpPullTransport({
-      origin: cacheURL,
-      queryForward: true,
-      wake: true,
-    })
-  }
+Wake sockets and upstream notifications are fail-closed. Consumers must provide
+`authorizeWake` and `authorizeNotify`; rejected requests do not instantiate a
+namespace Durable Object. See the
+[`orez-sync-cf-host` integration guide](https://github.com/natew/orez/tree/main/packages/sync-cf-host)
+for the capability and service-binding patterns.
 
-  return (
-    <ProvideZero
-      cacheURL={cacheURL}
-      transport="http-pull"
-      userID={user.id}
-      auth={sessionToken}
-      authData={user}
-    >
-      {children}
-    </ProvideZero>
-  )
-}
-```
+## Deployment status
 
-`queryForward` sends registered query names and arguments to the application
-query endpoint. `wake` lets the host notify the client to pull immediately after
-new data arrives. Application components continue to call `useQuery(...)` and
-`zero.mutate(...)` exactly as before.
+The public integration uses a service binding for application queries and
+mutations plus a change feed from the authoritative data service. Packaging the
+consumer adapter and stable configuration surface is still in progress, so the
+host remains preview.
 
-## Deployment connection
-
-The Cloudflare deployment connects the sync host to the application over
-private service bindings:
-
-```text
-                         ┌─ query name + args ─→ app query endpoint
-Zero client ─→ Orez Lite ┤
-                         └─ mutation push ─────→ app mutate endpoint
-                                                      │
-                                                      ▼
-                                             authoritative database
-                                                      │
-                                                      ▼ changes
-                         client patches ←──── Orez Lite replica
-```
-
-The application endpoint authenticates the original bearer token. Orez receives
-only the authorized query result shape and committed database changes needed to
-maintain client subscriptions.
-
-The deployment also chooses a namespace key, such as an organization or
-project ID. A namespace is a storage and ordering boundary, not an authorization
-mechanism. The application must still authenticate every query and mutation.
-
-## What is currently Cloudflare-specific
-
-The public Orez Lite integration runs the Rust/WASM engine in a SQLite Durable
-Object. It uses a service binding for application queries and pushes, plus a
-change feed from the authoritative data service. Packaging this deployment into
-a smaller reusable adapter is still in progress, so the host remains marked
-preview.
-
-Application code should not depend on the host’s internal query AST, replication
-cursor, Durable Object schema, or cache-invalidation controls. Those are Orez
-implementation details and may change during preview.
+Application code should not depend on Orez's internal query AST, replication
+cursor, Durable Object schema, or cache invalidation tables. Those are server
+implementation details.
 
 ## Next steps
 
-1. Review [Queries and permissions](/docs/orez-lite/queries).
-2. Review [Mutations](/docs/orez-lite/writes).
-3. Read [Architecture](/docs/orez-lite/architecture) if you need the engine and
-   replication details.
-4. Read [Limitations](/docs/orez-lite/limitations) before a production rollout.
+1. Read [Architecture](/docs/orez-lite/architecture).
+2. Review [Operations](/docs/orez-lite/operations).
+3. Read [Limitations](/docs/orez-lite/limitations) before a production rollout.

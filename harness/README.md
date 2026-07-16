@@ -48,7 +48,8 @@ coverable pairs with 400 generated specs (`--rounds 100 --queriesPerRound 4`).
 
 targets: `stock-zero` (real zero-cache + embedded postgres + fixture app
 server), `orez-local` (orez `src/sync-server` core over pure bun:sqlite,
-clients on on-zero's production http-pull transport), and `orez-cf` (the
+real `@rocicorp/zero` clients through the canonical `orez/zero-http`
+integration), and `orez-cf` (the
 SAME core hosted in a durable object over `ctx.storage.sql` — `cf/worker.ts`
 deployed as `zharness-sync` on lslcf; fresh namespace per run; admin oracle
 gated by the ADMIN_KEY secret, key file `~/.zharness-cf-admin-key`; deploy

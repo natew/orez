@@ -85,9 +85,8 @@ export default function HomePage() {
             </H1>
             <Paragraph color="$color10" className="home-lede">
               Orez runs a complete Zero stack from one config and one command. The Node
-              runtime packages stock Zero for local development and CI, while Orez Lite
-              runs the same application queries and mutators through a compact
-              SQLite-native sync engine.
+              runtime packages zero-cache for local development and CI. Orez Lite is a
+              compact SQLite-native Zero server. Both use the real Zero client.
             </Paragraph>
             <XStack className="hero-actions" items="center" gap="$3" flexWrap="wrap">
               <AppLink
@@ -180,8 +179,8 @@ export default function HomePage() {
               setup portable.
             </RuntimeCard>
             <RuntimeCard href="/docs/orez-lite" title="Orez Lite" badge="Preview">
-              Run Orez’s SQLite-native sync engine in a Cloudflare Durable Object while
-              keeping the application-facing Zero model.
+              Replace Zero's server with Orez's SQLite-native engine in a Cloudflare
+              Durable Object. The real Zero client stays unchanged.
             </RuntimeCard>
           </div>
         </section>
@@ -195,16 +194,15 @@ export default function HomePage() {
               textTransform="uppercase"
               letterSpacing={1.1}
             >
-              One client model
+              The real Zero client
             </SizableText>
             <H2 id="same-app-title" color="$color12" className="section-title">
-              One client API across both runtimes.
+              Same client, different server.
             </H2>
             <Paragraph color="$color10" className="section-lede">
-              Node packages stock Zero into a coordinated runner. Orez Lite provides pull,
-              query tracking, replication, and wake through a smaller SQLite-native
-              engine. Queries, mutations, authentication, and permissions stay in your
-              application.
+              Both runtimes use `@rocicorp/zero` in the browser. Node runs zero-cache;
+              Orez Lite replaces that server with a smaller SQLite-native engine that
+              speaks the Zero protocol.
             </Paragraph>
           </div>
           <div

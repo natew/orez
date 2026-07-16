@@ -1,11 +1,10 @@
 # Architecture
 
-The orez rust sync server is a Zero sync server that runs on SQLite. It speaks
-Zero's protocol-v51 `http-pull` dialect to stock `@rocicorp/zero` clients, and
-it replaces zero-cache for deployments where you would rather not run Postgres
-and a long-lived cache process. On Cloudflare it runs as one Durable Object per
-namespace, holding both the sync engine and its SQLite storage inside the same
-object.
+The orez rust sync server is a Zero server that runs on SQLite. It speaks the
+Zero protocol to the real `@rocicorp/zero` client and replaces zero-cache for
+deployments where you would rather not run Postgres and a long-lived cache
+process. On Cloudflare it runs as one Durable Object per namespace, holding both
+the sync engine and its SQLite storage inside the same object.
 
 The client half of Zero is unchanged. The ZQL query engine, the local store,
 and optimistic mutations stay exactly as Rocicorp ships them. What orez replaces
@@ -136,11 +135,11 @@ the IndexedDB commit fails, the live database is closed and the host rejects all
 later work. A new worker restores the previous complete snapshot before opening
 SQLite. There is no in-memory fallback.
 
-The host accepts a mutator registry and named-query resolver so an on-zero
-adapter can preserve generated validators, permissions, transaction helpers,
-and deferred effects without running on-zero's separate mutation bookkeeping.
-The root Orez package includes both WASM binaries beside the subpath export, so
-ordinary worker bundles do not need consumer-specific asset copies.
+The host accepts the application's mutator registry and named-query resolver so
+generated validators, permissions, transaction helpers, and deferred effects
+keep working without a second mutation-bookkeeping path. The root Orez package
+includes both WASM binaries beside the subpath export, so ordinary worker
+bundles do not need consumer-specific asset copies.
 
 ## The two request paths
 
@@ -183,6 +182,26 @@ invalidation. There is no CVR, no per-client server-side view state, and no
 websocket poke stream. The only durable per-client state is the clients table
 (`_zsync_clients`): a last-mutation-id and the client-group to user binding.
 
+## Paged upstream resnapshot
+
+The Cloudflare host rebuilds a derived replica through bounded, keyset-ordered
+source pages. Each page commits to a staged generation with its table and opaque
+source cursor recorded durably. A Durable Object eviction or process restart
+therefore resumes the generation instead of restarting a large transaction.
+
+Source pages are intentionally fuzzy across requests. After every table is
+staged, the host replays the retained change feed from the first page's
+watermark until caught up. Finalization atomically swaps the staged tables into
+place and bumps the sync-core epoch in the same transaction. Every client then
+performs one full resync because its old cookie belongs to the previous table
+generation. That reset is expected.
+
+The source still supports the legacy single-response `/snapshot` endpoint for
+small datasets and older harnesses, but Orez Lite uses the paged, resumable path
+by default. Replica DDL used by this flow must not contain foreign keys; the
+authoritative source owns referential integrity, and cross-page replica
+enforcement cannot be correct.
+
 ## How it fits the rest of orez
 
 The broader orez project is a local Zero development stack (run Zero on PGlite or
@@ -213,6 +232,7 @@ On Cloudflare the deployment has two Durable Object roles:
   one-for-one, and the app's Postgres-wire writes to the data worker are
   unchanged.
 
-The `src/zero-http/` transport is the client side of the `http-pull` dialect
-(the on-zero fake-WebSocket transport that turns sync into stateless HTTP
-polls). The sync host answers exactly what that transport expects.
+The canonical Orez transport integration lives at `orez/zero-http`, with source
+in `src/zero-http/`. It keeps `@rocicorp/zero` as the client and maps its sync
+connection onto the Orez Lite pull, push, and wake server endpoints. Downstream
+vendored copies are refreshed from this implementation.

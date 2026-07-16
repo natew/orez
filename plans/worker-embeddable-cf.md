@@ -1,5 +1,10 @@
 # orez/worker: Embeddable orez for CF Workers
 
+> **Sunset:** this zero-cache-in-Cloudflare embed and its `src/worker/**` patch
+> layer are frozen for removal. They receive security fixes only. New
+> Cloudflare server work uses Orez Lite and `orez-sync-cf-host`. This file is a
+> historical implementation record, not a current integration guide.
+
 ## Context
 
 soot's DataDO has PGlite running in CF DO (proven). It uses on-zero for typed
