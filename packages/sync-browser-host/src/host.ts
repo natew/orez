@@ -15,6 +15,7 @@ import {
 } from './generated/sync_wasm.js'
 import initSyncWasm from './generated/sync_wasm.js'
 import { IndexedDbSnapshotStore } from './idb-snapshot.js'
+import { createPostCommitEffects } from 'orez-sync-cf-host/post-commit'
 import {
   BedrockDirectSql,
   BedrockMutatorSql,
@@ -24,9 +25,9 @@ import {
 import { isMutationApplicationError } from './types.js'
 
 import type {
+  ApplicationTransaction,
   BrowserSyncHost,
   BrowserSyncHostConfig,
-  DeferredEffect,
   JsonValue,
   NormalizedClaims,
   PullCaps,
@@ -289,14 +290,12 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
     return claims
   }
 
-  async #runEffects(effects: DeferredEffect[]): Promise<void> {
-    for (const effect of effects) {
-      try {
-        await effect()
-      } catch (error) {
-        console.error('browser sync deferred effect failed', error)
-      }
-    }
+  async #runEffectsAfterCommit(
+    effects: ReturnType<typeof createPostCommitEffects>
+  ): Promise<void> {
+    await effects.runAfterCommit((error) => {
+      console.error('browser sync deferred effect failed', error)
+    })
   }
 
   #visibility(claims: NormalizedClaims): unknown {
@@ -424,10 +423,11 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
         const results: MutationResult[] = []
         let changed = false
         for (const mutation of plan.mutations) {
-          const deferred: DeferredEffect[] = []
+          const effects = createPostCommitEffects()
           try {
             await this.#reach('before_mutation')
             const preflight = await this.#writeTransaction('mutation', async () => {
+              effects.beginAttempt()
               const decision = engine_preflight(
                 this.#engineDb,
                 plan.clientGroupID,
@@ -443,9 +443,7 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
                 claims,
                 clientID: mutation.clientID,
                 mutationID: mutation.id,
-                defer(effect) {
-                  deferred.push(effect)
-                },
+                defer: effects.defer,
               })
               engine_finalize(
                 this.#engineDb,
@@ -471,7 +469,7 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
 
             changed = true
             results.push({ clientID: mutation.clientID, id: mutation.id, result: {} })
-            await this.#runEffects(deferred)
+            await this.#runEffectsAfterCommit(effects)
           } catch (error) {
             if (!isMutationApplicationError(error)) throw error
             await this.#writeTransaction('mutation', () =>
@@ -537,6 +535,20 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
     await this.#queue.run(async () => {
       await this.#writeTransaction('direct', () => this.#directSql.exec(sql, params))
       this.#notifyDataChanged()
+    })
+  }
+
+  async transaction<Value>(work: ApplicationTransaction<Value>): Promise<Value> {
+    this.#assertAccepting()
+    const effects = createPostCommitEffects()
+    return await this.#queue.run(async () => {
+      effects.beginAttempt()
+      const result = await this.#writeTransaction('direct', () =>
+        work(this.#mutatorSql, { defer: effects.defer })
+      )
+      this.#notifyDataChanged()
+      await this.#runEffectsAfterCommit(effects)
+      return result
     })
   }
 

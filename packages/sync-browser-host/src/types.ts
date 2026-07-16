@@ -57,6 +57,15 @@ export type MutatorContext = {
   defer(effect: DeferredEffect): void
 }
 
+export type ApplicationTransactionContext = {
+  defer(effect: DeferredEffect): void
+}
+
+export type ApplicationTransaction<Value> = (
+  tx: MutatorSql,
+  context: ApplicationTransactionContext
+) => Value | Promise<Value>
+
 export type RegisteredMutator = (
   tx: MutatorSql,
   args: JsonValue,
@@ -130,6 +139,7 @@ export interface BrowserSyncHost {
     params?: readonly unknown[]
   ): Promise<Row[]>
   exec(sql: string, params?: readonly unknown[]): Promise<void>
+  transaction<Value>(work: ApplicationTransaction<Value>): Promise<Value>
   subscribe(listener: () => void): () => void
   close(): Promise<void>
 }

@@ -121,11 +121,88 @@ type WorkerMessage =
       port: MessagePort
     }
   | { type: 'connect'; id: string; port: MessagePort }
+  | { type: 'application-transaction'; id: string }
+  | { type: 'application-transaction-rollback'; id: string }
 
 let host: BrowserSyncHost | undefined
 
 self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
   const message = event.data
+  if (message.type === 'application-transaction-rollback') {
+    if (!host) {
+      self.postMessage({
+        type: 'application-transaction-rollback-error',
+        id: message.id,
+        message: 'host is not ready',
+      })
+      return
+    }
+    void host
+      .transaction(async (tx, context) => {
+        await tx.exec(
+          'INSERT INTO todo (id, title, done) VALUES (?, ?, ?)',
+          ['application-transaction-rollback', 'must roll back', 0]
+        )
+        context.defer(() => {
+          self.postMessage({
+            type: 'application-transaction-rollback-effect',
+            id: message.id,
+          })
+        })
+        throw new Error('rollback requested')
+      })
+      .then(() => {
+        self.postMessage({
+          type: 'application-transaction-rollback-error',
+          id: message.id,
+          message: 'transaction unexpectedly committed',
+        })
+      })
+      .catch((error) => {
+        self.postMessage({
+          type: 'application-transaction-rollback-complete',
+          id: message.id,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      })
+    return
+  }
+  if (message.type === 'application-transaction') {
+    if (!host) {
+      self.postMessage({
+        type: 'application-transaction-error',
+        id: message.id,
+        message: 'host is not ready',
+      })
+      return
+    }
+    void host
+      .transaction(async (tx, context) => {
+        await tx.exec(
+          'INSERT INTO todo (id, title, done) VALUES (?, ?, ?)',
+          ['application-transaction', 'trusted', 0]
+        )
+        const rows = await tx.query<{ title: string }>(
+          'SELECT title FROM todo WHERE id = ?',
+          ['application-transaction']
+        )
+        context.defer(() => {
+          self.postMessage({ type: 'application-transaction-effect', id: message.id })
+        })
+        return rows
+      })
+      .then((rows) => {
+        self.postMessage({ type: 'application-transaction-complete', id: message.id, rows })
+      })
+      .catch((error) => {
+        self.postMessage({
+          type: 'application-transaction-error',
+          id: message.id,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      })
+    return
+  }
   if (message.type === 'connect') {
     if (!host) {
       self.postMessage({ type: 'boot-error', message: 'host is not ready' })

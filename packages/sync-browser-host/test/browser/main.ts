@@ -9,6 +9,12 @@ type WorkerControlMessage =
   | { type: 'fault-reached'; point: BrowserHostTestFaultPoint }
   | { type: 'effect-complete'; id: string }
   | { type: 'connected'; id: string }
+  | { type: 'application-transaction-effect'; id: string }
+  | { type: 'application-transaction-complete'; id: string; rows: unknown[] }
+  | { type: 'application-transaction-error'; id: string; message: string }
+  | { type: 'application-transaction-rollback-effect'; id: string }
+  | { type: 'application-transaction-rollback-complete'; id: string; message: string }
+  | { type: 'application-transaction-rollback-error'; id: string; message: string }
 
 type Connection = {
   worker: Worker
@@ -16,6 +22,11 @@ type Connection = {
   attachClient(): Promise<BrowserSyncHostPortClient>
   waitForFault(point: BrowserHostTestFaultPoint): Promise<void>
   waitForEffect(id: string): Promise<void>
+  runApplicationTransaction(): Promise<{ rows: unknown[]; effectBeforeResolve: boolean }>
+  runRolledBackApplicationTransaction(): Promise<{
+    message: string
+    effectRan: boolean
+  }>
   terminate(): void
 }
 
@@ -107,6 +118,55 @@ async function openConnection(
     },
     async waitForEffect(id) {
       await waitFor((message) => message.type === 'effect-complete' && message.id === id)
+    },
+    async runApplicationTransaction() {
+      const id = crypto.randomUUID()
+      worker.postMessage({ type: 'application-transaction', id })
+      const complete = await waitFor(
+        (message) =>
+          (message.type === 'application-transaction-complete' ||
+            message.type === 'application-transaction-error') &&
+          message.id === id
+      )
+      if (complete.type !== 'application-transaction-complete') {
+        throw new Error(
+          complete.type === 'application-transaction-error'
+            ? complete.message
+            : 'unexpected application transaction response'
+        )
+      }
+      return {
+        rows: complete.rows,
+        effectBeforeResolve: messages.some(
+          (message) =>
+            message.type === 'application-transaction-effect' && message.id === id
+        ),
+      }
+    },
+    async runRolledBackApplicationTransaction() {
+      const id = crypto.randomUUID()
+      worker.postMessage({ type: 'application-transaction-rollback', id })
+      const complete = await waitFor(
+        (message) =>
+          (message.type === 'application-transaction-rollback-complete' ||
+            message.type === 'application-transaction-rollback-error') &&
+          message.id === id
+      )
+      if (complete.type !== 'application-transaction-rollback-complete') {
+        throw new Error(
+          complete.type === 'application-transaction-rollback-error'
+            ? complete.message
+            : 'unexpected application transaction rollback response'
+        )
+      }
+      return {
+        message: complete.message,
+        effectRan: messages.some(
+          (message) =>
+            message.type === 'application-transaction-rollback-effect' &&
+            message.id === id
+        ),
+      }
     },
     terminate() {
       worker.terminate()
@@ -265,6 +325,45 @@ async function runBrowserHostSpike() {
   )
   equal(wakes, 2, 'direct SQL wakes the first attached client')
   equal(secondWakes, 2, 'direct SQL wakes the second attached client')
+  wakes = 0
+  secondWakes = 0
+
+  const rolledBackApplicationTransaction =
+    await connection.runRolledBackApplicationTransaction()
+  equal(
+    rolledBackApplicationTransaction.message,
+    'rollback requested',
+    'application transaction returns the callback error'
+  )
+  equal(
+    rolledBackApplicationTransaction.effectRan,
+    false,
+    'application transaction drops deferred effects on rollback'
+  )
+  equal(
+    await connection.client.query(
+      'SELECT id FROM todo WHERE id = ?',
+      ['application-transaction-rollback']
+    ),
+    [],
+    'application transaction rolls back row writes'
+  )
+  equal(wakes, 0, 'rolled-back application transaction does not wake clients')
+  equal(secondWakes, 0, 'rolled-back application transaction does not wake peer clients')
+
+  const applicationTransaction = await connection.runApplicationTransaction()
+  equal(
+    applicationTransaction.rows,
+    [{ title: 'trusted' }],
+    'application transaction materializes rows'
+  )
+  equal(
+    applicationTransaction.effectBeforeResolve,
+    true,
+    'application transaction runs deferred effects before resolving'
+  )
+  equal(wakes, 1, 'application transaction wakes the first attached client')
+  equal(secondWakes, 1, 'application transaction wakes the second attached client')
   wakes = 0
   secondWakes = 0
 

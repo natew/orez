@@ -6,6 +6,8 @@ export {
 export {
   MutationApplicationError,
   registerMutators,
+  type ApplicationTransaction,
+  type ApplicationTransactionContext,
   type BrowserSyncHost,
   type BrowserSyncHostAssets,
   type BrowserSyncHostConfig,
