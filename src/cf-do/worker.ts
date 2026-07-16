@@ -39,15 +39,15 @@ import {
   upgradeToTableSnapshot,
 } from './tx-journal.js'
 import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
-import type {
-  ApplicationSqlTable,
-} from './application-sql.js'
+
+import type { ApplicationSqlExecResult, ApplicationSqlTable } from './application-sql.js'
 import type { SqlStatementMetadata } from 'orez-sync-cf-host'
 
 export { createApplicationSqlClient } from './application-sql.js'
 export type {
   ApplicationSqlClient,
   ApplicationSqlDurableObjectNamespace,
+  ApplicationSqlExecResult,
   ApplicationSqlQueryCompiler,
   ApplicationSqlRpc,
   ApplicationSqlTable,
@@ -151,7 +151,7 @@ export type ZeroDOTransactionExecutor = {
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
-  ): Promise<void>
+  ): Promise<ApplicationSqlExecResult>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -248,7 +248,9 @@ function assertApplicationTransactionSQL(sql: string): void {
   }
 }
 
-function applicationSqlTrack(metadata: SqlStatementMetadata | undefined): SqlTrack | undefined {
+function applicationSqlTrack(
+  metadata: SqlStatementMetadata | undefined
+): SqlTrack | undefined {
   if (!metadata) return undefined
   const operations = {
     insert: 'INSERT',
@@ -361,10 +363,15 @@ export class ZeroDO extends DurableObject {
         if (trippedAt) this.writeBudget.restoreTrip(trippedAt)
       }
       const recovered = await this.atomically(() => {
-        const transactionIDs = recoverTxJournal(this.sql, 'application', (transactionID) => {
-          this.rollbackPendingTrackedChanges(transactionID)
-        })
-        for (const transactionID of transactionIDs) this.deletePendingTrackedChanges(transactionID)
+        const transactionIDs = recoverTxJournal(
+          this.sql,
+          'application',
+          (transactionID) => {
+            this.rollbackPendingTrackedChanges(transactionID)
+          }
+        )
+        for (const transactionID of transactionIDs)
+          this.deletePendingTrackedChanges(transactionID)
         return transactionIDs
       })
       if (recovered.length) this.invalidateSchemaCaches()
@@ -1146,7 +1153,8 @@ export class ZeroDO extends DurableObject {
     }
     const tx: ZeroDOTransactionExecutor = {
       async exec(sql, params = [], metadata) {
-        execute(sql, params, metadata)
+        const result = execute(sql, params, metadata)
+        return { changes: result.changes }
       },
       async query<Row extends Record<string, unknown>>(sql, params = []) {
         return execute(sql, params).rows as Row[]
@@ -1212,23 +1220,25 @@ export class ZeroDO extends DurableObject {
    * avoids re-entering a Durable Object while it waits on a callback. These
    * methods are intentionally absent from fetch().
    */
-  async applicationSqlQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
-    sql: string,
-    params: readonly unknown[] = []
-  ): Promise<Row[]> {
+  async applicationSqlQuery<
+    Row extends Record<string, unknown> = Record<string, unknown>,
+  >(sql: string, params: readonly unknown[] = []): Promise<Row[]> {
     this.assertNoApplicationSqlSession()
-    return this.runApplicationTransaction(() => {
-      throw new Error('queryAst requires an application SQLite transaction compiler')
-    }, (tx) => tx.query<Row>(sql, params))
+    return this.runApplicationTransaction(
+      () => {
+        throw new Error('queryAst requires an application SQLite transaction compiler')
+      },
+      (tx) => tx.query<Row>(sql, params)
+    )
   }
 
   async applicationSqlExec(
     sql: string,
     params: readonly unknown[] = [],
     metadata?: SqlStatementMetadata
-  ): Promise<void> {
+  ): Promise<ApplicationSqlExecResult> {
     this.assertNoApplicationSqlSession()
-    await this.runApplicationTransaction(
+    return this.runApplicationTransaction(
       () => {
         throw new Error('queryAst requires an application SQLite transaction compiler')
       },
@@ -1236,7 +1246,9 @@ export class ZeroDO extends DurableObject {
     )
   }
 
-  async applicationSqlRegisterTables(tables: readonly ApplicationSqlTable[]): Promise<void> {
+  async applicationSqlRegisterTables(
+    tables: readonly ApplicationSqlTable[]
+  ): Promise<void> {
     this.assertNoApplicationSqlSession()
     await this.atomically(() => this.registerApplicationSqlTables(tables))
   }
@@ -1248,13 +1260,13 @@ export class ZeroDO extends DurableObject {
     this.applicationSqlSessionID = sessionID
   }
 
-  async applicationSqlSessionQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
-    sessionID: string,
-    sql: string,
-    params: readonly unknown[] = []
-  ): Promise<Row[]> {
+  async applicationSqlSessionQuery<
+    Row extends Record<string, unknown> = Record<string, unknown>,
+  >(sessionID: string, sql: string, params: readonly unknown[] = []): Promise<Row[]> {
     this.assertApplicationSqlSession(sessionID)
-    return this.atomically(() => this.executeSQL(sql, [...params], undefined, sessionID).rows as Row[])
+    return this.atomically(
+      () => this.executeSQL(sql, [...params], undefined, sessionID).rows as Row[]
+    )
   }
 
   async applicationSqlSessionExec(
@@ -1262,11 +1274,17 @@ export class ZeroDO extends DurableObject {
     sql: string,
     params: readonly unknown[] = [],
     metadata?: SqlStatementMetadata
-  ): Promise<void> {
+  ): Promise<ApplicationSqlExecResult> {
     this.assertApplicationSqlSession(sessionID)
-    await this.atomically(() =>
-      this.executeSQL(sql, [...params], applicationSqlTrack(metadata), sessionID)
-    )
+    return this.atomically(() => {
+      const result = this.executeSQL(
+        sql,
+        [...params],
+        applicationSqlTrack(metadata),
+        sessionID
+      )
+      return { changes: result.changes }
+    })
   }
 
   async applicationSqlSessionQueryPlan<Result = unknown>(
@@ -1361,6 +1379,7 @@ export class ZeroDO extends DurableObject {
   ): {
     rows: Record<string, unknown>[]
     columns: string[]
+    changes: number
     affectedRows?: number
     capturedChanges?: number
   } {
@@ -1421,11 +1440,14 @@ export class ZeroDO extends DurableObject {
     this.cdc.finishSchemaChange(suspendedCdc)
     const columns = Array.isArray(cursor.columnNames) ? cursor.columnNames : []
     const rows = this.cursorRows(cursor, columns)
+    const rowMutation = isSqlRowMutation(sql)
+    const changes = rowMutation
+      ? Number(this.sql.exec('SELECT changes() AS changes').one()?.changes ?? 0)
+      : 0
     const mutation = isSqlMutation(sql)
     if (mutation) this.writeBudget.recordLogical(rows.length)
-    if (mutation && !isSqlRowMutation(sql)) this.cdc.invalidateSchema()
-    const captured =
-      track || (this.cdc.active && isSqlRowMutation(sql)) ? this.cdc.drain() : []
+    if (mutation && !rowMutation) this.cdc.invalidateSchema()
+    const captured = track || (this.cdc.active && rowMutation) ? this.cdc.drain() : []
     for (const change of captured) {
       this.appendCapturedChange(
         change,
@@ -1464,11 +1486,12 @@ export class ZeroDO extends DurableObject {
     }
 
     const publishedCaptured = captured.filter((change) => change.publish !== false).length
-    if (!track) return { rows, columns, capturedChanges: publishedCaptured }
+    if (!track) return { rows, columns, changes, capturedChanges: publishedCaptured }
 
     return {
       rows: track.returnRows ? rows : [],
       columns: track.returnRows ? columns : [],
+      changes,
       affectedRows: rows.length,
       capturedChanges:
         publishedCaptured ||

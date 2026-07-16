@@ -13,9 +13,17 @@ function createSqlStorage() {
     exec(statement: string, ...params: unknown[]) {
       lastSql = statement
       lastParams = params
+      if (/^\s*select changes\(\)/i.test(statement)) {
+        return {
+          columnNames: ['changes'],
+          one: () => ({ changes: 1 }),
+          toArray: () => [{ changes: 1 }],
+        }
+      }
       const selected = /^\s*select/i.test(statement)
       return {
         columnNames: selected ? ['id', 'enabled'] : [],
+        rowsWritten: selected ? 0 : 1,
         toArray() {
           cursorConsumed = true
           return selected ? rows : []
@@ -131,9 +139,12 @@ describe('ZeroDO trusted application transaction', () => {
         metadata: unknown
       ) => {
         calls.push(['exec', sql, params, metadata])
+        return { changes: 1 }
       },
-      applicationSqlTransaction: async (_compiler: unknown, work: (tx: unknown) => unknown) =>
-        work(target),
+      applicationSqlTransaction: async (
+        _compiler: unknown,
+        work: (tx: unknown) => unknown
+      ) => work(target),
     }
     const client = createApplicationSqlClient(
       {
@@ -147,13 +158,18 @@ describe('ZeroDO trusted application transaction', () => {
     )
 
     await client.query('SELECT id FROM item WHERE id = ?', ['row-1'])
-    await client.exec('UPDATE item SET enabled = ? WHERE id = ?', [1, 'row-1'], {
-      table: 'item',
-      publicTable: 'public.item',
-      kind: 'update',
-    })
+    const execResult = await client.exec(
+      'UPDATE item SET enabled = ? WHERE id = ?',
+      [1, 'row-1'],
+      {
+        table: 'item',
+        publicTable: 'public.item',
+        kind: 'update',
+      }
+    )
 
     expect(client.namespace).toBe('proj-123')
+    expect(execResult).toEqual({ changes: 1 })
     expect(calls).toEqual([
       ['get', 'id:proj-123'],
       ['query', 'SELECT id FROM item WHERE id = ?', ['row-1']],
@@ -194,11 +210,14 @@ describe('ZeroDO trusted application transaction', () => {
     const { createApplicationSqlClient } = await import('./application-sql.js')
     const target = {
       applicationSqlQuery: async () => [],
-      applicationSqlExec: async () => {},
+      applicationSqlExec: async () => ({ changes: 0 }),
       applicationSqlRegisterTables: async () => {},
       applicationSqlBegin: async (sessionID: string) => events.push(`begin:${sessionID}`),
       applicationSqlSessionQuery: async () => [],
-      applicationSqlSessionExec: async () => events.push('exec'),
+      applicationSqlSessionExec: async () => {
+        events.push('exec')
+        return { changes: 1 }
+      },
       applicationSqlSessionQueryPlan: async () => {
         events.push('queryAst')
         return [{ id: 'row-1', enabled: true }]
@@ -216,11 +235,12 @@ describe('ZeroDO trusted application transaction', () => {
       () => flatPlan(),
       async (tx, context) => {
         const rows = await tx.queryAst({ table: 'item' }, pluralFormat)
-        await tx.exec('UPDATE item SET enabled = ?', [1], {
+        const execResult = await tx.exec('UPDATE item SET enabled = ?', [1], {
           table: 'item',
           publicTable: 'public.item',
           kind: 'update',
         })
+        expect(execResult).toEqual({ changes: 1 })
         context.defer(() => events.push('effect'))
         return rows
       }
@@ -234,12 +254,13 @@ describe('ZeroDO trusted application transaction', () => {
   it('installs CDC from explicit SQLite write metadata', async () => {
     const { zero } = await createTestZero(async (work) => await work())
 
-    await zero.applicationSqlExec(
+    const result = await zero.applicationSqlExec(
       'INSERT INTO item (id, enabled) VALUES (?, ?)',
       ['row-1', 1],
       { table: 'item', publicTable: 'public.item', kind: 'upsert' }
     )
 
+    expect(result).toEqual({ changes: 1 })
     expect(zero.cdc.ensureTable).toHaveBeenCalledWith({
       physicalTableName: 'item',
       tableName: 'public.item',

@@ -1,5 +1,5 @@
-import type { DeferredEffect } from 'orez-sync-cf-host/post-commit'
 import type { SqlStatementMetadata } from 'orez-sync-cf-host'
+import type { DeferredEffect } from 'orez-sync-cf-host/post-commit'
 import type {
   CompiledTransactionQueryPlan,
   TransactionQueryBudget,
@@ -16,8 +16,16 @@ export type ApplicationSqlTable = Pick<SqlStatementMetadata, 'table' | 'publicTa
   publish?: boolean
 }
 
+export type ApplicationSqlExecResult = {
+  changes: number
+}
+
 export type ApplicationSqlTransaction = {
-  exec(sql: string, params?: readonly unknown[], metadata?: SqlStatementMetadata): Promise<void>
+  exec(
+    sql: string,
+    params?: readonly unknown[],
+    metadata?: SqlStatementMetadata
+  ): Promise<ApplicationSqlExecResult>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -53,10 +61,12 @@ export type ApplicationSqlRpc = {
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
-  ): Promise<void>
+  ): Promise<ApplicationSqlExecResult>
   applicationSqlRegisterTables(tables: readonly ApplicationSqlTable[]): Promise<void>
   applicationSqlBegin(sessionID: string): Promise<void>
-  applicationSqlSessionQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
+  applicationSqlSessionQuery<
+    Row extends Record<string, unknown> = Record<string, unknown>,
+  >(
     sessionID: string,
     sql: string,
     params?: readonly unknown[]
@@ -66,7 +76,7 @@ export type ApplicationSqlRpc = {
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
-  ): Promise<void>
+  ): Promise<ApplicationSqlExecResult>
   applicationSqlSessionQueryPlan<Result = unknown>(
     sessionID: string,
     plan: CompiledTransactionQueryPlan,
@@ -92,7 +102,11 @@ export type ApplicationSqlClient = {
     sql: string,
     params?: readonly unknown[]
   ): Promise<Row[]>
-  exec(sql: string, params?: readonly unknown[], metadata?: SqlStatementMetadata): Promise<void>
+  exec(
+    sql: string,
+    params?: readonly unknown[],
+    metadata?: SqlStatementMetadata
+  ): Promise<ApplicationSqlExecResult>
   registerTables(tables: readonly ApplicationSqlTable[]): Promise<void>
   transaction<Value>(
     compileQuery: ApplicationSqlQueryCompiler,
@@ -110,7 +124,8 @@ export function createApplicationSqlClient(
   return {
     namespace,
     query: (sql, params = []) => target.applicationSqlQuery(sql, params),
-    exec: (sql, params = [], metadata) => target.applicationSqlExec(sql, params, metadata),
+    exec: (sql, params = [], metadata) =>
+      target.applicationSqlExec(sql, params, metadata),
     registerTables: (tables) => target.applicationSqlRegisterTables(tables),
     async transaction(compileQuery, work, queryBudget) {
       const sessionID = crypto.randomUUID()
@@ -119,12 +134,19 @@ export function createApplicationSqlClient(
       const tx: ApplicationSqlTransaction = {
         exec: (sql, params = [], metadata) =>
           target.applicationSqlSessionExec(sessionID, sql, params, metadata),
-        query: (sql, params = []) => target.applicationSqlSessionQuery(sessionID, sql, params),
+        query: (sql, params = []) =>
+          target.applicationSqlSessionQuery(sessionID, sql, params),
         async queryAst(ast, format, queryName) {
           const plan = await compileQuery(ast, format)
-          return target.applicationSqlSessionQueryPlan(sessionID, plan, queryName, queryBudget)
+          return target.applicationSqlSessionQueryPlan(
+            sessionID,
+            plan,
+            queryName,
+            queryBudget
+          )
         },
-        registerTables: (tables) => target.applicationSqlSessionRegisterTables(sessionID, tables),
+        registerTables: (tables) =>
+          target.applicationSqlSessionRegisterTables(sessionID, tables),
       }
       try {
         const value = await work(tx, { defer: (effect) => effects.push(effect) })
