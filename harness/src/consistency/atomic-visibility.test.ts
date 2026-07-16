@@ -131,7 +131,7 @@ describe(`atomic visibility (${ATOMIC_VISIBILITY_WORKLOAD_PROFILE.name}@${ATOMIC
   test('rejects histories with no known successful mutation', () => {
     expect(violations(validEvidence('info'))).toEqual([
       'atomic visibility requires at least one multi-effect mutation group',
-      'atomic visibility requires at least one non-writing client observation',
+      'atomic visibility requires at least one non-writing client observation of a complete group',
       'atomic visibility requires at least one eligible group/read pair',
       'atomic visibility requires at least one eligible pair observing a complete group',
     ])
@@ -156,7 +156,7 @@ describe(`atomic visibility (${ATOMIC_VISIBILITY_WORKLOAD_PROFILE.name}@${ATOMIC
     )
     expect(violations(events)).toEqual([
       'atomic visibility requires at least one multi-effect mutation group',
-      'atomic visibility requires at least one non-writing client observation',
+      'atomic visibility requires at least one non-writing client observation of a complete group',
       'atomic visibility requires at least one eligible group/read pair',
       'atomic visibility requires at least one eligible pair observing a complete group',
     ])
@@ -165,7 +165,7 @@ describe(`atomic visibility (${ATOMIC_VISIBILITY_WORKLOAD_PROFILE.name}@${ATOMIC
   test('rejects histories with no successful read', () => {
     expect(violations(history(...mutation('group-1', group)))).toEqual([
       'atomic visibility requires at least one successful read',
-      'atomic visibility requires at least one non-writing client observation',
+      'atomic visibility requires at least one non-writing client observation of a complete group',
       'atomic visibility requires at least one eligible group/read pair',
       'atomic visibility requires at least one eligible pair observing a complete group',
     ])
@@ -177,7 +177,7 @@ describe(`atomic visibility (${ATOMIC_VISIBILITY_WORKLOAD_PROFILE.name}@${ATOMIC
       ...read('read-partial-scope', { x: [1] })
     )
     expect(violations(events)).toEqual([
-      'atomic visibility requires at least one non-writing client observation',
+      'atomic visibility requires at least one non-writing client observation of a complete group',
       'atomic visibility requires at least one eligible group/read pair',
       'atomic visibility requires at least one eligible pair observing a complete group',
     ])
@@ -189,6 +189,7 @@ describe(`atomic visibility (${ATOMIC_VISIBILITY_WORKLOAD_PROFILE.name}@${ATOMIC
       ...read('read-none', { x: [], y: [] })
     )
     expect(violations(events)).toEqual([
+      'atomic visibility requires at least one non-writing client observation of a complete group',
       'atomic visibility requires at least one eligible pair observing a complete group',
     ])
   })
@@ -199,7 +200,7 @@ describe(`atomic visibility (${ATOMIC_VISIBILITY_WORKLOAD_PROFILE.name}@${ATOMIC
       event.clientId = 'writer-client'
     }
     expect(violations(events)).toEqual([
-      'atomic visibility requires at least one non-writing client observation',
+      'atomic visibility requires at least one non-writing client observation of a complete group',
     ])
   })
 
@@ -259,7 +260,7 @@ describe(`atomic visibility (${ATOMIC_VISIBILITY_WORKLOAD_PROFILE.name}@${ATOMIC
     expect(violations(missingMutation)).toEqual([
       'mutation group-1 terminal ok has no transaction array',
       'atomic visibility requires at least one multi-effect mutation group',
-      'atomic visibility requires at least one non-writing client observation',
+      'atomic visibility requires at least one non-writing client observation of a complete group',
       'atomic visibility requires at least one eligible group/read pair',
       'atomic visibility requires at least one eligible pair observing a complete group',
     ])

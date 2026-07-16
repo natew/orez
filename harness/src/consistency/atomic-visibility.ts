@@ -121,24 +121,23 @@ export function checkAtomicVisibility(events: readonly HistoryEvent[]): CheckRes
 
   let eligiblePairs = 0
   let completePairs = 0
-  let nonWritingPairs = 0
+  let nonWritingCompletePairs = 0
   for (const group of groups) {
     for (const read of reads) {
       if (![...group.keys].every((key) => read.values.has(key))) continue
       eligiblePairs++
-      if (
+      const nonWriting =
         group.clientId !== undefined &&
         read.clientId !== undefined &&
         read.clientId !== group.clientId
-      ) {
-        nonWritingPairs++
-      }
       const missing = group.effects.filter(
         ({ key, value }) => !read.values.get(key)!.includes(value)
       )
       const present = group.effects.length - missing.length
-      if (present === group.effects.length) completePairs++
-      else if (present > 0) {
+      if (present === group.effects.length) {
+        completePairs++
+        if (nonWriting) nonWritingCompletePairs++
+      } else if (present > 0) {
         violations.push(
           `atomic group ${group.opId} is partially visible in read ${read.opId}; missing effects: ${missing.map(({ key, value }) => `${key}=${value}`).join(', ')}`
         )
@@ -152,9 +151,9 @@ export function checkAtomicVisibility(events: readonly HistoryEvent[]): CheckRes
   if (successfulReads === 0) {
     violations.push('atomic visibility requires at least one successful read')
   }
-  if (nonWritingPairs === 0) {
+  if (nonWritingCompletePairs === 0) {
     violations.push(
-      'atomic visibility requires at least one non-writing client observation'
+      'atomic visibility requires at least one non-writing client observation of a complete group'
     )
   }
   if (eligiblePairs === 0) {
