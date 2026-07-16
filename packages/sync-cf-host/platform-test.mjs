@@ -91,6 +91,21 @@ try {
   check(result.body.result.balance, 105, 'application transaction singular root')
   check(result.body.result.entries.length, 2, 'application transaction related rows')
 
+  const applicationRpc = ns('application-rpc')
+  result = await call(`_application-rpc/${applicationRpc}`, '/commit')
+  check(result.status, 200, 'application RPC transaction status')
+  check(result.body.before, [{ balance: 100 }], 'application RPC query before transaction')
+  check(result.body.result.balance, 100, 'application RPC queryAst serializes to the Durable Object')
+  check(result.body.result.entries.length, 0, 'application RPC queryAst materializes relations')
+  check(result.body.after, [{ balance: 111 }], 'application RPC exec commits through session')
+  check(result.body.effectRan, true, 'application RPC deferred effect runs after commit')
+
+  result = await call(`_application-rpc/${applicationRpc}`, '/rollback')
+  check(result.status, 409, 'application RPC rollback status')
+  check(result.body.before, [{ balance: 111 }], 'application RPC rollback starts after commit')
+  check(result.body.after, [{ balance: 111 }], 'application RPC rollback discards SQL write')
+  check(result.body.effectRan, false, 'application RPC rollback discards deferred effect')
+
   result = await call(transactions, '/application-transaction-query-budget')
   check(result.status, 409, 'application transaction query budget status')
   check(

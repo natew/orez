@@ -189,27 +189,46 @@ describe('ZeroDO trusted application transaction', () => {
     expect(events).toEqual(['transaction', 'work', 'commit', 'effect'])
   })
 
-  it('runs private application RPC work in the owning transaction', async () => {
+  it('serializes application transactions without passing a callback to the Durable Object', async () => {
     const events: string[] = []
-    const { storage, zero } = await createTestZero(async (work) => {
-      events.push('transaction')
-      const value = await work()
-      events.push('commit')
-      return value
-    })
+    const { createApplicationSqlClient } = await import('./application-sql.js')
+    const target = {
+      applicationSqlQuery: async () => [],
+      applicationSqlExec: async () => {},
+      applicationSqlRegisterTables: async () => {},
+      applicationSqlBegin: async (sessionID: string) => events.push(`begin:${sessionID}`),
+      applicationSqlSessionQuery: async () => [],
+      applicationSqlSessionExec: async () => events.push('exec'),
+      applicationSqlSessionQueryPlan: async () => {
+        events.push('queryAst')
+        return [{ id: 'row-1', enabled: true }]
+      },
+      applicationSqlSessionRegisterTables: async () => {},
+      applicationSqlCommit: async () => events.push('commit'),
+      applicationSqlRollback: async () => events.push('rollback'),
+    }
+    const client = createApplicationSqlClient(
+      { idFromName: () => 'id', get: () => target },
+      'proj-123'
+    )
 
-    const result = await zero.applicationSqlTransaction(
+    const result = await client.transaction(
       () => flatPlan(),
-      async (tx: any, context: any) => {
-        storage.resetCursor()
+      async (tx, context) => {
         const rows = await tx.queryAst({ table: 'item' }, pluralFormat)
+        await tx.exec('UPDATE item SET enabled = ?', [1], {
+          table: 'item',
+          publicTable: 'public.item',
+          kind: 'update',
+        })
         context.defer(() => events.push('effect'))
         return rows
       }
     )
 
     expect(result).toEqual([{ id: 'row-1', enabled: true }])
-    expect(events).toEqual(['transaction', 'commit', 'effect'])
+    expect(events[0]).toMatch(/^begin:/)
+    expect(events.slice(1)).toEqual(['queryAst', 'exec', 'commit', 'effect'])
   })
 
   it('installs CDC from explicit SQLite write metadata', async () => {

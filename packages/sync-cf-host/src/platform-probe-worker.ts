@@ -1,6 +1,6 @@
 import { createQueryCompiler } from 'orez-sync-cf-host/query-compiler'
 
-import { ZeroDO } from '../../../src/cf-do/worker.js'
+import { createApplicationSqlClient, ZeroDO } from '../../../src/cf-do/worker.js'
 import {
   SqlStorageDirect,
   SqlStorageMutatorTransaction,
@@ -84,6 +84,50 @@ const json = (value: unknown, status = 200) =>
     status,
     headers: { 'cache-control': 'no-store' },
   })
+
+async function runApplicationRpcProbe(
+  env: Env,
+  namespace: string,
+  action: 'commit' | 'rollback'
+): Promise<Response> {
+  const client = createApplicationSqlClient(env.PROBE_DO, namespace)
+  const before = await client.query<{ balance: number }>(
+    "SELECT balance FROM accounts WHERE id = 'primary'"
+  )
+  let effectRan = false
+  try {
+    const result = await client.transaction(
+      compileTransactionQuery,
+      async (tx, context) => {
+        const account = await tx.queryAst<{ balance: number; entries: unknown[] }>(
+          transactionQueryAst,
+          transactionQueryFormat,
+          `applicationRpc${action}`
+        )
+        await tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = 'primary'", [11], {
+          table: 'accounts',
+          publicTable: 'public.account',
+          kind: 'update',
+        })
+        context.defer(() => {
+          effectRan = true
+        })
+        if (action === 'rollback') throw new Error('intentional application RPC rollback')
+        return account
+      },
+      { maxSelects: 8, maxRows: 20 }
+    )
+    const after = await client.query<{ balance: number }>(
+      "SELECT balance FROM accounts WHERE id = 'primary'"
+    )
+    return json({ ok: true, before, after, result, effectRan })
+  } catch (error) {
+    const after = await client.query<{ balance: number }>(
+      "SELECT balance FROM accounts WHERE id = 'primary'"
+    )
+    return json({ ok: false, error: String(error), before, after, effectRan }, 409)
+  }
+}
 
 export class ProbeDurableObject extends ZeroDO {
   readonly #db: SqlStorageSyncDb
@@ -367,7 +411,7 @@ export class ProbeDurableObject extends ZeroDO {
     }
 
     if (route === '/application-transaction-query') {
-      const result = await this.applicationSqlTransaction(
+      const result = await this.runApplicationTransaction(
         compileTransactionQuery,
         (tx) =>
           tx.queryAst(
@@ -410,10 +454,17 @@ export class ProbeDurableObject extends ZeroDO {
 }
 
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
-    const [, namespace] = url.pathname.split('/')
-    if (!namespace) return Promise.resolve(new Response('orez rust sync M0 probe'))
+    const [, first, second, third] = url.pathname.split('/')
+    if (first === '_application-rpc') {
+      if (!second || (third !== 'commit' && third !== 'rollback')) {
+        return json({ error: 'unknown application RPC probe' }, 404)
+      }
+      return runApplicationRpcProbe(env, second, third)
+    }
+    const namespace = first
+    if (!namespace) return new Response('orez rust sync M0 probe')
     return env.PROBE_DO.get(env.PROBE_DO.idFromName(namespace)).fetch(request)
   },
 } satisfies ExportedHandler<Env>

@@ -1,5 +1,5 @@
 // @ts-nocheck — cloudflare:workers types not available in orez
-import { DurableObject, RpcTarget } from 'cloudflare:workers'
+import { DurableObject } from 'cloudflare:workers'
 import {
   createPostCommitEffects,
   type DeferredEffect,
@@ -40,10 +40,7 @@ import {
 } from './tx-journal.js'
 import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
 import type {
-  ApplicationSqlQueryCompiler,
-  ApplicationSqlTransaction,
-  ApplicationSqlTransactionContext,
-  ApplicationSqlTransactionWork,
+  ApplicationSqlTable,
 } from './application-sql.js'
 import type { SqlStatementMetadata } from 'orez-sync-cf-host'
 
@@ -53,6 +50,7 @@ export type {
   ApplicationSqlDurableObjectNamespace,
   ApplicationSqlQueryCompiler,
   ApplicationSqlRpc,
+  ApplicationSqlTable,
   ApplicationSqlTransaction,
   ApplicationSqlTransactionContext,
   ApplicationSqlTransactionWork,
@@ -169,50 +167,6 @@ export type ZeroDOTransactionContext = {
   defer(effect: DeferredEffect): void
 }
 
-class ApplicationSqlTransactionTarget
-  extends RpcTarget
-  implements ApplicationSqlTransaction
-{
-  constructor(private readonly tx: ZeroDOTransactionExecutor) {
-    super()
-  }
-
-  exec(
-    sql: string,
-    params: readonly unknown[] = [],
-    metadata?: SqlStatementMetadata
-  ): Promise<void> {
-    return this.tx.exec(sql, params, metadata)
-  }
-
-  query<Row extends Record<string, unknown> = Record<string, unknown>>(
-    sql: string,
-    params: readonly unknown[] = []
-  ): Promise<Row[]> {
-    return this.tx.query<Row>(sql, params)
-  }
-
-  queryAst<Result = unknown>(
-    ast: unknown,
-    format: TransactionQueryFormat,
-    queryName?: string
-  ): Promise<Result> {
-    return this.tx.queryAst<Result>(ast, format, queryName)
-  }
-}
-
-class ApplicationSqlTransactionContextTarget
-  extends RpcTarget
-  implements ApplicationSqlTransactionContext
-{
-  constructor(private readonly context: ZeroDOTransactionContext) {
-    super()
-  }
-
-  defer(effect: DeferredEffect): void {
-    this.context.defer(effect)
-  }
-}
 interface SocketAttachment {
   clientID: string
   clientGroupID: string
@@ -309,10 +263,6 @@ function applicationSqlTrack(metadata: SqlStatementMetadata | undefined): SqlTra
   }
 }
 
-const applicationSqlQueryCompiler: ZeroDOQueryCompiler = () => {
-  throw new Error('queryAst requires an application SQLite transaction compiler')
-}
-
 export class ZeroDO extends DurableObject {
   private sql: any
   private watermarks: DurableWatermarkState
@@ -324,6 +274,7 @@ export class ZeroDO extends DurableObject {
   private writeBudgetAdminToken: string | undefined
   private activeWriteMeasurements: SqlWriteMeasurement[] | null = null
   private pendingChangesSchemaReady = false
+  private applicationSqlSessionID: string | null = null
 
   private recordWriteBudgetRows(rows: number): void {
     const wasTripped = this.writeBudget.status().tripped
@@ -1224,20 +1175,46 @@ export class ZeroDO extends DurableObject {
     return value
   }
 
+  private assertApplicationSqlSession(sessionID: string): void {
+    if (!sessionID || this.applicationSqlSessionID !== sessionID) {
+      throw new Error('application SQLite session is not active')
+    }
+  }
+
+  private assertNoApplicationSqlSession(): void {
+    if (this.applicationSqlSessionID) {
+      throw new Error('application SQLite session is active')
+    }
+  }
+
+  private applicationSqlTables(): string[] {
+    return this.sql
+      .exec("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .toArray()
+      .map((row: any) => String(row.name))
+  }
+
+  private registerApplicationSqlTables(tables: readonly ApplicationSqlTable[]): void {
+    for (const table of tables) {
+      this.cdc.ensureTable({ physicalTableName: table.table, tableName: table.publicTable })
+    }
+  }
+
   /**
    * Private Durable Object RPC surface for the application SQLite client.
    *
-   * These methods are intentionally absent from fetch(): only a Worker that
-   * holds the ZeroSqlDO binding can call them. The bound object selects the
-   * application namespace; callers never include a namespace in SQL payloads.
+   * The client owns its callback and sends serialized session turns. This
+   * avoids re-entering a Durable Object while it waits on a callback. These
+   * methods are intentionally absent from fetch().
    */
   async applicationSqlQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params: readonly unknown[] = []
   ): Promise<Row[]> {
-    return this.runApplicationTransaction(applicationSqlQueryCompiler, (tx) =>
-      tx.query<Row>(sql, params)
-    )
+    this.assertNoApplicationSqlSession()
+    return this.runApplicationTransaction(() => {
+      throw new Error('queryAst requires an application SQLite transaction compiler')
+    }, (tx) => tx.query<Row>(sql, params))
   }
 
   async applicationSqlExec(
@@ -1245,25 +1222,98 @@ export class ZeroDO extends DurableObject {
     params: readonly unknown[] = [],
     metadata?: SqlStatementMetadata
   ): Promise<void> {
-    await this.runApplicationTransaction(applicationSqlQueryCompiler, (tx) =>
-      tx.exec(sql, params, metadata)
+    this.assertNoApplicationSqlSession()
+    await this.runApplicationTransaction(
+      () => {
+        throw new Error('queryAst requires an application SQLite transaction compiler')
+      },
+      (tx) => tx.exec(sql, params, metadata)
     )
   }
 
-  async applicationSqlTransaction<Value>(
-    compileQuery: ApplicationSqlQueryCompiler,
-    work: ApplicationSqlTransactionWork<Value>,
-    queryBudget?: Partial<TransactionQueryBudget>
-  ): Promise<Value> {
-    return this.runApplicationTransaction(
-      compileQuery,
-      (tx, context) =>
-        work(
-          new ApplicationSqlTransactionTarget(tx),
-          new ApplicationSqlTransactionContextTarget(context)
-        ),
-      queryBudget
+  async applicationSqlRegisterTables(tables: readonly ApplicationSqlTable[]): Promise<void> {
+    this.assertNoApplicationSqlSession()
+    await this.atomically(() => this.registerApplicationSqlTables(tables))
+  }
+
+  async applicationSqlBegin(sessionID: string): Promise<void> {
+    this.assertNoApplicationSqlSession()
+    if (!sessionID) throw new TypeError('application SQLite session id is required')
+    await this.atomically(() =>
+      snapshotTxSchema(this.sql, sessionID, 'application', this.applicationSqlTables())
     )
+    this.applicationSqlSessionID = sessionID
+  }
+
+  async applicationSqlSessionQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sessionID: string,
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<Row[]> {
+    this.assertApplicationSqlSession(sessionID)
+    return this.atomically(() => this.executeSQL(sql, [...params], undefined, sessionID).rows as Row[])
+  }
+
+  async applicationSqlSessionExec(
+    sessionID: string,
+    sql: string,
+    params: readonly unknown[] = [],
+    metadata?: SqlStatementMetadata
+  ): Promise<void> {
+    this.assertApplicationSqlSession(sessionID)
+    await this.atomically(() =>
+      this.executeSQL(sql, [...params], applicationSqlTrack(metadata), sessionID)
+    )
+  }
+
+  async applicationSqlSessionQueryPlan<Result = unknown>(
+    sessionID: string,
+    plan: CompiledTransactionQueryPlan,
+    queryName?: string,
+    queryBudget?: Partial<TransactionQueryBudget>
+  ): Promise<Result> {
+    this.assertApplicationSqlSession(sessionID)
+    return this.atomically(() =>
+      executeTransactionQueryPlan<Result>(
+        plan,
+        (sql, params) => this.executeSQL(sql, params, undefined, sessionID).rows,
+        { queryName, budget: queryBudget }
+      )
+    )
+  }
+
+  async applicationSqlSessionRegisterTables(
+    sessionID: string,
+    tables: readonly ApplicationSqlTable[]
+  ): Promise<void> {
+    this.assertApplicationSqlSession(sessionID)
+    await this.atomically(() => this.registerApplicationSqlTables(tables))
+  }
+
+  async applicationSqlCommit(sessionID: string): Promise<void> {
+    this.assertApplicationSqlSession(sessionID)
+    try {
+      await this.atomically(() => {
+        this.commitPendingTrackedChanges(sessionID)
+        commitTxJournal(this.sql, sessionID)
+      })
+    } finally {
+      this.applicationSqlSessionID = null
+    }
+  }
+
+  async applicationSqlRollback(sessionID: string): Promise<void> {
+    this.assertApplicationSqlSession(sessionID)
+    try {
+      await this.atomically(() => {
+        this.rollbackPendingTrackedChanges(sessionID)
+        rollbackTxJournal(this.sql, sessionID)
+        this.deletePendingTrackedChanges(sessionID)
+      })
+      this.invalidateSchemaCaches()
+    } finally {
+      this.applicationSqlSessionID = null
+    }
   }
 
   private atomicallySync<T>(work: () => T): T {

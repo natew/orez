@@ -6,19 +6,15 @@ import type {
   TransactionQueryFormat,
 } from 'orez-sync-cf-host/transaction-query'
 
-/** A SQLite query compiler owned by the application schema. */
 export type ApplicationSqlQueryCompiler = (
   ast: unknown,
   format: TransactionQueryFormat
 ) => CompiledTransactionQueryPlan | Promise<CompiledTransactionQueryPlan>
 
-/** Transaction-scoped SQLite operations exposed to trusted application code. */
+export type ApplicationSqlTable = Pick<SqlStatementMetadata, 'table' | 'publicTable'>
+
 export type ApplicationSqlTransaction = {
-  exec(
-    sql: string,
-    params?: readonly unknown[],
-    metadata?: SqlStatementMetadata
-  ): Promise<void>
+  exec(sql: string, params?: readonly unknown[], metadata?: SqlStatementMetadata): Promise<void>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -28,6 +24,7 @@ export type ApplicationSqlTransaction = {
     format: TransactionQueryFormat,
     queryName?: string
   ): Promise<Result>
+  registerTables(tables: readonly ApplicationSqlTable[]): Promise<void>
 }
 
 export type ApplicationSqlTransactionContext = {
@@ -40,8 +37,9 @@ export type ApplicationSqlTransactionWork<Value> = (
 ) => Value | Promise<Value>
 
 /**
- * RPC methods implemented by a ZeroSqlDO. They are reachable only through a
- * Durable Object binding. ZeroDO's public fetch surface does not expose them.
+ * Private Durable Object RPC protocol. Transaction callbacks stay in the
+ * caller: every SQL turn is tagged with a serialized session id, avoiding a
+ * re-entrant RPC call into a Durable Object that is awaiting a callback.
  */
 export type ApplicationSqlRpc = {
   applicationSqlQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
@@ -53,11 +51,31 @@ export type ApplicationSqlRpc = {
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
   ): Promise<void>
-  applicationSqlTransaction<Value>(
-    compileQuery: ApplicationSqlQueryCompiler,
-    work: ApplicationSqlTransactionWork<Value>,
+  applicationSqlRegisterTables(tables: readonly ApplicationSqlTable[]): Promise<void>
+  applicationSqlBegin(sessionID: string): Promise<void>
+  applicationSqlSessionQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sessionID: string,
+    sql: string,
+    params?: readonly unknown[]
+  ): Promise<Row[]>
+  applicationSqlSessionExec(
+    sessionID: string,
+    sql: string,
+    params?: readonly unknown[],
+    metadata?: SqlStatementMetadata
+  ): Promise<void>
+  applicationSqlSessionQueryPlan<Result = unknown>(
+    sessionID: string,
+    plan: CompiledTransactionQueryPlan,
+    queryName?: string,
     queryBudget?: Partial<TransactionQueryBudget>
-  ): Promise<Value>
+  ): Promise<Result>
+  applicationSqlSessionRegisterTables(
+    sessionID: string,
+    tables: readonly ApplicationSqlTable[]
+  ): Promise<void>
+  applicationSqlCommit(sessionID: string): Promise<void>
+  applicationSqlRollback(sessionID: string): Promise<void>
 }
 
 export type ApplicationSqlDurableObjectNamespace = {
@@ -65,18 +83,14 @@ export type ApplicationSqlDurableObjectNamespace = {
   get(id: unknown): ApplicationSqlRpc
 }
 
-/** A private client bound to exactly one authoritative SQLite namespace. */
 export type ApplicationSqlClient = {
   readonly namespace: string
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
   ): Promise<Row[]>
-  exec(
-    sql: string,
-    params?: readonly unknown[],
-    metadata?: SqlStatementMetadata
-  ): Promise<void>
+  exec(sql: string, params?: readonly unknown[], metadata?: SqlStatementMetadata): Promise<void>
+  registerTables(tables: readonly ApplicationSqlTable[]): Promise<void>
   transaction<Value>(
     compileQuery: ApplicationSqlQueryCompiler,
     work: ApplicationSqlTransactionWork<Value>,
@@ -94,7 +108,30 @@ export function createApplicationSqlClient(
     namespace,
     query: (sql, params = []) => target.applicationSqlQuery(sql, params),
     exec: (sql, params = [], metadata) => target.applicationSqlExec(sql, params, metadata),
-    transaction: (compileQuery, work, queryBudget) =>
-      target.applicationSqlTransaction(compileQuery, work, queryBudget),
+    registerTables: (tables) => target.applicationSqlRegisterTables(tables),
+    async transaction(compileQuery, work, queryBudget) {
+      const sessionID = crypto.randomUUID()
+      const effects: DeferredEffect[] = []
+      await target.applicationSqlBegin(sessionID)
+      const tx: ApplicationSqlTransaction = {
+        exec: (sql, params = [], metadata) =>
+          target.applicationSqlSessionExec(sessionID, sql, params, metadata),
+        query: (sql, params = []) => target.applicationSqlSessionQuery(sessionID, sql, params),
+        async queryAst(ast, format, queryName) {
+          const plan = await compileQuery(ast, format)
+          return target.applicationSqlSessionQueryPlan(sessionID, plan, queryName, queryBudget)
+        },
+        registerTables: (tables) => target.applicationSqlSessionRegisterTables(sessionID, tables),
+      }
+      try {
+        const value = await work(tx, { defer: (effect) => effects.push(effect) })
+        await target.applicationSqlCommit(sessionID)
+        for (const effect of effects) await effect()
+        return value
+      } catch (error) {
+        await target.applicationSqlRollback(sessionID).catch(() => {})
+        throw error
+      }
+    },
   }
 }
