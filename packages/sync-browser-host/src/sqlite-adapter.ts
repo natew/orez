@@ -2,6 +2,7 @@ import { executeTransactionQueryPlan } from 'orez-sync-cf-host/transaction-query
 
 import type { MutatorSql, SyncSql } from './types.js'
 import type { BedrockSqliteModule, Database, Statement } from 'bedrock-sqlite/browser'
+import type { SQLiteExecResult, SqlStatementMetadata } from 'orez-sync-cf-host'
 import type {
   CompiledTransactionQueryPlan,
   TransactionQueryBudget,
@@ -127,15 +128,25 @@ export class BedrockSyncDb implements JsSyncDb {
 export class BedrockDirectSql implements SyncSql {
   constructor(private readonly db: Database) {}
 
-  exec(sql: string, params: readonly unknown[] = []): void {
+  exec(
+    sql: string,
+    params: readonly unknown[] = [],
+    _metadata?: SqlStatementMetadata
+  ): SQLiteExecResult {
     assertConsumerSql(sql)
     if (params.length === 0) {
       this.db.exec(sql)
-      return
+      const statement = this.db.prepare('SELECT changes() AS changes')
+      try {
+        const result = statement.get() as { changes: number }
+        return { changes: result.changes }
+      } finally {
+        statement.finalize()
+      }
     }
     const statement = this.db.prepare(sql)
     try {
-      statement.run([...params])
+      return { changes: statement.run([...params]).changes }
     } finally {
       statement.finalize()
     }
@@ -165,8 +176,12 @@ export class BedrockMutatorSql implements MutatorSql {
     private readonly queryBudget?: Partial<TransactionQueryBudget>
   ) {}
 
-  async exec(sql: string, params: readonly unknown[] = []): Promise<void> {
-    this.direct.exec(sql, params)
+  async exec(
+    sql: string,
+    params: readonly unknown[] = [],
+    metadata?: SqlStatementMetadata
+  ): Promise<SQLiteExecResult> {
+    return this.direct.exec(sql, params, metadata)
   }
 
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(

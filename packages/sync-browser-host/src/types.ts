@@ -1,3 +1,4 @@
+import type { SQLiteExecResult, SqlStatementMetadata } from 'orez-sync-cf-host'
 import type {
   TransactionQueryBudget,
   TransactionQueryFormat,
@@ -28,7 +29,11 @@ export type ZeroSchemaConfig = {
 }
 
 export interface SyncSql {
-  exec(sql: string, params?: readonly unknown[]): void
+  exec(
+    sql: string,
+    params?: readonly unknown[],
+    metadata?: SqlStatementMetadata
+  ): SQLiteExecResult
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -36,7 +41,11 @@ export interface SyncSql {
 }
 
 export interface MutatorSql {
-  exec(sql: string, params?: readonly unknown[]): Promise<void>
+  exec(
+    sql: string,
+    params?: readonly unknown[],
+    metadata?: SqlStatementMetadata
+  ): Promise<SQLiteExecResult>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -138,7 +147,11 @@ export interface BrowserSyncHost {
     sql: string,
     params?: readonly unknown[]
   ): Promise<Row[]>
-  exec(sql: string, params?: readonly unknown[]): Promise<void>
+  exec(
+    sql: string,
+    params?: readonly unknown[],
+    metadata?: SqlStatementMetadata
+  ): Promise<SQLiteExecResult>
   transaction<Value>(work: ApplicationTransaction<Value>): Promise<Value>
   subscribe(listener: () => void): () => void
   close(): Promise<void>
@@ -150,7 +163,11 @@ export interface BrowserSyncHostPortClient {
     sql: string,
     params?: readonly unknown[]
   ): Promise<Row[]>
-  exec(sql: string, params?: readonly unknown[]): Promise<void>
+  exec(
+    sql: string,
+    params?: readonly unknown[],
+    metadata?: SqlStatementMetadata
+  ): Promise<SQLiteExecResult>
   subscribe(listener: () => void): () => void
   close(): void
 }
