@@ -178,7 +178,7 @@ type ZeroColumnDefinition<
   KColumn extends ColumnNames<TTable>,
 > = Flatten<{
   optional: boolean
-  type: ValueType
+  type: ResolveColumnZeroType<Columns<TTable>[KColumn]>
   customType: ResolveCustomType<Columns<TTable>[KColumn]>
   serverName?: string
 }>
@@ -275,7 +275,7 @@ export type DrizzleToZeroSchema<
       ? ZeroTableBuilderSchema<K, TTable, TableConfigFor<TSchema, TColumnConfig, K>>
       : never
   }
-  readonly relationships: Record<string, Record<string, RelationHop[]>>
+  readonly relationships: Record<string, Record<string, ZeroRelationship>>
   readonly enableLegacyMutators?: boolean
   readonly enableLegacyQueries?: boolean
 }
@@ -286,6 +286,8 @@ type RelationHop = {
   destSchema: string
   cardinality: 'one' | 'many'
 }
+
+type ZeroRelationship = readonly [RelationHop] | readonly [RelationHop, RelationHop]
 
 type RuntimeColumn = Column & {
   columnType?: string
@@ -647,7 +649,7 @@ const normalizeRelation = ({
           destSchema: targetTableName,
           cardinality: relation.relationType,
         },
-      ] satisfies RelationHop[],
+      ] satisfies ZeroRelationship,
     }
   }
 
@@ -686,7 +688,7 @@ const normalizeRelation = ({
         destSchema: targetTableName,
         cardinality: relation.relationType,
       },
-    ] satisfies RelationHop[],
+    ] satisfies ZeroRelationship,
   }
 }
 
@@ -780,7 +782,7 @@ export const drizzleZeroConfig = <
     throw new Error(`${prefix}: No SQLite tables found in the input`)
   }
 
-  const relationships: Record<string, Record<string, RelationHop[]>> = {}
+  const relationships: Record<string, Record<string, ZeroRelationship>> = {}
   for (const relationConfig of discoveredRelations.values()) {
     for (const relation of Object.values(relationConfig.relations)) {
       const normalized = normalizeRelation({ schema, relation })

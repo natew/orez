@@ -10,6 +10,7 @@ import {
   text,
 } from 'drizzle-orm/sqlite-core'
 import { describe, expect, test } from 'vitest'
+import type { Schema } from '@rocicorp/zero'
 
 import {
   drizzleZeroConfig,
@@ -114,8 +115,9 @@ describe('drizzleZeroConfig', () => {
         suppressDefaultsWarning: true,
       }
     )
+    const zeroSchema: Schema = schema
 
-    expect(schema.tables.users).toMatchObject({
+    expect(zeroSchema.tables.users).toMatchObject({
       name: 'users',
       serverName: 'user_records',
       primaryKey: ['id'],
