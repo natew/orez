@@ -1,4 +1,4 @@
-import { string as zeroString, type Row } from '@rocicorp/zero'
+import { createBuilder, string as zeroString, type Row } from '@rocicorp/zero'
 import { defineRelations } from 'drizzle-orm'
 import { pgTable, text as pgText } from 'drizzle-orm/pg-core'
 import {
@@ -180,6 +180,11 @@ describe('drizzleZeroConfig', () => {
         cardinality: 'many',
       },
     ])
+
+    const query = createBuilder(schema).users.related('posts', (post) =>
+      post.where('title', 'hello').orderBy('title', 'asc')
+    )
+    expect(query).toBeDefined()
   })
 
   test('rejects a non-SQLite table', () => {

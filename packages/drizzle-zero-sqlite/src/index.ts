@@ -286,7 +286,7 @@ export type DrizzleToZeroSchema<
       ? ZeroTableBuilderSchema<K, TTable, TableConfigFor<TSchema, TColumnConfig, K>>
       : never
   }
-  readonly relationships: Record<string, Record<string, ZeroRelationship>>
+  readonly relationships: DrizzleToZeroRelationships<TSchema, TColumnConfig>
   readonly enableLegacyMutators?: boolean
   readonly enableLegacyQueries?: boolean
 }
@@ -299,6 +299,74 @@ type RelationHop = {
 }
 
 type ZeroRelationship = readonly [RelationHop] | readonly [RelationHop, RelationHop]
+
+type DrizzleRelation = {
+  readonly targetTableName: string
+  readonly relationType: 'one' | 'many'
+}
+
+type TypedRelationHop<TRelation extends DrizzleRelation> = Flatten<{
+  sourceField: string[]
+  destField: string[]
+  destSchema: TRelation['targetTableName']
+  cardinality: TRelation['relationType']
+}>
+
+type TypedZeroRelationship<TRelation extends DrizzleRelation> =
+  | readonly [TypedRelationHop<TRelation>]
+  | readonly [RelationHop, TypedRelationHop<TRelation>]
+
+type RelationshipsForTableConfig<
+  TConfig,
+  TIncludedTableName extends string,
+> = TConfig extends {
+  readonly name: infer TSourceTableName extends TIncludedTableName
+  readonly relations: infer TRelations extends Record<string, DrizzleRelation>
+}
+  ? {
+      readonly [K in TSourceTableName]: {
+        readonly [R in keyof TRelations as TRelations[R] extends {
+          readonly targetTableName: TIncludedTableName
+        }
+          ? R
+          : never]: TRelations[R] extends DrizzleRelation
+          ? TypedZeroRelationship<TRelations[R]>
+          : never
+      }
+    }
+  : never
+
+type RelationshipsForExport<TExport, TIncludedTableName extends string> =
+  TExport extends Record<string, unknown>
+    ? UnionToIntersection<
+        {
+          [K in keyof TExport]: RelationshipsForTableConfig<
+            TExport[K],
+            TIncludedTableName
+          >
+        }[keyof TExport]
+      >
+    : never
+
+type UnionToIntersection<T> = (T extends unknown ? (value: T) => void : never) extends (
+  value: infer I
+) => void
+  ? I
+  : never
+
+type DrizzleToZeroRelationships<
+  TSchema extends Record<string, unknown>,
+  TColumnConfig extends TableColumnsConfig<TSchema>,
+> = Flatten<
+  UnionToIntersection<
+    {
+      [K in keyof TSchema]: RelationshipsForExport<
+        TSchema[K],
+        IncludedTableNames<TSchema, TColumnConfig>
+      >
+    }[keyof TSchema]
+  >
+>
 
 type RuntimeColumn = Column & {
   columnType?: string
