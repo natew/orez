@@ -1,5 +1,5 @@
 // @ts-nocheck — cloudflare:workers types not available in orez
-import { DurableObject } from 'cloudflare:workers'
+import { DurableObject, RpcTarget } from 'cloudflare:workers'
 import {
   createPostCommitEffects,
   type DeferredEffect,
@@ -39,6 +39,25 @@ import {
   upgradeToTableSnapshot,
 } from './tx-journal.js'
 import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
+import type {
+  ApplicationSqlQueryCompiler,
+  ApplicationSqlTransaction,
+  ApplicationSqlTransactionContext,
+  ApplicationSqlTransactionWork,
+} from './application-sql.js'
+import type { SqlStatementMetadata } from 'orez-sync-cf-host'
+
+export { createApplicationSqlClient } from './application-sql.js'
+export type {
+  ApplicationSqlClient,
+  ApplicationSqlDurableObjectNamespace,
+  ApplicationSqlQueryCompiler,
+  ApplicationSqlRpc,
+  ApplicationSqlTransaction,
+  ApplicationSqlTransactionContext,
+  ApplicationSqlTransactionWork,
+} from './application-sql.js'
+export type { SqlStatementMetadata } from 'orez-sync-cf-host'
 
 /**
  * zero-do: Durable Object that exposes raw SQL execution over ctx.storage.sql.
@@ -99,7 +118,7 @@ interface PushBody {
 interface SqlTrack {
   tableName: string
   physicalTableName?: string
-  operation: 'INSERT' | 'UPDATE' | 'DELETE'
+  operation: 'INSERT' | 'UPDATE' | 'DELETE' | 'UPSERT'
   returnRows?: boolean
   rowColumns?: string[]
   transactionID?: string
@@ -127,10 +146,14 @@ interface SqlWriteMeasurement {
 export type ZeroDOQueryCompiler = (
   ast: unknown,
   format: TransactionQueryFormat
-) => CompiledTransactionQueryPlan
+) => CompiledTransactionQueryPlan | Promise<CompiledTransactionQueryPlan>
 
 export type ZeroDOTransactionExecutor = {
-  exec(sql: string, params?: readonly unknown[]): Promise<void>
+  exec(
+    sql: string,
+    params?: readonly unknown[],
+    metadata?: SqlStatementMetadata
+  ): Promise<void>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -144,6 +167,51 @@ export type ZeroDOTransactionExecutor = {
 
 export type ZeroDOTransactionContext = {
   defer(effect: DeferredEffect): void
+}
+
+class ApplicationSqlTransactionTarget
+  extends RpcTarget
+  implements ApplicationSqlTransaction
+{
+  constructor(private readonly tx: ZeroDOTransactionExecutor) {
+    super()
+  }
+
+  exec(
+    sql: string,
+    params: readonly unknown[] = [],
+    metadata?: SqlStatementMetadata
+  ): Promise<void> {
+    return this.tx.exec(sql, params, metadata)
+  }
+
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<Row[]> {
+    return this.tx.query<Row>(sql, params)
+  }
+
+  queryAst<Result = unknown>(
+    ast: unknown,
+    format: TransactionQueryFormat,
+    queryName?: string
+  ): Promise<Result> {
+    return this.tx.queryAst<Result>(ast, format, queryName)
+  }
+}
+
+class ApplicationSqlTransactionContextTarget
+  extends RpcTarget
+  implements ApplicationSqlTransactionContext
+{
+  constructor(private readonly context: ZeroDOTransactionContext) {
+    super()
+  }
+
+  defer(effect: DeferredEffect): void {
+    this.context.defer(effect)
+  }
 }
 interface SocketAttachment {
   clientID: string
@@ -224,6 +292,25 @@ function assertApplicationTransactionSQL(sql: string): void {
   if (TRANSACTION_CONTROL_SQL.test(sql)) {
     throw new TypeError('transaction SQL is owned by ZeroDO')
   }
+}
+
+function applicationSqlTrack(metadata: SqlStatementMetadata | undefined): SqlTrack | undefined {
+  if (!metadata) return undefined
+  const operations = {
+    insert: 'INSERT',
+    update: 'UPDATE',
+    delete: 'DELETE',
+    upsert: 'UPSERT',
+  } satisfies Record<SqlStatementMetadata['kind'], SqlTrack['operation']>
+  return {
+    tableName: metadata.publicTable,
+    physicalTableName: metadata.table,
+    operation: operations[metadata.kind],
+  }
+}
+
+const applicationSqlQueryCompiler: ZeroDOQueryCompiler = () => {
+  throw new Error('queryAst requires an application SQLite transaction compiler')
 }
 
 export class ZeroDO extends DurableObject {
@@ -1090,13 +1177,17 @@ export class ZeroDO extends DurableObject {
     queryBudget?: Partial<TransactionQueryBudget>
   ): Promise<T> {
     const effects = createPostCommitEffects()
-    const execute = (sql: string, params: readonly unknown[] = []) => {
+    const execute = (
+      sql: string,
+      params: readonly unknown[] = [],
+      metadata?: SqlStatementMetadata
+    ) => {
       assertApplicationTransactionSQL(sql)
-      return this.executeSQL(sql, [...params])
+      return this.executeSQL(sql, [...params], applicationSqlTrack(metadata))
     }
     const tx: ZeroDOTransactionExecutor = {
-      async exec(sql, params = []) {
-        execute(sql, params)
+      async exec(sql, params = [], metadata) {
+        execute(sql, params, metadata)
       },
       async query<Row extends Record<string, unknown>>(sql, params = []) {
         return execute(sql, params).rows as Row[]
@@ -1106,7 +1197,7 @@ export class ZeroDO extends DurableObject {
         format: TransactionQueryFormat,
         queryName?: string
       ) {
-        const compiled = compileQuery(ast, format)
+        const compiled = await compileQuery(ast, format)
         return executeTransactionQueryPlan<Result>(
           compiled,
           (sql, params) => execute(sql, params).rows,
@@ -1131,6 +1222,48 @@ export class ZeroDO extends DurableObject {
       )
     })
     return value
+  }
+
+  /**
+   * Private Durable Object RPC surface for the application SQLite client.
+   *
+   * These methods are intentionally absent from fetch(): only a Worker that
+   * holds the ZeroSqlDO binding can call them. The bound object selects the
+   * application namespace; callers never include a namespace in SQL payloads.
+   */
+  async applicationSqlQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = []
+  ): Promise<Row[]> {
+    return this.runApplicationTransaction(applicationSqlQueryCompiler, (tx) =>
+      tx.query<Row>(sql, params)
+    )
+  }
+
+  async applicationSqlExec(
+    sql: string,
+    params: readonly unknown[] = [],
+    metadata?: SqlStatementMetadata
+  ): Promise<void> {
+    await this.runApplicationTransaction(applicationSqlQueryCompiler, (tx) =>
+      tx.exec(sql, params, metadata)
+    )
+  }
+
+  async applicationSqlTransaction<Value>(
+    compileQuery: ApplicationSqlQueryCompiler,
+    work: ApplicationSqlTransactionWork<Value>,
+    queryBudget?: Partial<TransactionQueryBudget>
+  ): Promise<Value> {
+    return this.runApplicationTransaction(
+      compileQuery,
+      (tx, context) =>
+        work(
+          new ApplicationSqlTransactionTarget(tx),
+          new ApplicationSqlTransactionContextTarget(context)
+        ),
+      queryBudget
+    )
   }
 
   private atomicallySync<T>(work: () => T): T {
@@ -1188,6 +1321,13 @@ export class ZeroDO extends DurableObject {
       })
     } else if (track) {
       capturesTrackedTable = this.cdc.capturesTable(track.tableName)
+    }
+
+    // SQLite decides whether an INSERT ... ON CONFLICT write inserted or
+    // updated. Only the installed trigger sees that result. Falling back to a
+    // caller-declared operation would publish a false change shape.
+    if (track?.operation === 'UPSERT' && !capturesTrackedTable) {
+      throw new Error(`upsert requires CDC registration for ${track.tableName}`)
     }
 
     // DoBackend already marked this table row-journaled, betting the DO could

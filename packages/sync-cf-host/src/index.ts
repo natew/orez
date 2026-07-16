@@ -26,6 +26,7 @@ export type {
   SyncHostConfig,
   SyncHostEnv,
   ServiceBinding,
+  SqlStatementMetadata,
   SyncSql,
   UpstreamConfig,
   VisibilityConfig,

@@ -31,8 +31,25 @@ export type ZeroSchemaConfig = {
   >
 }
 
+/**
+ * Explicit identity for a SQLite write to a published application table.
+ *
+ * The physical table installs CDC. `publicTable` is the logical Zero name
+ * emitted in the change feed. This replaces metadata recovered by parsing
+ * PostgreSQL statements.
+ */
+export type SqlStatementMetadata = {
+  table: string
+  publicTable: string
+  kind: 'insert' | 'update' | 'delete' | 'upsert'
+}
+
 export interface SyncSql {
-  exec(sql: string, params?: readonly unknown[]): void
+  exec(
+    sql: string,
+    params?: readonly unknown[],
+    metadata?: SqlStatementMetadata
+  ): void
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -40,7 +57,11 @@ export interface SyncSql {
 }
 
 export interface MutatorSql {
-  exec(sql: string, params?: readonly unknown[]): Promise<void>
+  exec(
+    sql: string,
+    params?: readonly unknown[],
+    metadata?: SqlStatementMetadata
+  ): Promise<void>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]

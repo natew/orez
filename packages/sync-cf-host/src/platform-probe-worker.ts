@@ -367,7 +367,7 @@ export class ProbeDurableObject extends ZeroDO {
     }
 
     if (route === '/application-transaction-query') {
-      const result = await this.runApplicationTransaction(
+      const result = await this.applicationSqlTransaction(
         compileTransactionQuery,
         (tx) =>
           tx.queryAst(
