@@ -89,7 +89,7 @@ describe('standalone query compiler', () => {
 
     expect(exitCode).not.toBe(0)
     expect(stderr).toContain(
-      'Bun consumers must register orez-sync-cf-host/bun-wasm-loader via bunfig preload'
+      'see the orez-sync-cf-host README Query compiler runtimes matrix'
     )
   })
 
