@@ -37,9 +37,9 @@ are engine-owned physical identifiers and do not cross the wire.
   aliases the projection back to logical names. Delete IDs and patch table names
   remain logical.
 - Visibility callbacks and their SQL fragments use logical table and column names.
-  Snapshot and point-read SQL project physical columns into a logical subquery
-  before applying the fragment, so existing host filters do not need a second
-  schema compiler.
+  Snapshot and point-read SQL project every modeled physical table into logical
+  CTEs before applying the fragment, so qualified outer references and nested
+  visibility subqueries keep working without a second schema compiler.
 - `zero_row`, `zero_pk_id`, and row/PK dedup helpers consume logical aliases and
   emit logical object keys. They contain no application SQL identifiers.
 

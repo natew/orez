@@ -297,11 +297,10 @@ pub fn run_mutator(
 }
 
 // optional per-user row visibility (permissions lane). returns a WHERE FRAGMENT
-// (+ positional params) selecting the user's visible rows of `table`; the engine
-// composes it as `SELECT * FROM "<table>" WHERE <fragment>` (snapshot) or
-// `... AND (<fragment>)` (diff point-read). semantically identical to
-// permissions.ts fixtureVisibility, rewritten from aliased full SELECTs to
-// unaliased fragments to match sync-core's Visibility contract.
+// (+ positional params) selecting the user's visible rows of `table`; sync-core
+// exposes logical table and column names through CTEs before applying it.
+// semantically identical to permissions.ts fixtureVisibility, rewritten from
+// aliased full SELECTs to fragments to match sync-core's Visibility contract.
 pub fn fixture_visible(table: &str, user_id: &str) -> Option<(String, Vec<SqlValue>)> {
     // project access predicate against the project table by two references: the
     // unaliased `project` row (used when filtering the project table itself)

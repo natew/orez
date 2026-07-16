@@ -173,7 +173,9 @@ fn snapshot(
             let (sql, params) = match visible.and_then(|v| v.of(table, user_id)) {
                 Some(filter) => (
                     format!(
-                        "SELECT * FROM ({base}) AS \"_zsync_visible\" WHERE {}",
+                        "WITH {} SELECT * FROM {} WHERE {}",
+                        tables.logical_ctes(),
+                        quote_ident(table),
                         filter.sql
                     ),
                     filter.params,
@@ -385,12 +387,19 @@ fn resolve_row(
     // diff only runs under row-local (or absent) visibility, so applying the
     // filter to the point read is safe: an invisible row emits del.
     let sql = if let Some(filter) = visible.and_then(|v| v.of(table, user_id)) {
-        let sql = format!(
-            "SELECT * FROM ({base}) AS \"_zsync_visible\" WHERE {}",
-            filter.sql
-        );
+        let logical_pk = spec
+            .primary_key
+            .iter()
+            .map(|column| format!("{} = ?", quote_ident(column)))
+            .collect::<Vec<_>>()
+            .join(" AND ");
         params.extend(filter.params);
-        sql
+        format!(
+            "WITH {} SELECT * FROM {} WHERE {logical_pk} AND ({})",
+            tables.logical_ctes(),
+            quote_ident(table),
+            filter.sql
+        )
     } else {
         base
     };

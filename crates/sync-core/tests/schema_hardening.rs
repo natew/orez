@@ -8,9 +8,10 @@ mod common;
 use common::TestDb;
 use serde_json::json;
 
+use sync_core::pull::{Caps, Visibility, VisibleFilter};
 use sync_core::schema::TableSpec;
 use sync_core::value::ZeroColumnType;
-use sync_core::{SyncDb, Tables, init_schema, trigger_ddl};
+use sync_core::{SqlValue, SyncDb, Tables, Transactor, handle_pull, init_schema, trigger_ddl};
 
 // the classic breakout payload: a table name that, unescaped, closes the trigger
 // name and appends an injected trigger that deletes from a victim table.
@@ -161,6 +162,96 @@ fn server_names_fall_back_to_logical_names_and_reject_physical_collisions() {
     }))
     .unwrap_err();
     assert!(duplicate_columns.contains("duplicate physical column mapping"));
+}
+
+#[test]
+fn mapped_visibility_fragments_use_logical_tables_and_columns() {
+    let tables = Tables::from_zero_schema(&json!({
+        "tables": {
+            "project": {
+                "serverName": "project_record",
+                "columns": {
+                    "id": { "type": "string", "serverName": "project_id" },
+                    "ownerId": { "type": "string", "serverName": "owner_id" },
+                },
+                "primaryKey": ["id"],
+            },
+            "member": {
+                "serverName": "project_member",
+                "columns": {
+                    "id": { "type": "string", "serverName": "member_id" },
+                    "projectId": { "type": "string", "serverName": "project_id" },
+                    "userId": { "type": "string", "serverName": "user_id" },
+                },
+                "primaryKey": ["id"],
+            },
+        }
+    }))
+    .unwrap();
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE project_record (project_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL)",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "CREATE TABLE project_member (
+            member_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            user_id TEXT NOT NULL
+        )",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "INSERT INTO project_record VALUES ('owned', 'u1'), ('shared', 'u2'), ('hidden', 'u2')",
+        &[],
+    )
+    .unwrap();
+    db.exec(
+        "INSERT INTO project_member VALUES ('m1', 'shared', 'u1')",
+        &[],
+    )
+    .unwrap();
+    init_schema(&mut db, &tables).unwrap();
+    let visibility = Visibility {
+        row_local: false,
+        filter: Box::new(|table, user| {
+            (table == "project").then(|| VisibleFilter {
+                sql: "project.ownerId = ? OR EXISTS (
+                    SELECT 1 FROM member access
+                    WHERE access.projectId = project.id AND access.userId = ?
+                )"
+                .into(),
+                params: vec![
+                    SqlValue::Text(user.to_string()),
+                    SqlValue::Text(user.to_string()),
+                ],
+            })
+        }),
+    };
+    let response = db
+        .transaction(|database| {
+            handle_pull(
+                database,
+                &tables,
+                4096,
+                Some(&visibility),
+                Caps::default(),
+                &json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": null }),
+                "u1",
+            )
+        })
+        .unwrap();
+    let mut project_ids = response["rowsPatch"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|operation| operation["op"] == "put" && operation["tableName"] == "project")
+        .map(|operation| operation["value"]["id"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    project_ids.sort();
+    assert_eq!(project_ids, vec!["owned", "shared"]);
 }
 
 #[test]
