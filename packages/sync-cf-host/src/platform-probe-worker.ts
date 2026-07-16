@@ -104,16 +104,20 @@ async function runApplicationRpcProbe(
           transactionQueryFormat,
           `applicationRpc${action}`
         )
-        await tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = 'primary'", [11], {
-          table: 'accounts',
-          publicTable: 'public.account',
-          kind: 'update',
-        })
+        const execResult = await tx.exec(
+          "UPDATE accounts SET balance = balance + ? WHERE id = 'primary'",
+          [11],
+          {
+            table: 'accounts',
+            publicTable: 'public.account',
+            kind: 'update',
+          }
+        )
         context.defer(() => {
           effectRan = true
         })
         if (action === 'rollback') throw new Error('intentional application RPC rollback')
-        return account
+        return { account, execResult }
       },
       { maxSelects: 8, maxRows: 20 }
     )
