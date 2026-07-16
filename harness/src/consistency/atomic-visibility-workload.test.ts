@@ -110,7 +110,7 @@ describe('atomic visibility workload contract', () => {
     expect(() =>
       validateAtomicProfileEvidence({
         ...evidence,
-        profile: { ...ATOMIC_VISIBILITY_WORKLOAD_PROFILE, version: 2 as 1 },
+        profile: { ...ATOMIC_VISIBILITY_WORKLOAD_PROFILE, version: 1 as 2 },
       })
     ).toThrow('does not match checker')
   })

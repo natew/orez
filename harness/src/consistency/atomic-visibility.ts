@@ -153,7 +153,9 @@ export function checkAtomicVisibility(events: readonly HistoryEvent[]): CheckRes
     violations.push('atomic visibility requires at least one successful read')
   }
   if (nonWritingPairs === 0) {
-    violations.push('atomic visibility requires at least one non-writing client observation')
+    violations.push(
+      'atomic visibility requires at least one non-writing client observation'
+    )
   }
   if (eligiblePairs === 0) {
     violations.push('atomic visibility requires at least one eligible group/read pair')
