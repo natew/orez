@@ -79,14 +79,17 @@ const LANES: Lane[] = [
     timeoutMs: 25 * 60_000,
   },
   {
+    // {SEED} is substituted per invocation: the lanes derive their results
+    // directory from the seed and refuse to overwrite an existing one, so a
+    // reused seed makes every later run fail vacuously at startup.
     name: 'atomic-visibility',
-    cmd: ['bun', 'src/atomic-visibility-lane.ts', '--target', 'rust-local', '--seed', 'matrix'],
+    cmd: ['bun', 'src/atomic-visibility-lane.ts', '--target', 'rust-local', '--seed', '{SEED}'],
     cwd: HARNESS_ROOT,
     timeoutMs: 10 * 60_000,
   },
   {
     name: 'exactly-once',
-    cmd: ['bun', 'src/exactly-once-lmid-lane.ts', '--target', 'rust-local', '--seed', 'matrix'],
+    cmd: ['bun', 'src/exactly-once-lmid-lane.ts', '--target', 'rust-local', '--seed', '{SEED}'],
     cwd: HARNESS_ROOT,
     timeoutMs: 10 * 60_000,
   },
@@ -120,6 +123,8 @@ const resultsDir = join(HARNESS_ROOT, 'results', 'mutation-matrix', runId)
 mkdirSync(resultsDir, { recursive: true })
 
 function sh(cmd: string[], cwd: string, timeoutMs: number, logFile: string): LaneOutcome {
+  const seed = `${runId}-${logFile.replace(/\.log$/, '')}`
+  cmd = cmd.map((part) => part.replaceAll('{SEED}', seed))
   const started = Date.now()
   const res = spawnSync(cmd[0], cmd.slice(1), {
     cwd,
