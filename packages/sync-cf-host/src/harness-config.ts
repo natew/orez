@@ -320,11 +320,12 @@ const harnessMutators = registerMutators({
       context.claims.userID,
       'must-roll-back',
     ])
-    context.defer(() =>
-      tx.exec('INSERT INTO _harness_effects (id, observedCommitted) VALUES (?, 0)', [
-        value.id,
-      ])
-    )
+    context.defer(async () => {
+      await tx.exec(
+        'INSERT INTO _harness_effects (id, observedCommitted) VALUES (?, 0)',
+        [value.id]
+      )
+    })
     throw new MutationApplicationError('intentional-rollback')
   },
 })

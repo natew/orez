@@ -26,6 +26,7 @@ export type {
   SyncHostConfig,
   SyncHostEnv,
   ServiceBinding,
+  SQLiteExecResult,
   SqlStatementMetadata,
   SyncSql,
   UpstreamConfig,

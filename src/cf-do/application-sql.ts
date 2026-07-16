@@ -1,4 +1,4 @@
-import type { SqlStatementMetadata } from 'orez-sync-cf-host'
+import type { SQLiteExecResult, SqlStatementMetadata } from 'orez-sync-cf-host'
 import type { DeferredEffect } from 'orez-sync-cf-host/post-commit'
 import type {
   CompiledTransactionQueryPlan,
@@ -16,9 +16,7 @@ export type ApplicationSqlTable = Pick<SqlStatementMetadata, 'table' | 'publicTa
   publish?: boolean
 }
 
-export type ApplicationSqlExecResult = {
-  changes: number
-}
+export type ApplicationSqlExecResult = SQLiteExecResult
 
 export type ApplicationSqlTransaction = {
   exec(
