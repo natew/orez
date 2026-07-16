@@ -339,6 +339,21 @@ jobs:
       - name: harness install
         run: cd harness && bun install
 
+      - name: rust-local atomic visibility consistency
+        run: cd harness && bun src/atomic-visibility-lane.ts --target rust-local --seed ${{ github.run_id }}
+
+      - name: rust-local exactly-once LMID consistency
+        run: cd harness && bun src/exactly-once-lmid-lane.ts --target rust-local --seed ${{ github.run_id }}
+
+      - name: upload rust-local consistency evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-local-consistency-${{ github.run_id }}-${{ github.run_attempt }}
+          path: harness/target/consistency/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: rust-local smoke (native host, 20 clients)
         run: cd harness && bun src/smoke.ts --target rust-local --clients 20 --projects 3
 

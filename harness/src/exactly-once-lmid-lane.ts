@@ -1,4 +1,4 @@
-// One-group orez-local reliability lane for the dedicated lost-push/LMID
+// One-group rust-local reliability lane for the dedicated lost-push/LMID
 // profile. This proves one non-idempotent authoritative application and one
 // fresh-client LMID advance through the empirically observed recovery path.
 import { execFileSync } from 'node:child_process'
@@ -33,24 +33,23 @@ import {
 import { HistoryRecorder } from './consistency/recorder.js'
 import { mutators, queries } from './fixture.js'
 import {
-  createOperationBoundDropFetch,
   createPullQuiescenceFetch,
   observedSyncFetch,
   PullAbortedByQuiesceControllerError,
   type SyncHttpObservation,
 } from './observed-fetch.js'
 import { assertServerOutcome } from './server-outcome.js'
-import { startOrezLocal } from './targets/orez-local.js'
+import { startRustLocal } from './targets/rust-local.js'
 
 const { values: args } = parseArgs({
   options: {
-    target: { type: 'string', default: 'orez-local' },
+    target: { type: 'string', default: 'rust-local' },
     seed: { type: 'string' },
     replay: { type: 'boolean', default: false },
     'results-dir': { type: 'string' },
   },
 })
-if (args.target !== 'orez-local') throw new Error('v1 supports only orez-local')
+if (args.target !== 'rust-local') throw new Error('v2 supports only rust-local')
 const seed = args.seed ?? randomUUID()
 if (!/^[A-Za-z0-9._:-]+$/.test(seed)) throw new Error('seed has unsafe characters')
 const scenario = `exactly-once-${createHash('sha256').update(seed).digest('hex').slice(0, 16)}`
@@ -335,13 +334,27 @@ async function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
   }
 }
 
-let targetForDropConsume: ReturnType<typeof startOrezLocal> extends Promise<infer T>
-  ? T
-  : never
-const dropFetch = createOperationBoundDropFetch((token) =>
-  targetForDropConsume.consumeExactlyOnceResponseDrop(token)
-)
-const pullController = createPullQuiescenceFetch(dropFetch.fetch)
+let responseDropArmed = false
+let onResponseDrop: (() => void) | undefined
+const dropFetch: typeof fetch = async (input, init) => {
+  const response = await fetch(input, init)
+  const url = new URL(
+    typeof input === 'string' || input instanceof URL ? input : input.url
+  )
+  if (!url.pathname.endsWith('/push') || !responseDropArmed) return response
+  responseDropArmed = false
+  const body = await response.clone().text()
+  if (response.status !== 500 || !body.includes('dropped push response')) {
+    throw new Error(
+      `armed native push response drop returned ${response.status}: ${body}`
+    )
+  }
+  onResponseDrop?.()
+  onResponseDrop = undefined
+  await response.arrayBuffer()
+  throw new Error('operation-bound post-commit response loss')
+}
+const pullController = createPullQuiescenceFetch(dropFetch)
 const stockFetch = observedSyncFetch(
   (observation) => protocolObservation('stock-client', observation),
   pullController.fetch
@@ -349,13 +362,13 @@ const stockFetch = observedSyncFetch(
 const harnessReplayFetch = observedSyncFetch((observation) =>
   protocolObservation('harness-replay', observation)
 )
-const target = await startOrezLocal({
+const target = await startRustLocal({
   pullIntervalMs: 0,
   fetch: stockFetch,
 })
-targetForDropConsume = target
 let client: ReturnType<typeof target.createClient> | undefined
-const replay = `bun src/exactly-once-lmid-lane.ts --target orez-local --seed=${seed} --replay`
+let observerClient: ReturnType<typeof target.createClient> | undefined
+const replay = `bun src/exactly-once-lmid-lane.ts --target rust-local --seed=${seed} --replay`
 try {
   await target.sql(
     `INSERT INTO task (id, "projectId", title, rank, done, meta, "dueAt") VALUES ('${probeId}', 'p0', 'exactly-once probe', 0, 0, NULL, NULL)`
@@ -365,6 +378,11 @@ try {
     clientId: client.clientID,
     clientGroupId: await client.clientGroupID,
     mutationId: 1,
+  }
+  observerClient = target.createClient('exactly-once-observer')
+  const observer = {
+    clientId: observerClient.clientID,
+    clientGroupId: await observerClient.clientGroupID,
   }
   const effect = { type: 'increment-probe' as const, probeId }
   const authority = async (observation: 'before' | 'after') => {
@@ -414,6 +432,7 @@ try {
     type: 'client-probe' as const,
     profileVersion: 1 as const,
     identity,
+    observer,
     effect,
   }
   const clientProbeOp = `${runId}-client-probe`
@@ -422,11 +441,11 @@ try {
     process: 'client-probe',
     phase: 'invoke',
     kind: 'read',
-    clientId: identity.clientId,
-    clientGroupId: identity.clientGroupId,
+    clientId: observer.clientId,
+    clientGroupId: observer.clientGroupId,
     exactlyOnce: { ...clientProbeStable, observed: null },
   })
-  const probeView = client.materialize(queries.taskById({ id: probeId }))
+  const probeView = observerClient.materialize(queries.taskById({ id: probeId }))
   await new Promise<void>((resolve, reject) => {
     const deadline = setTimeout(
       () => reject(new Error('timed out hydrating the rank-0 probe')),
@@ -443,8 +462,8 @@ try {
           process: 'client-probe',
           phase: 'ok',
           kind: 'read',
-          clientId: identity!.clientId,
-          clientGroupId: identity!.clientGroupId,
+          clientId: observer.clientId,
+          clientGroupId: observer.clientGroupId,
           exactlyOnce: {
             ...clientProbeStable,
             observed: { resultType: 'complete', applicationCount: String(data.rank) },
@@ -455,6 +474,8 @@ try {
     })
   })
   probeView.destroy()
+  await observerClient.close()
+  observerClient = undefined
 
   const mutationOp = `${runId}-mutation`
   const planId = `${runId}-drop-response`
@@ -491,11 +512,13 @@ try {
       anchor: { historyIndex: event.index, historyOpId: event.opId },
     })
   }
-  const dropToken = target.armExactlyOnceResponseDrop(
-    { identity, args: { id: probeId } },
-    faultStage
-  )
-  dropFetch.arm(dropToken)
+  await target.dropNextPushResponse()
+  faultStage('arm')
+  responseDropArmed = true
+  onResponseDrop = () => {
+    faultStage('fire')
+    faultStage('heal')
+  }
   recordingProtocol = true
 
   const mutationEvidence = {
@@ -677,5 +700,6 @@ try {
 } finally {
   recordingProtocol = false
   await client?.close().catch(() => {})
+  await observerClient?.close().catch(() => {})
   await target.close()
 }

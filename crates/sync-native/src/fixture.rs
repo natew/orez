@@ -6,6 +6,7 @@
 // sync-core's Mutator/Visibility traits.
 
 use serde_json::Value;
+use std::collections::HashSet;
 
 use sync_core::{DbError, SqlValue, SyncDb};
 
@@ -171,6 +172,69 @@ pub fn run_mutator(
     _user_id: &str,
 ) -> Result<(), MutateError> {
     match name {
+        "exactlyOnce.incrementProbe" => {
+            let id = text(args, "id")?;
+            let rows = db.query(
+                "SELECT rank FROM task WHERE id = ?",
+                &[SqlValue::Text(id.clone())],
+            )?;
+            if rows.len() != 1 {
+                return Err(MutateError::App("probe-not-found".into()));
+            }
+            db.exec(
+                "UPDATE task SET rank = rank + 1 WHERE id = ?",
+                &[SqlValue::Text(id)],
+            )?;
+            Ok(())
+        }
+        "atomicVisibility.appendGroup" => {
+            let effects = args
+                .get("effects")
+                .and_then(Value::as_array)
+                .filter(|effects| effects.len() >= 2)
+                .ok_or_else(|| {
+                    MutateError::Unknown("atomic append requires at least two effects".into())
+                })?;
+            let mut ids = HashSet::new();
+            let mut identities = HashSet::new();
+            let mut validated = Vec::with_capacity(effects.len());
+            for effect in effects {
+                let id = text(effect, "id")?;
+                let project_id = text(effect, "projectId")?;
+                let rank = effect
+                    .get("rank")
+                    .and_then(Value::as_f64)
+                    .filter(|rank| {
+                        rank.is_finite()
+                            && rank.fract() == 0.0
+                            && rank.abs() <= 9_007_199_254_740_991.0
+                            && !(*rank == 0.0 && rank.is_sign_negative())
+                    })
+                    .ok_or_else(|| MutateError::Unknown("invalid atomic append rank".into()))?;
+                if !ids.insert(id.clone())
+                    || !identities.insert((project_id.clone(), rank.to_bits()))
+                {
+                    return Err(MutateError::Unknown(
+                        "atomic append effects must be unique".into(),
+                    ));
+                }
+                validated.push((id, project_id, rank));
+            }
+            for (id, project_id, rank) in validated {
+                let title = format!("atomic-visibility:{id}");
+                db.exec(
+                    r#"INSERT INTO task (id, "projectId", title, rank, done, meta, "dueAt")
+                       VALUES (?, ?, ?, ?, 0, NULL, NULL)"#,
+                    &[
+                        SqlValue::Text(id),
+                        SqlValue::Text(project_id),
+                        SqlValue::Text(title),
+                        SqlValue::Real(rank),
+                    ],
+                )?;
+            }
+            Ok(())
+        }
         "project.create" => {
             let id = text(args, "id")?;
             let owner = text(args, "ownerId")?;

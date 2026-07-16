@@ -9,7 +9,7 @@ import type { ConsistencyCheck } from './artifacts.js'
 
 export const EXACTLY_ONCE_LMID_PROFILE = {
   name: 'exactly-once-lost-push-recovery-plus-server-replay',
-  version: 1,
+  version: 2,
 } as const
 
 export type ExactlyOnceLmidResult = Pick<
@@ -406,12 +406,20 @@ export function checkExactlyOnceLmid(
     )
   )
     violations.push('quiescence-aborted pulls are outside the client close interval')
+  const pullsDrainedDuringQuiesce = pulls.filter(
+    (pair) =>
+      pair.invoke.index < (quiesce?.invoke.index ?? -1) &&
+      pair.terminal !== undefined &&
+      pair.terminal.index > (quiesce?.invoke.index ?? Number.MAX_SAFE_INTEGER) &&
+      pair.terminal.index < (quiesce?.terminal?.index ?? -1)
+  )
   const quiesceObserved = quiesce?.terminal?.exactlyOnce.observed
   if (
     quiesceObserved?.closed === true &&
     (quiesceObserved.pendingPushAtClose !== 0 ||
-      quiesceObserved.pendingPullAtClose !== abortedPulls.length ||
-      quiesceObserved.controllerPullAbortsRequested !== abortedPulls.length ||
+      quiesceObserved.pendingPullAtClose !== pullsDrainedDuringQuiesce.length ||
+      quiesceObserved.controllerPullAbortsRequested !==
+        pullsDrainedDuringQuiesce.length ||
       quiesceObserved.pendingAfterQuiesce !== 0)
   )
     violations.push('client quiesce drain counts do not match recorded operations')
@@ -446,10 +454,11 @@ export function checkExactlyOnceLmid(
   const clientObserved = clientProbes[0]?.terminal?.exactlyOnce.observed
   if (
     clientProbes.length !== 1 ||
+    clientProbes[0]?.invoke.exactlyOnce.observer.clientId === identity?.clientId ||
     clientObserved?.resultType !== 'complete' ||
     canonicalI64(clientObserved.applicationCount) !== 0n
   ) {
-    violations.push('missing complete client rank-0 probe precondition')
+    violations.push('missing complete non-writing client rank-0 probe precondition')
   }
   if (violations.length > 0) return { status: 'fail', violations }
   if (mutationPhase === 'info') {
