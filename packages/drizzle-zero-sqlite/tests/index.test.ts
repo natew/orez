@@ -1,4 +1,4 @@
-import { string as zeroString } from '@rocicorp/zero'
+import { string as zeroString, type Row } from '@rocicorp/zero'
 import { defineRelations } from 'drizzle-orm'
 import { pgTable, text as pgText } from 'drizzle-orm/pg-core'
 import {
@@ -29,6 +29,32 @@ const users = sqliteTable('user_records', {
 
 const metadataType: ZeroCustomType<typeof users.metadata> = { theme: 'dark' }
 const updateFieldType: ZeroCustomType<typeof users.displayName> = 'Ada'
+
+const typedSchema = drizzleZeroConfig(
+  { users },
+  {
+    tables: {
+      users: {
+        id: true,
+        displayName: true,
+        active: true,
+        createdAt: true,
+        metadata: true,
+        score: true,
+      },
+    },
+    suppressDefaultsWarning: true,
+  }
+)
+type Users = Row<(typeof typedSchema)['tables']['users']>
+const typedUser: Users = {
+  id: 'user-1',
+  displayName: 'Ada',
+  active: true,
+  createdAt: 1,
+  metadata: { theme: 'dark' },
+  score: 10,
+}
 
 const posts = sqliteTable('posts', {
   id: text().primaryKey(),
@@ -79,12 +105,22 @@ describe('drizzleZeroConfig', () => {
     const source = generateDrizzleZeroSqliteSchemaFile({
       importPath: './drizzle-schema.js',
       schemaName: 'zeroSchema',
+      tableNames: ['users', 'account_members'],
     })
 
     expect(source).toContain("import { drizzleZeroConfig } from 'drizzle-zero-sqlite'")
-    expect(source).toContain("import * as drizzleSchema from \"./drizzle-schema.js\"")
+    expect(source).toContain('import * as drizzleSchema from "./drizzle-schema.js"')
     expect(source).toContain('export const zeroSchema = drizzleZeroConfig(drizzleSchema)')
+    expect(source).toContain(
+      `export type Users = Row<(typeof zeroSchema)['tables']["users"]>`
+    )
+    expect(source).toContain(
+      `export type AccountMembers = Row<(typeof zeroSchema)['tables']["account_members"]>`
+    )
+    expect(source).toContain('export const zql = createBuilder(zeroSchema)')
+    expect(source).toContain(`declare module '@rocicorp/zero'`)
     expect(source).not.toMatch(/pg-core|drizzle-zero'|postgres/)
+    expect(typedUser.metadata).toEqual({ theme: 'dark' })
   })
 
   test('maps SQLite tables, columns, defaults, and composite primary keys', () => {
