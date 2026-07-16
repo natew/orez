@@ -312,10 +312,14 @@ export function createSyncWorker<Env extends SyncHostEnv>(
   }
 }
 
+export interface SyncDurableObjectConstructor<Env extends SyncHostEnv> {
+  new (ctx: DurableObjectState, env: Env): DurableObject<Env>
+}
+
 /** Create the namespace Durable Object class for one bundled consumer config. */
 export function createSyncDurableObject<Env extends SyncHostEnv>(
   config: SyncHostConfig<Env>
-) {
+): SyncDurableObjectConstructor<Env> {
   validateSyncHostConfig(config)
   const compileQuery = createQueryCompiler(config.schema)
   const defaultRetainChanges = String(config.retainChanges ?? 4_096)

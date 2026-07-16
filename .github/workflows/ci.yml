@@ -209,7 +209,7 @@ jobs:
         run: bun run --cwd packages/sync-browser-host playwright install --with-deps chromium
 
       - name: browser worker durability and protocol suite
-        run: bun run test:sync-browser-host
+        run: rm -rf packages/sync-cf-host/dist && bun run test:sync-browser-host
 
   # rust sync engine: workspace build + native crate tests + format gate.
   rust:

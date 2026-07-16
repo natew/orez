@@ -185,7 +185,7 @@ if (into) {
   console.info('building...')
   cleanRootDist()
   run('bun run build')
-  run('bun run build:wasm', { cwd: resolve(root, 'packages', 'sync-cf-host') })
+  run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
   preparePgToSqliteDist()
 
   const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
@@ -318,9 +318,8 @@ if (existsSync(compilerPkgPath)) {
   })
 }
 
-// orez-sync-cf-host — CF DO host for the rust sync engine (TS source +
-// generated wasm; consumers bundle with wrangler). skip if wasm isn't built —
-// the release build step builds it.
+// orez-sync-cf-host — built CF DO host and standalone query runtime plus
+// generated wasm. skip if wasm isn't built — the release build step builds it.
 const cfHostDir = resolve(root, 'packages', 'sync-cf-host')
 const cfHostPkgPath = resolve(cfHostDir, 'package.json')
 if (existsSync(cfHostPkgPath)) {
@@ -390,7 +389,7 @@ if (!packOnly) {
 console.info('\nbuilding...')
 cleanRootDist()
 run('bun run build')
-run('bun run build:wasm', { cwd: resolve(root, 'packages', 'sync-cf-host') })
+run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
 preparePgToSqliteDist()
 
 // bump versions in source (skip for --pack-only and --canary)

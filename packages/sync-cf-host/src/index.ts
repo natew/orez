@@ -32,6 +32,7 @@ export type {
   VisibilityFilter,
   ZeroSchemaConfig,
 } from './types.js'
+export type { SyncDurableObjectConstructor } from './host.js'
 export type {
   CompiledTransactionQueryNode,
   CompiledTransactionQueryPlan,

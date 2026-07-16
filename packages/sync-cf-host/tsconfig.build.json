@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": [
+    "src/index.ts",
+    "src/post-commit.ts",
+    "src/mutation-error.ts",
+    "src/bun-wasm-loader.ts",
+    "src/query-compiler.ts",
+    "src/transaction-query.ts",
+    "src/vite-wasm-loader.ts"
+  ]
+}

@@ -80,6 +80,12 @@
         "workerd": "1.20260617.1",
         "wrangler": "4.103.0",
       },
+      "peerDependencies": {
+        "vite": ">=5",
+      },
+      "optionalPeers": [
+        "vite",
+      ],
     },
     "pg-to-sqlite": {
       "name": "pg-to-sqlite",

@@ -1,8 +1,8 @@
 import { Database } from 'bun:sqlite'
 import { describe, expect, test } from 'bun:test'
 
-import { createQueryCompiler } from './src/query-compiler.ts'
-import { executeTransactionQueryPlan } from './src/transaction-query.ts'
+import { createQueryCompiler } from 'orez-sync-cf-host/query-compiler'
+import { executeTransactionQueryPlan } from 'orez-sync-cf-host/transaction-query'
 
 const schema = {
   tables: {
@@ -75,7 +75,7 @@ function database() {
 describe('standalone query compiler', () => {
   test('explains how to load wasm when Bun has no preload', async () => {
     const child = Bun.spawn(
-      [process.execPath, '-e', "await import('./src/query-compiler.ts')"],
+      [process.execPath, '-e', "await import('orez-sync-cf-host/query-compiler')"],
       {
         cwd: import.meta.dir,
         stdout: 'ignore',

@@ -3,29 +3,56 @@
   "version": "0.5.19",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./post-commit": "./src/post-commit.ts",
-    "./mutation-error": {
-      "types": "./src/mutation-error.ts",
-      "import": "./src/mutation-error.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
-    "./bun-wasm-loader": "./src/bun-wasm-loader.ts",
-    "./query-compiler": "./src/query-compiler.ts",
-    "./transaction-query": "./src/transaction-query.ts"
+    "./post-commit": {
+      "types": "./dist/post-commit.d.ts",
+      "import": "./dist/post-commit.js"
+    },
+    "./mutation-error": {
+      "types": "./dist/mutation-error.d.ts",
+      "import": "./dist/mutation-error.js"
+    },
+    "./bun-wasm-loader": {
+      "types": "./dist/bun-wasm-loader.d.ts",
+      "import": "./dist/bun-wasm-loader.js"
+    },
+    "./query-compiler": {
+      "types": "./dist/query-compiler.d.ts",
+      "import": "./dist/query-compiler.js"
+    },
+    "./transaction-query": {
+      "types": "./dist/transaction-query.d.ts",
+      "import": "./dist/transaction-query.js"
+    },
+    "./vite-wasm-loader": {
+      "types": "./dist/vite-wasm-loader.d.ts",
+      "import": "./dist/vite-wasm-loader.js"
+    },
+    "./wasm-module": {
+      "types": "./dist/generated/sync_wasm_bg.wasm.d.ts",
+      "import": "./dist/generated/sync_wasm_bg.wasm"
+    }
   },
   "scripts": {
     "build:wasm": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm && rm -f src/generated/.gitignore && bun scripts/write-wasm-module-type.ts",
     "build:wasm:platform": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm -- --features platform-probes && rm -f src/generated/.gitignore && bun scripts/write-wasm-module-type.ts",
-    "bundle": "bun run build:wasm && wrangler deploy --dry-run --outdir dist",
-    "measure": "bun run build:wasm && bun measure.mjs",
-    "test": "bun run test:config && bun run test:query-compiler && bun run test:platform && bun run test:integration && bun run test:ingest && bun run test:restart",
+    "build:runtime": "rm -rf dist && mkdir -p dist && cp -R src/generated dist/generated && tsc -p tsconfig.build.json",
+    "build:dist": "bun run build:wasm && bun run build:runtime",
+    "build:dist:platform": "bun run build:wasm:platform && bun run build:runtime",
+    "bundle": "bun run build:dist && wrangler deploy --dry-run --outdir .wrangler/bundle",
+    "measure": "bun run build:dist && bun measure.mjs",
+    "test": "bun run test:config && bun run test:query-compiler && bun run test:package && bun run test:platform && bun run test:integration && bun run test:ingest && bun run test:restart",
     "test:config": "bun test config.test.mjs write-safeguards.test.mjs mutation-error.test.mjs post-commit.test.mjs",
-    "test:integration": "bun run build:wasm && bun integration-test.mjs",
-    "test:ingest": "bun run build:wasm && bun ingest-test.mjs",
-    "test:query-compiler": "bun run build:wasm && bun test --preload orez-sync-cf-host/bun-wasm-loader query-compiler.test.mjs",
-    "test:restart": "bun restart-test.mjs",
-    "test:platform": "bun run build:wasm:platform && bun platform-test.mjs",
-    "typecheck": "bun run build:wasm:platform && tsc --noEmit"
+    "test:integration": "bun run build:dist && bun integration-test.mjs",
+    "test:ingest": "bun run build:dist && bun ingest-test.mjs",
+    "test:package": "bun run build:dist && node package-runtime-test.mjs",
+    "test:query-compiler": "bun run build:dist && bun test --preload orez-sync-cf-host/bun-wasm-loader query-compiler.test.mjs && node vite-ssr-query-compiler-test.mjs",
+    "test:restart": "bun run build:dist && bun restart-test.mjs",
+    "test:platform": "bun run build:dist:platform && bun platform-test.mjs",
+    "typecheck": "bun run build:dist:platform && tsc --noEmit"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "4.20260617.1",
@@ -35,7 +62,13 @@
     "workerd": "1.20260617.1",
     "wrangler": "4.103.0"
   },
-  "files": [
-    "src"
-  ]
+  "peerDependencies": {
+    "vite": ">=5"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  },
+  "files": ["dist", "README.md"]
 }

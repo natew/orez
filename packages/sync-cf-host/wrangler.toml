@@ -7,6 +7,11 @@ compatibility_flags = ["nodejs_compat"]
 account_id = "6afff1f79e2fd12f1cfd1bfe1dfd08d1"
 workers_dev = true
 
+[[rules]]
+type = "CompiledWasm"
+globs = ["orez-sync-cf-host/wasm-module"]
+fallthrough = true
+
 [[durable_objects.bindings]]
 name = "SYNC_DO"
 class_name = "SyncDurableObject"

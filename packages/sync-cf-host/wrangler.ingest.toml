@@ -2,6 +2,11 @@ name = "orez-rust-sync-ingest-harness"
 main = "src/ingest-harness-worker.ts"
 compatibility_date = "2026-06-01"
 
+[[rules]]
+type = "CompiledWasm"
+globs = ["orez-sync-cf-host/wasm-module"]
+fallthrough = true
+
 [vars]
 ADMIN_KEY = "ingest-harness-admin"
 

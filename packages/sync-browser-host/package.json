@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build:wasm": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-browser-host/src/generated --out-name sync_wasm && rm -f src/generated/.gitignore",
-    "build:dist": "bun run build:wasm && tsc -p tsconfig.build.json && mkdir -p ../../dist/sync-browser-host/generated && cp src/generated/sync_wasm.js src/generated/sync_wasm_bg.wasm ../../dist/sync-browser-host/generated/ && cp ../../sqlite-wasm/dist/sqlite3-browser.wasm ../../dist/sync-browser-host/generated/",
+    "build:dist": "bun run --cwd ../sync-cf-host build:dist && bun run build:wasm && tsc -p tsconfig.build.json && mkdir -p ../../dist/sync-browser-host/generated && cp src/generated/sync_wasm.js src/generated/sync_wasm_bg.wasm ../../dist/sync-browser-host/generated/ && cp ../../sqlite-wasm/dist/sqlite3-browser.wasm ../../dist/sync-browser-host/generated/",
     "typecheck": "bun run build:dist && tsc --noEmit",
     "test": "bun run typecheck && bun test test/unit && bun test/browser/run.ts"
   },

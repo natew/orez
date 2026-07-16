@@ -1,5 +1,6 @@
+import { createQueryCompiler } from 'orez-sync-cf-host/query-compiler'
+
 import { ZeroDO } from '../../../src/cf-do/worker.js'
-import { createQueryCompiler } from './query-compiler.js'
 import {
   SqlStorageDirect,
   SqlStorageMutatorTransaction,

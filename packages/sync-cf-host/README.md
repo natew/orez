@@ -24,12 +24,32 @@ paths.
 Transaction-query `ILIKE` folding is ASCII-only on Durable Object SQLite;
 non-ASCII case pairs can diverge from PostgreSQL.
 
-### Bun query compiler
+### Query compiler runtimes
 
-Wrangler loads the engine's `.wasm` import as a precompiled
-`WebAssembly.Module`. Bun consumers of `createQueryCompiler` must register the
-package loader so the same import has the same value without changing the
-compiler code:
+Every runtime uses the same `orez-sync-cf-host/wasm-module` import and the same
+`initSync` path. Configure the loader that matches the host:
+
+| Host                         | Configuration                                                                                    | Module value                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| Workerd / Wrangler           | Map the package's `wasm-module` export as a compiled Wasm module; do not install the Vite plugin | Cloudflare `CompiledWasm`                                    |
+| Bun                          | Preload `orez-sync-cf-host/bun-wasm-loader`                                                      | `WebAssembly.Module` compiled by the Bun loader              |
+| Vite serve / SSR development | Add `orezSyncCfHostWasm()` from `orez-sync-cf-host/vite-wasm-loader`                             | `WebAssembly.Module` built from package bytes by Vite        |
+| Node production bundle       | Keep the same Vite plugin active for the production SSR build                                    | `WebAssembly.Module` built from bytes embedded in the bundle |
+
+The Vite plugin also keeps `orez-sync-cf-host` inside Vite's SSR pipeline. A
+direct Node import without a build loader is unsupported because Node does not
+load the bare `.wasm` export.
+
+Wrangler consumers map the bare address rather than a filesystem glob:
+
+```toml
+[[rules]]
+type = "CompiledWasm"
+globs = ["orez-sync-cf-host/wasm-module"]
+fallthrough = true
+```
+
+Bun consumers register the preload in `bunfig.toml`:
 
 ```toml
 # bunfig.toml
@@ -39,6 +59,21 @@ preload = ["orez-sync-cf-host/bun-wasm-loader"]
 For a single command, use
 `bun --preload orez-sync-cf-host/bun-wasm-loader <command>`. The compiler throws
 an error naming this preload when Bun resolves the `.wasm` import as a pathname.
+
+Node-targeted Vite consumers add the plugin once and leave it active in serve
+and build:
+
+```ts
+import { orezSyncCfHostWasm } from 'orez-sync-cf-host/vite-wasm-loader'
+
+export default {
+  plugins: [orezSyncCfHostWasm()],
+}
+```
+
+If one Vite config targets both Node and Workerd, include this plugin only for
+the Node target. The Workerd target uses the `CompiledWasm` mapping above and
+must not run the Vite loader.
 
 ## Wake channel and eviction
 

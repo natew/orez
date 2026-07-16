@@ -1,5 +1,6 @@
+import wasmModule from 'orez-sync-cf-host/wasm-module'
+
 import { initSync } from './generated/sync_wasm.js'
-import wasmModule from './generated/sync_wasm_bg.wasm'
 
 if (!(wasmModule instanceof WebAssembly.Module)) {
   throw new TypeError(

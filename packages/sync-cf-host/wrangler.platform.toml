@@ -2,6 +2,11 @@ name = "orez-rust-sync-platform-test"
 main = "src/platform-probe-worker.ts"
 compatibility_date = "2026-06-01"
 
+[[rules]]
+type = "CompiledWasm"
+globs = ["orez-sync-cf-host/wasm-module"]
+fallthrough = true
+
 [[durable_objects.bindings]]
 name = "PROBE_DO"
 class_name = "ProbeDurableObject"
