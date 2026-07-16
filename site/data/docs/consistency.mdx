@@ -1,0 +1,97 @@
+---
+title: Consistency
+description: The contract Orez tests against, the four properties it proves, and what it deliberately does not claim.
+---
+
+# Consistency
+
+Orez is an asynchronous client cache over a transactional authority. A client
+may read an older committed snapshot while another client's acknowledged write
+is still propagating. That is the contract Zero documents for its clients, and
+Orez does not reinterpret it: the validation suite makes no claim of global
+linearizability or strict serializability for cache reads.
+
+What Orez does own is a database's core job. The server decides what a query
+returns and whether a mutation commits. If those are wrong, they are wrong
+regardless of consistency model. So the test suite is organized around four
+properties, in priority order:
+
+1. **Named queries return the right data and the right shape.** ZQL queries —
+   filters, ordering, limits, related subqueries, permission transforms —
+   produce the same rows the reference implementation produces.
+2. **Custom mutators commit or roll back atomically, exactly once.** A
+   mutation's row effects and its last-mutation-ID move together: never rows
+   without the ack, never the ack without the rows, and a replayed mutation
+   never applies twice.
+3. **No data loss** across restart, eviction, reconnect, retention pruning,
+   and injected storage faults.
+4. **Ordering holds.** Client cookies never regress, an acknowledgement never
+   arrives before its effects, and a patch is never applied torn.
+
+## How observations are made
+
+Zero clients keep a local optimistic store that applies mutations instantly,
+before the server confirms anything. A read on the mutating client immediately
+after a mutation observes that local overlay, not the engine. Every
+correctness check in the suite therefore observes server-confirmed state: a
+read after the server acknowledged the mutation, a non-writing client's view,
+or the authority database directly. A test run with zero non-writing clients
+is treated as invalid rather than passing.
+
+The suite keeps three kinds of evidence separate, because mixing them makes
+stale-but-valid cache reads look like transactional anomalies:
+
+- **Authority history** — mutation invocations, server outcomes,
+  last-mutation-IDs, and direct authoritative reads. This history supports
+  atomicity, durability, and idempotency claims.
+- **Client observation history** — complete materialized-query observations,
+  cookies, and convergence barriers. This history supports monotonic-session,
+  read-your-writes, atomic-visibility, authorization, and
+  eventual-convergence claims. Wall-clock completion order across clients is
+  not a serialization order.
+- **Differential traces** — generated operations run against the TypeScript
+  reference core, stock zero-cache, and the Rust engine, with normalized
+  outputs compared. These prove semantic equivalence for the exercised
+  corpus.
+
+Convergence is proven with a barrier, not a delay: the workload stops, faults
+heal, a unique sentinel commits, every client must report a complete
+observation containing the sentinel, and a fresh client plus a direct
+authority read must agree with all of them. Two clients agreeing with each
+other is not enough.
+
+## How the checks run
+
+- **Differential lanes** compare Orez against stock zero-cache and against a
+  TypeScript reference core: fixed query shapes, seeded randomized sweeps
+  with shrinking, and a generated operation-trace differential inside the
+  Rust engine's test suite.
+- **Consistency checkers** consume recorded operation histories and validate
+  atomic visibility, exactly-once mutation application, and
+  permission-transition behavior. Every checker ships with a positive fixture
+  and a mutant history it must reject, so the checker itself is proven able
+  to fail.
+- **Fault lanes** kill and restart the server process over the same SQLite
+  file, inject storage faults at named transaction boundaries, evict and
+  resume Cloudflare Durable Objects, and drop or replay responses. Scheduled
+  faults carry receipts; a fault that never fired invalidates the run instead
+  of passing it.
+- **Mutation testing at the system level** keeps a suite of known engine bugs
+  (dropped filter branches, skipped LMID writes, over-pruned retention,
+  leaked invisible rows) and records which lanes catch which. A mutant
+  nothing catches is treated as a named hole to close, not a pass.
+
+## What is deliberately not claimed
+
+- Global linearizability or strict serializability across clients. An
+  asynchronous cache cannot honestly claim either, and Orez does not.
+- CAP-theorem positioning. Orez inherits Zero's model: reads are local and
+  fast, writes are authoritative and acknowledged.
+- Green-badge completeness. The suite's own documentation records the gaps it
+  has not closed — checks that exist but do not yet run against every target,
+  and randomized machinery that has not yet pinned a real bug. A claim
+  stronger than the evidence would be a regression, not a feature.
+
+The repository's internal testing documentation tracks the current gap list
+with the same candor; `/docs/testing` describes how evidence is scoped per
+runtime.

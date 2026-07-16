@@ -18,6 +18,7 @@ export const docsSections: DocsSection[] = [
       { title: 'Get started', route: '/docs/getting-started' },
       { title: 'Choose a runtime', route: '/docs/runtimes' },
       { title: 'Unchanged Zero client', route: '/docs/zero-compatibility' },
+      { title: 'Consistency', route: '/docs/consistency' },
     ],
   },
   {
