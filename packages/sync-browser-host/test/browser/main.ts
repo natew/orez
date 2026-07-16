@@ -354,8 +354,8 @@ async function runBrowserHostSpike() {
   const applicationTransaction = await connection.runApplicationTransaction()
   equal(
     applicationTransaction.rows,
-    [{ title: 'trusted' }],
-    'application transaction materializes rows'
+    [{ id: 'application-transaction', title: 'trusted', done: false }],
+    'application transaction materializes queryAst rows'
   )
   equal(
     applicationTransaction.effectBeforeResolve,

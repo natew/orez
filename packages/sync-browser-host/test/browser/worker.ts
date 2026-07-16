@@ -182,17 +182,33 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
           'INSERT INTO todo (id, title, done) VALUES (?, ?, ?)',
           ['application-transaction', 'trusted', 0]
         )
-        const rows = await tx.query<{ title: string }>(
-          'SELECT title FROM todo WHERE id = ?',
-          ['application-transaction']
+        const row = await tx.queryAst<
+          | { id: string; title: string; done: boolean }
+          | undefined
+        >(
+          {
+            table: 'todo',
+            where: {
+              type: 'simple',
+              op: '=',
+              left: { type: 'column', name: 'id' },
+              right: { type: 'literal', value: 'application-transaction' },
+            },
+          },
+          { singular: true, relationships: {} },
+          'applicationTransactionTodo'
         )
         context.defer(() => {
           self.postMessage({ type: 'application-transaction-effect', id: message.id })
         })
-        return rows
+        return row
       })
-      .then((rows) => {
-        self.postMessage({ type: 'application-transaction-complete', id: message.id, rows })
+      .then((row) => {
+        self.postMessage({
+          type: 'application-transaction-complete',
+          id: message.id,
+          rows: row ? [row] : [],
+        })
       })
       .catch((error) => {
         self.postMessage({
