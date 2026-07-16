@@ -1,5 +1,6 @@
 import type { BrowserHostTestHooks, BrowserHostTestFaultPoint } from './host.js'
 import type { BrowserSyncHost, BrowserSyncHostPortClient } from './types.js'
+import type { SqlStatementMetadata } from 'orez-sync-cf-host'
 
 type SerializedRequest = {
   url: string
@@ -28,6 +29,7 @@ type PortRequest =
       operation: 'exec'
       sql: string
       params: readonly unknown[]
+      metadata?: SqlStatementMetadata
     }
   | { id: number; operation: 'disconnect' }
 
@@ -136,8 +138,11 @@ export function serveBrowserSyncHostPortInternal(
             value: await host.query(request.sql, request.params),
           }
         } else {
-          await host.exec(request.sql, request.params)
-          response = { id: request.id, ok: true }
+          response = {
+            id: request.id,
+            ok: true,
+            value: await host.exec(request.sql, request.params, request.metadata),
+          }
         }
         await reachDuringDelivery(hooks)
         if (!disconnected) {
@@ -220,8 +225,10 @@ export function createBrowserSyncHostPortClient(
       if (!result.ok) throw new Error('unreachable')
       return result.value as never
     },
-    async exec(sql, params = []) {
-      await send({ operation: 'exec', sql, params })
+    async exec(sql, params = [], metadata) {
+      const result = await send({ operation: 'exec', sql, params, metadata })
+      if (!result.ok) throw new Error('unreachable')
+      return result.value as never
     },
     subscribe(listener) {
       if (closed) throw new Error('browser sync host port is closed')

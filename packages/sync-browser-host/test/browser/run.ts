@@ -48,6 +48,7 @@ const server = Bun.serve({
   port: 0,
   async fetch(request) {
     const pathname = new URL(request.url).pathname
+    if (pathname === '/favicon.ico') return new Response(null, { status: 204 })
     const path =
       pathname === '/'
         ? join(import.meta.dir, 'index.html')
@@ -61,7 +62,12 @@ const server = Bun.serve({
   },
 })
 
-const browser = await chromium.launch({ headless: true })
+const browser = await chromium.launch({
+  channel: 'chromium',
+  headless: true,
+  args: ['--use-angle=metal'],
+  ignoreDefaultArgs: ['--enable-unsafe-swiftshader', '--force-color-profile=srgb'],
+})
 const page = await browser.newPage()
 page.setDefaultTimeout(60_000)
 const consoleErrors: string[] = []

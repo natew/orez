@@ -32,6 +32,7 @@ import type {
   NormalizedClaims,
   PullCaps,
 } from './types.js'
+import type { SQLiteExecResult, SqlStatementMetadata } from 'orez-sync-cf-host'
 
 const DEFAULT_CAPS: PullCaps = {
   maxChangeRows: 10_000,
@@ -530,11 +531,18 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
     })
   }
 
-  async exec(sql: string, params: readonly unknown[] = []): Promise<void> {
+  async exec(
+    sql: string,
+    params: readonly unknown[] = [],
+    metadata?: SqlStatementMetadata
+  ): Promise<SQLiteExecResult> {
     this.#assertAccepting()
-    await this.#queue.run(async () => {
-      await this.#writeTransaction('direct', () => this.#directSql.exec(sql, params))
+    return await this.#queue.run(async () => {
+      const result = await this.#writeTransaction('direct', () =>
+        this.#directSql.exec(sql, params, metadata)
+      )
       this.#notifyDataChanged()
+      return result
     })
   }
 

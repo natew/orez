@@ -310,10 +310,11 @@ async function runBrowserHostSpike() {
   await connection.client.exec(
     'CREATE TABLE IF NOT EXISTS blob_probe (id TEXT PRIMARY KEY, payload BLOB NOT NULL)'
   )
-  await connection.client.exec('INSERT INTO blob_probe (id, payload) VALUES (?, ?)', [
-    'blob',
-    Uint8Array.from([0, 127, 128, 255]),
-  ])
+  const blobInsert = await connection.client.exec(
+    'INSERT INTO blob_probe (id, payload) VALUES (?, ?)',
+    ['blob', Uint8Array.from([0, 127, 128, 255])]
+  )
+  equal(blobInsert, { changes: 1 }, 'direct SQL reports affected rows')
   const blobRows = await connection.client.query<{ payload: Uint8Array }>(
     'SELECT payload FROM blob_probe WHERE id = ?',
     ['blob']
