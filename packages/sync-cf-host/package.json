@@ -31,7 +31,7 @@
       "types": "./dist/vite-wasm-loader.d.ts",
       "import": "./dist/vite-wasm-loader.js"
     },
-    "./wasm-module": {
+    "./wasm-module.wasm": {
       "types": "./dist/generated/sync_wasm_bg.wasm.d.ts",
       "import": "./dist/generated/sync_wasm_bg.wasm"
     }

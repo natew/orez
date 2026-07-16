@@ -26,26 +26,28 @@ non-ASCII case pairs can diverge from PostgreSQL.
 
 ### Query compiler runtimes
 
-Every runtime uses the same `orez-sync-cf-host/wasm-module` import and the same
+Every runtime uses the same `orez-sync-cf-host/wasm-module.wasm` import and the same
 `initSync` path. Configure the loader that matches the host:
 
-| Host                         | Configuration                                                                                    | Module value                                                 |
-| ---------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
-| Workerd / Wrangler           | Map the package's `wasm-module` export as a compiled Wasm module; do not install the Vite plugin | Cloudflare `CompiledWasm`                                    |
-| Bun                          | Preload `orez-sync-cf-host/bun-wasm-loader`                                                      | `WebAssembly.Module` compiled by the Bun loader              |
-| Vite serve / SSR development | Add `orezSyncCfHostWasm()` from `orez-sync-cf-host/vite-wasm-loader`                             | `WebAssembly.Module` built from package bytes by Vite        |
-| Node production bundle       | Keep the same Vite plugin active for the production SSR build                                    | `WebAssembly.Module` built from bytes embedded in the bundle |
+| Host                         | Configuration                                                                                         | Module value                                                 |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Workerd / Wrangler           | Map the package's `wasm-module.wasm` export as a compiled Wasm module; do not install the Vite plugin | Cloudflare `CompiledWasm`                                    |
+| Bun                          | Preload `orez-sync-cf-host/bun-wasm-loader`                                                           | `WebAssembly.Module` compiled by the Bun loader              |
+| Vite serve / SSR development | Add `orezSyncCfHostWasm()` from `orez-sync-cf-host/vite-wasm-loader`                                  | `WebAssembly.Module` built from package bytes by Vite        |
+| Node production bundle       | Keep the same Vite plugin active for the production SSR build                                         | `WebAssembly.Module` built from bytes embedded in the bundle |
 
 The Vite plugin also keeps `orez-sync-cf-host` inside Vite's SSR pipeline. A
 direct Node import without a build loader is unsupported because Node does not
 load the bare `.wasm` export.
 
-Wrangler consumers map the bare address rather than a filesystem glob:
+Wrangler consumers map the bare address rather than a filesystem glob. The
+`.wasm` suffix is part of the public subpath because extension-keyed bundlers
+classify the original import address:
 
 ```toml
 [[rules]]
 type = "CompiledWasm"
-globs = ["orez-sync-cf-host/wasm-module"]
+globs = ["orez-sync-cf-host/wasm-module.wasm"]
 fallthrough = true
 ```
 

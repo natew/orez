@@ -33,7 +33,7 @@ try {
     targets.every((target) => !target.endsWith('.ts') || target.endsWith('.d.ts'))
   )
   assert.equal(
-    packedPackage.exports['./wasm-module'].import,
+    packedPackage.exports['./wasm-module.wasm'].import,
     './dist/generated/sync_wasm_bg.wasm'
   )
 
@@ -65,7 +65,7 @@ for (const [specifier, suffix] of expected) {
   const resolved = import.meta.resolve(specifier)
   if (!resolved.endsWith(suffix)) throw new Error(specifier + ' resolved to ' + resolved)
 }
-const wasm = import.meta.resolve('orez-sync-cf-host/wasm-module')
+const wasm = import.meta.resolve('orez-sync-cf-host/wasm-module.wasm')
 if (!wasm.endsWith('/dist/generated/sync_wasm_bg.wasm')) throw new Error(wasm)
 if (!existsSync(fileURLToPath(wasm))) throw new Error('wasm export is missing')
 const transaction = await import('orez-sync-cf-host/transaction-query')

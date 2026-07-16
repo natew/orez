@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 
 import type { Plugin } from 'vite'
 
-const wasmModuleID = 'orez-sync-cf-host/wasm-module'
+const wasmModuleID = 'orez-sync-cf-host/wasm-module.wasm'
 const resolvedWasmModuleID = `\0${wasmModuleID}`
 
 /** Load the sync engine for Vite's Node serve, SSR, and production build paths. */

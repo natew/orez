@@ -9,7 +9,7 @@ workers_dev = true
 
 [[rules]]
 type = "CompiledWasm"
-globs = ["orez-sync-cf-host/wasm-module"]
+globs = ["orez-sync-cf-host/wasm-module.wasm"]
 fallthrough = true
 
 [[durable_objects.bindings]]

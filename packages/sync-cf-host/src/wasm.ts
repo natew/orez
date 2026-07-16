@@ -1,4 +1,4 @@
-import wasmModule from 'orez-sync-cf-host/wasm-module'
+import wasmModule from 'orez-sync-cf-host/wasm-module.wasm'
 
 import { initSync } from './generated/sync_wasm.js'
 
