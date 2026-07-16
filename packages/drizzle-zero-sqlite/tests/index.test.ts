@@ -79,11 +79,18 @@ describe('drizzleZeroConfig', () => {
     const source = generateDrizzleZeroSqliteSchemaFile({
       importPath: './drizzle-schema.js',
       schemaName: 'zeroSchema',
+      tableNames: ['users', 'posts'],
     })
 
+    expect(source).toContain("import { createBuilder, type Row } from '@rocicorp/zero'")
     expect(source).toContain("import { drizzleZeroConfig } from 'drizzle-zero-sqlite'")
-    expect(source).toContain("import * as drizzleSchema from \"./drizzle-schema.js\"")
+    expect(source).toContain('import * as drizzleSchema from "./drizzle-schema.js"')
     expect(source).toContain('export const zeroSchema = drizzleZeroConfig(drizzleSchema)')
+    expect(source).toContain(
+      `export type Posts = Row<(typeof zeroSchema)['tables']["posts"]>`
+    )
+    expect(source).toContain('export const zql = createBuilder(zeroSchema)')
+    expect(source).toContain('schema: Schema')
     expect(source).not.toMatch(/pg-core|drizzle-zero'|postgres/)
   })
 
