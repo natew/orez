@@ -55,6 +55,13 @@ plan hash otherwise. The diagnostic includes both counters and both limits. An
 unbounded root with a related child therefore fails explicitly instead of
 consuming the Durable Object CPU budget without a bound.
 
+The host exposes two thin execution drivers over one validation, decoding, and
+budget core. `executeTransactionQueryPlan` consumes synchronous materialized
+selects inside a Durable Object, where no cursor may survive an await.
+`executeTransactionQueryPlanAsync` consumes materialized selects from an async
+HTTP executor, as Chat local development does. The environment requires the two
+drivers; their result shapes, ordering, budgets, and diagnostics are identical.
+
 ## Supported query subset
 
 The compiler accepts the current Zero AST fields `schema`, `table`, `alias`,

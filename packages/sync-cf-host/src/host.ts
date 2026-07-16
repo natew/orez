@@ -1,13 +1,20 @@
 import { DurableObject } from 'cloudflare:workers'
 
 import { validatePullCaps, validateSyncHostConfig } from './config.js'
+import { createPostCommitEffects } from './post-commit.js'
+import { createQueryCompiler } from './query-compiler.js'
+import {
+  SqlStorageDirect,
+  SqlStorageMutatorTransaction,
+  SqlStorageSyncDb,
+} from './sql-storage-adapter.js'
+import { isMutationApplicationError } from './types.js'
 import {
   engine_apply_snapshot_changes,
   engine_apply_snapshot_page,
   engine_apply_upstream,
   engine_assemble_push_response,
   engine_begin_snapshot_generation,
-  engine_compile_query,
   engine_finalize,
   engine_finalize_snapshot_generation,
   engine_handle_pull,
@@ -23,16 +30,7 @@ import {
   engine_record_app_error,
   engine_state,
   engine_version,
-  initSync,
-} from './generated/sync_wasm.js'
-import wasmModule from './generated/sync_wasm_bg.wasm'
-import { createPostCommitEffects } from './post-commit.js'
-import {
-  SqlStorageDirect,
-  SqlStorageMutatorTransaction,
-  SqlStorageSyncDb,
-} from './sql-storage-adapter.js'
-import { isMutationApplicationError } from './types.js'
+} from './wasm.js'
 import {
   IngestBreakerError,
   IngestCircuitBreaker,
@@ -47,8 +45,6 @@ import type {
   SyncHostConfig,
   SyncHostEnv,
 } from './types.js'
-
-initSync({ module: wasmModule })
 
 const CLAIMS_HEADER = 'x-orez-sync-claims'
 const NAMESPACE_HEADER = 'x-orez-sync-namespace'
@@ -320,6 +316,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
   config: SyncHostConfig<Env>
 ) {
   validateSyncHostConfig(config)
+  const compileQuery = createQueryCompiler(config.schema)
   const defaultRetainChanges = String(config.retainChanges ?? 4_096)
   const caps: PullCaps = validatePullCaps({ ...DEFAULT_CAPS, ...config.caps })
   const idleTeardownMs = config.idleTeardownMs ?? 5_000
@@ -370,8 +367,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       this.#directSql = new SqlStorageDirect(ctx.storage.sql, recordRowsWritten)
       this.#mutatorSql = new SqlStorageMutatorTransaction(
         this.#directSql,
-        (ast, format) =>
-          this.#wasm(() => engine_compile_query(config.schema, ast, format)),
+        (ast, format) => this.#wasm(() => compileQuery(ast, format)),
         config.transactionQueryBudget
       )
       ctx.blockConcurrencyWhile(async () => {

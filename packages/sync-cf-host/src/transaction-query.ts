@@ -78,6 +78,10 @@ type ExecuteSelect = (
   sql: string,
   params: readonly unknown[]
 ) => readonly MaterializedRow[]
+type ExecuteSelectAsync = (
+  sql: string,
+  params: readonly unknown[]
+) => readonly MaterializedRow[] | Promise<readonly MaterializedRow[]>
 
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER)
 const MIN_SAFE = BigInt(Number.MIN_SAFE_INTEGER)
@@ -325,66 +329,166 @@ function decodeRow(
   return decoded
 }
 
+type TransactionQueryExecutionState = {
+  budget: TransactionQueryBudget
+  query: string
+  rows: number
+  selects: number
+}
+
+type PreparedSelect = {
+  params: unknown[]
+  state: TransactionQueryExecutionState
+}
+
+type DecodedSelect = {
+  rows: Array<{ decoded: MaterializedRow; raw: MaterializedRow }>
+  state: TransactionQueryExecutionState
+}
+
+type NodeExecution = {
+  state: TransactionQueryExecutionState
+  value: MaterializedRow[] | MaterializedRow | null | undefined
+}
+
+function createExecutionState(
+  plan: CompiledTransactionQueryPlan,
+  options: TransactionQueryExecutionOptions
+): TransactionQueryExecutionState {
+  assertPlan(plan)
+  return {
+    budget: resolveBudget(options.budget),
+    query: options.queryName?.trim() || `${plan.rootTable}:${plan.planHash}`,
+    rows: 0,
+    selects: 0,
+  }
+}
+
+function assertWithinBudget(state: TransactionQueryExecutionState): void {
+  if (state.selects <= state.budget.maxSelects && state.rows <= state.budget.maxRows) {
+    return
+  }
+  throw new TransactionQueryBudgetError(
+    state.query,
+    state.selects,
+    state.rows,
+    state.budget.maxSelects,
+    state.budget.maxRows
+  )
+}
+
+function prepareSelect(
+  state: TransactionQueryExecutionState,
+  node: CompiledTransactionQueryNode,
+  parent?: MaterializedRow
+): PreparedSelect {
+  const params = node.bindings.map((binding) => {
+    if (binding.kind === 'literal') return decodeWireValue(binding.value)
+    if (!parent || !Object.hasOwn(parent, binding.field)) {
+      throw new TypeError(
+        `transaction query parent row for ${node.table} is missing field ${binding.field}`
+      )
+    }
+    return parent[binding.field]
+  })
+  const next = { ...state, selects: state.selects + 1 }
+  assertWithinBudget(next)
+  return { params, state: next }
+}
+
+function decodeSelect(
+  state: TransactionQueryExecutionState,
+  node: CompiledTransactionQueryNode,
+  materialized: readonly MaterializedRow[]
+): DecodedSelect {
+  if (!Array.isArray(materialized)) {
+    throw new TypeError('transaction query select must return a materialized row array')
+  }
+  const next = { ...state, rows: state.rows + materialized.length }
+  assertWithinBudget(next)
+  const rows = materialized.map((raw) => {
+    if (!isObject(raw)) {
+      throw new TypeError(
+        `transaction query select for ${node.table} returned a non-object row`
+      )
+    }
+    return { decoded: decodeRow(raw, node), raw }
+  })
+  return { rows, state: next }
+}
+
+function shapeRows(
+  node: CompiledTransactionQueryNode,
+  rows: MaterializedRow[]
+): NodeExecution['value'] {
+  return node.singular ? rows[0] : rows
+}
+
 export function executeTransactionQueryPlan<Result = unknown>(
   plan: CompiledTransactionQueryPlan,
   execute: ExecuteSelect,
   options: TransactionQueryExecutionOptions = {}
 ): Result {
-  assertPlan(plan)
-  const budget = resolveBudget(options.budget)
-  const query = options.queryName?.trim() || `${plan.rootTable}:${plan.planHash}`
-  let selects = 0
-  let rows = 0
-
-  const exceeded = () => {
-    throw new TransactionQueryBudgetError(
-      query,
-      selects,
-      rows,
-      budget.maxSelects,
-      budget.maxRows
-    )
-  }
-
   const run = (
     node: CompiledTransactionQueryNode,
+    state: TransactionQueryExecutionState,
     parent?: MaterializedRow
-  ): MaterializedRow[] | MaterializedRow | null | undefined => {
-    const params = node.bindings.map((binding) => {
-      if (binding.kind === 'literal') return decodeWireValue(binding.value)
-      if (!parent || !Object.hasOwn(parent, binding.field)) {
-        throw new TypeError(
-          `transaction query parent row for ${node.table} is missing field ${binding.field}`
-        )
-      }
-      return parent[binding.field]
-    })
-
-    selects++
-    if (selects > budget.maxSelects) exceeded()
-    const materialized = execute(node.sql, params)
-    if (!Array.isArray(materialized)) {
-      throw new TypeError('transaction query select must return a materialized row array')
-    }
-    rows += materialized.length
-    if (rows > budget.maxRows) exceeded()
-
-    const hydrated = materialized.map((raw) => {
-      if (!isObject(raw)) {
-        throw new TypeError(
-          `transaction query select for ${node.table} returned a non-object row`
-        )
-      }
-      const decoded = decodeRow(raw, node)
+  ): NodeExecution => {
+    const prepared = prepareSelect(state, node, parent)
+    const selected = decodeSelect(
+      prepared.state,
+      node,
+      execute(node.sql, prepared.params)
+    )
+    const hydrated: MaterializedRow[] = []
+    let current = selected.state
+    for (const { decoded, raw } of selected.rows) {
       for (const relationship of node.relationships) {
-        const related = run(relationship.node, raw)
+        const related = run(relationship.node, current, raw)
+        current = related.state
         decoded[relationship.name] =
-          relationship.node.singular && related === undefined ? null : related
+          relationship.node.singular && related.value === undefined ? null : related.value
       }
-      return decoded
-    })
-    return node.singular ? hydrated[0] : hydrated
+      hydrated.push(decoded)
+    }
+    return { state: current, value: shapeRows(node, hydrated) }
   }
 
-  return run(plan.root) as Result
+  const state = createExecutionState(plan, options)
+  return run(plan.root, state).value as Result
+}
+
+export async function executeTransactionQueryPlanAsync<Result = unknown>(
+  plan: CompiledTransactionQueryPlan,
+  execute: ExecuteSelectAsync,
+  options: TransactionQueryExecutionOptions = {}
+): Promise<Result> {
+  const run = async (
+    node: CompiledTransactionQueryNode,
+    state: TransactionQueryExecutionState,
+    parent?: MaterializedRow
+  ): Promise<NodeExecution> => {
+    const prepared = prepareSelect(state, node, parent)
+    const selected = decodeSelect(
+      prepared.state,
+      node,
+      await execute(node.sql, prepared.params)
+    )
+    const hydrated: MaterializedRow[] = []
+    let current = selected.state
+    for (const { decoded, raw } of selected.rows) {
+      for (const relationship of node.relationships) {
+        const related = await run(relationship.node, current, raw)
+        current = related.state
+        decoded[relationship.name] =
+          relationship.node.singular && related.value === undefined ? null : related.value
+      }
+      hydrated.push(decoded)
+    }
+    return { state: current, value: shapeRows(node, hydrated) }
+  }
+
+  const state = createExecutionState(plan, options)
+  const { value } = await run(plan.root, state)
+  return value as Result
 }

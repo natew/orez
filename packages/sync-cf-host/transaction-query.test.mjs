@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   executeTransactionQueryPlan,
+  executeTransactionQueryPlanAsync,
   TransactionQueryBudgetError,
 } from './src/transaction-query.ts'
 
@@ -111,6 +112,73 @@ describe('transaction query materializer', () => {
           },
         ],
       },
+    ])
+  })
+
+  test('matches the sync driver through ordered HTTP selects', async () => {
+    const rowsFor = (sql, params) => {
+      if (sql === 'root') {
+        return [
+          { id: 'u1', active: 1, profile: '{"theme":"dark"}' },
+          { id: 'u2', active: 0, profile: null },
+        ]
+      }
+      return params[0] === 'u1' ? [{ id: 'p1', authorId: 'u1', rank: 3 }] : []
+    }
+    const sync = executeTransactionQueryPlan(plan(), rowsFor)
+    const calls = []
+    const asyncResult = await executeTransactionQueryPlanAsync(
+      plan(),
+      async (sql, params) => {
+        calls.push([sql, params])
+        const response = Response.json({ rows: rowsFor(sql, params) })
+        return (await response.json()).rows
+      }
+    )
+
+    expect(asyncResult).toEqual(sync)
+    expect(calls).toEqual([
+      ['root', ['enabled']],
+      ['child', ['u1']],
+      ['child', ['u2']],
+    ])
+  })
+
+  test('aborts an HTTP execution budget before the next parent select', async () => {
+    const calls = []
+    let caught
+    try {
+      await executeTransactionQueryPlanAsync(
+        plan(),
+        async (sql, params) => {
+          calls.push([sql, params])
+          const rows =
+            sql === 'root'
+              ? [
+                  { id: 'u1', active: 1, profile: null },
+                  { id: 'u2', active: 1, profile: null },
+                ]
+              : [{ id: 'p1', authorId: params[0], rank: 3 }]
+          return (await Response.json({ rows }).json()).rows
+        },
+        { queryName: 'asyncUsersWithPosts', budget: { maxSelects: 2 } }
+      )
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(TransactionQueryBudgetError)
+    expect(caught).toEqual(
+      expect.objectContaining({
+        code: 'transaction_query_budget_exceeded',
+        query: 'asyncUsersWithPosts',
+        rows: 3,
+        selects: 3,
+      })
+    )
+    expect(calls).toEqual([
+      ['root', ['enabled']],
+      ['child', ['u1']],
     ])
   })
 

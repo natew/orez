@@ -1,23 +1,21 @@
-import { DurableObject } from 'cloudflare:workers'
-
+import { ZeroDO } from '../../../src/cf-do/worker.js'
+import { createQueryCompiler } from './query-compiler.js'
 import {
-  engine_compile_query,
-  initSync,
+  SqlStorageDirect,
+  SqlStorageMutatorTransaction,
+  SqlStorageSyncDb,
+} from './sql-storage-adapter.js'
+import {
   init_probe_schema,
   pull_snapshot,
   push_finalize,
   push_preflight,
   rust_panic_after_writes,
   value_round_trip,
-} from './generated/sync_wasm.js'
-import wasmModule from './generated/sync_wasm_bg.wasm'
-import {
-  SqlStorageDirect,
-  SqlStorageMutatorTransaction,
-  SqlStorageSyncDb,
-} from './sql-storage-adapter.js'
+} from './wasm-platform.js'
 
-initSync({ module: wasmModule })
+import type { TransactionQueryFormat } from './transaction-query.js'
+import type { ZeroSchemaConfig } from './types.js'
 
 interface Env {
   PROBE_DO: DurableObjectNamespace<ProbeDurableObject>
@@ -25,6 +23,54 @@ interface Env {
 
 type DeferredEffect = { mutationID: string; kind: string }
 type MutatorName = 'read-then-write' | 'multi-table' | 'application-error'
+
+const transactionQuerySchema = {
+  tables: {
+    account: {
+      name: 'account',
+      serverName: 'accounts',
+      columns: {
+        id: { type: 'string' },
+        balance: { type: 'number' },
+      },
+      primaryKey: ['id'],
+    },
+    entry: {
+      name: 'entry',
+      serverName: 'ledger',
+      columns: {
+        id: { type: 'number' },
+        accountId: { type: 'string', serverName: 'account_id' },
+        amount: { type: 'number' },
+        note: { type: 'string' },
+      },
+      primaryKey: ['id'],
+    },
+  },
+} as const satisfies ZeroSchemaConfig
+
+const transactionQueryAst = {
+  table: 'account',
+  where: {
+    type: 'simple',
+    op: '=',
+    left: { type: 'column', name: 'id' },
+    right: { type: 'literal', value: 'primary' },
+  },
+  related: [
+    {
+      correlation: { parentField: ['id'], childField: ['accountId'] },
+      subquery: { table: 'entry', alias: 'entries', orderBy: [['id', 'asc']] },
+    },
+  ],
+}
+
+const transactionQueryFormat = {
+  singular: true,
+  relationships: { entries: { singular: false, relationships: {} } },
+} as const satisfies TransactionQueryFormat
+
+const compileTransactionQuery = createQueryCompiler(transactionQuerySchema)
 
 // Deterministic local analogue of normal DO idle eviction, matching the
 // harness/cf probe: discard all in-memory state after an idle gap while SQL
@@ -38,7 +84,7 @@ const json = (value: unknown, status = 200) =>
     headers: { 'cache-control': 'no-store' },
   })
 
-export class ProbeDurableObject extends DurableObject<Env> {
+export class ProbeDurableObject extends ZeroDO {
   readonly #db: SqlStorageSyncDb
   #bootID = crypto.randomUUID()
   #lastRequestAt = 0
@@ -46,7 +92,7 @@ export class ProbeDurableObject extends DurableObject<Env> {
   #effects: Array<DeferredEffect & { observedCommitted: boolean }> = []
 
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env)
+    super(ctx, env as never)
     this.#db = new SqlStorageSyncDb(ctx.storage.sql)
     ctx.storage.transactionSync(() => init_probe_schema(this.#db))
   }
@@ -297,65 +343,65 @@ export class ProbeDurableObject extends DurableObject<Env> {
     }
 
     if (route === '/transaction-query') {
-      const schema = {
-        tables: {
-          account: {
-            name: 'account',
-            serverName: 'accounts',
-            columns: {
-              id: { type: 'string' },
-              balance: { type: 'number' },
-            },
-            primaryKey: ['id'],
-          },
-          entry: {
-            name: 'entry',
-            serverName: 'ledger',
-            columns: {
-              id: { type: 'number' },
-              accountId: { type: 'string', serverName: 'account_id' },
-              amount: { type: 'number' },
-              note: { type: 'string' },
-            },
-            primaryKey: ['id'],
-          },
-        },
-      }
-      const ast = {
-        table: 'account',
-        where: {
-          type: 'simple',
-          op: '=',
-          left: { type: 'column', name: 'id' },
-          right: { type: 'literal', value: 'primary' },
-        },
-        related: [
-          {
-            correlation: { parentField: ['id'], childField: ['accountId'] },
-            subquery: { table: 'entry', alias: 'entries', orderBy: [['id', 'asc']] },
-          },
-        ],
-      }
-      const format = {
-        singular: true,
-        relationships: { entries: { singular: false, relationships: {} } },
-      }
-      let plan: ReturnType<typeof engine_compile_query> | undefined
+      let plan: ReturnType<typeof compileTransactionQuery> | undefined
       const tx = new SqlStorageMutatorTransaction(
         new SqlStorageDirect(this.ctx.storage.sql),
         (queryAst, queryFormat) => {
-          plan = engine_compile_query(schema, queryAst, queryFormat)
+          plan = compileTransactionQuery(queryAst, queryFormat)
           return plan
         }
       )
-      const result = await tx.queryAst(ast, format, 'platformTransactionQuery')
+      const result = await tx.queryAst(
+        transactionQueryAst,
+        transactionQueryFormat,
+        'platformTransactionQuery'
+      )
       let malformedFormatStatus: unknown
       try {
-        await tx.queryAst(ast, undefined as never)
+        await tx.queryAst(transactionQueryAst, undefined as never)
       } catch (error) {
         malformedFormatStatus = (error as { status?: unknown }).status
       }
       return json({ result, malformedFormatStatus, plan })
+    }
+
+    if (route === '/application-transaction-query') {
+      const result = await this.runApplicationTransaction(
+        compileTransactionQuery,
+        (tx) =>
+          tx.queryAst(
+            transactionQueryAst,
+            transactionQueryFormat,
+            'applicationTransactionQuery'
+          ),
+        { maxSelects: 8, maxRows: 20 }
+      )
+      return json({ result })
+    }
+
+    if (route === '/application-transaction-query-budget') {
+      try {
+        await this.runApplicationTransaction(
+          compileTransactionQuery,
+          (tx) =>
+            tx.queryAst(
+              transactionQueryAst,
+              transactionQueryFormat,
+              'budgetedApplicationTransactionQuery'
+            ),
+          { maxSelects: 1 }
+        )
+      } catch (error) {
+        return json(
+          {
+            code: Reflect.get(error as object, 'code'),
+            query: Reflect.get(error as object, 'query'),
+            selects: Reflect.get(error as object, 'selects'),
+          },
+          409
+        )
+      }
+      return json({ error: 'query budget did not abort the transaction' }, 500)
     }
 
     return json({ error: 'not found', route }, 404)

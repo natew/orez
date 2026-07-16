@@ -1,4 +1,5 @@
 export { createSyncDurableObject, createSyncWorker } from './host.js'
+export { createQueryCompiler } from './query-compiler.js'
 export {
   MutationApplicationError,
   isMutationApplicationError,
@@ -8,6 +9,7 @@ export {
   DEFAULT_TRANSACTION_QUERY_BUDGET,
   TransactionQueryBudgetError,
   executeTransactionQueryPlan,
+  executeTransactionQueryPlanAsync,
 } from './transaction-query.js'
 
 export type {
@@ -42,3 +44,4 @@ export type {
   TransactionQueryFormat,
   TransactionQueryWireValue,
 } from './transaction-query.js'
+export type { TransactionQueryCompiler } from './query-compiler.js'

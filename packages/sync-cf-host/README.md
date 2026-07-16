@@ -24,6 +24,22 @@ paths.
 Transaction-query `ILIKE` folding is ASCII-only on Durable Object SQLite;
 non-ASCII case pairs can diverge from PostgreSQL.
 
+### Bun query compiler
+
+Wrangler loads the engine's `.wasm` import as a precompiled
+`WebAssembly.Module`. Bun consumers of `createQueryCompiler` must register the
+package loader so the same import has the same value without changing the
+compiler code:
+
+```toml
+# bunfig.toml
+preload = ["orez-sync-cf-host/bun-wasm-loader"]
+```
+
+For a single command, use
+`bun --preload orez-sync-cf-host/bun-wasm-loader <command>`. The compiler throws
+an error naming this preload when Bun resolves the `.wasm` import as a pathname.
+
 ## Wake channel and eviction
 
 `GET /<namespace>/wake?clientID=<id>&wakeToken=<capability>` upgrades to a

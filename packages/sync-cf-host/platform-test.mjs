@@ -86,6 +86,25 @@ try {
   check(result.body.plan.root.relationships.length, 1, 'recursive plan crosses wasm')
   check(result.body.malformedFormatStatus, 400, 'malformed format is a 400')
 
+  result = await call(transactions, '/application-transaction-query')
+  check(result.status, 200, 'application transaction query status')
+  check(result.body.result.balance, 105, 'application transaction singular root')
+  check(result.body.result.entries.length, 2, 'application transaction related rows')
+
+  result = await call(transactions, '/application-transaction-query-budget')
+  check(result.status, 409, 'application transaction query budget status')
+  check(
+    result.body.code,
+    'transaction_query_budget_exceeded',
+    'application transaction budget code'
+  )
+  check(
+    result.body.query,
+    'budgetedApplicationTransactionQuery',
+    'application transaction budget query name'
+  )
+  check(result.body.selects, 2, 'application transaction budget select count')
+
   result = await call(transactions, '/push/application-error', { mutationID: 'm3' })
   check(result.status, 409, 'application error status')
   check(result.body.effectsDeferredButNotRun, 1, 'failed mutator deferred an effect')

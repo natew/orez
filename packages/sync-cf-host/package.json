@@ -9,6 +9,8 @@
       "types": "./src/mutation-error.ts",
       "import": "./src/mutation-error.ts"
     },
+    "./bun-wasm-loader": "./src/bun-wasm-loader.ts",
+    "./query-compiler": "./src/query-compiler.ts",
     "./transaction-query": "./src/transaction-query.ts"
   },
   "scripts": {
@@ -16,16 +18,19 @@
     "build:wasm:platform": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm -- --features platform-probes && rm -f src/generated/.gitignore && bun scripts/write-wasm-module-type.ts",
     "bundle": "bun run build:wasm && wrangler deploy --dry-run --outdir dist",
     "measure": "bun run build:wasm && bun measure.mjs",
-    "test": "bun run test:config && bun run test:platform && bun run test:integration && bun run test:ingest && bun run test:restart",
-    "test:config": "bun test config.test.mjs write-safeguards.test.mjs mutation-error.test.mjs",
+    "test": "bun run test:config && bun run test:query-compiler && bun run test:platform && bun run test:integration && bun run test:ingest && bun run test:restart",
+    "test:config": "bun test config.test.mjs write-safeguards.test.mjs mutation-error.test.mjs transaction-query.test.mjs",
     "test:integration": "bun run build:wasm && bun integration-test.mjs",
     "test:ingest": "bun run build:wasm && bun ingest-test.mjs",
+    "test:query-compiler": "bun run build:wasm && bun test --preload orez-sync-cf-host/bun-wasm-loader query-compiler.test.mjs",
     "test:restart": "bun restart-test.mjs",
     "test:platform": "bun run build:wasm:platform && bun platform-test.mjs",
     "typecheck": "bun run build:wasm:platform && tsc --noEmit"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "4.20260617.1",
+    "@types/bun": "1.3.14",
+    "@types/node": "22.19.10",
     "typescript": "5.9.3",
     "workerd": "1.20260617.1",
     "wrangler": "4.103.0"
