@@ -4,7 +4,7 @@ import { initSync } from './generated/sync_wasm.js'
 
 if (!(wasmModule instanceof WebAssembly.Module)) {
   throw new TypeError(
-    '.wasm import did not resolve to WebAssembly.Module; Bun consumers must register orez-sync-cf-host/bun-wasm-loader via bunfig preload, and Vite/Node consumers must use orez-sync-cf-host/vite-wasm-loader; see the package README runtime matrix'
+    '.wasm import did not resolve to WebAssembly.Module; see the orez-sync-cf-host README Query compiler runtimes matrix'
   )
 }
 

@@ -34,11 +34,10 @@ Every runtime uses the same `orez-sync-cf-host/wasm-module.wasm` import and the 
 | Workerd / Wrangler           | Map the package's `wasm-module.wasm` export as a compiled Wasm module; do not install the Vite plugin | Cloudflare `CompiledWasm`                                    |
 | Bun                          | Preload `orez-sync-cf-host/bun-wasm-loader`                                                           | `WebAssembly.Module` compiled by the Bun loader              |
 | Vite serve / SSR development | Add `orezSyncCfHostWasm()` from `orez-sync-cf-host/vite-wasm-loader`                                  | `WebAssembly.Module` built from package bytes by Vite        |
+| Direct Node >= 22.15         | Preload `orez-sync-cf-host/node-wasm-loader` with `NODE_OPTIONS=--import`                              | `WebAssembly.Module` compiled by the Node loader             |
 | Node production bundle       | Keep the same Vite plugin active for the production SSR build                                         | `WebAssembly.Module` built from bytes embedded in the bundle |
 
-The Vite plugin also keeps `orez-sync-cf-host` inside Vite's SSR pipeline. A
-direct Node import without a build loader is unsupported because Node does not
-load the bare `.wasm` export.
+The Vite plugin also keeps `orez-sync-cf-host` inside Vite's SSR pipeline.
 
 Wrangler consumers map the bare address rather than a filesystem glob. The
 `.wasm` suffix is part of the public subpath because extension-keyed bundlers
@@ -60,7 +59,14 @@ preload = ["orez-sync-cf-host/bun-wasm-loader"]
 
 For a single command, use
 `bun --preload orez-sync-cf-host/bun-wasm-loader <command>`. The compiler throws
-an error naming this preload when Bun resolves the `.wasm` import as a pathname.
+an error pointing to this runtime matrix if a loader is missing.
+
+Direct Node consumers on Node 22.15 or newer preload the synchronous module
+hook. `NODE_OPTIONS` also carries the hook into test-runner child processes:
+
+```sh
+NODE_OPTIONS=--import=orez-sync-cf-host/node-wasm-loader node app.js
+```
 
 Node-targeted Vite consumers add the plugin once and leave it active in serve
 and build:

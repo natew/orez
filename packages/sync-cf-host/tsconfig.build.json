@@ -10,6 +10,7 @@
     "src/index.ts",
     "src/post-commit.ts",
     "src/mutation-error.ts",
+    "src/node-wasm-loader.ts",
     "src/bun-wasm-loader.ts",
     "src/query-compiler.ts",
     "src/transaction-query.ts",

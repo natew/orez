@@ -15,6 +15,10 @@
       "types": "./dist/mutation-error.d.ts",
       "import": "./dist/mutation-error.js"
     },
+    "./node-wasm-loader": {
+      "types": "./dist/node-wasm-loader.d.ts",
+      "import": "./dist/node-wasm-loader.js"
+    },
     "./bun-wasm-loader": {
       "types": "./dist/bun-wasm-loader.d.ts",
       "import": "./dist/bun-wasm-loader.js"
