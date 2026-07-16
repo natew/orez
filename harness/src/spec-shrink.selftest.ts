@@ -124,6 +124,17 @@ okSpec(
   },
   'task start cursor (rank,id)'
 )
+okSpec(
+  {
+    table: 'task',
+    orderBy: [
+      ['dueAt', 'asc'],
+      ['id', 'asc'],
+    ],
+    start: { row: { dueAt: null, id: 't1' } },
+  },
+  'nullable task start cursor (dueAt,id)'
+)
 
 console.log('[spec] grammar closure — invalid shapes rejected')
 throwsSpec({ table: 'nope', orderBy: [['id', 'asc']] }, 'unknown table')
@@ -245,17 +256,6 @@ throwsSpec(
     exists: [{ rel: 'members' }, { rel: 'tasks' }],
   },
   'exists > 1'
-)
-throwsSpec(
-  {
-    table: 'task',
-    orderBy: [
-      ['dueAt', 'asc'],
-      ['id', 'asc'],
-    ],
-    start: { row: { dueAt: null, id: 't1' } },
-  },
-  'start on non-(rank) order column'
 )
 throwsSpec(
   { table: 'project', orderBy: [['id', 'asc']], exists: [] },
