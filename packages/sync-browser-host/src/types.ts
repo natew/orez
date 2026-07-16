@@ -60,7 +60,10 @@ export function registerMutators<
   return Object.freeze({ ...registry })
 }
 
-export { MutationApplicationError, isMutationApplicationError } from 'orez-sync-cf-host/mutation-error'
+export {
+  MutationApplicationError,
+  isMutationApplicationError,
+} from 'orez-sync-cf-host/mutation-error'
 
 export type VisibilityFilter = {
   sql: string
