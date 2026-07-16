@@ -13,7 +13,7 @@
 // reverted with git apply). results land in results/mutation-matrix/<run>/.
 
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -78,6 +78,18 @@ const LANES: Lane[] = [
     cwd: HARNESS_ROOT,
     timeoutMs: 25 * 60_000,
   },
+  {
+    name: 'atomic-visibility',
+    cmd: ['bun', 'src/atomic-visibility-lane.ts', '--target', 'rust-local', '--seed', 'matrix'],
+    cwd: HARNESS_ROOT,
+    timeoutMs: 10 * 60_000,
+  },
+  {
+    name: 'exactly-once',
+    cmd: ['bun', 'src/exactly-once-lmid-lane.ts', '--target', 'rust-local', '--seed', 'matrix'],
+    cwd: HARNESS_ROOT,
+    timeoutMs: 10 * 60_000,
+  },
 ]
 
 type Mutant = {
@@ -133,6 +145,20 @@ function assertCleanEngineTree(context: string) {
   const res = git(['status', '--porcelain', '--', 'crates/'])
   if (res.out.trim() !== '') {
     throw new Error(`crates/ tree is dirty ${context}:\n${res.out}`)
+  }
+}
+
+// a caught mutant can make proptest persist a regression seed under crates/.
+// that seed reproduces the MUTANT, not an engine bug — quarantine it into the
+// run's results dir so the tree stays clean and the seed stays inspectable.
+function quarantineMutantArtifacts(mutantId: string) {
+  const res = git(['status', '--porcelain', '--', 'crates/'])
+  for (const line of res.out.split('\n')) {
+    if (!line.startsWith('??')) continue
+    const rel = line.slice(3).trim()
+    const dest = join(resultsDir, `${mutantId}-untracked`, rel.replaceAll('/', '__'))
+    mkdirSync(join(resultsDir, `${mutantId}-untracked`), { recursive: true })
+    renameSync(join(REPO_ROOT, rel), dest)
   }
 }
 
@@ -250,6 +276,7 @@ for (const mutant of mutants) {
     }
   } finally {
     applyMutant(mutant, true)
+    quarantineMutantArtifacts(mutant.id)
     assertCleanEngineTree(`after reverting mutant ${mutant.id}`)
   }
   saveMatrix()
