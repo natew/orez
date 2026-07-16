@@ -265,8 +265,8 @@ class QueryOracle {
     }
   }
 
-  collectAst(ast: Ast, row: Row, out: Map<string, Member>, includeRoot = true) {
-    if (includeRoot) out.set(memberKey(ast.table, row), { table: ast.table, row })
+  collectAst(ast: Ast, row: Row, out: Map<string, Member>) {
+    out.set(memberKey(ast.table, row), { table: ast.table, row })
     this.collectCondition(ast.where, row, out)
     for (const relation of ast.related ?? []) {
       for (const related of this.correlatedRows(relation, row)) {
