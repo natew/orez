@@ -127,6 +127,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/{ns}/admin/settle-push", post(admin_settle_push))
         .route("/{ns}/admin/status", get(admin_status))
         .route("/{ns}/admin/invalidate", post(admin_invalidate))
+        .route("/{ns}/admin/prune-to-head", post(admin_prune_to_head))
         .route("/{ns}/admin/reset-cursor", post(admin_reset_cursor))
         .route("/{ns}/admin/drop-next-push-response", post(admin_drop_push))
         .route("/{ns}/admin/fault", post(admin_fault))
@@ -779,6 +780,25 @@ async fn admin_invalidate(State(state): State<Arc<AppState>>, Path(ns): Path<Str
         Err(e) => return json_status(400, json!({ "error": e })),
     };
     let result = namespace.run(engine::invalidate).await;
+    match result {
+        Ok(()) => json_status(200, json!({ "ok": true })),
+        Err(e) => json_status(e.status, json!({ "error": e.message })),
+    }
+}
+
+// harness full-prune hook: empty the change log to the head over the same
+// sqlite file (see engine::prune_to_head). the state machine pairs this with a
+// server restart to prove the durable high-water keeps the served cookie
+// monotonic (mutant O1).
+async fn admin_prune_to_head(
+    State(state): State<Arc<AppState>>,
+    Path(ns): Path<String>,
+) -> Response {
+    let namespace = match state.manager.get(&ns) {
+        Ok(n) => n,
+        Err(e) => return json_status(400, json!({ "error": e })),
+    };
+    let result = namespace.run(engine::prune_to_head).await;
     match result {
         Ok(()) => json_status(200, json!({ "ok": true })),
         Err(e) => json_status(e.status, json!({ "error": e.message })),

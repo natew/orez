@@ -16,6 +16,7 @@
 //   POST /<ns>/admin/settle-push        settle an app-owned committed push
 //   GET  /<ns>/admin/status            { ok, bootID, pid, versions, counters }
 //   POST /<ns>/admin/invalidate         epoch bump
+//   POST /<ns>/admin/prune-to-head      empty the change log to the head (O1)
 //   POST /<ns>/admin/reset-cursor       restored/behind-server fault
 //   POST /<ns>/admin/drop-next-push-response  lost-response fault
 //   POST /<ns>/admin/fault              arm a one-shot pull/push lifecycle fault (M6)

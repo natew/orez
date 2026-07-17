@@ -320,6 +320,23 @@ pub fn invalidate(conn: &Connection) -> Result<(), EngineError> {
     result
 }
 
+// harness full-prune hook: bump the durable high-water, then prune the entire
+// change log (retain 0), raising the floor to the head so _zsync_changes is
+// emptied. the durable high-water must keep the served cookie monotonic across
+// a reopen of the same sqlite file (invariant 7 / mutant O1). the state machine
+// arms this before a server restart to exercise O1 end to end at the system
+// level, which no other lane does (it empties the log AND reopens the store).
+pub fn prune_to_head(conn: &Connection) -> Result<(), EngineError> {
+    conn.execute_batch("BEGIN").expect("BEGIN failed");
+    let result = (|| {
+        let mut db = RusqliteDb::new(conn);
+        sync_core::watermark(&mut db)?;
+        sync_core::prune(&mut db, 0)
+    })();
+    finish(conn, result.is_ok());
+    result
+}
+
 // harness reset-cursor fault hook: wipe the change log + floor + durable
 // high-water mark to simulate a restored/behind server, so a persisted client
 // whose cookie is ahead gets the 409 future-cookie reset path.
