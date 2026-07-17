@@ -963,7 +963,10 @@ export function generateDrizzleZeroSqliteSchemaFile(
     `import { drizzleZeroConfig } from 'drizzle-zero-sqlite'`,
     `import * as ${drizzleName} from ${JSON.stringify(options.importPath)}`,
     '',
-    `export const ${schemaName} = drizzleZeroConfig(${drizzleName})`,
+    // the defaults warning is a codegen-time lint; the schema author already saw
+    // it (or suppressed it) when their config module was evaluated, so generated
+    // runtime modules must not repeat it on every boot
+    `export const ${schemaName} = drizzleZeroConfig(${drizzleName}, { suppressDefaultsWarning: true })`,
     '',
     `export type Schema = typeof ${schemaName}`,
     ...rowAliases,

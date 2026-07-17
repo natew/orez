@@ -9,8 +9,12 @@ faults.
 Each successful arm stores the admin route's confirmation in the executed trace.
 The same receipt is resolved as `fired` from the matching server response or killed
 request, or as `not-fired` when another arm replaces it, the server restarts, or the
-run ends. Nemesis executions with no fired receipt are invalid. The final tally and
-the result JSON report both outcomes.
+run ends. A generated nemesis run with no fired receipt is invalid: the required
+prefix pairs each arm with a firing write, so zero fires means injection itself
+broke. Replays and shrink candidates are judged on execution alone, because
+receipts canceled by restart, replacement, or run-end are legitimate there and a
+whole-run coverage property shrinks to a vacuous trace. The final tally and the
+result JSON report both outcomes.
 
 ## Clean-engine stability
 
@@ -57,8 +61,10 @@ diff --git a/crates/sync-core/src/store.rs b/crates/sync-core/src/store.rs
 
 The 24-operation run failed because the server-confirmed `_zsync_meta.floor`
 did not advance. Delta debugging took 15 replays and reduced the composed failure
-to three operations, retaining a fired fault instead of accepting a vacuous
-candidate:
+to three operations. At the time the in-execution vacuity check forced every
+accepted candidate to retain a fired fault; since shrink candidates are judged
+on execution alone (2026-07-16), the same mutant minimizes to the single `prune`
+operation, which still replays red on the mutant and green on a clean engine:
 
 ```json
 [

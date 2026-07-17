@@ -356,6 +356,12 @@ jobs:
       - name: rust-local exactly-once LMID consistency
         run: cd harness && bun src/exactly-once-lmid-lane.ts --target rust-local --seed ${{ github.run_id }}
 
+      # capped-diff cut: a one-row diff cap splits a mutation's effect from its
+      # lmid ack across two pulls, the system-level net for M4 and O2 (see
+      # docs/sync/mutation-matrix.md). sub-second; the release binary is already built.
+      - name: rust-local capped-diff cut (M4/O2)
+        run: cd harness && bun src/capped-diff-lane.ts --target rust-local
+
       - name: upload rust-local consistency evidence
         if: always()
         uses: actions/upload-artifact@v4

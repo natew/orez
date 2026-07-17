@@ -11,8 +11,9 @@ Run provenance: engine tree = main @ 261e27d merged with
 @ 19d9003. Six lanes from run `run-2026-07-16-v2`; the two consistency lanes
 from `run-2026-07-16-v3` after the seed fix. O1, M4, and O2 were re-run across
 all lanes after adding the engine-invariant tests in
-`run-2026-07-16-engine-invariants-v3`. All lanes were green at baseline in
-each cited run.
+`run-2026-07-16-engine-invariants-v3`. The capped-diff lane column is from
+`run-2026-07-16-capped-diff` (targeted baseline/M4/O2 runs, after
+`test/coverage-capped-diff`). All lanes were green at baseline in each cited run.
 
 Replay: `cd harness && bun scripts/mutation-matrix.ts` (clean crates/ tree
 required; ~35 min).
@@ -22,24 +23,31 @@ required; ~35 min).
 Lanes: cargo = `cargo test -p sync-core` (unit + TS-oracle differentials),
 smoke/state-machine/metamorphic/eviction/sweep = harness system lanes against
 `rust-local`, atomic-vis / exactly-once = recorded-history consistency lanes
-against `rust-local`.
+against `rust-local`, capped-diff = `capped-diff-lane.ts` against `rust-local`
+with `maxChangeRows: 1` (the only system lane that pulls with a cap small enough
+to split a mutation's row effect from its lmid ack).
 
-| mutant                           | cargo  | smoke  | state-machine | metamorphic | eviction | sweep  | atomic-vis | exactly-once |
-| -------------------------------- | ------ | ------ | ------------- | ----------- | -------- | ------ | ---------- | ------------ |
-| Q1 AND branch dropped            | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
-| Q2 orderBy inverted              | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
-| Q3 limit off-by-one              | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
-| Q4 related window drops last row | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
-| M1 rows commit, LMID skipped     | CAUGHT | CAUGHT | CAUGHT        | ·           | CAUGHT   | CAUGHT | ·          | CAUGHT       |
-| M2 replay double-applies         | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | CAUGHT       |
-| M3 rollback swallowed            | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
-| M4 LMID advances, no change row  | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
-| L1 prune without floor raise     | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | ·            |
-| L2 snapshot omits first row      | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | ·          | ·            |
-| L3 diff omits first changed row  | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | CAUGHT     | ·            |
-| O1 non-durable watermark         | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
-| O2 acks beyond the diff cap      | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
-| P1 snapshot ignores visible()    | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
+| mutant                           | cargo  | smoke  | state-machine | metamorphic | eviction | sweep  | atomic-vis | exactly-once | capped-diff |
+| -------------------------------- | ------ | ------ | ------------- | ----------- | -------- | ------ | ---------- | ------------ | ----------- |
+| Q1 AND branch dropped            | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
+| Q2 orderBy inverted              | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
+| Q3 limit off-by-one              | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
+| Q4 related window drops last row | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
+| M1 rows commit, LMID skipped     | CAUGHT | CAUGHT | CAUGHT        | ·           | CAUGHT   | CAUGHT | ·          | CAUGHT       | n/r         |
+| M2 replay double-applies         | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | CAUGHT       | n/r         |
+| M3 rollback swallowed            | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
+| M4 LMID advances, no change row  | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | CAUGHT      |
+| L1 prune without floor raise     | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | ·            | n/r         |
+| L2 snapshot omits first row      | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | ·          | ·            | n/r         |
+| L3 diff omits first changed row  | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | CAUGHT     | ·            | n/r         |
+| O1 non-durable watermark         | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
+| O2 acks beyond the diff cap      | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | CAUGHT      |
+| P1 snapshot ignores visible()    | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
+
+`n/r` = not run this pass. The capped-diff lane was run only against baseline,
+M4, and O2 (targeted single-mutant runs, `run-2026-07-16-capped-diff`); its
+other cells were not evaluated, so they claim no verdict. `·` = run and not
+caught; `CAUGHT` = run and caught.
 
 ## Findings, in order of importance
 
@@ -50,19 +58,30 @@ against `rust-local`.
    `cargo test -p sync-core` now catches it. Every system lane still passes the
    mutant because none empties the log and restarts over the same store.
 
-2. **Seven mutants are caught only by `cargo test -p sync-core`** (Q1–Q4,
-   M4, O1, O2). The cargo suite includes hand-written query tests and
-   the deterministic TS-oracle differentials. It is the single load-bearing
-   net for query shape correctness, durable watermark retention, and
-   capped-diff ordering. No system lane duplicates it. Remaining
-   system-level blind spots:
-   - **M4 / O2:** deterministic cargo tests now use
-     `Caps { max_change_rows: 1, ... }` to cut between effects and LMIDs and to
-     prove an LMID-only rejected push still advances the cookie. No system lane
-     pulls with caps small enough to hit either cut path.
+2. **Five mutants are caught only by `cargo test -p sync-core`** (Q1–Q4, O1).
+   The cargo suite includes hand-written query tests and the deterministic
+   TS-oracle differentials. It is the single load-bearing net for query shape
+   correctness and durable watermark retention. Remaining system-level blind
+   spots:
    - **Q1–Q4:** sweep at 5 rounds / seed 42 never trips on pure query-shape
      bugs; the deterministic oracle (which shrank both of its red-proof
      mutants to minimal traces) is the effective generative net.
+   - **O1:** no system lane empties the change log and restarts over the same
+     store, so the reopened-watermark regression stays cargo-only (finding 1).
+
+   One former blind spot CLOSED at the system level (run
+   `run-2026-07-16-capped-diff`, after `test/coverage-capped-diff`):
+   - **M4 / O2** are now CAUGHT by the capped-diff lane. It runs a native host
+     with `--max-change-rows 1`, then, as a non-writing observer in the writer's
+     client group, raw-pulls twice off the pull dialect. The one-row cap admits
+     the probe's row effect on the first diff and holds its lmid ack for the
+     second. M4 (no lmid change row) goes red because the ack ships on no pull
+     ("the probe's lmid ack never shipped … the effect committed but its ack is
+     unreachable"). O2 (acks beyond the cut) goes red because the first diff
+     carries the ack together with the effect ("first capped diff delivered the
+     probe effect AND lmid ack 2 (baseline ack 1); an ack led its effect under a
+     one-row cap"). All observations come from server-confirmed pull responses,
+     never the writer's optimistic cache.
 
    Two former blind spots CLOSED at the system level (run `verify-d`,
    2026-07-16, after `test/coverage-lane-gaps`):

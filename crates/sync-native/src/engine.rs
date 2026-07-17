@@ -44,6 +44,10 @@ pub type VisibleFn = Arc<dyn Fn(&str, &str) -> Option<(String, Vec<SqlValue>)> +
 pub struct EngineContext {
     pub tables: Tables,
     pub retain_changes: i64,
+    // baseline-pull change-row cap. one diff ships at most this many change
+    // rows, cutting at a row boundary before pk dedup, so effects and their
+    // lmid ack ride separate pulls when the cap is small (see Caps).
+    pub max_change_rows: usize,
     pub visibility_enabled: bool,
     // query-aware mode: pulls carry desired queries and go through the
     // query-aware engine (membership/refcount) instead of the baseline
@@ -59,6 +63,7 @@ impl EngineContext {
     pub fn new(
         tables: Tables,
         retain_changes: i64,
+        max_change_rows: usize,
         visibility_enabled: bool,
         query_aware: bool,
         init_fn: InitFn,
@@ -68,6 +73,7 @@ impl EngineContext {
         Self {
             tables,
             retain_changes,
+            max_change_rows,
             visibility_enabled,
             query_aware,
             init_fn,
@@ -180,7 +186,10 @@ pub fn pull(
                 &ctx.tables,
                 ctx.retain_changes,
                 visibility.as_ref(),
-                Caps::default(),
+                Caps {
+                    max_change_rows: ctx.max_change_rows,
+                    ..Caps::default()
+                },
                 body,
                 user_id,
             )
