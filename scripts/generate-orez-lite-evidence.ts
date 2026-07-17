@@ -117,6 +117,69 @@ function rustTestCount(): number {
   )
 }
 
+// distinct harness lanes (bun src/<name>.ts) a ci job runs. the evidence job
+// checks out the same workflow after the lanes pass, so this tracks lane
+// additions and removals automatically instead of a point-in-time constant.
+export function laneCountFromWorkflow(workflow: string, jobName: string): number {
+  const lines = workflow.split('\n')
+  const start = lines.indexOf(`  ${jobName}:`)
+  if (start === -1) throw new Error(`ci.yml has no job ${jobName}`)
+  let end = lines.length
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^ {2}\S/.test(lines[i])) {
+      end = i
+      break
+    }
+  }
+  const block = lines.slice(start, end).join('\n')
+  const lanes = new Set<string>()
+  for (const match of block.matchAll(/\bbun\s+src\/([\w.-]+)\.ts\b/g)) {
+    lanes.add(match[1])
+  }
+  if (lanes.size === 0) throw new Error(`ci.yml job ${jobName} runs no harness lanes`)
+  return lanes.size
+}
+
+function ciLaneCount(jobName: string): number {
+  return laneCountFromWorkflow(
+    readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8'),
+    jobName
+  )
+}
+
+type StateMachineRun = { target: string; trace: { kind: string }[] }
+
+const restartKinds = new Set(['serverRestart', 'clientRestart'])
+
+// total generated lifecycle steps across a target's recorded state-machine
+// traces. this is the only artifact-backed operation count the fault jobs
+// upload; sweep rounds, protocol-fuzz cases, and push-soak operations run but
+// emit no per-run artifact, so they stay out of the counted total.
+export function traceStepCount(runs: StateMachineRun[]): number {
+  return runs.reduce((total, run) => total + run.trace.length, 0)
+}
+
+// process restarts recorded in a target's state-machine traces.
+export function traceRestartCount(runs: StateMachineRun[]): number {
+  return runs.reduce(
+    (total, run) => total + run.trace.filter((op) => restartKinds.has(op.kind)).length,
+    0
+  )
+}
+
+// state-machine result artifacts downloaded from the fault jobs. each fault job
+// runs the lifecycle state machine and uploads results/, so no run for a target
+// means the artifact download broke; fail rather than publish a false 0.
+function stateMachineRuns(resultsDir: string, target: string): StateMachineRun[] {
+  const runs = walkFiles(resultsDir, (path) => /state-machine-.*\.json$/.test(path))
+    .map((path) => readJson<StateMachineRun>(path))
+    .filter((run) => run.target === target)
+  if (runs.length === 0) {
+    throw new Error(`no state-machine results for ${target} under ${resultsDir}`)
+  }
+  return runs
+}
+
 function sqliteVersion(libsqliteVersion: string): string {
   const cargoHome = process.env.CARGO_HOME ?? join(process.env.HOME ?? '', '.cargo')
   const registryRoot = join(cargoHome, 'registry/src')
@@ -357,6 +420,17 @@ async function generate(): Promise<void> {
     bun: Bun.version,
   }
 
+  // the fault jobs upload harness/results/ + harness/regressions/; the evidence
+  // job downloads both into OREZ_REGRESSION_TRACES_PATH, so results/ holds the
+  // recorded state-machine traces this run produced for each host.
+  const traceRoot = resolve(
+    root,
+    process.env.OREZ_REGRESSION_TRACES_PATH ?? 'harness/regressions'
+  )
+  const stateMachineResultsDir = join(traceRoot, 'results')
+  const rustLocalStateMachine = stateMachineRuns(stateMachineResultsDir, 'rust-local')
+  const rustCfStateMachine = stateMachineRuns(stateMachineResultsDir, 'rust-cf')
+
   const rustCore = suite('rust-core')
   Object.assign(rustCore, {
     status: 'pass',
@@ -372,9 +446,11 @@ async function generate(): Promise<void> {
   const nativeHost = suite('native-host')
   Object.assign(nativeHost, {
     status: 'pass',
-    scenarioCount: 8,
+    scenarioCount: ciLaneCount('rust-local'),
     randomizedSeed: seed,
-    operationCount: 40,
+    // heterogeneous per-lane totals (sweep rounds, storm clients, query shapes)
+    // are not summable into one honest operation count.
+    operationCount: null,
     restarts: 0,
     durationMs: durationMs(job('rust-local')),
     logsUrl: job('rust-local').html_url,
@@ -384,10 +460,10 @@ async function generate(): Promise<void> {
   const wasmWorkerd = suite('wasm-workerd')
   Object.assign(wasmWorkerd, {
     status: 'pass',
-    scenarioCount: 14,
+    scenarioCount: ciLaneCount('sync-cf-host'),
     randomizedSeed: seed,
-    operationCount: 12542,
-    restarts: 2,
+    operationCount: traceStepCount(rustCfStateMachine),
+    restarts: traceRestartCount(rustCfStateMachine),
     durationMs: durationMs(job('sync-cf-host')),
     logsUrl: job('sync-cf-host').html_url,
     artifactsUrl,
@@ -396,10 +472,10 @@ async function generate(): Promise<void> {
   const nativeFaultRecovery = suite('native-fault-recovery')
   Object.assign(nativeFaultRecovery, {
     status: 'pass',
-    scenarioCount: 8,
+    scenarioCount: ciLaneCount('rust-local-faults'),
     randomizedSeed: seed,
-    operationCount: 542,
-    restarts: 1,
+    operationCount: traceStepCount(rustLocalStateMachine),
+    restarts: traceRestartCount(rustLocalStateMachine),
     durationMs: durationMs(job('rust-local-faults')),
     logsUrl: job('rust-local-faults').html_url,
     artifactsUrl,
@@ -408,9 +484,10 @@ async function generate(): Promise<void> {
   const stockDifferential = suite('stock-zero-differential')
   Object.assign(stockDifferential, {
     status: 'pass',
-    scenarioCount: 84,
+    scenarioCount: ciLaneCount('harness'),
     randomizedSeed: seed,
-    operationCount: 84,
+    // per-query comparisons are not tallied into a single operation total.
+    operationCount: null,
     restarts: 0,
     durationMs: durationMs(job('harness')) + durationMs(job('rust-local')),
     logsUrl: job('rust-local').html_url,
@@ -447,15 +524,12 @@ async function generate(): Promise<void> {
       (total, item) => total + (item.operationCount ?? 0),
       0
     ),
-    operationUnit: 'explicitly counted suite operations (not total HTTP/database calls)',
+    operationUnit:
+      'recorded generated lifecycle steps from the state-machine trace artifacts; randomized sweep rounds, protocol-fuzz cases, push-soak operations, and SQLite statements are executed but not summed here',
     restarts: evidence.suites.reduce((total, item) => total + (item.restarts ?? 0), 0),
     durationMs: completed - started,
   }
 
-  const traceRoot = resolve(
-    root,
-    process.env.OREZ_REGRESSION_TRACES_PATH ?? 'harness/regressions'
-  )
   const regressionRoot = existsSync(join(traceRoot, 'regressions'))
     ? join(traceRoot, 'regressions')
     : traceRoot
@@ -485,7 +559,7 @@ async function generate(): Promise<void> {
     ...releaseIdentityLimitation,
     'The workerd lane is local emulation; deployed Cloudflare isolate memory, quota, eviction, and regional propagation require a separate named deployment qualification.',
     `The compatibility corpus is pinned to Zero ${evidence.versions.zero} and does not imply compatibility with later Zero releases.`,
-    'Scenario and operation totals count the explicitly named corpus cases and soak operations, not every internal assertion, HTTP request, or SQLite statement.',
+    'Scenario counts are the distinct harness lanes CI ran per host; the operation total counts only the recorded state-machine lifecycle steps, not every sweep round, protocol-fuzz case, soak push, internal assertion, HTTP request, or SQLite statement.',
     `GitHub Actions logs and artifacts are immutable per run but retained for ${evidence.artifacts.retentionDays} days.`,
   ]
   evidence.unresolvedLanes = [
