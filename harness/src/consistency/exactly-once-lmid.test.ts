@@ -22,6 +22,8 @@ const observer = {
   clientId: 'observer-client-1',
 }
 const effect = { type: 'increment-probe' as const, probeId: 'probe-1' }
+const rejectedIdentity: ExactlyOnceIdentity = { ...identity, mutationId: 2 }
+const rejectedEffect = { type: 'rejected-increment' as const, probeId: 'probe-1' }
 
 function history(phase: TerminalPhase = 'ok'): {
   events: HistoryEvent[]
@@ -37,7 +39,8 @@ function history(phase: TerminalPhase = 'ok'): {
     terminal: ExactlyOnceEvidence,
     terminalPhase: TerminalPhase = 'ok'
   ) => {
-    const eventIdentity = invoke.type === 'client-probe' ? invoke.observer : identity
+    const eventIdentity =
+      invoke.type === 'client-probe' ? invoke.observer : invoke.identity
     recorder.record({
       opId,
       process,
@@ -251,11 +254,24 @@ function history(phase: TerminalPhase = 'ok'): {
       }
     )
   }
+  const rejectedMutation = {
+    type: 'mutation' as const,
+    profileVersion: 1 as const,
+    identity: rejectedIdentity,
+    effect: rejectedEffect,
+  }
+  pair(
+    'mutation-2-app-error',
+    'app-error-writer',
+    'mutation',
+    rejectedMutation,
+    rejectedMutation
+  )
   authority('after', {
     probeRowCount: 1,
     applicationCount: '1',
     clientRowCount: 1,
-    lastMutationId: '1',
+    lastMutationId: '2',
   })
 
   const point = {
@@ -415,6 +431,8 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
         'stockRetryTimestamps=none',
         'stockRetryTimestampDriftCount=0',
         'final harness replay was already processed',
+        'appErrorMutationCount=1',
+        'app-error mutation advanced LMID with no row effects',
         'neither stock retry nor pull recovery is universally required',
       ],
     })
@@ -743,7 +761,7 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
     const result = checkExactlyOnceLmid(fixture.events, fixture.schedule)
     expect(result.status).toBe('fail')
     expect(result.violations).toContain(
-      'after authority does not show one application and LMID 1'
+      'after authority does not show one application and LMID 2'
     )
   })
 
@@ -951,6 +969,49 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
       status: 'fail',
       violations: ['missing complete non-writing client rank-0 probe precondition'],
     })
+  })
+
+  test('requires one rejected mutation, rollback, and its LMID advance', () => {
+    const missing = history()
+    missing.events = missing.events.filter(
+      (event) =>
+        event.exactlyOnce?.type !== 'mutation' ||
+        event.exactlyOnce.effect.type !== 'rejected-increment'
+    )
+    reindex(missing.events, missing.schedule)
+    expect(checkExactlyOnceLmid(missing.events, missing.schedule).violations).toContain(
+      'expected exactly one app-error mutation, got 0'
+    )
+
+    const failedResponse = history()
+    failedResponse.events.find(
+      (event) =>
+        event.exactlyOnce?.type === 'mutation' &&
+        event.exactlyOnce.effect.type === 'rejected-increment' &&
+        event.phase === 'ok'
+    )!.phase = 'fail'
+    expect(
+      checkExactlyOnceLmid(failedResponse.events, failedResponse.schedule).violations
+    ).toContain('app-error mutation did not receive the expected rejection')
+
+    for (const [field, value] of [
+      ['applicationCount', '2'],
+      ['lastMutationId', '1'],
+    ] as const) {
+      const fixture = history()
+      const after = fixture.events.find(
+        (event) =>
+          event.exactlyOnce?.type === 'authority' &&
+          event.exactlyOnce.observation === 'after' &&
+          event.phase === 'ok'
+      )!
+      if (after.exactlyOnce?.type === 'authority' && after.exactlyOnce.observed) {
+        after.exactlyOnce.observed[field] = value
+      }
+      expect(checkExactlyOnceLmid(fixture.events, fixture.schedule).violations).toContain(
+        'after authority does not show one application and LMID 2'
+      )
+    }
   })
 
   test('closes nested raw evidence objects', () => {

@@ -93,6 +93,12 @@ const LANES: Lane[] = [
     cwd: HARNESS_ROOT,
     timeoutMs: 10 * 60_000,
   },
+  {
+    name: 'permissions',
+    cmd: ['bun', 'src/permissions.ts', '--target', 'rust-local'],
+    cwd: HARNESS_ROOT,
+    timeoutMs: 10 * 60_000,
+  },
 ]
 
 type Mutant = {

@@ -47,7 +47,7 @@
       "property": "mutator",
       "file": "crates/sync-core/src/push.rs",
       "description": "app-error mutations commit their partial row effects and ack success instead of rolling back",
-      "expectedLanes": ["cargo-sync-core", "state-machine"]
+      "expectedLanes": ["cargo-sync-core", "state-machine", "exactly-once"]
     },
     {
       "id": "M4-lmid-no-change-row",
@@ -96,7 +96,7 @@
       "property": "permission",
       "file": "crates/sync-core/src/pull.rs",
       "description": "snapshot ignores the visible() filter and serves every row of every table",
-      "expectedLanes": ["cargo-sync-core"]
+      "expectedLanes": ["cargo-sync-core", "permissions"]
     }
   ]
 }

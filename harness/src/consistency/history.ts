@@ -23,10 +23,9 @@ export type ExactlyOnceIdentity = ExactlyOnceClientIdentity & {
   mutationId: number
 }
 
-export type ExactlyOnceEffect = {
-  type: 'increment-probe'
-  probeId: string
-}
+export type ExactlyOnceEffect =
+  | { type: 'increment-probe'; probeId: string }
+  | { type: 'rejected-increment'; probeId: string }
 
 export type ExactlyOnceEvidence =
   | {
@@ -370,17 +369,23 @@ function validateExactlyOnceEvent(event: HistoryEvent, violations: string[]): bo
     return false
   }
   if (
-    (raw.type === 'authority' ||
-      raw.type === 'mutation' ||
-      raw.type === 'client-probe') &&
-    (typeof raw.effect !== 'object' ||
-      raw.effect === null ||
-      !exactKeys(raw.effect as Record<string, unknown>, ['type', 'probeId']) ||
-      (raw.effect as Record<string, unknown>).type !== 'increment-probe' ||
-      !nonemptyString((raw.effect as Record<string, unknown>).probeId))
+    raw.type === 'authority' ||
+    raw.type === 'mutation' ||
+    raw.type === 'client-probe'
   ) {
-    violations.push(`event ${event.index} has malformed exactly-once effect`)
-    return false
+    const effect = raw.effect as Record<string, unknown> | undefined
+    const allowedEffect =
+      effect?.type === 'increment-probe' ||
+      (raw.type === 'mutation' && effect?.type === 'rejected-increment')
+    if (
+      !effect ||
+      !exactKeys(effect, ['type', 'probeId']) ||
+      !allowedEffect ||
+      !nonemptyString(effect.probeId)
+    ) {
+      violations.push(`event ${event.index} has malformed exactly-once effect`)
+      return false
+    }
   }
   if (
     (raw.type === 'push' || raw.type === 'pull') &&

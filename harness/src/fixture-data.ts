@@ -182,6 +182,13 @@ export function executeMutator(
       tx.exec(`UPDATE task SET rank = rank + 1 WHERE id = ?`, [id])
       return
     }
+    case 'exactlyOnce.incrementThenReject': {
+      const { id } = validateIncrementProbeArgs(args)
+      const rows = tx.all(`SELECT rank FROM task WHERE id = ?`, [id])
+      if (rows.length !== 1) throw new MutationAppError('probe-not-found')
+      tx.exec(`UPDATE task SET rank = rank + 1 WHERE id = ?`, [id])
+      throw new MutationAppError('intentional-reject')
+    }
     case 'atomicVisibility.appendGroup': {
       const { effects } = validateAtomicAppendArgs(args)
       for (const effect of effects) {
