@@ -64,9 +64,17 @@ mise exec node@24.3.0 -- bun harness/src/multi-tab.ts --target rust-local
 mise exec node@24.3.0 -- bun harness/src/multi-tab.ts --target rust-cf
 ```
 
-The rust-cf differential is currently held red for an intermittent
-`allProjects` completion stall; do not record this lane green until the first
-pull/ack sequence is root-caused and repeated runs pass.
+The rust-cf differential's intermittent `allProjects` completion stall was
+root-caused (2026-07-16) to the harness's vendored `httpPullTransport.ts`
+lagging canonical fix `1efd3e5`: a got-query ack rode an early poke, a following
+snapshot-reset pull (leading `rowsPatch` `clear`) wiped the stock client's
+got-query marks, and the transport never re-asserted an ack it believed
+delivered, so the view never reached `complete` (load-dependent, ~3/10 under CPU
+load; a low-latency local run rarely trips it). The got-set re-assertion +
+dedupe is now ported into the vendored transport and pinned by
+`harness/src/vendor/httpPullTransport.stall.test.ts` (red before the port, green
+after); 15/15 repeated `query-diff --against rust-cf` runs against local workerd
+pass. This lane is settled green.
 
 ### Malformed and adversarial protocol inputs
 
@@ -109,6 +117,32 @@ same 65,536-byte block-growth and three-block monotonic-growth gates to wasm
 memory, fails on any push or application error, and samples JS heap bytes from
 the authenticated status endpoint when the current workerd exposes
 `performance.memory`.
+
+### 2026-07-16 rust-cf query-diff stall root-cause + deployed lane
+
+The intermittent `allProjects` completion stall (held red above) was a transport
+bug, not an engine bug. The harness's vendored `httpPullTransport.ts` had
+drifted behind canonical fix `1efd3e5`: nothing re-asserted a client's acked
+got-query set when a later snapshot-reset pull (`rowsPatch` `clear`) wiped
+replicache, so an ack that rode an earlier poke silently regressed to unknown
+and the materialized view never completed. Ported the got-set re-assertion +
+per-hash dedupe into the vendored transport;
+`harness/src/vendor/httpPullTransport.stall.test.ts` pins the ordering
+deterministically (view never completes against the pre-fix transport, completes
+against the fixed one). Repeated end-to-end `query-diff --against rust-cf` runs
+against local workerd: 15/15 pass (2.9–4.3 s each; the pre-fix 23 s slow-round
+outlier is gone). The fix is transport-wide, so every query-aware rust-cf/orez-cf
+lane benefits, not just query-diff.
+
+The credentialed deployed Cloudflare qualification now runs on its own schedule
+via `.github/workflows/deployed-qualification.yml` (weekly + `workflow_dispatch`,
+never on PRs): it deploys `packages/sync-cf-host` (the rust-cf WASM DO host)
+under `orez-rust-sync-qual` to the account holding `CLOUDFLARE_API_TOKEN`
+(`aa20b480…`, parameterized via env), runs the bounded m6 CF suite (reconnect,
+eviction, storage-faults, backup-restore, state-machine 24 steps) against the
+live origin, uploads traces, and tears the worker down. The whole suite was
+validated green against a local workerd stand-in (rc=0); the first credentialed
+run happens on the schedule.
 
 ### Storage failure, quota, and clock skew
 

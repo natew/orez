@@ -210,7 +210,15 @@ protocol fuzz, reconnect, eviction, storage faults, backup/restore, and the stat
 machine against `rust-cf`; both jobs upload their seeds and minimized traces as
 artifacts. The heavier `harness/scripts/nightly.sh` cron lane widens the grid:
 the full four-host corpus, the M6 qualification matrix, and the state machine at
-80 steps across several seeds against both `rust-local` and `rust-cf`.
+80 steps across several seeds against both `rust-local` and `rust-cf`. Every
+lane above runs `rust-cf` against a local `wrangler dev` worker, never a real
+deployment. The separate `.github/workflows/deployed-qualification.yml`
+(weekly + `workflow_dispatch`, never on pull requests) is the credentialed
+counterpart: it deploys `packages/sync-cf-host` to the account holding
+`CLOUDFLARE_API_TOKEN` and runs the bounded m6 CF fault suite (reconnect,
+eviction, storage-faults, backup-restore, state-machine 24 steps) against that
+live origin, then deletes the worker. Because it needs external credentials it
+is kept off the PR path (see "What is not covered" item 7).
 
 `harness/src/soot-deployed-conformance.ts` is a faithful port of soot's own
 integration test, run against the deployed worker in soot's dialect. It exists
@@ -304,10 +312,23 @@ list-append --consistency-models serializable`, failing the job on `false`,
 6. **`soot-deployed-conformance.ts` and `query-security.ts` are manual lanes.**
    They are not in CI, `m6-runner`, or the nightly script. Their green results
    are recorded point-in-time results, not continuously enforced gates.
-7. **One lane is known-fragile.** `plans/rust-sync-m6-qualification.md` notes
-   the `rust-cf` query-diff differential was held red for an intermittent
-   `allProjects` completion stall, which is in tension with the same document's
-   green summary table. Treat the CF query-diff lane as not fully settled.
+7. **The `rust-cf` query-diff stall is fixed; the deployed CF lane's first
+   credentialed run is still pending.** The intermittent `allProjects`
+   completion stall was the harness's vendored `httpPullTransport.ts` lagging
+   canonical fix `1efd3e5`: a got-query ack rode an early poke, a following
+   snapshot-reset pull (leading `rowsPatch` `clear`) wiped the stock client's
+   got-query marks, and the transport never re-asserted an ack it believed
+   delivered, so the view never reached `complete` (load-dependent). The got-set
+   re-assertion + dedupe is ported into the vendored transport and pinned by
+   `harness/src/vendor/httpPullTransport.stall.test.ts` (red before the port,
+   green after); repeated `query-diff --against rust-cf` runs against local
+   workerd pass. What is still uncovered: the credentialed deployed Cloudflare
+   qualification (`.github/workflows/deployed-qualification.yml`, weekly +
+   dispatch, never on PRs — it deploys the rust-cf WASM host and runs the
+   bounded m6 CF fault suite against a live origin) has been validated only
+   against a local workerd stand-in; its first real credentialed run has not
+   happened yet, so the deployed-origin results are not enforced evidence until
+   that schedule fires.
 8. **Scale and longevity numbers are historical single runs**, not gated
    assertions. Hours-long longevity and larger load grids are listed as
    remaining work.
