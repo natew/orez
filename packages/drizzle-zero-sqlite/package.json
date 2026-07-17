@@ -1,6 +1,6 @@
 {
   "name": "drizzle-zero-sqlite",
-  "version": "0.5.23",
+  "version": "0.5.24",
   "description": "Generate Zero schemas from Drizzle SQLite schemas",
   "sideEffects": false,
   "main": "dist/index.js",
