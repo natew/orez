@@ -187,11 +187,16 @@ try {
 
   // writers push tasks into the shared pool for the whole duration; acks are
   // tracked so the final barrier can prove every acknowledged write survived.
+  // `paused` lets a checkpoint quiesce the workload so its divergence check is a
+  // real convergence barrier, not a race against in-flight optimistic writes.
   let stop = false
+  let paused = false
   const intervalMs = 1000 / rate
   const writerLoops = Array.from({ length: writers }, async (_, w) => {
     let seq = 0
     while (!stop && Date.now() - t0 < durationMs) {
+      while (paused && !stop) await new Promise((r) => setTimeout(r, 20))
+      if (stop || Date.now() - t0 >= durationMs) break
       const id = `lv-${w}-${seq++}`
       const projectID = projectPool[(w + seq) % projectPool.length]!
       const started = Date.now()
@@ -224,9 +229,17 @@ try {
     await new Promise((r) => setTimeout(r, Math.min(checkpointMs, durationMs - (Date.now() - t0))))
     if (Date.now() - t0 >= durationMs) break
 
-    // no client divergence: every client equals the oracle for the pool. use a
-    // short eventually so an in-flight pull can settle, but a persistent gap
-    // (a lost or dropped row) fails the checkpoint.
+    // no client divergence: quiesce the workload so this is a real convergence
+    // barrier, not a race against in-flight optimistic writes. pause the writers,
+    // drain every outstanding ack, then require every client to equal the oracle
+    // exactly. a persistent gap (a lost or dropped row) fails the checkpoint.
+    paused = true
+    if (mutationErrors > 0) throw new Error(`${mutationErrors} mutation server ack(s) failed`)
+    await eventually(() => {
+      if (acked.size + mutationErrors < issued.size)
+        throw new Error(`draining ${issued.size - acked.size - mutationErrors} in-flight writes`)
+    }, `checkpoint drain at ${Math.round((Date.now() - t0) / 1000)}s`, 30_000)
+    if (mutationErrors > 0) throw new Error(`${mutationErrors} mutation server ack(s) failed`)
     let clientRows = 0
     await eventually(async () => {
       const want = await oracleIDs(projectPool)
@@ -240,6 +253,7 @@ try {
       }
       clientRows = want.length
     }, `checkpoint divergence at ${Math.round((Date.now() - t0) / 1000)}s`, 30_000)
+    paused = false
 
     // memory ceiling.
     const rss = rssMb(target.pid)
