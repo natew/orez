@@ -5,6 +5,8 @@
 
 Run [Zero](https://zero.rocicorp.dev) locally with zero native dependencies. No Postgres install, no SQLite compilation, no Docker.
 
+Read the [Orez documentation](https://orez-docs.natewienert.workers.dev).
+
 ```
 bunx orez
 ```

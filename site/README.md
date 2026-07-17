@@ -3,7 +3,7 @@
 The public documentation site for orez. It is a small [One](https://onestack.dev)
 app with a static homepage and Rust-powered MDX documentation.
 
-Live site: https://orez-docs.lslcf.workers.dev
+Live site: https://orez-docs.natewienert.workers.dev
 
 ## Develop
 
