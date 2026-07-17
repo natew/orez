@@ -176,9 +176,7 @@ async function oracleSig(): Promise<{ sig: string; count: number }> {
   )) as { id: string; rank: number }[]
   return {
     count: rows.length,
-    sig: canonical(
-      rows.map(({ id, rank }) => [id, Number(rank)] as const)
-    ),
+    sig: canonical(rows.map(({ id, rank }) => [id, Number(rank)] as const)),
   }
 }
 
@@ -222,13 +220,17 @@ try {
     views.push(watch(zero, projectPool))
   }
   // hydrate: every client must see the whole seeded pool.
-  await eventually(() => {
-    for (const view of views) {
-      const got = view.snapshot()
-      if (!got.complete || got.count < poolSize)
-        throw new Error(`hydrating ${got.count}/${poolSize}`)
-    }
-  }, 'hydration', 120_000)
+  await eventually(
+    () => {
+      for (const view of views) {
+        const got = view.snapshot()
+        if (!got.complete || got.count < poolSize)
+          throw new Error(`hydrating ${got.count}/${poolSize}`)
+      }
+    },
+    'hydration',
+    120_000
+  )
 
   const baselineRss = rssMb(target.pid)
   console.log(
@@ -273,23 +275,37 @@ try {
   // drain outstanding acks, then compare every client to the oracle. used by both
   // the periodic checkpoints and the final barrier.
   const drainAndCompare = async (label: string) => {
-    if (mutationErrors > 0) throw new Error(`${mutationErrors} mutation server ack(s) failed`)
-    await eventually(() => {
-      if (ackedCount + mutationErrors < issuedCount)
-        throw new Error(`draining ${issuedCount - ackedCount - mutationErrors} in-flight writes`)
-    }, `${label} drain`, 60_000)
-    if (mutationErrors > 0) throw new Error(`${mutationErrors} mutation server ack(s) failed`)
+    if (mutationErrors > 0)
+      throw new Error(`${mutationErrors} mutation server ack(s) failed`)
+    await eventually(
+      () => {
+        if (ackedCount + mutationErrors < issuedCount)
+          throw new Error(
+            `draining ${issuedCount - ackedCount - mutationErrors} in-flight writes`
+          )
+      },
+      `${label} drain`,
+      60_000
+    )
+    if (mutationErrors > 0)
+      throw new Error(`${mutationErrors} mutation server ack(s) failed`)
     let rows = 0
-    await eventually(async () => {
-      const oracle = await oracleSig()
-      for (const [slot, view] of views.entries()) {
-        const got = view.snapshot()
-        if (!got.complete) throw new Error(`client ${slot} incomplete`)
-        if (got.sig !== oracle.sig)
-          throw new Error(`client ${slot} diverged: ${got.count} rows vs oracle ${oracle.count}`)
-      }
-      rows = oracle.count
-    }, `${label} convergence`, 60_000)
+    await eventually(
+      async () => {
+        const oracle = await oracleSig()
+        for (const [slot, view] of views.entries()) {
+          const got = view.snapshot()
+          if (!got.complete) throw new Error(`client ${slot} incomplete`)
+          if (got.sig !== oracle.sig)
+            throw new Error(
+              `client ${slot} diverged: ${got.count} rows vs oracle ${oracle.count}`
+            )
+        }
+        rows = oracle.count
+      },
+      `${label} convergence`,
+      60_000
+    )
     return rows
   }
 
@@ -302,7 +318,9 @@ try {
     if (Date.now() - t0 >= durationMs) break
 
     paused = true
-    const rows = await drainAndCompare(`checkpoint at ${Math.round((Date.now() - t0) / 1000)}s`)
+    const rows = await drainAndCompare(
+      `checkpoint at ${Math.round((Date.now() - t0) / 1000)}s`
+    )
 
     const rss = rssMb(target.pid)
     if (rss > rssCeilingMb)
@@ -337,7 +355,9 @@ try {
   // update for every row is durable and visible everywhere.
   const sentinelID = poolIDs[0]!
   const sentinelRank = 900000 + (Date.now() % 1000)
-  const sentinel = zeros[0]!.mutate(mutators.task.setRank({ id: sentinelID, rank: sentinelRank }))
+  const sentinel = zeros[0]!.mutate(
+    mutators.task.setRank({ id: sentinelID, rank: sentinelRank })
+  )
   const sentinelOutcome = await sentinel.server
   if ((sentinelOutcome as { type: string }).type !== 'success')
     throw new Error('sentinel mutation did not succeed')
@@ -345,28 +365,37 @@ try {
   issuedCount++
 
   await drainAndCompare('final barrier')
-  await eventually(async () => {
-    const oracle = (await target.oracle(
-      `SELECT rank FROM task WHERE id = '${sentinelID}'`
-    )) as { rank: number }[]
-    if (Number(oracle[0]?.rank) !== sentinelRank)
-      throw new Error('sentinel rank not durable in oracle')
-    for (const [slot, view] of views.entries()) {
-      const sig = view.snapshot().sig
-      if (!sig.includes(`["${sentinelID}",${sentinelRank}]`))
-        throw new Error(`client ${slot} missing sentinel rank`)
-    }
-  }, 'sentinel visibility', 60_000)
+  await eventually(
+    async () => {
+      const oracle = (await target.oracle(
+        `SELECT rank FROM task WHERE id = '${sentinelID}'`
+      )) as { rank: number }[]
+      if (Number(oracle[0]?.rank) !== sentinelRank)
+        throw new Error('sentinel rank not durable in oracle')
+      for (const [slot, view] of views.entries()) {
+        const sig = view.snapshot().sig
+        if (!sig.includes(`["${sentinelID}",${sentinelRank}]`))
+          throw new Error(`client ${slot} missing sentinel rank`)
+      }
+    },
+    'sentinel visibility',
+    60_000
+  )
 
   // fresh late client must equal the authority too.
   const late = target.createClient('longevity-late')
   const lateView = watch(late, projectPool)
-  await eventually(async () => {
-    const oracle = await oracleSig()
-    const got = lateView.snapshot()
-    if (!got.complete || got.count < poolSize) throw new Error(`late hydrating ${got.count}`)
-    if (got.sig !== oracle.sig) throw new Error('late client diverged')
-  }, 'fresh late-client equality', 60_000)
+  await eventually(
+    async () => {
+      const oracle = await oracleSig()
+      const got = lateView.snapshot()
+      if (!got.complete || got.count < poolSize)
+        throw new Error(`late hydrating ${got.count}`)
+      if (got.sig !== oracle.sig) throw new Error('late client diverged')
+    },
+    'fresh late-client equality',
+    60_000
+  )
   lateView.destroy()
 
   const oracle = await oracleSig()
@@ -391,7 +420,10 @@ try {
   }
   const resultsDir = join(import.meta.dirname, '..', 'results')
   mkdirSync(resultsDir, { recursive: true })
-  writeFileSync(join(resultsDir, 'longevity-rust-local.json'), JSON.stringify(result, null, 2))
+  writeFileSync(
+    join(resultsDir, 'longevity-rust-local.json'),
+    JSON.stringify(result, null, 2)
+  )
   console.log(`[longevity] ${JSON.stringify({ ...result, samples: undefined })}`)
   console.log(
     `[longevity] PASS rust-local: ${checkpoints.length} checkpoints, ${issuedCount} updates on ${poolSize} rows, peak RSS ${result.peakRssMb}MB <= ${rssCeilingMb}MB, watermark monotonic, zero lost writes`
