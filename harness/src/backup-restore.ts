@@ -84,7 +84,8 @@ try {
     await assertServerOutcome(request.server, 'success', 'backup seed mutation')
   }
 
-  if ('origin' in source) await stopCfWriter(source)
+  // rust-local now also exposes `origin`; only the CF DO has a writer to stop
+  if (args.target === 'rust-cf') await stopCfWriter(source as RustCfTarget)
   const backup = new Map<string, Array<Record<string, unknown>>>()
   for (const table of tables) {
     backup.set(table, await source.oracle(`SELECT * FROM "${table}" ORDER BY id`))
