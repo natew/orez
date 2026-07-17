@@ -141,6 +141,14 @@ const LANES: Lane[] = [
     cwd: HARNESS_ROOT,
     timeoutMs: 10 * 60_000,
   },
+  {
+    // one-row diff cap: splits a mutation's row effect from its lmid ack across
+    // two pulls, the only system net for the capped-diff cut bugs (M4, O2).
+    name: 'capped-diff',
+    cmd: ['bun', 'src/capped-diff-lane.ts', '--target', 'rust-local'],
+    cwd: HARNESS_ROOT,
+    timeoutMs: 5 * 60_000,
+  },
 ]
 
 type Mutant = {
