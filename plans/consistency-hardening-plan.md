@@ -181,17 +181,38 @@ The docs site should own the consistency story publicly.
 - Reconcile `docs/sync/testing.md` §4 against the landed `history.ts` export
   before publishing.
 
-## Execution assignments (2026-07-16)
+## Execution status (2026-07-16, end of day)
 
-- **Item 3 (wire orphan lanes)** — Codex Sol (high), worktree
-  `~/.worktrees/orez-wire-lanes`, branch `test/wire-consistency-lanes`.
-- **Item 2 (query oracle)** — Codex Sol (high), worktree
-  `~/.worktrees/orez-query-oracle`, branch `test/query-differential-oracle`.
-- **Item 1 (mutation matrix) + docs reconciliation + public docs page** —
-  this session, mutation runs in an isolated worktree so mutants never touch
-  a shared tree.
-- Land-or-kill: every branch above lands or is explicitly discarded within
-  two days (`docs/rca-2026-07-14-unlanded-reliability-work.md`).
+Items 1–3 and the docs work are DONE and merged to local main (commit
+`65f7e91`, not yet pushed):
+
+- **Item 3** — `test/wire-consistency-lanes` @ ce43931: both lanes run
+  against rust-local in the PR CI job with uploaded evidence; red-proofed in
+  `docs/sync/lane-red-proof.md`. No rust-cf nightly workflow exists yet.
+- **Item 2** — `test/query-differential-oracle` @ 19d9003: deterministic
+  ZQL oracle in `crates/sync-core/tests/differential.rs` +
+  `ts-oracle/run-oracle.ts`; red-proofed with shrinking in
+  `docs/sync/query-oracle-red-proof.md`; nullable start-cursor axis added to
+  the sweep generator.
+- **Item 1** — 14-mutant matrix committed: `harness/mutants/`,
+  `harness/scripts/mutation-matrix.ts`, results and analysis in
+  `docs/sync/mutation-matrix.md`.
+- Docs: `docs/sync/testing.md` §4 reconciled; public page
+  `site/data/docs/consistency.mdx` render-verified.
+
+### Follow-ups the matrix produced (next work, in order)
+
+1. **O1 hole: nothing catches a non-durable watermark** (invariant 7).
+   Add a cargo invariant test and a state-machine step covering watermark
+   monotonicity across prune + restart.
+2. **Exactly-once workload never issues an app-error mutation**, so
+   swallowed rollbacks (M3) are invisible at system level.
+3. **No rust-local lane runs a visibility policy** (P1 invisible at system
+   level); port a permissions workload to rust-local.
+4. **No lane exercises capped diffs** (M4/O2 only observable there).
+5. rust-cf nightly workflow does not exist; item 3's nightly half is open.
+6. Items 4–7 of this plan (nemesis composition, Elle-on-real-workload
+   decision, sync-wasm tests, auditable heavy lanes) remain unstarted.
 
 ## Rules
 
