@@ -372,6 +372,12 @@ export const mutators = defineMutators({
       const { id } = validateIncrementProbeArgs(args)
       await tx.mutate.task.update({ id, rank: 1 })
     }),
+    incrementThenReject: defineMutator(
+      async ({ tx, args }: { tx: Tx; args: unknown }) => {
+        const { id } = validateIncrementProbeArgs(args)
+        await tx.mutate.task.update({ id, rank: 2 })
+      }
+    ),
   },
   atomicVisibility: {
     appendGroup: defineMutator(async ({ tx, args }: { tx: Tx; args: unknown }) => {

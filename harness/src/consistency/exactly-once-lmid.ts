@@ -9,7 +9,7 @@ import type { ConsistencyCheck } from './artifacts.js'
 
 export const EXACTLY_ONCE_LMID_PROFILE = {
   name: 'exactly-once-lost-push-recovery-plus-server-replay',
-  version: 2,
+  version: 3,
 } as const
 
 export type ExactlyOnceLmidResult = Pick<
@@ -78,20 +78,54 @@ export function checkExactlyOnceLmid(
   const violations: string[] = []
   const reports: string[] = []
   const mutations = terminalPairs(events, 'mutation')
-  if (mutations.length !== 1) {
-    violations.push(`expected exactly one mutation, got ${mutations.length}`)
+  const successfulMutations = mutations.filter(
+    (pair) => pair.invoke.exactlyOnce.effect.type === 'increment-probe'
+  )
+  const rejectedMutations = mutations.filter(
+    (pair) => pair.invoke.exactlyOnce.effect.type === 'rejected-increment'
+  )
+  if (successfulMutations.length !== 1) {
+    violations.push(
+      `expected exactly one successful increment mutation, got ${successfulMutations.length}`
+    )
   }
-  const mutation = mutations[0]
+  if (rejectedMutations.length !== 1) {
+    violations.push(
+      `expected exactly one app-error mutation, got ${rejectedMutations.length}`
+    )
+  }
+  if (mutations.length !== 2) {
+    violations.push(`expected exactly two mutations, got ${mutations.length}`)
+  }
+  const mutation = successfulMutations[0]
+  const rejectedMutation = rejectedMutations[0]
   const identity = mutation?.invoke.exactlyOnce.identity
+  const rejectedIdentity = rejectedMutation?.invoke.exactlyOnce.identity
   if (identity !== undefined) {
     if (!Number.isSafeInteger(identity.mutationId) || identity.mutationId !== 1) {
       violations.push(`mutation id must be the fresh-client value 1`)
     }
   }
+  if (
+    identity !== undefined &&
+    (rejectedIdentity?.clientId !== identity.clientId ||
+      rejectedIdentity.clientGroupId !== identity.clientGroupId ||
+      rejectedIdentity.mutationId !== identity.mutationId + 1)
+  ) {
+    violations.push('app-error mutation must be mutation 2 on the same client group')
+  }
 
   for (const event of events) {
     const evidence = event.exactlyOnce
     if (evidence === undefined || identity === undefined) continue
+    if (
+      evidence.type === 'mutation' &&
+      evidence.effect.type === 'rejected-increment' &&
+      rejectedIdentity !== undefined &&
+      sameIdentity(evidence, rejectedMutation!.invoke.exactlyOnce)
+    ) {
+      continue
+    }
     if (!sameIdentity(evidence, mutation!.invoke.exactlyOnce)) {
       violations.push(`event ${event.opId} has a conflicting mutation identity`)
     }
@@ -156,9 +190,9 @@ export function checkExactlyOnceLmid(
       observed.probeRowCount !== 1 ||
       application !== 1n ||
       observed.clientRowCount !== 1 ||
-      lmid !== 1n
+      lmid !== 2n
     ) {
-      violations.push('after authority does not show one application and LMID 1')
+      violations.push('after authority does not show one application and LMID 2')
     }
   }
   validateAuthority('before', before)
@@ -429,6 +463,8 @@ export function checkExactlyOnceLmid(
     quiesce?.terminal?.index,
     harnessReplay?.invoke.index,
     harnessReplay?.terminal?.index,
+    rejectedMutation?.invoke.index,
+    rejectedMutation?.terminal?.index,
     after?.invoke.index,
     after?.terminal?.index,
   ]
@@ -436,7 +472,9 @@ export function checkExactlyOnceLmid(
     suffix.some((value) => value === undefined) ||
     suffix.some((value, index) => index > 0 && value! <= suffix[index - 1]!)
   )
-    violations.push('mutation, quiesce, replay, and final authority are out of order')
+    violations.push(
+      'mutation, quiesce, replay, app-error mutation, and final authority are out of order'
+    )
   if (
     quiesce?.terminal &&
     events.some(
@@ -450,6 +488,9 @@ export function checkExactlyOnceLmid(
     violations.push('stock protocol traffic occurred after client quiescence')
 
   if (mutationPhase === 'fail') violations.push('success-only mutation terminated fail')
+  if (rejectedMutation?.terminal?.phase !== 'ok') {
+    violations.push('app-error mutation did not receive the expected rejection')
+  }
   const clientProbes = terminalPairs(events, 'client-probe')
   const clientObserved = clientProbes[0]?.terminal?.exactlyOnce.observed
   if (
@@ -489,6 +530,8 @@ export function checkExactlyOnceLmid(
           ).length
       }`,
       'final harness replay was already processed',
+      'appErrorMutationCount=1',
+      'app-error mutation advanced LMID with no row effects',
       'neither stock retry nor pull recovery is universally required',
     ],
   }

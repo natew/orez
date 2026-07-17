@@ -187,6 +187,21 @@ pub fn run_mutator(
             )?;
             Ok(())
         }
+        "exactlyOnce.incrementThenReject" => {
+            let id = text(args, "id")?;
+            let rows = db.query(
+                "SELECT rank FROM task WHERE id = ?",
+                &[SqlValue::Text(id.clone())],
+            )?;
+            if rows.len() != 1 {
+                return Err(MutateError::App("probe-not-found".into()));
+            }
+            db.exec(
+                "UPDATE task SET rank = rank + 1 WHERE id = ?",
+                &[SqlValue::Text(id)],
+            )?;
+            Err(MutateError::App("intentional-reject".into()))
+        }
         "atomicVisibility.appendGroup" => {
             let effects = args
                 .get("effects")

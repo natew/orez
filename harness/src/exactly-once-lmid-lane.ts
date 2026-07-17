@@ -17,6 +17,8 @@ import {
 } from './consistency/exactly-once-lmid.js'
 import {
   assertExpectedExactlyOncePush,
+  assertRejectingIncrementResponse,
+  buildRejectingIncrementPush,
   parseExactlyOncePush,
 } from './consistency/exactly-once-workload.js'
 import {
@@ -632,6 +634,58 @@ try {
     await waitForProtocolIdle()
   }
   recordingProtocol = false
+  const rejectedIdentity = { ...identity, mutationId: identity.mutationId + 1 }
+  const rejectedEffect = { type: 'rejected-increment' as const, probeId }
+  const rejectedEvidence = {
+    type: 'mutation' as const,
+    profileVersion: 1 as const,
+    identity: rejectedIdentity,
+    effect: rejectedEffect,
+  }
+  const rejectedOp = `${runId}-app-error-mutation`
+  recorder.record({
+    opId: rejectedOp,
+    process: 'app-error-writer',
+    phase: 'invoke',
+    kind: 'mutation',
+    clientId: rejectedIdentity.clientId,
+    clientGroupId: rejectedIdentity.clientGroupId,
+    exactlyOnce: rejectedEvidence,
+  })
+  let rejectedPhase: 'ok' | 'fail' = 'ok'
+  let rejectedError: string | undefined
+  try {
+    if (!capturedPushBody) throw new Error('stock push raw body was not captured')
+    const body = buildRejectingIncrementPush(capturedPushBody, {
+      identity,
+      args: { id: probeId },
+    })
+    const response = await fetch(`${target.origin}/push`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token-exactly-once-client',
+        'content-type': 'application/json',
+      },
+      body,
+    })
+    if (!response.ok) {
+      throw new Error(`rejecting increment returned HTTP ${response.status}`)
+    }
+    assertRejectingIncrementResponse(await response.json(), rejectedIdentity)
+  } catch (error) {
+    rejectedPhase = 'fail'
+    rejectedError = error instanceof Error ? error.message : String(error)
+  }
+  recorder.record({
+    opId: rejectedOp,
+    process: 'app-error-writer',
+    phase: rejectedPhase,
+    kind: 'mutation',
+    clientId: rejectedIdentity.clientId,
+    clientGroupId: rejectedIdentity.clientGroupId,
+    exactlyOnce: rejectedEvidence,
+    ...(rejectedError ? { error: rejectedError } : {}),
+  })
   await authority('after')
 
   const schedule: FaultSchedule = {

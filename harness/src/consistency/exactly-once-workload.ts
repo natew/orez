@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto'
 import type { ExactlyOnceIdentity } from './history.js'
 
 export const EXACTLY_ONCE_MUTATOR = 'exactlyOnce.incrementProbe' as const
+export const EXACTLY_ONCE_REJECTING_MUTATOR = 'exactlyOnce.incrementThenReject' as const
+export const EXACTLY_ONCE_REJECTION = 'intentional-reject' as const
 
 export type IncrementProbeArgs = { id: string }
 
@@ -116,5 +118,57 @@ export function assertExpectedExactlyOncePush(
     parsed.args.id !== expected.args.id
   ) {
     throw new Error('push does not match the armed exactly-once identity')
+  }
+}
+
+export function buildRejectingIncrementPush(
+  capturedBody: string,
+  expected: ExpectedExactlyOncePush
+): string {
+  const body = JSON.parse(capturedBody) as Record<string, unknown>
+  const parsed = parseExactlyOncePush(body)
+  assertExpectedExactlyOncePush(parsed, expected)
+  const mutations = body.mutations as Array<Record<string, unknown>>
+  const mutation = mutations[0]!
+  return JSON.stringify({
+    ...body,
+    requestID: `${String(body.requestID)}-reject`,
+    timestamp: Number(body.timestamp) + 1,
+    mutations: [
+      {
+        ...mutation,
+        id: expected.identity.mutationId + 1,
+        name: EXACTLY_ONCE_REJECTING_MUTATOR,
+        timestamp: Number(mutation.timestamp) + 1,
+      },
+    ],
+  })
+}
+
+export function assertRejectingIncrementResponse(
+  body: unknown,
+  expected: ExactlyOnceIdentity
+): void {
+  const mutation = (body as { pushResponse?: { mutations?: unknown[] } })?.pushResponse
+    ?.mutations?.[0] as
+    | {
+        id?: { clientID?: unknown; id?: unknown }
+        result?: { error?: unknown; message?: unknown; details?: unknown }
+      }
+    | undefined
+  const mutations = (body as { pushResponse?: { mutations?: unknown[] } })?.pushResponse
+    ?.mutations
+  if (
+    !Array.isArray(mutations) ||
+    mutations.length !== 1 ||
+    mutation?.id?.clientID !== expected.clientId ||
+    mutation.id.id !== expected.mutationId ||
+    mutation.result?.error !== 'app' ||
+    mutation.result.message !== EXACTLY_ONCE_REJECTION ||
+    mutation.result.details !== EXACTLY_ONCE_REJECTION
+  ) {
+    throw new Error(
+      `rejecting increment expected one app-error response, got ${JSON.stringify(body)}`
+    )
   }
 }

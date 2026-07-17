@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   assertExpectedExactlyOncePush,
+  assertRejectingIncrementResponse,
+  buildRejectingIncrementPush,
   parseExactlyOncePush,
   validateIncrementProbeArgs,
 } from './exactly-once-workload.js'
@@ -93,5 +95,50 @@ describe('exactly-once workload boundary', () => {
   test('validates the probe id', () => {
     expect(validateIncrementProbeArgs({ id: 'probe' })).toEqual({ id: 'probe' })
     expect(() => validateIncrementProbeArgs({ id: '' })).toThrow('nonempty id')
+  })
+
+  test('builds mutation 2 and requires its deterministic app error', () => {
+    const parsed = parseExactlyOncePush(body)
+    const rejection = JSON.parse(
+      buildRejectingIncrementPush(JSON.stringify(body), {
+        identity: parsed.identity,
+        args: parsed.args,
+      })
+    )
+    expect(rejection.mutations).toEqual([
+      expect.objectContaining({
+        clientID: 'client-1',
+        id: 2,
+        name: 'exactlyOnce.incrementThenReject',
+        args: [{ id: 'probe-1' }],
+      }),
+    ])
+    const response = {
+      pushResponse: {
+        mutations: [
+          {
+            id: { clientID: 'client-1', id: 2 },
+            result: {
+              error: 'app',
+              message: 'intentional-reject',
+              details: 'intentional-reject',
+            },
+          },
+        ],
+      },
+    }
+    expect(() =>
+      assertRejectingIncrementResponse(response, {
+        ...parsed.identity,
+        mutationId: 2,
+      })
+    ).not.toThrow()
+    response.pushResponse.mutations[0]!.result = {} as never
+    expect(() =>
+      assertRejectingIncrementResponse(response, {
+        ...parsed.identity,
+        mutationId: 2,
+      })
+    ).toThrow('expected one app-error response')
   })
 })
