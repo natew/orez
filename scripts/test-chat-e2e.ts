@@ -354,8 +354,9 @@ function main() {
     })
   } catch {}
 
-  // step 8: run chat e2e tests in lite mode
-  const testCmd = ['bun', 'run', 'test', 'e2e', '--integration', '--lite']
+  // step 8: run chat e2e tests (chat removed its lite mode; the plain
+  // integration run is the mode)
+  const testCmd = ['bun', 'run', 'test', 'e2e', '--integration']
   if (retry) testCmd.push('--retry')
   if (filter) testCmd.push('--filter', filter)
 
