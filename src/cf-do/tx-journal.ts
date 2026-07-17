@@ -202,7 +202,10 @@ export function snapshotTxSchema(
 ): void {
   sql.exec(TX_SCHEMA_DDL)
   const exists = sql
-    .exec(`SELECT 1 AS ok FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ? LIMIT 1`, txID)
+    .exec(
+      `SELECT 1 AS ok FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ? AND type = 'marker' LIMIT 1`,
+      txID
+    )
     .toArray()
   if (exists.length === 0) {
     const objects = sql
@@ -250,6 +253,23 @@ export function snapshotTxSchema(
       .toArray()
     if (tableExists.length > 0) upgradeToTableSnapshot(sql, txID, table, owner)
   }
+}
+
+/** persist one cheap recovery marker only when a transaction first mutates data. */
+export function beginTxJournal(
+  sql: DurableSqlStorage,
+  txID: string,
+  owner = 'default'
+): void {
+  sql.exec(TX_SCHEMA_DDL)
+  sql.exec(
+    `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) ` +
+      `SELECT ?, ?, 'active', '', '', NULL WHERE NOT EXISTS (` +
+      `SELECT 1 FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ? AND type = 'active')`,
+    txID,
+    owner,
+    txID
+  )
 }
 
 function restoreSchemaSnapshot(
@@ -394,11 +414,16 @@ export function commitTxJournal(sql: DurableSqlStorage, txID: string): void {
 export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
   const schema = schemaRows(sql, txID)
   const rows = manifestTableExists(sql) ? manifestRows(sql, txID).reverse() : []
-  if (schema.length > 0) {
+  if (schema.some((row) => row.type === 'marker')) {
     restoreSchemaSnapshot(sql, txID, schema, rows)
     return
   }
-  if (rows.length === 0) return
+  if (rows.length === 0) {
+    if (schema.length > 0) {
+      sql.exec(`DELETE FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ?`, txID)
+    }
+    return
+  }
 
   const restoredTables = rows.filter((row) => row.snapshot).map((row) => row.original)
   const triggers = suspendTriggers(sql, restoredTables)
@@ -437,6 +462,9 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
   }
   restoreTriggers(sql, triggers)
   sql.exec(`DELETE FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ?`, txID)
+  if (schema.length > 0) {
+    sql.exec(`DELETE FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ?`, txID)
+  }
 }
 
 /**

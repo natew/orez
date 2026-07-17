@@ -21,6 +21,7 @@ import {
 } from '../do-sql-tracking.js'
 import {
   TransactionalCdc,
+  schemaChangeTargets,
   type CapturedRowChange,
   type CdcTableRegistration,
 } from './cdc.js'
@@ -31,6 +32,7 @@ import {
   rollbackPendingChanges,
 } from './row-undo.js'
 import {
+  beginTxJournal,
   commitTxJournal,
   recoverTxJournal,
   rollbackTxJournal,
@@ -1288,21 +1290,34 @@ export class ZeroDO extends DurableObject {
   async applicationSqlBegin(sessionID: string): Promise<void> {
     if (!sessionID) throw new TypeError('application SQLite session id is required')
     await this.acquireApplicationSqlTurn(sessionID)
-    try {
-      await this.atomically(() => snapshotTxSchema(this.sql, sessionID, 'application'))
-    } catch (error) {
-      this.releaseApplicationSqlTurn(sessionID)
-      throw error
+  }
+
+  private prepareApplicationSqlMutation(sessionID: string, sql: string): void {
+    if (!isSqlMutation(sql)) return
+    if (!isSqlRowMutation(sql)) {
+      const targets = schemaChangeTargets(sql)
+      if (
+        /^\s*CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\b/i.test(sql) &&
+        targets.length > 0 &&
+        targets.every((table) => this.tableExists(table))
+      ) {
+        return
+      }
+      beginTxJournal(this.sql, sessionID, 'application')
+      snapshotTxSchema(this.sql, sessionID, 'application', targets)
+      return
     }
+    beginTxJournal(this.sql, sessionID, 'application')
   }
 
   async applicationSqlSessionQuery<
     Row extends Record<string, unknown> = Record<string, unknown>,
   >(sessionID: string, sql: string, params: readonly unknown[] = []): Promise<Row[]> {
     this.assertApplicationSqlSession(sessionID)
-    return this.atomically(
-      () => this.executeSQL(sql, [...params], undefined, sessionID).rows as Row[]
-    )
+    return this.atomically(() => {
+      this.prepareApplicationSqlMutation(sessionID, sql)
+      return this.executeSQL(sql, [...params], undefined, sessionID).rows as Row[]
+    })
   }
 
   async applicationSqlSessionExec(
@@ -1313,6 +1328,7 @@ export class ZeroDO extends DurableObject {
   ): Promise<ApplicationSqlExecResult> {
     this.assertApplicationSqlSession(sessionID)
     return this.atomically(() => {
+      this.prepareApplicationSqlMutation(sessionID, sql)
       const result = this.executeSQL(
         sql,
         [...params],

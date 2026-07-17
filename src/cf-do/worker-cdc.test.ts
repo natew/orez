@@ -236,20 +236,45 @@ describe('ZeroDO transactional CDC integration', () => {
     expect(zero.readChangesSince(0)).toEqual([])
   })
 
-  it('snapshots application schema without copying every table at session begin', async () => {
+  it('defers the application schema snapshot until the session changes schema', async () => {
     const { sql, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
 
     await zero.applicationSqlBegin('application-schema-only')
+    await zero.applicationSqlSessionQuery('application-schema-only', 'SELECT * FROM item')
+    await zero.applicationSqlSessionExec(
+      'application-schema-only',
+      'CREATE TABLE IF NOT EXISTS item (id TEXT PRIMARY KEY, body TEXT)'
+    )
+    await zero.applicationSqlSessionRegisterTables('application-schema-only', [
+      { table: 'item', publicTable: 'public.item' },
+    ])
 
     expect(
       sql
         .exec(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '_orez_tx_application-schema-only_%'"
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_orez_tx_schema'"
         )
         .toArray()
     ).toEqual([])
+
+    await zero.applicationSqlSessionExec(
+      'application-schema-only',
+      'ALTER TABLE item ADD COLUMN extra TEXT'
+    )
+    expect(
+      sql
+        .exec("SELECT name FROM _orez_tx_schema WHERE tx_id = 'application-schema-only'")
+        .toArray().length
+    ).toBeGreaterThan(0)
+
     await zero.applicationSqlRollback('application-schema-only')
+    expect(
+      sql
+        .exec('PRAGMA table_info(item)')
+        .toArray()
+        .map((column) => column.name)
+    ).toEqual(['id', 'body'])
   })
 
   it('recovers an interrupted application session when the Durable Object is recreated', async () => {

@@ -476,7 +476,7 @@ function unquoteSqlIdentifier(identifier: string): string {
  * names, but accepting every SQLite identifier form also covers direct /exec
  * callers and keeps CDC independent of the compiler.
  */
-function schemaChangeTargets(sql: string): string[] {
+export function schemaChangeTargets(sql: string): string[] {
   const identifier = '("(?:[^"]|"")*"|`(?:[^`]|``)*`|\\[[^\\]]+\\]|[^\\s;(]+)'
   const patterns = [
     new RegExp(`\\bALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${identifier}`, 'gi'),
