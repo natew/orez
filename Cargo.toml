@@ -6,6 +6,9 @@ members = [
   "crates/sync-wasm",
   "crates/soot-native",
 ]
+# test-chat is a copied-in chat checkout (scripts/test-chat-e2e.ts); its
+# standalone crates (rust-sync/chat-native) must not join this workspace
+exclude = ["test-chat"]
 
 [workspace.package]
 edition = "2024"
