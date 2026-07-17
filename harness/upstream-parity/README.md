@@ -57,15 +57,43 @@ materializes client-side, so it never pushes the start into the buggy sqlite
 fetch. Orez's own Rust server compiler also handles NULL cursors correctly and
 is tested (`crates/sync-core/tests/query_ast.rs::start_cursor_null_ordering`).
 
-Why the stock-vs-Orez **differential** misses it: the sweep generator has **no
-nullable-column start-cursor axis**, so this shape is never generated. Had it
-been, stock (`[]`) and orez-local (rows) would DIVERGE and the differential
-would also flag it — so #6121 is a _generator-coverage_ miss, not a case of both
-sides being wrong. The metamorphic guard caught it **with no oracle** by
-exercising that axis on a single target. Its distinct, structural value remains
-the harder class the differential is blind to _by construction_ — where both
-targets share the same wrong behavior — plus running against any one target
-(incl. CF) with no reference impl. See `../regressions/` for the recorded repro.
+Why the stock-vs-Orez **differential** does not gate it: the sweep generator now
+has a nullable-column start-cursor axis, but suppresses that axis before
+materializing against the 1.7.0 stock pin. The pin can return wrong rows for the
+initial query and can crash its view-syncer when later edits flow through the
+pipeline, so no cross-target comparison is possible. The generator reports how
+many candidates it suppressed. The metamorphic guard keeps the axis covered
+**with no oracle** against a single target. Its distinct, structural value
+remains the harder class the differential is blind to by construction, where
+both targets share the same wrong behavior, plus running against any one target
+(including CF) with no reference implementation. See `../regressions/` for the
+recorded repro.
+
+## stock-pin generator suppressions
+
+The randomized sweep always boots the pinned stock zero-cache as its reference.
+Generated shapes that crash that reference must be excluded before
+materialization; classifying the resulting disconnect as an expected failure
+would hide every later comparison in the run.
+
+- **Null-anchored `start()`**: suppressed because stock 1.7.0 contains #6121 and
+  its IVM can fail with `Bound should be set` after edits. The deterministic
+  Rust/TypeScript differential and the metamorphic `startSuffix` relation cover
+  the cursor behavior without this stock pin.
+- **Explicit nullable-bound take window**: a task query with `.limit(n)` ordered
+  by `dueAt asc` places a null-sorted row at the window bound in the seeded data.
+  On sweep seed `29558895429`, a later task edit made stock 1.7.0 lose that bound
+  and assert in `zql/src/ivm/take.js`. The same mirrored write trace remained
+  healthy on `orez-local`; the failure response and view-syncer shutdown came
+  only from `stock-zero`. Removing the limit or ordering by `rank`, `id`, or
+  `dueAt desc` passed, while removing filters and relationships still crashed,
+  which isolates the suppressed shape to the nullable ascending limit. The
+  generator applies this exclusion to root and related task windows. It still
+  exercises unbounded `dueAt asc` ordering and limited windows on other orders.
+
+Both suppressions are temporary compatibility gaps. Remove their flags and the
+matching generator or coverage logic when the stock oracle advances to a
+version that serves and incrementally maintains these shapes.
 
 The oracle-free technique is **metamorphic self-consistency** (upstream's own,
 `fuzz/metamorphic.ts`): a transform whose result relationship is known without an

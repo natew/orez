@@ -46,7 +46,11 @@ import {
   writeCorpusEntry,
 } from './spec-corpus.js'
 import { constructCount, shrinkSpec } from './spec-shrink.js'
-import { SUPPRESS_NULL_START_VS_STOCK, sweepPairwiseCoverage } from './sweep-coverage.js'
+import {
+  isSuppressedNullBoundLimitVsStock,
+  SUPPRESS_NULL_START_VS_STOCK,
+  sweepPairwiseCoverage,
+} from './sweep-coverage.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
@@ -237,6 +241,10 @@ function genOrderBy(table: TableName): [string, 'asc' | 'desc'][] {
   return order
 }
 
+// explicit nullable-order limits omitted from root and related task windows
+// because the pinned stock oracle crashes while maintaining them
+let nullBoundLimitSuppressed = 0
+
 function genSub(
   to: TableName,
   kind: 'one' | 'many',
@@ -258,7 +266,15 @@ function genSub(
   const sub: GenSubSpec = {}
   if (chance(0.5)) sub.where = genWhere(to, 1)
   sub.orderBy = genOrderBy(to)
-  if (chance(0.5)) sub.limit = int(1, 4)
+  if (chance(0.5)) {
+    const limit = int(1, 4)
+    const candidate = { ...sub, limit }
+    if (isSuppressedNullBoundLimitVsStock(to, candidate)) {
+      nullBoundLimitSuppressed++
+    } else {
+      sub.limit = limit
+    }
+  }
   const related = nest()
   if (related) sub.related = related
   return sub
@@ -307,13 +323,22 @@ function genSpec(): GenSpec {
       }
     }
   }
-  if (chance(0.4)) spec.limit = int(1, 8)
+  const wantedLimit = chance(0.4)
+  if (wantedLimit) {
+    const limit = int(1, 8)
+    const candidate = { ...spec, limit }
+    if (isSuppressedNullBoundLimitVsStock(table, candidate)) {
+      nullBoundLimitSuppressed++
+    } else {
+      spec.limit = limit
+    }
+  }
   if (rels.length > 0 && chance(0.6)) {
     const count = chance(0.3) && rels.length > 1 ? 2 : 1
     const chosen = [...rels].sort(() => rng() - 0.5).slice(0, count)
     spec.related = chosen.map((r) => ({ rel: r.rel, sub: genSub(r.to, r.kind, 1) }))
   }
-  if (spec.limit === undefined && chance(0.15)) spec.one = true
+  if (!wantedLimit && spec.limit === undefined && chance(0.15)) spec.one = true
   return spec
 }
 
@@ -1029,6 +1054,11 @@ try {
 if (nullStartSuppressed > 0) {
   console.log(
     `[sweep] ${nullStartSuppressed} null-anchored start cursors suppressed (stock pin cannot serve them: #6121 + IVM "Bound should be set"; the deterministic differential and metamorphic startSuffix cover the axis)`
+  )
+}
+if (nullBoundLimitSuppressed > 0) {
+  console.log(
+    `[sweep] ${nullBoundLimitSuppressed} nullable-order limits suppressed (stock pin crashes take.js on edits when dueAt asc supplies a null window bound; dueAt ordering and limits remain covered separately)`
   )
 }
 if (failures.length > 0) {

@@ -1,12 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  isSuppressedNullBoundLimitVsStock,
   SWEEP_COVERAGE_AXES,
   sweepAxisAssignment,
   sweepPairwiseCoverage,
 } from './sweep-coverage.js'
 
-import type { GenSpec } from './fixture.js'
+import type { GenSpec, GenSubSpec } from './fixture.js'
 
 describe('sweep pairwise coverage', () => {
   test('classifies every grammar axis', () => {
@@ -75,6 +76,33 @@ describe('sweep pairwise coverage', () => {
       start: { row: { dueAt: null, id: 't1' } },
     }
     expect(sweepAxisAssignment(nullable).cursorValue).toBe('null')
+  })
+
+  test('suppresses only nullable ascending task limits against the stock pin', () => {
+    const dueAtAsc = {
+      orderBy: [
+        ['dueAt', 'asc'],
+        ['id', 'asc'],
+      ],
+      limit: 4,
+    } satisfies GenSubSpec
+
+    expect(isSuppressedNullBoundLimitVsStock('task', dueAtAsc)).toBe(true)
+    expect(
+      isSuppressedNullBoundLimitVsStock('task', {
+        ...dueAtAsc,
+        orderBy: [
+          ['dueAt', 'desc'],
+          ['id', 'asc'],
+        ],
+      })
+    ).toBe(false)
+    expect(
+      isSuppressedNullBoundLimitVsStock('task', {
+        orderBy: dueAtAsc.orderBy,
+      })
+    ).toBe(false)
+    expect(isSuppressedNullBoundLimitVsStock('project', dueAtAsc)).toBe(false)
   })
 
   test('rejects a shape outside the declared generator grammar', () => {

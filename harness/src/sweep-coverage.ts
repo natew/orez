@@ -1,7 +1,7 @@
 // Pairwise accounting for the sweep grammar. Unlike a raw Cartesian product,
 // the denominator excludes combinations the generator cannot produce (for
 // example start!=none on a non-task table, or limit=set with cardinality=one).
-import type { GenSpec, GenWhere } from './fixture.js'
+import type { GenSpec, GenSubSpec, GenWhere } from './fixture.js'
 
 export const SWEEP_COVERAGE_AXES = [
   { name: 'table', values: ['user', 'project', 'member', 'task'] },
@@ -75,6 +75,28 @@ function assignments(): AxisAssignment[] {
 // startSuffix relation. DELETE this flag when the zero pin advances past
 // the upstream fixes.
 export const SUPPRESS_NULL_START_VS_STOCK = true
+
+// stock zero-cache 1.7.0 can also crash its take IVM when an edit flows
+// through an explicit limit ordered by nullable dueAt ascending. the window's
+// bound is a null-sorted row in the seeded sweep data, and the pinned take.js
+// loses that bound before a later edit ("Bound should be set"). keep dueAt
+// ordering and limits independently exercised, but do not combine this exact
+// shape in a lane whose oracle is the stock pin. apply this to root and related
+// task windows. delete the flag when the stock pin contains the upstream fix.
+export const SUPPRESS_NULL_BOUND_LIMIT_VS_STOCK = true
+
+export function isSuppressedNullBoundLimitVsStock(
+  table: GenSpec['table'],
+  spec: GenSubSpec
+): boolean {
+  return (
+    SUPPRESS_NULL_BOUND_LIMIT_VS_STOCK &&
+    table === 'task' &&
+    spec.limit !== undefined &&
+    spec.orderBy?.[0]?.[0] === 'dueAt' &&
+    spec.orderBy[0][1] === 'asc'
+  )
+}
 
 // Coarse reachability constraints mirror genSpec()/genSub(). They describe
 // which axis combinations are possible, not the generator probabilities.
