@@ -192,6 +192,15 @@ ignored visibility, capped-diff cut ordering, non-durable watermark) are now
 each caught by a dedicated system lane, and a new lane earns its place by
 going red on at least one mutant.
 
+**PR-gate budget** (audited 2026-07-16, run 29560870553): total wall clock is
+about ten minutes and the reliability lanes are not the bottleneck. The
+critical path is the root `test` job (about 6 minutes of vitest) and
+`native-integration`; the harness job finishes in under a minute and the
+`rust-local` job — every consistency lane, Elle, capped-diff, and the composed
+nemesis at 24 steps — in about 2.5 minutes, all in parallel. Before demoting
+any reliability lane to nightly, check this balance again; the cheaper lever
+has been tooling installs shared across jobs, not lanes.
+
 CI runs these as release-blocking jobs. The `rust-local-faults` job runs the
 pinned corpus ledger, the portable corpus across the TypeScript oracle, stock
 zero-cache, and native Rust, rust-local transaction and storage faults, and the
