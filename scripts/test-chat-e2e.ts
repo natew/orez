@@ -122,6 +122,37 @@ function allowColdDoBackendStartup() {
   log('extended cold lite backend readiness budget to 120s')
 }
 
+// chat-native pins orez's sync-core/sync-native to a git rev. the whole point
+// of this harness is exercising the LOCAL orez working tree, so patch the git
+// source to the local crates (cargo rebuilds on the next backend start).
+function useLocalOrezCrates() {
+  const cargoPath = resolve(TEST_DIR, 'rust-sync', 'chat-native', 'Cargo.toml')
+  if (!existsSync(cargoPath)) return
+  const source = readFileSync(cargoPath, 'utf8')
+  if (source.includes('[patch."https://github.com/natew/orez.git"]')) return
+  const patch = [
+    '',
+    '[patch."https://github.com/natew/orez.git"]',
+    `sync-core = { path = "${resolve(OREZ_ROOT, 'crates', 'sync-core')}" }`,
+    `sync-native = { path = "${resolve(OREZ_ROOT, 'crates', 'sync-native')}" }`,
+    '',
+  ].join('\n')
+  writeFileSync(cargoPath, source + patch)
+  log('patched chat-native to build against local orez crates')
+}
+
+function enableAlwaysOnTrace() {
+  if (process.env.TRACE !== '1') return
+  const configPath = resolve(TEST_DIR, 'playwright.config.ts')
+  const source = readFileSync(configPath, 'utf8')
+  const next = source.replace("trace: 'on-first-retry'", "trace: 'on'")
+  if (next === source) {
+    throw new Error('could not patch playwright trace mode (config changed upstream?)')
+  }
+  writeFileSync(configPath, next)
+  log('patched playwright config: trace always on (TRACE=1)')
+}
+
 function main() {
   // step 0: validate ~/chat exists
   if (!existsSync(CHAT_SOURCE)) {
@@ -211,6 +242,8 @@ function main() {
   syncChatWorkingTree()
   enableSingleDbBackendScript()
   allowColdDoBackendStartup()
+  useLocalOrezCrates()
+  enableAlwaysOnTrace()
 
   // write .env.development with offset ports
   // vite needs these to override production hostnames in .env
