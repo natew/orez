@@ -319,6 +319,77 @@ observer overlap) is green at baseline and red under O1 at `fullPruneRestart`
 (`served watermark regressed across full prune + restart: 18 -> 0`), same
 artifact both times.
 
+## Longevity soak: gated nightly lane with red proofs
+
+`harness/src/longevity.ts` is a bounded soak, not a nemesis, but it earns its
+place here the same way every other lane does: by proving it can go red.
+
+It boots `rust-local`, hydrates six clients on a shared `tasksInProjects` view,
+and runs three writers pushing task creates for ~25 minutes. At every 60-second
+checkpoint it enforces three hard invariants and, after quiescing, a final
+convergence barrier:
+
+- **no client divergence** — every client's materialized id-set equals the SQL
+  oracle for the watched projects;
+- **memory ceiling** — the native process RSS (read via `ps`) stays under a
+  fixed bound (400 MB default, large headroom over the host's ~7–15 MB
+  steady-state footprint);
+- **watermark monotonic** — the server-confirmed change-log watermark (a raw
+  null-cookie pull cookie) never decreases between checkpoints;
+- **zero lost writes** — after a unique sentinel commit, the oracle holds every
+  acknowledged write and every client plus a fresh late client converge to it.
+
+A clean 25-minute run passes with the RSS peak far under the ceiling, the
+watermark strictly increasing, and every acknowledged write durable. A short
+clean run (`--duration-min 1 --checkpoint-sec 15`) reports, for example:
+
+```
+[longevity] checkpoint 1: t=15s writes=223 rss=9MB watermark=446 rows=250
+[longevity] checkpoint 2: t=30s writes=448 rss=10MB watermark=896 rows=475
+[longevity] checkpoint 3: t=45s writes=672 rss=11MB watermark=1344 rows=699
+[longevity] PASS rust-local: 3 checkpoints, 892 writes, peak RSS 11MB <= 400MB, watermark monotonic, zero lost writes
+```
+
+### Red proof 1 — divergence under engine mutant M1
+
+M1 (`M1-skip-finalize`, rows commit without advancing the LMID) is caught by the
+query-aware convergence lanes; longevity is one. Applied with:
+
+```sh
+git apply harness/mutants/patches/M1-skip-finalize.patch
+cd harness
+bun src/longevity.ts --target rust-local --duration-min 1 --checkpoint-sec 15
+```
+
+The first checkpoint's divergence invariant goes red because the stalled LMID
+strands the workload — the clients' optimistic rows run ahead of what the oracle
+durably commits:
+
+```
+[longevity] FAIL: timeout waiting for checkpoint divergence at 15s: Error: client 0 diverged: 253 rows vs oracle 30
+```
+
+Reverting the patch, the identical invocation passes again.
+
+### Red proof 2 — RSS ceiling mid-soak
+
+The memory-ceiling invariant is proved live by lowering the bound below the
+process's real footprint, so it trips at a checkpoint rather than at baseline:
+
+```sh
+bun src/longevity.ts --target rust-local --duration-min 1 --checkpoint-sec 15 --rss-ceiling-mb 8
+```
+
+```
+[longevity] start pid=99370 baselineRss=7MB ceiling=8MB ...
+error: RSS 9MB exceeded ceiling 8MB
+```
+
+The default 400 MB ceiling gives a real leak the same fate with room to spare.
+Two convergence-lane mutants that live in the baseline (non-query-aware) pull
+path, L2 and L3, do NOT red this lane: it is query-aware, so those are caught
+by `smoke`/`sweep`/`eviction` instead, which is the documented split.
+
 ## CI schedule
 
 The `rust-local-faults` PR job runs one bounded 24-operation nemesis trace with
