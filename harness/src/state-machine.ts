@@ -174,6 +174,10 @@ function generateTrace(): Operation[] {
     { kind: 'checkpoint' },
   ]
   const required = args.nemesis ? nemesisRequired : lifecycleRequired
+  // the prefix pairs each required arm with a firing write; truncating it
+  // would generate a schedule that cannot satisfy the fired-fault gate.
+  if (args.nemesis && steps < required.length)
+    throw new Error(`--nemesis requires --steps >= ${required.length}`)
   const rng = mulberry32(seed)
   const generated: Operation[] = []
   const project = () => `p${Math.floor(rng() * 10)}`
@@ -397,8 +401,6 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
   const storageKey = `state-machine-${seed}`
   let client = target.createClient('state-machine-user', { kvStore, storageKey })
   const views = new Map<number, View>()
-  const requiresFaults =
-    args.nemesis || trace.some((operation) => operation.kind === 'armEngineFault')
 
   const recoverKill = async (fault: NonNullable<typeof pendingFault>) => {
     if (fault.receipt.arm.kind !== 'kill' || fault.receipt.resolution?.status !== 'fired')
@@ -653,11 +655,6 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
   }
 
   const report = { trace: recordedTrace, faultTally }
-  if (requiresFaults && faultTally.fired === 0) {
-    executionError = new Error(
-      `INVALID nemesis schedule: armed ${faultTally.armed} faults but fired none`
-    )
-  }
   if (executionError) throw new TraceExecutionError(executionError, report)
   return report
 }
@@ -735,15 +732,10 @@ const trace = replay?.minimized ?? replay?.trace ?? generateTrace()
 console.log(
   `[state-machine] seed=${seed} target=${args.against} nemesis=${args.nemesis} operations=${trace.length}`
 )
-let report: ExecutionReport
-try {
-  report = await execute(trace)
-} catch (error) {
-  const failure = error as TraceExecutionError
-  console.error(`[state-machine] FAIL seed=${seed}: ${String(failure.failure)}`)
-  const minimized = args['no-shrink']
-    ? { operations: trace, failure }
-    : await minimize(trace, failure)
+function failWithArtifact(
+  failure: TraceExecutionError,
+  minimized: { operations: Operation[]; failure: TraceExecutionError }
+): never {
   printFaultTally(minimized.failure.report.faultTally)
   const directory = join(import.meta.dirname, '..', 'regressions')
   mkdirSync(directory, { recursive: true })
@@ -768,6 +760,35 @@ try {
     `[state-machine] minimized ${trace.length} -> ${minimized.operations.length}: ${file}`
   )
   process.exit(1)
+}
+
+let report: ExecutionReport
+try {
+  report = await execute(trace)
+} catch (error) {
+  const failure = error as TraceExecutionError
+  console.error(`[state-machine] FAIL seed=${seed}: ${String(failure.failure)}`)
+  failWithArtifact(
+    failure,
+    args['no-shrink'] ? { operations: trace, failure } : await minimize(trace, failure)
+  )
+}
+
+// a generated nemesis schedule must fire at least one fault; the required
+// prefix pairs each arm with a firing write, so zero fires means injection
+// itself broke. replays and shrink candidates are judged on execution alone:
+// receipts canceled by restart, replacement, or run-end are legitimate there,
+// and shrinking a whole-run coverage property only converges on a vacuous
+// trace that hides the original failure.
+if (args.nemesis && !args.replay && report.faultTally.fired === 0) {
+  const failure = new TraceExecutionError(
+    new Error(
+      `INVALID nemesis schedule: armed ${report.faultTally.armed} faults but fired none`
+    ),
+    report
+  )
+  console.error(`[state-machine] FAIL seed=${seed}: ${String(failure.failure)}`)
+  failWithArtifact(failure, { operations: trace, failure })
 }
 
 if (args.nemesis) printFaultTally(report.faultTally)
