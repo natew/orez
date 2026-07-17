@@ -18,3 +18,6 @@ serde_json.workspace = true
 serde-wasm-bindgen = "0.6"
 sync-core = { path = "../sync-core" }
 wasm-bindgen = "0.2"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

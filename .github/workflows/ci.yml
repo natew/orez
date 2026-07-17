@@ -226,10 +226,18 @@ jobs:
         with:
           bun-version: latest
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.94.0
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: install wasm-pack
+        run: cargo install wasm-pack --version 0.14.0 --locked
 
       - name: cache cargo
         uses: actions/cache@v4
@@ -258,6 +266,9 @@ jobs:
       # fixes, and they must be enforced here rather than left unrun.
       - name: workspace tests
         run: cargo test --workspace
+
+      - name: sync-wasm node tests
+        run: wasm-pack test --node crates/sync-wasm
 
   # Checker-boundary self-tests only. These prove the pinned Elle binary accepts
   # and rejects known JSON histories; they do not check an Orez workload.

@@ -657,7 +657,9 @@ mod tests {
     // same protocol end to end through /admin/sql.
     use super::*;
 
-    use sync_core::SqlValue;
+    use sync_core::schema::{TableSpec, Tables};
+    use sync_core::value::ZeroColumnType;
+    use sync_core::{Preflight, SqlValue};
 
     fn test_namespace(lease: Duration) -> (tempfile::TempDir, Namespace) {
         namespace_with_init(
@@ -702,6 +704,217 @@ mod tests {
     // (liveness, strong-count) are what spare a namespace, not a lenient policy.
     fn aggressive_policy() -> RetentionPolicy {
         RetentionPolicy::exclusive(Duration::ZERO, 0, Duration::ZERO, Duration::from_secs(600))
+    }
+
+    #[test]
+    fn concurrent_writers_are_serialized_with_consistent_lmids_and_change_log() {
+        const THREADS: usize = 8;
+        const WRITES_PER_THREAD: i64 = 32;
+
+        let tables = Tables::new().with(
+            "item",
+            TableSpec {
+                columns: vec![
+                    ("id".into(), ZeroColumnType::String),
+                    ("label".into(), ZeroColumnType::String),
+                ],
+                primary_key: vec!["id".into()],
+            },
+        );
+        let init_tables = tables.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(Manager::new(
+            dir.path().to_path_buf(),
+            Arc::new(move |db: &mut dyn SyncDb| {
+                db.exec(
+                    "CREATE TABLE IF NOT EXISTS item (id TEXT PRIMARY KEY, label TEXT NOT NULL)",
+                    &[],
+                )
+                .map_err(|error| error.0)?;
+                sync_core::init_schema(db, &init_tables).map_err(|error| error.0)
+            }),
+            Duration::from_secs(5),
+        ));
+        let start = Arc::new(std::sync::Barrier::new(THREADS));
+        let worker_threads = Arc::new(Mutex::new(HashSet::new()));
+        let active_closures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active_closures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let writers: Vec<_> = (0..THREADS)
+            .map(|thread_id| {
+                let manager = manager.clone();
+                let start = start.clone();
+                let worker_threads = worker_threads.clone();
+                let active_closures = active_closures.clone();
+                let max_active_closures = max_active_closures.clone();
+                std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    start.wait();
+                    let namespace = manager.get("race").unwrap();
+                    for mutation_id in 1..=WRITES_PER_THREAD {
+                        let client_id = format!("writer-{thread_id}");
+                        let item_id = format!("{thread_id}-{mutation_id}");
+                        let worker_threads = worker_threads.clone();
+                        let active_closures = active_closures.clone();
+                        let max_active_closures = max_active_closures.clone();
+                        let outcome = runtime.block_on(namespace.run(move |conn| {
+                            worker_threads
+                                .lock()
+                                .unwrap()
+                                .insert(std::thread::current().id());
+                            let active = active_closures
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                + 1;
+                            max_active_closures
+                                .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+                            std::thread::yield_now();
+                            let outcome = (|| {
+                                conn.execute_batch("BEGIN")
+                                    .map_err(|error| error.to_string())?;
+                                let result = (|| -> Result<(), String> {
+                                    let mut db = RusqliteDb::new(conn);
+                                    let decision = sync_core::preflight(
+                                        &mut db,
+                                        "shared-group",
+                                        &client_id,
+                                        mutation_id,
+                                        "shared-user",
+                                    )
+                                    .map_err(|error| {
+                                        format!("engine {}: {}", error.status, error.message)
+                                    })?;
+                                    if decision != Preflight::Applied {
+                                        return Err(format!(
+                                            "unexpected replay for {client_id}:{mutation_id}"
+                                        ));
+                                    }
+                                    db.exec(
+                                        "INSERT INTO item (id, label) VALUES (?, ?)",
+                                        &[
+                                            SqlValue::Text(item_id),
+                                            SqlValue::Text(format!("mutation {mutation_id}")),
+                                        ],
+                                    )
+                                    .map_err(|error| error.0)?;
+                                    sync_core::finalize(
+                                        &mut db,
+                                        "shared-group",
+                                        &client_id,
+                                        mutation_id,
+                                    )
+                                    .map_err(|error| {
+                                        format!("engine {}: {}", error.status, error.message)
+                                    })
+                                })();
+                                let end = if result.is_ok() { "COMMIT" } else { "ROLLBACK" };
+                                conn.execute_batch(end).map_err(|error| error.to_string())?;
+                                result
+                            })();
+                            active_closures.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                            outcome
+                        }));
+                        outcome.unwrap_or_else(|error| {
+                            panic!("writer {thread_id} mutation {mutation_id} failed: {error}")
+                        });
+                    }
+                })
+            })
+            .collect();
+
+        for writer in writers {
+            writer.join().expect("concurrent writer thread panicked");
+        }
+
+        assert_eq!(
+            worker_threads.lock().unwrap().len(),
+            1,
+            "one namespace must execute every closure on one worker thread"
+        );
+        assert_eq!(
+            max_active_closures.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "namespace database closures must never overlap"
+        );
+
+        let expected = i64::try_from(THREADS).unwrap() * WRITES_PER_THREAD;
+        let namespace = manager.get("race").unwrap();
+        let observed = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(namespace.run(move |conn| {
+                let scalar = |sql: &str| {
+                    conn.query_row(sql, [], |row| row.get::<_, i64>(0))
+                        .unwrap()
+                };
+                (
+                    scalar("SELECT count(*) FROM item"),
+                    scalar(&format!(
+                        "SELECT count(*) FROM _zsync_clients WHERE lastMutationID = {WRITES_PER_THREAD}"
+                    )),
+                    scalar("SELECT count(*) FROM _zsync_changes WHERE op = 'row'"),
+                    scalar("SELECT count(*) FROM _zsync_changes WHERE op = 'lmid'"),
+                    scalar(&format!(
+                        "SELECT count(*) FROM (
+                            SELECT json_extract(pk, '$.clientID') AS client_id
+                            FROM _zsync_changes
+                            WHERE op = 'lmid'
+                            GROUP BY client_id
+                            HAVING count(*) != {WRITES_PER_THREAD}
+                                OR min(CAST(json_extract(pk, '$.lmid') AS INTEGER)) != 1
+                                OR max(CAST(json_extract(pk, '$.lmid') AS INTEGER)) != {WRITES_PER_THREAD}
+                                OR count(DISTINCT json_extract(pk, '$.lmid')) != {WRITES_PER_THREAD}
+                        )"
+                    )),
+                    scalar(
+                        "SELECT count(*)
+                         FROM _zsync_changes AS effect
+                         LEFT JOIN _zsync_changes AS acknowledgement
+                           ON acknowledgement.watermark = effect.watermark + 1
+                         WHERE effect.op = 'row'
+                           AND (
+                               COALESCE(acknowledgement.op, '') != 'lmid'
+                               OR json_extract(effect.pk, '$.id') !=
+                                  replace(json_extract(acknowledgement.pk, '$.clientID'), 'writer-', '')
+                                  || '-' || json_extract(acknowledgement.pk, '$.lmid')
+                           )",
+                    ),
+                    scalar("SELECT count(DISTINCT watermark) FROM _zsync_changes"),
+                    scalar("SELECT COALESCE(max(watermark), 0) FROM _zsync_changes"),
+                )
+            }));
+
+        assert_eq!(
+            observed.0, expected,
+            "every application write must commit once"
+        );
+        assert_eq!(observed.1, i64::try_from(THREADS).unwrap());
+        assert_eq!(
+            observed.2, expected,
+            "every write needs one row journal entry"
+        );
+        assert_eq!(
+            observed.3, expected,
+            "every write needs one lmid journal entry"
+        );
+        assert_eq!(
+            observed.4, 0,
+            "each client must have a gap-free lmid history"
+        );
+        assert_eq!(observed.5, 0, "a different job interleaved before an lmid");
+        assert_eq!(
+            observed.6,
+            expected * 2,
+            "journal watermarks must be unique"
+        );
+        assert_eq!(
+            observed.7,
+            expected * 2,
+            "journal watermarks must stay contiguous"
+        );
     }
 
     #[test]

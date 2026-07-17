@@ -158,6 +158,14 @@ green Elle job that checks nothing is worse than no Elle job.
 `namespace.rs` claims exactly one thread touches a namespace's db; spawn
 concurrent threads and prove it rather than asserting it in a comment.
 
+Completed on `test/coverage-sync-wasm`: three Node wasm tests exercise a real
+SQLite adapter through the exported push, pull, error, preflight, and finalize
+boundary. The native race drives 256 real engine writes from eight OS threads
+through one `Namespace`, then checks gap-free LMIDs, exact journal counts,
+effect-before-ack ordering, contiguous unique watermarks, one executing worker
+thread, and a peak of one active database closure. Both suites have recorded
+red mutations in `docs/sync/sync-wasm-red-proof.md`.
+
 ### 7. Move the heavy lanes into auditable CI
 
 `m6-runner --suite all`, the rust-cf sweep, and the state machine at 80 steps
@@ -214,9 +222,10 @@ Items 1–3 and the docs work are DONE and merged to local main (commit
    Dedicated tests cut between row effects and LMIDs with a one-row cap. A
    capped system lane remains open.
 5. **Rust-cf nightly coverage closed on main @ 8afc103.**
-6. Items 4–6 of this plan (nemesis composition, Elle-on-real-workload
-   decision, and sync-wasm tests) remain unstarted. Item 7's auditable heavy
-   lanes landed on main @ 8afc103.
+6. Items 4–5 of this plan (nemesis composition and the Elle-on-real-workload
+   decision) remain unstarted. Item 6's sync-wasm and single-writer coverage
+   is complete on `test/coverage-sync-wasm`. Item 7's auditable heavy lanes
+   landed on main @ 8afc103.
 
 ## Rules
 
