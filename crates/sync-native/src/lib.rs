@@ -279,16 +279,16 @@ impl SyncNativeHost {
     ) -> Self {
         std::fs::create_dir_all(&data_dir).expect("failed to create data dir");
 
-        let ctx = Arc::new(EngineContext::new(
-            config.tables,
-            config.retain_changes,
-            config.max_change_rows,
-            config.visibility_enabled,
-            config.query_aware,
-            config.initialize,
-            config.mutate,
-            config.visible,
-        ));
+        let ctx = Arc::new(EngineContext {
+            tables: config.tables,
+            retain_changes: config.retain_changes,
+            max_change_rows: config.max_change_rows,
+            visibility_enabled: config.visibility_enabled,
+            query_aware: config.query_aware,
+            init_fn: config.initialize,
+            mutate_fn: config.mutate,
+            visible_fn: config.visible,
+        });
 
         let init_ctx = ctx.clone();
         let init: namespace::InitFn =

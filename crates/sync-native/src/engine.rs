@@ -54,34 +54,12 @@ pub struct EngineContext {
     // full-namespace pull. a namespace serves one consumer kind, not a mix.
     pub query_aware: bool,
     // consumer-provided callbacks
-    init_fn: InitFn,
-    mutate_fn: MutateFn,
-    visible_fn: Option<VisibleFn>,
+    pub(crate) init_fn: InitFn,
+    pub(crate) mutate_fn: MutateFn,
+    pub(crate) visible_fn: Option<VisibleFn>,
 }
 
 impl EngineContext {
-    pub fn new(
-        tables: Tables,
-        retain_changes: i64,
-        max_change_rows: usize,
-        visibility_enabled: bool,
-        query_aware: bool,
-        init_fn: InitFn,
-        mutate_fn: MutateFn,
-        visible_fn: Option<VisibleFn>,
-    ) -> Self {
-        Self {
-            tables,
-            retain_changes,
-            max_change_rows,
-            visibility_enabled,
-            query_aware,
-            init_fn,
-            mutate_fn,
-            visible_fn,
-        }
-    }
-
     fn visibility(&self) -> Option<Visibility<'_>> {
         let visible_fn = self.visible_fn.as_ref()?;
         if !self.visibility_enabled {
