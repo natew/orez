@@ -16,9 +16,43 @@ receipts canceled by restart, replacement, or run-end are legitimate there and a
 whole-run coverage property shrinks to a vacuous trace. The final tally and the
 result JSON report both outcomes.
 
+## 2026-07-16 update: O1 system lane, composed overlap, offline-past-retention
+
+Three reliability pieces landed on top of the composed nemesis (this session,
+against main after the 123d7ee restructure):
+
+- **O1 at the system level (`fullPruneRestart` op).** Before this, no system
+  lane emptied the change log AND reopened the same store, so mutant O1
+  (non-durable watermark) was caught only by `cargo test -p sync-core`. The new
+  op reads the server-confirmed watermark via a raw null-cookie pull, POSTs the
+  new `/{ns}/admin/prune-to-head` admin route (`engine::prune_to_head`: bump the
+  durable high-water, then `prune(db, 0)` to empty the log to the head),
+  restarts the native process over the same SQLite file, and re-reads the served
+  watermark. A regression fails the run. It sits in both the lifecycle prefix
+  (so the mutation-matrix `state-machine` lane catches O1) and the nemesis
+  prefix. Details below.
+- **Composed overlap (`pausePulls`/`resumePulls` ops).** A second, independent
+  fault class: a client-side transport pause that gates this one client's pulls
+  at the fetch seam. The nemesis prefix holds it open across an engine-fault arm
+  and a server restart, so two fault classes are active at once, then heals it on
+  resume and requires the client to reconverge with no silent loss. It carries
+  its own arm/fire/heal receipts, validated on generated schedules exactly like
+  the engine-fault receipts.
+- **Client offline past retention: already covered, not duplicated.**
+  `harness/src/reconnect.ts` (`retainChanges: 2`, wired per-PR against both
+  `rust-local` and `rust-cf` in `ci.yml`) already proves it: the client closes,
+  eight upstream writes land past the retained floor, the host restarts over the
+  same SQLite file, and the resumed client carries its persisted **non-null**
+  cookie, is forced into a **snapshot** because the stale cookie is below the
+  floor (an explicit reset, not silent loss), and its view converges with both
+  the pre-close row and every offline row. The future-cookie direction (server
+  behind the client) is covered in the same lane via `resetCursor` → 409 →
+  explicit `onClientStateNotFound` → fresh reload. No new op was added; the suite
+  stays lean.
+
 ## Clean-engine stability
 
-Five different seeds passed this exact invocation:
+Five different seeds passed this exact invocation (2026-07-16, merged main):
 
 ```sh
 cd harness
@@ -27,12 +61,14 @@ for seed in 1 2 3 4 5; do
 done
 ```
 
-The five runs armed 3, 4, 3, 4, and 3 faults. They fired 3, 3, 2, 4, and 3.
-Seeds 2 and 3 each resolved a still-armed random kill fault as `not-fired` when the
-run ended. This proves the generator does not serialize every arm immediately next
-to a firing operation. Every run also fired the required
+The five runs armed 4, 3, 3, 4, and 4 faults and fired 3, 2, 2, 3, and 3. Each
+resolved one still-armed kill fault as `not-fired` (the engine fault armed inside
+the transport-pause window, canceled by the composed restart). Every run also
+reported `transport pauses armed=1 fired=1 healed=1`: the held-open pause blocked
+at least one real pull and healed on resume. Every run fired the required
 `push_after_write_before_commit/kill`, restarted the native process over the same
-SQLite file, continued through response loss, and completed.
+SQLite file, ran a full prune + reopen through `fullPruneRestart`, continued
+through response loss, and completed.
 
 ## L1: prune without a retained floor
 
@@ -174,6 +210,63 @@ bun scripts/mutation-matrix.ts \
 Run `2026-07-17T01-26-01-549Z` reported baseline `state-machine: pass`, then
 `state-machine: CAUGHT` for M1 and L1. This confirms the opt-in nemesis path did
 not regress the plain lane.
+
+## O1: non-durable watermark, caught at the system level
+
+`fullPruneRestart` closes mutation-matrix finding 1. Applied with:
+
+```sh
+git apply harness/mutants/patches/O1-nondurable-watermark.patch
+cargo build --release -p sync-native
+cd harness
+# matrix's plain state-machine lane (non-nemesis):
+bun src/state-machine.ts --against rust-local --seed 7 --steps 24 --no-shrink
+# and inside the composed schedule:
+bun src/state-machine.ts --against rust-local --nemesis --seed 1 --steps 24 --no-shrink
+```
+
+O1 drops the durable high-water fallback in `store::watermark`, returning
+`max_log` instead of `max(max_log, high)`. While the change log is populated the
+two are equal, so every existing system lane passed the mutant. Once
+`fullPruneRestart` empties the log to the head and reopens the same file,
+`max_log` is 0 while the durable high-water is unchanged. Both lanes failed:
+
+```
+[state-machine] FAIL seed=7: Error: served watermark regressed across full prune + restart: 20 -> 0
+[state-machine] FAIL seed=1: Error: served watermark regressed across full prune + restart: 18 -> 0
+```
+
+The client also surfaces the downstream symptom in the logs: its persisted
+cookie is now ahead of the regressed watermark, so its next pull returns
+`409 InvalidConnectionRequestBaseCookie`. The probe catches the fault directly
+from the server-confirmed pull cookie, before the client's silent reset can mask
+it. Reverting the patch, the identical minimized trace replays **green** at
+baseline and **red** under O1, so the check is specific, not flaky:
+
+```sh
+# red under O1, green after revert — same artifact both times
+bun src/state-machine.ts --against rust-local --nemesis --seed 1 \
+  --replay regressions/state-machine-rust-local-seed-1.json --no-shrink
+```
+
+## Composed overlap: sabotaged heal fails schedule validation
+
+The overlap's receipt validation is proved by a deliberately sabotaged heal
+(`resumePulls` left without its `healTransport` call), then restored. A generated
+nemesis run then fails top-level validation rather than passing vacuously:
+
+```
+[state-machine] FAIL seed=1: Error: INVALID transport schedule: armed 1 pauses but healed 0
+[state-machine] transport pauses armed=1 fired=1 healed=0
+```
+
+Like the fired-fault gate, this coverage check runs only on generated
+(non-replay) nemesis schedules: a shrink candidate may legitimately drop the
+pause/resume pair, and the check has its own fingerprint
+(`transport-schedule-invalid`) so it never masquerades as the failure under
+minimization. The composed schedule also fails end to end under a real engine
+mutant: the seed-1 nemesis trace above (which contains the overlap) goes red at
+`fullPruneRestart` under O1.
 
 ## CI schedule
 

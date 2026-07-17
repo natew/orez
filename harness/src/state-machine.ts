@@ -48,18 +48,48 @@ type FaultReceipt = {
   }
 }
 
+// a second, independent fault class: a client-side transport pause that gates
+// this client's pulls at the fetch seam. it is held open across other faults
+// (an engine-fault arm and a server restart) so two classes are active at once,
+// then healed on resume. its own arm/fire/heal receipts are validated exactly
+// like the engine-fault receipts: a generated schedule must fire and heal every
+// pause, and a missing or duplicate receipt fails validation.
+type TransportReceipt = {
+  id: string
+  arm: {
+    step: number
+    kind: 'pause-pulls'
+    confirmed: true
+  }
+  fire?: {
+    step: number
+    operation: Operation['kind'] | 'run-end'
+    blockedPulls: number
+  }
+  heal?: {
+    step: number
+    operation: Operation['kind'] | 'run-end'
+  }
+}
+
 type Operation =
   | { kind: 'desire'; slot: number; projectIDs: string[] }
   | { kind: 'undesire'; slot: number }
   | { kind: 'write'; id: string; projectID: string; rank: number }
   | { kind: 'responseLoss'; id: string; projectID: string }
   | { kind: 'prune'; epoch: number }
+  | { kind: 'fullPruneRestart' }
   | { kind: 'armEngineFault'; point: FaultPoint; faultKind: FaultKind }
+  | { kind: 'pausePulls' }
+  | { kind: 'resumePulls' }
   | { kind: 'serverRestart' }
   | { kind: 'clientRestart' }
   | { kind: 'checkpoint' }
 
-type RecordedOperation = Operation & { faultReceipt?: FaultReceipt }
+type RecordedOperation = Operation & {
+  faultReceipt?: FaultReceipt
+  transportReceipt?: TransportReceipt
+}
 
 type FaultTally = {
   armed: number
@@ -68,9 +98,16 @@ type FaultTally = {
   byFault: Record<string, { armed: number; fired: number; notFired: number }>
 }
 
+type TransportTally = {
+  armed: number
+  fired: number
+  healed: number
+}
+
 type ExecutionReport = {
   trace: RecordedOperation[]
   faultTally: FaultTally
+  transportTally: TransportTally
 }
 
 class TraceExecutionError extends Error {
@@ -141,6 +178,10 @@ function generateTrace(): Operation[] {
       projectID: 'p1',
     },
     { kind: 'prune', epoch: 0 },
+    // empty the change log to the head and reopen the same sqlite file: the
+    // served cookie must not regress (mutant O1). no other system lane empties
+    // the log AND restarts over the same store.
+    { kind: 'fullPruneRestart' },
     { kind: 'serverRestart' },
     { kind: 'clientRestart' },
     { kind: 'desire', slot: 1, projectIDs: ['p2'] },
@@ -156,6 +197,21 @@ function generateTrace(): Operation[] {
     },
     { kind: 'write', id: `sm-${seed}-postcommit`, projectID: 'p0', rank: 4.25 },
     { kind: 'prune', epoch: 0 },
+    // composed overlap: hold a transport pause open across an engine-fault arm
+    // and a server restart, so two fault classes are active at once. the engine
+    // fault is canceled by the restart (a documented not-fired); the transport
+    // fault heals on resume and the client must reconverge with no silent loss.
+    { kind: 'pausePulls' },
+    {
+      kind: 'armEngineFault',
+      point: 'push_after_write_before_commit',
+      faultKind: 'kill',
+    },
+    { kind: 'serverRestart' },
+    { kind: 'resumePulls' },
+    // O1 at the system level, inside the composed schedule.
+    { kind: 'fullPruneRestart' },
+    // an independent engine fault that fires, so the run is never vacuous.
     {
       kind: 'armEngineFault',
       point: 'push_after_write_before_commit',
@@ -240,15 +296,13 @@ function generateTrace(): Operation[] {
   return [...required, ...generated].slice(0, steps)
 }
 
-async function startTarget(
-  onSync?: (observation: SyncHttpObservation) => void
-): Promise<StateTarget> {
+async function startTarget(fetchImpl?: typeof fetch): Promise<StateTarget> {
   if (args.against === 'rust-local') {
     return (await import('./targets/rust-local.js')).startRustLocal({
       pullIntervalMs: 75,
       queryAware: true,
       retainChanges: args.nemesis ? 2 : 8,
-      fetch: onSync ? observedSyncFetch(onSync) : undefined,
+      fetch: fetchImpl,
     })
   }
   return (await import('./targets/rust-cf.js')).startRustCf({
@@ -332,6 +386,7 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
     ...operation,
   })) as RecordedOperation[]
   const faultTally: FaultTally = { armed: 0, fired: 0, notFired: 0, byFault: {} }
+  const transportTally: TransportTally = { armed: 0, fired: 0, healed: 0 }
   let pendingFault:
     | {
         receipt: FaultReceipt
@@ -340,8 +395,27 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
         recovery?: Promise<void>
       }
     | undefined
+  // second fault class: when engaged, this client's pulls fail at the fetch
+  // seam, modeling a one-client transport outage. verification is suspended
+  // while paused because a paused view cannot observe server progress.
+  let pullsPaused = false
+  let blockedPulls = 0
+  let pendingTransport: { receipt: TransportReceipt } | undefined
   let currentStep = -1
   let currentOperation: Operation = { kind: 'checkpoint' }
+
+  const healTransport = (transport: NonNullable<typeof pendingTransport>) => {
+    if (transport.receipt.heal) return
+    transport.receipt.heal = {
+      step: currentStep,
+      operation:
+        currentStep < 0 || currentStep >= recordedTrace.length
+          ? 'run-end'
+          : currentOperation.kind,
+    }
+    transportTally.healed++
+    if (pendingTransport === transport) pendingTransport = undefined
+  }
 
   const bumpFault = (receipt: FaultReceipt, field: 'armed' | 'fired' | 'notFired') => {
     faultTally[field]++
@@ -395,7 +469,34 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
     }
   }
 
-  const target = await startTarget(onSync)
+  // client fetch seam: observe every push/pull for fault firing, and gate pulls
+  // while the transport pause is engaged. the gate records the pause's fire on
+  // the first blocked pull. the watermark probe (fullPruneRestart) uses global
+  // fetch directly, so it is never gated.
+  const observed = observedSyncFetch(onSync)
+  const gatedFetch: typeof fetch = (input, init) => {
+    const url = new URL(
+      typeof input === 'string' || input instanceof URL ? input : input.url
+    )
+    if (pullsPaused && url.pathname.endsWith('/pull')) {
+      blockedPulls++
+      if (pendingTransport && !pendingTransport.receipt.fire) {
+        pendingTransport.receipt.fire = {
+          step: currentStep,
+          operation:
+            currentStep < 0 || currentStep >= recordedTrace.length
+              ? 'run-end'
+              : currentOperation.kind,
+          blockedPulls,
+        }
+        transportTally.fired++
+      }
+      return Promise.reject(new Error('transport pause: client pull blocked'))
+    }
+    return observed(input, init)
+  }
+
+  const target = await startTarget(gatedFetch)
   const directory = mkdtempSync(join(tmpdir(), 'orez-state-machine-'))
   const kvStore = persistentKVStoreProvider(directory)
   const storageKey = `state-machine-${seed}`
@@ -450,6 +551,34 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
   }
 
   let executionError: unknown
+
+  // read the server-confirmed change-log watermark by issuing a raw null-cookie
+  // pull (a snapshot's cookie is the current watermark). this is an authority
+  // observation, not the client's optimistic overlay, so a regression here is a
+  // real durable-cookie fault (mutant O1). the probe uses a throwaway client so
+  // it never disturbs the state-machine client's cursor.
+  const servedWatermark = async (label: string): Promise<bigint> => {
+    if (!target.origin) throw new Error('servedWatermark requires rust-local')
+    const response = await fetch(`${target.origin}/pull`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token-state-machine-user',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        clientID: `wm-probe-${seed}-${label}`,
+        clientGroupID: `wm-probe-group-${seed}`,
+        cookie: null,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!response.ok)
+      throw new Error(`watermark probe (${label}) pull failed ${response.status}`)
+    const body = (await response.json()) as { cookie?: number | string | null }
+    // the cookie is a canonical decimal string / integer; compare with BigInt so
+    // an i64 above the JS safe-integer range still compares exactly.
+    return BigInt(body.cookie ?? 0)
+  }
 
   const verify = async (step: number, operation: Operation) => {
     for (const [slot, view] of views) {
@@ -541,6 +670,32 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
           }
           break
         }
+        case 'fullPruneRestart': {
+          if (!target.origin || !target.adminKey)
+            throw new Error('fullPruneRestart requires the rust-local admin route')
+          // like a serverRestart, this restarts the host and cancels any still
+          // armed engine fault (a documented not-fired).
+          if (pendingFault)
+            resolveFault(
+              pendingFault,
+              'not-fired',
+              'full prune + restart before fault fired'
+            )
+          const before = await servedWatermark(`before-${step}`)
+          const response = await fetch(`${target.origin}/admin/prune-to-head`, {
+            method: 'POST',
+            headers: { 'x-admin-key': target.adminKey },
+          })
+          if (!response.ok) throw new Error(`prune-to-head failed ${response.status}`)
+          await response.arrayBuffer()
+          await target.restart(50)
+          const after = await servedWatermark(`after-${step}`)
+          if (after < before)
+            throw new Error(
+              `served watermark regressed across full prune + restart: ${before} -> ${after}`
+            )
+          break
+        }
         case 'armEngineFault': {
           if (!target.origin || !target.adminKey)
             throw new Error('armEngineFault requires the rust-local admin route')
@@ -595,6 +750,33 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
             resolveFault(pendingFault, 'not-fired', 'server restarted before fault fired')
           await target.restart(50)
           break
+        case 'pausePulls': {
+          if (!target.origin)
+            throw new Error('pausePulls requires the rust-local transport')
+          // defensive: the required prefix never double-arms, but a shrink
+          // candidate could drop the matching resume.
+          if (pendingTransport) healTransport(pendingTransport)
+          pullsPaused = true
+          blockedPulls = 0
+          const receipt: TransportReceipt = {
+            id: `transport-${seed}-${transportTally.armed + 1}`,
+            arm: { step, kind: 'pause-pulls', confirmed: true },
+          }
+          recordedTrace[step]!.transportReceipt = receipt
+          pendingTransport = { receipt }
+          transportTally.armed++
+          // fire deterministically: drive one pull through the gate, which
+          // records the pause's fire and rejects without touching the network.
+          await gatedFetch(`${target.origin}/pull`, { method: 'POST' }).catch(
+            () => undefined
+          )
+          break
+        }
+        case 'resumePulls': {
+          pullsPaused = false
+          if (pendingTransport) healTransport(pendingTransport)
+          break
+        }
         case 'clientRestart': {
           const desired = [...views.entries()].map(([slot, view]) => ({
             slot,
@@ -617,7 +799,9 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
           break
       }
       await recoverObservedKill()
-      await verify(step, operation)
+      // a paused client cannot observe server progress, so convergence is only
+      // checked once the transport pause heals. the resume op itself is verified.
+      if (!pullsPaused) await verify(step, operation)
       if (operation.kind === 'prune') {
         await eventually(
           async () => {
@@ -654,7 +838,7 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
     }
   }
 
-  const report = { trace: recordedTrace, faultTally }
+  const report = { trace: recordedTrace, faultTally, transportTally }
   if (executionError) throw new TraceExecutionError(executionError, report)
   return report
 }
@@ -667,6 +851,8 @@ function failureFingerprint(error: unknown) {
   if (viewFailure)
     return `view-${viewFailure[3]}:${viewFailure[1]}:slot-${viewFailure[2]}`
   if (message.includes('retention floor did not advance')) return 'retention-floor'
+  if (message.includes('served watermark regressed')) return 'watermark-regression'
+  if (message.includes('INVALID transport schedule')) return 'transport-schedule-invalid'
   if (message.includes('lost-response write')) return 'lost-response-cardinality'
   if (message.includes('timeout waiting for server write')) return 'server-write-timeout'
   if (message.includes('timeout waiting for client write')) return 'client-write-timeout'
@@ -721,6 +907,13 @@ function printFaultTally(tally: FaultTally) {
   )
 }
 
+function printTransportTally(tally: TransportTally) {
+  if (tally.armed === 0) return
+  console.log(
+    `[state-machine] transport pauses armed=${tally.armed} fired=${tally.fired} healed=${tally.healed}`
+  )
+}
+
 const replay = args.replay
   ? (JSON.parse(await Bun.file(args.replay).text()) as {
       trace: Operation[]
@@ -737,6 +930,7 @@ function failWithArtifact(
   minimized: { operations: Operation[]; failure: TraceExecutionError }
 ): never {
   printFaultTally(minimized.failure.report.faultTally)
+  printTransportTally(minimized.failure.report.transportTally)
   const directory = join(import.meta.dirname, '..', 'regressions')
   mkdirSync(directory, { recursive: true })
   const file = join(directory, `state-machine-${args.against}-seed-${seed}.json`)
@@ -751,6 +945,7 @@ function failWithArtifact(
         trace: failure.report.trace,
         minimized: minimized.failure.report.trace,
         faultTally: minimized.failure.report.faultTally,
+        transportTally: minimized.failure.report.transportTally,
       },
       null,
       2
@@ -791,7 +986,33 @@ if (args.nemesis && !args.replay && report.faultTally.fired === 0) {
   failWithArtifact(failure, { operations: trace, failure })
 }
 
-if (args.nemesis) printFaultTally(report.faultTally)
+// transport-pause coverage, judged only on generated schedules (like the fault
+// gate above): every armed pause must fire (a pull was actually blocked) and
+// heal (an explicit resume). a missing fire/heal receipt is a schedule defect.
+// replays and shrink candidates are exempt: a shrink may legitimately drop the
+// pause/resume pair, and that is not the failure under minimization.
+if (args.nemesis && !args.replay && report.transportTally.armed > 0) {
+  const t = report.transportTally
+  const defect =
+    t.fired < t.armed
+      ? `fired ${t.fired}`
+      : t.healed < t.armed
+        ? `healed ${t.healed}`
+        : undefined
+  if (defect) {
+    const failure = new TraceExecutionError(
+      new Error(`INVALID transport schedule: armed ${t.armed} pauses but ${defect}`),
+      report
+    )
+    console.error(`[state-machine] FAIL seed=${seed}: ${String(failure.failure)}`)
+    failWithArtifact(failure, { operations: trace, failure })
+  }
+}
+
+if (args.nemesis) {
+  printFaultTally(report.faultTally)
+  printTransportTally(report.transportTally)
+}
 console.log(`[state-machine] PASS seed=${seed} target=${args.against}`)
 // A deterministic replay supersedes an older failure for the same target and
 // seed. Leaving that artifact behind would make a green CI rerun publish stale
@@ -819,6 +1040,7 @@ writeFileSync(
       retainChanges: args.nemesis ? 2 : 8,
       trace: report.trace,
       faultTally: report.faultTally,
+      transportTally: report.transportTally,
     },
     null,
     2

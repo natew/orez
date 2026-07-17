@@ -40,7 +40,7 @@ to split a mutation's row effect from its lmid ack).
 | L1 prune without floor raise     | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | ·            | n/r         |
 | L2 snapshot omits first row      | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | ·          | ·            | n/r         |
 | L3 diff omits first changed row  | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | CAUGHT     | ·            | n/r         |
-| O1 non-durable watermark         | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
+| O1 non-durable watermark         | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | ·            | n/r         |
 | O2 acks beyond the diff cap      | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | CAUGHT      |
 | P1 snapshot ignores visible()    | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
 
@@ -51,23 +51,24 @@ caught; `CAUGHT` = run and caught.
 
 ## Findings, in order of importance
 
-1. **The O1 cargo hole is closed; system lanes still miss it.** The dedicated
-   engine-invariant test advances the watermark, fully prunes the change log,
-   reopens the same SQLite file, and requires the durable high-water to keep
-   the cookie monotonic. O1 regresses the reopened watermark from 1 to 0, so
-   `cargo test -p sync-core` now catches it. Every system lane still passes the
-   mutant because none empties the log and restarts over the same store.
+1. **The O1 system hole is closed (2026-07-16).** The state-machine lane now
+   catches O1 through a `fullPruneRestart` step in its required prefix: it reads
+   the server-confirmed watermark via a raw null-cookie pull, empties the change
+   log to the head over the new `/{ns}/admin/prune-to-head` route, restarts the
+   native process over the same SQLite file, and fails on a served-cookie
+   regression (`served watermark regressed across full prune + restart: 20 -> 0`
+   under O1, green at baseline). The step sits in both the lifecycle prefix
+   (matrix `state-machine` lane, seed 7) and the nemesis prefix. See
+   `docs/sync/nemesis-red-proof.md`. `cargo test -p sync-core`'s
+   engine-invariant test still covers the same property in isolation.
 
-2. **Five mutants are caught only by `cargo test -p sync-core`** (Q1–Q4, O1).
+2. **Four mutants are caught only by `cargo test -p sync-core`** (Q1–Q4).
    The cargo suite includes hand-written query tests and the deterministic
    TS-oracle differentials. It is the single load-bearing net for query shape
-   correctness and durable watermark retention. Remaining system-level blind
-   spots:
+   correctness. Remaining system-level blind spots:
    - **Q1–Q4:** sweep at 5 rounds / seed 42 never trips on pure query-shape
      bugs; the deterministic oracle (which shrank both of its red-proof
      mutants to minimal traces) is the effective generative net.
-   - **O1:** no system lane empties the change log and restarts over the same
-     store, so the reopened-watermark regression stays cargo-only (finding 1).
 
    One former blind spot CLOSED at the system level (run
    `run-2026-07-16-capped-diff`, after `test/coverage-capped-diff`):

@@ -211,9 +211,12 @@ Items 1–3 and the docs work are DONE and merged to local main (commit
 
 ### Follow-ups the matrix produced (next work, in order)
 
-1. **O1 cargo hole closed on `test/coverage-engine-invariants`.** A dedicated
-   invariant test now covers watermark monotonicity across a full prune and
-   restart over the same SQLite file. A system state-machine step remains open.
+1. **O1 closed at cargo AND system level.** The engine-invariant test covers
+   watermark monotonicity across a full prune and restart in isolation; the
+   state-machine lane now covers it end to end via a `fullPruneRestart` step
+   (raw watermark probe → `/admin/prune-to-head` → restart over the same file →
+   served-cookie non-regression). Red-proofed both lanes under O1; see
+   `docs/sync/nemesis-red-proof.md`.
 2. **Exactly-once workload never issues an app-error mutation**, so
    swallowed rollbacks (M3) are invisible at system level.
 3. **No rust-local lane runs a visibility policy** (P1 invisible at system
@@ -222,10 +225,14 @@ Items 1–3 and the docs work are DONE and merged to local main (commit
    Dedicated tests cut between row effects and LMIDs with a one-row cap. A
    capped system lane remains open.
 5. **Rust-cf nightly coverage closed on main @ 8afc103.**
-6. Items 4–5 of this plan (nemesis composition and the Elle-on-real-workload
-   decision) remain unstarted. Item 6's sync-wasm and single-writer coverage
-   is complete on `test/coverage-sync-wasm`. Item 7's auditable heavy lanes
-   landed on main @ 8afc103.
+6. Item 4 (nemesis composition) has landed its first overlap: the state machine
+   holds a client transport pause open across an engine-fault arm and a server
+   restart (two fault classes active at once) with arm/fire/heal receipts and
+   generated-only schedule validation; richer overlap density can ride the
+   nightly 80-step run. Item 5 (Elle-on-real-workload decision) remains
+   unstarted. Item 6's sync-wasm and single-writer coverage is complete on
+   `test/coverage-sync-wasm`. Item 7's auditable heavy lanes landed on main
+   @ 8afc103.
 
 ## Rules
 
