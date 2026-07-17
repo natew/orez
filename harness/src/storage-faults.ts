@@ -20,8 +20,10 @@ const target: RustCfTarget | RustLocalTarget =
       : (() => {
           throw new Error('target must be rust-local or rust-cf')
         })()
-const cf = 'origin' in target
-const origin = cf ? target.origin : `${target.baseUrl}/${target.namespace}`
+// rust-local now also exposes `origin`, so discriminate on the requested
+// target, not on shape
+const cf = args.target === 'rust-cf'
+const origin = target.origin
 const adminKey = cf
   ? (process.env.ZHARNESS_CF_ADMIN_KEY ??
     readFileSync(join(homedir(), '.zharness-cf-admin-key'), 'utf8').trim())

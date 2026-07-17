@@ -28,6 +28,7 @@ const { values: args } = parseArgs({
     lanes: { type: 'string' },
     'baseline-only': { type: 'boolean', default: false },
     'run-id': { type: 'string' },
+    gate: { type: 'boolean', default: false },
   },
 })
 
@@ -50,13 +51,31 @@ const LANES: Lane[] = [
   },
   {
     name: 'smoke',
-    cmd: ['bun', 'src/smoke.ts', '--target', 'rust-local', '--clients', '10', '--projects', '2'],
+    cmd: [
+      'bun',
+      'src/smoke.ts',
+      '--target',
+      'rust-local',
+      '--clients',
+      '10',
+      '--projects',
+      '2',
+    ],
     cwd: HARNESS_ROOT,
     timeoutMs: 10 * 60_000,
   },
   {
     name: 'state-machine',
-    cmd: ['bun', 'src/state-machine.ts', '--against', 'rust-local', '--seed', '7', '--steps', '24'],
+    cmd: [
+      'bun',
+      'src/state-machine.ts',
+      '--against',
+      'rust-local',
+      '--seed',
+      '7',
+      '--steps',
+      '24',
+    ],
     cwd: HARNESS_ROOT,
     timeoutMs: 15 * 60_000,
   },
@@ -74,7 +93,16 @@ const LANES: Lane[] = [
   },
   {
     name: 'sweep',
-    cmd: ['bun', 'src/sweep.ts', '--against', 'rust-local', '--rounds', '5', '--seed', '42'],
+    cmd: [
+      'bun',
+      'src/sweep.ts',
+      '--against',
+      'rust-local',
+      '--rounds',
+      '5',
+      '--seed',
+      '42',
+    ],
     cwd: HARNESS_ROOT,
     timeoutMs: 25 * 60_000,
   },
@@ -83,13 +111,27 @@ const LANES: Lane[] = [
     // directory from the seed and refuse to overwrite an existing one, so a
     // reused seed makes every later run fail vacuously at startup.
     name: 'atomic-visibility',
-    cmd: ['bun', 'src/atomic-visibility-lane.ts', '--target', 'rust-local', '--seed', '{SEED}'],
+    cmd: [
+      'bun',
+      'src/atomic-visibility-lane.ts',
+      '--target',
+      'rust-local',
+      '--seed',
+      '{SEED}',
+    ],
     cwd: HARNESS_ROOT,
     timeoutMs: 10 * 60_000,
   },
   {
     name: 'exactly-once',
-    cmd: ['bun', 'src/exactly-once-lmid-lane.ts', '--target', 'rust-local', '--seed', '{SEED}'],
+    cmd: [
+      'bun',
+      'src/exactly-once-lmid-lane.ts',
+      '--target',
+      'rust-local',
+      '--seed',
+      '{SEED}',
+    ],
     cwd: HARNESS_ROOT,
     timeoutMs: 10 * 60_000,
   },
@@ -116,7 +158,9 @@ const manifest: { mutants: Mutant[] } = JSON.parse(
 const laneFilter = args.lanes?.split(',').map((s) => s.trim())
 const mutantFilter = args.mutants?.split(',').map((s) => s.trim())
 const lanes = LANES.filter((l) => !laneFilter || laneFilter.includes(l.name))
-const mutants = manifest.mutants.filter((m) => !mutantFilter || mutantFilter.includes(m.id))
+const mutants = manifest.mutants.filter(
+  (m) => !mutantFilter || mutantFilter.includes(m.id)
+)
 
 const runId = args['run-id'] ?? new Date().toISOString().replace(/[:.]/g, '-')
 const resultsDir = join(HARNESS_ROOT, 'results', 'mutation-matrix', runId)
@@ -136,7 +180,8 @@ function sh(cmd: string[], cwd: string, timeoutMs: number, logFile: string): Lan
   const ms = Date.now() - started
   const log = join(resultsDir, logFile)
   writeFileSync(log, `$ ${cmd.join(' ')}\n\n${res.stdout ?? ''}\n${res.stderr ?? ''}`)
-  const timedOut = res.error != null && (res.error as NodeJS.ErrnoException).code === 'ETIMEDOUT'
+  const timedOut =
+    res.error != null && (res.error as NodeJS.ErrnoException).code === 'ETIMEDOUT'
   if (timedOut) return { status: 'timeout', ms, log }
   return { status: res.status === 0 ? 'pass' : 'red', ms, log }
 }
@@ -203,7 +248,9 @@ function saveMatrix() {
 }
 
 function renderMarkdown(): string {
-  const laneNames = lanes.map((l) => l.name).filter((l) => !matrix.baselineRedLanes.includes(l))
+  const laneNames = lanes
+    .map((l) => l.name)
+    .filter((l) => !matrix.baselineRedLanes.includes(l))
   const lines: string[] = []
   lines.push(`# Mutation matrix — run ${matrix.runId}`)
   lines.push('')
@@ -245,7 +292,9 @@ for (const lane of lanes) {
   const outcome = sh(lane.cmd, lane.cwd, lane.timeoutMs, `baseline-${lane.name}.log`)
   matrix.baseline[lane.name] = outcome
   if (outcome.status !== 'pass') matrix.baselineRedLanes.push(lane.name)
-  console.log(`[matrix] baseline ${lane.name}: ${outcome.status} (${Math.round(outcome.ms / 1000)}s)`)
+  console.log(
+    `[matrix] baseline ${lane.name}: ${outcome.status} (${Math.round(outcome.ms / 1000)}s)`
+  )
   saveMatrix()
 }
 
@@ -271,9 +320,15 @@ for (const mutant of mutants) {
       continue
     }
     for (const lane of activeLanes) {
-      const outcome = sh(lane.cmd, lane.cwd, lane.timeoutMs, `${mutant.id}-${lane.name}.log`)
+      const outcome = sh(
+        lane.cmd,
+        lane.cwd,
+        lane.timeoutMs,
+        `${mutant.id}-${lane.name}.log`
+      )
       row.lanes[lane.name] = outcome
-      if (outcome.status === 'red' || outcome.status === 'timeout') row.caughtBy.push(lane.name)
+      if (outcome.status === 'red' || outcome.status === 'timeout')
+        row.caughtBy.push(lane.name)
       console.log(
         `[matrix]   ${lane.name}: ${outcome.status === 'red' ? 'CAUGHT' : outcome.status} (${Math.round(outcome.ms / 1000)}s)`
       )
@@ -296,4 +351,33 @@ console.log(`[matrix] done -> ${resultsDir}`)
 const uncaught = matrix.rows.filter((r) => r.build === 'pass' && r.caughtBy.length === 0)
 if (uncaught.length > 0) {
   console.log(`[matrix] UNCAUGHT mutants: ${uncaught.map((r) => r.mutant).join(', ')}`)
+}
+
+// --gate: fail when coverage regresses against harness/mutants/expected.json.
+// a mutant expected caught that nothing catches is a hole that OPENED; a
+// mutant expected uncaught that is now caught means expected.json (and the
+// matrix doc) should be updated to ratchet the new coverage in.
+if (args.gate) {
+  const expected: { caught: Record<string, boolean> } = JSON.parse(
+    readFileSync(join(MUTANTS_DIR, 'expected.json'), 'utf8')
+  )
+  const regressions: string[] = []
+  const improvements: string[] = []
+  for (const row of matrix.rows) {
+    if (row.build !== 'pass') continue
+    const want = expected.caught[row.mutant]
+    if (want === undefined) continue
+    const got = row.caughtBy.length > 0
+    if (want && !got) regressions.push(row.mutant)
+    if (!want && got) improvements.push(row.mutant)
+  }
+  if (improvements.length > 0) {
+    console.log(
+      `[matrix] coverage IMPROVED (update expected.json): ${improvements.join(', ')}`
+    )
+  }
+  if (regressions.length > 0) {
+    console.error(`[matrix] GATE FAILED — coverage regressed: ${regressions.join(', ')}`)
+    process.exit(1)
+  }
 }

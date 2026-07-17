@@ -24,22 +24,22 @@ smoke/state-machine/metamorphic/eviction/sweep = harness system lanes against
 `rust-local`, atomic-vis / exactly-once = recorded-history consistency lanes
 against `rust-local`.
 
-| mutant | cargo | smoke | state-machine | metamorphic | eviction | sweep | atomic-vis | exactly-once |
-|---|---|---|---|---|---|---|---|---|
-| Q1 AND branch dropped | CAUGHT | · | · | · | · | · | · | · |
-| Q2 orderBy inverted | CAUGHT | · | · | · | · | · | · | · |
-| Q3 limit off-by-one | CAUGHT | · | · | · | · | · | · | · |
-| Q4 related window drops last row | CAUGHT | · | · | · | · | · | · | · |
-| M1 rows commit, LMID skipped | CAUGHT | CAUGHT | CAUGHT | · | CAUGHT | CAUGHT | · | CAUGHT |
-| M2 replay double-applies | CAUGHT | · | CAUGHT | · | · | · | · | CAUGHT |
-| M3 rollback swallowed | CAUGHT | · | · | · | · | · | · | · |
-| M4 LMID advances, no change row | CAUGHT | · | · | · | · | · | · | · |
-| L1 prune without floor raise | CAUGHT | · | CAUGHT | · | · | · | · | · |
-| L2 snapshot omits first row | CAUGHT | CAUGHT | · | · | CAUGHT | CAUGHT | · | · |
-| L3 diff omits first changed row | CAUGHT | CAUGHT | · | · | CAUGHT | CAUGHT | CAUGHT | · |
-| O1 non-durable watermark | CAUGHT | · | · | · | · | · | · | · |
-| O2 acks beyond the diff cap | CAUGHT | · | · | · | · | · | · | · |
-| P1 snapshot ignores visible() | CAUGHT | · | · | · | · | · | · | · |
+| mutant                           | cargo  | smoke  | state-machine | metamorphic | eviction | sweep  | atomic-vis | exactly-once |
+| -------------------------------- | ------ | ------ | ------------- | ----------- | -------- | ------ | ---------- | ------------ |
+| Q1 AND branch dropped            | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
+| Q2 orderBy inverted              | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
+| Q3 limit off-by-one              | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
+| Q4 related window drops last row | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
+| M1 rows commit, LMID skipped     | CAUGHT | CAUGHT | CAUGHT        | ·           | CAUGHT   | CAUGHT | ·          | CAUGHT       |
+| M2 replay double-applies         | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | CAUGHT       |
+| M3 rollback swallowed            | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
+| M4 LMID advances, no change row  | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
+| L1 prune without floor raise     | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | ·            |
+| L2 snapshot omits first row      | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | ·          | ·            |
+| L3 diff omits first changed row  | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | CAUGHT     | ·            |
+| O1 non-durable watermark         | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
+| O2 acks beyond the diff cap      | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
+| P1 snapshot ignores visible()    | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            |
 
 ## Findings, in order of importance
 

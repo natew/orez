@@ -13,7 +13,7 @@ is an asynchronous client cache over a transactional authority, and
 `plans/consistency-validation-architecture.md` already refuses to claim global
 linearizability. That framing stands.
 
-What orez *does* own is a database's core job: it decides what a query returns
+What orez _does_ own is a database's core job: it decides what a query returns
 and whether a mutation commits. If those are wrong, they are wrong. So the bar
 is these four properties, in priority order:
 
@@ -51,15 +51,15 @@ gaps, each re-verified by direct inspection:
    Invalidate on one fixture table — no query axis, no ZQL. The query layer
    (`crates/sync-core/src/query/`: compile 690 + membership 992 + transaction
    998 lines) is covered by hand-written cargo tests (`query_pull.rs`,
-   `query_related.rs`, `query_windowed_corpus.rs`, …) plus the *live*
+   `query_related.rs`, `query_windowed_corpus.rs`, …) plus the _live_
    comparison against stock zero-cache (`harness/src/query-diff.ts`,
    `shapes.ts`), which needs booted Postgres + zero-cache and cannot shrink or
    run per-PR at volume. This is property #1 with the weakest coverage.
 
 2. **The mutator-correctness checkers never run against the engine.**
    VERIFIED: `grep -rn "atomic-visibility-lane\|exactly-once-lmid-lane"
-   .github harness/scripts harness/package.json` returns nothing. CI runs only
-   the checker *self-tests* (`ci.yml` "consistency checker self-tests" step).
+.github harness/scripts harness/package.json` returns nothing. CI runs only
+   the checker _self-tests_ (`ci.yml` "consistency checker self-tests" step).
    The lane drivers `harness/src/atomic-visibility-lane.ts` and
    `harness/src/exactly-once-lmid-lane.ts` are built, self-tested, and
    orphaned. Template for wiring: `permission-transition-lane.ts` IS wired
@@ -67,7 +67,7 @@ gaps, each re-verified by direct inspection:
 
 3. **Nothing has ever proven the harness can fail.** VERIFIED: both
    `harness/regressions/sweep/v1/` and `crates/sync-core/proptest-regressions/`
-   contain only READMEs. The one committed regression is an *upstream*
+   contain only READMEs. The one committed regression is an _upstream_
    zero-cache bug (#6121) the sweep structurally could not have generated
    (`upstream-parity/README.md`). We cannot distinguish "no bugs" from "holes
    in the net."
@@ -108,7 +108,7 @@ Deliverable: a committed matrix of mutant → lanes that caught it, with the
 uncaught ones named as work. A mutant nothing catches is the highest-value
 signal in this entire plan. Keep the mutants as a runnable suite, not a
 one-off. Do not skip mutants that seem obviously covered; those are exactly
-where the surprises live. Mutants that only corrupt the *optimistic* client
+where the surprises live. Mutants that only corrupt the _optimistic_ client
 path are out of scope; the matrix targets the engine's authoritative results.
 
 ### 2. Give the query-aware layer a deterministic oracle
