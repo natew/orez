@@ -48,7 +48,7 @@ jobs:
           bun src/smoke.ts --target rust-local --clients 50 --projects 5
           bun src/sweep.ts --against rust-local --rounds 80 --seed ${{ github.run_id }}
           bun src/state-machine.ts --against rust-local --seed 7 --steps 80
-          bun src/state-machine.ts --against rust-local --seed ${{ github.run_id }} --steps 80
+          bun src/state-machine.ts --against rust-local --nemesis --seed ${{ github.run_id }} --steps 80
 
       - name: upload rust-local nightly evidence
         if: always()

@@ -466,7 +466,7 @@ jobs:
         run: |
           cd harness
           bun src/state-machine.ts --against rust-local --seed 1 --steps 18
-          bun src/state-machine.ts --against rust-local --seed ${{ github.run_id }} --steps 24
+          bun src/state-machine.ts --against rust-local --nemesis --seed ${{ github.run_id }} --steps 24
 
       - name: upload native seeds and minimized traces
         if: always()

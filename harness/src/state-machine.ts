@@ -1,8 +1,8 @@
-// Electric-style generated lifecycle model for the Rust hosts. A deterministic
+// electric-style generated lifecycle model for the Rust hosts. A deterministic
 // trace mixes writes, desired-query changes, retention pruning, lost responses,
-// server restarts, and client restarts. Every operation compares live client
-// views to an authoritative SQL oracle. Failures emit the seed, full trace, and
-// a delta-debugged reproducer under harness/regressions/.
+// engine faults, server restarts, and client restarts. Every operation compares
+// live client views to an authoritative SQL oracle. Failures emit the seed, full
+// trace, and a delta-debugged reproducer under harness/regressions/.
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,15 +10,42 @@ import { parseArgs } from 'node:util'
 
 import { canonical } from './canonical.js'
 import { mutators, queries } from './fixture.js'
+import { observedSyncFetch, type SyncHttpObservation } from './observed-fetch.js'
 import { persistentKVStoreProvider } from './persistent-kv.js'
 import { assertServerOutcome } from './server-outcome.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
 
 type StateTarget = SyncTarget & {
+  readonly origin?: string
+  readonly adminKey?: string
   dropNextPushResponse(): Promise<void> | void
   pull(): Promise<void>
   restart(downForMs?: number): Promise<void>
+}
+
+type FaultPoint =
+  | 'push_before_mutation'
+  | 'push_after_write_before_commit'
+  | 'push_after_commit_before_response'
+  | 'pull_during_tx'
+  | 'pull_after_commit'
+type FaultKind = 'kill' | 'error' | 'quota'
+
+type FaultReceipt = {
+  id: string
+  arm: {
+    step: number
+    point: FaultPoint
+    kind: FaultKind
+    confirmed: true
+  }
+  resolution?: {
+    status: 'fired' | 'not-fired'
+    step: number
+    operation: Operation['kind'] | 'run-end'
+    reason: string
+  }
 }
 
 type Operation =
@@ -27,9 +54,42 @@ type Operation =
   | { kind: 'write'; id: string; projectID: string; rank: number }
   | { kind: 'responseLoss'; id: string; projectID: string }
   | { kind: 'prune'; epoch: number }
+  | { kind: 'armEngineFault'; point: FaultPoint; faultKind: FaultKind }
   | { kind: 'serverRestart' }
   | { kind: 'clientRestart' }
   | { kind: 'checkpoint' }
+
+type RecordedOperation = Operation & { faultReceipt?: FaultReceipt }
+
+type FaultTally = {
+  armed: number
+  fired: number
+  notFired: number
+  byFault: Record<string, { armed: number; fired: number; notFired: number }>
+}
+
+type ExecutionReport = {
+  trace: RecordedOperation[]
+  faultTally: FaultTally
+}
+
+class TraceExecutionError extends Error {
+  constructor(
+    readonly failure: unknown,
+    readonly report: ExecutionReport
+  ) {
+    super(String(failure), { cause: failure })
+  }
+}
+
+const FAULT_POINTS: readonly FaultPoint[] = [
+  'push_before_mutation',
+  'push_after_write_before_commit',
+  'push_after_commit_before_response',
+  'pull_during_tx',
+  'pull_after_commit',
+]
+const FAULT_KINDS: readonly FaultKind[] = ['kill', 'error', 'quota']
 
 const { values: args } = parseArgs({
   options: {
@@ -37,6 +97,7 @@ const { values: args } = parseArgs({
     seed: { type: 'string', default: '1' },
     steps: { type: 'string', default: '24' },
     replay: { type: 'string' },
+    nemesis: { type: 'boolean', default: false },
     'no-shrink': { type: 'boolean', default: false },
     'shrink-runs': { type: 'string', default: '12' },
   },
@@ -44,6 +105,8 @@ const { values: args } = parseArgs({
 
 if (!['rust-local', 'rust-cf'].includes(args.against!))
   throw new Error('--against must be rust-local or rust-cf')
+if (args.nemesis && args.against !== 'rust-local')
+  throw new Error('--nemesis currently requires --against rust-local')
 
 const seed = Number(args.seed)
 const steps = Number(args.steps)
@@ -69,7 +132,7 @@ function mulberry32(initial: number) {
 }
 
 function generateTrace(): Operation[] {
-  const required: Operation[] = [
+  const lifecycleRequired: Operation[] = [
     { kind: 'desire', slot: 0, projectIDs: ['p0', 'p1'] },
     { kind: 'write', id: `sm-${seed}-write`, projectID: 'p0', rank: 4.25 },
     {
@@ -84,11 +147,38 @@ function generateTrace(): Operation[] {
     { kind: 'undesire', slot: 1 },
     { kind: 'checkpoint' },
   ]
+  const nemesisRequired: Operation[] = [
+    { kind: 'desire', slot: 0, projectIDs: ['p0', 'p1'] },
+    {
+      kind: 'armEngineFault',
+      point: 'push_after_commit_before_response',
+      faultKind: 'error',
+    },
+    { kind: 'write', id: `sm-${seed}-postcommit`, projectID: 'p0', rank: 4.25 },
+    { kind: 'prune', epoch: 0 },
+    {
+      kind: 'armEngineFault',
+      point: 'push_after_write_before_commit',
+      faultKind: 'kill',
+    },
+    { kind: 'write', id: `sm-${seed}-kill`, projectID: 'p1', rank: 9.5 },
+    {
+      kind: 'responseLoss',
+      id: `sm-${seed}-lost-response`,
+      projectID: 'p1',
+    },
+    { kind: 'serverRestart' },
+    { kind: 'clientRestart' },
+    { kind: 'desire', slot: 1, projectIDs: ['p2'] },
+    { kind: 'undesire', slot: 1 },
+    { kind: 'checkpoint' },
+  ]
+  const required = args.nemesis ? nemesisRequired : lifecycleRequired
   const rng = mulberry32(seed)
   const generated: Operation[] = []
   const project = () => `p${Math.floor(rng() * 10)}`
   for (let index = required.length; index < steps; index++) {
-    const roll = Math.floor(rng() * 8)
+    const roll = Math.floor(rng() * (args.nemesis ? 10 : 8))
     switch (roll) {
       case 0:
         generated.push({
@@ -118,6 +208,27 @@ function generateTrace(): Operation[] {
       case 6:
         generated.push({ kind: 'clientRestart' })
         break
+      case 7:
+        generated.push(
+          args.nemesis
+            ? {
+                kind: 'responseLoss',
+                id: `sm-${seed}-${index}-lost-response`,
+                projectID: project(),
+              }
+            : { kind: 'checkpoint' }
+        )
+        break
+      case 8:
+      case 9: {
+        const point = FAULT_POINTS[Math.floor(rng() * FAULT_POINTS.length)]!
+        const faultKind =
+          point === 'push_after_write_before_commit'
+            ? 'kill'
+            : FAULT_KINDS[Math.floor(rng() * FAULT_KINDS.length)]!
+        generated.push({ kind: 'armEngineFault', point, faultKind })
+        break
+      }
       default:
         generated.push({ kind: 'checkpoint' })
     }
@@ -125,12 +236,15 @@ function generateTrace(): Operation[] {
   return [...required, ...generated].slice(0, steps)
 }
 
-async function startTarget(): Promise<StateTarget> {
+async function startTarget(
+  onSync?: (observation: SyncHttpObservation) => void
+): Promise<StateTarget> {
   if (args.against === 'rust-local') {
     return (await import('./targets/rust-local.js')).startRustLocal({
       pullIntervalMs: 75,
       queryAware: true,
-      retainChanges: 8,
+      retainChanges: args.nemesis ? 2 : 8,
+      fetch: onSync ? observedSyncFetch(onSync) : undefined,
     })
   }
   return (await import('./targets/rust-cf.js')).startRustCf({
@@ -209,17 +323,136 @@ async function oracleIDs(target: SyncTarget, projectIDs: string[]) {
   return rows.map(({ id }) => id).sort()
 }
 
-async function execute(trace: Operation[]) {
-  const target = await startTarget()
+async function execute(trace: Operation[]): Promise<ExecutionReport> {
+  const recordedTrace = trace.map((operation) => ({
+    ...operation,
+  })) as RecordedOperation[]
+  const faultTally: FaultTally = { armed: 0, fired: 0, notFired: 0, byFault: {} }
+  let pendingFault:
+    | {
+        receipt: FaultReceipt
+        resolve: (status: 'fired' | 'not-fired') => void
+        resolution: Promise<'fired' | 'not-fired'>
+        recovery?: Promise<void>
+      }
+    | undefined
+  let currentStep = -1
+  let currentOperation: Operation = { kind: 'checkpoint' }
+
+  const bumpFault = (receipt: FaultReceipt, field: 'armed' | 'fired' | 'notFired') => {
+    faultTally[field]++
+    const key = `${receipt.arm.point}/${receipt.arm.kind}`
+    const entry = (faultTally.byFault[key] ??= { armed: 0, fired: 0, notFired: 0 })
+    entry[field]++
+  }
+
+  const resolveFault = (
+    fault: NonNullable<typeof pendingFault>,
+    status: 'fired' | 'not-fired',
+    reason: string
+  ) => {
+    if (fault.receipt.resolution) return
+    fault.receipt.resolution = {
+      status,
+      step: currentStep,
+      operation:
+        currentStep < 0 || currentStep >= recordedTrace.length
+          ? 'run-end'
+          : currentOperation.kind,
+      reason,
+    }
+    bumpFault(fault.receipt, status === 'fired' ? 'fired' : 'notFired')
+    if (pendingFault === fault) pendingFault = undefined
+    fault.resolve(status)
+  }
+
+  const onSync = (observation: SyncHttpObservation) => {
+    const fault = pendingFault
+    if (!fault || observation.phase !== 'terminal') return
+    const pointPath = fault.receipt.arm.point.startsWith('push_') ? 'push' : 'pull'
+    if (observation.path !== pointPath) return
+    if (fault.receipt.arm.kind === 'kill') {
+      if (observation.error !== undefined)
+        resolveFault(fault, 'fired', `engine process exited during ${observation.path}`)
+      return
+    }
+    const expectedStatus = fault.receipt.arm.kind === 'quota' ? 507 : 500
+    const responseText = observation.rawResponseBody ?? ''
+    if (
+      observation.status === expectedStatus &&
+      responseText.includes(fault.receipt.arm.point) &&
+      responseText.includes('injected')
+    ) {
+      resolveFault(
+        fault,
+        'fired',
+        `server confirmed injected ${observation.status} during ${observation.path}`
+      )
+    }
+  }
+
+  const target = await startTarget(onSync)
   const directory = mkdtempSync(join(tmpdir(), 'orez-state-machine-'))
   const kvStore = persistentKVStoreProvider(directory)
   const storageKey = `state-machine-${seed}`
   let client = target.createClient('state-machine-user', { kvStore, storageKey })
   const views = new Map<number, View>()
+  const requiresFaults =
+    args.nemesis || trace.some((operation) => operation.kind === 'armEngineFault')
+
+  const recoverKill = async (fault: NonNullable<typeof pendingFault>) => {
+    if (fault.receipt.arm.kind !== 'kill' || fault.receipt.resolution?.status !== 'fired')
+      return
+    fault.recovery ??= target.restart(50)
+    await fault.recovery
+  }
+
+  const recoverObservedKill = async () => {
+    for (const operation of recordedTrace) {
+      const receipt = operation.faultReceipt
+      if (
+        !receipt ||
+        receipt.arm.kind !== 'kill' ||
+        receipt.resolution?.status !== 'fired'
+      )
+        continue
+      const fault = operationFaults.get(receipt.id)
+      if (fault) await recoverKill(fault)
+    }
+  }
+
+  const operationFaults = new Map<string, NonNullable<typeof pendingFault>>()
+
+  const completeMutation = async (
+    request: { client: Promise<unknown>; server: Promise<unknown> },
+    label: string
+  ) => {
+    const kill =
+      pendingFault?.receipt.arm.kind === 'kill' &&
+      pendingFault.receipt.arm.point.startsWith('push_')
+        ? pendingFault
+        : undefined
+    await withTimeout(request.client, `client ${label}`)
+    const server = withTimeout(
+      assertServerOutcome(request.server, 'success', label),
+      `server ${label}`
+    )
+    if (kill) {
+      const first = await Promise.race([
+        server.then(() => 'server' as const),
+        kill.resolution.then((status) => status),
+      ])
+      if (first === 'fired') await recoverKill(kill)
+    }
+    await server
+  }
+
+  let executionError: unknown
 
   const verify = async (step: number, operation: Operation) => {
     for (const [slot, view] of views) {
       await eventually(async () => {
+        await recoverObservedKill()
         const got = view.snapshot()
         if (!got.complete) throw new Error(`slot ${slot} is incomplete`)
         const want = await oracleIDs(target, view.projectIDs)
@@ -234,6 +467,9 @@ async function execute(trace: Operation[]) {
 
   try {
     for (const [step, operation] of trace.entries()) {
+      currentStep = step
+      currentOperation = operation
+      await recoverObservedKill()
       switch (operation.kind) {
         case 'desire': {
           views.get(operation.slot)?.destroy()
@@ -256,11 +492,7 @@ async function execute(trace: Operation[]) {
               meta: { seed, step },
             })
           )
-          await withTimeout(request.client, `client write ${operation.id}`)
-          await withTimeout(
-            assertServerOutcome(request.server, 'success', operation.id),
-            `server write ${operation.id}`
-          )
+          await completeMutation(request, `write ${operation.id}`)
           break
         }
         case 'responseLoss': {
@@ -274,11 +506,7 @@ async function execute(trace: Operation[]) {
               done: false,
             })
           )
-          await withTimeout(request.client, `lost-response client ${operation.id}`)
-          await withTimeout(
-            assertServerOutcome(request.server, 'success', operation.id),
-            `lost-response recovery ${operation.id}`
-          )
+          await completeMutation(request, `lost-response ${operation.id}`)
           const rows = await target.oracle(
             `SELECT id FROM task WHERE id = '${operation.id}'`
           )
@@ -289,6 +517,11 @@ async function execute(trace: Operation[]) {
           break
         }
         case 'prune': {
+          const pullKill =
+            pendingFault?.receipt.arm.kind === 'kill' &&
+            pendingFault.receipt.arm.point.startsWith('pull_')
+              ? pendingFault
+              : undefined
           for (let index = 0; index < 16; index++) {
             const id = `sm-prune-${seed}-${operation.epoch}-${index}`
             await target.sql(
@@ -297,10 +530,67 @@ async function execute(trace: Operation[]) {
           }
           // Make pruning self-contained so removing surrounding operations
           // during shrinking cannot create a dependency-only false failure.
-          await target.pull()
+          try {
+            await target.pull()
+          } catch (error) {
+            await recoverObservedKill()
+            if (pullKill?.receipt.resolution?.status !== 'fired') throw error
+            await target.pull()
+          }
+          break
+        }
+        case 'armEngineFault': {
+          if (!target.origin || !target.adminKey)
+            throw new Error('armEngineFault requires the rust-local admin route')
+          if (pendingFault)
+            resolveFault(pendingFault, 'not-fired', 'replaced by a later fault arm')
+          const response = await fetch(`${target.origin}/admin/fault`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-admin-key': target.adminKey,
+            },
+            body: JSON.stringify({ point: operation.point, kind: operation.faultKind }),
+          })
+          if (!response.ok)
+            throw new Error(
+              `arm ${operation.point}/${operation.faultKind} failed ${response.status}`
+            )
+          const body = (await response.json()) as {
+            armed?: boolean
+            point?: string
+          }
+          if (body.armed !== true || body.point !== operation.point)
+            throw new Error(
+              `arm ${operation.point}/${operation.faultKind} returned no receipt`
+            )
+          let resolve!: (status: 'fired' | 'not-fired') => void
+          const receipt: FaultReceipt = {
+            id: `fault-${seed}-${faultTally.armed + 1}`,
+            arm: {
+              step,
+              point: operation.point,
+              kind: operation.faultKind,
+              confirmed: true,
+            },
+          }
+          const fault = {
+            receipt,
+            resolve,
+            resolution: new Promise<'fired' | 'not-fired'>((done) => {
+              resolve = done
+            }),
+          }
+          fault.resolve = resolve
+          recordedTrace[step]!.faultReceipt = receipt
+          operationFaults.set(receipt.id, fault)
+          pendingFault = fault
+          bumpFault(receipt, 'armed')
           break
         }
         case 'serverRestart':
+          if (pendingFault)
+            resolveFault(pendingFault, 'not-fired', 'server restarted before fault fired')
           await target.restart(50)
           break
         case 'clientRestart': {
@@ -324,32 +614,56 @@ async function execute(trace: Operation[]) {
         case 'checkpoint':
           break
       }
+      await recoverObservedKill()
       await verify(step, operation)
       if (operation.kind === 'prune') {
-        await eventually(async () => {
-          const rows = (await target.oracle(
-            'SELECT floor FROM _zsync_meta WHERE lock = 1'
-          )) as { floor: number | string }[]
-          if (Number(rows[0]?.floor) <= 0)
-            throw new Error('retention floor did not advance')
-        }, `seed ${seed} step ${step} retention pruning`)
+        await eventually(
+          async () => {
+            const rows = (await target.oracle(
+              'SELECT floor FROM _zsync_meta WHERE lock = 1'
+            )) as { floor: number | string }[]
+            if (Number(rows[0]?.floor) <= 0)
+              throw new Error('retention floor did not advance')
+          },
+          `seed ${seed} step ${step} retention pruning`,
+          5_000
+        )
       }
     }
+  } catch (error) {
+    executionError = error
   } finally {
+    currentStep = trace.length
+    currentOperation = { kind: 'checkpoint' }
+    if (pendingFault)
+      resolveFault(pendingFault, 'not-fired', 'run ended before fault fired')
     for (const view of views.values()) view.destroy()
     try {
       // target.close owns every client it created. Bound cleanup as well as the
       // operations: a broken connection must yield an artifact, not hang the
       // CI job before its always() upload step.
-      await withTimeout(target.close(), 'state-machine target cleanup', 10_000)
+      await withTimeout(target.close(), 'state-machine target cleanup', 10_000).catch(
+        (error) => {
+          executionError ??= error
+        }
+      )
     } finally {
       rmSync(directory, { recursive: true, force: true })
     }
   }
+
+  const report = { trace: recordedTrace, faultTally }
+  if (requiresFaults && faultTally.fired === 0) {
+    executionError = new Error(
+      `INVALID nemesis schedule: armed ${faultTally.armed} faults but fired none`
+    )
+  }
+  if (executionError) throw new TraceExecutionError(executionError, report)
+  return report
 }
 
 function failureFingerprint(error: unknown) {
-  const message = String(error)
+  const message = String(error instanceof TraceExecutionError ? error.failure : error)
   const viewFailure = message.match(
     /step \d+ (\w+): Error: slot (\d+) (diverged|is incomplete)/
   )
@@ -364,8 +678,9 @@ function failureFingerprint(error: unknown) {
   return message.replaceAll(/\d+/g, '#')
 }
 
-async function minimize(trace: Operation[], expectedError: unknown) {
+async function minimize(trace: Operation[], expectedError: TraceExecutionError) {
   let current = trace
+  let currentFailure = expectedError
   let granularity = 2
   let runs = 0
   const expectedFingerprint = failureFingerprint(expectedError)
@@ -381,6 +696,7 @@ async function minimize(trace: Operation[], expectedError: unknown) {
       } catch (error) {
         if (failureFingerprint(error) === expectedFingerprint) {
           current = candidate
+          currentFailure = error as TraceExecutionError
           granularity = Math.max(2, granularity - 1)
           reduced = true
           break
@@ -393,7 +709,19 @@ async function minimize(trace: Operation[], expectedError: unknown) {
     granularity = Math.min(current.length, granularity * 2)
   }
   console.error(`[state-machine] shrink replays: ${runs}/${maxShrinkRuns}`)
-  return current
+  return { operations: current, failure: currentFailure }
+}
+
+function printFaultTally(tally: FaultTally) {
+  console.log('\n[state-machine] fault tallies:')
+  for (const [fault, counts] of Object.entries(tally.byFault).sort()) {
+    console.log(
+      `  ${fault.padEnd(48)} armed=${counts.armed} fired=${counts.fired} not-fired=${counts.notFired}`
+    )
+  }
+  console.log(
+    `[state-machine] faults armed=${tally.armed} fired=${tally.fired} not-fired=${tally.notFired}`
+  )
 }
 
 const replay = args.replay
@@ -405,13 +733,18 @@ const replay = args.replay
 const trace = replay?.minimized ?? replay?.trace ?? generateTrace()
 
 console.log(
-  `[state-machine] seed=${seed} target=${args.against} operations=${trace.length}`
+  `[state-machine] seed=${seed} target=${args.against} nemesis=${args.nemesis} operations=${trace.length}`
 )
+let report: ExecutionReport
 try {
-  await execute(trace)
+  report = await execute(trace)
 } catch (error) {
-  console.error(`[state-machine] FAIL seed=${seed}: ${String(error)}`)
-  const minimized = args['no-shrink'] ? trace : await minimize(trace, error)
+  const failure = error as TraceExecutionError
+  console.error(`[state-machine] FAIL seed=${seed}: ${String(failure.failure)}`)
+  const minimized = args['no-shrink']
+    ? { operations: trace, failure }
+    : await minimize(trace, failure)
+  printFaultTally(minimized.failure.report.faultTally)
   const directory = join(import.meta.dirname, '..', 'regressions')
   mkdirSync(directory, { recursive: true })
   const file = join(directory, `state-machine-${args.against}-seed-${seed}.json`)
@@ -421,21 +754,23 @@ try {
       {
         seed,
         target: args.against,
-        error: String(error),
-        replay: `bun src/state-machine.ts --against ${args.against} --seed ${seed} --replay ${file} --no-shrink`,
-        trace,
-        minimized,
+        error: String(failure.failure),
+        replay: `bun src/state-machine.ts --against ${args.against} --seed ${seed}${args.nemesis ? ' --nemesis' : ''} --replay ${file} --no-shrink`,
+        trace: failure.report.trace,
+        minimized: minimized.failure.report.trace,
+        faultTally: minimized.failure.report.faultTally,
       },
       null,
       2
     )
   )
   console.error(
-    `[state-machine] minimized ${trace.length} -> ${minimized.length}: ${file}`
+    `[state-machine] minimized ${trace.length} -> ${minimized.operations.length}: ${file}`
   )
   process.exit(1)
 }
 
+if (args.nemesis) printFaultTally(report.faultTally)
 console.log(`[state-machine] PASS seed=${seed} target=${args.against}`)
 // A deterministic replay supersedes an older failure for the same target and
 // seed. Leaving that artifact behind would make a green CI rerun publish stale
@@ -459,7 +794,10 @@ writeFileSync(
       result: 'PASS',
       seed,
       target: args.against,
-      trace,
+      nemesis: args.nemesis,
+      retainChanges: args.nemesis ? 2 : 8,
+      trace: report.trace,
+      faultTally: report.faultTally,
     },
     null,
     2
