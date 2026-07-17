@@ -215,6 +215,99 @@ describe('elle projection', () => {
     ])
   })
 
+  test('projects live-lane read and mutation kinds, skipping non-transactional events', () => {
+    // shape recorded by atomic-visibility-lane.ts: a non-writing reader process
+    // observes an empty then a full list, and a writer process appends. neither
+    // event carries kind 'transaction'; both must project as list-append txns.
+    const history = [
+      event({
+        opId: 'read-before',
+        process: 'atomic-reader',
+        kind: 'read',
+        transaction: [{ type: 'read', key: 'p0', value: null }],
+      }),
+      event({
+        index: 1,
+        relativeMicros: 1,
+        opId: 'read-before',
+        process: 'atomic-reader',
+        phase: 'ok',
+        kind: 'read',
+        transaction: [{ type: 'read', key: 'p0', value: [] }],
+      }),
+      event({
+        index: 2,
+        relativeMicros: 2,
+        opId: 'mutation',
+        process: 'atomic-writer',
+        kind: 'mutation',
+        transaction: [{ type: 'append', key: 'p0', value: 42 }],
+      }),
+      event({
+        index: 3,
+        relativeMicros: 3,
+        opId: 'mutation',
+        process: 'atomic-writer',
+        phase: 'ok',
+        kind: 'mutation',
+        transaction: [{ type: 'append', key: 'p0', value: 42 }],
+      }),
+      event({
+        index: 4,
+        relativeMicros: 4,
+        opId: 'read-after',
+        process: 'atomic-reader',
+        kind: 'read',
+        transaction: [{ type: 'read', key: 'p0', value: null }],
+      }),
+      event({
+        index: 5,
+        relativeMicros: 5,
+        opId: 'read-after',
+        process: 'atomic-reader',
+        phase: 'ok',
+        kind: 'read',
+        transaction: [{ type: 'read', key: 'p0', value: [42] }],
+      }),
+    ]
+    expect(projectElleListAppend(history)).toEqual([
+      {
+        index: 0,
+        time: 0,
+        process: 0,
+        type: 'invoke',
+        f: 'txn',
+        value: [['r', 'p0', null]],
+      },
+      { index: 1, time: 1, process: 0, type: 'ok', f: 'txn', value: [['r', 'p0', []]] },
+      {
+        index: 2,
+        time: 2,
+        process: 1,
+        type: 'invoke',
+        f: 'txn',
+        value: [['append', 'p0', 42]],
+      },
+      {
+        index: 3,
+        time: 3,
+        process: 1,
+        type: 'ok',
+        f: 'txn',
+        value: [['append', 'p0', 42]],
+      },
+      {
+        index: 4,
+        time: 4,
+        process: 0,
+        type: 'invoke',
+        f: 'txn',
+        value: [['r', 'p0', null]],
+      },
+      { index: 5, time: 5, process: 0, type: 'ok', f: 'txn', value: [['r', 'p0', [42]]] },
+    ])
+  })
+
   test('rejects duplicate append identities', () => {
     const history = [
       event({ transaction: [{ type: 'append', key: 'x', value: 1 }] }),

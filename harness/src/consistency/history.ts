@@ -721,8 +721,14 @@ export function projectElleListAppend(
   const appendValues = new Map<string, Set<number>>()
   const processIds = new Map<string, number>()
   for (const event of events) {
-    if (event.kind !== 'transaction') continue
-    if (event.transaction === undefined || event.transaction.length === 0) {
+    // an event participates in the list-append model exactly when it carries
+    // list-append micro-operations. that is the dedicated `transaction` lane as
+    // well as the authority `mutation` (append) and client cache `read`
+    // observations recorded by live lanes like atomic-visibility. events without
+    // micro-ops (barriers, faults, pushes, pulls, exactly-once probes) are not
+    // list-append transactions and are skipped.
+    if (event.transaction === undefined) continue
+    if (event.transaction.length === 0) {
       throw new Error(`transaction ${event.opId} has no micro-operations`)
     }
 
