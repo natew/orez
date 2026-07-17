@@ -380,6 +380,9 @@ jobs:
       - name: rust-local capped-diff cut (M4/O2)
         run: cd harness && bun src/capped-diff-lane.ts --target rust-local
 
+      - name: rust-local HTTP pull cookie dialect conformance
+        run: cd harness && bun src/pull-dialect-conformance.ts --target rust-local
+
       - name: upload rust-local consistency evidence
         if: always()
         uses: actions/upload-artifact@v4

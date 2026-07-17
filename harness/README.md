@@ -33,6 +33,7 @@ bun src/multi-tab.ts                               # real shared client group + 
 bun src/corpus-check.ts                            # validate pinned upstream provenance
 bun src/upstream-corpus.ts                         # one observable trace across all four hosts
 bun src/state-machine.ts --against rust-local --seed 7 --steps 24
+bun src/pull-dialect-conformance.ts --target rust-local # raw HTTP cookie contract
 bun src/m6-runner.ts --suite native --quick        # native fault/recovery qualification
 ```
 
@@ -67,6 +68,13 @@ changes, pruning, response loss, server restart, and client restart while
 checking every live view against an authoritative SQL oracle. Rust-CF commands
 use `ZHARNESS_RUST_CF_WORKER` when set and read `ZHARNESS_CF_ADMIN_KEY` (or
 `~/.zharness-cf-admin-key`) for admin probes.
+
+`pull-dialect-conformance.ts` checks monotone and identical cookies, stale-client
+convergence, foreign/future-cookie reset recovery, and same-store restart
+durability through raw HTTP pulls. Protocol sequencing is independent of the
+fixture schema: a target adapter supplies auth, state changes, authoritative row
+reads, and patch normalization. Each check emits a receipt and the full run is
+saved under `target/consistency/`.
 
 `permissions.ts` runs `orez-local` with its optional `visible()` policy:
 owner-or-member projects, tasks/members through visible projects, and only
