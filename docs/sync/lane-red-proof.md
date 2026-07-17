@@ -97,3 +97,31 @@ The final counts came from direct authenticated authority SQL, after the lost
 response, stock retry, client quiescence, and byte-identical harness replay.
 The precondition client was a separate non-writing Zero client. All scheduled
 fault arm, fire, and heal receipts were present and anchored in the history.
+
+## Elle list-append on the recorded atomic-visibility history
+
+`scripts/elle/check-history.sh` projects a recorded atomic-visibility
+`history.jsonl` and runs the pinned elle-cli 0.1.9 jar with `--model
+list-append --consistency-models serializable --verbose`, failing on anything
+other than `valid?: true`. Proven both directions on 2026-07-16 against a real
+history recorded by `bun src/atomic-visibility-lane.ts --target rust-local
+--seed elle-proof`.
+
+Green: the unmodified recorded history returns `{"valid?":true}`, exit 0. The
+observed lists are restricted to the appended ranks, so the reader observes an
+empty list before the append and `[<rank>]` after it (a serial order exists).
+
+Red: the after-read observation for one key in the recorded `history.jsonl` was
+edited to drop that key's appended rank, fabricating the same partial-visibility
+torn read the `pull.rs` mutant above produces (the reader sees the append on
+`p0` but not on `p1`). The history stays structurally valid
+(`validateHistory` does not constrain read values), so it flows through the
+projection into elle:
+
+```text
+elle did not return valid=true (got False); anomalies: ['G-single-item']
+```
+
+elle's `also-not` list includes `serializable`, and the runner exits 1. The
+G-single cycle is exactly `wr` on the visible key and `rw` on the missing key,
+which is the dependency signature of a non-atomic client observation.

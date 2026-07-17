@@ -134,8 +134,16 @@ not mislabeled as a black-box observed history.
 
 Elle is used for one dedicated transactional workload. Each key stores a list;
 every append value is globally unique for that key; transactions append to and
-read several keys; reads return complete lists. The runtime history is
-losslessly projected by `projectElleListAppend` to Jepsen JSON.
+read several keys; reads return complete lists. `projectElleListAppend` projects
+every event carrying list-append micro-ops (the atomic-visibility lane's `read`
+and `mutation` kinds as well as the dedicated `transaction` kind) to Jepsen
+JSON. When the workload runs against a store that already holds unrelated seed
+rows, `src/consistency/elle-project.ts` (driven by
+`scripts/elle/check-history.sh`) restricts each observed list to the values
+appended within the history, so elle analyzes the tracked list-append
+sub-history embedded in the store. That
+restriction means elle checks dependency safety among the tracked appends and
+does not detect a read of a value no transaction appended.
 
 The checker invocation must explicitly name the model because elle-cli defaults
 to strict serializability:

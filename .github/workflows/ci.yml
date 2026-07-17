@@ -288,7 +288,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/elle-cli
-          key: elle-cli-${{ runner.os }}-${{ hashFiles('scripts/elle/self-test.sh') }}
+          key: elle-cli-${{ runner.os }}-${{ hashFiles('scripts/elle/lib.sh', 'scripts/elle/self-test.sh') }}
           restore-keys: |
             elle-cli-${{ runner.os }}-
 
@@ -352,6 +352,28 @@ jobs:
 
       - name: rust-local atomic visibility consistency
         run: cd harness && bun src/atomic-visibility-lane.ts --target rust-local --seed ${{ github.run_id }}
+
+      # run the pinned elle-cli list-append analysis on the atomic-visibility
+      # history just recorded above (no extra workload run). serializable holds
+      # because the workload's none-or-all visibility admits a serial order; a
+      # torn read would surface as a G-single/serializability anomaly.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: cache pinned Elle release
+        uses: actions/cache@v4
+        with:
+          path: .cache/elle-cli
+          key: elle-cli-${{ runner.os }}-${{ hashFiles('scripts/elle/lib.sh', 'scripts/elle/self-test.sh') }}
+          restore-keys: |
+            elle-cli-${{ runner.os }}-
+
+      - name: elle list-append on recorded atomic-visibility history
+        env:
+          ELLE_CACHE_DIR: ${{ github.workspace }}/.cache/elle-cli
+        run: scripts/elle/check-history.sh '' harness/target/consistency/elle-report
 
       - name: rust-local exactly-once LMID consistency
         run: cd harness && bun src/exactly-once-lmid-lane.ts --target rust-local --seed ${{ github.run_id }}

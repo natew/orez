@@ -230,19 +230,30 @@ State this plainly rather than implying blanket coverage.
    admin-transaction scheduler. What those do not cover is the running binary
    over a real TCP socket, graceful shutdown, and the wake WebSocket under load;
    that behavior is exercised only by the `rust-local` harness lanes.
-4. **The consistency checkers exist but Elle never runs on a real workload.**
-   An operation-history export now exists: `src/consistency/history.ts` defines
-   the recorded history schema, `recorder.ts` captures it from live lanes, and
-   `projectElleListAppend` projects it to Jepsen/Elle list-append JSON. Real
-   checkers (`atomic-visibility.ts`, `exactly-once-lmid.ts`,
-   `permission-transition.ts`) consume recorded histories. What is still
-   missing: `scripts/elle/self-test.sh` checks only toy fixtures (its own
-   header says it does not check an Orez workload), `projectElleListAppend`
-   is called by nothing but its test, and there is no network fault injection
-   (no partition, latency, or packet-drop lanes). Faults in the real harness
-   are process-kill, injected DO storage faults (`storage-faults.ts`),
-   eviction (`eviction.ts`), and the admin-transaction lease and rollback
-   paths only.
+4. **Elle now runs the pinned checker on a real recorded workload.** The
+   `rust-local` CI job records the atomic-visibility lane's history, then
+   `scripts/elle/check-history.sh` projects it and runs the pinned elle-cli
+   0.1.9 standalone jar (verified by SHA-256, Java 21) with `--model
+   list-append --consistency-models serializable`, failing the job on `false`,
+   `unknown`, or malformed output. `projectElleListAppend`
+   (`src/consistency/history.ts`) projects every event carrying list-append
+   micro-ops (the atomic-visibility lane's `read` and `mutation` kinds, not just
+   the dedicated `transaction` kind), and `src/consistency/elle-project.ts`
+   restricts each observed list to the values appended within the history so the
+   tracked list-append sub-history embedded in a seeded store is what elle
+   analyzes. `serializable` is the honest model here: the workload's none-or-all
+   visibility means an empty read orders before the append and a full read after
+   it, so a serial order exists; a torn read surfaces as a G-single anomaly (red
+   proof in `docs/sync/lane-red-proof.md`). Realtime/strict variants are not
+   claimed for asynchronous cache reads. Bounds worth stating: elle checks only
+   the atomic-visibility workload (one authoritative multi-key append plus
+   non-writing complete-list reads), and because it drops values outside the
+   append universe it does not detect a read of a value no transaction appended.
+   `scripts/elle/self-test.sh` remains a separate checker-boundary self-test
+   over toy fixtures. Still missing: there is no network fault injection (no
+   partition, latency, or packet-drop lanes). Faults in the real harness are
+   process-kill, injected DO storage faults (`storage-faults.ts`), eviction
+   (`eviction.ts`), and the admin-transaction lease and rollback paths only.
 5. **The upstream IVM fuzzer was not ported.** `protocol-fuzz.ts` fuzzes
    malformed input structurally (every case must 4xx); it does not fuzz
    semantically valid query shapes for correctness. The real IVM fuzzer still
