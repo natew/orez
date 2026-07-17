@@ -66,6 +66,17 @@ type TransportReceipt = {
     operation: Operation['kind'] | 'run-end'
     blockedPulls: number
   }
+  // an engine fault that fired WHILE this pause was active: proof that two fault
+  // classes overlapped in effect, not just in schedule. recorded when a fault
+  // resolves as fired during an active pause. a non-writing observer client,
+  // whose pull is not gated by this client's pause, drives the firing pull
+  // deterministically so the engine fault fires through the held-open transport.
+  overlap?: {
+    faultId: string
+    point: FaultPoint
+    kind: FaultKind
+    step: number
+  }
   heal?: {
     step: number
     operation: Operation['kind'] | 'run-end'
@@ -81,6 +92,7 @@ type Operation =
   | { kind: 'fullPruneRestart' }
   | { kind: 'armEngineFault'; point: FaultPoint; faultKind: FaultKind }
   | { kind: 'pausePulls' }
+  | { kind: 'observerPull' }
   | { kind: 'resumePulls' }
   | { kind: 'serverRestart' }
   | { kind: 'clientRestart' }
@@ -102,6 +114,8 @@ type TransportTally = {
   armed: number
   fired: number
   healed: number
+  // engine faults that fired while a pause was active (composed overlap in effect)
+  overlapped: number
 }
 
 type ExecutionReport = {
@@ -198,11 +212,22 @@ function generateTrace(): Operation[] {
     },
     { kind: 'write', id: `sm-${seed}-postcommit`, projectID: 'p0', rank: 4.25 },
     { kind: 'prune', epoch: 0 },
-    // composed overlap: hold a transport pause open across an engine-fault arm
-    // and a server restart, so two fault classes are active at once. the engine
-    // fault is canceled by the restart (a documented not-fired); the transport
-    // fault heals on resume and the client must reconverge with no silent loss.
+    // composed overlap: hold a transport pause open, then fire an engine fault
+    // THROUGH it. the primary client's pulls are gated at its fetch seam, so its
+    // own writes can never drive a firing pull while paused. a non-writing
+    // observer client's pull is not gated, so it deterministically fires an armed
+    // pull-boundary fault while the transport pause is still active: two fault
+    // classes overlap in effect, not just in schedule (recorded on the transport
+    // receipt's overlap field). the pause is then held across a second engine-fault
+    // arm and a server restart (that arm is canceled by the restart, a documented
+    // not-fired), heals on resume, and the client must reconverge with no loss.
     { kind: 'pausePulls' },
+    {
+      kind: 'armEngineFault',
+      point: 'pull_after_commit',
+      faultKind: 'error',
+    },
+    { kind: 'observerPull' },
     {
       kind: 'armEngineFault',
       point: 'push_after_write_before_commit',
@@ -387,7 +412,7 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
     ...operation,
   })) as RecordedOperation[]
   const faultTally: FaultTally = { armed: 0, fired: 0, notFired: 0, byFault: {} }
-  const transportTally: TransportTally = { armed: 0, fired: 0, healed: 0 }
+  const transportTally: TransportTally = { armed: 0, fired: 0, healed: 0, overlapped: 0 }
   let pendingFault:
     | {
         receipt: FaultReceipt
@@ -441,6 +466,24 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
       reason,
     }
     bumpFault(fault.receipt, status === 'fired' ? 'fired' : 'notFired')
+    // composed overlap in effect: a fault that fires while a transport pause is
+    // held records itself on that pause's receipt. this is what the observer
+    // pull proves (an engine fault firing through an active client-transport
+    // outage), and the top-level gate requires at least one such overlap.
+    if (
+      status === 'fired' &&
+      pullsPaused &&
+      pendingTransport &&
+      !pendingTransport.receipt.overlap
+    ) {
+      pendingTransport.receipt.overlap = {
+        faultId: fault.receipt.id,
+        point: fault.receipt.arm.point,
+        kind: fault.receipt.arm.kind,
+        step: currentStep,
+      }
+      transportTally.overlapped++
+    }
     if (pendingFault === fault) pendingFault = undefined
     fault.resolve(status)
   }
@@ -773,6 +816,46 @@ async function execute(trace: Operation[]): Promise<ExecutionReport> {
           )
           break
         }
+        case 'observerPull': {
+          if (!target.origin)
+            throw new Error('observerPull requires the rust-local transport')
+          // a second, non-writing observer client. it drives one pull through the
+          // OBSERVED fetch seam but NOT the transport-pause gate, so its pull
+          // reaches the server while the primary client's pulls are held. it uses
+          // a distinct client group so it never disturbs the primary's cursor.
+          // when a pull-boundary fault is armed, this is the pull that fires it:
+          // the fault fires while the transport pause is active, and onSync
+          // resolves the receipt from this observation (which also stamps the
+          // overlap on the active pause's receipt). deterministic: the primary's
+          // gated pulls never reach the server, so no other pull can consume the
+          // one-shot fault first. the top-level gate enforces the overlap, so a
+          // sabotage (not arming, or gating the observer) fails coverage.
+          const pending = pendingFault
+          await observed(`${target.origin}/pull`, {
+            method: 'POST',
+            headers: {
+              authorization: 'Bearer token-state-machine-user',
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              clientID: `observer-${seed}-${step}`,
+              clientGroupID: `observer-group-${seed}`,
+              cookie: null,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          }).catch(() => undefined)
+          // receipt-verify the fire deterministically: if a fault was armed, this
+          // observer pull must have resolved it as fired by the time the observed
+          // fetch settled (onSync runs inside that await). a non-fire is surfaced
+          // by the top-level overlap gate, not swallowed here.
+          if (pending)
+            await withTimeout(
+              pending.resolution,
+              `observer pull fault ${pending.receipt.id}`,
+              5_000
+            ).catch(() => undefined)
+          break
+        }
         case 'resumePulls': {
           pullsPaused = false
           if (pendingTransport) healTransport(pendingTransport)
@@ -911,7 +994,7 @@ function printFaultTally(tally: FaultTally) {
 function printTransportTally(tally: TransportTally) {
   if (tally.armed === 0) return
   console.log(
-    `[state-machine] transport pauses armed=${tally.armed} fired=${tally.fired} healed=${tally.healed}`
+    `[state-machine] transport pauses armed=${tally.armed} fired=${tally.fired} healed=${tally.healed} overlapped=${tally.overlapped}`
   )
 }
 
@@ -999,7 +1082,12 @@ if (args.nemesis && !args.replay && report.transportTally.armed > 0) {
       ? `fired ${t.fired}`
       : t.healed < t.armed
         ? `healed ${t.healed}`
-        : undefined
+        : // composed overlap must be real, not just scheduled: at least one engine
+          // fault must have fired while a pause was active. sabotaging the observer
+          // (not arming its pull fault, or gating its pull) drives this to zero.
+          t.overlapped < 1
+          ? `overlapped ${t.overlapped} (no engine fault fired under an active pause)`
+          : undefined
   if (defect) {
     const failure = new TraceExecutionError(
       new Error(`INVALID transport schedule: armed ${t.armed} pauses but ${defect}`),

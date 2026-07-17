@@ -31,13 +31,21 @@ against main after the 123d7ee restructure):
   watermark. A regression fails the run. It sits in both the lifecycle prefix
   (so the mutation-matrix `state-machine` lane catches O1) and the nemesis
   prefix. Details below.
-- **Composed overlap (`pausePulls`/`resumePulls` ops).** A second, independent
-  fault class: a client-side transport pause that gates this one client's pulls
-  at the fetch seam. The nemesis prefix holds it open across an engine-fault arm
-  and a server restart, so two fault classes are active at once, then heals it on
-  resume and requires the client to reconverge with no silent loss. It carries
-  its own arm/fire/heal receipts, validated on generated schedules exactly like
-  the engine-fault receipts.
+- **Composed overlap (`pausePulls`/`observerPull`/`resumePulls` ops).** A second,
+  independent fault class: a client-side transport pause that gates this one
+  client's pulls at the fetch seam. The nemesis prefix holds it open across an
+  engine-fault arm and a server restart, so two fault classes are active at once,
+  then heals it on resume and requires the client to reconverge with no silent
+  loss. It carries its own arm/fire/heal receipts, validated on generated
+  schedules exactly like the engine-fault receipts. It also fires an engine fault
+  **through** the active pause: the primary client's own writes can never drive a
+  firing pull while its pulls are gated, so a non-writing observer client (a raw
+  pull on a distinct client group, whose fetch is not gated by the primary's
+  pause) deterministically fires an armed `pull_after_commit` fault while the
+  transport pause is still held. That overlap-in-effect is recorded on the pause
+  receipt (`overlap`) and a top-level gate requires at least one such overlap on
+  every generated schedule. See "Composed overlap: engine fault fires through the
+  pause" below.
 - **Client offline past retention: already covered, not duplicated.**
   `harness/src/reconnect.ts` (`retainChanges: 2`, wired per-PR against both
   `rust-local` and `rust-cf` in `ci.yml`) already proves it: the client closes,
@@ -61,14 +69,18 @@ for seed in 1 2 3 4 5; do
 done
 ```
 
-The five runs armed 4, 3, 3, 4, and 4 faults and fired 3, 2, 2, 3, and 3. Each
-resolved one still-armed kill fault as `not-fired` (the engine fault armed inside
-the transport-pause window, canceled by the composed restart). Every run also
-reported `transport pauses armed=1 fired=1 healed=1`: the held-open pause blocked
-at least one real pull and healed on resume. Every run fired the required
-`push_after_write_before_commit/kill`, restarted the native process over the same
-SQLite file, ran a full prune + reopen through `fullPruneRestart`, continued
-through response loss, and completed.
+The five runs armed 5, 4, 4, 5, and 5 faults and fired 3, 3, 3, 4, and 3. Each
+resolved the still-armed kill fault inside the transport-pause window as
+`not-fired` (canceled by the composed restart). Every run also reported
+`transport pauses armed=1 fired=1 healed=1 overlapped=1`: the held-open pause
+blocked at least one real primary pull, an armed `pull_after_commit/error` fault
+fired through it via the non-gated observer pull (the `overlapped=1`), and it
+healed on resume. Every run fired the required `pull_after_commit/error` under the
+pause and the later `push_after_write_before_commit/kill`, restarted the native
+process over the same SQLite file, ran a full prune + reopen through
+`fullPruneRestart`, continued through response loss, and completed. Clean 24-step
+wall time is about 12s (well under the 25s budget); the observer overlap adds two
+cheap ops (one admin arm, one raw pull).
 
 ## L1: prune without a retained floor
 
@@ -267,6 +279,123 @@ pause/resume pair, and the check has its own fingerprint
 minimization. The composed schedule also fails end to end under a real engine
 mutant: the seed-1 nemesis trace above (which contains the overlap) goes red at
 `fullPruneRestart` under O1.
+
+## Composed overlap: engine fault fires through the pause
+
+The earlier composed overlap held two fault classes active only in schedule: the
+engine fault armed inside the pause window was always canceled by the composed
+restart, never fired, because the primary client's pulls are gated while it is
+paused, so its own writes can never drive a firing pull. The `observerPull` op
+closes that gap. During the pause window the prefix arms a `pull_after_commit/
+error` fault, then a non-writing observer client (a raw null-cookie pull on a
+distinct client group, `observer-group-<seed>`, driven through the observed fetch
+seam but NOT the transport-pause gate) drives one pull to the server. The primary
+client's gated pulls never reach the server, so the observer's pull is the only
+pull that can consume the one-shot fault: it fires deterministically while the
+transport pause is still active. `onSync` resolves the receipt from that
+observation and stamps the pause receipt's `overlap` field; the run reports
+`transport pauses armed=1 fired=1 healed=1 overlapped=1`.
+
+A top-level gate (generated, non-replay schedules only, same
+`transport-schedule-invalid` fingerprint) requires `overlapped >= 1` whenever a
+pause is armed: an armed pause that never overlaps a fired engine fault is a
+schedule defect. Two independent sabotages of the mechanism fail that gate,
+proving it is not vacuous:
+
+```
+# sabotage 1 — gate the observer too (route its pull through the paused seam):
+[state-machine] FAIL seed=1: Error: INVALID transport schedule: armed 1 pauses but overlapped 0 (no engine fault fired under an active pause)
+[state-machine] transport pauses armed=1 fired=1 healed=1 overlapped=0
+
+# sabotage 2 — drop the pull-fault arm (observer pull finds nothing to fire):
+[state-machine] FAIL seed=1: Error: INVALID transport schedule: armed 1 pauses but overlapped 0 (no engine fault fired under an active pause)
+[state-machine] transport pauses armed=1 fired=1 healed=1 overlapped=0
+```
+
+Both were reverted after their proof; the seed-1 nemesis run then reported
+`overlapped=1` and passed. The composed trace still reds end to end under a real
+engine mutant: replaying the seed-1 nemesis artifact (which now contains the
+observer overlap) is green at baseline and red under O1 at `fullPruneRestart`
+(`served watermark regressed across full prune + restart: 18 -> 0`), same
+artifact both times.
+
+## Longevity soak: gated nightly lane with red proofs
+
+`harness/src/longevity.ts` is a bounded soak, not a nemesis, but it earns its
+place here the same way every other lane does: by proving it can go red.
+
+It boots `rust-local`, seeds a fixed pool of 1000 tasks, hydrates six clients on
+a shared `tasksInProjects` view, and runs three writers pushing `setRank` updates
+within that pool for ~25 minutes. The working set is bounded on purpose: a soak
+must hold memory and pull cost flat so the ceiling catches a real leak (not
+legitimate data growth) and so throughput does not decay under an ever-larger
+view — an earlier create-forever version stalled at ~18k rows when the per-update
+listener's whole-set copy starved ack processing. At every 60-second checkpoint
+it enforces three hard invariants and, after quiescing, a final convergence
+barrier:
+
+- **no client divergence** — each checkpoint quiesces the writers and drains
+  every outstanding ack (a real convergence barrier, not a race against in-flight
+  optimistic writes), then requires every client's `(id, rank)` view to equal the
+  SQL oracle exactly, so a lost or stale **update** is caught, not just a lost row;
+- **memory ceiling** — the native process RSS (read via `ps`) stays under a
+  fixed bound (400 MB default, large headroom over the bounded pool's flat
+  ~15 MB footprint);
+- **watermark monotonic** — the server-confirmed change-log watermark (a raw
+  null-cookie pull cookie) never decreases between checkpoints;
+- **zero lost writes** — after a unique sentinel `setRank`, the oracle, every
+  client, and a fresh late client agree on every row's final rank.
+
+A clean run passes with the RSS peak flat and far under the ceiling, the
+watermark strictly increasing, and every acknowledged update durable. A short
+clean run (`--duration-min 1 --checkpoint-sec 15 --pool 1000`) reports, for
+example (`rows` is the seeded pool plus 27 pre-existing seed rows in the shared
+projects; RSS stays flat because the working set is bounded):
+
+```
+[longevity] checkpoint 1: t=15s updates=356 rss=16MB watermark=2068 rows=1027
+[longevity] checkpoint 2: t=30s updates=713 rss=16MB watermark=3139 rows=1027
+[longevity] checkpoint 3: t=45s updates=1070 rss=16MB watermark=4210 rows=1027
+[longevity] PASS rust-local: 3 checkpoints, 1416 updates on 1000 rows, peak RSS 16MB <= 400MB, watermark monotonic, zero lost writes
+```
+
+### Red proof 1 — engine mutant M1 strands the workload
+
+M1 (`M1-skip-finalize`, rows commit without advancing the LMID) is caught by the
+query-aware convergence lanes; longevity is one. Applied with:
+
+```sh
+git apply harness/mutants/patches/M1-skip-finalize.patch
+cd harness
+bun src/longevity.ts --target rust-local --duration-min 1 --checkpoint-sec 15 --pool 1000
+```
+
+The first checkpoint goes red because the never-advancing LMID means the
+writers' updates never confirm, so the barrier's drain guard never clears:
+
+```
+[longevity] FAIL: timeout waiting for checkpoint at 15s drain: Error: draining 354 in-flight writes
+```
+
+Reverting the patch, the identical invocation passes again.
+
+### Red proof 2 — RSS ceiling mid-soak
+
+The memory-ceiling invariant is proved live by lowering the bound just below the
+process's real footprint, so it trips at a checkpoint rather than at baseline:
+
+```sh
+bun src/longevity.ts --target rust-local --duration-min 1 --checkpoint-sec 15 --pool 1000 --rss-ceiling-mb 15
+```
+
+```
+[longevity] start pid=60535 baselineRss=14MB ceiling=15MB ...
+error: RSS 16MB exceeded ceiling 15MB
+```
+
+The default 400 MB ceiling gives a real leak the same fate with room to spare;
+because the working set is bounded, a clean run's RSS stays flat, so any sustained
+climb is a genuine leak.
 
 ## CI schedule
 

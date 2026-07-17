@@ -60,6 +60,47 @@ jobs:
             harness/results/
           if-no-files-found: warn
 
+  longevity-soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+      - name: harness install
+        run: cd harness && bun install
+      - name: build engine
+        run: cargo build --release -p sync-native
+
+      # gated soak: ~25 minutes of sustained rust-local load with hard pass/fail
+      # invariants at every checkpoint (no client divergence, RSS ceiling,
+      # monotonic watermark) and a final barrier that proves zero lost writes.
+      # it can go red — see docs/sync/nemesis-red-proof.md longevity section.
+      - name: rust-local longevity soak
+        run: |
+          cd harness
+          bun src/longevity.ts --target rust-local --duration-min 25 --checkpoint-sec 60
+
+      - name: upload longevity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-longevity-${{ github.run_id }}
+          path: harness/results/
+          if-no-files-found: warn
+
   rust-cf-heavy:
     runs-on: ubuntu-latest
     timeout-minutes: 150
