@@ -27,26 +27,32 @@ against `rust-local`, capped-diff = `capped-diff-lane.ts` against `rust-local`
 with `maxChangeRows: 1` (the only system lane that pulls with a cap small enough
 to split a mutation's row effect from its lmid ack).
 
-| mutant                           | cargo  | smoke  | state-machine | metamorphic | eviction | sweep  | atomic-vis | exactly-once | capped-diff |
-| -------------------------------- | ------ | ------ | ------------- | ----------- | -------- | ------ | ---------- | ------------ | ----------- |
-| Q1 AND branch dropped            | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
-| Q2 orderBy inverted              | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
-| Q3 limit off-by-one              | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
-| Q4 related window drops last row | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
-| M1 rows commit, LMID skipped     | CAUGHT | CAUGHT | CAUGHT        | ·           | CAUGHT   | CAUGHT | ·          | CAUGHT       | n/r         |
-| M2 replay double-applies         | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | CAUGHT       | n/r         |
-| M3 rollback swallowed            | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
-| M4 LMID advances, no change row  | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | CAUGHT      |
-| L1 prune without floor raise     | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | ·            | n/r         |
-| L2 snapshot omits first row      | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | ·          | ·            | n/r         |
-| L3 diff omits first changed row  | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | CAUGHT     | ·            | n/r         |
-| O1 non-durable watermark         | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | ·            | n/r         |
-| O2 acks beyond the diff cap      | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | CAUGHT      |
-| P1 snapshot ignores visible()    | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | n/r         |
+Full-matrix run `2026-07-17T08-01-29-065Z` — every cell evaluated, all ten
+lanes green at baseline, every mutant caught by at least one lane.
 
-`n/r` = not run this pass. The capped-diff lane was run only against baseline,
-M4, and O2 (targeted single-mutant runs, `run-2026-07-16-capped-diff`); its
-other cells were not evaluated, so they claim no verdict. `·` = run and not
+| mutant                           | cargo  | smoke  | state-machine | metamorphic | eviction | sweep  | atomic-vis | exactly-once | permissions | capped-diff |
+| -------------------------------- | ------ | ------ | ------------- | ----------- | -------- | ------ | ---------- | ------------ | ----------- | ----------- |
+| Q1 AND branch dropped            | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | ·           | ·           |
+| Q2 orderBy inverted              | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | ·           | ·           |
+| Q3 limit off-by-one              | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | ·           | ·           |
+| Q4 related window drops last row | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | ·           | ·           |
+| M1 rows commit, LMID skipped     | CAUGHT | CAUGHT | CAUGHT        | ·           | CAUGHT   | CAUGHT | ·          | CAUGHT       | ·           | CAUGHT      |
+| M2 replay double-applies         | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | CAUGHT       | ·           | ·           |
+| M3 rollback swallowed            | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | CAUGHT       | ·           | ·           |
+| M4 LMID advances, no change row  | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | ·           | CAUGHT      |
+| L1 prune without floor raise     | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | ·            | ·           | ·           |
+| L2 snapshot omits first row      | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | ·          | ·            | ·           | ·           |
+| L3 diff omits first changed row  | CAUGHT | CAUGHT | ·             | ·           | CAUGHT   | CAUGHT | CAUGHT     | ·            | ·           | CAUGHT      |
+| O1 non-durable watermark         | CAUGHT | ·      | CAUGHT        | ·           | ·        | ·      | ·          | ·            | ·           | ·           |
+| O2 acks beyond the diff cap      | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | ·           | CAUGHT      |
+| P1 snapshot ignores visible()    | CAUGHT | ·      | ·             | ·           | ·        | ·      | ·          | ·            | CAUGHT      | ·           |
+
+The full run also confirmed the capped-diff lane catches M1 and L3 beyond its
+designed M4/O2 targets (a skipped finalize and a dropped first diff entry both
+break the effect-then-ack cut). A caution for future full runs: sweep lanes
+executed under an installed mutant write minimized divergence fixtures into
+`harness/regressions/sweep/v1/` — those are mutant-induced, tracked per mutant
+in the run directory's `*-untracked` files, and must be deleted, not committed. `·` = run and not
 caught; `CAUGHT` = run and caught.
 
 ## Findings, in order of importance
