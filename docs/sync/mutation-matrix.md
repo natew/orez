@@ -11,7 +11,7 @@ Run provenance: engine tree = main @ 261e27d merged with
 @ 19d9003. Six lanes from run `run-2026-07-16-v2`; the two consistency lanes
 from `run-2026-07-16-v3` after the seed fix. O1, M4, and O2 were re-run across
 all lanes after adding the engine-invariant tests in
-`run-2026-07-16-engine-invariants-v2`. All lanes were green at baseline in
+`run-2026-07-16-engine-invariants-v3`. All lanes were green at baseline in
 each cited run.
 
 Replay: `cd harness && bun scripts/mutation-matrix.ts` (clean crates/ tree
