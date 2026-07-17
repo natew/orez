@@ -55,7 +55,10 @@ describe('sweep pairwise coverage', () => {
 
     expect(SWEEP_COVERAGE_AXES).toHaveLength(9)
     expect(report.hit).toBe(36) // C(9, 2): one tuple hit per axis pair
-    expect(report.total).toBe(280)
+    // 280 with the null cursorValue pairs; 263 while
+    // SUPPRESS_NULL_START_VS_STOCK marks them unreachable (stock pin cannot
+    // serve null-anchored cursors — restore 280 when the pin advances)
+    expect(report.total).toBe(263)
     expect(report.percent).toBeGreaterThan(0)
     expect(report.percent).toBeLessThan(100)
     expect(report.missing).toEqual([...report.missing].sort())

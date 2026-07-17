@@ -64,6 +64,18 @@ function assignments(): AxisAssignment[] {
   return result
 }
 
+// stock zero-cache at the pinned version cannot serve null-anchored start
+// cursors: #6121 returns wrong results, and the IVM crashes the view-syncer
+// outright with "Bound should be set" (zql take.js) when edits flow through
+// a null-anchored pipeline (seen live: CI sweep seed 29546345438). the sweep
+// always compares against stock, so genSpec() suppresses the axis while the
+// pin predates the fixes, and coverage accounting must agree that those
+// pairs are unreachable. the axis stays fully exercised where stock is not
+// involved: the deterministic rust/ts differential and the metamorphic
+// startSuffix relation. DELETE this flag when the zero pin advances past
+// the upstream fixes.
+export const SUPPRESS_NULL_START_VS_STOCK = true
+
 // Coarse reachability constraints mirror genSpec()/genSub(). They describe
 // which axis combinations are possible, not the generator probabilities.
 function isReachable(assignment: AxisAssignment): boolean {
@@ -73,6 +85,7 @@ function isReachable(assignment: AxisAssignment): boolean {
   if (table !== 'task' && start !== 'none') return false
   if ((start === 'none') !== (order !== 'cursor')) return false
   if ((start === 'none') !== (cursorValue === 'none')) return false
+  if (SUPPRESS_NULL_START_VS_STOCK && cursorValue === 'null') return false
   if (table !== 'project' && related === 'plain') return false
   if (cardinality === 'one' && limit === 'set') return false
   return true

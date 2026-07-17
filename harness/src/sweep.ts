@@ -46,7 +46,10 @@ import {
   writeCorpusEntry,
 } from './spec-corpus.js'
 import { constructCount, shrinkSpec } from './spec-shrink.js'
-import { sweepPairwiseCoverage } from './sweep-coverage.js'
+import {
+  SUPPRESS_NULL_START_VS_STOCK,
+  sweepPairwiseCoverage,
+} from './sweep-coverage.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
@@ -264,6 +267,11 @@ function genSub(
   return sub
 }
 
+// tally of null-anchored start cursors the generator wanted but suppressed
+// vs the stock pin (see SUPPRESS_NULL_START_VS_STOCK) — printed at the end
+// so the narrowed coverage is never silent
+let nullStartSuppressed = 0
+
 function genSpec(): GenSpec {
   const table = pick(['project', 'task', 'member', 'user'] as const)
   const spec: GenSpec = { table }
@@ -278,7 +286,9 @@ function genSpec(): GenSpec {
   // shape and a nullable dueAt cursor so NULL ordering remains in the ordinary
   // differential corpus instead of being reachable only by metamorphic tests.
   if (table === 'task' && chance(0.25)) {
-    if (chance(0.35)) {
+    const wantNullAnchor = chance(0.35)
+    if (wantNullAnchor && SUPPRESS_NULL_START_VS_STOCK) nullStartSuppressed++
+    if (wantNullAnchor && !SUPPRESS_NULL_START_VS_STOCK) {
       const cursor = pick(SEED.task.filter((row) => row.dueAt === null))
       spec.orderBy = [
         ['dueAt', pick(['asc', 'desc'] as const)],
@@ -670,7 +680,6 @@ console.log(
 const [stock, other] = await Promise.all([startStockZero(), startAgainst(args.against!)])
 
 const failures: string[] = []
-const knownGaps: string[] = []
 try {
   const stockZero = stock.createClient('user-1')
   const otherZero = other.createClient('user-1')
@@ -700,18 +709,6 @@ try {
   // anti-vacuous (an inject run that shrinks nothing is a false green).
   let shrankEligible = false
 
-  // stock zero-cache at the pinned version returns wrong results for a start
-  // cursor anchored on a NULL-sorted row (upstream #6121, fixed upstream after
-  // the 1.7.0 pin; committed repro:
-  // regressions/known-gap-zql-6121-null-start-cursor.json). orez implements
-  // the post-fix semantics, so a cross-target divergence on that axis is the
-  // known upstream gap, not an orez failure: record the artifact, report it,
-  // keep the run green. DELETE this classifier when the zero pin advances
-  // past the fix — the axis then diffs at full strength again.
-  const isKnown6121Gap = (spec: GenSpec) =>
-    spec.start != null &&
-    (spec.orderBy ?? []).some(([column]) => spec.start!.row[column] === null)
-
   const compareAll = (phase: Phase, round: number) => {
     let diverged = 0
     for (let i = 0; i < stockViews.length; i++) {
@@ -720,24 +717,6 @@ try {
       const left = canonical(leftRows)
       const right = canonical(rightRows)
       if (left !== right) {
-        if (isKnown6121Gap(allSpecs[i]!)) {
-          const file = emitDivergence({
-            phase,
-            comparisonKind: 'cross-target',
-            round,
-            specIndex: i,
-            spec: allSpecs[i]!,
-            observedTarget: args.against!,
-            leftRows,
-            rightRows,
-            note: `known upstream gap #6121 (null-anchored start cursor) at ${phase} round ${round} spec ${i} vs ${args.against}`,
-            minimizationComplete: false,
-          })
-          knownGaps.push(
-            `[${phase} r${round}] spec ${i} diverged on the known #6121 axis (artifact ${file})`
-          )
-          continue
-        }
         diverged++
         const eligible = phase === 'hydrate' && round === 0
         if (eligible && pendingShrink === null) {
@@ -1050,11 +1029,10 @@ try {
   await Promise.allSettled([stock.close(), other.close()])
 }
 
-if (knownGaps.length > 0) {
+if (nullStartSuppressed > 0) {
   console.log(
-    `[sweep] ${knownGaps.length} divergences on the known #6121 axis (upstream, not orez):`
+    `[sweep] ${nullStartSuppressed} null-anchored start cursors suppressed (stock pin cannot serve them: #6121 + IVM "Bound should be set"; the deterministic differential and metamorphic startSuffix cover the axis)`
   )
-  for (const g of knownGaps) console.log(g)
 }
 if (failures.length > 0) {
   console.error(`[sweep] FAIL seed=${SWEEP_SEED} — ${failures.length} failures:`)
