@@ -314,17 +314,19 @@ list-append --consistency-models serializable`, failing the job on `false`,
    `allProjects` completion stall, which is in tension with the same document's
    green summary table. Treat the CF query-diff lane as not fully settled.
 8. **A bounded longevity soak is now a gated nightly lane; hours-long
-   longevity and larger load grids are not.** `harness/src/longevity.ts` runs
-   ~25 minutes of sustained `rust-local` load (six clients, three writers) with
-   hard pass/fail invariants enforced at every 60-second checkpoint — no client
-   diverges from the SQL oracle, the native process RSS stays under a fixed
-   ceiling with large headroom, and the server-confirmed watermark never
-   decreases — plus a final convergence barrier (unique sentinel, every client
-   and a fresh late client equal the authority) that proves zero lost writes. It
-   is wired into `.github/workflows/nightly.yml` as its own `longevity-soak`
-   job, uploads its samples, and is proved able to fail: the divergence
-   invariant goes red under engine mutant M1 and the RSS ceiling goes red
-   mid-soak under a lowered bound (see `docs/sync/nemesis-red-proof.md`). PR CI
-   is untouched. Still historical
-   single runs, not gated: multi-hour longevity, the larger bench/load grids in
-   `harness/scripts/nightly.sh`, and the CF-side memory soaks.
+   longevity and larger load grids are not.** `harness/src/longevity.ts` seeds a
+   fixed 1000-row pool and runs ~25 minutes of sustained `rust-local` update load
+   (six clients, three writers issuing `setRank` updates) with hard pass/fail
+   invariants enforced at every 60-second checkpoint — every client's `(id, rank)`
+   view equals the SQL oracle (a lost or stale update is caught, not just a lost
+   row), the native process RSS stays under a fixed ceiling with large headroom
+   (the bounded working set keeps it flat, so a climb is a real leak), and the
+   server-confirmed watermark never decreases — plus a final convergence barrier
+   (unique sentinel update, every client and a fresh late client equal the
+   authority) that proves zero lost writes. It is wired into
+   `.github/workflows/nightly.yml` as its own `longevity-soak` job, uploads its
+   samples, and is proved able to fail: engine mutant M1's skipped LMID strands
+   the checkpoint drain, and the RSS ceiling goes red mid-soak under a lowered
+   bound (see `docs/sync/nemesis-red-proof.md`). PR CI is untouched. Still
+   historical single runs, not gated: multi-hour longevity, the larger bench/load
+   grids in `harness/scripts/nightly.sh`, and the CF-side memory soaks.
