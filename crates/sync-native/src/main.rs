@@ -6,7 +6,8 @@
 //
 // usage: sync-native --data-dir <dir> --port <port>
 //                    [--admin-token <token>] [--allow-origin <origin>]
-//                    [--retain-changes <n>] [--visible] [--query-aware]
+//                    [--retain-changes <n>] [--max-change-rows <n>]
+//                    [--visible] [--query-aware]
 //
 // routes (namespace = one sqlite file under --data-dir):
 //   POST /<ns>/pull, /<ns>/push        the http-pull dialect (engine)
@@ -35,6 +36,7 @@ struct CliConfig {
     data_dir: PathBuf,
     port: u16,
     retain_changes: i64,
+    max_change_rows: usize,
     visible: bool,
     query_aware: bool,
     admin_token: Option<String>,
@@ -45,6 +47,7 @@ fn parse_args() -> CliConfig {
     let mut data_dir: Option<PathBuf> = None;
     let mut port: Option<u16> = None;
     let mut retain_changes: i64 = 4096;
+    let mut max_change_rows: usize = sync_core::pull::Caps::default().max_change_rows;
     let mut visible = false;
     let mut query_aware = false;
     let mut admin_token = None;
@@ -68,6 +71,11 @@ fn parse_args() -> CliConfig {
                     .parse()
                     .expect("--retain-changes must be an integer");
             }
+            "--max-change-rows" => {
+                max_change_rows = expect_value(&mut args, "--max-change-rows")
+                    .parse()
+                    .expect("--max-change-rows must be a non-negative integer");
+            }
             "--visible" => visible = true,
             "--query-aware" => query_aware = true,
             "--admin-token" => {
@@ -84,6 +92,7 @@ fn parse_args() -> CliConfig {
         data_dir: data_dir.expect("--data-dir is required"),
         port: port.expect("--port is required"),
         retain_changes,
+        max_change_rows,
         visible,
         query_aware,
         admin_token,
@@ -140,6 +149,7 @@ async fn main() {
         visible,
         authenticate,
         retain_changes: cli.retain_changes,
+        max_change_rows: cli.max_change_rows,
         visibility_enabled: cli.visible,
         query_aware: cli.query_aware,
         query_resolution: None,
