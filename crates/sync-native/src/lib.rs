@@ -208,6 +208,13 @@ pub struct SyncNativeConfig {
     /// pruned floor gets a full snapshot on its next pull. Default: 4096.
     pub retain_changes: i64,
 
+    /// Baseline-pull change-row cap. One diff response ships at most this many
+    /// change rows, cutting at a row boundary before pk dedup; the remainder
+    /// ships on the next poll. A small cap forces a mutation's row effects and
+    /// its lmid ack onto separate pulls, exercising the capped-diff cut path.
+    /// Use [`sync_core::Caps::default().max_change_rows`] for production budgets.
+    pub max_change_rows: usize,
+
     /// Whether visibility filtering is active at boot. When false the
     /// visibility callback is ignored. Can be toggled at runtime via the
     /// admin route.
@@ -275,6 +282,7 @@ impl SyncNativeHost {
         let ctx = Arc::new(EngineContext::new(
             config.tables,
             config.retain_changes,
+            config.max_change_rows,
             config.visibility_enabled,
             config.query_aware,
             config.initialize,

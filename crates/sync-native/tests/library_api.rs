@@ -124,6 +124,7 @@ fn custom_config_with_lease(admin_tx_lease: std::time::Duration) -> SyncNativeCo
         visible: None,
         authenticate: custom_auth(),
         retain_changes: 4096,
+        max_change_rows: sync_core::Caps::default().max_change_rows,
         visibility_enabled: false,
         query_aware: false,
         query_resolution: None,
@@ -1875,6 +1876,7 @@ async fn fixture_config_still_works() {
             value.strip_prefix("Bearer token-").map(str::to_string)
         }),
         retain_changes: 4096,
+        max_change_rows: sync_core::Caps::default().max_change_rows,
         visibility_enabled: false,
         query_aware: false,
         query_resolution: None,

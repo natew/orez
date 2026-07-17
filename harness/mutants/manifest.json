@@ -54,7 +54,7 @@
       "property": "mutator",
       "file": "crates/sync-core/src/store.rs",
       "description": "advance_lmid updates the counter but appends no lmid change row: acks never ride diffs (invariants 3, 4)",
-      "expectedLanes": ["cargo-sync-core", "smoke"]
+      "expectedLanes": ["cargo-sync-core", "capped-diff"]
     },
     {
       "id": "L1-prune-no-floor",
@@ -89,7 +89,7 @@
       "property": "ordering",
       "file": "crates/sync-core/src/pull.rs",
       "description": "capped diffs include lmid acks from beyond the cut: an ack can precede its row effects (invariant 3)",
-      "expectedLanes": ["cargo-sync-core"]
+      "expectedLanes": ["cargo-sync-core", "capped-diff"]
     },
     {
       "id": "P1-snapshot-visibility-ignore",

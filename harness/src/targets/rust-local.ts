@@ -92,6 +92,10 @@ async function processExit(child: ChildProcess, timeoutMs = 10_000) {
 export async function startRustLocal(opts?: {
   pullIntervalMs?: number
   retainChanges?: number
+  // baseline-pull change-row cap (--max-change-rows). small values (1-2) cut a
+  // mutation's row effects and its lmid ack onto separate pulls, exercising the
+  // capped-diff path a default host never reaches.
+  maxChangeRows?: number
   visible?: boolean
   queryAware?: boolean
   onPull?: (observation: HttpPullObservation) => void
@@ -110,6 +114,8 @@ export async function startRustLocal(opts?: {
   const spawnArgs = ['--data-dir', directory, '--port', String(port)]
   if (opts?.retainChanges !== undefined)
     spawnArgs.push('--retain-changes', String(opts.retainChanges))
+  if (opts?.maxChangeRows !== undefined)
+    spawnArgs.push('--max-change-rows', String(opts.maxChangeRows))
   if (opts?.visible) spawnArgs.push('--visible')
   if (opts?.queryAware) spawnArgs.push('--query-aware')
 
