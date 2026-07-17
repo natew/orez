@@ -50,18 +50,12 @@ against `rust-local`.
    `cargo test -p sync-core` now catches it. Every system lane still passes the
    mutant because none empties the log and restarts over the same store.
 
-2. **Nine mutants are caught only by `cargo test -p sync-core`** (Q1–Q4,
-   M3, M4, O1, O2, P1). The cargo suite includes hand-written query tests and
+2. **Seven mutants are caught only by `cargo test -p sync-core`** (Q1–Q4,
+   M4, O1, O2). The cargo suite includes hand-written query tests and
    the deterministic TS-oracle differentials. It is the single load-bearing
-   net for query shape correctness, rollback semantics, durable watermark
-   retention, and capped-diff ordering. No system lane duplicates it.
-   Specific system-level blind spots worth closing:
-   - **M3 (swallowed rollback):** neither consistency lane issues an
-     app-error mutation, so rollback-vs-commit is never checked against a
-     live target. Add a rejected mutation to the exactly-once workload.
-   - **P1 (visibility ignored):** no rust-local lane configures a
-     `visible()` policy; `permissions.ts` runs the TypeScript core only.
-     Port a permissions workload to rust-local.
+   net for query shape correctness, durable watermark retention, and
+   capped-diff ordering. No system lane duplicates it. Remaining
+   system-level blind spots:
    - **M4 / O2:** deterministic cargo tests now use
      `Caps { max_change_rows: 1, ... }` to cut between effects and LMIDs and to
      prove an LMID-only rejected push still advances the cookie. No system lane
@@ -69,6 +63,18 @@ against `rust-local`.
    - **Q1–Q4:** sweep at 5 rounds / seed 42 never trips on pure query-shape
      bugs; the deterministic oracle (which shrank both of its red-proof
      mutants to minimal traces) is the effective generative net.
+
+   Two former blind spots CLOSED at the system level (run `verify-d`,
+   2026-07-16, after `test/coverage-lane-gaps`):
+   - **M3 (swallowed rollback)** is now CAUGHT by the exactly-once lane: the
+     workload issues a deterministically rejected mutation and the checker
+     requires zero row effects plus the app-error LMID advance ("after
+     authority does not show one application and LMID 2").
+   - **P1 (visibility ignored)** is now CAUGHT by `permissions.ts --target
+     rust-local`: the native fixture host configures a `visible()` policy
+     and the lane fails on the leaked row ("owner projects: expected
+     [perm-project], got [perm-foreign, perm-project]"). The permissions
+     lane is registered in the matrix runner.
 
 3. **The mutator/loss core is genuinely well-covered.** M1 (rows without
    LMID) went red in six independent lanes; L2/L3 (dropped snapshot/diff
