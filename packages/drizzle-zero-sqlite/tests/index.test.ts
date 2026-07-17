@@ -87,7 +87,9 @@ describe('drizzleZeroConfig', () => {
     expect(source).toContain("import { createBuilder, type Row } from '@rocicorp/zero'")
     expect(source).toContain("import { drizzleZeroConfig } from 'drizzle-zero-sqlite'")
     expect(source).toContain('import * as drizzleSchema from "./drizzle-schema.js"')
-    expect(source).toContain('export const zeroSchema = drizzleZeroConfig(drizzleSchema)')
+    expect(source).toContain(
+      'export const zeroSchema = drizzleZeroConfig(drizzleSchema, { suppressDefaultsWarning: true })'
+    )
     expect(source).toContain(
       `export type Posts = Row<(typeof zeroSchema)['tables']["posts"]>`
     )
