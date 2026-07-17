@@ -28,8 +28,7 @@ jobs:
           toolchain: 1.94.0
           targets: wasm32-unknown-unknown
 
-      - name: install wasm-pack
-        run: cargo install wasm-pack --version 0.14.0 --locked
+      - uses: ./.github/actions/setup-wasm-pack
 
       - run: bun install --frozen-lockfile
 
@@ -168,8 +167,7 @@ jobs:
           toolchain: 1.94.0
           targets: wasm32-unknown-unknown
 
-      - name: install wasm-pack
-        run: cargo install wasm-pack --version 0.14.0 --locked
+      - uses: ./.github/actions/setup-wasm-pack
 
       - run: bun install --frozen-lockfile
 
@@ -200,8 +198,7 @@ jobs:
           toolchain: 1.94.0
           targets: wasm32-unknown-unknown
 
-      - name: install wasm-pack
-        run: cargo install wasm-pack --version 0.14.0 --locked
+      - uses: ./.github/actions/setup-wasm-pack
 
       - run: bun install --frozen-lockfile
 
@@ -236,8 +233,7 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
-      - name: install wasm-pack
-        run: cargo install wasm-pack --version 0.14.0 --locked
+      - uses: ./.github/actions/setup-wasm-pack
 
       - name: cache cargo
         uses: actions/cache@v4
@@ -537,8 +533,7 @@ jobs:
           restore-keys: |
             rust-${{ runner.os }}-
 
-      - name: install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - uses: ./.github/actions/setup-wasm-pack
 
       - run: bun install --frozen-lockfile
 

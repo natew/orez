@@ -80,8 +80,7 @@ jobs:
           key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
           restore-keys: |
             rust-${{ runner.os }}-
-      - name: install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - uses: ./.github/actions/setup-wasm-pack
       - run: bun install --frozen-lockfile
       - name: sync-cf-host install
         run: cd packages/sync-cf-host && bun install
