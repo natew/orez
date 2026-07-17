@@ -28,6 +28,7 @@ const { values: args } = parseArgs({
     lanes: { type: 'string' },
     'baseline-only': { type: 'boolean', default: false },
     'run-id': { type: 'string' },
+    gate: { type: 'boolean', default: false },
   },
 })
 
@@ -296,4 +297,31 @@ console.log(`[matrix] done -> ${resultsDir}`)
 const uncaught = matrix.rows.filter((r) => r.build === 'pass' && r.caughtBy.length === 0)
 if (uncaught.length > 0) {
   console.log(`[matrix] UNCAUGHT mutants: ${uncaught.map((r) => r.mutant).join(', ')}`)
+}
+
+// --gate: fail when coverage regresses against harness/mutants/expected.json.
+// a mutant expected caught that nothing catches is a hole that OPENED; a
+// mutant expected uncaught that is now caught means expected.json (and the
+// matrix doc) should be updated to ratchet the new coverage in.
+if (args.gate) {
+  const expected: { caught: Record<string, boolean> } = JSON.parse(
+    readFileSync(join(MUTANTS_DIR, 'expected.json'), 'utf8')
+  )
+  const regressions: string[] = []
+  const improvements: string[] = []
+  for (const row of matrix.rows) {
+    if (row.build !== 'pass') continue
+    const want = expected.caught[row.mutant]
+    if (want === undefined) continue
+    const got = row.caughtBy.length > 0
+    if (want && !got) regressions.push(row.mutant)
+    if (!want && got) improvements.push(row.mutant)
+  }
+  if (improvements.length > 0) {
+    console.log(`[matrix] coverage IMPROVED (update expected.json): ${improvements.join(', ')}`)
+  }
+  if (regressions.length > 0) {
+    console.error(`[matrix] GATE FAILED — coverage regressed: ${regressions.join(', ')}`)
+    process.exit(1)
+  }
 }

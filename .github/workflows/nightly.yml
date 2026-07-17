@@ -1,0 +1,155 @@
+# nightly heavy lanes in auditable CI (consistency-hardening plan item 7).
+# heavier than per-PR on purpose: bigger sweeps, longer state machines, the
+# consistency lanes on fresh seeds, and the mutation-matrix coverage gate.
+# every job uploads its artifacts so evidence is reviewable, not a green dot.
+# no external credentials: rust-cf runs against a local workerd via
+# `wrangler dev --local`, exactly like the per-PR rust job.
+name: nightly
+
+on:
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  rust-local-heavy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+      - name: harness install
+        run: cd harness && bun install
+      - name: build engine
+        run: cargo build --release -p sync-native
+
+      - name: consistency lanes, fresh seeds
+        run: |
+          cd harness
+          bun src/atomic-visibility-lane.ts --target rust-local --seed nightly-${{ github.run_id }}
+          bun src/exactly-once-lmid-lane.ts --target rust-local --seed nightly-${{ github.run_id }}
+
+      - name: rust-local heavy sweep and state machines
+        run: |
+          cd harness
+          bun src/smoke.ts --target rust-local --clients 50 --projects 5
+          bun src/sweep.ts --against rust-local --rounds 80 --seed ${{ github.run_id }}
+          bun src/state-machine.ts --against rust-local --seed 7 --steps 80
+          bun src/state-machine.ts --against rust-local --seed ${{ github.run_id }} --steps 80
+
+      - name: upload rust-local nightly evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-rust-local-${{ github.run_id }}
+          path: |
+            harness/regressions/
+            harness/results/
+          if-no-files-found: warn
+
+  rust-cf-heavy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+      - name: install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - run: bun install --frozen-lockfile
+      - name: sync-cf-host install
+        run: cd packages/sync-cf-host && bun install
+      - name: harness install
+        run: cd harness && bun install
+
+      - name: rust-cf heavy lanes against local workerd
+        env:
+          ZHARNESS_RUST_CF_WORKER: http://127.0.0.1:8998
+          ZHARNESS_CF_ADMIN_KEY: nightly-rust-cf-admin
+        run: |
+          cd packages/sync-cf-host
+          bun run build:wasm
+          bunx wrangler dev --config wrangler.toml --local --var ADMIN_KEY:nightly-rust-cf-admin --port 8998 --log-level error --show-interactive-dev-session false > /tmp/nightly-rust-cf-worker.log 2>&1 &
+          worker_pid=$!
+          trap 'kill "$worker_pid"; wait "$worker_pid" || true' EXIT
+          for attempt in $(seq 1 150); do
+            if curl --fail --silent http://127.0.0.1:8998 > /dev/null; then break; fi
+            if [ "$attempt" = 150 ]; then cat /tmp/nightly-rust-cf-worker.log; exit 1; fi
+            sleep 0.1
+          done
+          cd ../../harness
+          bun src/shapes.ts --against rust-cf
+          bun src/sweep.ts --against rust-cf --rounds 80 --seed ${{ github.run_id }}
+          bun src/state-machine.ts --against rust-cf --seed 7 --steps 80
+          bun src/state-machine.ts --against rust-cf --seed ${{ github.run_id }} --steps 80
+
+      - name: upload rust-cf nightly evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-rust-cf-${{ github.run_id }}
+          path: |
+            harness/regressions/
+            harness/results/
+          if-no-files-found: warn
+
+  mutation-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+      - name: harness install
+        run: cd harness && bun install
+
+      # the coverage ratchet: fails when a mutant the committed matrix lists
+      # as caught goes uncaught (see harness/mutants/expected.json).
+      - name: mutation matrix gate
+        run: cd harness && bun scripts/mutation-matrix.ts --gate --run-id nightly-${{ github.run_id }}
+
+      - name: upload matrix results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-mutation-matrix-${{ github.run_id }}
+          path: harness/results/mutation-matrix/
+          if-no-files-found: error
