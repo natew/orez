@@ -323,8 +323,8 @@ list-append --consistency-models serializable`, failing the job on `false`,
    and a fresh late client equal the authority) that proves zero lost writes. It
    is wired into `.github/workflows/nightly.yml` as its own `longevity-soak`
    job, uploads its samples, and is proved able to fail: the divergence
-   invariant goes red under engine mutant M1 (`client 0 diverged: 253 rows vs
-   oracle 30`) and the RSS ceiling goes red mid-soak under a lowered bound (see
-   `docs/sync/nemesis-red-proof.md`). PR CI is untouched. Still historical
+   invariant goes red under engine mutant M1 and the RSS ceiling goes red
+   mid-soak under a lowered bound (see `docs/sync/nemesis-red-proof.md`). PR CI
+   is untouched. Still historical
    single runs, not gated: multi-hour longevity, the larger bench/load grids in
    `harness/scripts/nightly.sh`, and the CF-side memory soaks.

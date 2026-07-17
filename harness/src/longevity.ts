@@ -45,7 +45,8 @@ const { values: args } = parseArgs({
   },
 })
 
-if (args.target !== 'rust-local') throw new Error('longevity soak target must be rust-local')
+if (args.target !== 'rust-local')
+  throw new Error('longevity soak target must be rust-local')
 const durationMs = Math.round(Number(args['duration-min']) * 60_000)
 const checkpointMs = Math.round(Number(args['checkpoint-sec']) * 1000)
 const clients = Number(args.clients)
@@ -93,7 +94,11 @@ function watch(client: FixtureZero, projectIDs: string[]): View {
   }
 }
 
-async function eventually(check: () => void | Promise<void>, label: string, timeoutMs = 60_000) {
+async function eventually(
+  check: () => void | Promise<void>,
+  label: string,
+  timeoutMs = 60_000
+) {
   const started = Date.now()
   let lastError: unknown
   while (Date.now() - started < timeoutMs) {
@@ -112,7 +117,8 @@ function rssMb(pid: number): number {
   // ps reports RSS in KiB on macOS and Linux.
   const out = execFileSync('ps', ['-o', 'rss=', '-p', String(pid)], { encoding: 'utf8' })
   const kib = Number(out.trim())
-  if (!Number.isFinite(kib) || kib <= 0) throw new Error(`could not read RSS for pid ${pid}`)
+  if (!Number.isFinite(kib) || kib <= 0)
+    throw new Error(`could not read RSS for pid ${pid}`)
   return Math.round(kib / 1024)
 }
 
@@ -138,7 +144,8 @@ async function servedWatermark(label: string): Promise<bigint> {
     }),
     signal: AbortSignal.timeout(10_000),
   })
-  if (!response.ok) throw new Error(`watermark probe (${label}) pull failed ${response.status}`)
+  if (!response.ok)
+    throw new Error(`watermark probe (${label}) pull failed ${response.status}`)
   const body = (await response.json()) as { cookie?: number | string | null }
   return BigInt(body.cookie ?? 0)
 }
@@ -175,7 +182,8 @@ try {
     views.push(watch(zero, projectPool))
   }
   await eventually(() => {
-    for (const view of views) if (!view.snapshot().complete) throw new Error('not hydrated')
+    for (const view of views)
+      if (!view.snapshot().complete) throw new Error('not hydrated')
   }, 'hydration')
 
   const baselineRss = rssMb(target.pid)
@@ -183,7 +191,9 @@ try {
     `[longevity] start pid=${target.pid} baselineRss=${baselineRss}MB ceiling=${rssCeilingMb}MB clients=${clients} writers=${writers} rate=${rate}/s duration=${Math.round(durationMs / 60_000)}min`
   )
   if (baselineRss > rssCeilingMb)
-    throw new Error(`baseline RSS ${baselineRss}MB already exceeds ceiling ${rssCeilingMb}MB`)
+    throw new Error(
+      `baseline RSS ${baselineRss}MB already exceeds ceiling ${rssCeilingMb}MB`
+    )
 
   // writers push tasks into the shared pool for the whole duration; acks are
   // tracked so the final barrier can prove every acknowledged write survived.
@@ -219,14 +229,17 @@ try {
       )
       await request.client
       const elapsed = Date.now() - started
-      if (elapsed < intervalMs) await new Promise((r) => setTimeout(r, intervalMs - elapsed))
+      if (elapsed < intervalMs)
+        await new Promise((r) => setTimeout(r, intervalMs - elapsed))
     }
   })
 
   // checkpoint loop: enforce the invariants on a cadence until the duration ends.
   let prevWatermark = await servedWatermark('start')
   while (Date.now() - t0 < durationMs) {
-    await new Promise((r) => setTimeout(r, Math.min(checkpointMs, durationMs - (Date.now() - t0))))
+    await new Promise((r) =>
+      setTimeout(r, Math.min(checkpointMs, durationMs - (Date.now() - t0)))
+    )
     if (Date.now() - t0 >= durationMs) break
 
     // no client divergence: quiesce the workload so this is a real convergence
@@ -234,25 +247,37 @@ try {
     // drain every outstanding ack, then require every client to equal the oracle
     // exactly. a persistent gap (a lost or dropped row) fails the checkpoint.
     paused = true
-    if (mutationErrors > 0) throw new Error(`${mutationErrors} mutation server ack(s) failed`)
-    await eventually(() => {
-      if (acked.size + mutationErrors < issued.size)
-        throw new Error(`draining ${issued.size - acked.size - mutationErrors} in-flight writes`)
-    }, `checkpoint drain at ${Math.round((Date.now() - t0) / 1000)}s`, 30_000)
-    if (mutationErrors > 0) throw new Error(`${mutationErrors} mutation server ack(s) failed`)
-    let clientRows = 0
-    await eventually(async () => {
-      const want = await oracleIDs(projectPool)
-      for (const [slot, view] of views.entries()) {
-        const got = view.snapshot()
-        if (!got.complete) throw new Error(`client ${slot} incomplete`)
-        if (canonical(got.ids) !== canonical(want))
+    if (mutationErrors > 0)
+      throw new Error(`${mutationErrors} mutation server ack(s) failed`)
+    await eventually(
+      () => {
+        if (acked.size + mutationErrors < issued.size)
           throw new Error(
-            `client ${slot} diverged: ${got.ids.length} rows vs oracle ${want.length}`
+            `draining ${issued.size - acked.size - mutationErrors} in-flight writes`
           )
-      }
-      clientRows = want.length
-    }, `checkpoint divergence at ${Math.round((Date.now() - t0) / 1000)}s`, 30_000)
+      },
+      `checkpoint drain at ${Math.round((Date.now() - t0) / 1000)}s`,
+      30_000
+    )
+    if (mutationErrors > 0)
+      throw new Error(`${mutationErrors} mutation server ack(s) failed`)
+    let clientRows = 0
+    await eventually(
+      async () => {
+        const want = await oracleIDs(projectPool)
+        for (const [slot, view] of views.entries()) {
+          const got = view.snapshot()
+          if (!got.complete) throw new Error(`client ${slot} incomplete`)
+          if (canonical(got.ids) !== canonical(want))
+            throw new Error(
+              `client ${slot} diverged: ${got.ids.length} rows vs oracle ${want.length}`
+            )
+        }
+        clientRows = want.length
+      },
+      `checkpoint divergence at ${Math.round((Date.now() - t0) / 1000)}s`,
+      30_000
+    )
     paused = false
 
     // memory ceiling.
@@ -282,7 +307,8 @@ try {
   // stop the workload and drain outstanding acks before the barrier.
   stop = true
   await Promise.all(writerLoops)
-  if (mutationErrors > 0) throw new Error(`${mutationErrors} mutation server ack(s) failed`)
+  if (mutationErrors > 0)
+    throw new Error(`${mutationErrors} mutation server ack(s) failed`)
 
   // final barrier: a unique sentinel commit after every tracked write, then wait
   // until the oracle holds every acknowledged write plus the sentinel and every
@@ -303,29 +329,39 @@ try {
     throw new Error('sentinel mutation did not succeed')
   acked.add(sentinelID)
 
-  await eventually(async () => {
-    const oracle = new Set(await oracleIDs(projectPool))
-    for (const id of acked) if (!oracle.has(id)) throw new Error(`lost write ${id} missing from oracle`)
-    const want = [...oracle].sort()
-    for (const [slot, view] of views.entries()) {
-      const got = view.snapshot()
-      if (!got.complete) throw new Error(`barrier: client ${slot} incomplete`)
-      if (!got.ids.includes(sentinelID)) throw new Error(`barrier: client ${slot} missing sentinel`)
-      if (canonical(got.ids) !== canonical(want))
-        throw new Error(`barrier: client ${slot} diverged from oracle`)
-    }
-  }, 'final convergence barrier', 120_000)
+  await eventually(
+    async () => {
+      const oracle = new Set(await oracleIDs(projectPool))
+      for (const id of acked)
+        if (!oracle.has(id)) throw new Error(`lost write ${id} missing from oracle`)
+      const want = [...oracle].sort()
+      for (const [slot, view] of views.entries()) {
+        const got = view.snapshot()
+        if (!got.complete) throw new Error(`barrier: client ${slot} incomplete`)
+        if (!got.ids.includes(sentinelID))
+          throw new Error(`barrier: client ${slot} missing sentinel`)
+        if (canonical(got.ids) !== canonical(want))
+          throw new Error(`barrier: client ${slot} diverged from oracle`)
+      }
+    },
+    'final convergence barrier',
+    120_000
+  )
 
   // fresh late client must equal the authority too.
   const late = target.createClient('longevity-late')
   const lateView = watch(late, projectPool)
-  await eventually(async () => {
-    const want = await oracleIDs(projectPool)
-    const got = lateView.snapshot()
-    if (!got.complete) throw new Error('late client incomplete')
-    if (!got.ids.includes(sentinelID)) throw new Error('late client missing sentinel')
-    if (canonical(got.ids) !== canonical(want)) throw new Error('late client diverged')
-  }, 'fresh late-client equality', 60_000)
+  await eventually(
+    async () => {
+      const want = await oracleIDs(projectPool)
+      const got = lateView.snapshot()
+      if (!got.complete) throw new Error('late client incomplete')
+      if (!got.ids.includes(sentinelID)) throw new Error('late client missing sentinel')
+      if (canonical(got.ids) !== canonical(want)) throw new Error('late client diverged')
+    },
+    'fresh late-client equality',
+    60_000
+  )
   lateView.destroy()
 
   const oracleFinal = await oracleIDs(projectPool)
@@ -349,7 +385,10 @@ try {
   }
   const resultsDir = join(import.meta.dirname, '..', 'results')
   mkdirSync(resultsDir, { recursive: true })
-  writeFileSync(join(resultsDir, 'longevity-rust-local.json'), JSON.stringify(result, null, 2))
+  writeFileSync(
+    join(resultsDir, 'longevity-rust-local.json'),
+    JSON.stringify(result, null, 2)
+  )
   console.log(`[longevity] ${JSON.stringify({ ...result, samples: undefined })}`)
   console.log(
     `[longevity] PASS rust-local: ${checkpoints.length} checkpoints, ${issued.size} writes, peak RSS ${result.peakRssMb}MB <= ${rssCeilingMb}MB, watermark monotonic, zero lost writes`
