@@ -63,9 +63,7 @@
       "durationMs": null,
       "whatItProves": "No CI-qualified claim is published yet. When green, this suite covers cookies, patches, mutation IDs, retention, query membership, permissions, and model invariants at the recorded SHA.",
       "whatItDoesNotProve": "It does not prove HTTP host lifecycle, workerd behavior, production capacity, or application-specific schemas and policies.",
-      "commands": [
-        "cargo test --workspace"
-      ],
+      "commands": ["cargo test --workspace"],
       "logsUrl": null,
       "artifactsUrl": null
     },

@@ -216,6 +216,7 @@ async fn main() {
         visible: None,
         authenticate,
         retain_changes: cfg.retain_changes,
+        max_change_rows: sync_core::pull::Caps::default().max_change_rows,
         visibility_enabled: cfg.visibility_enabled,
         query_aware: cfg.query_aware,
         query_resolution: None,

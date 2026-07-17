@@ -246,9 +246,9 @@ State this plainly rather than implying blanket coverage.
    changes, and multi-table writes, including replacing a query's permission
    transform in place — alongside the baseline put/del/reject/upstream/pull/
    invalidate ops, and shrinks failures to minimal traces. What it feeds the
-   engine are *already-transformed* ASTs: the computation of a transform from a
+   engine are _already-transformed_ ASTs: the computation of a transform from a
    policy is proven by the permissions lane (`permissions.ts --target
-   rust-local`, with a `visible()` policy and a red-proof against mutant P1)
+rust-local`, with a `visible()` policy and a red-proof against mutant P1)
    and the live `query-diff.ts` comparison, not by the deterministic oracle.
 2. **`sync-wasm` is covered at its boundary, not exhaustively.** Three Node
    wasm tests drive a real SQLite adapter through the exported push, pull,
@@ -268,7 +268,7 @@ State this plainly rather than implying blanket coverage.
    `rust-local` CI job records the atomic-visibility lane's history, then
    `scripts/elle/check-history.sh` projects it and runs the pinned elle-cli
    0.1.9 standalone jar (verified by SHA-256, Java 21) with `--model
-   list-append --consistency-models serializable`, failing the job on `false`,
+list-append --consistency-models serializable`, failing the job on `false`,
    `unknown`, or malformed output. `projectElleListAppend`
    (`src/consistency/history.ts`) projects every event carrying list-append
    micro-ops (the atomic-visibility lane's `read` and `mutation` kinds, not just

@@ -180,8 +180,9 @@ function generateTrace(): Operation[] {
     { kind: 'prune', epoch: 0 },
     // empty the change log to the head and reopen the same sqlite file: the
     // served cookie must not regress (mutant O1). no other system lane empties
-    // the log AND restarts over the same store.
-    { kind: 'fullPruneRestart' },
+    // the log AND restarts over the same store. the probe drives the rust-local
+    // admin route, so the rust-cf lifecycle schedule does not generate it.
+    ...(args.against === 'rust-local' ? [{ kind: 'fullPruneRestart' } as const] : []),
     { kind: 'serverRestart' },
     { kind: 'clientRestart' },
     { kind: 'desire', slot: 1, projectIDs: ['p2'] },
