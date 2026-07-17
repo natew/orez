@@ -71,7 +71,7 @@ against `rust-local`.
      requires zero row effects plus the app-error LMID advance ("after
      authority does not show one application and LMID 2").
    - **P1 (visibility ignored)** is now CAUGHT by `permissions.ts --target
-     rust-local`: the native fixture host configures a `visible()` policy
+rust-local`: the native fixture host configures a `visible()` policy
      and the lane fails on the leaked row ("owner projects: expected
      [perm-project], got [perm-foreign, perm-project]"). The permissions
      lane is registered in the matrix runner.
