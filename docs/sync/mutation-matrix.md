@@ -9,7 +9,10 @@ output, not just its exit code (see "vacuity incident" below for why).
 Run provenance: engine tree = main @ 261e27d merged with
 `test/wire-consistency-lanes` @ ce43931 and `test/query-differential-oracle`
 @ 19d9003. Six lanes from run `run-2026-07-16-v2`; the two consistency lanes
-from `run-2026-07-16-v3` after the seed fix. All lanes green at baseline.
+from `run-2026-07-16-v3` after the seed fix. O1, M4, and O2 were re-run across
+all lanes after adding the engine-invariant tests in
+`run-2026-07-16-engine-invariants-v2`. All lanes were green at baseline in
+each cited run.
 
 Replay: `cd harness && bun scripts/mutation-matrix.ts` (clean crates/ tree
 required; ~35 min).
@@ -34,34 +37,35 @@ against `rust-local`.
 | L1 prune without floor raise | CAUGHT | · | CAUGHT | · | · | · | · | · |
 | L2 snapshot omits first row | CAUGHT | CAUGHT | · | · | CAUGHT | CAUGHT | · | · |
 | L3 diff omits first changed row | CAUGHT | CAUGHT | · | · | CAUGHT | CAUGHT | CAUGHT | · |
-| O1 non-durable watermark | **·** | **·** | **·** | **·** | **·** | **·** | **·** | **·** |
+| O1 non-durable watermark | CAUGHT | · | · | · | · | · | · | · |
 | O2 acks beyond the diff cap | CAUGHT | · | · | · | · | · | · | · |
 | P1 snapshot ignores visible() | CAUGHT | · | · | · | · | · | · | · |
 
 ## Findings, in order of importance
 
-1. **O1 is caught by nothing.** Dropping the durable high-water from
-   `store::watermark` (invariant 7: the cookie never regresses even if the
-   change log is emptied) passes every lane, including the cargo suite. No
-   test empties or truncates the log in a way that exposes it. Close this
-   with a cargo invariant test (watermark monotonic across prune + restart
-   over the same file) and a state-machine step that exercises the durable
-   high-water path.
+1. **The O1 cargo hole is closed; system lanes still miss it.** The dedicated
+   engine-invariant test advances the watermark, fully prunes the change log,
+   reopens the same SQLite file, and requires the durable high-water to keep
+   the cookie monotonic. O1 regresses the reopened watermark from 1 to 0, so
+   `cargo test -p sync-core` now catches it. Every system lane still passes the
+   mutant because none empties the log and restarts over the same store.
 
-2. **Seven mutants are caught only by `cargo test -p sync-core`** (Q1–Q4,
-   M3, M4, O2, P1). The cargo suite — hand-written query tests plus the
-   deterministic TS-oracle differentials — is the single load-bearing net for
-   query shape correctness, rollback semantics, and capped-diff ordering. No
-   system lane duplicates it. Specific system-level blind spots worth
-   closing:
+2. **Nine mutants are caught only by `cargo test -p sync-core`** (Q1–Q4,
+   M3, M4, O1, O2, P1). The cargo suite includes hand-written query tests and
+   the deterministic TS-oracle differentials. It is the single load-bearing
+   net for query shape correctness, rollback semantics, durable watermark
+   retention, and capped-diff ordering. No system lane duplicates it.
+   Specific system-level blind spots worth closing:
    - **M3 (swallowed rollback):** neither consistency lane issues an
      app-error mutation, so rollback-vs-commit is never checked against a
      live target. Add a rejected mutation to the exactly-once workload.
    - **P1 (visibility ignored):** no rust-local lane configures a
      `visible()` policy; `permissions.ts` runs the TypeScript core only.
      Port a permissions workload to rust-local.
-   - **M4 / O2:** only observable through capped diffs or lmid-only pushes;
-     no lane pulls with caps small enough to hit the cut path.
+   - **M4 / O2:** deterministic cargo tests now use
+     `Caps { max_change_rows: 1, ... }` to cut between effects and LMIDs and to
+     prove an LMID-only rejected push still advances the cookie. No system lane
+     pulls with caps small enough to hit either cut path.
    - **Q1–Q4:** sweep at 5 rounds / seed 42 never trips on pure query-shape
      bugs; the deterministic oracle (which shrank both of its red-proof
      mutants to minimal traces) is the effective generative net.
