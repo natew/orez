@@ -329,8 +329,10 @@ and runs three writers pushing task creates for ~25 minutes. At every 60-second
 checkpoint it enforces three hard invariants and, after quiescing, a final
 convergence barrier:
 
-- **no client divergence** — every client's materialized id-set equals the SQL
-  oracle for the watched projects;
+- **no client divergence** — each checkpoint quiesces the writers and drains
+  every outstanding ack (a real convergence barrier, not a race against in-flight
+  optimistic writes), then requires every client's materialized id-set to equal
+  the SQL oracle for the watched projects exactly;
 - **memory ceiling** — the native process RSS (read via `ps`) stays under a
   fixed bound (400 MB default, large headroom over the host's ~7–15 MB
   steady-state footprint);
