@@ -46,10 +46,7 @@ import {
   writeCorpusEntry,
 } from './spec-corpus.js'
 import { constructCount, shrinkSpec } from './spec-shrink.js'
-import {
-  SUPPRESS_NULL_START_VS_STOCK,
-  sweepPairwiseCoverage,
-} from './sweep-coverage.js'
+import { SUPPRESS_NULL_START_VS_STOCK, sweepPairwiseCoverage } from './sweep-coverage.js'
 import { startStockZero } from './targets/stock-zero.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
