@@ -3,6 +3,11 @@
 // file only from that source:
 //   cp ~/orez/src/zero-http/transport.ts \
 //      harness/src/vendor/httpPullTransport.ts   (re-add this header)
+// the canonical has since grown consumer-only features (appID/shardNum/
+// pushOrigin routing, authenticated wake tokens, a flush/quiescence gate) the
+// harness does not use, so it is not a clean cp today. the got-query
+// re-assertion + dedupe fix (canonical 1efd3e5) is ported here directly; the
+// snapshot-reset stall it prevents is pinned by httpPullTransport.stall.test.ts.
 // http-pull transport: runs a stock @rocicorp/zero client over stateless HTTP
 // by intercepting its /sync/v51/connect WebSocket with a shim that translates
 // pull responses into v51 pokes. ported from the orez zero-http spike — the
@@ -208,6 +213,12 @@ class ZeroHttpSocket {
   private readonly wsid: string
   private cookie: string | null
   private pendingGotQueriesPatch: GotQueryPatchOp[] = []
+  // every got-query hash acked to the client so far. a rowsPatch 'clear'
+  // resets the client's ENTIRE replicache space — rows AND got-query marks —
+  // so any clear-bearing poke must re-assert the full got set or queries the
+  // client already had marked complete silently regress to unknown forever
+  // (the transport never re-sends an ack it believes was delivered).
+  private ackedGotHashes = new Set<string>()
   // query-aware extension state: the accumulated un-acked desired-query delta
   // to ship, a client-side query-state version that bumps on each change, and
   // the version/length of the delta the in-flight pull sent (to clear the
@@ -613,8 +624,18 @@ class ZeroHttpSocket {
     }
 
     const pokeID = `zero-http-${++this.state.nextPokeID}`
-    const gotQueries = this.pendingGotQueriesPatch
+    let gotQueries = dedupeGotQueriesPatch(this.pendingGotQueriesPatch)
     this.pendingGotQueriesPatch = []
+    const rowsCleared =
+      Array.isArray(response.rowsPatch) &&
+      response.rowsPatch.some((op) => (op as { op?: string })?.op === 'clear')
+    if (rowsCleared && this.ackedGotHashes.size > 0) {
+      gotQueries = dedupeGotQueriesPatch([
+        ...[...this.ackedGotHashes].map((hash) => ({ op: 'put' as const, hash })),
+        ...gotQueries,
+      ])
+    }
+    this.recordAckedGotQueries(gotQueries)
 
     this.emitMessage([
       'pokeStart',
@@ -656,8 +677,9 @@ class ZeroHttpSocket {
     if (serverCookie === null) return
     const nextCookie = toLocalWebSocketCookie(serverCookie, ++this.nextLocalCookieID)
     const pokeID = `zero-http-${++this.state.nextPokeID}`
-    const gotQueries = this.pendingGotQueriesPatch
+    const gotQueries = dedupeGotQueriesPatch(this.pendingGotQueriesPatch)
     this.pendingGotQueriesPatch = []
+    this.recordAckedGotQueries(gotQueries)
 
     this.emitMessage([
       'pokeStart',
@@ -680,6 +702,14 @@ class ZeroHttpSocket {
     ])
     this.emitMessage(['pokeEnd', { pokeID, cookie: nextCookie }])
     this.cookie = nextCookie
+  }
+
+  private recordAckedGotQueries(patch: GotQueryPatchOp[]) {
+    for (const op of patch) {
+      if (op.op === 'clear') this.ackedGotHashes.clear()
+      else if (op.op === 'put') this.ackedGotHashes.add(op.hash)
+      else this.ackedGotHashes.delete(op.hash)
+    }
   }
 
   private emitMessage(message: unknown) {
@@ -749,6 +779,29 @@ function gotQueriesPatch(patch: DesiredQueryPatchOp[]) {
     else if (op.hash) got.push({ op: op.op, hash: op.hash })
   }
   return got
+}
+
+// the same query hash can be acked twice into one poke: the sec-protocol
+// initConnection queues its got-ack in the constructor, and a racing
+// changeDesiredQueries send() queues it again before the in-flight pull's
+// poke consumes the pending patch. a duplicate put for one hash inside a
+// single gotQueriesPatch stalls the zero client's complete tracking, so
+// collapse to the last op per hash (a clear resets everything before it).
+function dedupeGotQueriesPatch(patch: GotQueryPatchOp[]): GotQueryPatchOp[] {
+  let clear = false
+  const lastOpByHash = new Map<string, GotQueryPatchOp>()
+  for (const op of patch) {
+    if (op.op === 'clear') {
+      clear = true
+      lastOpByHash.clear()
+      continue
+    }
+    lastOpByHash.delete(op.hash)
+    lastOpByHash.set(op.hash, op)
+  }
+  const deduped: GotQueryPatchOp[] = clear ? [{ op: 'clear' }] : []
+  deduped.push(...lastOpByHash.values())
+  return deduped
 }
 
 function toHttpCookie(cookie: string | null): number | null {

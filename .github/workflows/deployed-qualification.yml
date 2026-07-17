@@ -1,0 +1,140 @@
+name: Deployed Cloudflare qualification
+
+# credentialed deployed-worker qualification for the rust-cf WASM Durable Object
+# host (packages/sync-cf-host). it deploys a real cloudflare worker and runs the
+# bounded m6 CF fault + lifecycle suite against that live origin, then tears the
+# worker down.
+#
+# this NEVER runs on pull_request or push: it needs the CLOUDFLARE_API_TOKEN
+# secret and an external deployment, and pull requests must not depend on
+# external credentials or a mutable deployment
+# (plans/consistency-validation-architecture.md — "the credentialed deployed
+# Cloudflare lane runs on a separate schedule"). weekly plus on demand only.
+on:
+  schedule:
+    - cron: '17 8 * * 1' # mondays 08:17 utc
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: state-machine step count
+        default: '24'
+
+permissions:
+  contents: read
+
+concurrency:
+  # one deployed worker name is reused; never let a scheduled run and a manual
+  # dispatch deploy or delete it at the same time
+  group: deployed-qualification
+  cancel-in-progress: false
+
+env:
+  # account that holds the CLOUDFLARE_API_TOKEN repo secret today (the account
+  # already hosting orez-docs). the committed wrangler.toml keeps its lightstrike
+  # default for humans; this workflow retargets the deploy via env only. change
+  # this value to move the deployed qualification worker to another account.
+  CLOUDFLARE_ACCOUNT_ID: aa20b480cc813f2131bc005e2b7fd140
+  QUAL_WORKER_NAME: orez-rust-sync-qual
+
+jobs:
+  deployed-qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          targets: wasm32-unknown-unknown
+
+      - uses: ./.github/actions/setup-wasm-pack
+
+      - run: bun install --frozen-lockfile
+
+      - name: sync-cf-host install
+        run: cd packages/sync-cf-host && bun install
+
+      - name: harness install
+        run: cd harness && bun install
+
+      - name: build wasm host bundle
+        run: cd packages/sync-cf-host && bun run build:dist
+
+      - name: deploy qualification worker
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd packages/sync-cf-host
+          # keep the committed wrangler.toml human default (lightstrike account)
+          # intact in the repo; this ephemeral CI checkout deploys elsewhere.
+          # wrangler resolves config.account_id BEFORE CLOUDFLARE_ACCOUNT_ID, so
+          # drop the pinned line here to let the env account win (one path).
+          sed -i '/^account_id *=/d' wrangler.toml
+          admin_key="qual-$(openssl rand -hex 16)"
+          echo "::add-mask::$admin_key"
+          echo "admin_key=$admin_key" >> "$GITHUB_OUTPUT"
+          deploy_log="$(mktemp)"
+          bunx wrangler@4.110.0 deploy \
+            --name "$QUAL_WORKER_NAME" \
+            --var "ADMIN_KEY:$admin_key" 2>&1 | tee "$deploy_log"
+          url="$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' "$deploy_log" | head -1)"
+          if [ -z "$url" ]; then
+            echo "could not parse the deployed worker URL" >&2
+            exit 1
+          fi
+          echo "worker_url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: deployed rust-cf qualification suite
+        env:
+          ZHARNESS_RUST_CF_WORKER: ${{ steps.deploy.outputs.worker_url }}
+          ZHARNESS_CF_ADMIN_KEY: ${{ steps.deploy.outputs.admin_key }}
+          STEPS: ${{ github.event.inputs.steps || '24' }}
+        run: |
+          set -euo pipefail
+          # wait for the deployment edge to answer before driving lanes
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent "$ZHARNESS_RUST_CF_WORKER" > /dev/null; then break; fi
+            if [ "$attempt" = 60 ]; then
+              echo "deployed worker never became reachable" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          cd harness
+          # bounded m6 CF fault + lifecycle suite against the live origin. any
+          # lane failure fails the job (set -e); the state machine additionally
+          # rejects a vacuous schedule, so an unfired scheduled fault fails here
+          # too rather than passing silently.
+          bun src/reconnect.ts --target rust-cf
+          bun src/eviction.ts --target rust-cf --clients 5
+          bun src/storage-faults.ts --target rust-cf
+          bun src/backup-restore.ts --target rust-cf
+          bun src/state-machine.ts --against rust-cf --seed "$GITHUB_RUN_ID" --steps "$STEPS"
+
+      - name: upload deployed qualification traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployed-qualification-traces-${{ github.run_id }}
+          path: |
+            harness/regressions/
+            harness/results/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: tear down qualification worker
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          cd packages/sync-cf-host
+          # wrangler skips its delete confirmation in CI (non-interactive)
+          bunx wrangler@4.110.0 delete --name "$QUAL_WORKER_NAME" || true
