@@ -188,7 +188,8 @@ Items 1–3 and the docs work are DONE and merged to local main (commit
 
 - **Item 3** — `test/wire-consistency-lanes` @ ce43931: both lanes run
   against rust-local in the PR CI job with uploaded evidence; red-proofed in
-  `docs/sync/lane-red-proof.md`. No rust-cf nightly workflow exists yet.
+  `docs/sync/lane-red-proof.md`. Rust-cf nightly coverage landed in
+  `.github/workflows/nightly.yml` @ 8afc103.
 - **Item 2** — `test/query-differential-oracle` @ 19d9003: deterministic
   ZQL oracle in `crates/sync-core/tests/differential.rs` +
   `ts-oracle/run-oracle.ts`; red-proofed with shrinking in
@@ -202,17 +203,20 @@ Items 1–3 and the docs work are DONE and merged to local main (commit
 
 ### Follow-ups the matrix produced (next work, in order)
 
-1. **O1 hole: nothing catches a non-durable watermark** (invariant 7).
-   Add a cargo invariant test and a state-machine step covering watermark
-   monotonicity across prune + restart.
+1. **O1 cargo hole closed on `test/coverage-engine-invariants`.** A dedicated
+   invariant test now covers watermark monotonicity across a full prune and
+   restart over the same SQLite file. A system state-machine step remains open.
 2. **Exactly-once workload never issues an app-error mutation**, so
    swallowed rollbacks (M3) are invisible at system level.
 3. **No rust-local lane runs a visibility policy** (P1 invisible at system
    level); port a permissions workload to rust-local.
-4. **No lane exercises capped diffs** (M4/O2 only observable there).
-5. rust-cf nightly workflow does not exist; item 3's nightly half is open.
-6. Items 4–7 of this plan (nemesis composition, Elle-on-real-workload
-   decision, sync-wasm tests, auditable heavy lanes) remain unstarted.
+4. **Capped diff cargo coverage closed on `test/coverage-engine-invariants`.**
+   Dedicated tests cut between row effects and LMIDs with a one-row cap. A
+   capped system lane remains open.
+5. **Rust-cf nightly coverage closed on main @ 8afc103.**
+6. Items 4–6 of this plan (nemesis composition, Elle-on-real-workload
+   decision, and sync-wasm tests) remain unstarted. Item 7's auditable heavy
+   lanes landed on main @ 8afc103.
 
 ## Rules
 

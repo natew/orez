@@ -12,7 +12,7 @@
     "L1-prune-no-floor": true,
     "L2-snapshot-skip-row": true,
     "L3-diff-drop-first-entry": true,
-    "O1-nondurable-watermark": false,
+    "O1-nondurable-watermark": true,
     "O2-ack-beyond-cap": true,
     "P1-snapshot-visibility-ignore": true
   }
