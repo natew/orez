@@ -1,0 +1,18 @@
+diff --git a/crates/sync-core/src/pull.rs b/crates/sync-core/src/pull.rs
+index 691faa9..b874b26 100644
+--- a/crates/sync-core/src/pull.rs
++++ b/crates/sync-core/src/pull.rs
+@@ -191,11 +191,11 @@ fn snapshot(
+         let physical_table = tables
+             .physical_name(&table)
+             .expect("iterated table has physical mapping");
+-        for row in db.query(&sql, &params)? {
++        for row in db.query(&sql, &params)?.iter().skip(1) {
+             patch.push(json!({
+                 "op": "put",
+                 "tableName": physical_table,
+-                "value": row_value(tables, &table, spec, &row)?,
++                "value": row_value(tables, &table, spec, row)?,
+             }));
+         }
+     }

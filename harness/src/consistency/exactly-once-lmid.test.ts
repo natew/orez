@@ -17,6 +17,10 @@ const identity: ExactlyOnceIdentity = {
   clientId: 'client-1',
   mutationId: 1,
 }
+const observer = {
+  clientGroupId: 'observer-group-1',
+  clientId: 'observer-client-1',
+}
 const effect = { type: 'increment-probe' as const, probeId: 'probe-1' }
 
 function history(phase: TerminalPhase = 'ok'): {
@@ -33,13 +37,14 @@ function history(phase: TerminalPhase = 'ok'): {
     terminal: ExactlyOnceEvidence,
     terminalPhase: TerminalPhase = 'ok'
   ) => {
+    const eventIdentity = invoke.type === 'client-probe' ? invoke.observer : identity
     recorder.record({
       opId,
       process,
       phase: 'invoke',
       kind,
-      clientId: identity.clientId,
-      clientGroupId: identity.clientGroupId,
+      clientId: eventIdentity.clientId,
+      clientGroupId: eventIdentity.clientGroupId,
       exactlyOnce: invoke,
     })
     return recorder.record({
@@ -47,8 +52,8 @@ function history(phase: TerminalPhase = 'ok'): {
       process,
       phase: terminalPhase,
       kind,
-      clientId: identity.clientId,
-      clientGroupId: identity.clientGroupId,
+      clientId: eventIdentity.clientId,
+      clientGroupId: eventIdentity.clientGroupId,
       exactlyOnce: terminal,
     })
   }
@@ -81,6 +86,7 @@ function history(phase: TerminalPhase = 'ok'): {
     type: 'client-probe' as const,
     profileVersion: 1 as const,
     identity,
+    observer,
     effect,
   }
   pair(
@@ -464,6 +470,25 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
     const lifecycle = history()
     addPendingPullAbort(lifecycle)
     expect(checkExactlyOnceLmid(lifecycle.events, lifecycle.schedule).status).toBe('pass')
+
+    const completedDuringClose = history()
+    addPendingPullAbort(completedDuringClose)
+    const terminal = completedDuringClose.events.find(
+      (event) =>
+        event.exactlyOnce?.type === 'pull' &&
+        event.exactlyOnce.observed?.outcome === 'aborted-by-quiesce-controller'
+    )!
+    terminal.phase = 'ok'
+    if (terminal.exactlyOnce?.type === 'pull') {
+      terminal.exactlyOnce.observed = {
+        outcome: 'pull-lmid-observed',
+        lastMutationId: null,
+      }
+    }
+    expect(
+      checkExactlyOnceLmid(completedDuringClose.events, completedDuringClose.schedule)
+        .status
+    ).toBe('pass')
   })
 
   test('rejects malformed quiescence counts, identities, phases, and late traffic', () => {
@@ -909,6 +934,23 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
     expect(
       checkExactlyOnceLmid(history('fail').events, history('fail').schedule).status
     ).toBe('fail')
+  })
+
+  test('rejects a client probe made by the mutation writer', () => {
+    const fixture = history()
+    for (const event of fixture.events) {
+      if (event.exactlyOnce?.type !== 'client-probe') continue
+      event.exactlyOnce.observer = {
+        clientId: identity.clientId,
+        clientGroupId: identity.clientGroupId,
+      }
+      event.clientId = identity.clientId
+      event.clientGroupId = identity.clientGroupId
+    }
+    expect(checkExactlyOnceLmid(fixture.events, fixture.schedule)).toMatchObject({
+      status: 'fail',
+      violations: ['missing complete non-writing client rank-0 probe precondition'],
+    })
   })
 
   test('closes nested raw evidence objects', () => {

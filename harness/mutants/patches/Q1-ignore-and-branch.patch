@@ -1,0 +1,15 @@
+diff --git a/crates/sync-core/src/query/compile.rs b/crates/sync-core/src/query/compile.rs
+index a3e7c59..2717002 100644
+--- a/crates/sync-core/src/query/compile.rs
++++ b/crates/sync-core/src/query/compile.rs
+@@ -304,7 +304,9 @@ impl<'a> Compiler<'a> {
+             Condition::Simple { op, left, right } => {
+                 self.compile_simple(op, left, right, table, alias)
+             }
+-            Condition::And(conds) => self.compile_junction(conds, "AND", "1", table, alias),
++            Condition::And(conds) => {
++                self.compile_junction(&conds[..conds.len().min(1)], "AND", "1", table, alias)
++            }
+             Condition::Or(conds) => self.compile_junction(conds, "OR", "0", table, alias),
+             Condition::Exists { negated, related } => {
+                 self.compile_exists(*negated, related, table, alias)

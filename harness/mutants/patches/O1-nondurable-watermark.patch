@@ -1,0 +1,21 @@
+diff --git a/crates/sync-core/src/store.rs b/crates/sync-core/src/store.rs
+index 63245cc..bf11e4a 100644
+--- a/crates/sync-core/src/store.rs
++++ b/crates/sync-core/src/store.rs
+@@ -47,14 +47,8 @@ pub(crate) fn watermark(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
+         "SELECT CAST(high AS TEXT) FROM _zsync_watermark WHERE lock = 1",
+         &[],
+     )?;
+-    let wm = max_log.max(high);
+-    if wm > high {
+-        db.exec(
+-            "UPDATE _zsync_watermark SET high = ? WHERE lock = 1",
+-            &[counter(wm)],
+-        )?;
+-    }
+-    Ok(wm)
++    let _ = high;
++    Ok(max_log)
+ }
+ 
+ pub(crate) fn floor(db: &mut dyn SyncDb) -> Result<i64, EngineError> {

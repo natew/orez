@@ -43,6 +43,7 @@ describe('sweep pairwise coverage', () => {
       order: 'cursor',
       limit: 'set',
       start: 'inclusive',
+      cursorValue: 'number',
       related: 'nested',
       cardinality: 'many',
     })
@@ -52,13 +53,25 @@ describe('sweep pairwise coverage', () => {
     const bare: GenSpec = { table: 'user', orderBy: [['id', 'asc']] }
     const report = sweepPairwiseCoverage([bare])
 
-    expect(SWEEP_COVERAGE_AXES).toHaveLength(8)
-    expect(report.hit).toBe(28) // C(8, 2): one tuple hit per axis pair
-    expect(report.total).toBe(225)
+    expect(SWEEP_COVERAGE_AXES).toHaveLength(9)
+    expect(report.hit).toBe(36) // C(9, 2): one tuple hit per axis pair
+    expect(report.total).toBe(280)
     expect(report.percent).toBeGreaterThan(0)
     expect(report.percent).toBeLessThan(100)
     expect(report.missing).toEqual([...report.missing].sort())
-    expect(report.byAxisPair).toHaveLength(28)
+    expect(report.byAxisPair).toHaveLength(36)
+  })
+
+  test('classifies nullable start cursors as their own axis', () => {
+    const nullable: GenSpec = {
+      table: 'task',
+      orderBy: [
+        ['dueAt', 'asc'],
+        ['id', 'asc'],
+      ],
+      start: { row: { dueAt: null, id: 't1' } },
+    }
+    expect(sweepAxisAssignment(nullable).cursorValue).toBe('null')
   })
 
   test('rejects a shape outside the declared generator grammar', () => {

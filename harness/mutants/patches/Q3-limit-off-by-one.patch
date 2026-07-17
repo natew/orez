@@ -1,0 +1,13 @@
+diff --git a/crates/sync-core/src/query/compile.rs b/crates/sync-core/src/query/compile.rs
+index a3e7c59..40324b2 100644
+--- a/crates/sync-core/src/query/compile.rs
++++ b/crates/sync-core/src/query/compile.rs
+@@ -164,7 +164,7 @@ impl<'a> Compiler<'a> {
+ 
+         if let Some(limit) = ast.limit {
+             sql.push_str(" LIMIT ?");
+-            self.params.push(SqlValue::Integer(limit));
++            self.params.push(SqlValue::Integer(limit + 1));
+         }
+         Ok(sql)
+     }

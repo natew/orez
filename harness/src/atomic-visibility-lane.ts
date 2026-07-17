@@ -3,7 +3,7 @@
 // mutation and complete full-scope client observations. It does not claim
 // convergence, realtime ordering, or general transaction semantics.
 //
-//   bun src/atomic-visibility-lane.ts --target orez-local --seed example
+//   bun src/atomic-visibility-lane.ts --target rust-local --seed example
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { basename, join } from 'node:path'
@@ -37,7 +37,7 @@ import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: {
-    target: { type: 'string', default: 'orez-local' },
+    target: { type: 'string', default: 'rust-local' },
     seed: { type: 'string' },
     replay: { type: 'boolean', default: false },
     'results-dir': { type: 'string' },
@@ -98,6 +98,11 @@ function sqlString(value: string): string {
 async function startTarget(name: string): Promise<SyncTarget> {
   if (name === 'orez-local') {
     return (await import('./targets/orez-local.js')).startOrezLocal({
+      pullIntervalMs: 100,
+    })
+  }
+  if (name === 'rust-local') {
+    return (await import('./targets/rust-local.js')).startRustLocal({
       pullIntervalMs: 100,
     })
   }

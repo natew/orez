@@ -5,7 +5,7 @@
 //
 // Validation is FULLY RECURSIVE and pinned to the EXACT v1 sweep generator
 // grammar (column-kind ops/values, relationship CARDINALITY, orderBy/where/
-// exists/related/limit/one closure bounds, the (rank,id) start-cursor shape, no
+// exists/related/limit/one closure bounds, numeric and nullable start cursors, no
 // unknown keys, safe id/target/path tokens). Every corruption THROWS (unlike
 // upstream loadRegressions which skips — matches "corrupt repros must fail").
 // The loader compares the recorded SEED fingerprint against the CURRENT fixture
@@ -354,25 +354,30 @@ export function assertValidSpec(spec: unknown): asserts spec is GenSpec {
     }
   }
   if (spec.start !== undefined) {
-    // sweep emits start ONLY on root task, orderBy exactly [[rank,dir],[id,asc]],
-    // row exactly {rank: finite number, id: nonempty string}, inclusive true|absent.
+    // sweep emits start only on root task, ordered by rank or nullable dueAt
+    // followed by id. Nullable cursors deliberately carry dueAt:null.
     if (table !== 'task') fail('start is only valid on table task')
     const ob = spec.orderBy as [string, string][]
+    const cursorColumn = ob[0]?.[0]
     if (
       ob.length !== 2 ||
-      ob[0]![0] !== 'rank' ||
+      (cursorColumn !== 'rank' && cursorColumn !== 'dueAt') ||
       (ob[0]![1] !== 'asc' && ob[0]![1] !== 'desc')
     ) {
-      fail("start requires orderBy exactly [['rank','asc'|'desc'],['id','asc']]")
+      fail("start requires orderBy exactly [['rank'|'dueAt','asc'|'desc'],['id','asc']]")
     }
     if (!isPlainObject(spec.start)) fail('spec.start must be an object')
     onlyKeys(spec.start, ['row', 'inclusive'], 'spec.start')
     if (spec.start.inclusive !== undefined && spec.start.inclusive !== true)
       fail('spec.start.inclusive must be true or absent')
     if (!isPlainObject(spec.start.row)) fail('spec.start.row must be an object')
-    onlyKeys(spec.start.row, ['rank', 'id'], 'spec.start.row')
-    if (!isFiniteNum(spec.start.row.rank))
+    onlyKeys(spec.start.row, [cursorColumn, 'id'], 'spec.start.row')
+    if (cursorColumn === 'rank' && !isFiniteNum(spec.start.row.rank)) {
       fail('spec.start.row.rank must be a finite number')
+    }
+    if (cursorColumn === 'dueAt' && spec.start.row.dueAt !== null) {
+      fail('spec.start.row.dueAt must be null')
+    }
     if (!isNonEmptyStr(spec.start.row.id))
       fail('spec.start.row.id must be a nonempty string')
   }

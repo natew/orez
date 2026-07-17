@@ -1,0 +1,15 @@
+diff --git a/crates/sync-core/src/store.rs b/crates/sync-core/src/store.rs
+index 63245cc..017a567 100644
+--- a/crates/sync-core/src/store.rs
++++ b/crates/sync-core/src/store.rs
+@@ -74,10 +74,6 @@ pub(crate) fn prune(db: &mut dyn SyncDb, retain_changes: i64) -> Result<(), Engi
+             "DELETE FROM _zsync_changes WHERE watermark <= ?",
+             &[counter(cutoff)],
+         )?;
+-        db.exec(
+-            "UPDATE _zsync_meta SET floor = ? WHERE lock = 1",
+-            &[counter(cutoff)],
+-        )?;
+     }
+     Ok(())
+ }

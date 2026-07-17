@@ -10,6 +10,7 @@ export const SWEEP_COVERAGE_AXES = [
   { name: 'order', values: ['id', 'multi', 'cursor'] },
   { name: 'limit', values: ['none', 'set'] },
   { name: 'start', values: ['none', 'exclusive', 'inclusive'] },
+  { name: 'cursorValue', values: ['none', 'number', 'null'] },
   { name: 'related', values: ['none', 'plain', 'decorated', 'nested'] },
   { name: 'cardinality', values: ['many', 'one'] },
 ] as const
@@ -66,10 +67,12 @@ function assignments(): AxisAssignment[] {
 // Coarse reachability constraints mirror genSpec()/genSub(). They describe
 // which axis combinations are possible, not the generator probabilities.
 function isReachable(assignment: AxisAssignment): boolean {
-  const { table, exists, order, limit, start, related, cardinality } = assignment
+  const { table, exists, order, limit, start, cursorValue, related, cardinality } =
+    assignment
   if (table === 'user' && (exists !== 'none' || related !== 'none')) return false
   if (table !== 'task' && start !== 'none') return false
   if ((start === 'none') !== (order !== 'cursor')) return false
+  if ((start === 'none') !== (cursorValue === 'none')) return false
   if (table !== 'project' && related === 'plain') return false
   if (cardinality === 'one' && limit === 'set') return false
   return true
@@ -89,6 +92,11 @@ function relatedValue(spec: GenSpec): string {
 
 export function sweepAxisAssignment(spec: GenSpec): AxisAssignment {
   const start = spec.start ? (spec.start.inclusive ? 'inclusive' : 'exclusive') : 'none'
+  const cursorValue = !spec.start
+    ? 'none'
+    : spec.start.row.dueAt === null
+      ? 'null'
+      : 'number'
   const exists = !spec.exists?.length
     ? 'none'
     : spec.exists.some((entry) => entry.where)
@@ -106,6 +114,7 @@ export function sweepAxisAssignment(spec: GenSpec): AxisAssignment {
     order,
     limit: spec.limit === undefined ? 'none' : 'set',
     start,
+    cursorValue,
     related: relatedValue(spec),
     cardinality: spec.one ? 'one' : 'many',
   }
