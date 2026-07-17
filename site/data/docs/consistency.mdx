@@ -65,21 +65,37 @@ other is not enough.
 - **Differential lanes** compare Orez against stock zero-cache and against a
   TypeScript reference core: fixed query shapes, seeded randomized sweeps
   with shrinking, and a generated operation-trace differential inside the
-  Rust engine's test suite.
+  Rust engine's test suite whose seeded vocabulary includes the query layer —
+  named ZQL queries, membership changes, multi-table writes, and in-place
+  permission-transform replacement — with failing traces shrunk to minimal
+  reproducers.
 - **Consistency checkers** consume recorded operation histories and validate
   atomic visibility, exactly-once mutation application, and
   permission-transition behavior. Every checker ships with a positive fixture
   and a mutant history it must reject, so the checker itself is proven able
-  to fail.
+  to fail. The recorded atomic-visibility history is additionally analyzed by
+  the pinned Elle checker (list-append, serializable) on every qualifying
+  run: a torn read surfaces as a dependency-cycle anomaly. The check is
+  scoped honestly — it proves dependency safety among the tracked appends of
+  that workload, and no strict or realtime model is claimed for asynchronous
+  cache reads.
 - **Fault lanes** kill and restart the server process over the same SQLite
-  file, inject storage faults at named transaction boundaries, evict and
-  resume Cloudflare Durable Objects, and drop or replay responses. Scheduled
-  faults carry receipts; a fault that never fired invalidates the run instead
-  of passing it.
-- **Mutation testing at the system level** keeps a suite of known engine bugs
-  (dropped filter branches, skipped LMID writes, over-pruned retention,
-  leaked invisible rows) and records which lanes catch which. A mutant
-  nothing catches is treated as a named hole to close, not a pass.
+  file, inject engine faults at named push/pull transaction boundaries,
+  inject storage faults, evict and resume Cloudflare Durable Objects, drop or
+  replay responses, and compose fault classes — a client transport outage
+  held open across an engine-fault arm and a server restart, and a full prune
+  followed by a restart that must keep the served cookie monotonic. Every
+  scheduled fault carries receipts: armed, then fired or an explicitly
+  recorded cancellation, with heals recorded for outages. A generated fault
+  schedule that fires nothing fails as invalid instead of passing vacuously.
+- **Mutation testing at the system level** keeps a suite of fourteen known
+  engine bugs (dropped filter branches, skipped LMID writes, over-pruned
+  retention, leaked invisible rows, swallowed rollbacks, non-durable
+  watermarks, ack-before-effect orderings) and records which lanes catch
+  which, with every verdict verified against the lane's actual failure
+  output. A mutant nothing catches is treated as a named hole to close, not
+  a pass; each formerly cargo-only catch now also has a dedicated
+  system-level lane that goes red on it.
 
 ## What is deliberately not claimed
 
@@ -89,8 +105,11 @@ other is not enough.
   fast, writes are authoritative and acknowledged.
 - Green-badge completeness. The suite's own documentation records the gaps it
   has not closed — checks that exist but do not yet run against every target,
-  and randomized machinery that has not yet pinned a real bug. A claim
-  stronger than the evidence would be a regression, not a feature.
+  fault modes not yet composed, and scale numbers that are historical single
+  runs rather than gated assertions. A claim stronger than the evidence would
+  be a regression, not a feature. (The machinery itself has pinned real bugs:
+  the metamorphic guard caught an upstream zero-cache defect, and the
+  mutation matrix proves each lane goes red on known engine bugs.)
 
 The repository's internal testing documentation tracks the current gap list
 with the same candor; `/docs/testing` describes how evidence is scoped per

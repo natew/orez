@@ -63,7 +63,9 @@
       "durationMs": null,
       "whatItProves": "No CI-qualified claim is published yet. When green, this suite covers cookies, patches, mutation IDs, retention, query membership, permissions, and model invariants at the recorded SHA.",
       "whatItDoesNotProve": "It does not prove HTTP host lifecycle, workerd behavior, production capacity, or application-specific schemas and policies.",
-      "commands": ["cargo test --workspace"],
+      "commands": [
+        "cargo test --workspace"
+      ],
       "logsUrl": null,
       "artifactsUrl": null
     },
@@ -78,12 +80,15 @@
       "operationUnit": "randomized query shapes",
       "restarts": null,
       "durationMs": null,
-      "whatItProves": "No CI-qualified claim is published yet. When green, this suite exercises the release native binary through real Zero clients, concurrent clients, permissions, wake, and query lifecycle.",
+      "whatItProves": "No CI-qualified claim is published yet. When green, this suite exercises the release native binary through real Zero clients, concurrent clients, permissions, wake, and query lifecycle; validates recorded atomic-visibility and exactly-once histories with checkers that are themselves red-proofed; runs the pinned Elle list-append analysis on the recorded history; and cuts a mutation's row effects from its ack under a one-row diff cap.",
       "whatItDoesNotProve": "It does not prove the Cloudflare host, multi-region behavior, unbounded namespace sizes, or a consumer's recovery objectives.",
       "commands": [
         "cd harness && bun src/shapes.ts --against rust-local",
         "cd harness && bun src/sweep.ts --against rust-local --rounds 10 --seed <ledger-seed>",
-        "cd harness && bun src/queries.ts --against rust-local"
+        "cd harness && bun src/queries.ts --against rust-local",
+        "cd harness && bun src/atomic-visibility-lane.ts --target rust-local --seed <ledger-seed>",
+        "scripts/elle/check-history.sh",
+        "cd harness && bun src/capped-diff-lane.ts --target rust-local"
       ],
       "logsUrl": null,
       "artifactsUrl": null
@@ -121,13 +126,13 @@
       "operationUnit": "protocol cases and generated lifecycle steps",
       "restarts": null,
       "durationMs": null,
-      "whatItProves": "No CI-qualified claim is published yet. When green, this suite covers pinned upstream corpus agreement, malformed protocol input, reconnect/retention, process eviction, transactional storage faults, backup/restore, and generated lifecycle transitions on the native host.",
+      "whatItProves": "No CI-qualified claim is published yet. When green, this suite covers pinned upstream corpus agreement, malformed protocol input, reconnect/retention (including a client offline past the retention floor), process eviction, transactional storage faults, backup/restore, and the composed nemesis state machine on the native host: receipted engine faults at named boundaries, a transport outage held open across a fault arm and a restart, and a full prune plus restart that must keep the served cookie monotonic.",
       "whatItDoesNotProve": "Injected faults cover named boundaries and generated traces, not every operating-system, filesystem, hardware, or application failure mode.",
       "commands": [
         "cd harness && bun src/corpus-check.ts",
         "cd harness && bun src/upstream-corpus.ts --hosts typescript-oracle,stock-zero,sync-native",
         "cd harness && bun src/protocol-fuzz.ts --target rust-local --cases 500 --seed <ledger-seed> --concurrency 20",
-        "cd harness && bun src/state-machine.ts --against rust-local --seed <ledger-seed> --steps 24"
+        "cd harness && bun src/state-machine.ts --against rust-local --nemesis --seed <ledger-seed> --steps 24"
       ],
       "logsUrl": null,
       "artifactsUrl": null
@@ -171,7 +176,7 @@
       "cargo test --workspace",
       "cd harness && bun src/shapes.ts --against rust-local",
       "cd harness && bun src/sweep.ts --against rust-local --rounds 10 --seed <ledger-seed>",
-      "cd harness && bun src/state-machine.ts --against rust-local --seed <ledger-seed> --steps 24",
+      "cd harness && bun src/state-machine.ts --against rust-local --nemesis --seed <ledger-seed> --steps 24",
       "cd packages/sync-cf-host && bun run test"
     ]
   },

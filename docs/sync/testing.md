@@ -3,10 +3,14 @@
 This is an honest assessment of what is tested, how, and what is not. The short
 version: the baseline pull and push engine is genuinely differential-tested
 against the TypeScript reference and randomized-model-verified; the query-aware
-and permission layer is heavily unit-tested in Rust and cross-checked live
-against stock zero-cache but has no deterministic oracle; the Cloudflare host has
-a real workerd fault, soak, and qualification matrix; and the ambitious
-jepsen-style harness that was scoped early was deliberately not built.
+layer has a deterministic seeded oracle (named already-transformed ZQL ASTs,
+membership, multi-table writes, in-place permission-transform replacement) plus
+the live cross-check against stock zero-cache; the Cloudflare host has a real
+workerd fault, soak, and qualification matrix; and the jepsen-style ambitions
+were scoped down to what this system honestly needs — a composed fault nemesis
+with arm/fire/heal receipts, an engine mutation matrix that proves each lane can
+go red, and the pinned Elle checker running on a real recorded workload history
+— rather than a full Jepsen rig.
 
 ## The three test tiers
 
@@ -167,7 +171,26 @@ Rust hosts: a deterministic seeded trace mixes writes, desired-query changes,
 retention pruning, lost responses, and server and client restarts, and every
 operation compares live client views to an authoritative SQL oracle; a failure
 emits the seed, the full trace, and a delta-debugged (shrunk) reproducer under
-`harness/regressions/`.
+`harness/regressions/`. Its `--nemesis` mode composes a second fault axis on
+top: one-shot engine faults armed at named push/pull boundaries, a client
+transport pause held open across an engine-fault arm and a server restart (two
+fault classes active at once), and a full-prune-plus-restart step that proves
+the durable watermark keeps the served cookie monotonic over the same SQLite
+file. Every scheduled fault carries receipts — arm, then fired or a documented
+cancellation; pauses also record heal — and a generated schedule whose faults
+never fire, or whose pause never fires or heals, fails as invalid instead of
+passing vacuously (replays and shrink candidates are judged on execution
+alone). See `docs/sync/nemesis-red-proof.md` for the red proofs.
+
+**The engine mutation matrix** (`harness/mutants/`, runner
+`harness/scripts/mutation-matrix.ts`, results `docs/sync/mutation-matrix.md`)
+keeps 14 known engine bugs as compile-checked patches and records which lane
+catches which, each verdict verified against the lane's actual failure output.
+It is the proof that the net can catch bugs at all: every mutant is caught by
+at least one suite, the former system-level blind spots (swallowed rollbacks,
+ignored visibility, capped-diff cut ordering, non-durable watermark) are now
+each caught by a dedicated system lane, and a new lane earns its place by
+going red on at least one mutant.
 
 CI runs these as release-blocking jobs. The `rust-local-faults` job runs the
 pinned corpus ledger, the portable corpus across the TypeScript oracle, stock
@@ -203,27 +226,38 @@ relevant files are:
   `src/pg-sqlite-compiler/integration.test.ts`: protocol transaction behavior
   and the final Postgres-to-SQLite compilation boundary.
 
-`scripts/test-chat-e2e.ts` is the compatibility harness for a fresh Chat
-`--lite` boot. It mirrors Chat, patches only the cold PG/Zero readiness waits to
-120 seconds, and leaves Playwright retries and timeouts unchanged. The
-2026-07-13 qualification completed Chat's clean global setup at 125,402
-billable rows under the unmodified 150k data-worker circuit. A later targeted
-browser run reached the app but hit local login/Zero-connect readiness, so do
-not describe that point-in-time run as a fully green browser suite.
+`scripts/test-chat-e2e.ts` is the compatibility harness for Chat against the
+local orez crates. It snapshots the Chat tree with `git archive` into a
+disposable workspace, installs the local orez and bedrock-sqlite dist, and runs
+Chat's full Playwright integration suite. The 2026-07-16 run was fully green:
+78 passed, 1 skipped, zero failures or flakes, after fixing an e2e-only auth
+rate-limit collision in Chat (all local Playwright workers shared one anonymous
+localhost rate-limit key; production limits unchanged). Earlier
+point-in-time results (the 2026-07-13 setup-only qualification at 125,402
+billable rows) are superseded by that green full run.
 
 ## What is not covered
 
 State this plainly rather than implying blanket coverage.
 
-1. **The differential oracle covers only the baseline engine.** The
-   `differential.rs` oracle exercises put, del, reject, upstream, pull, and
-   invalidate on one fixture table. The query-aware and permission compiler has
-   no TypeScript-oracle differential. Its correctness rests on Rust-internal
-   assertions plus the live `query-diff.ts` comparison against stock zero-cache,
-   which is a live-server comparison, not a deterministic oracle.
-2. **`sync-wasm` has no tests of its own.** There are no `wasm_bindgen_test`
-   cases and no `crates/sync-wasm/tests/`. The WASM engine is exercised only
-   indirectly, through the workerd lanes and the `rust-cf` harness target.
+1. **The permission-transform computation has no oracle differential.** The
+   `differential.rs` oracle now generates a query axis — named
+   already-transformed ZQL ASTs, query registration/removal, membership
+   changes, and multi-table writes, including replacing a query's permission
+   transform in place — alongside the baseline put/del/reject/upstream/pull/
+   invalidate ops, and shrinks failures to minimal traces. What it feeds the
+   engine are *already-transformed* ASTs: the computation of a transform from a
+   policy is proven by the permissions lane (`permissions.ts --target
+   rust-local`, with a `visible()` policy and a red-proof against mutant P1)
+   and the live `query-diff.ts` comparison, not by the deterministic oracle.
+2. **`sync-wasm` is covered at its boundary, not exhaustively.** Three Node
+   wasm tests drive a real SQLite adapter through the exported push, pull,
+   error, preflight, and finalize boundary, and a native race drives 256 engine
+   writes from eight OS threads through one namespace to prove the
+   single-writer invariant (gap-free LMIDs, effect-before-ack, one executing
+   worker). Both have recorded red mutations
+   (`docs/sync/sync-wasm-red-proof.md`). Everything else in the WASM path is
+   still exercised indirectly through the workerd lanes and `rust-cf`.
 3. **`sync-native`'s real-socket behavior is harness-only.** The crate now has
    cargo coverage (see "sync-native cargo tests"): a library-API integration
    suite over the axum router and worker-level unit tests for the
