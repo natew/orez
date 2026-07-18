@@ -61,7 +61,7 @@
       "operationUnit": "not applicable",
       "restarts": 0,
       "durationMs": null,
-      "whatItProves": "No CI-qualified claim is published yet. When green, this suite covers cookies, patches, mutation IDs, retention, query membership, permissions, and model invariants at the recorded SHA.",
+      "whatItProves": "This suite covers cookies, patches, mutation IDs, retention, query membership, permissions, and model invariants at the recorded SHA.",
       "whatItDoesNotProve": "It does not prove HTTP host lifecycle, workerd behavior, production capacity, or application-specific schemas and policies.",
       "commands": ["cargo test --workspace"],
       "logsUrl": null,
@@ -78,7 +78,7 @@
       "operationUnit": "distinct native-host conformance lanes; per-lane totals (sweep rounds, storm clients, query shapes) are not summed into an operation count",
       "restarts": null,
       "durationMs": null,
-      "whatItProves": "No CI-qualified claim is published yet. When green, this suite exercises the release native binary through real Zero clients, concurrent clients, permissions, wake, and query lifecycle; validates recorded atomic-visibility and exactly-once histories with checkers that are themselves red-proofed; runs the pinned Elle list-append analysis on the recorded history; and cuts a mutation's row effects from its ack under a one-row diff cap.",
+      "whatItProves": "This suite exercises the release native binary through real Zero clients, concurrent clients, permissions, wake, and query lifecycle; validates recorded atomic-visibility and exactly-once histories with checkers that are themselves red-proofed; runs the pinned Elle list-append analysis on the recorded history; and cuts a mutation's row effects from its ack under a one-row diff cap.",
       "whatItDoesNotProve": "It does not prove the Cloudflare host, multi-region behavior, unbounded namespace sizes, or a consumer's recovery objectives.",
       "commands": [
         "cd harness && bun src/shapes.ts --against rust-local",
@@ -102,7 +102,7 @@
       "operationUnit": "distinct sync-cf-host lanes; the operation count is recorded state-machine lifecycle steps, not push-soak or protocol-fuzz totals",
       "restarts": null,
       "durationMs": null,
-      "whatItProves": "No CI-qualified claim is published yet. When green, this suite covers WASM value boundaries, local Durable Object SQLite transactions, ingest, restart, push-memory soak, protocol fuzz, recovery faults, backup/restore, and generated lifecycle transitions under the pinned workerd.",
+      "whatItProves": "This suite covers WASM value boundaries, local Durable Object SQLite transactions, ingest, restart, push-memory soak, protocol fuzz, recovery faults, backup/restore, and generated lifecycle transitions under the pinned workerd.",
       "whatItDoesNotProve": "Local workerd is not the Cloudflare production service and does not establish isolate memory, regional propagation, quota, or eviction behavior in a deployed account.",
       "commands": [
         "cd packages/sync-cf-host && bun run test",
@@ -124,7 +124,7 @@
       "operationUnit": "distinct fault and lifecycle lanes; the operation count is recorded state-machine lifecycle steps, not protocol-fuzz cases",
       "restarts": null,
       "durationMs": null,
-      "whatItProves": "No CI-qualified claim is published yet. When green, this suite covers pinned upstream corpus agreement, malformed protocol input, reconnect/retention (including a client offline past the retention floor), process eviction, transactional storage faults, backup/restore, and the composed nemesis state machine on the native host: receipted engine faults at named boundaries, a transport outage held open across a fault arm and a restart, and a full prune plus restart that must keep the served cookie monotonic.",
+      "whatItProves": "This suite covers pinned upstream corpus agreement, malformed protocol input, reconnect/retention (including a client offline past the retention floor), process eviction, transactional storage faults, backup/restore, and the composed nemesis state machine on the native host: receipted engine faults at named boundaries, a transport outage held open across a fault arm and a restart, and a full prune plus restart that must keep the served cookie monotonic.",
       "whatItDoesNotProve": "Injected faults cover named boundaries and generated traces, not every operating-system, filesystem, hardware, or application failure mode.",
       "commands": [
         "cd harness && bun src/corpus-check.ts",
@@ -146,7 +146,7 @@
       "operationUnit": "distinct stock-Zero differential harness lanes; per-query comparisons are not summed into an operation total",
       "restarts": 0,
       "durationMs": null,
-      "whatItProves": "No CI-qualified claim is published yet. When green, named and seeded query scenarios produce the same observable results as the pinned stock Zero server for the exercised corpus.",
+      "whatItProves": "Named and seeded query scenarios produce the same observable results as the pinned stock Zero server for the exercised corpus.",
       "whatItDoesNotProve": "Differential agreement is limited to the recorded corpus and Zero version; it is not a claim of internal implementation equivalence or future-version compatibility.",
       "commands": [
         "cd harness && bun src/shapes.ts --against rust-local",

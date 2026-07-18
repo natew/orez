@@ -290,11 +290,19 @@ export function EvidenceLedger() {
             </dl>
             <div className="evidence-proof-grid">
               <div>
-                <h4>What this proves</h4>
+                <h4>
+                  {suite.status === 'pass'
+                    ? 'What this run proves'
+                    : 'Coverage after CI qualification'}
+                </h4>
                 <p>{suite.whatItProves}</p>
               </div>
               <div>
-                <h4>What this does not prove</h4>
+                <h4>
+                  {suite.status === 'pass'
+                    ? 'What this run does not prove'
+                    : 'Coverage limits'}
+                </h4>
                 <p>{suite.whatItDoesNotProve}</p>
               </div>
             </div>
