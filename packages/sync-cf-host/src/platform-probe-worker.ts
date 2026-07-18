@@ -246,12 +246,91 @@ async function runApplicationOverlapProbe(
   })
 }
 
+async function runApplicationCancellationProbe(
+  env: Env,
+  namespace: string,
+  action: 'hold' | 'queued' | 'active' | 'status' | 'release' | 'verify',
+  signal: AbortSignal
+): Promise<Response> {
+  const target = env.PROBE_DO.get(env.PROBE_DO.idFromName(namespace))
+  if (action === 'status') return json(await target.applicationCancellationStatus())
+  if (action === 'release') {
+    await target.applicationCancellationRelease()
+    return json({ ok: true })
+  }
+  const activeController = action === 'active' ? new AbortController() : undefined
+  const client = createApplicationSqlClient(env.PROBE_DO, namespace, {
+    signal: activeController?.signal ?? signal,
+  })
+  if (action === 'verify') {
+    await client.exec(
+      'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)'
+    )
+    await client.exec(
+      'INSERT OR REPLACE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
+      [
+        'accounts',
+        JSON.stringify({
+          columns: transactionQuerySchema.tables.account.columns,
+          primaryKey: transactionQuerySchema.tables.account.primaryKey,
+        }),
+      ]
+    )
+    await client.transaction(compileTransactionQuery, (tx) =>
+      tx.exec("UPDATE accounts SET balance = balance + 5 WHERE id = 'primary'", [], {
+        table: 'accounts',
+        publicTable: 'public.account',
+        kind: 'update',
+      })
+    )
+    const direct = await client.query<{ balance: number }>(
+      "SELECT balance FROM accounts WHERE id = 'primary'"
+    )
+    const snapshotResponse = await target.fetch(
+      new Request('https://orez-probe.local/snapshot')
+    )
+    return json({
+      direct,
+      snapshotStatus: snapshotResponse.status,
+      snapshot: await snapshotResponse.json(),
+    })
+  }
+
+  await target.applicationCancellationMark(action)
+  try {
+    await client.transaction(compileTransactionQuery, async (tx) => {
+      await tx.exec(
+        "UPDATE accounts SET balance = balance + 100 WHERE id = 'primary'",
+        [],
+        {
+          table: 'accounts',
+          publicTable: 'public.account',
+          kind: 'update',
+        }
+      )
+      if (action === 'queued') return
+      if (action === 'hold') {
+        await target.applicationCancellationWait()
+        throw new Error('intentional held transaction rollback')
+      }
+      await target.applicationCancellationMark('active-active')
+      setTimeout(() => activeController?.abort(), 25)
+      await new Promise((resolve) => setTimeout(resolve, 60_000))
+    })
+    return json({ ok: true })
+  } catch (error) {
+    return json({ ok: false, error: String(error) })
+  }
+}
+
 export class ProbeDurableObject extends ZeroDO {
   readonly #db: SqlStorageSyncDb
   #bootID = crypto.randomUUID()
   #lastRequestAt = 0
   #reinstantiations = 0
   #effects: Array<DeferredEffect & { observedCommitted: boolean }> = []
+  #applicationCancellationStages = new Set<string>()
+  #applicationCancellationRelease: (() => void) | undefined
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env as never)
@@ -285,6 +364,29 @@ export class ProbeDurableObject extends ZeroDO {
       sideEffectCount: this.#effects.length,
       sideEffects: this.#effects,
     }
+  }
+
+  applicationCancellationMark(stage: string): void {
+    this.#applicationCancellationStages.add(stage)
+  }
+
+  applicationCancellationStatus(): { stages: string[]; activeSession: boolean } {
+    return {
+      stages: [...this.#applicationCancellationStages],
+      activeSession: Reflect.get(this, 'activeApplicationSqlSession') !== null,
+    }
+  }
+
+  async applicationCancellationWait(): Promise<void> {
+    this.#applicationCancellationStages.add('hold-active')
+    await new Promise<void>((resolve) => {
+      this.#applicationCancellationRelease = resolve
+    })
+  }
+
+  applicationCancellationRelease(): void {
+    this.#applicationCancellationRelease?.()
+    this.#applicationCancellationRelease = undefined
   }
 
   async #mutate(name: MutatorName, deferred: DeferredEffect[]): Promise<void> {
@@ -587,6 +689,20 @@ export default {
       }
       if (third === 'overlap') return runApplicationOverlapProbe(env, second)
       return runApplicationRpcProbe(env, second, third)
+    }
+    if (first === '_application-cancellation') {
+      if (!second) return json({ error: 'unknown application cancellation probe' }, 404)
+      switch (third) {
+        case 'hold':
+        case 'queued':
+        case 'active':
+        case 'status':
+        case 'release':
+        case 'verify':
+          return runApplicationCancellationProbe(env, second, third, request.signal)
+        default:
+          return json({ error: 'unknown application cancellation probe' }, 404)
+      }
     }
     const namespace = first
     if (!namespace) return new Response('orez rust sync M0 probe')

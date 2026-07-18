@@ -43,6 +43,7 @@ vi.mock('cloudflare:workers', () => ({
       this.env = env
     }
   },
+  RpcTarget: class {},
 }))
 
 import { ZeroDO } from '../cf-do/worker.js'

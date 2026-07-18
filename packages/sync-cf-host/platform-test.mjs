@@ -40,13 +40,31 @@ const check = (actual, expected, message) => {
   assertions++
 }
 const ns = (label) => `${label}-${crypto.randomUUID()}`
-const call = async (namespace, route, body) => {
+const call = async (namespace, route, body, signal) => {
   const response = await fetch(`${baseURL}/${namespace}${route}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   })
   return { status: response.status, body: await response.json() }
+}
+const waitForStage = async (namespace, stage) => {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const status = await call(`_application-cancellation/${namespace}`, '/status')
+    if (status.body.stages.includes(stage)) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`application cancellation stage did not start: ${stage}`)
+}
+const callWithTimeout = async (namespace, route, timeoutMs = 3_000) => {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await call(namespace, route, undefined, controller.signal)
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 try {
@@ -156,6 +174,61 @@ try {
     result.body.after,
     [{ balance: 105 }],
     'overlapping transaction result is durable'
+  )
+
+  const canceledQueued = ns('application-canceled-queued')
+  const held = call(`_application-cancellation/${canceledQueued}`, '/hold')
+  await waitForStage(canceledQueued, 'hold-active')
+  const queuedController = new AbortController()
+  const queued = call(
+    `_application-cancellation/${canceledQueued}`,
+    '/queued',
+    undefined,
+    queuedController.signal
+  ).then(
+    () => 'resolved',
+    (error) => error.name
+  )
+  await waitForStage(canceledQueued, 'queued')
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  queuedController.abort()
+  check(await queued, 'AbortError', 'queued application RPC observes caller abort')
+  await call(`_application-cancellation/${canceledQueued}`, '/release')
+  const heldResult = await held
+  check(heldResult.body.ok, false, 'held owner rolls back after release')
+  result = await callWithTimeout(`_application-cancellation/${canceledQueued}`, '/verify')
+  check(
+    result.body.direct,
+    [{ balance: 105 }],
+    'canceling a queued transaction leaves no owner behind'
+  )
+  check(result.body.snapshotStatus, 200, 'snapshot follows canceled queued transaction')
+  check(
+    result.body.snapshot.tables.accounts[0].balance,
+    105,
+    'snapshot excludes the canceled queued write'
+  )
+
+  const canceledActive = ns('application-canceled-active')
+  const active = call(`_application-cancellation/${canceledActive}`, '/active')
+  await waitForStage(canceledActive, 'active-active')
+  check((await active).body.ok, false, 'active application RPC observes cancellation')
+  const activeStatus = await call(
+    `_application-cancellation/${canceledActive}`,
+    '/status'
+  )
+  check(activeStatus.body.activeSession, false, 'active session is disposed after abort')
+  result = await callWithTimeout(`_application-cancellation/${canceledActive}`, '/verify')
+  check(
+    result.body.direct,
+    [{ balance: 105 }],
+    'canceling an active transaction rolls back its write and releases ownership'
+  )
+  check(result.body.snapshotStatus, 200, 'snapshot follows canceled active transaction')
+  check(
+    result.body.snapshot.tables.accounts[0].balance,
+    105,
+    'snapshot excludes the canceled active write'
   )
 
   result = await call(transactions, '/application-transaction-query-budget')

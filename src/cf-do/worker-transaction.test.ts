@@ -78,7 +78,8 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
   zero.tableSchemas = new Map()
   zero.schemaTables = new Set<string>()
   zero.pendingChangesSchemaReady = false
-  zero.applicationSqlTurnWaiters = []
+  zero.activeApplicationSqlSession = null
+  zero.applicationSqlDidCommit = () => {}
   zero.ctx = { storage: { transaction } }
   return { storage, zero }
 }
@@ -130,22 +131,22 @@ describe('ZeroDO trusted application transaction', () => {
     const { createApplicationSqlClient } = await import('./application-sql.js')
     const calls: unknown[] = []
     const target = {
-      applicationSqlQuery: async (sql: string, params: readonly unknown[]) => {
-        calls.push(['query', sql, params])
-        return [{ id: 'row-1' }]
-      },
-      applicationSqlExec: async (
-        sql: string,
-        params: readonly unknown[],
-        metadata: unknown
-      ) => {
-        calls.push(['exec', sql, params, metadata])
-        return { changes: 1 }
-      },
-      applicationSqlTransaction: async (
-        _compiler: unknown,
-        work: (tx: unknown) => unknown
-      ) => work(target),
+      applicationSqlSession: async () => ({
+        [Symbol.dispose]() {},
+        begin: async () => true,
+        query: async (sql: string, params: readonly unknown[]) => {
+          calls.push(['query', sql, params])
+          return [{ id: 'row-1' }]
+        },
+        exec: async (sql: string, params: readonly unknown[], metadata: unknown) => {
+          calls.push(['exec', sql, params, metadata])
+          return { changes: 1 }
+        },
+        queryPlan: async () => [],
+        registerTables: async () => {},
+        commit: async () => {},
+        rollback: async () => {},
+      }),
     }
     const client = createApplicationSqlClient(
       {
@@ -210,22 +211,25 @@ describe('ZeroDO trusted application transaction', () => {
     const events: string[] = []
     const { createApplicationSqlClient } = await import('./application-sql.js')
     const target = {
-      applicationSqlQuery: async () => [],
-      applicationSqlExec: async () => ({ changes: 0 }),
-      applicationSqlRegisterTables: async () => {},
-      applicationSqlBegin: async (sessionID: string) => events.push(`begin:${sessionID}`),
-      applicationSqlSessionQuery: async () => [],
-      applicationSqlSessionExec: async () => {
-        events.push('exec')
-        return { changes: 1 }
-      },
-      applicationSqlSessionQueryPlan: async () => {
-        events.push('queryAst')
-        return [{ id: 'row-1', enabled: true }]
-      },
-      applicationSqlSessionRegisterTables: async () => {},
-      applicationSqlCommit: async () => events.push('commit'),
-      applicationSqlRollback: async () => events.push('rollback'),
+      applicationSqlSession: async (sessionID: string) => ({
+        [Symbol.dispose]() {},
+        begin: async () => {
+          events.push(`begin:${sessionID}`)
+          return true
+        },
+        query: async () => [],
+        exec: async () => {
+          events.push('exec')
+          return { changes: 1 }
+        },
+        queryPlan: async () => {
+          events.push('queryAst')
+          return [{ id: 'row-1', enabled: true }]
+        },
+        registerTables: async () => {},
+        commit: async () => events.push('commit'),
+        rollback: async () => events.push('rollback'),
+      }),
     }
     const client = createApplicationSqlClient(
       { idFromName: () => 'id', get: () => target },
@@ -252,10 +256,31 @@ describe('ZeroDO trusted application transaction', () => {
     expect(events.slice(1)).toEqual(['queryAst', 'exec', 'commit', 'effect'])
   })
 
+  it('leaves no server ownership behind for a disposed waiting session', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    const owner = await zero.applicationSqlSession('owner')
+    const canceled = await zero.applicationSqlSession('canceled')
+    const next = await zero.applicationSqlSession('next')
+    expect(await owner.begin()).toBe(true)
+
+    expect(await canceled.begin()).toBe(false)
+    canceled[Symbol.dispose]()
+    expect(await next.begin()).toBe(false)
+    zero.releaseApplicationSqlTurn(owner)
+    expect(await next.begin()).toBe(true)
+
+    await expect(next.query('SELECT id FROM item')).resolves.toEqual([
+      { id: 'row-1', enabled: 1 },
+    ])
+    zero.releaseApplicationSqlTurn(next)
+  })
+
   it('installs CDC from explicit SQLite write metadata', async () => {
     const { zero } = await createTestZero(async (work) => await work())
+    const session = await zero.applicationSqlSession('cdc-metadata')
+    await session.begin()
 
-    const result = await zero.applicationSqlExec(
+    const result = await session.exec(
       'INSERT INTO item (id, enabled) VALUES (?, ?)',
       ['row-1', 1],
       { table: 'item', publicTable: 'public.item', kind: 'upsert' }

@@ -11,6 +11,7 @@ vi.mock('cloudflare:workers', () => ({
       this.ctx = ctx
     }
   },
+  RpcTarget: class {},
 }))
 
 const BetterSqlite3 = BedrockSqlite.Database
@@ -42,7 +43,8 @@ async function createWorkerCore() {
   zero.tableSchemas = new Map()
   zero.schemaTables = new Set<string>()
   zero.pendingChangesSchemaReady = false
-  zero.applicationSqlTurnWaiters = []
+  zero.activeApplicationSqlSession = null
+  zero.applicationSqlDidCommit = () => {}
   // A real transaction boundary: an abort has to roll the SQLite side back, or
   // the cache-staleness regressions below cannot be observed at all.
   const runTransaction = <T>(work: () => T): T => {
@@ -218,19 +220,22 @@ describe('ZeroDO transactional CDC integration', () => {
     expect(zero.readChangesSince(0)).toEqual([])
   })
 
-  it('rolls back an unannotated write to a registered private application table', async () => {
+  it('rolls back an active application write when its capability is disposed', async () => {
     const { sql, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE private_note (id TEXT PRIMARY KEY, body TEXT)')
 
-    await zero.applicationSqlRegisterTables([
+    const registration = await zero.applicationSqlSession(
+      'application-private-registration'
+    )
+    await registration.begin()
+    await registration.registerTables([
       { table: 'private_note', publicTable: 'private.private_note', publish: false },
     ])
-    await zero.applicationSqlBegin('application-private-rollback')
-    await zero.applicationSqlSessionExec(
-      'application-private-rollback',
-      "INSERT INTO private_note VALUES ('n1', 'discarded')"
-    )
-    await zero.applicationSqlRollback('application-private-rollback')
+    await registration.commit()
+    const session = await zero.applicationSqlSession('application-private-rollback')
+    await session.begin()
+    await session.exec("INSERT INTO private_note VALUES ('n1', 'discarded')")
+    session[Symbol.dispose]()
 
     expect(sql.exec('SELECT * FROM private_note').toArray()).toEqual([])
     expect(zero.readChangesSince(0)).toEqual([])
@@ -240,15 +245,11 @@ describe('ZeroDO transactional CDC integration', () => {
     const { sql, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
 
-    await zero.applicationSqlBegin('application-schema-only')
-    await zero.applicationSqlSessionQuery('application-schema-only', 'SELECT * FROM item')
-    await zero.applicationSqlSessionExec(
-      'application-schema-only',
-      'CREATE TABLE IF NOT EXISTS item (id TEXT PRIMARY KEY, body TEXT)'
-    )
-    await zero.applicationSqlSessionRegisterTables('application-schema-only', [
-      { table: 'item', publicTable: 'public.item' },
-    ])
+    const session = await zero.applicationSqlSession('application-schema-only')
+    await session.begin()
+    await session.query('SELECT * FROM item')
+    await session.exec('CREATE TABLE IF NOT EXISTS item (id TEXT PRIMARY KEY, body TEXT)')
+    await session.registerTables([{ table: 'item', publicTable: 'public.item' }])
 
     expect(
       sql
@@ -258,17 +259,14 @@ describe('ZeroDO transactional CDC integration', () => {
         .toArray()
     ).toEqual([])
 
-    await zero.applicationSqlSessionExec(
-      'application-schema-only',
-      'ALTER TABLE item ADD COLUMN extra TEXT'
-    )
+    await session.exec('ALTER TABLE item ADD COLUMN extra TEXT')
     expect(
       sql
         .exec("SELECT name FROM _orez_tx_schema WHERE tx_id = 'application-schema-only'")
         .toArray().length
     ).toBeGreaterThan(0)
 
-    await zero.applicationSqlRollback('application-schema-only')
+    await session.rollback()
     expect(
       sql
         .exec('PRAGMA table_info(item)')
@@ -280,14 +278,17 @@ describe('ZeroDO transactional CDC integration', () => {
   it('recovers an interrupted application session when the Durable Object is recreated', async () => {
     const { sql, nativeDb, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE private_note (id TEXT PRIMARY KEY, body TEXT)')
-    await zero.applicationSqlRegisterTables([
+    const registration = await zero.applicationSqlSession(
+      'application-restart-registration'
+    )
+    await registration.begin()
+    await registration.registerTables([
       { table: 'private_note', publicTable: 'private.private_note', publish: false },
     ])
-    await zero.applicationSqlBegin('application-restart')
-    await zero.applicationSqlSessionExec(
-      'application-restart',
-      "INSERT INTO private_note VALUES ('n1', 'interrupted')"
-    )
+    await registration.commit()
+    const session = await zero.applicationSqlSession('application-restart')
+    await session.begin()
+    await session.exec("INSERT INTO private_note VALUES ('n1', 'interrupted')")
 
     const { ZeroDO } = await import('./worker.js')
     let recovery: Promise<void> | undefined

@@ -46,47 +46,33 @@ export type ApplicationSqlTransactionWork<Value> = (
 ) => Value | Promise<Value>
 
 /**
- * Private Durable Object RPC protocol. Transaction callbacks stay in the
- * caller: every SQL turn is tagged with a serialized session id, avoiding a
- * re-entrant RPC call into a Durable Object that is awaiting a callback.
+ * private durable object RPC protocol. the session capability is returned
+ * before it asks for ownership. waiting retries hold no durable object state,
+ * and request cancellation disposes an active session before rejecting work.
  */
-export type ApplicationSqlRpc = {
-  applicationSqlQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
+export type ApplicationSqlSessionRpc = Disposable & {
+  begin(): Promise<boolean>
+  query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
   ): Promise<Row[]>
-  applicationSqlExec(
+  exec(
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
   ): Promise<ApplicationSqlExecResult>
-  applicationSqlRegisterTables(tables: readonly ApplicationSqlTable[]): Promise<void>
-  applicationSqlBegin(sessionID: string): Promise<void>
-  applicationSqlSessionQuery<
-    Row extends Record<string, unknown> = Record<string, unknown>,
-  >(
-    sessionID: string,
-    sql: string,
-    params?: readonly unknown[]
-  ): Promise<Row[]>
-  applicationSqlSessionExec(
-    sessionID: string,
-    sql: string,
-    params?: readonly unknown[],
-    metadata?: SqlStatementMetadata
-  ): Promise<ApplicationSqlExecResult>
-  applicationSqlSessionQueryPlan<Result = unknown>(
-    sessionID: string,
+  queryPlan<Result = unknown>(
     plan: CompiledTransactionQueryPlan,
     queryName?: string,
     queryBudget?: Partial<TransactionQueryBudget>
   ): Promise<Result>
-  applicationSqlSessionRegisterTables(
-    sessionID: string,
-    tables: readonly ApplicationSqlTable[]
-  ): Promise<void>
-  applicationSqlCommit(sessionID: string): Promise<void>
-  applicationSqlRollback(sessionID: string): Promise<void>
+  registerTables(tables: readonly ApplicationSqlTable[]): Promise<void>
+  commit(): Promise<void>
+  rollback(): Promise<void>
+}
+
+export type ApplicationSqlRpc = {
+  applicationSqlSession(sessionID: string): Promise<ApplicationSqlSessionRpc>
 }
 
 export type ApplicationSqlDurableObjectNamespace = {
@@ -113,48 +99,96 @@ export type ApplicationSqlClient = {
   ): Promise<Value>
 }
 
+export type ApplicationSqlClientOptions = {
+  signal?: AbortSignal
+}
+
+async function withApplicationSqlSession<Value>(
+  target: ApplicationSqlRpc,
+  signal: AbortSignal | undefined,
+  work: (session: ApplicationSqlSessionRpc) => Value | Promise<Value>
+): Promise<Value> {
+  using session = await target.applicationSqlSession(crypto.randomUUID())
+  let rejectAbort: ((reason: unknown) => void) | undefined
+  const aborted = signal
+    ? new Promise<never>((_resolve, reject) => {
+        rejectAbort = reject
+      })
+    : undefined
+  void aborted?.catch(() => {})
+  const abort = () => {
+    try {
+      session[Symbol.dispose]()
+    } finally {
+      rejectAbort?.(
+        signal?.reason ??
+          new DOMException('application SQLite request was canceled', 'AbortError')
+      )
+    }
+  }
+  signal?.addEventListener('abort', abort, { once: true })
+  try {
+    signal?.throwIfAborted()
+    while (!(await session.begin())) {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      signal?.throwIfAborted()
+    }
+    const pendingWork = work(session)
+    const value = aborted
+      ? await Promise.race([Promise.resolve(pendingWork), aborted])
+      : await pendingWork
+    await session.commit()
+    return value
+  } catch (error) {
+    await session.rollback().catch(() => {})
+    throw error
+  } finally {
+    signal?.removeEventListener('abort', abort)
+  }
+}
+
 export function createApplicationSqlClient(
   durableObjects: ApplicationSqlDurableObjectNamespace,
-  namespace: string
+  namespace: string,
+  options: ApplicationSqlClientOptions = {}
 ): ApplicationSqlClient {
   if (!namespace) throw new TypeError('application SQLite namespace is required')
   const target = durableObjects.get(durableObjects.idFromName(namespace))
   return {
     namespace,
-    query: (sql, params = []) => target.applicationSqlQuery(sql, params),
+    query: (sql, params = []) =>
+      withApplicationSqlSession(target, options.signal, (session) =>
+        session.query(sql, params)
+      ),
     exec: (sql, params = [], metadata) =>
-      target.applicationSqlExec(sql, params, metadata),
-    registerTables: (tables) => target.applicationSqlRegisterTables(tables),
+      withApplicationSqlSession(target, options.signal, (session) =>
+        session.exec(sql, params, metadata)
+      ),
+    registerTables: (tables) =>
+      withApplicationSqlSession(target, options.signal, (session) =>
+        session.registerTables(tables)
+      ),
     async transaction(compileQuery, work, queryBudget) {
-      const sessionID = crypto.randomUUID()
       const effects: DeferredEffect[] = []
-      await target.applicationSqlBegin(sessionID)
-      const tx: ApplicationSqlTransaction = {
-        exec: (sql, params = [], metadata) =>
-          target.applicationSqlSessionExec(sessionID, sql, params, metadata),
-        query: (sql, params = []) =>
-          target.applicationSqlSessionQuery(sessionID, sql, params),
-        async queryAst(ast, format, queryName) {
-          const plan = await compileQuery(ast, format)
-          return target.applicationSqlSessionQueryPlan(
-            sessionID,
-            plan,
-            queryName,
-            queryBudget
-          )
-        },
-        registerTables: (tables) =>
-          target.applicationSqlSessionRegisterTables(sessionID, tables),
-      }
-      try {
-        const value = await work(tx, { defer: (effect) => effects.push(effect) })
-        await target.applicationSqlCommit(sessionID)
-        for (const effect of effects) await effect()
-        return value
-      } catch (error) {
-        await target.applicationSqlRollback(sessionID).catch(() => {})
-        throw error
-      }
+      const value = await withApplicationSqlSession(
+        target,
+        options.signal,
+        async (session) => {
+          const tx: ApplicationSqlTransaction = {
+            exec: (sql, params = [], metadata) => session.exec(sql, params, metadata),
+            query: (sql, params = []) => session.query(sql, params),
+            async queryAst(ast, format, queryName) {
+              const plan = await compileQuery(ast, format)
+              return session.queryPlan(plan, queryName, queryBudget)
+            },
+            registerTables: (tables) => session.registerTables(tables),
+          }
+          const value = await work(tx, { defer: (effect) => effects.push(effect) })
+          return value
+        }
+      )
+      for (const effect of effects) await effect()
+      return value
     },
   }
 }

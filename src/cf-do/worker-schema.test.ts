@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('cloudflare:workers', () => ({
   DurableObject: class {},
+  RpcTarget: class {},
 }))
 
 class FakeResult {
