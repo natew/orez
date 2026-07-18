@@ -1094,7 +1094,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
 
           const endpoint = new URL(
             `${upstreamPath ?? ''}${config.mutateUrl}`,
-            'https://upstream.invalid'
+            config.mutateOrigin ?? 'https://upstream.invalid'
           )
           const headers = new Headers(request.headers)
           headers.delete(CLAIMS_HEADER)

@@ -141,8 +141,10 @@ export type SyncHostConfig<Env extends SyncHostEnv = SyncHostEnv> = {
   hostVersion: string
   schema: ZeroSchemaConfig
   mutators?: MutatorRegistry
-  /** Relative app push endpoint on the upstream service binding. */
+  /** Absolute app push path on the upstream service binding. */
   mutateUrl?: string
+  /** Absolute origin used for delegated push requests through the service binding. */
+  mutateOrigin?: string
   /** Env binding for delegated pushes; defaults to upstream.binding. */
   mutateBinding?: string
   delegatedPushRetry?: DelegatedPushRetryConfig

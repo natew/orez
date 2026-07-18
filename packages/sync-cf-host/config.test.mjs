@@ -57,6 +57,41 @@ describe('mutation mode', () => {
     ).not.toThrow()
   })
 
+  test('mutateOrigin is an http(s) origin only for delegated pushes', () => {
+    expect(() =>
+      validateSyncHostConfig({
+        ...base,
+        mutators: {},
+        mutateOrigin: 'https://app.example.com',
+      })
+    ).toThrow('requires mutateUrl')
+    for (const mutateOrigin of [
+      'app.example.com',
+      'ftp://app.example.com',
+      'https://app.example.com/path',
+      'https://app.example.com?query=1',
+      'https://app.example.com#hash',
+      'https://app.example.com/',
+    ]) {
+      expect(() =>
+        validateSyncHostConfig({
+          ...base,
+          mutateUrl: '/push',
+          mutateOrigin,
+          upstream: { binding: 'DATA', namespacePath: '/data' },
+        })
+      ).toThrow('absolute http(s) origin')
+    }
+    expect(() =>
+      validateSyncHostConfig({
+        ...base,
+        mutateUrl: '/push',
+        mutateOrigin: 'https://app.example.com',
+        upstream: { binding: 'DATA', namespacePath: '/data' },
+      })
+    ).not.toThrow()
+  })
+
   test('validates ingest budgets and delegated retry bounds', () => {
     expect(() =>
       validateSyncHostConfig({

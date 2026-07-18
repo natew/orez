@@ -21,6 +21,9 @@ export function validateSyncHostConfig<Env extends SyncHostEnv>(
   if (config.mutateBinding !== undefined && !hasDelegate) {
     throw new TypeError('sync host config mutateBinding requires mutateUrl')
   }
+  if (config.mutateOrigin !== undefined && !hasDelegate) {
+    throw new TypeError('sync host config mutateOrigin requires mutateUrl')
+  }
   if (config.delegatedPushRetry !== undefined && !hasDelegate) {
     throw new TypeError('sync host config delegatedPushRetry requires mutateUrl')
   }
@@ -34,6 +37,20 @@ export function validateSyncHostConfig<Env extends SyncHostEnv>(
   }
   if (config.mutateUrl && !config.mutateUrl.startsWith('/')) {
     throw new TypeError('mutateUrl must be an absolute path')
+  }
+  if (config.mutateOrigin !== undefined) {
+    let origin: URL
+    try {
+      origin = new URL(config.mutateOrigin)
+    } catch {
+      throw new TypeError('mutateOrigin must be an absolute http(s) origin')
+    }
+    if (
+      (origin.protocol !== 'http:' && origin.protocol !== 'https:') ||
+      origin.origin !== config.mutateOrigin
+    ) {
+      throw new TypeError('mutateOrigin must be an absolute http(s) origin')
+    }
   }
   if (config.upstream) {
     if (!config.upstream.binding) throw new TypeError('upstream.binding is required')

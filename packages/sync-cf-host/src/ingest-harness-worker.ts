@@ -36,11 +36,13 @@ const activeSnapshots = new Set<string>()
 let delegatedFailuresRemaining = 0
 let delegatedAttempts = 0
 let delegatedPushFailedRemaining = 0
+let delegatedUrl = ''
 
 const config: SyncHostConfig<Env> = {
   hostVersion: 'upstream-ingest-harness',
   schema,
-  mutateUrl: '/api/zero/push',
+  mutateUrl: '/api/zero/push?schema=feed_0&appID=feed',
+  mutateOrigin: 'https://app.internal',
   mutateBinding: 'APP',
   delegatedPushRetry: {
     maxAttempts: 3,
@@ -227,6 +229,7 @@ export class DataService extends WorkerEntrypoint<Env> {
 
 export class AppService extends WorkerEntrypoint<Env> {
   fetch(request: Request): Promise<Response> {
+    delegatedUrl = request.url
     if (!new URL(request.url).pathname.endsWith('/api/zero/push')) {
       return Promise.resolve(
         new Response('APP route rejected non-push request', { status: 418 })
@@ -337,6 +340,7 @@ export default {
             delegatedFailuresRemaining,
             delegatedPushFailedRemaining,
             delegatedAttempts,
+            delegatedUrl,
           })
         )
       }
@@ -353,10 +357,12 @@ export default {
             Number((body as { pushFailed?: unknown }).pushFailed) || 0
           )
           delegatedAttempts = 0
+          delegatedUrl = ''
           return Response.json({
             delegatedFailuresRemaining,
             delegatedPushFailedRemaining,
             delegatedAttempts,
+            delegatedUrl,
           })
         })
     }

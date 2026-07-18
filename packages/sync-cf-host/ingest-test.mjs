@@ -316,6 +316,10 @@ try {
     response.json()
   )
   assert.equal(retriedDelegation.delegatedAttempts, 3)
+  const delegatedUrl = new URL(retriedDelegation.delegatedUrl)
+  assert.equal(delegatedUrl.origin, 'https://app.internal')
+  assert.equal(delegatedUrl.searchParams.get('schema'), 'feed_0')
+  assert.equal(delegatedUrl.searchParams.get('appID'), 'feed')
 
   // A persistently failing endpoint receives exactly maxAttempts requests;
   // the host returns the terminal response instead of spinning a hot loop.
