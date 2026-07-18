@@ -2,7 +2,11 @@ import { Zero } from '@rocicorp/zero'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { zeroHttpFixtureMutators, zeroHttpFixtureSchema } from './fixture-schema.js'
-import { ensureHttpPullTransport, installHttpPullTransport } from './transport.js'
+import {
+  ensureHttpPullTransport,
+  flushHttpPullTransports,
+  installHttpPullTransport,
+} from './transport.js'
 
 const ORIGIN = 'https://zero-http.local'
 
@@ -193,9 +197,11 @@ describe('zero-http transport', () => {
       })
     })
     const transport = installHttpPullTransport({
+      appID: 'chat',
       origin: ORIGIN,
       pushOrigin: 'https://app.local/zero-http',
       fetch,
+      shardNum: 2,
     })
     transports.push(transport)
     const zero = createZero()
@@ -212,7 +218,12 @@ describe('zero-http transport', () => {
     await mutation.server
 
     const push = requests.find((request) => request.path.endsWith('/push'))
-    expect(push?.url).toBe('https://app.local/zero-http/push')
+    const pushURL = new URL(push?.url ?? '')
+    expect(`${pushURL.origin}${pushURL.pathname}`).toBe(
+      'https://app.local/zero-http/push',
+    )
+    expect(pushURL.searchParams.get('schema')).toBe('chat_2')
+    expect(pushURL.searchParams.get('appID')).toBe('chat')
     expect(requests.find((request) => request.path === '/pull')?.url).toBe(
       'https://zero-http.local/pull',
     )
@@ -286,6 +297,236 @@ describe('zero-http transport', () => {
         .filter((message) => message[0] === 'pushResponse')
         .map((message) => message[1].mutations[0].id.id),
     ).toEqual([1, 2])
+  })
+
+  test('flush waits for a queued push before reporting the transport flushed', async () => {
+    const pushStarted = defer<void>()
+    const releasePush = defer<void>()
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      pushStarted.resolve()
+      await releasePush.promise
+      const mutation = request.body.mutations[0]
+      return jsonResponse({
+        pushResponse: {
+          mutations: [
+            {
+              id: { clientID: mutation.clientID, id: mutation.id },
+              result: {},
+            },
+          ],
+        },
+      })
+    })
+    const transport = install(fetch)
+    const { messages, socket } = openRawSocketWithMessages()
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true),
+    )
+
+    socket.send(JSON.stringify(['push', pushBody(1)]))
+    let flushed = false
+    const flush = transport.flush().then(() => {
+      flushed = true
+    })
+    await pushStarted.promise
+    expect(flushed).toBe(false)
+
+    releasePush.resolve()
+    await flush
+    expect(flushed).toBe(true)
+    socket.close()
+  })
+
+  test('flush rejects when its queued push fails', async () => {
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      throw new TypeError('offline')
+    })
+    const transport = install(fetch)
+    const { messages, socket } = openRawSocketWithMessages()
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true),
+    )
+
+    socket.send(JSON.stringify(['push', pushBody(1)]))
+    await expect(transport.flush()).rejects.toThrow('offline')
+    socket.close()
+  })
+
+  test('flush rejects stale work across socket replacements', async () => {
+    const pushes = new Map(
+      ['c1', 'c2', 'c3'].map((clientID) => [
+        clientID,
+        { started: defer<void>(), release: defer<void>() },
+      ]),
+    )
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      const clientID = request.body.mutations[0].clientID as string
+      const push = pushes.get(clientID)
+      if (!push) throw new Error(`unexpected client ${clientID}`)
+      push.started.resolve()
+      await push.release.promise
+      return jsonResponse({
+        pushResponse: {
+          mutations: [
+            {
+              id: { clientID, id: request.body.mutations[0].id },
+              result: {},
+            },
+          ],
+        },
+      })
+    })
+    const transport = install(fetch)
+
+    const first = openRawSocketWithMessages({ clientID: 'c1' })
+    await eventually(() =>
+      expect(first.messages.some((message) => message[0] === 'connected')).toBe(true),
+    )
+    first.socket.send(JSON.stringify(['push', pushBody(1, 'c1')]))
+    const firstFlush = transport.flush()
+    await pushes.get('c1')?.started.promise
+
+    first.socket.close()
+    const second = openRawSocketWithMessages({ clientID: 'c2' })
+    await eventually(() =>
+      expect(second.messages.some((message) => message[0] === 'connected')).toBe(true),
+    )
+    second.socket.send(JSON.stringify(['push', pushBody(1, 'c2')]))
+    pushes.get('c1')?.release.resolve()
+    await expect(firstFlush).rejects.toThrow('transport changed during flush')
+
+    const secondFlush = transport.flush()
+    await pushes.get('c2')?.started.promise
+    second.socket.close()
+    const third = openRawSocketWithMessages({ clientID: 'c3' })
+    await eventually(() =>
+      expect(third.messages.some((message) => message[0] === 'connected')).toBe(true),
+    )
+    third.socket.send(JSON.stringify(['push', pushBody(1, 'c3')]))
+    pushes.get('c2')?.release.resolve()
+    await expect(secondFlush).rejects.toThrow('transport changed during flush')
+
+    let finalFlushed = false
+    const finalFlush = transport.flush().then(() => {
+      finalFlushed = true
+    })
+    await pushes.get('c3')?.started.promise
+    expect(finalFlushed).toBe(false)
+    pushes.get('c3')?.release.resolve()
+    await finalFlush
+    expect(finalFlushed).toBe(true)
+    third.socket.close()
+  })
+
+  test('flush waits for a recovery push queued during its final pull', async () => {
+    const finalPullStarted = defer<void>()
+    const releaseFinalPull = defer<void>()
+    const pushStarted = defer<void>()
+    const releasePush = defer<void>()
+    let flushing = false
+    let flushPulls = 0
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        if (flushing && ++flushPulls === 2) {
+          finalPullStarted.resolve()
+          await releaseFinalPull.promise
+        }
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      pushStarted.resolve()
+      await releasePush.promise
+      const mutation = request.body.mutations[0]
+      return jsonResponse({
+        pushResponse: {
+          mutations: [
+            {
+              id: { clientID: mutation.clientID, id: mutation.id },
+              result: {},
+            },
+          ],
+        },
+      })
+    })
+    const transport = install(fetch)
+    const { messages, socket } = openRawSocketWithMessages({ clientID: 'late-push' })
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true),
+    )
+    await transport.pull()
+
+    flushing = true
+    let flushed = false
+    const flush = transport.flush().then(() => {
+      flushed = true
+    })
+    await finalPullStarted.promise
+
+    socket.send(JSON.stringify(['push', pushBody(1, 'late-push')]))
+    await pushStarted.promise
+    releaseFinalPull.resolve()
+    await sleep(0)
+    expect(flushed).toBe(false)
+
+    releasePush.resolve()
+    await flush
+    expect(flushed).toBe(true)
+    socket.close()
+  })
+
+  test('flushHttpPullTransports drains ensured transports', async () => {
+    const origin = 'https://zero-http-global-flush.local'
+    const pushStarted = defer<void>()
+    const releasePush = defer<void>()
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      pushStarted.resolve()
+      await releasePush.promise
+      const mutation = request.body.mutations[0]
+      return jsonResponse({
+        pushResponse: {
+          mutations: [
+            {
+              id: { clientID: mutation.clientID, id: mutation.id },
+              result: {},
+            },
+          ],
+        },
+      })
+    })
+    const transport = ensureHttpPullTransport({ origin, fetch })
+    transports.push(transport)
+    const { messages, socket } = openRawSocketWithMessages({ origin })
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true),
+    )
+
+    socket.send(JSON.stringify(['push', pushBody(1)]))
+    let flushed = false
+    const flush = flushHttpPullTransports().then(() => {
+      flushed = true
+    })
+    await pushStarted.promise
+    expect(flushed).toBe(false)
+    releasePush.resolve()
+    await flush
+    expect(flushed).toBe(true)
+    socket.close()
   })
 
   test('cookie discipline skips unchanged pokes, chains changed pokes, and coalesces concurrent pulls', async () => {
@@ -680,11 +921,13 @@ function openRawSocket() {
 
 function openRawSocketWithMessages(opts?: {
   authToken?: string
+  clientID?: string
   desiredQueriesPatch?: unknown[]
+  origin?: string
 }) {
-  const url = new URL(`${ORIGIN}/sync/v51/connect`)
+  const url = new URL(`${opts?.origin ?? ORIGIN}/sync/v51/connect`)
   url.protocol = 'wss:'
-  url.searchParams.set('clientID', 'c1')
+  url.searchParams.set('clientID', opts?.clientID ?? 'c1')
   url.searchParams.set('clientGroupID', 'cg1')
   url.searchParams.set('userID', 'u1')
   url.searchParams.set('baseCookie', '')
@@ -704,7 +947,7 @@ function openRawSocketWithMessages(opts?: {
   return { messages, socket }
 }
 
-function pushBody(id: number) {
+function pushBody(id: number, clientID = 'c1') {
   return {
     clientGroupID: 'cg1',
     pushVersion: 1,
@@ -715,7 +958,7 @@ function pushBody(id: number) {
         type: 'custom',
         name: 'project|create',
         id,
-        clientID: 'c1',
+        clientID,
         args: [{ id: `p${id}`, ownerId: 'u1', name: `project ${id}` }],
       },
     ],

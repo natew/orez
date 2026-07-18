@@ -62,6 +62,7 @@ type PullResponse =
     }
 
 type TransportState = {
+  readonly appID: string
   readonly origin: URL
   readonly originString: string
   readonly pushOriginString: string
@@ -73,7 +74,9 @@ type TransportState = {
   readonly queryTransform: QueryTransform | undefined
   readonly queryForward: boolean
   readonly queryAware: boolean
+  readonly shardNum: number
   nextPokeID: number
+  socketGeneration: number
   transientFailureCount: number
 }
 
@@ -83,11 +86,13 @@ const TRANSIENT_RECONNECT_BACKOFF_MAX_MS = 30_000
 
 export type HttpPullTransport = {
   pull(): Promise<void>
+  flush(): Promise<void>
   readonly connections: number
   uninstall(): void
 }
 
 export type HttpPullTransportOptions = {
+  appID?: string
   origin: string
   // optional authoritative mutation endpoint base. reads and wake stay on
   // origin, while push POSTs to <pushOrigin>/push. this supports a native read
@@ -111,6 +116,7 @@ export type HttpPullTransportOptions = {
   // queries ship as name+args for the SERVER (consumer worker) to resolve with
   // auth. the production path for permission-transformed queries.
   queryForward?: boolean
+  shardNum?: number
 }
 
 export function installHttpPullTransport(
@@ -123,6 +129,7 @@ export function installHttpPullTransport(
   }
 
   const state: TransportState = {
+    appID: opts.appID ?? 'zero',
     origin: new URL(opts.origin),
     originString: trimTrailingSlash(new URL(opts.origin).toString()),
     pushOriginString: trimTrailingSlash(
@@ -139,7 +146,9 @@ export function installHttpPullTransport(
     queryTransform: opts.queryTransform,
     queryForward: opts.queryForward === true,
     queryAware: opts.queryTransform !== undefined || opts.queryForward === true,
+    shardNum: opts.shardNum ?? 0,
     nextPokeID: 0,
+    socketGeneration: 0,
     transientFailureCount: 0,
   }
 
@@ -166,6 +175,18 @@ export function installHttpPullTransport(
     pull: async () => {
       await Promise.all([...state.sockets].map((socket) => socket.pull()))
     },
+    flush: async () => {
+      await Promise.resolve()
+      const generation = state.socketGeneration
+      const sockets = [...state.sockets]
+      await Promise.all(sockets.map((socket) => socket.flush()))
+      if (
+        state.socketGeneration !== generation ||
+        sockets.some((socket) => !state.sockets.has(socket))
+      ) {
+        throw new Error('transport changed during flush')
+      }
+    },
     get connections() {
       return state.sockets.size
     },
@@ -191,6 +212,12 @@ export function ensureHttpPullTransport(
   const transport = installHttpPullTransport(opts)
   transportsByOrigin.set(key, transport)
   return transport
+}
+
+export async function flushHttpPullTransports() {
+  await Promise.all(
+    [...transportsByOrigin.values()].map((transport) => transport.flush()),
+  )
 }
 
 class ZeroHttpSocket {
@@ -232,6 +259,9 @@ class ZeroHttpSocket {
   private pullInFlight: Promise<void> | undefined
   private pullAfterCurrent = false
   private pushChain: Promise<void> = Promise.resolve()
+  private pushCompletion: Promise<void> = Promise.resolve()
+  private flushGeneration = 0
+  private readonly pendingUpstream = new Set<Promise<void>>()
   private nextLocalCookieID: number
   private openTimer: ReturnType<typeof setTimeout> | undefined
   private pullTimer: ReturnType<typeof setInterval> | undefined
@@ -264,6 +294,7 @@ class ZeroHttpSocket {
     this.queueDesiredQueries(decoded.initConnectionMessage?.[1])
 
     this.state.sockets.add(this)
+    this.state.socketGeneration++
     this.openTimer = setTimeout(() => this.open(), reconnectDelayMs(this.state))
   }
 
@@ -288,10 +319,12 @@ class ZeroHttpSocket {
     switch (message[0]) {
       case 'initConnection':
       case 'changeDesiredQueries':
+        this.flushGeneration++
         this.queueDesiredQueries(message[1])
         this.requestPullAfterCurrent()
         return
       case 'updateAuth':
+        this.flushGeneration++
         this.authToken = (message[1] as { auth?: string }).auth
         return
       case 'push':
@@ -301,7 +334,10 @@ class ZeroHttpSocket {
         this.emitMessage(['pong', {}])
         return
       case 'pull':
-        this.run(this.answerMutationRecoveryPull(message[1]))
+        this.flushGeneration++
+        const recoveryPull = this.answerMutationRecoveryPull(message[1])
+        this.trackUpstream(recoveryPull)
+        this.run(recoveryPull)
         return
       case 'deleteClients':
       case 'ackMutationResponses':
@@ -317,7 +353,7 @@ class ZeroHttpSocket {
     if (this.pullTimer) clearInterval(this.pullTimer)
     this.closeWakeChannel()
     this.readyState = this.CLOSED
-    this.state.sockets.delete(this)
+    if (this.state.sockets.delete(this)) this.state.socketGeneration++
     this.emit('close', { code, reason, wasClean: code <= 1001 })
   }
 
@@ -344,6 +380,22 @@ class ZeroHttpSocket {
         if (pullAgain && this.readyState !== this.CLOSED) await this.pull()
       })
     return this.pullInFlight
+  }
+
+  async flush(): Promise<void> {
+    for (;;) {
+      const generation = this.flushGeneration
+      await Promise.all([...this.pendingUpstream])
+      await this.pushCompletion
+      await this.pull()
+      await Promise.all([...this.pendingUpstream])
+      await this.pushCompletion
+      await this.pull()
+      await Promise.resolve()
+      if (this.flushGeneration === generation && this.pendingUpstream.size === 0) {
+        return
+      }
+    }
   }
 
   private open() {
@@ -469,18 +521,32 @@ class ZeroHttpSocket {
     // client" assert and kill the connection. mirror the same filtering.
     this.emitMessage([
       'pushResponse',
-      filterMutationResultsToClient(response.pushResponse, this.clientID),
+      filterMutationResultsToClient(
+        'pushResponse' in response ? response.pushResponse : response,
+        this.clientID,
+      ),
     ])
     this.requestPullAfterCurrent()
   }
 
   private enqueuePush(body: unknown) {
+    this.flushGeneration++
     const nextPush = this.pushChain.then(async () => {
       if (this.readyState === this.CLOSED) return
       await this.push(body)
     })
+    this.pushCompletion = nextPush
     this.pushChain = nextPush.catch(() => {})
+    this.trackUpstream(nextPush)
     this.run(nextPush)
+  }
+
+  private trackUpstream(promise: Promise<void>) {
+    this.pendingUpstream.add(promise)
+    void promise.then(
+      () => this.pendingUpstream.delete(promise),
+      () => this.pendingUpstream.delete(promise),
+    )
   }
 
   private requestPullAfterCurrent() {
@@ -551,7 +617,12 @@ class ZeroHttpSocket {
 
   private async postJSON(path: '/pull' | '/push', body: unknown) {
     const base = path === '/push' ? this.state.pushOriginString : this.state.originString
-    const response = await this.state.fetch(`${base}${path}`, {
+    const url = new URL(`${base}${path}`)
+    if (path === '/push') {
+      url.searchParams.set('schema', `${this.state.appID}_${this.state.shardNum}`)
+      url.searchParams.set('appID', this.state.appID)
+    }
+    const response = await this.state.fetch(url, {
       method: 'POST',
       headers: {
         authorization: this.authToken ? `Bearer ${this.authToken}` : '',
