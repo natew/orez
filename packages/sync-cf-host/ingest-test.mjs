@@ -47,6 +47,35 @@ try {
     return { status: response.status, body: parsed }
   }
 
+  // A root-mounted data feed is encoded as an empty internal path. Empty is a
+  // configured root, while null means the worker has not supplied a feed path.
+  const rootNamespace = `root-mount-${crypto.randomUUID()}`
+  const rootOrigin = `${base}/${rootNamespace}`
+  const rootPull = await fetch(`${rootOrigin}/pull`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer token-user-a',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientID: 'root-reader',
+      clientGroupID: 'root-group',
+      cookie: null,
+    }),
+  })
+  assert.equal(rootPull.status, 200)
+  const rootStatusResponse = await fetch(`${rootOrigin}/admin/status`, {
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  })
+  assert.equal(rootStatusResponse.status, 200)
+  const rootStatus = await rootStatusResponse.json()
+  assert.equal(rootStatus.engine.upstreamWatermark, '1')
+  const rootBudgetResponse = await fetch(`${rootOrigin}/admin/upstream-write-budget`, {
+    headers: { 'x-admin-key': 'ingest-harness-admin' },
+  })
+  assert.equal(rootBudgetResponse.status, 200)
+  assert.deepEqual(await rootBudgetResponse.json(), { enabled: true, rootMount: true })
+
   // An upstream namespace must not become a permanent polling timer after its
   // client leaves. Pulls ingest synchronously and therefore do not need an
   // alarm. A wake socket arms the safety poll; after that socket closes, the
@@ -129,6 +158,15 @@ try {
     }),
   })
   assert.equal(firstPushResponse.status, 200)
+  const firstPushStatusResponse = await fetch(
+    `${base}/${firstPushNamespace}/admin/status`,
+    {
+      headers: { 'x-admin-key': 'ingest-harness-admin' },
+    }
+  )
+  assert.equal(firstPushStatusResponse.status, 200)
+  const firstPushStatus = await firstPushStatusResponse.json()
+  assert.equal(Number(firstPushStatus.engine.upstreamWatermark) > 0, true)
 
   // First-push provisioning and delegated endpoint construction must remain
   // namespace-local under contention. Boot several namespaces concurrently,

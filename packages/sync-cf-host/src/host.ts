@@ -558,7 +558,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     async #upstreamWriteBudgetStatus(): Promise<Response> {
       if (!config.upstream) return json({ error: 'upstream is not configured' }, 404)
       const path = this.#controlGet('upstreamPath')
-      if (!path) return json({ error: 'upstream path is not known yet' }, 409)
+      if (path === null) return json({ error: 'upstream path is not known yet' }, 409)
       const endpoint = new URL(`${path}/_orez/write-budget`, 'https://upstream.invalid')
       const response = await this.#serviceBinding().fetch(endpoint.toString(), {
         headers: { host: endpoint.host },
@@ -578,7 +578,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     #rememberUpstreamPath(request: Request): string | null {
       if (!config.upstream) return null
       const path = request.headers.get(UPSTREAM_PATH_HEADER)
-      if (path) {
+      if (path !== null) {
         this.#controlSet('upstreamPath', path)
         return path
       }
@@ -680,7 +680,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
       }
       this.#ingestBreaker.assertReady()
       const path = upstreamPath ?? this.#controlGet('upstreamPath')
-      if (!path) {
+      if (path === null) {
         return forceSnapshot
           ? Promise.reject(requestError('upstream path is not available'))
           : Promise.resolve(0)

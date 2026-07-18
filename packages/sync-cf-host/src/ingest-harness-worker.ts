@@ -52,7 +52,8 @@ const config: SyncHostConfig<Env> = {
   },
   upstream: {
     binding: 'DATA',
-    namespacePath: (namespace) => `/${namespace}`,
+    namespacePath: (namespace) =>
+      namespace.startsWith('root-mount-') ? '/' : `/${namespace}`,
     changeLimit: 2,
     intervalMs: 1_000,
   },
@@ -120,6 +121,35 @@ export class DataService extends WorkerEntrypoint<Env> {
       return Promise.resolve(
         new Response('DATA route rejected non-feed request', { status: 418 })
       )
+    }
+    if (pathname === '/changes') {
+      const cursor = Number(url.searchParams.get('watermark') ?? 0)
+      return Promise.resolve(
+        Response.json({
+          watermark: 1,
+          changes:
+            cursor >= 1
+              ? []
+              : [
+                  {
+                    watermark: 1,
+                    tableName: 'item',
+                    op: 'INSERT',
+                    rowData: {
+                      id: 'root-feed-row',
+                      label: 'root-mounted upstream feed',
+                      rank: 1,
+                      done: false,
+                      meta: null,
+                    },
+                    oldData: null,
+                  },
+                ],
+        })
+      )
+    }
+    if (pathname === '/_orez/write-budget') {
+      return Promise.resolve(Response.json({ enabled: true, rootMount: true }))
     }
     const namespace = pathname.split('/')[1] ?? ''
     if (pathname.endsWith('/changes') && jsonValueNamespaces.has(namespace)) {
