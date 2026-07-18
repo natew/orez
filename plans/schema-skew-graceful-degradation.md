@@ -48,13 +48,13 @@ column, type, and primary key declared by the client. Server-only tables and
 columns are ignored. A direct runtime probe against the installed implementation
 confirmed:
 
-| Change | Zero result |
-| --- | --- |
-| exact schema | accepted |
-| server adds a column and a table | accepted |
+| Change                                  | Zero result                 |
+| --------------------------------------- | --------------------------- |
+| exact schema                            | accepted                    |
+| server adds a column and a table        | accepted                    |
 | client requires a missing server column | `SchemaVersionNotSupported` |
-| shared column changes type | `SchemaVersionNotSupported` |
-| shared table changes primary key | `SchemaVersionNotSupported` |
+| shared column changes type              | `SchemaVersionNotSupported` |
+| shared table changes primary key        | `SchemaVersionNotSupported` |
 
 Recent Agentbus schema changes added optional server-projected fields such as
 `session.latest_summary_status` and

@@ -114,7 +114,7 @@ export type EncryptedRowBatch = {
 
 export interface EncryptionKeyring {
   /** Current writable epoch and its 32-byte network content key. */
-  current(): Promise<{epoch: number; key: Uint8Array} | undefined>
+  current(): Promise<{ epoch: number; key: Uint8Array } | undefined>
 
   /** Key for a historical epoch, or undefined when this device lacks it. */
   get(epoch: number): Promise<Uint8Array | undefined>
@@ -425,7 +425,7 @@ The host currently represents visibility as SQL plus parameters. Add an explicit
 type VisibilityFilter = {
   sql: string
   params: readonly JSONValue[]
-  columns: readonly {table: string; column: string}[]
+  columns: readonly { table: string; column: string }[]
 }
 ```
 
