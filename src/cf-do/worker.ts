@@ -1962,13 +1962,18 @@ export class ZeroDO extends DurableObject {
     return this.sql
       .exec(statement, ...params)
       .toArray()
-      .map((row: any) => ({
-        watermark: Number(row.watermark),
-        tableName: String(row.table_name),
-        op: String(row.op),
-        rowData: row.row_data ? JSON.parse(String(row.row_data)) : null,
-        oldData: row.old_data ? JSON.parse(String(row.old_data)) : null,
-      }))
+      .map((row: any) => {
+        const tableName = String(row.table_name)
+        const rowData = row.row_data ? JSON.parse(String(row.row_data)) : null
+        const oldData = row.old_data ? JSON.parse(String(row.old_data)) : null
+        return {
+          watermark: Number(row.watermark),
+          tableName,
+          op: String(row.op),
+          rowData: rowData ? this.normalizeRow(tableName, rowData) : null,
+          oldData: oldData ? this.normalizeRow(tableName, oldData) : null,
+        }
+      })
   }
 
   private watermark(): number {
@@ -2031,16 +2036,21 @@ export class ZeroDO extends DurableObject {
   }
 
   private schemaForTable(tableName: string): SchemaTable | undefined {
-    const cached = this.tableSchemas.get(tableName)
+    const schemaTableName = tableName.replace(/^public\./, '')
+    const tableSchemas = (this.tableSchemas ??= new Map())
+    const cached = tableSchemas.get(schemaTableName)
     if (cached) return cached
     try {
       this.ensureSchemaMetadataTable()
       const row = this.sql
-        .exec('SELECT schema_json FROM _zero_schema_tables WHERE name = ?', tableName)
+        .exec(
+          'SELECT schema_json FROM _zero_schema_tables WHERE name = ?',
+          schemaTableName
+        )
         .one()
       if (!row?.schema_json) return undefined
       const schema = JSON.parse(String(row.schema_json)) as SchemaTable
-      this.tableSchemas.set(tableName, schema)
+      tableSchemas.set(schemaTableName, schema)
       return schema
     } catch {
       return undefined

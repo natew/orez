@@ -723,6 +723,48 @@ describe('ZeroDO snapshot feed timestamp fidelity', () => {
   })
 })
 
+describe('ZeroDO change feed type fidelity', () => {
+  it('decodes schema JSON columns from trigger-captured storage text', async () => {
+    const { zero } = await createWorkerCore()
+    zero.ensureSchemaTables({
+      tables: {
+        item: {
+          primaryKey: ['id'],
+          columns: {
+            id: { type: 'string' },
+            meta: { type: 'json' },
+          },
+        },
+      },
+    })
+    zero.cdc.syncTables([{ physicalTableName: 'item', tableName: 'public.item' }])
+
+    zero.executeSQL(
+      'INSERT INTO item (id, meta) VALUES (?, ?) RETURNING *',
+      ['one', JSON.stringify({ tags: ['alpha', 2, true] })],
+      {
+        physicalTableName: 'item',
+        tableName: 'public.item',
+        operation: 'INSERT',
+        rowColumns: ['id', 'meta'],
+      }
+    )
+
+    const response = await zero.fetch(new Request('http://do/changes?watermark=0'))
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      changes: [
+        {
+          tableName: 'public.item',
+          op: 'INSERT',
+          rowData: { id: 'one', meta: { tags: ['alpha', 2, true] } },
+          oldData: null,
+        },
+      ],
+    })
+  })
+})
+
 describe('ZeroDO legacy snapshot feed', () => {
   it('fails closed when a table read errors', async () => {
     const { sql, zero } = await createWorkerCore()
