@@ -52,6 +52,8 @@ const MUTATION_RE =
 // a real WITH write always carries insert/update/delete/replace.
 const WITH_RE = /^\s*with\b/i
 const WITH_MUTATION_RE = /\b(?:insert|update|delete|replace)\b/i
+const CREATE_TABLE_IF_NOT_EXISTS_RE =
+  /^\s*create\s+table\s+if\s+not\s+exists\s+("(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]+\]|[^\s(]+)\s*\(/i
 
 const isMutationStatement = (text: string): boolean =>
   MUTATION_RE.test(text) || (WITH_RE.test(text) && WITH_MUTATION_RE.test(text))
@@ -110,10 +112,13 @@ export function installZeroSqlWriteCircuitBreaker(
       .trim()
       .slice(0, 500)
 
-  const assertOpen = (statement: unknown) => {
+  const assertOpen = (statement: unknown, allowExistingTableNoop = false) => {
     const state = readState()
     const trippedAt = Number(state.tripped_at || 0)
-    if (trippedAt > 0) {
+    if (
+      trippedAt > 0 &&
+      !(allowExistingTableNoop && isExistingTableNoop(String(statement || '')))
+    ) {
       throw new Error(
         logPrefix +
           ' ZeroSqlDO write circuit breaker tripped at ' +
@@ -121,6 +126,32 @@ export function installZeroSqlWriteCircuitBreaker(
           '; refusing SQL write: ' +
           clippedStatement(statement)
       )
+    }
+  }
+
+  const isExistingTableNoop = (statement: string): boolean => {
+    // cache recovery repeats trusted CREATE TABLE IF NOT EXISTS guards before
+    // reads. sqlite guarantees those statements are no-ops only when the target
+    // already exists, so prove that state without opening any other ddl path.
+    if (statement.includes(';')) return false
+    const identifier = CREATE_TABLE_IF_NOT_EXISTS_RE.exec(statement)?.[1]
+    if (!identifier) return false
+    const tableName = identifier.startsWith('"')
+      ? identifier.slice(1, -1).replace(/""/g, '"')
+      : identifier.startsWith('`')
+        ? identifier.slice(1, -1).replace(/``/g, '`')
+        : identifier.startsWith('[')
+          ? identifier.slice(1, -1)
+          : identifier
+    try {
+      return Boolean(
+        rawExec(
+          "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+          tableName
+        ).one()
+      )
+    } catch {
+      return false
     }
   }
 
@@ -184,7 +215,7 @@ export function installZeroSqlWriteCircuitBreaker(
     const text = String(statement || '')
     const isCircuitStatement = text.includes(table)
     const isMutation = isMutationStatement(text) && !isCircuitStatement
-    if (isMutation) assertOpen(text)
+    if (isMutation) assertOpen(text, true)
     const cursor = rawExec(statement, ...params)
     if (isMutation && recordRowsWritten(cursor && cursor.rowsWritten, text)) {
       assertOpen(text)

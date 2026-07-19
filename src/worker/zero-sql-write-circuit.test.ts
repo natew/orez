@@ -21,6 +21,7 @@ class FakeSql implements DurableSqlStorage {
   }
   rowsForNextMutation = 0
   tableCreated = false
+  existingTables = new Set<string>()
 
   constructor(table = '_orez_write_circuit') {
     this.table = table
@@ -34,6 +35,9 @@ class FakeSql implements DurableSqlStorage {
   }
 
   exec(sql: string, ...params: unknown[]): DurableSqlCursor {
+    if (sql.startsWith('SELECT 1 AS ok FROM sqlite_master')) {
+      return this.cursor(this.existingTables.has(String(params[0])) ? [{ ok: 1 }] : [])
+    }
     if (sql.startsWith('CREATE TABLE IF NOT EXISTS ' + this.table)) {
       this.tableCreated = true
       return this.cursor([])
@@ -110,6 +114,24 @@ describe('installZeroSqlWriteCircuitBreaker', () => {
     expect(() => write(sql, 1)).toThrow(/refusing SQL write/)
     // reads still pass
     expect(() => sql.exec('select 1')).not.toThrow()
+  })
+
+  it('allows only proven no-op table initialization while tripped', () => {
+    const sql = new FakeSql()
+    sql.existingTables.add('_zero_changes')
+    installZeroSqlWriteCircuitBreaker(sql)
+    expect(() => write(sql, 10_000_001)).toThrow(/circuit breaker tripped/)
+    sql.rowsForNextMutation = 0
+
+    expect(() =>
+      sql.exec('CREATE TABLE IF NOT EXISTS "_zero_changes" (watermark INTEGER)')
+    ).not.toThrow()
+    expect(() =>
+      sql.exec('CREATE TABLE IF NOT EXISTS missing (id INTEGER PRIMARY KEY)')
+    ).toThrow(/refusing SQL write/)
+    expect(() => sql.exec('CREATE TABLE another (id INTEGER PRIMARY KEY)')).toThrow(
+      /refusing SQL write/
+    )
   })
 
   it('trips only after the rate stays over the soft cap for the sustained window', () => {

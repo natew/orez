@@ -2,6 +2,7 @@
 import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
+import { installZeroSqlWriteCircuitBreaker } from '../worker/zero-sql-write-circuit.js'
 import { TransactionalCdc } from './cdc.js'
 import { DurableWatermarkState } from './watermark.js'
 
@@ -20,13 +21,18 @@ function createSqliteStorage() {
   const nativeDb = new BetterSqlite3(':memory:')
   const exec = (sql: string, ...params: unknown[]) => {
     const stmt = nativeDb.prepare(sql)
-    const rows: Array<Record<string, unknown>> = stmt.reader
-      ? stmt.all(...params)
-      : (stmt.run(...params), [])
+    let rows: Array<Record<string, unknown>> = []
+    let rowsWritten = 0
+    if (stmt.reader) {
+      rows = stmt.all(...params)
+    } else {
+      rowsWritten = Number(stmt.run(...params).changes)
+    }
     return {
       toArray: () => rows,
       one: () => rows[0],
       columnNames: stmt.reader ? stmt.columns().map((column: any) => column.name) : [],
+      rowsWritten,
     }
   }
   return { nativeDb, sql: { exec } }
@@ -273,6 +279,25 @@ describe('ZeroDO transactional CDC integration', () => {
         .toArray()
         .map((column) => column.name)
     ).toEqual(['id', 'body'])
+  })
+
+  it('commits a read-only application session while the write circuit is tripped', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY)')
+    installZeroSqlWriteCircuitBreaker(sql, {
+      hardRowsPerWindow: 0,
+      rowsPerWindow: 0,
+    })
+    expect(() => sql.exec("INSERT INTO item VALUES ('visible')")).toThrow(
+      /circuit breaker tripped/
+    )
+
+    const session = await zero.applicationSqlSession('application-read-only')
+    await session.begin()
+    await expect(session.query('SELECT id FROM item')).resolves.toEqual([
+      { id: 'visible' },
+    ])
+    await expect(session.commit()).resolves.toBeUndefined()
   })
 
   it('recovers an interrupted application session when the Durable Object is recreated', async () => {

@@ -283,6 +283,7 @@ const APPLICATION_SQL_DISPOSE = Symbol('applicationSqlDispose')
 class ApplicationSqlSessionTarget extends RpcTarget {
   state: ApplicationSqlSessionState = 'created'
   changed = false
+  mutated = false
 
   constructor(
     readonly owner: ZeroDO,
@@ -1328,8 +1329,8 @@ export class ZeroDO extends DurableObject {
     return new ApplicationSqlSessionTarget(this, sessionID)
   }
 
-  private prepareApplicationSqlMutation(sessionID: string, sql: string): void {
-    if (!isSqlMutation(sql)) return
+  private prepareApplicationSqlMutation(sessionID: string, sql: string): boolean {
+    if (!isSqlMutation(sql)) return false
     if (!isSqlRowMutation(sql)) {
       const targets = schemaChangeTargets(sql)
       if (
@@ -1337,13 +1338,14 @@ export class ZeroDO extends DurableObject {
         targets.length > 0 &&
         targets.every((table) => this.tableExists(table))
       ) {
-        return
+        return false
       }
       beginTxJournal(this.sql, sessionID, 'application')
       snapshotTxSchema(this.sql, sessionID, 'application', targets)
-      return
+      return true
     }
     beginTxJournal(this.sql, sessionID, 'application')
+    return true
   }
 
   async [APPLICATION_SQL_QUERY]<
@@ -1355,7 +1357,9 @@ export class ZeroDO extends DurableObject {
   ): Promise<Row[]> {
     this.assertApplicationSqlSession(session)
     return this.atomically(() => {
-      this.prepareApplicationSqlMutation(session.sessionID, sql)
+      if (this.prepareApplicationSqlMutation(session.sessionID, sql)) {
+        session.mutated = true
+      }
       return this.executeSQL(sql, [...params], undefined, session.sessionID).rows as Row[]
     })
   }
@@ -1368,7 +1372,9 @@ export class ZeroDO extends DurableObject {
   ): Promise<ApplicationSqlExecResult> {
     this.assertApplicationSqlSession(session)
     return this.atomically(() => {
-      this.prepareApplicationSqlMutation(session.sessionID, sql)
+      if (this.prepareApplicationSqlMutation(session.sessionID, sql)) {
+        session.mutated = true
+      }
       const result = this.executeSQL(
         sql,
         [...params],
@@ -1407,10 +1413,12 @@ export class ZeroDO extends DurableObject {
   async [APPLICATION_SQL_COMMIT](session: ApplicationSqlSessionTarget): Promise<void> {
     this.assertApplicationSqlSession(session)
     try {
-      await this.atomically(() => {
-        this.commitPendingTrackedChanges(session.sessionID)
-        commitTxJournal(this.sql, session.sessionID)
-      })
+      if (session.mutated) {
+        await this.atomically(() => {
+          this.commitPendingTrackedChanges(session.sessionID)
+          commitTxJournal(this.sql, session.sessionID)
+        })
+      }
     } finally {
       this.releaseApplicationSqlTurn(session)
     }
@@ -1420,12 +1428,14 @@ export class ZeroDO extends DurableObject {
   async [APPLICATION_SQL_ROLLBACK](session: ApplicationSqlSessionTarget): Promise<void> {
     this.assertApplicationSqlSession(session)
     try {
-      await this.atomically(() => {
-        this.rollbackPendingTrackedChanges(session.sessionID)
-        rollbackTxJournal(this.sql, session.sessionID)
-        this.deletePendingTrackedChanges(session.sessionID)
-      })
-      this.invalidateSchemaCaches()
+      if (session.mutated) {
+        await this.atomically(() => {
+          this.rollbackPendingTrackedChanges(session.sessionID)
+          rollbackTxJournal(this.sql, session.sessionID)
+          this.deletePendingTrackedChanges(session.sessionID)
+        })
+        this.invalidateSchemaCaches()
+      }
     } finally {
       this.releaseApplicationSqlTurn(session)
     }
@@ -1440,12 +1450,14 @@ export class ZeroDO extends DurableObject {
 
     this.assertApplicationSqlSession(session)
     try {
-      this.atomicallySync(() => {
-        this.rollbackPendingTrackedChanges(session.sessionID)
-        rollbackTxJournal(this.sql, session.sessionID)
-        this.deletePendingTrackedChanges(session.sessionID)
-      })
-      this.invalidateSchemaCaches()
+      if (session.mutated) {
+        this.atomicallySync(() => {
+          this.rollbackPendingTrackedChanges(session.sessionID)
+          rollbackTxJournal(this.sql, session.sessionID)
+          this.deletePendingTrackedChanges(session.sessionID)
+        })
+        this.invalidateSchemaCaches()
+      }
     } finally {
       this.releaseApplicationSqlTurn(session)
     }
