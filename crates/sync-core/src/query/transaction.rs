@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::db::SqlValue;
 use crate::error::EngineError;
-use crate::schema::quote_ident;
+use crate::schema::{Tables, quote_ident};
 use crate::value::ZeroColumnType;
 
 use super::ast::{
@@ -456,18 +456,21 @@ impl<'a> SqlCompiler<'a> {
                 ))
             }
             SimpleOp::Like | SimpleOp::NotLike | SimpleOp::ILike | SimpleOp::NotILike => {
-                let RightVal::Scalar(value) = right else {
-                    return Err(reject("LIKE requires a scalar operand"));
+                let right = match right {
+                    RightVal::Scalar(value) => {
+                        let pattern = match value {
+                            Scalar::Text(value) => SqlValue::Text(postgres_like_to_glob(value)?),
+                            other => scalar_to_sql(other),
+                        };
+                        self.bindings.push(QueryBinding::Literal(pattern));
+                        "?".to_string()
+                    }
+                    RightVal::List(_) => return Err(reject("LIKE requires a scalar operand")),
                 };
-                let pattern = match value {
-                    Scalar::Text(value) => SqlValue::Text(postgres_like_to_glob(value)?),
-                    other => scalar_to_sql(other),
-                };
-                self.bindings.push(QueryBinding::Literal(pattern));
                 let comparison = if matches!(operator, SimpleOp::ILike | SimpleOp::NotILike) {
-                    format!("LOWER({left}) GLOB LOWER(?)")
+                    format!("LOWER({left}) GLOB LOWER({right})")
                 } else {
-                    format!("{left} GLOB ?")
+                    format!("{left} GLOB {right}")
                 };
                 if matches!(operator, SimpleOp::NotLike | SimpleOp::NotILike) {
                     Ok(format!("NOT ({comparison})"))
@@ -476,11 +479,16 @@ impl<'a> SqlCompiler<'a> {
                 }
             }
             _ => {
-                let RightVal::Scalar(value) = right else {
-                    return Err(reject("operator requires a scalar operand"));
+                let right = match right {
+                    RightVal::Scalar(value) => {
+                        self.push_literal(value);
+                        "?".to_string()
+                    }
+                    RightVal::List(_) => {
+                        return Err(reject("operator requires a scalar operand"));
+                    }
                 };
-                self.push_literal(value);
-                Ok(format!("{left} {} ?", binary_operator(operator)))
+                Ok(format!("{left} {} {right}", binary_operator(operator)))
             }
         }
     }
@@ -984,9 +992,11 @@ fn hash_node(state: &mut u64, node: &CompiledQueryNode) {
 
 pub fn compile_transaction_query(
     schema: &QuerySchema,
+    tables: &Tables,
     ast: &Ast,
     format: &QueryFormat,
 ) -> Result<CompiledQueryPlan, EngineError> {
+    super::opacity::validate_encrypted_column_usage(tables, ast)?;
     let root = compile_regular_node(schema, ast, format, None)?;
     let mut hash = 0xcbf29ce484222325;
     hash_node(&mut hash, &root);

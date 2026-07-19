@@ -32,6 +32,8 @@ fn chat_tables() -> Tables {
             TableSpec {
                 columns: vec![s("id"), b("private"), s("creatorId")],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -39,6 +41,8 @@ fn chat_tables() -> Tables {
             TableSpec {
                 columns: vec![s("id"), s("serverId"), s("userId")],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -46,6 +50,8 @@ fn chat_tables() -> Tables {
             TableSpec {
                 columns: vec![s("id"), s("serverId"), s("userId"), b("canAdmin")],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -53,6 +59,8 @@ fn chat_tables() -> Tables {
             TableSpec {
                 columns: vec![s("id"), s("channelId"), s("userId")],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -66,6 +74,8 @@ fn chat_tables() -> Tables {
                     b("solo"),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -80,6 +90,8 @@ fn chat_tables() -> Tables {
                     s("content"),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
 }

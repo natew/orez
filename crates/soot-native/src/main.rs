@@ -84,6 +84,8 @@ fn build_tables(defs: &[TableDef]) -> Tables {
             TableSpec {
                 columns,
                 primary_key: t.primary_key.clone(),
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         );
     }

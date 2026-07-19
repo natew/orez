@@ -34,6 +34,7 @@ pub mod schema;
 mod store;
 pub mod upstream;
 pub mod value;
+pub mod visibility;
 pub mod wire;
 
 pub use db::{DbError, Row, SqlValue, SyncDb};
@@ -52,4 +53,5 @@ pub use upstream::{
     read_snapshot_progress, upstream_watermark,
 };
 pub use value::{ZeroColumnType, to_zero_value, to_zero_value_json};
+pub use visibility::{VisibilityExpression, compile_visibility_filter};
 pub use wire::WireValue;

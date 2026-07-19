@@ -500,7 +500,16 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         filters: Object.keys(config.schema.tables).flatMap((table) => {
           const filter = config.visibility?.filter(table, claims)
           return filter
-            ? [{ table, sql: filter.sql, params: [...(filter.params ?? [])] }]
+            ? [
+                filter.kind === 'expression'
+                  ? { kind: 'expression', table, expression: filter.expression }
+                  : {
+                      kind: 'raw',
+                      table,
+                      sql: filter.sql,
+                      params: [...(filter.params ?? [])],
+                    },
+              ]
             : []
         }),
       }

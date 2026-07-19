@@ -54,6 +54,23 @@ const format = {
   relationships: { entries: { singular: false, relationships: {} } },
 }
 
+const encryptedSchema = {
+  schemaID: 'query-compiler-encryption-v1',
+  tables: {
+    record: {
+      serverName: 'records',
+      columns: {
+        id: { type: 'string', serverName: 'record_id' },
+        route: { type: 'string', serverName: 'route_key' },
+        secret: { type: 'string', serverName: 'secret_blob', encrypted: true },
+      },
+      primaryKey: ['id'],
+    },
+  },
+}
+
+const flatFormat = { singular: false, relationships: {} }
+
 function database() {
   const db = new Database(':memory:')
   db.exec(`
@@ -128,5 +145,60 @@ describe('standalone query compiler', () => {
         selects: 2,
       })
     )
+  })
+
+  test('rejects encrypted predicate use before transaction query compilation', () => {
+    const compile = createQueryCompiler(encryptedSchema)
+
+    expect(() =>
+      compile(
+        {
+          table: 'record',
+          where: {
+            type: 'simple',
+            op: '=',
+            left: { type: 'column', name: 'secret_blob' },
+            right: { type: 'literal', value: 'ciphertext' },
+          },
+        },
+        flatFormat
+      )
+    ).toThrow(
+      "schema 'query-compiler-encryption-v1' encrypted column 'record.secret' has forbidden use 'predicate'"
+    )
+  })
+
+  test('allows encrypted columns in transaction query projection', () => {
+    const plan = createQueryCompiler(encryptedSchema)(
+      {
+        table: 'record',
+      },
+      flatFormat
+    )
+
+    expect(plan.root.columns).toEqual([
+      { name: 'id', columnType: 'string' },
+      { name: 'route', columnType: 'string' },
+      { name: 'secret', columnType: 'string' },
+    ])
+    expect(plan.root.sql).toContain('"secret_blob" AS "secret"')
+  })
+
+  test('rejects v51 right-hand column references at parse time', () => {
+    const compile = createQueryCompiler(schema)
+    expect(() =>
+      compile(
+        {
+          table: 'account',
+          where: {
+            type: 'simple',
+            op: '!=',
+            left: { type: 'column', name: 'id' },
+            right: { type: 'column', name: 'balance' },
+          },
+        },
+        flatFormat
+      )
+    ).toThrow("condition right must be a literal, got 'column'")
   })
 })

@@ -317,6 +317,8 @@ mod tests {
         let spec = TableSpec {
             columns: vec![("createdAt".into(), ZeroColumnType::Number)],
             primary_key: vec![],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
         };
         let tables = Tables::new().with("record", spec.clone());
         let row = Row {

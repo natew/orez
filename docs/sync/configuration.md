@@ -89,11 +89,16 @@ permission transform.
 An alternative to query awareness for simpler per-user row filtering, applied
 inside the engine rather than delegated to the app.
 
-| Field                              | Type                             | Default | Meaning                                                                                            |
-| ---------------------------------- | -------------------------------- | ------- | -------------------------------------------------------------------------------------------------- |
-| `visibility.rowLocal`              | `boolean \| (claims) => boolean` | none    | True only when every predicate depends on the selected row alone.                                  |
-| `visibility.filter(table, claims)` | `=> {sql, params} \| undefined`  | none    | Returns a SQL `WHERE` fragment (without the keyword) selecting the user's visible rows of a table. |
-| `visibilityEnabled`                | `boolean`                        | `false` | Enables visibility from the first request. Defaults off so harnesses start unfiltered.             |
+| Field                              | Type                               | Default | Meaning                                                                                                                     |
+| ---------------------------------- | ---------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `visibility.rowLocal`              | `boolean \| (claims) => boolean`   | none    | True only when every predicate depends on the selected row alone.                                                           |
+| `visibility.filter(table, claims)` | `=> VisibilityFilter \| undefined` | none    | Returns `visibility.filter(expression)`. Rust generates the SQL and validates every referenced column from that expression. |
+| `visibilityEnabled`                | `boolean`                          | `false` | Enables visibility from the first request. Defaults off so harnesses start unfiltered.                                      |
+
+Build filters with `visibility.column`, `visibility.value`,
+`visibility.comparison`, `visibility.and`, `visibility.or`, and
+`visibility.exists`. `visibility.raw(sql, params)` is retained for schemas with
+no encrypted columns and is rejected when any column has `encrypted: true`.
 
 A visibility filter can revoke rows without any row change, which a diff cannot
 express, so any config with `visibility` always answers pulls with a full

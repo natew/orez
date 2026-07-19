@@ -41,6 +41,8 @@ fn custom_tables() -> Tables {
                 ("label".to_string(), ZeroColumnType::String),
             ],
             primary_key: vec!["id".to_string()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
         },
     );
     tables

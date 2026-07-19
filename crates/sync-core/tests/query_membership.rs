@@ -31,6 +31,8 @@ fn schema() -> Tables {
                 ("priority".into(), Number),
             ],
             primary_key: vec!["id".into()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
         },
     )
 }

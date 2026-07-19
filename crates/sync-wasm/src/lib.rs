@@ -331,10 +331,18 @@ struct VisibilityWire {
 }
 
 #[derive(Clone, Deserialize)]
-struct VisibilityFilterWire {
-    table: String,
-    sql: String,
-    params: Vec<serde_json::Value>,
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum VisibilityFilterWire {
+    Raw {
+        table: String,
+        sql: String,
+        #[serde(default)]
+        params: Vec<serde_json::Value>,
+    },
+    Expression {
+        table: String,
+        expression: sync_core::VisibilityExpression,
+    },
 }
 
 fn from_js<T: for<'de> Deserialize<'de>>(value: JsValue) -> Result<T, JsValue> {
@@ -650,13 +658,14 @@ pub fn engine_compile_query(
     ast: JsValue,
     format: JsValue,
 ) -> Result<JsValue, JsValue> {
-    let schema = query_json_from_js(schema, "schema")?;
-    let schema = sync_core::query::parse_query_schema(&schema).map_err(engine_error)?;
+    let schema_json = query_json_from_js(schema, "schema")?;
+    let tables = sync_core::Tables::from_zero_schema(&schema_json).map_err(js_err)?;
+    let schema = sync_core::query::parse_query_schema(&schema_json).map_err(engine_error)?;
     let ast = query_json_from_js(ast, "AST")?;
     let ast = sync_core::query::parse_ast(&ast).map_err(engine_error)?;
     let format = query_json_from_js(format, "format")?;
     let format = sync_core::query::parse_query_format(&format).map_err(engine_error)?;
-    let compiled = sync_core::query::compile_transaction_query(&schema, &ast, &format)
+    let compiled = sync_core::query::compile_transaction_query(&schema, &tables, &ast, &format)
         .map_err(engine_error)?;
     to_js(&CompiledQueryPlanWire {
         root_table: compiled.root_table,
@@ -679,32 +688,65 @@ pub fn engine_handle_pull(
     let mut db = WasmDb(db);
     let tables = tables_from_js(schema)?;
     let visibility: Option<VisibilityWire> = from_js(visibility)?;
-    if let Some(visibility) = &visibility {
-        for filter in &visibility.filters {
-            for param in &filter.params {
-                sql_value_from_json(param.clone())?;
+    let visibility = match visibility {
+        Some(visibility) => {
+            let mut filters = Vec::with_capacity(visibility.filters.len());
+            for filter in visibility.filters {
+                match filter {
+                    VisibilityFilterWire::Raw { table, sql, params } => {
+                        let table = tables
+                            .logical_name(&table)
+                            .ok_or_else(|| {
+                                engine_error(sync_core::EngineError::bad_request(format!(
+                                    "unknown table '{table}'"
+                                )))
+                            })?
+                            .to_string();
+                        if tables.has_encrypted_columns() {
+                            return Err(engine_error(sync_core::EngineError::bad_request(
+                                format!(
+                                    "schema '{}' raw visibility SQL for table '{table}' cannot prove all referenced columns clear; forbidden use 'visibility'",
+                                    tables.schema_id()
+                                ),
+                            )));
+                        }
+                        let params = params
+                            .into_iter()
+                            .map(sql_value_from_json)
+                            .collect::<Result<Vec<_>, _>>()?;
+                        filters.push((table, sync_core::VisibleFilter { sql, params }));
+                    }
+                    VisibilityFilterWire::Expression { table, expression } => {
+                        let table = tables
+                            .logical_name(&table)
+                            .ok_or_else(|| {
+                                engine_error(sync_core::EngineError::bad_request(format!(
+                                    "unknown table '{table}'"
+                                )))
+                            })?
+                            .to_string();
+                        let filter =
+                            sync_core::compile_visibility_filter(&tables, &table, &expression)
+                                .map_err(engine_error)?;
+                        filters.push((table, filter));
+                    }
+                }
             }
+            Some(sync_core::Visibility {
+                row_local: visibility.row_local,
+                filter: Box::new(move |table, _user_id| {
+                    let (_, filter) = filters
+                        .iter()
+                        .find(|(filter_table, _)| filter_table == table)?;
+                    Some(sync_core::VisibleFilter {
+                        sql: filter.sql.clone(),
+                        params: filter.params.clone(),
+                    })
+                }),
+            })
         }
-    }
-    let visibility = visibility.map(|visibility| {
-        let filters = visibility.filters;
-        sync_core::Visibility {
-            row_local: visibility.row_local,
-            filter: Box::new(move |table, _user_id| {
-                let filter = filters.iter().find(|filter| filter.table == table)?;
-                Some(sync_core::VisibleFilter {
-                    sql: filter.sql.clone(),
-                    params: filter
-                        .params
-                        .clone()
-                        .into_iter()
-                        .map(sql_value_from_json)
-                        .collect::<Result<Vec<_>, _>>()
-                        .expect("visibility params validated before engine call"),
-                })
-            }),
-        }
-    });
+        None => None,
+    };
     let caps: CapsWire = from_js(caps)?;
     let body: serde_json::Value = from_js(body)?;
     let result = sync_core::handle_pull(
