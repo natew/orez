@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { resolve, join } from 'node:path'
+import { resolve, join, relative } from 'node:path'
 
 import {
   orderReleasePackages,
@@ -30,15 +30,16 @@ const patch = args.includes('--patch')
 const minor = args.includes('--minor')
 const major = args.includes('--major')
 const canary = args.includes('--canary')
+const rePublish = args.includes('--republish')
 const skipTest = args.includes('--skip-test') || args.includes('--skip-all')
 const packOnly = args.includes('--pack-only')
 const ci = args.includes('--ci')
 const intoIdx = args.indexOf('--into')
 const into = intoIdx !== -1 ? args[intoIdx + 1] : null
 
-if (!patch && !minor && !major && !canary && !packOnly && !into) {
+if (!patch && !minor && !major && !canary && !rePublish && !packOnly && !into) {
   console.info(
-    'usage: bun scripts/release.ts --patch|--minor|--major|--canary [--dry-run] [--skip-test] [--pack-only] [--into <dir>]'
+    'usage: bun scripts/release.ts --patch|--minor|--major|--canary|--republish [--dry-run] [--skip-test] [--pack-only] [--into <dir>]'
   )
   process.exit(1)
 }
@@ -49,6 +50,7 @@ function run(
   cmd: string,
   opts?: {
     cwd?: string
+    env?: Record<string, string>
     silent?: boolean
   }
 ) {
@@ -57,6 +59,7 @@ function run(
   return execSync(cmd, {
     stdio: opts?.silent ? 'pipe' : 'inherit',
     cwd,
+    env: { ...process.env, ...opts?.env },
   })
 }
 
@@ -85,6 +88,10 @@ function preparePgToSqliteDist() {
 }
 
 function bumpVersion(current: string): string {
+  if (rePublish) {
+    return current
+  }
+
   // strip any existing prerelease tag (e.g. -canary.123)
   const base = current.split('-')[0]
   const [curMajor, curMinor, curPatch] = base.split('.').map(Number)
@@ -360,13 +367,7 @@ if (!packOnly && !ci) {
   }
 }
 
-function publishPackage(name: string, version: string, cwd: string) {
-  const tag = canary ? '--tag canary' : ''
-  const publishCommand = `npm publish --access public ${tag}`.trim()
-
-  console.info(`\npublishing ${name}@${version}...`)
-  run(publishCommand, { cwd })
-}
+const preparedPackages: Array<{ name: string; version: string; cwd: string }> = []
 
 for (const p of packages) {
   const name = p.pkg.name
@@ -410,13 +411,85 @@ for (const p of packages) {
     console.info(`\npacking ${name}@${p.next}...`)
     run('npm pack', { cwd: tmpDir })
   } else {
-    publishPackage(name, p.next, tmpDir)
+    preparedPackages.push({ name, version: p.next, cwd: tmpDir })
   }
 }
 
 if (packOnly) {
   console.info(`\npacked to ${tmpBase}`)
   process.exit(0)
+}
+
+function isPublished({ name, version }: (typeof preparedPackages)[number]) {
+  try {
+    const output = run(`npm view ${name}@${version} version --json`, {
+      cwd: tmpBase,
+      silent: true,
+    }).toString()
+    const found = JSON.parse(output.trim())
+    return found === version || (Array.isArray(found) && found.includes(version))
+  } catch (error) {
+    const details = error as { stdout?: Buffer; stderr?: Buffer }
+    const message = `${String(error)}\n${details.stdout || ''}\n${details.stderr || ''}`
+    if (/E404|404 Not Found|is not in this registry/i.test(message)) {
+      return false
+    }
+    throw new Error(`Could not verify ${name}@${version} on npm:\n${message}`)
+  }
+}
+
+console.info(`Checking ${preparedPackages.length} package versions on npm...`)
+const pendingPackages = preparedPackages.filter((pkg) => {
+  if (isPublished(pkg)) {
+    console.info(`Skipping ${pkg.name}: this version is already published`)
+    return false
+  }
+  return true
+})
+
+if (pendingPackages.length > 0) {
+  if (!ci && process.stdin.isTTY && process.stdout.isTTY) {
+    console.info(
+      'npm will open the browser for 2FA once. Select “do not challenge for the next 5 minutes” so the same short-lived approval can publish the remaining packages.'
+    )
+  }
+
+  writeFileSync(
+    join(tmpBase, 'package.json'),
+    JSON.stringify(
+      {
+        name: 'orez-release',
+        private: true,
+        workspaces: pendingPackages.map((pkg) => relative(tmpBase, pkg.cwd)),
+      },
+      null,
+      2
+    ) + '\n'
+  )
+
+  const webAuthCache = join(root, 'scripts', 'cache-npm-webauth.cjs')
+  const nodeOptions = [process.env.NODE_OPTIONS, `--require=${webAuthCache}`]
+    .filter(Boolean)
+    .join(' ')
+  const tag = canary ? '--tag canary' : ''
+
+  try {
+    run(`npm publish --workspaces --ignore-scripts --access public ${tag}`.trim(), {
+      cwd: tmpBase,
+      env: { NODE_OPTIONS: nodeOptions },
+    })
+  } catch (error) {
+    const postflight = pendingPackages.map((pkg) => ({
+      pkg,
+      published: isPublished(pkg),
+    }))
+    const completed = postflight.filter(({ published }) => published)
+    const missing = postflight.filter(({ published }) => !published)
+    throw new Error(
+      `Publish stopped after ${completed.length} packages. Still missing:\n${missing.map(({ pkg }) => pkg.name).join('\n')}\n\nRe-run with --republish to retry only these packages.`,
+      { cause: error }
+    )
+  }
 }
 
 // git commit + tag + push (skip for canary releases)
