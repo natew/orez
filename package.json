@@ -47,6 +47,10 @@
       "types": "./dist/sync-browser-host/index.d.ts",
       "import": "./dist/sync-browser-host/index.js"
     },
+    "./sync-cf-host": {
+      "types": "./dist/sync-cf-host.d.ts",
+      "import": "./dist/sync-cf-host.js"
+    },
     "./worker/*": {
       "types": "./dist/worker/*.d.ts",
       "import": "./dist/worker/*.js"
