@@ -8,7 +8,7 @@
 //
 // supported: simple conditions (= != IS "IS NOT" < > <= >= LIKE "NOT LIKE"
 // ILIKE "NOT ILIKE" IN "NOT IN") with a column or literal on the left and a
-// same-row column, literal, or array (for IN) on the right; and/or; correlated EXISTS/NOT EXISTS
+// literal or array (for IN) on the right; and/or; correlated EXISTS/NOT EXISTS
 // subqueries; related subqueries; orderBy (with a stable pk tie-breaker added at
 // compile time); limit; start cursor. unsupported (static params, cross-table
 // column refs, unknown ops/fields/tables/columns) is a 400.
@@ -101,7 +101,6 @@ impl SimpleOp {
 pub enum RightVal {
     Scalar(Scalar),
     List(Vec<Scalar>),
-    Column(String),
 }
 
 // left of a simple condition: a column or a resolved literal (a cross-table
@@ -493,8 +492,8 @@ fn parse_value_ref(value: &Value) -> Result<ValueRef, EngineError> {
     }
 }
 
-// right side of a simple condition. IN/NOT IN require an array literal; every
-// other op accepts a scalar literal or a same-row column reference.
+// right side of a simple condition. Zero v51 only exposes literals here;
+// IN/NOT IN require an array literal and every other op requires a scalar.
 fn parse_right(value: &Value, wants_list: bool) -> Result<RightVal, EngineError> {
     let obj = value
         .as_object()
@@ -508,20 +507,9 @@ fn parse_right(value: &Value, wants_list: bool) -> Result<RightVal, EngineError>
             "static parameters must be resolved before reaching the engine",
         ));
     }
-    if ty == "column" {
-        if wants_list {
-            return Err(reject("IN/NOT IN requires an array literal"));
-        }
-        assert_only_keys(obj, &["type", "name"], "column reference")?;
-        let name = obj
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| reject("column reference requires a name"))?;
-        return Ok(RightVal::Column(name.to_string()));
-    }
     if ty != "literal" {
         return Err(reject(format!(
-            "condition right must be a literal or column, got '{ty}'"
+            "condition right must be a literal, got '{ty}'"
         )));
     }
     assert_only_keys(obj, &["type", "value"], "literal")?;

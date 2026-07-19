@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::db::SqlValue;
 use crate::error::EngineError;
-use crate::schema::quote_ident;
+use crate::schema::{Tables, quote_ident};
 use crate::value::ZeroColumnType;
 
 use super::ast::{
@@ -465,7 +465,6 @@ impl<'a> SqlCompiler<'a> {
                         self.bindings.push(QueryBinding::Literal(pattern));
                         "?".to_string()
                     }
-                    RightVal::Column(column) => self.column_sql(table, column, alias)?,
                     RightVal::List(_) => return Err(reject("LIKE requires a scalar operand")),
                 };
                 let comparison = if matches!(operator, SimpleOp::ILike | SimpleOp::NotILike) {
@@ -485,7 +484,6 @@ impl<'a> SqlCompiler<'a> {
                         self.push_literal(value);
                         "?".to_string()
                     }
-                    RightVal::Column(column) => self.column_sql(table, column, alias)?,
                     RightVal::List(_) => {
                         return Err(reject("operator requires a scalar operand"));
                     }
@@ -994,9 +992,11 @@ fn hash_node(state: &mut u64, node: &CompiledQueryNode) {
 
 pub fn compile_transaction_query(
     schema: &QuerySchema,
+    tables: &Tables,
     ast: &Ast,
     format: &QueryFormat,
 ) -> Result<CompiledQueryPlan, EngineError> {
+    super::opacity::validate_encrypted_column_usage(tables, ast)?;
     let root = compile_regular_node(schema, ast, format, None)?;
     let mut hash = 0xcbf29ce484222325;
     hash_node(&mut hash, &root);

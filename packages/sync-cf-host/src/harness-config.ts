@@ -2,6 +2,7 @@ import { queryNameToAst } from '../../../harness/src/query-resolver.mjs'
 import {
   MutationApplicationError,
   registerMutators,
+  visibility,
   type SyncHostConfig,
   type SyncHostEnv,
   type SyncSql,
@@ -458,60 +459,110 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
       rowLocal: false,
       filter(table, claims) {
         const user = claims.userID
+        const userValue = visibility.value(user)
+        const eq = (
+          left: ReturnType<typeof visibility.column>,
+          right:
+            | ReturnType<typeof visibility.column>
+            | ReturnType<typeof visibility.value>
+        ) => visibility.comparison(left, '=', right)
         if (table === 'user')
-          return {
-            sql: '"id" = ?',
-            params: [user],
-            columns: [{ table: 'user', column: 'id' }],
-          }
+          return visibility.filter(eq(visibility.column('user', 'id'), userValue))
         if (table === 'project') {
-          return {
-            sql: '("ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?))',
-            params: [user, user],
-            columns: [
-              { table: 'project', column: 'ownerId' },
-              { table: 'project', column: 'id' },
-              { table: 'member', column: 'projectId' },
-              { table: 'member', column: 'userId' },
-            ],
-          }
+          return visibility.filter(
+            visibility.or(
+              eq(visibility.column('project', 'ownerId'), userValue),
+              visibility.exists(
+                'member',
+                visibility.and(
+                  eq(
+                    visibility.column('member', 'projectId'),
+                    visibility.column('project', 'id')
+                  ),
+                  eq(visibility.column('member', 'userId'), userValue)
+                )
+              )
+            )
+          )
         }
         if (table === 'member') {
-          return {
-            sql: 'EXISTS (SELECT 1 FROM project p WHERE p.id = member."projectId" AND (p."ownerId" = ? OR EXISTS (SELECT 1 FROM member access WHERE access."projectId" = p.id AND access."userId" = ?)))',
-            params: [user, user],
-            columns: [
-              { table: 'member', column: 'projectId' },
-              { table: 'member', column: 'userId' },
-              { table: 'project', column: 'id' },
-              { table: 'project', column: 'ownerId' },
-            ],
-          }
+          return visibility.filter(
+            visibility.exists(
+              'project',
+              visibility.and(
+                eq(
+                  visibility.column('project', 'id', 'p'),
+                  visibility.column('member', 'projectId')
+                ),
+                visibility.or(
+                  eq(visibility.column('project', 'ownerId', 'p'), userValue),
+                  visibility.exists(
+                    'member',
+                    visibility.and(
+                      eq(
+                        visibility.column('member', 'projectId', 'access'),
+                        visibility.column('project', 'id', 'p')
+                      ),
+                      eq(visibility.column('member', 'userId', 'access'), userValue)
+                    ),
+                    'access'
+                  )
+                )
+              ),
+              'p'
+            )
+          )
         }
         if (table === 'task')
-          return {
-            sql: 'EXISTS (SELECT 1 FROM project WHERE project.id = task."projectId" AND (project."ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?)))',
-            params: [user, user],
-            columns: [
-              { table: 'task', column: 'projectId' },
-              { table: 'project', column: 'id' },
-              { table: 'project', column: 'ownerId' },
-              { table: 'member', column: 'projectId' },
-              { table: 'member', column: 'userId' },
-            ],
-          }
+          return visibility.filter(
+            visibility.exists(
+              'project',
+              visibility.and(
+                eq(
+                  visibility.column('project', 'id'),
+                  visibility.column('task', 'projectId')
+                ),
+                visibility.or(
+                  eq(visibility.column('project', 'ownerId'), userValue),
+                  visibility.exists(
+                    'member',
+                    visibility.and(
+                      eq(
+                        visibility.column('member', 'projectId'),
+                        visibility.column('project', 'id')
+                      ),
+                      eq(visibility.column('member', 'userId'), userValue)
+                    )
+                  )
+                )
+              )
+            )
+          )
         if (table === 'message')
-          return {
-            sql: 'EXISTS (SELECT 1 FROM project WHERE project.id = message."serverId" AND (project."ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?)))',
-            params: [user, user],
-            columns: [
-              { table: 'message', column: 'serverId' },
-              { table: 'project', column: 'id' },
-              { table: 'project', column: 'ownerId' },
-              { table: 'member', column: 'projectId' },
-              { table: 'member', column: 'userId' },
-            ],
-          }
+          return visibility.filter(
+            visibility.exists(
+              'project',
+              visibility.and(
+                eq(
+                  visibility.column('project', 'id'),
+                  visibility.column('message', 'serverId')
+                ),
+                visibility.or(
+                  eq(visibility.column('project', 'ownerId'), userValue),
+                  visibility.exists(
+                    'member',
+                    visibility.and(
+                      eq(
+                        visibility.column('member', 'projectId'),
+                        visibility.column('project', 'id')
+                      ),
+                      eq(visibility.column('member', 'userId'), userValue)
+                    )
+                  )
+                )
+              )
+            )
+          )
         return undefined
       },
     },

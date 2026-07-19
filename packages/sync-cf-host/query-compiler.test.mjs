@@ -55,6 +55,7 @@ const format = {
 }
 
 const encryptedSchema = {
+  schemaID: 'query-compiler-encryption-v1',
   tables: {
     record: {
       serverName: 'records',
@@ -156,25 +157,21 @@ describe('standalone query compiler', () => {
           where: {
             type: 'simple',
             op: '=',
-            left: { type: 'column', name: 'route' },
-            right: { type: 'column', name: 'secret_blob' },
+            left: { type: 'column', name: 'secret_blob' },
+            right: { type: 'literal', value: 'ciphertext' },
           },
         },
         flatFormat
       )
-    ).toThrow("encrypted column 'record.secret' has forbidden use 'predicate'")
+    ).toThrow(
+      "schema 'query-compiler-encryption-v1' encrypted column 'record.secret' has forbidden use 'predicate'"
+    )
   })
 
   test('allows encrypted columns in transaction query projection', () => {
     const plan = createQueryCompiler(encryptedSchema)(
       {
         table: 'record',
-        where: {
-          type: 'simple',
-          op: '!=',
-          left: { type: 'column', name: 'route' },
-          right: { type: 'column', name: 'id' },
-        },
       },
       flatFormat
     )
@@ -185,6 +182,23 @@ describe('standalone query compiler', () => {
       { name: 'secret', columnType: 'string' },
     ])
     expect(plan.root.sql).toContain('"secret_blob" AS "secret"')
-    expect(plan.root.sql).toContain('"route_key" != "q0"."record_id"')
+  })
+
+  test('rejects v51 right-hand column references at parse time', () => {
+    const compile = createQueryCompiler(schema)
+    expect(() =>
+      compile(
+        {
+          table: 'account',
+          where: {
+            type: 'simple',
+            op: '!=',
+            left: { type: 'column', name: 'id' },
+            right: { type: 'column', name: 'balance' },
+          },
+        },
+        flatFormat
+      )
+    ).toThrow("condition right must be a literal, got 'column'")
   })
 })

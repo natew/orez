@@ -283,7 +283,6 @@ pub fn register_query(
     transform_version: i64,
 ) -> Result<(), EngineError> {
     let ast = parse_ast(ast_json)?;
-    super::opacity::validate_encrypted_column_usage(tables, &ast)?;
     compile(&ast, tables)?; // validate + reject unsupported shapes here
     // the dependency set includes related-output and EXISTS child tables (not
     // just the root query's), so touched-table narrowing never skips a query
@@ -558,6 +557,22 @@ fn active_queries(db: &mut dyn SyncDb, group: &str) -> Result<Vec<ActiveQuery>, 
     Ok(out)
 }
 
+pub(crate) fn validate_active_queries(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+    group: &str,
+) -> Result<(), EngineError> {
+    validate_queries(tables, &active_queries(db, group)?)
+}
+
+fn validate_queries(tables: &Tables, queries: &[ActiveQuery]) -> Result<(), EngineError> {
+    for query in queries {
+        let ast = parse_ast(&query.ast_json)?;
+        super::opacity::validate_encrypted_column_usage(tables, &ast)?;
+    }
+    Ok(())
+}
+
 // the set of query hashes already computed at least once for the group
 fn read_query_state(db: &mut dyn SyncDb, group: &str) -> Result<BTreeSet<String>, EngineError> {
     let rows = db.query(
@@ -792,6 +807,7 @@ pub(crate) fn recompute_group_with_rehydrate(
     rehydrate: &BTreeSet<String>,
 ) -> Result<Vec<Value>, EngineError> {
     let queries = active_queries(db, group)?;
+    validate_queries(tables, &queries)?;
 
     // clear computed markers for queries this group no longer desires, so a
     // later re-desire recomputes from scratch instead of being narrowed away.

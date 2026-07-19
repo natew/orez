@@ -3,8 +3,16 @@ import type {
   TransactionQueryBudget,
   TransactionQueryFormat,
 } from './transaction-query.js'
+import type { VisibilityFilter } from './visibility.js'
 
 export type { DeferredEffect } from './post-commit.js'
+export {
+  visibility,
+  type VisibilityExpression,
+  type VisibilityFilter,
+  type VisibilityOperand,
+  type VisibilityValue,
+} from './visibility.js'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
@@ -22,6 +30,7 @@ export type ZeroColumn = {
 }
 
 export type ZeroSchemaConfig = {
+  readonly schemaID?: string
   readonly tables: Readonly<
     Record<
       string,
@@ -106,13 +115,6 @@ export function registerMutators<
 }
 
 export { MutationApplicationError, isMutationApplicationError } from './mutation-error.js'
-
-export type VisibilityFilter = {
-  /** SQL WHERE fragment only, without the WHERE keyword. */
-  sql: string
-  params?: readonly JsonPrimitive[]
-  columns: readonly { table: string; column: string }[]
-}
 
 export type VisibilityConfig = {
   /** True only when every predicate depends on the selected row alone. */

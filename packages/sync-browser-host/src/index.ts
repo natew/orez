@@ -6,6 +6,7 @@ export {
 export {
   MutationApplicationError,
   registerMutators,
+  visibility,
   type ApplicationTransaction,
   type ApplicationTransactionContext,
   type BrowserSyncHost,
@@ -24,7 +25,10 @@ export {
   type RegisteredMutator,
   type SyncSql,
   type VisibilityConfig,
+  type VisibilityExpression,
   type VisibilityFilter,
+  type VisibilityOperand,
+  type VisibilityValue,
   type ZeroColumn,
   type ZeroSchemaConfig,
 } from './types.js'

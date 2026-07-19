@@ -3,6 +3,15 @@ import type {
   TransactionQueryBudget,
   TransactionQueryFormat,
 } from 'orez-sync-cf-host/transaction-query'
+import type { VisibilityFilter } from 'orez-sync-cf-host/visibility'
+
+export {
+  visibility,
+  type VisibilityExpression,
+  type VisibilityFilter,
+  type VisibilityOperand,
+  type VisibilityValue,
+} from 'orez-sync-cf-host/visibility'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
@@ -19,6 +28,7 @@ export type ZeroColumn = {
 }
 
 export type ZeroSchemaConfig = {
+  readonly schemaID?: string
   readonly tables: Readonly<
     Record<
       string,
@@ -97,12 +107,6 @@ export {
   MutationApplicationError,
   isMutationApplicationError,
 } from 'orez-sync-cf-host/mutation-error'
-
-export type VisibilityFilter = {
-  sql: string
-  params?: readonly JsonPrimitive[]
-  columns: readonly { table: string; column: string }[]
-}
 
 export type VisibilityConfig = {
   rowLocal: boolean | ((claims: NormalizedClaims) => boolean)

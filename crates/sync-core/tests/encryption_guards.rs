@@ -1,15 +1,23 @@
 mod common;
 
+use std::collections::BTreeSet;
+
 use serde_json::{Value, json};
 
 use common::TestDb;
 use sync_core::pull::Caps;
-use sync_core::query::{init_query_schema, register_query};
-use sync_core::schema::ColumnUse;
-use sync_core::{Tables, Transactor, handle_pull, init_schema};
+use sync_core::query::compile::compile_predicate_probe;
+use sync_core::query::{
+    compile, compile_transaction_query, handle_query_pull, init_query_schema, parse_ast,
+    parse_query_format, parse_query_schema, recompute_group, register_query, set_desire,
+};
+use sync_core::{
+    Tables, Transactor, VisibilityExpression, compile_visibility_filter, handle_pull, init_schema,
+};
 
 fn encrypted_schema() -> Value {
     json!({
+        "schemaID": "encryption-guards-v1",
         "tables": {
             "message": {
                 "serverName": "messages",
@@ -50,6 +58,16 @@ fn tables() -> Tables {
     Tables::from_zero_schema(&encrypted_schema()).unwrap()
 }
 
+fn clear_tables() -> Tables {
+    let mut schema = encrypted_schema();
+    for table in schema["tables"].as_object_mut().unwrap().values_mut() {
+        for column in table["columns"].as_object_mut().unwrap().values_mut() {
+            column.as_object_mut().unwrap().remove("encrypted");
+        }
+    }
+    Tables::from_zero_schema(&schema).unwrap()
+}
+
 fn simple(left: Value, right: Value) -> Value {
     json!({
         "table": "message",
@@ -72,7 +90,24 @@ fn registration_error(ast: Value) -> sync_core::EngineError {
 
 #[test]
 fn schema_rejects_encrypted_primary_keys_and_unsupported_types() {
+    let missing_schema_id = json!({
+        "tables": {
+            "record": {
+                "columns": {
+                    "id": { "type": "string" },
+                    "secret": { "type": "string", "encrypted": true }
+                },
+                "primaryKey": ["id"]
+            }
+        }
+    });
+    assert_eq!(
+        Tables::from_zero_schema(&missing_schema_id).unwrap_err(),
+        "schema.schemaID is required when encrypted column metadata is present"
+    );
+
     let primary_key = json!({
+        "schemaID": "primary-key-v1",
         "tables": {
             "record": {
                 "columns": { "secret": { "type": "string", "encrypted": true } },
@@ -80,14 +115,13 @@ fn schema_rejects_encrypted_primary_keys_and_unsupported_types() {
             }
         }
     });
-    assert!(
-        Tables::from_zero_schema(&primary_key)
-            .unwrap_err()
-            .contains("forbidden use 'primary-key'")
-    );
+    let error = Tables::from_zero_schema(&primary_key).unwrap_err();
+    assert!(error.contains("schema 'primary-key-v1'"), "{error}");
+    assert!(error.contains("forbidden use 'primary-key'"), "{error}");
 
     for column_type in ["number", "boolean", "null"] {
         let schema = json!({
+            "schemaID": "unsupported-type-v1",
             "tables": {
                 "record": {
                     "columns": {
@@ -99,6 +133,7 @@ fn schema_rejects_encrypted_primary_keys_and_unsupported_types() {
             }
         });
         let error = Tables::from_zero_schema(&schema).unwrap_err();
+        assert!(error.contains("schema 'unsupported-type-v1'"), "{error}");
         assert!(error.contains("unsupported logical type"), "{error}");
         assert!(error.contains(column_type), "{error}");
     }
@@ -149,6 +184,21 @@ fn initialization_rejects_every_sqlite_index_kind_on_encrypted_columns() {
              CREATE INDEX secret_partial ON messages(secret_blob) WHERE route_key IS NOT NULL",
         ),
         (
+            "partial",
+            "CREATE TABLE messages (message_id TEXT PRIMARY KEY, route_key TEXT, secret_blob TEXT, details_blob TEXT);\
+             CREATE INDEX clear_key_secret_predicate ON messages(route_key) WHERE secret_blob IS NOT NULL",
+        ),
+        (
+            "partial",
+            "CREATE TABLE messages (message_id TEXT PRIMARY KEY, route_key TEXT, secret_blob TEXT, details_blob TEXT);\
+             CREATE INDEX quoted_secret_predicate ON messages(route_key) WHERE \"secret_blob\" IS NOT NULL",
+        ),
+        (
+            "partial",
+            "CREATE TABLE messages (message_id TEXT PRIMARY KEY, route_key TEXT, secret_blob TEXT, details_blob TEXT);\
+             CREATE INDEX expression_secret_predicate ON messages(route_key) WHERE length(secret_blob) > 0",
+        ),
+        (
             "unique",
             "CREATE TABLE messages (message_id TEXT PRIMARY KEY, route_key TEXT, secret_blob TEXT UNIQUE, details_blob TEXT)",
         ),
@@ -172,6 +222,10 @@ fn initialization_rejects_every_sqlite_index_kind_on_encrypted_columns() {
             )
             .unwrap();
         let error = init_schema(&mut db, &tables()).unwrap_err().0;
+        assert!(
+            error.contains("schema 'encryption-guards-v1'"),
+            "{kind}: {error}"
+        );
         assert!(error.contains("forbidden use 'index'"), "{kind}: {error}");
         assert!(error.contains(kind), "{kind}: {error}");
     }
@@ -222,18 +276,123 @@ fn clear_indexes_and_encrypted_projection_are_allowed() {
 }
 
 #[test]
-fn query_registration_rejects_encrypted_predicate_operands() {
+fn query_registration_rejects_encrypted_predicates() {
     let left = registration_error(simple(column("secret_blob"), literal("x")));
     assert!(left.message.contains("message.secret"), "{}", left.message);
     assert!(left.message.contains("forbidden use 'predicate'"));
+    assert!(left.message.contains("schema 'encryption-guards-v1'"));
+}
 
-    let right = registration_error(simple(column("route"), column("secret")));
-    assert!(
-        right.message.contains("message.secret"),
-        "{}",
-        right.message
-    );
-    assert!(right.message.contains("forbidden use 'predicate'"));
+#[test]
+fn every_public_compiler_rejects_encrypted_predicates() {
+    let tables = tables();
+    let ast_json = simple(column("secret"), literal("x"));
+    let ast = parse_ast(&ast_json).unwrap();
+
+    let errors = [
+        compile(&ast, &tables).err().unwrap(),
+        compile_predicate_probe(&ast, &tables).err().unwrap(),
+    ];
+    for error in errors {
+        assert!(error.message.contains("schema 'encryption-guards-v1'"));
+        assert!(error.message.contains("forbidden use 'predicate'"));
+    }
+
+    let query_schema = parse_query_schema(&encrypted_schema()).unwrap();
+    let format = parse_query_format(&json!({
+        "singular": false,
+        "relationships": {}
+    }))
+    .unwrap();
+    let error = compile_transaction_query(&query_schema, &tables, &ast, &format).unwrap_err();
+    assert!(error.message.contains("schema 'encryption-guards-v1'"));
+    assert!(error.message.contains("forbidden use 'predicate'"));
+}
+
+#[test]
+fn persisted_queries_are_revalidated_when_encryption_metadata_changes() {
+    let mut db = TestDb::memory();
+    db.conn
+        .execute_batch(
+            "CREATE TABLE messages (
+                message_id TEXT PRIMARY KEY,
+                route_key TEXT,
+                secret_blob TEXT,
+                details_blob TEXT
+            )",
+        )
+        .unwrap();
+    init_query_schema(&mut db).unwrap();
+    let ast = simple(column("secret"), literal("clear-before-schema-change"));
+    register_query(&mut db, &clear_tables(), "group", "same-version", &ast, 7).unwrap();
+    set_desire(&mut db, "group", "client", "same-version", 7).unwrap();
+    recompute_group(&mut db, &clear_tables(), "group", &BTreeSet::new()).unwrap();
+
+    let error = recompute_group(&mut db, &tables(), "group", &BTreeSet::new()).unwrap_err();
+    assert!(error.message.contains("schema 'encryption-guards-v1'"));
+    assert!(error.message.contains("message.secret"));
+    assert!(error.message.contains("forbidden use 'predicate'"));
+}
+
+#[test]
+fn caught_up_query_pulls_revalidate_persisted_queries_before_unchanged() {
+    let mut db = TestDb::memory();
+    db.conn
+        .execute_batch(
+            "CREATE TABLE messages (
+                message_id TEXT PRIMARY KEY,
+                route_key TEXT,
+                secret_blob TEXT,
+                details_blob TEXT
+            );
+            CREATE TABLE attachments (
+                attachment_id TEXT PRIMARY KEY,
+                message_id TEXT,
+                body_blob TEXT
+            )",
+        )
+        .unwrap();
+    let clear_tables = clear_tables();
+    init_schema(&mut db, &clear_tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+    let ast = simple(column("secret"), literal("clear-before-schema-change"));
+    let first = handle_query_pull(
+        &mut db,
+        &clear_tables,
+        4096,
+        &json!({
+            "clientID": "client",
+            "clientGroupID": "group",
+            "cookie": null,
+            "queries": {
+                "version": 7,
+                "patch": [{
+                    "op": "put",
+                    "hash": "same-version",
+                    "ast": ast,
+                    "transformVersion": 7
+                }]
+            }
+        }),
+        "user",
+    )
+    .unwrap();
+
+    let error = handle_query_pull(
+        &mut db,
+        &tables(),
+        4096,
+        &json!({
+            "clientID": "client",
+            "clientGroupID": "group",
+            "cookie": first["cookie"].clone()
+        }),
+        "user",
+    )
+    .unwrap_err();
+    assert!(error.message.contains("schema 'encryption-guards-v1'"));
+    assert!(error.message.contains("message.secret"));
+    assert!(error.message.contains("forbidden use 'predicate'"));
 }
 
 #[test]
@@ -321,16 +480,35 @@ fn projection_and_clear_relationship_correlation_remain_allowed() {
 }
 
 #[test]
-fn visibility_references_fail_closed_through_the_shared_resolver() {
+fn structured_visibility_resolves_physical_names_and_rejects_encrypted_columns() {
     let tables = tables();
-    tables
-        .validate_column_usage("messages", "route_key", ColumnUse::Visibility)
+    let clear: VisibilityExpression = serde_json::from_value(json!({
+        "type": "comparison",
+        "operator": "=",
+        "left": { "type": "column", "table": "messages", "column": "route_key" },
+        "right": { "type": "value", "value": "r1" }
+    }))
+    .unwrap();
+    let compiled = compile_visibility_filter(&tables, "messages", &clear).unwrap();
+    assert_eq!(compiled.sql, "\"message\".\"route\" = ?");
+
+    let encrypted: VisibilityExpression = serde_json::from_value(json!({
+        "type": "comparison",
+        "operator": "=",
+        "left": { "type": "column", "table": "messages", "column": "secret_blob" },
+        "right": { "type": "value", "value": "ciphertext" }
+    }))
+    .unwrap();
+    let error = compile_visibility_filter(&tables, "messages", &encrypted)
+        .err()
         .unwrap();
-    let error = tables
-        .validate_column_usage("messages", "secret_blob", ColumnUse::Visibility)
-        .unwrap_err();
     assert!(
         error.message.contains("message.secret"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("schema 'encryption-guards-v1'"),
         "{}",
         error.message
     );

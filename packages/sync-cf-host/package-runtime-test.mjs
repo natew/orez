@@ -60,6 +60,7 @@ const expected = new Map([
   ['orez-sync-cf-host/bun-wasm-loader', '/dist/bun-wasm-loader.js'],
   ['orez-sync-cf-host/query-compiler', '/dist/query-compiler.js'],
   ['orez-sync-cf-host/transaction-query', '/dist/transaction-query.js'],
+  ['orez-sync-cf-host/visibility', '/dist/visibility.js'],
   ['orez-sync-cf-host/vite-wasm-loader', '/dist/vite-wasm-loader.js'],
 ])
 for (const [specifier, suffix] of expected) {
@@ -72,6 +73,10 @@ if (!existsSync(fileURLToPath(wasm))) throw new Error('wasm export is missing')
 const transaction = await import('orez-sync-cf-host/transaction-query')
 if (typeof transaction.executeTransactionQueryPlan !== 'function') {
   throw new Error('built transaction-query export did not load')
+}
+const visibility = await import('orez-sync-cf-host/visibility')
+if (typeof visibility.visibility?.filter !== 'function') {
+  throw new Error('built visibility export did not load')
 }
 const viteLoader = await import('orez-sync-cf-host/vite-wasm-loader')
 if (typeof viteLoader.orezSyncCfHostWasm !== 'function') {

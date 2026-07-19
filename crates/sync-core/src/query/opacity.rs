@@ -1,7 +1,7 @@
 use crate::error::EngineError;
 use crate::schema::{ColumnUse, Tables};
 
-use super::ast::{Ast, Condition, CorrelatedSubquery, RightVal, ValueRef};
+use super::ast::{Ast, Condition, CorrelatedSubquery, ValueRef};
 
 pub fn validate_encrypted_column_usage(tables: &Tables, ast: &Ast) -> Result<(), EngineError> {
     validate_ast(tables, ast)
@@ -33,11 +33,8 @@ fn validate_condition(
     condition: &Condition,
 ) -> Result<(), EngineError> {
     match condition {
-        Condition::Simple { left, right, .. } => {
+        Condition::Simple { left, .. } => {
             if let ValueRef::Column(column) = left {
-                tables.validate_column_usage(table, column, ColumnUse::Predicate)?;
-            }
-            if let RightVal::Column(column) = right {
                 tables.validate_column_usage(table, column, ColumnUse::Predicate)?;
             }
         }

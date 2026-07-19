@@ -170,6 +170,7 @@ fn engine_errors_keep_400_and_403_statuses_without_panicking() {
 fn encrypted_visibility_is_rejected_while_projection_stays_opaque() {
     let db = db();
     let schema = json!({
+        "schemaID": "wasm-encryption-v1",
         "tables": {
             "item": {
                 "columns": {
@@ -190,6 +191,39 @@ fn encrypted_visibility_is_rejected_while_projection_stays_opaque() {
         "INSERT INTO item VALUES ('i1', 'orez-e1.7.tag.ciphertext')",
     );
 
+    let pull_body = json!({
+        "clientID": "reader-1",
+        "clientGroupID": "group-1",
+        "cookie": null,
+    });
+    for columns in [json!([]), json!([{ "table": "item", "column": "id" }])] {
+        exec_sql(&db, "BEGIN");
+        let error = engine_handle_pull(
+            &db,
+            to_js(&schema),
+            to_js(&json!({
+                "rowLocal": false,
+                "filters": [{
+                    "kind": "raw",
+                    "table": "item",
+                    "sql": "secret = ?",
+                    "params": ["orez-e1.7.tag.ciphertext"],
+                    "columns": columns,
+                }],
+            })),
+            to_js(&json!({ "maxChangeRows": 100, "maxChangeBytes": 65_536 })),
+            "4096",
+            to_js(&pull_body),
+            "user-1",
+        )
+        .expect_err("raw visibility metadata must not bypass encrypted schemas");
+        exec_sql(&db, "ROLLBACK");
+        assert_eq!(status(&error), 400);
+        assert!(message(&error).contains("schema 'wasm-encryption-v1'"));
+        assert!(message(&error).contains("raw visibility SQL"));
+        assert!(message(&error).contains("forbidden use 'visibility'"));
+    }
+
     exec_sql(&db, "BEGIN");
     let error = engine_handle_pull(
         &db,
@@ -197,24 +231,26 @@ fn encrypted_visibility_is_rejected_while_projection_stays_opaque() {
         to_js(&json!({
             "rowLocal": false,
             "filters": [{
+                "kind": "expression",
                 "table": "item",
-                "sql": "secret = ?",
-                "params": ["orez-e1.7.tag.ciphertext"],
-                "columns": [{ "table": "item", "column": "secret" }],
+                "expression": {
+                    "type": "comparison",
+                    "operator": "=",
+                    "left": { "type": "column", "table": "item", "column": "secret" },
+                    "right": { "type": "value", "value": "orez-e1.7.tag.ciphertext" },
+                },
             }],
         })),
         to_js(&json!({ "maxChangeRows": 100, "maxChangeBytes": 65_536 })),
         "4096",
-        to_js(&json!({
-            "clientID": "reader-1",
-            "clientGroupID": "group-1",
-            "cookie": null,
-        })),
+        to_js(&pull_body),
         "user-1",
     )
-    .expect_err("visibility must not inspect an encrypted column");
+    .expect_err("structured visibility must reject encrypted columns");
     exec_sql(&db, "ROLLBACK");
     assert_eq!(status(&error), 400);
+    assert!(message(&error).contains("schema 'wasm-encryption-v1'"));
+    assert!(message(&error).contains("item.secret"));
     assert!(message(&error).contains("forbidden use 'visibility'"));
 
     exec_sql(&db, "BEGIN");
@@ -222,14 +258,22 @@ fn encrypted_visibility_is_rejected_while_projection_stays_opaque() {
         engine_handle_pull(
             &db,
             to_js(&schema),
-            JsValue::NULL,
+            to_js(&json!({
+                "rowLocal": true,
+                "filters": [{
+                    "kind": "expression",
+                    "table": "item",
+                    "expression": {
+                        "type": "comparison",
+                        "operator": "=",
+                        "left": { "type": "column", "table": "item", "column": "id" },
+                        "right": { "type": "value", "value": "i1" },
+                    },
+                }],
+            })),
             to_js(&json!({ "maxChangeRows": 100, "maxChangeBytes": 65_536 })),
             "4096",
-            to_js(&json!({
-                "clientID": "reader-1",
-                "clientGroupID": "group-1",
-                "cookie": null,
-            })),
+            to_js(&pull_body),
             "user-1",
         )
         .unwrap(),

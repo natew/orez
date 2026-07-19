@@ -84,12 +84,26 @@ struct TableMapping {
 // an ordered map of logical sync table name -> spec + physical SQLite mapping.
 // order is preserved so snapshot row emission matches the reference core's
 // Object.entries() iteration.
-#[derive(Debug, Clone, Default)]
-pub struct Tables(Vec<(String, TableSpec, TableMapping)>);
+#[derive(Debug, Clone)]
+pub struct Tables(Vec<(String, TableSpec, TableMapping)>, String);
+
+impl Default for Tables {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Tables {
     pub fn new() -> Self {
-        Tables(Vec::new())
+        Tables(Vec::new(), "manual".to_string())
+    }
+
+    fn with_schema_id(schema_id: String) -> Self {
+        Tables(Vec::new(), schema_id)
+    }
+
+    pub fn schema_id(&self) -> &str {
+        &self.1
     }
 
     pub fn with(mut self, name: impl Into<String>, spec: TableSpec) -> Self {
@@ -146,6 +160,16 @@ impl Tables {
             .iter()
             .find(|(logical, _, _)| logical == logical_name)
             .map(|(_, _, mapping)| mapping.physical_name.as_str())
+    }
+
+    pub fn logical_name(&self, table: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(logical, _, mapping)| {
+                logical.eq_ignore_ascii_case(table)
+                    || mapping.physical_name.eq_ignore_ascii_case(table)
+            })
+            .map(|(logical, _, _)| logical.as_str())
     }
 
     pub fn physical_column(&self, logical_table: &str, logical_column: &str) -> Option<&str> {
@@ -205,7 +229,8 @@ impl Tables {
         let resolved = self.resolve_column(table, column)?;
         if resolved.encrypted {
             return Err(EngineError::bad_request(format!(
-                "encrypted column '{}.{}' has forbidden use '{}'",
+                "schema '{}' encrypted column '{}.{}' has forbidden use '{}'",
+                self.schema_id(),
                 resolved.logical_table,
                 resolved.logical_column,
                 usage.as_str()
@@ -280,7 +305,31 @@ impl Tables {
             .get("tables")
             .and_then(|t| t.as_object())
             .ok_or_else(|| "schema.tables must be an object".to_string())?;
-        let mut tables = Tables::new();
+        let has_encrypted_metadata = tables_obj.values().any(|table| {
+            table
+                .get("columns")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|columns| {
+                    columns
+                        .values()
+                        .any(|column| column.get("encrypted").is_some())
+                })
+        });
+        let schema_id = match schema.get("schemaID") {
+            Some(serde_json::Value::String(value)) if !value.is_empty() => value.clone(),
+            Some(serde_json::Value::String(_)) => {
+                return Err("schema.schemaID must not be empty".to_string());
+            }
+            Some(_) => return Err("schema.schemaID must be a string".to_string()),
+            None if has_encrypted_metadata => {
+                return Err(
+                    "schema.schemaID is required when encrypted column metadata is present"
+                        .to_string(),
+                );
+            }
+            None => "unidentified".to_string(),
+        };
+        let mut tables = Tables::with_schema_id(schema_id);
         let mut logical_tables = BTreeSet::new();
         let mut physical_tables = BTreeSet::new();
         for (name, table) in tables_obj {
@@ -383,7 +432,8 @@ impl Tables {
                 };
                 if encrypted && !matches!(ty, "string" | "json") {
                     return Err(format!(
-                        "encrypted column '{name}.{col}' has unsupported logical type '{ty}'"
+                        "schema '{}' encrypted column '{name}.{col}' has unsupported logical type '{ty}'",
+                        tables.schema_id()
                     ));
                 }
                 if encrypted {
@@ -427,7 +477,8 @@ impl Tables {
                 }
                 if encrypted_columns.contains(column) {
                     return Err(format!(
-                        "encrypted column '{name}.{column}' has forbidden use 'primary-key'"
+                        "schema '{}' encrypted column '{name}.{column}' has forbidden use 'primary-key'",
+                        tables.schema_id()
                     ));
                 }
             }
@@ -483,6 +534,18 @@ fn validate_encrypted_indexes(db: &mut dyn SyncDb, tables: &Tables) -> Result<()
             let unique = integer_column(&index, "is_unique")? != 0;
             let partial = integer_column(&index, "partial")? != 0;
             let origin = text_column(&index, "origin")?;
+            if partial {
+                let encrypted_columns = spec
+                    .encrypted_columns
+                    .iter()
+                    .map(|column| format!("{logical_table}.{column}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(DbError(format!(
+                    "schema '{}' encrypted columns [{encrypted_columns}] have forbidden use 'index' in partial SQLite index '{index_name}' because its WHERE predicate cannot be proven clear",
+                    tables.schema_id()
+                )));
+            }
             let columns = db.query(
                 "SELECT cid, name FROM pragma_index_info(?)",
                 &[SqlValue::Text(index_name.to_string())],
@@ -497,8 +560,6 @@ fn validate_encrypted_indexes(db: &mut dyn SyncDb, tables: &Tables) -> Result<()
                 "primary"
             } else if unique {
                 "unique"
-            } else if partial {
-                "partial"
             } else {
                 "ordinary"
             };
@@ -511,7 +572,8 @@ fn validate_encrypted_indexes(db: &mut dyn SyncDb, tables: &Tables) -> Result<()
                     .collect::<Vec<_>>()
                     .join(", ");
                 return Err(DbError(format!(
-                    "encrypted columns [{encrypted_columns}] have forbidden use 'index' in {kind} SQLite index '{index_name}' because its referenced columns cannot be proven clear"
+                    "schema '{}' encrypted columns [{encrypted_columns}] have forbidden use 'index' in {kind} SQLite index '{index_name}' because its referenced columns cannot be proven clear",
+                    tables.schema_id()
                 )));
             }
 
@@ -522,7 +584,8 @@ fn validate_encrypted_indexes(db: &mut dyn SyncDb, tables: &Tables) -> Result<()
                     .map_err(|error| DbError(error.message))?;
                 if resolved.encrypted {
                     return Err(DbError(format!(
-                        "encrypted column '{}.{}' has forbidden use '{}' in {kind} SQLite index '{index_name}'",
+                        "schema '{}' encrypted column '{}.{}' has forbidden use '{}' in {kind} SQLite index '{index_name}'",
+                        tables.schema_id(),
                         resolved.logical_table,
                         resolved.logical_column,
                         ColumnUse::Index.as_str()
@@ -545,7 +608,7 @@ pub(crate) fn quote_ident(name: &str) -> String {
 // letters/digits/underscores. every real Zero schema name (camelCase tables and
 // columns) satisfies this; anything else (embedded quotes, whitespace, dots) is
 // rejected at schema ingest so an injection-shaped name never reaches DDL.
-fn is_valid_identifier(name: &str) -> bool {
+pub(crate) fn is_valid_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}

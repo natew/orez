@@ -421,19 +421,26 @@ The guard must resolve server and logical names through `TableSpec`; comparing r
 
 ### Visibility filters
 
-The host currently represents visibility as SQL plus parameters. Add an explicit, required list of referenced columns to each configured filter:
+The host currently represents visibility as SQL plus parameters. Replace that
+with a structured expression whose column nodes carry the table and column:
 
 ```ts
 type VisibilityFilter = {
-  sql: string
-  params: readonly JSONValue[]
-  columns: readonly { table: string; column: string }[]
+  kind: 'expression'
+  expression: VisibilityExpression
 }
 ```
 
-Include this metadata in the visibility wire object assembled in `packages/sync-cf-host/src/host.ts`. Rust resolves the declared references through `Tables` and rejects an encrypted column before `engine_handle_pull` can install or evaluate the filter.
+Include the expression in the visibility wire object assembled in
+`packages/sync-cf-host/src/host.ts`. Rust compiles both the SQL and bindings from
+the expression, resolves every column node through `Tables`, and rejects an
+encrypted column before `engine_handle_pull` can install or evaluate the
+filter.
 
-This is a trusted configuration invariant. Do not attempt substring matching against SQL. The config builder should generate both SQL and column references from one structured expression so they cannot drift. Raw SQL visibility without complete column metadata is invalid when the schema contains any encrypted column.
+Do not attempt substring matching against SQL. The config builder and Rust
+compiler generate SQL and column references from the same structured expression
+so they cannot drift. Raw SQL visibility is invalid when the schema contains
+any encrypted column.
 
 ### Guard error contract
 
