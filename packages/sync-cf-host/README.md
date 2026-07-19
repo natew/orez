@@ -7,9 +7,10 @@ from `src/harness-worker.ts`. Consumers provide a JSON Zero schema, application
 DDL/seed initializer, normalized-claims authenticator, mutator registry, and an
 optional row-visibility hook.
 
-The Worker authenticates at the consumer edge, forwards only normalized claims
-to a per-namespace Durable Object, and never logs tokens, mutation arguments, or
-row contents. Pull runs `engine_handle_pull` inside `transactionSync`; push runs
+The Worker authenticates at the consumer edge and forwards normalized claims
+inside the binding request body, where request-header observability cannot record
+them. It never logs tokens, mutation arguments, or row contents. Pull runs
+`engine_handle_pull` inside `transactionSync`; push runs
 Rust `push_validate`/`preflight`/`finalize`/`record_app_error` steps around the
 registered asynchronous TypeScript mutator inside `ctx.storage.transaction`.
 Every SQL cursor is materialized before an await. Mutators may await only their

@@ -47,7 +47,6 @@ import type {
   SyncHostEnv,
 } from './types.js'
 
-const CLAIMS_HEADER = 'x-orez-sync-claims'
 const NAMESPACE_HEADER = 'x-orez-sync-namespace'
 const UPSTREAM_PATH_HEADER = 'x-orez-sync-upstream-path'
 const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
@@ -120,6 +119,11 @@ type FaultPoint =
   | 'pull_during_tx'
   | 'pull_after_commit'
 type FaultKind = 'error' | 'quota'
+
+type ForwardedSyncBody = {
+  claims: NormalizedClaims
+  body: Record<string, unknown>
+}
 
 type Counters = {
   pulls: number
@@ -218,16 +222,44 @@ function routeAfterNamespace(pathname: string): string {
   return `/${parts.join('/')}`
 }
 
-function claimsFromRequest(request: Request): NormalizedClaims | null {
-  const encoded = request.headers.get(CLAIMS_HEADER)
-  if (!encoded) return null
-  try {
-    const value = JSON.parse(decodeURIComponent(encoded)) as NormalizedClaims
-    return value && typeof value.userID === 'string' && value.userID.length > 0
-      ? value
+function jsonBodyRequest(request: Request, headers: Headers, body: unknown): Request {
+  headers.delete('content-encoding')
+  headers.delete('content-length')
+  headers.set('content-type', 'application/json')
+  return new Request(request.url, {
+    method: request.method,
+    headers,
+    body: JSON.stringify(body),
+  })
+}
+
+async function forwardedSyncRequest(
+  request: Request
+): Promise<{ claims: NormalizedClaims; request: Request }> {
+  const value = await requestObject(request)
+  const claims = value.claims
+  const body = value.body
+  const userID =
+    claims && typeof claims === 'object' && !Array.isArray(claims)
+      ? (claims as Record<string, unknown>).userID
       : null
-  } catch {
-    return null
+  if (
+    !claims ||
+    typeof claims !== 'object' ||
+    Array.isArray(claims) ||
+    typeof userID !== 'string' ||
+    userID.length === 0
+  ) {
+    throw requestError('missing normalized claims', 401)
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw requestError('request body must be a JSON object')
+  }
+
+  const headers = new Headers(request.headers)
+  return {
+    claims: claims as NormalizedClaims,
+    request: jsonBodyRequest(request, headers, body),
   }
 }
 
@@ -256,7 +288,8 @@ function socketCloseQuietly(socket: WebSocket, code: number, reason: string): vo
 
 /**
  * Create the consumer-facing Worker router. Authentication happens here; the
- * Durable Object receives only normalized claims over a binding-private header.
+ * Durable Object receives normalized claims inside the binding request body so
+ * observability systems cannot record them as request-header metadata.
  */
 export function createSyncWorker<Env extends SyncHostEnv>(
   config: SyncHostConfig<Env>
@@ -285,13 +318,20 @@ export function createSyncWorker<Env extends SyncHostEnv>(
       }
 
       const headers = new Headers(request.headers)
-      headers.delete(CLAIMS_HEADER)
       headers.delete(NAMESPACE_HEADER)
       headers.delete(UPSTREAM_PATH_HEADER)
+      let forwardedBody: ForwardedSyncBody | null = null
       if (!isAdmin && route !== '/wake' && route !== '/notify') {
         const claims = await config.authenticate(request, env)
         if (!claims) return json({ error: 'missing authentication' }, 401)
-        headers.set(CLAIMS_HEADER, encodeURIComponent(JSON.stringify(claims)))
+        if ((route === '/pull' || route === '/push') && request.method === 'POST') {
+          try {
+            const body = await requestObject(request)
+            forwardedBody = { claims, body }
+          } catch (error) {
+            return json(errorBody(error), statusOf(error))
+          }
+        }
       }
       headers.set(NAMESPACE_HEADER, await namespaceHash(namespace))
       if (config.upstream) {
@@ -305,7 +345,9 @@ export function createSyncWorker<Env extends SyncHostEnv>(
         headers.set(UPSTREAM_PATH_HEADER, namespacePath.replace(/\/$/, ''))
       }
 
-      const forwarded = new Request(request, { headers })
+      const forwarded = forwardedBody
+        ? jsonBodyRequest(request, headers, forwardedBody)
+        : new Request(request, { headers })
       const id = env.SYNC_DO.idFromName(namespace)
       return env.SYNC_DO.get(id).fetch(forwarded)
     },
@@ -1394,7 +1436,6 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
             config.mutateOrigin ?? 'https://upstream.invalid'
           )
           const headers = new Headers(request.headers)
-          headers.delete(CLAIMS_HEADER)
           headers.delete(NAMESPACE_HEADER)
           headers.delete(UPSTREAM_PATH_HEADER)
           headers.set('host', endpoint.host)
@@ -1884,32 +1925,23 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         }
       }
 
-      const claims = claimsFromRequest(request)
-      if (!claims) return json({ error: 'missing normalized claims' }, 401)
-      if (route === '/pull' && request.method === 'POST') {
+      if ((route === '/pull' || route === '/push') && request.method === 'POST') {
+        let forwarded
+        try {
+          forwarded = await forwardedSyncRequest(request)
+        } catch (error) {
+          return json(errorBody(error), statusOf(error))
+        }
+        // pull and push both establish the upstream schema and snapshot barrier.
         try {
           await this.#ingest(upstreamPath)
         } catch (error) {
-          // Workerd requires a forwarded request body to be consumed even when
-          // ingest fails before the pull handler parses it.
-          await request.arrayBuffer()
           return json(errorBody(error), statusOf(error))
         }
-        return this.#pull(request, claims, namespace)
-      }
-      if (route === '/push' && request.method === 'POST') {
-        // A push may be the first request for a fresh namespace. DATA's
-        // /changes call is also its schema-provisioning barrier, so complete it
-        // before delegating the mutation to APP. Pull already enforces this
-        // ordering above; skipping it here let APP race half-created tables and
-        // surface a terminal, bodyless 500 to Zero.
-        try {
-          await this.#ingest(upstreamPath)
-        } catch (error) {
-          await request.arrayBuffer()
-          return json(errorBody(error), statusOf(error))
+        if (route === '/pull') {
+          return this.#pull(forwarded.request, forwarded.claims, namespace)
         }
-        return this.#push(request, claims, namespace, upstreamPath)
+        return this.#push(forwarded.request, forwarded.claims, namespace, upstreamPath)
       }
       return json({ error: 'not found' }, 404)
     }

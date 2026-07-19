@@ -28,6 +28,9 @@ export default {
         await mintHarnessWakeToken(namespace, claims.userID, env.ADMIN_KEY)
       )
     }
-    return syncWorker.fetch!(request, env, ctx)
+    const headers = new Headers(request.headers)
+    headers.set('x-harness-request-gate', '1')
+    const gatedRequest = new Request(request, { headers }) as typeof request
+    return syncWorker.fetch!(gatedRequest, env, ctx)
   },
 } satisfies ExportedHandler<Env>
