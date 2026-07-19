@@ -1,6 +1,6 @@
 # Transparent column encryption
 
-Status: draft for coordinator review
+Status: stage 3 implemented; deployment stages 4 through 7 remain
 
 ## Goal
 
@@ -283,21 +283,11 @@ The codec must reject duplicate custom mutation identities inside one push when 
 
 ## Portable randomness and Hermes support
 
-The crypto primitives were executed in the real GPUI Hermes fixture runner using deterministic inputs. X25519, HKDF-SHA256, and XChaCha20-Poly1305 completed successfully:
+Orez exposes one portable conformance entry that calls the production `orez-e1` column codec and production RFC 9180 HPKE functions. It pins the codec identity, deterministic column envelope, RFC 9180 A.2.1 recipient keys, encapsulated key, ciphertext, and both decrypt round trips. It does not contain a second crypto implementation.
 
-```text
-CRYPTO_HERMES_PROBE PASS shared=32 key=32 ciphertext=38 random=undefined
-```
+The same entry passes in Node, real Chromium, and both the React and UI Hermes contexts of the GPUI runtime. The Chromium run removes `globalThis.crypto` before loading the bundle, which proves deterministic column encryption and known-answer HPKE do not acquire randomness implicitly. The HPKE vector supplies its deterministic `randomBytes` adapter explicitly.
 
-This confirms noble's required language and typed-array features work in the desktop Hermes runtime. The remaining gap is secure randomness. GPUI Hermes currently has no `globalThis.crypto`, `crypto.getRandomValues`, or Expo native-module bridge.
-
-Before enabling enrollment or encryption in GPUI, add a host-provided `crypto.getRandomValues` implementation in `react-native-gpui` backed by the Rust operating-system CSPRNG. Install it in the Hermes preamble before application code runs. It must:
-
-- accept only integer typed arrays allowed by the Web Crypto contract
-- fill the exact viewed byte range
-- enforce the 65,536-byte call limit
-- throw on host RNG failure
-- never use `Math.random` or a deterministic fallback
+The GPUI runtime now installs a host-provided `crypto.getRandomValues` implementation before application code runs, backed by the Rust operating-system CSPRNG. Its React and UI Hermes conformance proves independent samples differ. The React lane also covers the allowed integer typed arrays, exact viewed byte range, 65,536-byte limit, and invalid or spoofed inputs. A Rust/Hermes unit test injects an operating-system random-source failure and proves it throws into JavaScript. Source inspection confirms the host calls `getrandom::fill` directly and contains no `Math.random` or deterministic fallback.
 
 Orez owns one `randomBytes(length)` adapter used by key generation, HPKE, and any randomized protocol operation:
 
@@ -307,7 +297,7 @@ Orez owns one `randomBytes(length)` adapter used by key generation, HPKE, and an
 
 The embedder selects the adapter explicitly at initialization. Missing secure randomness is a startup error for enrollment and key creation. Column encryption uses derived nonces, but key generation and HPKE encapsulation still require secure randomness.
 
-Add conformance tests that execute the same known-answer crypto vectors in Node, browser, Expo Hermes, and GPUI Hermes. The GPUI test must also call the real host random adapter and prove two independent samples differ; deterministic fixture inputs alone do not validate enrollment readiness.
+Expo Hermes still needs to run the same Orez conformance entry. Its explicit Expo random adapter must be covered separately by enrollment conformance. Those are deployment-stage gates because device key storage and enrollment are introduced in stage 4, not evidence that stage 3's portable codec is incomplete.
 
 ## Desktop daemon writer path
 
@@ -327,6 +317,8 @@ The sidecar is a daemon-supervised process and is independent of the visible des
 Do not attach the writer lifecycle to `agentbus orez start`. `src/commands/orez.rs` currently supervises an optional local PGlite, zero-cache, and on-zero stack, while the cloud topology has the one sync server in the Durable Object. At cutover, the headless cloud writer is the only daemon history publishing process; the local `src/pg_writer.rs` to PGlite path is retired from production cloud publishing.
 
 The sidecar imports the canonical Agentbus schema, `cloud.applyBatch` mutator, manifest, and orez codec modules. It must not contain its own row projection or crypto rules. The visible desktop client and writer share those modules.
+
+The canonical writer defines this mutator with Zero's current `defineMutators` API and submits its `MutateRequest` through `zero.mutate(...)`. Its serialized wire name is `cloud.applyBatch`, and `EncryptedColumnManifest.rowMutations` is keyed by that exact name because transport transformation happens after Zero constructs the push. The legacy function-mutator API uses a different `|` separator and is not the production writer path.
 
 ### Loopback protocol
 
@@ -611,7 +603,14 @@ Run the same codec vectors and a real encrypt/push/pull/decrypt flow in:
 - GPUI Hermes with the OS-backed random host function
 - Node for the headless writer sidecar
 
-Passing deterministic noble vectors in GPUI Hermes is already confirmed. Full acceptance remains blocked until the GPUI host supplies secure randomness and the test exercises it.
+Stage 3 currently has these proofs:
+
+- the one production codec conformance entry passes in Node and real Chromium
+- the same entry passes in the GPUI React and UI Hermes contexts
+- GPUI's separate runtime conformance covers the OS-backed random host function
+- a stock Zero custom mutation starts with a plaintext logical row, is observed as ciphertext at the `/push` server boundary, is returned as ciphertext by `/pull`, and materializes as plaintext through a normal query
+
+The stock Zero test proves the in-process transport composition. It does not claim the full Agentbus deployment flow. Expo Hermes plus the real Agentbus encrypt/push/persist/pull/decrypt flow remain deployment-stage gates. They depend on stage 4 key storage and enrollment, stage 5 daemon outbox and headless writer, and stage 6 schema migration and cutover. Until those pieces exist there is no package-correct production path that can exercise the complete flow or inspect migrated Durable Object storage.
 
 ## Implementation order
 

@@ -4,13 +4,12 @@ import { describe, expect, test, vi } from 'vitest'
 
 import {
   createEncryptedColumnCodec,
-  deriveX25519KeyPair,
   generateX25519KeyPair,
-  hpkeOpen,
   hpkeSeal,
   unwrapContentKey,
   wrapContentKey,
 } from './encrypted-column-codec.js'
+import { runEncryptionConformance } from './encrypted-column-conformance.js'
 
 import type {
   EncryptedColumnManifest,
@@ -44,6 +43,14 @@ const manifest = {
 const contentKey = Uint8Array.from({ length: 32 }, (_, index) => index)
 
 describe('orez-e1 encrypted column codec', () => {
+  test('matches the portable Orez column and RFC 9180 known-answer entry', async () => {
+    await expect(runEncryptionConformance()).resolves.toEqual({
+      codec: 'orez-e1',
+      columnVector: 'pass',
+      hpkeVector: 'RFC 9180 A.2.1',
+    })
+  })
+
   test('encrypts only declared row payload columns and round-trips string and JSON values', async () => {
     const codec = createEncryptedColumnCodec({
       manifest,
@@ -128,12 +135,6 @@ describe('orez-e1 encrypted column codec', () => {
     expect(current).toHaveBeenCalledTimes(3)
     expect(encodedPut(changedMutation).body).not.toBe(encodedPut(first).body)
     expect(encodedPut(changedMutation).detail).not.toBe(encodedPut(first).detail)
-    expect(encodedPut(first).body).toBe(
-      'orez-e1.3.QHCGUMBeRxu6O1-3.JcHJvjKg96SntU4Pt99PhB236MEWjrltO5klR6_Ome8iP6agq3ERGk2GiaL15prxFIxDUWfgekJWLFYK-TY8'
-    )
-    expect(encodedPut(first).detail).toBe(
-      'orez-e1.3.QHCGUMBeRxu6O1-3.nWn-O6GDUwDyfKVfcln7UbwLxN5cuEYn6MFropDVsTM6MQTcoR-Zkr6t0fuiJk45-R-4_axCGERWy7ST34zsUuO7fcUNNy3qQySbqetEpfU'
-    )
   })
 
   test('derives distinct nonces for every column and row in one mutation', async () => {
@@ -419,48 +420,6 @@ describe('orez-e1 encrypted column codec', () => {
 })
 
 describe('RFC 9180 key wrapping', () => {
-  test('matches the RFC 9180 A.2.1 base-mode vector', () => {
-    const recipient = deriveX25519KeyPair(
-      hex('1ac01f181fdf9f352797655161c58b75c656a6cc2716dcb66372da835542e1df')
-    )
-    expect(toHex(recipient.privateKey)).toBe(
-      '8057991eef8f1f1af18f4a9491d16a1ce333f695d4db8e38da75975c4478e0fb'
-    )
-    expect(toHex(recipient.publicKey)).toBe(
-      '4310ee97d88cc1f088a5576c77ab0cf5c3ac797f3d95139c6c84b5429c59662a'
-    )
-
-    const inputKeyMaterial = hex(
-      '909a9b35d3dc4713a5e72a4da274b55d3d3821a37e5d099e74a647db583a904b'
-    )
-    const info = hex('4f6465206f6e2061204772656369616e2055726e')
-    const plaintext = hex('4265617574792069732074727574682c20747275746820626561757479')
-    const associatedData = hex('436f756e742d30')
-    const sealed = hpkeSeal({
-      recipientPublicKey: recipient.publicKey,
-      plaintext,
-      info,
-      associatedData,
-      randomBytes: () => inputKeyMaterial,
-    })
-
-    expect(toHex(sealed.encapsulatedKey)).toBe(
-      '1afa08d3dec047a643885163f1180476fa7ddb54c6a8029ea33f95796bf2ac4a'
-    )
-    expect(toHex(sealed.ciphertext)).toBe(
-      '1c5250d8034ec2b784ba2cfd69dbdb8af406cfe3ff938e131f0def8c8b60b4db21993c62ce81883d2dd1b51a28'
-    )
-    expect(
-      hpkeOpen({
-        recipientPrivateKey: recipient.privateKey,
-        encapsulatedKey: sealed.encapsulatedKey,
-        ciphertext: sealed.ciphertext,
-        info,
-        associatedData,
-      })
-    ).toEqual(plaintext)
-  })
-
   test('wraps 32-byte content keys and authenticates enrollment context', () => {
     const recipient = generateX25519KeyPair(
       (length) => new Uint8Array(nodeRandomBytes(length))
@@ -593,14 +552,6 @@ function pullWithBody(body: unknown): PullResponse {
       },
     ],
   } as PullResponse
-}
-
-function hex(value: string) {
-  return Uint8Array.from(value.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16))
-}
-
-function toHex(value: Uint8Array) {
-  return Array.from(value, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
 function envelopeNonce(value: unknown) {

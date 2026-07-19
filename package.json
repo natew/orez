@@ -39,6 +39,10 @@
       "types": "./dist/zero-http/encrypted-column-codec.d.ts",
       "import": "./dist/zero-http/encrypted-column-codec.js"
     },
+    "./zero-http/encryption/conformance": {
+      "types": "./dist/zero-http/encrypted-column-conformance.d.ts",
+      "import": "./dist/zero-http/encrypted-column-conformance.js"
+    },
     "./sync-browser-host": {
       "types": "./dist/sync-browser-host/index.d.ts",
       "import": "./dist/sync-browser-host/index.js"
@@ -74,6 +78,10 @@
     "test:wasm": "vitest run src/wasm-sqlite.test.ts",
     "test:sync-browser-host": "bun run --cwd packages/sync-browser-host test",
     "test:sync-cf-host": "bun run --cwd packages/sync-cf-host test",
+    "build:encryption-conformance": "tsc",
+    "conformance:encryption:node": "bun run build:encryption-conformance && node scripts/encryption-codec-node-conformance.mjs",
+    "conformance:encryption:browser": "bun run --cwd packages/sync-browser-host conformance:encryption-codec",
+    "conformance:encryption:gpui": "bun run build:encryption-conformance && node scripts/encryption-codec-gpui-conformance.mjs",
     "test:transaction-query:chat": "bun run --cwd packages/sync-cf-host build:dist && bun harness/src/chat-transaction-query-diff.ts",
     "test:all": "bun run --cwd packages/sync-cf-host build:dist && vitest run",
     "test:watch": "bun run --cwd packages/sync-cf-host build:dist && vitest",
