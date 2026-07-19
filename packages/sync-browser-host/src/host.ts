@@ -309,7 +309,14 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
       filters: Object.keys(this.config.schema.tables).flatMap((table) => {
         const filter = this.config.visibility?.filter(table, claims)
         return filter
-          ? [{ table, sql: filter.sql, params: [...(filter.params ?? [])] }]
+          ? [
+              {
+                table,
+                sql: filter.sql,
+                params: [...(filter.params ?? [])],
+                columns: filter.columns.map((column) => ({ ...column })),
+              },
+            ]
           : []
       }),
     }

@@ -54,6 +54,22 @@ const format = {
   relationships: { entries: { singular: false, relationships: {} } },
 }
 
+const encryptedSchema = {
+  tables: {
+    record: {
+      serverName: 'records',
+      columns: {
+        id: { type: 'string', serverName: 'record_id' },
+        route: { type: 'string', serverName: 'route_key' },
+        secret: { type: 'string', serverName: 'secret_blob', encrypted: true },
+      },
+      primaryKey: ['id'],
+    },
+  },
+}
+
+const flatFormat = { singular: false, relationships: {} }
+
 function database() {
   const db = new Database(':memory:')
   db.exec(`
@@ -128,5 +144,47 @@ describe('standalone query compiler', () => {
         selects: 2,
       })
     )
+  })
+
+  test('rejects encrypted predicate use before transaction query compilation', () => {
+    const compile = createQueryCompiler(encryptedSchema)
+
+    expect(() =>
+      compile(
+        {
+          table: 'record',
+          where: {
+            type: 'simple',
+            op: '=',
+            left: { type: 'column', name: 'route' },
+            right: { type: 'column', name: 'secret_blob' },
+          },
+        },
+        flatFormat
+      )
+    ).toThrow("encrypted column 'record.secret' has forbidden use 'predicate'")
+  })
+
+  test('allows encrypted columns in transaction query projection', () => {
+    const plan = createQueryCompiler(encryptedSchema)(
+      {
+        table: 'record',
+        where: {
+          type: 'simple',
+          op: '!=',
+          left: { type: 'column', name: 'route' },
+          right: { type: 'column', name: 'id' },
+        },
+      },
+      flatFormat
+    )
+
+    expect(plan.root.columns).toEqual([
+      { name: 'id', columnType: 'string' },
+      { name: 'route', columnType: 'string' },
+      { name: 'secret', columnType: 'string' },
+    ])
+    expect(plan.root.sql).toContain('"secret_blob" AS "secret"')
+    expect(plan.root.sql).toContain('"route_key" != "q0"."record_id"')
   })
 })

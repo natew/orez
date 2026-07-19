@@ -26,6 +26,8 @@ fn tables(n_tables: usize) -> Tables {
             TableSpec {
                 columns: vec![("id".into(), String), ("v".into(), Number)],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         );
     }
@@ -273,6 +275,8 @@ fn narrowing_benchmark() {
                 ("v".into(), ZeroColumnType::Number),
             ],
             primary_key: vec!["id".into()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
         },
     );
     init_schema(&mut db2, &mtables).unwrap();

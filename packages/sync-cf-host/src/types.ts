@@ -15,6 +15,12 @@ export type NormalizedClaims = {
   [claim: string]: JsonValue
 }
 
+export type ZeroColumn = {
+  readonly type: string
+  readonly serverName?: string
+  readonly encrypted?: true
+}
+
 export type ZeroSchemaConfig = {
   readonly tables: Readonly<
     Record<
@@ -22,9 +28,7 @@ export type ZeroSchemaConfig = {
       {
         readonly name?: string
         readonly serverName?: string
-        readonly columns: Readonly<
-          Record<string, { readonly type: string; readonly serverName?: string }>
-        >
+        readonly columns: Readonly<Record<string, ZeroColumn>>
         readonly primaryKey: readonly string[]
       }
     >
@@ -107,6 +111,7 @@ export type VisibilityFilter = {
   /** SQL WHERE fragment only, without the WHERE keyword. */
   sql: string
   params?: readonly JsonPrimitive[]
+  columns: readonly { table: string; column: string }[]
 }
 
 export type VisibilityConfig = {

@@ -458,28 +458,59 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
       rowLocal: false,
       filter(table, claims) {
         const user = claims.userID
-        if (table === 'user') return { sql: '"id" = ?', params: [user] }
+        if (table === 'user')
+          return {
+            sql: '"id" = ?',
+            params: [user],
+            columns: [{ table: 'user', column: 'id' }],
+          }
         if (table === 'project') {
           return {
             sql: '("ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?))',
             params: [user, user],
+            columns: [
+              { table: 'project', column: 'ownerId' },
+              { table: 'project', column: 'id' },
+              { table: 'member', column: 'projectId' },
+              { table: 'member', column: 'userId' },
+            ],
           }
         }
         if (table === 'member') {
           return {
             sql: 'EXISTS (SELECT 1 FROM project p WHERE p.id = member."projectId" AND (p."ownerId" = ? OR EXISTS (SELECT 1 FROM member access WHERE access."projectId" = p.id AND access."userId" = ?)))',
             params: [user, user],
+            columns: [
+              { table: 'member', column: 'projectId' },
+              { table: 'member', column: 'userId' },
+              { table: 'project', column: 'id' },
+              { table: 'project', column: 'ownerId' },
+            ],
           }
         }
         if (table === 'task')
           return {
             sql: 'EXISTS (SELECT 1 FROM project WHERE project.id = task."projectId" AND (project."ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?)))',
             params: [user, user],
+            columns: [
+              { table: 'task', column: 'projectId' },
+              { table: 'project', column: 'id' },
+              { table: 'project', column: 'ownerId' },
+              { table: 'member', column: 'projectId' },
+              { table: 'member', column: 'userId' },
+            ],
           }
         if (table === 'message')
           return {
             sql: 'EXISTS (SELECT 1 FROM project WHERE project.id = message."serverId" AND (project."ownerId" = ? OR EXISTS (SELECT 1 FROM member WHERE member."projectId" = project.id AND member."userId" = ?)))',
             params: [user, user],
+            columns: [
+              { table: 'message', column: 'serverId' },
+              { table: 'project', column: 'id' },
+              { table: 'project', column: 'ownerId' },
+              { table: 'member', column: 'projectId' },
+              { table: 'member', column: 'userId' },
+            ],
           }
         return undefined
       },

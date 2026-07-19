@@ -25,6 +25,8 @@ fn schema() -> Tables {
                 ("closed".into(), Boolean),
             ],
             primary_key: vec!["id".into()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
         },
     )
 }
@@ -410,6 +412,8 @@ fn unbounded_related_fresh_pull_includes_child_rows() {
             TableSpec {
                 columns: vec![("id".into(), S), ("name".into(), S)],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -421,6 +425,8 @@ fn unbounded_related_fresh_pull_includes_child_rows() {
                     ("userId".into(), S),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         );
     init_schema(&mut db, &tables).unwrap();

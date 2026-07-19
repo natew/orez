@@ -283,6 +283,7 @@ pub fn register_query(
     transform_version: i64,
 ) -> Result<(), EngineError> {
     let ast = parse_ast(ast_json)?;
+    super::opacity::validate_encrypted_column_usage(tables, &ast)?;
     compile(&ast, tables)?; // validate + reject unsupported shapes here
     // the dependency set includes related-output and EXISTS child tables (not
     // just the root query's), so touched-table narrowing never skips a query

@@ -47,6 +47,8 @@ fn schema() -> Tables {
                 ("ownerId".into(), String),
             ],
             primary_key: vec!["id".into()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
         },
     )
 }

@@ -65,6 +65,13 @@ fn status(error: &JsValue) -> u16 {
         .unwrap() as u16
 }
 
+fn message(error: &JsValue) -> String {
+    Reflect::get(error, &JsValue::from_str("message"))
+        .unwrap()
+        .as_string()
+        .unwrap()
+}
+
 #[wasm_bindgen_test]
 fn push_and_pull_round_trip_through_wasm_exports() {
     let db = db();
@@ -157,6 +164,81 @@ fn engine_errors_keep_400_and_403_statuses_without_panicking() {
         .expect_err("a different user must not claim an owned client group");
     exec_sql(&db, "ROLLBACK");
     assert_eq!(status(&forbidden), 403);
+}
+
+#[wasm_bindgen_test]
+fn encrypted_visibility_is_rejected_while_projection_stays_opaque() {
+    let db = db();
+    let schema = json!({
+        "tables": {
+            "item": {
+                "columns": {
+                    "id": { "type": "string" },
+                    "secret": { "type": "string", "encrypted": true },
+                },
+                "primaryKey": ["id"],
+            },
+        },
+    });
+    exec_sql(
+        &db,
+        "CREATE TABLE item (id TEXT PRIMARY KEY, secret TEXT NOT NULL)",
+    );
+    engine_init_schema(&db, to_js(&schema)).unwrap();
+    exec_sql(
+        &db,
+        "INSERT INTO item VALUES ('i1', 'orez-e1.7.tag.ciphertext')",
+    );
+
+    exec_sql(&db, "BEGIN");
+    let error = engine_handle_pull(
+        &db,
+        to_js(&schema),
+        to_js(&json!({
+            "rowLocal": false,
+            "filters": [{
+                "table": "item",
+                "sql": "secret = ?",
+                "params": ["orez-e1.7.tag.ciphertext"],
+                "columns": [{ "table": "item", "column": "secret" }],
+            }],
+        })),
+        to_js(&json!({ "maxChangeRows": 100, "maxChangeBytes": 65_536 })),
+        "4096",
+        to_js(&json!({
+            "clientID": "reader-1",
+            "clientGroupID": "group-1",
+            "cookie": null,
+        })),
+        "user-1",
+    )
+    .expect_err("visibility must not inspect an encrypted column");
+    exec_sql(&db, "ROLLBACK");
+    assert_eq!(status(&error), 400);
+    assert!(message(&error).contains("forbidden use 'visibility'"));
+
+    exec_sql(&db, "BEGIN");
+    let pull = from_js(
+        engine_handle_pull(
+            &db,
+            to_js(&schema),
+            JsValue::NULL,
+            to_js(&json!({ "maxChangeRows": 100, "maxChangeBytes": 65_536 })),
+            "4096",
+            to_js(&json!({
+                "clientID": "reader-1",
+                "clientGroupID": "group-1",
+                "cookie": null,
+            })),
+            "user-1",
+        )
+        .unwrap(),
+    );
+    exec_sql(&db, "COMMIT");
+    assert_eq!(
+        pull["rowsPatch"][1]["value"]["secret"],
+        "orez-e1.7.tag.ciphertext"
+    );
 }
 
 #[wasm_bindgen_test]

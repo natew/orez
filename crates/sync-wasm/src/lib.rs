@@ -335,6 +335,13 @@ struct VisibilityFilterWire {
     table: String,
     sql: String,
     params: Vec<serde_json::Value>,
+    columns: Vec<VisibilityColumnWire>,
+}
+
+#[derive(Clone, Deserialize)]
+struct VisibilityColumnWire {
+    table: String,
+    column: String,
 }
 
 fn from_js<T: for<'de> Deserialize<'de>>(value: JsValue) -> Result<T, JsValue> {
@@ -650,10 +657,12 @@ pub fn engine_compile_query(
     ast: JsValue,
     format: JsValue,
 ) -> Result<JsValue, JsValue> {
-    let schema = query_json_from_js(schema, "schema")?;
-    let schema = sync_core::query::parse_query_schema(&schema).map_err(engine_error)?;
+    let schema_json = query_json_from_js(schema, "schema")?;
+    let tables = sync_core::Tables::from_zero_schema(&schema_json).map_err(js_err)?;
+    let schema = sync_core::query::parse_query_schema(&schema_json).map_err(engine_error)?;
     let ast = query_json_from_js(ast, "AST")?;
     let ast = sync_core::query::parse_ast(&ast).map_err(engine_error)?;
+    sync_core::query::validate_encrypted_column_usage(&tables, &ast).map_err(engine_error)?;
     let format = query_json_from_js(format, "format")?;
     let format = sync_core::query::parse_query_format(&format).map_err(engine_error)?;
     let compiled = sync_core::query::compile_transaction_query(&schema, &ast, &format)
@@ -681,6 +690,15 @@ pub fn engine_handle_pull(
     let visibility: Option<VisibilityWire> = from_js(visibility)?;
     if let Some(visibility) = &visibility {
         for filter in &visibility.filters {
+            for column in &filter.columns {
+                tables
+                    .validate_column_usage(
+                        &column.table,
+                        &column.column,
+                        sync_core::schema::ColumnUse::Visibility,
+                    )
+                    .map_err(engine_error)?;
+            }
             for param in &filter.params {
                 sql_value_from_json(param.clone())?;
             }

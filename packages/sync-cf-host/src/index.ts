@@ -32,6 +32,7 @@ export type {
   UpstreamConfig,
   VisibilityConfig,
   VisibilityFilter,
+  ZeroColumn,
   ZeroSchemaConfig,
 } from './types.js'
 export type { SyncDurableObjectConstructor } from './host.js'

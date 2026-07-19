@@ -25,5 +25,6 @@ export {
   type SyncSql,
   type VisibilityConfig,
   type VisibilityFilter,
+  type ZeroColumn,
   type ZeroSchemaConfig,
 } from './types.js'
