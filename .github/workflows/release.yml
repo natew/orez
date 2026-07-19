@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: select latest main build
+        id: candidate
+        run: |
+          git fetch origin main --no-tags
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            echo "A newer main commit exists; its CI run will publish the canary instead."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v6
+        if: steps.candidate.outputs.release == 'true'
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: install OIDC-capable npm
+        if: steps.candidate.outputs.release == 'true'
+        run: npm install --global npm@12.0.1
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.candidate.outputs.release == 'true'
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@master
+        if: steps.candidate.outputs.release == 'true'
+        with:
+          toolchain: 1.94.0
+          targets: wasm32-unknown-unknown
+
+      - uses: ./.github/actions/setup-wasm-pack
+        if: steps.candidate.outputs.release == 'true'
+
+      - name: install dependencies
+        if: steps.candidate.outputs.release == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: publish canary with npm trusted publishing
+        if: steps.candidate.outputs.release == 'true'
+        run: bun scripts/release.ts --canary --ci --skip-test
