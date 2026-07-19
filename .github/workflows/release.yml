@@ -34,8 +34,13 @@ jobs:
         id: candidate
         run: |
           git fetch origin main --no-tags
+          version=$(node -p "require('./package.json').version")
+          subject=$(git log -1 --pretty=%s)
           if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
             echo "A newer main commit exists; its CI run will publish the canary instead."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$subject" = "v$version" ]; then
+            echo "Skipping stable release commit v$version."
             echo "release=false" >> "$GITHUB_OUTPUT"
           else
             echo "release=true" >> "$GITHUB_OUTPUT"

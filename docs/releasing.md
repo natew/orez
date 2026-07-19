@@ -6,7 +6,8 @@ with npm trusted publishing. Canary versions use the current stable version plus
 `-canary.<timestamp>` and the npm `canary` dist-tag.
 
 Canary publishing does not edit manifests, create a release commit or tag, or
-push back to `main`.
+push back to `main`. Stable release commits, whose subject matches the checked-in
+`v<version>`, are skipped instead of producing a canary of the same version.
 
 ## npm trusted publishers
 
