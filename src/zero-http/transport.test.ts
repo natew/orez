@@ -1,4 +1,4 @@
-import { Zero } from '@rocicorp/zero'
+import { Zero, defineMutator, defineMutators } from '@rocicorp/zero'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { createEncryptedColumnCodec } from './encrypted-column-codec.js'
@@ -7,6 +7,7 @@ import { ensureHttpPullTransport, installHttpPullTransport } from './transport.j
 
 import type {
   EncryptedColumnManifest,
+  EncryptedRowBatch,
   PayloadCodec,
   PullResponse,
   PushRequest,
@@ -33,6 +34,13 @@ const transportEncryptionManifest = {
     },
   },
 } as const satisfies EncryptedColumnManifest
+const encryptionFixtureMutators = defineMutators({
+  cloud: {
+    applyBatch: defineMutator<EncryptedRowBatch, typeof zeroHttpFixtureSchema>(
+      async () => {}
+    ),
+  },
+})
 
 type RequestRecord = {
   url: string
@@ -176,6 +184,98 @@ describe('zero-http transport', () => {
     view.destroy()
 
     expect(data).toEqual([{ id: 'p1', ownerId: 'u1', name: 'decrypted project' }])
+  })
+
+  test('stock Zero encrypts a plaintext row mutation and decrypts the applied row into a query', async () => {
+    const plaintext = 'stock Zero plaintext round trip'
+    let storedCiphertext: string | undefined
+    let returnedStoredRow = false
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        if (storedCiphertext && !returnedStoredRow) {
+          returnedStoredRow = true
+          return jsonResponse({
+            cookie: 1,
+            lastMutationIDChanges: {},
+            rowsPatch: [
+              { op: 'clear' },
+              {
+                op: 'put',
+                tableName: 'project_record',
+                value: {
+                  project_id: 'p-stock',
+                  owner_id: 'u1',
+                  project_name: storedCiphertext,
+                },
+              },
+            ],
+          })
+        }
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+
+      expect(request.path).toBe('/push')
+      const mutation = request.body.mutations[0]
+      expect(mutation.name).toBe('cloud.applyBatch')
+      const appliedBatch = mutation.args[0]
+      const appliedValue = appliedBatch.rows[0].value
+      expect(appliedValue.id).toBe('p-stock')
+      expect(appliedValue.ownerId).toBe('u1')
+      expect(appliedValue.name).toMatch(/^orez-e1\.4\./)
+      expect(JSON.stringify(request.body)).not.toContain(plaintext)
+      storedCiphertext = appliedValue.name
+      return jsonResponse({
+        pushResponse: {
+          mutations: [
+            {
+              id: { clientID: mutation.clientID, id: mutation.id },
+              result: {},
+            },
+          ],
+        },
+      })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      payloadCodec: createTransportEncryptionCodec(),
+    })
+    transports.push(transport)
+    const zero = createEncryptedZero()
+    const view = zero.query.project.materialize()
+    await eventually(() =>
+      expect(
+        fetch.mock.calls.some((call) => recordRequest(call[0], call[1]).path === '/pull')
+      ).toBe(true)
+    )
+
+    const mutation = zero.mutate(
+      encryptionFixtureMutators.cloud.applyBatch({
+        sourceID: 'stock-source',
+        fromSeq: 1,
+        throughSeq: 1,
+        rows: [
+          {
+            seq: 1,
+            op: 'put',
+            table: 'project',
+            value: { id: 'p-stock', ownerId: 'u1', name: plaintext },
+          },
+        ],
+      })
+    )
+    await mutation.client
+    await mutation.server
+    await eventually(() =>
+      expect(view.data).toEqual([
+        expect.objectContaining({ id: 'p-stock', ownerId: 'u1', name: plaintext }),
+      ])
+    )
+
+    expect(storedCiphertext).toMatch(/^orez-e1\.4\./)
+    expect(returnedStoredRow).toBe(true)
+    view.destroy()
   })
 
   test('rejects plaintext injected into an encrypted pull before any poke', async () => {
@@ -1113,6 +1213,20 @@ function createZero(
     mutators: zeroHttpFixtureMutators,
     pingTimeoutMs: options.pingTimeoutMs,
     onClientStateNotFound: options.onClientStateNotFound,
+  })
+  zeros.push(zero)
+  return zero
+}
+
+function createEncryptedZero() {
+  const zero = new Zero({
+    server: ORIGIN,
+    userID: 'u1',
+    auth: 'token-u1',
+    schema: zeroHttpFixtureSchema,
+    kvStore: 'mem',
+    storageKey: `zero-http-encryption-test-${++storageID}`,
+    mutators: encryptionFixtureMutators,
   })
   zeros.push(zero)
   return zero
