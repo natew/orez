@@ -18,8 +18,6 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join } from 'node:path'
-import { stdin as input, stdout as output } from 'node:process'
-import { createInterface } from 'node:readline/promises'
 
 import {
   orderReleasePackages,
@@ -37,11 +35,6 @@ const packOnly = args.includes('--pack-only')
 const ci = args.includes('--ci')
 const intoIdx = args.indexOf('--into')
 const into = intoIdx !== -1 ? args[intoIdx + 1] : null
-// Match the One/Tamagui release flow: prompts also work when the release is
-// driven through an agent PTY, where Node may not report stdin/stdout as TTYs.
-// A real CI environment remains fail-closed and must provide NPM_CONFIG_OTP
-// explicitly. The local `--ci` workflow can still prompt for an OTP.
-const canPromptForNpmOtp = !process.env.CI
 
 if (!patch && !minor && !major && !canary && !packOnly && !into) {
   console.info(
@@ -55,46 +48,16 @@ const root = resolve(import.meta.dirname, '..')
 function run(
   cmd: string,
   opts?: {
-    captureOnError?: boolean
     cwd?: string
-    env?: NodeJS.ProcessEnv
     silent?: boolean
   }
 ) {
   const cwd = opts?.cwd ?? root
   if (!opts?.silent) console.info(`$ ${cmd}`)
-  const env = opts?.env ? { ...process.env, ...opts.env } : process.env
-
-  try {
-    return execSync(cmd, {
-      stdio: opts?.silent || opts?.captureOnError ? 'pipe' : 'inherit',
-      cwd,
-      env,
-    })
-  } catch (err) {
-    if (opts?.captureOnError && err && typeof err === 'object') {
-      const error = err as Error & { stderr?: Buffer; stdout?: Buffer }
-      const stdout = error.stdout?.toString() ?? ''
-      const stderr = error.stderr?.toString() ?? ''
-      if (stdout) process.stdout.write(stdout)
-      if (stderr) process.stderr.write(stderr)
-      throw new Error([error.message, stdout, stderr].filter(Boolean).join('\n'))
-    }
-    throw err
-  }
-}
-
-function isPublishAuthOrOtpError(message: string) {
-  return (
-    /EOTP|one-time password|two-factor authentication|\botp\b/i.test(message) ||
-    /code E404[\s\S]*PUT https:\/\/registry\.npmjs\.org\/@[^/\s]+%2f[^/\s]+/i.test(
-      message
-    )
-  )
-}
-
-function redactNpmOtp(command: string) {
-  return command.replace(/--otp(?:=|\s+)\S+/g, '--otp=******')
+  return execSync(cmd, {
+    stdio: opts?.silent ? 'pipe' : 'inherit',
+    cwd,
+  })
 }
 
 function cleanRootDist() {
@@ -119,41 +82,6 @@ function preparePgToSqliteDist() {
     const src = resolve(root, 'dist', file)
     if (existsSync(src)) cpSync(src, join(dest, file))
   }
-}
-
-let cachedNpmOtp = process.env.npm_config_otp || process.env.NPM_CONFIG_OTP
-let otpPromptInFlight: Promise<string> | undefined
-
-function getNpmOtp(reason: string): Promise<string> {
-  if (otpPromptInFlight) return otpPromptInFlight
-
-  otpPromptInFlight = (async () => {
-    console.info(`\n${reason}`)
-
-    const rl = createInterface({ input, output })
-    try {
-      while (true) {
-        const code = (await rl.question('npm 2FA code (6 digits): ')).trim()
-
-        if (!code) {
-          throw new Error('No OTP provided, aborting publish')
-        }
-
-        if (/^\d{6}$/.test(code)) {
-          cachedNpmOtp = code
-          return code
-        }
-
-        console.info('Enter a 6-digit code')
-      }
-    } finally {
-      rl.close()
-    }
-  })().finally(() => {
-    otpPromptInFlight = undefined
-  })
-
-  return otpPromptInFlight
 }
 
 function bumpVersion(current: string): string {
@@ -422,7 +350,7 @@ if (dryRun) {
 const tmpBase = mkdtempSync(join(tmpdir(), 'orez-publish-'))
 console.info(`\n${packOnly ? 'packing to' : 'publishing from'} ${tmpBase}`)
 
-if (!packOnly) {
+if (!packOnly && !ci) {
   try {
     run('npm whoami', { cwd: tmpBase, silent: true })
   } catch (err) {
@@ -430,68 +358,14 @@ if (!packOnly) {
       `npm is not authenticated for publishing. Run \`npm login\` and then re-run the release.\n\n${err}`
     )
   }
-
-  // no eager OTP prompt. an account with 2FA set to auth-only (the current one)
-  // never gets an EOTP on publish, so asking up front demanded a code npm was
-  // not going to ask for — on every single release. publishWithOtp already
-  // prompts and retries when npm actually returns EOTP, and CI still fail-closes
-  // on NPM_CONFIG_OTP, so the reactive path covers the auth-and-writes case too.
 }
 
-async function publishWithOtp(name: string, version: string, cwd: string) {
+function publishPackage(name: string, version: string, cwd: string) {
   const tag = canary ? '--tag canary' : ''
   const publishCommand = `npm publish --access public ${tag}`.trim()
 
   console.info(`\npublishing ${name}@${version}...`)
-
-  let attempt = 0
-  let otp = cachedNpmOtp
-
-  while (true) {
-    attempt++
-
-    try {
-      console.info(
-        `$ ${redactNpmOtp(
-          [publishCommand, otp ? '--otp=******' : ''].filter(Boolean).join(' ')
-        )}`
-      )
-      const publishOutput = run(publishCommand, {
-        cwd,
-        env: otp ? { npm_config_otp: otp } : undefined,
-        silent: true,
-        captureOnError: true,
-      })
-      if (publishOutput.length) {
-        process.stdout.write(publishOutput)
-      }
-      return
-    } catch (err) {
-      const message = String(err)
-      const needsOtp = isPublishAuthOrOtpError(message)
-
-      if (needsOtp && attempt < 3) {
-        if (!canPromptForNpmOtp) {
-          throw new Error(
-            `npm requires a 2FA code to publish ${name}. Re-run with NPM_CONFIG_OTP set.\n\n${message}`
-          )
-        }
-
-        if (otp && cachedNpmOtp === otp) {
-          cachedNpmOtp = undefined
-        }
-
-        otp = await getNpmOtp(
-          attempt === 1
-            ? `npm requires a 2FA code to publish ${name}`
-            : `npm 2FA code expired, need a fresh one for ${name}`
-        )
-        continue
-      }
-
-      throw err
-    }
-  }
+  run(publishCommand, { cwd })
 }
 
 for (const p of packages) {
@@ -536,7 +410,7 @@ for (const p of packages) {
     console.info(`\npacking ${name}@${p.next}...`)
     run('npm pack', { cwd: tmpDir })
   } else {
-    await publishWithOtp(name, p.next, tmpDir)
+    publishPackage(name, p.next, tmpDir)
   }
 }
 

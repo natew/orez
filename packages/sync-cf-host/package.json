@@ -77,5 +77,10 @@
   "files": [
     "dist",
     "README.md"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/natew/orez.git",
+    "directory": "packages/sync-cf-host"
+  }
 }
