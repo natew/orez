@@ -16,7 +16,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::db::{DbError, SyncDb};
+use crate::db::{DbError, SqlValue, SyncDb};
+use crate::error::EngineError;
 use crate::value::ZeroColumnType;
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,8 @@ pub struct TableSpec {
     // ordered so snapshot column emission is deterministic
     pub columns: Vec<(String, ZeroColumnType)>,
     pub primary_key: Vec<String>,
+    pub encrypted_columns: BTreeSet<String>,
+    pub encrypted_physical_columns: BTreeSet<String>,
 }
 
 impl TableSpec {
@@ -33,6 +36,43 @@ impl TableSpec {
             .find(|(c, _)| c == name)
             .map(|(_, t)| *t)
     }
+
+    pub fn is_encrypted(&self, name: &str) -> bool {
+        self.encrypted_columns.contains(name) || self.encrypted_physical_columns.contains(name)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnUse {
+    Index,
+    Predicate,
+    Order,
+    Cursor,
+    Correlation,
+    Visibility,
+}
+
+impl ColumnUse {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ColumnUse::Index => "index",
+            ColumnUse::Predicate => "predicate",
+            ColumnUse::Order => "order",
+            ColumnUse::Cursor => "cursor",
+            ColumnUse::Correlation => "correlation",
+            ColumnUse::Visibility => "visibility",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedColumn<'a> {
+    pub logical_table: &'a str,
+    pub physical_table: &'a str,
+    pub logical_column: &'a str,
+    pub physical_column: &'a str,
+    pub column_type: ZeroColumnType,
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -44,12 +84,26 @@ struct TableMapping {
 // an ordered map of logical sync table name -> spec + physical SQLite mapping.
 // order is preserved so snapshot row emission matches the reference core's
 // Object.entries() iteration.
-#[derive(Debug, Clone, Default)]
-pub struct Tables(Vec<(String, TableSpec, TableMapping)>);
+#[derive(Debug, Clone)]
+pub struct Tables(Vec<(String, TableSpec, TableMapping)>, String);
+
+impl Default for Tables {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Tables {
     pub fn new() -> Self {
-        Tables(Vec::new())
+        Tables(Vec::new(), "manual".to_string())
+    }
+
+    fn with_schema_id(schema_id: String) -> Self {
+        Tables(Vec::new(), schema_id)
+    }
+
+    pub fn schema_id(&self) -> &str {
+        &self.1
     }
 
     pub fn with(mut self, name: impl Into<String>, spec: TableSpec) -> Self {
@@ -57,8 +111,9 @@ impl Tables {
         self
     }
 
-    pub fn push(&mut self, name: impl Into<String>, spec: TableSpec) {
+    pub fn push(&mut self, name: impl Into<String>, mut spec: TableSpec) {
         let name = name.into();
+        spec.encrypted_physical_columns = spec.encrypted_columns.clone();
         let mapping = TableMapping {
             physical_name: name.clone(),
             physical_columns: spec
@@ -107,6 +162,16 @@ impl Tables {
             .map(|(_, _, mapping)| mapping.physical_name.as_str())
     }
 
+    pub fn logical_name(&self, table: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(logical, _, mapping)| {
+                logical.eq_ignore_ascii_case(table)
+                    || mapping.physical_name.eq_ignore_ascii_case(table)
+            })
+            .map(|(logical, _, _)| logical.as_str())
+    }
+
     pub fn physical_column(&self, logical_table: &str, logical_column: &str) -> Option<&str> {
         self.0
             .iter()
@@ -118,6 +183,66 @@ impl Tables {
                     .find(|(logical, _)| logical == logical_column)
                     .map(|(_, physical)| physical.as_str())
             })
+    }
+
+    pub fn resolve_column(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<ResolvedColumn<'_>, EngineError> {
+        let (logical_table, spec, mapping) = self
+            .0
+            .iter()
+            .find(|(logical, _, mapping)| {
+                logical.eq_ignore_ascii_case(table)
+                    || mapping.physical_name.eq_ignore_ascii_case(table)
+            })
+            .ok_or_else(|| EngineError::bad_request(format!("unknown table '{table}'")))?;
+        let (logical_column, physical_column) = mapping
+            .physical_columns
+            .iter()
+            .find(|(logical, physical)| {
+                logical.eq_ignore_ascii_case(column) || physical.eq_ignore_ascii_case(column)
+            })
+            .ok_or_else(|| {
+                EngineError::bad_request(format!("unknown column '{table}.{column}'"))
+            })?;
+        let column_type = spec
+            .column_type(logical_column)
+            .expect("column mapping belongs to table spec");
+        Ok(ResolvedColumn {
+            logical_table,
+            physical_table: &mapping.physical_name,
+            logical_column,
+            physical_column,
+            column_type,
+            encrypted: spec.encrypted_columns.contains(logical_column),
+        })
+    }
+
+    pub fn validate_column_usage(
+        &self,
+        table: &str,
+        column: &str,
+        usage: ColumnUse,
+    ) -> Result<ResolvedColumn<'_>, EngineError> {
+        let resolved = self.resolve_column(table, column)?;
+        if resolved.encrypted {
+            return Err(EngineError::bad_request(format!(
+                "schema '{}' encrypted column '{}.{}' has forbidden use '{}'",
+                self.schema_id(),
+                resolved.logical_table,
+                resolved.logical_column,
+                usage.as_str()
+            )));
+        }
+        Ok(resolved)
+    }
+
+    pub fn has_encrypted_columns(&self) -> bool {
+        self.0
+            .iter()
+            .any(|(_, spec, _)| !spec.encrypted_columns.is_empty())
     }
 
     pub(crate) fn projected_columns(
@@ -180,7 +305,31 @@ impl Tables {
             .get("tables")
             .and_then(|t| t.as_object())
             .ok_or_else(|| "schema.tables must be an object".to_string())?;
-        let mut tables = Tables::new();
+        let has_encrypted_metadata = tables_obj.values().any(|table| {
+            table
+                .get("columns")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|columns| {
+                    columns
+                        .values()
+                        .any(|column| column.get("encrypted").is_some())
+                })
+        });
+        let schema_id = match schema.get("schemaID") {
+            Some(serde_json::Value::String(value)) if !value.is_empty() => value.clone(),
+            Some(serde_json::Value::String(_)) => {
+                return Err("schema.schemaID must not be empty".to_string());
+            }
+            Some(_) => return Err("schema.schemaID must be a string".to_string()),
+            None if has_encrypted_metadata => {
+                return Err(
+                    "schema.schemaID is required when encrypted column metadata is present"
+                        .to_string(),
+                );
+            }
+            None => "unidentified".to_string(),
+        };
+        let mut tables = Tables::with_schema_id(schema_id);
         let mut logical_tables = BTreeSet::new();
         let mut physical_tables = BTreeSet::new();
         for (name, table) in tables_obj {
@@ -190,7 +339,11 @@ impl Tables {
             if !is_valid_identifier(name) {
                 return Err(format!("table name '{name}' is not a valid identifier"));
             }
-            if !logical_tables.insert(name.to_ascii_lowercase()) {
+            let logical_table_key = name.to_ascii_lowercase();
+            if physical_tables.contains(&logical_table_key) {
+                return Err(format!("ambiguous logical/physical table mapping '{name}'"));
+            }
+            if !logical_tables.insert(logical_table_key.clone()) {
                 return Err(format!("duplicate logical table name '{name}'"));
             }
             let physical_name = match table.get("serverName") {
@@ -203,7 +356,15 @@ impl Tables {
                     "physical table name '{physical_name}' for '{name}' is not a valid identifier"
                 ));
             }
-            if !physical_tables.insert(physical_name.to_ascii_lowercase()) {
+            let physical_table_key = physical_name.to_ascii_lowercase();
+            if physical_table_key != logical_table_key
+                && logical_tables.contains(&physical_table_key)
+            {
+                return Err(format!(
+                    "ambiguous logical/physical table mapping '{physical_name}'"
+                ));
+            }
+            if !physical_tables.insert(physical_table_key) {
                 return Err(format!(
                     "duplicate physical table mapping '{physical_name}'"
                 ));
@@ -214,13 +375,21 @@ impl Tables {
                 .ok_or_else(|| format!("table '{name}'.columns must be an object"))?;
             let mut columns = Vec::new();
             let mut physical_columns = Vec::new();
+            let mut encrypted_columns = BTreeSet::new();
+            let mut encrypted_physical_columns = BTreeSet::new();
             let mut seen_logical_columns = BTreeSet::new();
             let mut seen_physical_columns = BTreeSet::new();
             for (col, spec) in columns_obj {
                 if !is_valid_identifier(col) {
                     return Err(format!("column '{name}.{col}' is not a valid identifier"));
                 }
-                if !seen_logical_columns.insert(col.to_ascii_lowercase()) {
+                let logical_column_key = col.to_ascii_lowercase();
+                if seen_physical_columns.contains(&logical_column_key) {
+                    return Err(format!(
+                        "ambiguous logical/physical column mapping '{name}.{col}'"
+                    ));
+                }
+                if !seen_logical_columns.insert(logical_column_key.clone()) {
                     return Err(format!("duplicate logical column name '{name}.{col}'"));
                 }
                 let ty = spec
@@ -239,10 +408,37 @@ impl Tables {
                         "physical column name '{physical_column}' for '{name}.{col}' is not a valid identifier"
                     ));
                 }
-                if !seen_physical_columns.insert(physical_column.to_ascii_lowercase()) {
+                let physical_column_key = physical_column.to_ascii_lowercase();
+                if physical_column_key != logical_column_key
+                    && seen_logical_columns.contains(&physical_column_key)
+                {
+                    return Err(format!(
+                        "ambiguous logical/physical column mapping '{name}.{physical_column}'"
+                    ));
+                }
+                if !seen_physical_columns.insert(physical_column_key) {
                     return Err(format!(
                         "duplicate physical column mapping '{name}.{physical_column}'"
                     ));
+                }
+                let encrypted = match spec.get("encrypted") {
+                    None => false,
+                    Some(serde_json::Value::Bool(true)) => true,
+                    Some(_) => {
+                        return Err(format!(
+                            "column '{name}.{col}'.encrypted must be true when present"
+                        ));
+                    }
+                };
+                if encrypted && !matches!(ty, "string" | "json") {
+                    return Err(format!(
+                        "schema '{}' encrypted column '{name}.{col}' has unsupported logical type '{ty}'",
+                        tables.schema_id()
+                    ));
+                }
+                if encrypted {
+                    encrypted_columns.insert(col.clone());
+                    encrypted_physical_columns.insert(physical_column.clone());
                 }
                 columns.push((col.clone(), ZeroColumnType::from_type_str(ty)));
                 physical_columns.push((col.clone(), physical_column));
@@ -279,6 +475,12 @@ impl Tables {
                         "table '{name}'.primaryKey references unknown column '{column}'"
                     ));
                 }
+                if encrypted_columns.contains(column) {
+                    return Err(format!(
+                        "schema '{}' encrypted column '{name}.{column}' has forbidden use 'primary-key'",
+                        tables.schema_id()
+                    ));
+                }
             }
             tables.push_mapped(
                 name.clone(),
@@ -286,12 +488,113 @@ impl Tables {
                 TableSpec {
                     columns,
                     primary_key,
+                    encrypted_columns,
+                    encrypted_physical_columns,
                 },
                 physical_columns,
             );
         }
         Ok(tables)
     }
+}
+
+fn text_column<'a>(row: &'a crate::db::Row, name: &str) -> Result<&'a str, DbError> {
+    match row.get(name) {
+        Some(SqlValue::Text(value)) => Ok(value),
+        value => Err(DbError(format!(
+            "SQLite metadata column '{name}' must be text, got {value:?}"
+        ))),
+    }
+}
+
+fn integer_column(row: &crate::db::Row, name: &str) -> Result<i64, DbError> {
+    match row.get(name) {
+        Some(SqlValue::Integer(value)) => Ok(*value),
+        value => Err(DbError(format!(
+            "SQLite metadata column '{name}' must be an integer, got {value:?}"
+        ))),
+    }
+}
+
+fn validate_encrypted_indexes(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> {
+    for (logical_table, spec) in tables.iter() {
+        if spec.encrypted_columns.is_empty() {
+            continue;
+        }
+        let physical_table = tables
+            .physical_name(logical_table)
+            .expect("iterated table has physical mapping");
+        let indexes = db.query(
+            "SELECT name, \"unique\" AS is_unique, origin, partial
+             FROM pragma_index_list(?)",
+            &[SqlValue::Text(physical_table.to_string())],
+        )?;
+        for index in indexes {
+            let index_name = text_column(&index, "name")?;
+            let unique = integer_column(&index, "is_unique")? != 0;
+            let partial = integer_column(&index, "partial")? != 0;
+            let origin = text_column(&index, "origin")?;
+            if partial {
+                let encrypted_columns = spec
+                    .encrypted_columns
+                    .iter()
+                    .map(|column| format!("{logical_table}.{column}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(DbError(format!(
+                    "schema '{}' encrypted columns [{encrypted_columns}] have forbidden use 'index' in partial SQLite index '{index_name}' because its WHERE predicate cannot be proven clear",
+                    tables.schema_id()
+                )));
+            }
+            let columns = db.query(
+                "SELECT cid, name FROM pragma_index_info(?)",
+                &[SqlValue::Text(index_name.to_string())],
+            )?;
+            let expression = columns.iter().any(|column| {
+                matches!(column.get("cid"), Some(SqlValue::Integer(-2)))
+                    || matches!(column.get("name"), None | Some(SqlValue::Null))
+            });
+            let kind = if expression {
+                "expression"
+            } else if origin == "pk" {
+                "primary"
+            } else if unique {
+                "unique"
+            } else {
+                "ordinary"
+            };
+
+            if expression {
+                let encrypted_columns = spec
+                    .encrypted_columns
+                    .iter()
+                    .map(|column| format!("{logical_table}.{column}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(DbError(format!(
+                    "schema '{}' encrypted columns [{encrypted_columns}] have forbidden use 'index' in {kind} SQLite index '{index_name}' because its referenced columns cannot be proven clear",
+                    tables.schema_id()
+                )));
+            }
+
+            for column in columns {
+                let physical_column = text_column(&column, "name")?;
+                let resolved = tables
+                    .resolve_column(physical_table, physical_column)
+                    .map_err(|error| DbError(error.message))?;
+                if resolved.encrypted {
+                    return Err(DbError(format!(
+                        "schema '{}' encrypted column '{}.{}' has forbidden use '{}' in {kind} SQLite index '{index_name}'",
+                        tables.schema_id(),
+                        resolved.logical_table,
+                        resolved.logical_column,
+                        ColumnUse::Index.as_str()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // SQLite identifier quoting: double-quote and escape embedded quotes. table
@@ -305,7 +608,7 @@ pub(crate) fn quote_ident(name: &str) -> String {
 // letters/digits/underscores. every real Zero schema name (camelCase tables and
 // columns) satisfies this; anything else (embedded quotes, whitespace, dots) is
 // rejected at schema ingest so an injection-shaped name never reaches DDL.
-fn is_valid_identifier(name: &str) -> bool {
+pub(crate) fn is_valid_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
@@ -342,6 +645,7 @@ fn pk_object(tables: &Tables, table: &str, spec: &TableSpec, reference: &str) ->
 // the durable metadata tables + one trigger set per application table. safe to
 // call on every startup (all statements are IF NOT EXISTS / idempotent).
 pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> {
+    validate_encrypted_indexes(db, tables)?;
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_clients (
             clientGroupID TEXT NOT NULL,

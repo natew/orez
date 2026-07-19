@@ -719,6 +719,8 @@ mod tests {
                     ("label".into(), ZeroColumnType::String),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         );
         let init_tables = tables.clone();

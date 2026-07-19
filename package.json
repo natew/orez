@@ -35,9 +35,21 @@
       "types": "./dist/zero-http/transport.d.ts",
       "import": "./dist/zero-http/transport.js"
     },
+    "./zero-http/encryption": {
+      "types": "./dist/zero-http/encrypted-column-codec.d.ts",
+      "import": "./dist/zero-http/encrypted-column-codec.js"
+    },
+    "./zero-http/encryption/conformance": {
+      "types": "./dist/zero-http/encrypted-column-conformance.d.ts",
+      "import": "./dist/zero-http/encrypted-column-conformance.js"
+    },
     "./sync-browser-host": {
       "types": "./dist/sync-browser-host/index.d.ts",
       "import": "./dist/sync-browser-host/index.js"
+    },
+    "./sync-cf-host": {
+      "types": "./dist/sync-cf-host.d.ts",
+      "import": "./dist/sync-cf-host.js"
     },
     "./worker/*": {
       "types": "./dist/worker/*.d.ts",
@@ -70,6 +82,10 @@
     "test:wasm": "vitest run src/wasm-sqlite.test.ts",
     "test:sync-browser-host": "bun run --cwd packages/sync-browser-host test",
     "test:sync-cf-host": "bun run --cwd packages/sync-cf-host test",
+    "build:encryption-conformance": "tsc",
+    "conformance:encryption:node": "bun run build:encryption-conformance && node scripts/encryption-codec-node-conformance.mjs",
+    "conformance:encryption:browser": "bun run --cwd packages/sync-browser-host conformance:encryption-codec",
+    "conformance:encryption:gpui": "bun run build:encryption-conformance && node scripts/encryption-codec-gpui-conformance.mjs",
     "test:transaction-query:chat": "bun run --cwd packages/sync-cf-host build:dist && bun harness/src/chat-transaction-query-diff.ts",
     "test:all": "bun run --cwd packages/sync-cf-host build:dist && vitest run",
     "test:watch": "bun run --cwd packages/sync-cf-host build:dist && vitest",
@@ -104,6 +120,9 @@
   "dependencies": {
     "@electric-sql/pglite": "0.4.1",
     "@electric-sql/pglite-tools": "^0.3.1",
+    "@noble/ciphers": "1.3.0",
+    "@noble/curves": "1.9.7",
+    "@noble/hashes": "1.8.0",
     "@pgsql/traverse": "17.2.6",
     "bedrock-sqlite": "workspace:*",
     "citty": "^0.2.0",

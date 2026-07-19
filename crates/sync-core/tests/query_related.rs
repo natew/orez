@@ -24,6 +24,8 @@ fn schema() -> Tables {
             TableSpec {
                 columns: vec![("id".into(), String), ("closed".into(), Boolean)],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -35,6 +37,8 @@ fn schema() -> Tables {
                     ("body".into(), String),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -46,6 +50,8 @@ fn schema() -> Tables {
                     ("emoji".into(), String),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
 }
@@ -358,6 +364,8 @@ fn windowed_child_rank_alias_avoids_column_collision() {
             TableSpec {
                 columns: vec![("id".into(), S)],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -371,6 +379,8 @@ fn windowed_child_rank_alias_avoids_column_collision() {
                     ("_zsync_rn".into(), Number),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         );
     init_schema(&mut db, &tables).unwrap();
@@ -413,6 +423,8 @@ fn windowed_child_rank_alias_avoids_case_insensitive_collision() {
             TableSpec {
                 columns: vec![("id".into(), S)],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -425,6 +437,8 @@ fn windowed_child_rank_alias_avoids_case_insensitive_collision() {
                     ("_ZSYNC_RN".into(), Number),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         );
     init_schema(&mut db, &tables).unwrap();

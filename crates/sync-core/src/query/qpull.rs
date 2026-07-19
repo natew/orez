@@ -21,7 +21,7 @@ use crate::wire;
 use super::membership::{
     advance_query_ack, canonical_pk_text, clear_desires, client_query_version, desired_hashes,
     prepare_transform_version, recompute_group_with_rehydrate, register_query, remove_desire,
-    reset_group, set_desire,
+    reset_group, set_desire, validate_active_queries,
 };
 
 // apply the desiredQueriesPatch and return queries newly desired by this client.
@@ -191,6 +191,7 @@ pub fn handle_query_pull(
 
     // fast path: caught up and no desired-query change -> unchanged
     if !fresh && cookie == Some(current) && applied_queries.is_none() {
+        validate_active_queries(db, tables, group)?;
         return Ok(json!({ "cookie": wire::counter_to_json(current)?, "unchanged": true }));
     }
 

@@ -387,6 +387,8 @@ fn trigger_name_is_quoted_so_a_hostile_table_cannot_inject() {
         TableSpec {
             columns: vec![("id".into(), ZeroColumnType::String)],
             primary_key: vec!["id".into()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
         },
     );
     // the hostile name resolves to one escaped identifier naming a table that does

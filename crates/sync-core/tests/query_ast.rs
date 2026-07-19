@@ -25,6 +25,8 @@ fn schema() -> Tables {
                     ("ownerId".into(), String),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -36,6 +38,8 @@ fn schema() -> Tables {
                     ("body".into(), String),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
 }
@@ -117,6 +121,24 @@ fn comparison_condition() {
         json!({ "table": "issue", "where": simple(">=", "priority", json!(3)) }),
     );
     assert_eq!(sorted(ids), vec!["i1", "i2", "i4"]);
+}
+
+#[test]
+fn rhs_column_reference_is_rejected_by_the_v51_parser() {
+    let error = parse_ast(&json!({
+        "table": "issue",
+        "where": {
+            "type": "simple",
+            "op": "!=",
+            "left": { "type": "column", "name": "id" },
+            "right": { "type": "column", "name": "ownerId" }
+        }
+    }))
+    .unwrap_err();
+    assert_eq!(
+        error.message,
+        "condition right must be a literal, got 'column'"
+    );
 }
 
 #[test]

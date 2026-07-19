@@ -157,6 +157,8 @@ fn begin_rejects_foreign_keys_without_mutating_the_live_schema() {
             TableSpec {
                 columns: vec![("id".into(), ZeroColumnType::String)],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -167,6 +169,8 @@ fn begin_rejects_foreign_keys_without_mutating_the_live_schema() {
                     ("parentId".into(), ZeroColumnType::String),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         );
     init_schema(&mut db, &tables).unwrap();
@@ -342,6 +346,8 @@ fn two_tables() -> Tables {
             TableSpec {
                 columns: vec![string_column("id"), string_column("value")],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -349,6 +355,8 @@ fn two_tables() -> Tables {
             TableSpec {
                 columns: vec![string_column("id"), string_column("value")],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
 }

@@ -363,18 +363,23 @@ impl<'a> Compiler<'a> {
                 Ok(format!("{left_sql} {kw} ({holes})"))
             }
             SimpleOp::Like | SimpleOp::NotLike | SimpleOp::ILike | SimpleOp::NotILike => {
-                let RightVal::Scalar(s) = right else {
-                    return Err(reject("LIKE requires a scalar operand"));
+                let right_sql = match right {
+                    RightVal::Scalar(s) => {
+                        self.params.push(match s {
+                            Scalar::Text(pattern) => {
+                                SqlValue::Text(postgres_like_to_glob(pattern)?)
+                            }
+                            other => scalar_to_sql(other),
+                        });
+                        "?".to_string()
+                    }
+                    RightVal::List(_) => return Err(reject("LIKE requires a scalar operand")),
                 };
-                self.params.push(match s {
-                    Scalar::Text(pattern) => SqlValue::Text(postgres_like_to_glob(pattern)?),
-                    other => scalar_to_sql(other),
-                });
                 let negate = matches!(op, SimpleOp::NotLike | SimpleOp::NotILike);
                 let comparison = if matches!(op, SimpleOp::ILike | SimpleOp::NotILike) {
-                    format!("LOWER({left_sql}) GLOB LOWER(?)")
+                    format!("LOWER({left_sql}) GLOB LOWER({right_sql})")
                 } else {
-                    format!("{left_sql} GLOB ?")
+                    format!("{left_sql} GLOB {right_sql}")
                 };
                 if negate {
                     Ok(format!("NOT ({comparison})"))
@@ -383,11 +388,16 @@ impl<'a> Compiler<'a> {
                 }
             }
             _ => {
-                let RightVal::Scalar(s) = right else {
-                    return Err(reject("operator requires a scalar operand"));
+                let right_sql = match right {
+                    RightVal::Scalar(s) => {
+                        self.params.push(scalar_to_sql(s));
+                        "?".to_string()
+                    }
+                    RightVal::List(_) => {
+                        return Err(reject("operator requires a scalar operand"));
+                    }
                 };
-                self.params.push(scalar_to_sql(s));
-                Ok(format!("{left_sql} {} ?", binary_op_sql(op)))
+                Ok(format!("{left_sql} {} {right_sql}", binary_op_sql(op)))
             }
         }
     }
@@ -455,6 +465,7 @@ pub fn compile_predicate_probe(
     ast: &Ast,
     tables: &Tables,
 ) -> Result<(String, Vec<SqlValue>, Vec<String>), EngineError> {
+    super::opacity::validate_encrypted_column_usage(tables, ast)?;
     let mut c = Compiler::new(tables);
     c.check_table(&ast.table)?;
     let spec = tables
@@ -490,6 +501,7 @@ pub fn compile_predicate_probe(
 }
 
 pub fn compile(ast: &Ast, tables: &Tables) -> Result<CompiledQuery, EngineError> {
+    super::opacity::validate_encrypted_column_usage(tables, ast)?;
     let mut c = Compiler::new(tables);
     let sql = c.compile_root(ast)?;
     let primary_key = tables
@@ -521,7 +533,7 @@ pub struct CompiledRelated {
 // recursively: the returned child SQL is itself a valid parent_sql for the
 // child's own related subqueries, which is how nested related-of-related is
 // walked. `depth` keeps the correlation aliases unique across nesting levels.
-pub fn compile_related_of(
+pub(crate) fn compile_related_of(
     parent_sql: &str,
     parent_params: &[SqlValue],
     parent_table: &str,

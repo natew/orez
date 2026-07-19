@@ -52,6 +52,8 @@ pub fn build_tables() -> sync_core::schema::Tables {
             CoreSpec {
                 columns,
                 primary_key,
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         );
     }

@@ -24,6 +24,8 @@ fn tables() -> Tables {
             TableSpec {
                 columns: vec![s("id"), b("private"), s("creatorId")],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -31,6 +33,8 @@ fn tables() -> Tables {
             TableSpec {
                 columns: vec![s("id"), s("serverId"), s("userId")],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -44,6 +48,8 @@ fn tables() -> Tables {
                     b("canAdmin"),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         // the channelUserRoles junction is a real two-hop: channel ->
@@ -53,6 +59,8 @@ fn tables() -> Tables {
             TableSpec {
                 columns: vec![s("id"), s("channelId"), s("roleId")],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -66,6 +74,8 @@ fn tables() -> Tables {
                     b("solo"),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -79,6 +89,8 @@ fn tables() -> Tables {
                     b("deleted"),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
 }

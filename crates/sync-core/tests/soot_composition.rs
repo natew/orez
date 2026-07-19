@@ -40,6 +40,8 @@ fn soot_tables() -> Tables {
                     col("size", Number),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -52,6 +54,8 @@ fn soot_tables() -> Tables {
                     col("command", String),
                 ],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
 }

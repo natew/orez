@@ -31,6 +31,10 @@
       "types": "./dist/transaction-query.d.ts",
       "import": "./dist/transaction-query.js"
     },
+    "./visibility": {
+      "types": "./dist/visibility.d.ts",
+      "import": "./dist/visibility.js"
+    },
     "./vite-wasm-loader": {
       "types": "./dist/vite-wasm-loader.d.ts",
       "import": "./dist/vite-wasm-loader.js"

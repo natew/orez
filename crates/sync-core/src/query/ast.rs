@@ -8,7 +8,7 @@
 //
 // supported: simple conditions (= != IS "IS NOT" < > <= >= LIKE "NOT LIKE"
 // ILIKE "NOT ILIKE" IN "NOT IN") with a column or literal on the left and a
-// literal (or array, for IN) on the right; and/or; correlated EXISTS/NOT EXISTS
+// literal or array (for IN) on the right; and/or; correlated EXISTS/NOT EXISTS
 // subqueries; related subqueries; orderBy (with a stable pk tie-breaker added at
 // compile time); limit; start cursor. unsupported (static params, cross-table
 // column refs, unknown ops/fields/tables/columns) is a 400.
@@ -492,9 +492,8 @@ fn parse_value_ref(value: &Value) -> Result<ValueRef, EngineError> {
     }
 }
 
-// right side of a simple condition: a literal only (a column on the right is
-// disallowed by the v51 SimpleCondition type). IN/NOT IN require an array
-// literal; every other op requires a scalar.
+// right side of a simple condition. Zero v51 only exposes literals here;
+// IN/NOT IN require an array literal and every other op requires a scalar.
 fn parse_right(value: &Value, wants_list: bool) -> Result<RightVal, EngineError> {
     let obj = value
         .as_object()

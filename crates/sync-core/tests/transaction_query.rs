@@ -7,7 +7,7 @@ use sync_core::query::{
     CompiledQueryNode, QueryBinding, compile_transaction_query, parse_ast, parse_query_format,
     parse_query_schema,
 };
-use sync_core::{Row, SqlValue, SyncDb};
+use sync_core::{Row, SqlValue, SyncDb, Tables};
 
 fn schema() -> serde_json::Value {
     json!({
@@ -70,6 +70,10 @@ fn format(singular: bool) -> serde_json::Value {
     json!({ "singular": singular, "relationships": {} })
 }
 
+fn tables() -> Tables {
+    Tables::from_zero_schema(&schema()).unwrap()
+}
+
 fn params(node: &CompiledQueryNode, parent: Option<&Row>) -> Vec<SqlValue> {
     node.bindings
         .iter()
@@ -124,7 +128,7 @@ fn compiles_physical_names_and_a_singular_related_plan() {
     }))
     .unwrap();
 
-    let plan = compile_transaction_query(&schema, &ast, &format).unwrap();
+    let plan = compile_transaction_query(&schema, &tables(), &ast, &format).unwrap();
 
     assert_eq!(plan.root_table, "user");
     assert_eq!(plan.plan_hash.len(), 16);
@@ -161,7 +165,7 @@ fn rejects_a_format_tree_that_omits_related_output() {
     .unwrap();
     let format = parse_query_format(&json!({ "singular": false, "relationships": {} })).unwrap();
 
-    let error = compile_transaction_query(&schema, &ast, &format).unwrap_err();
+    let error = compile_transaction_query(&schema, &tables(), &ast, &format).unwrap_err();
     assert!(error.to_string().contains("format relationships"));
 }
 
@@ -236,7 +240,7 @@ fn executes_case_sensitive_like_ascii_ilike_and_null_comparison_families() {
     };
     let ids = |db: &mut TestDb, operator: &str, value: serde_json::Value| {
         let ast = query(operator, value);
-        let plan = compile_transaction_query(&schema, &ast, &format).unwrap();
+        let plan = compile_transaction_query(&schema, &tables(), &ast, &format).unwrap();
         execute(db, &plan.root, None)
             .iter()
             .map(|row| text(row, "id"))
@@ -290,7 +294,7 @@ fn executes_related_order_and_limit_independently_per_parent() {
         }
     }))
     .unwrap();
-    let plan = compile_transaction_query(&schema, &ast, &format).unwrap();
+    let plan = compile_transaction_query(&schema, &tables(), &ast, &format).unwrap();
     let child = &plan.root.relationships[0].node;
     let grandchild = &child.relationships[0].node;
 
@@ -384,7 +388,7 @@ fn executes_the_standard_hidden_two_hop_junction_shape() {
         }
     }))
     .unwrap();
-    let plan = compile_transaction_query(&schema, &ast, &format).unwrap();
+    let plan = compile_transaction_query(&schema, &tables(), &ast, &format).unwrap();
     let groups = &plan.root.relationships[0].node;
     assert_eq!(groups.table, "group");
     assert!(groups.sql.contains("JOIN \"group_records\""));
@@ -451,7 +455,7 @@ fn preserves_compound_correlation_binding_order() {
     }))
     .unwrap();
 
-    let plan = compile_transaction_query(&schema, &ast, &format).unwrap();
+    let plan = compile_transaction_query(&schema, &tables(), &ast, &format).unwrap();
     assert_eq!(
         plan.root.relationships[0].node.bindings,
         vec![
@@ -510,7 +514,7 @@ fn rejects_invalid_schema_mappings_aliases_and_hidden_shapes() {
     }))
     .unwrap();
     assert!(
-        compile_transaction_query(&schema, &conflicting_alias, &conflicting_format)
+        compile_transaction_query(&schema, &tables(), &conflicting_alias, &conflicting_format,)
             .unwrap_err()
             .to_string()
             .contains("conflicts with column")
@@ -531,7 +535,7 @@ fn rejects_invalid_schema_mappings_aliases_and_hidden_shapes() {
     }))
     .unwrap();
     assert!(
-        compile_transaction_query(&schema, &invalid_hidden, &hidden_format)
+        compile_transaction_query(&schema, &tables(), &invalid_hidden, &hidden_format)
             .unwrap_err()
             .to_string()
             .contains("two-hop junction")
@@ -544,7 +548,7 @@ fn rejects_every_unsupported_contract_shape() {
     let plural = parse_query_format(&format(false)).unwrap();
     let reject = |value: serde_json::Value, format: &sync_core::query::QueryFormat| {
         parse_ast(&value)
-            .and_then(|ast| compile_transaction_query(&schema, &ast, format))
+            .and_then(|ast| compile_transaction_query(&schema, &tables(), &ast, format))
             .unwrap_err()
             .to_string()
     };
@@ -715,7 +719,7 @@ fn rejects_every_unsupported_contract_shape() {
     }))
     .unwrap();
     assert!(
-        compile_transaction_query(&schema, &incomplete_related, &nested_format)
+        compile_transaction_query(&schema, &tables(), &incomplete_related, &nested_format,)
             .unwrap_err()
             .to_string()
             .contains("unknown table 'ghost'")
@@ -761,7 +765,7 @@ fn executes_every_remaining_simple_operator_and_boolean_junction() {
 
     let ids = |db: &mut TestDb, where_: serde_json::Value| {
         let ast = parse_ast(&json!({ "table": "post", "where": where_ })).unwrap();
-        let plan = compile_transaction_query(&schema, &ast, &format).unwrap();
+        let plan = compile_transaction_query(&schema, &tables(), &ast, &format).unwrap();
         execute(db, &plan.root, None)
             .iter()
             .map(|row| text(row, "id"))
@@ -864,7 +868,7 @@ fn executes_correlated_exists_and_not_exists() {
         .unwrap()
     };
     let ids = |db: &mut TestDb, operator: &str| {
-        let plan = compile_transaction_query(&schema, &ast(operator), &format).unwrap();
+        let plan = compile_transaction_query(&schema, &tables(), &ast(operator), &format).unwrap();
         execute(db, &plan.root, None)
             .iter()
             .map(|row| text(row, "id"))
@@ -888,6 +892,7 @@ fn compiles_the_harvested_chat_query_corpus() {
     assert_eq!(corpus["counts"]["cases"], json!(252));
     assert_eq!(corpus["counts"]["queries"], json!(123));
     let schema = parse_query_schema(&corpus["schema"]).unwrap();
+    let tables = Tables::from_zero_schema(&corpus["schema"]).unwrap();
     let cases = corpus["cases"].as_array().unwrap();
     for test_case in cases {
         let name = test_case["name"].as_str().unwrap();
@@ -896,7 +901,7 @@ fn compiles_the_harvested_chat_query_corpus() {
             .unwrap_or_else(|error| panic!("{name}/{user} AST failed: {error}"));
         let format = parse_query_format(&test_case["format"])
             .unwrap_or_else(|error| panic!("{name}/{user} format failed: {error}"));
-        compile_transaction_query(&schema, &ast, &format)
+        compile_transaction_query(&schema, &tables, &ast, &format)
             .unwrap_or_else(|error| panic!("{name}/{user} compile failed: {error}"));
     }
 }

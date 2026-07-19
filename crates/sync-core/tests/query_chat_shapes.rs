@@ -20,6 +20,8 @@ fn tables() -> Tables {
             TableSpec {
                 columns: vec![s("id"), s("name")],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -27,6 +29,8 @@ fn tables() -> Tables {
             TableSpec {
                 columns: vec![s("id"), s("serverId"), ("private".into(), Boolean)],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         .with(
@@ -34,6 +38,8 @@ fn tables() -> Tables {
             TableSpec {
                 columns: vec![s("id"), s("channelId"), s("userId")],
                 primary_key: vec!["id".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
         // composite primary key (serverId, userId) — 9 of Chat's 51 tables have these
@@ -42,6 +48,8 @@ fn tables() -> Tables {
             TableSpec {
                 columns: vec![s("serverId"), s("userId"), s("role")],
                 primary_key: vec!["serverId".into(), "userId".into()],
+                encrypted_columns: Default::default(),
+                encrypted_physical_columns: Default::default(),
             },
         )
 }

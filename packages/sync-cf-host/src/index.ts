@@ -4,6 +4,7 @@ export {
   MutationApplicationError,
   isMutationApplicationError,
   registerMutators,
+  visibility,
 } from './types.js'
 export {
   DEFAULT_TRANSACTION_QUERY_BUDGET,
@@ -31,7 +32,11 @@ export type {
   SyncSql,
   UpstreamConfig,
   VisibilityConfig,
+  VisibilityExpression,
   VisibilityFilter,
+  VisibilityOperand,
+  VisibilityValue,
+  ZeroColumn,
   ZeroSchemaConfig,
 } from './types.js'
 export type { SyncDurableObjectConstructor } from './host.js'

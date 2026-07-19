@@ -11,6 +11,23 @@
 // plans/zero-http.md. do not "simplify" any of it without re-running those
 // tests against a stock zero client.
 
+import { identityPayloadCodec } from './payload-codec.js'
+
+import type { PayloadCodec, PullResponse, PushRequest } from './payload-codec.js'
+
+export type {
+  EncryptedColumnManifest,
+  EncryptedRowBatch,
+  EncryptionKeyring,
+  JSONObject,
+  JSONPrimitive,
+  JSONValue,
+  PayloadCodec,
+  PullResponse,
+  PushMutation,
+  PushRequest,
+} from './payload-codec.js'
+
 type WebSocketProtocols = string | string[] | undefined
 type SocketEventType = 'open' | 'message' | 'close' | 'error'
 type SocketListener = ((event: any) => void) | { handleEvent(event: any): void }
@@ -45,22 +62,6 @@ type QueryPatchOp =
 // harness. omit it (with queryForward) to ship name+args and resolve SERVER-side.
 export type QueryTransform = (name: string, args: readonly unknown[]) => unknown
 
-type ServerGotQueries = { version: number; patch: GotQueryPatchOp[] }
-
-type PullResponse =
-  | {
-      cookie: number
-      lastMutationIDChanges: Record<string, number>
-      rowsPatch: unknown[]
-      unchanged?: false
-      gotQueries?: ServerGotQueries
-    }
-  | {
-      cookie: number | null
-      unchanged: true
-      gotQueries?: ServerGotQueries
-    }
-
 type TransportState = {
   readonly appID: string
   readonly origin: URL
@@ -74,6 +75,7 @@ type TransportState = {
   readonly queryTransform: QueryTransform | undefined
   readonly queryForward: boolean
   readonly queryAware: boolean
+  readonly payloadCodec: PayloadCodec
   readonly shardNum: number
   nextPokeID: number
   socketGeneration: number
@@ -129,6 +131,22 @@ export type HttpPullTransportOptions = {
   // queries ship as name+args for the SERVER (consumer worker) to resolve with
   // auth. the production path for permission-transformed queries.
   queryForward?: boolean
+  // transforms selected row payloads at the final serialized transport
+  // boundary. omitted options use the module-level identity codec.
+  payloadCodec?: PayloadCodec
+}
+
+function normalizePayloadCodec(codec: PayloadCodec | undefined): PayloadCodec {
+  const resolved = codec ?? identityPayloadCodec
+  if (
+    typeof resolved.id !== 'string' ||
+    !resolved.id ||
+    typeof resolved.encodePush !== 'function' ||
+    typeof resolved.decodePull !== 'function'
+  ) {
+    throw new Error('zero-http payload codec must have an id, encodePush, and decodePull')
+  }
+  return resolved
 }
 
 export function installHttpPullTransport(
@@ -139,6 +157,7 @@ export function installHttpPullTransport(
   if (!fetchImpl) {
     throw new Error('installHttpPullTransport requires a fetch implementation')
   }
+  const payloadCodec = normalizePayloadCodec(opts.payloadCodec)
 
   const state: TransportState = {
     appID: opts.appID ?? 'zero',
@@ -158,6 +177,7 @@ export function installHttpPullTransport(
     queryTransform: opts.queryTransform,
     queryForward: opts.queryForward === true,
     queryAware: opts.queryTransform !== undefined || opts.queryForward === true,
+    payloadCodec,
     shardNum: opts.shardNum ?? 0,
     nextPokeID: 0,
     socketGeneration: 0,
@@ -213,22 +233,33 @@ export function installHttpPullTransport(
 // per-origin idempotent install for app usage (ProvideZero rotates zero
 // instances against the same server; installing per rotation would chain
 // shims unboundedly). installed transports live for the page lifetime.
-const transportsByOrigin = new Map<string, HttpPullTransport>()
+const transportsByOrigin = new Map<
+  string,
+  { readonly codecID: string; readonly transport: HttpPullTransport }
+>()
 
 export function ensureHttpPullTransport(
   opts: HttpPullTransportOptions
 ): HttpPullTransport {
   const key = trimTrailingSlash(new URL(opts.origin).toString())
+  const payloadCodec = normalizePayloadCodec(opts.payloadCodec)
   const existing = transportsByOrigin.get(key)
-  if (existing) return existing
-  const transport = installHttpPullTransport(opts)
-  transportsByOrigin.set(key, transport)
+  if (existing) {
+    if (existing.codecID !== payloadCodec.id) {
+      throw new Error(
+        `zero-http transport for ${key} already uses payload codec ${existing.codecID}; cannot install ${payloadCodec.id}`
+      )
+    }
+    return existing.transport
+  }
+  const transport = installHttpPullTransport({ ...opts, payloadCodec })
+  transportsByOrigin.set(key, { codecID: payloadCodec.id, transport })
   return transport
 }
 
 export async function flushHttpPullTransports() {
   await Promise.all(
-    [...transportsByOrigin.values()].map((transport) => transport.flush())
+    [...transportsByOrigin.values()].map(({ transport }) => transport.flush())
   )
 }
 
@@ -549,7 +580,8 @@ class ZeroHttpSocket {
   }
 
   private async push(body: unknown) {
-    const response = (await this.postJSON('/push', body)) as {
+    const encodedBody = await this.state.payloadCodec.encodePush(body as PushRequest)
+    const response = (await this.postJSON('/push', encodedBody)) as {
       pushResponse?: unknown
     }
     // mutation RECOVERY pushes carry a PREVIOUS client's pending mutations,
@@ -603,7 +635,7 @@ class ZeroHttpSocket {
   // invariant 13 — so the client marks a query got only after its rows land).
   private applyServerGotQueries(response: PullResponse) {
     const got = response.gotQueries
-    this.pendingGotQueriesPatch = got ? got.patch : []
+    this.pendingGotQueriesPatch = got ? [...got.patch] : []
     if (
       got &&
       this.sentQueryVersion !== undefined &&
@@ -651,7 +683,8 @@ class ZeroHttpSocket {
     } else {
       this.sentQueryVersion = undefined
     }
-    return (await this.postJSON('/pull', body)) as PullResponse
+    const response = (await this.postJSON('/pull', body)) as PullResponse
+    return this.state.payloadCodec.decodePull(response)
   }
 
   private async postJSON(path: '/pull' | '/push', body: unknown) {
