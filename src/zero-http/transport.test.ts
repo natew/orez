@@ -1,10 +1,38 @@
 import { Zero } from '@rocicorp/zero'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { createEncryptedColumnCodec } from './encrypted-column-codec.js'
 import { zeroHttpFixtureMutators, zeroHttpFixtureSchema } from './fixture-schema.js'
 import { ensureHttpPullTransport, installHttpPullTransport } from './transport.js'
 
+import type {
+  EncryptedColumnManifest,
+  PayloadCodec,
+  PullResponse,
+  PushRequest,
+} from './transport.js'
+
 const ORIGIN = 'https://zero-http.local'
+const transportEncryptionKey = new Uint8Array(32).fill(17)
+const transportEncryptionManifest = {
+  version: 1,
+  networkID: 'transport-network',
+  schemaID: 'transport-schema',
+  rowMutations: {
+    'cloud.applyBatch': {
+      argumentIndex: 0,
+      format: 'orez-row-batch-v1',
+    },
+  },
+  tables: {
+    project: {
+      serverName: 'project_record',
+      primaryKey: ['id'],
+      primaryKeyServerNames: { id: 'project_id' },
+      columns: { name: { serverName: 'project_name' } },
+    },
+  },
+} as const satisfies EncryptedColumnManifest
 
 type RequestRecord = {
   url: string
@@ -79,6 +107,106 @@ describe('zero-http transport', () => {
     expect(requests[0].body.cookie).toBeNull()
     expect(requests[0].body.clientID).toEqual(expect.any(String))
     expect(requests[0].body.clientGroupID).toEqual(expect.any(String))
+  })
+
+  test('decrypts a stock Zero pull whose primary key has a physical name', async () => {
+    const payloadCodec = createTransportEncryptionCodec()
+    const encoded = await payloadCodec.encodePush({
+      mutations: [
+        {
+          type: 'custom',
+          name: 'cloud.applyBatch',
+          clientID: 'transport-client',
+          id: 1,
+          args: [
+            {
+              sourceID: 'transport-source',
+              fromSeq: 1,
+              throughSeq: 1,
+              rows: [
+                {
+                  seq: 1,
+                  op: 'put',
+                  table: 'project',
+                  value: { id: 'p1', ownerId: 'u1', name: 'decrypted project' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    const batch = encoded.mutations[0].args?.[0] as {
+      rows: Array<{ value: { name: string } }>
+    }
+    const encryptedName = batch.rows[0].value.name
+    const fetch = vi.fn(async () =>
+      jsonResponse({
+        cookie: 1,
+        lastMutationIDChanges: {},
+        rowsPatch: [
+          { op: 'clear' },
+          {
+            op: 'put',
+            tableName: 'user_record',
+            value: { user_id: 'u1', display_name: 'ada' },
+          },
+          {
+            op: 'put',
+            tableName: 'project_record',
+            value: {
+              project_id: 'p1',
+              owner_id: 'u1',
+              project_name: encryptedName,
+            },
+          },
+        ],
+      })
+    )
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      payloadCodec,
+    })
+    transports.push(transport)
+    const zero = createZero()
+
+    const view = zero.query.project.materialize()
+    const data = await waitForComplete(view)
+    view.destroy()
+
+    expect(data).toEqual([{ id: 'p1', ownerId: 'u1', name: 'decrypted project' }])
+  })
+
+  test('rejects plaintext injected into an encrypted pull before any poke', async () => {
+    const fetch = vi.fn(async () =>
+      jsonResponse({
+        cookie: 1,
+        lastMutationIDChanges: {},
+        rowsPatch: [
+          {
+            op: 'put',
+            tableName: 'project_record',
+            value: {
+              project_id: 'p1',
+              owner_id: 'u1',
+              project_name: 'edge plaintext injection',
+            },
+          },
+        ],
+      })
+    )
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      payloadCodec: createTransportEncryptionCodec(),
+    })
+    transports.push(transport)
+    const { messages } = openRawSocketWithMessages()
+
+    await eventually(() => expect(fetch).toHaveBeenCalledTimes(1))
+    await eventually(() => expect(transport.connections).toBe(0))
+    expect(messages.some((message) => message[0].startsWith('poke'))).toBe(false)
   })
 
   test('got queries survive a snapshot-reset poke after the ack', async () => {
@@ -301,6 +429,238 @@ describe('zero-http transport', () => {
         .filter((message) => message[0] === 'pushResponse')
         .map((message) => message[1].mutations[0].id.id)
     ).toEqual([1, 2])
+  })
+
+  test('encodes each push attempt inside the existing FIFO push chain', async () => {
+    const firstEncodeStarted = defer<void>()
+    const releaseFirstEncode = defer<void>()
+    const encodedIDs: number[] = []
+    const postedIDs: number[] = []
+    const payloadCodec: PayloadCodec = {
+      id: 'test-push-codec',
+      async encodePush(body) {
+        const id = body.mutations[0].id
+        encodedIDs.push(id)
+        if (id === 1) {
+          firstEncodeStarted.resolve()
+          await releaseFirstEncode.promise
+        }
+        return {
+          ...body,
+          mutations: body.mutations.map((mutation) => ({
+            ...mutation,
+            args: [{ encodedByCodec: true, original: mutation.args?.[0] ?? null }],
+          })),
+        } as PushRequest
+      },
+      async decodePull(response) {
+        return response
+      },
+    }
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      const mutation = request.body.mutations[0]
+      postedIDs.push(mutation.id)
+      expect(mutation.args[0].encodedByCodec).toBe(true)
+      return jsonResponse({
+        pushResponse: {
+          mutations: [
+            {
+              id: { clientID: mutation.clientID, id: mutation.id },
+              result: {},
+            },
+          ],
+        },
+      })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      payloadCodec,
+    })
+    transports.push(transport)
+    const { messages, socket } = openRawSocketWithMessages()
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true)
+    )
+
+    socket.send(JSON.stringify(['push', pushBody(1)]))
+    await firstEncodeStarted.promise
+    socket.send(JSON.stringify(['push', pushBody(2)]))
+    await sleep(25)
+
+    expect(encodedIDs).toEqual([1])
+    expect(postedIDs).toEqual([])
+    releaseFirstEncode.resolve()
+    await eventually(() => expect(encodedIDs).toEqual([1, 2]))
+    await eventually(() => expect(postedIDs).toEqual([1, 2]))
+  })
+
+  test('does not POST a push when its payload codec fails closed', async () => {
+    const paths: string[] = []
+    const payloadCodec: PayloadCodec = {
+      id: 'test-fail-closed-codec',
+      async encodePush() {
+        throw new Error('no current encryption key is available')
+      },
+      async decodePull(response) {
+        return response
+      },
+    }
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      paths.push(request.path)
+      return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      payloadCodec,
+    })
+    transports.push(transport)
+    const { messages, socket } = openRawSocketWithMessages()
+    await eventually(() =>
+      expect(messages.some((message) => message[0] === 'connected')).toBe(true)
+    )
+
+    socket.send(JSON.stringify(['push', pushBody(1)]))
+
+    await eventually(() => expect(transport.connections).toBe(0))
+    expect(paths).toEqual(['/pull'])
+  })
+
+  test('decodes initial, direct, wake, and recovery pulls at the fetch boundary', async () => {
+    const wakeSockets = useFakeNativeWebSocket()
+    const decodePull = vi.fn(async (response: PullResponse) => {
+      if (response.unchanged) return response
+      return {
+        ...response,
+        rowsPatch: response.rowsPatch.map((patch) => {
+          if (
+            !patch ||
+            typeof patch !== 'object' ||
+            Array.isArray(patch) ||
+            patch.op !== 'put' ||
+            !patch.value ||
+            typeof patch.value !== 'object' ||
+            Array.isArray(patch.value)
+          ) {
+            return patch
+          }
+          return {
+            ...patch,
+            value: {
+              ...patch.value,
+              project_name: `plain-${patch.value.project_name}`,
+            },
+          }
+        }),
+      } as PullResponse
+    })
+    const payloadCodec: PayloadCodec = {
+      id: 'test-pull-codec',
+      async encodePush(body) {
+        return body
+      },
+      decodePull,
+    }
+    let cookie = 0
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      expect(request.path).toBe('/pull')
+      cookie++
+      return jsonResponse({
+        cookie,
+        lastMutationIDChanges: {},
+        rowsPatch: [
+          {
+            op: 'put',
+            tableName: 'project_record',
+            value: {
+              project_id: `p${cookie}`,
+              owner_id: 'u1',
+              project_name: `cipher-${cookie}`,
+            },
+          },
+        ],
+      })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      wake: true,
+      payloadCodec,
+    })
+    transports.push(transport)
+    const { messages, socket } = openRawSocketWithMessages()
+
+    await eventually(() => expect(decodePull).toHaveBeenCalledTimes(1))
+    await eventually(() => expect(wakeSockets).toHaveLength(1))
+    await transport.pull()
+    expect(decodePull).toHaveBeenCalledTimes(2)
+
+    wakeSockets[0].onmessage?.()
+    await eventually(() => expect(decodePull).toHaveBeenCalledTimes(3))
+
+    socket.send(
+      JSON.stringify([
+        'pull',
+        {
+          clientGroupID: 'cg1',
+          cookie: null,
+          requestID: 'mutation-recovery',
+        },
+      ])
+    )
+    await eventually(() => expect(decodePull).toHaveBeenCalledTimes(4))
+    await eventually(() =>
+      expect(
+        messages.some(
+          (message) =>
+            message[0] === 'pull' && message[1].requestID === 'mutation-recovery'
+        )
+      ).toBe(true)
+    )
+
+    const emittedNames = messages
+      .filter((message) => message[0] === 'pokePart')
+      .flatMap((message) => message[1].rowsPatch ?? [])
+      .filter((patch) => patch.op === 'put')
+      .map((patch) => patch.value.project_name)
+    expect(emittedNames).toEqual(['plain-cipher-1', 'plain-cipher-2', 'plain-cipher-3'])
+  })
+
+  test('a pull codec authentication failure emits no poke', async () => {
+    const payloadCodec: PayloadCodec = {
+      id: 'test-auth-failure-codec',
+      async encodePush(body) {
+        return body
+      },
+      async decodePull() {
+        throw new Error('orez-e1 authentication failed')
+      },
+    }
+    const fetch = vi.fn(async () =>
+      jsonResponse({
+        cookie: 1,
+        lastMutationIDChanges: {},
+        rowsPatch: [{ op: 'put', tableName: 'project_record', value: {} }],
+      })
+    )
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      payloadCodec,
+    })
+    transports.push(transport)
+    const { messages } = openRawSocketWithMessages()
+
+    await eventually(() => expect(fetch).toHaveBeenCalledTimes(1))
+    await eventually(() => expect(transport.connections).toBe(0))
+    expect(messages.some((message) => message[0].startsWith('poke'))).toBe(false)
   })
 
   test('cookie discipline skips unchanged pokes, chains changed pokes, and coalesces concurrent pulls', async () => {
@@ -624,6 +984,40 @@ describe('zero-http transport', () => {
     first.uninstall()
   })
 
+  test('ensureHttpPullTransport rejects a conflicting codec for one origin', () => {
+    const origin = 'http://127.0.0.1:65502'
+    const codec = (id: string): PayloadCodec => ({
+      id,
+      async encodePush(body) {
+        return body
+      },
+      async decodePull(response) {
+        return response
+      },
+    })
+    const first = ensureHttpPullTransport({
+      origin,
+      fetch: vi.fn(),
+      payloadCodec: codec('codec-a'),
+    })
+
+    expect(
+      ensureHttpPullTransport({
+        origin,
+        fetch: vi.fn(),
+        payloadCodec: codec('codec-a'),
+      })
+    ).toBe(first)
+    expect(() =>
+      ensureHttpPullTransport({
+        origin,
+        fetch: vi.fn(),
+        payloadCodec: codec('codec-b'),
+      })
+    ).toThrow('already uses payload codec codec-a')
+    first.uninstall()
+  })
+
   test('push responses are filtered to this client — foreign (recovery) results are dropped', async () => {
     // a mutation-RECOVERY push carries a previous client's pending mutations
     // and the server echoes that old clientID in the response. zero-cache only
@@ -694,6 +1088,16 @@ function install(fetch: typeof globalThis.fetch) {
   const transport = installHttpPullTransport({ origin: ORIGIN, fetch })
   transports.push(transport)
   return transport
+}
+
+function createTransportEncryptionCodec() {
+  return createEncryptedColumnCodec({
+    manifest: transportEncryptionManifest,
+    keyring: {
+      current: async () => ({ epoch: 4, key: transportEncryptionKey }),
+      get: async (epoch) => (epoch === 4 ? transportEncryptionKey : undefined),
+    },
+  })
 }
 
 function createZero(

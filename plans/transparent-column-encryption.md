@@ -77,6 +77,8 @@ export type EncryptedColumnManifest = {
         serverName?: string
         /** Logical clear-text primary-key columns in canonical order. */
         primaryKey: readonly string[]
+        /** Physical names for renamed primary-key columns. */
+        primaryKeyServerNames?: Readonly<Record<string, string>>
         columns: Readonly<
           Record<
             string,
@@ -116,7 +118,7 @@ export interface EncryptionKeyring {
   /** Current writable epoch and its 32-byte network content key. */
   current(): Promise<{ epoch: number; key: Uint8Array } | undefined>
 
-  /** Key for a historical epoch, or undefined when this device lacks it. */
+  /** Key for a readable current or historical epoch, or undefined. */
   get(epoch: number): Promise<Uint8Array | undefined>
 }
 
@@ -189,7 +191,7 @@ Encoding stays inside the existing `pushChain`. Concurrent sends therefore canno
 6. Replace only declared payload values with authenticated envelopes.
 7. Leave `del` rows and every clear column unchanged.
 
-If no current write key exists, a row mutation that contains plaintext for an encrypted column fails before the network request. A client must never downgrade to plaintext. A mutation value that is already a valid `orez-e1` envelope is left byte-for-byte unchanged. This permits persisted Zero queues and reconstructed writer batches to retry a previously encoded mutation safely.
+If no current write key exists, a row mutation that contains plaintext for an encrypted column fails before the network request. A client must never downgrade to plaintext. A mutation value that is already a valid `orez-e1` envelope is authenticated with its historical key before it is left byte-for-byte unchanged. A missing key or failed authentication rejects the push. This permits persisted Zero queues and reconstructed writer batches to retry a previously encoded mutation safely without accepting forged ciphertext.
 
 ### Pull
 
@@ -205,12 +207,12 @@ This call belongs in `fetchPull`, rather than only in the periodic `pull()` call
 `decodePull` walks `rowsPatch` put operations:
 
 1. Resolve the physical table and physical column through the manifest's reverse map.
-2. Parse values only when they begin with the exact `orez-e1.` prefix.
+2. Require every present declared encrypted physical column to be a string beginning with the exact `orez-e1.` prefix, then parse it.
 3. Look up the content key by the envelope epoch.
-4. Reconstruct authenticated associated data from the manifest, physical patch, clear primary key, and envelope mutation tag.
+4. Read clear primary-key values using their physical manifest names, then reconstruct authenticated associated data using their logical identity and the envelope mutation tag.
 5. Authenticate, decrypt, parse the canonical JSON plaintext, and restore the original string or JSON value.
 
-When the keyring has no key for an epoch, return the ciphertext string unchanged. This is the intentional no-key view. When a key exists but authentication or parsing fails, reject the pull. Feeding an unverified value to Zero would hide corruption and could persist a false plaintext value in the client cache.
+When the keyring has no key for an epoch, return the ciphertext string unchanged. This is the intentional no-key view. Reject a present declared encrypted column containing plaintext, malformed envelope data, or a value that fails authentication or canonical parsing. Feeding an unverified value to Zero would hide corruption and could persist a false plaintext value in the client cache. Legacy plaintext migration requires an explicit, separately authenticated versioned mode and is never the steady-state fallback.
 
 The codec also decodes any equivalent row-patch field used by the current pull protocol. Tests must exercise every pull response variant that can reach `emitPoke`; there cannot be a second unwrapped response path.
 
@@ -224,7 +226,7 @@ Both Zero `string` and `json` encrypted columns carry a string at the server:
 orez-e1.<epoch>.<mutation-tag>.<ciphertext-base64url>
 ```
 
-The encrypted payload contains the original logical value encoded as canonical JSON. Canonical JSON preserves the distinction between a JSON string and structured JSON. The binary ciphertext includes the AEAD authentication tag. The nonce is derived and is not stored separately.
+The encrypted payload contains the original logical value encoded as canonical JSON. Canonical JSON preserves the distinction between a JSON string and structured JSON. After base64url decoding, the binary payload is `derived-nonce (24 bytes) || XChaCha20-Poly1305 ciphertext and tag`. A reader extracts the nonce to open the AEAD, then re-derives it from the authenticated plaintext and rejects any mismatch. Carrying the deterministic nonce makes the envelope independently decryptable without adding randomness or weakening the nonce derivation rule below.
 
 P0 supports encrypted Zero columns whose declared logical type is `string` or `json`. The Rust schema guard rejects encrypted `number`, `boolean`, or `null` columns. This restriction avoids server-side type coercion of ciphertext. A later schema design can separate logical client types from the physical opaque storage type if other logical types become necessary.
 
