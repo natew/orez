@@ -415,7 +415,7 @@ export const latestMessages = syncedQuery(
 the generator:
 
 1. discovers namespace files and folders, plus folders marked with `instance.ts`
-2. derives each instance's related-table closure and validates ownership/scope
+2. derives each instance's related-table closure, mutation support tables, and scope
 3. parses TypeScript AST to extract parameter types
 4. converts types to valibot schemas
 5. wraps query functions in `syncedQuery()` with validators
@@ -438,13 +438,23 @@ eliminates duplicate column definitions — drizzle is the single source of trut
 ```ts
 // generate-schema.ts (run at build/dev time)
 import { drizzleZeroConfig } from 'drizzle-zero'
-import { deriveDataMembership, generateDrizzleSchemaFile } from 'on-zero/generate'
-import * as drizzleSchema from './database/schema'
-import { relations } from './database/relations'
+import {
+  deriveDataMembership,
+  generateDrizzleSchemaFile,
+  generateDrizzleSchemaInputFile,
+} from 'on-zero/generate'
+import * as drizzleSchema from './data/generated/drizzleSchema'
 
 const { allTables } = await deriveDataMembership({ dir: 'src/data' })
+writeFileSync(
+  'src/data/generated/drizzleSchema.ts',
+  await generateDrizzleSchemaInputFile({
+    dir: 'src/data',
+    schemaImportPath: '../../database/schema',
+  })
+)
 const dzSchema = drizzleZeroConfig(
-  { ...drizzleSchema, relations },
+  drizzleSchema,
   {
     tables: Object.fromEntries(allTables.map((table) => [table, true])),
     suppressDefaultsWarning: true,
@@ -455,6 +465,12 @@ const dzSchema = drizzleZeroConfig(
 const output = generateDrizzleSchemaFile(dzSchema)
 writeFileSync('src/data/generated/schema.ts', output)
 ```
+
+`allTables` includes synced tables plus fileless tables reached through static
+`tx.mutate.<table>` and `tx.query.<table>` accesses in mutation modules and their
+local helpers. these support tables type server pushes but do not become client
+query namespaces or part of `syncTables`. the generated drizzle input filters out
+relations whose source or target is outside `allTables`.
 
 the generated file uses zero's `table()` builder and `relationships()` function,
 giving full type inference for zql queries including nested `.related()` calls.

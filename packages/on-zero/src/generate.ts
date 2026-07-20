@@ -19,6 +19,7 @@ import {
 import { discoverDataLayout, namespaceImportPath } from './generate-layout'
 
 import type { ExtractedMutation, ModelMutations, SchemaColumn } from './generate-helpers'
+import type { DataLayout } from './generate-layout'
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex')
 const GENERATOR_CACHE_VERSION = '2'
@@ -818,17 +819,14 @@ export type DataMembership = {
     {
       tables: string[]
       syncTables: string[]
+      supportTables: string[]
       scope: string | null
     }
   >
   allTables: string[]
 }
 
-export async function deriveDataMembership(options: {
-  dir: string
-}): Promise<DataMembership> {
-  const ts = await import('typescript')
-  const layout = discoverDataLayout(ts, resolve(options.dir))
+function dataMembershipFromLayout(layout: DataLayout): DataMembership {
   return {
     instances: Object.fromEntries(
       layout.instances.map((instance) => [
@@ -836,14 +834,115 @@ export async function deriveDataMembership(options: {
         {
           tables: instance.namespaces.map((namespace) => namespace.name).sort(),
           syncTables: [...instance.syncTables],
+          supportTables: [...instance.supportTables],
           scope: instance.scope,
         },
       ])
     ),
     allTables: [
-      ...new Set(layout.instances.flatMap((instance) => instance.syncTables)),
+      ...new Set(
+        layout.instances.flatMap((instance) => [
+          ...instance.syncTables,
+          ...instance.supportTables,
+        ])
+      ),
     ].sort(),
   }
+}
+
+export async function deriveDataMembership(options: {
+  dir: string
+}): Promise<DataMembership> {
+  const ts = await import('typescript')
+  const layout = discoverDataLayout(ts, resolve(options.dir))
+  return dataMembershipFromLayout(layout)
+}
+
+export async function generateDrizzleSchemaInputFile(options: {
+  dir: string
+  schemaImportPath: string
+}): Promise<string> {
+  const ts = await import('typescript')
+  const baseDir = resolve(options.dir)
+  const layout = discoverDataLayout(ts, baseDir)
+  const tableNames = dataMembershipFromLayout(layout).allTables
+  const relationsPath =
+    layout.metadataPaths.find(
+      (path) =>
+        basename(path) === 'relations.ts' &&
+        dirname(path) === resolve(dirname(baseDir), 'database')
+    ) ?? layout.metadataPaths.find((path) => basename(path) === 'relations.ts')
+  const relationEntries: string[] = []
+
+  if (relationsPath) {
+    const source = ts.createSourceFile(
+      relationsPath,
+      readFileSync(relationsPath, 'utf8'),
+      ts.ScriptTarget.Latest,
+      true
+    )
+    const included = new Set(tableNames)
+    const visit = (node: import('typescript').Node) => {
+      if (
+        !ts.isCallExpression(node) ||
+        node.expression.getText(source) !== 'defineRelations'
+      ) {
+        ts.forEachChild(node, visit)
+        return
+      }
+      const factory = node.arguments[1]
+      if (
+        !factory ||
+        (!ts.isArrowFunction(factory) && !ts.isFunctionExpression(factory))
+      ) {
+        return
+      }
+      const body = ts.isParenthesizedExpression(factory.body)
+        ? factory.body.expression
+        : factory.body
+      if (!ts.isObjectLiteralExpression(body)) return
+
+      for (const tableProperty of body.properties) {
+        if (
+          !ts.isPropertyAssignment(tableProperty) ||
+          !ts.isObjectLiteralExpression(tableProperty.initializer)
+        ) {
+          continue
+        }
+        const table = tableProperty.name.getText(source).replace(/^['"]|['"]$/g, '')
+        if (!included.has(table)) continue
+        const relations: string[] = []
+        for (const relationProperty of tableProperty.initializer.properties) {
+          if (
+            !ts.isPropertyAssignment(relationProperty) ||
+            !ts.isCallExpression(relationProperty.initializer) ||
+            !ts.isPropertyAccessExpression(relationProperty.initializer.expression)
+          ) {
+            continue
+          }
+          const target = relationProperty.initializer.expression.name.text
+          if (included.has(target)) relations.push(relationProperty.getText(source))
+        }
+        relationEntries.push(
+          `  ${tableProperty.name.getText(source)}: {${relations.length ? `\n${relations.map((relation) => `    ${relation},`).join('\n')}\n  ` : ''}},`
+        )
+      }
+    }
+    visit(source)
+  }
+
+  const schemaImportPath = JSON.stringify(options.schemaImportPath)
+  return [
+    '// auto-generated from the on-zero data layout',
+    `import { defineRelations } from 'drizzle-orm'`,
+    `import * as schema from ${schemaImportPath}`,
+    '',
+    `export { ${tableNames.join(', ')} } from ${schemaImportPath}`,
+    `export const relations = defineRelations(schema, (r) => ({`,
+    ...relationEntries,
+    `}))`,
+    '',
+  ].join('\n')
 }
 
 export async function generate(options: GenerateOptions): Promise<GenerateResult> {
@@ -1069,6 +1168,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
           .map((namespace) => namespace.name),
         tables: instance.namespaces.map((namespace) => namespace.name),
         syncTables: instance.syncTables,
+        supportTables: instance.supportTables,
       }))
     )
   )

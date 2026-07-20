@@ -34,6 +34,7 @@ export type ZeroInstanceManifestEntry<
   models: Models
   tables: readonly string[]
   syncTables: readonly string[]
+  supportTables: readonly string[]
   scope: string | null
   defaultVisibility: ((value: string) => { column: string; value: string }) | null
 }

@@ -95,6 +95,11 @@ export type LiteParsedFile = {
   queries: LiteQueryExport[]
   relations?: LiteRelationInfo[]
   tables?: LiteTableInfo[]
+  // static table names reached through tx.mutate.<table> or tx.query.<table>.
+  // element access such as tx.mutate[name] is intentionally omitted.
+  supportTables?: string[]
+  // static import/export module specifiers used to follow mutation helpers.
+  imports?: string[]
   // parser syntax failure. the membership pass warns and ignores this file.
   parseError?: string
 }
@@ -136,6 +141,21 @@ function baseName(path: string, ext?: string): string {
   let base = idx >= 0 ? path.slice(idx + 1) : path
   if (ext && base.endsWith(ext)) base = base.slice(0, -ext.length)
   return base
+}
+
+function resolvePath(path: string): string {
+  const absolute = path.startsWith('/')
+  const parts: string[] = []
+  for (const part of path.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  return `${absolute ? '/' : ''}${parts.join('/')}`
+}
+
+function parentDir(path: string): string {
+  return path.slice(0, path.lastIndexOf('/'))
 }
 
 // returns files whose path is an immediate child of `dirPrefix` and ends in
@@ -503,6 +523,47 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
     syncTables.set(instance.name, tables)
   }
 
+  const supportTables = new Map<string, string[]>()
+  for (const instance of instances) {
+    const supported = new Set<string>()
+    for (const namespace of instance.namespaces) {
+      if (!namespace.modelPath) continue
+      const visited = new Set<string>()
+      const scan = (path: string) => {
+        if (visited.has(path)) return
+        visited.add(path)
+        const parsed = parse(files[path]!, path)
+        if (parsed.parseError) {
+          throw new Error(
+            `[on-zero] unable to derive mutation dependencies from ${path}: ${parsed.parseError}`
+          )
+        }
+        for (const table of parsed.supportTables ?? []) {
+          if (owners.has(table) || relatedOwners.has(table)) continue
+          if (!syncTables.get(instance.name)!.includes(table)) {
+            supported.add(table)
+          }
+        }
+        for (const specifier of parsed.imports ?? []) {
+          const unresolved = specifier.startsWith('~/data/')
+            ? `${baseDir}/${specifier.slice('~/data/'.length)}`
+            : specifier.startsWith('.')
+              ? `${parentDir(path)}/${specifier}`
+              : null
+          if (!unresolved) continue
+          const normalized = resolvePath(unresolved)
+          const dependency = [
+            normalized.endsWith('.ts') ? normalized : `${normalized}.ts`,
+            `${normalized}/index.ts`,
+          ].find((candidate) => candidate in files && candidate.startsWith(`${baseDir}/`))
+          if (dependency) scan(dependency)
+        }
+      }
+      scan(namespace.modelPath)
+    }
+    supportTables.set(instance.name, [...supported].sort())
+  }
+
   // emit files
   const modelNames = modelNamespaces.map((namespace) => namespace.name)
   const out: Record<string, string> = {}
@@ -542,6 +603,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
         .map((namespace) => namespace.name),
       tables: instance.namespaces.map((namespace) => namespace.name),
       syncTables: syncTables.get(instance.name)!,
+      supportTables: supportTables.get(instance.name)!,
     }))
   )
 

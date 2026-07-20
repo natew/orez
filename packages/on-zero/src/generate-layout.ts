@@ -17,6 +17,7 @@ export type DataInstance = {
   scope: string | null
   namespaces: DataNamespace[]
   syncTables: string[]
+  supportTables: string[]
 }
 
 export type DataLayout = {
@@ -486,6 +487,76 @@ function relatedTables(
   return reached
 }
 
+function mutationSupportTables(
+  ts: typeof import('typescript'),
+  baseDir: string,
+  namespace: DataNamespace
+): string[] {
+  if (!namespace.modelPath) return []
+  const tables = new Set<string>()
+  const visited = new Set<string>()
+
+  const scan = (path: string) => {
+    if (visited.has(path)) return
+    visited.add(path)
+    const source = ts.createSourceFile(
+      path,
+      readFileSync(path, 'utf8'),
+      ts.ScriptTarget.Latest,
+      true
+    )
+
+    const visit = (node: ts.Node) => {
+      if (
+        ts.isPropertyAccessExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ['mutate', 'query'].includes(node.expression.name.text)
+      ) {
+        const transaction = node.expression.expression
+        if (
+          (ts.isIdentifier(transaction) && transaction.text === 'tx') ||
+          (ts.isPropertyAccessExpression(transaction) && transaction.name.text === 'tx')
+        ) {
+          tables.add(node.name.text)
+        }
+      }
+
+      if (
+        (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+        node.moduleSpecifier &&
+        ts.isStringLiteral(node.moduleSpecifier)
+      ) {
+        const specifier = node.moduleSpecifier.text
+        const unresolved = specifier.startsWith('~/data/')
+          ? resolve(baseDir, specifier.slice('~/data/'.length))
+          : specifier.startsWith('.')
+            ? resolve(dirname(path), specifier)
+            : null
+        if (unresolved) {
+          for (const candidate of [
+            unresolved.endsWith('.ts') ? unresolved : `${unresolved}.ts`,
+            resolve(unresolved, 'index.ts'),
+          ]) {
+            if (
+              existsSync(candidate) &&
+              (candidate === baseDir || candidate.startsWith(`${baseDir}${sep}`))
+            ) {
+              scan(candidate)
+              break
+            }
+          }
+        }
+      }
+
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+  }
+
+  scan(namespace.modelPath)
+  return [...tables].sort()
+}
+
 export function discoverDataLayout(
   ts: typeof import('typescript'),
   baseDir: string
@@ -493,13 +564,21 @@ export function discoverDataLayout(
   const instanceDirs = collectInstanceDirs(baseDir)
   const instanceDirSet = new Set(instanceDirs)
   const instances: DataInstance[] = [
-    { name: 'default', dir: baseDir, scope: null, namespaces: [], syncTables: [] },
+    {
+      name: 'default',
+      dir: baseDir,
+      scope: null,
+      namespaces: [],
+      syncTables: [],
+      supportTables: [],
+    },
     ...instanceDirs.map((dir) => ({
       name: basename(dir),
       dir,
       scope: readScope(ts, resolve(dir, 'instance.ts')),
       namespaces: [],
       syncTables: [],
+      supportTables: [],
     })),
   ]
   const duplicateInstance = instances.find(
@@ -554,6 +633,19 @@ export function discoverDataLayout(
         }
       }
     }
+  }
+
+  for (const instance of instances) {
+    const supportTables = new Set<string>()
+    for (const namespace of instance.namespaces) {
+      for (const table of mutationSupportTables(ts, baseDir, namespace)) {
+        if (owners.has(table) || relatedOwners.has(table)) continue
+        if (!instance.syncTables.includes(table)) {
+          supportTables.add(table)
+        }
+      }
+    }
+    instance.supportTables = [...supportTables].sort()
   }
 
   return { instances, namespaces, metadataPaths: metadata }

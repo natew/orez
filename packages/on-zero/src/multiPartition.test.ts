@@ -16,6 +16,7 @@ describe('createZeroClients', () => {
         models: {},
         tables: ['account'],
         syncTables: ['account'],
+        supportTables: [],
         scope: null,
         defaultVisibility: null,
       },
@@ -25,6 +26,7 @@ describe('createZeroClients', () => {
         models: {},
         tables: ['message'],
         syncTables: ['message'],
+        supportTables: [],
         scope: 'projectId',
         defaultVisibility: (value: string) => ({ column: 'projectId', value }),
       },
@@ -51,6 +53,7 @@ describe('createZeroClients', () => {
       models: {},
       tables: Object.keys(queries),
       syncTables: Object.keys(queries),
+      supportTables: [],
       scope: null,
       defaultVisibility: null,
     })

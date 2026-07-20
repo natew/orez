@@ -1,3 +1,5 @@
+import { runInNewContext } from 'node:vm'
+
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { generateLite } from './generate-lite'
@@ -581,5 +583,116 @@ describe('generateLite', () => {
     expect(result.files['instances.ts']).toContain(
       'syncTables: ["comment","message","userPublic"]'
     )
+  })
+
+  test('derives fileless support tables through parsed mutation helpers', () => {
+    const files = {
+      [`${DIR}/post.ts`]: '// namespace',
+      [`${DIR}/helpers/writeAudit.ts`]: '// helper',
+      [`${DIR}/helpers/readSettings.ts`]: '// nested helper',
+    }
+    const empty = { mutations: [], queries: [] }
+    const result = generateLite({
+      files,
+      dir: DIR,
+      parse: makeParse({
+        [`${DIR}/post.ts`]: {
+          ...empty,
+          mutations: [{ modelName: 'post', handlers: [], schema: null }],
+          imports: ['./helpers/writeAudit'],
+          supportTables: ['post'],
+        },
+        [`${DIR}/helpers/writeAudit.ts`]: {
+          ...empty,
+          imports: ['./readSettings'],
+          supportTables: ['audit'],
+        },
+        [`${DIR}/helpers/readSettings.ts`]: {
+          ...empty,
+          supportTables: ['settings'],
+        },
+      }),
+    })
+    const runnable = result.files['instances.ts']!.replace(
+      "import { schema } from './schema'",
+      ''
+    )
+      .replace("import * as groupedQueries from './groupedQueries'", '')
+      .replace("import { models } from './models'", '')
+      .replace('export const instances =', 'globalThis.instances =')
+      .replace(/: string/g, '')
+      .replace(' as const', '')
+    const context = {
+      groupedQueries: {},
+      models: { post: {} },
+      schema: {},
+    } as { instances?: Record<string, { supportTables: string[] }> }
+
+    runInNewContext(runnable, context)
+
+    expect(context.instances?.default?.supportTables).toEqual(['audit', 'settings'])
+  })
+
+  test('includes a fileless support table in every lite instance that uses it', () => {
+    const files = {
+      [`${DIR}/account.ts`]: '// control namespace',
+      [`${DIR}/project/instance.ts`]: `export default defineInstance({ scope: 'projectId' })`,
+      [`${DIR}/project/message.ts`]: '// project namespace',
+      ['/proj/src/database/schema.ts']: '// table columns',
+    }
+    const empty = { mutations: [], queries: [] }
+
+    const result = generateLite({
+      files,
+      dir: DIR,
+      parse: makeParse({
+        [`${DIR}/account.ts`]: {
+          ...empty,
+          mutations: [{ modelName: 'account', handlers: [], schema: null }],
+          supportTables: ['audit'],
+        },
+        [`${DIR}/project/message.ts`]: {
+          ...empty,
+          mutations: [
+            {
+              modelName: 'message',
+              handlers: [],
+              schema: {
+                tableName: 'message',
+                primaryKeys: ['id'],
+                columns: [
+                  { name: 'id', builderText: 'string()' },
+                  { name: 'projectId', builderText: 'string()' },
+                ],
+              },
+            },
+          ],
+          supportTables: ['audit'],
+        },
+        '/proj/src/database/schema.ts': {
+          ...empty,
+          tables: [{ name: 'message', columns: ['id', 'projectId'] }],
+        },
+      }),
+    })
+    const runnable = result.files['instances.ts']!.replace(
+      "import { schema } from './schema'",
+      ''
+    )
+      .replace("import * as groupedQueries from './groupedQueries'", '')
+      .replace("import { models } from './models'", '')
+      .replace('export const instances =', 'globalThis.instances =')
+      .replace(/: string/g, '')
+      .replace(' as const', '')
+    const context = {
+      groupedQueries: {},
+      models: { account: {}, message: {} },
+      schema: {},
+    } as { instances?: Record<string, { supportTables: string[] }> }
+
+    runInNewContext(runnable, context)
+
+    expect(context.instances?.default?.supportTables).toEqual(['audit'])
+    expect(context.instances?.project?.supportTables).toEqual(['audit'])
   })
 })

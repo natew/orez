@@ -13,7 +13,12 @@ import { runInNewContext } from 'node:vm'
 import * as zero from '@rocicorp/zero'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { deriveDataMembership, generate, generateDrizzleSchemaFile } from './generate'
+import {
+  deriveDataMembership,
+  generate,
+  generateDrizzleSchemaFile,
+  generateDrizzleSchemaInputFile,
+} from './generate'
 
 const testDir = join(tmpdir(), 'on-zero-test-' + Date.now())
 
@@ -294,6 +299,7 @@ export const userPublic = sqliteTable('user_public', { id: text(), projectId: te
     expect(membership.instances.project).toEqual({
       tables: ['message'],
       syncTables: ['comment', 'message', 'userPublic'],
+      supportTables: [],
       scope: 'projectId',
     })
 
@@ -333,6 +339,7 @@ export const userPublic = sqliteTable('user_public', { id: text(), projectId: te
         default: {
           tables: ['server'],
           syncTables: ['server'],
+          supportTables: [],
           scope: null,
         },
       },
@@ -353,6 +360,119 @@ export const userPublic = sqliteTable('user_public', { id: text(), projectId: te
       '[on-zero] ignoring data/types.ts: no recognized data exports'
     )
     warn.mockRestore()
+  })
+
+  test('derives fileless support tables through mutation helpers', async () => {
+    writeFileSync(
+      join(dataDir(), 'post.ts'),
+      `
+import { writeAudit } from './helpers/writeAudit'
+export const posts = () => zql.post
+export const mutate = mutations('post', { save: async (ctx) => writeAudit(ctx.tx) })
+`
+    )
+    writeFileSync(
+      join(dataDir(), 'helpers/writeAudit.ts'),
+      `
+import { readSettings } from './readSettings'
+export async function writeAudit(tx: Transaction) {
+  await tx.mutate.audit.insert({ id: 'audit' })
+  await tx.mutate.post.update({ id: 'post' })
+  await tx.mutate[tableName].insert({ id: 'dynamic' })
+  return readSettings(tx)
+}
+`
+    )
+    writeFileSync(
+      join(dataDir(), 'helpers/readSettings.ts'),
+      `export const readSettings = (tx: Transaction) => tx.query.settings`
+    )
+
+    await expect(deriveDataMembership({ dir: dataDir() })).resolves.toEqual({
+      instances: {
+        default: {
+          tables: ['post'],
+          syncTables: ['post'],
+          supportTables: ['audit', 'settings'],
+          scope: null,
+        },
+      },
+      allTables: ['audit', 'post', 'settings'],
+    })
+  })
+
+  test('includes a fileless support table in every instance that uses it', async () => {
+    writeFileSync(
+      join(dataDir(), 'account.ts'),
+      `export const mutate = mutations('account', { save: async (ctx) => ctx.tx.mutate.audit.insert({}) })`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/instance.ts'),
+      `export default defineInstance({ scope: 'projectId' })`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/message.ts'),
+      `
+export const schema = table('message').columns({ id: string(), projectId: string() })
+export const mutate = mutations(schema, permission, {
+  save: async (ctx) => ctx.tx.mutate.audit.insert({}),
+})
+`
+    )
+
+    await expect(deriveDataMembership({ dir: dataDir() })).resolves.toMatchObject({
+      instances: {
+        default: { supportTables: ['audit'] },
+        project: { supportTables: ['audit'] },
+      },
+      allTables: ['account', 'audit', 'message'],
+    })
+  })
+
+  test('emits only relations whose source and target are derived members', async () => {
+    writeFileSync(join(dataDir(), 'post.ts'), `export const posts = () => zql.post`)
+    writeFileSync(
+      join(dataDir(), 'comment.ts'),
+      `export const comments = () => zql.comment`
+    )
+    writeFileSync(
+      join(testDir, 'src/database/relations.ts'),
+      `
+export const relations = defineRelations(schema, (r) => ({
+  post: {
+    comments: r.many.comment({}),
+    privateNotes: r.many.privateNote({}),
+  },
+  comment: { post: r.one.post({}), author: r.one.privateUser({}) },
+  privateNote: { post: r.one.post({}) },
+}))
+`
+    )
+
+    const generated = await generateDrizzleSchemaInputFile({
+      dir: dataDir(),
+      schemaImportPath: '../../database/schema',
+    })
+    const runnable = generated
+      .replace(`import { defineRelations } from 'drizzle-orm'`, '')
+      .replace(`import * as schema from "../../database/schema"`, '')
+      .replace(/export \{[^\n]+\} from [^\n]+/, '')
+      .replace('export const relations =', 'globalThis.relations =')
+    const context = {
+      schema: { comment: {}, post: {} },
+      defineRelations: (_schema: unknown, factory: (relations: unknown) => unknown) =>
+        factory({
+          one: new Proxy({}, { get: (_target, table) => () => ({ table }) }),
+          many: new Proxy({}, { get: (_target, table) => () => ({ table }) }),
+        }),
+    } as { relations?: unknown }
+
+    runInNewContext(runnable, context)
+
+    expect(context.relations).toEqual({
+      comment: { post: { table: 'post' } },
+      post: { comments: { table: 'comment' } },
+    })
   })
 
   test('rejects a relation that crosses instance ownership', async () => {
