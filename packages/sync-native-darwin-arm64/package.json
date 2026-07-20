@@ -14,7 +14,8 @@
     "arm64"
   ],
   "files": [
-    "bin"
+    "bin",
+    "LICENSES.txt"
   ],
   "publishConfig": {
     "access": "public"

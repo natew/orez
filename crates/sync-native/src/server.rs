@@ -43,7 +43,6 @@ pub struct AppState {
     authorize_wake: crate::AuthorizeWakeFn,
     query_resolution: Option<crate::QueryResolution>,
     query_pull_locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
-    query_transform_versions: Mutex<HashMap<(String, String), u64>>,
     admin_token: String,
     allowed_origins: HashSet<String>,
     trust_missing_admin_peer: AtomicBool,
@@ -64,8 +63,7 @@ impl AppState {
         authenticate: crate::AuthFn,
         authorize_wake: crate::AuthorizeWakeFn,
         query_resolution: Option<crate::QueryResolution>,
-        admin_token: String,
-        allowed_origins: Vec<String>,
+        security: crate::SyncNativeSecurity,
     ) -> Self {
         Self {
             manager,
@@ -75,9 +73,8 @@ impl AppState {
             authorize_wake,
             query_resolution,
             query_pull_locks: Mutex::new(HashMap::new()),
-            query_transform_versions: Mutex::new(HashMap::new()),
-            admin_token,
-            allowed_origins: allowed_origins.into_iter().collect(),
+            admin_token: security.admin_token,
+            allowed_origins: security.allowed_origins.into_iter().collect(),
             trust_missing_admin_peer: AtomicBool::new(false),
             boot_id: boot_id(),
             counters: Counters::default(),
@@ -299,8 +296,12 @@ async fn pull(
         Err(e) => return json_status(400, json!({ "error": e })),
     };
     let _query_pull_guard = if state.ctx.query_aware && state.query_resolution.is_some() {
+        let client_group = value
+            .get("clientGroupID")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         Some(
-            query_pull_lock(&state.query_pull_locks, &ns)
+            query_pull_lock(&state.query_pull_locks, &format!("{ns}\0{client_group}"))
                 .lock_owned()
                 .await,
         )
@@ -310,20 +311,10 @@ async fn pull(
     if state.ctx.query_aware
         && let Some(resolution) = &state.query_resolution
     {
-        match resolve_named_queries(
-            &mut value,
-            &headers,
-            &claims,
-            &ns,
-            &resolution.resolve,
-            &state.query_transform_versions,
-        )
-        .await
-        {
-            Ok(Some(transform_version)) => {
+        match resolve_named_queries(&mut value, &headers, &claims, &ns, &resolution.resolve).await {
+            Ok(transform_version) => {
                 value["_serverQueryTransformVersion"] = json!(transform_version);
             }
-            Ok(None) => {}
             Err(error) => {
                 return json_status(error.status, json!({ "error": error.message }));
             }
@@ -407,8 +398,7 @@ async fn resolve_named_queries(
     claims: &crate::AuthClaims,
     namespace: &str,
     resolver: &crate::ResolveQueriesFn,
-    transform_versions: &Mutex<HashMap<(String, String), u64>>,
-) -> Result<Option<u64>, crate::QueryResolveError> {
+) -> Result<u64, crate::QueryResolveError> {
     const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
     let patch = body
@@ -446,17 +436,6 @@ async fn resolve_named_queries(
         }
     }
 
-    if named_queries.is_empty() {
-        if let Some(version) = transform_versions
-            .lock()
-            .unwrap()
-            .get(&(namespace.to_string(), claims.user_id().to_string()))
-            .copied()
-        {
-            return Ok(Some(version));
-        }
-    }
-
     let resolved = resolver(
         named_queries,
         headers.clone(),
@@ -477,13 +456,8 @@ async fn resolve_named_queries(
         )));
     }
 
-    transform_versions.lock().unwrap().insert(
-        (namespace.to_string(), claims.user_id().to_string()),
-        resolved.transform_version,
-    );
-
     let Some(patch) = patch else {
-        return Ok(Some(resolved.transform_version));
+        return Ok(resolved.transform_version);
     };
     for (index, ast) in put_indices.into_iter().zip(resolved.asts) {
         let hash = patch[index]["hash"].clone();
@@ -494,7 +468,7 @@ async fn resolve_named_queries(
             "transformVersion": resolved.transform_version,
         });
     }
-    Ok(Some(resolved.transform_version))
+    Ok(resolved.transform_version)
 }
 
 async fn push(
@@ -848,14 +822,7 @@ async fn admin_invalidate(State(state): State<Arc<AppState>>, Path(ns): Path<Str
     };
     let result = namespace.run(engine::invalidate).await;
     match result {
-        Ok(()) => {
-            state
-                .query_transform_versions
-                .lock()
-                .unwrap()
-                .retain(|(namespace, _), _| namespace != &ns);
-            json_status(200, json!({ "ok": true }))
-        }
+        Ok(()) => json_status(200, json!({ "ok": true })),
         Err(e) => json_status(e.status, json!({ "error": e.message })),
     }
 }

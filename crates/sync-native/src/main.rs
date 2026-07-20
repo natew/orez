@@ -10,7 +10,7 @@ async fn main() {
         Command::Help => println!("{}", sync_native::standalone::USAGE),
         Command::Version => println!("sync-native {}", env!("CARGO_PKG_VERSION")),
         Command::Serve(config) => {
-            if let Err(error) = serve(config).await {
+            if let Err(error) = serve(*config).await {
                 eprintln!("error: {error}");
                 std::process::exit(1);
             }

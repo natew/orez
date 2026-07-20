@@ -1,0 +1,17 @@
+Orez sync-native software licenses
+
+This file contains the license texts and attributions for the Rust packages
+used to build sync-native across its supported targets.
+
+{{#each licenses}}
+===============================================================================
+{{{name}}} ({{{id}}})
+
+Used by:
+{{#each used_by}}
+- {{{crate.name}}} {{{crate.version}}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

@@ -93,6 +93,55 @@ runs:
           '${{ inputs.version }}' \
           '${{ github.sha }}'
 
+    - name: Smoke-test packed npm packages before publish
+      shell: bash
+      run: |
+        mkdir -p .release/packed .release/packed-smoke
+        bun scripts/sync-native-package.ts prepare-launcher \
+          .release/launcher \
+          '${{ inputs.version }}' \
+          '${{ github.sha }}'
+        platform_tgz="$(npm pack \
+          .release/platform \
+          --pack-destination .release/packed \
+          --silent)"
+        launcher_tgz="$(npm pack \
+          .release/launcher \
+          --pack-destination .release/packed \
+          --silent)"
+        mkdir -p \
+          .release/packed-smoke/platform \
+          .release/packed-smoke/launcher
+        tar -xzf ".release/packed/$platform_tgz" \
+          -C .release/packed-smoke/platform \
+          --strip-components=1
+        tar -xzf ".release/packed/$launcher_tgz" \
+          -C .release/packed-smoke/launcher \
+          --strip-components=1
+        platform_package_dir=.release/packed-smoke/platform
+        test -s "$platform_package_dir/LICENSE"
+        test -s "$platform_package_dir/LICENSES.txt"
+        actual="$($platform_package_dir/bin/${{ inputs.executable }} --version)"
+        expected='sync-native ${{ inputs.version }}'
+        if [ "$actual" != "$expected" ]; then
+          echo "expected '$expected', got '$actual'" >&2
+          exit 1
+        fi
+        if [ '${{ inputs.libc }}' != 'musl' ]; then
+          npm install \
+            --prefix .release/packed-smoke/install \
+            --ignore-scripts \
+            --no-package-lock \
+            --omit=optional \
+            "$PWD/.release/packed/$platform_tgz" \
+            "$PWD/.release/packed/$launcher_tgz"
+          launcher_actual="$(node .release/packed-smoke/install/node_modules/orez-sync-native/bin/sync-native.cjs --version)"
+          if [ "$launcher_actual" != "$expected" ]; then
+            echo "expected launcher '$expected', got '$launcher_actual'" >&2
+            exit 1
+          fi
+        fi
+
     - name: Publish platform npm package
       shell: bash
       run: |

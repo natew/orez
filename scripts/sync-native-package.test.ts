@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   cpSync,
@@ -76,9 +76,42 @@ describe('sync-native npm packages', () => {
     expect(launcherManifest.version).toBe(version)
     expect(platformManifest.orezSourceCommit).toBe('abc123')
     expect(launcherManifest.orezSourceCommit).toBe('abc123')
+    expect(readFileSync(resolve(platformDir, 'LICENSES.txt'), 'utf8')).toBe(
+      readFileSync('LICENSES.txt', 'utf8')
+    )
     expect(new Set(Object.values(launcherManifest.optionalDependencies))).toEqual(
       new Set([version])
     )
+  })
+
+  it('rejects a stale platform package resolved beside a newer launcher', () => {
+    const platform = currentSyncNativePlatform()
+    if (!platform || platform.os === 'win32') return
+
+    const temporary = mkdtempSync(resolve(tmpdir(), 'orez-sync-native-stale-'))
+    const fakeBinary = resolve(temporary, 'fake-sync-native')
+    writeFileSync(fakeBinary, '#!/bin/sh\nexit 0\n')
+    chmodSync(fakeBinary, 0o755)
+    const platformDir = resolve(
+      temporary,
+      'node_modules',
+      ...platform.npmPackage.split('/')
+    )
+    preparePlatformPackage(platform.id, fakeBinary, platformDir)
+    const platformManifestPath = resolve(platformDir, 'package.json')
+    const platformManifest = JSON.parse(readFileSync(platformManifestPath, 'utf8'))
+    platformManifest.version = '0.0.9'
+    writeFileSync(platformManifestPath, JSON.stringify(platformManifest, null, 2) + '\n')
+    const launcherDir = resolve(temporary, 'node_modules/orez-sync-native')
+    prepareLauncherPackage(launcherDir)
+
+    const result = spawnSync(
+      process.execPath,
+      [resolve(launcherDir, 'bin/sync-native.cjs'), '--version'],
+      { encoding: 'utf8' }
+    )
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('is 0.0.9, expected 0.1.0')
   })
 
   it('prepares package-name bootstraps without consuming a release version', () => {

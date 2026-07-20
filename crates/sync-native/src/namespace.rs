@@ -517,7 +517,9 @@ impl Manager {
         }
         let mut outcome = SweepOutcome::default();
         outcome.evicted = self.evict_idle(policy.idle_ttl());
-        self.sweep_files(policy, now, &mut outcome);
+        if policy.deletes_files() {
+            self.sweep_files(policy, now, &mut outcome);
+        }
         outcome
     }
 

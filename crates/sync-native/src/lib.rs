@@ -50,6 +50,13 @@ impl AuthError {
         }
     }
 
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: 403,
+            message: message.into(),
+        }
+    }
+
     pub fn upstream(message: impl Into<String>) -> Self {
         Self {
             status: 502,
@@ -385,6 +392,7 @@ impl SyncNativeHost {
         let retention = config.retention;
         manager.retain(&retention, SystemTime::now()).emit();
 
+        let admin_token = security.admin_token.clone();
         let state = Arc::new(server::AppState::new(
             manager.clone(),
             wake::WakeRegistry::new(),
@@ -392,8 +400,7 @@ impl SyncNativeHost {
             config.authenticate,
             config.authorize_wake,
             config.query_resolution,
-            security.admin_token.clone(),
-            security.allowed_origins,
+            security,
         ));
 
         let router = server::build_router(state.clone());
@@ -401,7 +408,7 @@ impl SyncNativeHost {
         Self {
             router,
             state,
-            admin_token: security.admin_token,
+            admin_token,
             manager,
             retention,
         }

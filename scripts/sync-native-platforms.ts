@@ -90,7 +90,10 @@ export function syncNativeMatrix(): string {
 export function renderSyncNativeShim(): string {
   const packages = SYNC_NATIVE_PLATFORMS.map(
     ({ os, cpu, libc, npmPackage, executable }) =>
-      `  '${os}-${cpu}${libc ? `-${libc}` : ''}': '${npmPackage}/bin/${executable}',`
+      `  '${os}-${cpu}${libc ? `-${libc}` : ''}': {
+    packageName: '${npmPackage}',
+    binary: '${npmPackage}/bin/${executable}',
+  },`
   ).join('\n')
 
   return `#!/usr/bin/env node
@@ -110,16 +113,26 @@ const libc =
       : 'musl'
     : undefined
 const key = [process.platform, process.arch, libc].filter(Boolean).join('-')
-const packageBinary = PACKAGES[key]
+const selected = PACKAGES[key]
 
-if (!packageBinary) {
+if (!selected) {
   console.error(\`sync-native does not support \${key}\`)
   process.exit(1)
 }
 
+const load = createRequire(__filename)
 let binary
 try {
-  binary = createRequire(__filename).resolve(packageBinary)
+  const launcherVersion = load('../package.json').version
+  const platformVersion = load(\`\${selected.packageName}/package.json\`).version
+  if (platformVersion !== launcherVersion) {
+    console.error(
+      \`sync-native binary package for \${key} is \${platformVersion}, expected \${launcherVersion}. \` +
+        'Reinstall orez-sync-native so its optional dependencies match.'
+    )
+    process.exit(1)
+  }
+  binary = load.resolve(selected.binary)
 } catch (error) {
   console.error(
     \`sync-native binary package for \${key} is missing. \` +

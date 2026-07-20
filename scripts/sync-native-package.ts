@@ -72,6 +72,9 @@ export function validateSyncNativePackages(version = syncNativeVersion()): void 
     if ((manifest.libc?.[0] ?? undefined) !== platform.libc) {
       throw new Error(`${platform.npmPackage} libc metadata is incorrect`)
     }
+    if (!manifest.files?.includes('LICENSES.txt')) {
+      throw new Error(`${platform.npmPackage} does not ship LICENSES.txt`)
+    }
   }
 }
 
@@ -95,6 +98,7 @@ export function preparePlatformPackage(
   if (sourceCommit) manifest.orezSourceCommit = sourceCommit
   writeJson(resolve(outputDir, 'package.json'), manifest)
   cpSync(resolve(root, 'LICENSE'), resolve(outputDir, 'LICENSE'))
+  cpSync(resolve(root, 'LICENSES.txt'), resolve(outputDir, 'LICENSES.txt'))
   const destination = resolve(outputDir, 'bin', platform.executable)
   cpSync(binaryPath, destination)
   if (platform.os !== 'win32') chmodSync(destination, 0o755)

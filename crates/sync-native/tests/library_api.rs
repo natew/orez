@@ -452,10 +452,13 @@ async fn query_resolution_preserves_pull_arrival_order() {
     let resume = Arc::new(tokio::sync::Notify::new());
     let signal_started = started.clone();
     let wait_for_resume = resume.clone();
-    let resolver: ResolveQueriesFn = Arc::new(move |_queries, _headers, _user_id, _namespace| {
+    let resolver: ResolveQueriesFn = Arc::new(move |queries, _headers, _user_id, _namespace| {
         let signal_started = signal_started.clone();
         let wait_for_resume = wait_for_resume.clone();
         Box::pin(async move {
+            if queries.is_empty() {
+                return Ok(resolved(Vec::new(), 1));
+            }
             signal_started.notify_one();
             wait_for_resume.notified().await;
             Ok(resolved(vec![item_query(None)], 1))
@@ -528,6 +531,84 @@ async fn query_resolution_preserves_pull_arrival_order() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stored["rows"][0]["desires"], json!(0));
     assert_eq!(stored["rows"][0]["version"], json!(2));
+}
+
+#[tokio::test]
+async fn slow_query_transform_does_not_block_another_client_group() {
+    let blocked_started = Arc::new(tokio::sync::Notify::new());
+    let blocked_resume = Arc::new(tokio::sync::Notify::new());
+    let independent_started = Arc::new(tokio::sync::Notify::new());
+    let resolver: ResolveQueriesFn = Arc::new({
+        let blocked_started = blocked_started.clone();
+        let blocked_resume = blocked_resume.clone();
+        let independent_started = independent_started.clone();
+        move |queries, _headers, _claims, _namespace| {
+            let blocked_started = blocked_started.clone();
+            let blocked_resume = blocked_resume.clone();
+            let independent_started = independent_started.clone();
+            Box::pin(async move {
+                if queries[0].name == "item.blocked" {
+                    blocked_started.notify_one();
+                    blocked_resume.notified().await;
+                } else {
+                    independent_started.notify_one();
+                }
+                Ok(resolved(vec![item_query(None)], 1))
+            })
+        }
+    });
+    let mut config = custom_config();
+    config.query_aware = true;
+    config.query_resolution = Some(QueryResolution { resolve: resolver });
+    let tmp = tempfile::tempdir().unwrap();
+    let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
+
+    let request = |client: &str, group: &str, name: &str, hash: &str| {
+        json!({
+            "clientID": client,
+            "clientGroupID": group,
+            "cookie": null,
+            "queries": {
+                "version": 1,
+                "patch": [{
+                    "op": "put",
+                    "hash": hash,
+                    "name": name,
+                    "args": [],
+                }],
+            },
+        })
+    };
+    let first_router = router.clone();
+    let first_body = request("client-one", "group-one", "item.blocked", "q-one");
+    let first = tokio::spawn(async move {
+        send(
+            &first_router,
+            pull_req("parallel-group-ns", &first_body, "Bearer user-1"),
+        )
+        .await
+    });
+    blocked_started.notified().await;
+
+    let second_router = router.clone();
+    let second_body = request("client-two", "group-two", "item.all", "q-two");
+    let second = tokio::spawn(async move {
+        send(
+            &second_router,
+            pull_req("parallel-group-ns", &second_body, "Bearer user-1"),
+        )
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        independent_started.notified(),
+    )
+    .await
+    .expect("another client group should resolve independently");
+    blocked_resume.notify_one();
+
+    assert_eq!(first.await.unwrap().0, StatusCode::OK);
+    assert_eq!(second.await.unwrap().0, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -647,7 +728,7 @@ async fn transform_version_bump_revokes_stored_query_without_a_client_patch() {
 }
 
 #[tokio::test]
-async fn admin_invalidation_refreshes_the_cached_query_transform_version() {
+async fn unchanged_pulls_observe_query_transform_version_changes() {
     let resolver_state = Arc::new(Mutex::new((1_u64, 0_usize)));
     let captured = resolver_state.clone();
     let resolver: ResolveQueriesFn = Arc::new(move |queries, _headers, _claims, _namespace| {
@@ -683,7 +764,7 @@ async fn admin_invalidation_refreshes_the_cached_query_transform_version() {
     });
     let (status, initial_response) = send(
         &router,
-        pull_req("invalidate-version-ns", &initial, "Bearer user-1"),
+        pull_req("live-version-ns", &initial, "Bearer user-1"),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -696,37 +777,25 @@ async fn admin_invalidation_refreshes_the_cached_query_transform_version() {
     });
     let (status, unchanged_response) = send(
         &router,
-        pull_req("invalidate-version-ns", &unchanged, "Bearer user-1"),
+        pull_req("live-version-ns", &unchanged, "Bearer user-1"),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(*resolver_state.lock().unwrap(), (1, 1));
+    assert_eq!(*resolver_state.lock().unwrap(), (1, 2));
 
     resolver_state.lock().unwrap().0 = 2;
-    let invalidate = Request::builder()
-        .method("POST")
-        .uri("/invalidate-version-ns/admin/invalidate")
-        .header("x-admin-key", ADMIN_TOKEN)
-        .body(axum::body::Body::empty())
-        .unwrap();
-    assert_eq!(send(&router, invalidate).await.0, StatusCode::OK);
-
-    let after_invalidation = json!({
+    let after_version_change = json!({
         "clientID": "query-client",
         "clientGroupID": "query-group",
         "cookie": unchanged_response["cookie"],
     });
     let (status, response) = send(
         &router,
-        pull_req(
-            "invalidate-version-ns",
-            &after_invalidation,
-            "Bearer user-1",
-        ),
+        pull_req("live-version-ns", &after_version_change, "Bearer user-1"),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(*resolver_state.lock().unwrap(), (2, 2));
+    assert_eq!(*resolver_state.lock().unwrap(), (2, 3));
     assert_eq!(
         response["gotQueries"],
         json!({ "version": 1, "patch": [{ "op": "del", "hash": "q-all" }] })
@@ -890,6 +959,38 @@ async fn admin_lists_persisted_namespaces_in_lexical_order() {
         response,
         json!({ "namespaces": ["control", "project-a", "project-z"] })
     );
+}
+
+#[tokio::test]
+async fn auth_rejection_cannot_create_a_namespace_replica() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = custom_config();
+    config.authenticate = Arc::new(|_headers, namespace| {
+        Box::pin(async move {
+            if namespace == "forbidden" {
+                return Err(AuthError::forbidden("namespace forbidden"));
+            }
+            Ok(AuthClaims::new("user-1"))
+        })
+    });
+    let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
+
+    let body = json!({
+        "clientID": "client",
+        "clientGroupID": "group",
+        "cookie": null,
+    });
+    let (status, _) = send(&router, pull_req("forbidden", &body, "Bearer user-1")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let request = Request::builder()
+        .uri("/admin/namespaces")
+        .header("x-admin-key", ADMIN_TOKEN)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, response) = send(&router, request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response, json!({ "namespaces": [] }));
 }
 
 #[tokio::test]

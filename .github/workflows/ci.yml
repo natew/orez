@@ -247,6 +247,19 @@ jobs:
           restore-keys: |
             rust-${{ runner.os }}-
 
+      - name: install pinned Rust license generator
+        run: cargo install cargo-about --version 0.9.1 --locked --features cli
+
+      - name: check sync-native license bundle
+        run: |
+          cargo about generate \
+            --locked \
+            --manifest-path crates/sync-native/Cargo.toml \
+            --fail \
+            --output-file /tmp/sync-native-LICENSES.txt \
+            scripts/sync-native-licenses.hbs
+          cmp LICENSES.txt /tmp/sync-native-LICENSES.txt
+
       # the whole workspace must compile (the native host depends on sync-core
       # and sync-wasm building); per-crate fmt gates stay owned by each track.
       - name: build workspace

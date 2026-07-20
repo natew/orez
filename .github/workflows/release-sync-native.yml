@@ -54,6 +54,9 @@ jobs:
           fi
           version="$(bun scripts/sync-native-package.ts version)"
           bun scripts/sync-native-package.ts check "$version"
+          bun test \
+            scripts/sync-native-package.test.ts \
+            scripts/release-package-order.test.ts
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "matrix=$(bun scripts/sync-native-package.ts matrix darwin-arm64)" >> "$GITHUB_OUTPUT"
         env:
@@ -92,6 +95,11 @@ jobs:
             .release/launcher \
             "$version" \
             '${{ github.sha }}'
+          mkdir -p .release/packed
+          npm pack \
+            .release/launcher \
+            --pack-destination .release/packed \
+            --silent
           if npm view "orez-sync-native@$version" version --json >/dev/null 2>&1; then
             published_commit="$(npm view "orez-sync-native@$version" orezSourceCommit)"
             if [ "$published_commit" != '${{ github.sha }}' ]; then

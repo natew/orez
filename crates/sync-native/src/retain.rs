@@ -28,6 +28,7 @@ use serde_json::json;
 #[derive(Clone, Copy)]
 pub struct RetentionPolicy {
     enabled: bool,
+    delete_files: bool,
     /// Delete a replica whose newest file has not been modified within this
     /// window. An abandoned namespace's replica ages out even under budget.
     max_age: Duration,
@@ -48,6 +49,7 @@ impl RetentionPolicy {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
+            delete_files: false,
             max_age: Duration::ZERO,
             max_bytes: 0,
             idle_ttl: Duration::ZERO,
@@ -68,8 +70,22 @@ impl RetentionPolicy {
     ) -> Self {
         Self {
             enabled: true,
+            delete_files: true,
             max_age,
             max_bytes,
+            idle_ttl,
+            interval,
+        }
+    }
+
+    /// Close idle worker threads and SQLite connections without ever deleting
+    /// a namespace file. Safe for authoritative standalone databases.
+    pub fn workers(idle_ttl: Duration, interval: Duration) -> Self {
+        Self {
+            enabled: true,
+            delete_files: false,
+            max_age: Duration::ZERO,
+            max_bytes: 0,
             idle_ttl,
             interval,
         }
@@ -81,6 +97,10 @@ impl RetentionPolicy {
 
     pub(crate) fn idle_ttl(&self) -> Duration {
         self.idle_ttl
+    }
+
+    pub(crate) fn deletes_files(&self) -> bool {
+        self.delete_files
     }
 
     pub(crate) fn interval(&self) -> Duration {
@@ -110,7 +130,7 @@ pub fn plan_deletions(
     policy: &RetentionPolicy,
     now: SystemTime,
 ) -> Vec<usize> {
-    if !policy.enabled {
+    if !policy.delete_files {
         return Vec::new();
     }
 
@@ -279,6 +299,19 @@ mod tests {
     #[test]
     fn default_is_disabled() {
         assert!(!RetentionPolicy::default().is_enabled());
+    }
+
+    #[test]
+    fn worker_eviction_never_deletes_files() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let files = vec![ReplicaFile {
+            mtime: at(now, Duration::from_secs(365 * 24 * 3600)),
+            size: u64::MAX,
+        }];
+        let policy = RetentionPolicy::workers(Duration::from_secs(30), Duration::from_secs(5));
+        assert!(policy.is_enabled());
+        assert!(!policy.deletes_files());
+        assert!(plan_deletions(&files, &policy, now).is_empty());
     }
 
     #[test]

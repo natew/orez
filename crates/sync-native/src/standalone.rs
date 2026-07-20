@@ -8,7 +8,7 @@ use axum::http::header::{
     CONNECTION, CONTENT_LENGTH, HOST, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER,
     TRANSFER_ENCODING, UPGRADE,
 };
-use axum::http::{HeaderMap, HeaderName};
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -58,7 +58,7 @@ pub struct ServeConfig {
 pub enum Command {
     Help,
     Version,
-    Serve(ServeConfig),
+    Serve(Box<ServeConfig>),
 }
 
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String> {
@@ -149,7 +149,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
     if max_change_rows == 0 {
         return Err("--max-change-rows must be greater than zero".to_string());
     }
-    Ok(Command::Serve(ServeConfig {
+    Ok(Command::Serve(Box::new(ServeConfig {
         schema: PathBuf::from(required("--schema")?),
         init_sql: PathBuf::from(required("--init-sql")?),
         data_dir: PathBuf::from(required("--data-dir")?),
@@ -176,7 +176,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
         allowed_origins,
         retain_changes,
         max_change_rows,
-    }))
+    })))
 }
 
 fn parse_number<T>(value: &str, flag: &str) -> Result<T, String>
@@ -191,7 +191,10 @@ where
 fn loopback_url(value: &str, flag: &str) -> Result<Url, String> {
     let url = Url::parse(value).map_err(|error| format!("invalid {flag}: {error}"))?;
     if url.scheme() != "http"
-        || !matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+        || !matches!(
+            url.host_str(),
+            Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+        )
         || url.port().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -226,23 +229,30 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
             config.admin_token_env
         ));
     }
+    let admin_header = HeaderValue::from_str(&admin_token).map_err(|_| {
+        format!(
+            "environment variable {} is not a valid HTTP header value",
+            config.admin_token_env
+        )
+    })?;
+    prepare_data_dir(&config.data_dir)?;
 
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| format!("failed to build callback client: {error}"))?;
-    let authenticate = callback_auth(client.clone(), config.auth_url.clone(), admin_token.clone());
+    let authenticate = callback_auth(
+        client.clone(),
+        config.auth_url.clone(),
+        admin_header.clone(),
+    );
     let authorize_wake = callback_wake(
         client.clone(),
         config.wake_authorize_url.clone(),
-        admin_token.clone(),
+        admin_header.clone(),
     );
-    let resolve = callback_queries(
-        client,
-        config.query_transform_url.clone(),
-        admin_token.clone(),
-    );
+    let resolve = callback_queries(client, config.query_transform_url.clone(), admin_header);
     let initialize: InitFn = Arc::new(move |db| {
         for statement in &init_sql {
             db.exec(statement, &[]).map_err(|error| error.to_string())?;
@@ -272,12 +282,35 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
             query_aware: true,
             query_resolution: Some(QueryResolution { resolve }),
             admin_tx_lease: crate::DEFAULT_ADMIN_TX_LEASE,
-            retention: RetentionPolicy::disabled(),
+            retention: RetentionPolicy::workers(Duration::from_secs(30), Duration::from_secs(5)),
         },
         config.data_dir,
         security,
     );
     host.run_on(config.host, config.port).await;
+    Ok(())
+}
+
+fn prepare_data_dir(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|error| {
+        format!(
+            "failed to create data directory {}: {error}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                format!(
+                    "failed to secure data directory {}: {error}",
+                    path.display()
+                )
+            },
+        )?;
+    }
     Ok(())
 }
 
@@ -288,7 +321,7 @@ fn read_json(path: &Path, label: &str) -> Result<Value, String> {
         .map_err(|error| format!("invalid JSON in {label} {}: {error}", path.display()))
 }
 
-fn callback_auth(client: Client, url: Url, admin_token: String) -> AuthFn {
+fn callback_auth(client: Client, url: Url, admin_token: HeaderValue) -> AuthFn {
     Arc::new(move |headers, namespace| {
         let client = client.clone();
         let url = url.clone();
@@ -304,6 +337,9 @@ fn callback_auth(client: Client, url: Url, admin_token: String) -> AuthFn {
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(AuthError::unauthorized("unauthorized"));
             }
+            if response.status() == reqwest::StatusCode::FORBIDDEN {
+                return Err(AuthError::forbidden("forbidden"));
+            }
             if !response.status().is_success() {
                 return Err(AuthError::upstream(format!(
                     "auth callback returned {}",
@@ -318,7 +354,7 @@ fn callback_auth(client: Client, url: Url, admin_token: String) -> AuthFn {
     })
 }
 
-fn callback_queries(client: Client, url: Url, admin_token: String) -> ResolveQueriesFn {
+fn callback_queries(client: Client, url: Url, admin_token: HeaderValue) -> ResolveQueriesFn {
     Arc::new(move |queries, headers, claims, namespace| {
         let client = client.clone();
         let url = url.clone();
@@ -416,7 +452,7 @@ fn callback_queries(client: Client, url: Url, admin_token: String) -> ResolveQue
     })
 }
 
-fn callback_wake(client: Client, url: Url, admin_token: String) -> AuthorizeWakeFn {
+fn callback_wake(client: Client, url: Url, admin_token: HeaderValue) -> AuthorizeWakeFn {
     Arc::new(move |namespace, token| {
         let client = client.clone();
         let url = url.clone();
@@ -446,7 +482,7 @@ fn callback_wake(client: Client, url: Url, admin_token: String) -> AuthorizeWake
     })
 }
 
-fn callback_headers(source: &HeaderMap, admin_token: &str) -> HeaderMap {
+fn callback_headers(source: &HeaderMap, admin_token: &HeaderValue) -> HeaderMap {
     static OMIT: [HeaderName; 9] = [
         HOST,
         CONNECTION,
@@ -472,12 +508,7 @@ fn callback_headers(source: &HeaderMap, admin_token: &str) -> HeaderMap {
         }
         headers.append(name, value.clone());
     }
-    headers.insert(
-        "x-admin-key",
-        admin_token
-            .parse()
-            .expect("validated admin token is a valid header value"),
-    );
+    headers.insert("x-admin-key", admin_token.clone());
     headers
 }
 
@@ -580,6 +611,28 @@ mod tests {
     }
 
     #[test]
+    fn accepts_ipv6_loopback_callbacks() {
+        let mut args = required_args();
+        let index = args.iter().position(|arg| arg == "--auth-url").unwrap() + 1;
+        args[index] = "http://[::1]:3000/auth".to_string();
+        assert!(matches!(parse_args(args), Ok(Command::Serve(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_directory_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("nested/data");
+        prepare_data_dir(&data_dir).unwrap();
+        assert_eq!(
+            std::fs::metadata(data_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
     fn accepts_only_canonical_browser_origins() {
         let mut args = required_args();
         args.extend([
@@ -666,6 +719,7 @@ mod tests {
                     },
                 ),
             )
+            .route("/forbidden", post(|| async { StatusCode::FORBIDDEN }))
             .with_state(seen.clone());
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -689,7 +743,7 @@ mod tests {
         let authenticate = callback_auth(
             client.clone(),
             Url::parse(&format!("http://127.0.0.1:{port}/auth")).unwrap(),
-            admin_token.to_string(),
+            admin_token.parse().unwrap(),
         );
         let claims = authenticate(headers.clone(), "project-one".to_string())
             .await
@@ -700,7 +754,7 @@ mod tests {
         let resolve = callback_queries(
             client.clone(),
             Url::parse(&format!("http://127.0.0.1:{port}/query")).unwrap(),
-            admin_token.to_string(),
+            admin_token.parse().unwrap(),
         );
         let resolved = resolve(
             vec![
@@ -724,9 +778,9 @@ mod tests {
         assert_eq!(resolved.asts[1]["table"], "second");
 
         let authorize_wake = callback_wake(
-            client,
+            client.clone(),
             Url::parse(&format!("http://127.0.0.1:{port}/wake")).unwrap(),
-            admin_token.to_string(),
+            admin_token.parse().unwrap(),
         );
         assert_eq!(
             authorize_wake("project-one".to_string(), None)
@@ -764,6 +818,19 @@ mod tests {
         assert_eq!(
             wake_body,
             json!({ "namespace": "project-one", "token": "signed-capability" })
+        );
+
+        let forbidden_auth = callback_auth(
+            client,
+            Url::parse(&format!("http://127.0.0.1:{port}/forbidden")).unwrap(),
+            admin_token.parse().unwrap(),
+        );
+        assert_eq!(
+            forbidden_auth(HeaderMap::new(), "project-two".to_string())
+                .await
+                .unwrap_err()
+                .status,
+            403
         );
         server.abort();
     }

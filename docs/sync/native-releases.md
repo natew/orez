@@ -47,21 +47,28 @@ the supervisor reports ready. Supervisors discover those namespaces through
 `{ "namespaces": [...] }` in lexical order. The on-disk filename layout is not
 an application contract.
 
+The standalone process creates and resets `--data-dir` to owner-only mode
+(`0700`) on Unix. On Windows, choose a user-private application directory whose
+ACL is inherited by the namespace databases.
+
 All callback URLs must be explicit-port `http://` URLs on `localhost`,
 `127.0.0.1`, or `[::1]`; redirects are disabled. Orez strips an inbound
 `x-admin-key`, attaches the process-owned key, and uses these contracts:
 
 - Auth: POST `{ "namespace": "..." }` while forwarding the original request
-  headers. HTTP 401 rejects the request. HTTP 200 returns a NormalizedClaims
-  object with a non-empty string `userID`; other claims are preserved.
+  headers. The application must authorize both the session and that exact
+  namespace before returning claims; HTTP 401 or 403 rejects the request before
+  Orez creates or opens its replica. HTTP 200 returns a NormalizedClaims object
+  with a non-empty string `userID`; other claims are preserved.
 - Query transform: POST the standard Zero body
   `["transform", [{ "id", "name", "args" }]]`, preserving request order and
   forwarding the original auth headers. Orez also attaches trusted
   `x-orez-namespace` and `x-orez-user-id` headers. The response is
   `{ "queryTransformVersion", "queries": [...] }`; each query result contains
   the matching `id` and either `ast` or `error`. The returned version is stored
-  with the AST and participates in invalidation. Orez caches the version per
-  namespace and user, and clears that cache on admin invalidation.
+  with the AST and participates in invalidation. Orez asks for the current
+  version on every pull, including pulls with no new named queries, so a policy
+  version change revokes stored ASTs without waiting for a client query patch.
 - Wake: POST `{ "namespace", "token" }`, where `token` is the WebSocket's
   `wakeToken` query value. Only HTTP 204 permits the upgrade.
 
@@ -86,6 +93,16 @@ The authoritative target list is `scripts/sync-native-platforms.ts`:
 
 GNU Linux packages target glibc 2.17 through `cargo-zigbuild`. Musl packages
 remain statically linked to musl.
+
+Every platform npm package contains `LICENSE` for Orez and `LICENSES.txt` for
+the exact Rust dependency graph used to build the executable. Embedded hosts
+must copy both files beside their distributed binary. Regenerate the latter
+with cargo-about 0.9.1 after changing Rust dependencies:
+
+```sh
+cargo about generate --locked --manifest-path crates/sync-native/Cargo.toml \
+  --fail --output-file LICENSES.txt scripts/sync-native-licenses.hbs
+```
 
 ## Release flow
 
