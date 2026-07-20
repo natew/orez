@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 
 import * as zero from '@rocicorp/zero'
-import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { deriveDataMembership, generate, generateDrizzleSchemaFile } from './generate'
 
@@ -27,6 +27,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   rmSync(testDir, { recursive: true, force: true })
 })
 
@@ -311,6 +312,47 @@ export const userPublic = sqliteTable('user_public', { id: text(), projectId: te
     expect(manifest).toContain(
       `defaultVisibility: (value: string) => ({ column: "projectId", value })`
     )
+  })
+
+  test('derives single-file namespaces from data exports', async () => {
+    writeFileSync(
+      join(dataDir(), 'server.ts'),
+      `export const serverRows = () => zql.server`
+    )
+    writeFileSync(
+      join(dataDir(), 'types.ts'),
+      `export const formatRow = (value: string) => value`
+    )
+    writeFileSync(
+      join(dataDir(), 'auth.ts'),
+      `export function authId(auth: { id: string }) { return auth.id }`
+    )
+
+    await expect(deriveDataMembership({ dir: dataDir() })).resolves.toEqual({
+      instances: {
+        default: {
+          tables: ['server'],
+          syncTables: ['server'],
+          scope: null,
+        },
+      },
+      allTables: ['server'],
+    })
+  })
+
+  test('warns once and ignores an unparseable non-data file', async () => {
+    writeFileSync(join(dataDir(), 'post.ts'), `export const posts = () => zql.post`)
+    writeFileSync(join(dataDir(), 'types.ts'), `export type Broken = {`)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    await expect(deriveDataMembership({ dir: dataDir() })).resolves.toMatchObject({
+      allTables: ['post'],
+    })
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn).toHaveBeenCalledWith(
+      '[on-zero] ignoring data/types.ts: no recognized data exports'
+    )
+    warn.mockRestore()
   })
 
   test('rejects a relation that crosses instance ownership', async () => {

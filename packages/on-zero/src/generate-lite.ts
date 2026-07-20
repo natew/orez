@@ -95,6 +95,8 @@ export type LiteParsedFile = {
   queries: LiteQueryExport[]
   relations?: LiteRelationInfo[]
   tables?: LiteTableInfo[]
+  // parser syntax failure. the membership pass warns and ignores this file.
+  parseError?: string
 }
 
 // the parser function signature the caller provides. pure: given source text
@@ -168,7 +170,11 @@ type LiteInstance = {
   namespaces: LiteNamespace[]
 }
 
-function discoverLiteLayout(files: Record<string, string>, baseDir: string) {
+function discoverLiteLayout(
+  files: Record<string, string>,
+  baseDir: string,
+  parse: LiteParseFn
+) {
   const paths = Object.keys(files)
   const instancePaths = paths
     .filter((path) => path.startsWith(`${baseDir}/`) && path.endsWith('/instance.ts'))
@@ -193,6 +199,30 @@ function discoverLiteLayout(files: Record<string, string>, baseDir: string) {
       (path) => baseName(path) !== 'instance.ts'
     )
     for (const path of directFiles) {
+      const source = files[path]!
+      let parsed: LiteParsedFile
+      try {
+        parsed = parse(source, path)
+      } catch {
+        console.warn(
+          `[on-zero] ignoring ${path.slice(baseDir.lastIndexOf('/') + 1)}: no recognized data exports`
+        )
+        continue
+      }
+      if (parsed.parseError) {
+        console.warn(
+          `[on-zero] ignoring ${path.slice(baseDir.lastIndexOf('/') + 1)}: no recognized data exports`
+        )
+        continue
+      }
+      const hasDataExport =
+        parsed.queries.length > 0 ||
+        parsed.mutations.length > 0 ||
+        (parsed.tables?.length ?? 0) > 0 ||
+        /export\s+const\s+(?:mutate|schema|where)\s*=\s*(?:mutations|serverWhere|table)\s*\(/.test(
+          source
+        )
+      if (!hasDataExport) continue
       instance.namespaces.push({
         name: baseName(path, '.ts'),
         instance: instance.name,
@@ -253,7 +283,7 @@ function discoverLiteLayout(files: Record<string, string>, baseDir: string) {
 export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   const { files, parse } = opts
   const baseDir = stripTrailingSlash(opts.dir)
-  const instances = discoverLiteLayout(files, baseDir)
+  const instances = discoverLiteLayout(files, baseDir, parse)
   const namespaces = instances.flatMap((instance) => instance.namespaces)
   const modelNamespaces = namespaces.filter(
     (namespace): namespace is LiteNamespace & { modelPath: string } =>

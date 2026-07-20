@@ -47,6 +47,9 @@ type ClientMap<Instances extends Record<string, ZeroInstanceManifestEntry>> = {
   [Name in keyof Instances]: ClientFor<Instances[Name]>
 }
 
+type ClientUnion<Instances extends Record<string, ZeroInstanceManifestEntry>> =
+  ClientMap<Instances>[keyof Instances]
+
 export function createZeroClients<
   const Instances extends Record<string, ZeroInstanceManifestEntry>,
 >(instances: Instances) {
@@ -79,11 +82,12 @@ export function createZeroClients<
         : createZeroClientWithDirectQueries(options)
   }
 
-  const orderedClients = names.map((name) => clients[name]!) as [
-    ReturnType<typeof createZeroClientInternal>,
-    ...ReturnType<typeof createZeroClientInternal>[],
-  ]
   const typedClients = clients as ClientMap<Instances>
+  // names is checked non-empty above. retain the union of the concrete client
+  // types so combineZeroClients can intersect every instance surface.
+  const orderedClients = names.map(
+    (name) => typedClients[name as keyof Instances]
+  ) as unknown as [ClientUnion<Instances>, ...ClientUnion<Instances>[]]
   const providers = Object.fromEntries(
     names.map((name) => [name, clients[name]!.ProvideZero])
   ) as { [Name in keyof Instances]: ClientMap<Instances>[Name]['ProvideZero'] }

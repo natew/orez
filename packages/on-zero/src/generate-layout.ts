@@ -93,7 +93,107 @@ function collectInstanceDirs(baseDir: string): string[] {
   return found.sort()
 }
 
+function hasParseErrors(source: ts.SourceFile): boolean {
+  // typescript keeps syntax diagnostics on SourceFile but does not expose them
+  // in its public type.
+  return Boolean(
+    (
+      source as unknown as {
+        parseDiagnostics?: readonly unknown[]
+      }
+    ).parseDiagnostics?.length
+  )
+}
+
+function hasNamespaceExports(
+  ts: typeof import('typescript'),
+  baseDir: string,
+  path: string
+): boolean {
+  const source = ts.createSourceFile(
+    path,
+    readFileSync(path, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true
+  )
+  if (hasParseErrors(source)) {
+    const displayPath = relative(dirname(baseDir), path).split(sep).join('/')
+    console.warn(`[on-zero] ignoring ${displayPath}: no recognized data exports`)
+    return false
+  }
+  const functions = new Map<string, ts.ConciseBody>()
+  const exported = new Set<string>()
+
+  for (const statement of source.statements) {
+    if (ts.isVariableStatement(statement)) {
+      const isExported = statement.modifiers?.some(
+        (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
+      )
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue
+        const name = declaration.name.text
+        const initializer = declaration.initializer
+        if (isExported && ts.isCallExpression(initializer)) {
+          const initializerText = initializer.getText(source)
+          if (
+            (name === 'mutate' && initializerText.startsWith('mutations(')) ||
+            (name === 'where' && initializerText.startsWith('serverWhere(')) ||
+            (name === 'schema' && initializerText.startsWith('table('))
+          ) {
+            return true
+          }
+        }
+        if (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) {
+          functions.set(name, initializer.body)
+          if (isExported) exported.add(name)
+        }
+      }
+      continue
+    }
+    if (ts.isFunctionDeclaration(statement) && statement.name && statement.body) {
+      functions.set(statement.name.text, statement.body)
+      if (
+        statement.modifiers?.some(
+          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword
+        )
+      ) {
+        exported.add(statement.name.text)
+      }
+    }
+  }
+
+  const visiting = new Set<string>()
+  const reachesQuery = (node: ts.Node): boolean => {
+    if (ts.isPropertyAccessExpression(node)) {
+      if (ts.isIdentifier(node.expression) && node.expression.text === 'zql') return true
+      if (
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === 'query'
+      )
+        return true
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const name = node.expression.text
+      const helper = functions.get(name)
+      if (helper && !visiting.has(name)) {
+        visiting.add(name)
+        const found = reachesQuery(helper)
+        visiting.delete(name)
+        if (found) return true
+      }
+    }
+    let found = false
+    ts.forEachChild(node, (child) => {
+      if (!found && reachesQuery(child)) found = true
+    })
+    return found
+  }
+
+  return [...exported].some((name) => reachesQuery(functions.get(name)!))
+}
+
 function discoverNamespaces(
+  ts: typeof import('typescript'),
   baseDir: string,
   instance: DataInstance,
   instanceDirs: Set<string>
@@ -105,6 +205,7 @@ function discoverNamespaces(
     if (entry.isFile()) {
       if (!isSourceFile(entry.name) || entry.name === 'instance.ts') continue
       const path = resolve(instance.dir, entry.name)
+      if (!hasNamespaceExports(ts, baseDir, path)) continue
       const name = basename(entry.name, '.ts')
       namespaces.push({
         name,
@@ -410,7 +511,7 @@ export function discoverDataLayout(
   }
 
   for (const instance of instances) {
-    instance.namespaces = discoverNamespaces(baseDir, instance, instanceDirSet)
+    instance.namespaces = discoverNamespaces(ts, baseDir, instance, instanceDirSet)
   }
   const namespaces = instances.flatMap((instance) => instance.namespaces)
   const owners = new Map<string, string>()

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { generateLite } from './generate-lite'
 
@@ -19,6 +19,10 @@ function makeParse(table: Record<string, LiteParsedFile>): LiteParseFn {
 }
 
 const DIR = '/proj/src/data'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 describe('generateLite', () => {
   test('emits models.ts, syncedMutations.ts, and README.md from inline types', () => {
@@ -215,7 +219,7 @@ describe('generateLite', () => {
 
   test('falls back to v.unknown() for type references', () => {
     const files: Record<string, string> = {
-      [`${DIR}/post.ts`]: '// fake',
+      [`${DIR}/post.ts`]: `export const allPosts = () => zql.post`,
     }
 
     const fixtures: Record<string, LiteParsedFile> = {
@@ -454,6 +458,57 @@ describe('generateLite', () => {
 
     const models = result.files['models.ts']!
     expect(models).toContain("from '../post/mutations'")
+  })
+
+  test('derives single-file namespaces from data exports', () => {
+    const files = {
+      [`${DIR}/server.ts`]: `export const serverRows = () => zql.server`,
+      [`${DIR}/types.ts`]: `export const formatRow = (value: string) => value`,
+    }
+    const result = generateLite({
+      files,
+      dir: DIR,
+      parse: makeParse({
+        [`${DIR}/server.ts`]: {
+          mutations: [],
+          queries: [{ name: 'serverRows', paramTypeText: null }],
+        },
+        [`${DIR}/types.ts`]: {
+          mutations: [],
+          queries: [],
+        },
+      }),
+    })
+
+    expect(result.modelCount).toBe(1)
+    expect(result.queryCount).toBe(1)
+  })
+
+  test('warns once and ignores an unparseable non-data file', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = generateLite({
+      files: {
+        [`${DIR}/server.ts`]: `export const serverRows = () => zql.server`,
+        [`${DIR}/types.ts`]: `export type Broken = {`,
+      },
+      dir: DIR,
+      parse: (source, path) => {
+        if (path.endsWith('/types.ts')) throw new Error('parse failed')
+        return {
+          mutations: [],
+          queries: source.includes('zql.server')
+            ? [{ name: 'serverRows', paramTypeText: null }]
+            : [],
+        }
+      },
+    })
+
+    expect(result.modelCount).toBe(1)
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn).toHaveBeenCalledWith(
+      '[on-zero] ignoring data/types.ts: no recognized data exports'
+    )
+    warn.mockRestore()
   })
 
   test('rejects the removed top-level layout', () => {
