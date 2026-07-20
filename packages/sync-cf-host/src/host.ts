@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers'
+import { createSyncExecutor } from 'orez-sync-executor'
 
 import { validatePullCaps, validateSyncHostConfig } from './config.js'
-import { createPostCommitEffects } from './post-commit.js'
 import { createQueryCompiler } from './query-compiler.js'
 import {
   decodeSqlParams,
@@ -9,12 +9,10 @@ import {
   SqlStorageMutatorTransaction,
   SqlStorageSyncDb,
 } from './sql-storage-adapter.js'
-import { isMutationApplicationError } from './types.js'
 import {
   engine_apply_snapshot_changes,
   engine_apply_snapshot_page,
   engine_apply_upstream,
-  engine_assemble_push_response,
   engine_begin_snapshot_generation,
   engine_finalize,
   engine_finalize_snapshot_generation,
@@ -28,7 +26,6 @@ import {
   engine_prune,
   engine_push_validate,
   engine_read_snapshot_progress,
-  engine_record_app_error,
   engine_state,
   engine_version,
 } from './wasm.js'
@@ -39,13 +36,15 @@ import {
   shouldRetryDelegatedPush,
 } from './write-safeguards.js'
 
+import type { PullCaps, SyncHostConfig, SyncHostEnv } from './types.js'
+import type { Schema } from '@rocicorp/zero'
 import type {
+  ApplicationDatabase,
+  ApplicationTransaction,
   JsonValue,
   NormalizedClaims,
-  PullCaps,
-  SyncHostConfig,
-  SyncHostEnv,
-} from './types.js'
+  SyncExecutor,
+} from 'orez-sync-executor'
 
 const NAMESPACE_HEADER = 'x-orez-sync-namespace'
 const UPSTREAM_PATH_HEADER = 'x-orez-sync-upstream-path'
@@ -68,12 +67,6 @@ type PushPlan =
   | { kind: 'process'; clientGroupID: string; mutations: PushMutation[] }
 
 type Preflight = { kind: 'applied' } | { kind: 'replay'; expected: string }
-
-type MutationResult = {
-  clientID: string
-  id: string
-  result: Record<string, unknown>
-}
 
 type DelegatedMutationResult = { id?: { clientID?: unknown; id?: unknown } }
 type DelegatedPushBody = {
@@ -291,8 +284,8 @@ function socketCloseQuietly(socket: WebSocket, code: number, reason: string): vo
  * Durable Object receives normalized claims inside the binding request body so
  * observability systems cannot record them as request-header metadata.
  */
-export function createSyncWorker<Env extends SyncHostEnv>(
-  config: SyncHostConfig<Env>
+export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Schema>(
+  config: SyncHostConfig<Env, S>
 ): ExportedHandler<Env> {
   validateSyncHostConfig(config)
   return {
@@ -323,7 +316,12 @@ export function createSyncWorker<Env extends SyncHostEnv>(
       let forwardedBody: ForwardedSyncBody | null = null
       if (!isAdmin && route !== '/wake' && route !== '/notify') {
         const claims = await config.authenticate(request, env)
-        if (!claims) return json({ error: 'missing authentication' }, 401)
+        if (!claims || typeof claims.userID !== 'string' || claims.userID.length === 0) {
+          return json({ error: 'missing authentication' }, 401)
+        }
+        if (!(await config.authorize(request, claims, namespace, env))) {
+          return json({ error: 'forbidden' }, 403)
+        }
         if ((route === '/pull' || route === '/push') && request.method === 'POST') {
           try {
             const body = await requestObject(request)
@@ -359,9 +357,10 @@ export interface SyncDurableObjectConstructor<Env extends SyncHostEnv> {
 }
 
 /** Create the namespace Durable Object class for one bundled consumer config. */
-export function createSyncDurableObject<Env extends SyncHostEnv>(
-  config: SyncHostConfig<Env>
-): SyncDurableObjectConstructor<Env> {
+export function createSyncDurableObject<
+  Env extends SyncHostEnv,
+  S extends Schema = Schema,
+>(config: SyncHostConfig<Env, S>): SyncDurableObjectConstructor<Env> {
   validateSyncHostConfig(config)
   const compileQuery = createQueryCompiler(config.schema)
   const defaultRetainChanges = String(config.retainChanges ?? 4_096)
@@ -385,6 +384,8 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
     readonly #engineDb: SqlStorageSyncDb
     readonly #directSql: SqlStorageDirect
     readonly #mutatorSql: SqlStorageMutatorTransaction
+    readonly #executor: SyncExecutor<S> | null
+    #executorBeforeCommitFault: FaultKind | null = null
     #bootID = crypto.randomUUID()
     #lastRequestAt = 0
     #hibernations = 0
@@ -417,6 +418,58 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         (ast, format) => this.#wasm(() => compileQuery(ast, format)),
         config.transactionQueryBudget
       )
+      const database: ApplicationDatabase = {
+        dialect: 'sqlite',
+        transaction: async <Value>(
+          work: (tx: ApplicationTransaction) => Value | Promise<Value>
+        ): Promise<Value> =>
+          this.ctx.storage.transaction(async () => {
+            let applicationWrite = false
+            const tx: ApplicationTransaction = {
+              exec: async (sql, params, metadata) => {
+                if (
+                  metadata !== undefined ||
+                  (!/^\s*CREATE\s+(?:SCHEMA|TABLE)\b/i.test(sql) &&
+                    !/\b_zsync_[A-Za-z0-9_]+\b/.test(sql))
+                ) {
+                  applicationWrite = true
+                }
+                return this.#mutatorSql.exec(sql, params, metadata)
+              },
+              query: (sql, params) => this.#mutatorSql.query(sql, params),
+              queryAst: (ast, format, queryName) =>
+                this.#mutatorSql.queryAst(ast, format, queryName),
+            }
+            const value = await work(tx)
+            if (applicationWrite && this.#executorBeforeCommitFault) {
+              const fault = this.#executorBeforeCommitFault
+              this.#executorBeforeCommitFault = null
+              throw this.#faultError(fault, 'push_after_write_before_commit')
+            }
+            return value
+          }),
+        query: (sql, params) => this.#mutatorSql.query(sql, params),
+      }
+      this.#executor = config.mutators
+        ? createSyncExecutor({
+            database,
+            effects: {
+              runBackground: (promise) => this.ctx.waitUntil(promise),
+              report: (error) => {
+                this.#counters.externalEffectFailures++
+                console.error(
+                  JSON.stringify({
+                    event: 'sync_external_effect_error',
+                    hostVersion: config.hostVersion,
+                    error: errorMessage(error),
+                  })
+                )
+              },
+            },
+            mutators: config.mutators,
+            schema: config.schema,
+          })
+        : null
       ctx.blockConcurrencyWhile(async () => {
         ctx.storage.transactionSync(() => {
           config.initialize(this.#directSql)
@@ -1532,126 +1585,39 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         const beforeMutationFault = this.#takeFault('push_before_mutation')
         if (beforeMutationFault)
           throw this.#faultError(beforeMutationFault, 'push_before_mutation')
-        const plan = this.#wasm(() => engine_push_validate(body)) as PushPlan
-        if (plan.kind === 'respond') return json(plan.response)
+        if (!this.#executor) throw new Error('local sync executor is not configured')
+        // Consume the fault outside the transaction it aborts so a rollback
+        // cannot restore the one-shot control flag.
+        this.#executorBeforeCommitFault = this.#takeFault(
+          'push_after_write_before_commit'
+        )
+        const txStarted = performance.now()
+        let result
+        try {
+          result = await this.#executor.push(body, claims)
+        } finally {
+          this.#executorBeforeCommitFault = null
+        }
+        transactionMs += performance.now() - txStarted
 
-        const results: MutationResult[] = []
-        for (const mutation of plan.mutations) {
-          const deferred = createPostCommitEffects()
-          try {
-            const txStarted = performance.now()
-            // consume the before-commit fault OUTSIDE the transaction it is
-            // about to abort: taken inside, the control-table delete rolls
-            // back with the abort and the fault re-fires on every retry
-            // instead of being one-shot.
-            const beforeCommitFault = this.#takeFault('push_after_write_before_commit')
-            const preflight = await this.ctx.storage.transaction(async () => {
-              // Storage transactions may retry their closure. Never carry a
-              // deferred effect from an abandoned attempt into the commit.
-              deferred.beginAttempt()
-              const decision = this.#wasm(() =>
-                engine_preflight(
-                  this.#engineDb,
-                  plan.clientGroupID,
-                  mutation.clientID,
-                  mutation.id,
-                  claims.userID
-                )
-              ) as Preflight
-              if (decision.kind === 'replay') return decision
-              const mutator = config.mutators?.[mutation.name]
-              if (!mutator) throw new Error(`unknown mutator: ${mutation.name}`)
-              await mutator(this.#mutatorSql, mutation.args[0] ?? null, {
-                claims,
-                clientID: mutation.clientID,
-                mutationID: mutation.id,
-                defer: deferred.defer,
-              })
-              if (beforeCommitFault)
-                throw this.#faultError(
-                  beforeCommitFault,
-                  'push_after_write_before_commit'
-                )
-              this.#wasm(() =>
-                engine_finalize(
-                  this.#engineDb,
-                  plan.clientGroupID,
-                  mutation.clientID,
-                  mutation.id
-                )
-              )
-              return decision
-            })
-            transactionMs += performance.now() - txStarted
-
-            if ((preflight as Preflight).kind === 'replay') {
-              const expected = (preflight as Extract<Preflight, { kind: 'replay' }>)
-                .expected
-              results.push({
-                clientID: mutation.clientID,
-                id: mutation.id,
-                result: {
-                  error: 'alreadyProcessed',
-                  details: `Ignoring mutation from ${mutation.clientID} with ID ${mutation.id} as it was already processed. Expected: ${expected}`,
-                },
-              })
-              continue
-            }
-
-            lmidAdvances++
-            results.push({
-              clientID: mutation.clientID,
-              id: mutation.id,
-              result: {},
-            })
-            // Keep the advisory fan-out off the push response's critical path.
-            // waitUntil anchors the coalescing timer across request completion,
-            // while the next serialized client push can join the same batch.
-            this.ctx.waitUntil(this.#enqueueWake(mutation.clientID))
-            await deferred.runAfterCommit((error) => {
-              this.#counters.externalEffectFailures++
-              console.error(
-                JSON.stringify({
-                  event: 'sync_external_effect_error',
-                  hostVersion: config.hostVersion,
-                  error: errorMessage(error),
-                })
-              )
-            })
-          } catch (error) {
-            const isAppError = isMutationApplicationError(error)
-            if (!isAppError) throw error
+        const mutationResults =
+          'mutations' in result.pushResponse ? result.pushResponse.mutations : []
+        for (const mutation of mutationResults) {
+          if (
+            'error' in mutation.result &&
+            mutation.result.error === 'alreadyProcessed'
+          ) {
+            continue
+          }
+          lmidAdvances++
+          if ('error' in mutation.result && mutation.result.error === 'app') {
             this.#counters.applicationErrors++
             resultClass = 'application_error'
-            const appError = error as Error & { details?: string }
-            const txStarted = performance.now()
-            await this.ctx.storage.transaction(async () => {
-              this.#wasm(() =>
-                engine_record_app_error(
-                  this.#engineDb,
-                  plan.clientGroupID,
-                  mutation.clientID,
-                  mutation.id,
-                  claims.userID
-                )
-              )
-            })
-            transactionMs += performance.now() - txStarted
-            lmidAdvances++
-            results.push({
-              clientID: mutation.clientID,
-              id: mutation.id,
-              result: {
-                error: 'app',
-                message: appError.message,
-                details: appError.details ?? appError.message,
-              },
-            })
-            this.ctx.waitUntil(this.#enqueueWake(mutation.clientID))
           }
+          this.ctx.waitUntil(this.#enqueueWake(mutation.id.clientID))
         }
 
-        if (plan.mutations.length > 0) {
+        if (mutationResults.length > 0) {
           const txStarted = performance.now()
           await this.ctx.storage.transaction(async () => {
             this.#wasm(() => engine_prune(this.#engineDb, this.#retainChanges()))
@@ -1664,7 +1630,6 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
         if (afterCommitFault)
           throw this.#faultError(afterCommitFault, 'push_after_commit_before_response')
 
-        const response = this.#wasm(() => engine_assemble_push_response(results))
         const state = this.#engineStateBestEffort()
         this.#log({
           namespaceHash: namespace,
@@ -1690,7 +1655,7 @@ export function createSyncDurableObject<Env extends SyncHostEnv>(
           this.#dropNextPushResponse = false
           return json({ error: 'intentionally dropped push response' }, 503)
         }
-        return json(response)
+        return json(result)
       } catch (error) {
         const status = statusOf(error)
         if (status === 500) this.#counters.invariantFailures++

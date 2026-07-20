@@ -1,5 +1,5 @@
-// orez-local target: the sqlite-native sync server core (orez
-// src/sync-server) hosted in-process over bun:sqlite, serving real
+// orez-local target: the executor-backed zero-http mount hosted in-process
+// over bun:sqlite, serving real
 // @rocicorp/zero clients through the canonical orez transport. pure sqlite, no
 // postgres, no zero-cache, no docker — this target IS the rewrite's server
 // core under test (plans/zero-server-rewrite.md phase 2).
@@ -10,22 +10,22 @@ import { createServer, type Server } from 'node:http'
 import { Zero } from '@rocicorp/zero'
 
 import {
-  type SyncDb,
-  type SyncServerConfig,
-  createSyncServer,
-} from '../../../src/sync-server/sync-server'
-import {
   assertExpectedExactlyOncePush,
   parseExactlyOncePush,
   type ExpectedExactlyOncePush,
 } from '../consistency/exactly-once-workload.js'
-import { TABLES, executeMutator, seedSqlite, userIDFromAuth } from '../fixture-data.js'
+import { createHarnessSyncServer } from '../executor-host.js'
+import { seedSqlite, userIDFromAuth } from '../fixture-data.js'
 import { mutators, schema } from '../fixture.js'
 // the production transport source, vendored verbatim (self-contained module,
 // no imports) so CI runs without the takeout checkout — provenance + refresh
 // instructions in the vendor file header
 import { ensureHttpPullTransport } from '../vendor/httpPullTransport.js'
 
+import type {
+  ZeroHttpSyncDb as SyncDb,
+  ZeroHttpVisibility,
+} from '../../../src/zero-http/mount.js'
 import type { Rows, SyncTarget } from '../target.js'
 
 export type PullObservation = {
@@ -37,7 +37,7 @@ export type OrezLocalTarget = SyncTarget & {
   readonly origin: string
   dropNextPushResponse(): void
   pull(): Promise<void>
-  invalidate(): void
+  invalidate(): Promise<void>
   resetCursor(): void
   restart(downForMs?: number): Promise<void>
   armExactlyOnceResponseDrop(
@@ -65,7 +65,7 @@ export async function startOrezLocal(opts?: {
   port?: number
   pullIntervalMs?: number
   retainChanges?: number
-  visible?: SyncServerConfig['visible']
+  visible?: ZeroHttpVisibility
   onPull?: (observation: PullObservation) => void
   fetch?: typeof fetch
 }): Promise<OrezLocalTarget> {
@@ -76,10 +76,7 @@ export async function startOrezLocal(opts?: {
 
   seedSqlite(db)
 
-  const sync = createSyncServer({
-    db,
-    tables: TABLES,
-    mutate: executeMutator,
+  const sync = createHarnessSyncServer(db, {
     retainChanges: opts?.retainChanges,
     visible: opts?.visible,
   })
@@ -112,9 +109,9 @@ export async function startOrezLocal(opts?: {
       }
       const response =
         url.pathname === '/pull'
-          ? sync.handlePull(body, userID)
+          ? await sync.handlePull(body, { userID })
           : url.pathname === '/push'
-            ? sync.handlePush(body, userID)
+            ? await sync.handlePush(body, { userID })
             : null
       if (!response) {
         res.statusCode = 404
@@ -235,7 +232,7 @@ export async function startOrezLocal(opts?: {
     },
 
     invalidate() {
-      sync.invalidate()
+      return sync.invalidate()
     },
 
     resetCursor() {

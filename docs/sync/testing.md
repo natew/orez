@@ -37,8 +37,8 @@ The suites that matter most:
 
 - **`differential.rs`** is the one true cross-implementation lane. A seeded
   PRNG generates an operation trace (put, del, reject, upstream SQL, pull,
-  invalidate), and both the Rust engine and the TypeScript reference core
-  (`src/sync-server/sync-server.ts`, via `crates/sync-core/ts-oracle/run-oracle.ts`)
+  invalidate), and both the Rust engine and the executor-backed TypeScript host
+  (`harness/src/executor-host.ts`, via `crates/sync-core/ts-oracle/run-oracle.ts`)
   execute the same trace. Pull responses are compared semantically: cookie
   exact, `unchanged` exact, `rowsPatch` order-independent. It runs 8 seeds of
   200 steps each.

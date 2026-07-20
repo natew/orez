@@ -1,5 +1,5 @@
-// the reference core's delta correctness suite (src/sync-server/sync-server.test.ts)
-// ported verbatim: every named test and every table-driven case. drives the
+// the original TypeScript delta correctness suite, ported verbatim: every
+// named test and every table-driven case. drives the
 // engine through the synchronous test host (rusqlite + the push-step driver).
 mod common;
 

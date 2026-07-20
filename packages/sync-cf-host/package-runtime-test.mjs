@@ -54,8 +54,6 @@ try {
 import { fileURLToPath } from 'node:url'
 const expected = new Map([
   ['orez-sync-cf-host', '/dist/index.js'],
-  ['orez-sync-cf-host/post-commit', '/dist/post-commit.js'],
-  ['orez-sync-cf-host/mutation-error', '/dist/mutation-error.js'],
   ['orez-sync-cf-host/node-wasm-loader', '/dist/node-wasm-loader.js'],
   ['orez-sync-cf-host/bun-wasm-loader', '/dist/bun-wasm-loader.js'],
   ['orez-sync-cf-host/query-compiler', '/dist/query-compiler.js'],

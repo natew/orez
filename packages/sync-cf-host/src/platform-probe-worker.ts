@@ -15,8 +15,7 @@ import {
   value_round_trip,
 } from './wasm-platform.js'
 
-import type { TransactionQueryFormat } from './transaction-query.js'
-import type { ZeroSchemaConfig } from './types.js'
+import type { TransactionQueryFormat, ZeroSchemaConfig } from 'orez-sync-executor'
 
 interface Env {
   PROBE_DO: DurableObjectNamespace<ProbeDurableObject>
@@ -94,11 +93,10 @@ async function runApplicationRpcProbe(
   const before = await client.query<{ balance: number }>(
     "SELECT balance FROM accounts WHERE id = 'primary'"
   )
-  let effectRan = false
   try {
     const result = await client.transaction(
       compileTransactionQuery,
-      async (tx, context) => {
+      async (tx) => {
         const account = await tx.queryAst<{ balance: number; entries: unknown[] }>(
           transactionQueryAst,
           transactionQueryFormat,
@@ -113,9 +111,6 @@ async function runApplicationRpcProbe(
             kind: 'update',
           }
         )
-        context.defer(() => {
-          effectRan = true
-        })
         if (action === 'rollback') throw new Error('intentional application RPC rollback')
         return { account, execResult }
       },
@@ -124,12 +119,12 @@ async function runApplicationRpcProbe(
     const after = await client.query<{ balance: number }>(
       "SELECT balance FROM accounts WHERE id = 'primary'"
     )
-    return json({ ok: true, before, after, result, effectRan })
+    return json({ ok: true, before, after, result })
   } catch (error) {
     const after = await client.query<{ balance: number }>(
       "SELECT balance FROM accounts WHERE id = 'primary'"
     )
-    return json({ ok: false, error: String(error), before, after, effectRan }, 409)
+    return json({ ok: false, error: String(error), before, after }, 409)
   }
 }
 
@@ -459,7 +454,7 @@ export class ProbeDurableObject extends ZeroDO {
         const expected = push_preflight(this.#db, mutationID)
         wasmMs += performance.now() - wasmStarted
 
-        // MutatorSql methods resolve through the microtask queue. Cross that
+        // application transaction methods resolve through the microtask queue. Cross that
         // same boundary here without admitting timers or other external work
         // into the storage transaction.
         await Promise.resolve()

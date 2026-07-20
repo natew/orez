@@ -1,10 +1,7 @@
 import { engine_compile_query } from './wasm.js'
 
-import type {
-  CompiledTransactionQueryPlan,
-  TransactionQueryFormat,
-} from './transaction-query.js'
-import type { ZeroSchemaConfig } from './types.js'
+import type { CompiledTransactionQueryPlan } from './transaction-query.js'
+import type { TransactionQueryFormat, ZeroSchemaConfig } from 'orez-sync-executor'
 
 export type TransactionQueryCompiler = (
   ast: unknown,

@@ -1,21 +1,24 @@
+import { MutationApplicationError, registerMutators } from 'orez-sync-executor'
+
 import { queryNameToAst } from '../../../harness/src/query-resolver.mjs'
 import {
-  MutationApplicationError,
-  registerMutators,
   visibility,
   type SyncHostConfig,
   type SyncHostEnv,
   type SyncSql,
-  type ZeroSchemaConfig,
 } from './index.js'
+
+import type { Schema } from '@rocicorp/zero'
 
 export const harnessSchema = {
   tables: {
     user: {
+      name: 'user',
       columns: { id: { type: 'string' }, name: { type: 'string' } },
       primaryKey: ['id'],
     },
     project: {
+      name: 'project',
       columns: {
         id: { type: 'string' },
         ownerId: { type: 'string' },
@@ -24,6 +27,7 @@ export const harnessSchema = {
       primaryKey: ['id'],
     },
     member: {
+      name: 'member',
       columns: {
         id: { type: 'string' },
         projectId: { type: 'string' },
@@ -32,6 +36,7 @@ export const harnessSchema = {
       primaryKey: ['id'],
     },
     task: {
+      name: 'task',
       columns: {
         id: { type: 'string' },
         projectId: { type: 'string' },
@@ -44,6 +49,7 @@ export const harnessSchema = {
       primaryKey: ['id'],
     },
     message: {
+      name: 'message',
       columns: {
         id: { type: 'string' },
         serverId: { type: 'string' },
@@ -58,7 +64,8 @@ export const harnessSchema = {
       primaryKey: ['id'],
     },
   },
-} as const satisfies ZeroSchemaConfig
+  relationships: {},
+} as const satisfies Schema
 
 const DDL = [
   'CREATE TABLE IF NOT EXISTS "user" (id TEXT PRIMARY KEY, name TEXT NOT NULL)',
@@ -200,37 +207,43 @@ function initializeHarness(sql: SyncSql): void {
 }
 
 const harnessMutators = registerMutators({
-  async 'project.create'(tx, args) {
+  async 'project.create'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; ownerId: string; name: string }
-    const exists = await tx.query('SELECT 1 FROM project WHERE id = ?', [value.id])
+    const exists = await sql.query('SELECT 1 FROM project WHERE id = ?', [value.id])
     if (exists.length > 0) throw new MutationApplicationError('exists')
-    await tx.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
+    await sql.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
       value.id,
       value.ownerId,
       value.name,
     ])
   },
-  async 'project.rename'(tx, args) {
+  async 'project.rename'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; name: string }
-    await tx.exec('UPDATE project SET name = ? WHERE id = ?', [value.name, value.id])
+    await sql.exec('UPDATE project SET name = ? WHERE id = ?', [value.name, value.id])
   },
-  async 'project.delete'(tx, args) {
+  async 'project.delete'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string }
-    await tx.exec('DELETE FROM project WHERE id = ?', [value.id])
+    await sql.exec('DELETE FROM project WHERE id = ?', [value.id])
   },
-  async 'member.add'(tx, args) {
+  async 'member.add'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; projectId: string; userId: string }
-    await tx.exec('INSERT INTO member (id, "projectId", "userId") VALUES (?, ?, ?)', [
+    await sql.exec('INSERT INTO member (id, "projectId", "userId") VALUES (?, ?, ?)', [
       value.id,
       value.projectId,
       value.userId,
     ])
   },
-  async 'member.remove'(tx, args) {
+  async 'member.remove'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string }
-    await tx.exec('DELETE FROM member WHERE id = ?', [value.id])
+    await sql.exec('DELETE FROM member WHERE id = ?', [value.id])
   },
-  async 'task.create'(tx, args) {
+  async 'task.create'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as {
       id: string
       projectId: string
@@ -240,7 +253,7 @@ const harnessMutators = registerMutators({
       meta?: unknown
       dueAt?: number
     }
-    await tx.exec(
+    await sql.exec(
       'INSERT INTO task (id, "projectId", title, rank, done, meta, "dueAt") VALUES (?, ?, ?, ?, ?, ?, ?)',
       [
         value.id,
@@ -253,22 +266,25 @@ const harnessMutators = registerMutators({
       ]
     )
   },
-  async 'task.toggle'(tx, args) {
+  async 'task.toggle'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string }
-    const rows = await tx.query<{ done: number }>('SELECT done FROM task WHERE id = ?', [
+    const rows = await sql.query<{ done: number }>('SELECT done FROM task WHERE id = ?', [
       value.id,
     ])
     if (rows.length === 0) throw new MutationApplicationError('not-found')
-    await tx.exec('UPDATE task SET done = ? WHERE id = ?', [
+    await sql.exec('UPDATE task SET done = ? WHERE id = ?', [
       rows[0]!.done ? 0 : 1,
       value.id,
     ])
   },
-  async 'task.setRank'(tx, args) {
+  async 'task.setRank'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; rank: number }
-    await tx.exec('UPDATE task SET rank = ? WHERE id = ?', [value.rank, value.id])
+    await sql.exec('UPDATE task SET rank = ? WHERE id = ?', [value.rank, value.id])
   },
-  async 'message.send'(tx, args) {
+  async 'message.send'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as {
       id: string
       serverId: string
@@ -280,7 +296,7 @@ const harnessMutators = registerMutators({
       order: string
       meta?: unknown
     }
-    await tx.exec(
+    await sql.exec(
       'INSERT INTO message (id, "serverId", "channelId", "creatorId", content, type, "createdAt", "order", meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
         value.id,
@@ -295,34 +311,36 @@ const harnessMutators = registerMutators({
       ]
     )
   },
-  async 'test.effectSuccess'(tx, args, context) {
+  async 'test.effectSuccess'({ tx, args, ctx }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; clientID: string; mutationID: number }
-    await tx.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
+    await sql.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
       value.id,
-      context.claims.userID,
+      ctx.claims.userID,
       'deferred-effect-success',
     ])
-    context.defer(async () => {
-      const rows = await tx.query<{ committed: number }>(
+    ctx.defer(async () => {
+      const rows = await sql.query<{ committed: number }>(
         `SELECT COUNT(*) AS committed FROM _zsync_clients
          WHERE clientID = ? AND lastMutationID >= ?`,
         [value.clientID, value.mutationID]
       )
-      await tx.exec(
+      await sql.exec(
         'INSERT INTO _harness_effects (id, observedCommitted) VALUES (?, ?)',
         [value.id, Number(rows[0]?.committed ?? 0) > 0 ? 1 : 0]
       )
     })
   },
-  async 'test.effectRollback'(tx, args, context) {
+  async 'test.effectRollback'({ tx, args, ctx }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string }
-    await tx.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
+    await sql.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
       value.id,
-      context.claims.userID,
+      ctx.claims.userID,
       'must-roll-back',
     ])
-    context.defer(async () => {
-      await tx.exec(
+    ctx.defer(async () => {
+      await sql.exec(
         'INSERT INTO _harness_effects (id, observedCommitted) VALUES (?, 0)',
         [value.id]
       )
@@ -439,6 +457,9 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
         .get('authorization')
         ?.match(/^Bearer token-(.+)$/)?.[1]
       return userID ? { userID } : null
+    },
+    authorize() {
+      return true
     },
     authorizeWake(request, env) {
       const url = new URL(request.url)

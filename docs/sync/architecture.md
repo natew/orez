@@ -15,16 +15,15 @@ per-query incremental sync.
 ## The pieces
 
 The deterministic engine and its WASM wrapper feed three hosts: native,
-Cloudflare, and a browser worker. A Node implementation remains beside them as
-the executable reference and local mount surface.
+Cloudflare, and a browser worker. The TypeScript executor owns application
+transactions, CRUD, mutation replay, and the local HTTP mount surface.
 
 ### crates/sync-core
 
-The deterministic sync engine, written in Rust. It is a port of the executable
-TypeScript spec at `src/sync-server/sync-server.ts`, and the two are kept in
-lockstep by differential tests (see the testing page). It has no async, no
-network, and no filesystem access, which is what lets it compile to WASM and run
-inside a Durable Object.
+The deterministic sync engine, written in Rust. Its wire behavior is kept in
+lockstep with the executor-backed TypeScript host by differential tests (see the
+testing page). It has no async, no network, and no filesystem access, which is
+what lets it compile to WASM and run inside a Durable Object.
 
 The engine owns a small set of internal SQLite tables and the protocol logic
 over them. Its modules (`crates/sync-core/src/`):
@@ -113,11 +112,11 @@ mutators or push delegation, upstream ingest) is passed in as one
 `SyncHostConfig` object. That object is the entire public API; the configuration
 page documents every field.
 
-The `src/sync-server/sync-server.ts` file, despite living under `src/`, is not a
-runtime dependency of the CF host. It is the TypeScript reference implementation
-of the same protocol, and it is also a usable Node/bun mount (`createSyncServer`
-and `createSyncServerMount`). The CF host runs the Rust port of it, compiled to
-WASM.
+`orez-sync-executor` is the shared application-database boundary. Both hosts
+call it for registered mutators, CRUD SQL, last-mutation-id ownership, replay,
+and deferred effects. `src/zero-http/mount.ts` composes that executor with the
+SQLite pull/change-log surface used by the Node and bun test mounts. The CF host
+keeps the Rust pull and ingest engine compiled to WASM.
 
 ### packages/sync-browser-host
 

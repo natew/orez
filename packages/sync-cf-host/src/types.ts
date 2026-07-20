@@ -1,11 +1,14 @@
-import type { DeferredEffect } from './post-commit.js'
+import type { TransactionQueryBudget } from './transaction-query.js'
+import type { Schema } from '@rocicorp/zero'
 import type {
-  TransactionQueryBudget,
-  TransactionQueryFormat,
-} from './transaction-query.js'
-import type { VisibilityFilter } from './visibility.js'
+  ExecResult,
+  JsonValue,
+  MutatorRegistry,
+  NormalizedClaims,
+  SqlStatementMetadata,
+  VisibilityConfig,
+} from 'orez-sync-executor'
 
-export type { DeferredEffect } from './post-commit.js'
 export {
   visibility,
   type VisibilityExpression,
@@ -13,113 +16,18 @@ export {
   type VisibilityOperand,
   type VisibilityValue,
 } from './visibility.js'
-
-export type JsonPrimitive = string | number | boolean | null
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
-
-export type NormalizedClaims = {
-  /** Stable consumer user id used for client-group ownership. */
-  userID: string
-  [claim: string]: JsonValue
-}
-
-export type ZeroColumn = {
-  readonly type: string
-  readonly serverName?: string
-  readonly encrypted?: true
-}
-
-export type ZeroSchemaConfig = {
-  readonly schemaID?: string
-  readonly tables: Readonly<
-    Record<
-      string,
-      {
-        readonly name?: string
-        readonly serverName?: string
-        readonly columns: Readonly<Record<string, ZeroColumn>>
-        readonly primaryKey: readonly string[]
-      }
-    >
-  >
-}
-
-/**
- * Explicit identity for a SQLite write to a published application table.
- *
- * The physical table installs CDC. `publicTable` is the logical Zero name
- * emitted in the change feed. This replaces metadata recovered by parsing
- * PostgreSQL statements.
- */
-export type SqlStatementMetadata = {
-  table: string
-  publicTable: string
-  kind: 'insert' | 'update' | 'delete' | 'upsert'
-}
-
-export type SQLiteExecResult = {
-  changes: number
-}
+export type { VisibilityConfig } from 'orez-sync-executor'
 
 export interface SyncSql {
   exec(
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
-  ): SQLiteExecResult
+  ): ExecResult
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
   ): Row[]
-}
-
-export interface MutatorSql {
-  exec(
-    sql: string,
-    params?: readonly unknown[],
-    metadata?: SqlStatementMetadata
-  ): Promise<SQLiteExecResult>
-  query<Row extends Record<string, unknown> = Record<string, unknown>>(
-    sql: string,
-    params?: readonly unknown[]
-  ): Promise<Row[]>
-  /** Execute a validated Zero AST inside the current application transaction. */
-  queryAst<Result = unknown>(
-    ast: JsonValue,
-    format: TransactionQueryFormat,
-    queryName?: string
-  ): Promise<Result>
-}
-
-export type MutatorContext = {
-  claims: NormalizedClaims
-  /** Current Zero mutation identity, when invoked by the production host. */
-  clientID?: string
-  mutationID?: string | number
-  defer(effect: DeferredEffect): void
-}
-
-export type RegisteredMutator = (
-  tx: MutatorSql,
-  args: JsonValue,
-  context: MutatorContext
-) => void | Promise<void>
-
-export type MutatorRegistry = Readonly<Record<string, RegisteredMutator>>
-
-/** Preserve mutator names while making the host-facing registry immutable. */
-export function registerMutators<
-  const Registry extends Record<string, RegisteredMutator>,
->(registry: Registry): Readonly<Registry> {
-  return Object.freeze({ ...registry })
-}
-
-export { MutationApplicationError, isMutationApplicationError } from './mutation-error.js'
-
-export type VisibilityConfig = {
-  /** True only when every predicate depends on the selected row alone. */
-  rowLocal: boolean | ((claims: NormalizedClaims) => boolean)
-  filter(table: string, claims: NormalizedClaims): VisibilityFilter | undefined
 }
 
 export type QueryResolver = (
@@ -173,10 +81,13 @@ export type DelegatedPushRetryConfig = {
   timeoutMs?: number
 }
 
-export type SyncHostConfig<Env extends SyncHostEnv = SyncHostEnv> = {
+export type SyncHostConfig<
+  Env extends SyncHostEnv = SyncHostEnv,
+  S extends Schema = Schema,
+> = {
   hostVersion: string
-  schema: ZeroSchemaConfig
-  mutators?: MutatorRegistry
+  schema: S
+  mutators?: MutatorRegistry<S>
   /**
    * absolute app push path on the delegated mutation service. a successful
    * response must be causally visible through the configured upstream data
@@ -200,6 +111,13 @@ export type SyncHostConfig<Env extends SyncHostEnv = SyncHostEnv> = {
     request: Request,
     env: Env
   ): NormalizedClaims | null | Promise<NormalizedClaims | null>
+  /** Authorize authenticated application access before selecting a namespace DO. */
+  authorize(
+    request: Request,
+    claims: NormalizedClaims,
+    namespace: string,
+    env: Env
+  ): boolean | Promise<boolean>
   /** Authorize the advisory wake socket before selecting a namespace DO.
    * Browser clients should present a short-lived, namespace-scoped capability
    * in the query string because WebSocket cannot set request headers. */

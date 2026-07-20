@@ -1,18 +1,13 @@
 import createSqliteModule from 'bedrock-sqlite/browser'
-import { createPostCommitEffects } from 'orez-sync-cf-host/post-commit'
+import { createSyncExecutor } from 'orez-sync-executor'
 
 import {
-  engine_assemble_push_response,
   engine_compile_query,
-  engine_finalize,
   engine_handle_pull,
   engine_handle_query_pull,
   engine_init_query_schema,
   engine_init_schema,
-  engine_preflight,
   engine_prune,
-  engine_push_validate,
-  engine_record_app_error,
 } from './generated/sync_wasm.js'
 import initSyncWasm from './generated/sync_wasm.js'
 import { IndexedDbSnapshotStore } from './idb-snapshot.js'
@@ -22,40 +17,23 @@ import {
   BedrockSyncDb,
   type BedrockBrowserModule,
 } from './sqlite-adapter.js'
-import { isMutationApplicationError } from './types.js'
 
+import type { BrowserSyncHost, BrowserSyncHostConfig, PullCaps } from './types.js'
+import type { Schema } from '@rocicorp/zero'
 import type {
+  ApplicationDatabase,
   ApplicationTransaction,
-  BrowserSyncHost,
-  BrowserSyncHostConfig,
+  ExecResult,
   JsonValue,
   NormalizedClaims,
-  PullCaps,
-} from './types.js'
-import type { SQLiteExecResult, SqlStatementMetadata } from 'orez-sync-cf-host'
+  PushResult,
+  SqlStatementMetadata,
+  SyncExecutor,
+} from 'orez-sync-executor'
 
 const DEFAULT_CAPS: PullCaps = {
   maxChangeRows: 10_000,
   maxChangeBytes: 2_000_000,
-}
-
-type PushMutation = {
-  id: string
-  clientID: string
-  name: string
-  args: JsonValue[]
-}
-
-type PushPlan =
-  | { kind: 'respond'; response: unknown }
-  | { kind: 'process'; clientGroupID: string; mutations: PushMutation[] }
-
-type Preflight = { kind: 'applied' } | { kind: 'replay'; expected: string }
-
-type MutationResult = {
-  clientID: string
-  id: string
-  result: Record<string, unknown>
 }
 
 export type BrowserHostTestFaultPoint =
@@ -72,8 +50,7 @@ export type BrowserHostTestHooks = {
 let syncWasmReady: Promise<void> | undefined
 
 function initializeSyncWasm(url: string | URL): Promise<void> {
-  syncWasmReady ??= initSyncWasm({ module_or_path: url }).then(() => undefined)
-  return syncWasmReady
+  return (syncWasmReady ??= initSyncWasm({ module_or_path: url }).then(() => undefined))
 }
 
 function json(value: unknown, status = 200): Response {
@@ -112,7 +89,7 @@ async function requestObject(request: Request): Promise<Record<string, unknown>>
   return value as Record<string, unknown>
 }
 
-function validateConfig(config: BrowserSyncHostConfig): PullCaps {
+function validateConfig<S extends Schema>(config: BrowserSyncHostConfig<S>): PullCaps {
   if (!config.storageKey) throw new TypeError('storageKey must not be empty')
   if (!config.mutators) throw new TypeError('mutators are required')
   if (config.queryAware && !config.resolveQuery) {
@@ -157,19 +134,22 @@ class OperationQueue {
   }
 }
 
-class BrowserSyncHostImpl implements BrowserSyncHost {
+class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
+  readonly executor: SyncExecutor<S>
   readonly #queue = new OperationQueue()
   readonly #listeners = new Set<() => void>()
   readonly #directSql: BedrockDirectSql
   readonly #engineDb: BedrockSyncDb
   readonly #mutatorSql: BedrockMutatorSql
+  readonly #rawExecutor: SyncExecutor<S>
   readonly #retainChanges: string
+  #executorTransactionKind: 'direct' | 'mutation' = 'direct'
   #fatalError: Error | undefined
   #closed = false
   #closePromise: Promise<void> | undefined
 
   private constructor(
-    private readonly config: BrowserSyncHostConfig,
+    private readonly config: BrowserSyncHostConfig<S>,
     private readonly caps: PullCaps,
     private readonly module: BedrockBrowserModule,
     private readonly db: InstanceType<BedrockBrowserModule['Database']>,
@@ -183,13 +163,84 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
       (ast, format) => engine_compile_query(config.schema, ast, format),
       config.transactionQueryBudget
     )
+    const database: ApplicationDatabase = {
+      dialect: 'sqlite',
+      transaction: async <Value>(
+        work: (tx: ApplicationTransaction) => Value | Promise<Value>
+      ): Promise<Value> => {
+        let applicationWrite = false
+        const tx: ApplicationTransaction = {
+          exec: async (sql, params, metadata) => {
+            if (
+              metadata !== undefined ||
+              (!/^\s*CREATE\s+(?:SCHEMA|TABLE)\b/i.test(sql) &&
+                !/\b_zsync_[A-Za-z0-9_]+\b/.test(sql))
+            ) {
+              applicationWrite = true
+            }
+            return this.#mutatorSql.exec(sql, params, metadata)
+          },
+          query: (sql, params) => this.#mutatorSql.query(sql, params),
+          queryAst: (ast, format, queryName) =>
+            this.#mutatorSql.queryAst(ast, format, queryName),
+        }
+        return this.#writeTransaction(
+          () => (applicationWrite ? this.#executorTransactionKind : 'maintenance'),
+          async () => {
+            const value = await work(tx)
+            if (applicationWrite && this.#executorTransactionKind === 'mutation') {
+              await this.#reach('after_app_write_before_sqlite_commit')
+            }
+            return value
+          }
+        )
+      },
+      query: (sql, params) => Promise.resolve(this.#directSql.query(sql, params)),
+    }
+    this.#rawExecutor = createSyncExecutor({
+      database,
+      effects: {
+        runBackground: (promise) => promise,
+        report: (error) => console.error('browser sync deferred effect failed', error),
+      },
+      mutators: config.mutators,
+      schema: config.schema,
+    })
+    this.executor = {
+      schema: config.schema,
+      push: (body, claims) => {
+        this.#assertAccepting()
+        return this.#queue.run(() => this.#runExecutorPush(body, claims, false))
+      },
+      execute: (name, args, claims) => {
+        this.#assertAccepting()
+        return this.#queue.run(async () => {
+          this.#executorTransactionKind = 'direct'
+          await this.#rawExecutor.execute(name, args, claims)
+          this.#notifyDataChanged()
+        })
+      },
+      transaction: (claims, work) => {
+        this.#assertAccepting()
+        return this.#queue.run(async () => {
+          this.#executorTransactionKind = 'direct'
+          const value = await this.#rawExecutor.transaction(claims, work)
+          this.#notifyDataChanged()
+          return value
+        })
+      },
+      query: (claims, work) => {
+        this.#assertAccepting()
+        return this.#queue.run(() => this.#rawExecutor.query(claims, work))
+      },
+    }
     this.#retainChanges = String(config.retainChanges ?? 4_096)
   }
 
-  static async create(
-    config: BrowserSyncHostConfig,
+  static async create<S extends Schema>(
+    config: BrowserSyncHostConfig<S>,
     hooks?: BrowserHostTestHooks
-  ): Promise<BrowserSyncHostImpl> {
+  ): Promise<BrowserSyncHostImpl<S>> {
     const caps = validateConfig(config)
     const sqliteWasmUrl =
       config.assets?.sqliteWasmUrl ??
@@ -263,7 +314,13 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
   }
 
   async #writeTransaction<Value>(
-    kind: 'bootstrap' | 'mutation' | 'pull' | 'maintenance' | 'direct',
+    kind:
+      | 'bootstrap'
+      | 'mutation'
+      | 'pull'
+      | 'maintenance'
+      | 'direct'
+      | (() => 'mutation' | 'maintenance' | 'direct'),
     operation: () => Value | Promise<Value>
   ): Promise<Value> {
     this.#assertAvailable()
@@ -276,7 +333,8 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
       if (this.db.inTransaction) this.db.exec('ROLLBACK')
       throw error
     }
-    if (kind === 'mutation') {
+    const completedKind = typeof kind === 'function' ? kind() : kind
+    if (completedKind === 'mutation') {
       await this.#reach('after_sqlite_commit_before_idb_commit')
     }
     await this.#checkpoint()
@@ -288,15 +346,41 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
     if (!claims || typeof claims.userID !== 'string' || claims.userID.length === 0) {
       throw requestError('missing authentication', 401)
     }
+    if (!(await this.config.authorize(request, claims, this.config.storageKey))) {
+      throw requestError('forbidden', 403)
+    }
     return claims
   }
 
-  async #runEffectsAfterCommit(
-    effects: ReturnType<typeof createPostCommitEffects>
-  ): Promise<void> {
-    await effects.runAfterCommit((error) => {
-      console.error('browser sync deferred effect failed', error)
-    })
+  async #runExecutorPush(
+    body: unknown,
+    claims: NormalizedClaims,
+    testHooks: boolean
+  ): Promise<PushResult> {
+    this.#assertAvailable()
+    this.#executorTransactionKind = 'mutation'
+    let result: PushResult
+    try {
+      result = await this.#rawExecutor.push(body, claims)
+    } finally {
+      this.#executorTransactionKind = 'direct'
+    }
+    const mutationResults =
+      'mutations' in result.pushResponse ? result.pushResponse.mutations : []
+    if (mutationResults.length > 0) {
+      await this.#writeTransaction('maintenance', () =>
+        engine_prune(this.#engineDb, this.#retainChanges)
+      )
+    }
+    const changed = mutationResults.some(
+      (mutation) =>
+        !('error' in mutation.result) || mutation.result.error !== 'alreadyProcessed'
+    )
+    if (changed) this.#notifyDataChanged()
+    if (testHooks && mutationResults.length > 0) {
+      await this.#reach('after_idb_commit_before_response')
+    }
+    return result
   }
 
   #visibility(claims: NormalizedClaims): unknown {
@@ -427,91 +511,8 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
       const body = await requestObject(request)
       return await this.#queue.run(async () => {
         this.#assertAvailable()
-        const plan = engine_push_validate(body) as PushPlan
-        if (plan.kind === 'respond') return json(plan.response)
-
-        const results: MutationResult[] = []
-        let changed = false
-        for (const mutation of plan.mutations) {
-          const effects = createPostCommitEffects()
-          try {
-            await this.#reach('before_mutation')
-            const preflight = await this.#writeTransaction('mutation', async () => {
-              effects.beginAttempt()
-              const decision = engine_preflight(
-                this.#engineDb,
-                plan.clientGroupID,
-                mutation.clientID,
-                mutation.id,
-                claims.userID
-              ) as Preflight
-              if (decision.kind === 'replay') return decision
-
-              const mutator = this.config.mutators[mutation.name]
-              if (!mutator) throw new Error(`unknown mutator: ${mutation.name}`)
-              await mutator(this.#mutatorSql, mutation.args[0] ?? null, {
-                claims,
-                clientID: mutation.clientID,
-                mutationID: mutation.id,
-                defer: effects.defer,
-              })
-              engine_finalize(
-                this.#engineDb,
-                plan.clientGroupID,
-                mutation.clientID,
-                mutation.id
-              )
-              await this.#reach('after_app_write_before_sqlite_commit')
-              return decision
-            })
-
-            if (preflight.kind === 'replay') {
-              results.push({
-                clientID: mutation.clientID,
-                id: mutation.id,
-                result: {
-                  error: 'alreadyProcessed',
-                  details: `Ignoring mutation from ${mutation.clientID} with ID ${mutation.id} as it was already processed. Expected: ${preflight.expected}`,
-                },
-              })
-              continue
-            }
-
-            changed = true
-            results.push({ clientID: mutation.clientID, id: mutation.id, result: {} })
-            await this.#runEffectsAfterCommit(effects)
-          } catch (error) {
-            if (!isMutationApplicationError(error)) throw error
-            await this.#writeTransaction('mutation', () =>
-              engine_record_app_error(
-                this.#engineDb,
-                plan.clientGroupID,
-                mutation.clientID,
-                mutation.id,
-                claims.userID
-              )
-            )
-            changed = true
-            results.push({
-              clientID: mutation.clientID,
-              id: mutation.id,
-              result: {
-                error: 'app',
-                message: error.message,
-                details: error.details,
-              },
-            })
-          }
-        }
-
-        if (plan.mutations.length > 0) {
-          await this.#writeTransaction('maintenance', () =>
-            engine_prune(this.#engineDb, this.#retainChanges)
-          )
-        }
-        if (changed) this.#notifyDataChanged()
-        await this.#reach('after_idb_commit_before_response')
-        return json(engine_assemble_push_response(results))
+        await this.#reach('before_mutation')
+        return json(await this.#runExecutorPush(body, claims, true))
       })
     } catch (error) {
       return json({ error: errorMessage(error) }, statusOf(error))
@@ -544,27 +545,13 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
     sql: string,
     params: readonly unknown[] = [],
     metadata?: SqlStatementMetadata
-  ): Promise<SQLiteExecResult> {
+  ): Promise<ExecResult> {
     this.#assertAccepting()
     return await this.#queue.run(async () => {
       const result = await this.#writeTransaction('direct', () =>
         this.#directSql.exec(sql, params, metadata)
       )
       this.#notifyDataChanged()
-      return result
-    })
-  }
-
-  async transaction<Value>(work: ApplicationTransaction<Value>): Promise<Value> {
-    this.#assertAccepting()
-    const effects = createPostCommitEffects()
-    return await this.#queue.run(async () => {
-      effects.beginAttempt()
-      const result = await this.#writeTransaction('direct', () =>
-        work(this.#mutatorSql, { defer: effects.defer })
-      )
-      this.#notifyDataChanged()
-      await this.#runEffectsAfterCommit(effects)
       return result
     })
   }
@@ -608,15 +595,15 @@ class BrowserSyncHostImpl implements BrowserSyncHost {
   }
 }
 
-export function createBrowserSyncHostInternal(
-  config: BrowserSyncHostConfig,
+export function createBrowserSyncHostInternal<S extends Schema>(
+  config: BrowserSyncHostConfig<S>,
   hooks?: BrowserHostTestHooks
-): Promise<BrowserSyncHost> {
+): Promise<BrowserSyncHost<S>> {
   return BrowserSyncHostImpl.create(config, hooks)
 }
 
-export function createBrowserSyncHost(
-  config: BrowserSyncHostConfig
-): Promise<BrowserSyncHost> {
+export function createBrowserSyncHost<S extends Schema>(
+  config: BrowserSyncHostConfig<S>
+): Promise<BrowserSyncHost<S>> {
   return createBrowserSyncHostInternal(config)
 }

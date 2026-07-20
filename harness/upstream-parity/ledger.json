@@ -288,7 +288,7 @@
         "purpose": "v51 wire-protocol valita schemas — the spec a wire client must conform to",
         "portability": "spec",
         "orezStatus": "upstream-baseline",
-        "note": "Orez conforms via the on-zero http-pull transport + src/sync-server; these schemas ARE the contract, not something to port. PROTOCOL_VERSION=51."
+        "note": "Orez conforms via the HTTP transport and executor-backed zero-http mount; these schemas ARE the contract, not something to port. PROTOCOL_VERSION=51."
       },
       {
         "path": "packages/zql-integration-tests/src/chinook/chinook-zero-cache-fuzzer.pg.test.ts",

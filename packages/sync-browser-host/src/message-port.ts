@@ -1,6 +1,7 @@
 import type { BrowserHostTestHooks, BrowserHostTestFaultPoint } from './host.js'
 import type { BrowserSyncHost, BrowserSyncHostPortClient } from './types.js'
-import type { SqlStatementMetadata } from 'orez-sync-cf-host'
+import type { Schema } from '@rocicorp/zero'
+import type { SqlStatementMetadata } from 'orez-sync-executor'
 
 type SerializedRequest = {
   url: string
@@ -97,8 +98,8 @@ async function reachDuringDelivery(hooks?: BrowserHostTestHooks): Promise<void> 
   await hooks?.reach('during_response_delivery' satisfies BrowserHostTestFaultPoint)
 }
 
-export function serveBrowserSyncHostPortInternal(
-  host: BrowserSyncHost,
+export function serveBrowserSyncHostPortInternal<S extends Schema>(
+  host: BrowserSyncHost<S>,
   port: MessagePort,
   hooks?: BrowserHostTestHooks
 ): () => void {
@@ -165,8 +166,8 @@ export function serveBrowserSyncHostPortInternal(
   return disconnect
 }
 
-export function serveBrowserSyncHostPort(
-  host: BrowserSyncHost,
+export function serveBrowserSyncHostPort<S extends Schema>(
+  host: BrowserSyncHost<S>,
   port: MessagePort
 ): () => void {
   return serveBrowserSyncHostPortInternal(host, port)

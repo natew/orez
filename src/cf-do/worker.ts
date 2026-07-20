@@ -1,14 +1,9 @@
 // @ts-nocheck — cloudflare:workers types not available in orez
 import { DurableObject, RpcTarget } from 'cloudflare:workers'
 import {
-  createPostCommitEffects,
-  type DeferredEffect,
-} from 'orez-sync-cf-host/post-commit'
-import {
   executeTransactionQueryPlan,
   type CompiledTransactionQueryPlan,
   type TransactionQueryBudget,
-  type TransactionQueryFormat,
 } from 'orez-sync-cf-host/transaction-query'
 
 import {
@@ -43,7 +38,7 @@ import {
 import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
 
 import type { ApplicationSqlExecResult, ApplicationSqlTable } from './application-sql.js'
-import type { SqlStatementMetadata } from 'orez-sync-cf-host'
+import type { SqlStatementMetadata, TransactionQueryFormat } from 'orez-sync-executor'
 
 export { createApplicationSqlClient } from './application-sql.js'
 export type {
@@ -56,10 +51,9 @@ export type {
   ApplicationSqlSessionRpc,
   ApplicationSqlTable,
   ApplicationSqlTransaction,
-  ApplicationSqlTransactionContext,
   ApplicationSqlTransactionWork,
 } from './application-sql.js'
-export type { SqlStatementMetadata } from 'orez-sync-cf-host'
+export type { SqlStatementMetadata } from 'orez-sync-executor'
 
 /**
  * zero-do: Durable Object that exposes raw SQL execution over ctx.storage.sql.
@@ -165,10 +159,6 @@ export type ZeroDOTransactionExecutor = {
     format: TransactionQueryFormat,
     queryName?: string
   ): Promise<Result>
-}
-
-export type ZeroDOTransactionContext = {
-  defer(effect: DeferredEffect): void
 }
 
 interface SocketAttachment {
@@ -1203,18 +1193,13 @@ export class ZeroDO extends DurableObject {
    * execute trusted subclass work in this object's SQLite transaction.
    *
    * the method is protected so the base public fetch surface cannot invoke it.
-   * every SQL cursor is consumed before an executor promise is returned, and
-   * external effects run only after the storage transaction commits.
+   * every SQL cursor is consumed before an executor promise is returned.
    */
   protected async runApplicationTransaction<T>(
     compileQuery: ZeroDOQueryCompiler,
-    work: (
-      tx: ZeroDOTransactionExecutor,
-      context: ZeroDOTransactionContext
-    ) => T | Promise<T>,
+    work: (tx: ZeroDOTransactionExecutor) => T | Promise<T>,
     queryBudget?: Partial<TransactionQueryBudget>
   ): Promise<T> {
-    const effects = createPostCommitEffects()
     const execute = (
       sql: string,
       params: readonly unknown[] = [],
@@ -1245,22 +1230,11 @@ export class ZeroDO extends DurableObject {
       },
     }
 
-    const value = await this.withSchemaProvisioningWait(() =>
+    return this.withSchemaProvisioningWait(() =>
       this.atomically(async () => {
-        effects.beginAttempt()
-        return work(tx, { defer: effects.defer })
+        return work(tx)
       })
     )
-
-    await effects.runAfterCommit((error) => {
-      console.error(
-        JSON.stringify({
-          event: 'orez_do_external_effect_error',
-          error: error instanceof Error ? error.message : String(error),
-        })
-      )
-    })
-    return value
   }
 
   private assertApplicationSqlSession(session: ApplicationSqlSessionTarget): void {

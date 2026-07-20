@@ -5,8 +5,10 @@
 import { Database } from 'bun:sqlite'
 import { createServer } from 'node:http'
 
-import { type SyncDb, createSyncServer } from '../../../src/sync-server/sync-server'
-import { TABLES, executeMutator, seedSqlite, userIDFromAuth } from '../fixture-data.js'
+import { createHarnessSyncServer } from '../executor-host.js'
+import { seedSqlite, userIDFromAuth } from '../fixture-data.js'
+
+import type { ZeroHttpSyncDb as SyncDb } from '../../../src/zero-http/mount.js'
 
 const port = Number(process.env.ZHARNESS_PROCESS_PORT)
 const filename = process.env.ZHARNESS_PROCESS_DB
@@ -34,11 +36,7 @@ const seeded = db.all(
 )
 if (seeded.length === 0) db.transaction(() => seedSqlite(db))
 
-const sync = createSyncServer({
-  db,
-  tables: TABLES,
-  mutate: executeMutator,
-})
+const sync = createHarnessSyncServer(db)
 
 const json = (
   res: Parameters<Parameters<typeof createServer>[0]>[1],
@@ -72,11 +70,11 @@ const server = createServer(async (req, res) => {
       return
     }
     if (url.pathname === '/pull') {
-      json(res, sync.handlePull(body, userID))
+      json(res, await sync.handlePull(body, { userID }))
       return
     }
     if (url.pathname === '/push') {
-      json(res, sync.handlePush(body, userID))
+      json(res, await sync.handlePush(body, { userID }))
       return
     }
     json(res, { error: 'not found' }, 404)

@@ -1,0 +1,33 @@
+{
+  "name": "orez-sync-executor",
+  "version": "0.5.30",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run src",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@rocicorp/zero": ">=1.7.0"
+  },
+  "devDependencies": {
+    "@rocicorp/zero": "1.7.0",
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/natew/orez.git",
+    "directory": "packages/sync-executor"
+  }
+}

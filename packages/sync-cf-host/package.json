@@ -7,14 +7,6 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./post-commit": {
-      "types": "./dist/post-commit.d.ts",
-      "import": "./dist/post-commit.js"
-    },
-    "./mutation-error": {
-      "types": "./dist/mutation-error.d.ts",
-      "import": "./dist/mutation-error.js"
-    },
     "./node-wasm-loader": {
       "types": "./dist/node-wasm-loader.d.ts",
       "import": "./dist/node-wasm-loader.js"
@@ -53,7 +45,7 @@
     "bundle": "bun run build:dist && wrangler deploy --dry-run --outdir .wrangler/bundle",
     "measure": "bun run build:dist && bun measure.mjs",
     "test": "bun run test:config && bun run test:query-compiler && bun run test:package && bun run test:platform && bun run test:integration && bun run test:ingest && bun run test:restart",
-    "test:config": "bun test config.test.mjs write-safeguards.test.mjs mutation-error.test.mjs post-commit.test.mjs transaction-query.test.mjs",
+    "test:config": "bun test config.test.mjs write-safeguards.test.mjs transaction-query.test.mjs",
     "test:integration": "bun run build:dist && bun integration-test.mjs",
     "test:ingest": "bun run build:dist && bun ingest-test.mjs",
     "test:package": "bun run build:dist && node package-runtime-test.mjs",
@@ -61,6 +53,9 @@
     "test:restart": "bun run build:dist && bun restart-test.mjs",
     "test:platform": "bun run build:dist:platform && bun platform-test.mjs",
     "typecheck": "bun run build:dist:platform && tsc --noEmit"
+  },
+  "dependencies": {
+    "orez-sync-executor": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "4.20260617.1",
@@ -71,6 +66,7 @@
     "wrangler": "4.103.0"
   },
   "peerDependencies": {
+    "@rocicorp/zero": ">=1.7.0",
     "vite": ">=5"
   },
   "peerDependenciesMeta": {

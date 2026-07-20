@@ -182,28 +182,29 @@ Every route is under `/<namespace>/admin/` and gated by `authorizeAdmin` (or the
 
 ## Node mount surface
 
-`src/sync-server/sync-server.ts` is the TypeScript reference implementation of
-the same protocol, usable directly as a Node or bun mount. It is the smaller
-surface: local mutators and per-user visibility, without query awareness or
-upstream ingest.
+`src/zero-http/mount.ts` is the executor-backed TypeScript implementation usable
+directly as a Node or bun mount. It is the smaller surface: local mutators and
+per-user visibility, without query awareness or upstream ingest.
 
-`createSyncServer(config)` returns `{handlePull, handlePush, watermark,
-invalidate}`. Its config:
+`createZeroHttpSyncServer(config)` returns `{executor, ready, handlePull,
+handlePush, watermark, invalidate}`. Its config:
 
 | Field                         | Type               | Default     | Meaning                                                                                                                                                  |
 | ----------------------------- | ------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `db`                          | `SyncDb`           | required    | A tiny SQLite handle with `exec`, `all`, and a synchronous `transaction`. bun:sqlite, better-sqlite3, and DO `ctx.storage.sql` all adapt in a few lines. |
-| `tables`                      | `SyncTables`       | required    | Column types and primary keys. `tablesFromZeroSchema(schema)` derives this from a Zero schema.                                                           |
-| `visible(table, userID)`      | `=> {sql, params}` | whole table | Per-user row visibility.                                                                                                                                 |
-| `mutate(tx, name, args, ctx)` | `(...) => void`    | required    | Runs one custom mutation inside the push transaction. Throw `MutationAppError` for an app-level rejection (the last-mutation-id still advances).         |
-| `retainChanges`               | `number`           | 4096        | Change-log retention.                                                                                                                                    |
+| `applicationDatabase`    | `ApplicationDatabase` | required    | The async transaction provider used by the shared executor.                                                                                             |
+| `db`                     | `ZeroHttpSyncDb`      | required    | A SQLite handle with `exec`, `all`, and a synchronous `transaction`, used by the pull and change-log surface.                                           |
+| `schema`                 | Zero `Schema`         | required    | The Zero schema, including physical table and column names.                                                                                              |
+| `tables`                 | `ZeroHttpTables`      | required    | Column types and primary keys for trigger and patch generation.                                                                                          |
+| `mutators`               | `MutatorRegistry`     | required    | Registered application mutators executed inside the application database transaction.                                                                   |
+| `visible(table, userID)` | `=> {sql, params}`    | whole table | Per-user row visibility.                                                                                                                                 |
+| `retainChanges`          | `number`              | 4096        | Change-log retention.                                                                                                                                    |
 
-`createSyncServerMount(config)` mounts the pull and push handlers behind one
+`createZeroHttpMount(config)` mounts the pull and push handlers behind one
 database-id path segment. Its config is `pathPrefix` (must start with `/`, for
 example `/p-` to produce `/p-<projectID>/pull`) and `server(databaseID)`, which
-resolves the `SyncServer` for a database only after the caller has authorized
-`route.databaseID`. It returns `{match(pathname), handle(route, body,
-userID)}`. `match` does routing only; `handle` delegates without translating
+resolves the `ZeroHttpSyncServer` for a database only after the caller has
+authorized `route.databaseID`. It returns `{match(pathname), handle(route, body,
+claims)}`. `match` does routing only; `handle` delegates without translating
 bodies, responses, or errors.
 
 ## Native replica-file retention

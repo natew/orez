@@ -1,6 +1,6 @@
 // the durable `_zsync_*` schema and the application-table triggers that feed
-// the change log. mirrors createSyncServer()'s DDL in the reference core
-// (src/sync-server/sync-server.ts) plus the plan's durable-watermark table.
+// the change log. mirrors the executor-backed zero-http mount plus the plan's
+// durable-watermark table.
 //
 // invariants encoded here:
 // - the change log stores WHICH primary keys were touched, never row values:

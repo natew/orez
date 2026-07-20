@@ -3,11 +3,13 @@ import { WorkerEntrypoint } from 'cloudflare:workers'
 import { ZeroDO } from '../../../src/cf-do/worker.js'
 import { createSyncDurableObject, createSyncWorker } from './index.js'
 
-import type { SyncHostConfig, SyncHostEnv, ZeroSchemaConfig } from './index.js'
+import type { SyncHostConfig, SyncHostEnv } from './index.js'
+import type { Schema } from '@rocicorp/zero'
 
 const schema = {
   tables: {
     item: {
+      name: 'item',
       columns: {
         id: { type: 'string' },
         label: { type: 'string' },
@@ -18,7 +20,8 @@ const schema = {
       primaryKey: ['id'],
     },
   },
-} as const satisfies ZeroSchemaConfig
+  relationships: {},
+} as const satisfies Schema
 
 type Fetcher = { fetch(input: string | Request, init?: RequestInit): Promise<Response> }
 interface Env extends SyncHostEnv {
@@ -74,6 +77,9 @@ const config: SyncHostConfig<Env> = {
   authenticate(request) {
     const userID = request.headers.get('authorization')?.match(/^Bearer token-(.+)$/)?.[1]
     return userID ? { userID } : null
+  },
+  authorize() {
+    return true
   },
   authorizeWake(request) {
     return new URL(request.url).searchParams.get('wakeToken') === 'ingest-harness-wake'

@@ -1,7 +1,5 @@
-// differential oracle: runs the TypeScript reference core
-// (src/sync-server/sync-server.ts) on a shared operation trace and emits the
-// pull responses as JSON, so the Rust differential test can compare its own run
-// of the SAME trace against this ground truth.
+// differential oracle: runs the executor-backed zero-http mount on a shared
+// operation trace and emits pull responses for the Rust differential test.
 //
 // run with: bun crates/sync-core/ts-oracle/run-oracle.ts <trace.json>
 // the trace is a JSON array of ops; the runner maintains a per-client mutation
@@ -9,12 +7,15 @@
 // stay in lockstep. output on stdout: a JSON array of pull responses in order.
 import { Database } from 'bun:sqlite'
 
+import { boolean, createSchema, json, number, string, table } from '@rocicorp/zero'
+import { MutationApplicationError } from 'orez-sync-executor'
+
 import {
-  createSyncServer,
-  MutationAppError,
-  type SyncDb,
-  type SyncTables,
-} from '../../../src/sync-server/sync-server.ts'
+  createZeroHttpApplicationDatabase,
+  createZeroHttpSyncServer,
+  type ZeroHttpSyncDb as SyncDb,
+  type ZeroHttpTables as SyncTables,
+} from '../../../src/zero-http/mount.ts'
 
 function bunSqliteDb(sqlite: Database): SyncDb {
   return {
@@ -74,7 +75,7 @@ function mutate(tx: SyncDb, name: string, args: unknown, _ctx: { userID: string 
   }
   if (name === 'item.reject') {
     tx.exec(`INSERT INTO item (id, label, rank, done) VALUES ('rejected', 'x', 0, 0)`)
-    throw new MutationAppError('nope')
+    throw new MutationApplicationError('nope')
   }
   throw new Error(`unknown mutator ${name}`)
 }
@@ -369,7 +370,28 @@ db.exec(
   `CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL,
    rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)`
 )
-const sync = createSyncServer({ db, tables: TABLES, mutate })
+const item = table('item')
+  .columns({
+    id: string(),
+    label: string(),
+    rank: number(),
+    done: boolean(),
+    meta: json(),
+  })
+  .primaryKey('id')
+const schema = createSchema({ tables: [item] })
+const sync = createZeroHttpSyncServer({
+  applicationDatabase: createZeroHttpApplicationDatabase(db),
+  db,
+  mutators: {
+    'item.put': ({ args }) => mutate(db, 'item.put', args, { userID: 'u1' }),
+    'item.del': ({ args }) => mutate(db, 'item.del', args, { userID: 'u1' }),
+    'item.reject': ({ args }) => mutate(db, 'item.reject', args, { userID: 'u1' }),
+  },
+  schema,
+  tables: TABLES,
+})
+await sync.ready()
 const query = new QueryOracle()
 
 const nextId: Record<string, number> = {}
@@ -391,7 +413,7 @@ for (const op of trace) {
           : op.op === 'del'
             ? { id: op.item }
             : {}
-      sync.handlePush(
+      await sync.handlePush(
         {
           clientGroupID: 'g1',
           mutations: [
@@ -400,7 +422,7 @@ for (const op of trace) {
           pushVersion: 1,
           requestID: 'r',
         },
-        'u1'
+        { userID: 'u1' }
       )
       break
     }
@@ -408,15 +430,15 @@ for (const op of trace) {
       db.exec(op.sql as string)
       break
     case 'invalidate':
-      sync.invalidate()
+      await sync.invalidate()
       break
     case 'pull': {
       const client = op.client as string
       const cookie = cookies[client] ?? null
-      const resp = sync.handlePull(
+      const resp = (await sync.handlePull(
         { clientID: client, clientGroupID: 'g1', cookie },
-        'u1'
-      ) as {
+        { userID: 'u1' }
+      )) as {
         cookie: number
       }
       cookies[client] = resp.cookie

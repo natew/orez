@@ -100,7 +100,7 @@ impl Transactor for TestDb {
     }
 }
 
-// the `item` table from the reference delta suite (sync-server.test.ts)
+// the `item` table from the reference delta suite
 pub fn item_tables() -> Tables {
     Tables::from_zero_schema(&json!({
         "tables": {

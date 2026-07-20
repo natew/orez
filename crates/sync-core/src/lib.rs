@@ -1,7 +1,6 @@
-// sync-core: the deterministic sqlite zero sync engine (rust port of the
-// executable spec at src/sync-server/sync-server.ts and soot's production
-// composition src/zero/httpPullProject.server.ts — see
-// plans/rust-sync-server-final-plan.md).
+// sync-core: the deterministic sqlite zero sync engine behind Orez hosts and
+// the executor-backed zero-http conformance mount; see
+// plans/rust-sync-server-final-plan.md.
 //
 // hard boundary rules (pinned by the plan, do not relax):
 // - the host owns transaction entry/exit; this crate NEVER emits

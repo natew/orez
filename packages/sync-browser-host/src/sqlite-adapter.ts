@@ -1,13 +1,17 @@
 import { executeTransactionQueryPlan } from 'orez-sync-cf-host/transaction-query'
 
-import type { MutatorSql, SyncSql } from './types.js'
+import type { SyncSql } from './types.js'
 import type { BedrockSqliteModule, Database, Statement } from 'bedrock-sqlite/browser'
-import type { SQLiteExecResult, SqlStatementMetadata } from 'orez-sync-cf-host'
 import type {
   CompiledTransactionQueryPlan,
   TransactionQueryBudget,
-  TransactionQueryFormat,
 } from 'orez-sync-cf-host/transaction-query'
+import type { TransactionQueryFormat } from 'orez-sync-executor'
+import type {
+  ApplicationTransaction,
+  ExecResult as SQLiteExecResult,
+  SqlStatementMetadata,
+} from 'orez-sync-executor'
 
 export type WireValue =
   | { kind: 'null' }
@@ -166,7 +170,7 @@ export class BedrockDirectSql implements SyncSql {
   }
 }
 
-export class BedrockMutatorSql implements MutatorSql {
+export class BedrockMutatorSql implements ApplicationTransaction {
   constructor(
     private readonly direct: BedrockDirectSql,
     private readonly compileQuery: (

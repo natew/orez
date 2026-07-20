@@ -3,8 +3,8 @@
 // maps `_zero_changes` rows since a client's cookie into put/del row patches
 // for an http-pull diff response.
 //
-// semantics follow the reference core (src/sync-server/sync-server.ts + its
-// delta suite) exactly: collect the pks TOUCHED since the cookie, dedup,
+// semantics follow the Orez zero-http delta suite exactly: collect the pks
+// TOUCHED since the cookie, dedup,
 // then resolve each against LIVE table state inside the pull transaction —
 // row exists → put (current values), row gone → del. old row images in the
 // log are used only to find pks (DELETE + pk-changing UPDATE), never as

@@ -1,6 +1,6 @@
 // generated operation-trace differential against the TypeScript reference core.
 // a deterministic PRNG generates a trace of high-level ops; the Rust engine and
-// the TS core (src/sync-server/sync-server.ts, run by ts-oracle/run-oracle.ts
+// the executor-backed TS mount (run by ts-oracle/run-oracle.ts
 // under bun) each execute the SAME trace with identical per-client id/cookie
 // bookkeeping, and their pull responses are compared. The same trace also
 // drives a multi-table query-aware pull fixture against a pure TypeScript ZQL

@@ -1,5 +1,5 @@
-// SQLite-to-Zero value conversion, mirrored from the reference core's
-// `toZeroValue` (src/sync-server/sync-server.ts) and soot's `toZeroValue`.
+// SQLite-to-Zero value conversion, mirrored from the zero-http mount's
+// `toZeroValue` and soot's `toZeroValue`.
 // rowsPatch values must match the zero schema's column types exactly, and
 // floats must round-trip with full fidelity: SQLite's json_object formats
 // REAL at 15 significant digits (0.1+0.2 -> "0.3"), so patch values are always

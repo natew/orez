@@ -150,6 +150,17 @@ if (into) {
     pkgDirs.push({ name: syncHostPkg.name, dir: syncHostDir, pkg: syncHostPkg })
   }
 
+  const syncExecutorDir = resolve(root, 'packages', 'sync-executor')
+  const syncExecutorPkgPath = resolve(syncExecutorDir, 'package.json')
+  if (existsSync(syncExecutorPkgPath)) {
+    const syncExecutorPkg = JSON.parse(readFileSync(syncExecutorPkgPath, 'utf-8'))
+    pkgDirs.push({
+      name: syncExecutorPkg.name,
+      dir: syncExecutorDir,
+      pkg: syncExecutorPkg,
+    })
+  }
+
   const drizzleZeroSqliteDir = resolve(root, 'packages', 'drizzle-zero-sqlite')
   const drizzleZeroSqlitePkgPath = resolve(drizzleZeroSqliteDir, 'package.json')
   if (existsSync(drizzleZeroSqlitePkgPath)) {
@@ -264,6 +275,20 @@ if (existsSync(cfHostPkgPath)) {
     originalVersion: cfHostPkg.version,
     pkgPath: cfHostPkgPath,
     pkg: cfHostPkg,
+    next: orezNext,
+  })
+}
+
+// orez-sync-executor — host-neutral mutation execution and application adapters.
+const syncExecutorDir = resolve(root, 'packages', 'sync-executor')
+const syncExecutorPkgPath = resolve(syncExecutorDir, 'package.json')
+if (existsSync(syncExecutorPkgPath)) {
+  const syncExecutorPkg = JSON.parse(readFileSync(syncExecutorPkgPath, 'utf-8'))
+  packages.push({
+    dir: syncExecutorDir,
+    originalVersion: syncExecutorPkg.version,
+    pkgPath: syncExecutorPkgPath,
+    pkg: syncExecutorPkg,
     next: orezNext,
   })
 }

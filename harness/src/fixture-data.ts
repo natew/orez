@@ -1,15 +1,13 @@
-// zero-import-free half of the fixture: DDL, deterministic seed, the table
-// spec, and the server-side mutator executor. the cloudflare worker bundles
-// THIS module + orez src/sync-server only — keeping @rocicorp/zero (a client
-// package) out of the worker bundle. fixture.ts re-exports and a guard in
-// fixture.ts asserts TABLES stays equal to tablesFromZeroSchema(schema).
-import {
-  MutationAppError,
-  type SyncDb,
-  type SyncTables,
-} from '../../src/sync-server/sync-server'
+// storage fixture shared by the local and Cloudflare Orez harness hosts.
+import { MutationApplicationError } from 'orez-sync-executor'
+
 import { validateAtomicAppendArgs } from './consistency/atomic-visibility-workload.js'
 import { validateIncrementProbeArgs } from './consistency/exactly-once-workload.js'
+
+import type {
+  ZeroHttpSyncDb as SyncDb,
+  ZeroHttpTables as SyncTables,
+} from '../../src/zero-http/mount.js'
 
 // mirror of the zero schema's tables (guarded against drift in fixture.ts)
 export const TABLES: SyncTables = {
@@ -178,16 +176,16 @@ export function executeMutator(
     case 'exactlyOnce.incrementProbe': {
       const { id } = validateIncrementProbeArgs(args)
       const rows = tx.all(`SELECT rank FROM task WHERE id = ?`, [id])
-      if (rows.length !== 1) throw new MutationAppError('probe-not-found')
+      if (rows.length !== 1) throw new MutationApplicationError('probe-not-found')
       tx.exec(`UPDATE task SET rank = rank + 1 WHERE id = ?`, [id])
       return
     }
     case 'exactlyOnce.incrementThenReject': {
       const { id } = validateIncrementProbeArgs(args)
       const rows = tx.all(`SELECT rank FROM task WHERE id = ?`, [id])
-      if (rows.length !== 1) throw new MutationAppError('probe-not-found')
+      if (rows.length !== 1) throw new MutationApplicationError('probe-not-found')
       tx.exec(`UPDATE task SET rank = rank + 1 WHERE id = ?`, [id])
-      throw new MutationAppError('intentional-reject')
+      throw new MutationApplicationError('intentional-reject')
     }
     case 'atomicVisibility.appendGroup': {
       const { effects } = validateAtomicAppendArgs(args)
@@ -211,7 +209,7 @@ export function executeMutator(
     case 'project.create': {
       const a = args as { id: string; ownerId: string; name: string }
       const exists = tx.all(`SELECT 1 FROM project WHERE id = ?`, [a.id])
-      if (exists.length > 0) throw new MutationAppError('exists')
+      if (exists.length > 0) throw new MutationApplicationError('exists')
       tx.exec(`INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)`, [
         a.id,
         a.ownerId,
@@ -271,7 +269,7 @@ export function executeMutator(
     case 'task.toggle': {
       const a = args as { id: string }
       const existing = tx.all(`SELECT done FROM task WHERE id = ?`, [a.id])
-      if (existing.length === 0) throw new MutationAppError('not-found')
+      if (existing.length === 0) throw new MutationApplicationError('not-found')
       tx.exec(`UPDATE task SET done = ? WHERE id = ?`, [existing[0]!.done ? 0 : 1, a.id])
       return
     }

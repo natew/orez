@@ -12,7 +12,7 @@ import {
   type ProtectedView,
 } from './permission-transition.js'
 
-// mount route segment grammar (createSyncServerMount): databaseIDs must match.
+// mount route segment grammar (createZeroHttpMount): databaseIDs must match.
 const DATABASE_ID = /^[A-Za-z0-9_-]{1,64}$/
 
 export type PermissionScenario = {

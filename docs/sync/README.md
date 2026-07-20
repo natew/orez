@@ -59,7 +59,8 @@ state is a last-mutation-id and the client-group to user binding.
 | `crates/sync-native`             | A standalone axum host for the same engine.                                |
 | `packages/sync-cf-host`          | The Cloudflare Durable Object host, published as `orez-sync-cf-host`.      |
 | `packages/sync-browser-host`     | The Bedrock and IndexedDB browser worker host, exported by Orez.           |
-| `src/sync-server/sync-server.ts` | The TypeScript reference implementation and Node mount.                    |
+| `packages/sync-executor`         | Shared mutation transactions, CRUD, replay, and effect execution.          |
+| `src/zero-http/mount.ts`         | The executor-backed TypeScript pull/push mount.                             |
 | `src/cf-do/worker.ts`            | The data worker (`ZeroSqlDO`) that owns writes and serves the change feed. |
 | `harness/`                       | The conformance and qualification test harness.                            |
 

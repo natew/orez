@@ -217,7 +217,20 @@ describe('zero-http fixture server', () => {
       args: { id: 'p1', ownerId: 'u1', name: 'new project' },
     })
     expect(replay.res.status).toBe(200)
-    expect(replay.body).toEqual(created.body)
+    expect(replay.body).toEqual({
+      pushResponse: {
+        mutations: [
+          {
+            id: { clientID: 'c1', id: 1 },
+            result: {
+              error: 'alreadyProcessed',
+              details:
+                'Ignoring mutation from c1 with ID 1 as it was already processed. Expected: 2',
+            },
+          },
+        ],
+      },
+    })
     expect(server.rows('project')).toEqual([
       { id: 'p1', ownerId: 'u1', name: 'new project' },
     ])
@@ -299,7 +312,7 @@ describe('zero-http fixture server', () => {
         mutations: [
           {
             id: { clientID: 'c1', id: 1 },
-            result: { error: 'app', details: 'not-found' },
+            result: { error: 'app', message: 'not-found', details: 'not-found' },
           },
         ],
       },
@@ -315,7 +328,20 @@ describe('zero-http fixture server', () => {
       args: { id: 'missing', name: 'different ghost' },
     })
     expect(replayedMissing.res.status).toBe(200)
-    expect(replayedMissing.body).toEqual(missing.body)
+    expect(replayedMissing.body).toEqual({
+      pushResponse: {
+        mutations: [
+          {
+            id: { clientID: 'c1', id: 1 },
+            result: {
+              error: 'alreadyProcessed',
+              details:
+                'Ignoring mutation from c1 with ID 1 as it was already processed. Expected: 2',
+            },
+          },
+        ],
+      },
+    })
     expect(server.rows('project')).toEqual([
       { id: 'p2', ownerId: 'u2', name: 'u2 project' },
     ])
@@ -340,7 +366,7 @@ describe('zero-http fixture server', () => {
         mutations: [
           {
             id: { clientID: 'c1', id: 2 },
-            result: { error: 'app', details: 'forbidden' },
+            result: { error: 'app', message: 'forbidden', details: 'forbidden' },
           },
         ],
       },
@@ -369,13 +395,13 @@ describe('zero-http fixture server', () => {
       name: 'project|create',
       args: { id: 'p-gap', ownerId: 'u1', name: 'gap' },
     })
-    expect(gap.res.status).toBe(500)
-    expect(gap.body.error).toContain('mutation id gap')
+    expect(gap.res.status).toBe(400)
+    expect(gap.body.error).toContain('skips lmid')
     expect(server.version()).toBe(beforeVersion)
     expect(server.rows('project')).toEqual([])
 
-    const afterGap = await pull(server, 'token-u1', { cookie: beforeVersion - 1 })
-    expect(afterGap.body.lastMutationIDChanges).toEqual({})
+    const afterGap = await pull(server, 'token-u1')
+    expect(afterGap.body.lastMutationIDChanges).toEqual({ c1: 0 })
     expect(puts(afterGap.body)).toEqual([
       { tableName: 'user_record', value: { user_id: 'u1', display_name: 'ada' } },
     ])
@@ -403,7 +429,7 @@ describe('zero-http fixture server', () => {
         mutations: [
           {
             id: { clientID: 'c-u2', id: 1 },
-            result: { error: 'app', details: 'not-found' },
+            result: { error: 'app', message: 'not-found', details: 'not-found' },
           },
         ],
       },
@@ -427,7 +453,7 @@ describe('zero-http fixture server', () => {
         mutations: [
           {
             id: { clientID: 'c-u1', id: 1 },
-            result: { error: 'app', details: 'forbidden' },
+            result: { error: 'app', message: 'forbidden', details: 'forbidden' },
           },
         ],
       },

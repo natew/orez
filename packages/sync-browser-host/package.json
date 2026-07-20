@@ -15,7 +15,8 @@
   },
   "dependencies": {
     "bedrock-sqlite": "workspace:*",
-    "orez-sync-cf-host": "workspace:*"
+    "orez-sync-cf-host": "workspace:*",
+    "orez-sync-executor": "workspace:*"
   },
   "devDependencies": {
     "esbuild": "0.25.12",

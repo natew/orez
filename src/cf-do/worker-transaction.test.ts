@@ -184,7 +184,7 @@ describe('ZeroDO trusted application transaction', () => {
     ])
   })
 
-  it('materializes rows before returning a promise and runs effects after commit', async () => {
+  it('materializes rows before returning a promise and commits after work', async () => {
     const events: string[] = []
     const { storage, zero } = await createTestZero(async (work) => {
       events.push('transaction')
@@ -193,18 +193,17 @@ describe('ZeroDO trusted application transaction', () => {
       return value
     })
 
-    const result = await zero.runTrustedTransaction(unusedCompiler, async (tx, ctx) => {
+    const result = await zero.runTrustedTransaction(unusedCompiler, async (tx) => {
       storage.resetCursor()
       const pendingRows = tx.query('SELECT id, enabled FROM item WHERE id = ?', ['row-1'])
       expect(storage.cursorConsumed).toBe(true)
       const rows = await pendingRows
       events.push('work')
-      ctx.defer(() => events.push('effect'))
       return rows
     })
 
     expect(result).toEqual([{ id: 'row-1', enabled: 1 }])
-    expect(events).toEqual(['transaction', 'work', 'commit', 'effect'])
+    expect(events).toEqual(['transaction', 'work', 'commit'])
   })
 
   it('serializes application transactions without passing a callback to the Durable Object', async () => {
@@ -238,7 +237,7 @@ describe('ZeroDO trusted application transaction', () => {
 
     const result = await client.transaction(
       () => flatPlan(),
-      async (tx, context) => {
+      async (tx) => {
         const rows = await tx.queryAst({ table: 'item' }, pluralFormat)
         const execResult = await tx.exec('UPDATE item SET enabled = ?', [1], {
           table: 'item',
@@ -246,14 +245,13 @@ describe('ZeroDO trusted application transaction', () => {
           kind: 'update',
         })
         expect(execResult).toEqual({ changes: 1 })
-        context.defer(() => events.push('effect'))
         return rows
       }
     )
 
     expect(result).toEqual([{ id: 'row-1', enabled: true }])
     expect(events[0]).toMatch(/^begin:/)
-    expect(events.slice(1)).toEqual(['queryAst', 'exec', 'commit', 'effect'])
+    expect(events.slice(1)).toEqual(['queryAst', 'exec', 'commit'])
   })
 
   it('leaves no server ownership behind for a disposed waiting session', async () => {
@@ -308,62 +306,17 @@ describe('ZeroDO trusted application transaction', () => {
     expect(storage.lastParams).toEqual(['row-1'])
   })
 
-  it('discards effects from a retried storage-transaction attempt', async () => {
-    let attempt = 0
-    const ran: number[] = []
-    const { zero } = await createTestZero(async (work) => {
-      await work()
-      return await work()
-    })
-
-    await zero.runTrustedTransaction(unusedCompiler, (_tx, ctx) => {
-      attempt++
-      const currentAttempt = attempt
-      ctx.defer(() => ran.push(currentAttempt))
-    })
-
-    expect(attempt).toBe(2)
-    expect(ran).toEqual([2])
-  })
-
-  it('logs a failed effect, continues, and preserves the committed result', async () => {
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const ran: string[] = []
-    const { zero } = await createTestZero(async (work) => await work())
-
-    const result = await zero.runTrustedTransaction(unusedCompiler, (_tx, ctx) => {
-      ctx.defer(() => {
-        throw new Error('webhook failed')
-      })
-      ctx.defer(() => ran.push('continued'))
-      return 'committed'
-    })
-
-    expect(result).toBe('committed')
-    expect(ran).toEqual(['continued'])
-    expect(consoleError).toHaveBeenCalledWith(
-      JSON.stringify({
-        event: 'orez_do_external_effect_error',
-        error: 'webhook failed',
-      })
-    )
-    consoleError.mockRestore()
-  })
-
-  it('invalidates schema caches and drops effects when the transaction aborts', async () => {
-    const ran: string[] = []
+  it('invalidates schema caches when the transaction aborts', async () => {
     const { zero } = await createTestZero(async (work) => await work())
     const invalidateWatermarks = vi.spyOn(zero.watermarks, 'invalidateCache')
     const reloadCdc = vi.spyOn(zero.cdc, 'reload')
 
     await expect(
-      zero.runTrustedTransaction(unusedCompiler, (_tx, ctx) => {
-        ctx.defer(() => ran.push('must not run'))
+      zero.runTrustedTransaction(unusedCompiler, () => {
         throw new Error('abort')
       })
     ).rejects.toThrow('abort')
 
-    expect(ran).toEqual([])
     expect(invalidateWatermarks).toHaveBeenCalledOnce()
     expect(reloadCdc).toHaveBeenCalledOnce()
   })

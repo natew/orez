@@ -481,7 +481,6 @@ export const permissions = definePermissions<unknown, Schema>(schema, () => ({
 // them without dragging in @rocicorp/zero)
 // ---------------------------------------------------------------------------
 
-import { tablesFromZeroSchema } from '../../src/sync-server/sync-server'
 import { SEED, TABLES, jsonColumnsOf } from './fixture-data.js'
 
 export { DDL, SEED, generateSeed, jsonColumnsOf as jsonColumns } from './fixture-data.js'
@@ -499,7 +498,19 @@ export { DDL, SEED, generateSeed, jsonColumnsOf as jsonColumns } from './fixture
           )
         : val
     )
-  const want = sortKeys(tablesFromZeroSchema(schema))
+  const want = sortKeys(
+    Object.fromEntries(
+      Object.entries(schema.tables).map(([name, table]) => [
+        name,
+        {
+          columns: Object.fromEntries(
+            Object.entries(table.columns).map(([column, spec]) => [column, spec.type])
+          ),
+          primaryKey: [...table.primaryKey],
+        },
+      ])
+    )
+  )
   const got = sortKeys(TABLES)
   if (want !== got) {
     throw new Error(

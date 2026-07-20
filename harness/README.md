@@ -48,7 +48,7 @@ and missing tuples without booting targets; seed 42 reaches all 225/225
 coverable pairs with 400 generated specs (`--rounds 100 --queriesPerRound 4`).
 
 targets: `stock-zero` (real zero-cache + embedded postgres + fixture app
-server), `orez-local` (orez `src/sync-server` core over pure bun:sqlite,
+server), `orez-local` (orez executor-backed zero-http core over pure bun:sqlite,
 real `@rocicorp/zero` clients through the canonical `orez/zero-http`
 integration), and `orez-cf` (the
 SAME core hosted in a durable object over `ctx.storage.sql` — `cf/worker.ts`

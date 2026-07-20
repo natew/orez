@@ -1,67 +1,164 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { DatabaseSync } from 'node:sqlite'
+
+import { MutationApplicationError, type MutatorRegistry } from 'orez-sync-executor'
+
+import { zeroHttpFixtureSchema } from './fixture-schema.js'
+import {
+  createZeroHttpApplicationDatabase,
+  createZeroHttpSyncServer,
+  type ZeroHttpSyncDb,
+} from './mount.js'
 
 import type { AddressInfo } from 'node:net'
 
 export type Row = Record<string, string>
 
 type TableName = 'user' | 'project' | 'member'
-type Tables = Record<TableName, Map<string, Row>>
-type WireTableName = 'user_record' | 'project_record' | 'project_member'
-type ClientMutationResults = Map<string, Map<string, Map<number, MutationResult>>>
+type Seed = { user?: Row[]; project?: Row[]; member?: Row[] }
 
-interface PullBody {
-  clientID: string
-  clientGroupID: string
-  cookie: number | null
-}
-
-interface PushMutation {
-  type: string
-  name: string
-  clientID: string
-  id: number
-  args: Row[]
-}
-
-interface PushBody {
-  clientGroupID: string
-  mutations: PushMutation[]
-}
-
-type MutationResult = Record<string, never> | { error: 'app'; details: string }
-
-const tableNames: TableName[] = ['user', 'project', 'member']
-const wireNames: Record<
-  TableName,
-  { table: WireTableName; columns: Record<string, string> }
-> = {
+const tables = {
   user: {
-    table: 'user_record',
+    physical: 'user_record',
     columns: { id: 'user_id', name: 'display_name' },
   },
   project: {
-    table: 'project_record',
+    physical: 'project_record',
     columns: { id: 'project_id', ownerId: 'owner_id', name: 'project_name' },
   },
   member: {
-    table: 'project_member',
+    physical: 'project_member',
     columns: { id: 'member_id', projectId: 'project_id', userId: 'user_id' },
   },
+} as const
+
+function createDatabase(sqlite: DatabaseSync): ZeroHttpSyncDb {
+  return {
+    exec(sql, params = []) {
+      sqlite.prepare(sql).run(...(params as never[]))
+    },
+    all(sql, params = []) {
+      return sqlite.prepare(sql).all(...(params as never[])) as Record<string, unknown>[]
+    },
+    transaction<Value>(work: () => Value): Value {
+      sqlite.exec('BEGIN')
+      try {
+        const result = work()
+        sqlite.exec('COMMIT')
+        return result
+      } catch (error) {
+        sqlite.exec('ROLLBACK')
+        throw error
+      }
+    },
+  }
 }
 
-export async function startZeroHttpServer(opts?: {
-  seed?: { user?: Row[]; project?: Row[]; member?: Row[] }
-}): Promise<{
+function createMutators(): MutatorRegistry<typeof zeroHttpFixtureSchema> {
+  return {
+    'project|create': async ({ tx, args, ctx }) => {
+      const value = args as { id: string; ownerId: string; name: string }
+      if (value.ownerId !== ctx.claims.userID) {
+        throw new MutationApplicationError('forbidden')
+      }
+      await tx.mutate.project.insert(value)
+    },
+    'project|rename': async ({ tx, args, ctx }) => {
+      const value = args as { id: string; name: string }
+      const rows = Array.from(
+        await tx.dbTransaction.query(
+          'SELECT owner_id AS ownerID FROM project_record WHERE project_id = ?',
+          [value.id]
+        )
+      )
+      if (rows.length === 0) throw new MutationApplicationError('not-found')
+      if (rows[0]!.ownerID !== ctx.claims.userID) {
+        throw new MutationApplicationError('forbidden')
+      }
+      await tx.mutate.project.update(value)
+    },
+    'member|add': async ({ tx, args, ctx }) => {
+      const value = args as { id: string; projectId: string; userId: string }
+      const rows = Array.from(
+        await tx.dbTransaction.query(
+          'SELECT project_id FROM project_record WHERE project_id = ? AND owner_id = ?',
+          [value.projectId, ctx.claims.userID]
+        )
+      )
+      if (rows.length === 0) throw new MutationApplicationError('forbidden')
+      await tx.mutate.member.insert(value)
+    },
+    'member|remove': async ({ tx, args, ctx }) => {
+      const value = args as { id: string }
+      const members = Array.from(
+        await tx.dbTransaction.query(
+          'SELECT project_id AS projectId FROM project_member WHERE member_id = ?',
+          [value.id]
+        )
+      )
+      if (members.length === 0) throw new MutationApplicationError('not-found')
+      const projects = Array.from(
+        await tx.dbTransaction.query(
+          'SELECT project_id FROM project_record WHERE project_id = ? AND owner_id = ?',
+          [members[0]!.projectId, ctx.claims.userID]
+        )
+      )
+      if (projects.length === 0) throw new MutationApplicationError('forbidden')
+      await tx.mutate.member.delete(value)
+    },
+  }
+}
+
+export async function startZeroHttpServer(opts?: { seed?: Seed }): Promise<{
   url: string
   version(): number
   rows(table: string): Row[]
   close(): Promise<void>
 }> {
-  const tables = seedTables(opts?.seed)
-  const lmids = new Map<string, Map<string, number>>()
-  const mutationResults: ClientMutationResults = new Map()
-  const clientGroupUsers = new Map<string, string>()
-  let cookie = 1
+  const sqlite = new DatabaseSync(':memory:')
+  initializeApplicationTables(sqlite, opts?.seed)
+  const db = createDatabase(sqlite)
+  const sync = createZeroHttpSyncServer({
+    applicationDatabase: createZeroHttpApplicationDatabase(db),
+    db,
+    schema: zeroHttpFixtureSchema,
+    tables: {
+      user: { columns: { id: 'string', name: 'string' }, primaryKey: ['id'] },
+      project: {
+        columns: { id: 'string', ownerId: 'string', name: 'string' },
+        primaryKey: ['id'],
+      },
+      member: {
+        columns: { id: 'string', projectId: 'string', userId: 'string' },
+        primaryKey: ['id'],
+      },
+    },
+    mutators: createMutators(),
+    visible(table, userID) {
+      if (table === 'user') {
+        return {
+          sql: 'SELECT * FROM user_record WHERE user_id = ?',
+          params: [userID],
+        }
+      }
+      if (table === 'project') {
+        return {
+          sql: `SELECT DISTINCT p.* FROM project_record p
+            LEFT JOIN project_member m ON m.project_id = p.project_id
+            WHERE p.owner_id = ? OR m.user_id = ?`,
+          params: [userID, userID],
+        }
+      }
+      return {
+        sql: `SELECT DISTINCT m.* FROM project_member m
+          JOIN project_record p ON p.project_id = m.project_id
+          LEFT JOIN project_member viewer ON viewer.project_id = p.project_id
+          WHERE p.owner_id = ? OR viewer.user_id = ?`,
+        params: [userID, userID],
+      }
+    },
+  })
+  await sync.ready()
 
   const server = createServer(async (req, res) => {
     try {
@@ -69,98 +166,32 @@ export async function startZeroHttpServer(opts?: {
         sendJSON(res, 404, { error: 'not found' })
         return
       }
-
-      const path = new URL(req.url || '/', 'http://127.0.0.1').pathname
-      const userID = authenticate(req, tables)
+      const userID = authenticate(req, sqlite)
       if (!userID) {
         sendJSON(res, 401, { error: 'unauthorized' })
         return
       }
-
-      if (path === '/pull') {
-        const body = (await readJSON(req)) as PullBody
-        if (!bindClientGroup(clientGroupUsers, body.clientGroupID, userID)) {
-          sendJSON(res, 403, { error: 'client group belongs to a different user' })
-          return
-        }
-        if (body.cookie === cookie) {
-          sendJSON(res, 200, { cookie, unchanged: true })
-          return
-        }
-        if (typeof body.cookie === 'number' && body.cookie > cookie) {
-          sendJSON(res, 409, {
-            error: `future cookie ${body.cookie} is ahead of server cookie ${cookie}`,
-          })
-          return
-        }
-
-        sendJSON(res, 200, {
-          cookie,
-          lastMutationIDChanges: lastMutationIDChanges(lmids, body.clientGroupID),
-          rowsPatch: [{ op: 'clear' }, ...visibleRowsPatch(tables, userID)],
-        })
-        return
-      }
-
+      const path = new URL(req.url || '/', 'http://127.0.0.1').pathname
+      const body = await readJSON(req)
       if (path === '/push') {
-        const body = (await readJSON(req)) as PushBody
-        if (!bindClientGroup(clientGroupUsers, body.clientGroupID, userID)) {
-          sendJSON(res, 403, { error: 'client group belongs to a different user' })
-          return
-        }
-        const mutations = Array.isArray(body.mutations) ? body.mutations : []
-        const gap = findMutationGap(lmids, body.clientGroupID, mutations)
-        if (gap) {
-          sendJSON(res, 500, { error: gap })
-          return
-        }
-
-        const pushResults: Array<{
-          id: { clientID: string; id: number }
-          result: MutationResult
-        }> = []
-        let processedNewMutation = false
-
-        for (const mutation of mutations) {
-          const current = lmidFor(lmids, body.clientGroupID, mutation.clientID)
-          if (mutation.id <= current) {
-            pushResults.push({
-              id: { clientID: mutation.clientID, id: mutation.id },
-              result:
-                resultForMutation(
-                  mutationResults,
-                  body.clientGroupID,
-                  mutation.clientID,
-                  mutation.id
-                ) || {},
-            })
-            continue
-          }
-
-          const result = applyMutation(tables, userID, mutation)
-          setLMID(lmids, body.clientGroupID, mutation.clientID, mutation.id)
-          setMutationResult(
-            mutationResults,
-            body.clientGroupID,
-            mutation.clientID,
-            mutation.id,
-            result
-          )
-          processedNewMutation = true
-          pushResults.push({
-            id: { clientID: mutation.clientID, id: mutation.id },
-            result,
-          })
-        }
-
-        if (processedNewMutation) cookie += 1
-        sendJSON(res, 200, { pushResponse: { mutations: pushResults } })
+        sendJSON(res, 200, await sync.handlePush(body, { userID }))
         return
       }
-
+      if (path === '/pull') {
+        sendJSON(res, 200, await sync.handlePull(body, { userID }))
+        return
+      }
       sendJSON(res, 404, { error: 'not found' })
-    } catch (err) {
-      sendJSON(res, 500, { error: err instanceof Error ? err.message : String(err) })
+    } catch (error) {
+      const status =
+        typeof error === 'object' && error !== null && 'status' in error
+          ? Number(error.status)
+          : error instanceof SyntaxError
+            ? 400
+            : 500
+      sendJSON(res, status, {
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   })
 
@@ -171,245 +202,74 @@ export async function startZeroHttpServer(opts?: {
       resolve()
     })
   })
-
   const address = server.address() as AddressInfo
   return {
     url: `http://127.0.0.1:${address.port}`,
-    version: () => cookie,
-    rows: (table) => rowsForTable(tables, table),
+    version: sync.watermark,
+    rows: (table) => rowsForTable(sqlite, table),
     close: () =>
       new Promise((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()))
+        server.close((error) => {
+          sqlite.close()
+          error ? reject(error) : resolve()
+        })
       }),
   }
 }
 
-function seedTables(seed?: { user?: Row[]; project?: Row[]; member?: Row[] }) {
-  const tables: Tables = {
-    user: new Map(),
-    project: new Map(),
-    member: new Map(),
-  }
-  for (const table of tableNames) {
-    for (const row of seed?.[table] || []) {
-      if (typeof row.id === 'string') tables[table].set(row.id, cloneRow(row))
+function initializeApplicationTables(sqlite: DatabaseSync, seed?: Seed): void {
+  sqlite.exec(`CREATE TABLE user_record (
+    user_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL
+  )`)
+  sqlite.exec(`CREATE TABLE project_record (
+    project_id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    project_name TEXT NOT NULL
+  )`)
+  sqlite.exec(`CREATE TABLE project_member (
+    member_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    user_id TEXT NOT NULL
+  )`)
+  for (const table of Object.keys(tables) as TableName[]) {
+    const config = tables[table]
+    for (const row of seed?.[table] ?? []) {
+      const columns = Object.keys(row) as Array<keyof typeof config.columns>
+      const physicalColumns = columns.map((column) => config.columns[column])
+      sqlite
+        .prepare(
+          `INSERT INTO "${config.physical}" (${physicalColumns
+            .map((column) => `"${column}"`)
+            .join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`
+        )
+        .run(...columns.map((column) => row[column as string]))
     }
   }
-  return tables
 }
 
-function authenticate(req: IncomingMessage, tables: Tables) {
+function authenticate(req: IncomingMessage, sqlite: DatabaseSync): string | null {
   const header = req.headers.authorization
   if (!header?.startsWith('Bearer token-')) return null
   const userID = header.slice('Bearer token-'.length)
-  return tables.user.has(userID) ? userID : null
+  const row = sqlite
+    .prepare('SELECT user_id FROM user_record WHERE user_id = ?')
+    .get(userID)
+  return row ? userID : null
 }
 
-function bindClientGroup(
-  clientGroupUsers: Map<string, string>,
-  clientGroupID: string,
-  userID: string
-) {
-  const owner = clientGroupUsers.get(clientGroupID)
-  if (owner) return owner === userID
-  clientGroupUsers.set(clientGroupID, userID)
-  return true
-}
-
-function visibleRowsPatch(tables: Tables, userID: string) {
-  const visibleProjectIDs = visibleProjectIDSet(tables, userID)
-  const rows: Array<{ op: 'put'; tableName: WireTableName; value: Row }> = []
-  const user = tables.user.get(userID)
-  if (user) rows.push(wirePut('user', user))
-
-  for (const project of tables.project.values()) {
-    if (visibleProjectIDs.has(project.id)) {
-      rows.push(wirePut('project', project))
-    }
-  }
-
-  for (const member of tables.member.values()) {
-    if (visibleProjectIDs.has(member.projectId)) {
-      rows.push(wirePut('member', member))
-    }
-  }
-  return rows
-}
-
-function wirePut(table: TableName, row: Row) {
-  const names = wireNames[table]
-  const value: Row = {}
-  for (const [column, columnValue] of Object.entries(row)) {
-    const physicalColumn = names.columns[column]
-    if (!physicalColumn) throw new Error(`missing wire mapping for ${table}.${column}`)
-    value[physicalColumn] = columnValue
-  }
-  return {
-    op: 'put' as const,
-    tableName: names.table,
-    value,
-  }
-}
-
-function visibleProjectIDSet(tables: Tables, userID: string) {
-  const projectIDs = new Set<string>()
-  for (const project of tables.project.values()) {
-    if (project.ownerId === userID) projectIDs.add(project.id)
-  }
-  for (const member of tables.member.values()) {
-    if (member.userId === userID && tables.project.has(member.projectId)) {
-      projectIDs.add(member.projectId)
-    }
-  }
-  return projectIDs
-}
-
-function findMutationGap(
-  lmids: Map<string, Map<string, number>>,
-  clientGroupID: string,
-  mutations: PushMutation[]
-) {
-  const nextLMIDs = new Map<string, number>()
-  for (const mutation of mutations) {
-    const current =
-      nextLMIDs.get(mutation.clientID) ?? lmidFor(lmids, clientGroupID, mutation.clientID)
-    if (mutation.id <= current) continue
-    if (mutation.id !== current + 1) {
-      return `mutation id gap for ${mutation.clientID}: got ${mutation.id}, expected ${
-        current + 1
-      }`
-    }
-    nextLMIDs.set(mutation.clientID, mutation.id)
-  }
-  return null
-}
-
-function applyMutation(
-  tables: Tables,
-  userID: string,
-  mutation: PushMutation
-): MutationResult {
-  if (mutation.type !== 'custom') return appError('unsupported')
-  const args = mutation.args[0] || {}
-
-  if (mutation.name === 'project|create') {
-    if (tables.project.has(args.id)) return appError('exists')
-    if (args.ownerId !== userID) return appError('forbidden')
-    tables.project.set(args.id, {
-      id: args.id,
-      ownerId: args.ownerId,
-      name: args.name,
-    })
-    return {}
-  }
-
-  if (mutation.name === 'project|rename') {
-    const project = tables.project.get(args.id)
-    if (!project) return appError('not-found')
-    if (project.ownerId !== userID) return appError('forbidden')
-    tables.project.set(args.id, { ...project, name: args.name })
-    return {}
-  }
-
-  if (mutation.name === 'member|add') {
-    const project = tables.project.get(args.projectId)
-    if (!project) return appError('not-found')
-    if (project.ownerId !== userID) return appError('forbidden')
-    if (tables.member.has(args.id)) return appError('exists')
-    tables.member.set(args.id, {
-      id: args.id,
-      projectId: args.projectId,
-      userId: args.userId,
-    })
-    return {}
-  }
-
-  if (mutation.name === 'member|remove') {
-    const member = tables.member.get(args.id)
-    if (!member) return appError('not-found')
-    const project = tables.project.get(member.projectId)
-    if (!project) return appError('not-found')
-    if (project.ownerId !== userID) return appError('forbidden')
-    tables.member.delete(args.id)
-    return {}
-  }
-
-  return appError('unsupported')
-}
-
-function appError(details: string): MutationResult {
-  return { error: 'app', details }
-}
-
-function lastMutationIDChanges(
-  lmids: Map<string, Map<string, number>>,
-  clientGroupID: string
-) {
-  return Object.fromEntries(lmids.get(clientGroupID) || [])
-}
-
-function lmidFor(
-  lmids: Map<string, Map<string, number>>,
-  clientGroupID: string,
-  clientID: string
-) {
-  return lmids.get(clientGroupID)?.get(clientID) || 0
-}
-
-function setLMID(
-  lmids: Map<string, Map<string, number>>,
-  clientGroupID: string,
-  clientID: string,
-  id: number
-) {
-  let group = lmids.get(clientGroupID)
-  if (!group) {
-    group = new Map()
-    lmids.set(clientGroupID, group)
-  }
-  group.set(clientID, id)
-}
-
-function resultForMutation(
-  results: ClientMutationResults,
-  clientGroupID: string,
-  clientID: string,
-  id: number
-) {
-  return results.get(clientGroupID)?.get(clientID)?.get(id)
-}
-
-function setMutationResult(
-  results: ClientMutationResults,
-  clientGroupID: string,
-  clientID: string,
-  id: number,
-  result: MutationResult
-) {
-  let group = results.get(clientGroupID)
-  if (!group) {
-    group = new Map()
-    results.set(clientGroupID, group)
-  }
-  let client = group.get(clientID)
-  if (!client) {
-    client = new Map()
-    group.set(clientID, client)
-  }
-  client.set(id, result)
-}
-
-function rowsForTable(tables: Tables, table: string): Row[] {
-  if (!isTableName(table)) return []
-  return [...tables[table].values()].map(cloneRow)
-}
-
-function isTableName(table: string): table is TableName {
-  return (tableNames as string[]).includes(table)
-}
-
-function cloneRow(row: Row): Row {
-  return { ...row }
+function rowsForTable(sqlite: DatabaseSync, table: string): Row[] {
+  if (!(table in tables)) return []
+  const config = tables[table as TableName]
+  const logicalColumns = Object.entries(config.columns)
+  return sqlite
+    .prepare(`SELECT * FROM "${config.physical}"`)
+    .all()
+    .map((row) =>
+      Object.fromEntries(
+        logicalColumns.map(([logical, physical]) => [logical, String(row[physical])])
+      )
+    )
 }
 
 async function readJSON(req: IncomingMessage): Promise<unknown> {
@@ -418,7 +278,7 @@ async function readJSON(req: IncomingMessage): Promise<unknown> {
   return body ? JSON.parse(body) : {}
 }
 
-function sendJSON(res: ServerResponse, status: number, body: unknown) {
+function sendJSON(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' })
   res.end(JSON.stringify(body))
 }

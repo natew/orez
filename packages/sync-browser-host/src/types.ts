@@ -1,9 +1,14 @@
-import type { SQLiteExecResult, SqlStatementMetadata } from 'orez-sync-cf-host'
+import type { Schema } from '@rocicorp/zero'
+import type { TransactionQueryBudget } from 'orez-sync-cf-host/transaction-query'
 import type {
-  TransactionQueryBudget,
-  TransactionQueryFormat,
-} from 'orez-sync-cf-host/transaction-query'
-import type { VisibilityFilter } from 'orez-sync-cf-host/visibility'
+  ExecResult,
+  MutatorRegistry,
+  NormalizedClaims,
+  QueryResolver,
+  SqlStatementMetadata,
+  SyncExecutor,
+  VisibilityConfig,
+} from 'orez-sync-executor'
 
 export {
   visibility,
@@ -12,112 +17,19 @@ export {
   type VisibilityOperand,
   type VisibilityValue,
 } from 'orez-sync-cf-host/visibility'
-
-export type JsonPrimitive = string | number | boolean | null
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue }
-
-export type NormalizedClaims = {
-  userID: string
-  [claim: string]: JsonValue
-}
-
-export type ZeroColumn = {
-  readonly type: string
-  readonly serverName?: string
-  readonly encrypted?: true
-}
-
-export type ZeroSchemaConfig = {
-  readonly schemaID?: string
-  readonly tables: Readonly<
-    Record<
-      string,
-      {
-        readonly name?: string
-        readonly serverName?: string
-        readonly columns: Readonly<Record<string, ZeroColumn>>
-        readonly primaryKey: readonly string[]
-      }
-    >
-  >
-}
+export type { VisibilityConfig } from 'orez-sync-executor'
 
 export interface SyncSql {
   exec(
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
-  ): SQLiteExecResult
+  ): ExecResult
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
   ): Row[]
 }
-
-export interface MutatorSql {
-  exec(
-    sql: string,
-    params?: readonly unknown[],
-    metadata?: SqlStatementMetadata
-  ): Promise<SQLiteExecResult>
-  query<Row extends Record<string, unknown> = Record<string, unknown>>(
-    sql: string,
-    params?: readonly unknown[]
-  ): Promise<Row[]>
-  queryAst<Result = unknown>(
-    ast: JsonValue,
-    format: TransactionQueryFormat,
-    queryName?: string
-  ): Promise<Result>
-}
-
-export type DeferredEffect = () => void | Promise<void>
-
-export type MutatorContext = {
-  claims: NormalizedClaims
-  clientID: string
-  mutationID: string
-  defer(effect: DeferredEffect): void
-}
-
-export type ApplicationTransactionContext = {
-  defer(effect: DeferredEffect): void
-}
-
-export type ApplicationTransaction<Value> = (
-  tx: MutatorSql,
-  context: ApplicationTransactionContext
-) => Value | Promise<Value>
-
-export type RegisteredMutator = (
-  tx: MutatorSql,
-  args: JsonValue,
-  context: MutatorContext
-) => void | Promise<void>
-
-export type MutatorRegistry = Readonly<Record<string, RegisteredMutator>>
-
-export function registerMutators<
-  const Registry extends Record<string, RegisteredMutator>,
->(registry: Registry): Readonly<Registry> {
-  return Object.freeze({ ...registry })
-}
-
-export {
-  MutationApplicationError,
-  isMutationApplicationError,
-} from 'orez-sync-cf-host/mutation-error'
-
-export type VisibilityConfig = {
-  rowLocal: boolean | ((claims: NormalizedClaims) => boolean)
-  filter(table: string, claims: NormalizedClaims): VisibilityFilter | undefined
-}
-
-export type QueryResolver = (
-  name: string,
-  args: readonly JsonValue[],
-  claims: NormalizedClaims
-) => JsonValue | Promise<JsonValue>
 
 export type PullCaps = {
   maxChangeRows: number
@@ -129,15 +41,20 @@ export type BrowserSyncHostAssets = {
   syncWasmUrl?: string | URL
 }
 
-export type BrowserSyncHostConfig = {
+export type BrowserSyncHostConfig<S extends Schema = Schema> = {
   storageKey: string
   assets?: BrowserSyncHostAssets
-  schema: ZeroSchemaConfig
+  schema: S
   initialize(sql: SyncSql): void
   authenticate(
     request: Request
   ): NormalizedClaims | null | Promise<NormalizedClaims | null>
-  mutators: MutatorRegistry
+  authorize(
+    request: Request,
+    claims: NormalizedClaims,
+    namespace: string
+  ): boolean | Promise<boolean>
+  mutators: MutatorRegistry<S>
   visibility?: VisibilityConfig
   queryAware?: boolean | ((claims: NormalizedClaims) => boolean)
   resolveQuery?: QueryResolver
@@ -148,7 +65,8 @@ export type BrowserSyncHostConfig = {
   onDataChanged?: () => void
 }
 
-export interface BrowserSyncHost {
+export interface BrowserSyncHost<S extends Schema = Schema> {
+  readonly executor: SyncExecutor<S>
   handlePull(request: Request): Promise<Response>
   handlePush(request: Request): Promise<Response>
   fetch(request: Request): Promise<Response>
@@ -160,8 +78,7 @@ export interface BrowserSyncHost {
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
-  ): Promise<SQLiteExecResult>
-  transaction<Value>(work: ApplicationTransaction<Value>): Promise<Value>
+  ): Promise<ExecResult>
   subscribe(listener: () => void): () => void
   close(): Promise<void>
 }
@@ -176,7 +93,7 @@ export interface BrowserSyncHostPortClient {
     sql: string,
     params?: readonly unknown[],
     metadata?: SqlStatementMetadata
-  ): Promise<SQLiteExecResult>
+  ): Promise<ExecResult>
   subscribe(listener: () => void): () => void
   close(): void
 }

@@ -138,7 +138,6 @@ try {
     { changes: 1 },
     'application RPC reports changed rows'
   )
-  check(result.body.effectRan, true, 'application RPC deferred effect runs after commit')
 
   result = await call(`_application-rpc/${applicationRpc}`, '/rollback')
   check(result.status, 409, 'application RPC rollback status')
@@ -152,7 +151,6 @@ try {
     [{ balance: 111 }],
     'application RPC rollback discards SQL write'
   )
-  check(result.body.effectRan, false, 'application RPC rollback discards deferred effect')
 
   const applicationOverlap = ns('application-overlap')
   result = await call(`_application-rpc/${applicationOverlap}`, '/overlap')

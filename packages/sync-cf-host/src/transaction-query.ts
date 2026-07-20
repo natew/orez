@@ -1,3 +1,5 @@
+import type { TransactionQueryFormat } from 'orez-sync-executor'
+
 export type TransactionQueryWireValue =
   | { kind: 'null' }
   | { kind: 'integer'; value: string }
@@ -44,11 +46,6 @@ export type TransactionQueryBudget = {
 export type TransactionQueryExecutionOptions = {
   queryName?: string
   budget?: Partial<TransactionQueryBudget>
-}
-
-export type TransactionQueryFormat = {
-  singular: boolean
-  relationships: Readonly<Record<string, TransactionQueryFormat>>
 }
 
 export const DEFAULT_TRANSACTION_QUERY_BUDGET: TransactionQueryBudget = {

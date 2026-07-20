@@ -1,4 +1,5 @@
 import type { PullCaps, SyncHostConfig, SyncHostEnv } from './types.js'
+import type { Schema } from '@rocicorp/zero'
 
 export function validatePullCaps(caps: PullCaps): PullCaps {
   if (!Number.isSafeInteger(caps.maxChangeRows) || caps.maxChangeRows < 1) {
@@ -7,14 +8,18 @@ export function validatePullCaps(caps: PullCaps): PullCaps {
   return caps
 }
 
-export function validateSyncHostConfig<Env extends SyncHostEnv>(
-  config: SyncHostConfig<Env>
-): SyncHostConfig<Env> {
+export function validateSyncHostConfig<
+  Env extends SyncHostEnv,
+  S extends Schema = Schema,
+>(config: SyncHostConfig<Env, S>): SyncHostConfig<Env, S> {
   if (typeof config.authorizeWake !== 'function') {
     throw new TypeError('sync host config authorizeWake is required')
   }
   if (typeof config.authorizeNotify !== 'function') {
     throw new TypeError('sync host config authorizeNotify is required')
+  }
+  if (typeof config.authorize !== 'function') {
+    throw new TypeError('sync host config authorize is required')
   }
   const hasMutators = config.mutators !== undefined
   const hasDelegate = config.mutateUrl !== undefined

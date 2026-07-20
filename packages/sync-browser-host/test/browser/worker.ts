@@ -1,8 +1,5 @@
-import {
-  createBrowserSyncHost,
-  MutationApplicationError,
-  registerMutators,
-} from 'orez/sync-browser-host'
+import { MutationApplicationError } from 'orez-sync-executor'
+import { createBrowserSyncHost } from 'orez/sync-browser-host'
 
 import {
   createBrowserSyncHostInternal,
@@ -11,10 +8,12 @@ import {
 import { serveBrowserSyncHostPortInternal } from '../../src/message-port.js'
 
 import type { BrowserSyncHost, BrowserSyncHostConfig } from '../../src/types.js'
+import type { MutatorRegistry } from 'orez-sync-executor'
 
 const schema = {
   tables: {
     todo: {
+      name: 'todo',
       columns: {
         id: { type: 'string' },
         title: { type: 'string' },
@@ -23,6 +22,7 @@ const schema = {
       primaryKey: ['id'],
     },
     todoTag: {
+      name: 'todoTag',
       columns: {
         id: { type: 'string' },
         todoId: { type: 'string' },
@@ -31,49 +31,56 @@ const schema = {
       primaryKey: ['id'],
     },
   },
+  relationships: {},
 } as const
 
-const mutators = registerMutators({
-  async 'todo.create'(tx, args) {
+const mutators = Object.freeze({
+  async 'todo.create'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; title: string; done?: boolean }
-    const existing = await tx.query('SELECT 1 FROM todo WHERE id = ?', [value.id])
+    const existing = await sql.query('SELECT 1 FROM todo WHERE id = ?', [value.id])
     if (existing.length > 0) throw new MutationApplicationError('already exists')
-    await tx.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
+    await sql.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
       value.id,
       value.title,
       value.done ? 1 : 0,
     ])
   },
-  async 'todo.rename'(tx, args) {
+  async 'todo.rename'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; title: string }
-    await tx.exec('UPDATE todo SET title = ? WHERE id = ?', [value.title, value.id])
+    await sql.exec('UPDATE todo SET title = ? WHERE id = ?', [value.title, value.id])
   },
-  async 'todo.delete'(tx, args) {
+  async 'todo.delete'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string }
-    await tx.exec('DELETE FROM todo WHERE id = ?', [value.id])
+    await sql.exec('DELETE FROM todo WHERE id = ?', [value.id])
   },
-  async 'todo.createDeferred'(tx, args, context) {
+  async 'todo.createDeferred'({ tx, args, ctx }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; title: string }
-    await tx.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
+    await sql.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
       value.id,
       value.title,
       0,
     ])
-    context.defer(() => {
+    ctx.defer(() => {
       self.postMessage({ type: 'effect-complete', id: value.id })
     })
   },
-  async 'todo.addTag'(tx, args) {
+  async 'todo.addTag'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { id: string; todoId: string; label: string }
-    await tx.exec('INSERT INTO todoTag (id, todoId, label) VALUES (?, ?, ?)', [
+    await sql.exec('INSERT INTO todoTag (id, todoId, label) VALUES (?, ?, ?)', [
       value.id,
       value.todoId,
       value.label,
     ])
   },
-  async 'todo.copyFromQuery'(tx, args) {
+  async 'todo.copyFromQuery'({ tx, args }) {
+    const sql = tx.dbTransaction.wrappedTransaction
     const value = args as { sourceId: string; targetId: string }
-    const source = await tx.queryAst<
+    const source = await sql.queryAst<
       | {
           id: string
           title: string
@@ -104,13 +111,44 @@ const mutators = registerMutators({
       'todoWithTags'
     )
     if (!source) throw new MutationApplicationError('source does not exist')
-    await tx.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
+    await sql.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
       value.targetId,
       `${source.title}:${source.tags.map((tag) => tag.label).join(',')}`,
       source.done ? 1 : 0,
     ])
   },
-})
+  async 'test.applicationTransaction'({ tx, args, ctx }) {
+    const sql = tx.dbTransaction.wrappedTransaction
+    const value = args as { messageID: string }
+    await sql.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
+      'application-transaction',
+      'trusted',
+      0,
+    ])
+    ctx.defer(() => {
+      self.postMessage({
+        type: 'application-transaction-effect',
+        id: value.messageID,
+      })
+    })
+  },
+  async 'test.applicationTransactionRollback'({ tx, args, ctx }) {
+    const sql = tx.dbTransaction.wrappedTransaction
+    const value = args as { messageID: string }
+    await sql.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
+      'application-transaction-rollback',
+      'must roll back',
+      0,
+    ])
+    ctx.defer(() => {
+      self.postMessage({
+        type: 'application-transaction-rollback-effect',
+        id: value.messageID,
+      })
+    })
+    throw new Error('rollback requested')
+  },
+} satisfies MutatorRegistry<typeof schema>)
 
 type WorkerMessage =
   | {
@@ -124,7 +162,7 @@ type WorkerMessage =
   | { type: 'application-transaction'; id: string }
   | { type: 'application-transaction-rollback'; id: string }
 
-let host: BrowserSyncHost | undefined
+let host: BrowserSyncHost<typeof schema> | undefined
 
 self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
   const message = event.data
@@ -137,21 +175,12 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
       })
       return
     }
-    void host
-      .transaction(async (tx, context) => {
-        await tx.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
-          'application-transaction-rollback',
-          'must roll back',
-          0,
-        ])
-        context.defer(() => {
-          self.postMessage({
-            type: 'application-transaction-rollback-effect',
-            id: message.id,
-          })
-        })
-        throw new Error('rollback requested')
-      })
+    void host.executor
+      .execute(
+        'test.applicationTransactionRollback',
+        { messageID: message.id },
+        { userID: 'preview-user' }
+      )
       .then(() => {
         self.postMessage({
           type: 'application-transaction-rollback-error',
@@ -177,33 +206,31 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
       })
       return
     }
-    void host
-      .transaction(async (tx, context) => {
-        await tx.exec('INSERT INTO todo (id, title, done) VALUES (?, ?, ?)', [
-          'application-transaction',
-          'trusted',
-          0,
-        ])
-        const row = await tx.queryAst<
-          { id: string; title: string; done: boolean } | undefined
-        >(
-          {
-            table: 'todo',
-            where: {
-              type: 'simple',
-              op: '=',
-              left: { type: 'column', name: 'id' },
-              right: { type: 'literal', value: 'application-transaction' },
+    void host.executor
+      .execute(
+        'test.applicationTransaction',
+        { messageID: message.id },
+        { userID: 'preview-user' }
+      )
+      .then(() =>
+        host!.executor.query({ userID: 'preview-user' }, (tx) =>
+          tx.dbTransaction.wrappedTransaction.queryAst<
+            { id: string; title: string; done: boolean } | undefined
+          >(
+            {
+              table: 'todo',
+              where: {
+                type: 'simple',
+                op: '=',
+                left: { type: 'column', name: 'id' },
+                right: { type: 'literal', value: 'application-transaction' },
+              },
             },
-          },
-          { singular: true, relationships: {} },
-          'applicationTransactionTodo'
+            { singular: true, relationships: {} },
+            'applicationTransactionTodo'
+          )
         )
-        context.defer(() => {
-          self.postMessage({ type: 'application-transaction-effect', id: message.id })
-        })
-        return row
-      })
+      )
       .then((row) => {
         self.postMessage({
           type: 'application-transaction-complete',
@@ -257,6 +284,9 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
             }
           : null
       },
+      authorize() {
+        return true
+      },
       mutators,
       queryAware: (claims) => claims.queryAware === true,
       resolveQuery(name) {
@@ -272,7 +302,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
           orderBy: [['id', 'asc']],
         }
       },
-    } satisfies BrowserSyncHostConfig
+    } satisfies BrowserSyncHostConfig<typeof schema>
     const createdHost = faultPoint
       ? await createBrowserSyncHostInternal(config, hooks)
       : await createBrowserSyncHost(config)

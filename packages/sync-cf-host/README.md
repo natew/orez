@@ -2,25 +2,21 @@
 
 This is the production-shaped Cloudflare Durable Object host for the Rust sync
 engine. The package exposes a consumer integration surface (`createSyncWorker`,
-`createSyncDurableObject`, `registerMutators`) and a harness deployment built
+`createSyncDurableObject`) and a harness deployment built
 from `src/harness-worker.ts`. Consumers provide a JSON Zero schema, application
-DDL/seed initializer, normalized-claims authenticator, mutator registry, and an
-optional row-visibility hook.
+DDL/seed initializer, normalized-claims authenticator, an
+`orez-sync-executor` mutator registry, and an optional row-visibility hook.
 
-The Worker authenticates at the consumer edge and forwards normalized claims
+The Worker authenticates and authorizes at the consumer edge, then forwards normalized claims
 inside the binding request body, where request-header observability cannot record
 them. It never logs tokens, mutation arguments, or row contents. Pull runs
-`engine_handle_pull` inside `transactionSync`; push runs
-Rust `push_validate`/`preflight`/`finalize`/`record_app_error` steps around the
-registered asynchronous TypeScript mutator inside `ctx.storage.transaction`.
-Every SQL cursor is materialized before an await. Mutators may await only their
-`MutatorSql` operations; timers, fetches, and other external work belong in
-`context.defer`, which runs only after commit. Application failures use the
+`engine_handle_pull` inside `transactionSync`; local push delegates validation,
+replay, LMID advancement, CRUD, and committed effects to `orez-sync-executor`
+inside `ctx.storage.transaction`. Every SQL cursor is materialized before an
+await. Mutators may await only their application transaction operations;
+timers, fetches, and other external work belong in
+`ctx.defer`, which runs only after commit. Application failures use the
 required second transaction to advance the LMID marker.
-
-The root `orez/cf-do` executor and this host consume the same `post-commit`
-module, so transaction retries discard effects from abandoned attempts in both
-paths.
 
 Transaction-query `ILIKE` folding is ASCII-only on Durable Object SQLite;
 non-ASCII case pairs can diverge from PostgreSQL.

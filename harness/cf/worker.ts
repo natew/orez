@@ -1,24 +1,14 @@
-// zharness-sync: the orez sync-server core hosted in a cloudflare durable
-// object over ctx.storage.sql — the orez-cf harness target. each first path
+import { createHarnessSyncServer, type HarnessSyncServer } from '../src/executor-host.js'
+import { seedSqlite, userIDFromAuth } from '../src/fixture-data'
+
+// zharness-sync: the executor-backed zero-http mount hosted in a cloudflare
+// durable object over ctx.storage.sql. each first path
 // segment is a namespace routed to its own DO (fresh dataset per harness
 // run): POST /<ns>/pull, /<ns>/push (bearer token-<userID>), and
 // /<ns>/admin/sql guarded by the ADMIN_KEY secret (the harness oracle +
 // upstream-write channel; a real deploy would never expose this).
 //
-// bundles fixture-data + orez src/sync-server only — no @rocicorp/zero in
-// the worker.
-import {
-  type SyncDb,
-  type SyncServer,
-  createSyncServer,
-} from '../../src/sync-server/sync-server'
-import {
-  DDL,
-  TABLES,
-  executeMutator,
-  seedSqlite,
-  userIDFromAuth,
-} from '../src/fixture-data'
+import type { ZeroHttpSyncDb as SyncDb } from '../../src/zero-http/mount.js'
 
 type Env = {
   SYNC_DO: DurableObjectNamespace
@@ -30,7 +20,11 @@ type SqlStorageLike = {
   exec(query: string, ...bindings: unknown[]): { toArray(): Record<string, unknown>[] }
 }
 type DurableObjectState = {
-  storage: { sql: SqlStorageLike; transactionSync<T>(fn: () => T): T }
+  storage: {
+    sql: SqlStorageLike
+    transaction<Value>(work: () => Value | Promise<Value>): Promise<Value>
+    transactionSync<Value>(work: () => Value): Value
+  }
 }
 type DurableObjectNamespace = {
   idFromName(name: string): unknown
@@ -59,17 +53,19 @@ function doSqliteDb(state: DurableObjectState): SyncDb {
 }
 
 export class SyncServerDO {
+  readonly #state: DurableObjectState
   #db: SyncDb
-  #sync: SyncServer | null = null
+  #sync: HarnessSyncServer | null = null
   #bootID = crypto.randomUUID()
   #lastRequestAt = 0
   #hibernations = 0
 
   constructor(state: DurableObjectState) {
+    this.#state = state
     this.#db = doSqliteDb(state)
   }
 
-  #ensure(): SyncServer {
+  #ensure(): HarnessSyncServer {
     if (this.#sync) return this.#sync
     const seeded = this.#db.all(
       `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'project'`
@@ -77,10 +73,8 @@ export class SyncServerDO {
     if (seeded.length === 0) {
       this.#db.transaction(() => seedSqlite(this.#db))
     }
-    this.#sync = createSyncServer({
-      db: this.#db,
-      tables: TABLES,
-      mutate: executeMutator,
+    this.#sync = createHarnessSyncServer(this.#db, {
+      transaction: (work) => this.#state.storage.transaction(work),
     })
     return this.#sync
   }
@@ -98,6 +92,7 @@ export class SyncServerDO {
     const [, , ...rest] = url.pathname.split('/')
     const route = `/${rest.join('/')}`
     const sync = this.#ensure()
+    await sync.ready()
 
     const json = (value: unknown, status = 200) =>
       new Response(JSON.stringify(value), {
@@ -124,10 +119,10 @@ export class SyncServerDO {
       if (!userID) return json({ error: 'missing auth' }, 401)
 
       if (route === '/pull') {
-        return json(sync.handlePull((await request.json()) as never, userID))
+        return json(await sync.handlePull((await request.json()) as never, { userID }))
       }
       if (route === '/push') {
-        return json(sync.handlePush((await request.json()) as never, userID))
+        return json(await sync.handlePush((await request.json()) as never, { userID }))
       }
       return json({ error: 'not found' }, 404)
     } catch (error) {

@@ -1,4 +1,4 @@
-// runtime proof for createSyncServerMount:
+// runtime proof for the executor-backed zero-http mount:
 // - the stock Zero client + vendored http-pull transport produce the same
 //   protocol responses against plain /pull|push and mounted /p-alpha/pull|push
 // - two mounted project databases keep rows, cookies, LMIDs, and group owners
@@ -10,12 +10,11 @@ import { createServer } from 'node:http'
 import { Zero } from '@rocicorp/zero'
 
 import {
-  type SyncDb,
-  type SyncServer,
-  createSyncServer,
-  createSyncServerMount,
-} from '../../src/sync-server/sync-server'
-import { TABLES, executeMutator, seedSqlite, userIDFromAuth } from './fixture-data.js'
+  createZeroHttpMount,
+  type ZeroHttpSyncDb as SyncDb,
+} from '../../src/zero-http/mount.js'
+import { createHarnessSyncServer, type HarnessSyncServer } from './executor-host.js'
+import { seedSqlite, userIDFromAuth } from './fixture-data.js'
 import { mutators, queries, schema } from './fixture.js'
 import { assertServerOutcome } from './server-outcome.js'
 import { installHttpPullTransport } from './vendor/httpPullTransport.js'
@@ -42,14 +41,14 @@ function sqliteDb(sqlite: Database): SyncDb {
   }
 }
 
-function makeProject(): { sqlite: Database; db: SyncDb; sync: SyncServer } {
+function makeProject(): { sqlite: Database; db: SyncDb; sync: HarnessSyncServer } {
   const sqlite = new Database(':memory:')
   const db = sqliteDb(sqlite)
   seedSqlite(db)
   return {
     sqlite,
     db,
-    sync: createSyncServer({ db, tables: TABLES, mutate: executeMutator }),
+    sync: createHarnessSyncServer(db),
   }
 }
 
@@ -105,7 +104,7 @@ function normalizeClientIDs(value: unknown): unknown {
 const plain = makeProject()
 const projects = new Map<string, ReturnType<typeof makeProject>>()
 const observations: Observation[] = []
-const mount = createSyncServerMount({
+const mount = createZeroHttpMount({
   pathPrefix: '/p-',
   server(databaseID) {
     let project = projects.get(databaseID)
@@ -141,8 +140,8 @@ const httpServer = createServer(async (req, res) => {
       operation = url.pathname === '/pull' ? 'pull' : 'push'
       response =
         operation === 'pull'
-          ? plain.sync.handlePull(body, userID)
-          : plain.sync.handlePush(body, userID)
+          ? await plain.sync.handlePull(body, { userID })
+          : await plain.sync.handlePush(body, { userID })
     } else {
       const route = mount.match(url.pathname)
       if (!route) {
@@ -151,7 +150,7 @@ const httpServer = createServer(async (req, res) => {
       }
       databaseID = route.databaseID
       operation = route.operation
-      response = mount.handle(route, body, userID)
+      response = await mount.handle(route, body, { userID })
     }
     observations.push({ databaseID, operation, response })
     json(res, response)

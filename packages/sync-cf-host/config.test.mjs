@@ -29,10 +29,13 @@ describe('sync host config', () => {
 
 const base = {
   hostVersion: 'test',
-  schema: { tables: {} },
+  schema: { tables: {}, relationships: {} },
   initialize() {},
   authenticate() {
     return { userID: 'u' }
+  },
+  authorize() {
+    return true
   },
   authorizeWake() {
     return true
@@ -47,6 +50,9 @@ const base = {
 
 describe('mutation mode', () => {
   test('requires explicit wake and notify capabilities', () => {
+    expect(() =>
+      validateSyncHostConfig({ ...base, authorize: undefined, mutators: {} })
+    ).toThrow('authorize is required')
     expect(() =>
       validateSyncHostConfig({ ...base, authorizeWake: undefined, mutators: {} })
     ).toThrow('authorizeWake is required')

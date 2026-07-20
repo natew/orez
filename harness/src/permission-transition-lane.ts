@@ -1,6 +1,6 @@
 // Live lane for the frozen populated-cache permission-transition v1 profile.
-// ONE http host serves two child namespaces via createSyncServerMount — each its
-// own in-process sqlite db + createSyncServer behind the fixture visible()
+// ONE http host serves two child namespaces via the executor-backed zero-http
+// mount, each with its own in-process sqlite db behind the fixture visible()
 // policy — so identical protected ids never collide and the two namespaces are
 // honestly the same host, not two processes. nsA runs a grant then a revoke;
 // nsB stays authorized. A disjoint sentinel scope permanently grants every
@@ -21,11 +21,9 @@ import { parseArgs } from 'node:util'
 import { Zero } from '@rocicorp/zero'
 
 import {
-  createSyncServer,
-  createSyncServerMount,
-  type SyncDb,
-  type SyncServer,
-} from '../../src/sync-server/sync-server'
+  createZeroHttpMount,
+  type ZeroHttpSyncDb as SyncDb,
+} from '../../src/zero-http/mount.js'
 import { FAULT_SCHEDULE_SCHEMA_VERSION } from './consistency/fault-schedule.js'
 import { writePermissionArtifacts } from './consistency/permission-artifacts.js'
 import {
@@ -46,7 +44,8 @@ import {
   type PermissionEpoch,
   type PermissionEvent,
 } from './consistency/permission-transition.js'
-import { TABLES, executeMutator, seedSqlite, userIDFromAuth } from './fixture-data.js'
+import { createHarnessSyncServer, type HarnessSyncServer } from './executor-host.js'
+import { seedSqlite, userIDFromAuth } from './fixture-data.js'
 import { fixtureVisibility } from './fixture-visibility.js'
 import { mutators, queries, schema, zql } from './fixture.js'
 import { ensureHttpPullTransport } from './vendor/httpPullTransport.js'
@@ -115,7 +114,12 @@ const SN = scenario.sentinel
 
 // ---- the host: two child namespaces on one process ------------------------
 
-type Namespace = { id: string; sqlite: Database; db: SyncDb; sync: SyncServer }
+type Namespace = {
+  id: string
+  sqlite: Database
+  db: SyncDb
+  sync: HarnessSyncServer
+}
 
 function sqliteDb(sqlite: Database): SyncDb {
   return {
@@ -146,10 +150,7 @@ function makeNamespace(
   const sqlite = new Database(':memory:')
   const db = sqliteDb(sqlite)
   seedSqlite(db)
-  const sync = createSyncServer({
-    db,
-    tables: TABLES,
-    mutate: executeMutator,
+  const sync = createHarnessSyncServer(db, {
     visible: fixtureVisibility,
   })
 
@@ -217,7 +218,7 @@ const namespaces = new Map<string, Namespace>([
 type PullEcho = { databaseID: string; clientID: string; clientGroupID: string }
 const echoes: PullEcho[] = []
 
-const mount = createSyncServerMount({
+const mount = createZeroHttpMount({
   pathPrefix: '/',
   server(databaseID) {
     const ns = namespaces.get(databaseID)
@@ -249,7 +250,7 @@ const httpServer: Server = createServer(async (req, res) => {
       res.end()
       return
     }
-    const response = mount.handle(route, body, userID)
+    const response = await mount.handle(route, body, { userID })
     if (
       route.operation === 'pull' &&
       body &&

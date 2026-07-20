@@ -1,10 +1,12 @@
-import type { SQLiteExecResult, SqlStatementMetadata } from 'orez-sync-cf-host'
-import type { DeferredEffect } from 'orez-sync-cf-host/post-commit'
 import type {
   CompiledTransactionQueryPlan,
   TransactionQueryBudget,
-  TransactionQueryFormat,
 } from 'orez-sync-cf-host/transaction-query'
+import type {
+  ExecResult,
+  SqlStatementMetadata,
+  TransactionQueryFormat,
+} from 'orez-sync-executor'
 
 export type ApplicationSqlQueryCompiler = (
   ast: unknown,
@@ -16,7 +18,7 @@ export type ApplicationSqlTable = Pick<SqlStatementMetadata, 'table' | 'publicTa
   publish?: boolean
 }
 
-export type ApplicationSqlExecResult = SQLiteExecResult
+export type ApplicationSqlExecResult = ExecResult
 
 export type ApplicationSqlTransaction = {
   exec(
@@ -36,13 +38,8 @@ export type ApplicationSqlTransaction = {
   registerTables(tables: readonly ApplicationSqlTable[]): Promise<void>
 }
 
-export type ApplicationSqlTransactionContext = {
-  defer(effect: DeferredEffect): void
-}
-
 export type ApplicationSqlTransactionWork<Value> = (
-  tx: ApplicationSqlTransaction,
-  context: ApplicationSqlTransactionContext
+  tx: ApplicationSqlTransaction
 ) => Value | Promise<Value>
 
 /**
@@ -169,26 +166,18 @@ export function createApplicationSqlClient(
         session.registerTables(tables)
       ),
     async transaction(compileQuery, work, queryBudget) {
-      const effects: DeferredEffect[] = []
-      const value = await withApplicationSqlSession(
-        target,
-        options.signal,
-        async (session) => {
-          const tx: ApplicationSqlTransaction = {
-            exec: (sql, params = [], metadata) => session.exec(sql, params, metadata),
-            query: (sql, params = []) => session.query(sql, params),
-            async queryAst(ast, format, queryName) {
-              const plan = await compileQuery(ast, format)
-              return session.queryPlan(plan, queryName, queryBudget)
-            },
-            registerTables: (tables) => session.registerTables(tables),
-          }
-          const value = await work(tx, { defer: (effect) => effects.push(effect) })
-          return value
+      return withApplicationSqlSession(target, options.signal, async (session) => {
+        const tx: ApplicationSqlTransaction = {
+          exec: (sql, params = [], metadata) => session.exec(sql, params, metadata),
+          query: (sql, params = []) => session.query(sql, params),
+          async queryAst(ast, format, queryName) {
+            const plan = await compileQuery(ast, format)
+            return session.queryPlan(plan, queryName, queryBudget)
+          },
+          registerTables: (tables) => session.registerTables(tables),
         }
-      )
-      for (const effect of effects) await effect()
-      return value
+        return work(tx)
+      })
     },
   }
 }

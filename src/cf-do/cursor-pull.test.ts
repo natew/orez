@@ -1,5 +1,5 @@
-// cursor-pull delta primitive: semantics must mirror the reference core's
-// delta suite (src/sync-server/sync-server.test.ts) — see the build plan in
+// cursor-pull delta primitive: semantics must mirror the Orez zero-http delta
+// suite — see the build plan in
 // plans/zero-server-rewrite.md. fixtures are PRODUCTION-SHAPED (2026-07-09
 // review, blocker 1): schema-qualified log identities like `public.item`,
 // internal soot_0_/_orez_ rows, and unmapped tables that must throw.

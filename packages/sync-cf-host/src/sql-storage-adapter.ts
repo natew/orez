@@ -4,14 +4,14 @@ import { trackBillableCursorRows } from './write-safeguards.js'
 import type {
   CompiledTransactionQueryPlan,
   TransactionQueryBudget,
-  TransactionQueryFormat,
 } from './transaction-query.js'
+import type { SyncSql } from './types.js'
 import type {
-  MutatorSql,
-  SQLiteExecResult,
+  ApplicationTransaction,
+  ExecResult,
   SqlStatementMetadata,
-  SyncSql,
-} from './types.js'
+} from 'orez-sync-executor'
+import type { TransactionQueryFormat } from 'orez-sync-executor'
 
 type WireValue =
   | { kind: 'null' }
@@ -205,7 +205,7 @@ export class SqlStorageDirect implements SyncSql {
     sql: string,
     params: readonly unknown[] = [],
     _metadata?: SqlStatementMetadata
-  ): SQLiteExecResult {
+  ): ExecResult {
     assertHostSql(sql)
     trackBillableCursorRows(
       this.sql.exec(sql, ...params),
@@ -234,7 +234,7 @@ export class SqlStorageDirect implements SyncSql {
  * materializes its SqlStorage operation before its promise resolves, so an
  * existing `await tx.query(...)` cannot carry a cursor across an await.
  */
-export class SqlStorageMutatorTransaction implements MutatorSql {
+export class SqlStorageMutatorTransaction implements ApplicationTransaction {
   constructor(
     private readonly direct: SqlStorageDirect,
     private readonly compileQuery: (
@@ -248,7 +248,7 @@ export class SqlStorageMutatorTransaction implements MutatorSql {
     sql: string,
     params: readonly unknown[] = [],
     metadata?: SqlStatementMetadata
-  ): Promise<SQLiteExecResult> {
+  ): Promise<ExecResult> {
     return this.direct.exec(sql, params, metadata)
   }
 
