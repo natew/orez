@@ -21,9 +21,10 @@ use crate::fault::{FaultKind, FaultPoint, FaultRegistry};
 
 // ---- config types -------------------------------------------------------
 
-/// Called once per namespace at creation to install app DDL and optional
-/// seed data. Runs inside a transaction before the engine installs its
-/// _zsync_* schema. Return Err(String) to fail namespace creation.
+/// Called whenever a namespace database is opened to install or migrate app
+/// DDL and optional seed data. The callback must be idempotent. It runs inside
+/// a transaction before the engine installs its _zsync_* schema. Return
+/// Err(String) to fail opening the namespace.
 pub type InitFn = Arc<dyn Fn(&mut dyn SyncDb) -> Result<(), String> + Send + Sync>;
 
 /// Runs a named mutator inside the push transaction. Return Ok(()) for
@@ -123,16 +124,7 @@ pub fn read_watermark(conn: &Connection) -> i64 {
 // _zsync_* schema + triggers. triggers install AFTER the seed so seed rows
 // stay out of the change log. idempotent across restart.
 pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), String> {
-    let initialized = !db
-        .query(
-            "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = '_zsync_meta'",
-            &[],
-        )
-        .map_err(|error| error.0)?
-        .is_empty();
-    if !initialized {
-        (ctx.init_fn)(db)?;
-    }
+    (ctx.init_fn)(db)?;
     sync_core::schema::init_schema(db, &ctx.tables).map_err(|e| e.0)?;
     // the query-aware tables are idempotent + unused in baseline mode, so
     // install them always so a namespace can serve query-aware pulls.

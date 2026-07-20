@@ -249,10 +249,10 @@ pub struct SyncNativeConfig {
     /// Usually derived from your Zero `createSchema()` result.
     pub tables: Tables,
 
-    /// Called once per namespace at creation to install app DDL and
-    /// optional seed data. Runs inside a transaction before the engine
-    /// installs its `_zsync_*` schema. Return `Err(String)` to fail
-    /// namespace creation.
+    /// Called whenever a namespace database is opened to install or migrate
+    /// app DDL and optional seed data. The callback must be idempotent. It runs
+    /// inside a transaction before the engine installs its `_zsync_*` schema.
+    /// Return `Err(String)` to fail opening the namespace.
     ///
     /// The engine's internal schema and triggers are installed
     /// automatically after this runs; you do not need to manage them.

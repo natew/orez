@@ -55,13 +55,16 @@ fn custom_tables() -> Tables {
 fn custom_init() -> InitFn {
     Arc::new(|db: &mut dyn SyncDb| {
         db.exec(
-            "CREATE TABLE item (id text PRIMARY KEY, label text NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS item (id text PRIMARY KEY, label text NOT NULL)",
             &[],
         )
         .map_err(|e| e.0)?;
         // seed one row so fresh pulls are not empty
-        db.exec("INSERT INTO item (id, label) VALUES ('i1', 'hello')", &[])
-            .map_err(|e| e.0)?;
+        db.exec(
+            "INSERT OR IGNORE INTO item (id, label) VALUES ('i1', 'hello')",
+            &[],
+        )
+        .map_err(|e| e.0)?;
         Ok(())
     })
 }
@@ -1780,18 +1783,18 @@ async fn two_namespaces_are_independent() {
 }
 
 #[tokio::test]
-async fn application_initialize_runs_once_for_a_persisted_namespace() {
+async fn application_initialize_reapplies_idempotently_for_a_persisted_namespace() {
     let tmp = tempfile::tempdir().unwrap();
     let make_config = || {
         let mut config = custom_config();
         config.initialize = Arc::new(|db| {
             db.exec(
-                "CREATE TABLE item (id text PRIMARY KEY, label text NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS item (id text PRIMARY KEY, label text NOT NULL)",
                 &[],
             )
             .map_err(|error| error.0)?;
             db.exec(
-                "INSERT INTO item (id, label) VALUES ('once', 'initialized once')",
+                "INSERT OR IGNORE INTO item (id, label) VALUES ('once', 'initialized once')",
                 &[],
             )
             .map_err(|error| error.0)
@@ -1827,6 +1830,75 @@ async fn application_initialize_runs_once_for_a_persisted_namespace() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["rows"][0]["count"], 1);
+}
+
+#[tokio::test]
+async fn application_initialize_migrates_a_populated_persisted_namespace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let first = test_host(custom_config(), tmp.path().to_path_buf()).into_router_trusted();
+    let push = push_body(json!([mutation(
+        1,
+        "item.create",
+        json!([{"id": "persisted", "label": "before upgrade"}]),
+        "upgrade-client"
+    )]));
+    let (status, _) = send(&first, push_req("upgraded", &push, "Bearer user-1")).await;
+    assert_eq!(status, StatusCode::OK);
+    drop(first);
+
+    let mut upgraded_tables = Tables::new();
+    upgraded_tables.push(
+        "item",
+        TableSpec {
+            columns: vec![
+                ("id".to_string(), ZeroColumnType::String),
+                ("label".to_string(), ZeroColumnType::String),
+                ("category".to_string(), ZeroColumnType::String),
+            ],
+            primary_key: vec!["id".to_string()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
+        },
+    );
+    let mut upgraded_config = custom_config();
+    upgraded_config.tables = upgraded_tables;
+    upgraded_config.initialize = Arc::new(|db| {
+        let has_category = !db
+            .query(
+                "SELECT name FROM pragma_table_info('item') WHERE name = 'category'",
+                &[],
+            )
+            .map_err(|error| error.0)?
+            .is_empty();
+        if !has_category {
+            db.exec(
+                "ALTER TABLE item ADD COLUMN category TEXT NOT NULL DEFAULT 'legacy'",
+                &[],
+            )
+            .map_err(|error| error.0)?;
+        }
+        Ok(())
+    });
+    let upgraded = test_host(upgraded_config, tmp.path().to_path_buf()).into_router_trusted();
+    let (status, response) = send(
+        &upgraded,
+        pull_req("upgraded", &pull_body(None), "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "upgrade pull failed: {response}");
+    assert!(
+        response["rowsPatch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|patch| {
+                patch["op"] == "put"
+                    && patch["tableName"] == "item"
+                    && patch["value"]["id"] == "persisted"
+                    && patch["value"]["category"] == "legacy"
+            }),
+        "populated row was not migrated: {response}"
+    );
 }
 
 #[tokio::test]
