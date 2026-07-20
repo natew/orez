@@ -3,6 +3,12 @@
   "version": "0.7.10",
   "description": "A typed layer over @rocicorp/zero with queries, mutations, and permissions",
   "sideEffects": false,
+  "files": [
+    "dist",
+    "types",
+    "src",
+    "cli.cjs"
+  ],
   "source": "src/index.ts",
   "main": "dist/cjs",
   "module": "dist/esm",

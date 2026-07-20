@@ -183,6 +183,13 @@ if (into) {
     })
   }
 
+  const onZeroDir = resolve(root, 'packages', 'on-zero')
+  const onZeroPkgPath = resolve(onZeroDir, 'package.json')
+  if (existsSync(onZeroPkgPath)) {
+    const onZeroPkg = JSON.parse(readFileSync(onZeroPkgPath, 'utf-8'))
+    pkgDirs.push({ name: onZeroPkg.name, dir: onZeroDir, pkg: onZeroPkg })
+  }
+
   const nativePlatform = currentSyncNativePlatform()
   if (!nativePlatform) {
     throw new Error(`sync-native does not support ${process.platform} ${process.arch}`)
