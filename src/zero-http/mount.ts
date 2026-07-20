@@ -587,11 +587,8 @@ export function createZeroHttpMount(options: {
   readonly pathPrefix: string
   server(databaseID: string): ZeroHttpSyncServer<any>
 }) {
-  if (
-    !options.pathPrefix.startsWith('/') ||
-    (options.pathPrefix !== '/' && !options.pathPrefix.endsWith('/'))
-  ) {
-    throw new TypeError('pathPrefix must start with / and end before the database ID')
+  if (!options.pathPrefix.startsWith('/')) {
+    throw new TypeError('pathPrefix must start with /')
   }
   return {
     match(pathname: string): ZeroHttpRoute | null {
