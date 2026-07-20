@@ -589,7 +589,7 @@ export function createZeroHttpMount(options: {
 }) {
   if (
     !options.pathPrefix.startsWith('/') ||
-    (options.pathPrefix !== '/' && options.pathPrefix.endsWith('/'))
+    (options.pathPrefix !== '/' && !options.pathPrefix.endsWith('/'))
   ) {
     throw new TypeError('pathPrefix must start with / and end before the database ID')
   }

@@ -3,11 +3,16 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { createEncryptedColumnCodec } from './encrypted-column-codec.js'
 import { zeroHttpFixtureMutators, zeroHttpFixtureSchema } from './fixture-schema.js'
-import { ensureHttpPullTransport, installHttpPullTransport } from './transport.js'
+import {
+  createZeroClientTransport,
+  ensureHttpPullTransport,
+  installHttpPullTransport,
+} from './transport.js'
 
 import type {
   EncryptedColumnManifest,
   EncryptedRowBatch,
+  HttpPullLifecycleEvent,
   PayloadCodec,
   PullResponse,
   PushRequest,
@@ -192,7 +197,7 @@ describe('zero-http transport', () => {
     let returnedStoredRow = false
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
-      if (request.path === '/pull') {
+      if (request.path.endsWith('/pull')) {
         if (storedCiphertext && !returnedStoredRow) {
           returnedStoredRow = true
           return jsonResponse({
@@ -413,12 +418,12 @@ describe('zero-http transport', () => {
     )
   })
 
-  test('pushOrigin routes mutations through the authoritative application server', async () => {
+  test('pullOrigin and pushOrigin route sync through the authoritative application server', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
       requests.push(request)
-      if (request.path === '/pull') {
+      if (request.path.endsWith('/pull')) {
         return jsonResponse({ cookie: request.body.cookie, unchanged: true })
       }
       const mutation = request.body.mutations[0]
@@ -435,6 +440,7 @@ describe('zero-http transport', () => {
     })
     const transport = installHttpPullTransport({
       origin: ORIGIN,
+      pullOrigin: 'https://app.local/zero-http',
       pushOrigin: 'https://app.local/zero-http',
       fetch,
     })
@@ -442,7 +448,7 @@ describe('zero-http transport', () => {
     const zero = createZero()
 
     await eventually(() =>
-      expect(requests.some((request) => request.path === '/pull')).toBe(true)
+      expect(requests.some((request) => request.path.endsWith('/pull'))).toBe(true)
     )
     const mutation = zero.mutate.project.create({
       id: 'p1',
@@ -456,8 +462,8 @@ describe('zero-http transport', () => {
     // push always carries the schema-shard routing params (native hosts route
     // by them; other servers ignore unknown query params)
     expect(push?.url).toBe('https://app.local/zero-http/push?schema=zero_0&appID=zero')
-    expect(requests.find((request) => request.path === '/pull')?.url).toBe(
-      'https://zero-http.local/pull'
+    expect(requests.find((request) => request.path.endsWith('/pull'))?.url).toBe(
+      'https://app.local/zero-http/pull'
     )
   })
 
@@ -481,10 +487,11 @@ describe('zero-http transport', () => {
     expect(requests.at(-1)?.headers.authorization).toBe('Bearer token-new')
   })
 
-  test('push frames are serialized per socket', async () => {
+  test('push frames are serialized and queued bursts are batched per socket', async () => {
     const firstPushStarted = defer<void>()
     const releaseFirstPush = defer<void>()
-    const pushIDs: number[] = []
+    const pushRequests: number[][] = []
+    const lifecycle: HttpPullLifecycleEvent[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
       if (request.path === '/pull') {
@@ -492,9 +499,9 @@ describe('zero-http transport', () => {
       }
 
       expect(request.path).toBe('/push')
-      const mutationID = request.body.mutations[0].id
-      pushIDs.push(mutationID)
-      if (mutationID === 1) {
+      const mutationIDs = request.body.mutations.map((mutation: any) => mutation.id)
+      pushRequests.push(mutationIDs)
+      if (mutationIDs[0] === 1) {
         firstPushStarted.resolve()
         await releaseFirstPush.promise
       }
@@ -507,7 +514,12 @@ describe('zero-http transport', () => {
         },
       })
     })
-    install(fetch)
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      lifecycle: (event) => lifecycle.push(event),
+    })
+    transports.push(transport)
     const { messages, socket } = openRawSocketWithMessages()
 
     await eventually(() =>
@@ -516,19 +528,32 @@ describe('zero-http transport', () => {
     socket.send(JSON.stringify(['push', pushBody(1)]))
     await firstPushStarted.promise
     socket.send(JSON.stringify(['push', pushBody(2)]))
+    socket.send(JSON.stringify(['push', pushBody(3)]))
+    socket.send(JSON.stringify(['push', pushBody(4)]))
     await sleep(25)
 
-    expect(pushIDs).toEqual([1])
+    expect(pushRequests).toEqual([[1]])
     releaseFirstPush.resolve()
-    await eventually(() => expect(pushIDs).toEqual([1, 2]))
+    await eventually(() => expect(pushRequests).toEqual([[1], [2, 3, 4]]))
     await eventually(() =>
       expect(messages.filter((message) => message[0] === 'pushResponse')).toHaveLength(2)
     )
     expect(
       messages
         .filter((message) => message[0] === 'pushResponse')
-        .map((message) => message[1].mutations[0].id.id)
-    ).toEqual([1, 2])
+        .flatMap((message) => message[1].mutations.map((mutation: any) => mutation.id.id))
+    ).toEqual([1, 2, 3, 4])
+    expect(
+      lifecycle
+        .filter((event) => event.type === 'push')
+        .map(({ pushFrameCount, mutationCount }) => ({
+          pushFrameCount,
+          mutationCount,
+        }))
+    ).toEqual([
+      { pushFrameCount: 1, mutationCount: 1 },
+      { pushFrameCount: 3, mutationCount: 3 },
+    ])
   })
 
   test('encodes each push attempt inside the existing FIFO push chain', async () => {
@@ -945,23 +970,237 @@ describe('zero-http transport', () => {
     view.destroy()
   })
 
-  test('transient pull failures back off reconnect attempts', async () => {
+  test('400 pull failure is terminal and does not reconnect a stock Zero client', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = recordRequest(input, init)
       requests.push(request)
       expect(request.path).toBe('/pull')
-      throw new TypeError('Failed to fetch')
+      return jsonResponse(
+        { error: 'query not registered: expense.expensesInRange' },
+        { status: 400 }
+      )
     })
-    install(fetch)
-    createZero()
+    const transport = install(fetch)
+    const zero = createZero()
 
-    await eventually(() => expect(requests.length).toBe(1))
-    await sleep(150)
-    expect(requests.length).toBe(1)
-    await eventually(() => expect(requests.length).toBe(2), 1_500)
-    await sleep(150)
-    expect(requests.length).toBe(2)
+    await eventually(() => expect(zero.connection.state.current.name).toBe('error'))
+    await sleep(100)
+
+    expect(requests).toHaveLength(1)
+    expect(transport.connections).toBe(0)
+    expect(zero.connection.state.current).toMatchObject({
+      name: 'error',
+      reason: expect.stringContaining('query not registered: expense.expensesInRange'),
+    })
+  })
+
+  test('pull and push 500 reconnects keep socket opens on their current Zero attempt', async () => {
+    const lifecycle: HttpPullLifecycleEvent[] = []
+    const zeroLogs: Array<{ context: Record<string, unknown>; args: unknown[] }> = []
+    let failPull = false
+    let failPush = false
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        if (failPull) {
+          failPull = false
+          return jsonResponse({ error: 'injected pull outage' }, { status: 500 })
+        }
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      if (failPush) {
+        failPush = false
+        return jsonResponse({ error: 'injected push outage' }, { status: 500 })
+      }
+      const mutation = request.body.mutations[0]
+      return jsonResponse({
+        pushResponse: {
+          mutations: [
+            {
+              id: { clientID: mutation.clientID, id: mutation.id },
+              result: {},
+            },
+          ],
+        },
+      })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      lifecycle: (event) => lifecycle.push(event),
+    })
+    transports.push(transport)
+    const zero = createZero({
+      logSink: {
+        log: (_level, context, ...args) => {
+          zeroLogs.push({ context: context ?? {}, args })
+        },
+      },
+    })
+
+    await eventually(() => expect(zero.connection.state.current.name).toBe('connected'))
+    failPull = true
+    await transport.pull().catch(() => {})
+    await eventually(
+      () => expect(lifecycle.filter((event) => event.type === 'open')).toHaveLength(2),
+      5_000
+    )
+
+    failPush = true
+    const mutation = zero.mutate.project.create({
+      id: 'p1',
+      ownerId: 'u1',
+      name: 'after reconnect',
+    })
+    await mutation.client
+    await mutation.server.catch(() => {})
+    await eventually(
+      () => expect(lifecycle.filter((event) => event.type === 'open')).toHaveLength(3),
+      5_000
+    )
+    await eventually(
+      () => expect(zero.connection.state.current.name).toBe('connected'),
+      5_000
+    )
+
+    const opens = lifecycle.filter((event) => event.type === 'open')
+    expect(
+      opens.map(({ generation, activeGeneration }) => [generation, activeGeneration])
+    ).toEqual([
+      [1, 1],
+      [2, 2],
+      [3, 3],
+    ])
+    expect(
+      zeroLogs.some(({ args }) =>
+        args.some((arg) => String(arg).includes('connect start time is undefined'))
+      )
+    ).toBe(false)
+  })
+
+  test('a pull 500 cannot let a timed-out socket construction open on the abandoned attempt', async () => {
+    vi.useFakeTimers()
+    const lifecycle: HttpPullLifecycleEvent[] = []
+    let pullCount = 0
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      pullCount++
+      if (pullCount === 1) {
+        return jsonResponse({ error: 'injected pull outage' }, { status: 500 })
+      }
+      return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+    })
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch,
+      lifecycle: (event) => lifecycle.push(event),
+    })
+    transports.push(transport)
+    const first = openRawSocketWithMessages({ wsid: 'before-pull-500' })
+    await vi.advanceTimersByTimeAsync(1)
+    expect(first.socket.readyState).toBe(first.socket.CLOSED)
+
+    let delayedOpened = false
+    let delayedClosed = 0
+    const delayed = openRawSocketWithMessages({
+      wsid: 'delayed-reconnect',
+      attemptStartedAt: performance.now() - 10_001,
+    })
+    delayed.socket.addEventListener('open', () => {
+      delayedOpened = true
+    })
+    delayed.socket.addEventListener('close', () => {
+      delayedClosed++
+    })
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(delayedOpened).toBe(false)
+    expect(delayedClosed).toBe(1)
+    expect(lifecycle.filter((event) => event.type === 'open')).toHaveLength(1)
+    const aborted = lifecycle.find((event) => event.type === 'aborted')
+    expect(aborted).toMatchObject({
+      pageID: transport.pageID,
+      transportID: transport.transportID,
+      zeroInstanceID: `${transport.pageID}:zero:c1`,
+      clientID: 'c1',
+      clientGroupID: 'cg1',
+      connectionAttemptID: `${transport.pageID}:zero:c1:attempt:delayed-reconnect`,
+      socketID: `${transport.transportID}:socket:2`,
+      wsid: 'delayed-reconnect',
+      generation: 2,
+      activeGeneration: 2,
+      code: 1000,
+    })
+    expect(aborted?.attemptAgeMs).toBeGreaterThanOrEqual(10_000)
+    expect(
+      lifecycle.filter(
+        (event) =>
+          event.generation === 2 &&
+          (event.type === 'aborted' ||
+            event.type === 'close' ||
+            event.type === 'superseded')
+      )
+    ).toHaveLength(1)
+  })
+
+  test('a replacement socket supersedes stale open and connected events for the same client', async () => {
+    vi.useFakeTimers()
+    const lifecycle: HttpPullLifecycleEvent[] = []
+    const transport = installHttpPullTransport({
+      origin: ORIGIN,
+      fetch: vi.fn(async () => jsonResponse({ cookie: null, unchanged: true })),
+      lifecycle: (event) => lifecycle.push(event),
+    })
+    transports.push(transport)
+
+    let connectStart: number | undefined = Date.now()
+    const errors: string[] = []
+    const attachStockLifecycle = (socket: WebSocket) => {
+      socket.addEventListener('open', () => {
+        if (connectStart === undefined) {
+          errors.push('Got open event but connect start time is undefined.')
+        }
+      })
+      socket.addEventListener('message', (event) => {
+        const message = JSON.parse(String(event.data)) as [string, unknown]
+        if (message[0] === 'connected') connectStart = undefined
+      })
+    }
+
+    const stale = openRawSocketWithMessages({ wsid: 'stale' }).socket
+    attachStockLifecycle(stale)
+    const current = openRawSocketWithMessages({ wsid: 'current' }).socket
+    attachStockLifecycle(current)
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(
+      lifecycle
+        .filter((event) => event.type === 'open')
+        .map(({ generation, activeGeneration, wsid }) => [
+          generation,
+          activeGeneration,
+          wsid,
+        ])
+    ).toEqual([[2, 2, 'current']])
+    expect(lifecycle).toContainEqual(
+      expect.objectContaining({
+        type: 'superseded',
+        generation: 1,
+        activeGeneration: 2,
+        wsid: 'stale',
+      })
+    )
+    expect(
+      lifecycle.filter(
+        (event) =>
+          event.generation === 1 &&
+          (event.type === 'aborted' ||
+            event.type === 'close' ||
+            event.type === 'superseded')
+      )
+    ).toHaveLength(1)
+    expect(errors).toEqual([])
   })
 
   test('authenticated wake appends a freshly minted token when the socket opens', async () => {
@@ -1075,17 +1314,35 @@ describe('zero-http transport', () => {
     globalThis.WebSocket = previous
   })
 
-  test('ensureHttpPullTransport installs once per origin', () => {
+  test('ensureHttpPullTransport installs once per origin across module reloads', async () => {
     // unique origin: the ensure registry is module-global and page-lifetime
     const origin = 'http://127.0.0.1:65501'
-    const first = ensureHttpPullTransport({ origin, fetch: vi.fn() })
-    const second = ensureHttpPullTransport({ origin, fetch: vi.fn() })
+    const fetch = vi.fn()
+    const first = ensureHttpPullTransport({ origin, fetch })
+    vi.resetModules()
+    const reloaded = await import('./transport.js')
+    const second = reloaded.ensureHttpPullTransport({ origin, fetch })
     expect(second).toBe(first)
+    expect(() =>
+      reloaded.ensureHttpPullTransport({ origin, fetch, pullIntervalMs: 999 })
+    ).toThrow('already installed with different pullIntervalMs')
+    first.uninstall()
+  })
+
+  test('createZeroClientTransport installs the shared transport for a Zero server', () => {
+    const origin = 'http://127.0.0.1:65503'
+    const fetch = vi.fn()
+    const plugin = createZeroClientTransport({ fetch, pullIntervalMs: 1_000 })
+
+    expect(plugin.type).toBe('orez-client')
+    const first = plugin.install(origin)
+    expect(plugin.install(origin)).toBe(first)
     first.uninstall()
   })
 
   test('ensureHttpPullTransport rejects a conflicting codec for one origin', () => {
     const origin = 'http://127.0.0.1:65502'
+    const fetch = vi.fn()
     const codec = (id: string): PayloadCodec => ({
       id,
       async encodePush(body) {
@@ -1097,24 +1354,24 @@ describe('zero-http transport', () => {
     })
     const first = ensureHttpPullTransport({
       origin,
-      fetch: vi.fn(),
+      fetch,
       payloadCodec: codec('codec-a'),
     })
 
     expect(
       ensureHttpPullTransport({
         origin,
-        fetch: vi.fn(),
+        fetch,
         payloadCodec: codec('codec-a'),
       })
     ).toBe(first)
     expect(() =>
       ensureHttpPullTransport({
         origin,
-        fetch: vi.fn(),
+        fetch,
         payloadCodec: codec('codec-b'),
       })
-    ).toThrow('already uses payload codec codec-a')
+    ).toThrow('already installed with different payloadCodecID')
     first.uninstall()
   })
 
@@ -1201,7 +1458,17 @@ function createTransportEncryptionCodec() {
 }
 
 function createZero(
-  options: { pingTimeoutMs?: number; onClientStateNotFound?: () => void } = {}
+  options: {
+    pingTimeoutMs?: number
+    onClientStateNotFound?: () => void
+    logSink?: {
+      log(
+        level: string,
+        context: Record<string, unknown> | undefined,
+        ...args: unknown[]
+      ): void
+    }
+  } = {}
 ) {
   const zero = new Zero({
     server: ORIGIN,
@@ -1213,6 +1480,8 @@ function createZero(
     mutators: zeroHttpFixtureMutators,
     pingTimeoutMs: options.pingTimeoutMs,
     onClientStateNotFound: options.onClientStateNotFound,
+    logLevel: options.logSink ? 'debug' : undefined,
+    logSink: options.logSink,
   })
   zeros.push(zero)
   return zero
@@ -1347,6 +1616,8 @@ function openRawSocket() {
 function openRawSocketWithMessages(opts?: {
   authToken?: string
   desiredQueriesPatch?: unknown[]
+  wsid?: string
+  attemptStartedAt?: number
 }) {
   const url = new URL(`${ORIGIN}/sync/v51/connect`)
   url.protocol = 'wss:'
@@ -1355,7 +1626,10 @@ function openRawSocketWithMessages(opts?: {
   url.searchParams.set('userID', 'u1')
   url.searchParams.set('baseCookie', '')
   url.searchParams.set('lmid', '0')
-  url.searchParams.set('wsid', 'ws-test')
+  url.searchParams.set('wsid', opts?.wsid ?? 'ws-test')
+  if (opts?.attemptStartedAt !== undefined) {
+    url.searchParams.set('ts', String(opts.attemptStartedAt))
+  }
   const messages: Array<[string, any]> = []
   const socket = new WebSocket(
     url,

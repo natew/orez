@@ -1,15 +1,11 @@
 // http-pull transport: runs a stock @rocicorp/zero client over stateless HTTP
 // by intercepting its /sync/v51/connect WebSocket with a shim that translates
-// pull responses into v51 pokes.
-//
-// this file is the CANONICAL copy. takeout and chat transport vendors are
-// downstream snapshots of it — evolve the
-// transport here and refresh them from here, never the other way. the wire
-// contract (lexicographic string cookies, gotQueriesPatch poke-part ordering,
-// FIFO push serialization, updateAuth, 401→Unauthorized frame, teardown
-// drain) is pinned by the sibling *.test.ts suite and documented in
-// plans/zero-http.md. do not "simplify" any of it without re-running those
-// tests against a stock zero client.
+// pull responses into v51 pokes. this browser-only module and the server mount
+// are the two halves of Orez's zero-http protocol. the
+// wire contract (lexicographic string cookies, gotQueriesPatch poke-part
+// ordering, bounded FIFO push batching, updateAuth, 401→Unauthorized frame,
+// teardown drain) is pinned by the tests in this directory. do not "simplify"
+// any of it without re-running those tests against a stock zero client.
 
 import { identityPayloadCodec } from './payload-codec.js'
 
@@ -62,10 +58,23 @@ type QueryPatchOp =
 // harness. omit it (with queryForward) to ship name+args and resolve SERVER-side.
 export type QueryTransform = (name: string, args: readonly unknown[]) => unknown
 
+type PushBody = Record<string, unknown> & {
+  mutations: unknown[]
+}
+
+type PushBatch = {
+  body: unknown
+  frameCount: number
+  mutationCount: number
+}
+
 type TransportState = {
   readonly appID: string
+  readonly pageID: string
+  readonly transportID: string
   readonly origin: URL
   readonly originString: string
+  readonly pullOriginString: string
   readonly pushOriginString: string
   readonly fetch: typeof fetch
   readonly nativeWebSocket: WebSocketConstructor | undefined
@@ -78,22 +87,28 @@ type TransportState = {
   readonly payloadCodec: PayloadCodec
   readonly shardNum: number
   nextPokeID: number
-  socketGeneration: number
-  transientFailureCount: number
+  nextSocketGeneration: number
+  readonly activeSocketGenerationByClient: Map<string, number>
+  readonly activeSocketByClient: Map<string, ZeroHttpSocket>
+  readonly lifecycle: ((event: HttpPullLifecycleEvent) => void) | undefined
 }
 
 const COOKIE_WIDTH = 20
-const TRANSIENT_RECONNECT_BACKOFF_BASE_MS = 1_000
-const TRANSIENT_RECONNECT_BACKOFF_MAX_MS = 30_000
+// the stock zero-cache pusher drains queued frames into a single request once
+// its current request completes. keep the same backpressure relief here, but
+// cap the number of mutations so one response cannot monopolize the HTTP
+// transport indefinitely under a sustained producer.
+const MAX_PUSH_BATCH_MUTATIONS = 64
+// @rocicorp/zero 1.6 starts this deadline before its async createSocket work.
+// the connect URL's `ts` is captured at the same attempt boundary.
+const ZERO_CONNECT_TIMEOUT_MS = 10_000
 
 export type HttpPullTransport = {
   pull(): Promise<void>
-  // resolves once every tracked upstream effect (pushes, recovery pulls,
-  // desired-query/auth changes) has settled AND a quiescent pull round-trip
-  // completed with no new work arriving. app teardown gates on this so a
-  // reload cannot strand an optimistic mutation client-side.
   flush(): Promise<void>
   readonly connections: number
+  readonly pageID: string
+  readonly transportID: string
   uninstall(): void
 }
 
@@ -103,9 +118,9 @@ export type HttpPullTransportOptions = {
   appID?: string
   shardNum?: number
   origin: string
-  // optional authoritative mutation endpoint base. reads and wake stay on
-  // origin, while push POSTs to <pushOrigin>/push. this supports a native read
-  // host paired with an application server that owns custom mutator execution.
+  // optional authoritative sync endpoint bases. websocket interception and
+  // wake stay on origin, while pull/push POST to their configured bases.
+  pullOrigin?: string
   pushOrigin?: string
   fetch?: typeof fetch
   // when set, every open connection also pulls on this interval so
@@ -134,6 +149,108 @@ export type HttpPullTransportOptions = {
   // transforms selected row payloads at the final serialized transport
   // boundary. omitted options use the module-level identity codec.
   payloadCodec?: PayloadCodec
+  // receives the structured connection lifecycle. when omitted, Orez logs
+  // failures so production errors retain their owners without logging routine
+  // connection and mutation traffic.
+  lifecycle?: (event: HttpPullLifecycleEvent) => void
+}
+
+export type HttpPullLifecycleEvent = {
+  type:
+    | 'created'
+    | 'listener'
+    | 'open'
+    | 'close'
+    | 'failure'
+    | 'superseded'
+    | 'aborted'
+    | 'push'
+  pageID: string
+  transportID: string
+  zeroInstanceID: string
+  clientGroupID: string
+  connectionAttemptID: string
+  socketID: string
+  generation: number
+  activeGeneration: number
+  clientID: string
+  wsid: string
+  timestamp: number
+  attemptStartedAt: number | undefined
+  attemptAgeMs: number | undefined
+  listener?: SocketEventType
+  code?: number
+  reason?: string
+  pushFrameCount?: number
+  mutationCount?: number
+}
+
+type HttpPullPageRegistry = {
+  readonly pageID: string
+  nextTransportGeneration: number
+  readonly transportsByOrigin: Map<string, HttpPullTransportRegistration>
+}
+
+type HttpPullTransportRegistration = {
+  readonly transport: HttpPullTransport
+  readonly options: NormalizedHttpPullTransportOptions
+}
+
+type NormalizedHttpPullTransportOptions = {
+  readonly appID: string
+  readonly shardNum: number
+  readonly origin: string
+  readonly pullOrigin: string
+  readonly pushOrigin: string
+  readonly fetch: typeof fetch | undefined
+  readonly pullIntervalMs: number | undefined
+  readonly wake: false | true | (() => Promise<string>)
+  readonly queryTransform: QueryTransform | undefined
+  readonly queryForward: boolean
+  readonly payloadCodecID: string
+  readonly lifecycle: ((event: HttpPullLifecycleEvent) => void) | undefined
+}
+
+const HTTP_PULL_OPTION_FIELDS = [
+  'appID',
+  'shardNum',
+  'origin',
+  'pullOrigin',
+  'pushOrigin',
+  'fetch',
+  'pullIntervalMs',
+  'wake',
+  'queryTransform',
+  'queryForward',
+  'payloadCodecID',
+  'lifecycle',
+] satisfies readonly (keyof NormalizedHttpPullTransportOptions)[]
+
+const HTTP_PULL_PAGE_REGISTRY = Symbol.for('on-zero.http-pull.page-registry')
+
+function isHttpPullPageRegistry(value: unknown): value is HttpPullPageRegistry {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'pageID' in value &&
+    typeof value.pageID === 'string' &&
+    'nextTransportGeneration' in value &&
+    typeof value.nextTransportGeneration === 'number' &&
+    'transportsByOrigin' in value &&
+    value.transportsByOrigin instanceof Map
+  )
+}
+
+function getHttpPullPageRegistry(): HttpPullPageRegistry {
+  const existing = Reflect.get(globalThis, HTTP_PULL_PAGE_REGISTRY)
+  if (isHttpPullPageRegistry(existing)) return existing
+  const registry: HttpPullPageRegistry = {
+    pageID: `page-${Date.now().toString(36)}`,
+    nextTransportGeneration: 0,
+    transportsByOrigin: new Map(),
+  }
+  Reflect.set(globalThis, HTTP_PULL_PAGE_REGISTRY, registry)
+  return registry
 }
 
 function normalizePayloadCodec(codec: PayloadCodec | undefined): PayloadCodec {
@@ -149,9 +266,19 @@ function normalizePayloadCodec(codec: PayloadCodec | undefined): PayloadCodec {
   return resolved
 }
 
+function logHttpPullLifecycle(event: HttpPullLifecycleEvent) {
+  const processValue = Reflect.get(globalThis, 'process') as
+    | { env?: { NODE_ENV?: string } }
+    | undefined
+  if (processValue?.env?.NODE_ENV === 'test' || event.type !== 'failure') return
+  console.error(`[orez:client] ${JSON.stringify(event)}`)
+}
+
 export function installHttpPullTransport(
   opts: HttpPullTransportOptions
 ): HttpPullTransport {
+  const pageRegistry = getHttpPullPageRegistry()
+  const transportID = `${pageRegistry.pageID}:transport:${++pageRegistry.nextTransportGeneration}`
   const previousWebSocket = globalThis.WebSocket as WebSocketConstructor | undefined
   const fetchImpl = opts.fetch ?? globalThis.fetch
   if (!fetchImpl) {
@@ -161,8 +288,13 @@ export function installHttpPullTransport(
 
   const state: TransportState = {
     appID: opts.appID ?? 'zero',
+    pageID: pageRegistry.pageID,
+    transportID,
     origin: new URL(opts.origin),
     originString: trimTrailingSlash(new URL(opts.origin).toString()),
+    pullOriginString: trimTrailingSlash(
+      new URL(opts.pullOrigin ?? opts.origin).toString()
+    ),
     pushOriginString: trimTrailingSlash(
       new URL(opts.pushOrigin ?? opts.origin).toString()
     ),
@@ -180,8 +312,10 @@ export function installHttpPullTransport(
     payloadCodec,
     shardNum: opts.shardNum ?? 0,
     nextPokeID: 0,
-    socketGeneration: 0,
-    transientFailureCount: 0,
+    nextSocketGeneration: 0,
+    activeSocketGenerationByClient: new Map(),
+    activeSocketByClient: new Map(),
+    lifecycle: opts.lifecycle ?? logHttpPullLifecycle,
   }
 
   const Shim = class {
@@ -203,17 +337,17 @@ export function installHttpPullTransport(
 
   globalThis.WebSocket = Shim as unknown as typeof WebSocket
 
-  return {
+  const transport: HttpPullTransport = {
     pull: async () => {
       await Promise.all([...state.sockets].map((socket) => socket.pull()))
     },
     flush: async () => {
       await Promise.resolve()
-      const generation = state.socketGeneration
+      const generation = state.nextSocketGeneration
       const sockets = [...state.sockets]
       await Promise.all(sockets.map((socket) => socket.flush()))
       if (
-        state.socketGeneration !== generation ||
+        state.nextSocketGeneration !== generation ||
         sockets.some((socket) => !state.sockets.has(socket))
       ) {
         throw new Error('transport changed during flush')
@@ -222,44 +356,83 @@ export function installHttpPullTransport(
     get connections() {
       return state.sockets.size
     },
+    pageID: state.pageID,
+    transportID: state.transportID,
     uninstall: () => {
       if (globalThis.WebSocket === (Shim as unknown as typeof WebSocket)) {
         globalThis.WebSocket = previousWebSocket as typeof WebSocket
       }
+      const registered = pageRegistry.transportsByOrigin.get(state.originString)
+      if (registered?.transport === transport) {
+        pageRegistry.transportsByOrigin.delete(state.originString)
+      }
     },
   }
+  return transport
 }
 
 // per-origin idempotent install for app usage (ProvideZero rotates zero
 // instances against the same server; installing per rotation would chain
 // shims unboundedly). installed transports live for the page lifetime.
-const transportsByOrigin = new Map<
-  string,
-  { readonly codecID: string; readonly transport: HttpPullTransport }
->()
-
 export function ensureHttpPullTransport(
   opts: HttpPullTransportOptions
 ): HttpPullTransport {
+  const pageRegistry = getHttpPullPageRegistry()
   const key = trimTrailingSlash(new URL(opts.origin).toString())
   const payloadCodec = normalizePayloadCodec(opts.payloadCodec)
-  const existing = transportsByOrigin.get(key)
+  const options: NormalizedHttpPullTransportOptions = {
+    appID: opts.appID ?? 'zero',
+    shardNum: opts.shardNum ?? 0,
+    origin: key,
+    pullOrigin: trimTrailingSlash(new URL(opts.pullOrigin ?? opts.origin).toString()),
+    pushOrigin: trimTrailingSlash(new URL(opts.pushOrigin ?? opts.origin).toString()),
+    fetch: opts.fetch ?? globalThis.fetch,
+    pullIntervalMs: opts.pullIntervalMs,
+    wake: typeof opts.wake === 'object' ? opts.wake.getToken : (opts.wake ?? false),
+    queryTransform: opts.queryTransform,
+    queryForward: opts.queryForward === true,
+    payloadCodecID: payloadCodec.id,
+    lifecycle: opts.lifecycle,
+  }
+  const existing = pageRegistry.transportsByOrigin.get(key)
   if (existing) {
-    if (existing.codecID !== payloadCodec.id) {
+    const conflicts = HTTP_PULL_OPTION_FIELDS.filter(
+      (field) => !Object.is(existing.options[field], options[field])
+    )
+    if (conflicts.length > 0) {
       throw new Error(
-        `zero-http transport for ${key} already uses payload codec ${existing.codecID}; cannot install ${payloadCodec.id}`
+        `HTTP pull transport for ${key} is already installed with different ${conflicts.join(', ')}`
       )
     }
     return existing.transport
   }
   const transport = installHttpPullTransport({ ...opts, payloadCodec })
-  transportsByOrigin.set(key, { codecID: payloadCodec.id, transport })
+  pageRegistry.transportsByOrigin.set(key, { transport, options })
   return transport
 }
 
+export type ZeroClientTransportPlugin = {
+  readonly type: 'orez-client'
+  install(origin: string): HttpPullTransport
+}
+
+export function createZeroClientTransport(
+  options: Omit<HttpPullTransportOptions, 'origin'> = {}
+): ZeroClientTransportPlugin {
+  return Object.freeze({
+    type: 'orez-client' as const,
+    install(origin: string) {
+      return ensureHttpPullTransport({ ...options, origin })
+    },
+  })
+}
+
 export async function flushHttpPullTransports() {
+  const pageRegistry = getHttpPullPageRegistry()
   await Promise.all(
-    [...transportsByOrigin.values()].map(({ transport }) => transport.flush())
+    [...pageRegistry.transportsByOrigin.values()].map(({ transport }) =>
+      transport.flush()
+    )
   )
 }
 
@@ -285,11 +458,8 @@ class ZeroHttpSocket {
   private readonly wsid: string
   private cookie: string | null
   private pendingGotQueriesPatch: GotQueryPatchOp[] = []
-  // every got-query hash acked to the client so far. a rowsPatch 'clear'
-  // resets the client's ENTIRE replicache space — rows AND got-query marks —
-  // so any clear-bearing poke must re-assert the full got set or queries the
-  // client already had marked complete silently regress to unknown forever
-  // (the transport never re-sends an ack it believes was delivered).
+  // a snapshot clear removes both rows and got-query marks from Replicache.
+  // remember every delivered mark so a clear-bearing poke can restore them.
   private ackedGotHashes = new Set<string>()
   // query-aware extension state: the accumulated un-acked desired-query delta
   // to ship, a client-side query-state version that bumps on each change, and
@@ -301,7 +471,8 @@ class ZeroHttpSocket {
   private sentQueryPatchLen = 0
   private pullInFlight: Promise<void> | undefined
   private pullAfterCurrent = false
-  private pushChain: Promise<void> = Promise.resolve()
+  private pendingPushes: unknown[] = []
+  private pushInFlight = false
   private pushCompletion: Promise<void> = Promise.resolve()
   private flushGeneration = 0
   private readonly pendingUpstream = new Set<Promise<void>>()
@@ -311,6 +482,12 @@ class ZeroHttpSocket {
   private wakeSocket: { close(): void } | undefined
   private wakeConnecting = false
   private wakeReconnectTimer: ReturnType<typeof setTimeout> | undefined
+  private readonly generation: number
+  private readonly zeroInstanceID: string
+  private readonly connectionAttemptID: string
+  private readonly socketID: string
+  private readonly attemptStartedAt: number | undefined
+  private settled = false
 
   constructor(
     private readonly state: TransportState,
@@ -322,6 +499,21 @@ class ZeroHttpSocket {
     this.clientID = this.connectURL.searchParams.get('clientID') ?? ''
     this.clientGroupID = this.connectURL.searchParams.get('clientGroupID') ?? ''
     this.wsid = this.connectURL.searchParams.get('wsid') ?? `zero-http-${Date.now()}`
+    this.generation = ++this.state.nextSocketGeneration
+    this.zeroInstanceID = `${this.state.pageID}:zero:${this.clientID}`
+    this.connectionAttemptID = `${this.zeroInstanceID}:attempt:${this.wsid}`
+    this.socketID = `${this.state.transportID}:socket:${this.generation}`
+    const attemptStartedAtParam = this.connectURL.searchParams.get('ts')
+    const attemptStartedAt = Number(attemptStartedAtParam)
+    this.attemptStartedAt =
+      attemptStartedAtParam !== null && Number.isFinite(attemptStartedAt)
+        ? attemptStartedAt
+        : undefined
+    const previousSocket = this.state.activeSocketByClient.get(this.clientID)
+    this.state.activeSocketGenerationByClient.set(this.clientID, this.generation)
+    this.state.activeSocketByClient.set(this.clientID, this)
+    previousSocket?.supersede()
+    this.emitLifecycle('created')
     const baseCookie = this.connectURL.searchParams.get('baseCookie')
     this.cookie = baseCookie ? baseCookie : null
     // the local cookie ID is encoded into the suffix of any cookie we
@@ -338,12 +530,17 @@ class ZeroHttpSocket {
     this.queueDesiredQueries(decoded.initConnectionMessage?.[1])
 
     this.state.sockets.add(this)
-    this.state.socketGeneration++
-    this.openTimer = setTimeout(() => this.open(), reconnectDelayMs(this.state))
+    // open on the next task so Zero can attach its listeners. open() checks the
+    // attempt timestamp first, so async socket construction that outlived Zero's
+    // deadline closes without delivering an event to abandoned state.
+    this.openTimer = setTimeout(() => this.open(), 0)
   }
 
   addEventListener(type: SocketEventType, listener: SocketListener | null) {
-    if (listener) this.listeners[type]?.add(listener)
+    if (listener) {
+      this.listeners[type]?.add(listener)
+      this.emitLifecycle('listener', { listener: type })
+    }
   }
 
   removeEventListener(type: SocketEventType, listener: SocketListener | null) {
@@ -393,12 +590,7 @@ class ZeroHttpSocket {
   }
 
   close(code = 1000, reason = '') {
-    if (this.readyState === this.CLOSED) return
-    if (this.openTimer) clearTimeout(this.openTimer)
-    if (this.pullTimer) clearInterval(this.pullTimer)
-    this.closeWakeChannel()
-    this.readyState = this.CLOSED
-    if (this.state.sockets.delete(this)) this.state.socketGeneration++
+    if (!this.settle('close', { code, reason })) return
     this.emit('close', { code, reason, wasClean: code <= 1001 })
   }
 
@@ -427,9 +619,8 @@ class ZeroHttpSocket {
     return this.pullInFlight
   }
 
-  // settle every tracked upstream effect, then prove quiescence with a double
-  // pull round-trip. loops until a full pass completes with no new work
-  // (flushGeneration unchanged and nothing pending).
+  // settle every tracked upstream effect, then prove quiescence with two pull
+  // round trips. repeat if work arrived during that pass.
   async flush(): Promise<void> {
     for (;;) {
       const generation = this.flushGeneration
@@ -448,7 +639,17 @@ class ZeroHttpSocket {
 
   private open() {
     if (this.readyState !== this.CONNECTING) return
+    const attemptAgeMs = this.getAttemptAgeMs()
+    if (attemptAgeMs !== undefined && attemptAgeMs >= ZERO_CONNECT_TIMEOUT_MS) {
+      const reason = `zero-http connection attempt ${this.wsid} expired after ${Math.round(
+        attemptAgeMs
+      )}ms before socket construction completed`
+      if (!this.settle('aborted', { code: 1000, reason })) return
+      this.emit('close', { code: 1000, reason, wasClean: true })
+      return
+    }
     this.readyState = this.OPEN
+    this.emitLifecycle('open')
     this.emit('open', {})
     this.emitMessage(['connected', { wsid: this.wsid, timestamp: Date.now() }])
     setTimeout(() => this.run(this.pull()), 0)
@@ -457,7 +658,7 @@ class ZeroHttpSocket {
         this.run(this.pull())
       }, this.state.pullIntervalMs)
     }
-    if (this.state.wake) void this.openWakeChannel()
+    if (this.state.wake) this.openWakeChannel()
   }
 
   // notification-only wake channel: a real WebSocket to <origin>/wake that
@@ -465,7 +666,7 @@ class ZeroHttpSocket {
   // immediate (coalesced) pull — push-shaped propagation without waiting on
   // the poll interval. advisory only: if it drops we reconnect, and the
   // interval poll remains the safety net that guarantees convergence.
-  private async openWakeChannel() {
+  private openWakeChannel() {
     const Native = this.state.nativeWebSocket
     if (
       !Native ||
@@ -477,49 +678,51 @@ class ZeroHttpSocket {
     }
     this.wakeConnecting = true
     const wsBase = this.state.originString.replace(/^http/, 'ws')
-    let wakeToken: string | undefined
-    let socket: {
-      onmessage: (() => void) | null
-      onclose: (() => void) | null
-      onerror: (() => void) | null
-      close(): void
-    }
-    try {
-      if (typeof this.state.wake === 'object') {
-        wakeToken = await this.state.wake.getToken()
+    void (async () => {
+      let wakeToken: string | undefined
+      let socket: {
+        onmessage: (() => void) | null
+        onclose: (() => void) | null
+        onerror: (() => void) | null
+        close(): void
       }
-      if (this.readyState !== this.OPEN || this.wakeSocket) return
-      const url =
-        `${wsBase}/wake?clientID=${encodeURIComponent(this.clientID)}` +
-        (wakeToken === undefined ? '' : `&wakeToken=${encodeURIComponent(wakeToken)}`)
-      socket = new Native(url) as unknown as typeof socket
-    } catch {
-      this.scheduleWakeReconnect()
-      return
-    } finally {
-      this.wakeConnecting = false
-    }
-    this.wakeSocket = socket
-    const reconnect = () => {
-      if (this.wakeSocket !== socket) return
-      this.wakeSocket = undefined
-      this.scheduleWakeReconnect()
-    }
-    // route through requestPullAfterCurrent, NOT pull() directly: a wake that
-    // lands while a pull is already in flight must set pullAfterCurrent so the
-    // in-flight pull re-runs and picks up the woken change. calling pull()
-    // directly would return the existing promise and silently drop the wake,
-    // leaving convergence to the safety poll (a burst-storm latency bug).
-    socket.onmessage = () => this.requestPullAfterCurrent()
-    socket.onclose = reconnect
-    socket.onerror = reconnect
+      try {
+        if (typeof this.state.wake === 'object') {
+          wakeToken = await this.state.wake.getToken()
+        }
+        if (this.readyState !== this.OPEN || this.wakeSocket) return
+        const url =
+          `${wsBase}/wake?clientID=${encodeURIComponent(this.clientID)}` +
+          (wakeToken === undefined ? '' : `&wakeToken=${encodeURIComponent(wakeToken)}`)
+        socket = new Native(url) as unknown as typeof socket
+      } catch {
+        this.scheduleWakeReconnect()
+        return
+      } finally {
+        this.wakeConnecting = false
+      }
+      this.wakeSocket = socket
+      const reconnect = () => {
+        if (this.wakeSocket !== socket) return
+        this.wakeSocket = undefined
+        this.scheduleWakeReconnect()
+      }
+      // route through requestPullAfterCurrent, NOT pull() directly: a wake that
+      // lands while a pull is already in flight must set pullAfterCurrent so the
+      // in-flight pull re-runs and picks up the woken change. calling pull()
+      // directly would return the existing promise and silently drop the wake,
+      // leaving convergence to the safety poll (a burst-storm latency bug).
+      socket.onmessage = () => this.requestPullAfterCurrent()
+      socket.onclose = reconnect
+      socket.onerror = reconnect
+    })()
   }
 
   private scheduleWakeReconnect() {
     if (this.readyState !== this.OPEN || this.wakeReconnectTimer) return
     this.wakeReconnectTimer = setTimeout(() => {
       this.wakeReconnectTimer = undefined
-      void this.openWakeChannel()
+      this.openWakeChannel()
     }, 500)
   }
 
@@ -579,11 +782,15 @@ class ZeroHttpSocket {
     this.queryVersion++
   }
 
-  private async push(body: unknown) {
+  private async push({ body, frameCount, mutationCount }: PushBatch) {
     const encodedBody = await this.state.payloadCodec.encodePush(body as PushRequest)
     const response = (await this.postJSON('/push', encodedBody)) as {
       pushResponse?: unknown
     }
+    this.emitLifecycle('push', {
+      pushFrameCount: frameCount,
+      mutationCount,
+    })
     // mutation RECOVERY pushes carry a PREVIOUS client's pending mutations,
     // and the server response echoes that old clientID. zero-cache's pusher
     // groups results by clientID and only delivers a client its OWN results
@@ -602,14 +809,53 @@ class ZeroHttpSocket {
 
   private enqueuePush(body: unknown) {
     this.flushGeneration++
-    const nextPush = this.pushChain.then(async () => {
-      if (this.readyState === this.CLOSED) return
-      await this.push(body)
-    })
-    this.pushCompletion = nextPush
-    this.pushChain = nextPush.catch(() => {})
-    this.trackUpstream(nextPush)
-    this.run(nextPush)
+    this.pendingPushes.push(body)
+    if (this.pushInFlight) return
+    const drain = this.drainPushes()
+    this.pushCompletion = drain
+    this.trackUpstream(drain)
+    this.run(drain)
+  }
+
+  private async drainPushes() {
+    this.pushInFlight = true
+    try {
+      while (this.readyState !== this.CLOSED && this.pendingPushes.length > 0) {
+        await this.push(this.takePushBatch())
+      }
+    } finally {
+      this.pushInFlight = false
+    }
+  }
+
+  private takePushBatch(): PushBatch {
+    const first = this.pendingPushes.shift()
+    const firstBody = parsePushBody(first)
+    if (!firstBody) {
+      return { body: first, frameCount: 1, mutationCount: 0 }
+    }
+
+    const mutations = [...firstBody.mutations]
+    let frameCount = 1
+    while (this.pendingPushes.length > 0) {
+      const nextBody = parsePushBody(this.pendingPushes[0])
+      if (
+        !nextBody ||
+        !areCompatiblePushBodies(firstBody, nextBody) ||
+        mutations.length + nextBody.mutations.length > MAX_PUSH_BATCH_MUTATIONS
+      ) {
+        break
+      }
+      this.pendingPushes.shift()
+      mutations.push(...nextBody.mutations)
+      frameCount++
+    }
+
+    return {
+      body: frameCount === 1 ? firstBody : { ...firstBody, mutations },
+      frameCount,
+      mutationCount: mutations.length,
+    }
   }
 
   private trackUpstream(promise: Promise<void>) {
@@ -688,7 +934,8 @@ class ZeroHttpSocket {
   }
 
   private async postJSON(path: '/pull' | '/push', body: unknown) {
-    const base = path === '/push' ? this.state.pushOriginString : this.state.originString
+    const base =
+      path === '/push' ? this.state.pushOriginString : this.state.pullOriginString
     const url = new URL(`${base}${path}`)
     if (path === '/push') {
       url.searchParams.set('schema', `${this.state.appID}_${this.state.shardNum}`)
@@ -703,9 +950,15 @@ class ZeroHttpSocket {
       body: JSON.stringify(body),
     })
     if (!response.ok) {
-      throw new ZeroHttpResponseError(path, response.status)
+      let bodyPreview: string | undefined
+      try {
+        const body = await response.text()
+        bodyPreview = body.length > 512 ? `${body.slice(0, 512)}...` : body || undefined
+      } catch {
+        // the status still owns the failure when the response body is unreadable
+      }
+      throw new ZeroHttpResponseError(path, response.status, bodyPreview)
     }
-    resetTransientFailures(this.state)
     return response.json()
   }
 
@@ -715,6 +968,7 @@ class ZeroHttpSocket {
 
   private fail(error: unknown) {
     if (this.readyState === this.CLOSED) return
+    this.emitLifecycle('failure', { reason: errorMessage(error) })
     if (isAuthHTTPError(error)) {
       this.emitMessage([
         'error',
@@ -744,7 +998,25 @@ class ZeroHttpSocket {
       if (this.readyState !== this.CLOSED) this.close(1000, error.message)
       return
     }
-    recordTransientFailure(this.state)
+    if (
+      error instanceof ZeroHttpResponseError &&
+      error.status >= 400 &&
+      error.status < 500 &&
+      error.status !== 408 &&
+      error.status !== 425 &&
+      error.status !== 429
+    ) {
+      this.emitMessage([
+        'error',
+        {
+          kind: error.path === '/pull' ? 'InvalidConnectionRequest' : 'InvalidPush',
+          message: error.message,
+          origin: 'server',
+        },
+      ])
+      if (this.readyState !== this.CLOSED) this.close(1000, error.message)
+      return
+    }
     this.emit('error', { error })
     this.close(1011, errorMessage(error))
   }
@@ -772,9 +1044,9 @@ class ZeroHttpSocket {
     const pokeID = `zero-http-${++this.state.nextPokeID}`
     let gotQueries = dedupeGotQueriesPatch(this.pendingGotQueriesPatch)
     this.pendingGotQueriesPatch = []
-    const rowsCleared =
-      Array.isArray(response.rowsPatch) &&
-      response.rowsPatch.some((op) => (op as { op?: string })?.op === 'clear')
+    const rowsCleared = response.rowsPatch.some(
+      (op) => (op as { op?: string })?.op === 'clear'
+    )
     if (rowsCleared && this.ackedGotHashes.size > 0) {
       gotQueries = dedupeGotQueriesPatch([
         ...[...this.ackedGotHashes].map((hash) => ({ op: 'put' as const, hash })),
@@ -871,6 +1143,77 @@ class ZeroHttpSocket {
       else listener.handleEvent(event)
     }
   }
+
+  private supersede() {
+    this.settle('superseded')
+  }
+
+  private settle(
+    type: Extract<HttpPullLifecycleEvent['type'], 'close' | 'superseded' | 'aborted'>,
+    detail: Pick<HttpPullLifecycleEvent, 'code' | 'reason'> = {}
+  ) {
+    if (this.settled) return false
+    this.settled = true
+    if (this.openTimer !== undefined) clearTimeout(this.openTimer)
+    if (this.pullTimer !== undefined) clearInterval(this.pullTimer)
+    this.closeWakeChannel()
+    this.readyState = this.CLOSED
+    this.state.sockets.delete(this)
+    if (this.state.activeSocketByClient.get(this.clientID) === this) {
+      this.state.activeSocketByClient.delete(this.clientID)
+      this.state.activeSocketGenerationByClient.delete(this.clientID)
+    }
+    this.emitLifecycle(type, detail)
+    return true
+  }
+
+  private getAttemptAgeMs() {
+    return this.attemptStartedAt === undefined
+      ? undefined
+      : performance.now() - this.attemptStartedAt
+  }
+
+  private emitLifecycle(
+    type: HttpPullLifecycleEvent['type'],
+    detail: Pick<
+      HttpPullLifecycleEvent,
+      'listener' | 'code' | 'reason' | 'pushFrameCount' | 'mutationCount'
+    > = {}
+  ) {
+    this.state.lifecycle?.({
+      type,
+      pageID: this.state.pageID,
+      transportID: this.state.transportID,
+      zeroInstanceID: this.zeroInstanceID,
+      clientGroupID: this.clientGroupID,
+      connectionAttemptID: this.connectionAttemptID,
+      socketID: this.socketID,
+      generation: this.generation,
+      activeGeneration:
+        this.state.activeSocketGenerationByClient.get(this.clientID) ?? this.generation,
+      clientID: this.clientID,
+      wsid: this.wsid,
+      timestamp: Date.now(),
+      attemptStartedAt: this.attemptStartedAt,
+      attemptAgeMs: this.getAttemptAgeMs(),
+      ...detail,
+    })
+  }
+}
+
+function parsePushBody(value: unknown): PushBody | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return
+  if (!('mutations' in value) || !Array.isArray(value.mutations)) return
+  // the runtime checks above establish the only fields batching reads.
+  return value as PushBody
+}
+
+function areCompatiblePushBodies(left: PushBody, right: PushBody) {
+  return (
+    left.clientGroupID === right.clientGroupID &&
+    left.pushVersion === right.pushVersion &&
+    left.schemaVersion === right.schemaVersion
+  )
 }
 
 function shouldIntercept(origin: URL, url: string | URL) {
@@ -927,12 +1270,8 @@ function gotQueriesPatch(patch: DesiredQueryPatchOp[]) {
   return got
 }
 
-// the same query hash can be acked twice into one poke: the sec-protocol
-// initConnection queues its got-ack in the constructor, and a racing
-// changeDesiredQueries send() queues it again before the in-flight pull's
-// poke consumes the pending patch. a duplicate put for one hash inside a
-// single gotQueriesPatch stalls the zero client's complete tracking, so
-// collapse to the last op per hash (a clear resets everything before it).
+// initConnection and a racing changeDesiredQueries can acknowledge the same
+// hash in one poke. Zero's complete tracking requires one final op per hash.
 function dedupeGotQueriesPatch(patch: GotQueryPatchOp[]): GotQueryPatchOp[] {
   let clear = false
   const lastOpByHash = new Map<string, GotQueryPatchOp>()
@@ -977,9 +1316,12 @@ function errorMessage(error: unknown) {
 class ZeroHttpResponseError extends Error {
   constructor(
     readonly path: '/pull' | '/push',
-    readonly status: number
+    readonly status: number,
+    bodyPreview: string | undefined
   ) {
-    super(`zero-http ${path} failed with ${status}`)
+    super(
+      `zero-http ${path} failed with ${status}${bodyPreview ? `: ${bodyPreview}` : ''}`
+    )
   }
 }
 
@@ -1012,26 +1354,4 @@ function isStaleClientCookieError(error: unknown): error is ZeroHttpResponseErro
     error.path === '/pull' &&
     error.status === 409
   )
-}
-
-function reconnectDelayMs(state: TransportState) {
-  if (state.transientFailureCount === 0) return 0
-  return Math.min(
-    TRANSIENT_RECONNECT_BACKOFF_BASE_MS * 2 ** (state.transientFailureCount - 1),
-    TRANSIENT_RECONNECT_BACKOFF_MAX_MS
-  )
-}
-
-function recordTransientFailure(state: TransportState) {
-  const maxExponent = Math.log2(
-    TRANSIENT_RECONNECT_BACKOFF_MAX_MS / TRANSIENT_RECONNECT_BACKOFF_BASE_MS
-  )
-  state.transientFailureCount = Math.min(
-    state.transientFailureCount + 1,
-    Math.ceil(maxExponent) + 1
-  )
-}
-
-function resetTransientFailures(state: TransportState) {
-  state.transientFailureCount = 0
 }
