@@ -17,7 +17,8 @@ oreZ makes Zero work on [PGlite](https://pglite.dev) (Postgres in WASM) and [bed
 
 Orez Lite is a SQLite-native Zero server for Cloudflare and other constrained
 hosts. It replaces Zero's server side and speaks the Zero protocol to the real
-`@rocicorp/zero` client. There is no Orez client API or client fork. See the
+`@rocicorp/zero` client. `orez/client` supplies the Orez Lite transport without
+forking Zero's query or mutation API. See the
 [Orez Lite server documentation](docs/sync/README.md).
 
 ## Requirements
