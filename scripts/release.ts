@@ -429,8 +429,11 @@ for (const p of packages) {
       }
     }
   }
-  // remove workspace-only fields
+  // remove workspace-only fields. prepare builds workspace packages from the
+  // repo tree; this tmp package ships prebuilt dist and has no workspace tree,
+  // so npm must not run it here or for anyone installing the published git ref
   delete tmpPkg.workspaces
+  if (tmpPkg.scripts) delete tmpPkg.scripts.prepare
   writeFileSync(tmpPkgPath, JSON.stringify(tmpPkg, null, 2) + '\n')
 
   if (packOnly) {
