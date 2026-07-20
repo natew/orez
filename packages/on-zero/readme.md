@@ -430,7 +430,7 @@ the generator:
 7. generates `syncedMutations.ts` with valibot validators for mutation args
 
 when using drizzle-zero integration, `schema.ts` is generated from your drizzle
-schema using `generateDrizzleSchemaFile()` — it produces `table()` + 
+schema using `generateDrizzleSchemaFile()` — it produces `table()` +
 `relationships()` + `createSchema()` calls with full type inference.
 
 exports named `permission` are automatically skipped during query generation.
