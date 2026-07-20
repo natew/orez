@@ -1,4 +1,5 @@
 export { createBrowserSyncHost } from './host.js'
+export { deleteBrowserSyncHostSnapshot } from './idb-snapshot.js'
 export {
   createBrowserSyncHostPortClient,
   serveBrowserSyncHostPort,

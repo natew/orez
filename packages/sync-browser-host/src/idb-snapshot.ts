@@ -54,6 +54,19 @@ async function openSnapshotDatabase(): Promise<IDBDatabase> {
   return requestResult(request)
 }
 
+export async function deleteBrowserSyncHostSnapshot(storageKey: string): Promise<void> {
+  if (!storageKey) throw new TypeError('storageKey must not be empty')
+
+  const database = await openSnapshotDatabase()
+  try {
+    const transaction = database.transaction(STORE_NAME, 'readwrite')
+    transaction.objectStore(STORE_NAME).delete(storageKey)
+    await transactionDone(transaction)
+  } finally {
+    database.close()
+  }
+}
+
 function validateSnapshot(value: unknown, storageKey: string): SnapshotRecord {
   if (!value || typeof value !== 'object') {
     throw new Error(`invalid browser database snapshot for ${storageKey}`)

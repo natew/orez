@@ -1,4 +1,7 @@
-import { createBrowserSyncHostPortClient } from 'orez/sync-browser-host'
+import {
+  createBrowserSyncHostPortClient,
+  deleteBrowserSyncHostSnapshot,
+} from 'orez/sync-browser-host'
 
 import type { BrowserHostTestFaultPoint } from '../../src/host.js'
 import type { BrowserSyncHostPortClient } from '../../src/types.js'
@@ -280,6 +283,53 @@ async function runCheckpointFailureCase() {
   equal(isReplay(replay.body), false, 'failed checkpoint leaves mutation replayable')
   restarted.terminate()
   return { fatal: true, restoredOldSnapshot: true }
+}
+
+async function runSnapshotDeletionCase() {
+  const targetStorageKey = `snapshot-delete-target:${crypto.randomUUID()}`
+  const siblingStorageKey = `snapshot-delete-sibling:${crypto.randomUUID()}`
+  const target = await openConnection(targetStorageKey)
+  const sibling = await openConnection(siblingStorageKey)
+  const targetSeed = await post(
+    target.client,
+    '/push',
+    mutation('snapshot-delete-target', 1, 'todo.create', {
+      id: 'target',
+      title: 'delete this snapshot',
+    })
+  )
+  const siblingSeed = await post(
+    sibling.client,
+    '/push',
+    mutation('snapshot-delete-sibling', 1, 'todo.create', {
+      id: 'sibling',
+      title: 'preserve this snapshot',
+    })
+  )
+  equal(targetSeed.status, 200, 'target snapshot seed status')
+  equal(siblingSeed.status, 200, 'sibling snapshot seed status')
+  target.terminate()
+  sibling.terminate()
+
+  await deleteBrowserSyncHostSnapshot(targetStorageKey)
+
+  const freshTarget = await openConnection(targetStorageKey)
+  const restoredSibling = await openConnection(siblingStorageKey)
+  equal(
+    await freshTarget.client.query('SELECT id FROM todo WHERE id = ?', ['target']),
+    [],
+    'snapshot deletion removes only the requested browser host database'
+  )
+  equal(
+    await restoredSibling.client.query('SELECT id FROM todo WHERE id = ?', ['sibling']),
+    [{ id: 'sibling' }],
+    'snapshot deletion preserves sibling browser host databases'
+  )
+  freshTarget.terminate()
+  restoredSibling.terminate()
+  await deleteBrowserSyncHostSnapshot(targetStorageKey)
+  await deleteBrowserSyncHostSnapshot(siblingStorageKey)
+  return { deletedTarget: true, preservedSibling: true }
 }
 
 async function runBrowserHostSpike() {
@@ -583,6 +633,7 @@ async function runBrowserHostSpike() {
   const faults = []
   for (const point of faultPoints) faults.push(await runFaultCase(point))
   const checkpointFailure = await runCheckpointFailureCase()
+  const snapshotDeletion = await runSnapshotDeletionCase()
 
   const result = {
     initialCookie: initial.body.cookie,
@@ -590,6 +641,7 @@ async function runBrowserHostSpike() {
     restored: restoredTwice,
     faults,
     checkpointFailure,
+    snapshotDeletion,
   }
   const output = document.querySelector('#result')
   if (output) output.textContent = JSON.stringify(result, null, 2)
