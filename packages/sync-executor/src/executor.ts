@@ -50,12 +50,12 @@ function isMutationID(value: unknown): value is number {
 
 function isMutationApplicationError(
   error: unknown
-): error is Error & { readonly details: JsonValue } {
+): error is Error & { readonly details: JsonValue | undefined } {
   return (
     isRecord(error) &&
     error.name === 'MutationApplicationError' &&
     typeof error.message === 'string' &&
-    isJsonValue(error.details)
+    (error.details === undefined || isJsonValue(error.details))
   )
 }
 
@@ -106,13 +106,13 @@ function toApplicationError(error: unknown): unknown {
   if (isMutationApplicationError(error)) return error
   if (error instanceof SyncExecutorRequestError) return error
   const message = error instanceof Error ? error.message : String(error)
-  return new MutationApplicationError(applicationErrorDetails(error) ?? message, message)
+  return new MutationApplicationError(applicationErrorDetails(error), message)
 }
 
-// mirrors zero's getErrorDetails ordering: a json-safe details payload wins, so
-// a thrown app error keeps what it carried (flagged words, field paths), then
-// named-error metadata. upstream can omit details entirely; MutationApplicationError
-// always carries one, so the caller falls back to the message.
+// mirrors zero's getErrorDetails exactly: a json-safe details payload wins, so a
+// thrown app error keeps what it carried (flagged words, field paths), then
+// named-error metadata, then nothing. an unnamed Error contributes no details
+// and the result omits the field, which is what upstream puts on the wire.
 function applicationErrorDetails(error: unknown): JsonValue | undefined {
   if (isRecord(error) && isJsonValue(error.details)) return error.details
   if (error instanceof Error && error.name && error.name !== 'Error') {
@@ -346,7 +346,7 @@ export function createSyncExecutor<S extends Schema>(
         result:
           | Record<string, never>
           | { error: 'alreadyProcessed'; details: string }
-          | { error: 'app'; message: string; details: JsonValue }
+          | { error: 'app'; message: string; details?: JsonValue }
       }> = []
 
       for (const mutation of push.mutations) {
@@ -447,7 +447,11 @@ export function createSyncExecutor<S extends Schema>(
           })
           results.push({
             id,
-            result: { error: 'app', message: error.message, details: error.details },
+            result: {
+              error: 'app',
+              message: error.message,
+              ...(error.details === undefined ? {} : { details: error.details }),
+            },
           })
         }
       }

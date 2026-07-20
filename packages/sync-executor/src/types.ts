@@ -149,7 +149,7 @@ export type PushResult = {
             | {
                 readonly error: 'app'
                 readonly message: string
-                readonly details: JsonValue
+                readonly details?: JsonValue
               }
         }[]
       }

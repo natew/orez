@@ -159,11 +159,8 @@ describe('sync executor', () => {
         mutations: [
           {
             id: { clientID: 'client-1', id: 1 },
-            result: {
-              error: 'app',
-              message: 'unknown mutator: toString',
-              details: 'unknown mutator: toString',
-            },
+            // an unnamed Error carries no details, and zero omits the field
+            result: { error: 'app', message: 'unknown mutator: toString' },
           },
         ],
       },
@@ -263,11 +260,7 @@ describe('sync executor', () => {
         mutations: [
           {
             id: { clientID: 'client-1', id: 1 },
-            result: {
-              error: 'app',
-              message: 'not authenticated',
-              details: 'not authenticated',
-            },
+            result: { error: 'app', message: 'not authenticated' },
           },
         ],
       },
