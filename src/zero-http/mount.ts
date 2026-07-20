@@ -148,14 +148,13 @@ function toZeroValue(type: string, raw: unknown): unknown {
 
 export function createZeroHttpSyncServer<S extends Schema>(options: {
   readonly applicationDatabase: ApplicationDatabase
-  readonly db: ZeroHttpSyncDb
   readonly schema: S
   readonly tables: ZeroHttpTables
   readonly mutators: MutatorRegistry<S>
   readonly visible?: ZeroHttpVisibility
   readonly retainChanges?: number
 }) {
-  const { applicationDatabase, db, mutators, schema, tables } = options
+  const { applicationDatabase, mutators, schema, tables } = options
   const retainChanges = options.retainChanges ?? 4096
   const schemaConfig = schema as unknown as ZeroSchemaConfig
   const tableConfigs = Object.entries(tables).map(([logical, spec]): TableConfig => {
@@ -189,60 +188,79 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
     schema,
   })
 
+  // every statement below runs through applicationDatabase, never a raw handle:
+  // that is what lets this mount sit on a remote/async application database, and
+  // it keeps pull, invalidate and prune on the SAME queue as mutator execution
+  // so a push cannot interleave with a pull mid-transaction.
   const ready = executor
     .push(
       { clientGroupID: '__zero_http_mount__', mutations: [], pushVersion: 1 },
       { userID: '__zero_http_mount__' }
     )
-    .then(() => {
-      db.exec(`CREATE TABLE IF NOT EXISTS _zsync_meta (
+    .then(() =>
+      applicationDatabase.transaction(async (tx) => {
+        await tx.exec(`CREATE TABLE IF NOT EXISTS _zsync_meta (
         lock INTEGER PRIMARY KEY CHECK (lock = 1),
         floor INTEGER NOT NULL
       )`)
-      db.exec(
-        `INSERT INTO _zsync_meta (lock, floor) VALUES (1, 0)
+        await tx.exec(
+          `INSERT INTO _zsync_meta (lock, floor) VALUES (1, 0)
          ON CONFLICT (lock) DO NOTHING`
-      )
-      for (const table of tableConfigs) {
-        const pkObject = (ref: 'NEW' | 'OLD') =>
-          `json_object(${table.primaryKey
-            .map(
-              (column) =>
-                `${quoteLiteral(column)}, ${ref}.${quoteIdentifier(table.columns[column]!.physical)}`
-            )
-            .join(', ')})`
-        const trigger = `_zsync_tr_${table.physical}`
-        const physical = quoteIdentifier(table.physical)
-        const tableName = quoteLiteral(table.physical)
-        db.exec(`CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(`${trigger}_i`)}
+        )
+        for (const table of tableConfigs) {
+          const pkObject = (ref: 'NEW' | 'OLD') =>
+            `json_object(${table.primaryKey
+              .map(
+                (column) =>
+                  `${quoteLiteral(column)}, ${ref}.${quoteIdentifier(table.columns[column]!.physical)}`
+              )
+              .join(', ')})`
+          const trigger = `_zsync_tr_${table.physical}`
+          const physical = quoteIdentifier(table.physical)
+          const tableName = quoteLiteral(table.physical)
+          // additive: CREATE TRIGGER IF NOT EXISTS never rewrites an existing
+          // table, so installing these against a populated database changes no
+          // rows and drops nothing.
+          await tx.exec(`CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(`${trigger}_i`)}
           AFTER INSERT ON ${physical} BEGIN
           INSERT INTO _zsync_changes ("tableName", "op", "pk")
           VALUES (${tableName}, 'row', ${pkObject('NEW')});
         END`)
-        db.exec(`CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(`${trigger}_u`)}
+          await tx.exec(`CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(`${trigger}_u`)}
           AFTER UPDATE ON ${physical} BEGIN
           INSERT INTO _zsync_changes ("tableName", "op", "pk")
           VALUES (${tableName}, 'row', ${pkObject('OLD')});
           INSERT INTO _zsync_changes ("tableName", "op", "pk")
           VALUES (${tableName}, 'row', ${pkObject('NEW')});
         END`)
-        db.exec(`CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(`${trigger}_d`)}
+          await tx.exec(`CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(`${trigger}_d`)}
           AFTER DELETE ON ${physical} BEGIN
           INSERT INTO _zsync_changes ("tableName", "op", "pk")
           VALUES (${tableName}, 'row', ${pkObject('OLD')});
         END`)
-      }
-    })
-
-  const watermark = () =>
-    Number(
-      db.all('SELECT COALESCE(MAX("watermark"), 0) AS value FROM _zsync_changes')[0]!
-        .value
+        }
+      })
     )
-  const floor = () => Number(db.all('SELECT floor FROM _zsync_meta')[0]!.floor)
 
-  function claimClient(clientGroupID: string, clientID: string, userID: string): void {
-    db.exec(
+  async function watermarkIn(tx: ApplicationTransaction): Promise<number> {
+    const rows = await tx.query(
+      'SELECT COALESCE(MAX("watermark"), 0) AS value FROM _zsync_changes'
+    )
+    return Number(rows[0]!.value)
+  }
+
+  async function floorIn(tx: ApplicationTransaction): Promise<number> {
+    const rows = await tx.query('SELECT floor FROM _zsync_meta')
+    return Number(rows[0]!.floor)
+  }
+
+  async function claimClient(
+    tx: ApplicationTransaction,
+    clientGroupID: string,
+    clientID: string,
+    userID: string
+  ): Promise<void> {
+    await tx.exec(
       `INSERT INTO _zsync_clients ("clientGroupID", "clientID", "lastMutationID", "userID")
        SELECT ?, ?, 0, ?
        WHERE NOT EXISTS (
@@ -253,7 +271,7 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
        DO UPDATE SET "userID" = excluded."userID" WHERE "userID" IS NULL`,
       [clientGroupID, clientID, userID, clientGroupID, userID]
     )
-    const owners = db.all(
+    const owners = await tx.query(
       `SELECT DISTINCT "userID" FROM _zsync_clients
        WHERE "clientGroupID" = ? AND "userID" IS NOT NULL`,
       [clientGroupID]
@@ -263,24 +281,31 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
     }
   }
 
-  function prune(): void {
-    const cutoff = watermark() - retainChanges
-    if (cutoff <= floor()) return
-    db.exec('DELETE FROM _zsync_changes WHERE "watermark" <= ?', [cutoff])
-    db.exec('UPDATE _zsync_meta SET floor = ?', [cutoff])
+  async function prune(tx: ApplicationTransaction): Promise<void> {
+    const cutoff = (await watermarkIn(tx)) - retainChanges
+    if (cutoff <= (await floorIn(tx))) return
+    await tx.exec('DELETE FROM _zsync_changes WHERE "watermark" <= ?', [cutoff])
+    await tx.exec('UPDATE _zsync_meta SET floor = ?', [cutoff])
   }
 
-  function visibleRows(table: TableConfig, userID: string): Record<string, unknown>[] {
+  async function visibleRows(
+    tx: ApplicationTransaction,
+    table: TableConfig,
+    userID: string
+  ): Promise<readonly Record<string, unknown>[]> {
     const filter = options.visible?.(table.logical, userID)
     return filter
-      ? db.all(filter.sql, filter.params)
-      : db.all(`SELECT * FROM ${quoteIdentifier(table.physical)}`)
+      ? tx.query(filter.sql, filter.params)
+      : tx.query(`SELECT * FROM ${quoteIdentifier(table.physical)}`)
   }
 
-  function snapshot(userID: string): unknown[] {
+  async function snapshot(
+    tx: ApplicationTransaction,
+    userID: string
+  ): Promise<unknown[]> {
     const patch: unknown[] = [{ op: 'clear' }]
     for (const table of tableConfigs) {
-      for (const row of visibleRows(table, userID)) {
+      for (const row of await visibleRows(tx, table, userID)) {
         patch.push({
           op: 'put',
           tableName: table.physical,
@@ -296,9 +321,9 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
     return patch
   }
 
-  function diff(cookie: number): unknown[] {
+  async function diff(tx: ApplicationTransaction, cookie: number): Promise<unknown[]> {
     const touched = new Map<string, { table: string; pk: Record<string, unknown> }>()
-    for (const change of db.all(
+    for (const change of await tx.query(
       `SELECT DISTINCT "tableName", "pk" FROM _zsync_changes
        WHERE "watermark" > ? AND "op" = 'row'`,
       [cookie]
@@ -315,9 +340,11 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
         .map((column) => `${quoteIdentifier(config.columns[column]!.physical)} = ?`)
         .join(' AND ')
       const params = config.primaryKey.map((column) => pk[column])
-      const row = db.all(
-        `SELECT * FROM ${quoteIdentifier(config.physical)} WHERE ${where}`,
-        params
+      const row = (
+        await tx.query(
+          `SELECT * FROM ${quoteIdentifier(config.physical)} WHERE ${where}`,
+          params
+        )
       )[0]
       if (!row) {
         patch.push({
@@ -349,15 +376,18 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
   return {
     executor,
     ready: () => ready,
-    watermark,
+    async watermark(): Promise<number> {
+      await ready
+      return applicationDatabase.transaction((tx) => watermarkIn(tx))
+    },
     async invalidate(): Promise<void> {
       await ready
-      db.transaction(() => {
-        db.exec(
+      await applicationDatabase.transaction(async (tx) => {
+        await tx.exec(
           `INSERT INTO _zsync_changes ("tableName", "op", "pk")
            VALUES ('_zsync_meta', 'marker', NULL)`
         )
-        db.exec(
+        await tx.exec(
           `UPDATE _zsync_meta SET floor =
            (SELECT COALESCE(MAX("watermark"), 0) FROM _zsync_changes)`
         )
@@ -366,10 +396,10 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
     async handlePull(value: unknown, claims: NormalizedClaims): Promise<unknown> {
       await ready
       const body = validatePull(value)
-      return db.transaction(() => {
-        claimClient(body.clientGroupID, body.clientID, claims.userID)
-        prune()
-        const current = watermark()
+      return applicationDatabase.transaction(async (tx) => {
+        await claimClient(tx, body.clientGroupID, body.clientID, claims.userID)
+        await prune(tx)
+        const current = await watermarkIn(tx)
         if (body.cookie !== null && body.cookie > current) {
           throw new ZeroHttpRequestError(
             409,
@@ -378,20 +408,24 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
         }
         if (body.cookie === current) return { cookie: current, unchanged: true }
         const lmids = Object.fromEntries(
-          db
-            .all(
+          (
+            await tx.query(
               `SELECT "clientID", "lastMutationID" FROM _zsync_clients
                WHERE "clientGroupID" = ?`,
               [body.clientGroupID]
             )
-            .map((row) => [String(row.clientID), Number(row.lastMutationID)])
+          ).map((row) => [String(row.clientID), Number(row.lastMutationID)])
         )
         const canDiff =
-          body.cookie !== null && body.cookie >= floor() && options.visible === undefined
+          body.cookie !== null &&
+          body.cookie >= (await floorIn(tx)) &&
+          options.visible === undefined
         return {
           cookie: current,
           lastMutationIDChanges: lmids,
-          rowsPatch: canDiff ? diff(body.cookie!) : snapshot(claims.userID),
+          rowsPatch: canDiff
+            ? await diff(tx, body.cookie!)
+            : await snapshot(tx, claims.userID),
         }
       })
     },
@@ -402,13 +436,12 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
         'mutations' in result.pushResponse &&
         result.pushResponse.mutations.length > 0
       ) {
-        db.transaction(prune)
+        await applicationDatabase.transaction((tx) => prune(tx))
       }
       return result
     },
   }
 }
-
 export type ZeroHttpSyncServer = ReturnType<typeof createZeroHttpSyncServer>
 
 export type ZeroHttpOperation = 'pull' | 'push'

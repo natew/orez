@@ -111,7 +111,7 @@ function createMutators(): MutatorRegistry<typeof zeroHttpFixtureSchema> {
 
 export async function startZeroHttpServer(opts?: { seed?: Seed }): Promise<{
   url: string
-  version(): number
+  version(): Promise<number>
   rows(table: string): Row[]
   close(): Promise<void>
 }> {
@@ -120,7 +120,6 @@ export async function startZeroHttpServer(opts?: { seed?: Seed }): Promise<{
   const db = createDatabase(sqlite)
   const sync = createZeroHttpSyncServer({
     applicationDatabase: createZeroHttpApplicationDatabase(db),
-    db,
     schema: zeroHttpFixtureSchema,
     tables: {
       user: { columns: { id: 'string', name: 'string' }, primaryKey: ['id'] },
@@ -205,7 +204,7 @@ export async function startZeroHttpServer(opts?: { seed?: Seed }): Promise<{
   const address = server.address() as AddressInfo
   return {
     url: `http://127.0.0.1:${address.port}`,
-    version: sync.watermark,
+    version: () => sync.watermark(),
     rows: (table) => rowsForTable(sqlite, table),
     close: () =>
       new Promise((resolve, reject) => {

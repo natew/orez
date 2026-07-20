@@ -157,7 +157,7 @@ describe('zero-http fixture server', () => {
 
     const first = await pull(server, 'token-u1')
     expect(first.res.status).toBe(200)
-    expect(first.body.cookie).toBe(server.version())
+    expect(first.body.cookie).toBe(await server.version())
     expect(first.body.rowsPatch).toBeDefined()
 
     const unchanged = await pull(server, 'token-u1', { cookie: first.body.cookie })
@@ -299,7 +299,7 @@ describe('zero-http fixture server', () => {
       project: [{ id: 'p2', ownerId: 'u2', name: 'u2 project' }],
       member: [],
     })
-    const beforeVersion = server.version()
+    const beforeVersion = await server.version()
 
     const missing = await push(server, 'token-u1', {
       id: 1,
@@ -320,7 +320,7 @@ describe('zero-http fixture server', () => {
     expect(server.rows('project')).toEqual([
       { id: 'p2', ownerId: 'u2', name: 'u2 project' },
     ])
-    expect(server.version()).toBeGreaterThan(beforeVersion)
+    expect(await server.version()).toBeGreaterThan(beforeVersion)
 
     const replayedMissing = await push(server, 'token-u1', {
       id: 1,
@@ -354,7 +354,7 @@ describe('zero-http fixture server', () => {
       value: { project_id: 'missing', owner_id: 'u1', project_name: 'ghost' },
     })
 
-    const beforeForbidden = server.version()
+    const beforeForbidden = await server.version()
     const forbidden = await push(server, 'token-u1', {
       id: 2,
       name: 'project|rename',
@@ -388,7 +388,7 @@ describe('zero-http fixture server', () => {
       project: [],
       member: [],
     })
-    const beforeVersion = server.version()
+    const beforeVersion = await server.version()
 
     const gap = await push(server, 'token-u1', {
       id: 2,
@@ -397,7 +397,7 @@ describe('zero-http fixture server', () => {
     })
     expect(gap.res.status).toBe(400)
     expect(gap.body.error).toContain('skips lmid')
-    expect(server.version()).toBe(beforeVersion)
+    expect(await server.version()).toBe(beforeVersion)
     expect(server.rows('project')).toEqual([])
 
     const afterGap = await pull(server, 'token-u1')
