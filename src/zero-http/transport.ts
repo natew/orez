@@ -112,6 +112,38 @@ export type HttpPullTransport = {
   uninstall(): void
 }
 
+export type WakeTokenFetchInit = RequestInit | (() => RequestInit | Promise<RequestInit>)
+
+export function createWakeTokenFetcher(
+  tokenURL: string | URL,
+  init: WakeTokenFetchInit = {},
+  fetchImplementation: typeof fetch = globalThis.fetch
+): () => Promise<string> {
+  if (!fetchImplementation) {
+    throw new Error('createWakeTokenFetcher requires a fetch implementation')
+  }
+  const request = fetchImplementation.bind(globalThis)
+  return async () => {
+    const fetchInit = typeof init === 'function' ? await init() : init
+    const response = await request(tokenURL, { ...fetchInit, method: 'POST' })
+    if (!response.ok) {
+      throw new Error(`wake token request failed: ${response.status}`)
+    }
+    const body: unknown = await response.json().catch(() => null)
+    if (
+      !body ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      !('token' in body) ||
+      typeof body.token !== 'string' ||
+      !body.token
+    ) {
+      throw new Error('wake token response is invalid')
+    }
+    return body.token
+  }
+}
+
 export type HttpPullTransportOptions = {
   // zero app id; encoded into /push routing params as schema=<appID>_<shardNum>
   // and appID=<appID> so a native host can address the right schema shard.

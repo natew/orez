@@ -39,6 +39,10 @@
       "types": "./dist/zero-http/transport.d.ts",
       "import": "./dist/zero-http/transport.js"
     },
+    "./wake": {
+      "types": "./dist/wake.d.ts",
+      "import": "./dist/wake.js"
+    },
     "./zero-http/mount": {
       "types": "./dist/zero-http/mount.d.ts",
       "import": "./dist/zero-http/mount.js"
