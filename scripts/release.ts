@@ -490,38 +490,44 @@ const pendingPackages = preparedPackages.filter((pkg) => {
 })
 
 if (pendingPackages.length > 0) {
-  if (!ci && process.stdin.isTTY && process.stdout.isTTY) {
-    console.info(
-      'npm will open the browser for 2FA once. Select “do not challenge for the next 5 minutes” so the same short-lived approval can publish the remaining packages.'
-    )
-  }
-
-  writeFileSync(
-    join(tmpBase, 'package.json'),
-    JSON.stringify(
-      {
-        name: 'orez-release',
-        private: true,
-        workspaces: pendingPackages.map((pkg) => relative(tmpBase, pkg.cwd)),
-      },
-      null,
-      2
-    ) + '\n'
-  )
-
-  const webAuthCache = join(root, 'scripts', 'cache-npm-webauth.cjs')
-  const nodeOptions = [process.env.NODE_OPTIONS, `--require=${webAuthCache}`]
-    .filter(Boolean)
-    .join(' ')
   const tag = canary ? '--tag canary' : ''
 
   try {
-    // trusted publishing exchanges a package-scoped OIDC token for each
-    // workspace; the local passkey cache would replay the first package's token.
-    run(`npm publish --workspaces --ignore-scripts --access public ${tag}`.trim(), {
-      cwd: tmpBase,
-      env: trustedPublishing ? {} : { NODE_OPTIONS: nodeOptions },
-    })
+    if (trustedPublishing) {
+      // each npm process exchanges one package-scoped OIDC token. npm's
+      // workspace publisher reuses its first token and package two rejects it.
+      for (const pkg of pendingPackages) {
+        run(`npm publish --ignore-scripts --access public ${tag}`.trim(), {
+          cwd: pkg.cwd,
+        })
+      }
+    } else {
+      if (!ci && process.stdin.isTTY && process.stdout.isTTY) {
+        console.info(
+          'npm will open the browser for 2FA once. Select “do not challenge for the next 5 minutes” so the same short-lived approval can publish the remaining packages.'
+        )
+      }
+      writeFileSync(
+        join(tmpBase, 'package.json'),
+        JSON.stringify(
+          {
+            name: 'orez-release',
+            private: true,
+            workspaces: pendingPackages.map((pkg) => relative(tmpBase, pkg.cwd)),
+          },
+          null,
+          2
+        ) + '\n'
+      )
+      const webAuthCache = join(root, 'scripts', 'cache-npm-webauth.cjs')
+      const nodeOptions = [process.env.NODE_OPTIONS, `--require=${webAuthCache}`]
+        .filter(Boolean)
+        .join(' ')
+      run(`npm publish --workspaces --ignore-scripts --access public ${tag}`.trim(), {
+        cwd: tmpBase,
+        env: { NODE_OPTIONS: nodeOptions },
+      })
+    }
   } catch (error) {
     const postflight = pendingPackages.map((pkg) => ({
       pkg,
