@@ -6,8 +6,8 @@ rather not run Postgres and a long-lived cache process. On Cloudflare it runs
 as one Durable Object per namespace, holding both the sync engine and its SQLite
 storage in the same object.
 
-The client half of Zero is unchanged. There is no Orez client API or client
-fork. What this replaces is the server half:
+The client half of Zero is unchanged. `orez/client` supplies the browser
+transport without forking Zero's API. What this replaces is the server half:
 replicating upstream data, feeding row changes to clients, running custom
 mutators, tracking per-client last-mutation-ids, and serving per-query
 incremental sync.

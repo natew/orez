@@ -1,19 +1,21 @@
 ---
 title: The Zero client
-description: Orez changes the server deployment, not the Zero client or application API.
+description: Orez keeps the Zero application API and provides its Orez Lite transport.
 ---
 
 # The real Zero client, unchanged
 
-Orez does not provide a client-side reimplementation of Zero. Applications use
-the real `@rocicorp/zero` package, its local cache, ZQL, named queries, custom
-mutators, framework integrations, and optimistic updates.
+Orez does not reimplement Zero's client. Applications use the real
+`@rocicorp/zero` package, its local cache, ZQL, named queries, custom mutators,
+framework integrations, and optimistic updates. For Orez Lite, `orez/client`
+provides the browser transport that connects that stock client to the Orez
+server.
 
 The difference between the Orez runtimes is entirely on the server:
 
 | Surface                                | Node runtime                     | Orez Lite                                      |
 | -------------------------------------- | -------------------------------- | ---------------------------------------------- |
-| Browser package                        | `@rocicorp/zero`                 | `@rocicorp/zero`                               |
+| Browser packages                       | `@rocicorp/zero`                 | `@rocicorp/zero` and `orez/client`             |
 | Client API and local cache             | Zero                             | Zero                                           |
 | Schema, named queries, and mutators    | Zero                             | Zero                                           |
 | Application query and mutate endpoints | Zero                             | Zero                                           |
@@ -24,8 +26,8 @@ The difference between the Orez runtimes is entirely on the server:
 ## What an application changes
 
 For Node, point the client at the `zero-cache` address printed by Orez. For
-Orez Lite, point that same client at the Orez Lite server. There is no second
-client dependency and no Orez-specific query or mutation API.
+Orez Lite, install the [`orez/client` transport](/docs/client) before creating
+the same Zero client. There is no Orez-specific query or mutation API.
 
 Zero's documentation is the source of truth for application development:
 

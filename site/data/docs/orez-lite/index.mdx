@@ -8,13 +8,15 @@ description: Replace Zero's server with a compact SQLite-native engine while kee
 <Status tone="preview">Preview</Status>
 
 Orez Lite is a server for Zero. It speaks the Zero protocol to the real
-`@rocicorp/zero` client and replaces only Zero's server-side sync machinery.
-There is no Orez client, client fork, query model, or mutator model to adopt.
+`@rocicorp/zero` client and replaces Zero's server-side sync machinery.
+Orez provides the small `orez/client` transport plugin needed to connect the
+stock client. There is no client fork, query model, or mutator model to adopt.
 
 Your schema, named queries, custom mutators, optimistic updates, authentication,
 and application query and mutate endpoints remain ordinary Zero. Install and
 use the client exactly as the [Zero documentation](https://zero.rocicorp.dev/docs)
-describes, then point it at the Orez Lite server instead of `zero-cache`.
+describes, install the [`orez/client` transport](/docs/client), then point it at
+the Orez Lite server instead of `zero-cache`.
 
 <VerifiedBuildCard />
 

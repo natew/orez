@@ -47,8 +47,8 @@ the database change feed.
 
 ## Client connection
 
-Set the existing Zero client's `cacheURL` to the deployed Orez Lite address.
-There is no Orez client package or alternate query API. Components keep using
+Install the `orez/client` transport with the deployed Orez Lite address, then
+set the existing Zero client's server to that address. Components keep using
 the same `@rocicorp/zero` queries, mutators, hooks, and optimistic local state.
 
 ## Namespaces and authorization
