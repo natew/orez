@@ -300,9 +300,9 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
           await tx.exec(`CREATE TRIGGER ${quoteIdentifier(`${trigger}_u`)}
           AFTER UPDATE ON ${physical} BEGIN
           INSERT INTO _zsync_changes ("tableName", "op", "pk")
-          VALUES (${tableName}, 'row', json_object('before', ${rowObject('OLD')}, 'after', NULL));
+          VALUES (${tableName}, 'row', json_object('before', ${rowObject('OLD')}, 'after', ${rowObject('NEW')}));
           INSERT INTO _zsync_changes ("tableName", "op", "pk")
-          VALUES (${tableName}, 'row', json_object('before', NULL, 'after', ${rowObject('NEW')}));
+          VALUES ('_zsync_meta', 'marker', NULL);
         END`)
           await tx.exec(`CREATE TRIGGER ${quoteIdentifier(`${trigger}_d`)}
           AFTER DELETE ON ${physical} BEGIN
