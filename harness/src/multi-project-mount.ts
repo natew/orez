@@ -283,8 +283,8 @@ try {
   assert.equal(JSON.parse(redInitial.body).cookie, 0)
   assert.equal(JSON.parse(blueInitial.body).cookie, 0)
   assert.equal((await post('/p-red/push', push('red only'), 'red-user')).status, 200)
-  assert.equal(projects.get('red')!.sync.watermark(), 2)
-  assert.equal(projects.get('blue')!.sync.watermark(), 0)
+  assert.equal(await projects.get('red')!.sync.watermark(), 2)
+  assert.equal(await projects.get('blue')!.sync.watermark(), 0)
   assert.deepEqual(JSON.parse((await post('/p-blue/pull', pull(0), 'blue-user')).body), {
     cookie: 0,
     unchanged: true,
