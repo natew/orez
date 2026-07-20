@@ -1,6 +1,6 @@
 {
   "name": "orez-sync-cf-host",
-  "version": "0.5.37",
+  "version": "0.5.38",
   "type": "module",
   "exports": {
     ".": {
