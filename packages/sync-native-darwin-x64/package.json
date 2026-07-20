@@ -1,5 +1,5 @@
 {
-  "name": "@nwienert/orez-sync-native-darwin-x64",
+  "name": "orez-sync-native-darwin-x64",
   "version": "0.1.0",
   "description": "Prebuilt Orez sync-native host for macOS x64",
   "license": "MIT",

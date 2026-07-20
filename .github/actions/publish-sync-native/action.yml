@@ -1,0 +1,39 @@
+name: Publish sync-native package
+description: Publish one prepared sync-native target and verify its launcher
+
+inputs:
+  version:
+    description: Native package version
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Publish platform npm package
+      shell: bash
+      run: |
+        package_name="$(node -p "require('./.release/platform/package.json').name")"
+        if npm view "$package_name@${{ inputs.version }}" version --json >/dev/null 2>&1; then
+          published_commit="$(npm view "$package_name@${{ inputs.version }}" orezSourceCommit)"
+          if [ "$published_commit" != '${{ github.sha }}' ]; then
+            echo "$package_name@${{ inputs.version }} came from $published_commit, not ${{ github.sha }}" >&2
+            exit 1
+          fi
+          echo "$package_name@${{ inputs.version }} already has this source commit"
+        else
+          npm publish .release/platform --ignore-scripts --access public
+        fi
+
+    - name: Verify the published launcher
+      shell: bash
+      run: |
+        npm install \
+          --prefix .release/smoke \
+          --ignore-scripts \
+          'orez-sync-native@${{ inputs.version }}'
+        actual="$(.release/smoke/node_modules/.bin/sync-native --version)"
+        expected='sync-native ${{ inputs.version }}'
+        if [ "$actual" != "$expected" ]; then
+          echo "expected '$expected', got '$actual'" >&2
+          exit 1
+        fi

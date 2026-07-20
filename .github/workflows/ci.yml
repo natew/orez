@@ -282,6 +282,47 @@ jobs:
       - name: sync-wasm node tests
         run: wasm-pack test --node crates/sync-wasm
 
+  sync-native-package-plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      version: ${{ steps.plan.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+
+      - name: Plan native package builds
+        id: plan
+        run: |
+          echo "version=$(bun scripts/sync-native-package.ts version)" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(bun scripts/sync-native-package.ts matrix)" >> "$GITHUB_OUTPUT"
+
+  # build the same package artifacts the release workflow will publish, on
+  # every supported hosted runner, without registry credentials or writes.
+  sync-native-packages:
+    needs: sync-native-package-plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.sync-native-package-plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/build-sync-native
+        with:
+          id: ${{ matrix.id }}
+          target: ${{ matrix.target }}
+          executable: ${{ matrix.executable }}
+          version: ${{ needs.sync-native-package-plan.outputs.version }}
+          libc: ${{ matrix.libc }}
+
   # Checker-boundary self-tests only. These prove the pinned Elle binary accepts
   # and rejects known JSON histories; they do not check an Orez workload.
   elle-cli-self-test:

@@ -38,11 +38,13 @@ configured value. Native requests without `Origin` remain allowed, while admin
 routes reject every request that contains `Origin`.
 
 `zero-schema.json` is the ordinary Zero schema object. `init-sql.json` is an
-ordered JSON array of SQL strings. Orez applies that array once when it creates
-a namespace, inside the same transaction and before installing its internal
-schema and triggers. Existing namespaces instead run application-owned
-migrations through the serialized `/<namespace>/admin/sql` transaction before
-the supervisor reports ready. Supervisors discover those namespaces through
+ordered JSON array of idempotent SQL strings. Orez reapplies that array whenever
+it opens a namespace, inside the same transaction and before installing or
+updating its internal schema and triggers. This ordering lets an existing
+namespace reach the application shape referenced by the current Zero schema
+before Orez uses that shape. Application-owned data migrations can also run
+through the serialized `/<namespace>/admin/sql` transaction before the
+supervisor reports ready. Supervisors discover those namespaces through
 `GET /admin/namespaces` with the process `x-admin-key`; its response is
 `{ "namespaces": [...] }` in lexical order. The on-disk filename layout is not
 an application contract.
@@ -147,26 +149,29 @@ script blocks waiting for every Rust target.
 ## First release bootstrap
 
 Each new npm package must exist before npm trusted publishing can be configured.
-Prepare name-only prereleases in a scratch directory:
+After the upgrade regression and hosted multi-platform CI pass, the release
+owner runs one command from a clean, current `main` checkout:
 
 ```sh
-bun scripts/sync-native-package.ts prepare-bootstrap .release/bootstrap
+bun run release:native:bootstrap
 ```
 
-With explicit release approval, publish each generated directory under the
-`bootstrap` tag. They use `0.0.0-bootstrap.0`, contain no executable, and never
-consume the real native version:
+The script verifies that its exact commit is current `origin/main` with green
+hosted CI, installs its own Node.js 24.16.0 and npm 12.0.1 runtime into
+`.release`, verifies npm is authenticated as `nwienert`, and asks for an
+explicit irreversible-action confirmation. It then
+publishes every missing unscoped name together at `0.0.0-bootstrap.0` under the
+`bootstrap` tag and configures their `natew/orez` / `release-sync-native.yml`
+trusted publishers. When the npm browser approval opens, approve with Touch ID
+or the registered security key and select the five-minute 2FA skip; the script
+paces all nine trust requests inside that window. A rerun skips names and exact
+trust configurations already completed, and stops if a name has another owner
+or trusted publisher.
 
-```sh
-for package in .release/bootstrap/*; do
-  npm publish "$package" --access public --tag bootstrap
-done
-```
-
-Then configure each package's trusted publisher for `natew/orez` and
-`release-sync-native.yml`. Subsequent workflow publishes use GitHub OIDC and
-carry npm provenance without stored npm tokens. Never publish the checked-in
-platform directories directly because they intentionally contain no binaries.
+The bootstrap packages contain no executable and never consume the real native
+version. Subsequent workflow publishes use GitHub OIDC and carry npm provenance
+without stored npm tokens. Never publish the checked-in platform directories
+directly because they intentionally contain no binaries.
 
 Publishing or bootstrapping packages remains a release action and requires
 explicit approval.

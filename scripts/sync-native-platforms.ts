@@ -23,7 +23,7 @@ const platform = (
   id,
   target,
   runner,
-  npmPackage: `@nwienert/orez-sync-native-${id}`,
+  npmPackage: `orez-sync-native-${id}`,
   packageDir: `packages/sync-native-${id}`,
   os,
   cpu,

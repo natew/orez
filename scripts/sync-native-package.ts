@@ -148,7 +148,7 @@ export function prepareBootstrapPackages(
     })),
   ]
 
-  return packages.map(({ dir, manifest }) => {
+  const packageDirs = packages.map(({ dir, manifest }) => {
     const packageDir = resolve(outputDir, dir)
     mkdirSync(packageDir, { recursive: true })
     manifest.version = version
@@ -160,6 +160,12 @@ export function prepareBootstrapPackages(
     cpSync(resolve(root, 'LICENSE'), resolve(packageDir, 'LICENSE'))
     return packageDir
   })
+  writeJson(resolve(outputDir, 'package.json'), {
+    name: 'orez-sync-native-bootstrap-workspace',
+    private: true,
+    workspaces: packages.map(({ dir }) => dir),
+  })
+  return packageDirs
 }
 
 export function currentSyncNativePlatform() {

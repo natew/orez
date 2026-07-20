@@ -110,6 +110,7 @@
     "test:chat:e2e": "bun scripts/test-chat-e2e.ts",
     "release": "bun scripts/release.ts",
     "release:native:prepare": "bun scripts/set-sync-native-version.ts",
+    "release:native:bootstrap": "bun scripts/bootstrap-sync-native-packages.ts",
     "perf:load": "bun run perf/load/harness.ts",
     "perf:memory": "bun run perf/memory/profile.ts",
     "perf:write-profile": "bun run build && bun run perf/write-amplification/build-production-shape.ts && bun run perf/write-amplification/production-shape.ts",

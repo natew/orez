@@ -120,9 +120,9 @@ pub fn read_watermark(conn: &Connection) -> i64 {
 
 // ---- worker init ---------------------------------------------------------
 
-// worker init: install the app tables + seed (consumer), then the engine's
-// _zsync_* schema + triggers. triggers install AFTER the seed so seed rows
-// stay out of the change log. idempotent across restart.
+// worker init: install or migrate the app tables (consumer), then the engine's
+// _zsync_* schema + triggers. on a fresh database the triggers install after
+// seed data, so those initial rows stay out of the change log.
 pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), String> {
     (ctx.init_fn)(db)?;
     sync_core::schema::init_schema(db, &ctx.tables).map_err(|e| e.0)?;

@@ -1,5 +1,5 @@
 {
-  "name": "@nwienert/orez-sync-native-linux-arm64-musl",
+  "name": "orez-sync-native-linux-arm64-musl",
   "version": "0.1.0",
   "description": "Prebuilt Orez sync-native host for Linux ARM64 musl",
   "license": "MIT",

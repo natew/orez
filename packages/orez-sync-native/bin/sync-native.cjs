@@ -6,36 +6,36 @@ const { spawn } = require('node:child_process')
 
 const PACKAGES = {
   'darwin-arm64': {
-    packageName: '@nwienert/orez-sync-native-darwin-arm64',
-    binary: '@nwienert/orez-sync-native-darwin-arm64/bin/sync-native',
+    packageName: 'orez-sync-native-darwin-arm64',
+    binary: 'orez-sync-native-darwin-arm64/bin/sync-native',
   },
   'darwin-x64': {
-    packageName: '@nwienert/orez-sync-native-darwin-x64',
-    binary: '@nwienert/orez-sync-native-darwin-x64/bin/sync-native',
+    packageName: 'orez-sync-native-darwin-x64',
+    binary: 'orez-sync-native-darwin-x64/bin/sync-native',
   },
   'linux-arm64-glibc': {
-    packageName: '@nwienert/orez-sync-native-linux-arm64-gnu',
-    binary: '@nwienert/orez-sync-native-linux-arm64-gnu/bin/sync-native',
+    packageName: 'orez-sync-native-linux-arm64-gnu',
+    binary: 'orez-sync-native-linux-arm64-gnu/bin/sync-native',
   },
   'linux-arm64-musl': {
-    packageName: '@nwienert/orez-sync-native-linux-arm64-musl',
-    binary: '@nwienert/orez-sync-native-linux-arm64-musl/bin/sync-native',
+    packageName: 'orez-sync-native-linux-arm64-musl',
+    binary: 'orez-sync-native-linux-arm64-musl/bin/sync-native',
   },
   'linux-x64-glibc': {
-    packageName: '@nwienert/orez-sync-native-linux-x64-gnu',
-    binary: '@nwienert/orez-sync-native-linux-x64-gnu/bin/sync-native',
+    packageName: 'orez-sync-native-linux-x64-gnu',
+    binary: 'orez-sync-native-linux-x64-gnu/bin/sync-native',
   },
   'linux-x64-musl': {
-    packageName: '@nwienert/orez-sync-native-linux-x64-musl',
-    binary: '@nwienert/orez-sync-native-linux-x64-musl/bin/sync-native',
+    packageName: 'orez-sync-native-linux-x64-musl',
+    binary: 'orez-sync-native-linux-x64-musl/bin/sync-native',
   },
   'win32-arm64': {
-    packageName: '@nwienert/orez-sync-native-win32-arm64',
-    binary: '@nwienert/orez-sync-native-win32-arm64/bin/sync-native.exe',
+    packageName: 'orez-sync-native-win32-arm64',
+    binary: 'orez-sync-native-win32-arm64/bin/sync-native.exe',
   },
   'win32-x64': {
-    packageName: '@nwienert/orez-sync-native-win32-x64',
-    binary: '@nwienert/orez-sync-native-win32-x64/bin/sync-native.exe',
+    packageName: 'orez-sync-native-win32-x64',
+    binary: 'orez-sync-native-win32-x64/bin/sync-native.exe',
   },
 }
 

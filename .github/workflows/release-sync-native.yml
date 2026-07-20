@@ -120,11 +120,15 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - uses: ./.github/actions/build-publish-sync-native
+      - uses: ./.github/actions/build-sync-native
         with:
           id: darwin-arm64
           target: aarch64-apple-darwin
           executable: sync-native
+          version: ${{ needs.plan.outputs.version }}
+
+      - uses: ./.github/actions/publish-sync-native
+        with:
           version: ${{ needs.plan.outputs.version }}
 
   remaining-platforms:
@@ -139,10 +143,14 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - uses: ./.github/actions/build-publish-sync-native
+      - uses: ./.github/actions/build-sync-native
         with:
           id: ${{ matrix.id }}
           target: ${{ matrix.target }}
           executable: ${{ matrix.executable }}
           version: ${{ needs.plan.outputs.version }}
           libc: ${{ matrix.libc }}
+
+      - uses: ./.github/actions/publish-sync-native
+        with:
+          version: ${{ needs.plan.outputs.version }}

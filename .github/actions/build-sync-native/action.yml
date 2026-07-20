@@ -1,5 +1,5 @@
-name: Build and publish sync-native package
-description: Build, smoke-test, package, and publish one generic sync-native target
+name: Build sync-native package
+description: Build, package, and smoke-test one generic sync-native target
 
 inputs:
   id:
@@ -27,7 +27,7 @@ runs:
         registry-url: https://registry.npmjs.org
         package-manager-cache: false
 
-    - name: Install OIDC-capable npm
+    - name: Install release npm
       shell: bash
       run: npm install --global npm@12.0.1
 
@@ -93,7 +93,7 @@ runs:
           '${{ inputs.version }}' \
           '${{ github.sha }}'
 
-    - name: Smoke-test packed npm packages before publish
+    - name: Smoke-test packed npm packages
       shell: bash
       run: |
         mkdir -p .release/packed .release/packed-smoke
@@ -140,33 +140,4 @@ runs:
             echo "expected launcher '$expected', got '$launcher_actual'" >&2
             exit 1
           fi
-        fi
-
-    - name: Publish platform npm package
-      shell: bash
-      run: |
-        package_name="$(node -p "require('./.release/platform/package.json').name")"
-        if npm view "$package_name@${{ inputs.version }}" version --json >/dev/null 2>&1; then
-          published_commit="$(npm view "$package_name@${{ inputs.version }}" orezSourceCommit)"
-          if [ "$published_commit" != '${{ github.sha }}' ]; then
-            echo "$package_name@${{ inputs.version }} came from $published_commit, not ${{ github.sha }}" >&2
-            exit 1
-          fi
-          echo "$package_name@${{ inputs.version }} already has this source commit"
-        else
-          npm publish .release/platform --ignore-scripts --access public
-        fi
-
-    - name: Verify the published launcher
-      shell: bash
-      run: |
-        npm install \
-          --prefix .release/smoke \
-          --ignore-scripts \
-          'orez-sync-native@${{ inputs.version }}'
-        actual="$(.release/smoke/node_modules/.bin/sync-native --version)"
-        expected='sync-native ${{ inputs.version }}'
-        if [ "$actual" != "$expected" ]; then
-          echo "expected '$expected', got '$actual'" >&2
-          exit 1
         fi

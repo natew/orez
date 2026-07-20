@@ -57,13 +57,13 @@ describe('orderReleasePackages', () => {
   it('orders optional platform packages before their launcher', () => {
     const packages = [
       optionalPkg('orez-sync-native', {
-        '@nwienert/orez-sync-native-darwin-arm64': 'workspace:*',
+        'orez-sync-native-darwin-arm64': 'workspace:*',
       }),
-      optionalPkg('@nwienert/orez-sync-native-darwin-arm64'),
+      optionalPkg('orez-sync-native-darwin-arm64'),
     ]
 
     expect(orderReleasePackages(packages).map((item) => item.pkg.name)).toEqual([
-      '@nwienert/orez-sync-native-darwin-arm64',
+      'orez-sync-native-darwin-arm64',
       'orez-sync-native',
     ])
   })

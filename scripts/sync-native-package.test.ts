@@ -119,7 +119,10 @@ describe('sync-native npm packages', () => {
     const packages = prepareBootstrapPackages(temporary)
 
     expect(packages).toHaveLength(9)
-    expect(readdirSync(temporary)).toHaveLength(9)
+    expect(readdirSync(temporary)).toHaveLength(10)
+    expect(
+      JSON.parse(readFileSync(resolve(temporary, 'package.json'), 'utf8')).workspaces
+    ).toHaveLength(9)
     for (const packageDir of packages) {
       const manifest = JSON.parse(
         readFileSync(resolve(packageDir, 'package.json'), 'utf8')

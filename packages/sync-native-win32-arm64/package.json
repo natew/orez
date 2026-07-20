@@ -1,5 +1,5 @@
 {
-  "name": "@nwienert/orez-sync-native-win32-arm64",
+  "name": "orez-sync-native-win32-arm64",
   "version": "0.1.0",
   "description": "Prebuilt Orez sync-native host for Windows ARM64",
   "license": "MIT",
