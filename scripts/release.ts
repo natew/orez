@@ -33,9 +33,12 @@ const canary = args.includes('--canary')
 const rePublish = args.includes('--republish')
 const skipTest = args.includes('--skip-test') || args.includes('--skip-all')
 const packOnly = args.includes('--pack-only')
-const ci = args.includes('--ci')
 const intoIdx = args.indexOf('--into')
 const into = intoIdx !== -1 ? args[intoIdx + 1] : null
+const trustedPublishing =
+  process.env.GITHUB_ACTIONS === 'true' &&
+  Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL) &&
+  Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN)
 
 if (!patch && !minor && !major && !canary && !rePublish && !packOnly && !into) {
   console.info(
@@ -328,6 +331,25 @@ for (const p of packages) {
   }
 }
 
+if (!packOnly && !dryRun && !trustedPublishing) {
+  try {
+    run('npm whoami', { silent: true })
+  } catch {
+    console.info(
+      '\nnpm authentication is required before publishing. Opening npm login...'
+    )
+    run('npm login')
+
+    try {
+      run('npm whoami', { silent: true })
+    } catch (error) {
+      throw new Error('npm login completed, but npm whoami is still unauthenticated.', {
+        cause: error,
+      })
+    }
+  }
+}
+
 // check: format, lint, types, tests
 if (!packOnly) {
   console.info('\nchecking...')
@@ -382,16 +404,6 @@ if (dryRun) {
 // publish each package from a tmp copy with workspace:* resolved
 const tmpBase = mkdtempSync(join(tmpdir(), 'orez-publish-'))
 console.info(`\n${packOnly ? 'packing to' : 'publishing from'} ${tmpBase}`)
-
-if (!packOnly && !ci) {
-  try {
-    run('npm whoami', { cwd: tmpBase, silent: true })
-  } catch (err) {
-    throw new Error(
-      `npm is not authenticated for publishing. Run \`npm login\` and then re-run the release.\n\n${err}`
-    )
-  }
-}
 
 const preparedPackages: Array<{ name: string; version: string; cwd: string }> = []
 
