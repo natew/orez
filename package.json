@@ -35,6 +35,10 @@
       "types": "./dist/zero-http/transport.d.ts",
       "import": "./dist/zero-http/transport.js"
     },
+    "./zero-http/mount": {
+      "types": "./dist/zero-http/mount.d.ts",
+      "import": "./dist/zero-http/mount.js"
+    },
     "./zero-http/encryption": {
       "types": "./dist/zero-http/encrypted-column-codec.d.ts",
       "import": "./dist/zero-http/encrypted-column-codec.js"
