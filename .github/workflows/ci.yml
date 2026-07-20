@@ -101,7 +101,8 @@ jobs:
         with:
           bun-version: latest
 
-      # root install: the harness imports src/sync-server from the repo root
+      # root install: the harness imports repo-root src and workspace packages;
+      # the root prepare script builds orez-sync-executor's dist
       - run: bun install --frozen-lockfile
 
       - name: harness install
@@ -340,7 +341,8 @@ jobs:
       - name: build sync-native (release)
         run: cargo build --release -p sync-native
 
-      # root install: the harness imports src/sync-server from the repo root
+      # root install: the harness imports repo-root src and workspace packages;
+      # the root prepare script builds orez-sync-executor's dist
       - run: bun install --frozen-lockfile
 
       - name: harness install

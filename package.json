@@ -71,6 +71,7 @@
     "dist"
   ],
   "scripts": {
+    "prepare": "bun run --cwd packages/sync-executor build",
     "build": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && tsc && bun run build:sync-browser-host && bun run --cwd packages/drizzle-zero-sqlite build && chmod +x dist/cli-entry.js",
     "build:sync-browser-host": "bun run --cwd packages/sync-browser-host build:dist",
     "dev": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && tsc --watch",
