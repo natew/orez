@@ -1,4 +1,4 @@
-import { MutationApplicationError } from 'orez-sync-executor'
+import { MutationApplicationError } from 'orez-sync-executor/core'
 import { createBrowserSyncHost } from 'orez/sync-browser-host'
 
 import {

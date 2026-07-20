@@ -1,5 +1,5 @@
 import createSqliteModule from 'bedrock-sqlite/browser'
-import { createSyncExecutor } from 'orez-sync-executor'
+import { createSyncExecutor } from 'orez-sync-executor/core'
 
 import {
   engine_compile_query,
