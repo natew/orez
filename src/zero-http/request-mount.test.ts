@@ -132,4 +132,62 @@ describe('zero-http request mount', () => {
     expect(invalid?.status).toBe(400)
     await expect(invalid?.json()).resolves.toEqual({ error: 'invalid pull body' })
   })
+
+  test('reports push application errors without reparsing in the consumer', async () => {
+    const callback = vi.fn()
+    const mount = createZeroHttpMount({
+      pathPrefix: '/sync/',
+      authenticate: () => ({ userID: 'user-1' }),
+      diagnostics: { argAllowlist: ['threadId'], callback },
+      server: () => ({
+        handlePull: vi.fn(),
+        handlePush: vi.fn(async () => ({
+          pushResponse: {
+            mutations: [
+              {
+                id: { clientID: 'client-1', id: 1 },
+                result: { error: 'app', message: 'denied' },
+              },
+            ],
+          },
+        })),
+      }),
+    })
+
+    const response = await mount.handleRequest(
+      new Request('https://example.test/sync/app/push', {
+        method: 'POST',
+        body: JSON.stringify({
+          clientGroupID: 'group-1',
+          pushVersion: 1,
+          mutations: [
+            {
+              id: 1,
+              clientID: 'client-1',
+              name: 'message.create',
+              type: 'custom',
+              args: [{ threadId: 'thread-1', text: 'private' }],
+            },
+          ],
+        }),
+      })
+    )
+
+    expect(response?.status).toBe(200)
+    expect(callback).toHaveBeenCalledWith({
+      request: expect.objectContaining({
+        mutations: [expect.objectContaining({ argSummary: 'threadId=thread-1' })],
+      }),
+      failure: null,
+      mutationErrors: [
+        {
+          id: 1,
+          clientID: 'client-1',
+          error: 'app',
+          message: 'denied',
+          detailsName: null,
+        },
+      ],
+    })
+  })
 })

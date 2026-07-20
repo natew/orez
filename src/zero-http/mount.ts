@@ -1,4 +1,8 @@
-import { createSyncExecutor, SyncExecutorRequestError } from 'orez-sync-executor'
+import {
+  createSyncExecutor,
+  reportPushDiagnostics,
+  SyncExecutorRequestError,
+} from 'orez-sync-executor'
 
 import type { Schema } from '@rocicorp/zero'
 import type {
@@ -7,6 +11,8 @@ import type {
   EffectScheduler,
   MutatorRegistry,
   NormalizedClaims,
+  PushDiagnosticsOptions,
+  PushResult,
   ZeroSchemaConfig,
 } from 'orez-sync-executor'
 
@@ -561,7 +567,7 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
         }
       })
     },
-    async handlePush(value: unknown, claims: NormalizedClaims): Promise<unknown> {
+    async handlePush(value: unknown, claims: NormalizedClaims): Promise<PushResult> {
       await ready
       const result = await executor.push(value, claims)
       if (
@@ -580,10 +586,10 @@ export type ZeroHttpSyncServer<S extends Schema = Schema> = ReturnType<
 
 export type ZeroHttpOperation = 'pull' | 'push'
 export type ZeroHttpRoute = { databaseID: string; operation: ZeroHttpOperation }
-export type ZeroHttpRequestServer = Pick<
-  ZeroHttpSyncServer<any>,
-  'handlePull' | 'handlePush'
->
+export type ZeroHttpRequestServer = {
+  handlePull(body: unknown, claims: NormalizedClaims): Promise<unknown>
+  handlePush(body: unknown, claims: NormalizedClaims): Promise<PushResult>
+}
 
 const DATABASE_ROUTE = /^([A-Za-z0-9_-]{1,64})\/(pull|push)$/
 
@@ -599,6 +605,7 @@ export function createZeroHttpMount(options: {
     request: Request,
     bodyText: string
   ): Response | null | Promise<Response | null>
+  readonly diagnostics?: PushDiagnosticsOptions
 }) {
   if (!options.pathPrefix.startsWith('/')) {
     throw new TypeError('pathPrefix must start with /')
@@ -644,8 +651,9 @@ export function createZeroHttpMount(options: {
         return new Response('method not allowed', { status: 405 })
       }
 
+      let bodyText = ''
       try {
-        const bodyText = await request.text()
+        bodyText = await request.text()
         let body: unknown
         try {
           body = JSON.parse(bodyText)
@@ -661,12 +669,36 @@ export function createZeroHttpMount(options: {
           if (response) return response
         }
 
-        const result = await handle(route, body, authenticated)
+        const server = options.server(route.databaseID)
+        const result =
+          route.operation === 'pull'
+            ? await server.handlePull(body, authenticated)
+            : await server.handlePush(body, authenticated)
+        if (route.operation === 'push') {
+          await reportPushDiagnostics(options.diagnostics, {
+            request,
+            bodyText,
+            response: (result as PushResult).pushResponse,
+          })
+        }
         return Response.json(result, {
           headers:
             route.operation === 'pull' ? { 'cache-control': 'no-store' } : undefined,
         })
       } catch (error) {
+        const status =
+          error instanceof ZeroHttpRequestError ||
+          error instanceof SyncExecutorRequestError
+            ? error.status
+            : 500
+        if (route.operation === 'push') {
+          await reportPushDiagnostics(options.diagnostics, {
+            request,
+            bodyText,
+            error,
+            status,
+          })
+        }
         if (
           error instanceof ZeroHttpRequestError ||
           error instanceof SyncExecutorRequestError

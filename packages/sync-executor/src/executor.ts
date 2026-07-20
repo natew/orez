@@ -1,4 +1,5 @@
 import { isJsonValue } from './crud.js'
+import { reportPushDiagnostics, type PushDiagnosticsOptions } from './diagnostics.js'
 import {
   createEffectAttempt,
   runCommittedEffects,
@@ -491,12 +492,17 @@ export async function handleSyncExecutorPushRequest<S extends Schema>(options: {
   readonly executor: SyncExecutor<S>
   readonly request: Request
   readonly claims: NormalizedClaims
+  readonly diagnostics?: PushDiagnosticsOptions
 }): Promise<Response> {
+  let bodyText = ''
   try {
-    const result = await options.executor.push(
-      await options.request.json(),
-      options.claims
-    )
+    bodyText = await options.request.text()
+    const result = await options.executor.push(JSON.parse(bodyText), options.claims)
+    await reportPushDiagnostics(options.diagnostics, {
+      request: options.request,
+      bodyText,
+      response: result.pushResponse,
+    })
     // the body IS zero's mutate response; wrapping it in another object fails
     // zero's mutateResponseSchema and the push comes back as PushFailed
     return Response.json(result.pushResponse)
@@ -507,6 +513,12 @@ export async function handleSyncExecutorPushRequest<S extends Schema>(options: {
         : error instanceof SyntaxError
           ? 400
           : 500
+    await reportPushDiagnostics(options.diagnostics, {
+      request: options.request,
+      bodyText,
+      error,
+      status,
+    })
     return Response.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status }

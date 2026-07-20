@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 
 import { createSchema, string, table } from '@rocicorp/zero'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { executeCrud } from './crud.js'
 import { createSyncExecutor, handleSyncExecutorPushRequest } from './executor.js'
@@ -146,6 +146,42 @@ describe('sync executor', () => {
     // {mutations:[...]} or {kind:'MutateResponse',...} and nothing else
     expect(await response.json()).toEqual({
       mutations: [{ id: { clientID: 'client-1', id: 1 }, result: {} }],
+    })
+  })
+
+  test('the push endpoint reports structured unsupported-version diagnostics', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    const executor = createSyncExecutor({ database, effects, mutators: {}, schema })
+    const callback = vi.fn()
+    const body = { ...push('create'), pushVersion: 2 }
+
+    const response = await handleSyncExecutorPushRequest({
+      executor,
+      request: new Request('https://example.test/push?appID=chat', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+      claims: { userID: 'user-1' },
+      diagnostics: { argAllowlist: ['id'], callback },
+    })
+
+    expect(response.status).toBe(200)
+    expect(callback).toHaveBeenCalledWith({
+      request: expect.objectContaining({
+        appID: 'chat',
+        clientGroupID: 'group-1',
+        mutationCount: 1,
+      }),
+      failure: {
+        kind: 'unsupportedPushVersion',
+        origin: 'response',
+        reason: 'unsupportedPushVersion',
+        message: null,
+        status: null,
+        mutationIDs: [{ id: 1, clientID: 'client-1' }],
+      },
+      mutationErrors: [],
     })
   })
 

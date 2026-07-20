@@ -4,6 +4,16 @@ export {
   handleSyncExecutorPushRequest,
   registerMutators,
 } from './executor.js'
+export { reportPushDiagnostics, summarizePushRequest } from './diagnostics.js'
+
+export type {
+  PushDiagnostic,
+  PushDiagnosticsOptions,
+  PushFailureSummary,
+  PushMutationErrorSummary,
+  PushMutationSummary,
+  PushRequestSummary,
+} from './diagnostics.js'
 
 export type {
   ApplicationDatabase,
