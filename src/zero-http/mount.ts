@@ -4,6 +4,7 @@ import type { Schema } from '@rocicorp/zero'
 import type {
   ApplicationDatabase,
   ApplicationTransaction,
+  EffectScheduler,
   MutatorRegistry,
   NormalizedClaims,
   ZeroSchemaConfig,
@@ -14,14 +15,6 @@ export type ZeroHttpSyncDb = {
   all(sql: string, params?: readonly unknown[]): Record<string, unknown>[]
   transaction<Value>(work: () => Value): Value
 }
-
-export type ZeroHttpTables = Record<
-  string,
-  {
-    columns: Record<string, 'string' | 'number' | 'boolean' | 'json' | 'null'>
-    primaryKey: string[]
-  }
->
 
 export class ZeroHttpRequestError extends Error {
   constructor(
@@ -36,7 +29,22 @@ export class ZeroHttpRequestError extends Error {
 export type ZeroHttpVisibility = (
   table: string,
   userID: string
-) => { sql: string; params: readonly unknown[] }
+) => { where: string; params: readonly unknown[] }
+
+export type ZeroHttpVisibilityChange = {
+  readonly table: string
+  readonly before: Readonly<Record<string, unknown>> | null
+  readonly after: Readonly<Record<string, unknown>> | null
+}
+
+export type ZeroHttpVisibilityInvalidation = {
+  readonly capture: Readonly<Record<string, readonly string[]>>
+  shouldReset(options: {
+    readonly transaction: ApplicationTransaction
+    readonly userID: string
+    readonly changes: readonly ZeroHttpVisibilityChange[]
+  }): boolean | Promise<boolean>
+}
 
 type TableConfig = {
   readonly logical: string
@@ -149,41 +157,57 @@ function toZeroValue(type: string, raw: unknown): unknown {
 export function createZeroHttpSyncServer<S extends Schema>(options: {
   readonly applicationDatabase: ApplicationDatabase
   readonly schema: S
-  readonly tables: ZeroHttpTables
+  readonly tables: readonly string[]
   readonly mutators: MutatorRegistry<S>
+  readonly effects: EffectScheduler
   readonly visible?: ZeroHttpVisibility
+  readonly visibilityInvalidation?: ZeroHttpVisibilityInvalidation
+  readonly initialCookie?: (
+    transaction: ApplicationTransaction
+  ) => number | Promise<number>
   readonly retainChanges?: number
 }) {
-  const { applicationDatabase, mutators, schema, tables } = options
+  const { applicationDatabase, effects, mutators, schema, tables } = options
   const retainChanges = options.retainChanges ?? 4096
   const schemaConfig = schema as unknown as ZeroSchemaConfig
-  const tableConfigs = Object.entries(tables).map(([logical, spec]): TableConfig => {
+  const tableConfigs = tables.map((logical): TableConfig => {
     const schemaTable = schemaConfig.tables[logical]
     if (!schemaTable) throw new TypeError(`unknown table: ${logical}`)
     return {
       logical,
       physical: schemaTable.serverName ?? schemaTable.name ?? logical,
       columns: Object.fromEntries(
-        Object.entries(spec.columns).map(([column, type]) => {
+        Object.entries(schemaTable.columns).map(([column, spec]) => {
           const schemaColumn = schemaTable.columns[column]
           if (!schemaColumn) throw new TypeError(`unknown column: ${logical}.${column}`)
-          return [column, { physical: schemaColumn.serverName ?? column, type }]
+          return [
+            column,
+            { physical: schemaColumn.serverName ?? column, type: spec.type },
+          ]
         })
       ),
-      primaryKey: spec.primaryKey,
+      primaryKey: schemaTable.primaryKey,
     }
   })
+  const tableByLogical = new Map(tableConfigs.map((table) => [table.logical, table]))
   const tableByPhysical = new Map(tableConfigs.map((table) => [table.physical, table]))
+  for (const [table, columns] of Object.entries(
+    options.visibilityInvalidation?.capture ?? {}
+  )) {
+    const config = tableByLogical.get(table)
+    if (!config)
+      throw new TypeError(`visibility invalidation names unknown table: ${table}`)
+    for (const column of columns) {
+      if (!config.columns[column]) {
+        throw new TypeError(
+          `visibility invalidation names unknown column: ${table}.${column}`
+        )
+      }
+    }
+  }
   const executor = createSyncExecutor({
     database: applicationDatabase,
-    effects: {
-      runBackground(promise) {
-        return promise
-      },
-      report(error) {
-        throw error
-      },
-    },
+    effects,
     mutators,
     schema,
   })
@@ -201,15 +225,55 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
       applicationDatabase.transaction(async (tx) => {
         await tx.exec(`CREATE TABLE IF NOT EXISTS _zsync_meta (
         lock INTEGER PRIMARY KEY CHECK (lock = 1),
-        floor INTEGER NOT NULL
+        floor INTEGER NOT NULL,
+        initialized INTEGER NOT NULL DEFAULT 0
       )`)
+        const metaColumns = await tx.query<{ name: string }>(
+          `SELECT name FROM pragma_table_info('_zsync_meta')`
+        )
+        if (!metaColumns.some((column) => column.name === 'initialized')) {
+          await tx.exec(
+            'ALTER TABLE _zsync_meta ADD COLUMN initialized INTEGER NOT NULL DEFAULT 0'
+          )
+        }
         await tx.exec(
-          `INSERT INTO _zsync_meta (lock, floor) VALUES (1, 0)
+          `INSERT INTO _zsync_meta (lock, floor, initialized) VALUES (1, 0, 0)
          ON CONFLICT (lock) DO NOTHING`
         )
+        const [meta] = await tx.query<{ initialized: number }>(
+          'SELECT initialized FROM _zsync_meta WHERE lock = 1'
+        )
+        if (!meta?.initialized) {
+          const requestedCookie = options.initialCookie
+            ? await options.initialCookie(tx)
+            : 0
+          if (
+            !Number.isSafeInteger(requestedCookie) ||
+            requestedCookie < 0 ||
+            requestedCookie >= Number.MAX_SAFE_INTEGER
+          ) {
+            throw new TypeError(`invalid initial cookie: ${requestedCookie}`)
+          }
+          const epoch = Math.max(await watermarkIn(tx), requestedCookie) + 1
+          await tx.exec(
+            `INSERT INTO _zsync_changes ("watermark", "tableName", "op", "pk")
+             VALUES (?, '_zsync_meta', 'marker', NULL)`,
+            [epoch]
+          )
+          await tx.exec(
+            'UPDATE _zsync_meta SET floor = ?, initialized = 1 WHERE lock = 1',
+            [epoch]
+          )
+        }
         for (const table of tableConfigs) {
-          const pkObject = (ref: 'NEW' | 'OLD') =>
-            `json_object(${table.primaryKey
+          const capture = [
+            ...new Set([
+              ...table.primaryKey,
+              ...(options.visibilityInvalidation?.capture[table.logical] ?? []),
+            ]),
+          ]
+          const rowObject = (ref: 'NEW' | 'OLD') =>
+            `json_object(${capture
               .map(
                 (column) =>
                   `${quoteLiteral(column)}, ${ref}.${quoteIdentifier(table.columns[column]!.physical)}`
@@ -218,25 +282,25 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
           const trigger = `_zsync_tr_${table.physical}`
           const physical = quoteIdentifier(table.physical)
           const tableName = quoteLiteral(table.physical)
-          // additive: CREATE TRIGGER IF NOT EXISTS never rewrites an existing
-          // table, so installing these against a populated database changes no
-          // rows and drops nothing.
-          await tx.exec(`CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(`${trigger}_i`)}
+          for (const suffix of ['i', 'u', 'd']) {
+            await tx.exec(
+              `DROP TRIGGER IF EXISTS ${quoteIdentifier(`${trigger}_${suffix}`)}`
+            )
+          }
+          await tx.exec(`CREATE TRIGGER ${quoteIdentifier(`${trigger}_i`)}
           AFTER INSERT ON ${physical} BEGIN
           INSERT INTO _zsync_changes ("tableName", "op", "pk")
-          VALUES (${tableName}, 'row', ${pkObject('NEW')});
+          VALUES (${tableName}, 'row', json_object('before', NULL, 'after', ${rowObject('NEW')}));
         END`)
-          await tx.exec(`CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(`${trigger}_u`)}
+          await tx.exec(`CREATE TRIGGER ${quoteIdentifier(`${trigger}_u`)}
           AFTER UPDATE ON ${physical} BEGIN
           INSERT INTO _zsync_changes ("tableName", "op", "pk")
-          VALUES (${tableName}, 'row', ${pkObject('OLD')});
-          INSERT INTO _zsync_changes ("tableName", "op", "pk")
-          VALUES (${tableName}, 'row', ${pkObject('NEW')});
+          VALUES (${tableName}, 'row', json_object('before', ${rowObject('OLD')}, 'after', ${rowObject('NEW')}));
         END`)
-          await tx.exec(`CREATE TRIGGER IF NOT EXISTS ${quoteIdentifier(`${trigger}_d`)}
+          await tx.exec(`CREATE TRIGGER ${quoteIdentifier(`${trigger}_d`)}
           AFTER DELETE ON ${physical} BEGIN
           INSERT INTO _zsync_changes ("tableName", "op", "pk")
-          VALUES (${tableName}, 'row', ${pkObject('OLD')});
+          VALUES (${tableName}, 'row', json_object('before', ${rowObject('OLD')}, 'after', NULL));
         END`)
         }
       })
@@ -295,7 +359,10 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
   ): Promise<readonly Record<string, unknown>[]> {
     const filter = options.visible?.(table.logical, userID)
     return filter
-      ? tx.query(filter.sql, filter.params)
+      ? tx.query(
+          `SELECT * FROM ${quoteIdentifier(table.physical)} WHERE ${filter.where}`,
+          filter.params
+        )
       : tx.query(`SELECT * FROM ${quoteIdentifier(table.physical)}`)
   }
 
@@ -321,16 +388,64 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
     return patch
   }
 
-  async function diff(tx: ApplicationTransaction, cookie: number): Promise<unknown[]> {
+  function loggedChanges(
+    rows: readonly Record<string, unknown>[]
+  ): ZeroHttpVisibilityChange[] {
+    return rows.map((row) => {
+      const table = String(row.tableName)
+      const config = tableByPhysical.get(table)
+      if (!config) throw new Error(`unknown change-log table: ${table}`)
+      const value = JSON.parse(String(row.pk)) as unknown
+      if (
+        !isRecord(value) ||
+        !('before' in value) ||
+        !('after' in value) ||
+        (value.before !== null && !isRecord(value.before)) ||
+        (value.after !== null && !isRecord(value.after))
+      ) {
+        throw new Error(`invalid change-log row for table: ${table}`)
+      }
+      return {
+        table: config.logical,
+        before: value.before,
+        after: value.after,
+      }
+    })
+  }
+
+  async function changesSince(
+    tx: ApplicationTransaction,
+    cookie: number
+  ): Promise<ZeroHttpVisibilityChange[]> {
+    return loggedChanges(
+      await tx.query(
+        `SELECT "tableName", "pk" FROM _zsync_changes
+         WHERE "watermark" > ? AND "op" = 'row'
+         ORDER BY "watermark"`,
+        [cookie]
+      )
+    )
+  }
+
+  async function diff(
+    tx: ApplicationTransaction,
+    changes: readonly ZeroHttpVisibilityChange[],
+    userID: string
+  ): Promise<unknown[]> {
     const touched = new Map<string, { table: string; pk: Record<string, unknown> }>()
-    for (const change of await tx.query(
-      `SELECT DISTINCT "tableName", "pk" FROM _zsync_changes
-       WHERE "watermark" > ? AND "op" = 'row'`,
-      [cookie]
-    )) {
-      const table = String(change.tableName)
-      const pk = JSON.parse(String(change.pk)) as Record<string, unknown>
-      touched.set(`${table} ${change.pk}`, { table, pk })
+    for (const change of changes) {
+      const config = tableByLogical.get(change.table)
+      if (!config) throw new Error(`unknown change-log table: ${change.table}`)
+      for (const row of [change.before, change.after]) {
+        if (!row) continue
+        const pk = Object.fromEntries(
+          config.primaryKey.map((column) => [column, row[column]])
+        )
+        touched.set(`${config.physical} ${JSON.stringify(pk)}`, {
+          table: config.physical,
+          pk,
+        })
+      }
     }
     const patch: unknown[] = []
     for (const { table, pk } of touched.values()) {
@@ -340,10 +455,13 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
         .map((column) => `${quoteIdentifier(config.columns[column]!.physical)} = ?`)
         .join(' AND ')
       const params = config.primaryKey.map((column) => pk[column])
+      const filter = options.visible?.(config.logical, userID)
       const row = (
         await tx.query(
-          `SELECT * FROM ${quoteIdentifier(config.physical)} WHERE ${where}`,
-          params
+          `SELECT * FROM ${quoteIdentifier(config.physical)} WHERE ${where}${
+            filter ? ` AND (${filter.where})` : ''
+          }`,
+          filter ? [...params, ...filter.params] : params
         )
       )[0]
       if (!row) {
@@ -416,16 +534,23 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
             )
           ).map((row) => [String(row.clientID), Number(row.lastMutationID)])
         )
-        const canDiff =
-          body.cookie !== null &&
-          body.cookie >= (await floorIn(tx)) &&
-          options.visible === undefined
+        const canDiff = body.cookie !== null && body.cookie >= (await floorIn(tx))
+        const changes = canDiff ? await changesSince(tx, body.cookie!) : []
+        const mustReset =
+          canDiff &&
+          options.visibilityInvalidation !== undefined &&
+          (await options.visibilityInvalidation.shouldReset({
+            transaction: tx,
+            userID: claims.userID,
+            changes,
+          }))
         return {
           cookie: current,
           lastMutationIDChanges: lmids,
-          rowsPatch: canDiff
-            ? await diff(tx, body.cookie!)
-            : await snapshot(tx, claims.userID),
+          rowsPatch:
+            canDiff && !mustReset
+              ? await diff(tx, changes, claims.userID)
+              : await snapshot(tx, claims.userID),
         }
       })
     },

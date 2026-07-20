@@ -74,14 +74,17 @@ async function push(
 
 function puts(body: { rowsPatch?: Array<Record<string, unknown>> }) {
   expect(body.rowsPatch?.[0]).toEqual({ op: 'clear' })
+  return rowPatches(body.rowsPatch?.slice(1))
+}
+
+function rowPatches(rowsPatch?: Array<Record<string, unknown>>) {
   const primaryKeys: Record<string, string> = {
     user_record: 'user_id',
     project_record: 'project_id',
     project_member: 'member_id',
   }
-  return body.rowsPatch
-    ?.slice(1)
-    .map((op) => ({
+  return rowsPatch
+    ?.map((op) => ({
       tableName: op.tableName,
       value: op.value,
     }))
@@ -148,7 +151,7 @@ describe('zero-http fixture server', () => {
     ).toBe(401)
   })
 
-  it('returns unchanged pulls by cookie and full snapshots after a push', async () => {
+  it('returns unchanged pulls by cookie and incremental rows after a push', async () => {
     const server = await start({
       user: [{ id: 'u1', name: 'ada' }],
       project: [],
@@ -179,11 +182,13 @@ describe('zero-http fixture server', () => {
     const changed = await pull(server, 'token-u1', { cookie: first.body.cookie })
     expect(changed.res.status).toBe(200)
     expect(changed.body.cookie).toBeGreaterThan(first.body.cookie)
-    expect(changed.body.rowsPatch[0]).toEqual({ op: 'clear' })
-    expect(puts(changed.body)).toContainEqual({
-      tableName: 'project_record',
-      value: { project_id: 'p1', owner_id: 'u1', project_name: 'new project' },
-    })
+    expect(changed.body.rowsPatch).toEqual([
+      {
+        op: 'put',
+        tableName: 'project_record',
+        value: { project_id: 'p1', owner_id: 'u1', project_name: 'new project' },
+      },
+    ])
   })
 
   it('applies pushes, exposes LMID changes, and acks replays idempotently', async () => {
@@ -349,10 +354,7 @@ describe('zero-http fixture server', () => {
     const afterMissing = await pull(server, 'token-u1', { cookie: beforeVersion })
     expect(afterMissing.body.cookie).toBeGreaterThan(beforeVersion)
     expect(afterMissing.body.lastMutationIDChanges).toEqual({ c1: 1 })
-    expect(puts(afterMissing.body)).not.toContainEqual({
-      tableName: 'project_record',
-      value: { project_id: 'missing', owner_id: 'u1', project_name: 'ghost' },
-    })
+    expect(afterMissing.body.rowsPatch).toEqual([])
 
     const beforeForbidden = await server.version()
     const forbidden = await push(server, 'token-u1', {
@@ -481,5 +483,117 @@ describe('zero-http fixture server', () => {
       },
     })
     expect(server.rows('member')).toEqual([{ id: 'm2', projectId: 'p2', userId: 'u2' }])
+  })
+
+  it('resets only the member whose project access changes, then resumes diffs', async () => {
+    const server = await start({
+      user: [
+        { id: 'u1', name: 'ada' },
+        { id: 'u2', name: 'ben' },
+      ],
+      project: [{ id: 'p1', ownerId: 'u1', name: 'shared' }],
+      member: [],
+    })
+
+    const u1Initial = await pull(server, 'token-u1', {
+      clientID: 'c-u1',
+      clientGroupID: 'cg-u1',
+    })
+    const u2Initial = await pull(server, 'token-u2', {
+      clientID: 'c-u2',
+      clientGroupID: 'cg-u2',
+    })
+
+    const grant = await push(
+      server,
+      'token-u1',
+      {
+        clientID: 'c-u1',
+        id: 1,
+        name: 'member|add',
+        args: { id: 'm-u2', projectId: 'p1', userId: 'u2' },
+      },
+      'cg-u1'
+    )
+    expect(grant.res.status).toBe(200)
+
+    const ownerAfterGrant = await pull(server, 'token-u1', {
+      clientID: 'c-u1',
+      clientGroupID: 'cg-u1',
+      cookie: u1Initial.body.cookie,
+    })
+    expect(ownerAfterGrant.body.rowsPatch).toEqual([
+      {
+        op: 'put',
+        tableName: 'project_member',
+        value: { member_id: 'm-u2', project_id: 'p1', user_id: 'u2' },
+      },
+    ])
+
+    const memberAfterGrant = await pull(server, 'token-u2', {
+      clientID: 'c-u2',
+      clientGroupID: 'cg-u2',
+      cookie: u2Initial.body.cookie,
+    })
+    expect(memberAfterGrant.body.rowsPatch[0]).toEqual({ op: 'clear' })
+    expect(puts(memberAfterGrant.body)).toContainEqual({
+      tableName: 'project_record',
+      value: { project_id: 'p1', owner_id: 'u1', project_name: 'shared' },
+    })
+
+    const renamed = await push(
+      server,
+      'token-u1',
+      {
+        clientID: 'c-u1',
+        id: 2,
+        name: 'project|rename',
+        args: { id: 'p1', name: 'renamed' },
+      },
+      'cg-u1'
+    )
+    expect(renamed.res.status).toBe(200)
+    const memberAfterRename = await pull(server, 'token-u2', {
+      clientID: 'c-u2',
+      clientGroupID: 'cg-u2',
+      cookie: memberAfterGrant.body.cookie,
+    })
+    expect(memberAfterRename.body.rowsPatch).toEqual([
+      {
+        op: 'put',
+        tableName: 'project_record',
+        value: { project_id: 'p1', owner_id: 'u1', project_name: 'renamed' },
+      },
+    ])
+
+    const revoke = await push(
+      server,
+      'token-u1',
+      {
+        clientID: 'c-u1',
+        id: 3,
+        name: 'member|remove',
+        args: { id: 'm-u2' },
+      },
+      'cg-u1'
+    )
+    expect(revoke.res.status).toBe(200)
+    const memberAfterRevoke = await pull(server, 'token-u2', {
+      clientID: 'c-u2',
+      clientGroupID: 'cg-u2',
+      cookie: memberAfterRename.body.cookie,
+    })
+    expect(puts(memberAfterRevoke.body)).toEqual([
+      { tableName: 'user_record', value: { user_id: 'u2', display_name: 'ben' } },
+    ])
+    await expect(
+      pull(server, 'token-u2', {
+        clientID: 'c-u2',
+        clientGroupID: 'cg-u2',
+        cookie: memberAfterRevoke.body.cookie,
+      })
+    ).resolves.toMatchObject({
+      body: { cookie: memberAfterRevoke.body.cookie, unchanged: true },
+    })
   })
 })

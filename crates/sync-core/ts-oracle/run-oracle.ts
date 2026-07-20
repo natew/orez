@@ -14,7 +14,6 @@ import {
   createZeroHttpApplicationDatabase,
   createZeroHttpSyncServer,
   type ZeroHttpSyncDb as SyncDb,
-  type ZeroHttpTables as SyncTables,
 } from '../../../src/zero-http/mount.ts'
 
 function bunSqliteDb(sqlite: Database): SyncDb {
@@ -37,19 +36,6 @@ function bunSqliteDb(sqlite: Database): SyncDb {
       }
     },
   }
-}
-
-const TABLES: SyncTables = {
-  item: {
-    columns: {
-      id: 'string',
-      label: 'string',
-      rank: 'number',
-      done: 'boolean',
-      meta: 'json',
-    },
-    primaryKey: ['id'],
-  },
 }
 
 function mutate(tx: SyncDb, name: string, args: unknown, _ctx: { userID: string }) {
@@ -382,14 +368,21 @@ const item = table('item')
 const schema = createSchema({ tables: [item] })
 const sync = createZeroHttpSyncServer({
   applicationDatabase: createZeroHttpApplicationDatabase(db),
-  db,
+  effects: {
+    runBackground(promise) {
+      return promise
+    },
+    report(error) {
+      throw error
+    },
+  },
   mutators: {
     'item.put': ({ args }) => mutate(db, 'item.put', args, { userID: 'u1' }),
     'item.del': ({ args }) => mutate(db, 'item.del', args, { userID: 'u1' }),
     'item.reject': ({ args }) => mutate(db, 'item.reject', args, { userID: 'u1' }),
   },
   schema,
-  tables: TABLES,
+  tables: ['item'],
 })
 await sync.ready()
 const query = new QueryOracle()

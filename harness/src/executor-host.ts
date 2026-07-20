@@ -66,11 +66,18 @@ export function createHarnessSyncServer(
 
   return createZeroHttpSyncServer({
     applicationDatabase: createZeroHttpApplicationDatabase(db, options?.transaction),
-    db,
+    effects: {
+      runBackground(promise) {
+        return promise
+      },
+      report(error) {
+        throw error
+      },
+    },
     mutators,
     retainChanges: options?.retainChanges,
     schema,
-    tables: TABLES,
+    tables: Object.keys(TABLES),
     visible: options?.visible,
   })
 }

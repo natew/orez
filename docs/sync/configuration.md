@@ -189,15 +189,17 @@ per-user visibility, without query awareness or upstream ingest.
 `createZeroHttpSyncServer(config)` returns `{executor, ready, handlePull,
 handlePush, watermark, invalidate}`. Its config:
 
-| Field                    | Type                  | Default     | Meaning                                                                                                       |
-| ------------------------ | --------------------- | ----------- | ------------------------------------------------------------------------------------------------------------- |
-| `applicationDatabase`    | `ApplicationDatabase` | required    | The async transaction provider used by the shared executor.                                                   |
-| `db`                     | `ZeroHttpSyncDb`      | required    | A SQLite handle with `exec`, `all`, and a synchronous `transaction`, used by the pull and change-log surface. |
-| `schema`                 | Zero `Schema`         | required    | The Zero schema, including physical table and column names.                                                   |
-| `tables`                 | `ZeroHttpTables`      | required    | Column types and primary keys for trigger and patch generation.                                               |
-| `mutators`               | `MutatorRegistry`     | required    | Registered application mutators executed inside the application database transaction.                         |
-| `visible(table, userID)` | `=> {sql, params}`    | whole table | Per-user row visibility.                                                                                      |
-| `retainChanges`          | `number`              | 4096        | Change-log retention.                                                                                         |
+| Field                    | Type                          | Default     | Meaning                                                                                     |
+| ------------------------ | ----------------------------- | ----------- | ------------------------------------------------------------------------------------------- |
+| `applicationDatabase`    | `ApplicationDatabase`         | required    | The one async transaction provider used by pull, push, invalidation, pruning, and replay.   |
+| `schema`                 | Zero `Schema`                 | required    | The Zero schema, including physical table and column names, types, and primary keys.        |
+| `tables`                 | `readonly string[]`           | required    | Logical schema table names to capture and sync.                                             |
+| `mutators`               | `MutatorRegistry`             | required    | Registered application mutators executed inside the application database transaction.       |
+| `effects`                | `EffectScheduler`             | required    | Background effect scheduling and error reporting for mutators.                              |
+| `visible(table, userID)` | `=> {where, params}`          | whole table | Per-user row predicate used by snapshots and incremental point reads.                       |
+| `visibilityInvalidation` | capture fields + reset policy | none        | Access-dependency changes that make an affected user receive one fresh authorized snapshot. |
+| `initialCookie`          | `(transaction) => number`     | 0           | Existing cookie high-water mark adopted once when change capture is first installed.        |
+| `retainChanges`          | `number`                      | 4096        | Change-log retention.                                                                       |
 
 `createZeroHttpMount(config)` mounts the pull and push handlers behind one
 database-id path segment. Its config is `pathPrefix` (must start with `/`, for

@@ -32,6 +32,15 @@ const tables = {
   },
 } as const
 
+const effects = {
+  runBackground(promise: Promise<void>) {
+    return promise
+  },
+  report(error: unknown) {
+    throw error
+  },
+}
+
 function createDatabase(sqlite: DatabaseSync): ZeroHttpSyncDb {
   return {
     exec(sql, params = []) {
@@ -120,41 +129,47 @@ export async function startZeroHttpServer(opts?: { seed?: Seed }): Promise<{
   const db = createDatabase(sqlite)
   const sync = createZeroHttpSyncServer({
     applicationDatabase: createZeroHttpApplicationDatabase(db),
+    effects,
     schema: zeroHttpFixtureSchema,
-    tables: {
-      user: { columns: { id: 'string', name: 'string' }, primaryKey: ['id'] },
-      project: {
-        columns: { id: 'string', ownerId: 'string', name: 'string' },
-        primaryKey: ['id'],
-      },
-      member: {
-        columns: { id: 'string', projectId: 'string', userId: 'string' },
-        primaryKey: ['id'],
-      },
-    },
+    tables: ['user', 'project', 'member'],
     mutators: createMutators(),
     visible(table, userID) {
       if (table === 'user') {
         return {
-          sql: 'SELECT * FROM user_record WHERE user_id = ?',
+          where: 'user_record.user_id = ?',
           params: [userID],
         }
       }
       if (table === 'project') {
         return {
-          sql: `SELECT DISTINCT p.* FROM project_record p
-            LEFT JOIN project_member m ON m.project_id = p.project_id
-            WHERE p.owner_id = ? OR m.user_id = ?`,
+          where: `project_record.owner_id = ? OR EXISTS (
+            SELECT 1 FROM project_member m
+            WHERE m.project_id = project_record.project_id AND m.user_id = ?
+          )`,
           params: [userID, userID],
         }
       }
       return {
-        sql: `SELECT DISTINCT m.* FROM project_member m
-          JOIN project_record p ON p.project_id = m.project_id
-          LEFT JOIN project_member viewer ON viewer.project_id = p.project_id
-          WHERE p.owner_id = ? OR viewer.user_id = ?`,
+        where: `EXISTS (
+          SELECT 1 FROM project_record p
+          WHERE p.project_id = project_member.project_id
+            AND (p.owner_id = ? OR EXISTS (
+              SELECT 1 FROM project_member viewer
+              WHERE viewer.project_id = p.project_id AND viewer.user_id = ?
+            ))
+        )`,
         params: [userID, userID],
       }
+    },
+    visibilityInvalidation: {
+      capture: { member: ['projectId', 'userId'] },
+      shouldReset({ changes, userID }) {
+        return changes.some(
+          (change) =>
+            change.table === 'member' &&
+            (change.before?.userId === userID || change.after?.userId === userID)
+        )
+      },
     },
   })
   await sync.ready()
