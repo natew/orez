@@ -63,6 +63,9 @@ describe('zero-http executor mount', () => {
           await tx.mutate.item.insert({ id: 'a', value: 'replacement' })
           await tx.mutate.item.insert({ id: 'b', value: 'later' })
         },
+        remove: async ({ tx }) => {
+          await tx.mutate.item.delete({ id: 'b' })
+        },
       },
     })
     const push = {
@@ -108,6 +111,33 @@ describe('zero-http executor mount', () => {
         { op: 'put', tableName: 'item', value: { id: 'a', value: 'original' } },
         { op: 'put', tableName: 'item', value: { id: 'b', value: 'later' } },
       ],
+    })
+
+    await expect(
+      server.handlePush(
+        {
+          ...push,
+          mutations: [{ ...push.mutations[0]!, id: 2, name: 'remove' }],
+        },
+        { userID: 'user-1' }
+      )
+    ).resolves.toEqual({
+      pushResponse: {
+        mutations: [{ id: { clientID: 'client-1', id: 2 }, result: {} }],
+      },
+    })
+    expect(sqlite.prepare('SELECT id, value FROM item ORDER BY id').all()).toEqual([
+      { id: 'a', value: 'original' },
+    ])
+    await expect(
+      server.handlePull(
+        { clientID: 'client-1', clientGroupID: 'group-1', cookie: 2 },
+        { userID: 'user-1' }
+      )
+    ).resolves.toEqual({
+      cookie: 4,
+      lastMutationIDChanges: { 'client-1': 2 },
+      rowsPatch: [{ op: 'del', tableName: 'item', id: { id: 'b' } }],
     })
   })
 })

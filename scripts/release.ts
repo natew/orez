@@ -39,7 +39,7 @@ const into = intoIdx !== -1 ? args[intoIdx + 1] : null
 
 if (!patch && !minor && !major && !canary && !rePublish && !packOnly && !into) {
   console.info(
-    'usage: bun scripts/release.ts --patch|--minor|--major|--canary|--republish [--dry-run] [--skip-test] [--pack-only] [--into <dir>]'
+    'usage: bun scripts/release.ts --patch|--minor|--major|--canary|--republish [--dry-run] [--skip-test] [--pack-only] [--into <dir>]\n       bun scripts/release.ts --pack-only [--patch|--minor|--major|--canary]'
   )
   process.exit(1)
 }
@@ -309,8 +309,9 @@ if (existsSync(drizzleZeroSqlitePkgPath)) {
 
 packages.splice(0, packages.length, ...orderReleasePackages(packages))
 
-// for --pack-only, use current versions instead of bumping
-if (packOnly) {
+// plain --pack-only preserves current versions; an explicit release kind packs
+// the next unpublished version without mutating source manifests.
+if (packOnly && !patch && !minor && !major && !canary) {
   for (const p of packages) {
     p.next = p.pkg.version
   }
@@ -321,7 +322,7 @@ const versionMap = new Map(packages.map((p) => [p.pkg.name, p.next]))
 
 for (const p of packages) {
   if (packOnly) {
-    console.info(`  ${p.pkg.name}: ${p.pkg.version}`)
+    console.info(`  ${p.pkg.name}: ${p.next}`)
   } else {
     console.info(`  ${p.pkg.name}: ${p.pkg.version} -> ${p.next}`)
   }

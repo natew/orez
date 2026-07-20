@@ -414,8 +414,16 @@ describe('zero-http fixture server', () => {
         { id: 'u2', name: 'ben' },
       ],
       project: [{ id: 'p2', ownerId: 'u2', name: 'u2 shared' }],
-      member: [{ id: 'm1', projectId: 'p2', userId: 'u1' }],
+      member: [
+        { id: 'm1', projectId: 'p2', userId: 'u1' },
+        { id: 'm2', projectId: 'p2', userId: 'u2' },
+      ],
     })
+
+    const members = [
+      { id: 'm1', projectId: 'p2', userId: 'u1' },
+      { id: 'm2', projectId: 'p2', userId: 'u2' },
+    ]
 
     const missing = await push(server, 'token-u2', {
       clientID: 'c-u2',
@@ -434,7 +442,7 @@ describe('zero-http fixture server', () => {
         ],
       },
     })
-    expect(server.rows('member')).toEqual([{ id: 'm1', projectId: 'p2', userId: 'u1' }])
+    expect(server.rows('member')).toEqual(members)
 
     const forbidden = await push(
       server,
@@ -458,7 +466,7 @@ describe('zero-http fixture server', () => {
         ],
       },
     })
-    expect(server.rows('member')).toEqual([{ id: 'm1', projectId: 'p2', userId: 'u1' }])
+    expect(server.rows('member')).toEqual(members)
 
     const removed = await push(server, 'token-u2', {
       clientID: 'c-u2',
@@ -472,6 +480,6 @@ describe('zero-http fixture server', () => {
         mutations: [{ id: { clientID: 'c-u2', id: 2 }, result: {} }],
       },
     })
-    expect(server.rows('member')).toEqual([])
+    expect(server.rows('member')).toEqual([{ id: 'm2', projectId: 'p2', userId: 'u2' }])
   })
 })

@@ -38,12 +38,12 @@ strict `>=1.7.0` boundary requested by the owner.
   `src/mutation-error.ts`, and `mutation-error.test.mjs`.
 - Updated current sync documentation and the release package set for the new
   executor package. Regenerated `bun.lock` with `@rocicorp/zero` 1.7.0.
-- The unpublished overlap commit `b93d35c` was not available after fetching.
-  Record deletion was not gratuitously refactored. Necessary deletion behavior
-  is touched in `packages/sync-executor/src/crud.ts` and
-  `src/zero-http/mount.ts`; `src/zero-http/server.ts` now delegates deletes to
-  the mount/executor. The legacy `src/sync-server/sync-server.ts` deletion
-  removes its old deletion path wholesale.
+- Reconciled unpublished overlap commit `b93d35c`: the branch exposes exact
+  browser snapshot deletion by storage key and preserves sibling snapshots.
+  Executor CRUD deletes by the complete primary key, the mount emits the exact
+  physical deletion ID, and the fixture server delegates deletes through that
+  single executor path. The existing light tests now preserve a sibling row
+  while deleting the target.
 
 ## In progress
 
@@ -83,7 +83,8 @@ coherent but still need final broad validation on the faster machine:
 
 ## Test state
 
-- `bun run check` passed. Log: `/tmp/orez-check.log`.
+- `bun run format:check` and `bun run check` passed. Logs:
+  `/tmp/orez-format-check.log` and `/tmp/orez-check.log`.
 - Executor tests passed: 5 tests. Log:
   `/tmp/orez-sync-executor-tests.log` (the latest direct run also passed).
 - `src/zero-http/mount.test.ts` and `src/zero-http/server.test.ts` passed: 8
@@ -91,14 +92,11 @@ coherent but still need final broad validation on the faster machine:
 - The restored harness suite passed: 34 tests. The Rust differential passed 2
   tests with 1 intentionally ignored. Log: `/tmp/orez-differential.log`.
 - Targeted CF, browser, and root CF DO tests passed before the full-suite run.
-- `bun run test:all > /tmp/orez-suite.log 2>&1` did not reach a terminal green
-  result on this MacBook Air. The first attempt exposed local setup failures
-  (`sqlite-wasm/dist/package.json` missing and a Node ABI-stale native SQLite
-  binary). Those were repaired locally. The next attempt failed when the disk
-  filled. A third attempt was running after disk cleanup and native SQLite was
-  proven loadable, but the owner stopped it because system load approached 100
-  and moved validation to a faster machine. The current log is therefore an
-  interrupted run, not a pass or a product failure.
+- `bun run test:all > /tmp/orez-suite.log 2>&1` reached a terminal result on the
+  faster machine: 1,187 passed, four skipped, and one integration test timed
+  out waiting for a replication poke while load peaked near the machine limit.
+  The Node 25 native SQLite binding was rebuilt first and is loadable. Re-run
+  the full suite at calm load to prove this is a load timeout.
 - The requested `bun heavy -- <cmd>` wrapper does not exist as a package script
   or executable in this checkout. Heavy commands were run directly and logged.
 
@@ -120,4 +118,3 @@ coherent but still need final broad validation on the faster machine:
 5. Build or pack the unreleased executor and use it to regenerate and validate
    the downstream Takeout lockfile. Do not publish without direct owner
    permission.
-
