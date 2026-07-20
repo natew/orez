@@ -97,6 +97,24 @@ function createMutators(): MutatorRegistry<typeof zeroHttpFixtureSchema> {
       if (rows.length === 0) throw new MutationApplicationError('forbidden')
       await tx.mutate.member.insert(value)
     },
+    'member|touch': async ({ tx, args, ctx }) => {
+      const value = args as { id: string }
+      const rows = Array.from(
+        await tx.dbTransaction.query(
+          `SELECT m.project_id AS projectId, m.user_id AS userId
+           FROM project_member m
+           JOIN project_record p ON p.project_id = m.project_id
+           WHERE m.member_id = ? AND p.owner_id = ?`,
+          [value.id, ctx.claims.userID]
+        )
+      )
+      if (rows.length === 0) throw new MutationApplicationError('forbidden')
+      await tx.mutate.member.update({
+        id: value.id,
+        projectId: String(rows[0]!.projectId),
+        userId: String(rows[0]!.userId),
+      })
+    },
     'member|remove': async ({ tx, args, ctx }) => {
       const value = args as { id: string }
       const members = Array.from(
@@ -164,11 +182,18 @@ export async function startZeroHttpServer(opts?: { seed?: Seed }): Promise<{
     visibilityInvalidation: {
       capture: { member: ['projectId', 'userId'] },
       shouldReset({ changes, userID }) {
-        return changes.some(
-          (change) =>
-            change.table === 'member' &&
-            (change.before?.userId === userID || change.after?.userId === userID)
-        )
+        return changes.some((change) => {
+          if (change.table !== 'member') return false
+          const before = change.before
+          const after = change.after
+          return (
+            (before?.userId === userID &&
+              (after?.userId !== before.userId ||
+                after?.projectId !== before.projectId)) ||
+            (after?.userId === userID &&
+              (before?.userId !== after.userId || before?.projectId !== after.projectId))
+          )
+        })
       },
     },
   })

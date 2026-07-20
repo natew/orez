@@ -541,12 +541,37 @@ describe('zero-http fixture server', () => {
       value: { project_id: 'p1', owner_id: 'u1', project_name: 'shared' },
     })
 
-    const renamed = await push(
+    const touched = await push(
       server,
       'token-u1',
       {
         clientID: 'c-u1',
         id: 2,
+        name: 'member|touch',
+        args: { id: 'm-u2' },
+      },
+      'cg-u1'
+    )
+    expect(touched.res.status).toBe(200)
+    const memberAfterTouch = await pull(server, 'token-u2', {
+      clientID: 'c-u2',
+      clientGroupID: 'cg-u2',
+      cookie: memberAfterGrant.body.cookie,
+    })
+    expect(memberAfterTouch.body.rowsPatch).toEqual([
+      {
+        op: 'put',
+        tableName: 'project_member',
+        value: { member_id: 'm-u2', project_id: 'p1', user_id: 'u2' },
+      },
+    ])
+
+    const renamed = await push(
+      server,
+      'token-u1',
+      {
+        clientID: 'c-u1',
+        id: 3,
         name: 'project|rename',
         args: { id: 'p1', name: 'renamed' },
       },
@@ -556,7 +581,7 @@ describe('zero-http fixture server', () => {
     const memberAfterRename = await pull(server, 'token-u2', {
       clientID: 'c-u2',
       clientGroupID: 'cg-u2',
-      cookie: memberAfterGrant.body.cookie,
+      cookie: memberAfterTouch.body.cookie,
     })
     expect(memberAfterRename.body.rowsPatch).toEqual([
       {
@@ -571,7 +596,7 @@ describe('zero-http fixture server', () => {
       'token-u1',
       {
         clientID: 'c-u1',
-        id: 3,
+        id: 4,
         name: 'member|remove',
         args: { id: 'm-u2' },
       },
