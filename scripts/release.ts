@@ -516,9 +516,11 @@ if (pendingPackages.length > 0) {
   const tag = canary ? '--tag canary' : ''
 
   try {
+    // trusted publishing exchanges a package-scoped OIDC token for each
+    // workspace; the local passkey cache would replay the first package's token.
     run(`npm publish --workspaces --ignore-scripts --access public ${tag}`.trim(), {
       cwd: tmpBase,
-      env: { NODE_OPTIONS: nodeOptions },
+      env: trustedPublishing ? {} : { NODE_OPTIONS: nodeOptions },
     })
   } catch (error) {
     const postflight = pendingPackages.map((pkg) => ({
