@@ -9,6 +9,7 @@
 
 import { globalValue } from './helpers/globalValue'
 import { getQueryName } from './queryRegistry'
+
 import type { ZeroRunner } from './zeroRunner'
 import type { AnyQueryRegistry } from '@rocicorp/zero'
 
@@ -23,13 +24,13 @@ export type ZeroClientInstance = {
 const getInstancesByNamespace = () =>
   globalValue<Map<string, ZeroClientInstance>>(
     'on-zero:instances-by-namespace',
-    () => new Map(),
+    () => new Map()
   )
 
 const getInstancesByQueryName = () =>
   globalValue<Map<string, ZeroClientInstance>>(
     'on-zero:instances-by-query-name',
-    () => new Map(),
+    () => new Map()
   )
 
 export function registerClientInstance({
@@ -65,7 +66,7 @@ export function registerClientInstance({
     if (existing) {
       throw new Error(
         `[on-zero] namespace '${namespace}' is already claimed by zero client instance '${existing.name}' ` +
-          `(while creating instance '${name}'). Each query/mutator namespace must belong to exactly one createZeroClient instance.`,
+          `(while creating instance '${name}'). Each query/mutator namespace must belong to exactly one createZeroClient instance.`
       )
     }
     instancesByNamespace.set(namespace, instance)
@@ -76,7 +77,7 @@ export function registerClientInstance({
     if (existing) {
       throw new Error(
         `[on-zero] query '${queryName}' is already claimed by zero client instance '${existing.name}' ` +
-          `(while creating instance '${name}'). Each query function must belong to exactly one createZeroClient instance.`,
+          `(while creating instance '${name}'). Each query function must belong to exactly one createZeroClient instance.`
       )
     }
     instancesByQueryName.set(queryName, instance)
@@ -86,7 +87,7 @@ export function registerClientInstance({
 }
 
 export function getInstanceForNamespace(
-  namespace: string,
+  namespace: string
 ): ZeroClientInstance | undefined {
   return getInstancesByNamespace().get(namespace)
 }

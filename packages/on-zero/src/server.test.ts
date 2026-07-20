@@ -31,7 +31,7 @@ const schema = createSchema({
 const queries = defineQueries({
   project: {
     byOwner: defineQuery(v.object({ ownerId: v.string() }), ({ args }) =>
-      zql.project.where('ownerId', args.ownerId),
+      zql.project.where('ownerId', args.ownerId)
     ),
   },
 })
@@ -40,7 +40,7 @@ type ProjectRow = { id: string; ownerId: string; name: string }
 
 function createTestExecutor(
   mutators: ZeroServerMutatorRegistry<typeof schema>,
-  rows: ProjectRow[],
+  rows: ProjectRow[]
 ) {
   const scheduledBackground: Promise<void>[] = []
   const tx = {
@@ -114,7 +114,7 @@ describe('createZeroServerBindings', () => {
         id: 'project-1',
         ownerId: 'anon',
         name: 'sneaky',
-      }),
+      })
     ).rejects.toThrow('not authenticated')
     expect(seenAuthData).toBe(null)
     expect(rows).toEqual([])
@@ -136,7 +136,7 @@ describe('createZeroServerBindings', () => {
           mutate: {
             create: async (
               { authData, server, tx }: MutatorContext,
-              value: ProjectRow,
+              value: ProjectRow
             ) => {
               mutationRuns++
               expect(authData?.id).toBe('user-1')
@@ -145,7 +145,7 @@ describe('createZeroServerBindings', () => {
                 async () => {
                   barrierRuns++
                 },
-                { barrier: true },
+                { barrier: true }
               )
               server?.enqueueTask(async () => {
                 backgroundRuns++
@@ -170,7 +170,7 @@ describe('createZeroServerBindings', () => {
     const server = bindings.server(executor)
     await server.mutate.project.create(
       { id: 'project-1', ownerId: 'user-1', name: 'first' },
-      { authData: { id: 'user-1' } },
+      { authData: { id: 'user-1' } }
     )
 
     expect(rows).toEqual([{ id: 'project-1', ownerId: 'user-1', name: 'first' }])
@@ -185,7 +185,7 @@ describe('createZeroServerBindings', () => {
     const ast = await bindings.resolveQuery(
       'project|byOwner',
       [{ ownerId: 'user-1' }],
-      claims,
+      claims
     )
     expect(JSON.stringify(ast)).toContain('ownerId')
     expect(JSON.stringify(ast)).toContain('user-1')
@@ -210,11 +210,11 @@ describe('createZeroServerBindings', () => {
             create: async ({ server }: MutatorContext, value: ProjectRow) => {
               const enqueueAction = server?.enqueueAction as (
                 action: Action,
-                options?: { barrier?: boolean },
+                options?: { barrier?: boolean }
               ) => void
               enqueueAction(
                 { type: 'project.provisionNamespace', projectId: value.id },
-                { barrier: true },
+                { barrier: true }
               )
               enqueueAction({ type: 'project.invalidateAccess', projectId: value.id })
             },
@@ -234,7 +234,7 @@ describe('createZeroServerBindings', () => {
     await executor.execute(
       'project|create',
       { id: 'project-1', ownerId: 'user-1', name: 'first' },
-      authDataToClaims({ id: 'user-1' }),
+      authDataToClaims({ id: 'user-1' })
     )
     expect(executed).toEqual([
       { type: 'project.provisionNamespace', projectId: 'project-1' },
@@ -261,11 +261,11 @@ describe('createZeroServerBindings', () => {
             create: async ({ server }: MutatorContext) => {
               const enqueueAction = server?.enqueueAction as (
                 action: Action,
-                options?: { barrier?: boolean },
+                options?: { barrier?: boolean }
               ) => void
               enqueueAction(
                 { type: 'durable.run', operationId: 'operation-1' },
-                { barrier: true },
+                { barrier: true }
               )
             },
           },
@@ -280,8 +280,8 @@ describe('createZeroServerBindings', () => {
       executor.execute(
         'project|create',
         { id: 'project-1', ownerId: 'user-1', name: 'first' },
-        authDataToClaims({ id: 'user-1' }),
-      ),
+        authDataToClaims({ id: 'user-1' })
+      )
     ).rejects.toThrow('remote unavailable')
     expect(dispatchRemote).toHaveBeenCalledOnce()
     expect(execute).not.toHaveBeenCalled()

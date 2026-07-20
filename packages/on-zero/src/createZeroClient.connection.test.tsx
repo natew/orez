@@ -95,7 +95,7 @@ async function mount(extraProps: Record<string, unknown> = {}, userID = 'conn') 
         {...extraProps}
       >
         <span>ok</span>
-      </client.ProvideZero>,
+      </client.ProvideZero>
     )
     await Promise.resolve()
   })
@@ -119,7 +119,7 @@ test('waitForZero resolves when the provider publishes its active instance', asy
         userID="readiness"
       >
         <span>ok</span>
-      </readinessClient.ProvideZero>,
+      </readinessClient.ProvideZero>
     )
     await Promise.resolve()
   })

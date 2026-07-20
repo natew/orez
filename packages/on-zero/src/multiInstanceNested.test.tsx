@@ -185,7 +185,7 @@ test('outer-instance query reads the OUTER store under nested providers', async 
       <project.ProvideZero server={null} userID="t1-prj">
         <ControlUserProbe id="u1" />
       </project.ProvideZero>
-    </control.ProvideZero>,
+    </control.ProvideZero>
   )
   await waitFor(() => probe.renders > 0, 'probe mount')
 
@@ -241,7 +241,7 @@ test('StrictMode: direct views survive the effect double-invoke', async () => {
           <ControlUserProbe id="u4" />
         </project.ProvideZero>
       </control.ProvideZero>
-    </StrictMode>,
+    </StrictMode>
   )
   await waitFor(() => probe.renders > 0, 'probe mount')
 

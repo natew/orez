@@ -54,7 +54,7 @@ function renderWith(props: {
         userID={props.userID}
       >
         <span>ok</span>
-      </client.ProvideZero>,
+      </client.ProvideZero>
     )
   })
 }

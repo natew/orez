@@ -29,7 +29,7 @@ const schema = createSchema({ tables: [todoTable] })
 const allTodos = (_args: void) =>
   (zql as unknown as { todo: { orderBy: (k: string, d: string) => any } }).todo.orderBy(
     'createdAt',
-    'desc',
+    'desc'
   )
 const oneTodo = (args: { id: string }) =>
   (zql as unknown as { todo: { where: (k: string, v: string) => any } }).todo

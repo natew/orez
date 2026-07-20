@@ -1,7 +1,7 @@
-import type { Schema, SchemaQuery } from '@rocicorp/zero'
 import { globalValue } from './helpers/globalValue'
 
 import type { AuthData, QueryBuilder } from './types'
+import type { Schema, SchemaQuery } from '@rocicorp/zero'
 
 type State = {
   schema: Schema | null

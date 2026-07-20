@@ -109,8 +109,8 @@ describe('multi-instance namespace dispatch', () => {
           can: async () => {},
           tx: { run: txRun },
         } as any,
-        () => run(byId, { id: '1' }),
-      ),
+        () => run(byId, { id: '1' })
+      )
     ).rejects.toThrow(/run\(namedQuery\) cannot be used inside a Zero mutation/)
 
     expect(ownerRunner).not.toHaveBeenCalled()
@@ -131,8 +131,8 @@ describe('multi-instance namespace dispatch', () => {
           can: async () => {},
           tx: { run: txRun },
         } as any,
-        () => run(byId, { id: '1' }),
-      ),
+        () => run(byId, { id: '1' })
+      )
     ).resolves.toEqual({ from: 'owner' })
 
     expect(ownerRunner).toHaveBeenCalledTimes(1)
@@ -154,8 +154,8 @@ describe('multi-instance namespace dispatch', () => {
           can: async () => {},
           tx: { run: txRun },
         } as any,
-        () => run(query),
-      ),
+        () => run(query)
+      )
     ).resolves.toEqual({ from: 'tx' })
 
     expect(txRun).toHaveBeenCalledWith(query, undefined)
@@ -197,7 +197,7 @@ describe('multi-instance namespace dispatch', () => {
         models,
         groupedQueries: {},
         instanceName: 'mdl-b',
-      }),
+      })
     ).toThrow(/already claimed/)
   })
 })
@@ -355,7 +355,7 @@ describe('combineZeroClients facade', () => {
     expect(b.useQuery).not.toHaveBeenCalled()
 
     expect(() => combineZeroClients(a, b, { inner: 'nope' })).toThrow(
-      /not one of the passed clients/,
+      /not one of the passed clients/
     )
   })
 

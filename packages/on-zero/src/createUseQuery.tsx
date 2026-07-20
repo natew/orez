@@ -1,8 +1,8 @@
-import { useQuery as zeroUseQuery } from '@rocicorp/zero/react'
 import { addContextToQuery, asQueryInternals } from '@rocicorp/zero/bindings'
-import { IS_SERVER_RUNTIME } from './helpers/platform'
+import { useQuery as zeroUseQuery } from '@rocicorp/zero/react'
 import { useContext, useMemo, useRef, type Context } from 'react'
 
+import { IS_SERVER_RUNTIME } from './helpers/platform'
 import { useZeroDebug } from './helpers/useZeroDebug'
 import { resolveQuery, type PlainQueryFn } from './resolveQuery'
 
@@ -32,13 +32,13 @@ export type UseQueryHook<Schema extends ZeroSchema> = {
   <TArg, TTable extends keyof Schema['tables'] & string, TReturn>(
     fn: PlainQueryFn<TArg, Query<TTable, Schema, TReturn>>,
     params: TArg,
-    options?: UseQueryOptions | boolean,
-  ): QueryResult<TReturn>;
+    options?: UseQueryOptions | boolean
+  ): QueryResult<TReturn>
 
   // overload 2: plain function with no params
   <TTable extends keyof Schema['tables'] & string, TReturn>(
     fn: PlainQueryFn<void, Query<TTable, Schema, TReturn>>,
-    options?: UseQueryOptions | boolean,
+    options?: UseQueryOptions | boolean
   ): QueryResult<TReturn>
 }
 
@@ -58,7 +58,7 @@ const EMPTY_RESPONSE_SINGULAR = Object.freeze([undefined, RESULT_UNKNOWN]) as ne
 // user-authored query body (`.one()` vs not), so passing an empty `ctx` is
 // safe here.
 export function emptyResponseFor(
-  queryRequest: unknown,
+  queryRequest: unknown
 ): readonly [unknown, { type: string }] {
   try {
     const query = addContextToQuery(queryRequest as any, {} as never)
@@ -129,7 +129,7 @@ export function createUseQuery<Schema extends ZeroSchema>({
     const queryRequest = useMemo(
       () => resolveQuery({ customQueries, fn, params }),
       // eslint-disable-next-line react-hooks/exhaustive-deps
-      [fn, paramsKey],
+      [fn, paramsKey]
     )
 
     // extract option values as primitives — a fresh options object each render
@@ -152,7 +152,7 @@ export function createUseQuery<Schema extends ZeroSchema>({
     const effectiveEnabled = disableMode ? false : optionEnabled
     const effectiveOptions = useMemo(
       () => ({ enabled: effectiveEnabled, ttl: optionTTL }),
-      [effectiveEnabled, optionTTL],
+      [effectiveEnabled, optionTTL]
     )
     const rawOut = zeroUseQuery(queryRequest, effectiveOptions)
 

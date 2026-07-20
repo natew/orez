@@ -80,7 +80,7 @@ async function mount() {
     root?.render(
       <client.ProvideZero cacheURL="http://127.0.0.1:7777/zero" userID="agentbus">
         <span>ok</span>
-      </client.ProvideZero>,
+      </client.ProvideZero>
     )
     await Promise.resolve()
   })
@@ -114,7 +114,7 @@ test('remint drops local state and reconstructs a fresh instance in place', asyn
     root?.render(
       <client.ProvideZero cacheURL="http://127.0.0.1:7777/zero" userID="remint-test">
         <span>ok</span>
-      </client.ProvideZero>,
+      </client.ProvideZero>
     )
     await Promise.resolve()
   })
@@ -159,7 +159,7 @@ test('remint with no provider mounted returns false without burning the guard bu
         userID="remint-unmounted"
       >
         <span>ok</span>
-      </isolated.ProvideZero>,
+      </isolated.ProvideZero>
     )
     await Promise.resolve()
   })
@@ -201,7 +201,7 @@ test('two consecutive server acknowledgement timeouts enter normal recovery', as
           }}
         >
           <span>ok</span>
-        </isolated.ProvideZero>,
+        </isolated.ProvideZero>
       )
       await Promise.resolve()
     })
@@ -210,7 +210,7 @@ test('two consecutive server acknowledgement timeouts enter normal recovery', as
       const result = isolated.awaitMutationServer(
         { client: Promise.resolve({}), server: new Promise(() => {}) },
         label,
-        10,
+        10
       )
       const timedOut = expect(result).rejects.toMatchObject({
         name: 'MutationTimeoutError',
@@ -254,7 +254,7 @@ test('transport and app benign log patterns suppress classified recovery', async
         scheduleReload={scheduleReload}
       >
         <span>ok</span>
-      </isolated.ProvideZero>,
+      </isolated.ProvideZero>
     )
     await Promise.resolve()
   })

@@ -38,8 +38,8 @@ describe('mutation lifecycle', () => {
       await expect(
         lifecycle.awaitMutationClient(
           { client: Promise.resolve({ type: 'error', error: { message: 'denied' } }) },
-          'save note',
-        ),
+          'save note'
+        )
       ).rejects.toMatchObject({
         name: 'MutationResultError',
         label: 'save note',
@@ -49,7 +49,7 @@ describe('mutation lifecycle', () => {
       const waiting = lifecycle.awaitMutationClient(
         { client: new Promise(() => {}) },
         'stuck note',
-        20,
+        20
       )
       const timedOut = expect(waiting).rejects.toMatchObject({
         name: 'MutationTimeoutError',
@@ -111,7 +111,7 @@ describe('mutation lifecycle', () => {
 
     const direct = lifecycle.awaitMutationClient(
       { client: Promise.resolve({}) },
-      'direct after close',
+      'direct after close'
     )
     await expect(direct).rejects.toBeInstanceOf(StaleGenerationError)
   })
@@ -124,7 +124,7 @@ describe('mutation lifecycle', () => {
         const result = lifecycle.awaitMutationServer(
           { client: Promise.resolve({}), server: new Promise(() => {}) },
           label,
-          10,
+          10
         )
         const timedOut = expect(result).rejects.toMatchObject({
           name: 'MutationTimeoutError',
@@ -156,7 +156,7 @@ describe('mutation lifecycle', () => {
         const result = lifecycle.awaitMutationServer(
           { client: Promise.resolve({}), server: new Promise(() => {}) },
           'write',
-          10,
+          10
         )
         const timedOut = expect(result).rejects.toBeInstanceOf(MutationTimeoutError)
         await vi.advanceTimersByTimeAsync(10)
@@ -168,8 +168,8 @@ describe('mutation lifecycle', () => {
         lifecycle.awaitMutationServer(
           { client: Promise.resolve({}), server: Promise.resolve({}) },
           'acked write',
-          10,
-        ),
+          10
+        )
       ).resolves.toEqual({})
       await timeout()
       expect(recoverFromAckTimeout).not.toHaveBeenCalled()

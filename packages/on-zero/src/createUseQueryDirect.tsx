@@ -4,8 +4,6 @@ import {
   DEFAULT_TTL_MS,
   deepClone,
 } from '@rocicorp/zero/bindings'
-import { useEmitterValue, type Emitter } from './helpers/emitter'
-import { IS_SERVER_RUNTIME } from './helpers/platform'
 import { useContext, useMemo, useRef, useSyncExternalStore, type Context } from 'react'
 
 import {
@@ -15,6 +13,8 @@ import {
   type UseQueryHook,
   type UseQueryOptions,
 } from './createUseQuery'
+import { useEmitterValue, type Emitter } from './helpers/emitter'
+import { IS_SERVER_RUNTIME } from './helpers/platform'
 import { resolveQuery } from './resolveQuery'
 
 import type {
@@ -44,10 +44,10 @@ export type MaterializableZero = {
   context: unknown
   materialize(
     query: any,
-    options?: { ttl?: any },
+    options?: { ttl?: any }
   ): {
     addListener(
-      cb: (data: any, resultType: string, error?: DirectQueryError) => void,
+      cb: (data: any, resultType: string, error?: DirectQueryError) => void
     ): void
     destroy(): void
     updateTTL(ttl: any): void
@@ -102,7 +102,7 @@ function getSnapshot(
   data: unknown,
   resultType: DirectResultType,
   retry: () => void,
-  error?: DirectQueryError,
+  error?: DirectQueryError
 ): DirectSnapshot {
   if (singular && data === undefined) {
     if (resultType === 'complete') return emptySnapshotSingularComplete
@@ -139,7 +139,7 @@ class DirectViewWrapper implements DirectView {
     private readonly zero: MaterializableZero,
     private ttl: UseQueryOptions['ttl'] | number,
     private readonly singular: boolean,
-    private readonly onDematerialized: (view: DirectViewWrapper) => void,
+    private readonly onDematerialized: (view: DirectViewWrapper) => void
   ) {
     this.snapshot = getDefaultSnapshot(singular)
     this.materializeIfNeeded()
@@ -152,7 +152,7 @@ class DirectViewWrapper implements DirectView {
       cloned,
       resultType as DirectResultType,
       this.retry,
-      error,
+      error
     )
     for (const listener of this.listeners) {
       listener()
@@ -217,7 +217,7 @@ class DirectViewStore {
     zero: MaterializableZero,
     queryRequest: unknown,
     enabled: boolean,
-    ttl: UseQueryOptions['ttl'] | number,
+    ttl: UseQueryOptions['ttl'] | number
   ): DirectView {
     const query = addContextToQuery(queryRequest as any, zero.context as any)
     const queryInternals = asQueryInternals(query)
@@ -242,7 +242,7 @@ class DirectViewStore {
           if (this.views.get(hash) === dematerialized) {
             this.views.delete(hash)
           }
-        },
+        }
       )
       this.views.set(hash, view)
     } else {
@@ -300,7 +300,7 @@ export function createUseQueryDirect<Schema extends ZeroSchema>({
       () => resolveQuery({ customQueries, fn, params }),
       // params is keyed by paramsKey
       // eslint-disable-next-line react-hooks/exhaustive-deps
-      [fn, paramsKey],
+      [fn, paramsKey]
     )
 
     const emptyForQuery = useMemo(() => emptyResponseFor(queryRequest), [queryRequest])
@@ -331,7 +331,7 @@ export function createUseQueryDirect<Schema extends ZeroSchema>({
     const out = useSyncExternalStore(
       view ? view.subscribe : DISABLED_SUBSCRIBE,
       view ? view.getSnapshot : getEmpty,
-      view ? view.getSnapshot : getEmpty,
+      view ? view.getSnapshot : getEmpty
     )
 
     if (!disableMode) {

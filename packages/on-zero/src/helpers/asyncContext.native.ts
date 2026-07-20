@@ -27,7 +27,7 @@ export function createAsyncContext<T>(): AsyncContext<T> {
 
       function wrapCallback(
         callback: Function | undefined | null,
-        context: T | undefined,
+        context: T | undefined
       ): Function | undefined | null {
         if (!callback) return callback
         return (...args: any[]) => {
@@ -46,19 +46,19 @@ export function createAsyncContext<T>(): AsyncContext<T> {
       OriginalPromise.prototype.then = function (
         this: Promise<any>,
         onFulfilled?: any,
-        onRejected?: any,
+        onRejected?: any
       ): Promise<any> {
         const context = currentContext
         return OriginalThen.call(
           this,
           wrapCallback(onFulfilled, context) as any,
-          wrapCallback(onRejected, context) as any,
+          wrapCallback(onRejected, context) as any
         )
       }
 
       OriginalPromise.prototype.catch = function (
         this: Promise<any>,
-        onRejected?: any,
+        onRejected?: any
       ): Promise<any> {
         const context = currentContext
         return OriginalCatch.call(this, wrapCallback(onRejected, context) as any)
@@ -66,7 +66,7 @@ export function createAsyncContext<T>(): AsyncContext<T> {
 
       OriginalPromise.prototype.finally = function (
         this: Promise<any>,
-        onFinally?: any,
+        onFinally?: any
       ): Promise<any> {
         const context = currentContext
         return OriginalFinally.call(this, wrapCallback(onFinally, context) as any)

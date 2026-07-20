@@ -1,5 +1,4 @@
 import { createEmitter, type Emitter } from './helpers/emitter'
-
 import { getInstanceForNamespace, getInstanceForQueryFn } from './instanceRegistry'
 import { run } from './run'
 
@@ -52,7 +51,7 @@ export type CombineZeroClientsOptions = {
 }
 
 type UnionToIntersection<U> = (U extends any ? (x: U) => void : never) extends (
-  x: infer I,
+  x: infer I
 ) => void
   ? I
   : never
@@ -89,7 +88,7 @@ export function combineZeroClients<
 
   if (!clientsByName.has(innerName)) {
     throw new Error(
-      `[on-zero] combineZeroClients inner instance '${innerName}' is not one of the passed clients`,
+      `[on-zero] combineZeroClients inner instance '${innerName}' is not one of the passed clients`
     )
   }
 
@@ -153,7 +152,7 @@ export function combineZeroClients<
   // one events stream relaying every instance's emitter
   const zeroEvents = createEmitter<ZeroEvent | null>(
     `zero:combined(${clients.map((client) => client.instanceName).join('+')})`,
-    null,
+    null
   )
   for (const client of clients) {
     client.zeroEvents.listen((event) => zeroEvents.emit(event))
@@ -164,7 +163,7 @@ export function combineZeroClients<
       (inner: ReactNode, client) => (
         <client.ControlQueries {...props}>{inner}</client.ControlQueries>
       ),
-      children,
+      children
     )
 
   const combined = {

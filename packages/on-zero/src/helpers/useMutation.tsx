@@ -53,7 +53,7 @@ function emitMutationError(error: MutationError): void {
 
 function toMutationError(
   scope: 'client' | 'server',
-  details: unknown,
+  details: unknown
 ): MutationError | null {
   if (!details || typeof details !== 'object') return null
   const d = details as {
@@ -90,7 +90,7 @@ function rejectionToError(scope: 'client' | 'server', e: unknown): MutationError
  */
 export function observeMutation(
   result: MutatorResultLike,
-  onError?: (error: MutationError) => void,
+  onError?: (error: MutationError) => void
 ): Promise<void> {
   let reportedGlobal = false
   const report = (err: MutationError | null) => {
@@ -128,7 +128,7 @@ export function observeMutation(
  * transaction, not N calls — that keeps it atomic and a single state.
  */
 export function useMutation<Fn extends (...args: any[]) => MutatorResultLike>(
-  mutator: Fn,
+  mutator: Fn
 ): [Fn, MutationState] {
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<MutationError | null>(null)

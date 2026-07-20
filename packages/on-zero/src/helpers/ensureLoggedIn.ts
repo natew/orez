@@ -1,5 +1,4 @@
 import { ensure } from './ensure'
-
 import { mutatorContext } from './mutatorContext'
 
 import type { AuthData } from '../types'

@@ -131,12 +131,12 @@ export type Where<
   ReturnType extends Condition | boolean = Condition | boolean,
 > = (
   expressionBuilder: ExpressionBuilder<Table, Schema>,
-  auth?: AuthData | null,
+  auth?: AuthData | null
 ) => ReturnType
 
 export type Can = <PWhere extends Where>(
   where: PWhere,
-  obj: string | Record<string, unknown>,
+  obj: string | Record<string, unknown>
 ) => Promise<void>
 
 type GenericTable = TableBuilderWithColumns<any>

@@ -119,7 +119,7 @@ function defaultGuardStorage(): RecoveryGuardStorage | undefined {
 // caught as a genuine fatal instead of reload-storming across loads.
 function recoveryGuardOpen(
   reasonKey: ZeroRecoveryReasonKey,
-  guardStorage: RecoveryGuardStorage | undefined,
+  guardStorage: RecoveryGuardStorage | undefined
 ): boolean {
   const key = `on-zero-recover-${reasonKey}`
   const now = Date.now()
@@ -210,7 +210,7 @@ function recover(
   deps: ZeroRecoveryDeps,
   reasonKey: ZeroRecoveryReasonKey,
   message: string,
-  dropLocalState: boolean,
+  dropLocalState: boolean
 ): void {
   if (typeof window === 'undefined') return
   deps.onRecovery?.(reasonKey)
@@ -263,7 +263,7 @@ export function makeZeroRecovery(deps: ZeroRecoveryDeps) {
         deps,
         reason.type,
         `update needed (${reason.message || reason.type})`,
-        dropLocalState,
+        dropLocalState
       )
     },
     onClientStateNotFound() {
@@ -280,7 +280,7 @@ export function makeZeroRecovery(deps: ZeroRecoveryDeps) {
         deps,
         'server-ack-timeout',
         `${input.label} server acknowledgement timed out ${input.consecutiveTimeouts} consecutive times (${input.timeoutMs}ms each)`,
-        true,
+        true
       )
     },
   }
@@ -329,7 +329,7 @@ function isBenignStoreClosedLog(text: string): boolean {
 // timeouts enter through the mutation lifecycle instead of string classification;
 // expected transport startup messages are declared through benignLogPatterns.
 function classifyMutationDesync(
-  text: string,
+  text: string
 ): Pick<ZeroRecoveryLogClassification, 'reasonKey' | 'message'> | undefined {
   if (text.includes('sent mutation ID') && text.includes('but expected')) {
     return {
@@ -382,7 +382,7 @@ function classifyMutationDesync(
 export function classifyZeroRecoveryLog(
   level: LogLevel | string,
   args: readonly unknown[],
-  nowMs = Date.now(),
+  nowMs = Date.now()
 ): ZeroRecoveryLogClassification | undefined {
   if (level !== 'error') return undefined
   const text = args.map(logArgText).join(' ')
@@ -429,7 +429,7 @@ export function classifyZeroRecoveryLog(
 // consumer that owns log-based recovery isn't double-fired.
 export function composeRecoveryLogSink(
   deps: ZeroRecoveryDeps,
-  consumerLogSink?: LogSink,
+  consumerLogSink?: LogSink
 ): LogSink {
   const consumerFlush = consumerLogSink?.flush
   return {

@@ -8,12 +8,12 @@
 
 import { createSchema, number, string, table } from '@rocicorp/zero'
 import { useQuery as useRawZeroQuery } from '@rocicorp/zero/react'
-import { IS_SERVER, IS_SERVER_RUNTIME } from './helpers/platform'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, test } from 'vitest'
 
 import { createZeroClient } from './createZeroClient'
+import { IS_SERVER, IS_SERVER_RUNTIME } from './helpers/platform'
 import { zql } from './zql'
 
 declare global {
@@ -32,7 +32,7 @@ const schema = createSchema({ tables: [todoTable] })
 const allTodos = (_args: void) =>
   (zql as unknown as { todo: { orderBy: (k: string, d: string) => any } }).todo.orderBy(
     'createdAt',
-    'desc',
+    'desc'
   )
 const oneTodo = (args: { id: string }) =>
   (zql as unknown as { todo: { where: (k: string, v: string) => any } }).todo
@@ -73,7 +73,7 @@ function renderWithDisabled<T>(useHook: () => T): T {
     root.render(
       <client.ProvideZero authData={{}} userID="anon" disable>
         <Probe />
-      </client.ProvideZero>,
+      </client.ProvideZero>
     )
   })
   if (captured === undefined) throw new Error('Probe did not render')

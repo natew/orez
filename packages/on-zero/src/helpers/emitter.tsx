@@ -37,7 +37,7 @@ export class Emitter<const T> {
       }
     } else if (this.value === next && process.env.NODE_ENV === 'development') {
       console.warn(
-        `[emitter] ${this.options?.name} no comparator option but received same value`,
+        `[emitter] ${this.options?.name} no comparator option but received same value`
       )
     }
     this.value = next
@@ -48,19 +48,17 @@ export class Emitter<const T> {
 export function createEmitter<T>(
   name: string,
   defaultValue: T,
-  options?: CreateEmitterOptions<T>,
+  options?: CreateEmitterOptions<T>
 ): Emitter<T> {
   const existing = createOrUpdateCache(name, defaultValue) as T
   return new Emitter(existing || defaultValue, { name, ...options })
 }
 
-type EmitterValue<E extends Emitter<any>> = E extends Emitter<infer Value>
-  ? Value
-  : never
+type EmitterValue<E extends Emitter<any>> = E extends Emitter<infer Value> ? Value : never
 
 export function useEmitterValue<E extends Emitter<any>>(
   emitter: E,
-  options?: { disable?: boolean },
+  options?: { disable?: boolean }
 ): EmitterValue<E> {
   const disabled = options?.disable
   const [state, setState] = useState<EmitterValue<E>>(() => emitter.value)

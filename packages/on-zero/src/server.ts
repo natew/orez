@@ -60,16 +60,16 @@ export interface ZeroServerApplicationTransaction {
   exec(
     sql: string,
     params?: readonly unknown[],
-    metadata?: SqlStatementMetadata,
+    metadata?: SqlStatementMetadata
   ): Promise<{ readonly changes: number }>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
-    params?: readonly unknown[],
+    params?: readonly unknown[]
   ): Promise<readonly Row[]>
   queryAst<Result = unknown>(
     ast: JsonValue,
     format: TransactionQueryFormat,
-    queryName?: string,
+    queryName?: string
   ): Promise<Result>
 }
 
@@ -82,7 +82,7 @@ export type ZeroServerMutationContext = {
   readonly claims: NormalizedClaims
   defer(
     effect: () => void | Promise<void>,
-    options?: { readonly barrier?: boolean },
+    options?: { readonly barrier?: boolean }
   ): void
 }
 
@@ -101,11 +101,11 @@ export interface ZeroServerExecutor<Schema extends ZeroSchema> {
   execute(name: string, args: JsonValue, claims: NormalizedClaims): Promise<void>
   transaction<Value>(
     claims: NormalizedClaims,
-    work: (tx: ZeroServerTransaction<Schema>) => Value | Promise<Value>,
+    work: (tx: ZeroServerTransaction<Schema>) => Value | Promise<Value>
   ): Promise<Value>
   query<Result>(
     claims: NormalizedClaims,
-    work: (tx: ZeroServerTransaction<Schema>) => Result | Promise<Result>,
+    work: (tx: ZeroServerTransaction<Schema>) => Result | Promise<Result>
   ): Promise<Result>
 }
 
@@ -135,7 +135,7 @@ export type ServerMutate<Models extends GenericModels> = {
   [Key in keyof Models]: {
     [K in keyof Models[Key]['mutate']]: Models[Key]['mutate'][K] extends (
       ctx: MutatorContext,
-      arg: infer Arg,
+      arg: infer Arg
     ) => any
       ? (arg: Arg, options?: MutateOptions) => Promise<void>
       : (options?: MutateOptions) => Promise<void>
@@ -176,7 +176,7 @@ export type ZeroServerBindings<
   resolveQuery(
     name: string,
     args: readonly JsonValue[],
-    claims: NormalizedClaims,
+    claims: NormalizedClaims
   ): Promise<JsonValue>
   transformQueryRequest(options: {
     authData: AuthData | null
@@ -186,11 +186,11 @@ export type ZeroServerBindings<
     mutate: ServerMutate<Models>
     transaction<Value>(
       claims: NormalizedClaims,
-      work: (tx: Transaction) => Value | Promise<Value>,
+      work: (tx: Transaction) => Value | Promise<Value>
     ): Promise<Value>
     query<Result>(
       claims: NormalizedClaims,
-      work: (q: QueryBuilder) => Query<any, Schema, Result>,
+      work: (q: QueryBuilder) => Query<any, Schema, Result>
     ): Promise<HumanReadable<Result>>
   }
 }
@@ -201,7 +201,7 @@ export function createZeroServerBindings<
   ServerActions extends Record<string, unknown>,
   Action extends AsyncActionEnvelope = never,
 >(
-  options: CreateZeroServerBindingsOptions<Schema, Models, ServerActions, Action>,
+  options: CreateZeroServerBindingsOptions<Schema, Models, ServerActions, Action>
 ): ZeroServerBindings<Schema, Models> {
   setSchema(options.schema, createBuilder(options.schema))
   setEnvironment('server')
@@ -223,7 +223,7 @@ export function createZeroServerBindings<
     : null
   const enqueueTask: NonNullable<MutatorContext['server']>['enqueueTask'] = (
     task,
-    taskOptions,
+    taskOptions
   ) => {
     const current = invocation.get()
     if (!current) throw new Error('on-zero task scheduled outside a server mutation')
@@ -264,7 +264,7 @@ export function createZeroServerBindings<
           throw new Error(`unknown on-zero mutator: ${modelName}|${mutatorName}`)
         try {
           await invocation.run({ authData, ctx }, () =>
-            mutation(tx as unknown as Transaction, args),
+            mutation(tx as unknown as Transaction, args)
           )
         } catch (error) {
           const name = (error as { name?: unknown })?.name
@@ -293,7 +293,7 @@ export function createZeroServerBindings<
           queries: options.queries!,
           permissions,
           validateQuery: options.validateQuery,
-        }),
+        })
       )
       return asQueryInternals(query as never).ast as JsonValue
     },
@@ -320,17 +320,17 @@ export function createZeroServerBindings<
               schema: options.schema,
               request,
               userID,
-            }),
+            })
       )
     },
     server(executor) {
       const transaction = <Value>(
         claims: NormalizedClaims,
-        work: (tx: Transaction) => Value | Promise<Value>,
+        work: (tx: Transaction) => Value | Promise<Value>
       ) => executor.transaction(claims, (tx) => work(tx as unknown as Transaction))
 
       setRunner((query) =>
-        transaction({ userID: 'server' }, (tx) => tx.run(query as never)),
+        transaction({ userID: 'server' }, (tx) => tx.run(query as never))
       )
 
       const mutate = new Proxy({} as ServerMutate<Models>, {
@@ -344,7 +344,7 @@ export function createZeroServerBindings<
                   typeof handler === 'function' && handler.length > 1
                 return (
                   argsOrOptions: JsonValue | MutateOptions,
-                  optionsForArgument?: MutateOptions,
+                  optionsForArgument?: MutateOptions
                 ) => {
                   const args = acceptsArgument ? (argsOrOptions as JsonValue) : null
                   const mutateOptions = acceptsArgument
@@ -355,7 +355,7 @@ export function createZeroServerBindings<
                   return executor.execute(`${modelName}|${mutatorName}`, args, claims)
                 }
               },
-            },
+            }
           )
         },
       })
@@ -365,10 +365,10 @@ export function createZeroServerBindings<
         transaction,
         query<Result>(
           claims: NormalizedClaims,
-          work: (q: QueryBuilder) => Query<any, Schema, Result>,
+          work: (q: QueryBuilder) => Query<any, Schema, Result>
         ) {
           return runWithQueryContext({ authData: mapClaims(claims) }, () =>
-            executor.query(claims, (tx) => tx.run(work(getZQL()) as never)),
+            executor.query(claims, (tx) => tx.run(work(getZQL()) as never))
           ) as Promise<HumanReadable<Result>>
         },
       }
@@ -403,7 +403,7 @@ function resolveServerQuery({
     try {
       return (getZQL() as any)[table]
         .where((eb: any) =>
-          permissions.buildPermissionQuery(authData, eb, permission, objOrId, table),
+          permissions.buildPermissionQuery(authData, eb, permission, objOrId, table)
         )
         .one()
     } finally {
@@ -423,7 +423,7 @@ const AUTH_CLAIM = 'authData'
 
 export function authDataToClaims(
   authData: AuthData | null | undefined,
-  anonymousUserID = 'anon',
+  anonymousUserID = 'anon'
 ): NormalizedClaims {
   const userID = typeof authData?.id === 'string' ? authData.id : anonymousUserID
   const claims: Record<string, JsonValue> = { userID }

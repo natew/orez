@@ -1,6 +1,6 @@
+import { isInZeroMutation, mutatorContext } from './helpers/mutatorContext'
 import { getInstanceForQueryFn } from './instanceRegistry'
 import { resolveQuery, type PlainQueryFn } from './resolveQuery'
-import { isInZeroMutation, mutatorContext } from './helpers/mutatorContext'
 import { getAmbientRunner, getRunner } from './zeroRunner'
 
 import type {
@@ -19,7 +19,7 @@ export function setCustomQueries(queries: AnyQueryRegistry) {
 function getCustomQueries(): AnyQueryRegistry {
   if (!customQueriesRef) {
     throw new Error(
-      'Custom queries not initialized. Ensure client or server bindings have been created.',
+      'Custom queries not initialized. Ensure client or server bindings have been created.'
     )
   }
   return customQueriesRef
@@ -33,7 +33,7 @@ export function run<
   TReturn,
 >(
   query: Query<TTable, Schema, TReturn>,
-  mode?: 'complete',
+  mode?: 'complete'
 ): Promise<HumanReadable<TReturn>>
 
 export function run<
@@ -44,7 +44,7 @@ export function run<
 >(
   fn: PlainQueryFn<TArg, Query<TTable, Schema, TReturn>>,
   params: TArg,
-  mode?: 'complete',
+  mode?: 'complete'
 ): Promise<HumanReadable<TReturn>>
 
 export function run<
@@ -53,13 +53,13 @@ export function run<
   TReturn,
 >(
   fn: PlainQueryFn<void, Query<TTable, Schema, TReturn>>,
-  mode?: 'complete',
+  mode?: 'complete'
 ): Promise<HumanReadable<TReturn>>
 
 export function run(
   queryOrFn: any,
   paramsOrMode?: any,
-  modeArg?: 'complete',
+  modeArg?: 'complete'
 ): Promise<any> {
   const hasParams = modeArg !== undefined || (paramsOrMode && paramsOrMode !== 'complete')
   const params = hasParams ? paramsOrMode : undefined
@@ -79,7 +79,7 @@ export function run(
   const inMutation = isInZeroMutation()
   if (inMutation && mutatorContext().environment === 'server') {
     throw new Error(
-      'run(namedQuery) cannot be used inside a Zero mutation. Use tx.run(zql...) for transactional mutation reads.',
+      'run(namedQuery) cannot be used inside a Zero mutation. Use tx.run(zql...) for transactional mutation reads.'
     )
   }
 

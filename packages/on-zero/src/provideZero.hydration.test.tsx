@@ -17,12 +17,12 @@
 // stability is what keeps useId stable.
 
 import { createSchema, string, table } from '@rocicorp/zero'
-import { IS_SERVER, IS_SERVER_RUNTIME } from './helpers/platform'
 import { useId, type ReactNode } from 'react'
 import { renderToString } from 'react-dom/server'
 import { expect, test } from 'vitest'
 
 import { createZeroClient } from './createZeroClient'
+import { IS_SERVER, IS_SERVER_RUNTIME } from './helpers/platform'
 
 const todoTable = table('todo')
   .columns({ id: string(), title: string() })

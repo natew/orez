@@ -30,7 +30,7 @@ export class MutationTimeoutError extends Error {
     super(
       phase === 'server'
         ? `${label} server acknowledgement did not complete within ${timeoutMs}ms`
-        : `${label} did not complete within ${timeoutMs}ms`,
+        : `${label} did not complete within ${timeoutMs}ms`
     )
     this.name = 'MutationTimeoutError'
     this.label = label
@@ -69,7 +69,7 @@ function describeMutationError(error: unknown): string {
   if (error && typeof error === 'object') {
     const typed = error as { type?: unknown; message?: unknown }
     const parts = [typed.type, typed.message].filter(
-      (part): part is string => typeof part === 'string' && part.length > 0,
+      (part): part is string => typeof part === 'string' && part.length > 0
     )
     if (parts.length) return parts.join(': ')
   }
@@ -173,7 +173,7 @@ export function createMutationLifecycle(options: {
           timer = setTimeout(
             () =>
               reject(new MutationTimeoutError(input.label, input.phase, input.timeoutMs)),
-            input.timeoutMs,
+            input.timeoutMs
           )
         }),
       ])
@@ -188,7 +188,7 @@ export function createMutationLifecycle(options: {
     label: string,
     timeoutMs: number,
     capturedGeneration: number,
-    observeServerFailure: boolean,
+    observeServerFailure: boolean
   ): Promise<unknown> {
     const result = await awaitInGeneration({
       promise: mutation.client,
@@ -211,7 +211,7 @@ export function createMutationLifecycle(options: {
   function awaitMutationClient(
     mutation: MutationLike,
     label: string,
-    timeoutMs = 30_000,
+    timeoutMs = 30_000
   ): Promise<unknown> {
     return settleMutationClient(mutation, label, timeoutMs, generation, true)
   }
@@ -219,7 +219,7 @@ export function createMutationLifecycle(options: {
   async function awaitMutationServer(
     mutation: MutationLike,
     label: string,
-    timeoutMs = 30_000,
+    timeoutMs = 30_000
   ): Promise<unknown> {
     const capturedGeneration = generation
     const clientResult = await settleMutationClient(
@@ -227,7 +227,7 @@ export function createMutationLifecycle(options: {
       label,
       timeoutMs,
       capturedGeneration,
-      false,
+      false
     )
     if (!mutation.server) return clientResult
 
@@ -261,7 +261,7 @@ export function createMutationLifecycle(options: {
   function enqueueBackgroundMutation(
     label: string,
     create: () => unknown,
-    mutationOptions: BackgroundMutationOptions = {},
+    mutationOptions: BackgroundMutationOptions = {}
   ): Promise<void> {
     const capturedGeneration = generation
     const { coalesceKey = '', settle = 'client', timeoutMs = 120_000 } = mutationOptions

@@ -209,7 +209,7 @@ describe('zero recovery', () => {
     const sqliteError = new Error('This statement has been finalized')
     sqliteError.name = 'SqliteError'
     expect(
-      classifyZeroRecoveryLog('error', ['Error running.', sqliteError]),
+      classifyZeroRecoveryLog('error', ['Error running.', sqliteError])
     ).toMatchObject({
       reasonKey: 'sqlite-statement-finalized',
       dropLocalState: true,
@@ -217,10 +217,10 @@ describe('zero recovery', () => {
     expect(
       classifyZeroRecoveryLog('error', [
         { name: 'SqliteError', message: 'database is locked' },
-      ]),
+      ])
     ).toBeUndefined()
     expect(
-      classifyZeroRecoveryLog('warn', ['Expected IndexedDB not found']),
+      classifyZeroRecoveryLog('warn', ['Expected IndexedDB not found'])
     ).toBeUndefined()
     expect(classifyZeroRecoveryLog('error', ['Store is closed'], 10_000)).toBeUndefined()
     expect(classifyZeroRecoveryLog('error', ['Store is closed'], 11_000)).toBeUndefined()
@@ -233,8 +233,8 @@ describe('zero recovery', () => {
       classifyZeroRecoveryLog(
         'error',
         ['Mutator "send" error on server', 'Store is closed'],
-        20_000,
-      ),
+        20_000
+      )
     ).toBeUndefined()
   })
 
@@ -247,7 +247,7 @@ describe('zero recovery', () => {
     const events: ZeroEvent[] = []
     const zeroEvents = createEmitter<ZeroEvent | null>(
       `test-recover-${emitterSeq++}`,
-      null,
+      null
     )
     zeroEvents.listen((event) => {
       if (event) events.push(event)
@@ -444,10 +444,10 @@ describe('zero recovery', () => {
     }
     // ack timeouts use the typed mutation path; synthetic strings do not classify.
     expect(
-      classifyZeroRecoveryLog('error', ['consecutive server-ack timeouts']),
+      classifyZeroRecoveryLog('error', ['consecutive server-ack timeouts'])
     ).toBeUndefined()
     expect(
-      classifyZeroRecoveryLog('error', ['Connection attempt timed out after 10 seconds']),
+      classifyZeroRecoveryLog('error', ['Connection attempt timed out after 10 seconds'])
     ).toBeUndefined()
     expect(classifyZeroRecoveryLog('warn', ['ClientNotFound'])).toBeUndefined()
   })
@@ -469,13 +469,13 @@ describe('zero recovery', () => {
   test('isRecoverableZeroStalePokeMessage matches only the stale-cookie signatures', () => {
     expect(
       isRecoverableZeroStalePokeMessage(
-        'Server returned unexpected base cookie during sync',
-      ),
+        'Server returned unexpected base cookie during sync'
+      )
     ).toBe(true)
     expect(
       isRecoverableZeroStalePokeMessage(
-        'Received cookie 5 is < than last snapshot cookie 9, ignoring client view',
-      ),
+        'Received cookie 5 is < than last snapshot cookie 9, ignoring client view'
+      )
     ).toBe(true)
     expect(isRecoverableZeroStalePokeMessage('client state not found')).toBe(false)
   })

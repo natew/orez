@@ -1,7 +1,6 @@
 import { IS_SERVER_RUNTIME } from './helpers/platform'
 import { setMutationsPermissions } from './modelRegistry'
 
-import type { TableBuilderWithColumns } from '@rocicorp/zero'
 import type {
   MutatorContext,
   Schema,
@@ -10,6 +9,7 @@ import type {
   TableUpdateRow,
   Where,
 } from './types'
+import type { TableBuilderWithColumns } from '@rocicorp/zero'
 
 // derive a TableBuilderWithColumns from the global schema by table name
 type SchemaTableBuilder<TName extends TableName> = TableBuilderWithColumns<
@@ -37,7 +37,7 @@ function proxyRegistry(): Map<string, any> {
 // returns the SAME proxy object on subsequent calls so HMR works
 function getOrCreateMutationProxy<T extends Record<string, Function>>(
   tableName: string,
-  implementations: T,
+  implementations: T
 ): T {
   // merge with any prior registration for this table: multiple modules may
   // register mutators on the same table (a seed.ts alongside the table's own
@@ -47,7 +47,7 @@ function getOrCreateMutationProxy<T extends Record<string, Function>>(
   const prior = mutationRegistry().get(tableName)
   mutationRegistry().set(
     tableName,
-    prior ? { ...prior, ...implementations } : implementations,
+    prior ? { ...prior, ...implementations } : implementations
   )
 
   // return existing proxy if we have one (HMR case)
@@ -117,11 +117,11 @@ type MutationsWithCRUD<Table extends GenericTable, Mutations extends MutationBui
 }
 
 export function mutations<Mutations extends MutationBuilders>(
-  mutations: Mutations,
+  mutations: Mutations
 ): Mutations
 export function mutations<Table extends GenericTable, Permissions extends Where>(
   table: Table,
-  permissions: Permissions,
+  permissions: Permissions
 ): MutationsWithCRUD<Table, {}>
 export function mutations<
   Table extends GenericTable,
@@ -130,12 +130,12 @@ export function mutations<
 >(
   table: Table,
   permissions: Permissions,
-  mutations: Mutations,
+  mutations: Mutations
 ): MutationsWithCRUD<Table, Mutations>
 // string-based overloads (for drizzle-zero derived schemas where table builders aren't available)
 export function mutations<TName extends TableName, Permissions extends Where>(
   tableName: TName,
-  permissions: Permissions,
+  permissions: Permissions
 ): MutationsWithCRUD<SchemaTableBuilder<TName>, {}>
 export function mutations<
   TName extends TableName,
@@ -144,7 +144,7 @@ export function mutations<
 >(
   tableName: TName,
   permissions: Permissions,
-  mutations: Mutations,
+  mutations: Mutations
 ): MutationsWithCRUD<SchemaTableBuilder<TName>, Mutations>
 export function mutations<
   Table extends GenericTable,
@@ -152,7 +152,7 @@ export function mutations<
 >(
   table: Table | string | Mutations,
   permissions?: Where,
-  mutations?: Mutations,
+  mutations?: Mutations
 ): Mutations {
   if (permissions) {
     const tableName =
