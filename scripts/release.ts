@@ -351,6 +351,22 @@ if (existsSync(drizzleZeroSqlitePkgPath)) {
   })
 }
 
+// on-zero — keeps its own version line (0.7.x), predating its move into this
+// repo; the rest of the family shares the orez version. npm trusted publishing
+// for on-zero must point at this repo's release workflow.
+const onZeroDir = resolve(root, 'packages', 'on-zero')
+const onZeroPkgPath = resolve(onZeroDir, 'package.json')
+if (existsSync(onZeroPkgPath)) {
+  const onZeroPkg = JSON.parse(readFileSync(onZeroPkgPath, 'utf-8'))
+  packages.push({
+    dir: onZeroDir,
+    originalVersion: onZeroPkg.version,
+    pkgPath: onZeroPkgPath,
+    pkg: onZeroPkg,
+    next: bumpVersion(onZeroPkg.version),
+  })
+}
+
 packages.splice(0, packages.length, ...orderReleasePackages(packages))
 
 // plain --pack-only preserves current versions; an explicit release kind packs
