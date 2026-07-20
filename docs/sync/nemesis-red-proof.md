@@ -229,7 +229,7 @@ not regress the plain lane.
 
 ```sh
 git apply harness/mutants/patches/O1-nondurable-watermark.patch
-cargo build --release -p sync-native
+cargo build --release -p sync-native --bin sync-native-fixture
 cd harness
 # matrix's plain state-machine lane (non-nemesis):
 bun src/state-machine.ts --against rust-local --seed 7 --steps 24 --no-shrink

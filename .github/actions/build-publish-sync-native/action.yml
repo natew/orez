@@ -1,0 +1,123 @@
+name: Build and publish sync-native package
+description: Build, smoke-test, package, and publish one generic sync-native target
+
+inputs:
+  id:
+    description: Platform package id
+    required: true
+  target:
+    description: Rust target triple
+    required: true
+  executable:
+    description: Target executable filename
+    required: true
+  version:
+    description: Native package version
+    required: true
+  libc:
+    description: Linux libc variant
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      with:
+        node-version: '24'
+        registry-url: https://registry.npmjs.org
+        package-manager-cache: false
+
+    - name: Install OIDC-capable npm
+      shell: bash
+      run: npm install --global npm@12.0.1
+
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      with:
+        bun-version: 1.3.12
+
+    - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+      with:
+        toolchain: 1.94.0
+        targets: ${{ inputs.target }}
+
+    - name: Install glibc 2.17 linker
+      if: inputs.libc == 'glibc'
+      shell: bash
+      run: >-
+        python3 -m pip install
+        cargo-zigbuild==0.23.0
+        ziglang==0.16.0
+
+    - name: Install musl linker
+      if: inputs.libc == 'musl'
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
+    - name: Build release binary
+      shell: bash
+      run: |
+        if [ '${{ inputs.libc }}' = 'glibc' ]; then
+          cargo zigbuild \
+            --locked \
+            --release \
+            -p sync-native \
+            --bin sync-native \
+            --target '${{ inputs.target }}.2.17'
+        else
+          cargo build \
+            --locked \
+            --release \
+            -p sync-native \
+            --bin sync-native \
+            --target '${{ inputs.target }}'
+        fi
+
+    - name: Smoke-test release binary
+      shell: bash
+      run: |
+        binary='target/${{ inputs.target }}/release/${{ inputs.executable }}'
+        actual="$($binary --version)"
+        expected='sync-native ${{ inputs.version }}'
+        if [ "$actual" != "$expected" ]; then
+          echo "expected '$expected', got '$actual'" >&2
+          exit 1
+        fi
+
+    - name: Prepare platform npm package
+      shell: bash
+      run: |
+        bun scripts/sync-native-package.ts prepare-platform \
+          '${{ inputs.id }}' \
+          'target/${{ inputs.target }}/release/${{ inputs.executable }}' \
+          '.release/platform' \
+          '${{ inputs.version }}' \
+          '${{ github.sha }}'
+
+    - name: Publish platform npm package
+      shell: bash
+      run: |
+        package_name="$(node -p "require('./.release/platform/package.json').name")"
+        if npm view "$package_name@${{ inputs.version }}" version --json >/dev/null 2>&1; then
+          published_commit="$(npm view "$package_name@${{ inputs.version }}" orezSourceCommit)"
+          if [ "$published_commit" != '${{ github.sha }}' ]; then
+            echo "$package_name@${{ inputs.version }} came from $published_commit, not ${{ github.sha }}" >&2
+            exit 1
+          fi
+          echo "$package_name@${{ inputs.version }} already has this source commit"
+        else
+          npm publish .release/platform --ignore-scripts --access public
+        fi
+
+    - name: Verify the published launcher
+      shell: bash
+      run: |
+        npm install \
+          --prefix .release/smoke \
+          --ignore-scripts \
+          'orez-sync-native@${{ inputs.version }}'
+        actual="$(.release/smoke/node_modules/.bin/sync-native --version)"
+        expected='sync-native ${{ inputs.version }}'
+        if [ "$actual" != "$expected" ]; then
+          echo "expected '$expected', got '$actual'" >&2
+          exit 1
+        fi

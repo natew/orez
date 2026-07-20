@@ -29,7 +29,7 @@ import type { Rows, SyncTarget } from '../target.js'
 const execFileAsync = promisify(execFile)
 
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url))
-const BINARY = join(REPO_ROOT, 'target', 'release', 'sync-native')
+const BINARY = join(REPO_ROOT, 'target', 'release', 'sync-native-fixture')
 
 export type RustLocalTarget = SyncTarget & {
   readonly baseUrl: string
@@ -56,10 +56,11 @@ function ensureBinaryBuilt(): Promise<void> {
       ...process.env,
       PATH: `${cargoBin}:${process.env.PATH ?? ''}`,
     }
-    buildPromise = execFileAsync('cargo', ['build', '--release', '-p', 'sync-native'], {
-      cwd: REPO_ROOT,
-      env,
-    }).then(() => undefined)
+    buildPromise = execFileAsync(
+      'cargo',
+      ['build', '--release', '-p', 'sync-native', '--bin', 'sync-native-fixture'],
+      { cwd: REPO_ROOT, env }
+    ).then(() => undefined)
   }
   return buildPromise
 }

@@ -4,12 +4,14 @@
 // the SyncNativeConfig passed at construction time.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::Request;
+use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, ORIGIN};
@@ -38,10 +40,13 @@ pub struct AppState {
     pub wake: Arc<WakeRegistry>,
     pub ctx: Arc<EngineContext>,
     pub authenticate: crate::AuthFn,
+    authorize_wake: crate::AuthorizeWakeFn,
     query_resolution: Option<crate::QueryResolution>,
     query_pull_locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    query_transform_versions: Mutex<HashMap<(String, String), u64>>,
     admin_token: String,
     allowed_origins: HashSet<String>,
+    trust_missing_admin_peer: AtomicBool,
     boot_id: String,
     // process-wide aggregate telemetry (mirrors the CF host's counters)
     counters: Counters,
@@ -57,6 +62,7 @@ impl AppState {
         wake: Arc<WakeRegistry>,
         ctx: Arc<EngineContext>,
         authenticate: crate::AuthFn,
+        authorize_wake: crate::AuthorizeWakeFn,
         query_resolution: Option<crate::QueryResolution>,
         admin_token: String,
         allowed_origins: Vec<String>,
@@ -66,10 +72,13 @@ impl AppState {
             wake,
             ctx,
             authenticate,
+            authorize_wake,
             query_resolution,
             query_pull_locks: Mutex::new(HashMap::new()),
+            query_transform_versions: Mutex::new(HashMap::new()),
             admin_token,
             allowed_origins: allowed_origins.into_iter().collect(),
+            trust_missing_admin_peer: AtomicBool::new(false),
             boot_id: boot_id(),
             counters: Counters::default(),
             faults: FaultRegistry::new(),
@@ -82,6 +91,10 @@ impl AppState {
     }
     fn take_drop_push(&self, ns: &str) -> bool {
         self.drop_push.lock().unwrap().remove(ns)
+    }
+
+    pub(crate) fn trust_missing_admin_peer(&self) {
+        self.trust_missing_admin_peer.store(true, Ordering::Release);
     }
 }
 
@@ -123,6 +136,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     let admin = Router::new()
         .route("/admin/health", get(health))
+        .route("/admin/namespaces", get(admin_namespaces))
         .route("/{ns}/admin/sql", post(admin_sql))
         .route("/{ns}/admin/settle-push", post(admin_settle_push))
         .route("/{ns}/admin/status", get(admin_status))
@@ -182,6 +196,19 @@ async fn require_admin(
     request: Request,
     next: Next,
 ) -> Response {
+    let trusted_peer = match request
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+    {
+        Some(ConnectInfo(peer)) => peer.ip().is_loopback(),
+        None => state.trust_missing_admin_peer.load(Ordering::Acquire),
+    };
+    if !trusted_peer {
+        return json_status(
+            403,
+            json!({ "error": "admin routes require a loopback peer" }),
+        );
+    }
     // Admin is a machine-only surface. This execution guard is independent of
     // CORS response headers and applies even to an otherwise allowed origin.
     if request.headers().contains_key(ORIGIN) {
@@ -240,6 +267,15 @@ async fn health() -> Response {
     json_status(200, json!({ "ok": true, "pid": std::process::id() }))
 }
 
+async fn admin_namespaces(State(state): State<Arc<AppState>>) -> Response {
+    let manager = state.manager.clone();
+    match tokio::task::spawn_blocking(move || manager.persisted_namespaces()).await {
+        Ok(Ok(namespaces)) => json_status(200, json!({ "namespaces": namespaces })),
+        Ok(Err(error)) => json_status(500, json!({ "error": error })),
+        Err(error) => json_status(500, json!({ "error": error.to_string() })),
+    }
+}
+
 async fn pull(
     State(state): State<Arc<AppState>>,
     Path(ns): Path<String>,
@@ -247,9 +283,11 @@ async fn pull(
     body: Bytes,
 ) -> Response {
     let started = Instant::now();
-    let Some(user_id) = (state.authenticate)(&headers) else {
-        return json_status(401, json!({ "error": "missing auth" }));
+    let claims = match (state.authenticate)(headers.clone(), ns.clone()).await {
+        Ok(claims) => claims,
+        Err(error) => return json_status(error.status, json!({ "error": error.message })),
     };
+    let user_id = claims.user_id().to_string();
     let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
         return json_status(400, json!({ "error": "invalid json" }));
     };
@@ -272,18 +310,24 @@ async fn pull(
     if state.ctx.query_aware
         && let Some(resolution) = &state.query_resolution
     {
-        if let Err(error) = resolve_named_queries(
+        match resolve_named_queries(
             &mut value,
             &headers,
-            &user_id,
+            &claims,
+            &ns,
             &resolution.resolve,
-            resolution.transform_version,
+            &state.query_transform_versions,
         )
         .await
         {
-            return json_status(error.status, json!({ "error": error.message }));
+            Ok(Some(transform_version)) => {
+                value["_serverQueryTransformVersion"] = json!(transform_version);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return json_status(error.status, json!({ "error": error.message }));
+            }
         }
-        value["_serverQueryTransformVersion"] = json!(resolution.transform_version);
     }
     let ns_hash = obs::namespace_hash(&ns);
     let input_cookie = value.get("cookie").cloned().unwrap_or(Value::Null);
@@ -360,76 +404,97 @@ async fn pull(
 async fn resolve_named_queries(
     body: &mut Value,
     headers: &HeaderMap,
-    user_id: &str,
+    claims: &crate::AuthClaims,
+    namespace: &str,
     resolver: &crate::ResolveQueriesFn,
-    transform_version: u64,
-) -> Result<(), crate::QueryResolveError> {
+    transform_versions: &Mutex<HashMap<(String, String), u64>>,
+) -> Result<Option<u64>, crate::QueryResolveError> {
     const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-    if transform_version > MAX_SAFE_INTEGER {
+
+    let patch = body
+        .get_mut("queries")
+        .and_then(|queries| queries.get_mut("patch"))
+        .and_then(Value::as_array_mut);
+
+    let mut named_queries = Vec::new();
+    let mut put_indices = Vec::new();
+    if let Some(patch) = patch.as_deref() {
+        for (index, operation) in patch.iter().enumerate() {
+            if operation.get("op").and_then(Value::as_str) != Some("put") {
+                continue;
+            }
+            if operation.get("hash").and_then(Value::as_str).is_none() {
+                return Err(crate::QueryResolveError::bad_request(
+                    "query put requires a hash",
+                ));
+            }
+            let Some(name) = operation.get("name").and_then(Value::as_str) else {
+                return Err(crate::QueryResolveError::bad_request(
+                    "query put requires a server-resolved named query",
+                ));
+            };
+            let Some(args) = operation.get("args").and_then(Value::as_array) else {
+                return Err(crate::QueryResolveError::bad_request(
+                    "named query args must be an array",
+                ));
+            };
+            named_queries.push(crate::NamedQuery {
+                name: name.to_string(),
+                args: args.clone(),
+            });
+            put_indices.push(index);
+        }
+    }
+
+    if named_queries.is_empty() {
+        if let Some(version) = transform_versions
+            .lock()
+            .unwrap()
+            .get(&(namespace.to_string(), claims.user_id().to_string()))
+            .copied()
+        {
+            return Ok(Some(version));
+        }
+    }
+
+    let resolved = resolver(
+        named_queries,
+        headers.clone(),
+        claims.clone(),
+        namespace.to_string(),
+    )
+    .await?;
+    if resolved.transform_version > MAX_SAFE_INTEGER {
         return Err(crate::QueryResolveError::upstream(
             "query transform version exceeds the JSON safe integer range",
         ));
     }
-
-    let Some(patch) = body
-        .get_mut("queries")
-        .and_then(|queries| queries.get_mut("patch"))
-        .and_then(Value::as_array_mut)
-    else {
-        return Ok(());
-    };
-
-    let mut named_queries = Vec::new();
-    let mut put_indices = Vec::new();
-    for (index, operation) in patch.iter().enumerate() {
-        if operation.get("op").and_then(Value::as_str) != Some("put") {
-            continue;
-        }
-        if operation.get("hash").and_then(Value::as_str).is_none() {
-            return Err(crate::QueryResolveError::bad_request(
-                "query put requires a hash",
-            ));
-        }
-        let Some(name) = operation.get("name").and_then(Value::as_str) else {
-            return Err(crate::QueryResolveError::bad_request(
-                "query put requires a server-resolved named query",
-            ));
-        };
-        let Some(args) = operation.get("args").and_then(Value::as_array) else {
-            return Err(crate::QueryResolveError::bad_request(
-                "named query args must be an array",
-            ));
-        };
-        named_queries.push(crate::NamedQuery {
-            name: name.to_string(),
-            args: args.clone(),
-        });
-        put_indices.push(index);
-    }
-
-    if named_queries.is_empty() {
-        return Ok(());
-    }
-
-    let asts = resolver(named_queries, headers.clone(), user_id.to_string()).await?;
-    if asts.len() != put_indices.len() {
+    if resolved.asts.len() != put_indices.len() {
         return Err(crate::QueryResolveError::upstream(format!(
             "query resolver returned {} ASTs for {} queries",
-            asts.len(),
+            resolved.asts.len(),
             put_indices.len()
         )));
     }
 
-    for (index, ast) in put_indices.into_iter().zip(asts) {
+    transform_versions.lock().unwrap().insert(
+        (namespace.to_string(), claims.user_id().to_string()),
+        resolved.transform_version,
+    );
+
+    let Some(patch) = patch else {
+        return Ok(Some(resolved.transform_version));
+    };
+    for (index, ast) in put_indices.into_iter().zip(resolved.asts) {
         let hash = patch[index]["hash"].clone();
         patch[index] = json!({
             "op": "put",
             "hash": hash,
             "ast": ast,
-            "transformVersion": transform_version,
+            "transformVersion": resolved.transform_version,
         });
     }
-    Ok(())
+    Ok(Some(resolved.transform_version))
 }
 
 async fn push(
@@ -439,9 +504,11 @@ async fn push(
     body: Bytes,
 ) -> Response {
     let started = Instant::now();
-    let Some(user_id) = (state.authenticate)(&headers) else {
-        return json_status(401, json!({ "error": "missing auth" }));
+    let claims = match (state.authenticate)(headers.clone(), ns.clone()).await {
+        Ok(claims) => claims,
+        Err(error) => return json_status(error.status, json!({ "error": error.message })),
     };
+    let user_id = claims.user_id().to_string();
     let Ok(value) = serde_json::from_slice::<Value>(&body) else {
         return json_status(400, json!({ "error": "invalid json" }));
     };
@@ -781,7 +848,14 @@ async fn admin_invalidate(State(state): State<Arc<AppState>>, Path(ns): Path<Str
     };
     let result = namespace.run(engine::invalidate).await;
     match result {
-        Ok(()) => json_status(200, json!({ "ok": true })),
+        Ok(()) => {
+            state
+                .query_transform_versions
+                .lock()
+                .unwrap()
+                .retain(|(namespace, _), _| namespace != &ns);
+            json_status(200, json!({ "ok": true }))
+        }
         Err(e) => json_status(e.status, json!({ "error": e.message })),
     }
 }
@@ -882,6 +956,13 @@ async fn wake_ws(
     Query(params): Query<HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let token = params
+        .get("wakeToken")
+        .filter(|token| !token.is_empty())
+        .cloned();
+    if let Err(error) = (state.authorize_wake)(ns.clone(), token).await {
+        return json_status(error.status, json!({ "error": error.message }));
+    }
     let client_id = params.get("clientID").cloned().unwrap_or_default();
     ws.on_upgrade(move |socket| wake_socket(socket, state, ns, client_id))
 }

@@ -16,3 +16,5 @@ perf/reports/
 perf/write-amplification/.generated/
 perf/write-amplification/.generated-chat-wrapper/
 target/
+.release/
+packages/sync-native-*/bin/

@@ -17,6 +17,8 @@ incremental sync.
 - **[Architecture](./architecture.md)**: the Rust engine, its WASM wrapper,
   native, Cloudflare, and browser hosts, the two request paths, the change-log
   model, and how it fits the rest of orez.
+- **[Native npm releases](./native-releases.md)**: platform packages, the
+  Mac-first availability checkpoint, and the independent Rust release cadence.
 - **[The delegation model](./delegation.md)**: the central design decision: an
   app either bundles mutators into the host or delegates writes to its own
   endpoint and lets the host replicate from a change feed. This is what makes it

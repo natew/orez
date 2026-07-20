@@ -1,0 +1,25 @@
+{
+  "name": "@nwienert/orez-sync-native-linux-x64-gnu",
+  "version": "0.1.0",
+  "description": "Prebuilt Orez sync-native host for Linux x64 glibc",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/natew/orez.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@nwienert/orez-sync-native-win32-x64",
+  "version": "0.1.0",
+  "description": "Prebuilt Orez sync-native host for Windows x64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/natew/orez.git"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

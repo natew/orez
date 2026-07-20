@@ -235,7 +235,7 @@ function applyMutant(m: Mutant, reverse = false) {
 
 function buildEngine(logFile: string): LaneOutcome {
   return sh(
-    ['cargo', 'build', '--release', '-p', 'sync-native'],
+    ['cargo', 'build', '--release', '-p', 'sync-native', '--bin', 'sync-native-fixture'],
     REPO_ROOT,
     20 * 60_000,
     logFile

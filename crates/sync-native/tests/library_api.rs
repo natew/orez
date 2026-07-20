@@ -4,11 +4,12 @@
 // 1. SyncNativeHost can be constructed with a custom config
 // 2. the health endpoint responds
 // 3. pull/push work with a custom schema
-// 4. into_router() works for embedding
+// 4. explicit trusted-router construction works for in-process embedding
 
 use std::sync::{Arc, Mutex};
 
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::extract::connect_info::ConnectInfo;
+use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -17,10 +18,13 @@ use sync_core::schema::{TableSpec, Tables};
 use sync_core::value::ZeroColumnType;
 use sync_core::{SqlValue, SyncDb};
 
+use sync_native::AuthClaims;
+use sync_native::AuthError;
 use sync_native::AuthFn;
 use sync_native::NamedQuery;
 use sync_native::QueryResolution;
 use sync_native::ResolveQueriesFn;
+use sync_native::ResolvedQueries;
 use sync_native::SyncNativeConfig;
 use sync_native::SyncNativeHost;
 use sync_native::SyncNativeSecurity;
@@ -105,12 +109,16 @@ fn custom_mutate() -> MutateFn {
 }
 
 fn custom_auth() -> AuthFn {
-    Arc::new(|headers: &HeaderMap| {
-        let value = headers.get("authorization")?.to_str().ok()?;
-        value
-            .strip_prefix("Bearer ")
-            .filter(|token| !token.is_empty())
-            .map(str::to_string)
+    Arc::new(|headers, _namespace| {
+        Box::pin(async move {
+            let token = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| AuthError::unauthorized("missing auth"))?;
+            Ok(AuthClaims::new(token))
+        })
     })
 }
 
@@ -125,6 +133,7 @@ fn custom_config_with_lease(admin_tx_lease: std::time::Duration) -> SyncNativeCo
         mutate: custom_mutate(),
         visible: None,
         authenticate: custom_auth(),
+        authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(()) })),
         retain_changes: 4096,
         max_change_rows: sync_core::Caps::default().max_change_rows,
         visibility_enabled: false,
@@ -149,6 +158,13 @@ fn item_query(label: Option<&str>) -> Value {
             },
         }),
         None => json!({ "table": "item" }),
+    }
+}
+
+fn resolved(asts: Vec<Value>, transform_version: u64) -> ResolvedQueries {
+    ResolvedQueries {
+        asts,
+        transform_version,
     }
 }
 
@@ -297,26 +313,28 @@ fn mutation(id: u64, name: &str, args: Value, client_id: &str) -> Value {
 async fn named_queries_are_batched_and_resolved_before_sqlite() {
     let seen = Arc::new(Mutex::new(Vec::<NamedQuery>::new()));
     let captured = seen.clone();
-    let resolver: ResolveQueriesFn = Arc::new(move |queries, headers, user_id| {
+    let resolver: ResolveQueriesFn = Arc::new(move |queries, headers, claims, _namespace| {
         assert_eq!(
             headers
                 .get("authorization")
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer user-1")
         );
-        assert_eq!(user_id, "user-1");
+        assert_eq!(claims.user_id(), "user-1");
         *captured.lock().unwrap() = queries;
-        Box::pin(async { Ok(vec![item_query(None), item_query(Some("missing"))]) })
+        Box::pin(async {
+            Ok(resolved(
+                vec![item_query(None), item_query(Some("missing"))],
+                7,
+            ))
+        })
     });
 
     let mut config = custom_config();
     config.query_aware = true;
-    config.query_resolution = Some(QueryResolution {
-        resolve: resolver,
-        transform_version: 7,
-    });
+    config.query_resolution = Some(QueryResolution { resolve: resolver });
     let tmp = tempfile::tempdir().unwrap();
-    let router = test_host(config, tmp.path().to_path_buf()).into_router();
+    let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
 
     let body = json!({
         "clientID": "query-client",
@@ -398,18 +416,15 @@ async fn named_queries_are_batched_and_resolved_before_sqlite() {
 async fn configured_query_resolver_rejects_client_authored_ast() {
     let calls = Arc::new(Mutex::new(0));
     let captured = calls.clone();
-    let resolver: ResolveQueriesFn = Arc::new(move |_queries, _headers, _user_id| {
+    let resolver: ResolveQueriesFn = Arc::new(move |_queries, _headers, _user_id, _namespace| {
         *captured.lock().unwrap() += 1;
-        Box::pin(async { Ok(vec![item_query(None)]) })
+        Box::pin(async { Ok(resolved(vec![item_query(None)], 0)) })
     });
     let mut config = custom_config();
     config.query_aware = true;
-    config.query_resolution = Some(QueryResolution {
-        resolve: resolver,
-        transform_version: 0,
-    });
+    config.query_resolution = Some(QueryResolution { resolve: resolver });
     let tmp = tempfile::tempdir().unwrap();
-    let router = test_host(config, tmp.path().to_path_buf()).into_router();
+    let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
 
     let (status, response) = send(&router, pull_req("query-ns", &json!([]), "Bearer user-1")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -437,23 +452,20 @@ async fn query_resolution_preserves_pull_arrival_order() {
     let resume = Arc::new(tokio::sync::Notify::new());
     let signal_started = started.clone();
     let wait_for_resume = resume.clone();
-    let resolver: ResolveQueriesFn = Arc::new(move |_queries, _headers, _user_id| {
+    let resolver: ResolveQueriesFn = Arc::new(move |_queries, _headers, _user_id, _namespace| {
         let signal_started = signal_started.clone();
         let wait_for_resume = wait_for_resume.clone();
         Box::pin(async move {
             signal_started.notify_one();
             wait_for_resume.notified().await;
-            Ok(vec![item_query(None)])
+            Ok(resolved(vec![item_query(None)], 1))
         })
     });
     let mut config = custom_config();
     config.query_aware = true;
-    config.query_resolution = Some(QueryResolution {
-        resolve: resolver,
-        transform_version: 1,
-    });
+    config.query_resolution = Some(QueryResolution { resolve: resolver });
     let tmp = tempfile::tempdir().unwrap();
-    let router = test_host(config, tmp.path().to_path_buf()).into_router();
+    let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
 
     let first_router = router.clone();
     let first = tokio::spawn(async move {
@@ -521,15 +533,18 @@ async fn query_resolution_preserves_pull_arrival_order() {
 #[tokio::test]
 async fn transform_version_bump_revokes_stored_query_without_a_client_patch() {
     let tmp = tempfile::tempdir().unwrap();
-    let resolver: ResolveQueriesFn =
-        Arc::new(|_queries, _headers, _user_id| Box::pin(async { Ok(vec![item_query(None)]) }));
+    let resolver: ResolveQueriesFn = Arc::new(|queries, _headers, _claims, _namespace| {
+        Box::pin(async move {
+            Ok(resolved(
+                queries.iter().map(|_| item_query(None)).collect(),
+                1,
+            ))
+        })
+    });
     let mut first_config = custom_config();
     first_config.query_aware = true;
-    first_config.query_resolution = Some(QueryResolution {
-        resolve: resolver,
-        transform_version: 1,
-    });
-    let first_router = test_host(first_config, tmp.path().to_path_buf()).into_router();
+    first_config.query_resolution = Some(QueryResolution { resolve: resolver });
+    let first_router = test_host(first_config, tmp.path().to_path_buf()).into_router_trusted();
     let body = json!({
         "clientID": "query-client",
         "clientGroupID": "query-group",
@@ -558,8 +573,16 @@ async fn transform_version_bump_revokes_stored_query_without_a_client_patch() {
     let cookie = first_response["cookie"].clone();
     drop(first_router);
 
-    let resolver: ResolveQueriesFn = Arc::new(|_queries, _headers, _user_id| {
-        Box::pin(async { Ok(vec![item_query(Some("missing"))]) })
+    let resolver: ResolveQueriesFn = Arc::new(|queries, _headers, _claims, _namespace| {
+        Box::pin(async move {
+            Ok(resolved(
+                queries
+                    .iter()
+                    .map(|_| item_query(Some("missing")))
+                    .collect(),
+                2,
+            ))
+        })
     });
     let mut second_config = custom_config();
     second_config.initialize = Arc::new(|db| {
@@ -576,11 +599,8 @@ async fn transform_version_bump_revokes_stored_query_without_a_client_patch() {
         Ok(())
     });
     second_config.query_aware = true;
-    second_config.query_resolution = Some(QueryResolution {
-        resolve: resolver,
-        transform_version: 2,
-    });
-    let second_router = test_host(second_config, tmp.path().to_path_buf()).into_router();
+    second_config.query_resolution = Some(QueryResolution { resolve: resolver });
+    let second_router = test_host(second_config, tmp.path().to_path_buf()).into_router_trusted();
     let body = json!({
         "clientID": "query-client",
         "clientGroupID": "query-group",
@@ -627,18 +647,107 @@ async fn transform_version_bump_revokes_stored_query_without_a_client_patch() {
 }
 
 #[tokio::test]
+async fn admin_invalidation_refreshes_the_cached_query_transform_version() {
+    let resolver_state = Arc::new(Mutex::new((1_u64, 0_usize)));
+    let captured = resolver_state.clone();
+    let resolver: ResolveQueriesFn = Arc::new(move |queries, _headers, _claims, _namespace| {
+        let mut state = captured.lock().unwrap();
+        state.1 += 1;
+        let version = state.0;
+        Box::pin(async move {
+            Ok(resolved(
+                queries.iter().map(|_| item_query(None)).collect(),
+                version,
+            ))
+        })
+    });
+    let mut config = custom_config();
+    config.query_aware = true;
+    config.query_resolution = Some(QueryResolution { resolve: resolver });
+    let tmp = tempfile::tempdir().unwrap();
+    let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
+
+    let initial = json!({
+        "clientID": "query-client",
+        "clientGroupID": "query-group",
+        "cookie": null,
+        "queries": {
+            "version": 1,
+            "patch": [{
+                "op": "put",
+                "hash": "q-all",
+                "name": "item.all",
+                "args": [],
+            }],
+        },
+    });
+    let (status, initial_response) = send(
+        &router,
+        pull_req("invalidate-version-ns", &initial, "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(*resolver_state.lock().unwrap(), (1, 1));
+
+    let unchanged = json!({
+        "clientID": "query-client",
+        "clientGroupID": "query-group",
+        "cookie": initial_response["cookie"],
+    });
+    let (status, unchanged_response) = send(
+        &router,
+        pull_req("invalidate-version-ns", &unchanged, "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(*resolver_state.lock().unwrap(), (1, 1));
+
+    resolver_state.lock().unwrap().0 = 2;
+    let invalidate = Request::builder()
+        .method("POST")
+        .uri("/invalidate-version-ns/admin/invalidate")
+        .header("x-admin-key", ADMIN_TOKEN)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(send(&router, invalidate).await.0, StatusCode::OK);
+
+    let after_invalidation = json!({
+        "clientID": "query-client",
+        "clientGroupID": "query-group",
+        "cookie": unchanged_response["cookie"],
+    });
+    let (status, response) = send(
+        &router,
+        pull_req(
+            "invalidate-version-ns",
+            &after_invalidation,
+            "Bearer user-1",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(*resolver_state.lock().unwrap(), (2, 2));
+    assert_eq!(
+        response["gotQueries"],
+        json!({ "version": 1, "patch": [{ "op": "del", "hash": "q-all" }] })
+    );
+}
+
+#[tokio::test]
 async fn transform_version_bump_invalidates_each_client_when_it_checks_in() {
     let tmp = tempfile::tempdir().unwrap();
-    let resolver: ResolveQueriesFn = Arc::new(|queries, _headers, _user_id| {
-        Box::pin(async move { Ok(queries.iter().map(|_| item_query(None)).collect()) })
+    let resolver: ResolveQueriesFn = Arc::new(|queries, _headers, _user_id, _namespace| {
+        Box::pin(async move {
+            Ok(resolved(
+                queries.iter().map(|_| item_query(None)).collect(),
+                1,
+            ))
+        })
     });
     let mut first_config = custom_config();
     first_config.query_aware = true;
-    first_config.query_resolution = Some(QueryResolution {
-        resolve: resolver,
-        transform_version: 1,
-    });
-    let first_router = test_host(first_config, tmp.path().to_path_buf()).into_router();
+    first_config.query_resolution = Some(QueryResolution { resolve: resolver });
+    let first_router = test_host(first_config, tmp.path().to_path_buf()).into_router_trusted();
 
     let mut cookies = Vec::new();
     for (client, hash) in [("client-one", "q-one"), ("client-two", "q-two")] {
@@ -666,12 +775,15 @@ async fn transform_version_bump_invalidates_each_client_when_it_checks_in() {
     }
     drop(first_router);
 
-    let resolver: ResolveQueriesFn = Arc::new(|queries, _headers, _user_id| {
+    let resolver: ResolveQueriesFn = Arc::new(|queries, _headers, _user_id, _namespace| {
         Box::pin(async move {
-            Ok(queries
-                .iter()
-                .map(|_| item_query(Some("missing")))
-                .collect())
+            Ok(resolved(
+                queries
+                    .iter()
+                    .map(|_| item_query(Some("missing")))
+                    .collect(),
+                2,
+            ))
         })
     });
     let mut second_config = custom_config();
@@ -689,11 +801,8 @@ async fn transform_version_bump_invalidates_each_client_when_it_checks_in() {
         Ok(())
     });
     second_config.query_aware = true;
-    second_config.query_resolution = Some(QueryResolution {
-        resolve: resolver,
-        transform_version: 2,
-    });
-    let second_router = test_host(second_config, tmp.path().to_path_buf()).into_router();
+    second_config.query_resolution = Some(QueryResolution { resolve: resolver });
+    let second_router = test_host(second_config, tmp.path().to_path_buf()).into_router_trusted();
 
     let first_body = json!({
         "clientID": "client-one",
@@ -748,7 +857,7 @@ async fn transform_version_bump_invalidates_each_client_when_it_checks_in() {
 async fn health_endpoint_responds() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     let req = Request::builder()
         .uri("/admin/health")
@@ -758,6 +867,72 @@ async fn health_endpoint_responds() {
     let (_status, v) = send(&router, req).await;
     assert_eq!(v["ok"], json!(true));
     assert!(v["pid"].is_number());
+}
+
+#[tokio::test]
+async fn admin_lists_persisted_namespaces_in_lexical_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let router = test_host(custom_config(), tmp.path().to_path_buf()).into_router_trusted();
+
+    for namespace in ["project-z", "control", "project-a"] {
+        let (status, _) = send(&router, admin_sql_req(namespace, "SELECT 1", None, None)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let request = Request::builder()
+        .uri("/admin/namespaces")
+        .header("x-admin-key", ADMIN_TOKEN)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, response) = send(&router, request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        response,
+        json!({ "namespaces": ["control", "project-a", "project-z"] })
+    );
+}
+
+#[tokio::test]
+async fn admin_requires_a_loopback_peer_or_explicit_in_process_trust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let router = test_host(custom_config(), tmp.path().to_path_buf()).into_router();
+    let request = || {
+        Request::builder()
+            .uri("/admin/health")
+            .header("x-admin-key", ADMIN_TOKEN)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+
+    let (status, _) = send(&router, request()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let mut remote = request();
+    remote.extensions_mut().insert(ConnectInfo(
+        "203.0.113.10:4000".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let (status, _) = send(&router, remote).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let mut loopback = request();
+    loopback.extensions_mut().insert(ConnectInfo(
+        "127.0.0.1:4000".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let (status, _) = send(&router, loopback).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let trusted_tmp = tempfile::tempdir().unwrap();
+    let trusted =
+        test_host(custom_config(), trusted_tmp.path().to_path_buf()).into_router_trusted();
+    let (status, _) = send(&trusted, request()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut trusted_remote = request();
+    trusted_remote.extensions_mut().insert(ConnectInfo(
+        "203.0.113.10:4000".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let (status, _) = send(&trusted, trusted_remote).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[test]
@@ -775,7 +950,7 @@ fn default_hosts_generate_distinct_process_admin_tokens() {
 async fn admin_requires_token_and_rejects_browser_origins() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     let mut missing = admin_sql_req("test-ns", "SELECT 1 AS value", None, None);
     missing.headers_mut().remove("x-admin-key");
@@ -870,7 +1045,7 @@ async fn admin_requires_token_and_rejects_browser_origins() {
 async fn admin_sql_binds_typed_params_and_rejects_ambiguous_values() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     let (status, values) = send(
         &router,
@@ -994,7 +1169,7 @@ async fn admin_sql_binds_typed_params_and_rejects_ambiguous_values() {
 async fn admin_sql_binds_params_through_transaction_rollback() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
     let transaction_id = "tx-bound-rollback";
 
     let (status, _) = send(
@@ -1059,7 +1234,7 @@ async fn admin_sql_binds_params_through_transaction_rollback() {
 async fn browser_sync_requires_an_exact_allowed_origin() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
     let body = pull_body(None);
 
     let mut denied = pull_req("test-ns", &body, "Bearer user-1");
@@ -1109,7 +1284,7 @@ async fn browser_sync_requires_an_exact_allowed_origin() {
 async fn fresh_pull_returns_seed_data() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     let body = pull_body(None);
     let req = pull_req("test-ns", &body, "Bearer user-1");
@@ -1132,7 +1307,7 @@ async fn fresh_pull_returns_seed_data() {
 async fn push_applies_mutation_and_pull_sees_it() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     // push: create a new item
     let push_body = push_body(json!([mutation(
@@ -1164,7 +1339,7 @@ async fn push_applies_mutation_and_pull_sees_it() {
 async fn delegated_push_settlement_is_pull_visible_after_its_effects_and_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     let client_b_pull = json!({
         "clientID": "client-b",
@@ -1283,7 +1458,7 @@ async fn delegated_push_settlement_is_pull_visible_after_its_effects_and_idempot
 async fn delegated_push_settlement_ignores_unacknowledged_cleanup_mutations() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
     let push = json!({
         "clientGroupID": "cleanup-group",
         "mutations": [
@@ -1343,7 +1518,7 @@ async fn delegated_push_settlement_ignores_unacknowledged_cleanup_mutations() {
 async fn delegated_cleanup_only_settlement_needs_no_acknowledgement() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
     let push = json!({
         "clientGroupID": "cleanup-group",
         "mutations": [mutation(
@@ -1388,7 +1563,7 @@ async fn delegated_cleanup_only_settlement_needs_no_acknowledgement() {
 async fn delegated_push_settlement_rejects_a_mismatched_ack_without_advancing_lmid() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
     let push = json!({
         "clientGroupID": "shared-group",
         "mutations": [mutation(
@@ -1438,7 +1613,7 @@ async fn delegated_push_settlement_rejects_a_mismatched_ack_without_advancing_lm
 async fn app_error_advances_lmid_no_rows() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     // baseline pull to obtain a cookie
     let body = pull_body(None);
@@ -1479,7 +1654,7 @@ async fn app_error_advances_lmid_no_rows() {
 async fn two_namespaces_are_independent() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     // push to ns-a only
     let push_body = push_body(json!([mutation(
@@ -1504,10 +1679,60 @@ async fn two_namespaces_are_independent() {
 }
 
 #[tokio::test]
+async fn application_initialize_runs_once_for_a_persisted_namespace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let make_config = || {
+        let mut config = custom_config();
+        config.initialize = Arc::new(|db| {
+            db.exec(
+                "CREATE TABLE item (id text PRIMARY KEY, label text NOT NULL)",
+                &[],
+            )
+            .map_err(|error| error.0)?;
+            db.exec(
+                "INSERT INTO item (id, label) VALUES ('once', 'initialized once')",
+                &[],
+            )
+            .map_err(|error| error.0)
+        });
+        config
+    };
+
+    let first = test_host(make_config(), tmp.path().to_path_buf()).into_router_trusted();
+    let (status, _) = send(
+        &first,
+        pull_req("persisted", &pull_body(None), "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    drop(first);
+
+    let second = test_host(make_config(), tmp.path().to_path_buf()).into_router_trusted();
+    let (status, _) = send(
+        &second,
+        pull_req("persisted", &pull_body(None), "Bearer user-1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(
+        &second,
+        admin_sql_req(
+            "persisted",
+            "SELECT count(*) AS count FROM item WHERE id = 'once'",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["rows"][0]["count"], 1);
+}
+
+#[tokio::test]
 async fn admin_transaction_rolls_back_and_excludes_namespace_work() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
     let transaction_id = "tx-rollback";
 
     let (status, _) = send(
@@ -1569,7 +1794,7 @@ async fn admin_transaction_rolls_back_and_excludes_namespace_work() {
 async fn admin_transaction_commits_and_excludes_namespace_work() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
     let transaction_id = "tx-commit";
 
     let (status, _) = send(
@@ -1633,7 +1858,7 @@ async fn admin_transaction_commits_and_excludes_namespace_work() {
 async fn admin_transaction_wrong_id_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     let (status, _) = send(
         &router,
@@ -1664,7 +1889,7 @@ async fn admin_transaction_wrong_id_rejected() {
 async fn admin_transaction_duplicate_begin_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     let (status, _) = send(
         &router,
@@ -1692,7 +1917,7 @@ async fn admin_transaction_duplicate_begin_rejected() {
 async fn admin_transaction_malformed_steps_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     // a begin step whose SQL is not a canonical BEGIN.
     let (status, _) = send(
@@ -1779,7 +2004,7 @@ async fn admin_transaction_disconnect_recovers_namespace() {
         custom_config_with_lease(std::time::Duration::from_millis(150)),
         tmp.path().to_path_buf(),
     );
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     let (status, _) = send(
         &router,
@@ -1831,7 +2056,7 @@ async fn admin_transaction_disconnect_recovers_namespace() {
 async fn auth_rejection_returns_401() {
     let tmp = tempfile::tempdir().unwrap();
     let host = test_host(custom_config(), tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     let req = Request::builder()
         .method("POST")
@@ -1873,10 +2098,17 @@ async fn fixture_config_still_works() {
         initialize: fixture_init,
         mutate: fixture_mutate,
         visible: None,
-        authenticate: Arc::new(|headers: &HeaderMap| {
-            let value = headers.get("authorization")?.to_str().ok()?;
-            value.strip_prefix("Bearer token-").map(str::to_string)
+        authenticate: Arc::new(|headers, _namespace| {
+            Box::pin(async move {
+                headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("Bearer token-"))
+                    .map(AuthClaims::new)
+                    .ok_or_else(|| AuthError::unauthorized("missing auth"))
+            })
         }),
+        authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(()) })),
         retain_changes: 4096,
         max_change_rows: sync_core::Caps::default().max_change_rows,
         visibility_enabled: false,
@@ -1886,7 +2118,7 @@ async fn fixture_config_still_works() {
         retention: sync_native::retain::RetentionPolicy::disabled(),
     };
     let host = test_host(config, tmp.path().to_path_buf());
-    let router = host.into_router();
+    let router = host.into_router_trusted();
 
     // pull: should get the fixture seed (users, projects, members, tasks)
     let body = pull_body(None);

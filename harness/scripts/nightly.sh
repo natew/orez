@@ -8,7 +8,7 @@ export PATH="$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.local/share
 
 cd "$(dirname "$0")/../.."
 bun install --frozen-lockfile
-cargo build --release -p sync-native
+cargo build --release -p sync-native --bin sync-native-fixture
 cd harness
 bun install
 mkdir -p results

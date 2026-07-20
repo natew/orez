@@ -1,8 +1,8 @@
 // sync-native: a native axum + rusqlite host for the sync-core engine.
 //
 // this crate is both a library (embed the sync host in your Rust process)
-// and a binary (run a standalone sync server with fixture data for harness
-// testing). downstream Rust consumers add `sync-native` as a dependency,
+// and a binary (run a standalone sync server around application-owned HTTP
+// callbacks). downstream Rust consumers add `sync-native` as a dependency,
 // populate a `SyncNativeConfig`, and call `SyncNativeHost::run()`.
 //
 // the engine lives in sync-core; this crate is the native host shell:
@@ -19,6 +19,7 @@ pub mod obs;
 pub mod retain;
 pub mod seed;
 pub mod server;
+pub mod standalone;
 pub mod wake;
 
 use std::future::Future;
@@ -34,9 +35,78 @@ use namespace::Manager;
 use serde_json::Value;
 use sync_core::schema::Tables;
 
-/// Authentication callback. Receives HTTP request headers, returns
-/// `Some(user_id)` for an authenticated user, or `None` to reject.
-pub type AuthFn = Arc<dyn Fn(&HeaderMap) -> Option<String> + Send + Sync>;
+/// An authentication failure returned to the pull or push caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthError {
+    pub status: u16,
+    pub message: String,
+}
+
+impl AuthError {
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: 401,
+            message: message.into(),
+        }
+    }
+
+    pub fn upstream(message: impl Into<String>) -> Self {
+        Self {
+            status: 502,
+            message: message.into(),
+        }
+    }
+}
+
+/// Application-authenticated claims. `userID` is the only field interpreted by
+/// the engine; the full object remains available to query policy callbacks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuthClaims {
+    value: Value,
+    user_id: String,
+}
+
+impl AuthClaims {
+    pub fn new(user_id: impl Into<String>) -> Self {
+        let user_id = user_id.into();
+        assert!(!user_id.is_empty(), "auth claims userID must not be empty");
+        Self {
+            value: serde_json::json!({ "userID": user_id }),
+            user_id,
+        }
+    }
+
+    pub fn from_value(value: Value) -> Result<Self, String> {
+        let user_id = value
+            .as_object()
+            .and_then(|claims| claims.get("userID"))
+            .and_then(Value::as_str)
+            .filter(|user_id| !user_id.is_empty())
+            .ok_or_else(|| "normalized claims require a non-empty userID".to_string())?
+            .to_string();
+        Ok(Self { value, user_id })
+    }
+
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+}
+
+pub type AuthFuture = Pin<Box<dyn Future<Output = Result<AuthClaims, AuthError>> + Send>>;
+
+/// Authenticate an incoming request for one namespace. The callback is async
+/// so standalone hosts can delegate policy to their application server.
+pub type AuthFn = Arc<dyn Fn(HeaderMap, String) -> AuthFuture + Send + Sync>;
+
+pub type WakeAuthorizeFuture = Pin<Box<dyn Future<Output = Result<(), AuthError>> + Send>>;
+
+/// Validate a short-lived wake capability for one namespace before upgrading
+/// its advisory WebSocket.
+pub type AuthorizeWakeFn = Arc<dyn Fn(String, Option<String>) -> WakeAuthorizeFuture + Send + Sync>;
 
 /// One named desired query forwarded by a client for server-side resolution.
 #[derive(Clone, Debug, PartialEq)]
@@ -69,17 +139,25 @@ impl QueryResolveError {
 }
 
 pub type ResolveQueriesFuture =
-    Pin<Box<dyn Future<Output = Result<Vec<Value>, QueryResolveError>> + Send>>;
+    Pin<Box<dyn Future<Output = Result<ResolvedQueries, QueryResolveError>> + Send>>;
+
+/// Permission-checked ASTs and the application-owned version that participates
+/// in each desired-query cache key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedQueries {
+    pub asts: Vec<Value>,
+    pub transform_version: u64,
+}
 
 /// Resolve a batch of named desired queries into permission-checked Zero ASTs.
 /// The returned ASTs must match the input order and length.
-pub type ResolveQueriesFn =
-    Arc<dyn Fn(Vec<NamedQuery>, HeaderMap, String) -> ResolveQueriesFuture + Send + Sync>;
+pub type ResolveQueriesFn = Arc<
+    dyn Fn(Vec<NamedQuery>, HeaderMap, AuthClaims, String) -> ResolveQueriesFuture + Send + Sync,
+>;
 
 /// Server-owned query resolution and invalidation policy.
 pub struct QueryResolution {
     pub resolve: ResolveQueriesFn,
-    pub transform_version: u64,
 }
 
 /// Default idle-between-steps budget for a server-owned admin transaction. If
@@ -199,10 +277,14 @@ pub struct SyncNativeConfig {
     /// which a diff cannot express.
     pub visible: Option<VisibleFn>,
 
-    /// Authenticate an incoming request. Receives the raw HTTP headers.
-    /// Return `Some(user_id)` for an authenticated user, or `None` to
-    /// reject with HTTP 401.
+    /// Authenticate an incoming request. Receives the raw HTTP headers and
+    /// namespace. Return the authenticated user ID or an [`AuthError`].
     pub authenticate: AuthFn,
+
+    /// Authorize a WebSocket wake token for one namespace. Browser WebSockets
+    /// cannot attach an Authorization header, so applications mint a
+    /// short-lived namespace capability and validate it here.
+    pub authorize_wake: AuthorizeWakeFn,
 
     /// Change-log retention rows. A client whose cookie falls below the
     /// pruned floor gets a full snapshot on its next pull. Default: 4096.
@@ -244,7 +326,8 @@ pub struct SyncNativeConfig {
     /// authoritative SQLite files must remain disabled. When explicitly enabled,
     /// the host evicts idle namespace workers and deletes replicas that are stale
     /// or over budget, once at startup and then on a background timer. The timer
-    /// only runs when the host is started with [`SyncNativeHost::run`].
+    /// only runs when the host is started with [`SyncNativeHost::run`] or
+    /// [`SyncNativeHost::run_on`].
     pub retention: retain::RetentionPolicy,
 }
 
@@ -254,10 +337,11 @@ pub struct SyncNativeConfig {
 /// (namespace workers, wake channels, counters, fault injection).
 ///
 /// Construct with `SyncNativeHost::new(config, data_dir)`, then either
-/// call `run(port)` to start serving or `into_router()` to nest the
-/// router inside your own axum application.
+/// call `run(port)` to start serving or `into_router()` to nest the router
+/// inside an axum application that installs TCP peer metadata.
 pub struct SyncNativeHost {
     router: Router,
+    state: Arc<server::AppState>,
     admin_token: String,
     manager: Arc<Manager>,
     retention: retain::RetentionPolicy,
@@ -306,6 +390,7 @@ impl SyncNativeHost {
             wake::WakeRegistry::new(),
             ctx,
             config.authenticate,
+            config.authorize_wake,
             config.query_resolution,
             security.admin_token.clone(),
             security.allowed_origins,
@@ -315,6 +400,7 @@ impl SyncNativeHost {
 
         Self {
             router,
+            state,
             admin_token: security.admin_token,
             manager,
             retention,
@@ -329,16 +415,32 @@ impl SyncNativeHost {
         &self.admin_token
     }
 
-    /// Consume the host and return the axum Router for nesting inside
-    /// another axum application.
+    /// Consume the host and return the axum Router for nesting inside another
+    /// axum application. Admin routes fail closed when peer metadata is absent.
     pub fn into_router(self) -> Router {
+        self.router
+    }
+
+    /// Consume the host as an in-process router whose admin routes may be
+    /// called without TCP peer metadata. Non-loopback peers remain forbidden.
+    /// Use this only when the embedding process is the admin trust boundary.
+    pub fn into_router_trusted(self) -> Router {
+        self.state.trust_missing_admin_peer();
         self.router
     }
 
     /// Start serving on the given port (binds 127.0.0.1). Blocks until
     /// SIGINT or a fatal error.
     pub async fn run(self, port: u16) {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        self.run_on("127.0.0.1".parse().expect("valid loopback IP"), port)
+            .await;
+    }
+
+    /// Start serving on an explicit IP address. Standalone supervisors may bind
+    /// a public container interface while keeping every policy callback on
+    /// loopback. Admin routes still reject every non-loopback TCP peer.
+    pub async fn run_on(self, host: std::net::IpAddr, port: u16) {
+        let listener = tokio::net::TcpListener::bind((host, port))
             .await
             .expect("failed to bind");
 
@@ -358,9 +460,13 @@ impl SyncNativeHost {
             });
         }
 
-        axum::serve(listener, self.router)
-            .with_graceful_shutdown(server::shutdown_signal())
-            .await
-            .expect("server error");
+        axum::serve(
+            listener,
+            self.router
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(server::shutdown_signal())
+        .await
+        .expect("server error");
     }
 }

@@ -33,8 +33,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: harness install
         run: cd harness && bun install
-      - name: build engine
-        run: cargo build --release -p sync-native
+      - name: build fixture host
+        run: cargo build --release -p sync-native --bin sync-native-fixture
 
       - name: consistency lanes, fresh seeds
         run: |
@@ -81,8 +81,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: harness install
         run: cd harness && bun install
-      - name: build engine
-        run: cargo build --release -p sync-native
+      - name: build fixture host
+        run: cargo build --release -p sync-native --bin sync-native-fixture
 
       # gated soak: ~25 minutes of sustained rust-local load with hard pass/fail
       # invariants at every checkpoint (no client divergence, RSS ceiling,

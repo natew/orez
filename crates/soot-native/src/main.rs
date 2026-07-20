@@ -13,7 +13,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::http::HeaderMap;
 use serde::Deserialize;
 use serde_json::Value;
 use sync_core::SyncDb;
@@ -21,7 +20,9 @@ use sync_core::schema::{TableSpec, Tables};
 use sync_core::value::ZeroColumnType;
 use sync_native::engine::{InitFn, MutateFn};
 use sync_native::retain::RetentionPolicy;
-use sync_native::{AuthFn, SyncNativeConfig, SyncNativeHost, SyncNativeSecurity};
+use sync_native::{
+    AuthClaims, AuthError, AuthFn, SyncNativeConfig, SyncNativeHost, SyncNativeSecurity,
+};
 
 // ---- config file shapes ---------------------------------------------------
 
@@ -111,14 +112,16 @@ fn make_mutate() -> MutateFn {
 }
 
 fn make_auth() -> AuthFn {
-    Arc::new(|headers: &HeaderMap| {
-        let value = headers.get("authorization")?.to_str().ok()?;
-        let token = value.strip_prefix("Bearer ")?;
-        // the app worker mints tokens of the form "token-<userId>"
-        token
-            .strip_prefix("token-")
-            .filter(|user_id| !user_id.is_empty())
-            .map(str::to_string)
+    Arc::new(|headers, _namespace| {
+        Box::pin(async move {
+            let user_id = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer token-"))
+                .filter(|user_id| !user_id.is_empty())
+                .ok_or_else(|| AuthError::unauthorized("missing auth"))?;
+            Ok(AuthClaims::new(user_id))
+        })
     })
 }
 
@@ -217,6 +220,7 @@ async fn main() {
         mutate,
         visible: None,
         authenticate,
+        authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(()) })),
         retain_changes: cfg.retain_changes,
         max_change_rows: sync_core::pull::Caps::default().max_change_rows,
         visibility_enabled: cfg.visibility_enabled,

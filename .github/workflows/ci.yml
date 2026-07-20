@@ -338,8 +338,8 @@ jobs:
           restore-keys: |
             rust-${{ runner.os }}-
 
-      - name: build sync-native (release)
-        run: cargo build --release -p sync-native
+      - name: build sync-native fixture (release)
+        run: cargo build --release -p sync-native --bin sync-native-fixture
 
       # root install: the harness imports repo-root src and workspace packages;
       # the root prepare script builds orez-sync-executor's dist
@@ -467,8 +467,8 @@ jobs:
       - name: harness install
         run: cd harness && bun install
 
-      - name: build sync-native (release)
-        run: cargo build --release -p sync-native
+      - name: build sync-native fixture (release)
+        run: cargo build --release -p sync-native --bin sync-native-fixture
 
       - name: pinned upstream corpus ledger
         run: cd harness && bun src/corpus-check.ts

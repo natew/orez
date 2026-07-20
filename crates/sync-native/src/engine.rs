@@ -123,7 +123,16 @@ pub fn read_watermark(conn: &Connection) -> i64 {
 // _zsync_* schema + triggers. triggers install AFTER the seed so seed rows
 // stay out of the change log. idempotent across restart.
 pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), String> {
-    (ctx.init_fn)(db)?;
+    let initialized = !db
+        .query(
+            "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = '_zsync_meta'",
+            &[],
+        )
+        .map_err(|error| error.0)?
+        .is_empty();
+    if !initialized {
+        (ctx.init_fn)(db)?;
+    }
     sync_core::schema::init_schema(db, &ctx.tables).map_err(|e| e.0)?;
     // the query-aware tables are idempotent + unused in baseline mode, so
     // install them always so a namespace can serve query-aware pulls.

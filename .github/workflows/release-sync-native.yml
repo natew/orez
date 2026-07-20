@@ -1,0 +1,140 @@
+name: Release sync-native
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: sync-native-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.12
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.94.0
+
+      - name: Validate package plan
+        id: plan
+        shell: bash
+        run: |
+          if [ '${{ github.ref }}' != 'refs/heads/main' ]; then
+            echo 'sync-native releases must run from main' >&2
+            exit 1
+          fi
+          git fetch origin main --no-tags
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            echo 'sync-native releases must use the current main commit' >&2
+            exit 1
+          fi
+          successful_ci_runs="$(
+            gh api \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=completed&per_page=100" \
+              --jq '[.workflow_runs[] | select(.conclusion == "success")] | length'
+          )"
+          if [ "$successful_ci_runs" -eq 0 ]; then
+            echo "CI has not passed for $GITHUB_SHA" >&2
+            exit 1
+          fi
+          version="$(bun scripts/sync-native-package.ts version)"
+          bun scripts/sync-native-package.ts check "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(bun scripts/sync-native-package.ts matrix darwin-arm64)" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  launcher:
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - run: npm install --global npm@12.0.1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.12
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.94.0
+
+      - name: Publish launcher before platform binaries
+        shell: bash
+        run: |
+          version='${{ needs.plan.outputs.version }}'
+          bun scripts/sync-native-package.ts prepare-launcher \
+            .release/launcher \
+            "$version" \
+            '${{ github.sha }}'
+          if npm view "orez-sync-native@$version" version --json >/dev/null 2>&1; then
+            published_commit="$(npm view "orez-sync-native@$version" orezSourceCommit)"
+            if [ "$published_commit" != '${{ github.sha }}' ]; then
+              echo "orez-sync-native@$version came from $published_commit, not ${{ github.sha }}" >&2
+              exit 1
+            fi
+            echo "orez-sync-native@$version already has this source commit"
+          else
+            npm publish .release/launcher --ignore-scripts --access public
+          fi
+
+  mac-arm64:
+    needs: [plan, launcher]
+    runs-on: macos-15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: ./.github/actions/build-publish-sync-native
+        with:
+          id: darwin-arm64
+          target: aarch64-apple-darwin
+          executable: sync-native
+          version: ${{ needs.plan.outputs.version }}
+
+  remaining-platforms:
+    needs: [plan, launcher]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: ./.github/actions/build-publish-sync-native
+        with:
+          id: ${{ matrix.id }}
+          target: ${{ matrix.target }}
+          executable: ${{ matrix.executable }}
+          version: ${{ needs.plan.outputs.version }}
+          libc: ${{ matrix.libc }}

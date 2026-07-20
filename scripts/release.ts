@@ -23,6 +23,11 @@ import {
   orderReleasePackages,
   selectLocalReleasePackages,
 } from './release-package-order.js'
+import {
+  currentSyncNativePlatform,
+  prepareLauncherPackage,
+  preparePlatformPackage,
+} from './sync-native-package.js'
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
@@ -178,6 +183,34 @@ if (into) {
     })
   }
 
+  const nativePlatform = currentSyncNativePlatform()
+  if (!nativePlatform) {
+    throw new Error(`sync-native does not support ${process.platform} ${process.arch}`)
+  }
+  run('cargo build --release -p sync-native --bin sync-native')
+  const nativePlatformDir = resolve(tmpDir, 'native-platform')
+  const nativeBinary = resolve(root, 'target', 'release', nativePlatform.executable)
+  preparePlatformPackage(nativePlatform.id, nativeBinary, nativePlatformDir)
+  const nativePlatformPkg = JSON.parse(
+    readFileSync(resolve(nativePlatformDir, 'package.json'), 'utf8')
+  )
+  pkgDirs.push({
+    name: nativePlatformPkg.name,
+    dir: nativePlatformDir,
+    pkg: nativePlatformPkg,
+  })
+
+  const nativeLauncherDir = resolve(tmpDir, 'native-launcher')
+  prepareLauncherPackage(nativeLauncherDir)
+  const nativeLauncherPkg = JSON.parse(
+    readFileSync(resolve(nativeLauncherDir, 'package.json'), 'utf8')
+  )
+  pkgDirs.push({
+    name: nativeLauncherPkg.name,
+    dir: nativeLauncherDir,
+    pkg: nativeLauncherPkg,
+  })
+
   const installed = new Set(
     pkgDirs
       .filter(({ name }) => existsSync(join(targetDir, 'node_modules', name)))
@@ -323,6 +356,10 @@ if (packOnly && !patch && !minor && !major && !canary) {
 
 // version map for resolving workspace:* at publish time
 const versionMap = new Map(packages.map((p) => [p.pkg.name, p.next]))
+const nativeLauncherPkg = JSON.parse(
+  readFileSync(resolve(root, 'packages', 'orez-sync-native', 'package.json'), 'utf8')
+)
+versionMap.set(nativeLauncherPkg.name, nativeLauncherPkg.version)
 
 for (const p of packages) {
   if (packOnly) {
@@ -430,7 +467,12 @@ for (const p of packages) {
   const tmpPkgPath = join(tmpDir, 'package.json')
   const tmpPkg = JSON.parse(readFileSync(tmpPkgPath, 'utf-8'))
   tmpPkg.version = p.next
-  for (const depField of ['dependencies', 'devDependencies', 'peerDependencies']) {
+  for (const depField of [
+    'dependencies',
+    'devDependencies',
+    'peerDependencies',
+    'optionalDependencies',
+  ]) {
     const deps = tmpPkg[depField]
     if (!deps) continue
     for (const dep of Object.keys(deps)) {

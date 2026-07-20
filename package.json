@@ -109,6 +109,7 @@
     "test:chat:smoke": "bun scripts/test-chat-integration.ts --smoke",
     "test:chat:e2e": "bun scripts/test-chat-e2e.ts",
     "release": "bun scripts/release.ts",
+    "release:native:prepare": "bun scripts/set-sync-native-version.ts",
     "perf:load": "bun run perf/load/harness.ts",
     "perf:memory": "bun run perf/memory/profile.ts",
     "perf:write-profile": "bun run build && bun run perf/write-amplification/build-production-shape.ts && bun run perf/write-amplification/production-shape.ts",
@@ -151,6 +152,9 @@
       "optional": true
     }
   },
+  "optionalDependencies": {
+    "orez-sync-native": "workspace:*"
+  },
   "devDependencies": {
     "@rocicorp/zero": "1.7.0",
     "@rocicorp/zero-sqlite3": "1.1.2",
@@ -176,7 +180,9 @@
     "packages/drizzle-zero-sqlite",
     "packages/sync-executor",
     "packages/sync-cf-host",
-    "packages/sync-browser-host"
+    "packages/sync-browser-host",
+    "packages/orez-sync-native",
+    "packages/sync-native-*"
   ],
   "trustedDependencies": [
     "@rocicorp/zero-sqlite3"

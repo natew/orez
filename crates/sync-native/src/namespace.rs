@@ -95,9 +95,9 @@ enum Job {
 // the boxed statement a Query step runs inside its admin transaction.
 type TxQueryFn = Box<dyn FnOnce(&Connection) -> Result<Vec<Row>, DbError> + Send>;
 
-// runs once on a fresh worker connection to install the app tables + seed and
-// the engine's _zsync_* schema/triggers. injected by main.rs so this module
-// stays free of the fixture and engine.
+// initializes a worker connection. the callback decides whether application
+// initialization is needed and always converges the engine schema/triggers.
+// spawn wraps it in one transaction.
 pub type InitFn = Arc<dyn Fn(&mut dyn SyncDb) -> Result<(), String> + Send + Sync>;
 
 pub struct Namespace {
@@ -385,9 +385,19 @@ fn spawn(
                 }
             };
             {
+                if let Err(error) = conn.execute_batch("BEGIN IMMEDIATE") {
+                    let _ = ready_tx.send(Err(error.to_string()));
+                    return;
+                }
                 let mut db = RusqliteDb::new(&conn);
                 if let Err(e) = init(&mut db) {
+                    let _ = conn.execute_batch("ROLLBACK");
                     let _ = ready_tx.send(Err(e));
+                    return;
+                }
+                if let Err(error) = conn.execute_batch("COMMIT") {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    let _ = ready_tx.send(Err(error.to_string()));
                     return;
                 }
             }
@@ -471,6 +481,30 @@ impl Manager {
             },
         );
         Ok(namespace)
+    }
+
+    pub fn persisted_namespaces(&self) -> Result<Vec<String>, String> {
+        let mut namespaces = Vec::new();
+        for entry in std::fs::read_dir(&self.data_dir).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if !entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_file()
+            {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(namespace) = name.to_str().and_then(|name| name.strip_suffix(".sqlite"))
+            else {
+                continue;
+            };
+            if sanitize(namespace).is_ok() {
+                namespaces.push(namespace.to_string());
+            }
+        }
+        namespaces.sort_unstable();
+        Ok(namespaces)
     }
 
     // run one retention pass: evict idle workers, then delete on-disk replicas
