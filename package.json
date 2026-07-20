@@ -43,6 +43,10 @@
       "types": "./dist/wake.d.ts",
       "import": "./dist/wake.js"
     },
+    "./naming": {
+      "types": "./dist/naming.d.ts",
+      "import": "./dist/naming.js"
+    },
     "./zero-http/mount": {
       "types": "./dist/zero-http/mount.d.ts",
       "import": "./dist/zero-http/mount.js"
