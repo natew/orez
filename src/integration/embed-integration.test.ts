@@ -92,6 +92,8 @@ describe('zero-cache embed integration', { timeout: 120000 }, () => {
   let zeroPort: number
   let pgPort: number
   let dataDir: string
+  const clientGroupID = `test-cg-${Date.now()}`
+  const sockets: WebSocket[] = []
 
   beforeAll(async () => {
     // use random ports to avoid conflicts with other tests
@@ -171,6 +173,7 @@ describe('zero-cache embed integration', { timeout: 120000 }, () => {
   }, 120000)
 
   afterAll(async () => {
+    for (const socket of sockets) socket.close()
     if (embed) await embed.stop()
     if (pgServer) pgServer.close()
     if (instances) {
@@ -192,66 +195,19 @@ describe('zero-cache embed integration', { timeout: 120000 }, () => {
   })
 
   test('accepts WebSocket connections', async () => {
-    const cg = `test-cg-${Date.now()}`
-    const cid = `test-client-${Date.now()}`
-    const secProtocol = encodeSecProtocols(
-      [
-        'initConnection',
-        {
-          desiredQueriesPatch: [],
-          clientSchema: {
-            tables: {
-              foo: {
-                columns: {
-                  id: { type: 'string' },
-                  value: { type: 'string' },
-                  num: { type: 'number' },
-                },
-                primaryKey: ['id'],
-              },
-            },
-          },
-        },
-      ],
-      undefined
-    )
-    const ws = new WebSocket(
-      `ws://localhost:${zeroPort}/sync/v${SYNC_PROTOCOL_VERSION}/connect` +
-        `?clientGroupID=${cg}&clientID=${cid}&wsid=ws1&schemaVersion=1&baseCookie=&ts=${Date.now()}&lmid=0`,
-      secProtocol
-    )
+    const downstream = new Queue<unknown>()
+    const ws = connectAndSubscribe(zeroPort, downstream, clientGroupID)
+    sockets.push(ws)
 
-    // collect messages — attach listener before open to catch everything
-    const messages: unknown[] = []
-    ws.on('message', (data) => {
-      messages.push(JSON.parse(data.toString()))
-    })
+    await drainInitialPokes(downstream)
 
-    const connected = new Promise<void>((resolve, reject) => {
-      ws.on('open', resolve)
-      ws.on('error', reject)
-      setTimeout(() => reject(new Error('ws connect timeout')), 10000)
-    })
-
-    await connected
-
-    // wait for messages to arrive
-    const deadline = Date.now() + 10000
-    while (
-      Date.now() < deadline &&
-      !messages.some((m) => Array.isArray(m) && m[0] === 'connected')
-    ) {
-      await new Promise((r) => setTimeout(r, 100))
-    }
-
-    const connectedMsg = messages.find((m) => Array.isArray(m) && m[0] === 'connected')
-    expect(connectedMsg).toMatchObject(['connected', { wsid: 'ws1' }])
-    ws.close()
+    expect(ws.readyState).toBe(WebSocket.OPEN)
   })
 
   test('live replication: insert triggers poke', async () => {
     const downstream = new Queue<unknown>()
-    const ws = connectAndSubscribe(zeroPort, downstream)
+    const ws = connectAndSubscribe(zeroPort, downstream, clientGroupID)
+    sockets.push(ws)
 
     await drainInitialPokes(downstream)
 
@@ -274,8 +230,6 @@ describe('zero-cache embed integration', { timeout: 120000 }, () => {
         }),
       ])
     )
-
-    ws.close()
   })
 
   // sootbean points zero clients at `https://host/p-<projectId>` — the zero
@@ -288,7 +242,8 @@ describe('zero-cache embed integration', { timeout: 120000 }, () => {
   // drops it fails here instead of in downstream prefixed deployments.
   test('syncs through a p-<id> server path prefix', async () => {
     const downstream = new Queue<unknown>()
-    const ws = connectAndSubscribe(zeroPort, downstream, '/p-abc123')
+    const ws = connectAndSubscribe(zeroPort, downstream, clientGroupID, '/p-abc123')
+    sockets.push(ws)
 
     await drainInitialPokes(downstream)
 
@@ -311,18 +266,18 @@ describe('zero-cache embed integration', { timeout: 120000 }, () => {
         }),
       ])
     )
-
-    ws.close()
   })
 })
+
+let nextClientID = 0
 
 function connectAndSubscribe(
   port: number,
   downstream: Queue<unknown>,
+  clientGroupID: string,
   basePath = ''
 ): WebSocket {
-  const cg = `test-cg-${Date.now()}`
-  const cid = `test-client-${Date.now()}`
+  const clientID = `test-client-${++nextClientID}`
   const secProtocol = encodeSecProtocols(
     [
       'initConnection',
@@ -355,7 +310,7 @@ function connectAndSubscribe(
   )
   const ws = new WebSocket(
     `ws://localhost:${port}${basePath}/sync/v${SYNC_PROTOCOL_VERSION}/connect` +
-      `?clientGroupID=${cg}&clientID=${cid}&wsid=ws1&schemaVersion=1&baseCookie=&ts=${Date.now()}&lmid=0`,
+      `?clientGroupID=${clientGroupID}&clientID=${clientID}&wsid=ws1&schemaVersion=1&baseCookie=&ts=${Date.now()}&lmid=0`,
     secProtocol
   )
 
@@ -367,20 +322,16 @@ function connectAndSubscribe(
 }
 
 async function drainInitialPokes(downstream: Queue<unknown>) {
-  let settled = false
-  const timeout = Date.now() + 30000
+  const deadline = Date.now() + 30000
 
-  while (!settled && Date.now() < timeout) {
-    const msg = (await downstream.dequeue('timeout' as any, 3000)) as any
-    if (msg === 'timeout') {
-      settled = true
-    } else if (Array.isArray(msg) && msg[0] === 'pokeEnd') {
-      const next = (await downstream.dequeue('timeout' as any, 2000)) as any
-      if (next === 'timeout') {
-        settled = true
-      }
-    }
+  while (Date.now() < deadline) {
+    const remaining = Math.max(1000, deadline - Date.now())
+    const msg = (await downstream.dequeue('timeout' as any, remaining)) as any
+    if (msg === 'timeout') break
+    if (Array.isArray(msg) && msg[0] === 'pokeEnd') return
   }
+
+  throw new Error('timed out waiting for initial poke')
 }
 
 async function waitForPokePart(
