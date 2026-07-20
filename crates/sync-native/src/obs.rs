@@ -52,16 +52,20 @@ impl Counters {
     }
 }
 
-// a stable 64-bit FNV-1a of the namespace as 16 hex chars, mirroring the CF host's
-// namespaceHash field. native namespaces are raw strings (not DO id hashes), so
-// we hash here to keep the field shape parallel and avoid logging raw names.
-pub fn namespace_hash(ns: &str) -> String {
+// a stable 64-bit FNV-1a as 16 hex chars.
+pub fn stable_hash(value: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in ns.bytes() {
+    for byte in value.bytes() {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x00000100000001b3);
     }
     format!("{hash:016x}")
+}
+
+// hash native namespace names to mirror the CF host's namespaceHash field
+// without logging raw names.
+pub fn namespace_hash(ns: &str) -> String {
+    stable_hash(ns)
 }
 
 // count of desired-query `put` ops in a pull body (the query-aware requests that

@@ -249,10 +249,17 @@ pub struct SyncNativeConfig {
     /// Usually derived from your Zero `createSchema()` result.
     pub tables: Tables,
 
-    /// Called whenever a namespace database is opened to install or migrate
-    /// app DDL and optional seed data. The callback must be idempotent. It runs
-    /// inside a transaction before the engine installs its `_zsync_*` schema.
-    /// Return `Err(String)` to fail opening the namespace.
+    /// Stable identity for the current application initializer. A namespace
+    /// skips `initialize` when this matches its durable marker. Change it
+    /// whenever the initializer's DDL, migration, or seed behavior changes.
+    pub initialize_version: String,
+
+    /// Installs or migrates app DDL and optional seed data when
+    /// `initialize_version` changes. The callback must be idempotent because
+    /// stores created before initializer versioning run it once during their
+    /// upgrade. It runs inside a transaction before the engine installs its
+    /// `_zsync_*` change-tracking schema. Return `Err(String)` to fail opening
+    /// the namespace.
     ///
     /// The engine's internal schema and triggers are installed
     /// automatically after this runs; you do not need to manage them.
@@ -376,6 +383,7 @@ impl SyncNativeHost {
             max_change_rows: config.max_change_rows,
             visibility_enabled: config.visibility_enabled,
             query_aware: config.query_aware,
+            init_version: config.initialize_version,
             init_fn: config.initialize,
             mutate_fn: config.mutate,
             visible_fn: config.visible,

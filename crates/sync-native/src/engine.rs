@@ -21,10 +21,11 @@ use crate::fault::{FaultKind, FaultPoint, FaultRegistry};
 
 // ---- config types -------------------------------------------------------
 
-/// Called whenever a namespace database is opened to install or migrate app
-/// DDL and optional seed data. The callback must be idempotent. It runs inside
-/// a transaction before the engine installs its _zsync_* schema. Return
-/// Err(String) to fail opening the namespace.
+/// Installs or migrates app DDL and optional seed data when the configured
+/// initializer version changes. The callback must be idempotent because stores
+/// created before initializer versioning run it once during their upgrade. It
+/// runs inside a transaction before the engine installs its _zsync_* schema.
+/// Return Err(String) to fail opening the namespace.
 pub type InitFn = Arc<dyn Fn(&mut dyn SyncDb) -> Result<(), String> + Send + Sync>;
 
 /// Runs a named mutator inside the push transaction. Return Ok(()) for
@@ -55,6 +56,7 @@ pub struct EngineContext {
     // full-namespace pull. a namespace serves one consumer kind, not a mix.
     pub query_aware: bool,
     // consumer-provided callbacks
+    pub(crate) init_version: String,
     pub(crate) init_fn: InitFn,
     pub(crate) mutate_fn: MutateFn,
     pub(crate) visible_fn: Option<VisibleFn>,
@@ -120,11 +122,35 @@ pub fn read_watermark(conn: &Connection) -> i64 {
 
 // ---- worker init ---------------------------------------------------------
 
-// worker init: install or migrate the app tables (consumer), then the engine's
-// _zsync_* schema + triggers. on a fresh database the triggers install after
-// seed data, so those initial rows stay out of the change log.
+// worker init: install or migrate the app tables when their version changes,
+// then the engine's _zsync_* schema + triggers. on a fresh database the
+// triggers install after seed data, so those initial rows stay out of the
+// change log.
 pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), String> {
-    (ctx.init_fn)(db)?;
+    db.exec(
+        "CREATE TABLE IF NOT EXISTS _zsync_app_init (
+            lock INTEGER PRIMARY KEY CHECK (lock = 1),
+            version TEXT NOT NULL
+        )",
+        &[],
+    )
+    .map_err(|error| error.0)?;
+    let is_current = !db
+        .query(
+            "SELECT version FROM _zsync_app_init WHERE lock = 1 AND version = ?",
+            &[SqlValue::Text(ctx.init_version.clone())],
+        )
+        .map_err(|error| error.0)?
+        .is_empty();
+    if !is_current {
+        (ctx.init_fn)(db)?;
+        db.exec(
+            "INSERT INTO _zsync_app_init (lock, version) VALUES (1, ?)
+             ON CONFLICT (lock) DO UPDATE SET version = excluded.version",
+            &[SqlValue::Text(ctx.init_version.clone())],
+        )
+        .map_err(|error| error.0)?;
+    }
     sync_core::schema::init_schema(db, &ctx.tables).map_err(|e| e.0)?;
     // the query-aware tables are idempotent + unused in baseline mode, so
     // install them always so a namespace can serve query-aware pulls.

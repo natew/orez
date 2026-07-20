@@ -221,6 +221,10 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
     if init_sql.iter().any(|statement| statement.trim().is_empty()) {
         return Err("init SQL statements must not be empty".to_string());
     }
+    let initialize_version = crate::obs::stable_hash(
+        &serde_json::to_string(&init_sql)
+            .map_err(|error| format!("failed to identify init SQL: {error}"))?,
+    );
     let admin_token = std::env::var(&config.admin_token_env)
         .map_err(|_| format!("environment variable {} is not set", config.admin_token_env))?;
     if admin_token.len() < 32 {
@@ -271,6 +275,7 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
     let host = SyncNativeHost::new_with_security(
         SyncNativeConfig {
             tables,
+            initialize_version,
             initialize,
             mutate,
             visible: None,

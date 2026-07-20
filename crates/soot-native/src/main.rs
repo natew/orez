@@ -216,6 +216,7 @@ async fn main() {
 
     let config = SyncNativeConfig {
         tables,
+        initialize_version: sync_native::obs::stable_hash(&raw),
         initialize,
         mutate,
         visible: None,

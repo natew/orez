@@ -457,8 +457,9 @@ impl Manager {
         }
     }
 
-    // get-or-create the namespace's worker. creation opens the file and seeds
-    // it, which is quick and only happens once per namespace per process.
+    // get-or-create the namespace's worker. creation opens the file and checks
+    // its initializer version, which is quick and only happens once per
+    // namespace per process.
     // holding the lock across spawn (which opens the connection) makes get,
     // eviction, and the file sweep mutually exclusive, so a namespace's file is
     // never open by two connections at once.

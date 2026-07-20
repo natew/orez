@@ -172,6 +172,7 @@ async fn main() {
 
     let config = SyncNativeConfig {
         tables: fixture::build_tables(),
+        initialize_version: "fixture-v1".to_string(),
         initialize,
         mutate,
         visible,

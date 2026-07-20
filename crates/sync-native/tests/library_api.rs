@@ -6,6 +6,7 @@
 // 3. pull/push work with a custom schema
 // 4. explicit trusted-router construction works for in-process embedding
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::connect_info::ConnectInfo;
@@ -132,6 +133,7 @@ fn custom_config() -> SyncNativeConfig {
 fn custom_config_with_lease(admin_tx_lease: std::time::Duration) -> SyncNativeConfig {
     SyncNativeConfig {
         tables: custom_tables(),
+        initialize_version: "test-v1".to_string(),
         initialize: custom_init(),
         mutate: custom_mutate(),
         visible: None,
@@ -1783,11 +1785,14 @@ async fn two_namespaces_are_independent() {
 }
 
 #[tokio::test]
-async fn application_initialize_reapplies_idempotently_for_a_persisted_namespace() {
+async fn application_initialize_is_skipped_for_a_current_persisted_namespace() {
     let tmp = tempfile::tempdir().unwrap();
+    let initialize_calls = Arc::new(AtomicUsize::new(0));
     let make_config = || {
         let mut config = custom_config();
-        config.initialize = Arc::new(|db| {
+        let initialize_calls = initialize_calls.clone();
+        config.initialize = Arc::new(move |db| {
+            initialize_calls.fetch_add(1, Ordering::SeqCst);
             db.exec(
                 "CREATE TABLE IF NOT EXISTS item (id text PRIMARY KEY, label text NOT NULL)",
                 &[],
@@ -1830,6 +1835,7 @@ async fn application_initialize_reapplies_idempotently_for_a_persisted_namespace
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["rows"][0]["count"], 1);
+    assert_eq!(initialize_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1844,6 +1850,16 @@ async fn application_initialize_migrates_a_populated_persisted_namespace() {
     )]));
     let (status, _) = send(&first, push_req("upgraded", &push, "Bearer user-1")).await;
     assert_eq!(status, StatusCode::OK);
+    let (status, response) = send(
+        &first,
+        admin_sql_req("upgraded", "DROP TABLE _zsync_app_init", None, None),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "failed to simulate an unversioned persisted store: {response}"
+    );
     drop(first);
 
     let mut upgraded_tables = Tables::new();
@@ -1862,6 +1878,7 @@ async fn application_initialize_migrates_a_populated_persisted_namespace() {
     );
     let mut upgraded_config = custom_config();
     upgraded_config.tables = upgraded_tables;
+    upgraded_config.initialize_version = "test-v2".to_string();
     upgraded_config.initialize = Arc::new(|db| {
         let has_category = !db
             .query(
@@ -2268,6 +2285,7 @@ async fn fixture_config_still_works() {
     let tmp = tempfile::tempdir().unwrap();
     let config = SyncNativeConfig {
         tables: fixture::build_tables(),
+        initialize_version: "fixture-v1".to_string(),
         initialize: fixture_init,
         mutate: fixture_mutate,
         visible: None,

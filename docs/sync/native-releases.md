@@ -38,13 +38,15 @@ configured value. Native requests without `Origin` remain allowed, while admin
 routes reject every request that contains `Origin`.
 
 `zero-schema.json` is the ordinary Zero schema object. `init-sql.json` is an
-ordered JSON array of idempotent SQL strings. Orez reapplies that array whenever
-it opens a namespace, inside the same transaction and before installing or
-updating its internal schema and triggers. This ordering lets an existing
-namespace reach the application shape referenced by the current Zero schema
-before Orez uses that shape. Application-owned data migrations can also run
-through the serialized `/<namespace>/admin/sql` transaction before the
-supervisor reports ready. Supervisors discover those namespaces through
+ordered JSON array of idempotent SQL strings. Orez hashes that array and stores
+the hash in each namespace. It applies the array when the hash changes, inside
+the same transaction and before installing or updating its internal schema and
+triggers. A namespace already on the current hash performs one metadata lookup
+and skips the application initializer. This ordering lets an existing namespace
+reach the application shape referenced by the current Zero schema before Orez
+uses that shape. Application-owned data migrations can also run through the
+serialized `/<namespace>/admin/sql` transaction before the supervisor reports
+ready. Supervisors discover those namespaces through
 `GET /admin/namespaces` with the process `x-admin-key`; its response is
 `{ "namespaces": [...] }` in lexical order. The on-disk filename layout is not
 an application contract.
