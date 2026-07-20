@@ -1,8 +1,8 @@
-// @vitest-environment jsdom
-import { createEmitter } from './emitter'
 import { UpdateNeededReasonType } from '@rocicorp/zero'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
+// @vitest-environment jsdom
+import { createEmitter } from './emitter'
 import {
   classifyZeroRecoveryLog,
   composeRecoveryLogSink,
@@ -11,8 +11,8 @@ import {
   resetRecoveryStateForTests,
 } from './recoverZeroClient'
 
-import type { ScheduleReloadContext, ZeroRecoveryDeps } from './recoverZeroClient'
 import type { ZeroEvent } from '../types'
+import type { ScheduleReloadContext, ZeroRecoveryDeps } from './recoverZeroClient'
 
 let emitterSeq = 0
 
@@ -48,6 +48,7 @@ describe('zero recovery', () => {
     expect(events).toEqual([
       {
         type: 'recovering',
+        reasonKey: 'SchemaVersionNotSupported',
         reason: expect.stringContaining('SchemaVersionNotSupported'),
       },
     ])
@@ -210,7 +211,7 @@ describe('zero recovery', () => {
     expect(
       classifyZeroRecoveryLog('error', ['Error running.', sqliteError]),
     ).toMatchObject({
-      reason: 'sqlite-statement-finalized',
+      reasonKey: 'sqlite-statement-finalized',
       dropLocalState: true,
     })
     expect(
@@ -224,7 +225,7 @@ describe('zero recovery', () => {
     expect(classifyZeroRecoveryLog('error', ['Store is closed'], 10_000)).toBeUndefined()
     expect(classifyZeroRecoveryLog('error', ['Store is closed'], 11_000)).toBeUndefined()
     expect(classifyZeroRecoveryLog('error', ['Store is closed'], 14_000)).toMatchObject({
-      reason: 'store-closed-repeat',
+      reasonKey: 'store-closed-repeat',
       dropLocalState: true,
     })
     resetRecoveryStateForTests()
@@ -272,6 +273,7 @@ describe('zero recovery', () => {
     expect(deleteLocalState).toHaveBeenCalledTimes(1)
     expect(events).toContainEqual({
       type: 'recovering',
+      reasonKey: 'client-state-not-found',
       reason: 'client state not found',
     })
   })
@@ -436,11 +438,11 @@ describe('zero recovery', () => {
     ]
     for (const [args, reason] of cases) {
       expect(classifyZeroRecoveryLog('error', args)).toMatchObject({
-        reason,
+        reasonKey: reason,
         dropLocalState: true,
       })
     }
-    // still narrow: app-infra strings and non-error levels do NOT classify.
+    // ack timeouts use the typed mutation path; synthetic strings do not classify.
     expect(
       classifyZeroRecoveryLog('error', ['consecutive server-ack timeouts']),
     ).toBeUndefined()
@@ -450,9 +452,9 @@ describe('zero recovery', () => {
     expect(classifyZeroRecoveryLog('warn', ['ClientNotFound'])).toBeUndefined()
   })
 
-  test('benignLogFilter suppresses recovery for a matching classified log', async () => {
+  test('benignLogPatterns suppress recovery for matching classified logs', async () => {
     const { deps, deleteLocalState, reload } = setup()
-    deps.benignLogFilter = (message) => message.includes('ClientNotFound')
+    deps.benignLogPatterns = ['ClientNotFound']
     const sink = composeRecoveryLogSink(deps)
     sink.log('error', undefined, 'ClientNotFound: gone')
     await flush()

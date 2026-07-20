@@ -48,8 +48,19 @@ export {
   composeRecoveryLogSink,
   isRecoverableZeroStalePokeMessage,
   type ZeroRecoveryLogClassification,
-  type ZeroRecoveryLogReason,
   type ZeroRecoveryDeps,
   type ScheduleReloadContext,
   type RecoveryGuardStorage,
+  type ZeroLogPattern,
 } from './helpers/recoverZeroClient'
+
+export {
+  isStaleGenerationError,
+  mutationErrorMessage,
+  MutationResultError,
+  MutationTimeoutError,
+  StaleGenerationError,
+  type BackgroundMutationOptions,
+  type MutationLike,
+  type MutationPhase,
+} from './helpers/mutationLifecycle'

@@ -23,7 +23,7 @@ const fakeZero = vi.hoisted(() => {
       complete: Promise.resolve(),
     }))
 
-    constructor() {
+    constructor(readonly options: Record<string, any>) {
       instances.push(this)
     }
   }
@@ -41,6 +41,7 @@ vi.mock('@rocicorp/zero', async (importOriginal) => {
 })
 
 import { createZeroClient } from './createZeroClient'
+import { resetRecoveryStateForTests } from './helpers/recoverZeroClient'
 
 declare global {
   // eslint-disable-next-line no-var
@@ -62,6 +63,8 @@ let container: HTMLDivElement
 let root: Root | null
 
 beforeEach(() => {
+  window.sessionStorage.clear()
+  resetRecoveryStateForTests()
   fakeZero.instances.length = 0
   container = document.createElement('div')
   root = null
@@ -169,4 +172,97 @@ test('remint with no provider mounted returns false without burning the guard bu
     await Promise.resolve()
   })
   expect(result).toBe(true)
+})
+
+test('two consecutive server acknowledgement timeouts enter normal recovery', async () => {
+  vi.useFakeTimers()
+  try {
+    const isolated = createZeroClient({
+      schema,
+      models: {},
+      groupedQueries: {},
+      instanceName: 'ack-timeout-recovery-test',
+    })
+    let scheduled:
+      | {
+          reasonKey: string
+          performReload: () => Promise<void>
+        }
+      | undefined
+
+    root = createRoot(container)
+    await act(async () => {
+      root?.render(
+        <isolated.ProvideZero
+          cacheURL="http://127.0.0.1:7777/zero"
+          userID="ack-timeout"
+          scheduleReload={(context) => {
+            scheduled = context
+          }}
+        >
+          <span>ok</span>
+        </isolated.ProvideZero>,
+      )
+      await Promise.resolve()
+    })
+
+    const timeout = async (label: string) => {
+      const result = isolated.awaitMutationServer(
+        { client: Promise.resolve({}), server: new Promise(() => {}) },
+        label,
+        10,
+      )
+      const timedOut = expect(result).rejects.toMatchObject({
+        name: 'MutationTimeoutError',
+        phase: 'server',
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10)
+      })
+      await timedOut
+    }
+
+    await timeout('first write')
+    expect(scheduled).toBeUndefined()
+    await timeout('second write')
+    expect(scheduled).toMatchObject({ reasonKey: 'server-ack-timeout' })
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('transport and app benign log patterns suppress classified recovery', async () => {
+  const isolated = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName: 'transport-log-classification-test',
+  })
+  const scheduleReload = vi.fn()
+  const install = vi.fn()
+  root = createRoot(container)
+  await act(async () => {
+    root?.render(
+      <isolated.ProvideZero
+        cacheURL="http://127.0.0.1:7777/zero"
+        userID="transport-log"
+        transport={{
+          install,
+          logClassifications: { benign: ['ClientNotFound'] },
+        }}
+        benignLogPatterns={[/sent mutation ID .* but expected/]}
+        scheduleReload={scheduleReload}
+      >
+        <span>ok</span>
+      </isolated.ProvideZero>,
+    )
+    await Promise.resolve()
+  })
+
+  const instance = fakeZero.instances.at(-1)!
+  instance.options.logSink.log('error', undefined, 'ClientNotFound: cold boot')
+  instance.options.logSink.log('error', undefined, 'sent mutation ID 5 but expected 4')
+  await Promise.resolve()
+  expect(install).toHaveBeenCalledOnce()
+  expect(scheduleReload).not.toHaveBeenCalled()
 })

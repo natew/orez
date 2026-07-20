@@ -10,8 +10,6 @@ import {
   ZeroContext,
   ZeroProvider,
 } from '@rocicorp/zero/react'
-import { createEmitter, type Emitter } from './helpers/emitter'
-import { IS_SERVER_RUNTIME } from './helpers/platform'
 import {
   createContext,
   memo,
@@ -24,6 +22,7 @@ import {
   type Context,
   type ReactNode,
 } from 'react'
+
 import { createPermissions } from './createPermissions'
 import {
   createUseQuery,
@@ -31,13 +30,17 @@ import {
   type UseQueryHook,
 } from './createUseQuery'
 import { createMutators } from './helpers/createMutators'
+import { createEmitter, type Emitter } from './helpers/emitter'
 import { getAuth } from './helpers/getAuth'
+import { createMutationLifecycle } from './helpers/mutationLifecycle'
+import { IS_SERVER_RUNTIME } from './helpers/platform'
 import {
   composeRecoveryLogSink,
   isRecoverableZeroStalePokeMessage,
   makeZeroRecovery,
   type RecoveryGuardStorage,
   type ScheduleReloadContext,
+  type ZeroLogPattern,
   type ZeroRecoveryDeps,
 } from './helpers/recoverZeroClient'
 import { registerClientInstance } from './instanceRegistry'
@@ -49,6 +52,7 @@ import { getEnvironment, setAuthData, setEnvironment, setSchema } from './state'
 import { getRawWhere, setEvaluatingPermission } from './where'
 import { setRunner, type ZeroRunner } from './zeroRunner'
 import { zql } from './zql'
+
 import type { AuthData, GenericModels, GetZeroMutators, ZeroEvent } from './types'
 import type {
   AnyQueryRegistry,
@@ -71,6 +75,9 @@ export type PermissionStrategy = 'optimistic' | 'optimistic-deny' | 'optimistic-
 
 export type ZeroProviderTransport = {
   install(serverURL: string): unknown
+  logClassifications?: {
+    benign?: readonly ZeroLogPattern[]
+  }
 }
 
 export type WaitForZeroOptions = {
@@ -85,6 +92,9 @@ export type CreateZeroClientOptions<
   models: Models
   groupedQueries: GroupedQueries
   permissionStrategy?: PermissionStrategy
+  // repeated server acknowledgement timeouts are a desync signal. one timeout
+  // remains a normal slow-server failure; recovery begins at this threshold.
+  serverAckTimeoutRecoveryThreshold?: number
   // names this client instance so multiple instances can coexist on one page.
   // each query/mutator namespace is claimed by exactly one instance, and the
   // ambient run() + the combineZeroClients facade dispatch by that claim.
@@ -142,6 +152,7 @@ export function createZeroClientInternal<
   groupedQueries,
   permissionStrategy = 'optimistic',
   instanceName = 'default',
+  serverAckTimeoutRecoveryThreshold = 2,
   createDirectUseQuery,
 }: CreateZeroClientOptions<Schema, Models> & {
   createDirectUseQuery?: DirectQueryAdapter<Schema>
@@ -349,6 +360,21 @@ export function createZeroClientInternal<
 
   const zeroEvents = createEmitter<ZeroEvent | null>(`zero${emitterScope}`, null)
 
+  let recoverFromAckTimeout: (input: {
+    label: string
+    timeoutMs: number
+    consecutiveTimeouts: number
+  }) => void = () => {}
+  const ackTimeoutRecoveryThreshold =
+    Number.isFinite(serverAckTimeoutRecoveryThreshold) &&
+    serverAckTimeoutRecoveryThreshold >= 2
+      ? Math.floor(serverAckTimeoutRecoveryThreshold)
+      : 2
+  const mutationLifecycle = createMutationLifecycle({
+    ackTimeoutRecoveryThreshold,
+    recoverFromAckTimeout: (input) => recoverFromAckTimeout(input),
+  })
+
   const zeroInstanceVersion = createDirectUseQuery
     ? createEmitter<number>(`zero-instance-version${emitterScope}`, 0)
     : null
@@ -479,6 +505,7 @@ export function createZeroClientInternal<
   function invalidateZeroInstance(instanceToInvalidate: ZeroInstance | null): void {
     if (!instanceToInvalidate) return
 
+    mutationLifecycle.fence()
     if (clearZeroInstanceReferences(instanceToInvalidate)) {
       zeroInstanceVersion?.emit(zeroInstanceVersion.value + 1)
     }
@@ -492,6 +519,7 @@ export function createZeroClientInternal<
   async function deleteZeroInstance(
     instanceToDelete: ZeroInstance | null,
   ): Promise<unknown> {
+    mutationLifecycle.fence()
     try {
       return await instanceToDelete?.delete()
     } finally {
@@ -589,9 +617,9 @@ export function createZeroClientInternal<
     // cross-reload loop-guard backing store; defaults to sessionStorage on web.
     // inject a native KV so Hermes gets real cross-reload protection.
     guardStorage?: RecoveryGuardStorage
-    // return true for a classified recovery log the app wants treated as benign
-    // (its own cold-boot timeout, say) so it does NOT trigger recovery.
-    benignLogFilter?: (message: string) => boolean
+    // expected recovery signatures supplied as data. transport patterns and app
+    // patterns are combined; neither replaces the built-in classification.
+    benignLogPatterns?: readonly ZeroLogPattern[]
     // called when the connection needs auth; return a fresh token to reconnect
     // in place. lets an expired token auto-recover without a reload.
     refreshAuth?: () => Promise<string | undefined>
@@ -634,7 +662,7 @@ export function createZeroClientInternal<
     beforeReload,
     scheduleReload,
     guardStorage,
-    benignLogFilter,
+    benignLogPatterns,
     refreshAuth,
     connectionDataset,
     disable,
@@ -702,6 +730,9 @@ export function createZeroClientInternal<
         .sort(([a], [b]) => (a < b ? -1 : 1)),
       hasAuth,
       transport,
+      benignLogPatterns?.map((pattern) =>
+        typeof pattern === 'string' ? pattern : `/${pattern.source}/${pattern.flags}`,
+      ),
       remintGeneration,
     ])
 
@@ -718,6 +749,7 @@ export function createZeroClientInternal<
     // until the commit-safe rotation effect below closes or reuses it.
     useLayoutEffect(() => {
       if (latestZeroInstance && (disable || cachedZero?.key !== instanceKey)) {
+        mutationLifecycle.fence()
         unpublishZeroInstance(latestZeroInstance)
       }
     }, [disable, instanceKey])
@@ -755,6 +787,7 @@ export function createZeroClientInternal<
           // the replacement's SetZeroInstance effect publishes one version
           // change; clearing the old references here must not emit a second.
           clearZeroInstanceReferences(cached.instance)
+          mutationLifecycle.fence()
           cached.instance.close()
         }
         // recovery closures reach the instance through this ref so they always
@@ -767,9 +800,14 @@ export function createZeroClientInternal<
           beforeReload,
           scheduleReload,
           guardStorage,
-          benignLogFilter,
+          benignLogPatterns: [
+            ...(transport?.logClassifications?.benign ?? []),
+            ...(benignLogPatterns ?? []),
+          ],
+          onRecovery: () => mutationLifecycle.fence(),
         }
         const recovery = makeZeroRecovery(recoveryDeps)
+        recoverFromAckTimeout = recovery.onServerAckTimeout
         const createdInstance = new ZeroClient<Schema, ZeroMutators>({
           kvStore: 'mem',
           ...options,
@@ -861,6 +899,7 @@ export function createZeroClientInternal<
     // runner before descendant effects perform imperative work.
     if (zeroInstance !== latestZeroInstance) {
       latestZeroInstance = zeroInstance
+      mutationLifecycle.activate()
       const runner: ZeroRunner = (query, options) =>
         zeroInstance.run(query as any, options)
       // the instance-keyed runner is what run() dispatches owned namespaces
@@ -948,7 +987,12 @@ export function createZeroClientInternal<
         if (name !== prevState.current) {
           prevState.current = name
           if (name === 'error' || name === 'needs-auth') {
-            zeroEvents.emit({ type: 'error', message: reason || name })
+            zeroEvents.emit({
+              type: 'error',
+              reasonKey:
+                name === 'needs-auth' ? 'connection-needs-auth' : 'connection-error',
+              message: reason || name,
+            })
           }
         }
       }, [state, zeroEvents, zeroInstance, refreshAuth, exposeDataset, datasetCacheUrl])
@@ -1020,5 +1064,8 @@ export function createZeroClientInternal<
     getQuery,
     waitForZero,
     remint,
+    enqueueBackgroundMutation: mutationLifecycle.enqueueBackgroundMutation,
+    awaitMutationClient: mutationLifecycle.awaitMutationClient,
+    awaitMutationServer: mutationLifecycle.awaitMutationServer,
   }
 }

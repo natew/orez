@@ -1,13 +1,8 @@
 import { createBuilder, mustGetQuery } from '@rocicorp/zero'
 import { asQueryInternals } from '@rocicorp/zero/bindings'
-// type-only: @rocicorp/zero/server pulls node and postgresql formatting in, and
-// importing it eagerly means merely importing on-zero/server drags that into a
-// browser worker. the real import happens inside transformQueryRequest, which
-// only ever runs on a server.
-import type { handleQueryRequest as zeroHandleQueryRequest } from '@rocicorp/zero/server'
-import { createAsyncContext } from './helpers/asyncContext'
 
 import { createPermissions } from './createPermissions'
+import { createAsyncContext } from './helpers/asyncContext'
 import { createMutators } from './helpers/createMutators'
 import { getScopedAuthData, runWithAuthScope } from './helpers/mutatorContext'
 import { runWithQueryContext } from './helpers/queryContext'
@@ -19,6 +14,7 @@ import { setRunner } from './zeroRunner'
 
 import type {
   AdminRoleMode,
+  AsyncActionEnvelope,
   AuthData,
   GenericModels,
   MutatorContext,
@@ -32,6 +28,11 @@ import type {
   Schema as ZeroSchema,
   ServerTransaction as RocicorpServerTransaction,
 } from '@rocicorp/zero'
+// type-only: @rocicorp/zero/server pulls node and postgresql formatting in, and
+// importing it eagerly means merely importing on-zero/server drags that into a
+// browser worker. the real import happens inside transformQueryRequest, which
+// only ever runs on a server.
+import type { handleQueryRequest as zeroHandleQueryRequest } from '@rocicorp/zero/server'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue =
@@ -141,14 +142,24 @@ export type ServerMutate<Models extends GenericModels> = {
   }
 }
 
+export type ZeroServerActionsConfig<Action extends AsyncActionEnvelope> = {
+  // used by runtimes that can execute application effects locally.
+  execute(action: Action): void | Promise<void>
+  // when present, this is the selected route. failures do not fall back to
+  // local execution, which prevents an action from running twice.
+  dispatchRemote?(action: Action): void | Promise<void>
+}
+
 export type CreateZeroServerBindingsOptions<
   Schema extends ZeroSchema,
   Models extends GenericModels,
   ServerActions extends Record<string, unknown>,
+  Action extends AsyncActionEnvelope = never,
 > = {
   schema: Schema
   models: Models
   createServerActions: () => ServerActions
+  actions?: ZeroServerActionsConfig<Action>
   queries?: AnyQueryRegistry
   mutations?: Record<string, Record<string, unknown>>
   validateQuery?: ValidateQueryFn
@@ -188,8 +199,9 @@ export function createZeroServerBindings<
   Schema extends ZeroSchema,
   Models extends GenericModels,
   ServerActions extends Record<string, unknown>,
+  Action extends AsyncActionEnvelope = never,
 >(
-  options: CreateZeroServerBindingsOptions<Schema, Models, ServerActions>,
+  options: CreateZeroServerBindingsOptions<Schema, Models, ServerActions, Action>,
 ): ZeroServerBindings<Schema, Models> {
   setSchema(options.schema, createBuilder(options.schema))
   setEnvironment('server')
@@ -206,6 +218,17 @@ export function createZeroServerBindings<
     authData: AuthData | null
     ctx: Parameters<ZeroServerMutatorRegistry<Schema>[string]>[0]['ctx']
   }>()
+  const executeAction = options.actions
+    ? (options.actions.dispatchRemote ?? options.actions.execute)
+    : null
+  const enqueueTask: NonNullable<MutatorContext['server']>['enqueueTask'] = (
+    task,
+    taskOptions,
+  ) => {
+    const current = invocation.get()
+    if (!current) throw new Error('on-zero task scheduled outside a server mutation')
+    current.ctx.defer(() => runWithAuthScope(current.authData, task), taskOptions)
+  }
   const decoratedMutators = createMutators({
     authData: null,
     can: permissions.can,
@@ -223,10 +246,12 @@ export function createZeroServerBindings<
         }
       : undefined,
     resolveAuthData: () => invocation.get()?.authData ?? null,
-    enqueueTask(task, taskOptions) {
-      const current = invocation.get()
-      if (!current) throw new Error('on-zero task scheduled outside a server mutation')
-      current.ctx.defer(() => runWithAuthScope(current.authData, task), taskOptions)
+    enqueueTask,
+    enqueueAction(action, actionOptions) {
+      if (!executeAction) {
+        throw new Error(`on-zero async actions are not configured`)
+      }
+      enqueueTask(() => Promise.resolve(executeAction(action as Action)), actionOptions)
     },
   }) as Record<string, Record<string, (tx: Transaction, args: unknown) => Promise<void>>>
 

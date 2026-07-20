@@ -1,8 +1,7 @@
-import { mapObject } from './mapObject'
-import { time } from './time'
-
 import { getAuthData } from '../state'
+import { mapObject } from './mapObject'
 import { runWithContext } from './mutatorContext'
+import { time } from './time'
 
 import type {
   AuthData,
@@ -27,6 +26,7 @@ export function createMutators<Models extends GenericModels>({
   authData,
   createServerActions,
   enqueueTask = () => {},
+  enqueueAction = () => {},
   can,
   models,
   validateMutation,
@@ -38,6 +38,7 @@ export function createMutators<Models extends GenericModels>({
   can: Can
   models: Models
   enqueueTask?: NonNullable<MutatorContext['server']>['enqueueTask']
+  enqueueAction?: NonNullable<MutatorContext['server']>['enqueueAction']
   createServerActions?: () => Record<string, any>
   validateMutation?: ValidateMutationFn
   /** valibot schemas keyed by model.mutationName, auto-validates args before running */
@@ -66,6 +67,7 @@ export function createMutators<Models extends GenericModels>({
             ? ({
                 actions: serverActions || {},
                 enqueueTask,
+                enqueueAction,
               } as MutatorContext['server'])
             : undefined,
       }

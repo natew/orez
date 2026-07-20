@@ -1,7 +1,8 @@
 import { createSchema, defineQueries, defineQuery, string, table } from '@rocicorp/zero'
 import * as v from 'valibot'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
+import { getScopedAuthData } from './helpers/mutatorContext'
 import {
   authDataToClaims,
   createZeroServerBindings,
@@ -9,7 +10,6 @@ import {
   type ZeroServerMutatorRegistry,
   type ZeroServerTransaction,
 } from './server'
-import { getScopedAuthData } from './helpers/mutatorContext'
 import { zql } from './zql'
 
 import type { AuthData, MutatorContext } from './types'
@@ -190,5 +190,100 @@ describe('createZeroServerBindings', () => {
     expect(JSON.stringify(ast)).toContain('ownerId')
     expect(JSON.stringify(ast)).toContain('user-1')
     expect(validatedQueryAuth).toBe('user-1')
+  })
+
+  test('enqueues typed actions through the configured local executor', async () => {
+    type Action =
+      | { type: 'project.provisionNamespace'; projectId: string }
+      | { type: 'project.invalidateAccess'; projectId: string }
+
+    const executed: Action[] = []
+    let releaseBackground: () => void = () => {}
+    const backgroundGate = new Promise<void>((resolve) => {
+      releaseBackground = resolve
+    })
+    const bindings = createZeroServerBindings({
+      schema,
+      models: {
+        project: {
+          mutate: {
+            create: async ({ server }: MutatorContext, value: ProjectRow) => {
+              const enqueueAction = server?.enqueueAction as (
+                action: Action,
+                options?: { barrier?: boolean },
+              ) => void
+              enqueueAction(
+                { type: 'project.provisionNamespace', projectId: value.id },
+                { barrier: true },
+              )
+              enqueueAction({ type: 'project.invalidateAccess', projectId: value.id })
+            },
+          },
+        },
+      },
+      createServerActions: () => ({}),
+      actions: {
+        async execute(action: Action) {
+          if (action.type === 'project.invalidateAccess') await backgroundGate
+          executed.push(action)
+        },
+      },
+    })
+    const { executor, scheduledBackground } = createTestExecutor(bindings.mutators, [])
+
+    await executor.execute(
+      'project|create',
+      { id: 'project-1', ownerId: 'user-1', name: 'first' },
+      authDataToClaims({ id: 'user-1' }),
+    )
+    expect(executed).toEqual([
+      { type: 'project.provisionNamespace', projectId: 'project-1' },
+    ])
+    releaseBackground()
+    await Promise.all(scheduledBackground)
+    expect(executed).toEqual([
+      { type: 'project.provisionNamespace', projectId: 'project-1' },
+      { type: 'project.invalidateAccess', projectId: 'project-1' },
+    ])
+  })
+
+  test('selects remote dispatch once and never falls back to local execution', async () => {
+    type Action = { type: 'durable.run'; operationId: string }
+    const execute = vi.fn(async (_action: Action) => {})
+    const dispatchRemote = vi.fn(async (_action: Action) => {
+      throw new Error('remote unavailable')
+    })
+    const bindings = createZeroServerBindings({
+      schema,
+      models: {
+        project: {
+          mutate: {
+            create: async ({ server }: MutatorContext) => {
+              const enqueueAction = server?.enqueueAction as (
+                action: Action,
+                options?: { barrier?: boolean },
+              ) => void
+              enqueueAction(
+                { type: 'durable.run', operationId: 'operation-1' },
+                { barrier: true },
+              )
+            },
+          },
+        },
+      },
+      createServerActions: () => ({}),
+      actions: { execute, dispatchRemote },
+    })
+    const { executor } = createTestExecutor(bindings.mutators, [])
+
+    await expect(
+      executor.execute(
+        'project|create',
+        { id: 'project-1', ownerId: 'user-1', name: 'first' },
+        authDataToClaims({ id: 'user-1' }),
+      ),
+    ).rejects.toThrow('remote unavailable')
+    expect(dispatchRemote).toHaveBeenCalledOnce()
+    expect(execute).not.toHaveBeenCalled()
   })
 })

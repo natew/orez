@@ -1,3 +1,5 @@
+import type { NullToOptional } from './helpers/NullToOptional'
+import type { TupleToUnion } from './helpers/tuple'
 import type {
   Condition,
   ExpressionBuilder,
@@ -7,8 +9,6 @@ import type {
   Schema as ZeroSchema,
   Transaction as ZeroTransaction,
 } from '@rocicorp/zero'
-import type { NullToOptional } from './helpers/NullToOptional'
-import type { TupleToUnion } from './helpers/tuple'
 
 /**
  * ➗0️⃣ START OVERRIDDEN TYPES
@@ -36,6 +36,7 @@ interface DefaultConfig {
   schema: ZeroSchema
   authData: {}
   serverActions: null
+  asyncAction: never
 }
 
 interface FinalConfig extends Omit<DefaultConfig, keyof Config>, Config {}
@@ -58,6 +59,15 @@ export type ServerActions =
   FinalConfig['serverActions'] extends Record<string, unknown>
     ? FinalConfig['serverActions']
     : Record<string, unknown>
+
+export type AsyncActionEnvelope = {
+  readonly type: string
+  readonly [field: string]: unknown
+}
+
+export type AsyncAction = FinalConfig['asyncAction'] extends AsyncActionEnvelope
+  ? FinalConfig['asyncAction']
+  : never
 
 export type QueryBuilder = SchemaQuery<Schema>
 
@@ -88,6 +98,7 @@ export type MutatorContext = {
      * through a new instance. Barrier tasks finish before the push response.
      */
     enqueueTask(task: AsyncTask, opts?: AsyncTaskOptions): void
+    enqueueAction(action: AsyncAction, opts?: AsyncTaskOptions): void
   }
   can: Can
 }
@@ -150,11 +161,29 @@ export type TablePrimaryKeys<TS extends GenericTable> = TupleToUnion<
 >
 
 export type ZeroEvent =
-  | { type: 'error'; message: string }
+  | {
+      type: 'error'
+      reasonKey: 'connection-error' | 'connection-needs-auth'
+      message: string
+    }
   // recovery lifecycle: 'recovering' = dropping local state + reloading;
   // 'fatal' = recovery already attempted (loop guard tripped), not reloading.
-  | { type: 'recovering'; reason: string }
-  | { type: 'fatal'; reason: string }
+  | { type: 'recovering'; reasonKey: ZeroRecoveryReasonKey; reason: string }
+  | { type: 'fatal'; reasonKey: ZeroRecoveryReasonKey; reason: string }
+
+export type ZeroRecoveryReasonKey =
+  | 'NewClientGroup'
+  | 'VersionNotSupported'
+  | 'SchemaVersionNotSupported'
+  | 'client-state-not-found'
+  | 'indexeddb-not-found'
+  | 'sqlite-statement-finalized'
+  | 'store-closed-repeat'
+  | 'mutation-desync'
+  | 'connection-cookie-invalid'
+  | 'client-not-found'
+  | 'connection-userid-mismatch'
+  | 'server-ack-timeout'
 
 /**
  * Admin role bypass for permissions:

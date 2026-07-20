@@ -712,6 +712,7 @@ type MutatorContext = {
   server?: {
     actions: ServerActions // async server functions
     enqueueTask(task: AsyncTask, opts?: { barrier?: boolean }): void
+    enqueueAction(action: AsyncAction, opts?: { barrier?: boolean }): void
   }
 }
 ```
@@ -742,6 +743,64 @@ export const mutate = mutations('message', permissions, {
 response by default. Pass `{ barrier: true }` only when the client's next writes
 depend on the effect, such as provisioning a namespace before the client writes
 through a new Zero instance.
+
+### typed async actions
+
+for effects that may need to cross a worker or service-binding boundary, augment
+`Config.asyncAction` with a discriminated union and configure one executor on the
+server bindings:
+
+```ts
+type AppAction =
+  | { type: 'project.provisionNamespace'; projectId: string; userId: string }
+  | { type: 'project.invalidateAccess'; projectId: string }
+
+declare module 'on-zero' {
+  interface Config {
+    asyncAction: AppAction
+  }
+}
+
+const zeroBindings = createZeroServerBindings({
+  schema,
+  models,
+  createServerActions,
+  actions: {
+    execute: executeAppAction,
+    // when this runtime cannot execute app effects locally, inject a remote
+    // dispatcher. it becomes the only route; a failure never runs locally too.
+    dispatchRemote,
+  },
+})
+```
+
+mutators call `ctx.server?.enqueueAction(action, { barrier })`. on-zero schedules
+it through the same post-commit task mechanism as `enqueueTask`, preserving the
+barrier and auth scope without a global dispatcher.
+
+### awaiting and queueing mutations
+
+each `createZeroClient` result owns settlement helpers and one serial background
+queue:
+
+```ts
+await client.awaitMutationClient(client.zero.mutate.note.update(note), 'save note')
+await client.awaitMutationServer(client.zero.mutate.note.insert(note), 'create note')
+
+void client.enqueueBackgroundMutation(
+  'stream note',
+  () => client.zero.mutate.note.update(note),
+  { coalesceKey: `note:${note.id}` },
+)
+```
+
+the queue settles the client commit by default; use `settle: 'server'` only when
+later work requires the authoritative server row. same-key work that has not
+started is superseded by the newest write. recovery and instance replacement
+fence queued and in-flight work internally. direct settlement rejects with
+`StaleGenerationError`; the best-effort background queue drops that condition
+quietly. `MutationTimeoutError`, `MutationResultError`, and
+`mutationErrorMessage()` expose typed failure details.
 
 ## getAuth
 
@@ -794,9 +853,9 @@ drops the affected instance's local store and reloads the page ONCE. this covers
   `…LastMutationID`, `ClientNotFound`, `connection userID mismatch`. these
   surface only through the error log, so the log sink recovers on them too.
 
-genuinely app-infra signatures (your own synthesized ack-timeout marker, a
-cold-boot connect timeout) are NOT in this list — keep those app-side and use
-`benignLogFilter` to stop them from tripping recovery.
+two consecutive server acknowledgement timeouts also recover by default. one
+timeout remains a normal slow-server failure. configure the threshold with
+`serverAckTimeoutRecoveryThreshold` on `createZeroClient`.
 
 ### the hooks (all optional props on `ProvideZero`)
 
@@ -825,9 +884,10 @@ cold-boot connect timeout) are NOT in this list — keep those app-side and use
   (e.g. wait for the dev origin to come back so the reload doesn't hit a
   restarting server). composes with `scheduleReload`.
 
-- **`benignLogFilter?: (message) => boolean`** — return `true` for a classified
-  recovery log you want treated as benign so it does NOT recover (your app's
-  cold-boot timeout, say). only affects recovery; the log still reaches the sink.
+- **`benignLogPatterns?: readonly (string | RegExp)[]`**: classified recovery
+  logs matching one of these patterns remain benign. a client transport can
+  provide its own patterns through `transport.logClassifications.benign`; app and
+  transport patterns are combined. the log still reaches the sink.
 
 - **`refreshAuth?: () => Promise<string | undefined>`** — called when the
   connection enters `needs-auth` (an expired token). return a fresh token and
@@ -841,6 +901,11 @@ cold-boot connect timeout) are NOT in this list — keep those app-side and use
   onto `document.body.dataset.zero*` (`zeroState`, `zeroConnected`,
   `zeroReason`, `zeroCacheUrl`) for e2e/diagnostics. enable on ONE instance so
   multiple instances don't clobber the dataset.
+
+`zeroEvents` always carries a typed `reasonKey`. recovery events use
+`ZeroRecoveryReasonKey`; connection errors use `connection-error` or
+`connection-needs-auth`, so consumers can switch on stable keys instead of
+matching message strings.
 
 ### guard + latch semantics
 

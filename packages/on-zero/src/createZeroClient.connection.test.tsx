@@ -138,6 +138,10 @@ test('installs the supplied client transport for the provider server', async () 
 
 test('refreshAuth reconnects in place on needs-auth, once per transition', async () => {
   const refreshAuth = vi.fn(async () => 'fresh-token')
+  const events: Array<{ type: string; reasonKey?: string }> = []
+  const off = client.zeroEvents.listen((event) => {
+    if (event) events.push(event)
+  })
   const instance = await mount({ refreshAuth }, 'conn-auth')
 
   await act(async () => {
@@ -150,6 +154,12 @@ test('refreshAuth reconnects in place on needs-auth, once per transition', async
     await Promise.resolve()
   })
   expect(instance.connection.connect).toHaveBeenCalledWith({ auth: 'fresh-token' })
+  expect(events).toContainEqual({
+    type: 'error',
+    reasonKey: 'connection-needs-auth',
+    message: 'token expired',
+  })
+  off()
 })
 
 test('stale-poke error reconnects instead of surfacing a fatal error', async () => {
@@ -219,6 +229,7 @@ test('fatal error state stays terminal and reports the reason', async () => {
     expect(instance.connection.connect).not.toHaveBeenCalled()
     expect(events).toContainEqual({
       type: 'error',
+      reasonKey: 'connection-error',
       message: 'Got open event but connect start time is undefined',
     })
     off()

@@ -1,8 +1,9 @@
 import { createSchema, string, table } from '@rocicorp/zero'
-import { createEmitter } from './helpers/emitter'
 import { describe, expect, test, vi } from 'vitest'
+
 import { combineZeroClients } from './combineZeroClients'
 import { createZeroClient } from './createZeroClient'
+import { createEmitter } from './helpers/emitter'
 import { runWithContext } from './helpers/mutatorContext'
 import {
   getInstanceForNamespace,
@@ -13,6 +14,7 @@ import { registerQuery } from './queryRegistry'
 import { run } from './run'
 import { setRunner, type ZeroRunner } from './zeroRunner'
 import { zql } from './zql'
+
 import type { ZeroEvent } from './types'
 import type { AnyQueryRegistry, Query } from '@rocicorp/zero'
 import type { ReactNode } from 'react'
@@ -211,10 +213,18 @@ describe('multi-instance isolation', () => {
 
     const seenByB: Array<ZeroEvent | null> = []
     b.zeroEvents.listen((event) => seenByB.push(event))
-    a.zeroEvents.emit({ type: 'error', message: 'a-only' })
+    a.zeroEvents.emit({
+      type: 'error',
+      reasonKey: 'connection-error',
+      message: 'a-only',
+    })
 
     expect(seenByB).toEqual([])
-    expect(a.zeroEvents.value).toEqual({ type: 'error', message: 'a-only' })
+    expect(a.zeroEvents.value).toEqual({
+      type: 'error',
+      reasonKey: 'connection-error',
+      message: 'a-only',
+    })
     expect(b.zeroEvents.value).toBe(null)
   })
 
@@ -357,8 +367,16 @@ describe('combineZeroClients facade', () => {
     const seen: Array<ZeroEvent | null> = []
     combined.zeroEvents.listen((event) => seen.push(event))
 
-    a.zeroEvents.emit({ type: 'error', message: 'from-a' })
-    b.zeroEvents.emit({ type: 'error', message: 'from-b' })
+    a.zeroEvents.emit({
+      type: 'error',
+      reasonKey: 'connection-error',
+      message: 'from-a',
+    })
+    b.zeroEvents.emit({
+      type: 'error',
+      reasonKey: 'connection-error',
+      message: 'from-b',
+    })
 
     const messageOf = (event: ZeroEvent | null) =>
       event?.type === 'error' ? event.message : undefined

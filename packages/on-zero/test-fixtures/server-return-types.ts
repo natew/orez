@@ -13,9 +13,14 @@ type AppAuthData = {
   role: 'admin' | undefined
 }
 
+type AppAsyncAction =
+  | { type: 'project.provisionNamespace'; projectId: string }
+  | { type: 'project.invalidateAccess'; projectId: string }
+
 declare module 'on-zero' {
   interface Config {
     authData: AppAuthData
+    asyncAction: AppAsyncAction
   }
 }
 
@@ -53,6 +58,14 @@ void bindings.resolveQuery('project|byID', [{ id: 'project' }], claims)
 void server.mutate.project.create({ id: 'project' }, { authData })
 void server.transaction(claims, async (tx) => tx.location)
 void server.query(claims, () => null as never)
+
+declare const mutationContext: MutatorContext
+mutationContext.server?.enqueueAction({
+  type: 'project.provisionNamespace',
+  projectId: 'project',
+})
+// @ts-expect-error async actions are a closed discriminated union
+mutationContext.server?.enqueueAction({ type: 'project.unknown', projectId: 'project' })
 
 // @ts-expect-error mutation argument types remain enforced through the server facade
 void server.mutate.project.create({ id: 42 }, { authData })

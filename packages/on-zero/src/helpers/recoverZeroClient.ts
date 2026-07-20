@@ -1,7 +1,7 @@
+import type { ZeroEvent, ZeroRecoveryReasonKey } from '../types'
 import type { Emitter } from './emitter'
-import type { ZeroEvent } from '../types'
-import type { UpdateNeededReason } from '@rocicorp/zero'
 import type { Context, LogLevel, LogSink } from '@rocicorp/logger'
+import type { UpdateNeededReason } from '@rocicorp/zero'
 
 // per-reason guard window: the SAME reason re-failing right after its reload is
 // surfaced as fatal instead of reload-storming on something the reload can't fix.
@@ -24,21 +24,20 @@ const STORE_CLOSED = 'Store is closed'
 const STORE_CLOSED_REPEAT_MIN_MS = 2_000
 const STORE_CLOSED_REPEAT_MAX_MS = 60_000
 
-export type ZeroRecoveryLogReason =
-  | 'indexeddb-not-found'
-  | 'sqlite-statement-finalized'
-  | 'store-closed-repeat'
-  | 'mutation-desync'
-  | 'connection-cookie-invalid'
-  | 'client-not-found'
-  | 'connection-userid-mismatch'
-
 export type ZeroRecoveryLogClassification = {
-  reason: ZeroRecoveryLogReason
-  reasonKey: string
+  reasonKey: Exclude<
+    ZeroRecoveryReasonKey,
+    | 'NewClientGroup'
+    | 'VersionNotSupported'
+    | 'SchemaVersionNotSupported'
+    | 'client-state-not-found'
+    | 'server-ack-timeout'
+  >
   message: string
   dropLocalState: boolean
 }
+
+export type ZeroLogPattern = string | RegExp
 
 // a minimal synchronous key/value store the cross-reload guard persists into.
 // web defaults to sessionStorage; native (Hermes) has none, so a consumer can
@@ -54,7 +53,7 @@ export type RecoveryGuardStorage = {
 // expo-updates reload) while still driving the SAME deletes-then-reload work.
 export type ScheduleReloadContext = {
   reason: string
-  reasonKey: string
+  reasonKey: ZeroRecoveryReasonKey
   dropLocalState: boolean
   // deletes every affected instance's local store, awaits beforeReload, then
   // reloads. idempotent — safe to call once the consumer decides to proceed.
@@ -78,9 +77,11 @@ export type ZeroRecoveryDeps = {
   // cross-reload guard backing store (defaults to sessionStorage on web). inject
   // a native KV so Hermes gets real cross-reload loop protection.
   guardStorage?: RecoveryGuardStorage
-  // called with the joined log text for a classified recovery signature; return
-  // true to treat it as benign and NOT recover (soot's cf cold-boot timeout).
-  benignLogFilter?: (message: string) => boolean
+  // classified transport/app messages that are expected and must not recover.
+  benignLogPatterns?: readonly ZeroLogPattern[]
+  // internal lifecycle fence. recovery invalidates queued and in-flight work
+  // before the consumer can defer the reload.
+  onRecovery?: (reasonKey: ZeroRecoveryReasonKey) => void
   // injectable for tests; defaults to a real page reload.
   reload?: () => void
 }
@@ -117,7 +118,7 @@ function defaultGuardStorage(): RecoveryGuardStorage | undefined {
 // survives the reload, so a reason that reloaded then immediately re-fires is
 // caught as a genuine fatal instead of reload-storming across loads.
 function recoveryGuardOpen(
-  reasonKey: string,
+  reasonKey: ZeroRecoveryReasonKey,
   guardStorage: RecoveryGuardStorage | undefined,
 ): boolean {
   const key = `on-zero-recover-${reasonKey}`
@@ -207,11 +208,12 @@ function performReload(deps: ZeroRecoveryDeps): Promise<void> {
 
 function recover(
   deps: ZeroRecoveryDeps,
-  reasonKey: string,
+  reasonKey: ZeroRecoveryReasonKey,
   message: string,
   dropLocalState: boolean,
 ): void {
   if (typeof window === 'undefined') return
+  deps.onRecovery?.(reasonKey)
   // each affected instance drops its OWN stale store, even when a reload is
   // already queued — otherwise a sibling's store survives the reload and
   // fatal-loops on the next boot. the single scheduled reload awaits these.
@@ -222,13 +224,13 @@ function recover(
   if (reloadScheduled) return
   if (!recoveryGuardOpen(reasonKey, deps.guardStorage)) {
     console.error(`[on-zero] ${message} — already recovered once, not reloading`)
-    deps.zeroEvents.emit({ type: 'fatal', reason: message })
+    deps.zeroEvents.emit({ type: 'fatal', reasonKey, reason: message })
     return
   }
   reloadScheduled = true
   armReloadLatchTimeout()
   console.warn(`[on-zero] ${message} — recovering`)
-  deps.zeroEvents.emit({ type: 'recovering', reason: message })
+  deps.zeroEvents.emit({ type: 'recovering', reasonKey, reason: message })
 
   const runReload = () => performReload(deps)
   if (deps.scheduleReload) {
@@ -268,6 +270,18 @@ export function makeZeroRecovery(deps: ZeroRecoveryDeps) {
       // local/server sync state is gone or rejected — the store is unusable, so
       // drop it and reload into a fresh client.
       recover(deps, 'client-state-not-found', 'client state not found', true)
+    },
+    onServerAckTimeout(input: {
+      label: string
+      timeoutMs: number
+      consecutiveTimeouts: number
+    }) {
+      recover(
+        deps,
+        'server-ack-timeout',
+        `${input.label} server acknowledgement timed out ${input.consecutiveTimeouts} consecutive times (${input.timeoutMs}ms each)`,
+        true,
+      )
     },
   }
 }
@@ -311,16 +325,14 @@ function isBenignStoreClosedLog(text: string): boolean {
 // the mutation/connection desync class: the local client group is out of sync
 // with the server's last-mutation-id / cookie / client record, so the store is
 // unusable and must be dropped + recovered. these surface only through the error
-// log, never the structured onClientStateNotFound callback. genuinely app-infra
-// signatures (a consumer's synthesized ack-timeout marker, a cold-boot connect
-// timeout) are NOT here — a consumer keeps those with benignLogFilter / its own
-// handling.
+// log, never the structured onClientStateNotFound callback. server acknowledgement
+// timeouts enter through the mutation lifecycle instead of string classification;
+// expected transport startup messages are declared through benignLogPatterns.
 function classifyMutationDesync(
   text: string,
-): { reason: ZeroRecoveryLogReason; reasonKey: string; message: string } | undefined {
+): Pick<ZeroRecoveryLogClassification, 'reasonKey' | 'message'> | undefined {
   if (text.includes('sent mutation ID') && text.includes('but expected')) {
     return {
-      reason: 'mutation-desync',
       reasonKey: 'mutation-desync',
       message: 'mutation id desync',
     }
@@ -330,42 +342,36 @@ function classifyMutationDesync(
     text.includes('Server reported an out-of-order mutation')
   ) {
     return {
-      reason: 'mutation-desync',
       reasonKey: 'mutation-desync',
       message: 'out-of-order mutation',
     }
   }
   if (text.includes('already processed')) {
     return {
-      reason: 'mutation-desync',
       reasonKey: 'mutation-desync',
       message: 'mutation already processed',
     }
   }
   if (text.includes('InvalidConnectionRequestLastMutationID')) {
     return {
-      reason: 'mutation-desync',
       reasonKey: 'mutation-desync',
       message: 'invalid connection last mutation id',
     }
   }
   if (text.includes('InvalidConnectionRequestBaseCookie')) {
     return {
-      reason: 'connection-cookie-invalid',
       reasonKey: 'connection-cookie-invalid',
       message: 'invalid connection base cookie',
     }
   }
   if (text.includes('ClientNotFound') || text.includes('Client not found')) {
     return {
-      reason: 'client-not-found',
       reasonKey: 'client-not-found',
       message: 'client not found',
     }
   }
   if (text.includes('connection userID mismatch')) {
     return {
-      reason: 'connection-userid-mismatch',
       reasonKey: 'connection-userid-mismatch',
       message: 'connection user id mismatch',
     }
@@ -382,15 +388,13 @@ export function classifyZeroRecoveryLog(
   const text = args.map(logArgText).join(' ')
   if (text.includes(LOCAL_STORE_LOST)) {
     return {
-      reason: 'indexeddb-not-found',
-      reasonKey: 'local-store',
+      reasonKey: 'indexeddb-not-found',
       message: 'local store lost',
       dropLocalState: true,
     }
   }
   if (text.includes(SQLITE_ERROR_NAME) && text.includes(SQLITE_STATEMENT_FINALIZED)) {
     return {
-      reason: 'sqlite-statement-finalized',
       reasonKey: 'sqlite-statement-finalized',
       message: 'sqlite statement finalized',
       dropLocalState: true,
@@ -409,7 +413,6 @@ export function classifyZeroRecoveryLog(
       nowMs - prevMs <= STORE_CLOSED_REPEAT_MAX_MS
     ) {
       return {
-        reason: 'store-closed-repeat',
         reasonKey: 'store-closed-repeat',
         message: 'local store closed repeatedly',
         dropLocalState: true,
@@ -435,16 +438,21 @@ export function composeRecoveryLogSink(
       else logToConsole(level, context, ...args)
       const recovery = classifyZeroRecoveryLog(level, args)
       if (!recovery) return
-      if (deps.benignLogFilter) {
-        const text = args.map(logArgText).join(' ')
-        if (deps.benignLogFilter(text)) return
-      }
+      const text = args.map(logArgText).join(' ')
+      if (deps.benignLogPatterns?.some((pattern) => matchesLogPattern(text, pattern)))
+        return
       recover(deps, recovery.reasonKey, recovery.message, recovery.dropLocalState)
     },
     // call through the consumer sink so a class-based sink keeps its `this`,
     // rather than handing Zero a detached method reference.
     flush: consumerFlush ? () => consumerFlush.call(consumerLogSink) : undefined,
   }
+}
+
+function matchesLogPattern(message: string, pattern: ZeroLogPattern): boolean {
+  if (typeof pattern === 'string') return message.includes(pattern)
+  pattern.lastIndex = 0
+  return pattern.test(message)
 }
 
 // generic Zero stale-poke / stale-cookie signatures: the client's view is behind
