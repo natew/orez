@@ -1,4 +1,4 @@
-import { createSyncExecutor } from 'orez-sync-executor'
+import { createSyncExecutor, SyncExecutorRequestError } from 'orez-sync-executor'
 
 import type { Schema } from '@rocicorp/zero'
 import type {
@@ -580,31 +580,102 @@ export type ZeroHttpSyncServer<S extends Schema = Schema> = ReturnType<
 
 export type ZeroHttpOperation = 'pull' | 'push'
 export type ZeroHttpRoute = { databaseID: string; operation: ZeroHttpOperation }
+export type ZeroHttpRequestServer = Pick<
+  ZeroHttpSyncServer<any>,
+  'handlePull' | 'handlePush'
+>
 
 const DATABASE_ROUTE = /^([A-Za-z0-9_-]{1,64})\/(pull|push)$/
 
 export function createZeroHttpMount(options: {
   readonly pathPrefix: string
-  server(databaseID: string): ZeroHttpSyncServer<any>
+  readonly databaseID?: string
+  server(databaseID: string): ZeroHttpRequestServer
+  authenticate(
+    request: Request,
+    route: ZeroHttpRoute
+  ): NormalizedClaims | Response | Promise<NormalizedClaims | Response>
+  beforePush?(
+    request: Request,
+    bodyText: string
+  ): Response | null | Promise<Response | null>
 }) {
   if (!options.pathPrefix.startsWith('/')) {
     throw new TypeError('pathPrefix must start with /')
   }
+  if (
+    options.databaseID !== undefined &&
+    !/^[A-Za-z0-9_-]{1,64}$/.test(options.databaseID)
+  ) {
+    throw new TypeError('databaseID must contain 1-64 URL-safe characters')
+  }
+
+  const match = (pathname: string): ZeroHttpRoute | null => {
+    if (!pathname.startsWith(options.pathPrefix)) return null
+    const suffix = pathname.slice(options.pathPrefix.length)
+    if (options.databaseID !== undefined) {
+      const operation = /^\/?(pull|push)$/.exec(suffix)?.[1]
+      return operation
+        ? { databaseID: options.databaseID, operation: operation as ZeroHttpOperation }
+        : null
+    }
+    const route = DATABASE_ROUTE.exec(suffix)
+    if (!route) return null
+    return {
+      databaseID: route[1]!,
+      operation: route[2]! as ZeroHttpOperation,
+    }
+  }
+
+  const handle = (route: ZeroHttpRoute, body: unknown, claims: NormalizedClaims) => {
+    const server = options.server(route.databaseID)
+    return route.operation === 'pull'
+      ? server.handlePull(body, claims)
+      : server.handlePush(body, claims)
+  }
+
   return {
-    match(pathname: string): ZeroHttpRoute | null {
-      if (!pathname.startsWith(options.pathPrefix)) return null
-      const match = DATABASE_ROUTE.exec(pathname.slice(options.pathPrefix.length))
-      if (!match) return null
-      return {
-        databaseID: match[1]!,
-        operation: match[2]! as ZeroHttpOperation,
+    match,
+    handle,
+    async handleRequest(request: Request): Promise<Response | null> {
+      const route = match(new URL(request.url).pathname)
+      if (!route) return null
+      if (request.method !== 'POST') {
+        return new Response('method not allowed', { status: 405 })
       }
-    },
-    handle(route: ZeroHttpRoute, body: unknown, claims: NormalizedClaims) {
-      const server = options.server(route.databaseID)
-      return route.operation === 'pull'
-        ? server.handlePull(body, claims)
-        : server.handlePush(body, claims)
+
+      try {
+        const bodyText = await request.text()
+        let body: unknown
+        try {
+          body = JSON.parse(bodyText)
+        } catch {
+          throw new ZeroHttpRequestError(400, `invalid ${route.operation} body`)
+        }
+
+        const authenticated = await options.authenticate(request, route)
+        if (authenticated instanceof Response) return authenticated
+
+        if (route.operation === 'push' && options.beforePush) {
+          const response = await options.beforePush(request, bodyText)
+          if (response) return response
+        }
+
+        const result = await handle(route, body, authenticated)
+        return Response.json(result, {
+          headers:
+            route.operation === 'pull' ? { 'cache-control': 'no-store' } : undefined,
+        })
+      } catch (error) {
+        if (
+          error instanceof ZeroHttpRequestError ||
+          error instanceof SyncExecutorRequestError
+        ) {
+          return Response.json({ error: error.message }, { status: error.status })
+        }
+        console.error(`[zero-http] ${route.operation} error`, error)
+        return new Response('internal error', { status: 500 })
+      }
     },
   }
 }

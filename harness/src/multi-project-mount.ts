@@ -106,6 +106,7 @@ const projects = new Map<string, ReturnType<typeof makeProject>>()
 const observations: Observation[] = []
 const mount = createZeroHttpMount({
   pathPrefix: '/p-',
+  authenticate: () => ({ userID: 'harness' }),
   server(databaseID) {
     let project = projects.get(databaseID)
     if (!project) {
