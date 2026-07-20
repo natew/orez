@@ -105,9 +105,20 @@ function validatePushBody(value: unknown): PushBody {
 function toApplicationError(error: unknown): unknown {
   if (isMutationApplicationError(error)) return error
   if (error instanceof SyncExecutorRequestError) return error
-  return new MutationApplicationError(
-    error instanceof Error ? error.message : String(error)
-  )
+  const message = error instanceof Error ? error.message : String(error)
+  return new MutationApplicationError(applicationErrorDetails(error) ?? message, message)
+}
+
+// mirrors zero's getErrorDetails ordering: a json-safe details payload wins, so
+// a thrown app error keeps what it carried (flagged words, field paths), then
+// named-error metadata. upstream can omit details entirely; MutationApplicationError
+// always carries one, so the caller falls back to the message.
+function applicationErrorDetails(error: unknown): JsonValue | undefined {
+  if (isRecord(error) && isJsonValue(error.details)) return error.details
+  if (error instanceof Error && error.name && error.name !== 'Error') {
+    return { name: error.name }
+  }
+  return undefined
 }
 
 function validateClaims(claims: NormalizedClaims): void {

@@ -187,6 +187,62 @@ describe('sync executor', () => {
     expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([])
   })
 
+  test('wrapping an ordinary error keeps its structured details and name', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+
+    class ProfanityError extends Error {
+      readonly details = { flaggedWords: ['badger'] }
+      constructor() {
+        super('profanity detected')
+        this.name = 'ProfanityError'
+      }
+    }
+    class EnsureError extends Error {
+      constructor() {
+        super('not authenticated')
+        this.name = 'EnsureError'
+      }
+    }
+
+    const mutators = {
+      profane: async () => {
+        throw new ProfanityError()
+      },
+      unauthed: async () => {
+        throw new EnsureError()
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    const withDetails = await executor.push(push('profane'), { userID: 'user-1' })
+    expect(withDetails.pushResponse).toMatchObject({
+      mutations: [
+        {
+          result: {
+            error: 'app',
+            message: 'profanity detected',
+            details: { flaggedWords: ['badger'] },
+          },
+        },
+      ],
+    })
+
+    // no details payload, so the error name is the metadata zero would carry
+    const named = await executor.push(push('unauthed', 2), { userID: 'user-1' })
+    expect(named.pushResponse).toMatchObject({
+      mutations: [
+        {
+          result: {
+            error: 'app',
+            message: 'not authenticated',
+            details: { name: 'EnsureError' },
+          },
+        },
+      ],
+    })
+  })
+
   test('an ordinary mutator error rolls back, advances the ledger, and unblocks the next id', async () => {
     const { database, sqlite } = sqliteDatabase()
     sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
