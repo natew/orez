@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
+
 import {
   formatObjectKey,
   generateGroupedQueriesFile,
@@ -14,6 +15,7 @@ import {
   parseTypeString,
   shouldSkipObjectKey,
 } from './generate-helpers'
+
 import type { ExtractedMutation, ModelMutations, SchemaColumn } from './generate-helpers'
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex')
@@ -36,7 +38,7 @@ function hashInputTree(baseDir: string, generatedDir: string): string {
   const walk = (dir: string) => {
     if (!existsSync(dir)) return
     const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
-      a.name < b.name ? -1 : 1,
+      a.name < b.name ? -1 : 1
     )
     for (const entry of entries) {
       const full = resolve(dir, entry.name)
@@ -108,7 +110,7 @@ function writeFileIfChanged(filePath: string, content: string): boolean {
 function createTypeResolver(
   ts: typeof import('typescript'),
   files: Array<{ path: string; content: string }>,
-  dir: string,
+  dir: string
 ) {
   // find tsconfig if it exists for path alias resolution
   const configPath = ts.findConfigFile(dir, ts.sys.fileExists, 'tsconfig.json')
@@ -128,7 +130,7 @@ function createTypeResolver(
       const parsed = ts.parseJsonConfigFileContent(
         configFile.config,
         ts.sys,
-        dirname(configPath),
+        dirname(configPath)
       )
       compilerOptions = { ...compilerOptions, ...parsed.options }
     }
@@ -155,7 +157,7 @@ function createTypeResolver(
   const program = ts.createProgram(
     files.map((f) => f.path),
     compilerOptions,
-    host,
+    host
   )
   const checker = program.getTypeChecker()
 
@@ -183,7 +185,7 @@ function resolveParamType(
   resolver: ReturnType<typeof createTypeResolver>,
   sourceFile: import('typescript').SourceFile,
   exportName: string,
-  paramIndex: number,
+  paramIndex: number
 ): import('typescript').Type | null {
   let result: import('typescript').Type | null = null
 
@@ -212,7 +214,7 @@ function resolveParamType(
 function resolveMutationParamTypes(
   ts: typeof import('typescript'),
   resolver: ReturnType<typeof createTypeResolver>,
-  sourceFile: import('typescript').SourceFile,
+  sourceFile: import('typescript').SourceFile
 ): Map<string, import('typescript').Type> {
   const resolved = new Map<string, import('typescript').Type>()
 
@@ -276,7 +278,7 @@ function extractMutationsFromModel(
   silent: boolean,
   typeToValibot: (typeString: string) => string | null,
   resolvedTypes?: Map<string, import('typescript').Type>,
-  resolvedTypeToValibot?: (type: import('typescript').Type) => string,
+  resolvedTypeToValibot?: (type: import('typescript').Type) => string
 ): ModelMutations | null {
   let mutateNode: import('typescript').CallExpression | null = null
 
@@ -406,7 +408,7 @@ function extractSchemaColumns(
   ts: typeof import('typescript'),
   sourceFile: ReturnType<typeof ts.createSourceFile>,
   columns: Record<string, SchemaColumn>,
-  primaryKeys: string[],
+  primaryKeys: string[]
 ) {
   // walk AST to find table(...).columns({...}).primaryKey(...)
   function visit(node: import('typescript').Node) {
@@ -446,7 +448,7 @@ function extractSchemaColumns(
 function getInstantiatedPropertyType(
   checker: import('typescript').TypeChecker,
   parent: import('typescript').Type,
-  name: string,
+  name: string
 ) {
   const resolveProperty: unknown = Reflect.get(checker, 'getTypeOfPropertyOfType')
   if (typeof resolveProperty !== 'function') return undefined
@@ -461,7 +463,7 @@ function tsTypeToValibot(
   ts: typeof import('typescript'),
   checker: import('typescript').TypeChecker,
   type: import('typescript').Type,
-  seen?: Set<import('typescript').Type>,
+  seen?: Set<import('typescript').Type>
 ): string {
   // prevent infinite recursion on circular types
   // only track structured types (objects, intersections) — not primitives/unions
@@ -510,14 +512,11 @@ function tsTypeToValibot(
     const members = type.types
     const hasNull = members.some((t) => t.getFlags() & ts.TypeFlags.Null)
     const hasUndefined = members.some(
-      (t) => t.getFlags() & (ts.TypeFlags.Undefined | ts.TypeFlags.Void),
+      (t) => t.getFlags() & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)
     )
     const rest = members.filter(
       (t) =>
-        !(
-          t.getFlags() &
-          (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)
-        ),
+        !(t.getFlags() & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void))
     )
     if (
       rest.length === 2 &&
@@ -544,7 +543,7 @@ function tsTypeToValibot(
   // resolve symbol property type with fallbacks
   const resolveSymbolType = (
     parent: import('typescript').Type,
-    prop: import('typescript').Symbol,
+    prop: import('typescript').Symbol
   ) => {
     // mapped and conditional types can expose transient symbols with no
     // declaration, so resolve each property against its concrete parent.
@@ -659,7 +658,7 @@ function serializeColumn(col: SchemaColumn): string {
   parts.push(`type: '${col.type}'`)
   parts.push(`optional: ${col.optional}`)
   parts.push(
-    `customType: null as unknown as ${col.type === 'json' ? 'ReadonlyJSONValue' : col.type}`,
+    `customType: null as unknown as ${col.type === 'json' ? 'ReadonlyJSONValue' : col.type}`
   )
   if (col.serverName) {
     parts.push(`serverName: '${col.serverName}'`)
@@ -740,7 +739,7 @@ export function generateDrizzleSchemaFile(schema: DrizzleZeroSchema): string {
         // many-to-many (2 hops)
         if (hops.length !== 2) {
           throw new Error(
-            `Relationship ${tableName}.${relName} must have one or two hops`,
+            `Relationship ${tableName}.${relName} must have one or two hops`
           )
         }
         const cardinality = hops[0]!.cardinality
@@ -760,7 +759,7 @@ export function generateDrizzleSchemaFile(schema: DrizzleZeroSchema): string {
       .join(',\n')
 
     lines.push(
-      `const ${tableName}Relationships = relationships(${tableName}Table, ({ one, many }) => ({`,
+      `const ${tableName}Relationships = relationships(${tableName}Table, ({ one, many }) => ({`
     )
     lines.push(relBody)
     lines.push(`}))`)
@@ -856,7 +855,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   const allModelFiles = readdirSync(modelsDir).filter(isGeneratorSourceFile).sort()
 
   const filesWithSchema = allModelFiles.filter((f) =>
-    readFileSync(resolve(modelsDir, f), 'utf-8').includes('export const schema = table('),
+    readFileSync(resolve(modelsDir, f), 'utf-8').includes('export const schema = table(')
   )
 
   const allModelNames = allModelFiles.map((f) => basename(f, '.ts'))
@@ -865,7 +864,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   const writeResults = [
     writeFileIfChanged(
       resolve(generatedDir, 'models.ts'),
-      generateModelsFile(allModelNames, modelsDirName),
+      generateModelsFile(allModelNames, modelsDirName)
     ),
     // only generate types.ts and tables.ts when model files define schemas.
     // when using drizzle-zero CLI for schema generation, these files are
@@ -874,11 +873,11 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
       ? [
           writeFileIfChanged(
             resolve(generatedDir, 'types.ts'),
-            generateTypesFile(schemaModelNames),
+            generateTypesFile(schemaModelNames)
           ),
           writeFileIfChanged(
             resolve(generatedDir, 'tables.ts'),
-            generateTablesFile(schemaModelNames, modelsDirName),
+            generateTablesFile(schemaModelNames, modelsDirName)
           ),
         ]
       : []),
@@ -939,13 +938,13 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
           filePath,
           content,
           ts.ScriptTarget.Latest,
-          true,
+          true
         )
 
         ts.forEachChild(sourceFile, (node) => {
           if (ts.isVariableStatement(node)) {
             const exportModifier = node.modifiers?.find(
-              (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+              (m) => m.kind === ts.SyntaxKind.ExportKeyword
             )
             if (!exportModifier) return
 
@@ -976,7 +975,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
                     resolver,
                     resolverSourceFile,
                     name,
-                    0,
+                    0
                   )
                   if (resolvedType) {
                     valibotCode = resolver.typeToValibot(resolvedType)
@@ -1006,11 +1005,11 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
 
     const groupedChanged = writeFileIfChanged(
       resolve(generatedDir, 'groupedQueries.ts'),
-      generateGroupedQueriesFile(allQueries),
+      generateGroupedQueriesFile(allQueries)
     )
     const syncedChanged = writeFileIfChanged(
       resolve(generatedDir, 'syncedQueries.ts'),
-      generateSyncedQueriesFile(allQueries),
+      generateSyncedQueriesFile(allQueries)
     )
 
     if (groupedChanged) filesChanged++
@@ -1037,7 +1036,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
         filePath,
         content,
         ts.ScriptTarget.Latest,
-        true,
+        true
       )
       const result = extractMutationsFromModel(
         ts,
@@ -1045,7 +1044,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
         content,
         filePath,
         !!silent,
-        typeToValibot,
+        typeToValibot
       )
 
       if (result) {
@@ -1054,7 +1053,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
 
         // check if any custom mutations have unresolved types
         const hasUnresolved = result.custom.some(
-          (m) => m.paramType !== 'void' && m.paramType !== 'unknown' && !m.valibotCode,
+          (m) => m.paramType !== 'void' && m.paramType !== 'unknown' && !m.valibotCode
         )
         if (hasUnresolved) {
           unresolvedModels.push({ baseName: fileBaseName, filePath })
@@ -1091,7 +1090,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
       const resolvedTypes = resolveMutationParamTypes(
         ts,
         modelResolver,
-        resolverSourceFile,
+        resolverSourceFile
       )
       if (resolvedTypes.size === 0) continue
 
@@ -1101,7 +1100,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
         filePath,
         content,
         ts.ScriptTarget.Latest,
-        true,
+        true
       )
       const result = extractMutationsFromModel(
         ts,
@@ -1111,7 +1110,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
         !!silent,
         typeToValibot,
         resolvedTypes,
-        modelResolver.typeToValibot,
+        modelResolver.typeToValibot
       )
 
       if (result) {
@@ -1127,21 +1126,21 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   for (const model of allModelMutations) {
     if (model.hasCRUD) mutationCount += 3 // insert, update, delete
     mutationCount += model.custom.filter(
-      (m) => !model.hasCRUD || !['insert', 'update', 'delete', 'upsert'].includes(m.name),
+      (m) => !model.hasCRUD || !['insert', 'update', 'delete', 'upsert'].includes(m.name)
     ).length
   }
 
   if (allModelMutations.length > 0) {
     const mutationsChanged = writeFileIfChanged(
       resolve(generatedDir, 'syncedMutations.ts'),
-      generateSyncedMutationsFile(allModelMutations),
+      generateSyncedMutationsFile(allModelMutations)
     )
     if (mutationsChanged) filesChanged++
   }
 
   if (filesChanged > 0 && !silent) {
     console.info(
-      `✓ ${allModelFiles.length} models (${filesWithSchema.length} schemas)${queryCount ? `, ${queryCount} queries` : ''}${mutationCount ? `, ${mutationCount} mutations` : ''}`,
+      `✓ ${allModelFiles.length} models (${filesWithSchema.length} schemas)${queryCount ? `, ${queryCount} queries` : ''}${mutationCount ? `, ${mutationCount} mutations` : ''}`
     )
   }
 

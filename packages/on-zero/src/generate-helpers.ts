@@ -254,7 +254,7 @@ export function parseTypeString(type: string): string | null {
     const hasNull = unionParts.includes('null')
     const hasUndefined = unionParts.includes('undefined') || unionParts.includes('void')
     const valueParts = unionParts.filter(
-      (part) => part !== 'null' && part !== 'undefined' && part !== 'void',
+      (part) => part !== 'null' && part !== 'undefined' && part !== 'void'
     )
     if (valueParts.length === 0) return hasNull ? 'v.null_()' : 'v.void_()'
 
@@ -316,12 +316,12 @@ export function generateModelsFile(modelNames: string[], modelsDirName: string):
   const imports = sorted
     .map(
       (name) =>
-        `import * as ${getModelImportName(name)} from '../${modelsDirName}/${name}'`,
+        `import * as ${getModelImportName(name)} from '../${modelsDirName}/${name}'`
     )
     .join('\n')
 
   const sortedByImportName = [...sorted].sort((a, b) =>
-    getModelImportName(a).localeCompare(getModelImportName(b)),
+    getModelImportName(a).localeCompare(getModelImportName(b))
   )
   const modelsObj = `export const models = {\n${sortedByImportName
     .map((name) => {
@@ -353,7 +353,7 @@ export function generateTablesFile(modelNames: string[], modelsDirName: string):
   const exports = sorted
     .map(
       (name) =>
-        `export { schema as ${getModelImportName(name)} } from '../${modelsDirName}/${name}'`,
+        `export { schema as ${getModelImportName(name)} } from '../${modelsDirName}/${name}'`
     )
     .join('\n')
 
@@ -422,7 +422,7 @@ see the [on-zero readme](./node_modules/on-zero/README.md) for full documentatio
 }
 
 export function generateGroupedQueriesFile(
-  queries: Array<{ name: string; sourceFile: string }>,
+  queries: Array<{ name: string; sourceFile: string }>
 ): string {
   const sortedFiles = [...new Set(queries.map((q) => q.sourceFile))].sort()
 
@@ -447,7 +447,7 @@ export function generateSyncedQueriesFile(
     params: string
     valibotCode: string
     sourceFile: string
-  }>,
+  }>
 ): string {
   const queryByFile = new Map<string, typeof queries>()
   for (const q of queries) {
@@ -534,7 +534,7 @@ export function columnTypeToValibot(col: SchemaColumn): string {
 export function schemaColumnsToValibot(
   columns: Record<string, SchemaColumn>,
   primaryKeys: string[],
-  mode: 'insert' | 'update' | 'delete',
+  mode: 'insert' | 'update' | 'delete'
 ): string {
   const entries: string[] = []
 
@@ -544,7 +544,7 @@ export function schemaColumnsToValibot(
       const col = columns[pk]
       if (col)
         entries.push(
-          `${formatObjectKey(pk)}: ${columnTypeToValibot({ ...col, optional: false })}`,
+          `${formatObjectKey(pk)}: ${columnTypeToValibot({ ...col, optional: false })}`
         )
     }
   } else if (mode === 'update') {
@@ -553,11 +553,11 @@ export function schemaColumnsToValibot(
       const isPK = primaryKeys.includes(name)
       if (isPK) {
         entries.push(
-          `${formatObjectKey(name)}: ${columnTypeToValibot({ ...col, optional: false })}`,
+          `${formatObjectKey(name)}: ${columnTypeToValibot({ ...col, optional: false })}`
         )
       } else {
         entries.push(
-          `${formatObjectKey(name)}: ${columnTypeToValibot({ ...col, optional: true })}`,
+          `${formatObjectKey(name)}: ${columnTypeToValibot({ ...col, optional: true })}`
         )
       }
     }
@@ -593,7 +593,7 @@ export function parseColumnType(initText: string): SchemaColumn {
 
 export function generateSyncedMutationsFile(modelMutations: ModelMutations[]): string {
   const sorted = [...modelMutations].sort((a, b) =>
-    a.modelName.localeCompare(b.modelName),
+    a.modelName.localeCompare(b.modelName)
   )
 
   const modelDefs = sorted
@@ -610,17 +610,17 @@ export function generateSyncedMutationsFile(modelMutations: ModelMutations[]): s
             const customMut = model.custom.find((m) => m.name === mode)!
             if (customMut.valibotCode) {
               entries.push(
-                `    ${mode}: ${extractValibotExpression(customMut.valibotCode)},`,
+                `    ${mode}: ${extractValibotExpression(customMut.valibotCode)},`
               )
             } else {
               // fall back to schema-derived
               entries.push(
-                `    ${mode}: ${schemaColumnsToValibot(model.columns, model.primaryKeys, mode)},`,
+                `    ${mode}: ${schemaColumnsToValibot(model.columns, model.primaryKeys, mode)},`
               )
             }
           } else {
             entries.push(
-              `    ${mode}: ${schemaColumnsToValibot(model.columns, model.primaryKeys, mode)},`,
+              `    ${mode}: ${schemaColumnsToValibot(model.columns, model.primaryKeys, mode)},`
             )
           }
         }

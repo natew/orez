@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 
 import { generateLite } from './generate-lite'
+
 import type { LiteParseFn, LiteParsedFile } from './generate-lite'
 
 // minimal hand-rolled "parser" backed by a lookup table. the real caller

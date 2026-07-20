@@ -116,7 +116,7 @@ function createSSRGuardRule(matchCallee, messageId, message) {
 const runCallRule = createSSRGuardRule(
   (node) => node.callee.type === 'Identifier' && node.callee.name === 'run',
   'missingGuard',
-  'run() is a footgun on client, must be inside `if (process.env.VITE_ENVIRONMENT === "ssr")`',
+  'run() is a footgun on client, must be inside `if (process.env.VITE_ENVIRONMENT === "ssr")`'
 )
 
 const enqueueTaskRule = createSSRGuardRule(
@@ -131,7 +131,7 @@ const enqueueTaskRule = createSSRGuardRule(
     )
   },
   'missingGuard',
-  'server.enqueueTask must be inside `if (process.env.VITE_ENVIRONMENT === "ssr")`',
+  'server.enqueueTask must be inside `if (process.env.VITE_ENVIRONMENT === "ssr")`'
 )
 
 const noEarlyReturnRule = {

@@ -42,10 +42,7 @@ const permission = serverWhere('notification', (q, auth) => {
   return q.cmp('userId', auth?.id || '')
 })
 
-export const latestNotifications = (props: {
-  userId: string
-  serverId: string
-}) => {
+export const latestNotifications = (props: { userId: string; serverId: string }) => {
   return zql.notification
     .where(permission)
     .where('userId', props.userId)
@@ -78,10 +75,8 @@ const permission = serverWhere('channel', (q, auth) => {
     q.cmp('deleted', '!=', true),
     q.or(
       q.cmp('private', false),
-      q.exists('role', (r) =>
-        r.whereExists('member', (m) => m.where('id', auth?.id)),
-      ),
-    ),
+      q.exists('role', (r) => r.whereExists('member', (m) => m.where('id', auth?.id)))
+    )
   )
 })
 ```
@@ -114,7 +109,7 @@ const permissions = serverWhere('message', (q, auth) => {
 export const mutate = mutations('message', permissions, {
   async send(
     ctx,
-    props: { id: string; content: string; channelId: string; createdAt: number },
+    props: { id: string; content: string; channelId: string; createdAt: number }
   ) {
     const auth = ensureLoggedIn()
 
@@ -180,7 +175,7 @@ export const permissions = serverWhere('channel', (q, auth) => {
 
   return q.or(
     q.cmp('public', true),
-    q.exists('members', (m) => m.where('userId', auth?.id)),
+    q.exists('members', (m) => m.where('userId', auth?.id))
   )
 })
 ```
@@ -239,8 +234,9 @@ type RelatedToServer = 'role' | 'channel' | 'message'
 export const hasServerAdminPermission = serverWhere<RelatedToServer>((_, auth) =>
   _.exists('server', (q) =>
     q.whereExists('role', (r) =>
-      r.where('canAdmin', true)
-       .whereExists('member', (m) => m.where('id', auth?.id || ''))
+      r
+        .where('canAdmin', true)
+        .whereExists('member', (m) => m.where('id', auth?.id || ''))
     )
   )
 )
@@ -289,9 +285,7 @@ use in queries:
 import { hasChannelReadPermission } from '../where/channel'
 
 export const channelMessages = (props: { channelId: string }) => {
-  return zql.message
-    .where(hasChannelReadPermission)
-    .where('channelId', props.channelId)
+  return zql.message.where(hasChannelReadPermission).where('channelId', props.channelId)
 }
 ```
 
@@ -311,7 +305,7 @@ export default {
   plugins: [
     onZeroPlugin(),
     // ... other plugins
-  ]
+  ],
 }
 ```
 
@@ -408,11 +402,11 @@ export const latestMessages = syncedQuery(
         channelId: v.string(),
         limit: v.optional(v.number()),
       }),
-    ]),
+    ])
   ),
   (arg) => {
     return messageQueries.latestMessages(arg)
-  },
+  }
 )
 ```
 
@@ -457,7 +451,7 @@ const dzSchema = drizzleZeroConfig(
       comment: true,
     },
     suppressDefaultsWarning: true,
-  },
+  }
 )
 
 // generates a typed schema.ts with createSchema() + relationships()
@@ -542,8 +536,10 @@ const project = createZeroClient({
 // useQuery/run/preload/getQuery dispatch by the query fn's namespace,
 // zero.mutate.<namespace> dispatches by model namespace; anything unclaimed
 // (and non-mutate zero access like userID) goes to the first client
-export const { useQuery, zero, run, preload, getQuery, zeroEvents } =
-  combineZeroClients(control, project)
+export const { useQuery, zero, run, preload, getQuery, zeroEvents } = combineZeroClients(
+  control,
+  project
+)
 
 // render every instance's provider. NESTING ORDER IS A CONTRACT: the LAST
 // client passed to combineZeroClients (or the `inner` option) must be the
@@ -790,7 +786,7 @@ await client.awaitMutationServer(client.zero.mutate.note.insert(note), 'create n
 void client.enqueueBackgroundMutation(
   'stream note',
   () => client.zero.mutate.note.update(note),
-  { coalesceKey: `note:${note.id}` },
+  { coalesceKey: `note:${note.id}` }
 )
 ```
 
@@ -950,7 +946,6 @@ await zeroServer.mutate.user.insert(user)
 
 // with explicit auth (optional - authData auto-resolves from context)
 await zeroServer.mutate.user.insert(user, { authData: { id: userId, email } })
-
 ```
 
 the second argument is an options object:
@@ -1030,9 +1025,8 @@ useful for prefetching data before navigation to avoid loading states.
 for ad-hoc queries that don't use query functions:
 
 ```ts
-const user = await zeroServer.query(
-  { userID: userId },
-  (q) => q.user.where('id', userId).one(),
+const user = await zeroServer.query({ userID: userId }, (q) =>
+  q.user.where('id', userId).one()
 )
 ```
 
@@ -1081,6 +1075,6 @@ await batchQuery(
       await processMessage(msg)
     }
   },
-  { chunk: 100, pause: 50 },
+  { chunk: 100, pause: 50 }
 )
 ```

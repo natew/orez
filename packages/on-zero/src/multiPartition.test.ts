@@ -11,8 +11,8 @@ describe('assertZeroInstancePartition', () => {
       assertZeroInstancePartition(
         'query namespace',
         { user: {}, workspace: {}, message: {}, thread: {} },
-        { control, project },
-      ),
+        { control, project }
+      )
     ).not.toThrow()
   })
 
@@ -21,8 +21,8 @@ describe('assertZeroInstancePartition', () => {
       assertZeroInstancePartition(
         'query namespace',
         { user: {}, planGrant: {} },
-        { control, project },
-      ),
+        { control, project }
+      )
     ).toThrow(/planGrant.*missing from the instance partition/)
   })
 
@@ -31,8 +31,8 @@ describe('assertZeroInstancePartition', () => {
       assertZeroInstancePartition(
         'query namespace',
         { user: {} },
-        { control, project: { user: 1 } },
-      ),
+        { control, project: { user: 1 } }
+      )
     ).toThrow(/user.*more than one instance partition/)
   })
 })

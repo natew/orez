@@ -107,8 +107,7 @@ just makes that migration a rename, not a restructure.
 ```ts
 export const instances = {
   default: { queries, models, tables, syncTables, scope: null },
-  project: { queries, models, tables, syncTables, scope: 'projectId',
-             defaultVisibility },
+  project: { queries, models, tables, syncTables, scope: 'projectId', defaultVisibility },
 }
 ```
 

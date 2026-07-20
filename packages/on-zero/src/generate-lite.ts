@@ -25,6 +25,7 @@ import {
   parseColumnType,
   parseTypeString,
 } from './generate-helpers'
+
 import type { ModelMutations, SchemaColumn } from './generate-helpers'
 
 // public types
@@ -319,7 +320,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   for (const m of allModelMutations) {
     if (m.hasCRUD) mutationCount += 3
     mutationCount += m.custom.filter(
-      (mut) => !m.hasCRUD || !['insert', 'update', 'delete', 'upsert'].includes(mut.name),
+      (mut) => !m.hasCRUD || !['insert', 'update', 'delete', 'upsert'].includes(mut.name)
     ).length
   }
 

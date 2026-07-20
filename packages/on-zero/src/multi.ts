@@ -1,9 +1,9 @@
+import { createUseQueryDirect } from './createUseQueryDirect'
 import {
   createZeroClientInternal,
   type DirectQueryAdapter,
   type CreateZeroClientOptions,
 } from './createZeroClient'
-import { createUseQueryDirect } from './createUseQueryDirect'
 
 import type { GenericModels } from './types'
 import type { Schema as ZeroSchema } from '@rocicorp/zero'
@@ -14,7 +14,7 @@ export function createZeroClientWithDirectQueries<
   Schema extends ZeroSchema,
   Models extends GenericModels,
 >(
-  options: CreateZeroClientOptions<Schema, Models>,
+  options: CreateZeroClientOptions<Schema, Models>
 ): ReturnType<typeof createZeroClientInternal<Schema, Models>> {
   const createDirectUseQuery: DirectQueryAdapter<Schema> = createUseQueryDirect
   return createZeroClientInternal<Schema, Models>({
@@ -36,7 +36,7 @@ export function createZeroClientWithDirectQueries<
 export function assertZeroInstancePartition(
   kind: string,
   entries: Record<string, unknown>,
-  partitions: Record<string, Record<string, unknown>>,
+  partitions: Record<string, Record<string, unknown>>
 ): void {
   const labels = Object.keys(partitions)
   for (const name of Object.keys(entries)) {
@@ -44,13 +44,13 @@ export function assertZeroInstancePartition(
     if (owners.length === 0) {
       throw new Error(
         `[on-zero] generated ${kind} "${name}" is missing from the instance partition ` +
-          `(${labels.join(' / ')}) — add it to exactly one partition table.`,
+          `(${labels.join(' / ')}) — add it to exactly one partition table.`
       )
     }
     if (owners.length > 1) {
       throw new Error(
         `[on-zero] generated ${kind} "${name}" is claimed by more than one instance partition ` +
-          `(${owners.join(', ')}) — it must belong to exactly one.`,
+          `(${owners.join(', ')}) — it must belong to exactly one.`
       )
     }
   }
