@@ -567,7 +567,9 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
     },
   }
 }
-export type ZeroHttpSyncServer = ReturnType<typeof createZeroHttpSyncServer>
+export type ZeroHttpSyncServer<S extends Schema = Schema> = ReturnType<
+  typeof createZeroHttpSyncServer<S>
+>
 
 export type ZeroHttpOperation = 'pull' | 'push'
 export type ZeroHttpRoute = { databaseID: string; operation: ZeroHttpOperation }
@@ -576,7 +578,7 @@ const DATABASE_ROUTE = /^([A-Za-z0-9_-]{1,64})\/(pull|push)$/
 
 export function createZeroHttpMount(options: {
   readonly pathPrefix: string
-  server(databaseID: string): ZeroHttpSyncServer
+  server(databaseID: string): ZeroHttpSyncServer<any>
 }) {
   if (
     !options.pathPrefix.startsWith('/') ||

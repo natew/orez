@@ -1,4 +1,4 @@
-export { MutationApplicationError } from './errors.js'
+export { MutationApplicationError, SyncExecutorRequestError } from './errors.js'
 export {
   createSyncExecutor,
   handleSyncExecutorPushRequest,
