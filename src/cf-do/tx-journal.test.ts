@@ -28,6 +28,7 @@ import {
 import {
   TX_MANIFEST_DDL,
   TX_MANIFEST_TABLE,
+  TX_SCHEMA_TABLE,
   commitTxJournal,
   recoverTxJournal,
   rollbackTxJournal,
@@ -284,6 +285,45 @@ describe('tx-journal core', () => {
     expect(
       storage.exec("SELECT 1 FROM sqlite_master WHERE name = 'created_in_tx'").toArray()
     ).toEqual([])
+  })
+
+  it('restores an empty table whose foreign key parent is absent', () => {
+    const storage = createSqliteStorage()
+    storage.exec('PRAGMA foreign_keys = ON')
+    storage.exec(
+      'CREATE TABLE tokenUsage (' +
+        'id TEXT PRIMARY KEY, ' +
+        'userId TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE)'
+    )
+
+    storage.transactionSync(() =>
+      snapshotTxSchema(storage.journal, 'missing-parent', 'application', ['tokenUsage'])
+    )
+    storage.exec('DROP TABLE tokenUsage')
+    storage.exec('CREATE TABLE tokenUsage (id TEXT PRIMARY KEY, userId TEXT NOT NULL)')
+
+    expect(
+      storage.transactionSync(() => recoverTxJournal(storage.journal, 'application'))
+    ).toEqual(['missing-parent'])
+    expect(storage.rows('tokenUsage')).toEqual([])
+    expect(
+      storage
+        .exec('PRAGMA foreign_key_list(tokenUsage)')
+        .toArray()
+        .map((row) => ({ from: row.from, table: row.table, to: row.to }))
+    ).toEqual([{ from: 'userId', table: 'user', to: 'id' }])
+    expect(storage.rows(TX_MANIFEST_TABLE)).toEqual([])
+    expect(
+      storage
+        .tables()
+        .filter(
+          (name) =>
+            name.startsWith('_orez_tx_') &&
+            name !== TX_MANIFEST_TABLE &&
+            name !== TX_SCHEMA_TABLE
+        )
+    ).toEqual([])
+    expect(recoverTxJournal(storage.journal, 'application')).toEqual([])
   })
 
   it('recovers DDL started against an empty schema after its owner dies', () => {
