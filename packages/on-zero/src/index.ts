@@ -26,6 +26,16 @@ export * from './serverWhere'
 export * from './zql'
 export { defineQuery, defineQueries } from '@rocicorp/zero'
 
+export type DataInstanceOptions<Scope extends string = string> = {
+  scope: Scope
+}
+
+export function defineInstance<const Scope extends string>(
+  options: DataInstanceOptions<Scope>
+): DataInstanceOptions<Scope> {
+  return options
+}
+
 // drizzle-zero re-exports moved to 'on-zero/drizzle' to avoid pulling
 // drizzle-zero + drizzle-orm/_relations into the main bundle
 // (breaks vite dep optimization under vxrn-web conditions)

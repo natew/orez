@@ -5,6 +5,7 @@ import { basename, dirname, resolve } from 'node:path'
 import {
   formatObjectKey,
   generateGroupedQueriesFile,
+  generateInstancesFile,
   generateModelsFile,
   generateReadmeFile,
   generateSyncedMutationsFile,
@@ -15,11 +16,12 @@ import {
   parseTypeString,
   shouldSkipObjectKey,
 } from './generate-helpers'
+import { discoverDataLayout, namespaceImportPath } from './generate-layout'
 
 import type { ExtractedMutation, ModelMutations, SchemaColumn } from './generate-helpers'
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex')
-const GENERATOR_CACHE_VERSION = '1'
+const GENERATOR_CACHE_VERSION = '2'
 
 const isGeneratorSourceFile = (name: string) =>
   name.endsWith('.ts') &&
@@ -810,16 +812,44 @@ export interface GenerateResult {
   mutationCount: number
 }
 
+export type DataMembership = {
+  instances: Record<
+    string,
+    {
+      tables: string[]
+      syncTables: string[]
+      scope: string | null
+    }
+  >
+  allTables: string[]
+}
+
+export async function deriveDataMembership(options: {
+  dir: string
+}): Promise<DataMembership> {
+  const ts = await import('typescript')
+  const layout = discoverDataLayout(ts, resolve(options.dir))
+  return {
+    instances: Object.fromEntries(
+      layout.instances.map((instance) => [
+        instance.name,
+        {
+          tables: instance.namespaces.map((namespace) => namespace.name).sort(),
+          syncTables: [...instance.syncTables],
+          scope: instance.scope,
+        },
+      ])
+    ),
+    allTables: [
+      ...new Set(layout.instances.flatMap((instance) => instance.syncTables)),
+    ].sort(),
+  }
+}
+
 export async function generate(options: GenerateOptions): Promise<GenerateResult> {
   const { dir, after, silent, force } = options
   const baseDir = resolve(dir)
-  // support both mutations/ (new) and models/ (legacy) directories
-  const mutationsDir = resolve(baseDir, 'mutations')
-  const usesMutationsDir = existsSync(mutationsDir)
-  const modelsDir = usesMutationsDir ? mutationsDir : resolve(baseDir, 'models')
-  const modelsDirName = usesMutationsDir ? 'mutations' : 'models'
   const generatedDir = resolve(baseDir, 'generated')
-  const queriesDir = resolve(baseDir, 'queries')
 
   if (!existsSync(generatedDir)) {
     mkdirSync(generatedDir, { recursive: true })
@@ -827,12 +857,22 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
 
   loadCache()
 
+  // the layout pass is intentionally first: filenames, instance markers, and
+  // related() calls determine schema membership before any type program exists.
+  const ts = await import('typescript')
+  const layout = discoverDataLayout(ts, baseDir)
+  const metadataHash = hash(
+    layout.metadataPaths
+      .map((path) => `${path}\0${readFileSync(path, 'utf8')}`)
+      .join('\0')
+  )
+
   // input-freshness gate: if nothing under baseDir changed since the last
   // COMPLETED generate (the input hash is only stored at the end, after
   // saveCache), the outputs are already current — skip the typescript-program
   // build entirely and return the cached counts. the configureServer watcher
   // still re-runs generate on real model/query edits.
-  const inputHash = hashInputTree(baseDir, generatedDir)
+  const inputHash = hash(`${hashInputTree(baseDir, generatedDir)}\0${metadataHash}`)
   if (
     !force &&
     generateCache.__generatorVersion === GENERATOR_CACHE_VERSION &&
@@ -852,19 +892,26 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     }
   }
 
-  const allModelFiles = readdirSync(modelsDir).filter(isGeneratorSourceFile).sort()
-
-  const filesWithSchema = allModelFiles.filter((f) =>
-    readFileSync(resolve(modelsDir, f), 'utf-8').includes('export const schema = table(')
+  const modelNamespaces = layout.namespaces.filter(
+    (namespace): namespace is typeof namespace & { modelPath: string } =>
+      namespace.modelPath !== null
   )
-
-  const allModelNames = allModelFiles.map((f) => basename(f, '.ts'))
-  const schemaModelNames = filesWithSchema.map((f) => basename(f, '.ts'))
+  const filesWithSchema = modelNamespaces.filter((namespace) =>
+    readFileSync(namespace.modelPath, 'utf-8').includes('export const schema = table(')
+  )
+  const modelModules = modelNamespaces.map((namespace) => ({
+    name: namespace.name,
+    importPath: namespaceImportPath(baseDir, namespace.modelPath),
+  }))
+  const schemaModules = filesWithSchema.map((namespace) => ({
+    name: namespace.name,
+    importPath: namespaceImportPath(baseDir, namespace.modelPath),
+  }))
 
   const writeResults = [
     writeFileIfChanged(
       resolve(generatedDir, 'models.ts'),
-      generateModelsFile(allModelNames, modelsDirName)
+      generateModelsFile(modelModules)
     ),
     // only generate types.ts and tables.ts when model files define schemas.
     // when using drizzle-zero CLI for schema generation, these files are
@@ -873,11 +920,11 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
       ? [
           writeFileIfChanged(
             resolve(generatedDir, 'types.ts'),
-            generateTypesFile(schemaModelNames)
+            generateTypesFile(schemaModules.map((module) => module.name))
           ),
           writeFileIfChanged(
             resolve(generatedDir, 'tables.ts'),
-            generateTablesFile(schemaModelNames, modelsDirName)
+            generateTablesFile(schemaModules)
           ),
         ]
       : []),
@@ -887,9 +934,6 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   let filesChanged = writeResults.filter(Boolean).length
   let queryCount = 0
   let mutationCount = 0
-
-  // lazy-load typescript
-  const ts = await import('typescript')
 
   // lightweight string-based parser for inline type annotations from source text
   // handles simple cases: primitives, inline objects, arrays
@@ -902,119 +946,133 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     }
   }
 
-  // generate query files if queries directory exists
-  if (existsSync(queriesDir)) {
-    const queryFiles = readdirSync(queriesDir).filter(isGeneratorSourceFile)
+  const allQueries: Array<{
+    name: string
+    params: string
+    valibotCode: string
+    sourceFile: string
+    importPath: string
+  }> = []
 
-    const allQueries: Array<{
-      name: string
-      params: string
-      valibotCode: string
-      sourceFile: string
-    }> = []
-
-    // build resolver for query files (lazy - only created if needed)
-    let queryResolver: ReturnType<typeof createTypeResolver> | null = null
-    const getQueryResolver = () => {
-      if (!queryResolver) {
-        const allFiles = readdirSync(queriesDir)
-          .filter(isGeneratorSourceFile)
-          .map((f) => ({
-            path: resolve(queriesDir, f),
-            content: readFileSync(resolve(queriesDir, f), 'utf-8'),
-          }))
-        queryResolver = createTypeResolver(ts, allFiles, queriesDir)
-      }
-      return queryResolver
+  let queryResolver: ReturnType<typeof createTypeResolver> | null = null
+  const getQueryResolver = () => {
+    if (!queryResolver) {
+      const allFiles = [
+        ...new Set(layout.namespaces.flatMap((namespace) => namespace.sourcePaths)),
+      ].map((path) => ({ path, content: readFileSync(path, 'utf-8') }))
+      queryResolver = createTypeResolver(ts, allFiles, baseDir)
     }
+    return queryResolver
+  }
 
-    for (const file of queryFiles) {
-      const filePath = resolve(queriesDir, file)
-      const fileBaseName = basename(file, '.ts')
+  for (const namespace of layout.namespaces.filter(
+    (namespace): namespace is typeof namespace & { queryPath: string } =>
+      namespace.queryPath !== null
+  )) {
+    const filePath = namespace.queryPath
 
-      try {
-        const content = readFileSync(filePath, 'utf-8')
-        const sourceFile = ts.createSourceFile(
-          filePath,
-          content,
-          ts.ScriptTarget.Latest,
-          true
-        )
+    try {
+      const content = readFileSync(filePath, 'utf-8')
+      const sourceFile = ts.createSourceFile(
+        filePath,
+        content,
+        ts.ScriptTarget.Latest,
+        true
+      )
 
-        ts.forEachChild(sourceFile, (node) => {
-          if (ts.isVariableStatement(node)) {
-            const exportModifier = node.modifiers?.find(
-              (m) => m.kind === ts.SyntaxKind.ExportKeyword
-            )
-            if (!exportModifier) return
+      ts.forEachChild(sourceFile, (node) => {
+        if (ts.isVariableStatement(node)) {
+          const exportModifier = node.modifiers?.find(
+            (m) => m.kind === ts.SyntaxKind.ExportKeyword
+          )
+          if (!exportModifier) return
 
-            const declaration = node.declarationList.declarations[0]
-            if (!declaration || !ts.isVariableDeclaration(declaration)) return
+          const declaration = node.declarationList.declarations[0]
+          if (!declaration || !ts.isVariableDeclaration(declaration)) return
 
-            const name = declaration.name.getText(sourceFile)
-            if (name === 'permission') return
+          const name = declaration.name.getText(sourceFile)
+          if (['mutate', 'permission', 'schema', 'where'].includes(name)) return
 
-            if (declaration.initializer && ts.isArrowFunction(declaration.initializer)) {
-              const params = declaration.initializer.parameters
-              let paramType = 'void'
+          if (declaration.initializer && ts.isArrowFunction(declaration.initializer)) {
+            const params = declaration.initializer.parameters
+            let paramType = 'void'
 
-              if (params.length > 0) {
-                const param = params[0]!
-                paramType = param.type?.getText(sourceFile) || 'unknown'
-              }
+            if (params.length > 0) {
+              const param = params[0]!
+              paramType = param.type?.getText(sourceFile) || 'unknown'
+            }
 
-              let valibotCode = typeToValibot(paramType)
+            let valibotCode = typeToValibot(paramType)
 
-              // if direct parse failed (unresolved reference), use TypeChecker
-              if (!valibotCode && params.length > 0 && params[0]!.type) {
-                const resolver = getQueryResolver()
-                const resolverSourceFile = resolver.program.getSourceFile(filePath)
-                if (resolverSourceFile) {
-                  const resolvedType = resolveParamType(
-                    ts,
-                    resolver,
-                    resolverSourceFile,
-                    name,
-                    0
-                  )
-                  if (resolvedType) {
-                    valibotCode = resolver.typeToValibot(resolvedType)
-                  }
+            // if direct parse failed (unresolved reference), use TypeChecker
+            if (!valibotCode && params.length > 0 && params[0]!.type) {
+              const resolver = getQueryResolver()
+              const resolverSourceFile = resolver.program.getSourceFile(filePath)
+              if (resolverSourceFile) {
+                const resolvedType = resolveParamType(
+                  ts,
+                  resolver,
+                  resolverSourceFile,
+                  name,
+                  0
+                )
+                if (resolvedType) {
+                  valibotCode = resolver.typeToValibot(resolvedType)
                 }
               }
+            }
 
-              if (valibotCode) {
-                allQueries.push({
-                  name,
-                  params: paramType,
-                  valibotCode,
-                  sourceFile: fileBaseName,
-                })
-              } else if (!silent && paramType !== 'void') {
-                console.error(`✗ ${name}: could not resolve type "${paramType}"`)
-              }
+            if (valibotCode) {
+              allQueries.push({
+                name,
+                params: paramType,
+                valibotCode,
+                sourceFile: namespace.name,
+                importPath: namespaceImportPath(baseDir, filePath),
+              })
+            } else if (!silent && paramType !== 'void') {
+              console.error(`✗ ${name}: could not resolve type "${paramType}"`)
             }
           }
-        })
-      } catch (err) {
-        if (!silent) console.error(`Error processing ${file}:`, err)
-      }
+        }
+      })
+    } catch (err) {
+      if (!silent) console.error(`Error processing ${filePath}:`, err)
     }
-
-    queryCount = allQueries.length
-
-    const groupedChanged = writeFileIfChanged(
-      resolve(generatedDir, 'groupedQueries.ts'),
-      generateGroupedQueriesFile(allQueries)
-    )
-    const syncedChanged = writeFileIfChanged(
-      resolve(generatedDir, 'syncedQueries.ts'),
-      generateSyncedQueriesFile(allQueries)
-    )
-
-    if (groupedChanged) filesChanged++
-    if (syncedChanged) filesChanged++
   }
+
+  queryCount = allQueries.length
+
+  const groupedChanged = writeFileIfChanged(
+    resolve(generatedDir, 'groupedQueries.ts'),
+    generateGroupedQueriesFile(allQueries)
+  )
+  const syncedChanged = writeFileIfChanged(
+    resolve(generatedDir, 'syncedQueries.ts'),
+    generateSyncedQueriesFile(allQueries)
+  )
+
+  if (groupedChanged) filesChanged++
+  if (syncedChanged) filesChanged++
+
+  const instancesChanged = writeFileIfChanged(
+    resolve(generatedDir, 'instances.ts'),
+    generateInstancesFile(
+      layout.instances.map((instance) => ({
+        name: instance.name,
+        scope: instance.scope,
+        queryNames: instance.namespaces
+          .map((namespace) => namespace.name)
+          .filter((name) => allQueries.some((query) => query.sourceFile === name)),
+        modelNames: instance.namespaces
+          .filter((namespace) => namespace.modelPath)
+          .map((namespace) => namespace.name),
+        tables: instance.namespaces.map((namespace) => namespace.name),
+        syncTables: instance.syncTables,
+      }))
+    )
+  )
+  if (instancesChanged) filesChanged++
 
   // generate mutation validators from model files
   const allModelMutations: ModelMutations[] = []
@@ -1023,9 +1081,9 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   const mutationFiles: Array<{ path: string; content: string; baseName: string }> = []
   const unresolvedModels: Array<{ baseName: string; filePath: string }> = []
 
-  for (const file of allModelFiles) {
-    const filePath = resolve(modelsDir, file)
-    const fileBaseName = basename(file, '.ts')
+  for (const namespace of modelNamespaces) {
+    const filePath = namespace.modelPath
+    const fileBaseName = namespace.name
 
     try {
       const content = readFileSync(filePath, 'utf-8')
@@ -1060,7 +1118,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
         }
       }
     } catch (err) {
-      if (!silent) console.error(`Error extracting mutations from ${file}:`, err)
+      if (!silent) console.error(`Error extracting mutations from ${filePath}:`, err)
     }
   }
 
@@ -1140,7 +1198,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
 
   if (filesChanged > 0 && !silent) {
     console.info(
-      `✓ ${allModelFiles.length} models (${filesWithSchema.length} schemas)${queryCount ? `, ${queryCount} queries` : ''}${mutationCount ? `, ${mutationCount} mutations` : ''}`
+      `✓ ${modelNamespaces.length} models (${filesWithSchema.length} schemas)${queryCount ? `, ${queryCount} queries` : ''}${mutationCount ? `, ${mutationCount} mutations` : ''}`
     )
   }
 
@@ -1161,7 +1219,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   generateCache.__generatorVersion = GENERATOR_CACHE_VERSION
   generateCache.__inputHash = inputHash
   generateCache.__counts = JSON.stringify({
-    modelCount: allModelFiles.length,
+    modelCount: modelNamespaces.length,
     schemaCount: filesWithSchema.length,
     queryCount,
     mutationCount,
@@ -1170,7 +1228,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
 
   return {
     filesChanged,
-    modelCount: allModelFiles.length,
+    modelCount: modelNamespaces.length,
     schemaCount: filesWithSchema.length,
     queryCount,
     mutationCount,
@@ -1180,9 +1238,6 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
 export async function watch(options: WatchOptions) {
   const { dir, debounce = 1000 } = options
   const baseDir = resolve(dir)
-  const mutationsDir = resolve(baseDir, 'mutations')
-  const modelsDir = existsSync(mutationsDir) ? mutationsDir : resolve(baseDir, 'models')
-  const queriesDir = resolve(baseDir, 'queries')
   const generatedDir = resolve(baseDir, 'generated')
 
   // initial run (silent)
@@ -1201,11 +1256,15 @@ export async function watch(options: WatchOptions) {
     }, debounce)
   }
 
-  const watcher = chokidar.watch([modelsDir, queriesDir], {
-    persistent: true,
-    ignoreInitial: true,
-    ignored: [generatedDir],
-  })
+  const databaseDir = resolve(dirname(baseDir), 'database')
+  const watcher = chokidar.watch(
+    existsSync(databaseDir) ? [baseDir, databaseDir] : [baseDir],
+    {
+      persistent: true,
+      ignoreInitial: true,
+      ignored: [generatedDir, /node_modules/],
+    }
+  )
 
   watcher.on('change', (path) => debouncedRegenerate(path, '📝'))
   watcher.on('add', (path) => debouncedRegenerate(path, '➕'))

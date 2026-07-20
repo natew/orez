@@ -16,6 +16,7 @@
 
 import {
   generateGroupedQueriesFile,
+  generateInstancesFile,
   generateModelsFile,
   generateReadmeFile,
   generateSyncedMutationsFile,
@@ -30,7 +31,7 @@ import type { ModelMutations, SchemaColumn } from './generate-helpers'
 
 // public types
 
-// minimal ast info about a single mutation handler file (e.g. `models/post.ts`)
+// minimal ast info about a namespace mutation module (e.g. `post/mutations.ts`)
 export type LiteMutationExport = {
   // the first arg to `mutations('NAME', ...)` — string literal from the source.
   // not currently emitted anywhere in the output; the model file basename is
@@ -70,6 +71,20 @@ export type LiteQueryExport = {
   // e.g. 'string' | '{ id: string }' | null. null means the query takes no
   // args and is treated as a void query in the generated output.
   paramTypeText: string | null
+  // relation-name paths starting at this namespace's table. nested related()
+  // calls are one path, e.g. [['comments', 'author']].
+  relatedPaths?: string[][]
+}
+
+export type LiteRelationInfo = {
+  sourceTable: string
+  name: string
+  targetTable: string
+}
+
+export type LiteTableInfo = {
+  name: string
+  columns: string[]
 }
 
 // what the caller returns for each source file.
@@ -78,6 +93,8 @@ export type LiteParsedFile = {
   // keeps the shape uniform and leaves room for future multi-export support.
   mutations: LiteMutationExport[]
   queries: LiteQueryExport[]
+  relations?: LiteRelationInfo[]
+  tables?: LiteTableInfo[]
 }
 
 // the parser function signature the caller provides. pure: given source text
@@ -85,18 +102,12 @@ export type LiteParsedFile = {
 export type LiteParseFn = (sourceCode: string, filePath: string) => LiteParsedFile
 
 export type LiteGenerateOptions = {
-  // file path → source content. paths are treated as opaque keys; generate-lite
-  // matches them by prefix against `{dir}/{modelsDir}/` and `{dir}/queries/`
-  // using forward-slash string comparison. pass whatever path shape you have
-  // (absolute, virtual, etc.), as long as you're consistent with `dir`.
+  // file path → source content. pass whatever path shape you have (absolute,
+  // virtual, etc.), as long as you're consistent with `dir`.
   files: Record<string, string>
-  // base data directory, e.g. '/proj/src/data'. generate-lite scans `files`
-  // for keys matching `{dir}/{modelsDir}/*.ts` and `{dir}/queries/*.ts`.
+  // base data directory, e.g. '/proj/src/data'. namespaces are direct .ts
+  // files or folders with queries.ts / mutations.ts.
   dir: string
-  // 'mutations' if `{dir}/mutations` exists, else 'models'. if the caller
-  // knows, they pass it; else generate-lite infers it from the file keys
-  // (prefers 'mutations' if any file is under it).
-  modelsDir?: 'mutations' | 'models'
   parse: LiteParseFn
 }
 
@@ -143,35 +154,136 @@ function listDirectTsFiles(files: Record<string, string>, dirPrefix: string): st
   return out.sort()
 }
 
+type LiteNamespace = {
+  name: string
+  instance: string
+  queryPath: string | null
+  modelPath: string | null
+}
+
+type LiteInstance = {
+  name: string
+  dir: string
+  scope: string | null
+  namespaces: LiteNamespace[]
+}
+
+function discoverLiteLayout(files: Record<string, string>, baseDir: string) {
+  const paths = Object.keys(files)
+  const instancePaths = paths
+    .filter((path) => path.startsWith(`${baseDir}/`) && path.endsWith('/instance.ts'))
+    .sort()
+  const instances: LiteInstance[] = [
+    { name: 'default', dir: baseDir, scope: null, namespaces: [] },
+    ...instancePaths.map((path) => {
+      const dir = path.slice(0, -'/instance.ts'.length)
+      const scope = files[path]!.match(/scope\s*:\s*['"]([^'"]+)['"]/)?.[1]
+      if (!scope) {
+        throw new Error(
+          `[on-zero] ${path} must default export defineInstance({ scope: 'columnName' })`
+        )
+      }
+      return { name: baseName(dir), dir, scope, namespaces: [] }
+    }),
+  ]
+  const instanceDirs = new Set(instances.slice(1).map((instance) => instance.dir))
+
+  for (const instance of instances) {
+    const directFiles = listDirectTsFiles(files, instance.dir).filter(
+      (path) => baseName(path) !== 'instance.ts'
+    )
+    for (const path of directFiles) {
+      instance.namespaces.push({
+        name: baseName(path, '.ts'),
+        instance: instance.name,
+        queryPath: path,
+        modelPath: path,
+      })
+    }
+
+    const prefix = `${instance.dir}/`
+    const folders = new Set<string>()
+    for (const path of paths) {
+      if (!path.startsWith(prefix)) continue
+      const rest = path.slice(prefix.length)
+      const slash = rest.indexOf('/')
+      if (slash > 0) folders.add(`${instance.dir}/${rest.slice(0, slash)}`)
+    }
+    for (const folder of [...folders].sort()) {
+      if (instanceDirs.has(folder) || folder === `${baseDir}/generated`) continue
+      const queries = `${folder}/queries.ts`
+      const mutations = `${folder}/mutations.ts`
+      if (!(queries in files) && !(mutations in files)) {
+        const oldName = baseName(folder)
+        if (
+          ['models', 'mutations', 'queries'].includes(oldName) &&
+          listDirectTsFiles(files, folder).length > 0
+        ) {
+          throw new Error(
+            `[on-zero] ${folder} uses the removed top-level ${oldName}/ layout; ` +
+              `move each namespace to <name>.ts or <name>/queries.ts + mutations.ts`
+          )
+        }
+        continue
+      }
+      instance.namespaces.push({
+        name: baseName(folder),
+        instance: instance.name,
+        queryPath: queries in files ? queries : null,
+        modelPath: mutations in files ? mutations : null,
+      })
+    }
+  }
+
+  const owners = new Map<string, string>()
+  for (const namespace of instances.flatMap((instance) => instance.namespaces)) {
+    const owner = owners.get(namespace.name)
+    if (owner) {
+      throw new Error(
+        `[on-zero] namespace '${namespace.name}' is claimed by instances '${owner}' and '${namespace.instance}'`
+      )
+    }
+    owners.set(namespace.name, namespace.instance)
+  }
+  return instances
+}
+
 // main entry point
 
 export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   const { files, parse } = opts
   const baseDir = stripTrailingSlash(opts.dir)
-
-  // determine models dir (mutations vs models)
-  let modelsDirName: 'mutations' | 'models'
-  if (opts.modelsDir) {
-    modelsDirName = opts.modelsDir
-  } else {
-    // infer: prefer 'mutations' if any file lives under {dir}/mutations/
-    const mutationsPrefix = `${baseDir}/mutations/`
-    const hasMutationsDir = Object.keys(files).some((p) => p.startsWith(mutationsPrefix))
-    modelsDirName = hasMutationsDir ? 'mutations' : 'models'
+  const instances = discoverLiteLayout(files, baseDir)
+  const namespaces = instances.flatMap((instance) => instance.namespaces)
+  const modelNamespaces = namespaces.filter(
+    (namespace): namespace is LiteNamespace & { modelPath: string } =>
+      namespace.modelPath !== null
+  )
+  const relations = new Map<string, Map<string, string>>()
+  const tableColumns = new Map<string, Set<string>>()
+  for (const path of Object.keys(files).filter(
+    (path) =>
+      path.endsWith('/relations.ts') ||
+      /\/database\/(?:schema[^/]*|zeroSchemaInput)\.ts$/.test(path)
+  )) {
+    const parsed = parse(files[path]!, path)
+    for (const relation of parsed.relations ?? []) {
+      const tableRelations = relations.get(relation.sourceTable) ?? new Map()
+      tableRelations.set(relation.name, relation.targetTable)
+      relations.set(relation.sourceTable, tableRelations)
+    }
+    for (const table of parsed.tables ?? []) {
+      tableColumns.set(table.name, new Set(table.columns))
+    }
   }
-
-  const modelsDirPath = `${baseDir}/${modelsDirName}`
-  const queriesDirPath = `${baseDir}/queries`
-
-  const modelFilePaths = listDirectTsFiles(files, modelsDirPath)
-  const queryFilePaths = listDirectTsFiles(files, queriesDirPath)
 
   // parse each model file and build ModelMutations records for the emitter
   const allModelMutations: ModelMutations[] = []
   const modelNamesWithSchema: string[] = []
 
-  for (const filePath of modelFilePaths) {
-    const modelName = baseName(filePath, '.ts')
+  for (const namespace of modelNamespaces) {
+    const filePath = namespace.modelPath
+    const modelName = namespace.name
     const content = files[filePath]!
     const parsed = parse(content, filePath)
 
@@ -190,6 +302,9 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
       for (const col of mutationExport.schema.columns) {
         columns[col.name] = parseColumnType(col.builderText)
       }
+      const names = new Set(mutationExport.schema.columns.map((column) => column.name))
+      tableColumns.set(modelName, names)
+      tableColumns.set(mutationExport.schema.tableName, names)
     }
 
     // a model participates in crud only when it has a schema AND its mutate
@@ -247,16 +362,34 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
     params: string
     valibotCode: string
     sourceFile: string
+    importPath: string
   }> = []
+  const relatedPaths = new Map<string, Array<{ query: string; paths: string[][] }>>()
 
-  for (const filePath of queryFilePaths) {
-    const fileBaseName = baseName(filePath, '.ts')
+  for (const namespace of namespaces.filter(
+    (namespace): namespace is LiteNamespace & { queryPath: string } =>
+      namespace.queryPath !== null
+  )) {
+    const filePath = namespace.queryPath
+    const fileBaseName = namespace.name
     const content = files[filePath]!
     const parsed = parse(content, filePath)
+    if (
+      content.includes('.related(') &&
+      !parsed.queries.some((query) => query.relatedPaths)
+    ) {
+      throw new Error(
+        `[on-zero] ${filePath} uses related(), but the lite parser did not return relatedPaths`
+      )
+    }
 
     for (const q of parsed.queries) {
-      // permission exports are filtered upstream in existing behavior
-      if (q.name === 'permission') continue
+      if (['mutate', 'permission', 'schema', 'where'].includes(q.name)) continue
+      if (q.relatedPaths?.length) {
+        const entries = relatedPaths.get(namespace.name) ?? []
+        entries.push({ query: q.name, paths: q.relatedPaths })
+        relatedPaths.set(namespace.name, entries)
+      }
 
       // null annotation → no first arg → void query
       if (q.paramTypeText == null) {
@@ -265,6 +398,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
           params: 'void',
           valibotCode: '',
           sourceFile: fileBaseName,
+          importPath: `../${filePath.slice(baseDir.length + 1).replace(/\.ts$/, '')}`,
         })
         continue
       }
@@ -288,27 +422,98 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
         params: paramType,
         valibotCode: valibotCode ?? 'v.unknown()',
         sourceFile: fileBaseName,
+        importPath: `../${filePath.slice(baseDir.length + 1).replace(/\.ts$/, '')}`,
       })
     }
   }
 
+  const owners = new Map(
+    namespaces.map((namespace) => [namespace.name, namespace.instance])
+  )
+  const relatedOwners = new Map<string, string>()
+  const syncTables = new Map<string, string[]>()
+  for (const instance of instances) {
+    const synced = new Set(instance.namespaces.map((namespace) => namespace.name))
+    for (const namespace of instance.namespaces) {
+      for (const query of relatedPaths.get(namespace.name) ?? []) {
+        for (const path of query.paths) {
+          let sourceTable = namespace.name
+          for (const relationName of path) {
+            const target = relations.get(sourceTable)?.get(relationName)
+            if (!target) {
+              throw new Error(
+                `[on-zero] ${namespace.name}.${query.query} related('${relationName}') cannot be resolved ` +
+                  `from table '${sourceTable}' through relations.ts`
+              )
+            }
+            const owner = owners.get(target) ?? relatedOwners.get(target)
+            if (owner && owner !== instance.name) {
+              throw new Error(
+                `[on-zero] ${namespace.name}.${query.query} in instance '${instance.name}' reaches ` +
+                  `table '${target}' owned by instance '${owner}'`
+              )
+            }
+            relatedOwners.set(target, instance.name)
+            synced.add(target)
+            sourceTable = target
+          }
+        }
+      }
+    }
+    const tables = [...synced].sort()
+    if (instance.scope) {
+      for (const table of tables) {
+        if (!tableColumns.get(table)?.has(instance.scope)) {
+          throw new Error(
+            `[on-zero] table '${table}' in instance '${instance.name}' is missing scope column '${instance.scope}'`
+          )
+        }
+      }
+    }
+    syncTables.set(instance.name, tables)
+  }
+
   // emit files
-  const modelNames = modelFilePaths.map((p) => baseName(p, '.ts'))
+  const modelNames = modelNamespaces.map((namespace) => namespace.name)
   const out: Record<string, string> = {}
 
-  out['models.ts'] = generateModelsFile(modelNames, modelsDirName)
+  out['models.ts'] = generateModelsFile(
+    modelNamespaces.map((namespace) => ({
+      name: namespace.name,
+      importPath: `../${namespace.modelPath.slice(baseDir.length + 1).replace(/\.ts$/, '')}`,
+    }))
+  )
 
   if (modelNamesWithSchema.length > 0) {
     out['types.ts'] = generateTypesFile(modelNamesWithSchema)
-    out['tables.ts'] = generateTablesFile(modelNamesWithSchema, modelsDirName)
+    out['tables.ts'] = generateTablesFile(
+      modelNamespaces
+        .filter((namespace) => modelNamesWithSchema.includes(namespace.name))
+        .map((namespace) => ({
+          name: namespace.name,
+          importPath: `../${namespace.modelPath.slice(baseDir.length + 1).replace(/\.ts$/, '')}`,
+        }))
+    )
   }
 
   out['README.md'] = generateReadmeFile()
 
-  if (queryFilePaths.length > 0) {
-    out['groupedQueries.ts'] = generateGroupedQueriesFile(allQueries)
-    out['syncedQueries.ts'] = generateSyncedQueriesFile(allQueries)
-  }
+  out['groupedQueries.ts'] = generateGroupedQueriesFile(allQueries)
+  out['syncedQueries.ts'] = generateSyncedQueriesFile(allQueries)
+  out['instances.ts'] = generateInstancesFile(
+    instances.map((instance) => ({
+      name: instance.name,
+      scope: instance.scope,
+      queryNames: instance.namespaces
+        .map((namespace) => namespace.name)
+        .filter((name) => allQueries.some((query) => query.sourceFile === name)),
+      modelNames: instance.namespaces
+        .filter((namespace) => namespace.modelPath)
+        .map((namespace) => namespace.name),
+      tables: instance.namespaces.map((namespace) => namespace.name),
+      syncTables: syncTables.get(instance.name)!,
+    }))
+  )
 
   if (allModelMutations.length > 0) {
     out['syncedMutations.ts'] = generateSyncedMutationsFile(allModelMutations)

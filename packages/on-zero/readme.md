@@ -27,15 +27,16 @@ it provides a few things:
 
 plus various hooks and helpers for react integration.
 
-mutations live in `mutations/` with their permissions. queries are just
-functions that use a global `zql` builder. schema is derived from drizzle.
+each namespace is either one file exporting its queries and mutations, or a
+folder with `queries.ts` and `mutations.ts`. queries use the global `zql`
+builder. schema is derived from drizzle.
 
 ## queries
 
 write plain functions. they become synced queries automatically.
 
 ```ts
-// src/data/queries/notification.ts
+// src/data/notification/queries.ts
 import { zql, serverWhere } from 'on-zero'
 
 const permission = serverWhere('notification', (q, auth) => {
@@ -98,7 +99,7 @@ mutations co-locate permissions and mutation handlers in one file. schema is
 derived from drizzle — no need to define it here.
 
 ```ts
-// src/data/mutations/message.ts
+// src/data/message/mutations.ts
 import { ensureLoggedIn, mutations, serverWhere } from 'on-zero'
 
 const permissions = serverWhere('message', (q, auth) => {
@@ -186,7 +187,7 @@ server-side - on the client they automatically pass.
 **for queries:** define permissions inline as a constant in query files:
 
 ```ts
-// src/data/queries/channel.ts
+// src/data/channel/queries.ts
 const permission = serverWhere('channel', (q, auth) => {
   return q.cmp('userId', auth?.id || '')
 })
@@ -199,7 +200,7 @@ export const myChannels = () => {
 **for mutations:** define permissions in mutation files for CRUD operations:
 
 ```ts
-// src/data/mutations/message.ts
+// src/data/message/mutations.ts
 const permissions = serverWhere('message', (q, auth) => {
   return q.cmp('authorId', auth?.id || '')
 })
@@ -350,8 +351,7 @@ generates all files needed to connect your mutations and queries:
 
 **options:**
 
-- `dir` - base directory containing `mutations/` and `queries/` folders
-  (default: `src/data`)
+- `dir` - base directory containing namespace files/folders (default: `src/data`)
 - `--watch` - watch for changes and regenerate automatically
 - `--after` - command to run after generation completes
 - `--force` - ignore cached inputs and regenerate all outputs
@@ -392,7 +392,7 @@ export type ChannelUpdate = Partial<Channel> & Pick<Channel, 'id'>
 ```ts
 import * as v from 'valibot'
 import { syncedQuery } from '@rocicorp/zero'
-import * as messageQueries from '../queries/message'
+import * as messageQueries from '../message/queries'
 
 export const latestMessages = syncedQuery(
   'latestMessages',
@@ -414,8 +414,8 @@ export const latestMessages = syncedQuery(
 
 the generator:
 
-1. scans `mutations/` for files with `export const mutate`
-2. scans `queries/` for exported arrow functions
+1. discovers namespace files and folders, plus folders marked with `instance.ts`
+2. derives each instance's related-table closure and validates ownership/scope
 3. parses TypeScript AST to extract parameter types
 4. converts types to valibot schemas
 5. wraps query functions in `syncedQuery()` with validators
@@ -438,18 +438,15 @@ eliminates duplicate column definitions — drizzle is the single source of trut
 ```ts
 // generate-schema.ts (run at build/dev time)
 import { drizzleZeroConfig } from 'drizzle-zero'
-import { generateDrizzleSchemaFile } from 'on-zero'
+import { deriveDataMembership, generateDrizzleSchemaFile } from 'on-zero/generate'
 import * as drizzleSchema from './database/schema'
 import { relations } from './database/relations'
 
+const { allTables } = await deriveDataMembership({ dir: 'src/data' })
 const dzSchema = drizzleZeroConfig(
   { ...drizzleSchema, relations },
   {
-    tables: {
-      user: true,
-      post: true,
-      comment: true,
-    },
+    tables: Object.fromEntries(allTables.map((table) => [table, true])),
     suppressDefaultsWarning: true,
   }
 )
@@ -511,47 +508,28 @@ standard [Zero installation guide](https://zero.rocicorp.dev/docs/install).
 ### multiple client instances
 
 one page can run several zero clients (e.g. a global control-plane instance
-plus a per-project instance with its own storage key and sync url). give each
-a unique `instanceName` and split queries/models so every namespace belongs to
-exactly one instance — duplicate claims throw at create time. then combine
-them into one consumer surface:
+plus a per-project instance with its own storage key and sync url). add an
+`instance.ts` marker to the partition folder. generation derives its queries,
+models, and sync-table closure and rejects duplicate or cross-instance reach.
 
 ```tsx
-import { createZeroClient } from 'on-zero'
-import { combineZeroClients, createZeroClientWithDirectQueries } from 'on-zero/multi'
+import { createZeroClients } from 'on-zero/multi'
+import { instances } from '~/data/generated/instances'
 
-const control = createZeroClientWithDirectQueries({
-  schema,
-  models: controlModels,
-  groupedQueries: controlQueries,
-  instanceName: 'control',
-})
-const project = createZeroClient({
-  schema,
-  models: projectModels,
-  groupedQueries: projectQueries,
-  instanceName: 'project',
-})
+const clients = createZeroClients(instances)
+const control = clients.clients.default
+const project = clients.clients.project
+const ProvideControlZero = clients.providers.default
+const ProvideProjectZero = clients.providers.project
 
 // useQuery/run/preload/getQuery dispatch by the query fn's namespace,
-// zero.mutate.<namespace> dispatches by model namespace; anything unclaimed
-// (and non-mutate zero access like userID) goes to the first client
-export const { useQuery, zero, run, preload, getQuery, zeroEvents } = combineZeroClients(
-  control,
-  project
-)
-
-// render every instance's provider. NESTING ORDER IS A CONTRACT: the LAST
-// client passed to combineZeroClients (or the `inner` option) must be the
-// INNERMOST provider — zero-react's useQuery resolves the nearest provider's
-// instance from context, so only the inner instance rides that path. all
-// other instances must opt into the context-free direct adapter through
-// createZeroClientWithDirectQueries.
-;<control.ProvideZero cacheURL={controlUrl} userID={user.id}>
-  <project.ProvideZero cacheURL={projectUrl} userID={`${user.id}:${projectId}`}>
+// zero.mutate.<namespace> dispatches by model namespace
+export const { useQuery, zero, run, preload, getQuery, zeroEvents } = clients.combined
+;<ProvideControlZero cacheURL={controlUrl} userID={user.id}>
+  <ProvideProjectZero cacheURL={projectUrl} userID={`${user.id}:${projectId}`}>
     <App />
-  </project.ProvideZero>
-</control.ProvideZero>
+  </ProvideProjectZero>
+</ProvideControlZero>
 ```
 
 constraints:
@@ -559,8 +537,7 @@ constraints:
 - each instance needs its own client-group identity (separate `userID` /
   storage key / cache url) — never swap the backing namespace under a live
   instance.
-- most apps should use plain `createZeroClient`; the `on-zero/multi` entrypoint
-  is only for this nested-provider edge case.
+- single-instance apps can keep using plain `createZeroClient`.
 - give the INNER slot to the instance owning the bulk of the subscriptions —
   inner queries use zero-react's native context path. outer instances use the
   direct adapter on their own mounted zero, so keep those instances on bounded,
@@ -569,26 +546,6 @@ constraints:
   transaction runs on that instance alone; cross-instance writes are not
   detectable at registration and will silently miss the other store.
 - omitting `instanceName` keeps the exact single-instance behavior.
-
-**guarding the partition against drift.** a generated namespace that ends up in
-NEITHER instance's split silently un-registers its queries (a `useQuery` then
-throws "query not registered" at runtime, error-boundarying a whole screen). run
-`assertZeroInstancePartition` at module eval over each split so the drift is a
-boot throw instead — it also catches a namespace listed in more than one
-partition:
-
-```ts
-import { assertZeroInstancePartition } from 'on-zero/multi'
-
-assertZeroInstancePartition('query namespace', groupedQueries, {
-  control: controlQueries,
-  project: projectQueries,
-})
-assertZeroInstancePartition('model namespace', models, {
-  control: controlModels,
-  project: projectModels,
-})
-```
 
 ### server validation hooks
 
@@ -964,7 +921,7 @@ run a query once without subscribing. works on both client and server:
 
 ```ts
 import { run } from 'on-zero'
-import { userById } from '~/data/queries/user'
+import { userById } from '~/data/user/queries'
 
 // with params - defaults to cache only on client
 const user = await run(userById, { id: userId })
@@ -991,7 +948,7 @@ use `getQuery` when you need the raw zero query object rather than subscribing v
 
 ```ts
 import { getQuery } from '~/zero/client'
-import { postById } from '~/data/queries/post'
+import { postById } from '~/data/post/queries'
 
 // returns the zero query object — same as what useQuery resolves internally
 const query = getQuery(postById, { postId: '123' })
@@ -1008,7 +965,7 @@ preload query results into cache without subscribing:
 
 ```ts
 import { preload } from '~/zero/client'
-import { userNotifications } from '~/data/queries/notification'
+import { userNotifications } from '~/data/notification/queries'
 
 // preload after login
 const { complete, cleanup } = preload(userNotifications, { userId, limit: 100 })

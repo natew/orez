@@ -13,8 +13,9 @@ export interface OnZeroPluginOptions extends Omit<GenerateOptions, 'dir' | 'sile
   disableGenerate?: boolean
 }
 
-function createOnZeroHmrPlugin(hmrInclude: string[] = []): Plugin {
-  const hmrPaths = ['/mutations/', '/models/', '/generated/', '/queries/', ...hmrInclude]
+function createOnZeroHmrPlugin(hmrInclude: string[] = [], dataDir = 'src/data'): Plugin {
+  const normalizedDataDir = `/${dataDir.replaceAll('\\', '/').replace(/^\/+|\/+$/g, '')}/`
+  const hmrPaths = [normalizedDataDir, ...hmrInclude]
 
   return {
     name: 'on-zero:hmr',
@@ -54,8 +55,7 @@ export function onZeroPlugin(options: OnZeroPluginOptions = {}): Plugin[] {
   const dir = options.dir ?? 'src/data'
 
   let dataDir: string
-  let modelsDir: string
-  let queriesDir: string
+  let databaseDir: string
 
   const runGenerate = (silent: boolean) =>
     generate({
@@ -72,8 +72,7 @@ export function onZeroPlugin(options: OnZeroPluginOptions = {}): Plugin[] {
 
       configResolved(config) {
         dataDir = resolve(config.root, dir)
-        modelsDir = resolve(dataDir, 'models')
-        queriesDir = resolve(dataDir, 'queries')
+        databaseDir = resolve(dataDir, '../database')
       },
 
       async buildStart() {
@@ -85,7 +84,11 @@ export function onZeroPlugin(options: OnZeroPluginOptions = {}): Plugin[] {
 
         const handler = async (file: string) => {
           if (!/\.tsx?$/.test(file)) return
-          if (isWithinDirectory(file, modelsDir) || isWithinDirectory(file, queriesDir)) {
+          if (
+            (isWithinDirectory(file, dataDir) &&
+              !isWithinDirectory(file, resolve(dataDir, 'generated'))) ||
+            isWithinDirectory(file, databaseDir)
+          ) {
             await runGenerate(false)
           }
         }
@@ -109,7 +112,7 @@ export function onZeroPlugin(options: OnZeroPluginOptions = {}): Plugin[] {
       },
     },
 
-    createOnZeroHmrPlugin(options.hmrInclude),
+    createOnZeroHmrPlugin(options.hmrInclude, dir),
   ]
 }
 

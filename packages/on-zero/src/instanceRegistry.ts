@@ -33,6 +33,18 @@ const getInstancesByQueryName = () =>
     () => new Map()
   )
 
+export function releaseClientInstances(names: readonly string[]): void {
+  const releasing = new Set(names)
+  const instancesByNamespace = getInstancesByNamespace()
+  const instancesByQueryName = getInstancesByQueryName()
+  for (const [namespace, owner] of instancesByNamespace) {
+    if (releasing.has(owner.name)) instancesByNamespace.delete(namespace)
+  }
+  for (const [queryName, owner] of instancesByQueryName) {
+    if (releasing.has(owner.name)) instancesByQueryName.delete(queryName)
+  }
+}
+
 export function registerClientInstance({
   name,
   namespaces,

@@ -85,6 +85,11 @@
       "types": "./types/generate-lite.d.ts",
       "import": "./dist/esm/generate-lite.mjs",
       "require": "./dist/cjs/generate-lite.cjs"
+    },
+    "./generate": {
+      "types": "./types/generate.d.ts",
+      "import": "./dist/esm/generate.mjs",
+      "require": "./dist/cjs/generate.cjs"
     }
   },
   "dependencies": {

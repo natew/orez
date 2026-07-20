@@ -23,12 +23,12 @@ const DIR = '/proj/src/data'
 describe('generateLite', () => {
   test('emits models.ts, syncedMutations.ts, and README.md from inline types', () => {
     const files: Record<string, string> = {
-      [`${DIR}/models/todo.ts`]: '// fake source, parser returns fixture',
-      [`${DIR}/models/user.ts`]: '// fake source, parser returns fixture',
+      [`${DIR}/todo.ts`]: '// fake source, parser returns fixture',
+      [`${DIR}/user.ts`]: '// fake source, parser returns fixture',
     }
 
     const fixtures: Record<string, LiteParsedFile> = {
-      [`${DIR}/models/todo.ts`]: {
+      [`${DIR}/todo.ts`]: {
         mutations: [
           {
             modelName: 'todo',
@@ -47,7 +47,7 @@ describe('generateLite', () => {
         ],
         queries: [],
       },
-      [`${DIR}/models/user.ts`]: {
+      [`${DIR}/user.ts`]: {
         mutations: [
           {
             modelName: 'user',
@@ -74,14 +74,17 @@ describe('generateLite', () => {
     // output file set
     expect(Object.keys(result.files).sort()).toEqual([
       'README.md',
+      'groupedQueries.ts',
+      'instances.ts',
       'models.ts',
       'syncedMutations.ts',
+      'syncedQueries.ts',
     ])
 
     // models.ts: aliases the user import without changing the model key
     const models = result.files['models.ts']!
-    expect(models).toContain("import * as todo from '../models/todo'")
-    expect(models).toContain("import * as userPublic from '../models/user'")
+    expect(models).toContain("import * as todo from '../todo'")
+    expect(models).toContain("import * as userPublic from '../user'")
     expect(models).toContain('user: userPublic,')
     expect(models).not.toContain('\n  userPublic,')
     expect(models).toContain('export const models = {')
@@ -104,12 +107,12 @@ describe('generateLite', () => {
 
   test('parses newline-separated mutation object types', () => {
     const files: Record<string, string> = {
-      [`${DIR}/models/agentEvent.ts`]: '// fake',
-      [`${DIR}/models/deployment.ts`]: '// fake',
+      [`${DIR}/agentEvent.ts`]: '// fake',
+      [`${DIR}/deployment.ts`]: '// fake',
     }
 
     const fixtures: Record<string, LiteParsedFile> = {
-      [`${DIR}/models/agentEvent.ts`]: {
+      [`${DIR}/agentEvent.ts`]: {
         mutations: [
           {
             modelName: 'agentEvent',
@@ -128,7 +131,7 @@ describe('generateLite', () => {
         ],
         queries: [],
       },
-      [`${DIR}/models/deployment.ts`]: {
+      [`${DIR}/deployment.ts`]: {
         mutations: [
           {
             modelName: 'deployment',
@@ -168,11 +171,11 @@ describe('generateLite', () => {
 
   test('parses object intersections and skips index signatures', () => {
     const files: Record<string, string> = {
-      [`${DIR}/models/agent.ts`]: '// fake',
+      [`${DIR}/agent.ts`]: '// fake',
     }
 
     const fixtures: Record<string, LiteParsedFile> = {
-      [`${DIR}/models/agent.ts`]: {
+      [`${DIR}/agent.ts`]: {
         mutations: [
           {
             modelName: 'agent',
@@ -212,11 +215,11 @@ describe('generateLite', () => {
 
   test('falls back to v.unknown() for type references', () => {
     const files: Record<string, string> = {
-      [`${DIR}/models/post.ts`]: '// fake',
+      [`${DIR}/post.ts`]: '// fake',
     }
 
     const fixtures: Record<string, LiteParsedFile> = {
-      [`${DIR}/models/post.ts`]: {
+      [`${DIR}/post.ts`]: {
         mutations: [
           {
             modelName: 'post',
@@ -254,11 +257,11 @@ describe('generateLite', () => {
 
   test('uses v.unknown() for explicitly unknown mutation params', () => {
     const files: Record<string, string> = {
-      [`${DIR}/models/project.ts`]: '// fake',
+      [`${DIR}/project.ts`]: '// fake',
     }
 
     const fixtures: Record<string, LiteParsedFile> = {
-      [`${DIR}/models/project.ts`]: {
+      [`${DIR}/project.ts`]: {
         mutations: [
           {
             modelName: 'project',
@@ -281,16 +284,11 @@ describe('generateLite', () => {
 
   test('emits query files with v.unknown() fallback for references', () => {
     const files: Record<string, string> = {
-      [`${DIR}/models/post.ts`]: '// fake',
-      [`${DIR}/queries/post.ts`]: '// fake',
+      [`${DIR}/post.ts`]: '// fake',
     }
 
     const fixtures: Record<string, LiteParsedFile> = {
-      [`${DIR}/models/post.ts`]: {
-        mutations: [],
-        queries: [],
-      },
-      [`${DIR}/queries/post.ts`]: {
+      [`${DIR}/post.ts`]: {
         mutations: [],
         queries: [
           // no-arg query → void
@@ -324,7 +322,8 @@ describe('generateLite', () => {
     expect(result.files['syncedQueries.ts']).toBeDefined()
 
     const grouped = result.files['groupedQueries.ts']!
-    expect(grouped).toContain("export * as post from '../queries/post'")
+    expect(grouped).toContain("import * as postSource from '../post'")
+    expect(grouped).toContain('postById: postSource.postById')
 
     const synced = result.files['syncedQueries.ts']!
     expect(synced).toContain('allPosts: defineQuery(() => Queries.post.allPosts())')
@@ -346,11 +345,11 @@ describe('generateLite', () => {
 
   test('emits types.ts and tables.ts when a model declares a schema inline', () => {
     const files: Record<string, string> = {
-      [`${DIR}/models/task.ts`]: '// fake',
+      [`${DIR}/task.ts`]: '// fake',
     }
 
     const fixtures: Record<string, LiteParsedFile> = {
-      [`${DIR}/models/task.ts`]: {
+      [`${DIR}/task.ts`]: {
         mutations: [
           {
             modelName: 'task',
@@ -386,7 +385,7 @@ describe('generateLite', () => {
     expect(types).toContain('export type Task = TableInsertRow<typeof schema.task>')
 
     const tables = result.files['tables.ts']!
-    expect(tables).toContain("export { schema as task } from '../models/task'")
+    expect(tables).toContain("export { schema as task } from '../task'")
 
     // crud validators emitted in syncedMutations.ts
     const synced = result.files['syncedMutations.ts']!
@@ -397,18 +396,18 @@ describe('generateLite', () => {
     expect(result.mutationCount).toBe(3)
   })
 
-  test('ignores nested files and non-ts files inside the models directory', () => {
+  test('ignores private files inside a namespace folder', () => {
     const files: Record<string, string> = {
-      [`${DIR}/models/post.ts`]: '// fake',
-      [`${DIR}/models/README.md`]: 'not a model',
-      [`${DIR}/models/helpers/util.ts`]: 'nested should be ignored',
-      [`${DIR}/models/post.d.ts`]: 'declaration file, ignored',
-      [`${DIR}/models/post.test.ts`]: 'test file, ignored',
-      [`${DIR}/models/post.spec.ts`]: 'spec file, ignored',
+      [`${DIR}/post/mutations.ts`]: '// fake',
+      [`${DIR}/post/README.md`]: 'not a model',
+      [`${DIR}/post/helpers/util.ts`]: 'private helper, ignored',
+      [`${DIR}/post/post.d.ts`]: 'declaration file, ignored',
+      [`${DIR}/post/post.test.ts`]: 'test file, ignored',
+      [`${DIR}/post/post.spec.ts`]: 'spec file, ignored',
     }
 
     const fixtures: Record<string, LiteParsedFile> = {
-      [`${DIR}/models/post.ts`]: {
+      [`${DIR}/post/mutations.ts`]: {
         mutations: [{ modelName: 'post', handlers: [], schema: null }],
         queries: [],
       },
@@ -422,20 +421,20 @@ describe('generateLite', () => {
 
     expect(result.modelCount).toBe(1)
     const models = result.files['models.ts']!
-    expect(models).toContain("import * as post from '../models/post'")
+    expect(models).toContain("import * as post from '../post/mutations'")
     expect(models).not.toContain('util')
     expect(models).not.toContain('README')
     expect(models).not.toContain('post.test')
     expect(models).not.toContain('post.spec')
   })
 
-  test('infers mutations/ directory when present', () => {
+  test('supports a split namespace folder', () => {
     const files: Record<string, string> = {
-      [`${DIR}/mutations/post.ts`]: '// fake',
+      [`${DIR}/post/mutations.ts`]: '// fake',
     }
 
     const fixtures: Record<string, LiteParsedFile> = {
-      [`${DIR}/mutations/post.ts`]: {
+      [`${DIR}/post/mutations.ts`]: {
         mutations: [
           {
             modelName: 'post',
@@ -453,8 +452,79 @@ describe('generateLite', () => {
       parse: makeParse(fixtures),
     })
 
-    // should use mutations dir path in re-exports
     const models = result.files['models.ts']!
-    expect(models).toContain("from '../mutations/post'")
+    expect(models).toContain("from '../post/mutations'")
+  })
+
+  test('rejects the removed top-level layout', () => {
+    expect(() =>
+      generateLite({
+        files: { [`${DIR}/queries/post.ts`]: '// fake' },
+        dir: DIR,
+        parse: makeParse({}),
+      })
+    ).toThrow(/removed top-level queries\/ layout/)
+  })
+
+  test('derives scoped related-table closure from lite metadata', () => {
+    const files = {
+      [`${DIR}/project/instance.ts`]: `export default defineInstance({ scope: 'projectId' })`,
+      [`${DIR}/project/message/queries.ts`]: `export const messages = () => zql.message.related('comments')`,
+      [`${DIR}/project/message/mutations.ts`]: '// fake mutation',
+      ['/proj/src/database/relations.ts']: '// fake relations',
+      ['/proj/src/database/schema.ts']: '// fake tables',
+    }
+    const empty = { mutations: [], queries: [] }
+    const result = generateLite({
+      files,
+      dir: DIR,
+      parse: makeParse({
+        [`${DIR}/project/message/queries.ts`]: {
+          ...empty,
+          queries: [
+            {
+              name: 'messages',
+              paramTypeText: null,
+              relatedPaths: [['comments', 'author']],
+            },
+          ],
+        },
+        [`${DIR}/project/message/mutations.ts`]: {
+          ...empty,
+          mutations: [
+            {
+              modelName: 'message',
+              handlers: [],
+              schema: {
+                tableName: 'message',
+                primaryKeys: ['id'],
+                columns: [
+                  { name: 'id', builderText: 'string()' },
+                  { name: 'projectId', builderText: 'string()' },
+                ],
+              },
+            },
+          ],
+        },
+        '/proj/src/database/relations.ts': {
+          ...empty,
+          relations: [
+            { sourceTable: 'message', name: 'comments', targetTable: 'comment' },
+            { sourceTable: 'comment', name: 'author', targetTable: 'userPublic' },
+          ],
+        },
+        '/proj/src/database/schema.ts': {
+          ...empty,
+          tables: [
+            { name: 'comment', columns: ['id', 'projectId'] },
+            { name: 'userPublic', columns: ['id', 'projectId'] },
+          ],
+        },
+      }),
+    })
+
+    expect(result.files['instances.ts']).toContain(
+      'syncTables: ["comment","message","userPublic"]'
+    )
   })
 })

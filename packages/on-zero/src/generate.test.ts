@@ -4,22 +4,26 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
-  writeFileSync,
+  writeFileSync as writeFile,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 
 import * as zero from '@rocicorp/zero'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
-import { generate, generateDrizzleSchemaFile } from './generate'
+import { deriveDataMembership, generate, generateDrizzleSchemaFile } from './generate'
 
 const testDir = join(tmpdir(), 'on-zero-test-' + Date.now())
 
+function writeFileSync(path: string, content: string) {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFile(path, content)
+}
+
 beforeEach(() => {
-  mkdirSync(join(testDir, 'models'), { recursive: true })
-  mkdirSync(join(testDir, 'queries'), { recursive: true })
+  mkdirSync(testDir, { recursive: true })
 })
 
 afterEach(() => {
@@ -29,7 +33,7 @@ afterEach(() => {
 describe('generate', () => {
   test('generates models.ts, types.ts, tables.ts from model files', async () => {
     writeFileSync(
-      join(testDir, 'models/post.ts'),
+      join(testDir, 'post/mutations.ts'),
       `
 import { table, string, boolean } from 'on-zero'
 
@@ -42,7 +46,7 @@ export const schema = table('post', {
     )
 
     writeFileSync(
-      join(testDir, 'models/comment.ts'),
+      join(testDir, 'comment/mutations.ts'),
       `
 import { table, string } from 'on-zero'
 
@@ -55,11 +59,11 @@ export const schema = table('comment', {
     )
 
     writeFileSync(
-      join(testDir, 'models/post.test.ts'),
+      join(testDir, 'post/post.test.ts'),
       `throw new Error('test files must not be generated as models')`
     )
     writeFileSync(
-      join(testDir, 'queries/comment.spec.ts'),
+      join(testDir, 'comment/comment.spec.ts'),
       `throw new Error('spec files must not be generated as queries')`
     )
 
@@ -76,8 +80,8 @@ export const schema = table('comment', {
 
     // check models.ts content
     const modelsContent = readFileSync(join(testDir, 'generated/models.ts'), 'utf-8')
-    expect(modelsContent).toContain("import * as comment from '../models/comment'")
-    expect(modelsContent).toContain("import * as post from '../models/post'")
+    expect(modelsContent).toContain("import * as comment from '../comment/mutations'")
+    expect(modelsContent).toContain("import * as post from '../post/mutations'")
     expect(modelsContent).not.toContain('post.test')
     expect(modelsContent).toContain('export const models = {')
 
@@ -92,21 +96,21 @@ export const schema = table('comment', {
 
     // check tables.ts content
     const tablesContent = readFileSync(join(testDir, 'generated/tables.ts'), 'utf-8')
-    expect(tablesContent).toContain("export { schema as post } from '../models/post'")
+    expect(tablesContent).toContain("export { schema as post } from '../post/mutations'")
     expect(tablesContent).toContain(
-      "export { schema as comment } from '../models/comment'"
+      "export { schema as comment } from '../comment/mutations'"
     )
   })
 
   test('generates query validators from query files', async () => {
     // need at least one model
     writeFileSync(
-      join(testDir, 'models/post.ts'),
+      join(testDir, 'post/mutations.ts'),
       `export const schema = table('post', { id: string() })`
     )
 
     writeFileSync(
-      join(testDir, 'queries/post.ts'),
+      join(testDir, 'post/queries.ts'),
       `
 import { zero } from '../zero'
 
@@ -132,7 +136,8 @@ export const postsByAuthor = ({ authorId, limit }: { authorId: string; limit?: n
       join(testDir, 'generated/groupedQueries.ts'),
       'utf-8'
     )
-    expect(groupedContent).toContain("export * as post from '../queries/post'")
+    expect(groupedContent).toContain("import * as postSource from '../post/queries'")
+    expect(groupedContent).toContain('postById: postSource.postById')
 
     // check syncedQueries.ts has validators
     const syncedContent = readFileSync(
@@ -147,12 +152,12 @@ export const postsByAuthor = ({ authorId, limit }: { authorId: string; limit?: n
 
   test('skips permission exports in queries', async () => {
     writeFileSync(
-      join(testDir, 'models/post.ts'),
+      join(testDir, 'post/mutations.ts'),
       `export const schema = table('post', { id: string() })`
     )
 
     writeFileSync(
-      join(testDir, 'queries/post.ts'),
+      join(testDir, 'post/queries.ts'),
       `
 export const permission = () => ({ canRead: true })
 export const allPosts = () => zero.query.post
@@ -173,14 +178,14 @@ export const allPosts = () => zero.query.post
 
   test('aliases user import without changing the model key', async () => {
     writeFileSync(
-      join(testDir, 'models/user.ts'),
+      join(testDir, 'user/mutations.ts'),
       `export const schema = table('user', { id: string(), name: string() })`
     )
 
     await generate({ dir: testDir, silent: true })
 
     const modelsContent = readFileSync(join(testDir, 'generated/models.ts'), 'utf-8')
-    expect(modelsContent).toContain("import * as userPublic from '../models/user'")
+    expect(modelsContent).toContain("import * as userPublic from '../user/mutations'")
     expect(modelsContent).toContain('user: userPublic,')
     expect(modelsContent).not.toContain('\n  userPublic,')
 
@@ -190,7 +195,7 @@ export const allPosts = () => zero.query.post
 
   test('runs after command when files change', async () => {
     writeFileSync(
-      join(testDir, 'models/post.ts'),
+      join(testDir, 'post/mutations.ts'),
       `export const schema = table('post', { id: string() })`
     )
 
@@ -208,7 +213,7 @@ export const allPosts = () => zero.query.post
 
   test('does not regenerate when nothing changed', async () => {
     writeFileSync(
-      join(testDir, 'models/post.ts'),
+      join(testDir, 'post/mutations.ts'),
       `export const schema = table('post', { id: string() })`
     )
 
@@ -221,11 +226,11 @@ export const allPosts = () => zero.query.post
 
   test('force regenerates without source changes', async () => {
     writeFileSync(
-      join(testDir, 'models/post.ts'),
+      join(testDir, 'post/mutations.ts'),
       `export const schema = table('post', { id: string() })`
     )
     writeFileSync(
-      join(testDir, 'queries/post.ts'),
+      join(testDir, 'post/queries.ts'),
       `export const allPosts = () => zero.query.post`
     )
     await generate({ dir: testDir, silent: true })
@@ -238,10 +243,163 @@ export const allPosts = () => zero.query.post
   })
 })
 
+describe('instance layout', () => {
+  const dataDir = () => join(testDir, 'src/data')
+
+  test('discovers file and folder namespaces and emits related sync closure', async () => {
+    writeFileSync(
+      join(dataDir(), 'reaction.ts'),
+      `export const allReactions = () => zql.reaction`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/instance.ts'),
+      `export default defineInstance({ scope: 'projectId' })`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/message/queries.ts'),
+      `
+const unused = () => zql.message.related('notARealRelation')
+const withComments = () => zql.message.related('comments', (q) => q.related('author'))
+export const messages = () => withComments()
+`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/message/mutations.ts'),
+      `export const schema = table('message').columns({ id: string(), projectId: string() })`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/message/helpers.ts'),
+      `export const privateHelper = () => 'ignored'`
+    )
+    writeFileSync(
+      join(testDir, 'src/database/relations.ts'),
+      `
+export const relations = defineRelations(schema, (r) => ({
+  message: { comments: r.many.comment({}) },
+  comment: { author: r.one.userPublic({}) },
+}))
+`
+    )
+    writeFileSync(
+      join(testDir, 'src/database/schema.ts'),
+      `
+export const comment = sqliteTable('comment', { id: text(), projectId: text() })
+export const userPublic = sqliteTable('user_public', { id: text(), projectId: text() })
+`
+    )
+
+    const membership = await deriveDataMembership({ dir: dataDir() })
+    expect(membership.allTables).toEqual(['comment', 'message', 'reaction', 'userPublic'])
+    expect(membership.instances.project).toEqual({
+      tables: ['message'],
+      syncTables: ['comment', 'message', 'userPublic'],
+      scope: 'projectId',
+    })
+
+    await generate({ dir: dataDir(), silent: true })
+
+    const grouped = readFileSync(join(dataDir(), 'generated/groupedQueries.ts'), 'utf8')
+    expect(grouped).toContain("from '../reaction'")
+    expect(grouped).toContain("from '../project/message/queries'")
+    expect(grouped).not.toContain('privateHelper')
+
+    const manifest = readFileSync(join(dataDir(), 'generated/instances.ts'), 'utf8')
+    expect(manifest).toContain('default: {')
+    expect(manifest).toContain('project: {')
+    expect(manifest).toContain('tables: ["message"]')
+    expect(manifest).toContain('syncTables: ["comment","message","userPublic"]')
+    expect(manifest).toContain(
+      `defaultVisibility: (value: string) => ({ column: "projectId", value })`
+    )
+  })
+
+  test('rejects a relation that crosses instance ownership', async () => {
+    writeFileSync(
+      join(dataDir(), 'userPublic.ts'),
+      `export const users = () => zql.userPublic`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/instance.ts'),
+      `export default defineInstance({ scope: 'projectId' })`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/message.ts'),
+      `
+export const schema = table('message').columns({ id: string(), projectId: string() })
+export const messages = () => zql.message.related('author')
+`
+    )
+    writeFileSync(
+      join(testDir, 'src/database/relations.ts'),
+      `export const relations = defineRelations(schema, (r) => ({ message: { author: r.one.userPublic({}) } }))`
+    )
+
+    await expect(generate({ dir: dataDir(), silent: true })).rejects.toThrow(
+      /message\.messages.*instance 'project'.*userPublic.*instance 'default'/
+    )
+  })
+
+  test('rejects a scoped sync table without the scope column', async () => {
+    writeFileSync(
+      join(dataDir(), 'project/instance.ts'),
+      `export default defineInstance({ scope: 'projectId' })`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/message.ts'),
+      `export const schema = table('message').columns({ id: string() })`
+    )
+
+    await expect(generate({ dir: dataDir(), silent: true })).rejects.toThrow(
+      /table 'message'.*instance 'project'.*scope column 'projectId'/
+    )
+  })
+
+  test('rejects duplicate namespaces across instances', async () => {
+    writeFileSync(
+      join(dataDir(), 'message.ts'),
+      `export const messages = () => zql.message`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/instance.ts'),
+      `export default defineInstance({ scope: 'projectId' })`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/message.ts'),
+      `export const schema = table('message').columns({ projectId: string() })`
+    )
+
+    await expect(generate({ dir: dataDir(), silent: true })).rejects.toThrow(
+      /namespace 'message'.*instances 'default' and 'project'/
+    )
+  })
+
+  test('rejects the removed top-level layout', async () => {
+    writeFileSync(
+      join(dataDir(), 'queries/message.ts'),
+      `export const messages = () => zql.message`
+    )
+
+    await expect(generate({ dir: dataDir(), silent: true })).rejects.toThrow(
+      /removed top-level queries\/ layout/
+    )
+  })
+
+  test('rejects dynamically named relations', async () => {
+    writeFileSync(
+      join(dataDir(), 'message.ts'),
+      `export const messages = (relation: string) => zql.message.related(relation)`
+    )
+
+    await expect(generate({ dir: dataDir(), silent: true })).rejects.toThrow(
+      /related\(\) without a string literal.*statically derivable/
+    )
+  })
+})
+
 describe('mutations', () => {
   test('generates validators for inline mutation param types', async () => {
     writeFileSync(
-      join(testDir, 'models/post.ts'),
+      join(testDir, 'post/mutations.ts'),
       `
 import { table, string } from 'on-zero'
 import { mutations, serverWhere } from 'on-zero'
@@ -274,7 +432,7 @@ export const mutate = mutations(schema, perm, {
 
   test('generates CRUD validators from schema columns', async () => {
     writeFileSync(
-      join(testDir, 'models/task.ts'),
+      join(testDir, 'task/mutations.ts'),
       `
 import { table, string, number, boolean } from 'on-zero'
 import { mutations, serverWhere } from 'on-zero'
@@ -310,7 +468,7 @@ export const mutate = mutations(schema, perm)
 
   test('treats models without export const mutate as empty mutations', async () => {
     writeFileSync(
-      join(testDir, 'models/readonly.ts'),
+      join(testDir, 'readonly/mutations.ts'),
       `
 import { table, string } from 'on-zero'
 
@@ -330,7 +488,7 @@ export const schema = table('readonly').columns({
 
   test('extracts custom mutations from bare mutations({})', async () => {
     writeFileSync(
-      join(testDir, 'models/admin.ts'),
+      join(testDir, 'admin/mutations.ts'),
       `
 import { mutations } from 'on-zero'
 
@@ -351,7 +509,7 @@ export const mutate = mutations({
 
   test('generates validators for string-model multiline mutation params', async () => {
     writeFileSync(
-      join(testDir, 'models/agentEvent.ts'),
+      join(testDir, 'agentEvent/mutations.ts'),
       `
 import { mutations, serverWhere } from 'on-zero'
 
@@ -388,7 +546,7 @@ export const mutate = mutations('agentEvent', perm, {
 
   test('generates validators for object intersections', async () => {
     writeFileSync(
-      join(testDir, 'models/agent.ts'),
+      join(testDir, 'agent/mutations.ts'),
       `
 import { mutations, serverWhere } from 'on-zero'
 
@@ -424,7 +582,7 @@ export const mutate = mutations('agent', perm, {
 
   test('uses v.unknown for untyped mutation payloads', async () => {
     writeFileSync(
-      join(testDir, 'models/project.ts'),
+      join(testDir, 'project/mutations.ts'),
       `
 import { mutations, serverWhere } from 'on-zero'
 
@@ -447,7 +605,7 @@ export const mutate = mutations('project', perm, {
 
   test('handles mutations with only context param (void)', async () => {
     writeFileSync(
-      join(testDir, 'models/user.ts'),
+      join(testDir, 'user/mutations.ts'),
       `
 import { table, string } from 'on-zero'
 import { mutations, serverWhere } from 'on-zero'
@@ -476,7 +634,7 @@ export const mutate = mutations(schema, perm, {
 
   test('handles primitive param type', async () => {
     writeFileSync(
-      join(testDir, 'models/user.ts'),
+      join(testDir, 'user/mutations.ts'),
       `
 import { table, string } from 'on-zero'
 import { mutations, serverWhere } from 'on-zero'
@@ -505,7 +663,7 @@ export const mutate = mutations(schema, perm, {
 
   test('handles array param type', async () => {
     writeFileSync(
-      join(testDir, 'models/batch.ts'),
+      join(testDir, 'batch/mutations.ts'),
       `
 import { mutations } from 'on-zero'
 
@@ -526,7 +684,7 @@ export const mutate = mutations({
 
   test('populates mutationCount and caching works', async () => {
     writeFileSync(
-      join(testDir, 'models/item.ts'),
+      join(testDir, 'item/mutations.ts'),
       `
 import { table, string } from 'on-zero'
 import { mutations, serverWhere } from 'on-zero'
@@ -559,7 +717,7 @@ describe('type resolution', () => {
   test('resolves imported type references for mutations', async () => {
     // types file that the model imports from
     writeFileSync(
-      join(testDir, 'models/types.ts'),
+      join(testDir, 'post/types.ts'),
       `
 export type ArchiveParams = {
   id: string
@@ -570,7 +728,7 @@ export type ArchiveParams = {
     )
 
     writeFileSync(
-      join(testDir, 'models/post.ts'),
+      join(testDir, 'post/mutations.ts'),
       `
 import { table, string, boolean } from 'on-zero'
 import { mutations } from 'on-zero'
@@ -596,7 +754,7 @@ export const mutate = mutations({
 
   test('resolves utility types like Pick', async () => {
     writeFileSync(
-      join(testDir, 'models/types.ts'),
+      join(testDir, 'item/types.ts'),
       `
 export type Item = {
   id: string
@@ -608,7 +766,7 @@ export type Item = {
     )
 
     writeFileSync(
-      join(testDir, 'models/item.ts'),
+      join(testDir, 'item/mutations.ts'),
       `
 import { table, string, number } from 'on-zero'
 import { mutations, serverWhere } from 'on-zero'
@@ -649,7 +807,7 @@ export const mutate = mutations(schema, perm, {
       'dir'
     )
     writeFileSync(
-      join(testDir, 'models/types.ts'),
+      join(testDir, 'item/types.ts'),
       `
 import type { Row } from '@rocicorp/zero'
 import { drizzleZeroConfig } from 'drizzle-zero-sqlite'
@@ -667,7 +825,7 @@ export type Item = Row<(typeof schema)['tables']['item']>
     )
 
     writeFileSync(
-      join(testDir, 'models/item.ts'),
+      join(testDir, 'item/mutations.ts'),
       `
 import { mutations } from 'on-zero'
 import type { Item } from './types'
@@ -693,7 +851,7 @@ export const mutate = mutations('item', {
 
   test('skips symbol-keyed properties when resolving imported mutation param types', async () => {
     writeFileSync(
-      join(testDir, 'models/types.ts'),
+      join(testDir, 'item/types.ts'),
       `
 export type WeirdParams = {
   id: string
@@ -703,7 +861,7 @@ export type WeirdParams = {
     )
 
     writeFileSync(
-      join(testDir, 'models/item.ts'),
+      join(testDir, 'item/mutations.ts'),
       `
 import { mutations } from 'on-zero'
 import type { WeirdParams } from './types'
@@ -726,12 +884,12 @@ export const mutate = mutations({
 
   test('resolves imported types in query params', async () => {
     writeFileSync(
-      join(testDir, 'models/post.ts'),
+      join(testDir, 'post/mutations.ts'),
       `export const schema = table('post', { id: string() })`
     )
 
     writeFileSync(
-      join(testDir, 'queries/types.ts'),
+      join(testDir, 'post/types.ts'),
       `
 export type PostFilter = {
   authorId: string
@@ -741,7 +899,7 @@ export type PostFilter = {
     )
 
     writeFileSync(
-      join(testDir, 'queries/post.ts'),
+      join(testDir, 'post/queries.ts'),
       `
 import type { PostFilter } from './types'
 
