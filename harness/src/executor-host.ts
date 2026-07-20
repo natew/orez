@@ -13,6 +13,7 @@ import {
   createZeroHttpSyncServer,
   type ZeroHttpSyncDb,
   type ZeroHttpVisibility,
+  type ZeroHttpVisibilityInvalidation,
 } from '../../src/zero-http/mount.js'
 import { TABLES, executeMutator } from './fixture-data.js'
 
@@ -53,6 +54,7 @@ export function createHarnessSyncServer(
   options?: {
     readonly retainChanges?: number
     readonly visible?: ZeroHttpVisibility
+    readonly visibilityInvalidation?: ZeroHttpVisibilityInvalidation
     readonly transaction?: <Value>(work: () => Value | Promise<Value>) => Promise<Value>
   }
 ) {
@@ -79,6 +81,7 @@ export function createHarnessSyncServer(
     schema,
     tables: Object.keys(TABLES),
     visible: options?.visible,
+    visibilityInvalidation: options?.visibilityInvalidation,
   })
 }
 

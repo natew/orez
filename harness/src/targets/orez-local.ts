@@ -25,6 +25,7 @@ import { ensureHttpPullTransport } from '../vendor/httpPullTransport.js'
 import type {
   ZeroHttpSyncDb as SyncDb,
   ZeroHttpVisibility,
+  ZeroHttpVisibilityInvalidation,
 } from '../../../src/zero-http/mount.js'
 import type { Rows, SyncTarget } from '../target.js'
 
@@ -66,6 +67,7 @@ export async function startOrezLocal(opts?: {
   pullIntervalMs?: number
   retainChanges?: number
   visible?: ZeroHttpVisibility
+  visibilityInvalidation?: ZeroHttpVisibilityInvalidation
   onPull?: (observation: PullObservation) => void
   fetch?: typeof fetch
 }): Promise<OrezLocalTarget> {
@@ -79,6 +81,7 @@ export async function startOrezLocal(opts?: {
   const sync = createHarnessSyncServer(db, {
     retainChanges: opts?.retainChanges,
     visible: opts?.visible,
+    visibilityInvalidation: opts?.visibilityInvalidation,
   })
 
   let dropPushResponse = false

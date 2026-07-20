@@ -254,16 +254,21 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
           ) {
             throw new TypeError(`invalid initial cookie: ${requestedCookie}`)
           }
-          const epoch = Math.max(await watermarkIn(tx), requestedCookie) + 1
-          await tx.exec(
-            `INSERT INTO _zsync_changes ("watermark", "tableName", "op", "pk")
-             VALUES (?, '_zsync_meta', 'marker', NULL)`,
-            [epoch]
-          )
-          await tx.exec(
-            'UPDATE _zsync_meta SET floor = ?, initialized = 1 WHERE lock = 1',
-            [epoch]
-          )
+          const baseline = Math.max(await watermarkIn(tx), requestedCookie)
+          if (baseline === 0) {
+            await tx.exec('UPDATE _zsync_meta SET initialized = 1 WHERE lock = 1')
+          } else {
+            const epoch = baseline + 1
+            await tx.exec(
+              `INSERT INTO _zsync_changes ("watermark", "tableName", "op", "pk")
+               VALUES (?, '_zsync_meta', 'marker', NULL)`,
+              [epoch]
+            )
+            await tx.exec(
+              'UPDATE _zsync_meta SET floor = ?, initialized = 1 WHERE lock = 1',
+              [epoch]
+            )
+          }
         }
         for (const table of tableConfigs) {
           const capture = [
@@ -295,7 +300,9 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
           await tx.exec(`CREATE TRIGGER ${quoteIdentifier(`${trigger}_u`)}
           AFTER UPDATE ON ${physical} BEGIN
           INSERT INTO _zsync_changes ("tableName", "op", "pk")
-          VALUES (${tableName}, 'row', json_object('before', ${rowObject('OLD')}, 'after', ${rowObject('NEW')}));
+          VALUES (${tableName}, 'row', json_object('before', ${rowObject('OLD')}, 'after', NULL));
+          INSERT INTO _zsync_changes ("tableName", "op", "pk")
+          VALUES (${tableName}, 'row', json_object('before', NULL, 'after', ${rowObject('NEW')}));
         END`)
           await tx.exec(`CREATE TRIGGER ${quoteIdentifier(`${trigger}_d`)}
           AFTER DELETE ON ${physical} BEGIN

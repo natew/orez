@@ -113,7 +113,7 @@ describe('zero-http executor mount', () => {
         { userID: 'user-1' }
       )
     ).resolves.toEqual({
-      cookie: 3,
+      cookie: 2,
       lastMutationIDChanges: { 'client-1': 1 },
       rowsPatch: [
         { op: 'clear' },
@@ -140,11 +140,11 @@ describe('zero-http executor mount', () => {
     ])
     await expect(
       server.handlePull(
-        { clientID: 'client-1', clientGroupID: 'group-1', cookie: 3 },
+        { clientID: 'client-1', clientGroupID: 'group-1', cookie: 2 },
         { userID: 'user-1' }
       )
     ).resolves.toEqual({
-      cookie: 5,
+      cookie: 4,
       lastMutationIDChanges: { 'client-1': 2 },
       rowsPatch: [{ op: 'del', tableName: 'item', id: { id: 'b' } }],
     })
@@ -198,7 +198,7 @@ describe('zero-http executor mount', () => {
         { userID: 'user-1' }
       )
     ).resolves.toEqual({
-      cookie: user1.cookie + 1,
+      cookie: user1.cookie + 2,
       lastMutationIDChanges: { c1: 0 },
       rowsPatch: [{ op: 'del', tableName: 'privateItem', id: { id: 'private-1' } }],
     })
@@ -208,7 +208,7 @@ describe('zero-http executor mount', () => {
         { userID: 'user-2' }
       )
     ).resolves.toEqual({
-      cookie: user2.cookie + 1,
+      cookie: user2.cookie + 2,
       lastMutationIDChanges: { c2: 0 },
       rowsPatch: [
         {

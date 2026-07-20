@@ -6,7 +6,7 @@
 //   bun src/permissions.ts --target rust-local
 import { parseArgs } from 'node:util'
 
-import { fixtureVisibility } from './fixture-visibility.js'
+import { fixtureVisibility, fixtureVisibilityInvalidation } from './fixture-visibility.js'
 import { queries } from './fixture.js'
 import { startOrezLocal } from './targets/orez-local.js'
 
@@ -106,7 +106,11 @@ const target =
       ? await (
           await import('./targets/rust-cf.js')
         ).startRustCf({ pullIntervalMs: 100, visible: true })
-      : await startOrezLocal({ pullIntervalMs: 100, visible: fixtureVisibility })
+      : await startOrezLocal({
+          pullIntervalMs: 100,
+          visible: fixtureVisibility,
+          visibilityInvalidation: fixtureVisibilityInvalidation,
+        })
 const views: ReturnType<typeof watchAccess>[] = []
 
 try {

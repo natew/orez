@@ -46,7 +46,7 @@ import {
 } from './consistency/permission-transition.js'
 import { createHarnessSyncServer, type HarnessSyncServer } from './executor-host.js'
 import { seedSqlite, userIDFromAuth } from './fixture-data.js'
-import { fixtureVisibility } from './fixture-visibility.js'
+import { fixtureVisibility, fixtureVisibilityInvalidation } from './fixture-visibility.js'
 import { mutators, queries, schema, zql } from './fixture.js'
 import { ensureHttpPullTransport } from './vendor/httpPullTransport.js'
 
@@ -152,6 +152,7 @@ function makeNamespace(
   seedSqlite(db)
   const sync = createHarnessSyncServer(db, {
     visible: fixtureVisibility,
+    visibilityInvalidation: fixtureVisibilityInvalidation,
   })
 
   db.exec(`INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)`, [
