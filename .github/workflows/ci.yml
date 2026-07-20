@@ -219,10 +219,12 @@ jobs:
 
       # the sync-core differential test shells out to bun to run the
       # ts-oracle (crates/sync-core/ts-oracle/run-oracle.ts) against the
-      # reference spec; it is self-contained (bun:sqlite only, no install).
+      # workspace executor package.
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      - run: bun install --frozen-lockfile
 
       - uses: actions/setup-node@v4
         with:
