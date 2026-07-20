@@ -45,7 +45,8 @@ export type ApplicationSqlTransactionWork<Value> = (
 /**
  * private durable object RPC protocol. the session capability is returned
  * before it asks for ownership. waiting retries hold no durable object state,
- * and request cancellation disposes an active session before rejecting work.
+ * and a cancellation signal closes a queued session or rolls back an active
+ * session before rejecting work.
  */
 export type ApplicationSqlSessionRpc = Disposable & {
   begin(): Promise<boolean>
@@ -114,14 +115,10 @@ async function withApplicationSqlSession<Value>(
     : undefined
   void aborted?.catch(() => {})
   const abort = () => {
-    try {
-      session[Symbol.dispose]()
-    } finally {
-      rejectAbort?.(
-        signal?.reason ??
-          new DOMException('application SQLite request was canceled', 'AbortError')
-      )
-    }
+    rejectAbort?.(
+      signal?.reason ??
+        new DOMException('application SQLite request was canceled', 'AbortError')
+    )
   }
   signal?.addEventListener('abort', abort, { once: true })
   try {
@@ -134,6 +131,7 @@ async function withApplicationSqlSession<Value>(
     const value = aborted
       ? await Promise.race([Promise.resolve(pendingWork), aborted])
       : await pendingWork
+    signal?.throwIfAborted()
     await session.commit()
     return value
   } catch (error) {

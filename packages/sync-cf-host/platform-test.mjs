@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 
+import { findPort } from '../../src/port.ts'
+
 const externalURL = process.env.M0_BASE_URL?.replace(/\/$/, '')
-const port = 9_000 + Math.floor(Math.random() * 500)
+const port = await findPort(0)
 const server = externalURL
   ? undefined
   : Bun.spawn(
@@ -94,7 +96,6 @@ try {
   check(result.body.state.ledgerCount, 2, 'multi-table ledger')
   check(result.body.state.outboxCount, 1, 'multi-table outbox')
   check(result.body.state.sideEffectCount, 2, 'multi-table post-commit effect')
-  const beforeAppError = result.body.state
 
   result = await call(transactions, '/transaction-query')
   check(result.status, 200, 'transaction query status')
@@ -177,20 +178,9 @@ try {
   const canceledQueued = ns('application-canceled-queued')
   const held = call(`_application-cancellation/${canceledQueued}`, '/hold')
   await waitForStage(canceledQueued, 'hold-active')
-  const queuedController = new AbortController()
-  const queued = call(
-    `_application-cancellation/${canceledQueued}`,
-    '/queued',
-    undefined,
-    queuedController.signal
-  ).then(
-    () => 'resolved',
-    (error) => error.name
-  )
+  const queued = call(`_application-cancellation/${canceledQueued}`, '/queued')
   await waitForStage(canceledQueued, 'queued')
-  await new Promise((resolve) => setTimeout(resolve, 40))
-  queuedController.abort()
-  check(await queued, 'AbortError', 'queued application RPC observes caller abort')
+  check((await queued).body.ok, false, 'queued application RPC observes cancellation')
   await call(`_application-cancellation/${canceledQueued}`, '/release')
   const heldResult = await held
   check(heldResult.body.ok, false, 'held owner rolls back after release')
@@ -243,12 +233,14 @@ try {
   )
   check(result.body.selects, 2, 'application transaction budget select count')
 
+  const beforeAppError = await call(transactions, '/status')
+  check(beforeAppError.status, 200, 'application error baseline status')
   result = await call(transactions, '/push/application-error', { mutationID: 'm3' })
   check(result.status, 409, 'application error status')
   check(result.body.effectsDeferredButNotRun, 1, 'failed mutator deferred an effect')
   check(
     result.body.state,
-    beforeAppError,
+    beforeAppError.body.state,
     'application error rolls back and runs no effect'
   )
 

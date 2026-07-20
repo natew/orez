@@ -12,8 +12,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { findPort } from '../../src/port.ts'
+
 const adminKey = 'local-admin'
-const port = 9_600 + Math.floor(Math.random() * 300)
+const port = await findPort(0)
 const persist = mkdtempSync(join(tmpdir(), 'sync-cf-restart-'))
 const baseURL = `http://127.0.0.1:${port}`
 const namespace = `restart-${crypto.randomUUID()}`

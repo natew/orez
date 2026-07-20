@@ -1400,6 +1400,10 @@ export class ZeroDO extends DurableObject {
   }
 
   async [APPLICATION_SQL_ROLLBACK](session: ApplicationSqlSessionTarget): Promise<void> {
+    if (session.state === 'created') {
+      session.state = 'closed'
+      return
+    }
     this.assertApplicationSqlSession(session)
     try {
       if (session.mutated) {

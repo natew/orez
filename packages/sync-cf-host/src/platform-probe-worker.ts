@@ -244,8 +244,7 @@ async function runApplicationOverlapProbe(
 async function runApplicationCancellationProbe(
   env: Env,
   namespace: string,
-  action: 'hold' | 'queued' | 'active' | 'status' | 'release' | 'verify',
-  signal: AbortSignal
+  action: 'hold' | 'queued' | 'active' | 'status' | 'release' | 'verify'
 ): Promise<Response> {
   const target = env.PROBE_DO.get(env.PROBE_DO.idFromName(namespace))
   if (action === 'status') return json(await target.applicationCancellationStatus())
@@ -253,9 +252,10 @@ async function runApplicationCancellationProbe(
     await target.applicationCancellationRelease()
     return json({ ok: true })
   }
-  const activeController = action === 'active' ? new AbortController() : undefined
+  const cancellationController =
+    action === 'queued' || action === 'active' ? new AbortController() : undefined
   const client = createApplicationSqlClient(env.PROBE_DO, namespace, {
-    signal: activeController?.signal ?? signal,
+    signal: cancellationController?.signal,
   })
   if (action === 'verify') {
     await client.exec(
@@ -292,6 +292,9 @@ async function runApplicationCancellationProbe(
   }
 
   await target.applicationCancellationMark(action)
+  if (action === 'queued') {
+    setTimeout(() => cancellationController?.abort(), 40)
+  }
   try {
     await client.transaction(compileTransactionQuery, async (tx) => {
       await tx.exec(
@@ -309,7 +312,7 @@ async function runApplicationCancellationProbe(
         throw new Error('intentional held transaction rollback')
       }
       await target.applicationCancellationMark('active-active')
-      setTimeout(() => activeController?.abort(), 25)
+      setTimeout(() => cancellationController?.abort(), 25)
       await new Promise((resolve) => setTimeout(resolve, 60_000))
     })
     return json({ ok: true })
@@ -694,7 +697,7 @@ export default {
         case 'status':
         case 'release':
         case 'verify':
-          return runApplicationCancellationProbe(env, second, third, request.signal)
+          return runApplicationCancellationProbe(env, second, third)
         default:
           return json({ error: 'unknown application cancellation probe' }, 404)
       }

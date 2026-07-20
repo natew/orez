@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 
+import { findPort } from '../../src/port.ts'
+
 const externalURL = process.env.M3_BASE_URL?.replace(/\/$/, '')
 const adminKey = process.env.M3_ADMIN_KEY ?? 'local-admin'
-const port = 9_000 + Math.floor(Math.random() * 500)
+const port = await findPort(0)
 const server = externalURL
   ? undefined
   : Bun.spawn(

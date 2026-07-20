@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers'
-import { createSyncExecutor } from 'orez-sync-executor'
+import { createSyncExecutor } from 'orez-sync-executor/core'
 
 import { validatePullCaps, validateSyncHostConfig } from './config.js'
 import { createQueryCompiler } from './query-compiler.js'

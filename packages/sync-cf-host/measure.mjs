@@ -1,10 +1,12 @@
+import { findPort } from '../../src/port.ts'
+
 const percentile = (values, p) => {
   const sorted = [...values].sort((a, b) => a - b)
   return sorted[Math.max(0, Math.ceil(sorted.length * p) - 1)]
 }
 
 const round = (value) => Math.round(value * 1_000) / 1_000
-const port = 9_500 + Math.floor(Math.random() * 300)
+const port = await findPort(0)
 const spawnedAt = performance.now()
 const server = Bun.spawn(
   [

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 
-const port = 9_000 + Math.floor(Math.random() * 500)
+import { findPort } from '../../src/port.ts'
+
+const port = await findPort(0)
 const server = Bun.spawn(
   [
     'bunx',

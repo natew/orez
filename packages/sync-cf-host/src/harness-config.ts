@@ -1,4 +1,4 @@
-import { MutationApplicationError, registerMutators } from 'orez-sync-executor'
+import { MutationApplicationError, registerMutators } from 'orez-sync-executor/core'
 
 import { queryNameToAst } from '../../../harness/src/query-resolver.mjs'
 import {
