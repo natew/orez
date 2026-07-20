@@ -258,6 +258,8 @@ jobs:
             --fail \
             --output-file /tmp/sync-native-LICENSES.txt \
             scripts/sync-native-licenses.hbs
+          bun scripts/normalize-sync-native-licenses.ts \
+            /tmp/sync-native-LICENSES.txt
           cmp LICENSES.txt /tmp/sync-native-LICENSES.txt
 
       # the whole workspace must compile (the native host depends on sync-core

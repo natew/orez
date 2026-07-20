@@ -102,6 +102,7 @@ with cargo-about 0.9.1 after changing Rust dependencies:
 ```sh
 cargo about generate --locked --manifest-path crates/sync-native/Cargo.toml \
   --fail --output-file LICENSES.txt scripts/sync-native-licenses.hbs
+bun scripts/normalize-sync-native-licenses.ts LICENSES.txt
 ```
 
 ## Release flow
