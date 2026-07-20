@@ -183,6 +183,7 @@
     "pg-to-sqlite",
     "sqlite-wasm",
     "packages/drizzle-zero-sqlite",
+    "packages/on-zero",
     "packages/sync-executor",
     "packages/sync-cf-host",
     "packages/sync-browser-host",
