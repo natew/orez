@@ -46,25 +46,16 @@ line counts below are what the consumer currently hand-rolls).
    local executor or the injected remote dispatcher. No globalThis install, no
    consumer-invented secret-header protocol; the CF service-binding hop is a
    dispatcher implementation the consumer passes in.
-4. Instance partition via folder structure (replaces the four hand lists +
-   three assertions in soot core.ts and the hand-kept sync-surface lists in
-   projectTables.ts). Convention over configuration:
-   - `src/data/<instance>/queries|mutations/*` — the folder IS the partition
-     declaration; a namespace lives in exactly one instance by construction.
-     Optional `instance.ts` per folder for config (scope column, namespace
-     derivation like `proj-<id>`).
-   - No instance folders (flat `src/data/queries`) = one default instance;
-     single-instance apps like takeout pay nothing. Same mechanism, not a
-     second layout.
-   - Generate emits per-instance groupedQueries/models plus the combined
-     multi-client wiring; the module-eval partition assertions die.
-   - The instance SYNC SURFACE is derived, not declared: the closure of
-     tables reachable from that instance's query ASTs (related() traversal)
-     covers related-only tables (soot's PROJECT_QUERY_TABLE_NAMES problem).
-     Server pull endpoints and visibility partitions consume the generated
-     surface.
-   - Cross-instance reach (a project query related()-ing a control table)
-     fails at generate time, not as an empty hydration in prod.
+4. Instance partition + data layout v2: full design in
+   `plans/on-zero-instance-folders.md` (supersedes the earlier bullet here).
+   Headline: model files (`src/data/<instance>/<namespace>.ts` with canonical
+   `where`/`query`/`mutate` slots) make sync membership, instance assignment,
+   and namespace ONE declaration; an optional `on-zero.config.ts` is the
+   explicit layer (instance names, dirs, scope columns — nothing inferred
+   from a name the config cannot restate). Derives and deletes THREE hand
+   lists: the drizzle-zero table allowlist, soot core.ts partition lists, and
+   soot projectTables.ts sync surfaces (related() closure). Generate-time
+   validation replaces module-eval assertions.
 
 ## orez features
 
