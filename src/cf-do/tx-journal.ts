@@ -348,6 +348,9 @@ function restoreSchemaSnapshot(
 
   for (const row of tables) {
     const snapshot = snapshotByTable.get(row.name)!
+    const hasRows =
+      sql.exec(`SELECT 1 AS ok FROM ${quoteIdent(snapshot)} LIMIT 1`).toArray().length > 0
+    if (!hasRows) continue
     const columns = writableColumns(sql, row.name)
     if (columns.length > 0) {
       const columnList = columns.map(quoteIdent).join(', ')
