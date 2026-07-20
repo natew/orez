@@ -53,7 +53,13 @@ import { getRawWhere, setEvaluatingPermission } from './where'
 import { setRunner, type ZeroRunner } from './zeroRunner'
 import { zql } from './zql'
 
-import type { AuthData, GenericModels, GetZeroMutators, ZeroEvent } from './types'
+import type {
+  AuthData,
+  GenericModels,
+  GetZeroMutators,
+  ZeroEvent,
+  ZeroEventsEmitter,
+} from './types'
 import type {
   AnyQueryRegistry,
   Query,
@@ -358,7 +364,10 @@ export function createZeroClientInternal<
   // unchanged for single-instance back-compat.
   const emitterScope = instanceName === 'default' ? '' : `:${instanceName}`
 
-  const zeroEvents = createEmitter<ZeroEvent | null>(`zero${emitterScope}`, null)
+  const zeroEvents: ZeroEventsEmitter = createEmitter<ZeroEvent | null>(
+    `zero${emitterScope}`,
+    null
+  )
 
   let recoverFromAckTimeout: (input: {
     label: string
@@ -929,7 +938,7 @@ export function createZeroClientInternal<
       exposeDataset,
       datasetCacheUrl,
     }: {
-      zeroEvents: ReturnType<typeof createEmitter<ZeroEvent | null>>
+      zeroEvents: ZeroEventsEmitter
       refreshAuth?: () => Promise<string | undefined>
       exposeDataset?: boolean
       datasetCacheUrl?: string

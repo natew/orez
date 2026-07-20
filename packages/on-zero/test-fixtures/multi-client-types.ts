@@ -1,7 +1,7 @@
 import { createSchema, string, table } from '@rocicorp/zero'
 import { createZeroClients, type ZeroInstanceManifestEntry } from 'on-zero/multi'
 
-import type { MutatorContext } from 'on-zero'
+import type { MutatorContext, ZeroEventsEmitter } from 'on-zero'
 
 const schema = createSchema({
   tables: [
@@ -39,6 +39,9 @@ declare const account: ZeroInstanceManifestEntry<typeof schema, AccountModels>
 declare const message: ZeroInstanceManifestEntry<typeof schema, MessageModels>
 
 const { clients, combined } = createZeroClients({ default: account, project: message })
+const publicEvents: ZeroEventsEmitter = combined.zeroEvents
+
+void publicEvents
 
 void clients.default.zero.mutate.account.insert({ id: 'account-1' })
 void clients.project.zero.mutate.message.insert({ id: 'message-1', body: 'hello' })

@@ -1,5 +1,4 @@
-import type { ZeroEvent, ZeroRecoveryReasonKey } from '../types'
-import type { Emitter } from './emitter'
+import type { ZeroEventsEmitter, ZeroRecoveryReasonKey } from '../types'
 import type { Context, LogLevel, LogSink } from '@rocicorp/logger'
 import type { UpdateNeededReason } from '@rocicorp/zero'
 
@@ -66,7 +65,7 @@ export type ZeroRecoveryDeps = {
   // EVERY underlying store; the latch below keeps it to one reload.
   deleteLocalState: () => Promise<unknown>
   // recovery lifecycle for consumers (preview postMessage, toast, …).
-  zeroEvents: Emitter<ZeroEvent | null>
+  zeroEvents: ZeroEventsEmitter
   // awaited before the reload — e.g. wait for the dev origin to come back so the
   // reload doesn't land on a restarting server. optional.
   beforeReload?: () => Promise<void>

@@ -453,13 +453,10 @@ writeFileSync(
     schemaImportPath: '../../database/schema',
   })
 )
-const dzSchema = drizzleZeroConfig(
-  drizzleSchema,
-  {
-    tables: Object.fromEntries(allTables.map((table) => [table, true])),
-    suppressDefaultsWarning: true,
-  }
-)
+const dzSchema = drizzleZeroConfig(drizzleSchema, {
+  tables: Object.fromEntries(allTables.map((table) => [table, true])),
+  suppressDefaultsWarning: true,
+})
 
 // generates a typed schema.ts with createSchema() + relationships()
 const output = generateDrizzleSchemaFile(dzSchema)

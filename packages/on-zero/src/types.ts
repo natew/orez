@@ -171,6 +171,17 @@ export type ZeroEvent =
   | { type: 'recovering'; reasonKey: ZeroRecoveryReasonKey; reason: string }
   | { type: 'fatal'; reasonKey: ZeroRecoveryReasonKey; reason: string }
 
+export type ZeroEventsEmitter = {
+  value: ZeroEvent | null
+  options?: {
+    name: string
+    silent?: boolean
+    comparator?: (a: ZeroEvent | null, b: ZeroEvent | null) => boolean
+  }
+  listen: (listener: (value: ZeroEvent | null) => void) => () => void
+  emit: (next: ZeroEvent | null) => void
+}
+
 export type ZeroRecoveryReasonKey =
   | 'NewClientGroup'
   | 'VersionNotSupported'

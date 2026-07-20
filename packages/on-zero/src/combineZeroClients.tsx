@@ -1,8 +1,8 @@
-import { createEmitter, type Emitter } from './helpers/emitter'
+import { createEmitter } from './helpers/emitter'
 import { getInstanceForNamespace, getInstanceForQueryFn } from './instanceRegistry'
 import { run } from './run'
 
-import type { ZeroEvent } from './types'
+import type { ZeroEvent, ZeroEventsEmitter } from './types'
 import type { ReactNode } from 'react'
 
 // combines multiple createZeroClient instances into one consumer surface:
@@ -40,7 +40,7 @@ type CombinableZeroClient = {
   zero: any
   preload: (...args: any[]) => any
   getQuery: (...args: any[]) => any
-  zeroEvents: Emitter<ZeroEvent | null>
+  zeroEvents: ZeroEventsEmitter
   ControlQueries: (props: ControlQueriesProps) => ReactNode
 }
 
@@ -72,7 +72,7 @@ export type CombinedZeroClients<Clients extends readonly CombinableZeroClient[]>
   preload: UnionToIntersection<Clients[number]['preload']>
   getQuery: UnionToIntersection<Clients[number]['getQuery']>
   run: typeof run
-  zeroEvents: Emitter<ZeroEvent | null>
+  zeroEvents: ZeroEventsEmitter
   ControlQueries: (props: ControlQueriesProps) => ReactNode
 }
 
