@@ -405,14 +405,14 @@ the generated query files are only used internally by zero client/server setup.
 
 ### types
 
-you can import types from this folder, but prefer re-exporting from \`../types.ts\`:
+you can import types from this folder, but prefer re-exporting from your app's public types barrel:
 
 \`\`\`ts
 // ❌ okay but not preferred
 import type { Message } from '~/data/generated/types'
 
-// ✅ better - re-export from types.ts
-import type { Message } from '~/data/types'
+// ✅ better - re-export from the app types barrel
+import type { Message } from '~/types'
 \`\`\`
 
 ## regeneration

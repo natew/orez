@@ -22,7 +22,7 @@ import type { ExtractedMutation, ModelMutations, SchemaColumn } from './generate
 import type { DataLayout } from './generate-layout'
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex')
-const GENERATOR_CACHE_VERSION = '3'
+const GENERATOR_CACHE_VERSION = '4'
 
 const isGeneratorSourceFile = (name: string) =>
   name.endsWith('.ts') &&
