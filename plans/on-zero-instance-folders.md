@@ -65,6 +65,12 @@ which the flat layout never had.
 
 - The ROOT is always the default/primary instance. Simple apps (takeout, most
   generated browser projects) never leave it — zero new concepts, no config.
+- Membership is decided by EXPORT SHAPE, never by filename: a data file is a
+  namespace iff the AST pass finds recognized data exports (query builders,
+  mutations(...), serverWhere slots). Conventional wiring modules at the data
+  root (server.ts, types.ts, zero-client.tsx, auth.ts) export none of those
+  and are ignored. No reserved-name list — chat has a real table named
+  `server`, which a name blacklist would silently drop.
 - `instance.ts` is the explicit opt-in indicator. A folder without it is just
   organization, never an instance — nothing is inferred from a folder name
   alone.
