@@ -4,7 +4,7 @@ import {
   runCommittedEffects,
   type EffectAttempt,
 } from './effects.js'
-import { SyncExecutorRequestError } from './errors.js'
+import { MutationApplicationError, SyncExecutorRequestError } from './errors.js'
 import { createServerTransaction } from './transaction.js'
 
 import type {
@@ -94,6 +94,20 @@ function validatePushBody(value: unknown): PushBody {
     mutations,
     pushVersion: value.pushVersion,
   }
+}
+
+// a mutator that throws is an application failure, not a transport failure:
+// upstream zero's process-mutations wraps any handler error the same way, so
+// the write rolls back, the client gets an app result, and the ledger still
+// advances. rethrowing instead would make the client retry that id forever and
+// block every later mutation in its group. ledger and database failures raised
+// outside the mutator stay fatal.
+function toApplicationError(error: unknown): unknown {
+  if (isMutationApplicationError(error)) return error
+  if (error instanceof SyncExecutorRequestError) return error
+  return new MutationApplicationError(
+    error instanceof Error ? error.message : String(error)
+  )
 }
 
 function validateClaims(claims: NormalizedClaims): void {
@@ -340,8 +354,6 @@ export function createSyncExecutor<S extends Schema>(
             )
             if (current.kind === 'replay') return current
 
-            const registered = mutators[mutation.name]
-            if (!registered) throw new Error(`unknown mutator: ${mutation.name}`)
             const attempt = createEffectAttempt()
             const tx = createServerTransaction(
               schema,
@@ -351,18 +363,28 @@ export function createSyncExecutor<S extends Schema>(
               mutation.id
             )
             try {
-              await registered({
-                tx,
-                args: mutation.args[0] ?? null,
-                ctx: {
-                  source: 'zero-push',
-                  claims,
-                  clientGroupID: push.clientGroupID,
-                  clientID: mutation.clientID,
-                  mutationID: mutation.id,
-                  defer: attempt.defer,
-                },
-              })
+              try {
+                // resolved in here so an unknown name is an application error
+                // too: a stale client naming a removed mutator would otherwise
+                // retry it forever and block its later mutation ids
+                if (!Object.hasOwn(mutators, mutation.name)) {
+                  throw new Error(`unknown mutator: ${mutation.name}`)
+                }
+                await mutators[mutation.name]!({
+                  tx,
+                  args: mutation.args[0] ?? null,
+                  ctx: {
+                    source: 'zero-push',
+                    claims,
+                    clientGroupID: push.clientGroupID,
+                    clientID: mutation.clientID,
+                    mutationID: mutation.id,
+                    defer: attempt.defer,
+                  },
+                })
+              } catch (error) {
+                throw toApplicationError(error)
+              }
               await advanceLMID(
                 database,
                 applicationTx,
@@ -423,9 +445,8 @@ export function createSyncExecutor<S extends Schema>(
 
     async execute(name, args, claims): Promise<void> {
       validateClaims(claims)
-      const registered = mutators[name]
-      if (!registered) throw new Error(`unknown mutator: ${name}`)
-      const committed = await runMutation(registered, args, claims, undefined)
+      if (!Object.hasOwn(mutators, name)) throw new Error(`unknown mutator: ${name}`)
+      const committed = await runMutation(mutators[name]!, args, claims, undefined)
       await runCommittedEffects(committed, effects)
     },
 
@@ -461,7 +482,9 @@ export async function handleSyncExecutorPushRequest<S extends Schema>(options: {
       await options.request.json(),
       options.claims
     )
-    return Response.json(result)
+    // the body IS zero's mutate response; wrapping it in another object fails
+    // zero's mutateResponseSchema and the push comes back as PushFailed
+    return Response.json(result.pushResponse)
   } catch (error) {
     const status =
       error instanceof SyncExecutorRequestError

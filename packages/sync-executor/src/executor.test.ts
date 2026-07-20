@@ -4,7 +4,7 @@ import { createSchema, string, table } from '@rocicorp/zero'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import { executeCrud } from './crud.js'
-import { createSyncExecutor } from './executor.js'
+import { createSyncExecutor, handleSyncExecutorPushRequest } from './executor.js'
 
 import type {
   ApplicationDatabase,
@@ -121,6 +121,118 @@ describe('sync executor', () => {
     expect(sqlite.prepare('SELECT lastMutationID FROM _zsync_clients').get()).toEqual({
       lastMutationID: 1,
     })
+  })
+
+  test('the push endpoint returns zero mutate response shape, not an internal wrapper', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    const mutators = {
+      create: async ({ tx }) => {
+        await tx.mutate.item.insert({ id: 'a', value: 'v' })
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    const response = await handleSyncExecutorPushRequest({
+      executor,
+      request: new Request('https://example.test/push', {
+        method: 'POST',
+        body: JSON.stringify(push('create')),
+      }),
+      claims: { userID: 'user-1' },
+    })
+
+    // zero parses this with mutateResponseSchema, which accepts
+    // {mutations:[...]} or {kind:'MutateResponse',...} and nothing else
+    expect(await response.json()).toEqual({
+      mutations: [{ id: { clientID: 'client-1', id: 1 }, result: {} }],
+    })
+  })
+
+  test('a mutation naming an inherited key is rejected, not resolved off the prototype', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    const executor = createSyncExecutor({ database, effects, mutators: {}, schema })
+
+    await expect(executor.push(push('toString'), { userID: 'user-1' })).resolves.toEqual({
+      pushResponse: {
+        mutations: [
+          {
+            id: { clientID: 'client-1', id: 1 },
+            result: {
+              error: 'app',
+              message: 'unknown mutator: toString',
+              details: 'unknown mutator: toString',
+            },
+          },
+        ],
+      },
+    })
+  })
+
+  test('a crud payload naming an inherited key is rejected as an unknown column', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    const mutators = {
+      sneak: async ({ tx }) => {
+        await tx.mutate.item.insert({ id: 'a', value: 'v', toString: 'x' } as never)
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    const result = await executor.push(push('sneak'), { userID: 'user-1' })
+    expect(result.pushResponse).toMatchObject({
+      mutations: [{ result: { error: 'app', message: 'unknown column: item.toString' } }],
+    })
+    expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([])
+  })
+
+  test('an ordinary mutator error rolls back, advances the ledger, and unblocks the next id', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+
+    const mutators = {
+      reject: async ({ tx }) => {
+        await tx.mutate.item.insert({ id: 'a', value: 'rolled-back' })
+        throw new Error('not authenticated')
+      },
+      create: async ({ tx }) => {
+        await tx.mutate.item.insert({ id: 'b', value: 'later' })
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    await expect(executor.push(push('reject'), { userID: 'user-1' })).resolves.toEqual({
+      pushResponse: {
+        mutations: [
+          {
+            id: { clientID: 'client-1', id: 1 },
+            result: {
+              error: 'app',
+              message: 'not authenticated',
+              details: 'not authenticated',
+            },
+          },
+        ],
+      },
+    })
+    expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([])
+    expect(sqlite.prepare('SELECT lastMutationID FROM _zsync_clients').get()).toEqual({
+      lastMutationID: 1,
+    })
+
+    // the next mutation must land: a stalled ledger would reject id 2 as
+    // out-of-order and the client would retry the failed mutation forever
+    await expect(executor.push(push('create', 2), { userID: 'user-1' })).resolves.toEqual(
+      {
+        pushResponse: {
+          mutations: [{ id: { clientID: 'client-1', id: 2 }, result: {} }],
+        },
+      }
+    )
+    expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([
+      { id: 'b', value: 'later' },
+    ])
   })
 
   test('replay acknowledges without invoking the mutator or effects again', async () => {

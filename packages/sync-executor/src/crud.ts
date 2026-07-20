@@ -50,13 +50,17 @@ export async function executeCrud(
   kind: CrudKind,
   input: unknown
 ): Promise<void> {
-  const table = schema.tables[tableName]
-  if (!table) throw new TypeError(`unknown table: ${tableName}`)
+  // hasOwn, not truthiness: a payload naming an inherited key like toString
+  // would otherwise resolve Object.prototype and reach SQL as a real column
+  if (!Object.hasOwn(schema.tables, tableName)) {
+    throw new TypeError(`unknown table: ${tableName}`)
+  }
+  const table = schema.tables[tableName]!
 
   const value = valueRecord(input)
   const entries = Object.entries(value).filter(([, field]) => field !== undefined)
   for (const [column] of entries) {
-    if (!table.columns[column]) {
+    if (!Object.hasOwn(table.columns, column)) {
       throw new TypeError(`unknown column: ${tableName}.${column}`)
     }
   }
