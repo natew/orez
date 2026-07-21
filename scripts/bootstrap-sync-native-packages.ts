@@ -58,9 +58,7 @@ function verifyOwner(name: string): void {
   const raw = JSON.parse(result.stdout)
   const maintainers = (Array.isArray(raw) ? raw : [raw]).map(
     (maintainer: string | { name?: string }) =>
-      typeof maintainer === 'string'
-        ? maintainer.match(/^[^ <]+/)?.[0]
-        : maintainer.name
+      typeof maintainer === 'string' ? maintainer.match(/^[^ <]+/)?.[0] : maintainer.name
   )
   if (!maintainers.includes('nwienert')) {
     throw new Error(`${name} exists but is not owned by nwienert`)
