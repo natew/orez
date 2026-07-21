@@ -1,4 +1,5 @@
 import { createSchema, string, table } from '@rocicorp/zero'
+import { defineConfig } from 'on-zero'
 import { createZeroClients, type ZeroInstanceManifestEntry } from 'on-zero/multi'
 
 import type { MutatorContext, ZeroEventsEmitter } from 'on-zero'
@@ -37,6 +38,15 @@ type MessageModels = {
 
 declare const account: ZeroInstanceManifestEntry<typeof schema, AccountModels>
 declare const message: ZeroInstanceManifestEntry<typeof schema, MessageModels>
+
+const dataConfig = defineConfig({
+  instances: {
+    control: { dir: './control', supportTables: ['audit'] },
+    project: { scope: 'projectId' },
+  },
+})
+const projectScope: 'projectId' | undefined = dataConfig.instances.project.scope
+void projectScope
 
 const { clients, combined } = createZeroClients({ default: account, project: message })
 const publicEvents: ZeroEventsEmitter = combined.zeroEvents
