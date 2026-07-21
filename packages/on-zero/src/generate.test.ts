@@ -611,16 +611,18 @@ export const messages = () => zql.message.related('author')
       allTables: ['account', 'audit', 'message'],
     })
 
+    // only message.ts is a model: account.ts exports a query and no mutate,
+    // where, or table declaration, so it must not enter models.ts
     await expect(
       generate({
         dir: dataDir(),
         config: join(dataDir(), 'on-zero.config.ts'),
         silent: true,
       })
-    ).resolves.toMatchObject({ modelCount: 2, schemaCount: 1 })
-    expect(readFileSync(join(dataDir(), 'generated/models.ts'), 'utf8')).toContain(
-      "from '../../project-data/message'"
-    )
+    ).resolves.toMatchObject({ modelCount: 1, schemaCount: 1 })
+    const models = readFileSync(join(dataDir(), 'generated/models.ts'), 'utf8')
+    expect(models).toContain("from '../../project-data/message'")
+    expect(models).not.toContain('account')
   })
 
   test('rejects missing configured instance directories', async () => {

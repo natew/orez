@@ -47,6 +47,32 @@ export function getModelImportName(name: string): string {
   return name === 'user' ? 'userPublic' : name
 }
 
+/**
+ * Assigns each name a module alias that cannot collide with another namespace's
+ * name or with another alias. `app` and `appSource` are both legal namespaces,
+ * so a plain `${name}Source` suffix is not safe on its own; the same is true of
+ * the `user` → `userPublic` rename above when both namespaces exist. Emitting a
+ * duplicate identifier produces a generated file that does not compile, so the
+ * disambiguation has to happen here rather than in the consuming app.
+ *
+ * Iteration order is the caller's, so output stays deterministic.
+ */
+export function uniqueModuleAliases(
+  names: readonly string[],
+  alias: (name: string) => string
+): Map<string, string> {
+  const taken = new Set<string>(names)
+  const aliases = new Map<string, string>()
+  for (const name of names) {
+    let candidate = alias(name)
+    // a candidate equal to its own name is the identity alias and always fine
+    while (candidate !== name && taken.has(candidate)) candidate += '_'
+    taken.add(candidate)
+    aliases.set(name, candidate)
+  }
+  return aliases
+}
+
 // string-based type parser
 
 function splitTopLevelTypeUnion(type: string): string[] {
@@ -324,20 +350,21 @@ export type GeneratedInstance = {
 
 export function generateModelsFile(modules: GeneratedModule[]): string {
   const sorted = [...modules].sort((a, b) => a.name.localeCompare(b.name))
+  const aliases = uniqueModuleAliases(
+    sorted.map(({ name }) => name),
+    getModelImportName
+  )
 
   const imports = sorted
-    .map(
-      ({ name, importPath }) =>
-        `import * as ${getModelImportName(name)} from '${importPath}'`
-    )
+    .map(({ name, importPath }) => `import * as ${aliases.get(name)!} from '${importPath}'`)
     .join('\n')
 
   const sortedByImportName = [...sorted].sort((a, b) =>
-    getModelImportName(a.name).localeCompare(getModelImportName(b.name))
+    aliases.get(a.name)!.localeCompare(aliases.get(b.name)!)
   )
   const modelsObj = `export const models = {\n${sortedByImportName
     .map(({ name }) => {
-      const importName = getModelImportName(name)
+      const importName = aliases.get(name)!
       return importName === name ? `  ${name},` : `  ${name}: ${importName},`
     })
     .join('\n')}\n}`
@@ -346,12 +373,14 @@ export function generateModelsFile(modules: GeneratedModule[]): string {
 }
 
 export function generateTypesFile(modelNames: string[]): string {
-  const sorted = [...modelNames].sort()
+  const sorted = [...modelNames].sort((a, b) => a.localeCompare(b))
+  // must match generateTablesFile: these types index into the schema names it exports
+  const aliases = uniqueModuleAliases(sorted, getModelImportName)
 
   const typeExports = sorted
     .map((name) => {
       const pascalName = name.charAt(0).toUpperCase() + name.slice(1)
-      const schemaName = getModelImportName(name)
+      const schemaName = aliases.get(name)!
       return `export type ${pascalName} = TableInsertRow<typeof schema.${schemaName}>\nexport type ${pascalName}Update = TableUpdateRow<typeof schema.${schemaName}>`
     })
     .join('\n\n')
@@ -361,11 +390,15 @@ export function generateTypesFile(modelNames: string[]): string {
 
 export function generateTablesFile(modules: GeneratedModule[]): string {
   const sorted = [...modules].sort((a, b) => a.name.localeCompare(b.name))
+  const aliases = uniqueModuleAliases(
+    sorted.map(({ name }) => name),
+    getModelImportName
+  )
 
   const exports = sorted
     .map(
       ({ name, importPath }) =>
-        `export { schema as ${getModelImportName(name)} } from '${importPath}'`
+        `export { schema as ${aliases.get(name)!} } from '${importPath}'`
     )
     .join('\n')
 
@@ -445,19 +478,21 @@ export function generateGroupedQueriesFile(
   }
 
   const sortedFiles = [...queryByFile.keys()].sort()
+  const aliases = uniqueModuleAliases(sortedFiles, (file) => `${file}Source`)
   const imports = sortedFiles
     .map(
       (file) =>
-        `import * as ${file}Source from '${queryByFile.get(file)![0]!.importPath}'`
+        `import * as ${aliases.get(file)!} from '${queryByFile.get(file)![0]!.importPath}'`
     )
     .join('\n')
   const exports = sortedFiles
     .map((file) => {
+      const alias = aliases.get(file)!
       const names = queryByFile
         .get(file)!
         .map((query) => query.name)
         .sort()
-      return `export const ${file} = {\n${names.map((name) => `  ${name}: ${file}Source.${name},`).join('\n')}\n}`
+      return `export const ${file} = {\n${names.map((name) => `  ${name}: ${alias}.${name},`).join('\n')}\n}`
     })
     .join('\n\n')
 

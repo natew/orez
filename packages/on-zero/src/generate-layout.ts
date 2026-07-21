@@ -224,11 +224,25 @@ function hasParseErrors(source: ts.SourceFile): boolean {
   )
 }
 
-function hasNamespaceExports(
+/**
+ * Which kinds of data exports a single-file namespace declares.
+ *
+ * `model` covers the exports that belong in generated `models.ts`: `mutate`,
+ * `where`, and a `schema` table declaration. `query` covers exported functions
+ * that reach a query builder. The two are reported separately because a
+ * query-only file must NOT enter models — a models entry with no `mutate` makes
+ * `GetZeroMutators` fail its constraint, which silently degrades EVERY
+ * `zero.mutate.*` call site in the app to an untyped error. Folder namespaces
+ * already get this right by construction (no `mutations.ts` means no model).
+ */
+type NamespaceExportKinds = { model: boolean; query: boolean }
+
+function namespaceExportKinds(
   ts: typeof import('typescript'),
   baseDir: string,
   path: string
-): boolean {
+): NamespaceExportKinds {
+  const none: NamespaceExportKinds = { model: false, query: false }
   const source = ts.createSourceFile(
     path,
     readFileSync(path, 'utf8'),
@@ -238,7 +252,7 @@ function hasNamespaceExports(
   if (hasParseErrors(source)) {
     const displayPath = relative(dirname(baseDir), path).split(sep).join('/')
     console.warn(`[on-zero] ignoring ${displayPath}: no recognized data exports`)
-    return false
+    return none
   }
   const functions = new Map<string, ts.ConciseBody>()
   const exported = new Set<string>()
@@ -259,7 +273,7 @@ function hasNamespaceExports(
             (name === 'where' && initializerText.startsWith('serverWhere(')) ||
             (name === 'schema' && initializerText.startsWith('table('))
           ) {
-            return true
+            return { model: true, query: false }
           }
         }
         if (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) {
@@ -308,7 +322,8 @@ function hasNamespaceExports(
     return found
   }
 
-  return [...exported].some((name) => reachesQuery(functions.get(name)!))
+  const query = [...exported].some((name) => reachesQuery(functions.get(name)!))
+  return { model: false, query }
 }
 
 function discoverNamespaces(
@@ -324,13 +339,16 @@ function discoverNamespaces(
     if (entry.isFile()) {
       if (!isSourceFile(entry.name) || entry.name === 'on-zero.config.ts') continue
       const path = resolve(instance.dir, entry.name)
-      if (!hasNamespaceExports(ts, baseDir, path)) continue
+      const kinds = namespaceExportKinds(ts, baseDir, path)
+      if (!kinds.model && !kinds.query) continue
       const name = basename(entry.name, '.ts')
       namespaces.push({
         name,
         instance: instance.name,
         queryPath: path,
-        modelPath: path,
+        // a query-only file is not a model, matching the folder layout where a
+        // missing mutations.ts leaves modelPath null
+        modelPath: kinds.model ? path : null,
         sourcePaths: [path],
       })
       continue
@@ -719,7 +737,8 @@ function assertNoUnclaimedNamespaces(
       ) {
         continue
       }
-      if (hasNamespaceExports(ts, baseDir, path)) {
+      const kinds = namespaceExportKinds(ts, baseDir, path)
+      if (kinds.model || kinds.query) {
         throw new Error(
           `[on-zero] data namespace ${path} is outside every instance directory declared in ${configPath}`
         )
