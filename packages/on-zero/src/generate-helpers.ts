@@ -356,7 +356,9 @@ export function generateModelsFile(modules: GeneratedModule[]): string {
   )
 
   const imports = sorted
-    .map(({ name, importPath }) => `import * as ${aliases.get(name)!} from '${importPath}'`)
+    .map(
+      ({ name, importPath }) => `import * as ${aliases.get(name)!} from '${importPath}'`
+    )
     .join('\n')
 
   const sortedByImportName = [...sorted].sort((a, b) =>

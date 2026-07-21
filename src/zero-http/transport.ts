@@ -469,9 +469,7 @@ export async function flushHttpPullTransports() {
 export async function pullHttpPullTransports() {
   const pageRegistry = getHttpPullPageRegistry()
   await Promise.all(
-    [...pageRegistry.transportsByOrigin.values()].map(({ transport }) =>
-      transport.pull()
-    )
+    [...pageRegistry.transportsByOrigin.values()].map(({ transport }) => transport.pull())
   )
 }
 
@@ -801,7 +799,11 @@ class ZeroHttpSocket {
         const args = ((op as { args?: readonly unknown[] }).args ??
           []) as readonly unknown[]
         if (name && transform) {
-          this.desiredQueryPatch.push({ op: 'put', hash: op.hash, ast: transform(name, args) })
+          this.desiredQueryPatch.push({
+            op: 'put',
+            hash: op.hash,
+            ast: transform(name, args),
+          })
         } else if (name) {
           this.desiredQueryPatch.push({ op: 'put', hash: op.hash, name, args })
         } else if (inline !== undefined) {

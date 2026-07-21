@@ -87,9 +87,7 @@ function withGotQueriesAck(
   response: unknown
 ): unknown {
   if (queryAware) return response
-  const queries = body.queries as
-    | { version?: unknown; patch?: unknown[] }
-    | undefined
+  const queries = body.queries as { version?: unknown; patch?: unknown[] } | undefined
   if (!queries || typeof queries.version !== 'number' || !Array.isArray(queries.patch)) {
     return response
   }
