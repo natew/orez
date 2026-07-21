@@ -291,12 +291,36 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
             ['i', 'u', 'd'].map((suffix) => `_zsync_tr_${table.physical}_${suffix}`)
           )
         )
-        const installedTriggers = await tx.query<{ name: string }>(
-          `SELECT name FROM sqlite_master
-           WHERE type = 'trigger' AND name GLOB '_zsync_tr_*'`
+        const installedTriggers = await tx.query<{
+          name: string
+          tableName: string
+        }>(
+          `SELECT name, tbl_name AS "tableName" FROM sqlite_master
+           WHERE type = 'trigger' AND name GLOB '_zsync_tr_*'
+           ORDER BY name`
         )
-        for (const trigger of installedTriggers) {
-          if (!expectedTriggers.has(trigger.name)) {
+        const retiredTriggers = installedTriggers.filter(
+          (trigger) => !expectedTriggers.has(trigger.name)
+        )
+        if (retiredTriggers.length > 0) {
+          const loggedTables = new Set(
+            (
+              await tx.query<{ tableName: string }>(
+                `SELECT DISTINCT "tableName" AS tableName FROM _zsync_changes
+                 WHERE "op" = 'row'`
+              )
+            ).map((row) => row.tableName)
+          )
+          for (const tableName of new Set(
+            retiredTriggers.map((trigger) => trigger.tableName)
+          )) {
+            if (loggedTables.has(tableName)) {
+              console.warn(
+                `[zero-http] retired table "${tableName}" has logged sync writes; removed its stale triggers, so future raw SQL writes will not sync. Include the table in this instance if writes continue.`
+              )
+            }
+          }
+          for (const trigger of retiredTriggers) {
             await tx.exec(`DROP TRIGGER IF EXISTS ${quoteIdentifier(trigger.name)}`)
           }
         }

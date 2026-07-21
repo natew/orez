@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 
 import { createSchema, string, table } from '@rocicorp/zero'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
   createZeroHttpApplicationDatabase,
@@ -32,6 +32,7 @@ const effects = {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const database of databases.splice(0)) database.close()
 })
 
@@ -72,6 +73,9 @@ describe('zero-http executor mount', () => {
       mutators: {},
     })
     await previous.ready()
+    sqlite
+      .prepare('INSERT INTO retiredItem (id, value) VALUES (?, ?)')
+      .run('retired-before-remount', 'evidence of prior writes')
     const retiredTriggers = () =>
       sqlite
         .prepare(
@@ -81,6 +85,7 @@ describe('zero-http executor mount', () => {
         )
         .all()
     expect(retiredTriggers()).toHaveLength(3)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     const server = createZeroHttpSyncServer({
       applicationDatabase,
@@ -91,6 +96,12 @@ describe('zero-http executor mount', () => {
     })
     await server.ready()
     expect(retiredTriggers()).toEqual([])
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /retired table "retiredItem" has logged sync writes.*future raw SQL writes will not sync/
+      )
+    )
     const first = (await server.handlePull(
       { clientID: 'client-1', clientGroupID: 'group-1', cookie: null },
       { id: 'user-1' }
