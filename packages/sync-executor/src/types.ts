@@ -18,7 +18,6 @@ export type NormalizedClaims = {
 
 export type AuthData = {
   readonly id: string
-  readonly [field: string]: unknown
 }
 
 export type ZeroSchemaConfig = {
