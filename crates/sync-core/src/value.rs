@@ -10,6 +10,24 @@ use serde_json::{Number, Value};
 
 use crate::db::SqlValue;
 
+// native triggers log a primary-key object. the shared mutation mount logs the
+// same key inside before/after so visibility changes and primary-key moves keep
+// both affected rows. normalize both writers before any pull resolves live rows.
+pub(crate) fn row_change_primary_keys(value: &Value) -> Vec<&Value> {
+    let Value::Object(fields) = value else {
+        return vec![value];
+    };
+    if fields.len() != 2 || !fields.contains_key("before") || !fields.contains_key("after") {
+        return vec![value];
+    }
+
+    [fields.get("before"), fields.get("after")]
+        .into_iter()
+        .flatten()
+        .filter(|key| !key.is_null())
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZeroColumnType {
     String,

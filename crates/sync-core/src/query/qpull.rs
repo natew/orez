@@ -16,6 +16,7 @@ use crate::db::{SqlValue, SyncDb};
 use crate::error::EngineError;
 use crate::schema::Tables;
 use crate::store;
+use crate::value::row_change_primary_keys;
 use crate::wire;
 
 use super::membership::{
@@ -113,11 +114,21 @@ fn scan_changed(
             Some(SqlValue::Text(s)) => s.clone(),
             _ => continue,
         };
-        let pk = match row.get("pk") {
-            Some(SqlValue::Text(s)) => canonical_pk_text(s),
+        let pks = match row.get("pk") {
+            Some(SqlValue::Text(s)) => {
+                let value: Value = serde_json::from_str(s).map_err(|error| {
+                    EngineError::internal(format!("bad change pk json: {error}"))
+                })?;
+                row_change_primary_keys(&value)
+                    .into_iter()
+                    .map(|key| canonical_pk_text(&key.to_string()))
+                    .collect::<Vec<_>>()
+            }
             _ => continue,
         };
-        out.insert((table, pk));
+        for pk in pks {
+            out.insert((table.clone(), pk));
+        }
     }
     Ok(out)
 }

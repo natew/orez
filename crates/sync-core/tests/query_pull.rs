@@ -147,6 +147,39 @@ fn desire_pull_then_data_change_flows_as_membership_delta() {
 }
 
 #[test]
+fn mutation_change_envelopes_flow_as_membership_deltas() {
+    let mut h = QHost::new();
+    let queries =
+        json!({ "version": 1, "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }] });
+    let first = h.pull("c1", json!(null), Some(queries));
+
+    h.exec("DROP TRIGGER _zsync_tr_issue_i");
+    h.exec("DROP TRIGGER _zsync_tr_issue_u");
+    h.exec(
+        "CREATE TRIGGER _zsync_tr_issue_i AFTER INSERT ON issue BEGIN
+         INSERT INTO _zsync_changes (tableName, op, pk)
+         VALUES ('issue', 'row', json_object('before', NULL, 'after', json_object('id', NEW.id)));
+         END",
+    );
+    h.exec(
+        "CREATE TRIGGER _zsync_tr_issue_u AFTER UPDATE ON issue BEGIN
+         INSERT INTO _zsync_changes (tableName, op, pk)
+         VALUES ('issue', 'row', json_object(
+           'before', json_object('id', OLD.id),
+           'after', json_object('id', NEW.id)
+         ));
+         END",
+    );
+
+    h.exec("UPDATE issue SET closed = 1 WHERE id = 'i1'");
+    h.exec("INSERT INTO issue VALUES ('i4', 'new', 0)");
+    let next = h.pull("c1", first["cookie"].clone(), None);
+
+    assert_eq!(put_ids(&next), vec!["i4"]);
+    assert_eq!(del_ids(&next), vec!["i1"]);
+}
+
+#[test]
 fn settled_update_migrating_between_queries_is_reemitted_without_snapshot() {
     let mut h = QHost::new();
     let closed_query = json!({ "table": "issue", "where": {

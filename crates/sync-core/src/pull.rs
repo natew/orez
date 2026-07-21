@@ -13,6 +13,7 @@ use crate::db::{Row, SqlValue, SyncDb};
 use crate::error::EngineError;
 use crate::schema::{TableSpec, Tables, quote_ident};
 use crate::store;
+use crate::value::row_change_primary_keys;
 use crate::wire;
 
 // per-user row visibility. `filter` returns a WHERE fragment over LOGICAL Zero
@@ -255,18 +256,35 @@ fn diff(
     let row_capped = raw.len() > max_change_rows;
     let mut changes: Vec<Change> = Vec::with_capacity(raw.len().min(max_change_rows));
     for row in raw.iter().take(max_change_rows) {
-        changes.push(Change {
-            watermark: counter_col(row.get("w")),
-            table_name: text_col(row.get("tableName")),
-            op: text_col(row.get("op")),
-            pk: match row.get("pk") {
-                Some(SqlValue::Text(s)) => Some(
-                    serde_json::from_str(s)
-                        .map_err(|e| EngineError::internal(format!("bad change pk json: {e}")))?,
-                ),
-                _ => None,
-            },
-        });
+        let watermark = counter_col(row.get("w"));
+        let table_name = text_col(row.get("tableName"));
+        let op = text_col(row.get("op"));
+        let pk = match row.get("pk") {
+            Some(SqlValue::Text(s)) => Some(
+                serde_json::from_str(s)
+                    .map_err(|e| EngineError::internal(format!("bad change pk json: {e}")))?,
+            ),
+            _ => None,
+        };
+        if op == "row"
+            && let Some(value) = &pk
+        {
+            for key in row_change_primary_keys(value) {
+                changes.push(Change {
+                    watermark,
+                    table_name: table_name.clone(),
+                    op: op.clone(),
+                    pk: Some(key.clone()),
+                });
+            }
+        } else {
+            changes.push(Change {
+                watermark,
+                table_name,
+                op,
+                pk,
+            });
+        }
     }
 
     // walk change rows in watermark order, deduping touched pks and collecting
@@ -335,7 +353,10 @@ fn diff(
             _ => {}
         }
 
-        if admitted_any && bytes + delta > caps.max_change_bytes {
+        if admitted_any
+            && change.watermark != cut_watermark
+            && bytes + delta > caps.max_change_bytes
+        {
             byte_capped = true;
             break;
         }
