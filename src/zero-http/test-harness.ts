@@ -61,9 +61,12 @@ export function waitForComplete<T>(view: {
   addListener(listener: (data: any, resultType: string) => void): () => void
 }): Promise<T> {
   return new Promise<T>((resolve, reject) => {
+    // the reconnect path waits out the zero client's fixed ~5s run-loop
+    // backoff before a complete can arrive, so the margin must sit well
+    // above that (still under the 15s vitest testTimeout)
     const timeout = setTimeout(
       () => reject(new Error('timed out waiting for complete query')),
-      5_000
+      10_000
     )
     let cleanup = () => {}
     cleanup = view.addListener((data, resultType) => {
