@@ -13,6 +13,10 @@ import type { ApplicationTransaction } from 'orez-sync-executor'
 
 const item = table('item').columns({ id: string(), value: string() }).primaryKey('id')
 const schema = createSchema({ tables: [item] })
+const retiredItem = table('retiredItem')
+  .columns({ id: string(), value: string() })
+  .primaryKey('id')
+const schemaWithRetiredItem = createSchema({ tables: [item, retiredItem] })
 const privateItem = table('privateItem')
   .columns({ id: string(), viewerId: string(), value: string() })
   .primaryKey('id')
@@ -54,6 +58,56 @@ function sqliteDb(sqlite: DatabaseSync): ZeroHttpSyncDb {
 }
 
 describe('zero-http executor mount', () => {
+  test('removes retired table triggers before a seeded incremental pull', async () => {
+    const sqlite = new DatabaseSync(':memory:')
+    databases.push(sqlite)
+    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    sqlite.exec('CREATE TABLE retiredItem (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    const applicationDatabase = createZeroHttpApplicationDatabase(sqliteDb(sqlite))
+    const previous = createZeroHttpSyncServer({
+      applicationDatabase,
+      effects,
+      schema: schemaWithRetiredItem,
+      tables: ['item', 'retiredItem'],
+      mutators: {},
+    })
+    await previous.ready()
+    const retiredTriggers = () =>
+      sqlite
+        .prepare(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'trigger' AND name GLOB '_zsync_tr_retiredItem_*'
+           ORDER BY name`
+        )
+        .all()
+    expect(retiredTriggers()).toHaveLength(3)
+
+    const server = createZeroHttpSyncServer({
+      applicationDatabase,
+      effects,
+      schema: schemaWithRetiredItem,
+      tables: ['item'],
+      mutators: {},
+    })
+    await server.ready()
+    expect(retiredTriggers()).toEqual([])
+    const first = (await server.handlePull(
+      { clientID: 'client-1', clientGroupID: 'group-1', cookie: null },
+      { id: 'user-1' }
+    )) as { cookie: number }
+
+    sqlite
+      .prepare('INSERT INTO retiredItem (id, value) VALUES (?, ?)')
+      .run('retired-1', 'written between pulls')
+
+    await expect(
+      server.handlePull(
+        { clientID: 'client-1', clientGroupID: 'group-1', cookie: first.cookie },
+        { id: 'user-1' }
+      )
+    ).resolves.toEqual({ cookie: first.cookie, unchanged: true })
+  })
+
   test('pushes, replays once, and pulls converged insert rows', async () => {
     const sqlite = new DatabaseSync(':memory:')
     databases.push(sqlite)

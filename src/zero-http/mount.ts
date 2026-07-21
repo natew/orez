@@ -284,6 +284,22 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
             )
           }
         }
+        // membership can shrink across deploys. a retired trigger would keep
+        // appending rows this instance cannot map, breaking every later diff.
+        const expectedTriggers = new Set(
+          tableConfigs.flatMap((table) =>
+            ['i', 'u', 'd'].map((suffix) => `_zsync_tr_${table.physical}_${suffix}`)
+          )
+        )
+        const installedTriggers = await tx.query<{ name: string }>(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'trigger' AND name GLOB '_zsync_tr_*'`
+        )
+        for (const trigger of installedTriggers) {
+          if (!expectedTriggers.has(trigger.name)) {
+            await tx.exec(`DROP TRIGGER IF EXISTS ${quoteIdentifier(trigger.name)}`)
+          }
+        }
         for (const table of tableConfigs) {
           const capture = [
             ...new Set([
