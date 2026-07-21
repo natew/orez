@@ -587,6 +587,11 @@ describe('generateLite', () => {
     expect(result.files['instances.ts']).toContain(
       'syncTables: ["comment","message","userPublic"]'
     )
+    // the returned membership mirrors what instances.ts serializes, so hosts
+    // read it structurally instead of re-parsing the emitted source
+    const instance = result.instances.find((entry) => entry.name === 'project')
+    expect(instance?.syncTables).toEqual(['comment', 'message', 'userPublic'])
+    expect(instance?.supportTables).toEqual([])
   })
 
   test('derives fileless support tables through parsed mutation helpers', () => {

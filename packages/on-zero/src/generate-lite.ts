@@ -137,6 +137,10 @@ export type LiteGenerateResult = {
   // relative paths under `{dir}/generated/`, e.g. 'models.ts',
   // 'syncedMutations.ts'. callers decide where to write.
   files: Record<string, string>
+  // per-instance table membership, exactly as serialized into instances.ts.
+  // callers that need membership (e.g. a host deriving its Zero schema tables)
+  // read it here instead of re-parsing the emitted source.
+  instances: Array<{ name: string; syncTables: string[]; supportTables: string[] }>
   modelCount: number
   queryCount: number
   mutationCount: number
@@ -752,6 +756,11 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
 
   return {
     files: out,
+    instances: instances.map((instance) => ({
+      name: instance.name,
+      syncTables: syncTables.get(instance.name)!,
+      supportTables: supportTables.get(instance.name)!,
+    })),
     modelCount: modelNames.length,
     queryCount: allQueries.length,
     mutationCount,
