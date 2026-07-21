@@ -22,11 +22,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/onejs/on-zero.git"
+    "url": "git+https://github.com/natew/orez.git",
+    "directory": "packages/on-zero"
   },
-  "homepage": "https://github.com/onejs/on-zero#readme",
+  "homepage": "https://github.com/natew/orez/tree/main/packages/on-zero#readme",
   "bugs": {
-    "url": "https://github.com/onejs/on-zero/issues"
+    "url": "https://github.com/natew/orez/issues"
   },
   "keywords": [
     "zero",
