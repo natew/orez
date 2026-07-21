@@ -24,8 +24,14 @@ afterEach(async () => {
   while (databases.length) databases.pop()?.close()
 })
 
-test('stock Zero converges through the Orez client and mount halves', async () => {
-  const sqlite = new DatabaseSync(':memory:')
+// both transport dialects must converge against the mount: baseline (the
+// client self-acknowledges its queries) and query-aware (queryForward — the
+// server's gotQueries ack is authoritative, so a mount that never acks would
+// leave every query stuck short of 'complete').
+test.each([{ queryForward: false }, { queryForward: true }])(
+  'stock Zero converges through the Orez client and mount halves (queryForward: $queryForward)',
+  async ({ queryForward }) => {
+    const sqlite = new DatabaseSync(':memory:')
   databases.push(sqlite)
   sqlite.exec(`
     CREATE TABLE user_record (
@@ -109,6 +115,7 @@ test('stock Zero converges through the Orez client and mount halves', async () =
     pullOrigin: `${ORIGIN}/sync/app`,
     pushOrigin: `${ORIGIN}/sync/app`,
     fetch: fetch as typeof globalThis.fetch,
+    queryForward,
   })
   transports.push(transport)
   const zero = new Zero({
@@ -118,14 +125,20 @@ test('stock Zero converges through the Orez client and mount halves', async () =
     schema: zeroHttpFixtureSchema,
     mutators: zeroHttpFixtureMutators,
     kvStore: 'mem',
-    storageKey: 'orez-client-mount-conformance',
+    storageKey: `orez-client-mount-conformance-${queryForward ? 'qf' : 'base'}`,
   })
   zeros.push(zero)
 
   const view = zero.query.project.materialize()
-  await eventually(() =>
+  let resultType = 'unknown'
+  const stopListening = view.addListener((_data, type) => {
+    resultType = String(type)
+  })
+  await eventually(() => {
     expect(view.data.map((project) => project.name)).toEqual(['first'])
-  )
+    expect(resultType).toBe('complete')
+  })
+  stopListening()
 
   const mutation = zero.mutate.project.create({
     id: 'p2',

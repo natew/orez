@@ -129,14 +129,54 @@ export function createZeroHttpApplicationDatabase(
   }
 }
 
+type PullQueryOp =
+  | { readonly op: 'clear' }
+  | { readonly op: 'put' | 'del'; readonly hash: string }
+
+type PullQueries = {
+  readonly version: number
+  readonly patch: readonly PullQueryOp[]
+}
+
 type PullBody = {
   readonly clientID: string
   readonly clientGroupID: string
   readonly cookie: number | null
+  readonly queries?: PullQueries
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+// this mount syncs every visible row regardless of desired queries, so the
+// query-aware dialect (queryForward / queryTransform clients) reduces to an
+// authoritative echo: extract the hash-level shape of the desired delta and
+// ack it in the same response that carries the rows. rows therefore never lag
+// their ack. query content (name/args or ast) is accepted and ignored.
+function validatePullQueries(value: unknown): PullQueries | undefined {
+  if (value === undefined) return undefined
+  if (
+    !isRecord(value) ||
+    typeof value.version !== 'number' ||
+    !Number.isSafeInteger(value.version) ||
+    value.version < 0 ||
+    !Array.isArray(value.patch)
+  ) {
+    throw new ZeroHttpRequestError(400, 'invalid pull queries')
+  }
+  const patch: PullQueryOp[] = []
+  for (const op of value.patch) {
+    if (!isRecord(op)) throw new ZeroHttpRequestError(400, 'invalid pull queries')
+    if (op.op === 'clear') {
+      patch.push({ op: 'clear' })
+    } else if ((op.op === 'put' || op.op === 'del') && typeof op.hash === 'string') {
+      patch.push({ op: op.op, hash: op.hash })
+    } else {
+      throw new ZeroHttpRequestError(400, 'invalid pull queries')
+    }
+  }
+  return { version: value.version, patch }
 }
 
 function validatePull(value: unknown): PullBody {
@@ -151,7 +191,8 @@ function validatePull(value: unknown): PullBody {
   ) {
     throw new ZeroHttpRequestError(400, 'invalid pull body')
   }
-  return value as PullBody
+  const queries = validatePullQueries(value.queries)
+  return { ...(value as Omit<PullBody, 'queries'>), queries }
 }
 
 function toZeroValue(type: string, raw: unknown): unknown {
@@ -576,6 +617,12 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
       await ready
       const claims = authDataToClaims(authData)
       const body = validatePull(value)
+      // acked in every response shape: the client clears its sent desired
+      // delta only on `gotQueries.version >= sentVersion`, including when the
+      // rows are unchanged.
+      const gotQueries = body.queries
+        ? { version: body.queries.version, patch: body.queries.patch }
+        : undefined
       return applicationDatabase.transaction(async (tx) => {
         await claimClient(tx, body.clientGroupID, body.clientID, claims.userID)
         await prune(tx)
@@ -586,7 +633,9 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
             `future cookie ${body.cookie} is ahead of watermark ${current}`
           )
         }
-        if (body.cookie === current) return { cookie: current, unchanged: true }
+        if (body.cookie === current) {
+          return { cookie: current, unchanged: true, gotQueries }
+        }
         const lmids = Object.fromEntries(
           (
             await tx.query(
@@ -613,6 +662,7 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
             canDiff && !mustReset
               ? await diff(tx, changes, claims.userID)
               : await snapshot(tx, claims.userID),
+          gotQueries,
         }
       })
     },

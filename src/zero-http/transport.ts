@@ -471,6 +471,18 @@ export async function flushHttpPullTransports() {
   )
 }
 
+// a data-changed nudge for hosts that know the server advanced (e.g. a local
+// mutation applied elsewhere in the page): pull every installed transport now
+// instead of waiting out its pullIntervalMs.
+export async function pullHttpPullTransports() {
+  const pageRegistry = getHttpPullPageRegistry()
+  await Promise.all(
+    [...pageRegistry.transportsByOrigin.values()].map(({ transport }) =>
+      transport.pull()
+    )
+  )
+}
+
 class ZeroHttpSocket {
   readonly CONNECTING = 0
   readonly OPEN = 1
