@@ -525,7 +525,7 @@ describe('generateLite', () => {
 
   test('derives scoped related-table closure from lite metadata', () => {
     const files = {
-      [`${DIR}/project/instance.ts`]: `export default defineInstance({ scope: 'projectId' })`,
+      [`${DIR}/on-zero.config.ts`]: `export default defineConfig({ instances: { project: { scope: 'projectId' } } })`,
       [`${DIR}/project/message/queries.ts`]: `export const messages = () => zql.message.related('comments')`,
       [`${DIR}/project/message/mutations.ts`]: '// fake mutation',
       ['/proj/src/database/relations.ts']: '// fake relations',
@@ -536,6 +536,10 @@ describe('generateLite', () => {
       files,
       dir: DIR,
       parse: makeParse({
+        [`${DIR}/on-zero.config.ts`]: {
+          ...empty,
+          dataConfig: { instances: { project: { scope: 'projectId' } } },
+        },
         [`${DIR}/project/message/queries.ts`]: {
           ...empty,
           queries: [
@@ -635,8 +639,8 @@ describe('generateLite', () => {
 
   test('includes a fileless support table in every lite instance that uses it', () => {
     const files = {
-      [`${DIR}/account.ts`]: '// control namespace',
-      [`${DIR}/project/instance.ts`]: `export default defineInstance({ scope: 'projectId' })`,
+      [`${DIR}/on-zero.config.ts`]: `export default defineConfig({ instances: { control: { dir: './planes/control', supportTables: ['manual'] }, project: { scope: 'projectId' } } })`,
+      [`${DIR}/planes/control/account.ts`]: '// control namespace',
       [`${DIR}/project/message.ts`]: '// project namespace',
       ['/proj/src/database/schema.ts']: '// table columns',
     }
@@ -646,7 +650,16 @@ describe('generateLite', () => {
       files,
       dir: DIR,
       parse: makeParse({
-        [`${DIR}/account.ts`]: {
+        [`${DIR}/on-zero.config.ts`]: {
+          ...empty,
+          dataConfig: {
+            instances: {
+              control: { dir: './planes/control', supportTables: ['manual'] },
+              project: { scope: 'projectId' },
+            },
+          },
+        },
+        [`${DIR}/planes/control/account.ts`]: {
           ...empty,
           mutations: [{ modelName: 'account', handlers: [], schema: null }],
           supportTables: ['audit'],
@@ -692,7 +705,129 @@ describe('generateLite', () => {
 
     runInNewContext(runnable, context)
 
-    expect(context.instances?.default?.supportTables).toEqual(['audit'])
+    expect(context.instances?.control?.supportTables).toEqual(['audit', 'manual'])
     expect(context.instances?.project?.supportTables).toEqual(['audit'])
+  })
+
+  test('keeps a configured default lite instance at the data root', () => {
+    const files = {
+      [`${DIR}/on-zero.config.ts`]: `export default defineConfig({ instances: { default: { dir: '.', supportTables: ['accountRepo', 'usageLedger'] }, project: { scope: 'projectId' } } })`,
+      [`${DIR}/account.ts`]: '// control namespace',
+      [`${DIR}/project/message.ts`]: '// project namespace',
+    }
+    const empty = { mutations: [], queries: [] }
+    const result = generateLite({
+      files,
+      dir: DIR,
+      parse: makeParse({
+        [`${DIR}/on-zero.config.ts`]: {
+          ...empty,
+          dataConfig: {
+            instances: {
+              default: { dir: '.', supportTables: ['accountRepo', 'usageLedger'] },
+              project: { scope: 'projectId' },
+            },
+          },
+        },
+        [`${DIR}/account.ts`]: {
+          ...empty,
+          queries: [{ name: 'accounts', paramTypeText: null }],
+        },
+        [`${DIR}/project/message.ts`]: {
+          ...empty,
+          mutations: [
+            {
+              modelName: 'message',
+              handlers: [],
+              schema: {
+                tableName: 'message',
+                primaryKeys: ['id'],
+                columns: [
+                  { name: 'id', builderText: 'string()' },
+                  { name: 'projectId', builderText: 'string()' },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+    })
+    const runnable = result.files['instances.ts']!.replace(
+      "import { schema } from './schema'",
+      ''
+    )
+      .replace("import * as groupedQueries from './groupedQueries'", '')
+      .replace("import { models } from './models'", '')
+      .replace('export const instances =', 'globalThis.instances =')
+      .replace(/: string/g, '')
+      .replace(' as const', '')
+    const context = {
+      groupedQueries: {},
+      models: { message: {} },
+      schema: {},
+    } as { instances?: Record<string, { supportTables: string[] }> }
+
+    runInNewContext(runnable, context)
+
+    expect(context.instances?.default?.supportTables).toEqual([
+      'accountRepo',
+      'usageLedger',
+    ])
+    expect(context.instances?.project?.supportTables).toEqual([])
+  })
+
+  test('rejects missing configured directories and instance.ts remnants', () => {
+    const empty = { mutations: [], queries: [] }
+    expect(() =>
+      generateLite({
+        files: {
+          [`${DIR}/on-zero.config.ts`]: `export default defineConfig({ instances: { project: {} } })`,
+        },
+        dir: DIR,
+        parse: makeParse({
+          [`${DIR}/on-zero.config.ts`]: {
+            ...empty,
+            dataConfig: { instances: { project: {} } },
+          },
+        }),
+      })
+    ).toThrow(/instance 'project' directory does not exist/)
+
+    expect(() =>
+      generateLite({
+        files: {
+          [`${DIR}/on-zero.config.ts`]: `export default defineConfig({ instances: { control: { dir: './shared' }, project: { dir: './shared' } } })`,
+          [`${DIR}/shared/account.ts`]: '// namespace',
+        },
+        dir: DIR,
+        parse: makeParse({
+          [`${DIR}/on-zero.config.ts`]: {
+            ...empty,
+            dataConfig: {
+              instances: {
+                control: { dir: './shared' },
+                project: { dir: './shared' },
+              },
+            },
+          },
+        }),
+      })
+    ).toThrow(/instances 'control' and 'project' resolve to the same directory/)
+
+    expect(() =>
+      generateLite({
+        files: {
+          [`${DIR}/post.ts`]: '// namespace',
+          [`${DIR}/project/instance.ts`]: `export default defineInstance({})`,
+        },
+        dir: DIR,
+        parse: makeParse({
+          [`${DIR}/post.ts`]: {
+            ...empty,
+            mutations: [{ modelName: 'post', handlers: [], schema: null }],
+          },
+        }),
+      })
+    ).toThrow(/uses removed instance\.ts configuration/)
   })
 })

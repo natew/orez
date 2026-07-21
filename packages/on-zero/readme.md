@@ -414,7 +414,7 @@ export const latestMessages = syncedQuery(
 
 the generator:
 
-1. discovers namespace files and folders, plus folders marked with `instance.ts`
+1. discovers namespace files and folders, plus explicit multi-instance config
 2. derives each instance's related-table closure, mutation support tables, and scope
 3. parses TypeScript AST to extract parameter types
 4. converts types to valibot schemas
@@ -521,18 +521,45 @@ standard [Zero installation guide](https://zero.rocicorp.dev/docs/install).
 ### multiple client instances
 
 one page can run several zero clients (e.g. a global control-plane instance
-plus a per-project instance with its own storage key and sync url). add an
-`instance.ts` marker to the partition folder. generation derives its queries,
-models, and sync-table closure and rejects duplicate or cross-instance reach.
+plus a per-project instance with its own storage key and sync url). add one
+`on-zero.config.ts` at the data root. every instance is explicit; its `dir`
+defaults to the instance key and otherwise resolves relative to the config file.
+
+```ts
+// src/data/on-zero.config.ts
+import { defineConfig } from 'on-zero'
+
+export default defineConfig({
+  instances: {
+    default: { dir: '.', supportTables: ['accountRepo', 'usageLedger'] },
+    project: { dir: './project-data', scope: 'projectId' },
+  },
+})
+```
+
+single-instance applications omit the config and keep namespaces directly in
+the data root. multi-instance applications may keep those root namespaces by
+declaring an instance with `dir: '.'`; nested instance directories remain
+independently owned. `instance.ts` and `defineInstance` were removed.
+
+generation auto-discovers the config. the cli also accepts its explicit path:
+
+```sh
+on-zero generate ./src/data/on-zero.config.ts
+```
+
+generation derives each instance's queries, models, support tables, and
+sync-table closure and rejects missing or multiply claimed directories,
+duplicate namespaces, missing scope columns, and cross-instance reach.
 
 ```tsx
 import { createZeroClients } from 'on-zero/multi'
 import { instances } from '~/data/generated/instances'
 
 const clients = createZeroClients(instances)
-const control = clients.clients.default
+const control = clients.clients.control
 const project = clients.clients.project
-const ProvideControlZero = clients.providers.default
+const ProvideControlZero = clients.providers.control
 const ProvideProjectZero = clients.providers.project
 
 // useQuery/run/preload/getQuery dispatch by the query fn's namespace,

@@ -48,14 +48,15 @@ line counts below are what the consumer currently hand-rolls).
    dispatcher implementation the consumer passes in.
 4. Instance partition + data layout v2: full design in
    `plans/on-zero-instance-folders.md` (supersedes the earlier bullet here).
-   Headline: model files (`src/data/<instance>/<namespace>.ts` with canonical
-   `where`/`query`/`mutate` slots) make sync membership, instance assignment,
-   and namespace ONE declaration; an optional `on-zero.config.ts` is the
-   explicit layer (instance names, dirs, scope columns — nothing inferred
-   from a name the config cannot restate). Derives and deletes THREE hand
-   lists: the drizzle-zero table allowlist, soot core.ts partition lists, and
-   soot projectTables.ts sync surfaces (related() closure). Generate-time
-   validation replaces module-eval assertions.
+   Headline: namespace files make sync membership and namespace one
+   declaration. Single-instance apps stay flat with no config. Multi-instance
+   apps use one `on-zero.config.ts` with explicit instance keys and optional
+   relative directory paths, scope columns, and support tables. There is no
+   implicit root instance when config exists, and the removed `instance.ts`
+   path is a hard error. Derives and deletes three hand lists: the drizzle-zero
+   table allowlist, soot core.ts partition lists, and soot projectTables.ts sync
+   surfaces (related closure). Generate-time validation replaces module-eval
+   assertions.
 
 ## orez features
 

@@ -1,159 +1,190 @@
-# on-zero instance folders — data layout v2
+# on-zero data layout and instance configuration
 
-Design for rails-pass item 4. The principle: a table's sync membership,
-instance assignment, and namespace are ONE declaration — where its files sit.
-Partitioning is opt-in via a single colocated marker file; apps that never
-partition (most apps) see nothing new.
+Design for rails-pass item 4. A table's namespace and sync membership are
+declared by its data file. Multi-instance partitioning is declared once in
+`on-zero.config.ts`. Single-instance applications keep a flat data root and
+need no config.
 
 ## What this deletes
 
-Three hand-maintained lists that restate overlapping truth today:
+The generator derives three previously hand-maintained lists:
 
-1. The Zero table allowlist (`drizzle-zero.config.ts` `tables:` map in
-   takeout; the `zeroSchemaInput` re-export module in soot). Derived instead:
-   a table is synced iff it has a queries or mutations file or is reachable
-   from any instance's queries via `related()`. A table nothing can query has
-   no reason to sync, so the derivation is complete.
-2. The instance partition lists (soot `core.ts`: controlQueries,
-   projectQueries, controlModels, projectModels + three module-eval
-   assertions). Derived from folder membership.
-3. The sync-surface lists (soot `projectTables.ts`: PROJECT_TABLE_NAMES,
-   PROJECT_QUERY_TABLE_NAMES, PROJECT_SYNC_TABLE_NAMES). Derived per instance
-   as the `related()` closure of that instance's query ASTs — covers
-   related-only tables (iosPublishStepRun etc.) nobody has to remember to
-   list.
+1. The drizzle-zero table allowlist. A table enters the schema when it owns a
+   namespace, is reached through `related()`, is reached statically through a
+   mutation transaction, or is declared as a server-only support table.
+2. Per-instance query and model lists. Configured directory ownership replaces
+   hand-built `controlQueries`, `projectQueries`, and matching model lists.
+3. Per-instance sync surfaces. The generator computes each instance's
+   namespace tables plus its complete `related()` closure.
 
-## Layout
+## Namespace layout
 
-```
+A namespace has one of two shapes:
+
+```text
 src/data/
-  generated/
-  reaction.ts        small namespace: ONE file (where + query + mutate)
-  thread/            big namespace: a folder
+  post.ts
+  thread/
     queries.ts
     mutations.ts
-    helpers.ts       private decomposition — generator ignores extra files
-  <instance>/        a folder is an instance ONLY because of the marker:
-    instance.ts        export default defineInstance({ scope: 'projectId' })
-    snapshot.ts        namespaces nest identically inside instances
-    message/
+    helpers.ts
+  generated/
+```
+
+Small namespaces use `<name>.ts`. Larger namespaces use
+`<name>/queries.ts` plus `<name>/mutations.ts`; other files in that folder are
+private helpers. The removed top-level `queries/`, `mutations/`, and `models/`
+layouts are hard errors.
+
+Membership is decided by export shape. A root file is a namespace only when the
+AST pass recognizes query builders, `mutations(...)`, `serverWhere(...)`, or a
+table declaration. Wiring files such as `server.ts`, `types.ts`, and
+`zero-client.tsx` are ignored when they export no data shape. There is no
+reserved filename list, so a real namespace named `server` works.
+
+## Single instance
+
+Single-instance applications put namespaces directly in the data root and do
+not create a config file:
+
+```text
+src/data/
+  post.ts
+  comment/
+    queries.ts
+    mutations.ts
+```
+
+Generation emits one `default` manifest entry. Existing `createZeroClient`
+usage is unchanged.
+
+## Multiple instances
+
+Multi-instance applications add one config file at the data root:
+
+```ts
+// src/data/on-zero.config.ts
+import { defineConfig } from 'on-zero'
+
+export default defineConfig({
+  instances: {
+    default: { dir: '.' },
+    project: { dir: './project-data', scope: 'projectId' },
+  },
+})
+```
+
+Each instance key is its generated client name. `dir` is optional and defaults
+to `./<key>`. Paths resolve relative to the config file, so applications own
+their physical layout:
+
+```text
+src/data/
+  on-zero.config.ts
+  control/
+    account.ts
+  project-data/
+    message.ts
+    snapshot/
       queries.ts
       mutations.ts
 ```
 
-MODEL-FIRST, one convention: the namespace is the organizing unit. A
-namespace is a file, or a folder with `queries.ts`/`mutations.ts` when it
-outgrows the file (like route.tsx vs route/index.tsx). A folder containing
-`instance.ts` is an instance, not a namespace — the marker disambiguates.
-The old top-level `queries/` + `mutations/` directories and the legacy
-`models/` alias are REMOVED — no optional older style. Every consumer
-(takeout, chat, soot, browser-project codegen) migrates in the cutover;
-mechanical file moves.
+The data root owns namespaces only when an instance explicitly declares
+`dir: '.'`. This lets an existing default instance remain flat while nested
+instances are configured beside it. Configured directories may also point
+outside the root, and generation, caching, watching, type resolution, and
+generated import paths follow them.
 
-Why folder mode keeps queries.ts/mutations.ts separate: query files are a
-shared read surface imported by many graphs (client components, server
-named-query resolution, dev queryTransform, the CF sync host's lean query
-resolver) while mutation files are imported only by the two registries and
-carry write-side weight + registration side effects (the split originally
-arrived with Zero's named-queries migration — takeout bddfde6a, chat
-357b42b53 — mirroring Zero's two registries). A single-file namespace merges
-those graphs; that cost is real but borne only by the namespace choosing it.
-Guidance: start single-file; go folder when the file gets big (chat's
-mutations/message.ts is ~690 lines) or its mutations carry heavy imports.
-Namespace folders also give big tables a home for private helper files,
-which the flat layout never had.
+`instance.ts` and `defineInstance` are removed. Any remaining `instance.ts`
+fails generation with migration guidance. There is one configuration path.
 
-- The ROOT is always the default/primary instance. Simple apps (takeout, most
-  generated browser projects) never leave it — zero new concepts, no config.
-- Membership is decided by EXPORT SHAPE, never by filename: a data file is a
-  namespace iff the AST pass finds recognized data exports (query builders,
-  mutations(...), serverWhere slots). Conventional wiring modules at the data
-  root (server.ts, types.ts, zero-client.tsx, auth.ts) export none of those
-  and are ignored. No reserved-name list — chat has a real table named
-  `server`, which a name blacklist would silently drop.
-- `instance.ts` is the explicit opt-in indicator. A folder without it is just
-  organization, never an instance — nothing is inferred from a folder name
-  alone.
-- Soot maps naturally: control plane = root, `project/` = the partitioned
-  instance. Two instances, one marker file.
-- The legacy `models/` directory alias is removed in this pass; the two
-  spellings above are the only layouts.
+## defineConfig options
 
-## defineInstance
+`defineConfig` is exported from `on-zero` and returns its input unchanged. Its
+types carry detailed editor documentation. `on-zero.config.ts` is the only home
+for current and future generator configuration.
+
+Each instance supports:
+
+- `dir`: namespace directory relative to the config file; defaults to the key.
+- `scope`: column required on every synced table in that instance. It also
+  emits the default row-visibility predicate in the generated manifest.
+- `supportTables`: server-only tables static mutation analysis cannot discover.
+  They enter schema generation and push typing, but never become query
+  namespaces or synced tables. Scope validation does not apply to them.
+
+## CLI and programmatic generation
+
+The config is auto-discovered for existing programmatic calls:
 
 ```ts
-// src/data/project/instance.ts
-import { defineInstance } from 'on-zero'
-
-export default defineInstance({
-  // column every table in this instance must carry; also emits the default
-  // row-visibility predicate for sync hosts
-  scope: 'projectId',
-})
+await generate({ dir: 'src/data' })
+await deriveDataMembership({ dir: 'src/data' })
 ```
 
-Instance name = folder name (acceptable now that membership itself is
-explicit via the marker). Keep the option surface minimal; grow it only when
-a real consumer needs more.
+The CLI accepts either a data directory or an explicit config path:
 
-## Permission convention (groundwork for item 9)
+```sh
+on-zero generate
+on-zero generate ./src/data
+on-zero generate ./src/data/on-zero.config.ts
+```
 
-Each table's `serverWhere` permission is exported from that table's query
-file under a canonical name (`export const where = serverWhere(...)`), where
-permissions already live today. Later (item 9) the orez sync hosts compile
-that same ZQL predicate to their SQL row visibility, so query permission,
-mutation permission (ctx.can), and sync visibility become one declaration and
-most of soot's zeroVisibility.ts dies. Not part of this item; the convention
-just makes that migration a rename, not a restructure.
+Passing the config path makes multi-instance generation self-explanatory while
+preserving `generate({ dir })` for browser-project codegen and arbitrary base
+directories.
 
 ## Generated manifest
 
-`generated/instances.ts`:
+`generated/instances.ts` contains one entry per configured key:
 
 ```ts
 export const instances = {
-  default: { queries, models, tables, syncTables, scope: null },
-  project: { queries, models, tables, syncTables, scope: 'projectId', defaultVisibility },
+  control: { queries, models, tables, syncTables, supportTables, scope: null },
+  project: {
+    queries,
+    models,
+    tables,
+    syncTables,
+    supportTables,
+    scope: 'projectId',
+    defaultVisibility,
+  },
 }
 ```
 
-- `tables` = namespaces with files; `syncTables` = tables ∪ related()
-  closure. Server pull endpoints and visibility partitions consume
-  `syncTables`.
-- Client composition: `createZeroClients(instances)` in on-zero/multi builds
-  each instance client, combines with the root as primary/outer, returns the
-  combined facade + per-instance providers. Soot core.ts (~240 lines)
-  becomes ~30 lines of re-exports.
-- Single-instance apps get the same manifest with one entry; createZeroClient
-  keeps working unchanged.
+- `tables` contains namespace-owned tables.
+- `syncTables` contains `tables` plus the complete `related()` closure.
+- `supportTables` contains server-only mutation dependencies.
+- `createZeroClients(instances)` creates each client and the typed combined
+  facade. Single-instance applications may continue using `createZeroClient`.
 
-## Generate-time validation (replaces runtime assertions)
+## Generate-time validation
 
-- cross-instance reach: an instance's query `related()`-ing into a table
-  owned by another instance is an ERROR naming the query and both instances
-  (physical partitioning makes this unservable; denormalize instead).
-- scope column missing on a member table: error.
-- namespace claimed by two instances (same filename under two instance
-  dirs): error — the combined facade is flat, namespaces stay global.
-- no opinion on missing `where`/CRUD: tables without permissions or mutations
-  are legitimate (server-owned writes, public rows, related-only tables).
-  Visibility policy stays app-owned.
+- a configured directory does not exist
+- two instances resolve to the same directory
+- a recognized root namespace is outside every configured directory
+- any removed `instance.ts` remains
+- a namespace is claimed by more than one instance
+- a query reaches a table owned by another instance through `related()`
+- a synced table lacks its instance's scope column
+- `related()` uses a dynamic name the generator cannot resolve
 
-## Implementation notes / risks
+Tables without `where` or CRUD exports remain valid. Visibility policy stays
+application-owned.
 
-- Derivation ordering: sync membership must be derivable BEFORE type
-  resolution (the zero schema that types zql is built from the allowlist).
-  Membership needs only filenames + related() name strings — a cheap AST
-  pass — so the pipeline is: walk dirs -> derive membership/closure -> build
-  zero schema -> typed generation as today. Verify against generate.ts's
-  real ordering.
-- The related() closure must resolve through relations.ts to target tables,
-  not just read string literals in query files.
-- Watch mode + input hash already walk the whole base dir; instance dirs are
-  covered.
-- drizzle-zero.config.ts survives only if it carries non-allowlist options
-  (column overrides); the `tables:` map is deleted.
-- Consumers to migrate in the cutover: takeout (no change beyond allowlist
-  deletion), soot (project/ instance folder), chat, and the contrast
-  browser-project codegen (programmatic generate({ dir }) — keep arbitrary
-  base dirs working).
+## Derivation order
+
+The cheap layout and AST membership pass runs before zero-schema construction
+and TypeScript type resolution:
+
+1. load `on-zero.config.ts` when present
+2. resolve and validate instance directories
+3. discover namespace exports
+4. derive related and mutation support closures
+5. build the filtered drizzle-zero schema and relations
+6. run typed query and mutation generation
+
+This ordering lets the derived table membership replace the drizzle-zero
+allowlist without circular type dependencies.

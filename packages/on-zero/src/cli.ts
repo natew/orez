@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 
 import { defineCommand, runMain } from 'citty'
 
@@ -13,7 +13,8 @@ const generateCommand = defineCommand({
   args: {
     dir: {
       type: 'positional',
-      description: 'Base directory (defaults to src/data)',
+      description:
+        'Data directory or explicit on-zero.config.ts path (defaults to src/data)',
       required: false,
       default: 'src/data',
     },
@@ -37,7 +38,14 @@ const generateCommand = defineCommand({
   },
 
   async run({ args }) {
-    const opts = { dir: resolve(args.dir), after: args.after, force: args.force }
+    const target = resolve(args.dir)
+    const config = basename(target) === 'on-zero.config.ts' ? target : undefined
+    const opts = {
+      dir: config ? dirname(config) : target,
+      config,
+      after: args.after,
+      force: args.force,
+    }
 
     if (args.watch) {
       await watch(opts)

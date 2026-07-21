@@ -36,8 +36,9 @@ const isGeneratorSourceFile = (name: string) =>
 // and building a TS program per query/model for type resolution — runs every
 // boot otherwise, even when the output is already current (the configureServer
 // watcher re-runs it on real edits, so the boot-time pass is pure redundancy).
-function hashInputTree(baseDir: string, generatedDir: string): string {
+function hashInputTree(sourceRoots: string[], generatedDir: string): string {
   const parts: string[] = []
+  const seen = new Set<string>()
   const walk = (dir: string) => {
     if (!existsSync(dir)) return
     const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
@@ -46,14 +47,21 @@ function hashInputTree(baseDir: string, generatedDir: string): string {
     for (const entry of entries) {
       const full = resolve(dir, entry.name)
       if (entry.isDirectory()) {
-        if (entry.name === 'node_modules' || full === generatedDir) continue
+        if (
+          entry.name === 'node_modules' ||
+          entry.name === 'generated' ||
+          full === generatedDir
+        )
+          continue
         walk(full)
       } else if (entry.isFile() && isGeneratorSourceFile(entry.name)) {
+        if (seen.has(full)) continue
+        seen.add(full)
         parts.push(`${full}\0${readFileSync(full, 'utf-8')}`)
       }
     }
   }
-  walk(baseDir)
+  for (const root of sourceRoots) walk(root)
   return hash(parts.join('\0'))
 }
 
@@ -792,6 +800,8 @@ export function generateDrizzleSchemaFile(schema: DrizzleZeroSchema): string {
 export interface GenerateOptions {
   /** base data directory */
   dir: string
+  /** explicit on-zero.config.ts path; auto-discovered in `dir` when omitted */
+  config?: string
   /** run after generation */
   after?: string
   /** suppress output */
@@ -852,19 +862,29 @@ function dataMembershipFromLayout(layout: DataLayout): DataMembership {
 
 export async function deriveDataMembership(options: {
   dir: string
+  config?: string
 }): Promise<DataMembership> {
   const ts = await import('typescript')
-  const layout = discoverDataLayout(ts, resolve(options.dir))
+  const layout = discoverDataLayout(
+    ts,
+    resolve(options.dir),
+    options.config ? resolve(options.config) : undefined
+  )
   return dataMembershipFromLayout(layout)
 }
 
 export async function generateDrizzleSchemaInputFile(options: {
   dir: string
   schemaImportPath: string
+  config?: string
 }): Promise<string> {
   const ts = await import('typescript')
   const baseDir = resolve(options.dir)
-  const layout = discoverDataLayout(ts, baseDir)
+  const layout = discoverDataLayout(
+    ts,
+    baseDir,
+    options.config ? resolve(options.config) : undefined
+  )
   const tableNames = dataMembershipFromLayout(layout).allTables
   const relationsPath =
     layout.metadataPaths.find(
@@ -946,7 +966,7 @@ export async function generateDrizzleSchemaInputFile(options: {
 }
 
 export async function generate(options: GenerateOptions): Promise<GenerateResult> {
-  const { dir, after, silent, force } = options
+  const { dir, after, silent, force, config } = options
   const baseDir = resolve(dir)
   const generatedDir = resolve(baseDir, 'generated')
 
@@ -956,10 +976,10 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
 
   loadCache()
 
-  // the layout pass is intentionally first: filenames, instance markers, and
-  // related() calls determine schema membership before any type program exists.
+  // the layout pass is intentionally first: config, filenames, and related()
+  // calls determine schema membership before any type program exists.
   const ts = await import('typescript')
-  const layout = discoverDataLayout(ts, baseDir)
+  const layout = discoverDataLayout(ts, baseDir, config ? resolve(config) : undefined)
   const metadataHash = hash(
     layout.metadataPaths
       .map((path) => `${path}\0${readFileSync(path, 'utf8')}`)
@@ -971,7 +991,9 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   // saveCache), the outputs are already current — skip the typescript-program
   // build entirely and return the cached counts. the configureServer watcher
   // still re-runs generate on real model/query edits.
-  const inputHash = hash(`${hashInputTree(baseDir, generatedDir)}\0${metadataHash}`)
+  const inputHash = hash(
+    `${hashInputTree(layout.sourceRoots, generatedDir)}\0${metadataHash}`
+  )
   if (
     !force &&
     generateCache.__generatorVersion === GENERATOR_CACHE_VERSION &&
@@ -1238,7 +1260,13 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
       }
       return results
     }
-    const allFiles = collectTsFiles(baseDir)
+    const allFiles = [
+      ...new Map(
+        layout.sourceRoots
+          .flatMap(collectTsFiles)
+          .map((file) => [file.path, file] as const)
+      ).values(),
+    ]
     const modelResolver = createTypeResolver(ts, allFiles, baseDir)
 
     for (const { baseName, filePath } of unresolvedModels) {
@@ -1357,8 +1385,19 @@ export async function watch(options: WatchOptions) {
   }
 
   const databaseDir = resolve(dirname(baseDir), 'database')
+  const ts = await import('typescript')
+  const layout = discoverDataLayout(
+    ts,
+    baseDir,
+    options.config ? resolve(options.config) : undefined
+  )
   const watcher = chokidar.watch(
-    existsSync(databaseDir) ? [baseDir, databaseDir] : [baseDir],
+    [
+      ...new Set([
+        ...layout.sourceRoots,
+        ...(existsSync(databaseDir) ? [databaseDir] : []),
+      ]),
+    ],
     {
       persistent: true,
       ignoreInitial: true,

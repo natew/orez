@@ -87,6 +87,17 @@ export type LiteTableInfo = {
   columns: string[]
 }
 
+export type LiteDataConfig = {
+  instances: Record<
+    string,
+    {
+      dir?: string
+      scope?: string
+      supportTables?: string[]
+    }
+  >
+}
+
 // what the caller returns for each source file.
 export type LiteParsedFile = {
   // a model file exports at most one `mutate = mutations(...)`, but an array
@@ -100,6 +111,8 @@ export type LiteParsedFile = {
   supportTables?: string[]
   // static import/export module specifiers used to follow mutation helpers.
   imports?: string[]
+  // present only for an on-zero.config.ts default defineConfig export.
+  dataConfig?: LiteDataConfig
   // parser syntax failure. the membership pass warns and ignores this file.
   parseError?: string
 }
@@ -115,6 +128,8 @@ export type LiteGenerateOptions = {
   // base data directory, e.g. '/proj/src/data'. namespaces are direct .ts
   // files or folders with queries.ts / mutations.ts.
   dir: string
+  // explicit on-zero.config.ts path. auto-discovered in `dir` when omitted.
+  config?: string
   parse: LiteParseFn
 }
 
@@ -158,6 +173,20 @@ function parentDir(path: string): string {
   return path.slice(0, path.lastIndexOf('/'))
 }
 
+function relativePath(from: string, to: string): string {
+  const fromParts = resolvePath(from).split('/').filter(Boolean)
+  const toParts = resolvePath(to).split('/').filter(Boolean)
+  let common = 0
+  while (fromParts[common] === toParts[common] && common < fromParts.length) common++
+  return [
+    ...Array.from({ length: fromParts.length - common }, () => '..'),
+    ...toParts.slice(common),
+  ].join('/')
+}
+
+const isWithin = (root: string, path: string) =>
+  path === root || path.startsWith(`${root}/`)
+
 // returns files whose path is an immediate child of `dirPrefix` and ends in
 // `.ts` (but not `.d.ts`, test files, or anything nested further down).
 function listDirectTsFiles(files: Record<string, string>, dirPrefix: string): string[] {
@@ -187,62 +216,158 @@ type LiteInstance = {
   name: string
   dir: string
   scope: string | null
+  declaredSupportTables: string[]
   namespaces: LiteNamespace[]
 }
 
 function discoverLiteLayout(
   files: Record<string, string>,
   baseDir: string,
-  parse: LiteParseFn
+  parse: LiteParseFn,
+  explicitConfigPath?: string
 ) {
   const paths = Object.keys(files)
-  const instancePaths = paths
-    .filter((path) => path.startsWith(`${baseDir}/`) && path.endsWith('/instance.ts'))
-    .sort()
-  const instances: LiteInstance[] = [
-    { name: 'default', dir: baseDir, scope: null, namespaces: [] },
-    ...instancePaths.map((path) => {
-      const dir = path.slice(0, -'/instance.ts'.length)
-      const scope = files[path]!.match(/scope\s*:\s*['"]([^'"]+)['"]/)?.[1]
-      if (!scope) {
+  const configPath = resolvePath(explicitConfigPath ?? `${baseDir}/on-zero.config.ts`)
+  const configSource = files[configPath]
+  let config: LiteDataConfig | undefined
+  if (configSource !== undefined) {
+    const parsed = parse(configSource, configPath)
+    if (parsed.parseError) {
+      throw new Error(`[on-zero] unable to parse ${configPath}: ${parsed.parseError}`)
+    }
+    config = parsed.dataConfig
+    if (!config) {
+      throw new Error(
+        `[on-zero] ${configPath} must default export defineConfig({ instances: { ... } })`
+      )
+    }
+  } else if (explicitConfigPath) {
+    throw new Error(`[on-zero] config file does not exist: ${configPath}`)
+  }
+  if (explicitConfigPath && parentDir(configPath) !== baseDir) {
+    throw new Error(`[on-zero] ${configPath} must be at the data root ${baseDir}`)
+  }
+
+  const instances: LiteInstance[] = config
+    ? Object.entries(config.instances).map(([name, options]) => {
+        if (options.dir?.startsWith('/')) {
+          throw new Error(
+            `[on-zero] instance '${name}' dir must be relative to ${configPath}`
+          )
+        }
+        if (options.scope === '') {
+          throw new Error(`[on-zero] instance '${name}' scope cannot be empty`)
+        }
+        if (options.supportTables?.some((table) => table === '')) {
+          throw new Error(
+            `[on-zero] instance '${name}' supportTables cannot contain an empty table name`
+          )
+        }
+        return {
+          name,
+          dir: resolvePath(`${parentDir(configPath)}/${options.dir ?? name}`),
+          scope: options.scope ?? null,
+          declaredSupportTables: [...(options.supportTables ?? [])],
+          namespaces: [],
+        }
+      })
+    : [
+        {
+          name: 'default',
+          dir: baseDir,
+          scope: null,
+          declaredSupportTables: [],
+          namespaces: [],
+        },
+      ]
+  if (config && instances.length === 0) {
+    throw new Error(`[on-zero] ${configPath} must declare at least one instance`)
+  }
+  for (const instance of instances) {
+    if (!paths.some((path) => isWithin(instance.dir, path))) {
+      throw new Error(
+        `[on-zero] instance '${instance.name}' directory does not exist: ${instance.dir}`
+      )
+    }
+    const duplicate = instances.find(
+      (candidate) => candidate !== instance && candidate.dir === instance.dir
+    )
+    if (duplicate) {
+      throw new Error(
+        `[on-zero] instances '${instance.name}' and '${duplicate.name}' resolve to the same directory: ${instance.dir}`
+      )
+    }
+  }
+  const instanceDirs = new Set(instances.map((instance) => instance.dir))
+  const sourceRoots = [baseDir, ...instances.map((instance) => instance.dir)]
+  const remnant = paths.find(
+    (path) =>
+      baseName(path) === 'instance.ts' && sourceRoots.some((root) => isWithin(root, path))
+  )
+  if (remnant) {
+    throw new Error(
+      `[on-zero] ${remnant} uses removed instance.ts configuration; delete it and configure instances in on-zero.config.ts`
+    )
+  }
+
+  const parseDataFile = (path: string): LiteParsedFile | null => {
+    let parsed: LiteParsedFile
+    try {
+      parsed = parse(files[path]!, path)
+    } catch {
+      console.warn(
+        `[on-zero] ignoring ${path.slice(baseDir.lastIndexOf('/') + 1)}: no recognized data exports`
+      )
+      return null
+    }
+    if (parsed.parseError) {
+      console.warn(
+        `[on-zero] ignoring ${path.slice(baseDir.lastIndexOf('/') + 1)}: no recognized data exports`
+      )
+      return null
+    }
+    return parsed
+  }
+  const hasDataExport = (source: string, parsed: LiteParsedFile) =>
+    parsed.queries.length > 0 ||
+    parsed.mutations.length > 0 ||
+    (parsed.tables?.length ?? 0) > 0 ||
+    /export\s+const\s+(?:mutate|schema|where)\s*=\s*(?:mutations|serverWhere|table)\s*\(/.test(
+      source
+    )
+
+  if (config) {
+    for (const path of paths) {
+      if (
+        path === configPath ||
+        !isWithin(baseDir, path) ||
+        instances.some((instance) => isWithin(instance.dir, path)) ||
+        isWithin(`${baseDir}/generated`, path) ||
+        !path.endsWith('.ts') ||
+        path.endsWith('.d.ts') ||
+        path.endsWith('.test.ts') ||
+        path.endsWith('.spec.ts') ||
+        baseName(path) === 'instance.ts'
+      ) {
+        continue
+      }
+      const parsed = parseDataFile(path)
+      if (parsed && hasDataExport(files[path]!, parsed)) {
         throw new Error(
-          `[on-zero] ${path} must default export defineInstance({ scope: 'columnName' })`
+          `[on-zero] data namespace ${path} is outside every instance directory declared in ${configPath}`
         )
       }
-      return { name: baseName(dir), dir, scope, namespaces: [] }
-    }),
-  ]
-  const instanceDirs = new Set(instances.slice(1).map((instance) => instance.dir))
+    }
+  }
 
   for (const instance of instances) {
     const directFiles = listDirectTsFiles(files, instance.dir).filter(
-      (path) => baseName(path) !== 'instance.ts'
+      (path) => baseName(path) !== 'on-zero.config.ts'
     )
     for (const path of directFiles) {
       const source = files[path]!
-      let parsed: LiteParsedFile
-      try {
-        parsed = parse(source, path)
-      } catch {
-        console.warn(
-          `[on-zero] ignoring ${path.slice(baseDir.lastIndexOf('/') + 1)}: no recognized data exports`
-        )
-        continue
-      }
-      if (parsed.parseError) {
-        console.warn(
-          `[on-zero] ignoring ${path.slice(baseDir.lastIndexOf('/') + 1)}: no recognized data exports`
-        )
-        continue
-      }
-      const hasDataExport =
-        parsed.queries.length > 0 ||
-        parsed.mutations.length > 0 ||
-        (parsed.tables?.length ?? 0) > 0 ||
-        /export\s+const\s+(?:mutate|schema|where)\s*=\s*(?:mutations|serverWhere|table)\s*\(/.test(
-          source
-        )
-      if (!hasDataExport) continue
+      const parsed = parseDataFile(path)
+      if (!parsed || !hasDataExport(source, parsed)) continue
       instance.namespaces.push({
         name: baseName(path, '.ts'),
         instance: instance.name,
@@ -260,7 +385,7 @@ function discoverLiteLayout(
       if (slash > 0) folders.add(`${instance.dir}/${rest.slice(0, slash)}`)
     }
     for (const folder of [...folders].sort()) {
-      if (instanceDirs.has(folder) || folder === `${baseDir}/generated`) continue
+      if (folder === `${baseDir}/generated` || instanceDirs.has(folder)) continue
       const queries = `${folder}/queries.ts`
       const mutations = `${folder}/mutations.ts`
       if (!(queries in files) && !(mutations in files)) {
@@ -302,8 +427,9 @@ function discoverLiteLayout(
 
 export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   const { files, parse } = opts
-  const baseDir = stripTrailingSlash(opts.dir)
-  const instances = discoverLiteLayout(files, baseDir, parse)
+  const baseDir = resolvePath(stripTrailingSlash(opts.dir))
+  const instances = discoverLiteLayout(files, baseDir, parse, opts.config)
+  const sourceRoots = [baseDir, ...instances.map((instance) => instance.dir)]
   const namespaces = instances.flatMap((instance) => instance.namespaces)
   const modelNamespaces = namespaces.filter(
     (namespace): namespace is LiteNamespace & { modelPath: string } =>
@@ -448,7 +574,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
           params: 'void',
           valibotCode: '',
           sourceFile: fileBaseName,
-          importPath: `../${filePath.slice(baseDir.length + 1).replace(/\.ts$/, '')}`,
+          importPath: `../${relativePath(baseDir, filePath).replace(/\.ts$/, '')}`,
         })
         continue
       }
@@ -472,7 +598,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
         params: paramType,
         valibotCode: valibotCode ?? 'v.unknown()',
         sourceFile: fileBaseName,
-        importPath: `../${filePath.slice(baseDir.length + 1).replace(/\.ts$/, '')}`,
+        importPath: `../${relativePath(baseDir, filePath).replace(/\.ts$/, '')}`,
       })
     }
   }
@@ -525,7 +651,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
 
   const supportTables = new Map<string, string[]>()
   for (const instance of instances) {
-    const supported = new Set<string>()
+    const supported = new Set<string>(instance.declaredSupportTables)
     for (const namespace of instance.namespaces) {
       if (!namespace.modelPath) continue
       const visited = new Set<string>()
@@ -555,7 +681,10 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
           const dependency = [
             normalized.endsWith('.ts') ? normalized : `${normalized}.ts`,
             `${normalized}/index.ts`,
-          ].find((candidate) => candidate in files && candidate.startsWith(`${baseDir}/`))
+          ].find(
+            (candidate) =>
+              candidate in files && sourceRoots.some((root) => isWithin(root, candidate))
+          )
           if (dependency) scan(dependency)
         }
       }
@@ -571,7 +700,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   out['models.ts'] = generateModelsFile(
     modelNamespaces.map((namespace) => ({
       name: namespace.name,
-      importPath: `../${namespace.modelPath.slice(baseDir.length + 1).replace(/\.ts$/, '')}`,
+      importPath: `../${relativePath(baseDir, namespace.modelPath).replace(/\.ts$/, '')}`,
     }))
   )
 
@@ -582,7 +711,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
         .filter((namespace) => modelNamesWithSchema.includes(namespace.name))
         .map((namespace) => ({
           name: namespace.name,
-          importPath: `../${namespace.modelPath.slice(baseDir.length + 1).replace(/\.ts$/, '')}`,
+          importPath: `../${relativePath(baseDir, namespace.modelPath).replace(/\.ts$/, '')}`,
         }))
     )
   }

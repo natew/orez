@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, dirname, relative, resolve, sep } from 'node:path'
 
 import type ts from 'typescript'
@@ -18,7 +18,7 @@ export type DataInstance = {
   namespaces: DataNamespace[]
   syncTables: string[]
   supportTables: string[]
-  /** `supportTables` declared in `on-zero.config.ts` or `instance.ts`. */
+  /** `supportTables` declared in `on-zero.config.ts`. */
   declaredSupportTables: string[]
 }
 
@@ -26,6 +26,7 @@ export type DataLayout = {
   instances: DataInstance[]
   namespaces: DataNamespace[]
   metadataPaths: string[]
+  sourceRoots: string[]
 }
 
 const isSourceFile = (name: string) =>
@@ -37,162 +38,178 @@ const isSourceFile = (name: string) =>
 const toImportPath = (baseDir: string, path: string) =>
   relative(baseDir, path).split(sep).join('/').replace(/\.ts$/, '')
 
+const isWithin = (root: string, path: string) => {
+  const child = relative(root, path)
+  return child === '' || (child !== '..' && !child.startsWith(`..${sep}`))
+}
+
 type ParsedInstanceConfig = {
   name: string
+  dir: string
   scope: string | null
   supportTables: string[]
 }
 
+function propertyName(
+  ts: typeof import('typescript'),
+  name: ts.PropertyName
+): string | null {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
+    return name.text
+  }
+  return null
+}
+
 function readDataConfig(
   ts: typeof import('typescript'),
-  baseDir: string
+  baseDir: string,
+  configPath: string | undefined
 ): { path: string; instances: ParsedInstanceConfig[] } | null {
-  const path = resolve(baseDir, 'on-zero.config.ts')
-  if (!existsSync(path)) return null
+  const path = configPath ? resolve(configPath) : resolve(baseDir, 'on-zero.config.ts')
+  if (!existsSync(path)) {
+    if (configPath) throw new Error(`[on-zero] config file does not exist: ${path}`)
+    return null
+  }
+  if (dirname(path) !== baseDir) {
+    throw new Error(`[on-zero] ${path} must be at the data root ${baseDir}`)
+  }
   const source = ts.createSourceFile(
     path,
     readFileSync(path, 'utf8'),
     ts.ScriptTarget.Latest,
     true
   )
+  if (hasParseErrors(source)) throw new Error(`[on-zero] unable to parse ${path}`)
+
   let config: ts.ObjectLiteralExpression | null = null
   for (const statement of source.statements) {
     if (!ts.isExportAssignment(statement) || statement.isExportEquals) continue
     const call = statement.expression
     if (
-      ts.isCallExpression(call) &&
-      call.expression.getText(source) === 'defineConfig' &&
-      call.arguments[0] &&
-      ts.isObjectLiteralExpression(call.arguments[0])
+      !ts.isCallExpression(call) ||
+      call.expression.getText(source) !== 'defineConfig'
     ) {
-      config = call.arguments[0]
+      continue
     }
+    const value = call.arguments[0]
+    if (value && ts.isObjectLiteralExpression(value)) config = value
   }
   if (!config) {
     throw new Error(
       `[on-zero] ${path} must default export defineConfig({ instances: { ... } })`
     )
   }
-  const instancesProperty = config.properties.find(
-    (property): property is ts.PropertyAssignment =>
-      ts.isPropertyAssignment(property) && property.name.getText(source) === 'instances'
-  )
-  if (
-    !instancesProperty ||
-    !ts.isObjectLiteralExpression(instancesProperty.initializer) ||
-    instancesProperty.initializer.properties.length === 0
-  ) {
+
+  const rootOptions = new Map<string, ts.Expression>()
+  for (const option of config.properties) {
+    if (!ts.isPropertyAssignment(option)) {
+      throw new Error(`[on-zero] ${path} options must use explicit property assignments`)
+    }
+    const name = propertyName(ts, option.name)
+    if (!name) throw new Error(`[on-zero] ${path} has an unsupported option name`)
+    if (rootOptions.has(name))
+      throw new Error(`[on-zero] ${path} repeats option '${name}'`)
+    rootOptions.set(name, option.initializer)
+  }
+  for (const name of rootOptions.keys()) {
+    if (name !== 'instances')
+      throw new Error(`[on-zero] ${path} has unknown option '${name}'`)
+  }
+  const instancesNode = rootOptions.get('instances')
+  if (!instancesNode || !ts.isObjectLiteralExpression(instancesNode)) {
     throw new Error(`[on-zero] ${path} must declare a non-empty instances object`)
   }
 
   const instances: ParsedInstanceConfig[] = []
-  for (const property of instancesProperty.initializer.properties) {
+  for (const property of instancesNode.properties) {
     if (!ts.isPropertyAssignment(property)) {
-      throw new Error(`[on-zero] ${path} instances must use property assignments`)
+      throw new Error(
+        `[on-zero] ${path} instances must use explicit property assignments`
+      )
     }
-    const name = property.name.getText(source).replace(/^['"]|['"]$/g, '')
+    const name = propertyName(ts, property.name)
+    if (!name) throw new Error(`[on-zero] ${path} has an unsupported instance name`)
     if (!ts.isObjectLiteralExpression(property.initializer)) {
       throw new Error(`[on-zero] instance '${name}' must be an object`)
     }
+    if (instances.some((instance) => instance.name === name)) {
+      throw new Error(`[on-zero] duplicate instance name '${name}'`)
+    }
+    let dir = resolve(dirname(path), name)
     let scope: string | null = null
     const supportTables: string[] = []
+    const seen = new Set<string>()
     for (const option of property.initializer.properties) {
-      if (!ts.isPropertyAssignment(option)) continue
-      const optionName = option.name.getText(source)
-      if (optionName === 'scope' && ts.isStringLiteral(option.initializer)) {
-        scope = option.initializer.text
+      if (!ts.isPropertyAssignment(option)) {
+        throw new Error(`[on-zero] instance '${name}' options must be assignments`)
       }
-      if (
-        optionName === 'supportTables' &&
-        ts.isArrayLiteralExpression(option.initializer)
-      ) {
+      const optionName = propertyName(ts, option.name)
+      if (!optionName)
+        throw new Error(`[on-zero] instance '${name}' has an invalid option`)
+      if (seen.has(optionName)) {
+        throw new Error(`[on-zero] instance '${name}' repeats option '${optionName}'`)
+      }
+      seen.add(optionName)
+      if (optionName === 'dir') {
+        if (!ts.isStringLiteral(option.initializer)) {
+          throw new Error(`[on-zero] instance '${name}' dir must be a string literal`)
+        }
+        if (option.initializer.text.startsWith('/')) {
+          throw new Error(`[on-zero] instance '${name}' dir must be relative to ${path}`)
+        }
+        dir = resolve(dirname(path), option.initializer.text)
+        continue
+      }
+      if (optionName === 'scope') {
+        if (!ts.isStringLiteral(option.initializer)) {
+          throw new Error(`[on-zero] instance '${name}' scope must be a string literal`)
+        }
+        if (!option.initializer.text) {
+          throw new Error(`[on-zero] instance '${name}' scope cannot be empty`)
+        }
+        scope = option.initializer.text
+        continue
+      }
+      if (optionName === 'supportTables') {
+        if (!ts.isArrayLiteralExpression(option.initializer)) {
+          throw new Error(`[on-zero] instance '${name}' supportTables must be an array`)
+        }
         for (const table of option.initializer.elements) {
           if (!ts.isStringLiteral(table)) {
             throw new Error(
               `[on-zero] instance '${name}' supportTables must contain string literals`
             )
           }
+          if (!table.text) {
+            throw new Error(
+              `[on-zero] instance '${name}' supportTables cannot contain an empty table name`
+            )
+          }
           supportTables.push(table.text)
         }
-      }
-    }
-    instances.push({ name, scope, supportTables })
-  }
-  return { path, instances }
-}
-
-function readInstanceOptions(
-  ts: typeof import('typescript'),
-  instancePath: string
-): { scope: string | null; supportTables: string[] } {
-  const source = ts.createSourceFile(
-    instancePath,
-    readFileSync(instancePath, 'utf8'),
-    ts.ScriptTarget.Latest,
-    true
-  )
-  let scope: string | null = null
-  const supportTables: string[] = []
-
-  for (const statement of source.statements) {
-    if (!ts.isExportAssignment(statement) || statement.isExportEquals) continue
-    const call = statement.expression
-    if (
-      !ts.isCallExpression(call) ||
-      call.expression.getText(source) !== 'defineInstance'
-    ) {
-      continue
-    }
-    const options = call.arguments[0]
-    if (!options || !ts.isObjectLiteralExpression(options)) continue
-    for (const property of options.properties) {
-      if (!ts.isPropertyAssignment(property)) continue
-      const name = property.name.getText(source)
-      if (name === 'scope' && ts.isStringLiteral(property.initializer)) {
-        scope = property.initializer.text
-      }
-      if (name === 'supportTables' && ts.isArrayLiteralExpression(property.initializer)) {
-        for (const element of property.initializer.elements) {
-          if (ts.isStringLiteral(element)) supportTables.push(element.text)
-        }
-      }
-    }
-  }
-
-  return { scope, supportTables }
-}
-
-function readScopedInstanceOptions(
-  ts: typeof import('typescript'),
-  instancePath: string
-) {
-  const options = readInstanceOptions(ts, instancePath)
-  if (!options.scope) {
-    throw new Error(
-      `[on-zero] ${instancePath} must default export defineInstance({ scope: 'columnName' })`
-    )
-  }
-  return { ...options, scope: options.scope }
-}
-
-function collectInstanceDirs(baseDir: string): string[] {
-  const found: string[] = []
-  const walk = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (
-        !entry.isDirectory() ||
-        entry.name === 'generated' ||
-        entry.name === 'node_modules'
-      ) {
         continue
       }
-      const child = resolve(dir, entry.name)
-      if (existsSync(resolve(child, 'instance.ts'))) found.push(child)
-      walk(child)
+      throw new Error(`[on-zero] instance '${name}' has unknown option '${optionName}'`)
+    }
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+      throw new Error(`[on-zero] instance '${name}' directory does not exist: ${dir}`)
+    }
+    instances.push({ name, dir, scope, supportTables })
+  }
+  if (instances.length === 0) {
+    throw new Error(`[on-zero] ${path} must declare at least one instance`)
+  }
+  for (const instance of instances) {
+    const duplicate = instances.find(
+      (candidate) => candidate !== instance && candidate.dir === instance.dir
+    )
+    if (duplicate) {
+      throw new Error(
+        `[on-zero] instances '${instance.name}' and '${duplicate.name}' resolve to the same directory: ${instance.dir}`
+      )
     }
   }
-  walk(baseDir)
-  return found.sort()
+  return { path, instances }
 }
 
 function hasParseErrors(source: ts.SourceFile): boolean {
@@ -305,7 +322,7 @@ function discoverNamespaces(
     a.name.localeCompare(b.name)
   )) {
     if (entry.isFile()) {
-      if (!isSourceFile(entry.name) || entry.name === 'instance.ts') continue
+      if (!isSourceFile(entry.name) || entry.name === 'on-zero.config.ts') continue
       const path = resolve(instance.dir, entry.name)
       if (!hasNamespaceExports(ts, baseDir, path)) continue
       const name = basename(entry.name, '.ts')
@@ -591,6 +608,7 @@ function relatedTables(
 function mutationSupportTables(
   ts: typeof import('typescript'),
   baseDir: string,
+  sourceRoots: string[],
   namespace: DataNamespace
 ): string[] {
   if (!namespace.modelPath) return []
@@ -640,7 +658,7 @@ function mutationSupportTables(
           ]) {
             if (
               existsSync(candidate) &&
-              (candidate === baseDir || candidate.startsWith(`${baseDir}${sep}`))
+              sourceRoots.some((root) => isWithin(root, candidate))
             ) {
               scan(candidate)
               break
@@ -658,68 +676,95 @@ function mutationSupportTables(
   return [...tables].sort()
 }
 
-export function discoverDataLayout(
-  ts: typeof import('typescript'),
-  baseDir: string
-): DataLayout {
-  const config = readDataConfig(ts, baseDir)
-  const instanceDirs = config
-    ? config.instances.map((instance) => resolve(baseDir, instance.name))
-    : collectInstanceDirs(baseDir)
-  for (const instanceDir of instanceDirs) {
-    if (!existsSync(instanceDir)) {
-      throw new Error(`[on-zero] instance directory does not exist: ${instanceDir}`)
+function assertNoInstanceFiles(roots: string[]) {
+  const visited = new Set<string>()
+  const walk = (dir: string) => {
+    if (visited.has(dir) || !existsSync(dir)) return
+    visited.add(dir)
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === 'generated') continue
+      const path = resolve(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(path)
+      } else if (entry.isFile() && entry.name === 'instance.ts') {
+        throw new Error(
+          `[on-zero] ${path} uses removed instance.ts configuration; delete it and configure instances in on-zero.config.ts`
+        )
+      }
     }
   }
-  const instanceDirSet = new Set(instanceDirs)
-  // the default instance owns baseDir itself, so its config (if any) is the
-  // root instance.ts — collectInstanceDirs only walks subdirectories.
-  const rootInstancePath = resolve(baseDir, 'instance.ts')
-  const instances: DataInstance[] = config
-    ? config.instances.map((instance) => ({
-        name: instance.name,
-        dir: resolve(baseDir, instance.name),
-        scope: instance.scope,
-        namespaces: [],
-        syncTables: [],
-        supportTables: [],
-        declaredSupportTables: instance.supportTables,
-      }))
-    : [
-        {
-          name: 'default',
-          dir: baseDir,
-          scope: null,
-          namespaces: [],
-          syncTables: [],
-          supportTables: [],
-          declaredSupportTables: existsSync(rootInstancePath)
-            ? readInstanceOptions(ts, rootInstancePath).supportTables
-            : [],
-        },
-        ...instanceDirs.map((dir) => {
-          const options = readScopedInstanceOptions(ts, resolve(dir, 'instance.ts'))
-          return {
-            name: basename(dir),
-            dir,
-            scope: options.scope,
-            namespaces: [],
-            syncTables: [],
-            supportTables: [],
-            declaredSupportTables: options.supportTables,
-          }
-        }),
-      ]
-  const duplicateInstance = instances.find(
-    (instance, index) =>
-      instances.findIndex((candidate) => candidate.name === instance.name) !== index
-  )
-  if (duplicateInstance) {
-    throw new Error(`[on-zero] duplicate instance name '${duplicateInstance.name}'`)
+  for (const root of roots) walk(root)
+}
+
+function assertNoUnclaimedNamespaces(
+  ts: typeof import('typescript'),
+  baseDir: string,
+  configPath: string,
+  instanceDirs: string[]
+) {
+  const walk = (dir: string) => {
+    if (instanceDirs.some((instanceDir) => isWithin(instanceDir, dir))) return
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === 'generated') continue
+      const path = resolve(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(path)
+        continue
+      }
+      if (
+        !entry.isFile() ||
+        !isSourceFile(entry.name) ||
+        path === configPath ||
+        entry.name === 'instance.ts'
+      ) {
+        continue
+      }
+      if (hasNamespaceExports(ts, baseDir, path)) {
+        throw new Error(
+          `[on-zero] data namespace ${path} is outside every instance directory declared in ${configPath}`
+        )
+      }
+    }
   }
+  walk(baseDir)
+}
+
+export function discoverDataLayout(
+  ts: typeof import('typescript'),
+  baseDir: string,
+  configPath?: string
+): DataLayout {
+  const config = readDataConfig(ts, baseDir, configPath)
+  const configured =
+    config?.instances ??
+    ([
+      { name: 'default', dir: baseDir, scope: null, supportTables: [] },
+    ] satisfies ParsedInstanceConfig[])
+  const sourceRoots = [
+    ...new Set([baseDir, ...configured.map((instance) => instance.dir)]),
+  ]
+  assertNoInstanceFiles(sourceRoots)
+  if (config) {
+    assertNoUnclaimedNamespaces(
+      ts,
+      baseDir,
+      config.path,
+      configured.map((instance) => instance.dir)
+    )
+  }
+  const instances: DataInstance[] = configured.map((instance) => ({
+    name: instance.name,
+    dir: instance.dir,
+    scope: instance.scope,
+    namespaces: [],
+    syncTables: [],
+    supportTables: [],
+    declaredSupportTables: instance.supportTables,
+  }))
+  const instanceDirs = new Set(instances.map((instance) => instance.dir))
 
   for (const instance of instances) {
-    instance.namespaces = discoverNamespaces(ts, baseDir, instance, instanceDirSet)
+    instance.namespaces = discoverNamespaces(ts, baseDir, instance, instanceDirs)
   }
   const namespaces = instances.flatMap((instance) => instance.namespaces)
   const owners = new Map<string, string>()
@@ -771,7 +816,7 @@ export function discoverDataLayout(
     // instance's change log or every later pull throws on it.
     const supportTables = new Set<string>(instance.declaredSupportTables)
     for (const namespace of instance.namespaces) {
-      for (const table of mutationSupportTables(ts, baseDir, namespace)) {
+      for (const table of mutationSupportTables(ts, baseDir, sourceRoots, namespace)) {
         if (owners.has(table) || relatedOwners.has(table)) continue
         if (!instance.syncTables.includes(table)) {
           supportTables.add(table)
@@ -787,6 +832,7 @@ export function discoverDataLayout(
     instances,
     namespaces,
     metadataPaths: config ? [...metadata, config.path].sort() : metadata,
+    sourceRoots,
   }
 }
 

@@ -254,12 +254,12 @@ describe('instance layout', () => {
 
   test('discovers file and folder namespaces and emits related sync closure', async () => {
     writeFileSync(
-      join(dataDir(), 'reaction.ts'),
+      join(dataDir(), 'control/reaction.ts'),
       `export const allReactions = () => zql.reaction`
     )
     writeFileSync(
-      join(dataDir(), 'project/instance.ts'),
-      `export default defineInstance({ scope: 'projectId' })`
+      join(dataDir(), 'on-zero.config.ts'),
+      `export default defineConfig({ instances: { control: {}, project: { scope: 'projectId' } } })`
     )
     writeFileSync(
       join(dataDir(), 'project/message/queries.ts'),
@@ -306,12 +306,12 @@ export const userPublic = sqliteTable('user_public', { id: text(), projectId: te
     await generate({ dir: dataDir(), silent: true })
 
     const grouped = readFileSync(join(dataDir(), 'generated/groupedQueries.ts'), 'utf8')
-    expect(grouped).toContain("from '../reaction'")
+    expect(grouped).toContain("from '../control/reaction'")
     expect(grouped).toContain("from '../project/message/queries'")
     expect(grouped).not.toContain('privateHelper')
 
     const manifest = readFileSync(join(dataDir(), 'generated/instances.ts'), 'utf8')
-    expect(manifest).toContain('default: {')
+    expect(manifest).toContain('control: {')
     expect(manifest).toContain('project: {')
     expect(manifest).toContain('tables: ["message"]')
     expect(manifest).toContain('syncTables: ["comment","message","userPublic"]')
@@ -403,12 +403,12 @@ export async function writeAudit(tx: Transaction) {
 
   test('includes a fileless support table in every instance that uses it', async () => {
     writeFileSync(
-      join(dataDir(), 'account.ts'),
+      join(dataDir(), 'control/account.ts'),
       `export const mutate = mutations('account', { save: async (ctx) => ctx.tx.mutate.audit.insert({}) })`
     )
     writeFileSync(
-      join(dataDir(), 'project/instance.ts'),
-      `export default defineInstance({ scope: 'projectId' })`
+      join(dataDir(), 'on-zero.config.ts'),
+      `export default defineConfig({ instances: { control: {}, project: { scope: 'projectId' } } })`
     )
     writeFileSync(
       join(dataDir(), 'project/message.ts'),
@@ -422,73 +422,50 @@ export const mutate = mutations(schema, permission, {
 
     await expect(deriveDataMembership({ dir: dataDir() })).resolves.toMatchObject({
       instances: {
-        default: { supportTables: ['audit'] },
+        control: { supportTables: ['audit'] },
         project: { supportTables: ['audit'] },
       },
       allTables: ['account', 'audit', 'message'],
     })
   })
 
-  test('includes support tables declared by the data config', async () => {
+  test('keeps a configured default instance at the data root', async () => {
     writeFileSync(
       join(dataDir(), 'on-zero.config.ts'),
-      `export default defineConfig({
-        instances: {
-          control: {
-            supportTables: [
-              'accountGithubOrgLink',
-              'accountRepo',
-              'agentEvent',
-              'message',
-              'sootAgent',
-              'sootSession',
-              'sootTask',
-              'sootTaskComment',
-              'thread',
-              'usageLedger',
-              'worktree',
-            ],
-          },
-          project: { scope: 'projectId' },
-        },
-      })`
+      `export default defineConfig({ instances: { default: { dir: '.', supportTables: ['accountGithubOrgLink', 'accountRepo', 'usageLedger'] }, project: { scope: 'projectId' } } })`
     )
     writeFileSync(
-      join(dataDir(), 'control/account.ts'),
+      join(dataDir(), 'account.ts'),
       `export const accounts = () => zql.account`
     )
     writeFileSync(
-      join(dataDir(), 'project/project.ts'),
-      `export const schema = table('project').columns({ id: string(), projectId: string() })`
+      join(dataDir(), 'project/message.ts'),
+      `export const schema = table('message').columns({ id: string(), projectId: string() })`
     )
 
-    await expect(deriveDataMembership({ dir: dataDir() })).resolves.toMatchObject({
+    await expect(deriveDataMembership({ dir: dataDir() })).resolves.toEqual({
       instances: {
-        control: {
+        default: {
           tables: ['account'],
-          supportTables: [
-            'accountGithubOrgLink',
-            'accountRepo',
-            'agentEvent',
-            'message',
-            'sootAgent',
-            'sootSession',
-            'sootTask',
-            'sootTaskComment',
-            'thread',
-            'usageLedger',
-            'worktree',
-          ],
+          syncTables: ['account'],
+          supportTables: ['accountGithubOrgLink', 'accountRepo', 'usageLedger'],
+          scope: null,
         },
-        project: { tables: ['project'], supportTables: [] },
+        project: {
+          tables: ['message'],
+          syncTables: ['message'],
+          supportTables: [],
+          scope: 'projectId',
+        },
       },
+      allTables: [
+        'account',
+        'accountGithubOrgLink',
+        'accountRepo',
+        'message',
+        'usageLedger',
+      ],
     })
-
-    await generate({ dir: dataDir(), silent: true })
-    const manifest = readFileSync(join(dataDir(), 'generated/instances.ts'), 'utf8')
-    expect(manifest).toContain('control: {')
-    expect(manifest).toContain('supportTables: ["accountGithubOrgLink","accountRepo"')
-    expect(manifest).toContain('project: {')
   })
 
   test('emits only relations whose source and target are derived members', async () => {
@@ -539,12 +516,12 @@ export const relations = defineRelations(schema, (r) => ({
 
   test('rejects a relation that crosses instance ownership', async () => {
     writeFileSync(
-      join(dataDir(), 'userPublic.ts'),
+      join(dataDir(), 'control/userPublic.ts'),
       `export const users = () => zql.userPublic`
     )
     writeFileSync(
-      join(dataDir(), 'project/instance.ts'),
-      `export default defineInstance({ scope: 'projectId' })`
+      join(dataDir(), 'on-zero.config.ts'),
+      `export default defineConfig({ instances: { control: {}, project: { scope: 'projectId' } } })`
     )
     writeFileSync(
       join(dataDir(), 'project/message.ts'),
@@ -559,14 +536,14 @@ export const messages = () => zql.message.related('author')
     )
 
     await expect(generate({ dir: dataDir(), silent: true })).rejects.toThrow(
-      /message\.messages.*instance 'project'.*userPublic.*instance 'default'/
+      /message\.messages.*instance 'project'.*userPublic.*instance 'control'/
     )
   })
 
   test('rejects a scoped sync table without the scope column', async () => {
     writeFileSync(
-      join(dataDir(), 'project/instance.ts'),
-      `export default defineInstance({ scope: 'projectId' })`
+      join(dataDir(), 'on-zero.config.ts'),
+      `export default defineConfig({ instances: { project: { scope: 'projectId' } } })`
     )
     writeFileSync(
       join(dataDir(), 'project/message.ts'),
@@ -580,12 +557,12 @@ export const messages = () => zql.message.related('author')
 
   test('rejects duplicate namespaces across instances', async () => {
     writeFileSync(
-      join(dataDir(), 'message.ts'),
+      join(dataDir(), 'control/message.ts'),
       `export const messages = () => zql.message`
     )
     writeFileSync(
-      join(dataDir(), 'project/instance.ts'),
-      `export default defineInstance({ scope: 'projectId' })`
+      join(dataDir(), 'on-zero.config.ts'),
+      `export default defineConfig({ instances: { control: {}, project: { scope: 'projectId' } } })`
     )
     writeFileSync(
       join(dataDir(), 'project/message.ts'),
@@ -593,7 +570,110 @@ export const messages = () => zql.message.related('author')
     )
 
     await expect(generate({ dir: dataDir(), silent: true })).rejects.toThrow(
-      /namespace 'message'.*instances 'default' and 'project'/
+      /namespace 'message'.*instances 'control' and 'project'/
+    )
+  })
+
+  test('resolves configured instance directories relative to the config file', async () => {
+    writeFileSync(
+      join(dataDir(), 'on-zero.config.ts'),
+      `export default defineConfig({ instances: { control: { dir: './planes/control-data', supportTables: ['audit'] }, project: { dir: '../project-data', scope: 'projectId' } } })`
+    )
+    writeFileSync(
+      join(dataDir(), 'planes/control-data/account.ts'),
+      `export const accounts = () => zql.account`
+    )
+    writeFileSync(
+      join(testDir, 'src/project-data/message.ts'),
+      `export const schema = table('message').columns({ id: string(), projectId: string() })`
+    )
+
+    await expect(
+      deriveDataMembership({
+        dir: dataDir(),
+        config: join(dataDir(), 'on-zero.config.ts'),
+      })
+    ).resolves.toEqual({
+      instances: {
+        control: {
+          tables: ['account'],
+          syncTables: ['account'],
+          supportTables: ['audit'],
+          scope: null,
+        },
+        project: {
+          tables: ['message'],
+          syncTables: ['message'],
+          supportTables: [],
+          scope: 'projectId',
+        },
+      },
+      allTables: ['account', 'audit', 'message'],
+    })
+
+    await expect(
+      generate({
+        dir: dataDir(),
+        config: join(dataDir(), 'on-zero.config.ts'),
+        silent: true,
+      })
+    ).resolves.toMatchObject({ modelCount: 2, schemaCount: 1 })
+    expect(readFileSync(join(dataDir(), 'generated/models.ts'), 'utf8')).toContain(
+      "from '../../project-data/message'"
+    )
+  })
+
+  test('rejects missing configured instance directories', async () => {
+    writeFileSync(
+      join(dataDir(), 'on-zero.config.ts'),
+      `export default defineConfig({ instances: { project: { dir: './missing' } } })`
+    )
+
+    await expect(deriveDataMembership({ dir: dataDir() })).rejects.toThrow(
+      /instance 'project' directory does not exist.*missing/
+    )
+  })
+
+  test('rejects two instances that resolve to the same directory', async () => {
+    writeFileSync(
+      join(dataDir(), 'on-zero.config.ts'),
+      `export default defineConfig({ instances: { control: { dir: './shared' }, project: { dir: './shared' } } })`
+    )
+    writeFileSync(
+      join(dataDir(), 'shared/account.ts'),
+      `export const accounts = () => zql.account`
+    )
+
+    await expect(deriveDataMembership({ dir: dataDir() })).rejects.toThrow(
+      /instances 'control' and 'project' resolve to the same directory/
+    )
+  })
+
+  test('rejects root namespaces when instances are configured', async () => {
+    writeFileSync(
+      join(dataDir(), 'on-zero.config.ts'),
+      `export default defineConfig({ instances: { project: {} } })`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/message.ts'),
+      `export const rows = () => zql.message`
+    )
+    writeFileSync(join(dataDir(), 'account.ts'), `export const rows = () => zql.account`)
+
+    await expect(deriveDataMembership({ dir: dataDir() })).rejects.toThrow(
+      /data namespace .*account\.ts.*outside every instance directory/
+    )
+  })
+
+  test('rejects removed instance.ts configuration', async () => {
+    writeFileSync(join(dataDir(), 'post.ts'), `export const posts = () => zql.post`)
+    writeFileSync(
+      join(dataDir(), 'project/instance.ts'),
+      `export default defineInstance({ scope: 'projectId' })`
+    )
+
+    await expect(deriveDataMembership({ dir: dataDir() })).rejects.toThrow(
+      /uses removed instance\.ts configuration/
     )
   })
 
