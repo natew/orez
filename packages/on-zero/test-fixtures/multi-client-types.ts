@@ -1,7 +1,13 @@
 import { createSchema, string, table } from '@rocicorp/zero'
+import { defineConfig, type MutatorContext, type ZeroEventsEmitter } from 'on-zero'
 import { createZeroClients, type ZeroInstanceManifestEntry } from 'on-zero/multi'
 
-import type { MutatorContext, ZeroEventsEmitter } from 'on-zero'
+defineConfig({
+  instances: {
+    control: { supportTables: ['audit'] },
+    project: { scope: 'projectId' },
+  },
+})
 
 const schema = createSchema({
   tables: [

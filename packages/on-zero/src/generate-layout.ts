@@ -18,7 +18,7 @@ export type DataInstance = {
   namespaces: DataNamespace[]
   syncTables: string[]
   supportTables: string[]
-  /** `supportTables` declared in this instance's `instance.ts`. */
+  /** `supportTables` declared in `on-zero.config.ts` or `instance.ts`. */
   declaredSupportTables: string[]
 }
 
@@ -36,6 +36,90 @@ const isSourceFile = (name: string) =>
 
 const toImportPath = (baseDir: string, path: string) =>
   relative(baseDir, path).split(sep).join('/').replace(/\.ts$/, '')
+
+type ParsedInstanceConfig = {
+  name: string
+  scope: string | null
+  supportTables: string[]
+}
+
+function readDataConfig(
+  ts: typeof import('typescript'),
+  baseDir: string
+): { path: string; instances: ParsedInstanceConfig[] } | null {
+  const path = resolve(baseDir, 'on-zero.config.ts')
+  if (!existsSync(path)) return null
+  const source = ts.createSourceFile(
+    path,
+    readFileSync(path, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true
+  )
+  let config: ts.ObjectLiteralExpression | null = null
+  for (const statement of source.statements) {
+    if (!ts.isExportAssignment(statement) || statement.isExportEquals) continue
+    const call = statement.expression
+    if (
+      ts.isCallExpression(call) &&
+      call.expression.getText(source) === 'defineConfig' &&
+      call.arguments[0] &&
+      ts.isObjectLiteralExpression(call.arguments[0])
+    ) {
+      config = call.arguments[0]
+    }
+  }
+  if (!config) {
+    throw new Error(
+      `[on-zero] ${path} must default export defineConfig({ instances: { ... } })`
+    )
+  }
+  const instancesProperty = config.properties.find(
+    (property): property is ts.PropertyAssignment =>
+      ts.isPropertyAssignment(property) && property.name.getText(source) === 'instances'
+  )
+  if (
+    !instancesProperty ||
+    !ts.isObjectLiteralExpression(instancesProperty.initializer) ||
+    instancesProperty.initializer.properties.length === 0
+  ) {
+    throw new Error(`[on-zero] ${path} must declare a non-empty instances object`)
+  }
+
+  const instances: ParsedInstanceConfig[] = []
+  for (const property of instancesProperty.initializer.properties) {
+    if (!ts.isPropertyAssignment(property)) {
+      throw new Error(`[on-zero] ${path} instances must use property assignments`)
+    }
+    const name = property.name.getText(source).replace(/^['"]|['"]$/g, '')
+    if (!ts.isObjectLiteralExpression(property.initializer)) {
+      throw new Error(`[on-zero] instance '${name}' must be an object`)
+    }
+    let scope: string | null = null
+    const supportTables: string[] = []
+    for (const option of property.initializer.properties) {
+      if (!ts.isPropertyAssignment(option)) continue
+      const optionName = option.name.getText(source)
+      if (optionName === 'scope' && ts.isStringLiteral(option.initializer)) {
+        scope = option.initializer.text
+      }
+      if (
+        optionName === 'supportTables' &&
+        ts.isArrayLiteralExpression(option.initializer)
+      ) {
+        for (const table of option.initializer.elements) {
+          if (!ts.isStringLiteral(table)) {
+            throw new Error(
+              `[on-zero] instance '${name}' supportTables must contain string literals`
+            )
+          }
+          supportTables.push(table.text)
+        }
+      }
+    }
+    instances.push({ name, scope, supportTables })
+  }
+  return { path, instances }
+}
 
 function readInstanceOptions(
   ts: typeof import('typescript'),
@@ -578,36 +662,54 @@ export function discoverDataLayout(
   ts: typeof import('typescript'),
   baseDir: string
 ): DataLayout {
-  const instanceDirs = collectInstanceDirs(baseDir)
+  const config = readDataConfig(ts, baseDir)
+  const instanceDirs = config
+    ? config.instances.map((instance) => resolve(baseDir, instance.name))
+    : collectInstanceDirs(baseDir)
+  for (const instanceDir of instanceDirs) {
+    if (!existsSync(instanceDir)) {
+      throw new Error(`[on-zero] instance directory does not exist: ${instanceDir}`)
+    }
+  }
   const instanceDirSet = new Set(instanceDirs)
   // the default instance owns baseDir itself, so its config (if any) is the
   // root instance.ts — collectInstanceDirs only walks subdirectories.
   const rootInstancePath = resolve(baseDir, 'instance.ts')
-  const instances: DataInstance[] = [
-    {
-      name: 'default',
-      dir: baseDir,
-      scope: null,
-      namespaces: [],
-      syncTables: [],
-      supportTables: [],
-      declaredSupportTables: existsSync(rootInstancePath)
-        ? readInstanceOptions(ts, rootInstancePath).supportTables
-        : [],
-    },
-    ...instanceDirs.map((dir) => {
-      const options = readScopedInstanceOptions(ts, resolve(dir, 'instance.ts'))
-      return {
-        name: basename(dir),
-        dir,
-        scope: options.scope,
+  const instances: DataInstance[] = config
+    ? config.instances.map((instance) => ({
+        name: instance.name,
+        dir: resolve(baseDir, instance.name),
+        scope: instance.scope,
         namespaces: [],
         syncTables: [],
         supportTables: [],
-        declaredSupportTables: options.supportTables,
-      }
-    }),
-  ]
+        declaredSupportTables: instance.supportTables,
+      }))
+    : [
+        {
+          name: 'default',
+          dir: baseDir,
+          scope: null,
+          namespaces: [],
+          syncTables: [],
+          supportTables: [],
+          declaredSupportTables: existsSync(rootInstancePath)
+            ? readInstanceOptions(ts, rootInstancePath).supportTables
+            : [],
+        },
+        ...instanceDirs.map((dir) => {
+          const options = readScopedInstanceOptions(ts, resolve(dir, 'instance.ts'))
+          return {
+            name: basename(dir),
+            dir,
+            scope: options.scope,
+            namespaces: [],
+            syncTables: [],
+            supportTables: [],
+            declaredSupportTables: options.supportTables,
+          }
+        }),
+      ]
   const duplicateInstance = instances.find(
     (instance, index) =>
       instances.findIndex((candidate) => candidate.name === instance.name) !== index
@@ -681,7 +783,11 @@ export function discoverDataLayout(
       .sort()
   }
 
-  return { instances, namespaces, metadataPaths: metadata }
+  return {
+    instances,
+    namespaces,
+    metadataPaths: config ? [...metadata, config.path].sort() : metadata,
+  }
 }
 
 export function namespaceImportPath(baseDir: string, path: string): string {

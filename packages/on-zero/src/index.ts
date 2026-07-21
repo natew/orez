@@ -24,6 +24,7 @@ export * from './mutations'
 export * from './where'
 export * from './serverWhere'
 export * from './zql'
+export { defineConfig, type DataConfig, type DataInstanceConfig } from './config'
 export { defineQuery, defineQueries } from '@rocicorp/zero'
 
 export type DataInstanceOptions<Scope extends string = string> = {

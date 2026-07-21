@@ -429,6 +429,68 @@ export const mutate = mutations(schema, permission, {
     })
   })
 
+  test('includes support tables declared by the data config', async () => {
+    writeFileSync(
+      join(dataDir(), 'on-zero.config.ts'),
+      `export default defineConfig({
+        instances: {
+          control: {
+            supportTables: [
+              'accountGithubOrgLink',
+              'accountRepo',
+              'agentEvent',
+              'message',
+              'sootAgent',
+              'sootSession',
+              'sootTask',
+              'sootTaskComment',
+              'thread',
+              'usageLedger',
+              'worktree',
+            ],
+          },
+          project: { scope: 'projectId' },
+        },
+      })`
+    )
+    writeFileSync(
+      join(dataDir(), 'control/account.ts'),
+      `export const accounts = () => zql.account`
+    )
+    writeFileSync(
+      join(dataDir(), 'project/project.ts'),
+      `export const schema = table('project').columns({ id: string(), projectId: string() })`
+    )
+
+    await expect(deriveDataMembership({ dir: dataDir() })).resolves.toMatchObject({
+      instances: {
+        control: {
+          tables: ['account'],
+          supportTables: [
+            'accountGithubOrgLink',
+            'accountRepo',
+            'agentEvent',
+            'message',
+            'sootAgent',
+            'sootSession',
+            'sootTask',
+            'sootTaskComment',
+            'thread',
+            'usageLedger',
+            'worktree',
+          ],
+        },
+        project: { tables: ['project'], supportTables: [] },
+      },
+    })
+
+    await generate({ dir: dataDir(), silent: true })
+    const manifest = readFileSync(join(dataDir(), 'generated/instances.ts'), 'utf8')
+    expect(manifest).toContain('control: {')
+    expect(manifest).toContain('supportTables: ["accountGithubOrgLink","accountRepo"')
+    expect(manifest).toContain('project: {')
+  })
+
   test('emits only relations whose source and target are derived members', async () => {
     writeFileSync(join(dataDir(), 'post.ts'), `export const posts = () => zql.post`)
     writeFileSync(
