@@ -210,6 +210,34 @@ async function requestObject(request: Request): Promise<Record<string, unknown>>
   return value as Record<string, unknown>
 }
 
+// clients always ship their desired queries and treat the server's got ack as
+// authoritative. the query-aware engine acks through its own tracking; a
+// non-query-aware host syncs every visible row, so its ack is an echo of the
+// hash-level desired delta in the same response that carries the rows.
+function withGotQueriesAck(
+  body: Record<string, unknown>,
+  queryAware: boolean,
+  response: Record<string, unknown>
+): Record<string, unknown> {
+  if (queryAware) return response
+  const queries = body.queries as
+    | { version?: unknown; patch?: unknown[] }
+    | undefined
+  if (!queries || typeof queries.version !== 'number' || !Array.isArray(queries.patch)) {
+    return response
+  }
+  return {
+    ...response,
+    gotQueries: {
+      version: queries.version,
+      patch: queries.patch.map((op) => {
+        const entry = op as { op?: unknown; hash?: unknown }
+        return entry.op === 'put' ? { op: 'put', hash: entry.hash } : op
+      }),
+    },
+  }
+}
+
 function routeAfterNamespace(pathname: string): string {
   const [, , ...parts] = pathname.split('/')
   return `/${parts.join('/')}`
@@ -1378,6 +1406,7 @@ export function createSyncDurableObject<
               return result
             })
             transactionMs = performance.now() - txStarted
+            response = withGotQueriesAck(body, queryAware, response)
           } finally {
             this.#pulling.delete(clientID)
           }

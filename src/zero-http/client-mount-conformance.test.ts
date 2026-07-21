@@ -24,14 +24,11 @@ afterEach(async () => {
   while (databases.length) databases.pop()?.close()
 })
 
-// both transport dialects must converge against the mount: baseline (the
-// client self-acknowledges its queries) and query-aware (queryForward — the
-// server's gotQueries ack is authoritative, so a mount that never acks would
-// leave every query stuck short of 'complete').
-test.each([{ queryForward: false }, { queryForward: true }])(
-  'stock Zero converges through the Orez client and mount halves (queryForward: $queryForward)',
-  async ({ queryForward }) => {
-    const sqlite = new DatabaseSync(':memory:')
+// the client always ships its desired queries and the mount's gotQueries ack
+// is authoritative — a mount that never acked would leave every query stuck
+// short of 'complete'.
+test('stock Zero converges through the Orez client and mount halves', async () => {
+  const sqlite = new DatabaseSync(':memory:')
   databases.push(sqlite)
   sqlite.exec(`
     CREATE TABLE user_record (
@@ -115,7 +112,6 @@ test.each([{ queryForward: false }, { queryForward: true }])(
     pullOrigin: `${ORIGIN}/sync/app`,
     pushOrigin: `${ORIGIN}/sync/app`,
     fetch: fetch as typeof globalThis.fetch,
-    queryForward,
   })
   transports.push(transport)
   const zero = new Zero({
@@ -125,7 +121,7 @@ test.each([{ queryForward: false }, { queryForward: true }])(
     schema: zeroHttpFixtureSchema,
     mutators: zeroHttpFixtureMutators,
     kvStore: 'mem',
-    storageKey: `orez-client-mount-conformance-${queryForward ? 'qf' : 'base'}`,
+    storageKey: 'orez-client-mount-conformance',
   })
   zeros.push(zero)
 

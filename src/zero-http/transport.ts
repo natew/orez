@@ -52,10 +52,10 @@ type QueryPatchOp =
   | { op: 'del'; hash: string }
   | { op: 'clear' }
 
-// transforms a named query's (name, args) into its Zero v51 AST. providing one
-// turns the query-aware extension on and resolves desired queries CLIENT-side
-// (ship the AST). use for a native host with no query registry, or a trusted
-// harness. omit it (with queryForward) to ship name+args and resolve SERVER-side.
+// transforms a named query's (name, args) into its Zero v51 AST, resolving
+// desired queries CLIENT-side (ship the AST). use for a native host with no
+// query registry, or a trusted harness. omit it to ship name+args and resolve
+// SERVER-side — the default, permission-safe path.
 export type QueryTransform = (name: string, args: readonly unknown[]) => unknown
 
 type PushBody = Record<string, unknown> & {
@@ -82,8 +82,6 @@ type TransportState = {
   readonly pullIntervalMs: number | undefined
   readonly wake: HttpPullTransportOptions['wake']
   readonly queryTransform: QueryTransform | undefined
-  readonly queryForward: boolean
-  readonly queryAware: boolean
   readonly payloadCodec: PayloadCodec
   readonly shardNum: number
   nextPokeID: number
@@ -173,14 +171,13 @@ export type HttpPullTransportOptions = {
    * with backoff; pulls remain the source of correctness.
    */
   wake?: boolean | { getToken(): Promise<string> }
-  // when provided, the query-aware extension is on and desired queries are
-  // resolved client-side to an AST before shipping (native host / trusted
-  // harness). omit for the baseline dialect (client-local got-query synthesis).
+  // when provided, named desired queries are resolved client-side to an AST
+  // before shipping (native host / trusted harness). when omitted, named
+  // queries ship as name+args for the SERVER to resolve with auth — the
+  // default, permission-safe path. either way the client always ships its
+  // desired queries and the server's got ack is authoritative, exactly like
+  // zero-cache over a websocket.
   queryTransform?: QueryTransform
-  // turns the query-aware extension on WITHOUT a client-side transform: desired
-  // queries ship as name+args for the SERVER (consumer worker) to resolve with
-  // auth. the production path for permission-transformed queries.
-  queryForward?: boolean
   // transforms selected row payloads at the final serialized transport
   // boundary. omitted options use the module-level identity codec.
   payloadCodec?: PayloadCodec
@@ -241,7 +238,6 @@ type NormalizedHttpPullTransportOptions = {
   readonly pullIntervalMs: number | undefined
   readonly wake: false | true | (() => Promise<string>)
   readonly queryTransform: QueryTransform | undefined
-  readonly queryForward: boolean
   readonly payloadCodecID: string
   readonly lifecycle: ((event: HttpPullLifecycleEvent) => void) | undefined
 }
@@ -256,7 +252,6 @@ const HTTP_PULL_OPTION_FIELDS = [
   'pullIntervalMs',
   'wake',
   'queryTransform',
-  'queryForward',
   'payloadCodecID',
   'lifecycle',
 ] satisfies readonly (keyof NormalizedHttpPullTransportOptions)[]
@@ -342,8 +337,6 @@ export function installHttpPullTransport(
     pullIntervalMs: opts.pullIntervalMs,
     wake: opts.wake ?? false,
     queryTransform: opts.queryTransform,
-    queryForward: opts.queryForward === true,
-    queryAware: opts.queryTransform !== undefined || opts.queryForward === true,
     payloadCodec,
     shardNum: opts.shardNum ?? 0,
     nextPokeID: 0,
@@ -425,7 +418,6 @@ export function ensureHttpPullTransport(
     pullIntervalMs: opts.pullIntervalMs,
     wake: typeof opts.wake === 'object' ? opts.wake.getToken : (opts.wake ?? false),
     queryTransform: opts.queryTransform,
-    queryForward: opts.queryForward === true,
     payloadCodecID: payloadCodec.id,
     lifecycle: opts.lifecycle,
   }
@@ -646,7 +638,7 @@ class ZeroHttpSocket {
     if (this.pullInFlight) return this.pullInFlight
     this.pullInFlight = this.fetchPull(this.clientGroupID, this.cookie, true)
       .then((response) => {
-        if (this.state.queryAware) this.applyServerGotQueries(response)
+        this.applyServerGotQueries(response)
         if (response.unchanged) {
           this.emitGotQueriesPatch(response.cookie)
           return
@@ -793,15 +785,10 @@ class ZeroHttpSocket {
     const desiredQueriesPatch = (body as { desiredQueriesPatch?: unknown })
       ?.desiredQueriesPatch
     if (!Array.isArray(desiredQueriesPatch)) return
-    if (!this.state.queryAware) {
-      // baseline dialect: synthesize the got-query ack locally
-      this.pendingGotQueriesPatch.push(...gotQueriesPatch(desiredQueriesPatch))
-      return
-    }
-    // query-aware: accumulate the desired-query delta to ship to the server. a
-    // put ships its inline ast, or a client-resolved ast (queryTransform), or
-    // name+args for the server to resolve (queryForward). the server owns the
-    // got-query ack.
+    // accumulate the desired-query delta to ship to the server — always, like
+    // stock Zero against zero-cache. a named put ships name+args for the server
+    // to resolve with auth (or a client-resolved ast via queryTransform); an
+    // anonymous put ships its inline ast. the server owns the got-query ack.
     const transform = this.state.queryTransform
     for (const op of desiredQueriesPatch as DesiredQueryPatchOp[]) {
       if (op.op === 'clear') {
@@ -813,16 +800,12 @@ class ZeroHttpSocket {
         const name = (op as { name?: string }).name ?? ''
         const args = ((op as { args?: readonly unknown[] }).args ??
           []) as readonly unknown[]
-        if (this.state.queryForward) {
+        if (name && transform) {
+          this.desiredQueryPatch.push({ op: 'put', hash: op.hash, ast: transform(name, args) })
+        } else if (name) {
           this.desiredQueryPatch.push({ op: 'put', hash: op.hash, name, args })
         } else if (inline !== undefined) {
           this.desiredQueryPatch.push({ op: 'put', hash: op.hash, ast: inline })
-        } else if (transform) {
-          this.desiredQueryPatch.push({
-            op: 'put',
-            hash: op.hash,
-            ast: transform(name, args),
-          })
         }
       }
     }
@@ -969,7 +952,7 @@ class ZeroHttpSocket {
     // ship the un-acked desired-query delta with the pull; remember what we
     // sent so the server ack can clear exactly that prefix. a recovery pull
     // (includeQueries=false) never carries desires.
-    if (includeQueries && this.state.queryAware && this.desiredQueryPatch.length > 0) {
+    if (includeQueries && this.desiredQueryPatch.length > 0) {
       this.sentQueryVersion = this.queryVersion
       this.sentQueryPatchLen = this.desiredQueryPatch.length
       body.queries = { version: this.queryVersion, patch: [...this.desiredQueryPatch] }
@@ -1338,15 +1321,6 @@ function decodeSecProtocol(protocols: WebSocketProtocols):
   } catch {
     return {}
   }
-}
-
-function gotQueriesPatch(patch: DesiredQueryPatchOp[]) {
-  const got: GotQueryPatchOp[] = []
-  for (const op of patch) {
-    if (op.op === 'clear') got.push({ op: 'clear' })
-    else if (op.hash) got.push({ op: op.op, hash: op.hash })
-  }
-  return got
 }
 
 // initConnection and a racing changeDesiredQueries can acknowledge the same

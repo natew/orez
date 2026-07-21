@@ -77,6 +77,35 @@ function requestError(message: string, status = 400): Error & { status: number }
   return Object.assign(new Error(message), { status })
 }
 
+// clients always ship their desired queries and treat the server's got ack as
+// authoritative. the query-aware engine acks through its own tracking; a
+// non-query-aware host syncs every visible row, so its ack is an echo of the
+// hash-level desired delta in the same response that carries the rows.
+function withGotQueriesAck(
+  body: Record<string, unknown>,
+  queryAware: boolean,
+  response: unknown
+): unknown {
+  if (queryAware) return response
+  const queries = body.queries as
+    | { version?: unknown; patch?: unknown[] }
+    | undefined
+  if (!queries || typeof queries.version !== 'number' || !Array.isArray(queries.patch)) {
+    return response
+  }
+  if (!response || typeof response !== 'object') return response
+  return {
+    ...response,
+    gotQueries: {
+      version: queries.version,
+      patch: queries.patch.map((op) => {
+        const entry = op as { op?: unknown; hash?: unknown }
+        return entry.op === 'put' ? { op: 'put', hash: entry.hash } : op
+      }),
+    },
+  }
+}
+
 async function requestObject(request: Request): Promise<Record<string, unknown>> {
   let value: unknown
   try {
@@ -508,7 +537,7 @@ class BrowserSyncHostImpl<
                 claims.userID
               )
         )
-        return json(response)
+        return json(withGotQueriesAck(body, queryAware, response))
       })
     } catch (error) {
       return json({ error: errorMessage(error) }, statusOf(error))

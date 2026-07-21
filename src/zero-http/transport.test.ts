@@ -54,6 +54,19 @@ type RequestRecord = {
   body: any
 }
 
+// every orez server acks the desired queries a pull carried, in that same
+// response; fake servers in these tests honor the same contract.
+function ackQueries(body: any) {
+  const queries = body?.queries
+  if (!queries) return undefined
+  return {
+    version: queries.version,
+    patch: queries.patch.map((op: any) =>
+      op.op === 'put' ? { op: 'put', hash: op.hash } : op
+    ),
+  }
+}
+
 const zeros: Zero<any, any>[] = []
 const transports: Array<{ uninstall(): void }> = []
 let storageID = 0
@@ -81,6 +94,7 @@ describe('zero-http transport', () => {
       return jsonResponse({
         cookie: ++cookie,
         lastMutationIDChanges: {},
+        gotQueries: ackQueries(request.body),
         rowsPatch: [
           { op: 'clear' },
           {
@@ -153,10 +167,12 @@ describe('zero-http transport', () => {
       rows: Array<{ value: { name: string } }>
     }
     const encryptedName = batch.rows[0].value.name
-    const fetch = vi.fn(async () =>
-      jsonResponse({
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      return jsonResponse({
         cookie: 1,
         lastMutationIDChanges: {},
+        gotQueries: ackQueries(request.body),
         rowsPatch: [
           { op: 'clear' },
           {
@@ -175,7 +191,7 @@ describe('zero-http transport', () => {
           },
         ],
       })
-    )
+    })
     const transport = installHttpPullTransport({
       origin: ORIGIN,
       fetch,
@@ -325,11 +341,12 @@ describe('zero-http transport', () => {
     // pins deterministically).
     let cookie = 0
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      recordRequest(input, init)
+      const request = recordRequest(input, init)
       if (cookie === 0) await sleep(150)
       return jsonResponse({
         cookie: ++cookie,
         lastMutationIDChanges: {},
+        gotQueries: ackQueries(request.body),
         rowsPatch: [
           { op: 'clear' },
           {
@@ -894,6 +911,7 @@ describe('zero-http transport', () => {
         return jsonResponse({
           cookie: 1,
           lastMutationIDChanges: {},
+          gotQueries: ackQueries(request.body),
           rowsPatch: [
             { op: 'clear' },
             {
@@ -910,7 +928,11 @@ describe('zero-http transport', () => {
         })
       }
 
-      return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      return jsonResponse({
+        cookie: request.body.cookie,
+        unchanged: true,
+        gotQueries: ackQueries(request.body),
+      })
     })
     install(fetch)
     const zero = createZero()
@@ -1851,17 +1873,16 @@ describe('zero-http query-aware extension', () => {
     ])
   })
 
-  test('queryForward ships name+args for the server to resolve (no client transform)', async () => {
+  test('named desired queries ship name+args for the server to resolve', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       requests.push(recordRequest(input, init))
       return jsonResponse({ cookie: 1, unchanged: true })
     })
-    // queryForward on, no transform: the permission transform stays server-side
+    // no transform: the permission transform stays server-side
     const transport = installHttpPullTransport({
       origin: ORIGIN,
       fetch,
-      queryForward: true,
     })
     transports.push(transport)
 
@@ -1873,7 +1894,7 @@ describe('zero-http query-aware extension', () => {
           name: 'byOwner',
           args: [{ ownerId: 'u1' }],
           // Zero may include a locally evaluable AST on a named query put.
-          // queryForward must discard it so the server remains authoritative.
+          // a named put must discard it so the server remains authoritative.
           ast: { table: 'secret' },
         },
       ],

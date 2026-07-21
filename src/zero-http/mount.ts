@@ -149,11 +149,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-// this mount syncs every visible row regardless of desired queries, so the
-// query-aware dialect (queryForward / queryTransform clients) reduces to an
-// authoritative echo: extract the hash-level shape of the desired delta and
-// ack it in the same response that carries the rows. rows therefore never lag
-// their ack. query content (name/args or ast) is accepted and ignored.
+// this mount syncs every visible row regardless of desired queries, so its
+// authoritative got ack is an echo: extract the hash-level shape of the
+// desired delta and ack it in the same response that carries the rows. rows
+// therefore never lag their ack. query content (name/args or ast) is accepted
+// and ignored.
 function validatePullQueries(value: unknown): PullQueries | undefined {
   if (value === undefined) return undefined
   if (
