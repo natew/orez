@@ -91,12 +91,12 @@ describe('zero-http executor mount', () => {
       ],
     }
 
-    await expect(server.handlePush(push, { userID: 'user-1' })).resolves.toEqual({
+    await expect(server.handlePush(push, { id: 'user-1' })).resolves.toEqual({
       pushResponse: {
         mutations: [{ id: { clientID: 'client-1', id: 1 }, result: {} }],
       },
     })
-    await expect(server.handlePush(push, { userID: 'user-1' })).resolves.toMatchObject({
+    await expect(server.handlePush(push, { id: 'user-1' })).resolves.toMatchObject({
       pushResponse: {
         mutations: [{ result: { error: 'alreadyProcessed' } }],
       },
@@ -110,7 +110,7 @@ describe('zero-http executor mount', () => {
     await expect(
       server.handlePull(
         { clientID: 'client-1', clientGroupID: 'group-1', cookie: null },
-        { userID: 'user-1' }
+        { id: 'user-1' }
       )
     ).resolves.toEqual({
       cookie: 2,
@@ -128,7 +128,7 @@ describe('zero-http executor mount', () => {
           ...push,
           mutations: [{ ...push.mutations[0]!, id: 2, name: 'remove' }],
         },
-        { userID: 'user-1' }
+        { id: 'user-1' }
       )
     ).resolves.toEqual({
       pushResponse: {
@@ -141,7 +141,7 @@ describe('zero-http executor mount', () => {
     await expect(
       server.handlePull(
         { clientID: 'client-1', clientGroupID: 'group-1', cookie: 2 },
-        { userID: 'user-1' }
+        { id: 'user-1' }
       )
     ).resolves.toEqual({
       cookie: 4,
@@ -174,11 +174,11 @@ describe('zero-http executor mount', () => {
 
     const user1 = (await server.handlePull(
       { clientID: 'c1', clientGroupID: 'g1', cookie: null },
-      { userID: 'user-1' }
+      { id: 'user-1' }
     )) as { cookie: number; rowsPatch: unknown[] }
     const user2 = (await server.handlePull(
       { clientID: 'c2', clientGroupID: 'g2', cookie: null },
-      { userID: 'user-2' }
+      { id: 'user-2' }
     )) as { cookie: number; rowsPatch: unknown[] }
     expect(user1.rowsPatch).toEqual([
       { op: 'clear' },
@@ -195,7 +195,7 @@ describe('zero-http executor mount', () => {
     await expect(
       server.handlePull(
         { clientID: 'c1', clientGroupID: 'g1', cookie: user1.cookie },
-        { userID: 'user-1' }
+        { id: 'user-1' }
       )
     ).resolves.toEqual({
       cookie: user1.cookie + 2,
@@ -205,7 +205,7 @@ describe('zero-http executor mount', () => {
     await expect(
       server.handlePull(
         { clientID: 'c2', clientGroupID: 'g2', cookie: user2.cookie },
-        { userID: 'user-2' }
+        { id: 'user-2' }
       )
     ).resolves.toEqual({
       cookie: user2.cookie + 2,
@@ -249,7 +249,7 @@ describe('zero-http executor mount', () => {
     await expect(
       firstServer.handlePull(
         { clientID: 'legacy-client', clientGroupID: 'legacy-group', cookie: 4000 },
-        { userID: 'user-1' }
+        { id: 'user-1' }
       )
     ).resolves.toEqual({
       cookie: 4001,
@@ -261,7 +261,7 @@ describe('zero-http executor mount', () => {
     await expect(
       restarted.handlePull(
         { clientID: 'legacy-client', clientGroupID: 'legacy-group', cookie: 4001 },
-        { userID: 'user-1' }
+        { id: 'user-1' }
       )
     ).resolves.toEqual({ cookie: 4001, unchanged: true })
   })
@@ -311,13 +311,13 @@ describe('zero-http executor mount', () => {
     })
     const initial = (await server.handlePull(
       { clientID: 'client-1', clientGroupID: 'group-1', cookie: null },
-      { userID: 'user-1' }
+      { id: 'user-1' }
     )) as { cookie: number }
 
     await Promise.all([
       server.handlePull(
         { clientID: 'client-1', clientGroupID: 'group-1', cookie: initial.cookie },
-        { userID: 'user-1' }
+        { id: 'user-1' }
       ),
       server.handlePush(
         {
@@ -333,7 +333,7 @@ describe('zero-http executor mount', () => {
             },
           ],
         },
-        { userID: 'user-1' }
+        { id: 'user-1' }
       ),
       server.invalidate(),
       server.watermark(),

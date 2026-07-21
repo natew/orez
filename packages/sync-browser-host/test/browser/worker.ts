@@ -302,7 +302,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
           orderBy: [['id', 'asc']],
         }
       },
-    } satisfies BrowserSyncHostConfig<typeof schema>
+    } satisfies BrowserSyncHostConfig<typeof schema, { id: string; queryAware: boolean }>
     const createdHost = faultPoint
       ? await createBrowserSyncHostInternal(config, hooks)
       : await createBrowserSyncHost(config)

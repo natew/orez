@@ -41,26 +41,29 @@ export type BrowserSyncHostAssets = {
   syncWasmUrl?: string | URL
 }
 
-export type BrowserSyncHostConfig<S extends Schema = Schema> = {
+export type BrowserSyncHostConfig<
+  S extends Schema = Schema,
+  A extends AuthData = AuthData,
+> = {
   storageKey: string
   assets?: BrowserSyncHostAssets
   schema: S
   initialize(sql: SyncSql): void
-  authenticate(request: Request): AuthData | null | Promise<AuthData | null>
+  authenticate(request: Request): A | null | Promise<A | null>
   authorize(
     request: Request,
-    authData: AuthData | null,
+    authData: A | null,
     namespace: string
   ): boolean | Promise<boolean>
   mutators: MutatorRegistry<S>
   visibility?: VisibilityConfig
-  queryAware?: boolean | ((authData: AuthData | null) => boolean)
+  queryAware?: boolean | ((authData: A | null) => boolean)
   resolveQuery?: (
     name: string,
     args: readonly JsonValue[],
-    authData: AuthData | null
+    authData: A | null
   ) => JsonValue | Promise<JsonValue>
-  queryTransformVersion?: number | ((authData: AuthData | null) => number)
+  queryTransformVersion?: number | ((authData: A | null) => number)
   retainChanges?: number
   caps?: Partial<PullCaps>
   transactionQueryBudget?: Partial<TransactionQueryBudget>

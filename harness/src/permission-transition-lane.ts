@@ -252,7 +252,7 @@ const httpServer: Server = createServer(async (req, res) => {
       res.end()
       return
     }
-    const response = await mount.handle(route, body, { userID })
+    const response = await mount.handle(route, body, { id: userID })
     if (
       route.operation === 'pull' &&
       body &&

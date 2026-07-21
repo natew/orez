@@ -112,9 +112,9 @@ export async function startOrezLocal(opts?: {
       }
       const response =
         url.pathname === '/pull'
-          ? await sync.handlePull(body, { userID })
+          ? await sync.handlePull(body, { id: userID })
           : url.pathname === '/push'
-            ? await sync.handlePush(body, { userID })
+            ? await sync.handlePush(body, { id: userID })
             : null
       if (!response) {
         res.statusCode = 404

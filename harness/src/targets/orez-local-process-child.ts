@@ -70,11 +70,11 @@ const server = createServer(async (req, res) => {
       return
     }
     if (url.pathname === '/pull') {
-      json(res, await sync.handlePull(body, { userID }))
+      json(res, await sync.handlePull(body, { id: userID }))
       return
     }
     if (url.pathname === '/push') {
-      json(res, await sync.handlePush(body, { userID }))
+      json(res, await sync.handlePush(body, { id: userID }))
       return
     }
     json(res, { error: 'not found' }, 404)

@@ -141,8 +141,8 @@ const httpServer = createServer(async (req, res) => {
       operation = url.pathname === '/pull' ? 'pull' : 'push'
       response =
         operation === 'pull'
-          ? await plain.sync.handlePull(body, { userID })
-          : await plain.sync.handlePush(body, { userID })
+          ? await plain.sync.handlePull(body, { id: userID })
+          : await plain.sync.handlePush(body, { id: userID })
     } else {
       const route = mount.match(url.pathname)
       if (!route) {
@@ -151,7 +151,7 @@ const httpServer = createServer(async (req, res) => {
       }
       databaseID = route.databaseID
       operation = route.operation
-      response = await mount.handle(route, body, { userID })
+      response = await mount.handle(route, body, { id: userID })
     }
     observations.push({ databaseID, operation, response })
     json(res, response)

@@ -90,7 +90,9 @@ async function requestObject(request: Request): Promise<Record<string, unknown>>
   return value as Record<string, unknown>
 }
 
-function validateConfig<S extends Schema>(config: BrowserSyncHostConfig<S>): PullCaps {
+function validateConfig<S extends Schema, A extends AuthData>(
+  config: BrowserSyncHostConfig<S, A>
+): PullCaps {
   if (!config.storageKey) throw new TypeError('storageKey must not be empty')
   if (!config.mutators) throw new TypeError('mutators are required')
   if (config.queryAware && !config.resolveQuery) {
@@ -135,7 +137,10 @@ class OperationQueue {
   }
 }
 
-class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
+class BrowserSyncHostImpl<
+  S extends Schema,
+  A extends AuthData,
+> implements BrowserSyncHost<S> {
   readonly executor: SyncExecutor<S>
   readonly #queue = new OperationQueue()
   readonly #listeners = new Set<() => void>()
@@ -150,7 +155,7 @@ class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
   #closePromise: Promise<void> | undefined
 
   private constructor(
-    private readonly config: BrowserSyncHostConfig<S>,
+    private readonly config: BrowserSyncHostConfig<S, A>,
     private readonly caps: PullCaps,
     private readonly module: BedrockBrowserModule,
     private readonly db: InstanceType<BedrockBrowserModule['Database']>,
@@ -238,10 +243,10 @@ class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
     this.#retainChanges = String(config.retainChanges ?? 4_096)
   }
 
-  static async create<S extends Schema>(
-    config: BrowserSyncHostConfig<S>,
+  static async create<S extends Schema, A extends AuthData>(
+    config: BrowserSyncHostConfig<S, A>,
     hooks?: BrowserHostTestHooks
-  ): Promise<BrowserSyncHostImpl<S>> {
+  ): Promise<BrowserSyncHostImpl<S, A>> {
     const caps = validateConfig(config)
     const sqliteWasmUrl =
       config.assets?.sqliteWasmUrl ??
@@ -343,7 +348,7 @@ class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
   }
 
   async #auth(request: Request): Promise<{
-    authData: AuthData | null
+    authData: A | null
     claims: NormalizedClaims
   }> {
     const authData = await this.config.authenticate(request)
@@ -416,7 +421,7 @@ class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
 
   async #resolvePullQueries(
     body: Record<string, unknown>,
-    authData: AuthData | null,
+    authData: A | null,
     queryAware: boolean,
     transformVersion: number
   ): Promise<Record<string, unknown>> {
@@ -601,15 +606,15 @@ class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
   }
 }
 
-export function createBrowserSyncHostInternal<S extends Schema>(
-  config: BrowserSyncHostConfig<S>,
+export function createBrowserSyncHostInternal<S extends Schema, A extends AuthData>(
+  config: BrowserSyncHostConfig<S, A>,
   hooks?: BrowserHostTestHooks
 ): Promise<BrowserSyncHost<S>> {
   return BrowserSyncHostImpl.create(config, hooks)
 }
 
-export function createBrowserSyncHost<S extends Schema>(
-  config: BrowserSyncHostConfig<S>
+export function createBrowserSyncHost<S extends Schema, A extends AuthData>(
+  config: BrowserSyncHostConfig<S, A>
 ): Promise<BrowserSyncHost<S>> {
   return createBrowserSyncHostInternal(config)
 }

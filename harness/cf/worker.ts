@@ -119,10 +119,14 @@ export class SyncServerDO {
       if (!userID) return json({ error: 'missing auth' }, 401)
 
       if (route === '/pull') {
-        return json(await sync.handlePull((await request.json()) as never, { userID }))
+        return json(
+          await sync.handlePull((await request.json()) as never, { id: userID })
+        )
       }
       if (route === '/push') {
-        return json(await sync.handlePush((await request.json()) as never, { userID }))
+        return json(
+          await sync.handlePush((await request.json()) as never, { id: userID })
+        )
       }
       return json({ error: 'not found' }, 404)
     } catch (error) {
