@@ -102,6 +102,9 @@ const MAX_PUSH_BATCH_MUTATIONS = 64
 // @rocicorp/zero 1.6 starts this deadline before its async createSocket work.
 // the connect URL's `ts` is captured at the same attempt boundary.
 const ZERO_CONNECT_TIMEOUT_MS = 10_000
+// ceiling on a server-supplied Retry-After. a daily quota can report a reset
+// hours out; honoring that verbatim would leave the client dark until then.
+const MAX_RETRY_AFTER_BACKOFF_MS = 60_000
 
 export type HttpPullTransport = {
   pull(): Promise<void>
@@ -982,14 +985,18 @@ class ZeroHttpSocket {
       body: JSON.stringify(body),
     })
     if (!response.ok) {
-      let bodyPreview: string | undefined
+      let body = ''
       try {
-        const body = await response.text()
-        bodyPreview = body.length > 512 ? `${body.slice(0, 512)}...` : body || undefined
+        body = await response.text()
       } catch {
         // the status still owns the failure when the response body is unreadable
       }
-      throw new ZeroHttpResponseError(path, response.status, bodyPreview)
+      throw new ZeroHttpResponseError(
+        path,
+        response.status,
+        body.length > 512 ? `${body.slice(0, 512)}...` : body || undefined,
+        retryAfterMsFromResponse(response, body)
+      )
     }
     return response.json()
   }
@@ -1049,8 +1056,36 @@ class ZeroHttpSocket {
       if (this.readyState !== this.CLOSED) this.close(1000, error.message)
       return
     }
+    // everything left is transient: a rate limit (429), a throttled or failing
+    // server (5xx), or a network error. stock Zero skips its run-loop sleep for
+    // a non-clean socket close — AbruptClose is one of the four close reasons
+    // throwIfConnectionError deliberately swallows — so closing 1011 here
+    // reconnects with NO delay, and each reconnect re-pushes the same pending
+    // mutations. measured: 605 pushes/s against a 429 and 374 pulls/s against a
+    // 500, which turns one transient failure into a self-sustaining storm that
+    // rate-limits the client permanently. ServerOverloaded is the protocol's
+    // only backoff-bearing frame (MutationRateLimited is swallowed with no
+    // delay at all), so a transient failure closes cleanly and carries the
+    // server's own Retry-After as the run loop's minimum sleep.
+    const retryAfterMs =
+      error instanceof ZeroHttpResponseError ? error.retryAfterMs : undefined
     this.emit('error', { error })
-    this.close(1011, errorMessage(error))
+    this.emitMessage([
+      'error',
+      {
+        kind: 'ServerOverloaded',
+        message: errorMessage(error),
+        // the backoff frame is the sync backend's to send, and Zero only
+        // treats it as a server error when the origin says so.
+        origin: 'zeroCache',
+        // a server may hand back a window measured in hours (a daily quota).
+        // sleeping that long strands the client, so cap what it will honor.
+        ...(retryAfterMs === undefined
+          ? {}
+          : { minBackoffMs: retryAfterMs, maxBackoffMs: MAX_RETRY_AFTER_BACKOFF_MS }),
+      },
+    ])
+    if (this.readyState !== this.CLOSED) this.close(1000, errorMessage(error))
   }
 
   private emitPoke(response: Exclude<PullResponse, { unchanged: true }>) {
@@ -1349,12 +1384,36 @@ class ZeroHttpResponseError extends Error {
   constructor(
     readonly path: '/pull' | '/push',
     readonly status: number,
-    bodyPreview: string | undefined
+    bodyPreview: string | undefined,
+    readonly retryAfterMs: number | undefined
   ) {
     super(
       `zero-http ${path} failed with ${status}${bodyPreview ? `: ${bodyPreview}` : ''}`
     )
   }
+}
+
+// a throttled server states its own wait, either as `retryAfterMs` in the JSON
+// error body or as the standard delta-seconds Retry-After header. an HTTP-date
+// Retry-After is ignored: the client clock cannot be trusted to compare with it.
+function retryAfterMsFromResponse(response: Response, body: string) {
+  const header = response.headers.get('retry-after')
+  const headerSeconds = header === null ? Number.NaN : Number(header)
+  const headerMs = Number.isFinite(headerSeconds)
+    ? Math.max(0, headerSeconds) * 1_000
+    : undefined
+  if (body) {
+    try {
+      const parsed: unknown = JSON.parse(body)
+      const value = (parsed as { retryAfterMs?: unknown } | null)?.retryAfterMs
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return Math.max(0, value)
+      }
+    } catch {
+      // an unparseable or truncated body leaves the header as the only hint
+    }
+  }
+  return headerMs
 }
 
 function isAuthHTTPError(error: unknown): error is ZeroHttpResponseError {

@@ -1042,9 +1042,11 @@ describe('zero-http transport', () => {
     await eventually(() => expect(zero.connection.state.current.name).toBe('connected'))
     failPull = true
     await transport.pull().catch(() => {})
+    // a 500 is transient, so the reconnect waits out Zero's run-loop backoff
+    // (5s) rather than retrying immediately — see the storm tests below.
     await eventually(
       () => expect(lifecycle.filter((event) => event.type === 'open')).toHaveLength(2),
-      5_000
+      8_000
     )
 
     failPush = true
@@ -1057,11 +1059,11 @@ describe('zero-http transport', () => {
     await mutation.server.catch(() => {})
     await eventually(
       () => expect(lifecycle.filter((event) => event.type === 'open')).toHaveLength(3),
-      5_000
+      8_000
     )
     await eventually(
       () => expect(zero.connection.state.current.name).toBe('connected'),
-      5_000
+      8_000
     )
 
     const opens = lifecycle.filter((event) => event.type === 'open')
@@ -1077,7 +1079,7 @@ describe('zero-http transport', () => {
         args.some((arg) => String(arg).includes('connect start time is undefined'))
       )
     ).toBe(false)
-  })
+  }, 30_000)
 
   test('a pull 500 cannot let a timed-out socket construction open on the abandoned attempt', async () => {
     vi.useFakeTimers()
@@ -1439,6 +1441,69 @@ describe('zero-http transport', () => {
     createZero({ onClientStateNotFound })
     await eventually(() => expect(onClientStateNotFound).toHaveBeenCalled(), 5_000)
   })
+
+  test('a rate-limited push waits out the server Retry-After instead of storming', async () => {
+    // without a backoff frame this loop measured 605 push attempts per second:
+    // a 429 closed the fake socket 1011, stock Zero swallows AbruptClose without
+    // sleeping, and every reconnect re-pushed the same pending mutation — which
+    // is what kept the client permanently rate limited.
+    const pushes: number[] = []
+    const pulls: number[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = recordRequest(input, init)
+      if (request.path === '/pull') {
+        pulls.push(Date.now())
+        return jsonResponse({ cookie: request.body.cookie, unchanged: true })
+      }
+      pushes.push(Date.now())
+      return jsonResponse(
+        {
+          kind: 'MutationRateLimited',
+          message: 'rate limit exceeded',
+          retryAfterMs: 8_000,
+          rule: 'zero.light.minute',
+        },
+        { status: 429, headers: { 'retry-after': '8' } }
+      )
+    })
+    install(fetch)
+    const zero = createZero()
+    void zero.mutate.project
+      .create({ id: 'p-429', ownerId: 'u1', name: 'rate limited' })
+      .server.catch(() => {})
+    await eventually(() => expect(pushes.length).toBeGreaterThan(0), 5_000)
+    await sleep(6_500)
+
+    // 8s Retry-After beats Zero's 5s floor, so the retry is still pending.
+    expect(pushes).toHaveLength(1)
+    expect(pulls).toHaveLength(0)
+    // and a rate limit is transient: the client must still be trying, not
+    // parked in the terminal error/needs-auth states.
+    expect(['connecting', 'disconnected', 'connected']).toContain(
+      zero.connection.state.current.name
+    )
+  }, 20_000)
+
+  test('a failing pull backs off instead of reconnecting flat out', async () => {
+    // same storm shape as the 429, measured at 374 pulls per second before the
+    // backoff frame. a deployment whose /pull 500s must not be DDoSed by its
+    // own clients.
+    const pulls: number[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      recordRequest(input, init)
+      pulls.push(Date.now())
+      return jsonResponse({ error: 'injected outage' }, { status: 500 })
+    })
+    install(fetch)
+    const zero = createZero()
+    await eventually(() => expect(pulls.length).toBeGreaterThan(0), 5_000)
+    await sleep(6_000)
+
+    expect(pulls.length).toBeLessThanOrEqual(2)
+    expect(['connecting', 'disconnected', 'connected']).toContain(
+      zero.connection.state.current.name
+    )
+  }, 20_000)
 })
 
 function install(fetch: typeof globalThis.fetch) {

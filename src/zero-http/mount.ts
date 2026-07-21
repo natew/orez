@@ -714,8 +714,21 @@ export function createZeroHttpMount(options: {
         ) {
           return Response.json({ error: error.message }, { status: error.status })
         }
-        console.error(`[zero-http] ${route.operation} error`, error)
-        return new Response('internal error', { status: 500 })
+        // an opaque "internal error" here is unrecoverable to debug: the client
+        // sees a bare 500 and the cause lives only in whichever process ran the
+        // mount. name the route and carry the message back so a failing sync is
+        // diagnosable from the caller's side.
+        console.error(
+          `[zero-http] ${route.operation} error (databaseID=${route.databaseID})`,
+          error
+        )
+        return Response.json(
+          {
+            error: error instanceof Error ? error.message : String(error),
+            operation: route.operation,
+          },
+          { status: 500 }
+        )
       }
     },
   }
