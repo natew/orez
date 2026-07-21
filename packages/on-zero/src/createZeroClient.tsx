@@ -29,9 +29,11 @@ import {
   type QueryControlMode,
   type UseQueryHook,
 } from './createUseQuery'
+import { clearZeroClientData } from './helpers/clearZeroClientData'
 import { createMutators } from './helpers/createMutators'
 import { createEmitter, type Emitter } from './helpers/emitter'
 import { getAuth } from './helpers/getAuth'
+import { readHostStorageScope } from './helpers/hostStorageScope'
 import { createMutationLifecycle } from './helpers/mutationLifecycle'
 import { IS_SERVER_RUNTIME } from './helpers/platform'
 import {
@@ -713,6 +715,34 @@ export function createZeroClientInternal<
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
+    // host-scoped storage: composed here so embedding hosts isolate co-located
+    // apps without app code carrying host globals. static per page load — the
+    // host injects the scope before the app's module graph evaluates.
+    const hostScope = readHostStorageScope()
+    const scopedProps = hostScope
+      ? { ...props, storageKey: `${hostScope}-${props.storageKey ?? 'zero'}` }
+      : props
+
+    // expose the client proxy for harnesses/tests — set from the mounted
+    // provider (not module scope) so hot-reloaded trees always point at the
+    // live client.
+    ;(globalThis as { __testZero?: unknown }).__testZero = zero
+
+    // `?reset` on any URL clears local zero state, then reloads without the
+    // param — a universal escape hatch for corrupt local data.
+    useEffect(() => {
+      if (typeof window === 'undefined' || typeof window.location === 'undefined') return
+      if (!new URLSearchParams(window.location.search).has('reset')) return
+      const url = new URL(window.location.href)
+      url.searchParams.delete('reset')
+      void clearZeroClientData({
+        closeZero: async () => zero.close(),
+        reload: false,
+      }).then(() => {
+        window.location.replace(url.toString())
+      })
+    }, [])
+
     // remint() reconstructs the client in place by bumping this counter, which
     // changes instanceKey and drives the rotate effect exactly as a real
     // identity change does. register the bump so the imperative remint() API can
@@ -731,7 +761,7 @@ export function createZeroClientInternal<
     // props (callbacks, logSink, batchViewUpdates) are bound at construction.
     // remintGeneration is included so remint() forces a fresh instance.
     const instanceKey = JSON.stringify([
-      Object.entries({ kvStore: 'mem', ...props })
+      Object.entries({ kvStore: 'mem', ...scopedProps })
         .filter(
           ([key, value]) =>
             key !== 'auth' && typeof value !== 'function' && value !== undefined
@@ -773,7 +803,7 @@ export function createZeroClientInternal<
         return
       }
       let cached = cachedZero
-      const options = props as Omit<
+      const options = scopedProps as Omit<
         ZeroOptions<Schema, ZeroMutators>,
         'schema' | 'mutators'
       >

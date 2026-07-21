@@ -224,6 +224,14 @@ function recover(
   if (!recoveryGuardOpen(reasonKey, deps.guardStorage)) {
     console.error(`[on-zero] ${message} — already recovered once, not reloading`)
     deps.zeroEvents.emit({ type: 'fatal', reasonKey, reason: message })
+    // hosts embedding this app (preview shells, test harnesses) observe the
+    // terminal state without sharing the module instance: a plain event on the
+    // realm's global scope.
+    try {
+      globalThis.dispatchEvent?.(
+        new CustomEvent('on-zero-fatal', { detail: { reasonKey, reason: message } })
+      )
+    } catch {}
     return
   }
   reloadScheduled = true
