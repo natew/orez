@@ -27,7 +27,19 @@ export * from './zql'
 export { defineQuery, defineQueries } from '@rocicorp/zero'
 
 export type DataInstanceOptions<Scope extends string = string> = {
-  scope: Scope
+  /**
+   * Scoping column. Required in a nested instance directory; omit it in the
+   * root `data/instance.ts`, which only configures the default instance.
+   */
+  scope?: Scope
+  /**
+   * Tables this instance writes that `on-zero generate` cannot reach by static
+   * analysis — writes arriving through server actions or seeding helpers, and
+   * writes to a table owned by another instance. Declared names are unioned
+   * into the generated `supportTables`, which keeps the sync change log
+   * mappable without syncing those rows to clients.
+   */
+  supportTables?: readonly string[]
 }
 
 export function defineInstance<const Scope extends string>(

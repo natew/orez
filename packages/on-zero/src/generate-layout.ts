@@ -18,6 +18,8 @@ export type DataInstance = {
   namespaces: DataNamespace[]
   syncTables: string[]
   supportTables: string[]
+  /** `supportTables` declared in this instance's `instance.ts`. */
+  declaredSupportTables: string[]
 }
 
 export type DataLayout = {
@@ -35,7 +37,10 @@ const isSourceFile = (name: string) =>
 const toImportPath = (baseDir: string, path: string) =>
   relative(baseDir, path).split(sep).join('/').replace(/\.ts$/, '')
 
-function readScope(ts: typeof import('typescript'), instancePath: string): string {
+function readInstanceOptions(
+  ts: typeof import('typescript'),
+  instancePath: string
+): { scope: string | null; supportTables: string[] } {
   const source = ts.createSourceFile(
     instancePath,
     readFileSync(instancePath, 'utf8'),
@@ -43,6 +48,7 @@ function readScope(ts: typeof import('typescript'), instancePath: string): strin
     true
   )
   let scope: string | null = null
+  const supportTables: string[] = []
 
   for (const statement of source.statements) {
     if (!ts.isExportAssignment(statement) || statement.isExportEquals) continue
@@ -56,22 +62,33 @@ function readScope(ts: typeof import('typescript'), instancePath: string): strin
     const options = call.arguments[0]
     if (!options || !ts.isObjectLiteralExpression(options)) continue
     for (const property of options.properties) {
-      if (
-        !ts.isPropertyAssignment(property) ||
-        property.name.getText(source) !== 'scope'
-      ) {
-        continue
+      if (!ts.isPropertyAssignment(property)) continue
+      const name = property.name.getText(source)
+      if (name === 'scope' && ts.isStringLiteral(property.initializer)) {
+        scope = property.initializer.text
       }
-      if (ts.isStringLiteral(property.initializer)) scope = property.initializer.text
+      if (name === 'supportTables' && ts.isArrayLiteralExpression(property.initializer)) {
+        for (const element of property.initializer.elements) {
+          if (ts.isStringLiteral(element)) supportTables.push(element.text)
+        }
+      }
     }
   }
 
-  if (!scope) {
+  return { scope, supportTables }
+}
+
+function readScopedInstanceOptions(
+  ts: typeof import('typescript'),
+  instancePath: string
+) {
+  const options = readInstanceOptions(ts, instancePath)
+  if (!options.scope) {
     throw new Error(
       `[on-zero] ${instancePath} must default export defineInstance({ scope: 'columnName' })`
     )
   }
-  return scope
+  return { ...options, scope: options.scope }
 }
 
 function collectInstanceDirs(baseDir: string): string[] {
@@ -563,6 +580,9 @@ export function discoverDataLayout(
 ): DataLayout {
   const instanceDirs = collectInstanceDirs(baseDir)
   const instanceDirSet = new Set(instanceDirs)
+  // the default instance owns baseDir itself, so its config (if any) is the
+  // root instance.ts — collectInstanceDirs only walks subdirectories.
+  const rootInstancePath = resolve(baseDir, 'instance.ts')
   const instances: DataInstance[] = [
     {
       name: 'default',
@@ -571,15 +591,22 @@ export function discoverDataLayout(
       namespaces: [],
       syncTables: [],
       supportTables: [],
+      declaredSupportTables: existsSync(rootInstancePath)
+        ? readInstanceOptions(ts, rootInstancePath).supportTables
+        : [],
     },
-    ...instanceDirs.map((dir) => ({
-      name: basename(dir),
-      dir,
-      scope: readScope(ts, resolve(dir, 'instance.ts')),
-      namespaces: [],
-      syncTables: [],
-      supportTables: [],
-    })),
+    ...instanceDirs.map((dir) => {
+      const options = readScopedInstanceOptions(ts, resolve(dir, 'instance.ts'))
+      return {
+        name: basename(dir),
+        dir,
+        scope: options.scope,
+        namespaces: [],
+        syncTables: [],
+        supportTables: [],
+        declaredSupportTables: options.supportTables,
+      }
+    }),
   ]
   const duplicateInstance = instances.find(
     (instance, index) =>
@@ -636,7 +663,11 @@ export function discoverDataLayout(
   }
 
   for (const instance of instances) {
-    const supportTables = new Set<string>()
+    // declared entries deliberately bypass the owner guard below: a table owned
+    // by another instance can still be written here (a control transaction that
+    // seeds project-owned rows), and that write has to stay mappable in THIS
+    // instance's change log or every later pull throws on it.
+    const supportTables = new Set<string>(instance.declaredSupportTables)
     for (const namespace of instance.namespaces) {
       for (const table of mutationSupportTables(ts, baseDir, namespace)) {
         if (owners.has(table) || relatedOwners.has(table)) continue
@@ -645,7 +676,9 @@ export function discoverDataLayout(
         }
       }
     }
-    instance.supportTables = [...supportTables].sort()
+    instance.supportTables = [...supportTables]
+      .filter((table) => !instance.syncTables.includes(table))
+      .sort()
   }
 
   return { instances, namespaces, metadataPaths: metadata }
