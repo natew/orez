@@ -176,7 +176,7 @@ export type ZeroServerBindings<
   resolveQuery(
     name: string,
     args: readonly JsonValue[],
-    claims: NormalizedClaims
+    authData: AuthData | null
   ): Promise<JsonValue>
   transformQueryRequest(options: {
     authData: AuthData | null
@@ -185,11 +185,11 @@ export type ZeroServerBindings<
   server(executor: ZeroServerExecutor<Schema>): {
     mutate: ServerMutate<Models>
     transaction<Value>(
-      claims: NormalizedClaims,
+      authData: AuthData | null,
       work: (tx: Transaction) => Value | Promise<Value>
     ): Promise<Value>
     query<Result>(
-      claims: NormalizedClaims,
+      authData: AuthData | null,
       work: (q: QueryBuilder) => Query<any, Schema, Result>
     ): Promise<HumanReadable<Result>>
   }
@@ -280,11 +280,10 @@ export function createZeroServerBindings<
     // freezing the registry makes the server seam immutable without importing
     // any particular executor implementation.
     mutators: Object.freeze({ ...registry }),
-    async resolveQuery(name, args, claims) {
+    async resolveQuery(name, args, authData) {
       if (!options.queries) {
         throw new Error('No queries registered with createZeroServerBindings.')
       }
-      const authData = mapClaims(claims)
       const query = await runWithQueryContext({ authData }, () =>
         resolveServerQuery({
           authData,
@@ -325,13 +324,14 @@ export function createZeroServerBindings<
     },
     server(executor) {
       const transaction = <Value>(
-        claims: NormalizedClaims,
+        authData: AuthData | null,
         work: (tx: Transaction) => Value | Promise<Value>
-      ) => executor.transaction(claims, (tx) => work(tx as unknown as Transaction))
+      ) =>
+        executor.transaction(authToClaims(authData), (tx) =>
+          work(tx as unknown as Transaction)
+        )
 
-      setRunner((query) =>
-        transaction({ userID: 'server' }, (tx) => tx.run(query as never))
-      )
+      setRunner((query) => transaction(null, (tx) => tx.run(query as never)))
 
       const mutate = new Proxy({} as ServerMutate<Models>, {
         get(_target, modelName: string) {
@@ -364,11 +364,13 @@ export function createZeroServerBindings<
         mutate,
         transaction,
         query<Result>(
-          claims: NormalizedClaims,
+          authData: AuthData | null,
           work: (q: QueryBuilder) => Query<any, Schema, Result>
         ) {
-          return runWithQueryContext({ authData: mapClaims(claims) }, () =>
-            executor.query(claims, (tx) => tx.run(work(getZQL()) as never))
+          return runWithQueryContext({ authData }, () =>
+            executor.query(authToClaims(authData), (tx) =>
+              tx.run(work(getZQL()) as never)
+            )
           ) as Promise<HumanReadable<Result>>
         },
       }
@@ -421,7 +423,7 @@ function resolveServerQuery({
 // authData and walk straight through `ensure(authData)` guards.
 const AUTH_CLAIM = 'authData'
 
-export function authDataToClaims(
+function authDataToClaims(
   authData: AuthData | null | undefined,
   anonymousUserID = 'anon'
 ): NormalizedClaims {

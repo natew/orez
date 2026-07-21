@@ -8,7 +8,9 @@ import type { Schema } from '@rocicorp/zero'
 import type {
   ApplicationDatabase,
   ApplicationTransaction,
+  AuthData,
   EffectScheduler,
+  JsonValue,
   MutatorRegistry,
   NormalizedClaims,
   PushDiagnosticsOptions,
@@ -30,6 +32,12 @@ export class ZeroHttpRequestError extends Error {
     super(message)
     this.name = 'ZeroHttpRequestError'
   }
+}
+
+function authDataToClaims(authData: AuthData | null): NormalizedClaims {
+  const claims: Record<string, JsonValue> = { userID: authData?.id ?? 'anon' }
+  if (authData) claims.authData = authData as unknown as JsonValue
+  return claims as NormalizedClaims
 }
 
 export type ZeroHttpVisibility = (
@@ -524,8 +532,9 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
         )
       })
     },
-    async handlePull(value: unknown, claims: NormalizedClaims): Promise<unknown> {
+    async handlePull(value: unknown, authData: AuthData | null): Promise<unknown> {
       await ready
+      const claims = authDataToClaims(authData)
       const body = validatePull(value)
       return applicationDatabase.transaction(async (tx) => {
         await claimClient(tx, body.clientGroupID, body.clientID, claims.userID)
@@ -567,9 +576,9 @@ export function createZeroHttpSyncServer<S extends Schema>(options: {
         }
       })
     },
-    async handlePush(value: unknown, claims: NormalizedClaims): Promise<PushResult> {
+    async handlePush(value: unknown, authData: AuthData | null): Promise<PushResult> {
       await ready
-      const result = await executor.push(value, claims)
+      const result = await executor.push(value, authDataToClaims(authData))
       if (
         'mutations' in result.pushResponse &&
         result.pushResponse.mutations.length > 0
@@ -587,8 +596,8 @@ export type ZeroHttpSyncServer<S extends Schema = Schema> = ReturnType<
 export type ZeroHttpOperation = 'pull' | 'push'
 export type ZeroHttpRoute = { databaseID: string; operation: ZeroHttpOperation }
 export type ZeroHttpRequestServer = {
-  handlePull(body: unknown, claims: NormalizedClaims): Promise<unknown>
-  handlePush(body: unknown, claims: NormalizedClaims): Promise<PushResult>
+  handlePull(body: unknown, authData: AuthData | null): Promise<unknown>
+  handlePush(body: unknown, authData: AuthData | null): Promise<PushResult>
 }
 
 const DATABASE_ROUTE = /^([A-Za-z0-9_-]{1,64})\/(pull|push)$/
@@ -600,7 +609,7 @@ export function createZeroHttpMount(options: {
   authenticate(
     request: Request,
     route: ZeroHttpRoute
-  ): NormalizedClaims | Response | Promise<NormalizedClaims | Response>
+  ): AuthData | null | Response | Promise<AuthData | null | Response>
   beforePush?(
     request: Request,
     bodyText: string
@@ -634,11 +643,11 @@ export function createZeroHttpMount(options: {
     }
   }
 
-  const handle = (route: ZeroHttpRoute, body: unknown, claims: NormalizedClaims) => {
+  const handle = (route: ZeroHttpRoute, body: unknown, authData: AuthData | null) => {
     const server = options.server(route.databaseID)
     return route.operation === 'pull'
-      ? server.handlePull(body, claims)
-      : server.handlePush(body, claims)
+      ? server.handlePull(body, authData)
+      : server.handlePush(body, authData)
   }
 
   return {

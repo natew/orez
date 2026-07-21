@@ -126,8 +126,10 @@ describe('sync executor', () => {
   test('the push endpoint returns zero mutate response shape, not an internal wrapper', async () => {
     const { database, sqlite } = sqliteDatabase()
     sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    let receivedClaims: unknown
     const mutators = {
-      create: async ({ tx }) => {
+      create: async ({ ctx, tx }) => {
+        receivedClaims = ctx.claims
         await tx.mutate.item.insert({ id: 'a', value: 'v' })
       },
     } satisfies MutatorRegistry<typeof schema>
@@ -139,13 +141,17 @@ describe('sync executor', () => {
         method: 'POST',
         body: JSON.stringify(push('create')),
       }),
-      claims: { userID: 'user-1' },
+      authData: { id: 'user-1', role: 'admin' },
     })
 
     // zero parses this with mutateResponseSchema, which accepts
     // {mutations:[...]} or {kind:'MutateResponse',...} and nothing else
     expect(await response.json()).toEqual({
       mutations: [{ id: { clientID: 'client-1', id: 1 }, result: {} }],
+    })
+    expect(receivedClaims).toEqual({
+      userID: 'user-1',
+      authData: { id: 'user-1', role: 'admin' },
     })
   })
 
@@ -162,7 +168,7 @@ describe('sync executor', () => {
         method: 'POST',
         body: JSON.stringify(body),
       }),
-      claims: { userID: 'user-1' },
+      authData: { id: 'user-1' },
       diagnostics: { argAllowlist: ['id'], callback },
     })
 

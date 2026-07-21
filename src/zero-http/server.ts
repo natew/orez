@@ -213,11 +213,11 @@ export async function startZeroHttpServer(opts?: { seed?: Seed }): Promise<{
       const path = new URL(req.url || '/', 'http://127.0.0.1').pathname
       const body = await readJSON(req)
       if (path === '/push') {
-        sendJSON(res, 200, await sync.handlePush(body, { userID }))
+        sendJSON(res, 200, await sync.handlePush(body, { id: userID }))
         return
       }
       if (path === '/pull') {
-        sendJSON(res, 200, await sync.handlePull(body, { userID }))
+        sendJSON(res, 200, await sync.handlePull(body, { id: userID }))
         return
       }
       sendJSON(res, 404, { error: 'not found' })

@@ -16,6 +16,11 @@ export type NormalizedClaims = {
   readonly [claim: string]: JsonValue
 }
 
+export type AuthData = {
+  readonly id: string
+  readonly [field: string]: unknown
+}
+
 export type ZeroSchemaConfig = {
   readonly schemaID?: string
   readonly tables: Readonly<

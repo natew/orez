@@ -1,8 +1,4 @@
-import {
-  createZeroServerBindings,
-  type NormalizedClaims,
-  type ZeroServerExecutor,
-} from 'on-zero/server'
+import { createZeroServerBindings, type ZeroServerExecutor } from 'on-zero/server'
 
 import type { Schema as ZeroSchema } from '@rocicorp/zero'
 import type { Config, MutatorContext } from 'on-zero'
@@ -48,16 +44,13 @@ const authData: Config['authData'] = {
   id: 'admin',
   role: 'admin',
 }
-const claims: NormalizedClaims = {
-  email: authData.email,
-  role: authData.role ?? null,
-  userID: authData.id,
-}
-
-void bindings.resolveQuery('project|byID', [{ id: 'project' }], claims)
+void bindings.resolveQuery('project|byID', [{ id: 'project' }], authData)
 void server.mutate.project.create({ id: 'project' }, { authData })
-void server.transaction(claims, async (tx) => tx.location)
-void server.query(claims, () => null as never)
+void server.transaction(authData, async (tx) => tx.location)
+void server.query(authData, () => null as never)
+
+// @ts-expect-error server APIs accept application auth, not sync claims
+void server.query({ userID: authData.id }, () => null as never)
 
 declare const mutationContext: MutatorContext
 mutationContext.server?.enqueueAction({

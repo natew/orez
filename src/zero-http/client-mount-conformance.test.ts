@@ -87,14 +87,14 @@ test('stock Zero converges through the Orez client and mount halves', async () =
   const mount = createZeroHttpMount({
     pathPrefix: '/sync/',
     server: () => server,
-    authenticate: () => ({ userID: 'u1' }),
+    authenticate: () => ({ id: 'u1' }),
   })
   const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const route = mount.match(new URL(String(input)).pathname)
     if (!route) return new Response('not found', { status: 404 })
     try {
       const response = await mount.handle(route, JSON.parse(String(init?.body)), {
-        userID: 'u1',
+        id: 'u1',
       })
       return Response.json(response)
     } catch (error) {

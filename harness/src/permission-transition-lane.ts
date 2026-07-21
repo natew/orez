@@ -221,7 +221,7 @@ const echoes: PullEcho[] = []
 
 const mount = createZeroHttpMount({
   pathPrefix: '/',
-  authenticate: () => ({ userID: 'harness' }),
+  authenticate: () => ({ id: 'harness' }),
   server(databaseID) {
     const ns = namespaces.get(databaseID)
     if (!ns) throw new Error(`unknown namespace ${databaseID}`)

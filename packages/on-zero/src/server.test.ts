@@ -4,7 +4,6 @@ import { describe, expect, test, vi } from 'vitest'
 
 import { getScopedAuthData } from './helpers/mutatorContext'
 import {
-  authDataToClaims,
   createZeroServerBindings,
   type ZeroServerExecutor,
   type ZeroServerMutatorRegistry,
@@ -43,6 +42,7 @@ function createTestExecutor(
   rows: ProjectRow[]
 ) {
   const scheduledBackground: Promise<void>[] = []
+  const queryClaims: unknown[] = []
   const tx = {
     mutate: {
       project: {
@@ -78,12 +78,13 @@ function createTestExecutor(
     async transaction(_claims, work) {
       return work(tx)
     },
-    async query(_claims, work) {
+    async query(claims, work) {
+      queryClaims.push(claims)
       return work(tx)
     },
   }
 
-  return { executor, scheduledBackground }
+  return { executor, queryClaims, scheduledBackground }
 }
 
 describe('createZeroServerBindings', () => {
@@ -166,7 +167,10 @@ describe('createZeroServerBindings', () => {
     })
 
     expect(Object.keys(bindings.mutators)).toEqual(['project|create'])
-    const { executor, scheduledBackground } = createTestExecutor(bindings.mutators, rows)
+    const { executor, queryClaims, scheduledBackground } = createTestExecutor(
+      bindings.mutators,
+      rows
+    )
     const server = bindings.server(executor)
     await server.mutate.project.create(
       { id: 'project-1', ownerId: 'user-1', name: 'first' },
@@ -181,15 +185,15 @@ describe('createZeroServerBindings', () => {
     expect(backgroundRuns).toBe(1)
     expect(backgroundAuth).toBe('user-1')
 
-    const claims = authDataToClaims({ id: 'user-1' })
-    const ast = await bindings.resolveQuery(
-      'project|byOwner',
-      [{ ownerId: 'user-1' }],
-      claims
-    )
+    const ast = await bindings.resolveQuery('project|byOwner', [{ ownerId: 'user-1' }], {
+      id: 'user-1',
+    })
     expect(JSON.stringify(ast)).toContain('ownerId')
     expect(JSON.stringify(ast)).toContain('user-1')
     expect(validatedQueryAuth).toBe('user-1')
+
+    await server.query({ id: 'user-1' }, () => zql.project)
+    expect(queryClaims).toEqual([{ userID: 'user-1', authData: { id: 'user-1' } }])
   })
 
   test('enqueues typed actions through the configured local executor', async () => {
@@ -234,7 +238,7 @@ describe('createZeroServerBindings', () => {
     await executor.execute(
       'project|create',
       { id: 'project-1', ownerId: 'user-1', name: 'first' },
-      authDataToClaims({ id: 'user-1' })
+      { userID: 'user-1', authData: { id: 'user-1' } }
     )
     expect(executed).toEqual([
       { type: 'project.provisionNamespace', projectId: 'project-1' },
@@ -280,7 +284,7 @@ describe('createZeroServerBindings', () => {
       executor.execute(
         'project|create',
         { id: 'project-1', ownerId: 'user-1', name: 'first' },
-        authDataToClaims({ id: 'user-1' })
+        { userID: 'user-1', authData: { id: 'user-1' } }
       )
     ).rejects.toThrow('remote unavailable')
     expect(dispatchRemote).toHaveBeenCalledOnce()

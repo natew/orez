@@ -11,6 +11,7 @@ import { createServerTransaction } from './transaction.js'
 import type {
   ApplicationDatabase,
   ApplicationTransaction,
+  AuthData,
   CreateSyncExecutorOptions,
   JsonValue,
   MutatorRegistry,
@@ -491,13 +492,22 @@ export function createSyncExecutor<S extends Schema>(
 export async function handleSyncExecutorPushRequest<S extends Schema>(options: {
   readonly executor: SyncExecutor<S>
   readonly request: Request
-  readonly claims: NormalizedClaims
+  readonly authData: AuthData | null
   readonly diagnostics?: PushDiagnosticsOptions
 }): Promise<Response> {
   let bodyText = ''
   try {
     bodyText = await options.request.text()
-    const result = await options.executor.push(JSON.parse(bodyText), options.claims)
+    const claims: Record<string, JsonValue> = {
+      userID: options.authData?.id ?? 'anon',
+    }
+    if (options.authData) {
+      claims.authData = options.authData as unknown as JsonValue
+    }
+    const result = await options.executor.push(
+      JSON.parse(bodyText),
+      claims as NormalizedClaims
+    )
     await reportPushDiagnostics(options.diagnostics, {
       request: options.request,
       bodyText,

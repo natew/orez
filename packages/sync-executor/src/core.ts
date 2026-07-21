@@ -18,6 +18,7 @@ export type {
 export type {
   ApplicationDatabase,
   ApplicationTransaction,
+  AuthData,
   CreateSyncExecutorOptions,
   DeferredEffect,
   DeferredEffectOptions,

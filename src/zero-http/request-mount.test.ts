@@ -7,7 +7,7 @@ describe('zero-http request mount', () => {
   test('matches glued database prefixes', () => {
     const mount = createZeroHttpMount({
       pathPrefix: '/p-',
-      authenticate: () => ({ userID: 'user-1' }),
+      authenticate: () => ({ id: 'user-1' }),
       server: () => ({
         handlePull: vi.fn(),
         handlePush: vi.fn(),
@@ -34,7 +34,7 @@ describe('zero-http request mount', () => {
         order.push(`authenticate:${route.databaseID}`)
         order.push('access')
         order.push('provision')
-        return { userID: 'user-1' }
+        return { id: 'user-1' }
       },
       async beforePush(_request, bodyText) {
         order.push(`beforePush:${JSON.parse(bodyText).pushVersion}`)
@@ -64,7 +64,7 @@ describe('zero-http request mount', () => {
       'beforePush:1',
       'server:project-1',
     ])
-    expect(handlePush).toHaveBeenCalledWith({ pushVersion: 1 }, { userID: 'user-1' })
+    expect(handlePush).toHaveBeenCalledWith({ pushVersion: 1 }, { id: 'user-1' })
   })
 
   test('supports fixed mounts and short-circuits denied authentication', async () => {
@@ -103,7 +103,7 @@ describe('zero-http request mount', () => {
       .mockResolvedValueOnce({ cookie: 1, rowsPatch: [] })
     const mount = createZeroHttpMount({
       pathPrefix: '/sync/',
-      authenticate: () => ({ userID: 'user-1' }),
+      authenticate: () => ({ id: 'user-1' }),
       server: () => ({ handlePull, handlePush: vi.fn() }),
     })
     const request = () =>
@@ -137,7 +137,7 @@ describe('zero-http request mount', () => {
     const callback = vi.fn()
     const mount = createZeroHttpMount({
       pathPrefix: '/sync/',
-      authenticate: () => ({ userID: 'user-1' }),
+      authenticate: () => ({ id: 'user-1' }),
       diagnostics: { argAllowlist: ['threadId'], callback },
       server: () => ({
         handlePull: vi.fn(),

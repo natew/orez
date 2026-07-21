@@ -206,7 +206,9 @@ database-id path segment. Its config is `pathPrefix` (must start with `/`, for
 example `/p-` to produce `/p-<projectID>/pull`) and `server(databaseID)`, which
 resolves the `ZeroHttpSyncServer` for a database only after the caller has
 authorized `route.databaseID`. It returns `{match(pathname), handle(route, body,
-claims)}`. `match` does routing only; `handle` delegates without translating
+authData)}`. `authenticate` and `handle` take application auth data directly;
+the mount constructs the sync claims internally. `match` does routing only;
+`handle` delegates without translating
 bodies, responses, or errors.
 
 ## Native replica-file retention
