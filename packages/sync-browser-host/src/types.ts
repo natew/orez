@@ -1,10 +1,10 @@
 import type { Schema } from '@rocicorp/zero'
 import type { TransactionQueryBudget } from 'orez-sync-cf-host/transaction-query'
 import type {
+  AuthData,
   ExecResult,
+  JsonValue,
   MutatorRegistry,
-  NormalizedClaims,
-  QueryResolver,
   SqlStatementMetadata,
   SyncExecutor,
   VisibilityConfig,
@@ -46,19 +46,21 @@ export type BrowserSyncHostConfig<S extends Schema = Schema> = {
   assets?: BrowserSyncHostAssets
   schema: S
   initialize(sql: SyncSql): void
-  authenticate(
-    request: Request
-  ): NormalizedClaims | null | Promise<NormalizedClaims | null>
+  authenticate(request: Request): AuthData | null | Promise<AuthData | null>
   authorize(
     request: Request,
-    claims: NormalizedClaims,
+    authData: AuthData | null,
     namespace: string
   ): boolean | Promise<boolean>
   mutators: MutatorRegistry<S>
   visibility?: VisibilityConfig
-  queryAware?: boolean | ((claims: NormalizedClaims) => boolean)
-  resolveQuery?: QueryResolver
-  queryTransformVersion?: number | ((claims: NormalizedClaims) => number)
+  queryAware?: boolean | ((authData: AuthData | null) => boolean)
+  resolveQuery?: (
+    name: string,
+    args: readonly JsonValue[],
+    authData: AuthData | null
+  ) => JsonValue | Promise<JsonValue>
+  queryTransformVersion?: number | ((authData: AuthData | null) => number)
   retainChanges?: number
   caps?: Partial<PullCaps>
   transactionQueryBudget?: Partial<TransactionQueryBudget>

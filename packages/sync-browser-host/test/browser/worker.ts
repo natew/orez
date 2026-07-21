@@ -279,7 +279,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
       authenticate(request) {
         return request.headers.get('authorization') === 'Bearer preview-token'
           ? {
-              userID: 'preview-user',
+              id: 'preview-user',
               queryAware: request.headers.get('x-query-aware') === '1',
             }
           : null
@@ -288,7 +288,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
         return true
       },
       mutators,
-      queryAware: (claims) => claims.queryAware === true,
+      queryAware: (authData) => authData?.queryAware === true,
       resolveQuery(name) {
         if (name !== 'todosDone') throw new Error(`unknown query: ${name}`)
         return {

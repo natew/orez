@@ -23,6 +23,7 @@ import type { Schema } from '@rocicorp/zero'
 import type {
   ApplicationDatabase,
   ApplicationTransaction,
+  AuthData,
   ExecResult,
   JsonValue,
   NormalizedClaims,
@@ -341,15 +342,20 @@ class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
     return value
   }
 
-  async #claims(request: Request): Promise<NormalizedClaims> {
-    const claims = await this.config.authenticate(request)
-    if (!claims || typeof claims.userID !== 'string' || claims.userID.length === 0) {
+  async #auth(request: Request): Promise<{
+    authData: AuthData | null
+    claims: NormalizedClaims
+  }> {
+    const authData = await this.config.authenticate(request)
+    if (!authData || typeof authData.id !== 'string' || authData.id.length === 0) {
       throw requestError('missing authentication', 401)
     }
-    if (!(await this.config.authorize(request, claims, this.config.storageKey))) {
+    if (!(await this.config.authorize(request, authData, this.config.storageKey))) {
       throw requestError('forbidden', 403)
     }
-    return claims
+    const claims: Record<string, JsonValue> = { userID: authData?.id ?? 'anon' }
+    if (authData) claims.authData = authData as unknown as JsonValue
+    return { authData, claims: claims as NormalizedClaims }
   }
 
   async #runExecutorPush(
@@ -410,7 +416,7 @@ class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
 
   async #resolvePullQueries(
     body: Record<string, unknown>,
-    claims: NormalizedClaims,
+    authData: AuthData | null,
     queryAware: boolean,
     transformVersion: number
   ): Promise<Record<string, unknown>> {
@@ -440,7 +446,7 @@ class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
         ast = await this.config.resolveQuery(
           entry.name,
           entry.args as JsonValue[],
-          claims
+          authData
         )
       } catch {
         throw requestError(`unknown or unsupported named query: ${entry.name}`)
@@ -453,17 +459,17 @@ class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
   async handlePull(request: Request): Promise<Response> {
     try {
       this.#assertAccepting()
-      const claims = await this.#claims(request)
+      const { authData, claims } = await this.#auth(request)
       const input = await requestObject(request)
       return await this.#queue.run(async () => {
         this.#assertAvailable()
         const queryAware =
           typeof this.config.queryAware === 'function'
-            ? this.config.queryAware(claims)
+            ? this.config.queryAware(authData)
             : (this.config.queryAware ?? Boolean(this.config.resolveQuery))
         const transformVersion = queryAware
           ? typeof this.config.queryTransformVersion === 'function'
-            ? this.config.queryTransformVersion(claims)
+            ? this.config.queryTransformVersion(authData)
             : (this.config.queryTransformVersion ?? 0)
           : 0
         if (!Number.isSafeInteger(transformVersion) || transformVersion < 0) {
@@ -471,7 +477,7 @@ class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
         }
         let body = await this.#resolvePullQueries(
           input,
-          claims,
+          authData,
           queryAware,
           transformVersion
         )
@@ -507,7 +513,7 @@ class BrowserSyncHostImpl<S extends Schema> implements BrowserSyncHost<S> {
   async handlePush(request: Request): Promise<Response> {
     try {
       this.#assertAccepting()
-      const claims = await this.#claims(request)
+      const { claims } = await this.#auth(request)
       const body = await requestObject(request)
       return await this.#queue.run(async () => {
         this.#assertAvailable()

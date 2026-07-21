@@ -22,7 +22,7 @@ const host = await createBrowserSyncHost({
     sql.exec('CREATE TABLE todo (id TEXT PRIMARY KEY, title TEXT NOT NULL)')
   },
   authenticate(request) {
-    return request.headers.has('authorization') ? { userID: 'preview' } : null
+    return request.headers.has('authorization') ? { id: 'preview' } : null
   },
   mutators,
 })
