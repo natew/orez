@@ -8,7 +8,7 @@ import {
 import { serveBrowserSyncHostPortInternal } from '../../src/message-port.js'
 
 import type { BrowserSyncHost, BrowserSyncHostConfig } from '../../src/types.js'
-import type { MutatorRegistry } from 'orez-sync-executor'
+import type { JsonValue, MutatorRegistry } from 'orez-sync-executor'
 
 const schema = {
   tables: {
@@ -27,6 +27,38 @@ const schema = {
         id: { type: 'string' },
         todoId: { type: 'string' },
         label: { type: 'string' },
+      },
+      primaryKey: ['id'],
+    },
+    budget: {
+      name: 'budget',
+      columns: {
+        id: { type: 'string' },
+        category: { type: 'string' },
+        monthlyLimit: { type: 'number' },
+        month: { type: 'string' },
+      },
+      primaryKey: ['id'],
+    },
+    expense: {
+      name: 'expense',
+      columns: {
+        id: { type: 'string' },
+        amount: { type: 'number' },
+        category: { type: 'string' },
+        date: { type: 'number' },
+        description: { type: 'string', optional: true },
+      },
+      primaryKey: ['id'],
+    },
+    savingsGoal: {
+      name: 'savingsGoal',
+      columns: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+        targetAmount: { type: 'number' },
+        currentAmount: { type: 'number' },
+        targetDate: { type: 'number', optional: true },
       },
       primaryKey: ['id'],
     },
@@ -161,11 +193,95 @@ type WorkerMessage =
   | { type: 'connect'; id: string; port: MessagePort }
   | { type: 'application-transaction'; id: string }
   | { type: 'application-transaction-rollback'; id: string }
+  | { type: 'seed-wave-finance'; id: string }
 
 let host: BrowserSyncHost<typeof schema> | undefined
 
 self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
   const message = event.data
+  if (message.type === 'seed-wave-finance') {
+    if (!host) {
+      self.postMessage({
+        type: 'seed-wave-finance-error',
+        id: message.id,
+        message: 'host is not ready',
+      })
+      return
+    }
+    void host.executor
+      .transaction({ userID: 'server' }, async (tx) => {
+        const sql = tx.dbTransaction.wrappedTransaction
+        const tables = [
+          {
+            name: 'budget',
+            columns: ['id', 'category', 'monthlyLimit', 'month'],
+            rows: [
+              ['seed-budget-housing', 'Housing', 180_000, '2026-07'],
+              ['seed-budget-food', 'Food', 60_000, '2026-07'],
+              ['seed-budget-transport', 'Transportation', 30_000, '2026-07'],
+              ['seed-budget-utilities', 'Utilities', 25_000, '2026-07'],
+              ['seed-budget-entertainment', 'Entertainment', 20_000, '2026-07'],
+              ['seed-budget-healthcare', 'Healthcare', 15_000, '2026-07'],
+              ['seed-budget-shopping', 'Shopping', 40_000, '2026-07'],
+            ],
+          },
+          {
+            name: 'expense',
+            columns: ['id', 'amount', 'category', 'date', 'description'],
+            rows: [
+              ['seed-expense-0', 180_000, 'Housing', 1_751_328_000_000, 'Monthly rent'],
+              ['seed-expense-1', 14_250, 'Food', 1_751_500_800_000, 'Weekly groceries'],
+              ['seed-expense-2', 4_500, 'Transportation', 1_751_673_600_000, 'Gas'],
+              ['seed-expense-3', 9_500, 'Utilities', 1_751_846_400_000, 'Electric bill'],
+              ['seed-expense-4', 6_700, 'Food', 1_752_105_600_000, 'Dinner out'],
+              [
+                'seed-expense-5',
+                1_599,
+                'Entertainment',
+                1_752_278_400_000,
+                'Streaming subscription',
+              ],
+              ['seed-expense-6', 2_450, 'Healthcare', 1_752_537_600_000, 'Pharmacy'],
+              ['seed-expense-7', 12_900, 'Shopping', 1_752_796_800_000, 'New sneakers'],
+              [
+                'seed-expense-8',
+                3_200,
+                'Transportation',
+                1_753_142_400_000,
+                'Ride share',
+              ],
+            ],
+          },
+          {
+            name: 'savingsGoal',
+            columns: ['id', 'name', 'targetAmount', 'currentAmount', 'targetDate'],
+            rows: [
+              ['seed-goal-emergency', 'Emergency Fund', 1_000_000, 320_000, null],
+              ['seed-goal-vacation', 'Vacation Fund', 500_000, 185_000, null],
+            ],
+          },
+        ] as const
+        for (const table of tables) {
+          for (const row of table.rows) {
+            await sql.exec(
+              `INSERT INTO "${table.name}" (${table.columns.map((column) => `"${column}"`).join(', ')}) VALUES (${table.columns.map(() => '?').join(', ')}) ON CONFLICT DO NOTHING`,
+              row
+            )
+          }
+        }
+      })
+      .then(() => {
+        self.postMessage({ type: 'seed-wave-finance-complete', id: message.id })
+      })
+      .catch((error) => {
+        self.postMessage({
+          type: 'seed-wave-finance-error',
+          id: message.id,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      })
+    return
+  }
   if (message.type === 'application-transaction-rollback') {
     if (!host) {
       self.postMessage({
@@ -275,6 +391,15 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
         sql.exec(
           'CREATE TABLE IF NOT EXISTS todoTag (id TEXT PRIMARY KEY, todoId TEXT NOT NULL, label TEXT NOT NULL)'
         )
+        sql.exec(
+          'CREATE TABLE IF NOT EXISTS budget (id TEXT PRIMARY KEY, category TEXT NOT NULL, monthlyLimit INTEGER NOT NULL, month TEXT NOT NULL)'
+        )
+        sql.exec(
+          'CREATE TABLE IF NOT EXISTS expense (id TEXT PRIMARY KEY, amount INTEGER NOT NULL, category TEXT NOT NULL, date INTEGER NOT NULL, description TEXT)'
+        )
+        sql.exec(
+          'CREATE TABLE IF NOT EXISTS savingsGoal (id TEXT PRIMARY KEY, name TEXT NOT NULL, targetAmount INTEGER NOT NULL, currentAmount INTEGER NOT NULL DEFAULT 0, targetDate INTEGER)'
+        )
       },
       authenticate(request) {
         return request.headers.get('authorization') === 'Bearer preview-token'
@@ -289,18 +414,25 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
       },
       mutators,
       queryAware: (authData) => authData?.queryAware === true,
-      resolveQuery(name) {
-        if (name !== 'todosDone') throw new Error(`unknown query: ${name}`)
-        return {
-          table: 'todo',
-          where: {
-            type: 'simple',
-            left: { type: 'column', name: 'done' },
-            right: { type: 'literal', value: true },
-            op: '=',
-          },
-          orderBy: [['id', 'asc']],
+      resolveQuery(name): JsonValue {
+        if (name === 'todosDone') {
+          return {
+            table: 'todo',
+            where: {
+              type: 'simple',
+              left: { type: 'column', name: 'done' },
+              right: { type: 'literal', value: true },
+              op: '=',
+            },
+            orderBy: [['id', 'asc']],
+          }
         }
+        if (name === 'allExpenses') {
+          return { table: 'expense', orderBy: [['date', 'desc']] }
+        }
+        if (name === 'allBudgets') return { table: 'budget' }
+        if (name === 'allSavingsGoals') return { table: 'savingsGoal' }
+        throw new Error(`unknown query: ${name}`)
       },
     } satisfies BrowserSyncHostConfig<typeof schema, { id: string; queryAware: boolean }>
     const createdHost = faultPoint

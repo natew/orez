@@ -18,6 +18,8 @@ type WorkerControlMessage =
   | { type: 'application-transaction-rollback-effect'; id: string }
   | { type: 'application-transaction-rollback-complete'; id: string; message: string }
   | { type: 'application-transaction-rollback-error'; id: string; message: string }
+  | { type: 'seed-wave-finance-complete'; id: string }
+  | { type: 'seed-wave-finance-error'; id: string; message: string }
 
 type Connection = {
   worker: Worker
@@ -26,6 +28,7 @@ type Connection = {
   waitForFault(point: BrowserHostTestFaultPoint): Promise<void>
   waitForEffect(id: string): Promise<void>
   runApplicationTransaction(): Promise<{ rows: unknown[]; effectBeforeResolve: boolean }>
+  seedWaveFinance(): Promise<void>
   runRolledBackApplicationTransaction(): Promise<{
     message: string
     effectRan: boolean
@@ -144,6 +147,23 @@ async function openConnection(
           (message) =>
             message.type === 'application-transaction-effect' && message.id === id
         ),
+      }
+    },
+    async seedWaveFinance() {
+      const id = crypto.randomUUID()
+      worker.postMessage({ type: 'seed-wave-finance', id })
+      const complete = await waitFor(
+        (message) =>
+          (message.type === 'seed-wave-finance-complete' ||
+            message.type === 'seed-wave-finance-error') &&
+          message.id === id
+      )
+      if (complete.type !== 'seed-wave-finance-complete') {
+        throw new Error(
+          complete.type === 'seed-wave-finance-error'
+            ? complete.message
+            : 'unexpected wave finance seed response'
+        )
       }
     },
     async runRolledBackApplicationTransaction() {
@@ -417,6 +437,98 @@ async function runBrowserHostSpike() {
   wakes = 0
   secondWakes = 0
 
+  await connection.seedWaveFinance()
+  const seedSqlCounts = await connection.client.query<{
+    tableName: string
+    count: number
+  }>(
+    `SELECT 'budget' AS tableName, COUNT(*) AS count FROM budget
+     UNION ALL SELECT 'expense', COUNT(*) FROM expense
+     UNION ALL SELECT 'savingsGoal', COUNT(*) FROM savingsGoal`
+  )
+  equal(
+    seedSqlCounts,
+    [
+      { tableName: 'budget', count: 7 },
+      { tableName: 'expense', count: 9 },
+      { tableName: 'savingsGoal', count: 2 },
+    ],
+    'wave finance seed direct SQL counts'
+  )
+  const seedChanges = await connection.client.query<{ tableName: string; count: number }>(
+    `SELECT tableName, COUNT(*) AS count FROM _zsync_changes
+     WHERE tableName IN ('budget', 'expense', 'savingsGoal')
+     GROUP BY tableName ORDER BY tableName`
+  )
+  equal(
+    seedChanges,
+    [
+      { tableName: 'budget', count: 7 },
+      { tableName: 'expense', count: 9 },
+      { tableName: 'savingsGoal', count: 2 },
+    ],
+    'wave finance seed enters the change stream'
+  )
+  const seedTriggers = await connection.client.query<{
+    tableName: string
+    count: number
+  }>(
+    `SELECT tbl_name AS tableName, COUNT(*) AS count FROM sqlite_master
+     WHERE type = 'trigger' AND tbl_name IN ('budget', 'expense', 'savingsGoal')
+     GROUP BY tbl_name ORDER BY tbl_name`
+  )
+  equal(
+    seedTriggers,
+    [
+      { tableName: 'budget', count: 3 },
+      { tableName: 'expense', count: 3 },
+      { tableName: 'savingsGoal', count: 3 },
+    ],
+    'wave finance tables have insert, update, and delete change triggers'
+  )
+  const seedQueryPull = await post(
+    connection.client,
+    '/pull',
+    {
+      clientID: 'wave-finance-client',
+      clientGroupID: 'wave-finance-group',
+      cookie: null,
+      queries: {
+        version: 1,
+        patch: [
+          { op: 'put', hash: 'all-expenses', name: 'allExpenses', args: [] },
+          { op: 'put', hash: 'all-budgets', name: 'allBudgets', args: [] },
+          { op: 'put', hash: 'all-savings-goals', name: 'allSavingsGoals', args: [] },
+        ],
+      },
+    },
+    true,
+    true
+  )
+  equal(seedQueryPull.status, 200, 'wave finance fresh named query status')
+  const seedQueryCounts = Object.fromEntries(
+    ['budget', 'expense', 'savingsGoal'].map((tableName) => [
+      tableName,
+      (seedQueryPull.body.rowsPatch as Array<Record<string, unknown>>).filter(
+        (entry) => entry.op === 'put' && entry.tableName === tableName
+      ).length,
+    ])
+  )
+  equal(
+    seedQueryCounts,
+    { budget: 7, expense: 9, savingsGoal: 2 },
+    'wave finance fresh named query counts match direct SQL'
+  )
+  const seedWatermark = await connection.client.query<{ high: number; log: number }>(
+    `SELECT high, (SELECT MAX(watermark) FROM _zsync_changes) AS log
+     FROM _zsync_watermark WHERE lock = 1`
+  )
+  equal(seedWatermark, [{ high: 19, log: 19 }], 'wave finance pull advances watermark')
+  equal(wakes, 1, 'wave finance seed wakes the first attached client')
+  equal(secondWakes, 1, 'wave finance seed wakes the second attached client')
+  wakes = 0
+  secondWakes = 0
+
   const createBody = mutation('client-main', 1, 'todo.create', {
     id: 'persistent',
     title: 'first',
@@ -642,6 +754,13 @@ async function runBrowserHostSpike() {
     faults,
     checkpointFailure,
     snapshotDeletion,
+    seedProbe: {
+      sqlCounts: seedSqlCounts,
+      changeCounts: seedChanges,
+      triggerCounts: seedTriggers,
+      queryCounts: seedQueryCounts,
+      watermark: seedWatermark,
+    },
   }
   const output = document.querySelector('#result')
   if (output) output.textContent = JSON.stringify(result, null, 2)
