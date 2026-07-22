@@ -96,6 +96,14 @@ function manifestTableExists(sql: DurableSqlStorage): boolean {
   )
 }
 
+function tableExists(sql: DurableSqlStorage, name: string): boolean {
+  return (
+    sql
+      .exec("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?", name)
+      .toArray().length > 0
+  )
+}
+
 function schemaTableExists(sql: DurableSqlStorage): boolean {
   return (
     sql
@@ -428,16 +436,22 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
     return
   }
 
-  const restoredTables = rows.filter((row) => row.snapshot).map((row) => row.original)
+  // A snapshotted table can be gone by the time its row rollback runs: a schema
+  // restore in the same recovery drops created temp tables, and an earlier
+  // partial recovery may already have dropped one. Its rows cannot and need not
+  // be restored into a table that no longer exists — that restore is a no-op —
+  // but its snapshot table and manifest row must still be cleaned up below.
+  // Without this guard the DELETE/INSERT throws "no such table" and wedges the
+  // durable object on every wake (prod token-usage rebuild, 2026-07-22).
+  const allSnapshotRows = rows.filter((row) => row.snapshot !== null && row.snapshot !== '')
+  const restorableRows = allSnapshotRows.filter((row) => tableExists(sql, row.original))
+  const restoredTables = restorableRows.map((row) => row.original)
   const triggers = suspendTriggers(sql, restoredTables)
   // Defer constraint checks across the whole atomic restore. Delete every
   // snapshotted table before inserting any snapshot rows: interleaving those
   // phases lets a later DELETE in a cyclic cascade erase an earlier restore.
   sql.exec('PRAGMA defer_foreign_keys = ON')
-  const snapshotRows = parentFirst(
-    sql,
-    rows.filter((row) => row.snapshot !== null && row.snapshot !== '')
-  )
+  const snapshotRows = parentFirst(sql, restorableRows)
   for (const row of snapshotRows) {
     sql.exec(`DELETE FROM ${quoteIdent(row.original)}`)
   }
@@ -452,9 +466,10 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
       `INSERT OR REPLACE INTO ${quotedTable} (${columnList}) SELECT ${columnList} FROM ${quotedSnapshot}`
     )
   }
-  for (const row of snapshotRows) {
-    const quotedSnapshot = quoteIdent(row.snapshot!)
-    sql.exec(`DROP TABLE IF EXISTS ${quotedSnapshot}`)
+  // Drop every snapshot table, including those whose original was gone: the
+  // snapshot is dead weight once the tx is being rolled back either way.
+  for (const row of allSnapshotRows) {
+    sql.exec(`DROP TABLE IF EXISTS ${quoteIdent(row.snapshot!)}`)
   }
   for (const row of rows) {
     if (row.snapshot === null) {

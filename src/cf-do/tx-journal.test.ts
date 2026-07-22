@@ -340,6 +340,55 @@ describe('tx-journal core', () => {
     ).toEqual([])
   })
 
+  it('recovers a row-journaled temp table that no longer exists at recovery', () => {
+    // reproduces the prod token-usage wedge (2026-07-22): a table-rebuild
+    // migration created a temp table (`__new_tokenUsage`), row-journaled its
+    // first write, then died mid-flight. by the time recovery ran the temp table
+    // was already gone (an earlier partial recovery had dropped it), yet its
+    // row-journal manifest entry survived. the DML rollback path then ran
+    // `DELETE FROM __new_tokenUsage` on the missing table and threw
+    // "no such table" on every wake — permanently 500ing the database.
+    const storage = createSqliteStorage()
+    storage.exec('CREATE TABLE tokenUsage (id TEXT PRIMARY KEY, cost INTEGER)')
+    storage.exec("INSERT INTO tokenUsage VALUES ('u1', 10)")
+
+    // marker + schema snapshot taken before the temp table exists
+    storage.transactionSync(() =>
+      snapshotTxSchema(storage.journal, 'rebuild', 'application', [])
+    )
+    storage.exec('CREATE TABLE __new_tokenUsage (id TEXT PRIMARY KEY, cost INTEGER)')
+    // the `INSERT INTO __new_tokenUsage ... SELECT` records a real row snapshot
+    storage.transactionSync(() =>
+      upgradeToTableSnapshot(storage.journal, 'rebuild', '__new_tokenUsage', 'application')
+    )
+    storage.exec('INSERT INTO __new_tokenUsage SELECT * FROM tokenUsage')
+    // an earlier partial recovery already dropped the temp table; only its
+    // dangling row-journal manifest entry remains
+    storage.exec('DROP TABLE __new_tokenUsage')
+
+    expect(
+      storage.transactionSync(() => recoverTxJournal(storage.journal, 'application'))
+    ).toEqual(['rebuild'])
+    // the temp table stays gone; the real table is untouched
+    expect(
+      storage.exec("SELECT 1 FROM sqlite_master WHERE name = '__new_tokenUsage'").toArray()
+    ).toEqual([])
+    expect(storage.rows('tokenUsage')).toEqual([{ id: 'u1', cost: 10 }])
+    // journal fully consumed, no orphan snapshot tables left behind
+    expect(storage.rows(TX_MANIFEST_TABLE)).toEqual([])
+    expect(
+      storage
+        .tables()
+        .filter(
+          (name) =>
+            name.startsWith('_orez_tx_') &&
+            name !== TX_MANIFEST_TABLE &&
+            name !== TX_SCHEMA_TABLE
+        )
+    ).toEqual([])
+    expect(recoverTxJournal(storage.journal, 'application')).toEqual([])
+  })
+
   it('commits transactional DDL and removes its recovery image', () => {
     const storage = createSqliteStorage()
     storage.exec('CREATE TABLE original (id INTEGER PRIMARY KEY)')
