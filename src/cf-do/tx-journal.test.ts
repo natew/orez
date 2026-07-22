@@ -359,7 +359,12 @@ describe('tx-journal core', () => {
     storage.exec('CREATE TABLE __new_tokenUsage (id TEXT PRIMARY KEY, cost INTEGER)')
     // the `INSERT INTO __new_tokenUsage ... SELECT` records a real row snapshot
     storage.transactionSync(() =>
-      upgradeToTableSnapshot(storage.journal, 'rebuild', '__new_tokenUsage', 'application')
+      upgradeToTableSnapshot(
+        storage.journal,
+        'rebuild',
+        '__new_tokenUsage',
+        'application'
+      )
     )
     storage.exec('INSERT INTO __new_tokenUsage SELECT * FROM tokenUsage')
     // an earlier partial recovery already dropped the temp table; only its
@@ -371,7 +376,9 @@ describe('tx-journal core', () => {
     ).toEqual(['rebuild'])
     // the temp table stays gone; the real table is untouched
     expect(
-      storage.exec("SELECT 1 FROM sqlite_master WHERE name = '__new_tokenUsage'").toArray()
+      storage
+        .exec("SELECT 1 FROM sqlite_master WHERE name = '__new_tokenUsage'")
+        .toArray()
     ).toEqual([])
     expect(storage.rows('tokenUsage')).toEqual([{ id: 'u1', cost: 10 }])
     // journal fully consumed, no orphan snapshot tables left behind

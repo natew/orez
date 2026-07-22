@@ -443,7 +443,9 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
   // but its snapshot table and manifest row must still be cleaned up below.
   // Without this guard the DELETE/INSERT throws "no such table" and wedges the
   // durable object on every wake (prod token-usage rebuild, 2026-07-22).
-  const allSnapshotRows = rows.filter((row) => row.snapshot !== null && row.snapshot !== '')
+  const allSnapshotRows = rows.filter(
+    (row) => row.snapshot !== null && row.snapshot !== ''
+  )
   const restorableRows = allSnapshotRows.filter((row) => tableExists(sql, row.original))
   const restoredTables = restorableRows.map((row) => row.original)
   const triggers = suspendTriggers(sql, restoredTables)
