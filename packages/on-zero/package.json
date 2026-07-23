@@ -15,7 +15,7 @@
   "type": "module",
   "types": "./types/index.d.ts",
   "bin": {
-    "on-zero": "./cli.cjs"
+    "on-zero": "cli.cjs"
   },
   "publishConfig": {
     "access": "public"
