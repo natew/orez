@@ -195,7 +195,13 @@ function validatePull(value: unknown): PullBody {
   return { ...(value as Omit<PullBody, 'queries'>), queries }
 }
 
-function toZeroValue(type: string, raw: unknown): unknown {
+// a raw sqlite value must reach the client as the column's declared zero
+// type. canonical zero guarantees this at its replication boundary: pg
+// timestamp text parses to epoch-ms numbers (timestampToFpMillis) and
+// unparseable input throws, so a client can never receive a string for a
+// number column — a string that slips through detonates far away, in the
+// client view engine's compareValues. exported for its unit test.
+export function toZeroValue(type: string, raw: unknown): unknown {
   if (raw === null || raw === undefined) return null
   if (type === 'boolean') {
     if (typeof raw === 'boolean') return raw
@@ -204,9 +210,27 @@ function toZeroValue(type: string, raw: unknown): unknown {
   if (type === 'number' && typeof raw === 'string') {
     const numeric = Number(raw)
     if (Number.isFinite(numeric)) return numeric
+    const timestamp = timestampTextToEpochMs(raw)
+    if (timestamp !== null) return timestamp
+    throw new Error(`Error parsing ${raw} as a zero number column value`)
   }
   if (type === 'json' && typeof raw === 'string') return JSON.parse(raw)
   return raw
+}
+
+// SQL/ISO timestamp text -> epoch milliseconds, interpreting a missing offset
+// as UTC. mirrors the rust engine's timestamp_text_to_epoch_ms
+// (crates/sync-core/src/value.rs) so both read boundaries decode the same
+// stable forms the data tier emits.
+function timestampTextToEpochMs(value: string): number | null {
+  if (value.length < 19) return null
+  const separator = value[10]
+  if (separator !== ' ' && separator !== 'T') return null
+  let normalized = `${value.slice(0, 10)}T${value.slice(11)}`
+  if (/[+-]\d{2}$/.test(normalized)) normalized += ':00'
+  else if (!/(?:Z|[+-]\d{2}:\d{2})$/.test(normalized)) normalized += 'Z'
+  const ms = Date.parse(normalized)
+  return Number.isFinite(ms) ? ms : null
 }
 
 export function createZeroHttpSyncServer<S extends Schema>(options: {
