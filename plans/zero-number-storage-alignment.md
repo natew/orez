@@ -70,3 +70,18 @@ a parent under enforced FKs; column swap instead).
   must run the migration before upgrading the read paths.
 - Do not start without explicit approval; the mount fix on this branch already
   removes the acute client-crash class.
+
+## Related upstream gap found during the same incident: rollback does not cover unregistered tables
+
+The cf-do transaction is a tx-journal, not sqlite BEGIN/ROLLBACK: rollback
+replays before-images/table snapshots, and those exist only for CDC-registered
+tables (`src/cf-do/worker.ts` around the row-journal fallback,
+`src/cf-do/tx-journal.ts`). A write to an unregistered table inside a
+"transaction" therefore silently survives rollback. Soot hit this with its
+migration ledger table: an aborted migration pass phantom-recorded statements
+whose effects were undone, wedging later passes with no-such-column errors.
+Soot now compensates in its runner (`packages/orez-cf-deploy/src/migration.ts`
+deletes its own inserts on failure), but the honest upstream fix is in the
+journal: snapshot every table a transaction writes (registered or not), or
+reject writes to unregistered tables inside a journaled transaction. Same
+approval gate as the storage alignment — flag before changing.
