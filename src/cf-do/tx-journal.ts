@@ -340,12 +340,18 @@ function restoreSchemaSnapshot(
     sql.exec(`DROP VIEW IF EXISTS ${quoteIdent(object.name)}`)
   }
   for (const object of current.filter(
-    (object) => object.type === 'trigger' && changedCurrentObject(object)
+    (object) =>
+      object.type === 'trigger' &&
+      !tablesToDrop.has(object.table) &&
+      changedCurrentObject(object)
   )) {
     sql.exec(`DROP TRIGGER IF EXISTS ${quoteIdent(object.name)}`)
   }
   for (const object of current.filter(
-    (object) => object.type === 'index' && changedCurrentObject(object)
+    (object) =>
+      object.type === 'index' &&
+      !tablesToDrop.has(object.table) &&
+      changedCurrentObject(object)
   )) {
     sql.exec(`DROP INDEX IF EXISTS ${quoteIdent(object.name)}`)
   }

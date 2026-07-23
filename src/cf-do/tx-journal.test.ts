@@ -340,6 +340,41 @@ describe('tx-journal core', () => {
     ).toEqual([])
   })
 
+  it('recovers an empty-schema migration that stopped before a foreign-key parent', () => {
+    const storage = createSqliteStorage()
+    storage.exec('PRAGMA foreign_keys = ON')
+    storage.transactionSync(() =>
+      snapshotTxSchema(storage.journal, 'dead-platform-ddl', 'application')
+    )
+    storage.exec(
+      'CREATE TABLE project (' +
+        'id TEXT PRIMARY KEY, ' +
+        'userId TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE)'
+    )
+    storage.exec('CREATE INDEX project_userId_idx ON project(userId)')
+
+    const workerdRecoverySql: DurableSqlStorage = {
+      exec(sql, ...params) {
+        if (/^DROP INDEX\b/.test(sql)) {
+          throw new Error('no such table: main.user: SQLITE_ERROR')
+        }
+        return storage.exec(sql, ...params)
+      },
+    }
+
+    expect(() =>
+      storage.transactionSync(() => recoverTxJournal(workerdRecoverySql, 'application'))
+    ).not.toThrow()
+    expect(
+      storage
+        .exec(
+          "SELECT name FROM sqlite_master WHERE name IN ('project', 'project_userId_idx')"
+        )
+        .toArray()
+    ).toEqual([])
+    expect(recoverTxJournal(storage.journal, 'application')).toEqual([])
+  })
+
   it('recovers a row-journaled temp table that no longer exists at recovery', () => {
     // reproduces the prod token-usage wedge (2026-07-22): a table-rebuild
     // migration created a temp table (`__new_tokenUsage`), row-journaled its
