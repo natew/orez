@@ -1,6 +1,6 @@
 {
   "name": "orez-sync-executor",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "type": "module",
   "sideEffects": false,
   "exports": {
