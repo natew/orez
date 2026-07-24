@@ -567,9 +567,7 @@ export function createZeroClientInternal<
     return true
   }
 
-  function emitReconnectStatus(
-    event: Extract<ZeroEvent, { type: 'reconnect' }>
-  ): void {
+  function emitReconnectStatus(event: Extract<ZeroEvent, { type: 'reconnect' }>): void {
     const current = zeroEvents.value
     if (
       current?.type === 'reconnect' &&
@@ -1010,8 +1008,7 @@ export function createZeroClientInternal<
       const prevState = useRef(state.name)
       const hasConnectedRef = useRef(false)
       const currentReconnect =
-        zeroEvents.value?.type === 'reconnect' &&
-        zeroEvents.value.status !== 'connected'
+        zeroEvents.value?.type === 'reconnect' && zeroEvents.value.status !== 'connected'
           ? zeroEvents.value
           : null
       const reconnectRef = useRef<{
@@ -1055,16 +1052,17 @@ export function createZeroClientInternal<
           }
         }
 
-        const reconnectReasonKey: ZeroReconnectReasonKey | undefined =
-          reason.includes('ServerOverloaded')
-            ? 'server-overloaded'
-            : reason.includes('Failed to fetch') ||
-                reason.includes('fetch failed') ||
-                reason.includes('NetworkError when attempting to fetch resource') ||
-                reason.includes('Network request failed') ||
-                reason.includes('Load failed')
-              ? 'transport'
-              : undefined
+        const reconnectReasonKey: ZeroReconnectReasonKey | undefined = reason.includes(
+          'ServerOverloaded'
+        )
+          ? 'server-overloaded'
+          : reason.includes('Failed to fetch') ||
+              reason.includes('fetch failed') ||
+              reason.includes('NetworkError when attempting to fetch resource') ||
+              reason.includes('Network request failed') ||
+              reason.includes('Load failed')
+            ? 'transport'
+            : undefined
 
         // stale-poke and paused transport errors both resume the existing
         // client. ServerOverloaded remains in Zero's own retry/backoff loop.
