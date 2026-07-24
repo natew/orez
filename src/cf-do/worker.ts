@@ -37,7 +37,11 @@ import {
 } from './tx-journal.js'
 import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
 
-import type { ApplicationSqlExecResult, ApplicationSqlTable } from './application-sql.js'
+import type {
+  ApplicationSqlClient,
+  ApplicationSqlExecResult,
+  ApplicationSqlTable,
+} from './application-sql.js'
 import type { SqlStatementMetadata, TransactionQueryFormat } from 'orez-sync-executor'
 
 export { createApplicationSqlClient } from './application-sql.js'
@@ -183,6 +187,7 @@ const DEFAULT_WRITE_BUDGET_WINDOW_MS = 5 * 60 * 1000
 const WRITE_BUDGET_TRIPPED_KEY = '_orez_write_budget_tripped_at'
 const SCHEMA_PROVISIONING_WAIT_MS = 20_000
 const SCHEMA_PROVISIONING_MAX_DELAY_MS = 500
+const APPLICATION_SQL_TURN_WAIT_MS = 30_000
 const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
 const MAX_SNAPSHOT_PAGE_ROWS = 10_000
 const TRANSACTION_CONTROL_SQL =
@@ -1279,6 +1284,79 @@ export class ZeroDO extends DurableObject {
       signal?.removeEventListener('abort', dispose)
       if (session.state === 'active') this.releaseApplicationSqlTurn(session)
       else if (session.state !== 'closed') dispose()
+    }
+  }
+
+  /**
+   * drive one application SQLite session from INSIDE this durable object.
+   *
+   * identical to the client-side session helper in application-sql.ts — same
+   * ownership acquisition, same per-statement journal, same commit/rollback —
+   * except the begin poll and every statement are local calls instead of RPCs.
+   * the caller must already be running in this object.
+   */
+  private async withLocalApplicationSqlSession<Value>(
+    work: (session: ApplicationSqlSessionTarget) => Value | Promise<Value>
+  ): Promise<Value> {
+    const session = await this.applicationSqlSession(crypto.randomUUID())
+    try {
+      // bounded, unlike the client-side poll. a remote caller that goes away
+      // stops polling and frees the turn; a local caller has no signal to
+      // observe, so an unbounded loop would spin for the life of the object
+      // every time somebody abandoned a request mid-reconcile.
+      const deadline = Date.now() + APPLICATION_SQL_TURN_WAIT_MS
+      while (!(await session.begin())) {
+        if (Date.now() >= deadline) {
+          throw new Error('timed out acquiring the application SQLite session')
+        }
+        await scheduler.wait(25)
+      }
+      const value = await work(session)
+      await session.commit()
+      return value
+    } catch (error) {
+      await session.rollback().catch(() => {})
+      throw error
+    } finally {
+      if (session.state !== 'closed') session[Symbol.dispose]()
+    }
+  }
+
+  /**
+   * an ApplicationSqlClient bound to THIS object, for subclass work that would
+   * otherwise call back into itself over RPC.
+   *
+   * a schema migration is the motivating case: driven from a worker it costs one
+   * round trip per statement, so replaying a full migration history into a fresh
+   * namespace ran ~1000 sequential round trips and measured 35.9s wall against
+   * 2.8s of durable-object cpu — 92% of it spent idle between statements. the
+   * statements, their order and their transaction semantics are unchanged; only
+   * the transport is.
+   */
+  protected applicationSqlLocalClient(namespace: string): ApplicationSqlClient {
+    const run = <Value>(work: (session: ApplicationSqlSessionTarget) => Promise<Value>) =>
+      this.withLocalApplicationSqlSession(work)
+    return {
+      namespace,
+      query: (sql, params = []) => run((session) => session.query(sql, params)),
+      exec: (sql, params = [], metadata) =>
+        run((session) => session.exec(sql, params, metadata)),
+      registerTables: (tables) => run((session) => session.registerTables(tables)),
+      transaction: (compileQuery, work, queryBudget) =>
+        run(async (session) =>
+          work({
+            exec: (sql, params = [], metadata) => session.exec(sql, params, metadata),
+            query: (sql, params = []) => session.query(sql, params),
+            registerTables: (tables) => session.registerTables(tables),
+            async queryAst(ast, format, queryName) {
+              return session.queryPlan(
+                await compileQuery(ast, format),
+                queryName,
+                queryBudget
+              )
+            },
+          })
+        ),
     }
   }
 
