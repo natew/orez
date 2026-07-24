@@ -1,0 +1,323 @@
+{
+  "seed": 30062507237,
+  "target": "rust-local",
+  "error": "Error: timeout waiting for server write sm-30062507237-22",
+  "replay": "bun src/state-machine.ts --against rust-local --seed 30062507237 --nemesis --replay /Users/n8/orez/harness/regressions/state-machine-rust-local-seed-30062507237.json --no-shrink",
+  "trace": [
+    {
+      "kind": "desire",
+      "slot": 0,
+      "projectIDs": [
+        "p0",
+        "p1"
+      ]
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "push_after_commit_before_response",
+      "faultKind": "error",
+      "faultReceipt": {
+        "id": "fault-30062507237-1",
+        "arm": {
+          "step": 1,
+          "point": "push_after_commit_before_response",
+          "kind": "error",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "fired",
+          "step": 2,
+          "operation": "write",
+          "reason": "server confirmed injected 500 during push"
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "id": "sm-30062507237-postcommit",
+      "projectID": "p0",
+      "rank": 4.25
+    },
+    {
+      "kind": "prune",
+      "epoch": 0
+    },
+    {
+      "kind": "pausePulls",
+      "transportReceipt": {
+        "id": "transport-30062507237-1",
+        "arm": {
+          "step": 4,
+          "kind": "pause-pulls",
+          "confirmed": true
+        },
+        "fire": {
+          "step": 4,
+          "operation": "pausePulls",
+          "blockedPulls": 1
+        },
+        "overlap": {
+          "faultId": "fault-30062507237-2",
+          "point": "pull_after_commit",
+          "kind": "error",
+          "step": 6
+        },
+        "heal": {
+          "step": 9,
+          "operation": "resumePulls"
+        }
+      }
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "pull_after_commit",
+      "faultKind": "error",
+      "faultReceipt": {
+        "id": "fault-30062507237-2",
+        "arm": {
+          "step": 5,
+          "point": "pull_after_commit",
+          "kind": "error",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "fired",
+          "step": 6,
+          "operation": "observerPull",
+          "reason": "server confirmed injected 500 during pull"
+        }
+      }
+    },
+    {
+      "kind": "observerPull"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "push_after_write_before_commit",
+      "faultKind": "kill",
+      "faultReceipt": {
+        "id": "fault-30062507237-3",
+        "arm": {
+          "step": 7,
+          "point": "push_after_write_before_commit",
+          "kind": "kill",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "not-fired",
+          "step": 8,
+          "operation": "serverRestart",
+          "reason": "server restarted before fault fired"
+        }
+      }
+    },
+    {
+      "kind": "serverRestart"
+    },
+    {
+      "kind": "resumePulls"
+    },
+    {
+      "kind": "fullPruneRestart"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "push_after_write_before_commit",
+      "faultKind": "kill",
+      "faultReceipt": {
+        "id": "fault-30062507237-4",
+        "arm": {
+          "step": 11,
+          "point": "push_after_write_before_commit",
+          "kind": "kill",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "fired",
+          "step": 12,
+          "operation": "write",
+          "reason": "engine process exited during push"
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "id": "sm-30062507237-kill",
+      "projectID": "p1",
+      "rank": 9.5
+    },
+    {
+      "kind": "responseLoss",
+      "id": "sm-30062507237-lost-response",
+      "projectID": "p1"
+    },
+    {
+      "kind": "serverRestart"
+    },
+    {
+      "kind": "clientRestart"
+    },
+    {
+      "kind": "desire",
+      "slot": 1,
+      "projectIDs": [
+        "p2"
+      ]
+    },
+    {
+      "kind": "undesire",
+      "slot": 1
+    },
+    {
+      "kind": "checkpoint"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "pull_after_commit",
+      "faultKind": "kill",
+      "faultReceipt": {
+        "id": "fault-30062507237-5",
+        "arm": {
+          "step": 19,
+          "point": "pull_after_commit",
+          "kind": "kill",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "fired",
+          "step": 19,
+          "operation": "armEngineFault",
+          "reason": "engine process exited during pull"
+        }
+      }
+    },
+    {
+      "kind": "clientRestart"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "pull_during_tx",
+      "faultKind": "kill",
+      "faultReceipt": {
+        "id": "fault-30062507237-6",
+        "arm": {
+          "step": 21,
+          "point": "pull_during_tx",
+          "kind": "kill",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "fired",
+          "step": 22,
+          "operation": "write",
+          "reason": "engine process exited during pull"
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "id": "sm-30062507237-22",
+      "projectID": "p1",
+      "rank": 4.63
+    },
+    {
+      "kind": "undesire",
+      "slot": 1
+    }
+  ],
+  "minimized": [
+    {
+      "kind": "write",
+      "id": "sm-30062507237-kill",
+      "projectID": "p1",
+      "rank": 9.5
+    },
+    {
+      "kind": "responseLoss",
+      "id": "sm-30062507237-lost-response",
+      "projectID": "p1"
+    },
+    {
+      "kind": "serverRestart"
+    },
+    {
+      "kind": "checkpoint"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "pull_after_commit",
+      "faultKind": "kill",
+      "faultReceipt": {
+        "id": "fault-30062507237-1",
+        "arm": {
+          "step": 4,
+          "point": "pull_after_commit",
+          "kind": "kill",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "not-fired",
+          "step": 6,
+          "operation": "armEngineFault",
+          "reason": "replaced by a later fault arm"
+        }
+      }
+    },
+    {
+      "kind": "clientRestart"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "pull_during_tx",
+      "faultKind": "kill",
+      "faultReceipt": {
+        "id": "fault-30062507237-2",
+        "arm": {
+          "step": 6,
+          "point": "pull_during_tx",
+          "kind": "kill",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "fired",
+          "step": 7,
+          "operation": "write",
+          "reason": "engine process exited during pull"
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "id": "sm-30062507237-22",
+      "projectID": "p1",
+      "rank": 4.63
+    },
+    {
+      "kind": "undesire",
+      "slot": 1
+    }
+  ],
+  "faultTally": {
+    "armed": 2,
+    "fired": 1,
+    "notFired": 1,
+    "byFault": {
+      "pull_after_commit/kill": {
+        "armed": 1,
+        "fired": 0,
+        "notFired": 1
+      },
+      "pull_during_tx/kill": {
+        "armed": 1,
+        "fired": 1,
+        "notFired": 0
+      }
+    }
+  },
+  "transportTally": {
+    "armed": 0,
+    "fired": 0,
+    "healed": 0,
+    "overlapped": 0
+  }
+}
