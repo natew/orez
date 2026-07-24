@@ -760,6 +760,18 @@ function startSqliteDoServer(storage: SqliteStorage): Promise<string> {
             respond(200, { ok: true, transactionIDs })
             return
           }
+          case '/snapshot-tx-schema': {
+            storage.transactionSync(() => {
+              const transactionID = String(parsed.transactionID)
+              const owner = parsed.owner === undefined ? 'default' : String(parsed.owner)
+              const affectedTables = Array.isArray(parsed.affectedTables)
+                ? parsed.affectedTables.map(String)
+                : []
+              snapshotTxSchema(storage.journal, transactionID, owner, affectedTables)
+            })
+            respond(200, { ok: true })
+            return
+          }
           default:
             respond(404, { error: 'not found' })
         }
@@ -1082,4 +1094,100 @@ describe('snapshot escalation naming', () => {
     expect(storage.rows('a-b')).toEqual([{ v: 'dash' }])
     expect(storage.rows('a_b')).toEqual([{ v: 'underscore' }])
   })
+})
+
+describe('kill-mid-tx crash recovery: fresh-namespace bootstrap matrix (DoBackend over HTTP)', () => {
+  // 2026-07-24 prod incident: fresh Contrast project namespaces wedge with
+  // `no such table: main.user` thrown FROM restoreSchemaSnapshot during
+  // recovery, permanently 503ing the namespace. model the bootstrap shape
+  // (create tables + fk + trigger + index + seed rows, then a 12-step table
+  // rebuild) and kill after EVERY statement; recovery must never throw, must
+  // be idempotent, and a successor generation must be able to replay the full
+  // bootstrap and commit.
+  const bootstrap: Array<{ sql: string; params?: unknown[] }> = [
+    { sql: 'CREATE TABLE "user" (id TEXT PRIMARY KEY, email TEXT)' },
+    {
+      sql: 'CREATE TABLE "project" (id TEXT PRIMARY KEY, "userId" TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE)',
+    },
+    { sql: 'CREATE INDEX "project_user_idx" ON "project"("userId")' },
+    { sql: `INSERT INTO "user" (id, email) VALUES ($1, $2)`, params: ['u1', 'a@b.c'] },
+    { sql: `INSERT INTO "project" (id, "userId") VALUES ($1, $2)`, params: ['p1', 'u1'] },
+    {
+      sql: 'CREATE TABLE "__new_user" (id TEXT PRIMARY KEY, email TEXT, "createdAt" INTEGER)',
+    },
+    {
+      sql: 'INSERT INTO "__new_user" (id, email, "createdAt") SELECT id, email, 0 FROM "user"',
+    },
+    { sql: 'DROP TABLE "user"' },
+    { sql: 'ALTER TABLE "__new_user" RENAME TO "user"' },
+    { sql: 'CREATE INDEX "user_email_idx" ON "user"(email)' },
+  ]
+
+  it('recovers cleanly from a kill after every bootstrap statement', async () => {
+    const failures: string[] = []
+    for (let kill = 1; kill <= bootstrap.length; kill++) {
+      const storage = createSqliteStorage()
+      const url = await startSqliteDoServer(storage)
+      const gen1 = new DoBackend(url, 'zero_cdb', 'zero', {
+        allowTransactionalDDL: true,
+        txOwner: 'app-sql',
+      })
+      await gen1.waitReady
+      await gen1.exec('BEGIN')
+      for (let i = 0; i < kill; i++) {
+        const statement = bootstrap[i]!
+        await gen1.query(statement.sql, statement.params ?? [])
+      }
+      // KILL: client abandoned, storage survives (DO eviction / worker death)
+
+      const recover = async (label: string) => {
+        const resp = await fetch(`${url}/recover-txs`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ owner: 'app-sql' }),
+        })
+        const body = (await resp.json()) as { error?: string; transactionIDs?: string[] }
+        if (resp.status !== 200) {
+          failures.push(
+            `kill@${kill} (${bootstrap[kill - 1]!.sql.slice(0, 60)}) ${label} recovery: ${body.error}`
+          )
+          return null
+        }
+        return body
+      }
+      if ((await recover('first')) === null) continue
+      // the prod wedge was recovery THROWING on every later boot — recovery
+      // must be idempotent, not just survivable once.
+      if ((await recover('second')) === null) continue
+
+      // the partial bootstrap is invisible: no user tables, no snapshot litter
+      const leftover = storage
+        .tables()
+        .filter(
+          (name) =>
+            !name.startsWith('_orez_') &&
+            !name.startsWith('_cf_') &&
+            !name.startsWith('_zero_') &&
+            !name.startsWith('sqlite_')
+        )
+      expect(leftover, `kill@${kill} left schema behind`).toEqual([])
+
+      // a successor generation replays the full bootstrap and commits
+      const gen2 = new DoBackend(url, 'zero_cdb', 'zero', {
+        allowTransactionalDDL: true,
+        txOwner: 'app-sql',
+      })
+      await gen2.waitReady
+      await gen2.exec('BEGIN')
+      for (const statement of bootstrap) {
+        await gen2.query(statement.sql, statement.params ?? [])
+      }
+      await gen2.exec('COMMIT')
+      expect(storage.rows('user'), `kill@${kill} replay lost rows`).toEqual([
+        { id: 'u1', email: 'a@b.c', createdAt: 0 },
+      ])
+      expect(storage.rows('project')).toEqual([{ id: 'p1', userId: 'u1' }])
+    }
+    expect(failures, failures.join('\n')).toEqual([])
+  }, 120_000)
 })

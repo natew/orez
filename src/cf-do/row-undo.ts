@@ -7,6 +7,7 @@ import {
   type JournalRecord,
   type TableIdentity,
 } from './cdc.js'
+import { schemaRestoreOwnsTable } from './tx-journal.js'
 
 import type { DurableSqlStorage } from './watermark.js'
 
@@ -203,6 +204,7 @@ export function rollbackPendingChanges(
   const tables = rows.map((row) => String(row.physical_table_name ?? '')).filter(Boolean)
   const suspended = suspendTriggers(sql, tables)
   const identities = new Map<string, TableIdentity | null>()
+  const schemaOwned = new Map<string, boolean>()
   try {
     for (const row of rows) {
       const table = String(row.physical_table_name)
@@ -212,6 +214,15 @@ export function rollbackPendingChanges(
       const newRowid = row.new_rowid == null ? null : String(row.new_rowid)
       const oldRowid = row.old_rowid == null ? null : String(row.old_rowid)
 
+      // a table created, dropped, or rebuilt by in-tx transactional DDL needs
+      // no row undo: the schema rollback (restoreSchemaSnapshot) rebuilds it
+      // wholesale from its pre-tx snapshot, and undoing rows against a
+      // dropped or reshaped table throws (which used to wedge recovery — and
+      // the namespace — permanently).
+      if (!schemaOwned.has(table)) {
+        schemaOwned.set(table, schemaRestoreOwnsTable(sql, transactionID, table))
+      }
+      if (schemaOwned.get(table)) continue
       if (!identities.has(table)) identities.set(table, tableIdentity(sql, table))
       const identity = identities.get(table)
       if (!identity) {

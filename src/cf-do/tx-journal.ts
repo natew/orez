@@ -197,6 +197,42 @@ function parentFirst(sql: DurableSqlStorage, rows: ManifestRow[]): ManifestRow[]
 }
 
 /**
+ * true when restoreSchemaSnapshot will rebuild `table` during the rollback of
+ * `txID`: the tx recorded a transactional-DDL schema marker and the table was
+ * created, dropped, or DDL-changed since the schema snapshot. row-level undo
+ * consults this to skip such tables — their pre-tx content comes back
+ * wholesale from the table snapshot, and undoing rows against a dropped or
+ * rebuilt table either throws or targets the wrong shape. before this,
+ * recovery of a tx killed mid table rebuild threw on every boot and wedged
+ * the namespace permanently (2026-07-24 prod fresh-project incident).
+ */
+export function schemaRestoreOwnsTable(
+  sql: DurableSqlStorage,
+  txID: string,
+  table: string
+): boolean {
+  if (!schemaTableExists(sql)) return false
+  const rows = sql
+    .exec(
+      `SELECT type, name, sql FROM "${TX_SCHEMA_TABLE}" WHERE tx_id = ? AND type IN ('marker', 'table')`,
+      txID
+    )
+    .toArray()
+  if (!rows.some((row) => String(row.type) === 'marker')) return false
+  const original = rows.find(
+    (row) => String(row.type) === 'table' && String(row.name) === table
+  )
+  const current = sql
+    .exec(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ? AND sql IS NOT NULL`,
+      table
+    )
+    .toArray()[0]
+  if (!original || !current) return true
+  return String(original.sql ?? '') !== String(current.sql ?? '')
+}
+
+/**
  * Capture the application schema before the first DDL statement and the data
  * of each table that a later DDL statement can destructively change. SQLite
  * can transact DDL, but the DO protocol spans requests, so rollback needs an
