@@ -620,6 +620,26 @@ function sqliteNoCase(identifier: string): string {
   return identifier.replace(/[A-Z]/g, (character) => character.toLowerCase())
 }
 
+/** The operation a tracked statement performs on its own table. */
+export type TrackedOperation = 'INSERT' | 'UPDATE' | 'DELETE' | 'UPSERT'
+
+/** What SQLite can implicitly do to a table reached through a referential action or trigger. */
+type RowOperation = 'INSERT' | 'UPDATE' | 'DELETE'
+
+const ROW_OPERATIONS: readonly RowOperation[] = ['INSERT', 'UPDATE', 'DELETE']
+
+// The event keyword sits immediately before `ON <table>`, or before `OF
+// <columns>` for a column-scoped UPDATE trigger. Anchoring on that separator
+// distinguishes the event from a trigger *named* insert/update/delete.
+const TRIGGER_EVENT = /\b(DELETE|INSERT|UPDATE)\s+(?:OF\b|ON\b)/i
+
+function triggerEvent(sql: string | null): RowOperation | null {
+  if (!sql) return null
+  const begin = sql.search(/\bBEGIN\b/i)
+  const match = TRIGGER_EVENT.exec(begin < 0 ? sql : sql.slice(0, begin))
+  return match ? (match[1]!.toUpperCase() as RowOperation) : null
+}
+
 /**
  * snapshot the source table and the transitive targets of its business
  * triggers and cascading/SET foreign keys. trigger SQL and FK metadata name
@@ -627,11 +647,22 @@ function sqliteNoCase(identifier: string): string {
  * tables only multiplies billable writes during zero-cache startup. if a
  * reachable trigger cannot be understood, retain the conservative all-table
  * fallback.
+ *
+ * reachability is per (table, operation), because SQLite fires implicit writes
+ * per operation: `ON DELETE CASCADE` only fires when the parent row is deleted,
+ * and `AFTER DELETE` triggers only fire on a delete. discovering side effects
+ * from the table alone made every UPDATE pay for its children's delete
+ * cascades. soot's five-second `sootAgent.runtimeClaimExpiresAt` renewal copied
+ * the whole `agentEvent` table on each beat purely because `agentEvent`
+ * references `sootAgent` `ON DELETE CASCADE`: 35 billable rows with an empty
+ * event table, 1,035 with 1,000 retained events, and the rolling write budget
+ * tripped from heartbeats alone once the table grew.
  */
 export function snapshotSideEffectWriteTables(
   sql: DurableSqlStorage,
   txID: string,
-  sourceTable: string
+  sourceTable: string,
+  operation: TrackedOperation
 ): boolean {
   const relations = sql
     .exec(
@@ -652,12 +683,18 @@ export function snapshotSideEffectWriteTables(
       )
       .map((relation) => [sqliteNoCase(relation.name), relation.name])
   )
+  const node = (table: string, op: RowOperation) => `${sqliteNoCase(table)}\0${op}`
   const edges = new Map<string, Set<string>>()
-  const unsafeTriggerSources = new Set<string>()
-  const addEdge = (from: string, to: string) => {
-    const fromKey = sqliteNoCase(from)
+  const unsafeNodes = new Set<string>()
+  const addEdge = (
+    from: string,
+    fromOp: RowOperation,
+    to: string,
+    toOps: readonly RowOperation[]
+  ) => {
+    const fromKey = node(from, fromOp)
     const targets = edges.get(fromKey) ?? new Set<string>()
-    targets.add(sqliteNoCase(to))
+    for (const toOp of toOps) targets.add(node(to, toOp))
     edges.set(fromKey, targets)
   }
 
@@ -669,18 +706,23 @@ export function snapshotSideEffectWriteTables(
     .toArray()
   for (const row of triggers) {
     const from = String(row.tbl_name ?? '')
-    const targets = triggerWriteTargets(
-      row.sql === null || row.sql === undefined ? null : String(row.sql)
-    )
-    if (!targets) unsafeTriggerSources.add(sqliteNoCase(from))
-    else {
-      for (const target of targets) {
-        if (!knownRelations.has(sqliteNoCase(target))) {
-          unsafeTriggerSources.add(sqliteNoCase(from))
-        } else {
-          addEdge(from, target)
-        }
+    const definition = row.sql === null || row.sql === undefined ? null : String(row.sql)
+    // an unreadable header hides which operation fires the trigger, so every
+    // operation on its table has to assume it does.
+    const event = triggerEvent(definition)
+    const firedBy = event ? [event] : ROW_OPERATIONS
+    const targets = triggerWriteTargets(definition)
+    const unknownTarget =
+      !targets || targets.some((target) => !knownRelations.has(sqliteNoCase(target)))
+    for (const firing of firedBy) {
+      if (unknownTarget) {
+        unsafeNodes.add(node(from, firing))
+        continue
       }
+      // reading which operation a trigger body performs would have to model
+      // REPLACE conflict resolution deleting rows, so assume all three on the
+      // target. only whether the trigger fires at all is decided precisely.
+      for (const target of targets!) addEdge(from, firing, target, ROW_OPERATIONS)
     }
   }
 
@@ -690,24 +732,37 @@ export function snapshotSideEffectWriteTables(
       .exec(`PRAGMA foreign_key_list(${quoteIdent(child.name)})`)
       .toArray()) {
       const parent = String(row.table ?? '')
-      const hasAction = [row.on_update, row.on_delete].some((action) => {
-        const normalized = String(action ?? 'NO ACTION').toUpperCase()
-        return normalized !== 'NO ACTION' && normalized !== 'RESTRICT'
-      })
-      if (parent && hasAction) addEdge(parent, child.name)
+      if (!parent) continue
+      const onDelete = String(row.on_delete ?? 'NO ACTION').toUpperCase()
+      const onUpdate = String(row.on_update ?? 'NO ACTION').toUpperCase()
+      // deleting a parent row deletes cascaded children and rewrites SET ones.
+      if (onDelete === 'CASCADE') addEdge(parent, 'DELETE', child.name, ['DELETE'])
+      else if (onDelete === 'SET NULL' || onDelete === 'SET DEFAULT')
+        addEdge(parent, 'DELETE', child.name, ['UPDATE'])
+      // updating a parent key rewrites children under every non-restricting
+      // action. which columns the statement touched is not known here, so any
+      // parent update follows the ON UPDATE edge.
+      if (onUpdate === 'CASCADE' || onUpdate === 'SET NULL' || onUpdate === 'SET DEFAULT')
+        addEdge(parent, 'UPDATE', child.name, ['UPDATE'])
     }
   }
 
+  // an upsert resolves to an insert or an update and only SQLite knows which,
+  // so it seeds both. an insert fires no referential action.
+  const seeded: readonly RowOperation[] =
+    operation === 'UPSERT' ? ['INSERT', 'UPDATE'] : [operation]
   const reachable = new Set<string>()
-  const pending = [sqliteNoCase(sourceTable)]
+  const reachableTables = new Set<string>()
+  const pending = seeded.map((op) => node(sourceTable, op))
   let hasSideEffect = false
   let mustSnapshotAll = false
   while (pending.length > 0) {
-    const table = pending.pop()!
-    if (reachable.has(table)) continue
-    reachable.add(table)
-    if (unsafeTriggerSources.has(table)) mustSnapshotAll = true
-    for (const target of edges.get(table) ?? []) {
+    const current = pending.pop()!
+    if (reachable.has(current)) continue
+    reachable.add(current)
+    reachableTables.add(current.slice(0, current.indexOf('\0')))
+    if (unsafeNodes.has(current)) mustSnapshotAll = true
+    for (const target of edges.get(current) ?? []) {
       hasSideEffect = true
       pending.push(target)
     }
@@ -716,7 +771,7 @@ export function snapshotSideEffectWriteTables(
 
   const selected = mustSnapshotAll
     ? [...snapshotTables.values()]
-    : [...reachable]
+    : [...reachableTables]
         .map((table) => snapshotTables.get(table))
         .filter((table): table is string => table !== undefined)
   for (const table of selected.sort()) upgradeToTableSnapshot(sql, txID, table)

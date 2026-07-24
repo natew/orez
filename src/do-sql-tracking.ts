@@ -10,6 +10,22 @@ export interface RowWriteBudgetOptions {
   now: () => number
 }
 
+/**
+ * What the circuit saw at the moment it tripped.
+ *
+ * The rolling counter keeps decaying after a trip and an evicted object comes
+ * back with none of it, so the live window cannot describe the trip: soot's
+ * tripped namespace reported `0/300000` and hid how far over budget it went.
+ * This is the durable evidence, carried through persistence and restore.
+ */
+export interface RowWriteBudgetTrip {
+  at: number
+  /** Null only for a trip restored from the legacy bare-timestamp format. */
+  windowRows: number | null
+  budget: number
+  windowMs: number
+}
+
 export interface RowWriteBudgetStatus {
   windowRows: number
   billableRows: number
@@ -20,6 +36,10 @@ export interface RowWriteBudgetStatus {
   windowEndsAt: number | null
   tripped: boolean
   trippedAt: number | null
+  /** Billable rows counted in the window when the circuit tripped. */
+  trippedWindowRows: number | null
+  /** Budget in force when the circuit tripped, which an env change can outlive. */
+  trippedBudget: number | null
 }
 
 type RowWriteSample = { at: number; billableRows: number; logicalRows: number }
@@ -29,15 +49,17 @@ export class WriteBudgetExceededError extends Error {
   readonly error = 'writeBudgetExceeded'
 
   constructor(
-    readonly windowRows: number,
+    readonly windowRows: number | null,
     readonly budget: number,
     readonly windowMs: number
   ) {
-    super(`row write budget exceeded: ${windowRows}/${budget} rows in ${windowMs}ms`)
+    super(
+      `row write budget exceeded: ${windowRows ?? 'unrecorded'}/${budget} rows in ${windowMs}ms`
+    )
     this.name = 'WriteBudgetExceededError'
   }
 
-  toJSON(): { error: string; windowRows: number; budget: number } {
+  toJSON(): { error: string; windowRows: number | null; budget: number } {
     return { error: this.error, windowRows: this.windowRows, budget: this.budget }
   }
 }
@@ -57,7 +79,7 @@ export class RollingRowWriteBudget {
   #samples: RowWriteSample[] = []
   #billableRows = 0
   #logicalRows = 0
-  #trippedAt: number | null = null
+  #trip: RowWriteBudgetTrip | null = null
 
   constructor(options: RowWriteBudgetOptions) {
     if (!Number.isSafeInteger(options.budgetRows) || options.budgetRows < 1)
@@ -96,15 +118,22 @@ export class RollingRowWriteBudget {
       windowMs: this.#windowMs,
       windowStartedAt,
       windowEndsAt: windowStartedAt === null ? null : windowStartedAt + this.#windowMs,
-      tripped: this.#trippedAt !== null,
-      trippedAt: this.#trippedAt,
+      tripped: this.#trip !== null,
+      trippedAt: this.#trip?.at ?? null,
+      trippedWindowRows: this.#trip?.windowRows ?? null,
+      trippedBudget: this.#trip?.budget ?? null,
     }
   }
 
+  /** The trip to persist, so a restored object still reports what tripped it. */
+  trip(): RowWriteBudgetTrip | null {
+    return this.#trip
+  }
+
   assertOpen(): void {
-    if (this.#trippedAt === null) return
-    const status = this.status()
-    throw new WriteBudgetExceededError(status.windowRows, status.budget, status.windowMs)
+    const trip = this.#trip
+    if (trip === null) return
+    throw new WriteBudgetExceededError(trip.windowRows, trip.budget, trip.windowMs)
   }
 
   #sample(): RowWriteSample {
@@ -130,7 +159,12 @@ export class RollingRowWriteBudget {
     sample.billableRows += rows
     this.#billableRows += rows
     if (this.#billableRows > this.#budgetRows) {
-      this.#trippedAt = this.#now()
+      this.#trip = {
+        at: this.#now(),
+        windowRows: this.#billableRows,
+        budget: this.#budgetRows,
+        windowMs: this.#windowMs,
+      }
       throw new WriteBudgetExceededError(
         this.#billableRows,
         this.#budgetRows,
@@ -149,15 +183,34 @@ export class RollingRowWriteBudget {
     return this.status()
   }
 
-  restoreTrip(trippedAt: number): void {
-    if (Number.isFinite(trippedAt) && trippedAt > 0) this.#trippedAt = trippedAt
+  /**
+   * Restore a sticky trip from durable storage.
+   *
+   * Accepts the bare timestamp written before trip counts were persisted. That
+   * format cannot say how far over budget the object went, so its count stays
+   * unrecorded rather than being reported as zero. Those values disappear the
+   * first time the namespace is reopened, which is the only way out anyway.
+   */
+  restoreTrip(persisted: number | Partial<RowWriteBudgetTrip>): void {
+    const trip = typeof persisted === 'number' ? { at: persisted } : persisted
+    const at = Number(trip?.at)
+    if (!Number.isFinite(at) || at <= 0) return
+    const windowRows = Number(trip.windowRows)
+    const budget = Number(trip.budget)
+    const windowMs = Number(trip.windowMs)
+    this.#trip = {
+      at,
+      windowRows: Number.isSafeInteger(windowRows) && windowRows > 0 ? windowRows : null,
+      budget: Number.isSafeInteger(budget) && budget > 0 ? budget : this.#budgetRows,
+      windowMs: Number.isSafeInteger(windowMs) && windowMs > 0 ? windowMs : this.#windowMs,
+    }
   }
 
   reopen(): RowWriteBudgetStatus {
     this.#samples = []
     this.#billableRows = 0
     this.#logicalRows = 0
-    this.#trippedAt = null
+    this.#trip = null
     return this.status()
   }
 }

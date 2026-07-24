@@ -45,13 +45,44 @@ return HTTP 429:
 
 The rolling counter uses conservative one-second buckets, bounding memory to
 roughly one sample per second even for single-row hot loops. The trip emits one
-structured `orez_do_write_budget_tripped` line. Further
-rejected requests do not log. Only the sticky trip timestamp is persisted in
-DO storage; the hot-path rolling counter is in the TypeScript worker layer.
-This deliberately avoids updating a meter table for every application write,
-which would add billed writes and amplify an incident. A busy runaway keeps the
-isolate resident, while persisted sticky state prevents a quiet/eviction cycle
-from reopening it.
+structured `orez_do_write_budget_tripped` line. Further rejected requests do not
+log. Only the sticky trip is persisted in DO storage; the hot-path rolling
+counter is in the TypeScript worker layer. This deliberately avoids updating a
+meter table for every application write, which would add billed writes and
+amplify an incident. A busy runaway keeps the isolate resident, while persisted
+sticky state prevents a quiet/eviction cycle from reopening it.
+
+### Persisting the trip (2026-07-24)
+
+The trip fires during cursor consumption, which is almost always inside
+`ctx.storage.transaction()`. A `put` in that scope is rolled back with the write
+(prod booted un-tripped this way on 2026-07-11), and code *after* the
+transaction does not reliably run either. Measured under real workerd: a budget
+tripped on the application SQL path resolved neither the transaction's success
+nor its failure path, so the DO persisted nothing and came back OPEN on the next
+eviction. Since the application SQL client is soot's real write path, the sticky
+circuit was not sticky where it mattered most, and only the HTTP `/exec`-style
+routes were covered.
+
+`persistWriteBudgetTrip` now runs at the moment the circuit fires — the one
+point every path passes through — and schedules the write with
+`ctx.blockConcurrencyWhile`, which the runtime defers until the in-flight
+storage work is done. That lands the put after the rollback instead of inside
+it. The 429 response sites only shape the response now; they no longer persist.
+
+The persisted value carries the trip's own count, budget, and window alongside
+its timestamp. The rolling window keeps decaying while the circuit stays sticky
+and a restored object starts with none of it, so a status read that consulted
+the live meter reported `0/300000` and erased how far over budget the namespace
+went. `status()` exposes `trippedWindowRows` and `trippedBudget`, and the 429
+body reports the trip-time count. A trip persisted in the older bare-timestamp
+format still restores, with its count reported as unrecorded rather than zero;
+those values disappear on the first reopen, which is the only way out anyway.
+
+`scripts/debug/measure-project-namespace-writes.ts --trip` in soot exercises all
+of this against a real Durable Object: trip, evict, confirm the count survived,
+confirm writes stay refused, confirm an unauthenticated reopen is still 403, and
+confirm the authorized reopen survives another eviction.
 
 Monitor and recovery routes (the outer worker forwards them to the singleton):
 

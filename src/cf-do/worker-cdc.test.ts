@@ -685,6 +685,229 @@ describe('ZeroDO implicit foreign-key side effects', () => {
       expect(sql.exec('SELECT * FROM child').toArray()).toEqual([{ parent_id: 1 }])
     }
   )
+
+  // Side-effect discovery follows ON DELETE actions only for a delete, so this
+  // is the control that the narrowing did not take the cascade snapshot away
+  // from the operation that actually fires it. The cascaded child rows carry no
+  // before-image of their own; only the table snapshot brings them back.
+  it.each(['rollback', 'recovery'] as const)(
+    'restores rows erased by ON DELETE CASCADE and ON DELETE SET NULL during %s',
+    async (mode) => {
+      const { sql, zero } = await createWorkerCore()
+      const { TX_MANIFEST_DDL, TX_MANIFEST_TABLE, recoverTxJournal, rollbackTxJournal } =
+        await import('./tx-journal.js')
+      sql.exec('PRAGMA foreign_keys = ON')
+      sql.exec('CREATE TABLE agent (id INTEGER PRIMARY KEY, claim INTEGER)')
+      sql.exec(
+        'CREATE TABLE agentEvent (' +
+          'id INTEGER PRIMARY KEY, ' +
+          'agent_id INTEGER REFERENCES agent(id) ON DELETE CASCADE, body TEXT)'
+      )
+      sql.exec(
+        'CREATE TABLE agentPin (' +
+          'id INTEGER PRIMARY KEY, ' +
+          'agent_id INTEGER REFERENCES agent(id) ON DELETE SET NULL, body TEXT)'
+      )
+      sql.exec('INSERT INTO agent VALUES (1, 100), (2, 200)')
+      sql.exec("INSERT INTO agentEvent VALUES (1, 1, 'a'), (2, 1, 'b'), (3, 2, 'other')")
+      sql.exec("INSERT INTO agentPin VALUES (1, 1, 'pinned'), (2, 2, 'other')")
+      zero.cdc.syncTables([{ physicalTableName: 'agent', tableName: 'public.agent' }])
+
+      const txID = `tx-delete-cascade-${mode}`
+      sql.exec(TX_MANIFEST_DDL)
+      sql.exec(
+        `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, ?, ?, ?)`,
+        txID,
+        'orez-embed',
+        'agent',
+        ''
+      )
+      zero.executeSQL(
+        'DELETE FROM agent WHERE id = 1 RETURNING *',
+        [],
+        {
+          physicalTableName: 'agent',
+          tableName: 'public.agent',
+          operation: 'DELETE',
+          rowColumns: ['id', 'claim'],
+        },
+        txID
+      )
+      expect(sql.exec('SELECT id FROM agent ORDER BY id').toArray()).toEqual([{ id: 2 }])
+      expect(sql.exec('SELECT id FROM agentEvent ORDER BY id').toArray()).toEqual([
+        { id: 3 },
+      ])
+      expect(sql.exec('SELECT id, agent_id FROM agentPin ORDER BY id').toArray()).toEqual(
+        [
+          { id: 1, agent_id: null },
+          { id: 2, agent_id: 2 },
+        ]
+      )
+
+      await zero.atomically(() => {
+        const beforeRollback = (id: string) => zero.rollbackPendingTrackedChanges(id)
+        if (mode === 'rollback') {
+          beforeRollback(txID)
+          rollbackTxJournal(zero.sql, txID)
+        } else {
+          expect(recoverTxJournal(zero.sql, 'orez-embed', beforeRollback)).toEqual([txID])
+        }
+        zero.deletePendingTrackedChanges(txID)
+      })
+
+      expect(sql.exec('SELECT * FROM agent ORDER BY id').toArray()).toEqual([
+        { id: 1, claim: 100 },
+        { id: 2, claim: 200 },
+      ])
+      expect(sql.exec('SELECT * FROM agentEvent ORDER BY id').toArray()).toEqual([
+        { id: 1, agent_id: 1, body: 'a' },
+        { id: 2, agent_id: 1, body: 'b' },
+        { id: 3, agent_id: 2, body: 'other' },
+      ])
+      expect(sql.exec('SELECT * FROM agentPin ORDER BY id').toArray()).toEqual([
+        { id: 1, agent_id: 1, body: 'pinned' },
+        { id: 2, agent_id: 2, body: 'other' },
+      ])
+    }
+  )
+
+  // The heartbeat shape that tripped soot's write budget: renewing one column
+  // on the parent must not copy the child table it can only cascade into on a
+  // delete, and the parent's own row still has to roll back.
+  it('renews a parent column without snapshotting its ON DELETE CASCADE child', async () => {
+    const { sql, zero } = await createWorkerCore()
+    const { TX_MANIFEST_DDL, TX_MANIFEST_TABLE, rollbackTxJournal } = await import(
+      './tx-journal.js'
+    )
+    sql.exec('PRAGMA foreign_keys = ON')
+    sql.exec('CREATE TABLE agent (id INTEGER PRIMARY KEY, claim INTEGER)')
+    sql.exec(
+      'CREATE TABLE agentEvent (' +
+        'id INTEGER PRIMARY KEY, ' +
+        'agent_id INTEGER REFERENCES agent(id) ON DELETE CASCADE, body TEXT)'
+    )
+    sql.exec('INSERT INTO agent VALUES (1, 100)')
+    for (let id = 1; id <= 50; id++) {
+      sql.exec('INSERT INTO agentEvent VALUES (?, 1, ?)', id, `event-${id}`)
+    }
+    zero.cdc.syncTables([{ physicalTableName: 'agent', tableName: 'public.agent' }])
+
+    const txID = 'tx-claim-renewal'
+    sql.exec(TX_MANIFEST_DDL)
+    sql.exec(
+      `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, ?, ?, ?)`,
+      txID,
+      'orez-embed',
+      'agent',
+      ''
+    )
+    zero.executeSQL(
+      'UPDATE agent SET claim = 999 WHERE id = 1 RETURNING *',
+      [],
+      {
+        physicalTableName: 'agent',
+        tableName: 'public.agent',
+        operation: 'UPDATE',
+        rowColumns: ['id', 'claim'],
+      },
+      txID
+    )
+
+    const snapshots = sql
+      .exec(
+        `SELECT original, snapshot FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ?`,
+        txID
+      )
+      .toArray()
+    expect(snapshots.map((row) => String(row.original))).toEqual(['agent'])
+    expect(String(snapshots[0].snapshot)).toBe('')
+    expect(
+      sql
+        .exec("SELECT name FROM sqlite_master WHERE name GLOB '_orez_tx_undo_*'")
+        .toArray()
+    ).toEqual([])
+
+    // The parent row rolls back from its own before-image instead.
+    expect(
+      sql
+        .exec(
+          'SELECT undoable FROM _zero_pending_changes WHERE transaction_id = ?',
+          txID
+        )
+        .toArray()
+    ).toEqual([{ undoable: 1 }])
+    await zero.atomically(() => {
+      zero.rollbackPendingTrackedChanges(txID)
+      rollbackTxJournal(zero.sql, txID)
+      zero.deletePendingTrackedChanges(txID)
+    })
+    expect(sql.exec('SELECT * FROM agent').toArray()).toEqual([{ id: 1, claim: 100 }])
+    expect(sql.exec('SELECT count(*) AS c FROM agentEvent').one()).toEqual({ c: 50 })
+  })
+})
+
+describe('ZeroDO write budget stickiness', () => {
+  // The circuit is only sticky if the trip reaches durable storage. It fires
+  // during cursor consumption inside ctx.storage.transaction(), so a put made
+  // in that scope is rolled back with the write. The HTTP handlers persist it
+  // from their 429 sites, but the application SQL RPC surface has no response
+  // to hang that on and it never crossed one — so a namespace that tripped on
+  // soot's real write path came back OPEN on the next eviction, and the
+  // 300,000-row circuit silently stopped being a circuit.
+  function trippableWorker(core: { zero: any }) {
+    const puts: Array<{ key: string; value: unknown }> = []
+    const deferred: Array<() => Promise<void>> = []
+    core.zero.ctx.storage.put = async (key: string, value: unknown) => {
+      puts.push({ key, value })
+    }
+    // Stand in for workerd's scheduling: hold the callback so the test can
+    // prove the put is NOT issued inside the transaction that is aborting.
+    core.zero.ctx.blockConcurrencyWhile = (work: () => Promise<void>) => {
+      deferred.push(work)
+      return Promise.resolve()
+    }
+    return { puts, deferred }
+  }
+
+  it('defers the sticky trip out of the aborting transaction and keeps its count', async () => {
+    const core = await createWorkerCore()
+    const { RollingRowWriteBudget, WriteBudgetExceededError } = await import(
+      '../do-sql-tracking.js'
+    )
+    const { puts, deferred } = trippableWorker(core)
+    core.zero.writeBudget = new RollingRowWriteBudget({
+      budgetRows: 3,
+      windowMs: 300_000,
+      now: () => 1_000,
+    })
+
+    expect(() => core.zero.recordWriteBudgetRows(9)).toThrow(WriteBudgetExceededError)
+    // Nothing yet: a put issued here would be rolled back with the write.
+    expect(puts).toEqual([])
+    expect(deferred).toHaveLength(1)
+
+    await deferred[0]!()
+    expect(puts).toEqual([
+      {
+        key: '_orez_write_budget_tripped_at',
+        value: { at: 1_000, windowRows: 9, budget: 3, windowMs: 300_000 },
+      },
+    ])
+  })
+
+  it('persists nothing while the circuit is open', async () => {
+    const core = await createWorkerCore()
+    const { RollingRowWriteBudget } = await import('../do-sql-tracking.js')
+    const { puts, deferred } = trippableWorker(core)
+    core.zero.writeBudget = new RollingRowWriteBudget({
+      budgetRows: 100,
+      windowMs: 300_000,
+      now: () => 1_000,
+    })
+    core.zero.recordWriteBudgetRows(9)
+    expect(deferred).toEqual([])
+    expect(puts).toEqual([])
+  })
 })
 
 describe('ZeroDO snapshot feed timestamp fidelity', () => {

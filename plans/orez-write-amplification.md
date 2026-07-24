@@ -73,6 +73,52 @@ prune limit of 25 accounts would project to about 145,000 rows, below half of a
 300,000-row window. Start at 25, confirm the production per-account distribution
 from the exact meter, then raise it further if the measured tail permits.
 
+## Operation-aware side-effect discovery (2026-07-24)
+
+A second amplification with the same shape, found in soot's factory heartbeat.
+
+`snapshotSideEffectWriteTables` copies every table SQLite can write implicitly
+for a tracked statement, because those rows carry no before-image of their own.
+It discovered them from the source *table* alone: any foreign key with a
+non-restricting `ON UPDATE` **or** `ON DELETE` action produced an edge, and any
+trigger on a reachable table produced an edge regardless of its event.
+
+`agentEvent` references `sootAgent` `ON DELETE CASCADE`. Soot renews
+`sootAgent.runtimeClaimExpiresAt` every five seconds with a 20-second TTL, and
+an UPDATE cannot fire an `ON DELETE` action — but every heartbeat still copied
+the entire `agentEvent` table. The cost of one renewal grew 1:1 with retained
+events until heartbeats alone consumed the 300,000-row budget. `agentEvent` also
+cascades from `project` and `user`, so ordinary lifecycle updates to either paid
+the same copy.
+
+Reachability is now tracked per `(table, operation)`:
+
+- `ON DELETE CASCADE` reaches the child as a DELETE, `ON DELETE SET NULL` /
+  `SET DEFAULT` as an UPDATE, and only when the parent is deleted.
+- `ON UPDATE CASCADE` / `SET NULL` / `SET DEFAULT` reaches the child as an
+  UPDATE, and only when the parent is updated. Which columns the statement
+  touched is not known at this layer, so any parent update follows the edge.
+- An INSERT fires no referential action.
+- An UPSERT resolves to an insert or an update and only SQLite knows which, so
+  it seeds both.
+- A trigger fires only for its own event, parsed from the `CREATE TRIGGER`
+  header. Its body targets stay conservative: reading which operation the body
+  performs would have to model `REPLACE` conflict resolution deleting rows, so
+  every operation on the target is assumed. Only whether the trigger fires at
+  all is decided precisely. An unreadable header keeps the existing all-table
+  fallback.
+
+Measured against soot's real application schema through the real application SQL
+path, one claim renewal (`scripts/debug/measure-project-namespace-writes.ts`):
+
+| retained `agentEvent` rows | before | after |
+| -------------------------- | -----: | ----: |
+| 0                          |     42 |    22 |
+| 1,000                      |  1,042 |    22 |
+| 5,000                      |      — |    22 |
+
+The cost is now flat in retained events instead of growing 1:1.
+
 ## Validation
 
 - The harness verifies three one-row updates in a storage transaction each

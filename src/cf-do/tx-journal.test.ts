@@ -35,6 +35,7 @@ import {
   snapshotSideEffectWriteTables,
   snapshotTxSchema,
   upgradeToTableSnapshot,
+  type TrackedOperation,
 } from './tx-journal.js'
 
 import type { DurableSqlStorage } from './watermark.js'
@@ -117,7 +118,9 @@ describe('tx-journal core', () => {
       },
     }
 
-    expect(snapshotSideEffectWriteTables(guarded, 'tx1', 'usageState')).toBe(false)
+    expect(snapshotSideEffectWriteTables(guarded, 'tx1', 'usageState', 'UPDATE')).toBe(
+      false
+    )
     expect(hiddenIntrospection).toBe(0)
   })
 
@@ -156,18 +159,19 @@ describe('tx-journal core', () => {
       'item'
     )
 
-    expect(snapshotSideEffectWriteTables(storage.journal, 'tx-targeted', 'ITEM')).toBe(
-      true
-    )
+    expect(
+      snapshotSideEffectWriteTables(storage.journal, 'tx-targeted', 'ITEM', 'INSERT')
+    ).toBe(true)
     const manifest = storage
       .exec(
         `SELECT original, snapshot FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ? ORDER BY original`,
         'tx-targeted'
       )
       .toArray()
+    // `child` references item ON DELETE CASCADE only, so inserting into item
+    // cannot touch it.
     expect(manifest.map((row) => String(row.original))).toEqual([
       'audit',
-      'child',
       'item',
       'stats',
     ])
@@ -176,6 +180,80 @@ describe('tx-journal core', () => {
     )
     expect(storage.tables()).toContain('unrelated')
     expect(manifest.some((row) => String(row.original) === 'unrelated')).toBe(false)
+  })
+
+  it('follows referential actions only for the operation that fires them', () => {
+    const storage = createSqliteStorage()
+    storage.exec('PRAGMA foreign_keys = ON')
+    storage.exec('CREATE TABLE sootAgent (id TEXT PRIMARY KEY, claim INTEGER)')
+    storage.exec(
+      'CREATE TABLE agentEvent (id TEXT PRIMARY KEY, ' +
+        'agentId TEXT REFERENCES sootAgent(id) ON DELETE CASCADE)'
+    )
+    storage.exec(
+      'CREATE TABLE agentLease (id TEXT PRIMARY KEY, ' +
+        'agentId TEXT REFERENCES sootAgent(id) ON UPDATE CASCADE)'
+    )
+    storage.exec(
+      'CREATE TABLE agentPin (id TEXT PRIMARY KEY, ' +
+        'agentId TEXT REFERENCES sootAgent(id) ON DELETE SET NULL)'
+    )
+    storage.exec(TX_MANIFEST_DDL)
+
+    const snapshotted = (txID: string, operation: TrackedOperation) => {
+      snapshotSideEffectWriteTables(storage.journal, txID, 'sootAgent', operation)
+      return storage
+        .exec(
+          `SELECT original FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ? ORDER BY original`,
+          txID
+        )
+        .toArray()
+        .map((row) => String(row.original))
+    }
+
+    // The soot heartbeat: renewing one claim column must not copy agentEvent.
+    expect(snapshotted('tx-update', 'UPDATE')).toEqual(['agentLease', 'sootAgent'])
+    expect(snapshotted('tx-insert', 'INSERT')).toEqual([])
+    expect(snapshotted('tx-delete', 'DELETE')).toEqual([
+      'agentEvent',
+      'agentPin',
+      'sootAgent',
+    ])
+    // An upsert resolves to an insert or an update, so it covers both.
+    expect(snapshotted('tx-upsert', 'UPSERT')).toEqual(['agentLease', 'sootAgent'])
+  })
+
+  it('fires a trigger only for its own event', () => {
+    const storage = createSqliteStorage()
+    storage.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, body TEXT)')
+    storage.exec('CREATE TABLE deleted_audit (id INTEGER PRIMARY KEY)')
+    storage.exec('CREATE TABLE updated_audit (id INTEGER PRIMARY KEY)')
+    storage.exec(
+      `CREATE TRIGGER item_deleted AFTER DELETE ON item BEGIN
+         INSERT INTO deleted_audit (id) VALUES (OLD.id);
+       END`
+    )
+    storage.exec(
+      `CREATE TRIGGER item_updated AFTER UPDATE OF body ON item BEGIN
+         INSERT INTO updated_audit (id) VALUES (NEW.id);
+       END`
+    )
+    storage.exec(TX_MANIFEST_DDL)
+
+    const snapshotted = (txID: string, operation: TrackedOperation) => {
+      snapshotSideEffectWriteTables(storage.journal, txID, 'item', operation)
+      return storage
+        .exec(
+          `SELECT original FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ? ORDER BY original`,
+          txID
+        )
+        .toArray()
+        .map((row) => String(row.original))
+    }
+
+    expect(snapshotted('tx-update', 'UPDATE')).toEqual(['item', 'updated_audit'])
+    expect(snapshotted('tx-delete', 'DELETE')).toEqual(['deleted_audit', 'item'])
+    expect(snapshotted('tx-insert', 'INSERT')).toEqual([])
   })
 
   it('falls back to all tables for a trigger target it cannot parse', () => {
@@ -196,9 +274,9 @@ describe('tx-journal core', () => {
       'item'
     )
 
-    expect(snapshotSideEffectWriteTables(storage.journal, 'tx-fallback', 'item')).toBe(
-      true
-    )
+    expect(
+      snapshotSideEffectWriteTables(storage.journal, 'tx-fallback', 'item', 'INSERT')
+    ).toBe(true)
     expect(
       storage
         .exec(
@@ -228,7 +306,12 @@ describe('tx-journal core', () => {
     )
 
     expect(
-      snapshotSideEffectWriteTables(storage.journal, 'tx-missing-target', 'item')
+      snapshotSideEffectWriteTables(
+        storage.journal,
+        'tx-missing-target',
+        'item',
+        'INSERT'
+      )
     ).toBe(true)
     expect(
       storage

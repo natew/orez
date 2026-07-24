@@ -145,7 +145,8 @@ export function createLocalSqlBackend(storage: unknown): LocalSqlBackend {
       snapshotsOwnStatement = snapshotSideEffectWriteTables(
         journalSql,
         transactionID,
-        track.physicalTableName!
+        track.physicalTableName!,
+        track.operation
       )
     }
     const suspended = cdc.beginSchemaChange(statement.sql)

@@ -53,18 +53,53 @@ describe('RollingRowWriteBudget', () => {
     meter.record(10)
     expect(() => meter.record(1)).toThrow(WriteBudgetExceededError)
     now = 2_000
-    expect(() => meter.record(1)).toThrow(WriteBudgetExceededError)
+    // The live window has fully decayed by now, so a sticky rejection has to
+    // report the trip's own count rather than re-reading the rolling meter.
+    expect(() => meter.record(1)).toThrow('row write budget exceeded: 11/10 rows')
     expect(meter.status()).toMatchObject({
       windowRows: 0,
       budget: 10,
       tripped: true,
       trippedAt: 10,
+      trippedWindowRows: 11,
+      trippedBudget: 10,
     })
-    expect(meter.reopen()).toMatchObject({ windowRows: 0, tripped: false })
+    expect(meter.reopen()).toMatchObject({
+      windowRows: 0,
+      tripped: false,
+      trippedWindowRows: null,
+    })
     expect(() => meter.record(1)).not.toThrow()
   })
 
-  it('restores a persisted sticky trip without synthesizing write rows', () => {
+  it('round-trips a persisted trip so a restored object still reports its count', () => {
+    let now = 10
+    const tripped = new RollingRowWriteBudget({
+      budgetRows: 10,
+      windowMs: 1_000,
+      now: () => now,
+    })
+    tripped.record(10)
+    expect(() => tripped.record(5)).toThrow(WriteBudgetExceededError)
+    const persisted = JSON.parse(JSON.stringify(tripped.trip()))
+    expect(persisted).toEqual({ at: 10, windowRows: 15, budget: 10, windowMs: 1_000 })
+
+    const restored = new RollingRowWriteBudget({
+      budgetRows: 10,
+      windowMs: 1_000,
+      now: () => 900_000,
+    })
+    restored.restoreTrip(persisted)
+    expect(restored.status()).toMatchObject({
+      windowRows: 0,
+      tripped: true,
+      trippedAt: 10,
+      trippedWindowRows: 15,
+    })
+    expect(() => restored.assertOpen()).toThrow('row write budget exceeded: 15/10 rows')
+  })
+
+  it('restores a legacy bare-timestamp trip as unrecorded rather than zero rows', () => {
     const meter = new RollingRowWriteBudget({
       budgetRows: 10,
       windowMs: 1_000,
@@ -75,7 +110,12 @@ describe('RollingRowWriteBudget', () => {
       windowRows: 0,
       tripped: true,
       trippedAt: 4_000,
+      trippedWindowRows: null,
+      trippedBudget: 10,
     })
+    expect(() => meter.assertOpen()).toThrow(
+      'row write budget exceeded: unrecorded/10 rows'
+    )
   })
 })
 

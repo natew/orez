@@ -13,6 +13,7 @@ import {
   trackSqlCursorRowsWritten,
   trackedChangeRow,
   WriteBudgetExceededError,
+  type RowWriteBudgetTrip,
 } from '../do-sql-tracking.js'
 import {
   TransactionalCdc,
@@ -363,21 +364,53 @@ export class ZeroDO extends DurableObject {
             trippedAt: status.trippedAt,
           })
         )
+        this.persistWriteBudgetTrip()
       }
       throw error
     }
   }
 
-  // persisting the sticky trip from inside the throwing request is unreliable:
-  // the trip fires during cursor consumption, often inside
-  // ctx.storage.transaction(), and the abort rolls back a put made in that
-  // scope (prod booted un-tripped this way on 2026-07-11). every 429 response
-  // site awaits this instead, which runs after the aborted transaction and
-  // re-asserts the flag on each subsequent 429.
-  private async writeBudgetErrorResponse(error: unknown): Promise<Response | null> {
+  /**
+   * Make the trip sticky, from outside the transaction that is aborting.
+   *
+   * The trip fires during cursor consumption, which is almost always inside
+   * ctx.storage.transaction(). A put in that scope is rolled back with the
+   * write (prod booted un-tripped this way on 2026-07-11), and code after the
+   * transaction does not reliably get to run either: measured under workerd,
+   * a write budget tripped on the application SQL path resolved neither the
+   * transaction's success nor its failure path, so a namespace tripped by
+   * soot's real write path persisted nothing and came back OPEN on the next
+   * eviction. blockConcurrencyWhile is the seam that survives both: the
+   * runtime defers this until the in-flight storage work is done, so it lands
+   * after the rollback rather than inside it.
+   *
+   * The count rides along with the timestamp. The rolling window keeps decaying
+   * while the circuit stays sticky and a restored object starts with none of
+   * it, so a status read that consults the live meter reports 0/budget and
+   * erases how far over the namespace actually went.
+   */
+  private persistWriteBudgetTrip(): void {
+    const trip = this.writeBudget.trip()
+    if (!trip) return
+    void this.ctx
+      .blockConcurrencyWhile(async () => {
+        await this.ctx.storage.put(WRITE_BUDGET_TRIPPED_KEY, trip)
+      })
+      .catch((error: unknown) => {
+        console.error(
+          JSON.stringify({
+            event: 'orez_do_write_budget_persist_failed',
+            message: error instanceof Error ? error.message : String(error),
+          })
+        )
+      })
+  }
+
+  // The trip itself is persisted by persistWriteBudgetTrip at the moment it
+  // fires, which is the one place every path passes through, so this only has
+  // to shape the response.
+  private writeBudgetErrorResponse(error: unknown): Response | null {
     if (!(error instanceof WriteBudgetExceededError)) return null
-    const trippedAt = this.writeBudget.status().trippedAt
-    await this.ctx.storage.put(WRITE_BUDGET_TRIPPED_KEY, trippedAt ?? Date.now())
     return Response.json(error.toJSON(), { status: 429 })
   }
 
@@ -426,8 +459,10 @@ export class ZeroDO extends DurableObject {
     this.watermarks = new DurableWatermarkState(this.sql)
     ctx.blockConcurrencyWhile(async () => {
       if (!this.writeBudgetDisabled) {
-        const trippedAt = await ctx.storage.get<number>(WRITE_BUDGET_TRIPPED_KEY)
-        if (trippedAt) this.writeBudget.restoreTrip(trippedAt)
+        const persisted = await ctx.storage.get<number | RowWriteBudgetTrip>(
+          WRITE_BUDGET_TRIPPED_KEY
+        )
+        if (persisted) this.writeBudget.restoreTrip(persisted)
       }
       const recovered = await this.atomically(() => {
         const transactionIDs = recoverTxJournal(
@@ -731,7 +766,7 @@ export class ZeroDO extends DurableObject {
         })
       return Response.json({ mutations: mutationResults })
     } catch (err: any) {
-      const budgetResponse = await this.writeBudgetErrorResponse(err)
+      const budgetResponse = this.writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
@@ -781,7 +816,7 @@ export class ZeroDO extends DurableObject {
         measurements ? { ...result, writeMeasurements: measurements } : result
       )
     } catch (err: any) {
-      const budgetResponse = await this.writeBudgetErrorResponse(err)
+      const budgetResponse = this.writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       const suffix = sql ? ` while executing: ${sqlErrorSnippet(sql, err.message)}` : ''
       console.error(`[exec-500] ${err.message} :: SQL=${sql.slice(0, 800)}`)
@@ -852,7 +887,7 @@ export class ZeroDO extends DurableObject {
         ...(measurements ? { writeMeasurements: measurements } : null),
       })
     } catch (err: any) {
-      const budgetResponse = await this.writeBudgetErrorResponse(err)
+      const budgetResponse = this.writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     } finally {
@@ -914,7 +949,7 @@ export class ZeroDO extends DurableObject {
         ...(measurements ? { writeMeasurements: measurements } : null),
       })
     } catch (err: any) {
-      const budgetResponse = await this.writeBudgetErrorResponse(err)
+      const budgetResponse = this.writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     } finally {
@@ -940,7 +975,7 @@ export class ZeroDO extends DurableObject {
       )
       return Response.json({ ok: true })
     } catch (err: any) {
-      const budgetResponse = await this.writeBudgetErrorResponse(err)
+      const budgetResponse = this.writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
@@ -964,7 +999,7 @@ export class ZeroDO extends DurableObject {
         ...(measurements ? { writeMeasurements: measurements } : null),
       })
     } catch (err: any) {
-      const budgetResponse = await this.writeBudgetErrorResponse(err)
+      const budgetResponse = this.writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     } finally {
@@ -991,7 +1026,7 @@ export class ZeroDO extends DurableObject {
       this.invalidateSchemaCaches()
       return Response.json({ ok: true, transactionIDs })
     } catch (err: any) {
-      const budgetResponse = await this.writeBudgetErrorResponse(err)
+      const budgetResponse = this.writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
@@ -1031,7 +1066,7 @@ export class ZeroDO extends DurableObject {
         changes: this.readChangesSince(watermark, changeLimit),
       })
     } catch (err: any) {
-      const budgetResponse = await this.writeBudgetErrorResponse(err)
+      const budgetResponse = this.writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
@@ -1168,7 +1203,7 @@ export class ZeroDO extends DurableObject {
         return Response.json({ watermark: this.watermark(), tables })
       })
     } catch (err: any) {
-      const budgetResponse = await this.writeBudgetErrorResponse(err)
+      const budgetResponse = this.writeBudgetErrorResponse(err)
       if (budgetResponse) return budgetResponse
       return Response.json({ error: err.message }, { status: 500 })
     }
@@ -1604,7 +1639,8 @@ export class ZeroDO extends DurableObject {
       snapshotsOwnStatement = snapshotSideEffectWriteTables(
         this.sql,
         trackedTransactionID,
-        physicalTableName
+        physicalTableName,
+        track.operation
       )
     }
 
