@@ -174,7 +174,7 @@ test('remint with no provider mounted returns false without burning the guard bu
   expect(result).toBe(true)
 })
 
-test('two consecutive server acknowledgement timeouts enter normal recovery', async () => {
+test('two consecutive server acknowledgement timeouts reconnect without reload or delete', async () => {
   vi.useFakeTimers()
   try {
     const isolated = createZeroClient({
@@ -183,12 +183,11 @@ test('two consecutive server acknowledgement timeouts enter normal recovery', as
       groupedQueries: {},
       instanceName: 'ack-timeout-recovery-test',
     })
-    let scheduled:
-      | {
-          reasonKey: string
-          performReload: () => Promise<void>
-        }
-      | undefined
+    const scheduleReload = vi.fn()
+    const events: Array<{ type: string; status?: string; reasonKey?: string }> = []
+    const off = isolated.zeroEvents.listen((event) => {
+      if (event) events.push(event)
+    })
 
     root = createRoot(container)
     await act(async () => {
@@ -196,9 +195,7 @@ test('two consecutive server acknowledgement timeouts enter normal recovery', as
         <isolated.ProvideZero
           cacheURL="http://127.0.0.1:7777/zero"
           userID="ack-timeout"
-          scheduleReload={(context) => {
-            scheduled = context
-          }}
+          scheduleReload={scheduleReload}
         >
           <span>ok</span>
         </isolated.ProvideZero>
@@ -223,9 +220,21 @@ test('two consecutive server acknowledgement timeouts enter normal recovery', as
     }
 
     await timeout('first write')
-    expect(scheduled).toBeUndefined()
+    expect(events).toEqual([])
     await timeout('second write')
-    expect(scheduled).toMatchObject({ reasonKey: 'server-ack-timeout' })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(events).toContainEqual({
+      type: 'reconnect',
+      status: 'trying',
+      reasonKey: 'server-ack-timeout',
+      reason:
+        'second write server acknowledgement timed out 2 consecutive times (10ms each)',
+    })
+    expect(scheduleReload).not.toHaveBeenCalled()
+    expect(fakeZero.instances[0]?.delete).not.toHaveBeenCalled()
+    off()
   } finally {
     vi.useRealTimers()
   }

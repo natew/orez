@@ -41,6 +41,7 @@ type CombinableZeroClient = {
   preload: (...args: any[]) => any
   getQuery: (...args: any[]) => any
   zeroEvents: ZeroEventsEmitter
+  reloadPage: () => boolean
   ControlQueries: (props: ControlQueriesProps) => ReactNode
 }
 
@@ -73,6 +74,7 @@ export type CombinedZeroClients<Clients extends readonly CombinableZeroClient[]>
   getQuery: UnionToIntersection<Clients[number]['getQuery']>
   run: typeof run
   zeroEvents: ZeroEventsEmitter
+  reloadPage: () => boolean
   ControlQueries: (props: ControlQueriesProps) => ReactNode
 }
 
@@ -163,8 +165,34 @@ export function combineZeroClients<
     `zero:combined(${clients.map((client) => client.instanceName).join('+')})`,
     null
   )
+  const reconnecting = new Map<
+    string,
+    Extract<ZeroEvent, { type: 'reconnect'; status: 'trying' | 'waiting' }>
+  >()
   for (const client of clients) {
-    client.zeroEvents.listen((event) => zeroEvents.emit(event))
+    client.zeroEvents.listen((event) => {
+      if (event?.type !== 'reconnect') {
+        zeroEvents.emit(event)
+        return
+      }
+      if (event.status === 'connected') {
+        reconnecting.delete(client.instanceName)
+        if (reconnecting.size === 0) {
+          zeroEvents.emit(event)
+          return
+        }
+        const pending = [...reconnecting.values()]
+        zeroEvents.emit(
+          pending.find((candidate) => candidate.status === 'waiting') ?? pending[0]!
+        )
+        return
+      }
+      reconnecting.set(client.instanceName, event)
+      const pending = [...reconnecting.values()]
+      zeroEvents.emit(
+        pending.find((candidate) => candidate.status === 'waiting') ?? event
+      )
+    })
   }
 
   const ControlQueries = ({ children, ...props }: ControlQueriesProps) =>
@@ -183,6 +211,7 @@ export function combineZeroClients<
     getQuery,
     run,
     zeroEvents,
+    reloadPage: primary.reloadPage,
     ControlQueries,
   }
 

@@ -61,6 +61,7 @@ import type {
   GetZeroMutators,
   ZeroEvent,
   ZeroEventsEmitter,
+  ZeroReconnectReasonKey,
 } from './types'
 import type {
   AnyQueryRegistry,
@@ -100,8 +101,8 @@ export type CreateZeroClientOptions<
   models: Models
   groupedQueries: GroupedQueries
   permissionStrategy?: PermissionStrategy
-  // repeated server acknowledgement timeouts are a desync signal. one timeout
-  // remains a normal slow-server failure; recovery begins at this threshold.
+  // repeated server acknowledgement timeouts reconnect with the existing local
+  // state. one timeout remains a normal slow-server failure.
   serverAckTimeoutRecoveryThreshold?: number
   // names this client instance so multiple instances can coexist on one page.
   // each query/mutator namespace is claimed by exactly one instance, and the
@@ -371,11 +372,6 @@ export function createZeroClientInternal<
     null
   )
 
-  let recoverFromAckTimeout: (input: {
-    label: string
-    timeoutMs: number
-    consecutiveTimeouts: number
-  }) => void = () => {}
   const ackTimeoutRecoveryThreshold =
     Number.isFinite(serverAckTimeoutRecoveryThreshold) &&
     serverAckTimeoutRecoveryThreshold >= 2
@@ -383,7 +379,12 @@ export function createZeroClientInternal<
       : 2
   const mutationLifecycle = createMutationLifecycle({
     ackTimeoutRecoveryThreshold,
-    recoverFromAckTimeout: (input) => recoverFromAckTimeout(input),
+    recoverFromAckTimeout: (input) => {
+      void reconnectInPlace(
+        'server-ack-timeout',
+        `${input.label} server acknowledgement timed out ${input.consecutiveTimeouts} consecutive times (${input.timeoutMs}ms each)`
+      )
+    },
   })
 
   const zeroInstanceVersion = createDirectUseQuery
@@ -563,6 +564,38 @@ export function createZeroClientInternal<
     const bump = remintControl.bump
     if (!bump) return false
     bump()
+    return true
+  }
+
+  function emitReconnectStatus(
+    event: Extract<ZeroEvent, { type: 'reconnect' }>
+  ): void {
+    const current = zeroEvents.value
+    if (
+      current?.type === 'reconnect' &&
+      current.status === event.status &&
+      ('reasonKey' in current ? current.reasonKey : undefined) ===
+        ('reasonKey' in event ? event.reasonKey : undefined) &&
+      ('reason' in current ? current.reason : undefined) ===
+        ('reason' in event ? event.reason : undefined)
+    ) {
+      return
+    }
+    zeroEvents.emit(event)
+  }
+
+  async function reconnectInPlace(
+    reasonKey: ZeroReconnectReasonKey,
+    reason: string
+  ): Promise<boolean> {
+    emitReconnectStatus({ type: 'reconnect', status: 'trying', reasonKey, reason })
+    return remint({ dropLocalState: false })
+  }
+
+  function reloadPage(): boolean {
+    const location = globalThis.location
+    if (!location?.reload) return false
+    location.reload()
     return true
   }
 
@@ -846,7 +879,6 @@ export function createZeroClientInternal<
           onRecovery: () => mutationLifecycle.fence(),
         }
         const recovery = makeZeroRecovery(recoveryDeps)
-        recoverFromAckTimeout = recovery.onServerAckTimeout
         const createdInstance = new ZeroClient<Schema, ZeroMutators>({
           kvStore: 'mem',
           ...options,
@@ -976,9 +1008,26 @@ export function createZeroClientInternal<
       const zeroInstance = useZero<Schema, ZeroMutators>()
       const state = useConnectionState()
       const prevState = useRef(state.name)
-      // one reconnect per distinct stale-poke reason / one refresh per needs-auth
-      // transition, so a stuck error state doesn't retry-storm.
-      const staleReconnectRef = useRef<string | null>(null)
+      const hasConnectedRef = useRef(false)
+      const currentReconnect =
+        zeroEvents.value?.type === 'reconnect' &&
+        zeroEvents.value.status !== 'connected'
+          ? zeroEvents.value
+          : null
+      const reconnectRef = useRef<{
+        reasonKey: ZeroReconnectReasonKey
+        reason: string
+      } | null>(
+        currentReconnect
+          ? {
+              reasonKey: currentReconnect.reasonKey,
+              reason: currentReconnect.reason,
+            }
+          : null
+      )
+      // one reconnect per distinct recoverable error / one refresh per
+      // needs-auth transition, so a stuck state doesn't retry-storm.
+      const recoverableErrorRef = useRef<string | null>(null)
       const needsAuthRef = useRef(false)
 
       useEffect(() => {
@@ -997,16 +1046,77 @@ export function createZeroClientInternal<
           else delete document.body.dataset.zeroConnected
         }
 
-        // stale-poke / stale-cookie: the local view is behind the server
-        // snapshot; a plain reconnect resolves it. not fatal — don't emit error.
-        if (name === 'error' && isRecoverableZeroStalePokeMessage(reason)) {
-          if (staleReconnectRef.current !== reason) {
-            staleReconnectRef.current = reason
+        if (name === 'connected') {
+          hasConnectedRef.current = true
+          recoverableErrorRef.current = null
+          if (reconnectRef.current) {
+            reconnectRef.current = null
+            emitReconnectStatus({ type: 'reconnect', status: 'connected' })
+          }
+        }
+
+        const reconnectReasonKey: ZeroReconnectReasonKey | undefined =
+          reason.includes('ServerOverloaded')
+            ? 'server-overloaded'
+            : reason.includes('Failed to fetch') ||
+                reason.includes('fetch failed') ||
+                reason.includes('NetworkError when attempting to fetch resource') ||
+                reason.includes('Network request failed') ||
+                reason.includes('Load failed')
+              ? 'transport'
+              : undefined
+
+        // stale-poke and paused transport errors both resume the existing
+        // client. ServerOverloaded remains in Zero's own retry/backoff loop.
+        if (
+          name === 'error' &&
+          (isRecoverableZeroStalePokeMessage(reason) || reconnectReasonKey)
+        ) {
+          if (recoverableErrorRef.current !== reason) {
+            recoverableErrorRef.current = reason
+            reconnectRef.current = {
+              reasonKey: reconnectReasonKey ?? 'transport',
+              reason,
+            }
+            emitReconnectStatus({
+              type: 'reconnect',
+              status: 'trying',
+              ...reconnectRef.current,
+            })
             void Promise.resolve(zeroInstance.connection?.connect?.()).catch(() => {})
           }
           return
         }
-        if (name !== 'error') staleReconnectRef.current = null
+        if (name !== 'error') recoverableErrorRef.current = null
+
+        if (
+          name === 'connecting' &&
+          (reconnectRef.current || hasConnectedRef.current || Boolean(reason))
+        ) {
+          reconnectRef.current = {
+            reasonKey:
+              reconnectReasonKey ?? reconnectRef.current?.reasonKey ?? 'transport',
+            reason: reason || reconnectRef.current?.reason || 'connection interrupted',
+          }
+          emitReconnectStatus({
+            type: 'reconnect',
+            status: reason ? 'waiting' : 'trying',
+            ...reconnectRef.current,
+          })
+        } else if (
+          name === 'disconnected' &&
+          (reconnectRef.current || hasConnectedRef.current)
+        ) {
+          reconnectRef.current = {
+            reasonKey: reconnectRef.current?.reasonKey ?? 'transport',
+            reason: reason || reconnectRef.current?.reason || 'connection interrupted',
+          }
+          emitReconnectStatus({
+            type: 'reconnect',
+            status: 'waiting',
+            ...reconnectRef.current,
+          })
+        }
 
         // needs-auth: the token expired and zero won't auto-resume unless the
         // auth string changes. refresh it and reconnect in place, once.
@@ -1092,6 +1202,7 @@ export function createZeroClientInternal<
   return {
     instanceName,
     zeroEvents,
+    reloadPage,
     ProvideZero,
     ControlQueries,
     useQuery,

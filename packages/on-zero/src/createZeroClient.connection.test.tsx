@@ -185,6 +185,72 @@ test('stale-poke error reconnects instead of surfacing a fatal error', async () 
   off()
 })
 
+test('transport error reconnects in place and publishes trying status', async () => {
+  const events: Array<{ type: string; status?: string; reasonKey?: string }> = []
+  const off = client.zeroEvents.listen((event) => {
+    if (event) events.push(event)
+  })
+  const instance = await mount({}, 'conn-transport')
+
+  await act(async () => {
+    instance.connection.state.set({
+      name: 'error',
+      reason: 'Unexpected internal error: Failed to fetch',
+    })
+    await Promise.resolve()
+  })
+
+  expect(instance.connection.connect).toHaveBeenCalledTimes(1)
+  expect(events).toContainEqual({
+    type: 'reconnect',
+    status: 'trying',
+    reasonKey: 'transport',
+    reason: 'Unexpected internal error: Failed to fetch',
+  })
+  expect(events.some((event) => event.type === 'error')).toBe(false)
+  await act(async () => {
+    instance.connection.state.set({ name: 'connected' })
+    await Promise.resolve()
+  })
+  expect(events).toContainEqual({ type: 'reconnect', status: 'connected' })
+  off()
+})
+
+test('server overload publishes waiting status while Zero owns retry backoff', async () => {
+  const events: Array<{ type: string; status?: string; reasonKey?: string }> = []
+  const off = client.zeroEvents.listen((event) => {
+    if (event) events.push(event)
+  })
+  const instance = await mount({}, 'conn-overload')
+
+  await act(async () => {
+    instance.connection.state.set({
+      name: 'connecting',
+      reason: 'ServerOverloaded: retry later',
+    })
+    await Promise.resolve()
+  })
+
+  expect(instance.connection.connect).not.toHaveBeenCalled()
+  expect(events).toContainEqual({
+    type: 'reconnect',
+    status: 'waiting',
+    reasonKey: 'server-overloaded',
+    reason: 'ServerOverloaded: retry later',
+  })
+  await act(async () => {
+    instance.connection.state.set({ name: 'connecting' })
+    await Promise.resolve()
+  })
+  expect(events).toContainEqual({
+    type: 'reconnect',
+    status: 'trying',
+    reasonKey: 'server-overloaded',
+    reason: 'ServerOverloaded: retry later',
+  })
+  off()
+})
+
 test('connectionDataset mirrors connection state onto the body dataset', async () => {
   const instance = await mount({ connectionDataset: true }, 'conn-dataset')
 

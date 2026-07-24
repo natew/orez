@@ -166,8 +166,15 @@ export type ZeroEvent =
       reasonKey: 'connection-error' | 'connection-needs-auth'
       message: string
     }
-  // recovery lifecycle: 'recovering' = dropping local state + reloading;
-  // 'fatal' = recovery already attempted (loop guard tripped), not reloading.
+  | {
+      type: 'reconnect'
+      status: 'trying' | 'waiting'
+      reasonKey: ZeroReconnectReasonKey
+      reason: string
+    }
+  | { type: 'reconnect'; status: 'connected' }
+  // destructive recovery lifecycle: 'recovering' = optionally dropping local
+  // state + reloading; 'fatal' = the reload loop guard tripped.
   | { type: 'recovering'; reasonKey: ZeroRecoveryReasonKey; reason: string }
   | { type: 'fatal'; reasonKey: ZeroRecoveryReasonKey; reason: string }
 
@@ -194,6 +201,10 @@ export type ZeroRecoveryReasonKey =
   | 'connection-cookie-invalid'
   | 'client-not-found'
   | 'connection-userid-mismatch'
+
+export type ZeroReconnectReasonKey =
+  | 'transport'
+  | 'server-overloaded'
   | 'server-ack-timeout'
 
 /**

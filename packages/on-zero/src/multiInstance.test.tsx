@@ -66,6 +66,7 @@ function fakeClient(name: string, namespaces: string[], zeroStub: unknown) {
     preload: vi.fn(() => `${name}-preload`),
     getQuery: vi.fn(() => `${name}-getQuery`),
     zeroEvents: createEmitter<ZeroEvent | null>(`zero:test-${name}`, null),
+    reloadPage: vi.fn(() => true),
     ControlQueries: ({ children }: { children: ReactNode }) => children,
   }
 }
@@ -283,6 +284,9 @@ describe('combineZeroClients facade', () => {
     expect(zero.userID).toBe('primary-user')
     // unclaimed namespaces fall back to the primary instance
     expect(zero.mutate.unknownNs).toBe(undefined)
+    expect(combined.reloadPage()).toBe(true)
+    expect(control.reloadPage).toHaveBeenCalledOnce()
+    expect(project.reloadPage).not.toHaveBeenCalled()
   })
 
   test('useQuery/preload/getQuery/usePermission dispatch by namespace', () => {
@@ -384,5 +388,50 @@ describe('combineZeroClients facade', () => {
     // the source emitters stay independent of each other
     expect(messageOf(a.zeroEvents.value)).toBe('from-a')
     expect(messageOf(b.zeroEvents.value)).toBe('from-b')
+  })
+
+  test('combined zeroEvents stays pending until every instance reconnects', () => {
+    const { client: a } = makeClient('reconnect-a', 'reconnectA')
+    const { client: b } = makeClient('reconnect-b', 'reconnectB')
+    const combined = combineZeroClients(a, b)
+    const seen: Array<ZeroEvent | null> = []
+    combined.zeroEvents.listen((event) => seen.push(event))
+
+    a.zeroEvents.emit({
+      type: 'reconnect',
+      status: 'waiting',
+      reasonKey: 'server-overloaded',
+      reason: 'busy',
+    })
+    b.zeroEvents.emit({
+      type: 'reconnect',
+      status: 'trying',
+      reasonKey: 'transport',
+      reason: 'fetch failed',
+    })
+    a.zeroEvents.emit({ type: 'reconnect', status: 'connected' })
+    b.zeroEvents.emit({ type: 'reconnect', status: 'connected' })
+
+    expect(seen).toEqual([
+      {
+        type: 'reconnect',
+        status: 'waiting',
+        reasonKey: 'server-overloaded',
+        reason: 'busy',
+      },
+      {
+        type: 'reconnect',
+        status: 'waiting',
+        reasonKey: 'server-overloaded',
+        reason: 'busy',
+      },
+      {
+        type: 'reconnect',
+        status: 'trying',
+        reasonKey: 'transport',
+        reason: 'fetch failed',
+      },
+      { type: 'reconnect', status: 'connected' },
+    ])
   })
 })

@@ -30,7 +30,6 @@ export type ZeroRecoveryLogClassification = {
     | 'VersionNotSupported'
     | 'SchemaVersionNotSupported'
     | 'client-state-not-found'
-    | 'server-ack-timeout'
   >
   message: string
   dropLocalState: boolean
@@ -277,18 +276,6 @@ export function makeZeroRecovery(deps: ZeroRecoveryDeps) {
       // local/server sync state is gone or rejected — the store is unusable, so
       // drop it and reload into a fresh client.
       recover(deps, 'client-state-not-found', 'client state not found', true)
-    },
-    onServerAckTimeout(input: {
-      label: string
-      timeoutMs: number
-      consecutiveTimeouts: number
-    }) {
-      recover(
-        deps,
-        'server-ack-timeout',
-        `${input.label} server acknowledgement timed out ${input.consecutiveTimeouts} consecutive times (${input.timeoutMs}ms each)`,
-        true
-      )
     },
   }
 }

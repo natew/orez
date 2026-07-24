@@ -846,8 +846,9 @@ drops the affected instance's local store and reloads the page ONCE. this covers
   `…LastMutationID`, `ClientNotFound`, `connection userID mismatch`. these
   surface only through the error log, so the log sink recovers on them too.
 
-two consecutive server acknowledgement timeouts also recover by default. one
-timeout remains a normal slow-server failure. configure the threshold with
+two consecutive server acknowledgement timeouts reconstruct the client in place
+without deleting local state or reloading the page. one timeout remains a normal
+slow-server failure. configure the threshold with
 `serverAckTimeoutRecoveryThreshold` on `createZeroClient`.
 
 ### the hooks (all optional props on `ProvideZero`)
@@ -899,6 +900,18 @@ timeout remains a normal slow-server failure. configure the threshold with
 `ZeroRecoveryReasonKey`; connection errors use `connection-error` or
 `connection-needs-auth`, so consumers can switch on stable keys instead of
 matching message strings.
+
+recoverable connection interruptions emit `{ type: 'reconnect', status:
+'trying' | 'waiting', reasonKey, reason }`, followed by `{ type: 'reconnect',
+status: 'connected' }` after sync reconnects. `ServerOverloaded` stays in
+Zero's built-in retry/backoff loop, transport errors such as `Failed to fetch`
+resume the paused connection, and acknowledgement timeouts reconstruct the
+client with its existing local state. none of these paths delete local state or
+reload the page.
+
+`createZeroClient` and a combined client also expose `reloadPage()`. it performs
+a plain page reload and returns `false` where no page location exists. this is
+the opt-in action for a host's reconnect toast; it never clears local state.
 
 ### guard + latch semantics
 
