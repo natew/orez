@@ -320,6 +320,35 @@ export const userPublic = sqliteTable('user_public', { id: text(), projectId: te
     )
   })
 
+  test('derives query membership from the returned query root', async () => {
+    writeFileSync(
+      join(dataDir(), 'category/mutations.ts'),
+      `export const schema = table('category').columns({ id: string() })`
+    )
+    writeFileSync(
+      join(dataDir(), 'dashboard/queries.ts'),
+      `export const monthSummary = () => zql.category.related('expenses')`
+    )
+    writeFileSync(
+      join(testDir, 'src/database/relations.ts'),
+      `export const relations = defineRelations(schema, (r) => ({
+        category: { expenses: r.many.expense({}) },
+      }))`
+    )
+
+    await expect(deriveDataMembership({ dir: dataDir() })).resolves.toEqual({
+      instances: {
+        default: {
+          tables: ['category'],
+          syncTables: ['category', 'expense'],
+          supportTables: [],
+          scope: null,
+        },
+      },
+      allTables: ['category', 'expense'],
+    })
+  })
+
   test('derives single-file namespaces from data exports', async () => {
     writeFileSync(
       join(dataDir(), 'server.ts'),

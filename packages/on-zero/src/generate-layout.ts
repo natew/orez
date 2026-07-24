@@ -16,6 +16,7 @@ export type DataInstance = {
   dir: string
   scope: string | null
   namespaces: DataNamespace[]
+  tables: string[]
   syncTables: string[]
   supportTables: string[]
   /** `supportTables` declared in `on-zero.config.ts`. */
@@ -522,11 +523,11 @@ function tableColumns(
   return columns
 }
 
-function relatedTables(
+function queriedTables(
   ts: typeof import('typescript'),
   namespace: DataNamespace,
   relations: Map<string, Map<string, string>>
-): Array<{ table: string; query: string }> {
+): Array<{ table: string; query: string; root: boolean }> {
   if (!namespace.queryPath) return []
   const source = ts.createSourceFile(
     namespace.queryPath,
@@ -534,7 +535,7 @@ function relatedTables(
     ts.ScriptTarget.Latest,
     true
   )
-  const reached: Array<{ table: string; query: string }> = []
+  const reached: Array<{ table: string; query: string; root: boolean }> = []
   const functions = new Map<string, ts.ConciseBody>()
   const exported = new Set<string>()
 
@@ -593,7 +594,7 @@ function relatedTables(
             `from table '${sourceTable}' through relations.ts`
         )
       }
-      reached.push({ table: target, query })
+      reached.push({ table: target, query, root: false })
       visit(node.expression.expression, currentTable, query)
       const callback = node.arguments[1]
       if (
@@ -609,7 +610,9 @@ function relatedTables(
       const key = `${query}:${node.expression.text}`
       if (helper && !visiting.has(key)) {
         visiting.add(key)
-        visit(helper, currentTable, query)
+        const helperRoot = rootTable(helper)
+        if (helperRoot) reached.push({ table: helperRoot, query, root: true })
+        visit(helper, helperRoot ?? currentTable, query)
         visiting.delete(key)
       }
     }
@@ -618,7 +621,10 @@ function relatedTables(
 
   for (const name of exported) {
     if (['mutate', 'schema', 'where'].includes(name)) continue
-    visit(functions.get(name)!, namespace.name, name)
+    const body = functions.get(name)!
+    const queryRoot = rootTable(body)
+    if (queryRoot) reached.push({ table: queryRoot, query: name, root: true })
+    visit(body, queryRoot ?? namespace.name, name)
   }
   return reached
 }
@@ -776,6 +782,7 @@ export function discoverDataLayout(
     dir: instance.dir,
     scope: instance.scope,
     namespaces: [],
+    tables: [],
     syncTables: [],
     supportTables: [],
     declaredSupportTables: instance.supportTables,
@@ -786,26 +793,36 @@ export function discoverDataLayout(
     instance.namespaces = discoverNamespaces(ts, baseDir, instance, instanceDirs)
   }
   const namespaces = instances.flatMap((instance) => instance.namespaces)
-  const owners = new Map<string, string>()
+  const namespaceOwners = new Map<string, string>()
   for (const namespace of namespaces) {
-    const owner = owners.get(namespace.name)
+    const owner = namespaceOwners.get(namespace.name)
     if (owner) {
       throw new Error(
         `[on-zero] namespace '${namespace.name}' is claimed by instances '${owner}' and '${namespace.instance}'`
       )
     }
-    owners.set(namespace.name, namespace.instance)
+    namespaceOwners.set(namespace.name, namespace.instance)
   }
+  const tableOwners = new Map(
+    namespaces
+      .filter((namespace) => namespace.modelPath !== null)
+      .map((namespace) => [namespace.name, namespace.instance])
+  )
 
   const metadata = metadataPaths(baseDir)
   const relations = relationTargets(ts, metadata)
   const columns = tableColumns(ts, metadata, namespaces)
   const relatedOwners = new Map<string, string>()
   for (const instance of instances) {
-    const syncTables = new Set(instance.namespaces.map((namespace) => namespace.name))
+    const tables = new Set(
+      instance.namespaces
+        .filter((namespace) => namespace.modelPath !== null)
+        .map((namespace) => namespace.name)
+    )
+    const syncTables = new Set(tables)
     for (const namespace of instance.namespaces) {
-      for (const reached of relatedTables(ts, namespace, relations)) {
-        const owner = owners.get(reached.table) ?? relatedOwners.get(reached.table)
+      for (const reached of queriedTables(ts, namespace, relations)) {
+        const owner = tableOwners.get(reached.table) ?? relatedOwners.get(reached.table)
         if (owner && owner !== instance.name) {
           throw new Error(
             `[on-zero] ${namespace.name}.${reached.query} in instance '${instance.name}' reaches ` +
@@ -813,9 +830,11 @@ export function discoverDataLayout(
           )
         }
         relatedOwners.set(reached.table, instance.name)
+        if (reached.root) tables.add(reached.table)
         syncTables.add(reached.table)
       }
     }
+    instance.tables = [...tables].sort()
     instance.syncTables = [...syncTables].sort()
     if (instance.scope) {
       for (const table of instance.syncTables) {
@@ -836,7 +855,7 @@ export function discoverDataLayout(
     const supportTables = new Set<string>(instance.declaredSupportTables)
     for (const namespace of instance.namespaces) {
       for (const table of mutationSupportTables(ts, baseDir, sourceRoots, namespace)) {
-        if (owners.has(table) || relatedOwners.has(table)) continue
+        if (tableOwners.has(table) || relatedOwners.has(table)) continue
         if (!instance.syncTables.includes(table)) {
           supportTables.add(table)
         }

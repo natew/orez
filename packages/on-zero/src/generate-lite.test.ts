@@ -298,21 +298,43 @@ describe('generateLite', () => {
         mutations: [],
         queries: [
           // no-arg query → void
-          { name: 'allPosts', paramTypeText: null },
+          { name: 'allPosts', rootTable: 'post', paramTypeText: null, relatedPaths: [] },
           // inline object → real validator
-          { name: 'postById', paramTypeText: '{ id: string }' },
+          {
+            name: 'postById',
+            rootTable: 'post',
+            paramTypeText: '{ id: string }',
+            relatedPaths: [],
+          },
           // primitive
-          { name: 'byAuthorId', paramTypeText: 'string' },
+          {
+            name: 'byAuthorId',
+            rootTable: 'post',
+            paramTypeText: 'string',
+            relatedPaths: [],
+          },
           // optional nullable inline object
           {
             name: 'paged',
+            rootTable: 'post',
             paramTypeText:
               '{ pageSize: number; cursor?: { id: string; createdAt: number } | null }',
+            relatedPaths: [],
           },
           // type reference → fallback
-          { name: 'filtered', paramTypeText: 'PostFilter' },
+          {
+            name: 'filtered',
+            rootTable: 'post',
+            paramTypeText: 'PostFilter',
+            relatedPaths: [],
+          },
           // permission should be skipped
-          { name: 'permission', paramTypeText: null },
+          {
+            name: 'permission',
+            rootTable: 'post',
+            paramTypeText: null,
+            relatedPaths: [],
+          },
         ],
       },
     }
@@ -473,7 +495,14 @@ describe('generateLite', () => {
       parse: makeParse({
         [`${DIR}/server.ts`]: {
           mutations: [],
-          queries: [{ name: 'serverRows', paramTypeText: null }],
+          queries: [
+            {
+              name: 'serverRows',
+              rootTable: 'server',
+              paramTypeText: null,
+              relatedPaths: [],
+            },
+          ],
         },
         [`${DIR}/types.ts`]: {
           mutations: [],
@@ -499,7 +528,14 @@ describe('generateLite', () => {
         return {
           mutations: [],
           queries: source.includes('zql.server')
-            ? [{ name: 'serverRows', paramTypeText: null }]
+            ? [
+                {
+                  name: 'serverRows',
+                  rootTable: 'server',
+                  paramTypeText: null,
+                  relatedPaths: [],
+                },
+              ]
             : [],
         }
       },
@@ -545,6 +581,7 @@ describe('generateLite', () => {
           queries: [
             {
               name: 'messages',
+              rootTable: 'message',
               paramTypeText: null,
               relatedPaths: [['comments', 'author']],
             },
@@ -592,6 +629,79 @@ describe('generateLite', () => {
     const instance = result.instances.find((entry) => entry.name === 'project')
     expect(instance?.syncTables).toEqual(['comment', 'message', 'userPublic'])
     expect(instance?.supportTables).toEqual([])
+  })
+
+  test('derives query membership from the query root instead of its namespace', () => {
+    const files = {
+      [`${DIR}/category/mutations.ts`]: '// fake category model',
+      [`${DIR}/dashboard/queries.ts`]: `export const monthSummary = () => zql.category.related('expenses')`,
+      ['/proj/src/database/relations.ts']: '// fake relations',
+      ['/proj/src/database/schema.ts']: '// fake tables',
+    }
+    const empty = { mutations: [], queries: [] }
+    const result = generateLite({
+      files,
+      dir: DIR,
+      parse: makeParse({
+        [`${DIR}/category/mutations.ts`]: {
+          ...empty,
+          mutations: [
+            {
+              modelName: 'category',
+              handlers: [],
+              schema: null,
+            },
+          ],
+        },
+        [`${DIR}/dashboard/queries.ts`]: {
+          ...empty,
+          queries: [
+            {
+              name: 'monthSummary',
+              rootTable: 'category',
+              paramTypeText: null,
+              relatedPaths: [['expenses']],
+            },
+          ],
+        },
+        '/proj/src/database/relations.ts': {
+          ...empty,
+          relations: [
+            {
+              sourceTable: 'category',
+              name: 'expenses',
+              targetTable: 'expense',
+            },
+          ],
+        },
+        '/proj/src/database/schema.ts': {
+          ...empty,
+          tables: [
+            { name: 'category', columns: ['id'] },
+            { name: 'expense', columns: ['id', 'categoryId'] },
+          ],
+        },
+      }),
+    })
+
+    expect(result.instances[0]?.syncTables).toEqual(['category', 'expense'])
+    expect(result.instances[0]?.syncTables).not.toContain('dashboard')
+  })
+
+  test('ignores related syntax mentioned only in a query-file comment', () => {
+    const files = {
+      [`${DIR}/dashboard/queries.ts`]: `// monthSummary moved to category/queries.ts because it uses .related()`,
+    }
+    const result = generateLite({
+      files,
+      dir: DIR,
+      parse: makeParse({
+        [`${DIR}/dashboard/queries.ts`]: { mutations: [], queries: [] },
+      }),
+    })
+
+    expect(result.queryCount).toBe(0)
+    expect(result.instances[0]?.syncTables).toEqual([])
   })
 
   test('derives fileless support tables through parsed mutation helpers', () => {
@@ -736,7 +846,14 @@ describe('generateLite', () => {
         },
         [`${DIR}/account.ts`]: {
           ...empty,
-          queries: [{ name: 'accounts', paramTypeText: null }],
+          queries: [
+            {
+              name: 'accounts',
+              rootTable: 'account',
+              paramTypeText: null,
+              relatedPaths: [],
+            },
+          ],
         },
         [`${DIR}/project/message.ts`]: {
           ...empty,

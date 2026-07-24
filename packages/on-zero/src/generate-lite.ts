@@ -67,13 +67,17 @@ export type LiteSchemaInfo = {
 export type LiteQueryExport = {
   // exported variable name, e.g. 'flightById'
   name: string
+  // table at the root of the returned query builder, e.g. `post` for
+  // `zql.post.where(...)`. query namespaces may group queries for another
+  // table, so this cannot be inferred from the source filename.
+  rootTable: string
   // text of the first parameter's type annotation, if present.
   // e.g. 'string' | '{ id: string }' | null. null means the query takes no
   // args and is treated as a void query in the generated output.
   paramTypeText: string | null
-  // relation-name paths starting at this namespace's table. nested related()
-  // calls are one path, e.g. [['comments', 'author']].
-  relatedPaths?: string[][]
+  // relation-name paths starting at rootTable. nested related() calls are one
+  // path, e.g. [['comments', 'author']].
+  relatedPaths: string[][]
 }
 
 export type LiteRelationInfo = {
@@ -544,7 +548,10 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
     sourceFile: string
     importPath: string
   }> = []
-  const relatedPaths = new Map<string, Array<{ query: string; paths: string[][] }>>()
+  const queryPaths = new Map<
+    string,
+    Array<{ query: string; rootTable: string; paths: string[][] }>
+  >()
 
   for (const namespace of namespaces.filter(
     (namespace): namespace is LiteNamespace & { queryPath: string } =>
@@ -552,24 +559,22 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   )) {
     const filePath = namespace.queryPath
     const fileBaseName = namespace.name
-    const content = files[filePath]!
-    const parsed = parse(content, filePath)
-    if (
-      content.includes('.related(') &&
-      !parsed.queries.some((query) => query.relatedPaths)
-    ) {
-      throw new Error(
-        `[on-zero] ${filePath} uses related(), but the lite parser did not return relatedPaths`
-      )
-    }
+    const parsed = parse(files[filePath]!, filePath)
 
     for (const q of parsed.queries) {
       if (['mutate', 'permission', 'schema', 'where'].includes(q.name)) continue
-      if (q.relatedPaths?.length) {
-        const entries = relatedPaths.get(namespace.name) ?? []
-        entries.push({ query: q.name, paths: q.relatedPaths })
-        relatedPaths.set(namespace.name, entries)
+      if (!q.rootTable || !Array.isArray(q.relatedPaths)) {
+        throw new Error(
+          `[on-zero] ${filePath} query '${q.name}' is missing lite parser query metadata`
+        )
       }
+      const entries = queryPaths.get(namespace.name) ?? []
+      entries.push({
+        query: q.name,
+        rootTable: q.rootTable,
+        paths: q.relatedPaths,
+      })
+      queryPaths.set(namespace.name, entries)
 
       // null annotation → no first arg → void query
       if (q.paramTypeText == null) {
@@ -608,16 +613,33 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
   }
 
   const owners = new Map(
-    namespaces.map((namespace) => [namespace.name, namespace.instance])
+    modelNamespaces.map((namespace) => [namespace.name, namespace.instance])
   )
   const relatedOwners = new Map<string, string>()
+  const directTables = new Map<string, string[]>()
   const syncTables = new Map<string, string[]>()
   for (const instance of instances) {
-    const synced = new Set(instance.namespaces.map((namespace) => namespace.name))
+    const direct = new Set(
+      instance.namespaces
+        .filter((namespace) => namespace.modelPath !== null)
+        .map((namespace) => namespace.name)
+    )
+    const synced = new Set(direct)
     for (const namespace of instance.namespaces) {
-      for (const query of relatedPaths.get(namespace.name) ?? []) {
+      for (const query of queryPaths.get(namespace.name) ?? []) {
+        const rootOwner =
+          owners.get(query.rootTable) ?? relatedOwners.get(query.rootTable)
+        if (rootOwner && rootOwner !== instance.name) {
+          throw new Error(
+            `[on-zero] ${namespace.name}.${query.query} in instance '${instance.name}' reaches ` +
+              `table '${query.rootTable}' owned by instance '${rootOwner}'`
+          )
+        }
+        relatedOwners.set(query.rootTable, instance.name)
+        direct.add(query.rootTable)
+        synced.add(query.rootTable)
         for (const path of query.paths) {
-          let sourceTable = namespace.name
+          let sourceTable = query.rootTable
           for (const relationName of path) {
             const target = relations.get(sourceTable)?.get(relationName)
             if (!target) {
@@ -640,6 +662,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
         }
       }
     }
+    directTables.set(instance.name, [...direct].sort())
     const tables = [...synced].sort()
     if (instance.scope) {
       for (const table of tables) {
@@ -734,7 +757,7 @@ export function generateLite(opts: LiteGenerateOptions): LiteGenerateResult {
       modelNames: instance.namespaces
         .filter((namespace) => namespace.modelPath)
         .map((namespace) => namespace.name),
-      tables: instance.namespaces.map((namespace) => namespace.name),
+      tables: directTables.get(instance.name)!,
       syncTables: syncTables.get(instance.name)!,
       supportTables: supportTables.get(instance.name)!,
     }))

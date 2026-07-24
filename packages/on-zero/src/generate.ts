@@ -842,7 +842,7 @@ function dataMembershipFromLayout(layout: DataLayout): DataMembership {
       layout.instances.map((instance) => [
         instance.name,
         {
-          tables: instance.namespaces.map((namespace) => namespace.name).sort(),
+          tables: [...instance.tables],
           syncTables: [...instance.syncTables],
           supportTables: [...instance.supportTables],
           scope: instance.scope,
@@ -1188,7 +1188,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
         modelNames: instance.namespaces
           .filter((namespace) => namespace.modelPath)
           .map((namespace) => namespace.name),
-        tables: instance.namespaces.map((namespace) => namespace.name),
+        tables: instance.tables,
         syncTables: instance.syncTables,
         supportTables: instance.supportTables,
       }))
