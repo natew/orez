@@ -1,6 +1,6 @@
 {
   "name": "pg-to-sqlite",
-  "version": "0.8.5",
+  "version": "0.9.0",
   "description": "PostgreSQL SQL to SQLite SQL compiler.",
   "type": "module",
   "license": "MIT",
