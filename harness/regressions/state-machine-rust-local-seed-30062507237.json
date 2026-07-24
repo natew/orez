@@ -7,10 +7,7 @@
     {
       "kind": "desire",
       "slot": 0,
-      "projectIDs": [
-        "p0",
-        "p1"
-      ]
+      "projectIDs": ["p0", "p1"]
     },
     {
       "kind": "armEngineFault",
@@ -160,9 +157,7 @@
     {
       "kind": "desire",
       "slot": 1,
-      "projectIDs": [
-        "p2"
-      ]
+      "projectIDs": ["p2"]
     },
     {
       "kind": "undesire",
