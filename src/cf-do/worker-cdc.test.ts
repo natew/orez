@@ -300,6 +300,68 @@ describe('ZeroDO transactional CDC integration', () => {
     await expect(session.commit()).resolves.toBeUndefined()
   })
 
+  it('recovers an interrupted write whose foreign-key parent table is missing', async () => {
+    const { sql, nativeDb, zero } = await createWorkerCore()
+    // workerd always runs durable-object SQLite with foreign_keys on
+    sql.exec('PRAGMA foreign_keys = ON')
+    sql.exec('CREATE TABLE parent (id TEXT PRIMARY KEY)')
+    sql.exec(
+      'CREATE TABLE child (id TEXT PRIMARY KEY, ' +
+        'parentId TEXT REFERENCES parent(id) ON DELETE CASCADE)'
+    )
+    sql.exec("INSERT INTO parent VALUES ('p1')")
+    const registration = await zero.applicationSqlSession('application-fk-registration')
+    await registration.begin()
+    await registration.registerTables([{ table: 'child', publicTable: 'public.child' }])
+    await registration.commit()
+    const session = await zero.applicationSqlSession('application-fk-interrupted')
+    await session.begin()
+    await session.exec("INSERT INTO child VALUES ('c1', 'p1')")
+
+    // the 2026-07-23 incident shape: by the time recovery runs, the parent
+    // table is gone (dropped under a foreign_keys toggle mid-rebuild), so with
+    // enforcement on EVERY statement on child fails at compile.
+    sql.exec('PRAGMA foreign_keys = OFF')
+    sql.exec('DROP TABLE parent')
+    sql.exec('PRAGMA foreign_keys = ON')
+    expect(() => sql.exec("DELETE FROM child WHERE id = 'c1'")).toThrow(/no such table/)
+
+    const { ZeroDO } = await import('./worker.js')
+    let recovery: Promise<void> | undefined
+    const transaction = <T>(work: () => T): T => {
+      nativeDb.exec('BEGIN')
+      try {
+        const value = work()
+        nativeDb.exec('COMMIT')
+        return value
+      } catch (error) {
+        nativeDb.exec('ROLLBACK')
+        throw error
+      }
+    }
+    new ZeroDO(
+      {
+        storage: {
+          sql,
+          get: async () => undefined,
+          transaction: async <T>(work: () => T) => transaction(work),
+          transactionSync: transaction,
+        },
+        blockConcurrencyWhile(work: () => Promise<void>) {
+          recovery = work()
+        },
+      } as any,
+      {} as any
+    )
+    await expect(recovery).resolves.toBeUndefined()
+
+    expect(sql.exec('SELECT * FROM child').toArray()).toEqual([])
+    expect(sql.exec('SELECT count(*) AS c FROM _zero_pending_changes').one()).toEqual({
+      c: 0,
+    })
+    expect(sql.exec('PRAGMA foreign_keys').one()).toEqual({ foreign_keys: 1 })
+  })
+
   it('recovers an interrupted application session before restoring a sticky write trip', async () => {
     const { sql, nativeDb, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE private_note (id TEXT PRIMARY KEY, body TEXT)')

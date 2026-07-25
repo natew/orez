@@ -458,7 +458,7 @@ export class ZeroDO extends DurableObject {
     this.cdc = new TransactionalCdc(this.sql)
     this.watermarks = new DurableWatermarkState(this.sql)
     ctx.blockConcurrencyWhile(async () => {
-      const recovered = await this.atomically(() => {
+      const recovered = this.rollbackAtomicallyWithoutForeignKeys(() => {
         const transactionIDs = recoverTxJournal(
           this.sql,
           'application',
@@ -987,7 +987,7 @@ export class ZeroDO extends DurableObject {
       const body = (await request.json()) as { transactionID?: unknown }
       const transactionID = String(body.transactionID || '')
       if (!transactionID) throw new Error('missing transactionID')
-      const count = await this.atomically(() => {
+      const count = this.rollbackAtomicallyWithoutForeignKeys(() => {
         this.rollbackPendingTrackedChanges(transactionID)
         rollbackTxJournal(this.sql, transactionID)
         return this.deletePendingTrackedChanges(transactionID)
@@ -1016,7 +1016,7 @@ export class ZeroDO extends DurableObject {
     try {
       const body = (await request.json().catch(() => ({}))) as { owner?: unknown }
       const owner = body.owner === undefined ? undefined : String(body.owner)
-      const transactionIDs = await this.atomically(() => {
+      const transactionIDs = this.rollbackAtomicallyWithoutForeignKeys(() => {
         const recovered = recoverTxJournal(this.sql, owner, (txID) => {
           this.rollbackPendingTrackedChanges(txID)
         })
@@ -1520,7 +1520,7 @@ export class ZeroDO extends DurableObject {
     this.assertApplicationSqlSession(session)
     try {
       if (session.mutated) {
-        await this.atomically(() => {
+        this.rollbackAtomicallyWithoutForeignKeys(() => {
           this.rollbackPendingTrackedChanges(session.sessionID)
           rollbackTxJournal(this.sql, session.sessionID)
           this.deletePendingTrackedChanges(session.sessionID)
@@ -1542,7 +1542,7 @@ export class ZeroDO extends DurableObject {
     this.assertApplicationSqlSession(session)
     try {
       if (session.mutated) {
-        this.atomicallySync(() => {
+        this.rollbackAtomicallyWithoutForeignKeys(() => {
           this.rollbackPendingTrackedChanges(session.sessionID)
           rollbackTxJournal(this.sql, session.sessionID)
           this.deletePendingTrackedChanges(session.sessionID)
@@ -1561,6 +1561,60 @@ export class ZeroDO extends DurableObject {
       this.invalidateSchemaCaches()
       throw error
     }
+  }
+
+  /**
+   * Run journal rollback/recovery with foreign-key enforcement off.
+   *
+   * Rollback restores pre-transaction images verbatim, so the target state is
+   * the pre-tx reality whatever its referential health. Enforcement is also
+   * fatal here: workerd always runs with foreign_keys on, and in a namespace
+   * whose parent table is missing (an interrupted table rebuild) EVERY
+   * statement on a referencing table fails at compile with "no such table:
+   * main.<parent>". That made recovery unable to ever finish, and because the
+   * storage transaction rolled the cleanup back while Cloudflare still billed
+   * the rows written, every wake re-ran the same doomed replay forever (the
+   * 2026-07-25 rows-written runaway). The pragma cannot change inside a
+   * transaction, so it brackets one synchronous transaction; the whole helper
+   * is synchronous, so no other event can execute while enforcement is off.
+   * The cursors must be consumed: workerd executes a statement only as its
+   * cursor is read, so a discarded PRAGMA cursor silently never runs.
+   */
+  private rollbackAtomicallyWithoutForeignKeys<T>(work: () => T): T {
+    this.sql.exec('PRAGMA foreign_keys = OFF').toArray()
+    try {
+      return this.atomicallySync(work)
+    } finally {
+      this.restoreForeignKeyEnforcement()
+    }
+  }
+
+  /**
+   * Measured under workerd: only the first foreign_keys change in an event
+   * applies, so the OFF above latches and an inline reset here is silently
+   * ignored — the object would then serve every later write unenforced.
+   * Verify, and when the inline reset did not stick, re-run it from
+   * blockConcurrencyWhile: the runtime defers that until the in-flight
+   * storage work is done, the same seam persistWriteBudgetTrip relies on.
+   */
+  private restoreForeignKeyEnforcement(): void {
+    this.sql.exec('PRAGMA foreign_keys = ON').toArray()
+    const state = this.sql.exec('PRAGMA foreign_keys').one() as
+      | { foreign_keys?: unknown }
+      | undefined
+    if (Number(state?.foreign_keys ?? 0) === 1) return
+    void this.ctx
+      .blockConcurrencyWhile(async () => {
+        this.sql.exec('PRAGMA foreign_keys = ON').toArray()
+      })
+      .catch((error: unknown) => {
+        console.error(
+          JSON.stringify({
+            event: 'orez_do_foreign_keys_restore_failed',
+            message: error instanceof Error ? error.message : String(error),
+          })
+        )
+      })
   }
 
   private invalidateSchemaCaches(): void {

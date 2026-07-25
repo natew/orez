@@ -363,7 +363,9 @@ function restoreSchemaSnapshot(
     }
   }
 
-  sql.exec('PRAGMA defer_foreign_keys = ON')
+  // consumed on purpose: workerd executes a statement only as its cursor is
+  // read, so a discarded PRAGMA cursor silently never runs.
+  sql.exec('PRAGMA defer_foreign_keys = ON').toArray()
   const changedCurrentObject = (object: (typeof current)[number]) => {
     const before = originalByKey.get(key(object))
     return !before || before.sql !== object.sql || tablesToDrop.has(object.table)
@@ -494,7 +496,8 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
   // Defer constraint checks across the whole atomic restore. Delete every
   // snapshotted table before inserting any snapshot rows: interleaving those
   // phases lets a later DELETE in a cyclic cascade erase an earlier restore.
-  sql.exec('PRAGMA defer_foreign_keys = ON')
+  // consumed on purpose: see the identical note in restoreSchemaSnapshot.
+  sql.exec('PRAGMA defer_foreign_keys = ON').toArray()
   const snapshotRows = parentFirst(sql, restorableRows)
   for (const row of snapshotRows) {
     sql.exec(`DELETE FROM ${quoteIdent(row.original)}`)
