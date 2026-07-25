@@ -458,12 +458,6 @@ export class ZeroDO extends DurableObject {
     this.cdc = new TransactionalCdc(this.sql)
     this.watermarks = new DurableWatermarkState(this.sql)
     ctx.blockConcurrencyWhile(async () => {
-      if (!this.writeBudgetDisabled) {
-        const persisted = await ctx.storage.get<number | RowWriteBudgetTrip>(
-          WRITE_BUDGET_TRIPPED_KEY
-        )
-        if (persisted) this.writeBudget.restoreTrip(persisted)
-      }
       const recovered = await this.atomically(() => {
         const transactionIDs = recoverTxJournal(
           this.sql,
@@ -477,6 +471,12 @@ export class ZeroDO extends DurableObject {
         return transactionIDs
       })
       if (recovered.length) this.invalidateSchemaCaches()
+      if (!this.writeBudgetDisabled) {
+        const persisted = await ctx.storage.get<number | RowWriteBudgetTrip>(
+          WRITE_BUDGET_TRIPPED_KEY
+        )
+        if (persisted) this.writeBudget.restoreTrip(persisted)
+      }
     })
   }
 

@@ -300,7 +300,7 @@ describe('ZeroDO transactional CDC integration', () => {
     await expect(session.commit()).resolves.toBeUndefined()
   })
 
-  it('recovers an interrupted application session when the Durable Object is recreated', async () => {
+  it('recovers an interrupted application session before restoring a sticky write trip', async () => {
     const { sql, nativeDb, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE private_note (id TEXT PRIMARY KEY, body TEXT)')
     const registration = await zero.applicationSqlSession(
@@ -317,6 +317,7 @@ describe('ZeroDO transactional CDC integration', () => {
 
     const { ZeroDO } = await import('./worker.js')
     let recovery: Promise<void> | undefined
+    let tripDeleted = false
     const transaction = <T>(work: () => T): T => {
       nativeDb.exec('BEGIN')
       try {
@@ -328,10 +329,17 @@ describe('ZeroDO transactional CDC integration', () => {
         throw error
       }
     }
-    new ZeroDO(
+    const recreated = new ZeroDO(
       {
         storage: {
           sql,
+          get: async (key: string) =>
+            key === '_orez_write_budget_tripped_at'
+              ? { at: 1_000, windowRows: 900, budget: 300, windowMs: 300_000 }
+              : undefined,
+          delete: async (key: string) => {
+            if (key === '_orez_write_budget_tripped_at') tripDeleted = true
+          },
           transaction: async <T>(work: () => T) => transaction(work),
           transactionSync: transaction,
         },
@@ -339,11 +347,28 @@ describe('ZeroDO transactional CDC integration', () => {
           recovery = work()
         },
       } as any,
-      { OREZ_DO_WRITE_BUDGET_DISABLED: 'true' } as any
+      {
+        OREZ_DO_WRITE_BUDGET_ROWS: '300',
+        OREZ_DO_WRITE_BUDGET_ADMIN_TOKEN: 'reopen-token',
+      } as any
     )
-    await recovery
+    await expect(recovery).resolves.toBeUndefined()
 
     expect(sql.exec('SELECT * FROM private_note').toArray()).toEqual([])
+    const status = await recreated.fetch(new Request('http://do/_orez/write-budget'))
+    expect(await status.json()).toMatchObject({
+      tripped: true,
+      trippedWindowRows: 900,
+    })
+    const reopened = await recreated.fetch(
+      new Request('http://do/_orez/write-budget/reopen', {
+        method: 'POST',
+        headers: { 'x-orez-admin-token': 'reopen-token' },
+      })
+    )
+    expect(reopened.status).toBe(200)
+    expect(await reopened.json()).toMatchObject({ ok: true, tripped: false })
+    expect(tripDeleted).toBe(true)
   })
 
   it('captures a published side effect even when the initiating table is private', async () => {
