@@ -37,7 +37,7 @@ export function getAmbientRunner(instance?: { runner: ZeroRunner | null }): Zero
 
   if (!runner) {
     throw new Error(
-      'Zero runner not initialized. Ensure ProvideZero is mounted or server bindings are active.'
+      'Zero runner not initialized. Ensure ProvideZero is mounted, connectHeadless() was called, or server bindings are active.'
     )
   }
 

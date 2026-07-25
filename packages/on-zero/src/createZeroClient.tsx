@@ -291,8 +291,115 @@ export function createZeroClientInternal<
 
   const DisabledContext = createContext<QueryControlMode>(false)
 
+  // mutators never vary per mount: auth is read dynamically through
+  // getAuthData() at mutation time. built once, lazily, so the provider and
+  // connectHeadless construct identical instances without either one forcing
+  // the work at createZeroClient() time.
+  let clientMutators: ReturnType<typeof createMutators> | null = null
+  function getClientMutators() {
+    clientMutators ??= createMutators({
+      models,
+      environment: 'client',
+      authData: null,
+      can: permissionsHelpers.can,
+    })
+    return clientMutators
+  }
+
+  type ConstructZeroInstanceArgs = {
+    options: Omit<ZeroOptions<Schema, ZeroMutators>, 'schema' | 'mutators'>
+    transport?: ZeroProviderTransport
+    beforeReload?: () => Promise<void>
+    scheduleReload?: (ctx: ScheduleReloadContext) => void
+    guardStorage?: RecoveryGuardStorage
+    benignLogPatterns?: readonly ZeroLogPattern[]
+  }
+
+  // build a Zero instance with on-zero's recovery wiring. shared by the
+  // provider's rotation effect and by connectHeadless so a non-react host gets
+  // the same instance the app gets, rather than a parallel construction that
+  // can drift.
+  function constructZeroInstance({
+    options,
+    transport,
+    beforeReload,
+    scheduleReload,
+    guardStorage,
+    benignLogPatterns,
+  }: ConstructZeroInstanceArgs): ZeroInstance {
+    // install before construction so the instance's first connect goes through
+    // HTTP. ensureHttpPullTransport is per-origin idempotent by design (a
+    // rotation would otherwise chain shims), so repeat calls reuse.
+    if (transport) {
+      // same precedence as zero's own getServer (cacheURL is the current
+      // option name; server is its deprecated alias)
+      const serverURL = options.cacheURL ?? options.server
+      if (typeof serverURL !== 'string') {
+        throw new Error(`client transport requires a server URL`)
+      }
+      transport.install(serverURL)
+    }
+    // recovery closures reach the instance through this ref so they always
+    // delete the CURRENT instance's own store (set right after construction;
+    // the handlers only fire post-mount).
+    const instanceRef: { current: ZeroInstance | null } = { current: null }
+    const recoveryDeps: ZeroRecoveryDeps = {
+      deleteLocalState: () => deleteZeroInstance(instanceRef.current),
+      zeroEvents,
+      beforeReload,
+      scheduleReload,
+      guardStorage,
+      benignLogPatterns: [
+        ...(transport?.logClassifications?.benign ?? []),
+        ...(benignLogPatterns ?? []),
+      ],
+      onRecovery: () => mutationLifecycle.fence(),
+    }
+    const recovery = makeZeroRecovery(recoveryDeps)
+    const createdInstance = new ZeroClient<Schema, ZeroMutators>({
+      kvStore: 'mem',
+      ...options,
+      schema,
+      // @ts-expect-error same erasure ZeroProvider needed
+      mutators: getClientMutators(),
+      // when the consumer brings no logSink, install ours: it preserves Zero's
+      // console output AND watches for the local-store-lost signature. a
+      // consumer with its own logSink owns log-based recovery (no double-fire
+      // with e.g. soot's origin-gated recovery).
+      logSink: options.logSink ?? composeRecoveryLogSink(recoveryDeps),
+      // consumer handlers win; otherwise on-zero's default self-healing
+      // recovery covers EVERY reason (drop local state + reload, guarded) —
+      // passing these to Zero disables its built-in reload, so any reason we
+      // left unhandled would fatal-blank the app forever.
+      onUpdateNeeded: options.onUpdateNeeded ?? recovery.onUpdateNeeded,
+      onClientStateNotFound:
+        options.onClientStateNotFound ?? recovery.onClientStateNotFound,
+    })
+    instanceRef.current = createdInstance
+    return createdInstance
+  }
+
   let latestZeroInstance: ZeroInstance | null = null
   const zeroReadyWaiters = new Set<(instance: ZeroInstance) => void>()
+
+  // publish the active instance through the stable facade and query runner.
+  // the provider calls this during render (before descendant effects do
+  // imperative work) and connectHeadless calls it directly — the `zero` proxy,
+  // run(), and waitForZero() resolve identically either way.
+  function publishZeroInstance(zeroInstance: ZeroInstance): boolean {
+    if (zeroInstance === latestZeroInstance) return false
+    latestZeroInstance = zeroInstance
+    mutationLifecycle.activate()
+    const runner: ZeroRunner = (query, options) => zeroInstance.run(query as any, options)
+    // the instance-keyed runner is what run() dispatches owned namespaces to;
+    // the global runner stays as the ambient fallback (inline zql)
+    instance.runner = runner
+    setRunner(runner)
+    const waiters = [...zeroReadyWaiters]
+    zeroReadyWaiters.clear()
+    for (const onReady of waiters) onReady(zeroInstance)
+    return true
+  }
 
   function waitForZero({ signal }: WaitForZeroOptions = {}): Promise<ZeroInstance> {
     if (latestZeroInstance) return Promise.resolve(latestZeroInstance)
@@ -733,19 +840,6 @@ export function createZeroClientInternal<
     // (mutations read auth dynamically via getAuthData() to avoid stale closure race condition)
     setAuthData(authData)
 
-    // mutators are stable — auth is read dynamically via getAuthData() at mutation
-    // time, so we don't need to recreate them (or the Zero instance) on auth change.
-    // setAuthData() above already ensures getAuthData() returns current auth.
-    const mutators = useMemo(() => {
-      return createMutators({
-        models,
-        environment: 'client',
-        authData: null,
-        can: permissionsHelpers.can,
-      })
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [])
-
     // host-scoped storage: composed here so embedding hosts isolate co-located
     // apps without app code carrying host globals. static per page load — the
     // host injects the scope before the app's module graph evaluates.
@@ -839,19 +933,6 @@ export function createZeroClientInternal<
         'schema' | 'mutators'
       >
 
-      // install before construction so the instance's first connect goes
-      // through HTTP. per-origin idempotence is strict: a second provider may
-      // reuse this transport only when every behavior option matches.
-      if (transport) {
-        // same precedence as zero's own getServer (cacheURL is the current
-        // option name; server is its deprecated alias)
-        const serverURL = options.cacheURL ?? options.server
-        if (typeof serverURL !== 'string') {
-          throw new Error(`client transport requires a server URL`)
-        }
-        transport.install(serverURL)
-      }
-
       if (cached?.key !== instanceKey) {
         if (cached) {
           // the replacement's SetZeroInstance effect publishes one version
@@ -860,44 +941,17 @@ export function createZeroClientInternal<
           mutationLifecycle.fence()
           cached.instance.close()
         }
-        // recovery closures reach the instance through this ref so they always
-        // delete the CURRENT instance's own store (set right after construction;
-        // the handlers only fire post-mount).
-        const instanceRef: { current: ZeroInstance | null } = { current: null }
-        const recoveryDeps: ZeroRecoveryDeps = {
-          deleteLocalState: () => deleteZeroInstance(instanceRef.current),
-          zeroEvents,
-          beforeReload,
-          scheduleReload,
-          guardStorage,
-          benignLogPatterns: [
-            ...(transport?.logClassifications?.benign ?? []),
-            ...(benignLogPatterns ?? []),
-          ],
-          onRecovery: () => mutationLifecycle.fence(),
+        cached = {
+          key: instanceKey,
+          instance: constructZeroInstance({
+            options,
+            transport,
+            beforeReload,
+            scheduleReload,
+            guardStorage,
+            benignLogPatterns,
+          }),
         }
-        const recovery = makeZeroRecovery(recoveryDeps)
-        const createdInstance = new ZeroClient<Schema, ZeroMutators>({
-          kvStore: 'mem',
-          ...options,
-          schema,
-          // @ts-expect-error same erasure ZeroProvider needed
-          mutators,
-          // when the consumer brings no logSink, install ours: it preserves
-          // Zero's console output AND watches for the local-store-lost signature.
-          // a consumer with its own logSink owns log-based recovery (no
-          // double-fire with e.g. soot's origin-gated recovery).
-          logSink: options.logSink ?? composeRecoveryLogSink(recoveryDeps),
-          // consumer handlers win; otherwise on-zero's default self-healing
-          // recovery covers EVERY reason (drop local state + reload, guarded) —
-          // passing these to Zero disables its built-in reload, so any reason we
-          // left unhandled would fatal-blank the app forever.
-          onUpdateNeeded: options.onUpdateNeeded ?? recovery.onUpdateNeeded,
-          onClientStateNotFound:
-            options.onClientStateNotFound ?? recovery.onClientStateNotFound,
-        })
-        instanceRef.current = createdInstance
-        cached = { key: instanceKey, instance: createdInstance }
         cachedZero = cached
       }
       setInstance(cached.instance)
@@ -964,27 +1018,65 @@ export function createZeroClientInternal<
   const SetZeroInstance = () => {
     const zeroInstance = useZero<Schema, ZeroMutators>()
 
-    // publish the active external instance through the stable facade and query
-    // runner before descendant effects perform imperative work.
-    if (zeroInstance !== latestZeroInstance) {
-      latestZeroInstance = zeroInstance
-      mutationLifecycle.activate()
-      const runner: ZeroRunner = (query, options) =>
-        zeroInstance.run(query as any, options)
-      // the instance-keyed runner is what run() dispatches owned namespaces
-      // to; the global runner stays as the ambient fallback (inline zql)
-      instance.runner = runner
-      setRunner(runner)
-      const waiters = [...zeroReadyWaiters]
-      zeroReadyWaiters.clear()
-      for (const onReady of waiters) onReady(zeroInstance)
-    }
+    // publish before descendant effects perform imperative work.
+    publishZeroInstance(zeroInstance)
 
     useEffect(() => {
       zeroInstanceVersion?.emit(zeroInstanceVersion.value + 1)
     }, [zeroInstance])
 
     return null
+  }
+
+  // connect WITHOUT react. same construction and same publication the provider
+  // uses, so `zero`, run(), getQuery(), and waitForZero() all resolve exactly as
+  // they do in a mounted app — which is what lets code written against the
+  // module-global facade run unchanged in a worker, a durable object, or a
+  // script. the caller owns the lifetime and must close().
+  //
+  // there is no react tree here, so nothing owns rotation: an identity change
+  // means close this instance and connect a new one. the host is expected to be
+  // scoped to a single identity for its lifetime (one project, one user).
+  function connectHeadless(
+    props: Omit<ZeroOptions<Schema, ZeroMutators>, 'schema' | 'mutators'> & {
+      authData?: AuthData | null
+      transport?: ZeroProviderTransport
+      beforeReload?: () => Promise<void>
+      scheduleReload?: (ctx: ScheduleReloadContext) => void
+      guardStorage?: RecoveryGuardStorage
+      benignLogPatterns?: readonly ZeroLogPattern[]
+    }
+  ): { zero: ZeroInstance; close: () => Promise<void> } {
+    const {
+      authData,
+      transport,
+      beforeReload,
+      scheduleReload,
+      guardStorage,
+      benignLogPatterns,
+      ...options
+    } = props
+    // mutations read auth dynamically through getAuthData(), so this has to be
+    // set before the first mutation exactly as the provider sets it in render.
+    setAuthData((authData ?? null) as AuthData)
+    const zeroInstance = constructZeroInstance({
+      options,
+      transport,
+      beforeReload,
+      scheduleReload,
+      guardStorage,
+      benignLogPatterns,
+    })
+    publishZeroInstance(zeroInstance)
+    zeroInstanceVersion?.emit(zeroInstanceVersion.value + 1)
+    return {
+      zero: zeroInstance,
+      close: async () => {
+        clearZeroInstanceReferences(zeroInstance)
+        mutationLifecycle.fence()
+        await zeroInstance.close()
+      },
+    }
   }
 
   // monitors connection state and emits events (replaces onError callback removed
@@ -1202,6 +1294,7 @@ export function createZeroClientInternal<
     zeroEvents,
     reloadPage,
     ProvideZero,
+    connectHeadless,
     ControlQueries,
     useQuery,
     useQueryDirect,
