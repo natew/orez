@@ -79,7 +79,7 @@ A second amplification with the same shape, found in soot's factory heartbeat.
 
 `snapshotSideEffectWriteTables` copies every table SQLite can write implicitly
 for a tracked statement, because those rows carry no before-image of their own.
-It discovered them from the source *table* alone: any foreign key with a
+It discovered them from the source _table_ alone: any foreign key with a
 non-restricting `ON UPDATE` **or** `ON DELETE` action produced an edge, and any
 trigger on a reachable table produced an edge regardless of its event.
 
@@ -109,7 +109,7 @@ Reachability is now tracked per `(table, operation)`:
   fallback.
 
 Measured against soot's real application schema through the real application SQL
-path, one claim renewal (`scripts/debug/measure-project-namespace-writes.ts`):
+path, one claim renewal (soot `test/cloudflare-write-budget.test.ts`):
 
 | retained `agentEvent` rows | before | after |
 | -------------------------- | -----: | ----: |

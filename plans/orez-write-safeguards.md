@@ -56,7 +56,7 @@ sticky state prevents a quiet/eviction cycle from reopening it.
 
 The trip fires during cursor consumption, which is almost always inside
 `ctx.storage.transaction()`. A `put` in that scope is rolled back with the write
-(prod booted un-tripped this way on 2026-07-11), and code *after* the
+(prod booted un-tripped this way on 2026-07-11), and code _after_ the
 transaction does not reliably run either. Measured under real workerd: a budget
 tripped on the application SQL path resolved neither the transaction's success
 nor its failure path, so the DO persisted nothing and came back OPEN on the next
@@ -79,10 +79,10 @@ body reports the trip-time count. A trip persisted in the older bare-timestamp
 format still restores, with its count reported as unrecorded rather than zero;
 those values disappear on the first reopen, which is the only way out anyway.
 
-`scripts/debug/measure-project-namespace-writes.ts --trip` in soot exercises all
-of this against a real Durable Object: trip, evict, confirm the count survived,
-confirm writes stay refused, confirm an unauthenticated reopen is still 403, and
-confirm the authorized reopen survives another eviction.
+Soot's `test/cloudflare-write-budget.test.ts` exercises all of this against a
+real Durable Object: trip, evict, confirm the count survived, confirm writes stay
+refused, confirm an unauthenticated reopen is still 403, and confirm the
+authorized reopen survives another eviction.
 
 Monitor and recovery routes (the outer worker forwards them to the singleton):
 

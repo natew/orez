@@ -776,9 +776,8 @@ describe('ZeroDO implicit foreign-key side effects', () => {
   // delete, and the parent's own row still has to roll back.
   it('renews a parent column without snapshotting its ON DELETE CASCADE child', async () => {
     const { sql, zero } = await createWorkerCore()
-    const { TX_MANIFEST_DDL, TX_MANIFEST_TABLE, rollbackTxJournal } = await import(
-      './tx-journal.js'
-    )
+    const { TX_MANIFEST_DDL, TX_MANIFEST_TABLE, rollbackTxJournal } =
+      await import('./tx-journal.js')
     sql.exec('PRAGMA foreign_keys = ON')
     sql.exec('CREATE TABLE agent (id INTEGER PRIMARY KEY, claim INTEGER)')
     sql.exec(
@@ -814,10 +813,7 @@ describe('ZeroDO implicit foreign-key side effects', () => {
     )
 
     const snapshots = sql
-      .exec(
-        `SELECT original, snapshot FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ?`,
-        txID
-      )
+      .exec(`SELECT original, snapshot FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ?`, txID)
       .toArray()
     expect(snapshots.map((row) => String(row.original))).toEqual(['agent'])
     expect(String(snapshots[0].snapshot)).toBe('')
@@ -830,10 +826,7 @@ describe('ZeroDO implicit foreign-key side effects', () => {
     // The parent row rolls back from its own before-image instead.
     expect(
       sql
-        .exec(
-          'SELECT undoable FROM _zero_pending_changes WHERE transaction_id = ?',
-          txID
-        )
+        .exec('SELECT undoable FROM _zero_pending_changes WHERE transaction_id = ?', txID)
         .toArray()
     ).toEqual([{ undoable: 1 }])
     await zero.atomically(() => {
@@ -871,9 +864,8 @@ describe('ZeroDO write budget stickiness', () => {
 
   it('defers the sticky trip out of the aborting transaction and keeps its count', async () => {
     const core = await createWorkerCore()
-    const { RollingRowWriteBudget, WriteBudgetExceededError } = await import(
-      '../do-sql-tracking.js'
-    )
+    const { RollingRowWriteBudget, WriteBudgetExceededError } =
+      await import('../do-sql-tracking.js')
     const { puts, deferred } = trippableWorker(core)
     core.zero.writeBudget = new RollingRowWriteBudget({
       budgetRows: 3,

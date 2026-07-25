@@ -202,7 +202,8 @@ export class RollingRowWriteBudget {
       at,
       windowRows: Number.isSafeInteger(windowRows) && windowRows > 0 ? windowRows : null,
       budget: Number.isSafeInteger(budget) && budget > 0 ? budget : this.#budgetRows,
-      windowMs: Number.isSafeInteger(windowMs) && windowMs > 0 ? windowMs : this.#windowMs,
+      windowMs:
+        Number.isSafeInteger(windowMs) && windowMs > 0 ? windowMs : this.#windowMs,
     }
   }
 
