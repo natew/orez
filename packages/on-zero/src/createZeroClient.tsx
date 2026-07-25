@@ -1045,6 +1045,10 @@ export function createZeroClientInternal<
       scheduleReload?: (ctx: ScheduleReloadContext) => void
       guardStorage?: RecoveryGuardStorage
       benignLogPatterns?: readonly ZeroLogPattern[]
+      // mint a fresh token. REQUIRED for any host that outlives its token: zero
+      // parks in needs-auth and will not resume until the auth string changes,
+      // so without this a long-lived headless host answers 401 forever.
+      refreshAuth?: () => Promise<string | undefined>
     }
   ): { zero: ZeroInstance; close: () => Promise<void> } {
     const {
@@ -1054,6 +1058,7 @@ export function createZeroClientInternal<
       scheduleReload,
       guardStorage,
       benignLogPatterns,
+      refreshAuth,
       ...options
     } = props
     // mutations read auth dynamically through getAuthData(), so this has to be
@@ -1069,14 +1074,149 @@ export function createZeroClientInternal<
     })
     publishZeroInstance(zeroInstance)
     zeroInstanceVersion?.emit(zeroInstanceVersion.value + 1)
+    const unwatch = watchZeroConnection({ zeroInstance, refreshAuth })
     return {
       zero: zeroInstance,
       close: async () => {
+        unwatch()
         clearZeroInstanceReferences(zeroInstance)
         mutationLifecycle.fence()
         await zeroInstance.close()
       },
     }
+  }
+
+
+  // watch a zero instance's connection and own the generic recovery: stale-poke
+  // and transport reconnects, needs-auth token refresh, reconnect-status events,
+  // and optional dataset mirroring. plain subscription, no react — a headless
+  // host needs exactly this and previously got none of it, so its token expiry
+  // ended as a permanent 401 with no way back.
+  function watchZeroConnection(args: {
+    zeroInstance: ZeroInstance
+    refreshAuth?: () => Promise<string | undefined>
+    exposeDataset?: boolean
+    datasetCacheUrl?: string
+  }): () => void {
+    const { zeroInstance, refreshAuth, exposeDataset, datasetCacheUrl } = args
+    let prevState = zeroInstance.connection.state.current.name
+    let hasConnected = false
+    const currentReconnect =
+      zeroEvents.value?.type === 'reconnect' && zeroEvents.value.status !== 'connected'
+        ? zeroEvents.value
+        : null
+    let reconnect: { reasonKey: ZeroReconnectReasonKey; reason: string } | null =
+      currentReconnect
+        ? { reasonKey: currentReconnect.reasonKey, reason: currentReconnect.reason }
+        : null
+    // one reconnect per distinct recoverable error / one refresh per needs-auth
+    // transition, so a stuck state doesn't retry-storm.
+    let recoverableError: string | null = null
+    let needsAuth = false
+
+    const handle = () => {
+      const state = zeroInstance.connection.state.current
+      const name = state.name
+      const reason =
+        'reason' in state && typeof state.reason === 'string' ? state.reason : ''
+
+      // mirror connection state onto the body dataset for e2e/diagnostics
+      // (enabled on one instance so instances don't clobber each other).
+      if (exposeDataset && typeof document !== 'undefined' && document.body) {
+        document.body.dataset.zeroState = name
+        if (datasetCacheUrl) document.body.dataset.zeroCacheUrl = datasetCacheUrl
+        if (reason) document.body.dataset.zeroReason = reason.slice(0, 200)
+        else delete document.body.dataset.zeroReason
+        if (name === 'connected') document.body.dataset.zeroConnected = 'true'
+        else delete document.body.dataset.zeroConnected
+      }
+
+      if (name === 'connected') {
+        hasConnected = true
+        recoverableError = null
+        if (reconnect) {
+          reconnect = null
+          emitReconnectStatus({ type: 'reconnect', status: 'connected' })
+        }
+      }
+
+      const reconnectReasonKey: ZeroReconnectReasonKey | undefined = reason.includes(
+        'ServerOverloaded'
+      )
+        ? 'server-overloaded'
+        : reason.includes('Failed to fetch') ||
+            reason.includes('fetch failed') ||
+            reason.includes('NetworkError when attempting to fetch resource') ||
+            reason.includes('Network request failed') ||
+            reason.includes('Load failed')
+          ? 'transport'
+          : undefined
+
+      // stale-poke and paused transport errors both resume the existing client.
+      // ServerOverloaded remains in Zero's own retry/backoff loop.
+      if (
+        name === 'error' &&
+        (isRecoverableZeroStalePokeMessage(reason) || reconnectReasonKey)
+      ) {
+        if (recoverableError !== reason) {
+          recoverableError = reason
+          reconnect = { reasonKey: reconnectReasonKey ?? 'transport', reason }
+          emitReconnectStatus({ type: 'reconnect', status: 'trying', ...reconnect })
+          void Promise.resolve(zeroInstance.connection?.connect?.()).catch(() => {})
+        }
+        return
+      }
+      if (name !== 'error') recoverableError = null
+
+      if (name === 'connecting' && (reconnect || hasConnected || Boolean(reason))) {
+        reconnect = {
+          reasonKey: reconnectReasonKey ?? reconnect?.reasonKey ?? 'transport',
+          reason: reason || reconnect?.reason || 'connection interrupted',
+        }
+        emitReconnectStatus({
+          type: 'reconnect',
+          status: reason ? 'waiting' : 'trying',
+          ...reconnect,
+        })
+      } else if (name === 'disconnected' && (reconnect || hasConnected)) {
+        reconnect = {
+          reasonKey: reconnect?.reasonKey ?? 'transport',
+          reason: reason || reconnect?.reason || 'connection interrupted',
+        }
+        emitReconnectStatus({ type: 'reconnect', status: 'waiting', ...reconnect })
+      }
+
+      // needs-auth: the token expired and zero won't auto-resume unless the
+      // auth string changes. refresh it and reconnect in place, once.
+      if (name === 'needs-auth') {
+        if (refreshAuth && !needsAuth) {
+          needsAuth = true
+          void refreshAuth()
+            .then((token) => {
+              if (token) zeroInstance.connection?.connect?.({ auth: token })
+            })
+            .catch(() => {})
+        }
+      } else {
+        needsAuth = false
+      }
+
+      if (name !== prevState) {
+        prevState = name
+        if (name === 'error' || name === 'needs-auth') {
+          zeroEvents.emit({
+            type: 'error',
+            reasonKey:
+              name === 'needs-auth' ? 'connection-needs-auth' : 'connection-error',
+            message: reason || name,
+          })
+        }
+      }
+    }
+
+    const unsubscribe = zeroInstance.connection.state.subscribe(handle)
+    handle()
+    return unsubscribe
   }
 
   // monitors connection state and emits events (replaces onError callback removed
@@ -1085,7 +1225,7 @@ export function createZeroClientInternal<
   // e2e dataset bookkeeping.
   const ConnectionMonitor = memo(
     ({
-      zeroEvents,
+      zeroEvents: _zeroEvents,
       refreshAuth,
       exposeDataset,
       datasetCacheUrl,
@@ -1096,146 +1236,19 @@ export function createZeroClientInternal<
       datasetCacheUrl?: string
     }) => {
       const zeroInstance = useZero<Schema, ZeroMutators>()
-      const state = useConnectionState()
-      const prevState = useRef(state.name)
-      const hasConnectedRef = useRef(false)
-      const currentReconnect =
-        zeroEvents.value?.type === 'reconnect' && zeroEvents.value.status !== 'connected'
-          ? zeroEvents.value
-          : null
-      const reconnectRef = useRef<{
-        reasonKey: ZeroReconnectReasonKey
-        reason: string
-      } | null>(
-        currentReconnect
-          ? {
-              reasonKey: currentReconnect.reasonKey,
-              reason: currentReconnect.reason,
-            }
-          : null
+      // the recovery logic itself is not react's — it is a subscription to the
+      // instance's connection state, shared with connectHeadless so a non-react
+      // host recovers identically instead of going dark on token expiry.
+      useEffect(
+        () =>
+          watchZeroConnection({
+            zeroInstance,
+            refreshAuth,
+            exposeDataset,
+            datasetCacheUrl,
+          }),
+        [zeroInstance, refreshAuth, exposeDataset, datasetCacheUrl]
       )
-      // one reconnect per distinct recoverable error / one refresh per
-      // needs-auth transition, so a stuck state doesn't retry-storm.
-      const recoverableErrorRef = useRef<string | null>(null)
-      const needsAuthRef = useRef(false)
-
-      useEffect(() => {
-        const name = state.name
-        const reason =
-          'reason' in state && typeof state.reason === 'string' ? state.reason : ''
-
-        // mirror connection state onto the body dataset for e2e/diagnostics
-        // (enabled on one instance so instances don't clobber each other).
-        if (exposeDataset && typeof document !== 'undefined' && document.body) {
-          document.body.dataset.zeroState = name
-          if (datasetCacheUrl) document.body.dataset.zeroCacheUrl = datasetCacheUrl
-          if (reason) document.body.dataset.zeroReason = reason.slice(0, 200)
-          else delete document.body.dataset.zeroReason
-          if (name === 'connected') document.body.dataset.zeroConnected = 'true'
-          else delete document.body.dataset.zeroConnected
-        }
-
-        if (name === 'connected') {
-          hasConnectedRef.current = true
-          recoverableErrorRef.current = null
-          if (reconnectRef.current) {
-            reconnectRef.current = null
-            emitReconnectStatus({ type: 'reconnect', status: 'connected' })
-          }
-        }
-
-        const reconnectReasonKey: ZeroReconnectReasonKey | undefined = reason.includes(
-          'ServerOverloaded'
-        )
-          ? 'server-overloaded'
-          : reason.includes('Failed to fetch') ||
-              reason.includes('fetch failed') ||
-              reason.includes('NetworkError when attempting to fetch resource') ||
-              reason.includes('Network request failed') ||
-              reason.includes('Load failed')
-            ? 'transport'
-            : undefined
-
-        // stale-poke and paused transport errors both resume the existing
-        // client. ServerOverloaded remains in Zero's own retry/backoff loop.
-        if (
-          name === 'error' &&
-          (isRecoverableZeroStalePokeMessage(reason) || reconnectReasonKey)
-        ) {
-          if (recoverableErrorRef.current !== reason) {
-            recoverableErrorRef.current = reason
-            reconnectRef.current = {
-              reasonKey: reconnectReasonKey ?? 'transport',
-              reason,
-            }
-            emitReconnectStatus({
-              type: 'reconnect',
-              status: 'trying',
-              ...reconnectRef.current,
-            })
-            void Promise.resolve(zeroInstance.connection?.connect?.()).catch(() => {})
-          }
-          return
-        }
-        if (name !== 'error') recoverableErrorRef.current = null
-
-        if (
-          name === 'connecting' &&
-          (reconnectRef.current || hasConnectedRef.current || Boolean(reason))
-        ) {
-          reconnectRef.current = {
-            reasonKey:
-              reconnectReasonKey ?? reconnectRef.current?.reasonKey ?? 'transport',
-            reason: reason || reconnectRef.current?.reason || 'connection interrupted',
-          }
-          emitReconnectStatus({
-            type: 'reconnect',
-            status: reason ? 'waiting' : 'trying',
-            ...reconnectRef.current,
-          })
-        } else if (
-          name === 'disconnected' &&
-          (reconnectRef.current || hasConnectedRef.current)
-        ) {
-          reconnectRef.current = {
-            reasonKey: reconnectRef.current?.reasonKey ?? 'transport',
-            reason: reason || reconnectRef.current?.reason || 'connection interrupted',
-          }
-          emitReconnectStatus({
-            type: 'reconnect',
-            status: 'waiting',
-            ...reconnectRef.current,
-          })
-        }
-
-        // needs-auth: the token expired and zero won't auto-resume unless the
-        // auth string changes. refresh it and reconnect in place, once.
-        if (name === 'needs-auth') {
-          if (refreshAuth && !needsAuthRef.current) {
-            needsAuthRef.current = true
-            void refreshAuth()
-              .then((token) => {
-                if (token) zeroInstance.connection?.connect?.({ auth: token })
-              })
-              .catch(() => {})
-          }
-        } else {
-          needsAuthRef.current = false
-        }
-
-        if (name !== prevState.current) {
-          prevState.current = name
-          if (name === 'error' || name === 'needs-auth') {
-            zeroEvents.emit({
-              type: 'error',
-              reasonKey:
-                name === 'needs-auth' ? 'connection-needs-auth' : 'connection-error',
-              message: reason || name,
-            })
-          }
-        }
-      }, [state, zeroEvents, zeroInstance, refreshAuth, exposeDataset, datasetCacheUrl])
-
       return null
     }
   )

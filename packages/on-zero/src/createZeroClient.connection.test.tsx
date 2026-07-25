@@ -303,3 +303,41 @@ test('fatal error state stays terminal and reports the reason', async () => {
     vi.useRealTimers()
   }
 })
+
+// the browser gets this recovery from ConnectionMonitor, a react component. a
+// headless host has no tree, so before connectHeadless shared the same watcher
+// it got none of it: an expired token parked the instance in needs-auth
+// permanently, every pull answered 401, and the host went dark with no way back.
+// this is the same transition as the provider test above, driven with no react.
+test('connectHeadless refreshes auth on needs-auth with no react tree', async () => {
+  const headlessClient = createZeroClient({
+    schema,
+    models: {},
+    groupedQueries: {},
+    instanceName: 'headless-auth-test',
+  })
+  const refreshAuth = vi.fn(async () => 'headless-fresh-token')
+  const connection = headlessClient.connectHeadless({
+    userID: 'headless-auth',
+    cacheURL: 'http://127.0.0.1:7788/zero',
+    refreshAuth,
+  })
+  const instance = fakeZero.instances.at(-1)!
+
+  instance.connection.state.set({ name: 'needs-auth', reason: 'token expired' })
+  await Promise.resolve()
+
+  expect(refreshAuth).toHaveBeenCalledTimes(1)
+  await Promise.resolve()
+  expect(instance.connection.connect).toHaveBeenCalledWith({
+    auth: 'headless-fresh-token',
+  })
+
+  // one refresh per transition, not per state emission — a stuck needs-auth
+  // must not retry-storm the token endpoint.
+  instance.connection.state.set({ name: 'needs-auth', reason: 'token expired again' })
+  await Promise.resolve()
+  expect(refreshAuth).toHaveBeenCalledTimes(1)
+
+  await connection.close()
+})
