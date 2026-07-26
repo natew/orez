@@ -375,6 +375,44 @@ async function reconcilePhantomLedger(tx, applied) {
     let missing = false
     if ((match = /^CREATE TABLE\\s+(?:IF NOT EXISTS\\s+)?[\`"]?(\\w+)/i.exec(sql))) {
       missing = !tables.has(match[1])
+      // a ledgered CREATE trusted by NAME can hide a table that predates the
+      // CREATE's definition: the table resolves, the CREATE never re-runs, and
+      // columns that only exist inside its definition are unreachable — every
+      // later index on them then fails the whole run, forever (prod
+      // 2026-07-26, 217 wedged namespaces retrying every sweep). converge the
+      // live table to the declared column set instead. an empty live column
+      // read is no evidence and must not trigger blind ALTERs.
+      if (!missing && Array.isArray(item.declaredColumns)) {
+        const live = new Set(
+          (liveColumns.get(match[1]) || []).map((column) => column.name),
+        )
+        if (live.size > 0) {
+          for (const column of item.declaredColumns) {
+            if (!column || typeof column.name !== 'string') continue
+            if (live.has(column.name)) continue
+            let definition = String(column.definition || '').trim()
+            if (!definition) continue
+            // sqlite refuses ADD COLUMN for these shapes; leave them to
+            // assertExpectedSchema, which reports the namespace loudly.
+            if (/\\bPRIMARY KEY\\b|\\bUNIQUE\\b/i.test(definition)) continue
+            if (/\\bNOT NULL\\b/i.test(definition) && /\\bREFERENCES\\b/i.test(definition)) continue
+            if (/\\bNOT NULL\\b/i.test(definition) && !/\\bDEFAULT\\b/i.test(definition)) {
+              // assertExpectedSchema compares name, type and NOT NULL but not
+              // defaults, so a zero default converges without a false mismatch.
+              definition += /\\b(?:INT|INTEGER|REAL|NUMERIC|BOOLEAN|FLOAT|DOUBLE|DECIMAL)\\b/i.test(definition)
+                ? ' DEFAULT 0'
+                : " DEFAULT ''"
+            }
+            console.warn(
+              '[orez-migrations] converging ' + match[1] + '.' + column.name +
+                ' from ledgered ' + baseId,
+            )
+            await tx.exec(
+              'ALTER TABLE ' + quoteIdentifier(match[1]) + ' ADD COLUMN ' + definition,
+            )
+          }
+        }
+      }
     } else if ((match = /^CREATE (?:UNIQUE )?INDEX\\s+(?:IF NOT EXISTS\\s+)?[\`"]?(\\w+)[\`"]?\\s+ON\\s+[\`"]?(\\w+)/i.exec(sql))) {
       // the index set was sampled BEFORE this pass drops and rebuilds <t>, so
       // "the index exists" is stale evidence for any table a resurrecting

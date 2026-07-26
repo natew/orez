@@ -4,6 +4,7 @@ import { join } from 'node:path'
 export type NativeSqlMigrationStatement = {
   id: string
   sql: string
+  declaredColumns?: Array<{ definition: string; name: string }>
   rebuildColumns?: string[]
   rebuildTarget?: string
   skipIfColumnExists?: { column: string; table: string }
@@ -22,6 +23,17 @@ type ParsedNativeSqlMigrationStatement = Omit<
 // by statement, but a rolled-back block leaves the ORIGINAL <t> behind, so the
 // table NAME still resolves while the rebuilt shape is gone.
 function rebuildColumnNames(createSql: string): string[] {
+  return createTableColumnEntries(createSql).map((entry) => entry.name)
+}
+
+// every column ENTRY a CREATE TABLE declares, with its full definition text.
+// the phantom-ledger reconcile uses these to converge a live table that
+// predates its ledgered CREATE: the old table resolves by NAME, so the CREATE
+// never re-runs, and columns that only ever existed inside its definition are
+// otherwise unreachable (prod 2026-07-26, 217 wedged namespaces).
+function createTableColumnEntries(
+  createSql: string
+): Array<{ definition: string; name: string }> {
   const open = createSql.indexOf('(')
   if (open < 0) return []
   const entries: string[] = []
@@ -81,8 +93,10 @@ function rebuildColumnNames(createSql: string): string[] {
         value.length > 0 &&
         !/^(?:CONSTRAINT|FOREIGN KEY|PRIMARY KEY|UNIQUE|CHECK)\b/i.test(value)
     )
-    .map((value) => /^[`"]?(\w+)/.exec(value)?.[1] ?? '')
-    .filter((name) => name.length > 0)
+    .flatMap((definition) => {
+      const name = /^[`"]?(\w+)/.exec(definition)?.[1]
+      return name ? [{ definition, name }] : []
+    })
 }
 
 export function readNativeSqlMigrationStatements(
@@ -148,6 +162,8 @@ export function readNativeSqlMigrationStatements(
           ) {
             recreateTempTable = null
           }
+          const plainCreate =
+            !created && /^CREATE TABLE IF NOT EXISTS\s+[`"]?\w+/i.test(rewritten)
           return {
             id: `${migrationId}:${index}`,
             ...statement,
@@ -156,6 +172,9 @@ export function readNativeSqlMigrationStatements(
               ? { rebuildTarget: blockTempTable.slice('__new_'.length) }
               : null),
             ...(created ? { rebuildColumns: rebuildColumnNames(rewritten) } : null),
+            ...(plainCreate
+              ? { declaredColumns: createTableColumnEntries(rewritten) }
+              : null),
             sql: rewritten,
           }
         })
