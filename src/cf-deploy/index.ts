@@ -7,6 +7,7 @@
 export * from './bundle.js'
 export * from './config.js'
 export * from './leaves.js'
+export * from './lite-worker.js'
 export * from './migration.js'
 export * from './nativeMigrations.js'
 export * from './prune.js'

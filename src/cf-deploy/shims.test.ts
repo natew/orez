@@ -38,10 +38,17 @@ function generatedNeedsSqlSchema(source: string) {
 }
 
 describe('cf shim builders', () => {
-  it('generates syntactically valid data-tier worker modules', async () => {
-    for (const build of [buildDataShimSource, buildUserShimSource]) {
+  it('generates syntactically valid worker modules', async () => {
+    const sources = [
+      buildDataShimSource(cfDeployConfig('contrast')),
+      buildUserShimSource(cfDeployConfig('contrast')),
+      buildRustSyncUserShimSource(cfDeployConfig('contrast'), {
+        feedTables: {},
+      }),
+    ]
+    for (const source of sources) {
       await expect(
-        transform(build(cfDeployConfig('contrast')), {
+        transform(source, {
           loader: 'js',
           format: 'esm',
         })
