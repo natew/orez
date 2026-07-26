@@ -420,7 +420,16 @@ describe('ZeroDO transactional CDC integration', () => {
           sql,
           get: async (key: string) =>
             key === '_orez_write_budget_tripped_at'
-              ? { at: 1_000, windowRows: 900, budget: 300, windowMs: 300_000 }
+              ? {
+                  at: 1_000,
+                  windowRows: 900,
+                  budget: 300,
+                  windowMs: 300_000,
+                  statement: {
+                    sql: 'UPDATE private_note SET body = ? WHERE id = ?',
+                    rowsWritten: 22,
+                  },
+                }
               : undefined,
           delete: async (key: string) => {
             if (key === '_orez_write_budget_tripped_at') tripDeleted = true
@@ -444,6 +453,10 @@ describe('ZeroDO transactional CDC integration', () => {
     expect(await status.json()).toMatchObject({
       tripped: true,
       trippedWindowRows: 900,
+      trippedStatement: {
+        sql: 'UPDATE private_note SET body = ? WHERE id = ?',
+        rowsWritten: 22,
+      },
     })
     const reopened = await recreated.fetch(
       new Request('http://do/_orez/write-budget/reopen', {
@@ -983,7 +996,12 @@ describe('ZeroDO write budget stickiness', () => {
       now: () => 1_000,
     })
 
-    expect(() => core.zero.recordWriteBudgetRows(9)).toThrow(WriteBudgetExceededError)
+    expect(() =>
+      core.zero.recordWriteBudgetRows(9, {
+        sql: "UPDATE message SET text = 'private-value' WHERE id = 42",
+        rowsWritten: 9,
+      })
+    ).toThrow(WriteBudgetExceededError)
     // Nothing yet: a put issued here would be rolled back with the write.
     expect(puts).toEqual([])
     expect(deferred).toHaveLength(1)
@@ -992,7 +1010,16 @@ describe('ZeroDO write budget stickiness', () => {
     expect(puts).toEqual([
       {
         key: '_orez_write_budget_tripped_at',
-        value: { at: 1_000, windowRows: 9, budget: 3, windowMs: 300_000 },
+        value: {
+          at: 1_000,
+          windowRows: 9,
+          budget: 3,
+          windowMs: 300_000,
+          statement: {
+            sql: 'UPDATE message SET text = ? WHERE id = ?',
+            rowsWritten: 9,
+          },
+        },
       },
     ])
   })
