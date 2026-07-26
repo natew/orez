@@ -396,13 +396,26 @@ async function reconcilePhantomLedger(tx, applied) {
       // columns that only exist inside its definition are unreachable — every
       // later index on them then fails the whole run, forever (prod
       // 2026-07-26, 217 wedged namespaces retrying every sweep). converge the
-      // live table to the declared column set instead. an empty live column
-      // read is no evidence and must not trigger blind ALTERs.
-      if (!missing && Array.isArray(item.declaredColumns)) {
+      // live table to the declared column set instead.
+      //
+      // the column read is a direct PRAGMA rather than the bulk scan above:
+      // that scan keys on sqlite_master.name case-EXACTLY, so a table whose
+      // stored spelling differs from the migration's reads as having no
+      // columns, and a convergence guarded on "did the bulk scan see it" then
+      // silently does nothing on exactly the namespaces that need it. PRAGMA
+      // resolves the table the way the failing statement will, and it is the
+      // same mechanism shouldSkipStatement already trusts here. rows.length
+      // is therefore the authority on existence too: sqlite_master saying
+      // absent while PRAGMA resolves columns means the CREATE would no-op.
+      if (Array.isArray(item.declaredColumns)) {
+        const liveRows = await tx.query(
+          'PRAGMA table_info(' + quoteIdentifier(match[1]) + ')',
+        )
         const live = new Set(
-          (liveColumns.get(match[1]) || []).map((column) => column.name),
+          liveRows.map((column) => String((column && column.name) ?? '')),
         )
         if (live.size > 0) {
+          missing = false
           for (const column of item.declaredColumns) {
             if (!column || typeof column.name !== 'string') continue
             if (live.has(column.name)) continue
@@ -565,20 +578,31 @@ async function applyNativeSchema(tx, instance) {
           const file = baseId.split(':')[0]
           const siblings = [...applied].filter((appliedId) => appliedId.startsWith(file))
           let tableInfo = ''
-          const target = /(?:UPDATE|ALTER TABLE|DELETE FROM|INSERT INTO)\\s+[\`"]?(\\w+)/i.exec(item.sql)
+          // CREATE INDEX belongs here as much as the DML shapes: "no such
+          // column" on an index names a column the target table is missing,
+          // and the table's real column list is the whole diagnosis. it also
+          // has to come BEFORE the ledger list, which runs to hundreds of ids
+          // and truncated every trailing byte of this off the stored error.
+          const target =
+            /(?:UPDATE|ALTER TABLE|DELETE FROM|INSERT INTO)\\s+[\`"]?(\\w+)/i.exec(item.sql) ||
+            /^CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+(?:IF NOT EXISTS\\s+)?[\`"]?\\w+[\`"]?\\s+ON\\s+[\`"]?(\\w+)/i.exec(item.sql)
           if (target) {
             try {
               const columns = await tx.query('PRAGMA table_info(' + quoteIdentifier(target[1]) + ')')
               tableInfo = ' | table_info(' + target[1] + '): ' +
-                columns.map((column) => column.name + ':' + column.type).join(', ')
-            } catch {}
+                (columns.map((column) => column.name + ':' + column.type).join(', ') ||
+                  '(no columns)')
+            } catch (infoError) {
+              tableInfo = ' | table_info(' + target[1] + ') failed: ' +
+                ((infoError && infoError.message) || String(infoError))
+            }
           }
           throw new Error(
             'migration statement ' + baseId + ' failed on instance ' + instance + ': ' +
               (error && error.message ? error.message : String(error)) +
               ' | sql: ' + item.sql.replace(/\\s+/g, ' ').slice(0, 160) +
-              ' | ledger for ' + file + ': ' + (siblings.join(', ') || '(none)') +
-              tableInfo,
+              tableInfo +
+              ' | ledger for ' + file + ': ' + (siblings.join(', ') || '(none)'),
             { cause: error },
           )
         }
