@@ -6,14 +6,14 @@ description: Connect the stock Zero client to Orez Lite over HTTP.
 # Client transport
 
 Orez Lite uses the real `@rocicorp/zero` client API and local cache. The
-browser transport that connects it to Orez Lite is provided by `orez/client`,
+browser transport that connects it to Orez Lite is provided by `orez-lite/client`,
 so the client and server halves of the wire protocol ship together.
 
 Install the transport before constructing `Zero`:
 
 ```ts
 import { Zero } from '@rocicorp/zero'
-import { createZeroClientTransport } from 'orez/client'
+import { createZeroClientTransport } from 'orez-lite/client'
 
 const server = 'https://sync.example.com'
 const transport = createZeroClientTransport({
@@ -56,9 +56,9 @@ The transport sends bearer auth from Zero's connection to both endpoints.
 
 ## Browser boundary
 
-`orez/client` is a browser-only leaf export. It contains the HTTP transport and
+`orez-lite/client` is a browser-only leaf export. It contains the HTTP transport and
 payload codec interface, and does not import Orez's Node, PostgreSQL, server,
 or mount code. Import server integration separately from
-`orez/zero-http/mount`.
+`orez-lite/zero-http`.
 
-`orez/zero-http` remains an alias of `orez/client` for compatibility.
+`orez-lite/client` remains an alias of `orez-lite/client` for compatibility.

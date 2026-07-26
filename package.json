@@ -27,73 +27,9 @@
       "types": "./dist/change-tracking.d.ts",
       "import": "./dist/change-tracking.js"
     },
-    "./sync-executor": {
-      "types": "./dist/sync-executor.d.ts",
-      "import": "./dist/sync-executor.js"
-    },
-    "./sync": {
-      "types": "./dist/sync.d.ts",
-      "import": "./dist/sync.js"
-    },
-    "./zero-http": {
-      "types": "./dist/zero-http/transport.d.ts",
-      "import": "./dist/zero-http/transport.js"
-    },
-    "./client": {
-      "types": "./dist/zero-http/transport.d.ts",
-      "import": "./dist/zero-http/transport.js"
-    },
-    "./wake": {
-      "types": "./dist/wake.d.ts",
-      "import": "./dist/wake.js"
-    },
     "./naming": {
       "types": "./dist/naming.d.ts",
       "import": "./dist/naming.js"
-    },
-    "./zero-http/mount": {
-      "types": "./dist/zero-http/mount.d.ts",
-      "import": "./dist/zero-http/mount.js"
-    },
-    "./zero-http/encryption": {
-      "types": "./dist/zero-http/encrypted-column-codec.d.ts",
-      "import": "./dist/zero-http/encrypted-column-codec.js"
-    },
-    "./zero-http/encryption/conformance": {
-      "types": "./dist/zero-http/encrypted-column-conformance.d.ts",
-      "import": "./dist/zero-http/encrypted-column-conformance.js"
-    },
-    "./sync-browser-host": {
-      "types": "./dist/sync-browser-host/index.d.ts",
-      "import": "./dist/sync-browser-host/index.js"
-    },
-    "./cloudflare": {
-      "types": "./dist/cloudflare.d.ts",
-      "import": "./dist/cloudflare.js"
-    },
-    "./cloudflare/build": {
-      "types": "./dist/cloudflare-build.d.ts",
-      "import": "./dist/cloudflare-build.js"
-    },
-    "./cloudflare/sync": {
-      "types": "./dist/cloudflare-sync.d.ts",
-      "import": "./dist/cloudflare-sync.js"
-    },
-    "./cloudflare/query-compiler": {
-      "types": "./dist/cloudflare-query-compiler.d.ts",
-      "import": "./dist/cloudflare-query-compiler.js"
-    },
-    "./cloudflare/transaction-query": {
-      "types": "./dist/cloudflare-transaction-query.d.ts",
-      "import": "./dist/cloudflare-transaction-query.js"
-    },
-    "./cloudflare/vite-wasm-loader": {
-      "types": "./dist/cloudflare-vite-wasm-loader.d.ts",
-      "import": "./dist/cloudflare-vite-wasm-loader.js"
-    },
-    "./cloudflare/bun-wasm-loader": {
-      "types": "./dist/cloudflare-bun-wasm-loader.d.ts",
-      "import": "./dist/cloudflare-bun-wasm-loader.js"
     },
     "./worker/*": {
       "types": "./dist/worker/*.d.ts",
@@ -111,10 +47,8 @@
     "dist"
   ],
   "scripts": {
-    "prepare": "bun run --cwd packages/sync-executor build",
-    "build": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && tsc && bun run build:sync-browser-host && bun run --cwd packages/drizzle-zero-sqlite build && bun run --cwd packages/on-zero build && chmod +x dist/cli-entry.js",
-    "build:sync-browser-host": "bun run --cwd packages/sync-browser-host build:dist",
-    "dev": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && tsc --watch",
+    "build": "rm -rf dist && tsc && bun run --cwd packages/orez-lite build && bun run --cwd packages/drizzle-zero-sqlite build && bun run --cwd packages/on-zero build && chmod +x dist/cli-entry.js",
+    "dev": "tsc --watch",
     "test": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && vitest run --exclude 'src/integration/' --exclude 'src/wasm-sqlite.test.ts' && bun run test:sync-executor && bun run --cwd packages/drizzle-zero-sqlite test",
     "test:integration": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && vitest run src/integration/",
     "native:bootstrap": "bun scripts/setup-native-sqlite.ts",
@@ -124,7 +58,7 @@
     "test:sync-browser-host": "bun run --cwd packages/sync-browser-host test",
     "test:sync-cf-host": "bun run --cwd packages/sync-cf-host test",
     "test:sync-executor": "bun run --cwd packages/sync-executor test",
-    "build:encryption-conformance": "tsc",
+    "build:encryption-conformance": "bun run --cwd packages/orez-lite build:runtime",
     "conformance:encryption:node": "bun run build:encryption-conformance && node scripts/encryption-codec-node-conformance.mjs",
     "conformance:encryption:browser": "bun run --cwd packages/sync-browser-host conformance:encryption-codec",
     "conformance:encryption:gpui": "bun run build:encryption-conformance && node scripts/encryption-codec-gpui-conformance.mjs",
@@ -134,7 +68,7 @@
     "lint": "oxlint --import-plugin --ignore-pattern sqlite-wasm/",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
-    "check": "bun run --cwd packages/sync-executor typecheck && bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && tsc --noEmit && bun run --cwd packages/sync-browser-host typecheck && bun run --cwd packages/sync-cf-host typecheck && bun run --cwd packages/drizzle-zero-sqlite typecheck",
+    "check": "tsc --noEmit && bun run --cwd packages/sync-executor typecheck && bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host typecheck && bun run --cwd packages/orez-lite typecheck && bun run --cwd packages/sync-browser-host typecheck && bun run --cwd packages/drizzle-zero-sqlite typecheck",
     "demo:test": "bun demo/src/test/run-e2e.ts",
     "check:all": "bun run lint && bun run format:check && bun run check && bun run test",
     "test:chat": "bun scripts/test-chat-integration.ts",
@@ -157,14 +91,8 @@
   "dependencies": {
     "@electric-sql/pglite": "0.4.1",
     "@electric-sql/pglite-tools": "^0.3.1",
-    "@noble/ciphers": "1.3.0",
-    "@noble/curves": "1.9.7",
-    "@noble/hashes": "1.8.0",
     "bedrock-sqlite": "workspace:*",
     "citty": "^0.2.0",
-    "esbuild": "^0.25.0",
-    "orez-sync-cf-host": "workspace:*",
-    "orez-sync-executor": "workspace:*",
     "pg-gateway": "0.3.0-beta.4",
     "pgsql-parser": "^17.9.11",
     "postgres": "^3.4.5"
@@ -182,9 +110,6 @@
       "optional": true
     }
   },
-  "optionalDependencies": {
-    "orez-sync-native": "workspace:*"
-  },
   "devDependencies": {
     "@rocicorp/zero": "1.7.0",
     "@rocicorp/zero-sqlite3": "1.1.2",
@@ -193,6 +118,7 @@
     "embedded-postgres": "17.10.0-beta.17",
     "oxfmt": "latest",
     "oxlint": "latest",
+    "orez-lite": "workspace:*",
     "pg": "8.22.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0",
@@ -207,6 +133,7 @@
     "sqlite-wasm",
     "packages/drizzle-zero-sqlite",
     "packages/on-zero",
+    "packages/orez-lite",
     "packages/sync-executor",
     "packages/sync-cf-host",
     "packages/sync-browser-host",

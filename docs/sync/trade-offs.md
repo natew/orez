@@ -73,7 +73,7 @@ Because a runaway writer bills real money and can wedge an object, the system ha
 defense in depth (`plans/orez-write-safeguards.md`). All three are independent,
 so a failure in one does not disable the others.
 
-1. **Data-worker write budget** (`src/cf-do/worker.ts`). The source `ZeroSqlDO`
+1. **Data-worker write budget** (`packages/orez-lite/src/cf-do/worker.ts`). The source `ZeroSqlDO`
    meters billable rows in a rolling window. Past `OREZ_DO_WRITE_BUDGET_ROWS`
    (default 150,000 per five minutes) it becomes sticky and mutating endpoints
    return HTTP 429 `writeBudgetExceeded`. Reads stay open, the trip is persisted

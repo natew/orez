@@ -15,20 +15,21 @@ oreZ makes Zero work on [PGlite](https://pglite.dev) (Postgres in WASM) and [bed
 
 ## Orez Lite
 
-Orez Lite is a SQLite-native Zero server for Cloudflare and other constrained
+[`orez-lite`](https://www.npmjs.com/package/orez-lite) is a separate
+SQLite-native Zero engine for Cloudflare and other constrained
 hosts. It replaces Zero's server side and speaks the Zero protocol to the real
-`@rocicorp/zero` client. `orez/client` supplies the Orez Lite transport without
+`@rocicorp/zero` client. `orez-lite/client` supplies the Orez Lite transport without
 forking Zero's query or mutation API. See the
 [Orez Lite server documentation](docs/sync/README.md).
 
 ## Cloudflare
 
-`orez/cloudflare` is the workerd runtime. A complete data worker is one factory
+`orez-lite/cloudflare` is the workerd runtime. A complete data worker is one factory
 call; the generated descriptor carries the real Zero schema, migration, and
 publication metadata, so applications never list tables or columns again:
 
 ```ts
-import { createOrezDataWorker } from 'orez/cloudflare'
+import { createOrezDataWorker } from 'orez-lite/cloudflare'
 import { orezAppSchema } from 'orez:cloudflare-migrations'
 
 const orez = createOrezDataWorker({
@@ -45,11 +46,12 @@ projection, write budgets, and optional streaming backups. Applications add
 only product routes, telemetry, cron work, and namespace inventory.
 
 Node-side migration, bundling, Wrangler configuration, pruning, and readiness
-helpers live at `orez/cloudflare/build`.
+helpers live at `orez-lite/cloudflare/build`.
 
 Cloudflare query compilation is available at
-`orez/cloudflare/query-compiler`. Applications only depend on `orez`; the
-workspace packages behind these exports are internal implementation units.
+`orez-lite/cloudflare/query-compiler`. Lite applications depend on `orez-lite`,
+not `orez`; the workspace packages behind these exports are internal
+implementation units.
 
 ## Requirements
 
@@ -71,7 +73,7 @@ not suitable for production.
 - **Local filesystem** — no replication, no HA. Use `orez pg_dump` for backups.
 
 Orez does not embed zero-cache in Cloudflare Durable Objects. Cloudflare server
-work uses the SQLite-native Orez Lite runtime from `orez/cloudflare`.
+work uses the SQLite-native Orez Lite runtime from `orez-lite/cloudflare`.
 
 ## Backends
 

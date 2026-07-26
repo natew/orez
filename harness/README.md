@@ -49,7 +49,7 @@ coverable pairs with 400 generated specs (`--rounds 100 --queriesPerRound 4`).
 
 targets: `stock-zero` (real zero-cache + embedded postgres + fixture app
 server), `orez-local` (orez executor-backed zero-http core over pure bun:sqlite,
-real `@rocicorp/zero` clients through the canonical `orez/zero-http`
+real `@rocicorp/zero` clients through the canonical `orez-lite/client`
 integration), and `orez-cf` (the
 SAME core hosted in a durable object over `ctx.storage.sql` — `cf/worker.ts`
 deployed as `zharness-sync` on lslcf; fresh namespace per run; admin oracle

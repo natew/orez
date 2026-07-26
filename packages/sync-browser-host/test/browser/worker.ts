@@ -1,5 +1,5 @@
+import { createBrowserSyncHost } from 'orez-lite/browser'
 import { MutationApplicationError } from 'orez-sync-executor/core'
-import { createBrowserSyncHost } from 'orez/sync-browser-host'
 
 import {
   createBrowserSyncHostInternal,

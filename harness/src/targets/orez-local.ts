@@ -22,12 +22,12 @@ import { mutators, schema } from '../fixture.js'
 // instructions in the vendor file header
 import { ensureHttpPullTransport } from '../vendor/httpPullTransport.js'
 
+import type { Rows, SyncTarget } from '../target.js'
 import type {
   ZeroHttpSyncDb as SyncDb,
   ZeroHttpVisibility,
   ZeroHttpVisibilityInvalidation,
-} from '../../../src/zero-http/mount.js'
-import type { Rows, SyncTarget } from '../target.js'
+} from 'orez-lite/zero-http'
 
 export type PullObservation = {
   body: unknown

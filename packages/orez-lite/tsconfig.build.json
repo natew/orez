@@ -4,10 +4,8 @@
     "declaration": true,
     "declarationMap": true,
     "noEmit": false,
-    "outDir": "../orez-lite/dist/browser",
-    "rootDir": "./src",
+    "outDir": "dist",
+    "rootDir": "src",
     "sourceMap": true
-  },
-  "include": ["src/**/*.ts"],
-  "exclude": ["test"]
+  }
 }

@@ -1,6 +1,6 @@
 // red-proof for the intermittent query-diff `allProjects` completion stall.
 //
-// this vendored transport is a snapshot of ~/orez/src/zero-http/transport.ts.
+// this vendored transport is a snapshot of ~/orez/packages/orez-lite/src/zero-http/transport.ts.
 // when it drifted behind the canonical fix (1efd3e5) the query-diff --against
 // rust-cf lane went intermittently red: a got ack rides an early poke, then an
 // immediately following snapshot-reset pull (leading rowsPatch op:'clear')

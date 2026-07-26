@@ -7,7 +7,7 @@ conformance.
 Run the lean DO worker first (same as chat e2e, CHAT_E2E.md §5):
 
 ```bash
-cd src/cf-do && bunx wrangler dev --port 8799 --local --no-show-interactive-dev-session
+cd packages/orez-lite/src/cf-do && bunx wrangler dev --port 8799 --local --no-show-interactive-dev-session
 # then, from repo root:
 bun run perf/scripts/bench-cf-do.ts            # defaults: CONC=4 N=1000
 CONC=8 N=2000 bun run perf/scripts/bench-cf-do.ts
@@ -48,7 +48,7 @@ change feed.
 
 ## cleanup done in this pass
 
-`src/cf-do/worker.ts` outer `export default` collapsed from a 35-line per-path
+`packages/orez-lite/src/cf-do/worker.ts` outer `export default` collapsed from a 35-line per-path
 route table (that duplicated the DO's own `fetch` routing and could drift) to a
 4-line forward-all to the singleton DO. Side benefit: CORS `OPTIONS` preflight now
 reaches the DO's handler (was 404 at the outer worker). Validated: bench green,

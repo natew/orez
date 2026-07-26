@@ -136,7 +136,7 @@ ordinary Cloudflare `[[services]]` bindings; the host reads them by name off
 
 ## Data-worker environment variables (write safeguards)
 
-These configure the write budget on the data worker (`src/cf-do/worker.ts`),
+These configure the write budget on the data worker (`packages/orez-lite/src/cf-do/worker.ts`),
 not the sync host. They are the source-side defense against a runaway writer.
 
 | Variable                           | Default | Meaning                                                                                                                       |
@@ -182,7 +182,7 @@ Every route is under `/<namespace>/admin/` and gated by `authorizeAdmin` (or the
 
 ## Node mount surface
 
-`src/zero-http/mount.ts` is the executor-backed TypeScript implementation usable
+`packages/orez-lite/src/zero-http/mount.ts` is the executor-backed TypeScript implementation usable
 directly as a Node or bun mount. It is the smaller surface: local mutators and
 per-user visibility, without query awareness or upstream ingest.
 

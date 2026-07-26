@@ -8,11 +8,8 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 
 import { Zero } from '@rocicorp/zero'
+import { createZeroHttpMount, type ZeroHttpSyncDb as SyncDb } from 'orez-lite/zero-http'
 
-import {
-  createZeroHttpMount,
-  type ZeroHttpSyncDb as SyncDb,
-} from '../../src/zero-http/mount.js'
 import { createHarnessSyncServer, type HarnessSyncServer } from './executor-host.js'
 import { seedSqlite, userIDFromAuth } from './fixture-data.js'
 import { mutators, queries, schema } from './fixture.js'

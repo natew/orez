@@ -17,7 +17,7 @@ import {
 } from './atomic-visibility.js'
 import { HistoryRecorder } from './recorder.js'
 
-import type { ZeroHttpSyncDb as SyncDb } from '../../../src/zero-http/mount.js'
+import type { ZeroHttpSyncDb as SyncDb } from 'orez-lite/zero-http'
 
 const effects = [
   { id: 'run-a', projectId: 'p0', rank: 101 },

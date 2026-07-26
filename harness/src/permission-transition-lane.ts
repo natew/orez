@@ -19,11 +19,8 @@ import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
 import { Zero } from '@rocicorp/zero'
+import { createZeroHttpMount, type ZeroHttpSyncDb as SyncDb } from 'orez-lite/zero-http'
 
-import {
-  createZeroHttpMount,
-  type ZeroHttpSyncDb as SyncDb,
-} from '../../src/zero-http/mount.js'
 import { FAULT_SCHEDULE_SCHEMA_VERSION } from './consistency/fault-schedule.js'
 import { writePermissionArtifacts } from './consistency/permission-artifacts.js'
 import {

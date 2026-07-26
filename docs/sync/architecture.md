@@ -112,15 +112,15 @@ mutators or push delegation, upstream ingest) is passed in as one
 `SyncHostConfig` object. That object is the entire public API; the configuration
 page documents every field.
 
-`orez-sync-executor` is the shared application-database boundary. Both hosts
+`orez-lite` exposes the shared application-database boundary. Both hosts
 call it for registered mutators, CRUD SQL, last-mutation-id ownership, replay,
-and deferred effects. `src/zero-http/mount.ts` composes that executor with the
+and deferred effects. `packages/orez-lite/src/zero-http/mount.ts` composes it with the
 SQLite pull/change-log surface used by the Node and bun test mounts. The CF host
 keeps the Rust pull and ingest engine compiled to WASM.
 
 ### packages/sync-browser-host
 
-The browser host is exported as `orez/sync-browser-host`. It loads sync-wasm
+The browser host is exported as `orez-lite/browser`. It loads sync-wasm
 and Bedrock SQLite in one worker and serves the same authenticated `/pull` and
 `/push` protocol through a `MessagePort`. The same port also exposes serialized
 direct `query` and `exec` calls for preview tooling. All attached clients receive
@@ -136,7 +136,7 @@ SQLite. There is no in-memory fallback.
 
 The host accepts the application's mutator registry and named-query resolver so
 generated validators, permissions, transaction helpers, and deferred effects
-keep working without a second mutation-bookkeeping path. The root Orez package
+keep working without a second mutation-bookkeeping path. The `orez-lite` package
 includes both WASM binaries beside the subpath export, so ordinary worker
 bundles do not need consumer-specific asset copies.
 
@@ -210,19 +210,19 @@ production on Cloudflare.
 
 On Cloudflare the deployment has two Durable Object roles:
 
-- The **data worker** (`src/cf-do/worker.ts`, the `ZeroSqlDO` class) is the
+- The **data worker** (`packages/orez-lite/src/cf-do/worker.ts`, the `ZeroSqlDO` class) is the
   write side. Apps use the typed Application SQL Durable Object RPC, and it
   stores rows in DO SQLite. It exposes a
   watermark-cursored change feed the sync host consumes:
   `GET/POST /<db>/changes {watermark, limit}` returns `{watermark, changes}` and
   answers HTTP 410 `watermarkTooOld` when the cursor precedes the retained
   floor; `GET /<db>/snapshot` returns every tracked table; `POST /<db>/notify`
-  wakes ingest. Authoritative row capture is in `src/cf-do/cdc.ts`: generated
+  wakes ingest. Authoritative row capture is in `packages/orez-lite/src/cf-do/cdc.ts`: generated
   SQLite triggers stage full before/after images in the same statement as the
   row write, including indirect writes from business triggers. Explicit
-  transactions are grouped and promoted only at commit; `src/cf-do/row-undo.ts`
+  transactions are grouped and promoted only at commit; `packages/orez-lite/src/cf-do/row-undo.ts`
   uses the same images for rollback and crash recovery. This is logical CDC,
-  not WAL/page copying. `src/do-sql-tracking.ts` meters billable writes, while
+  not WAL/page copying. `packages/orez-lite/src/do-sql-tracking.ts` meters billable writes, while
   `src/change-tracking.ts` is the separate Postgres-compatible replication
   entrypoint.
 - The **sync host** (`packages/sync-cf-host`) is the read side. It ingests the
@@ -230,7 +230,7 @@ On Cloudflare the deployment has two Durable Object roles:
   pushes. Application writes and sync ingestion share the same authoritative
   SQLite object without a Postgres compatibility layer.
 
-The canonical Orez transport integration lives at `orez/zero-http`, with source
-in `src/zero-http/`. It keeps `@rocicorp/zero` as the client and maps its sync
+The canonical Orez transport integration lives at `orez-lite/client`, with source
+in `packages/orez-lite/src/zero-http/`. It keeps `@rocicorp/zero` as the client and maps its sync
 connection onto the Orez Lite pull, push, and wake server endpoints. Downstream
 vendored copies are refreshed from this implementation.

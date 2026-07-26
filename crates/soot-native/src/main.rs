@@ -195,7 +195,7 @@ async fn main() {
 
     let data_dir = args.data_dir.unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        cwd.join(".orez/sync-native").to_string_lossy().to_string()
+        cwd.join(".orez-lite-native").to_string_lossy().to_string()
     });
 
     let port = args

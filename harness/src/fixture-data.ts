@@ -7,7 +7,7 @@ import { validateIncrementProbeArgs } from './consistency/exactly-once-workload.
 import type {
   ZeroHttpSyncDb as SyncDb,
   ZeroHttpTables as SyncTables,
-} from '../../src/zero-http/mount.js'
+} from 'orez-lite/zero-http'
 
 // mirror of the zero schema's tables (guarded against drift in fixture.ts)
 export const TABLES: SyncTables = {

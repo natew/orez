@@ -335,16 +335,18 @@ async function generate(): Promise<void> {
 
   const evidence = readJson<Evidence>(evidencePath)
   const rootPackage = readJson<{
-    version: string
     devDependencies: Record<string, string>
   }>(join(root, 'package.json'))
-  const packageTag = `v${rootPackage.version}`
+  const litePackage = readJson<{ version: string }>(
+    join(root, 'packages/orez-lite/package.json')
+  )
+  const packageTag = `v${litePackage.version}`
   const pushedTag = process.env.GITHUB_REF?.startsWith('refs/tags/')
     ? process.env.GITHUB_REF.slice('refs/tags/'.length)
     : null
   if (pushedTag && pushedTag !== packageTag) {
     throw new Error(
-      `release tag ${pushedTag} does not match package version ${rootPackage.version}`
+      `release tag ${pushedTag} does not match package version ${litePackage.version}`
     )
   }
   const releaseTag = pushedTag ?? packageTag

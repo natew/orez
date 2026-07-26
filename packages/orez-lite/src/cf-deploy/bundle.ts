@@ -12,9 +12,14 @@ import { basename, dirname, join } from 'path'
 
 import { build, type Plugin } from 'esbuild'
 
-import { getBrowserDefine } from '../worker/browser-build-config.js'
-import { NODE_EXTERNALS, isOrezAliasImporter, resolveAlias } from './leaves.js'
+import { NODE_EXTERNALS, isOrezLiteImporter, resolveAlias } from './leaves.js'
 import { pruneUnreachableWorkerModules, shimWorkerCreateRequire } from './prune.js'
+
+const WORKER_DEFINE = {
+  'process.env.NODE_ENV': '"development"',
+  'process.env.SINGLE_PROCESS': '"1"',
+  'process.versions.node': '"20.0.0"',
+}
 
 import type { CloudflareConfig } from './config.js'
 import type { WorkerChunkPruneSignatures } from './prune.js'
@@ -41,7 +46,7 @@ export const SERVER_CONTEXT_STUBS: Record<string, string> = {
   'server-only': 'export {}\n',
 }
 
-export function orezCfAliasPlugin(
+export function orezLiteAliasPlugin(
   cfg: CloudflareConfig,
   aliases: Record<string, string>,
   resolveDir: string,
@@ -99,7 +104,7 @@ export function orezCfAliasPlugin(
     ...SERVER_CONTEXT_STUBS,
   }
   return {
-    name: 'orez-cf-aliases',
+    name: 'orez-lite-aliases',
     setup(buildApi) {
       // consumer-declared .wasm modules (cfg.compiledWasmModules) → attach each as a
       // CompiledWasm worker module: resolve the specifier (honoring its package
@@ -130,13 +135,13 @@ export function orezCfAliasPlugin(
           // code (e.g. an auth module's `import 'server-only'`) must hit the
           // no-op, not the throwing client-guard entry
           if (specifier in SERVER_CONTEXT_STUBS) {
-            return { path: specifier, namespace: 'orez-cf-virtual' }
+            return { path: specifier, namespace: 'orez-lite-virtual' }
           }
-          if (args.importer && !isOrezAliasImporter(args.importer)) return undefined
-          return { path: specifier, namespace: 'orez-cf-virtual' }
+          if (args.importer && !isOrezLiteImporter(args.importer)) return undefined
+          return { path: specifier, namespace: 'orez-lite-virtual' }
         })
       }
-      buildApi.onLoad({ filter: /.*/, namespace: 'orez-cf-virtual' }, (args) => ({
+      buildApi.onLoad({ filter: /.*/, namespace: 'orez-lite-virtual' }, (args) => ({
         contents: virtualModules[args.path],
         loader: 'js',
         resolveDir,
@@ -145,16 +150,11 @@ export function orezCfAliasPlugin(
       for (const [specifier, target] of entries) {
         const filter = new RegExp(`^${specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`)
         buildApi.onResolve({ filter }, async (args) => {
-          const isOrezBuildModule = specifier.startsWith('orez:')
-          const isZeroRunner =
-            specifier === '@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js'
-          const isPatchedParser = specifier.startsWith('libpg-query')
+          const isVirtualBuildModule = specifier.startsWith('orez:')
           if (
-            !isOrezBuildModule &&
-            !isZeroRunner &&
-            !isPatchedParser &&
+            !isVirtualBuildModule &&
             args.importer &&
-            !isOrezAliasImporter(args.importer)
+            !isOrezLiteImporter(args.importer)
           ) {
             return undefined
           }
@@ -231,7 +231,7 @@ async function bundleCloudflareSplitAppWorker(
     mainFields: ['browser', 'module', 'main'],
     external: ['cloudflare:*', './assets/*', ...NODE_EXTERNALS],
     define: {
-      ...getBrowserDefine(),
+      ...WORKER_DEFINE,
       ...options.define,
       // shim the CJS module globals, which are undefined in this workerd ESM
       // bundle (platform: 'neutral' does not inject them). a bundled dep that
@@ -241,7 +241,7 @@ async function bundleCloudflareSplitAppWorker(
       __filename: JSON.stringify('index.js'),
       __dirname: JSON.stringify('/'),
     },
-    plugins: [orezCfAliasPlugin(cfg, aliases, workerDir, nodeModulesPath, workerDir)],
+    plugins: [orezLiteAliasPlugin(cfg, aliases, workerDir, nodeModulesPath, workerDir)],
     logLevel: 'silent',
   })
   const oneAppChunks = readdirSync(outDir).filter((name) =>
@@ -333,13 +333,13 @@ export async function bundleCloudflareLiteDataWorker(
     mainFields: ['browser', 'module', 'main'],
     external: ['cloudflare:*', ...NODE_EXTERNALS],
     define: {
-      ...getBrowserDefine(),
+      ...WORKER_DEFINE,
       ...options.define,
       __filename: JSON.stringify('index.js'),
       __dirname: JSON.stringify('/'),
     },
     plugins: [
-      orezCfAliasPlugin(
+      orezLiteAliasPlugin(
         cfg,
         {
           'orez:cloudflare-migrations': join(workerDir, 'orez-migrations.js'),

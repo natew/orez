@@ -21,7 +21,7 @@ The supervisor starts the binary with file-backed schema and migration inputs:
 sync-native serve \
   --schema zero-schema.json \
   --init-sql init-sql.json \
-  --data-dir .orez/sync-native \
+  --data-dir .orez-lite-native \
   --host 127.0.0.1 \
   --port 5048 \
   --admin-token-env SYNC_NATIVE_ADMIN_TOKEN \

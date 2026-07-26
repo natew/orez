@@ -47,7 +47,7 @@ the database change feed.
 
 ## Client connection
 
-Install the `orez/client` transport with the deployed Orez Lite address, then
+Install the `orez-lite/client` transport with the deployed Orez Lite address, then
 set the existing Zero client's server to that address. Components keep using
 the same `@rocicorp/zero` queries, mutators, hooks, and optimistic local state.
 
@@ -60,7 +60,7 @@ must still authorize every query and mutation.
 
 Wake sockets and upstream notifications are fail-closed. Consumers must provide
 `authorizeWake` and `authorizeNotify`; rejected requests do not instantiate a
-namespace Durable Object. These APIs are exported from `orez/cloudflare/sync`;
+namespace Durable Object. These APIs are exported from `orez-lite/cloudflare/sync`;
 applications do not install the internal host package separately.
 
 ## Deployment status

@@ -366,9 +366,9 @@ describe('zero-http transport', () => {
 
     const view = zero.query.project.materialize()
     const data = await waitForComplete(view)
+    await eventually(() => expect(fetch.mock.calls.length).toBeGreaterThanOrEqual(2))
     view.destroy()
 
-    expect(fetch.mock.calls.length).toBeGreaterThanOrEqual(2)
     expect(data).toEqual([{ id: 'p1', ownerId: 'u1', name: 'control' }])
   })
 

@@ -113,7 +113,7 @@ every socket attempt, including reconnects, so short-lived tokens are never
 reused after the wake connection drops:
 
 ```ts
-import { ensureHttpPullTransport } from 'orez/zero-http'
+import { ensureHttpPullTransport } from 'orez-lite/client'
 
 ensureHttpPullTransport({
   origin: syncOrigin,

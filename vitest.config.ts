@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     globals: false,
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'packages/orez-lite/src/**/*.test.ts'],
     setupFiles: ['src/test-setup.ts'],
     exclude: ['**/demo/**', '**/node_modules/**'],
     testTimeout: 15_000,

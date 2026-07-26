@@ -8,7 +8,7 @@ import { seedSqlite, userIDFromAuth } from '../src/fixture-data'
 // /<ns>/admin/sql guarded by the ADMIN_KEY secret (the harness oracle +
 // upstream-write channel; a real deploy would never expose this).
 //
-import type { ZeroHttpSyncDb as SyncDb } from '../../src/zero-http/mount.js'
+import type { ZeroHttpSyncDb as SyncDb } from 'orez-lite/zero-http'
 
 type Env = {
   SYNC_DO: DurableObjectNamespace

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * release script: check, build, publish both orez + bedrock-sqlite, commit, tag, push.
+ * release script: check, build, publish the Orez package family, commit, tag, push.
  * uses workspace:* protocol — at publish time we copy to tmp and replace with real versions.
  */
 
@@ -138,6 +138,17 @@ if (into) {
       name: syncExecutorPkg.name,
       dir: syncExecutorDir,
       pkg: syncExecutorPkg,
+    })
+  }
+
+  const orezLiteDir = resolve(root, 'packages', 'orez-lite')
+  const orezLitePkgPath = resolve(orezLiteDir, 'package.json')
+  if (existsSync(orezLitePkgPath)) {
+    const orezLitePkg = JSON.parse(readFileSync(orezLitePkgPath, 'utf-8'))
+    pkgDirs.push({
+      name: orezLitePkg.name,
+      dir: orezLiteDir,
+      pkg: orezLitePkg,
     })
   }
 
@@ -290,6 +301,20 @@ if (existsSync(syncExecutorPkgPath)) {
     originalVersion: syncExecutorPkg.version,
     pkgPath: syncExecutorPkgPath,
     pkg: syncExecutorPkg,
+    next: orezNext,
+  })
+}
+
+// orez-lite — public SQLite and Rust sync engine.
+const orezLiteDir = resolve(root, 'packages', 'orez-lite')
+const orezLitePkgPath = resolve(orezLiteDir, 'package.json')
+if (existsSync(orezLitePkgPath)) {
+  const orezLitePkg = JSON.parse(readFileSync(orezLitePkgPath, 'utf-8'))
+  packages.push({
+    dir: orezLiteDir,
+    originalVersion: orezLitePkg.version,
+    pkgPath: orezLitePkgPath,
+    pkg: orezLitePkg,
     next: orezNext,
   })
 }

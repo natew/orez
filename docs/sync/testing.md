@@ -235,14 +235,14 @@ The root TypeScript suite covers the Postgres-to-DO-SQLite path separately from
 the Rust engine. Run it from the repository root with `bun run test`. The most
 relevant files are:
 
-- `src/cf-do/cdc.test.ts`: real-SQLite logical CDC, including full row images,
+- `packages/orez-lite/src/cf-do/cdc.test.ts`: real-SQLite logical CDC, including full row images,
   failed multi-row statements, SQLite transaction rollback, primary-key
   changes, schema changes, and indirect writes from business triggers. The
   failed-statement, rollback, and primary-key cases are adapted from Turso's CDC
   integration suite.
-- `src/cf-do/worker-cdc.test.ts`: staging, transaction grouping, publish versus
+- `packages/orez-lite/src/cf-do/worker-cdc.test.ts`: staging, transaction grouping, publish versus
   rollback-only capture, and DDL integration at the `ZeroDO` boundary.
-- `src/cf-do/worker-transaction.test.ts`: application-SQL transaction commit
+- `packages/orez-lite/src/cf-do/worker-transaction.test.ts`: application-SQL transaction commit
   and rollback behavior at the `ZeroDO` boundary.
 
 ## What is not covered

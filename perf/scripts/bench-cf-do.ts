@@ -3,7 +3,7 @@
  * cf-do backend perf + conformance harness.
  *
  * Drives the orez Cloudflare DO SQL backend (the `ZeroDO` worker in
- * src/cf-do/worker.ts) over its HTTP endpoints — /exec, /batch, /changes — the
+ * packages/orez-lite/src/cf-do/worker.ts) over its HTTP endpoints — /exec, /batch, /changes — the
  * development SQL surface. Measures throughput + latency distribution per
  * scenario and asserts conformance (roundtrip, batch
  * atomicity, change capture, monotonic watermark). Use it to baseline the DO
@@ -12,7 +12,7 @@
  *
  * The DO worker must already be running (same as chat e2e, CHAT_E2E.md §5):
  *
- *   cd src/cf-do && bunx wrangler dev --port 8799 --local \
+ *   cd packages/orez-lite/src/cf-do && bunx wrangler dev --port 8799 --local \
  *     --no-show-interactive-dev-session
  *
  * Then:

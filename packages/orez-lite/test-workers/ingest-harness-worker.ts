@@ -1,9 +1,12 @@
 import { WorkerEntrypoint } from 'cloudflare:workers'
 
-import { ZeroDO } from '../../../src/cf-do/worker.js'
-import { createSyncDurableObject, createSyncWorker } from './index.js'
+import {
+  createSyncDurableObject,
+  createSyncWorker,
+} from '../../sync-cf-host/src/index.js'
+import { ZeroDO } from '../src/cf-do/worker.js'
 
-import type { SyncHostConfig, SyncHostEnv } from './index.js'
+import type { SyncHostConfig, SyncHostEnv } from '../../sync-cf-host/src/index.js'
 import type { Schema } from '@rocicorp/zero'
 
 const schema = {

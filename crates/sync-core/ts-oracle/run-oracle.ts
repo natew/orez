@@ -8,13 +8,12 @@
 import { Database } from 'bun:sqlite'
 
 import { boolean, createSchema, json, number, string, table } from '@rocicorp/zero'
-import { MutationApplicationError } from 'orez-sync-executor'
-
 import {
   createZeroHttpApplicationDatabase,
   createZeroHttpSyncServer,
   type ZeroHttpSyncDb as SyncDb,
-} from '../../../src/zero-http/mount.ts'
+} from 'orez-lite/zero-http'
+import { MutationApplicationError } from 'orez-sync-executor'
 
 function bunSqliteDb(sqlite: Database): SyncDb {
   return {

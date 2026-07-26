@@ -1,11 +1,10 @@
 import { createQueryCompiler } from 'orez-sync-cf-host/query-compiler'
 
-import { createApplicationSqlClient, ZeroDO } from '../../../src/cf-do/worker.js'
 import {
   SqlStorageDirect,
   SqlStorageMutatorTransaction,
   SqlStorageSyncDb,
-} from './sql-storage-adapter.js'
+} from '../../sync-cf-host/src/sql-storage-adapter.js'
 import {
   init_probe_schema,
   pull_snapshot,
@@ -13,7 +12,8 @@ import {
   push_preflight,
   rust_panic_after_writes,
   value_round_trip,
-} from './wasm-platform.js'
+} from '../../sync-cf-host/src/wasm-platform.js'
+import { createApplicationSqlClient, ZeroDO } from '../src/cf-do/worker.js'
 
 import type { TransactionQueryFormat, ZeroSchemaConfig } from 'orez-sync-executor'
 

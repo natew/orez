@@ -1,7 +1,7 @@
 import type {
   ZeroHttpVisibility,
   ZeroHttpVisibilityInvalidation,
-} from '../../src/zero-http/mount.js'
+} from 'orez-lite/zero-http'
 
 // The fixture's per-user row visibility policy: a project is visible to its
 // owner or any member, and its member/task rows follow the project. Shared by

@@ -1,7 +1,7 @@
 /**
  * Runtime-only Orez Lite APIs for modules evaluated by workerd.
  *
- * Deploy tooling lives at `orez/cloudflare/build` so Node-based build scripts
+ * Deploy tooling lives at `orez-lite/cloudflare/build` so Node-based build scripts
  * never evaluate `cloudflare:workers`.
  */
 export { createApplicationSqlClient, ZeroDO } from './cf-do/worker.js'

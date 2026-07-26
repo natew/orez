@@ -1,7 +1,7 @@
 import {
   createBrowserSyncHostPortClient,
   deleteBrowserSyncHostSnapshot,
-} from 'orez/sync-browser-host'
+} from 'orez-lite/browser'
 
 import type { BrowserHostTestFaultPoint } from '../../src/host.js'
 import type { BrowserSyncHostPortClient } from '../../src/types.js'
