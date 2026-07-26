@@ -316,7 +316,8 @@ export { runWorker as default };
     `import { parentWorker, singleProcessMode } from "../types/processes.js";
 import { exitAfter } from "../services/life-cycle.js";
 var lc = new LogContext("info", {}, consoleLogSink);
-async function runWorker(parent) {
+async function runWorker(parent, env) {
+\tconst config = getNormalizedZeroConfig({ env });
 \tlc = createLogContext(config, "main");
 \tconst processes = new ProcessManager(lc, parent);
 \tif (litestream.executable) await restoreReplica(lc, config, null);
@@ -344,11 +345,17 @@ export { runWorker as default };
     zcBase,
     'types/processes.js',
     `function childWorker(moduleUrl, env, ...args) {
-  const [parent, child] = inProcChannel();
-  import(moduleUrl.href).then(async ({ default: runWorker }) => {
-    await runWorker();
-  });
-  return child;
+\targs.push(...process.argv.slice(2));
+\tif (singleProcessMode()) {
+\t\tconst [parent, child] = inProcChannel();
+\t\timport(moduleUrl.href).then(async ({ default: runWorker }) => {
+\t\t\tawait runWorker();
+\t\t});
+\t\treturn child;
+\t}
+\treturn wrap(fork(moduleUrl, args, {
+\t\tenv
+\t}));
 }
 function wrap(target) {
   return new Proxy(target, { get(target, prop, receiver) {

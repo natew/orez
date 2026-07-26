@@ -285,8 +285,6 @@ function patchProcesses(zcBase: string): void {
     throw new Error(`orez CF overlay: processes.js missing at ${processesPath}`)
   }
 
-  applyZeroWorkerArgvPatch(processesPath)
-  applyZeroMainArgvPatch(resolve(zcBase, 'server', 'main.js'))
   let code = readFileSync(processesPath, 'utf-8')
   const proxyGetAnchor = 'return Reflect.get(target, prop, receiver);'
   const proxyGetReplacement =
@@ -312,10 +310,17 @@ function patchProcesses(zcBase: string): void {
         throw new Error(`orez CF overlay: existing processes patch missing ${marker}`)
       }
     }
+    applyZeroWorkerArgvPatch(processesPath)
+    applyZeroMainArgvPatch(resolve(zcBase, 'server', 'main.js'))
+    code = readFileSync(processesPath, 'utf-8')
     const patched = patchProcessWrapperProxy(code)
     if (patched !== code) writeFileSync(processesPath, patched)
     return
   }
+
+  applyZeroWorkerArgvPatch(processesPath)
+  applyZeroMainArgvPatch(resolve(zcBase, 'server', 'main.js'))
+  code = readFileSync(processesPath, 'utf-8')
 
   // add static imports of all zero-cache worker modules at the top.
   // these are relative to processes.js location in @rocicorp/zero.

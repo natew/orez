@@ -48,14 +48,7 @@ function findZeroWorkerFiles(): { mainPath: string; processesPath: string } | nu
     dir = parent
   }
 
-  const processesPath = resolve(
-    dir,
-    'out',
-    'zero-cache',
-    'src',
-    'types',
-    'processes.js'
-  )
+  const processesPath = resolve(dir, 'out', 'zero-cache', 'src', 'types', 'processes.js')
   const mainPath = resolve(dir, 'out', 'zero-cache', 'src', 'server', 'main.js')
   return existsSync(processesPath) && existsSync(mainPath)
     ? { mainPath, processesPath }

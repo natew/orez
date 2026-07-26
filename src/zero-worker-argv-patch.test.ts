@@ -83,9 +83,7 @@ async function runWorker(parent, env) {
     applyZeroMainArgvPatch(file)
 
     const patched = readFileSync(file, 'utf-8')
-    expect(patched).toContain(
-      'singleProcessMode() ? { env, argv: [] } : { env }'
-    )
+    expect(patched).toContain('singleProcessMode() ? { env, argv: [] } : { env }')
   })
 
   it('is idempotent', () => {
