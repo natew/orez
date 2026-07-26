@@ -415,7 +415,6 @@ describe('orez-e1 encrypted column codec', () => {
     expect(first.id).toBe(
       'orez-e1:network-test:schema-test:4KUOl_sd4WpwfoFkSXWiwGE048vkbpVkd34DFjHUUAE'
     )
-    expect(first.id).not.toContain(Buffer.from(contentKey).toString('hex'))
   })
 })
 

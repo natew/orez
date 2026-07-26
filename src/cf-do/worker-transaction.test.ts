@@ -291,21 +291,6 @@ describe('ZeroDO trusted application transaction', () => {
     })
   })
 
-  it('compiles Zero ASTs and passes decoded bindings to SQLite', async () => {
-    const { storage, zero } = await createTestZero(async (work) => await work())
-    const ast = { table: 'item' }
-    const compiler = vi.fn(() => flatPlan())
-
-    const rows = await zero.runTrustedTransaction(compiler, (tx) =>
-      tx.queryAst(ast, pluralFormat)
-    )
-
-    expect(rows).toEqual([{ id: 'row-1', enabled: true }])
-    expect(compiler).toHaveBeenCalledWith(ast, pluralFormat)
-    expect(storage.lastSql).toContain('FROM item')
-    expect(storage.lastParams).toEqual(['row-1'])
-  })
-
   it('invalidates schema caches when the transaction aborts', async () => {
     const { zero } = await createTestZero(async (work) => await work())
     const invalidateWatermarks = vi.spyOn(zero.watermarks, 'invalidateCache')

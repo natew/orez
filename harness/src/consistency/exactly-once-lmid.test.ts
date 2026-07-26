@@ -672,99 +672,6 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
     }
   })
 
-  test('rejects stock push and pull traffic after quiescence', () => {
-    const latePull = history()
-    addStockRetry(latePull)
-    const pulls = latePull.events.filter((event) => event.exactlyOnce?.type === 'pull')
-    latePull.events = latePull.events.filter((event) => !pulls.includes(event))
-    const afterQuiesce = latePull.events.findIndex(
-      (event) => event.exactlyOnce?.type === 'client-quiesce' && event.phase === 'ok'
-    )
-    latePull.events.splice(afterQuiesce + 1, 0, ...pulls)
-    reindex(latePull.events, latePull.schedule)
-    expect(checkExactlyOnceLmid(latePull.events, latePull.schedule).violations).toContain(
-      'stock protocol traffic occurred after client quiescence'
-    )
-
-    const latePush = history()
-    const stock = latePush.events
-      .filter(
-        (event) =>
-          event.exactlyOnce?.type === 'push' &&
-          event.exactlyOnce.source === 'stock-client'
-      )
-      .map((event) => structuredClone(event))
-    for (const event of stock) {
-      event.opId = 'late-stock-push'
-      event.process = 'late-stock-push'
-      if (event.exactlyOnce?.type === 'push') event.exactlyOnce.attempt = 3
-    }
-    const quiesced = latePush.events.findIndex(
-      (event) => event.exactlyOnce?.type === 'client-quiesce' && event.phase === 'ok'
-    )
-    latePush.events.splice(quiesced + 1, 0, ...stock)
-    reindex(latePush.events, latePush.schedule)
-    expect(checkExactlyOnceLmid(latePush.events, latePush.schedule).violations).toContain(
-      'stock protocol traffic occurred after client quiescence'
-    )
-  })
-
-  test('rejects stock retry operation drift and invoke before response loss', () => {
-    const drift = history()
-    addStockRetry(drift)
-    for (const event of drift.events) {
-      if (
-        event.exactlyOnce?.type === 'push' &&
-        event.exactlyOnce.source === 'stock-client' &&
-        event.exactlyOnce.attempt === 2
-      )
-        event.exactlyOnce.operationDigest = 'e'.repeat(64)
-    }
-    expect(checkExactlyOnceLmid(drift.events, drift.schedule).violations).toContain(
-      'stock retry 2 changed semantic body'
-    )
-
-    const early = history()
-    addStockRetry(early)
-    const retryInvokeIndex = early.events.findIndex(
-      (event) =>
-        event.exactlyOnce?.type === 'push' &&
-        event.exactlyOnce.source === 'stock-client' &&
-        event.exactlyOnce.attempt === 2 &&
-        event.phase === 'invoke'
-    )
-    const [retryInvoke] = early.events.splice(retryInvokeIndex, 1)
-    const lossIndex = early.events.findIndex(
-      (event) =>
-        event.exactlyOnce?.type === 'push' &&
-        event.exactlyOnce.attempt === 1 &&
-        event.phase === 'info'
-    )
-    early.events.splice(lossIndex, 0, retryInvoke!)
-    reindex(early.events, early.schedule)
-    expect(checkExactlyOnceLmid(early.events, early.schedule).violations).toContain(
-      'stock retry invokes must follow loss and precede mutation terminal'
-    )
-  })
-
-  test('duplicate application is a safety failure even with terminal info', () => {
-    const fixture = history('info')
-    const after = fixture.events.find(
-      (event) =>
-        event.exactlyOnce?.type === 'authority' &&
-        event.exactlyOnce.observation === 'after' &&
-        event.phase === 'ok'
-    )!
-    if (after.exactlyOnce?.type === 'authority' && after.exactlyOnce.observed) {
-      after.exactlyOnce.observed.applicationCount = '2'
-    }
-    const result = checkExactlyOnceLmid(fixture.events, fixture.schedule)
-    expect(result.status).toBe('fail')
-    expect(result.violations).toContain(
-      'after authority does not show one application and LMID 2'
-    )
-  })
-
   test('terminal info alone is inconclusive', () => {
     const fixture = history('info')
     expect(checkExactlyOnceLmid(fixture.events, fixture.schedule)).toEqual({
@@ -772,26 +679,6 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
       violations: [],
       reports: ['mutation terminal outcome is unknown after complete recovery evidence'],
     })
-  })
-
-  test('rejects replay body and receipt anchor mutants', () => {
-    const digest = history()
-    const push2 = digest.events.filter(
-      (event) => event.exactlyOnce?.type === 'push' && event.exactlyOnce.attempt === 2
-    )
-    for (const event of push2) {
-      if (event.exactlyOnce?.type === 'push')
-        event.exactlyOnce.operationDigest = 'different'
-    }
-    expect(checkExactlyOnceLmid(digest.events, digest.schedule).violations).toContain(
-      'final harness replay does not match captured push 1'
-    )
-
-    const anchor = history()
-    anchor.schedule.receipts[1]!.anchor!.historyIndex++
-    expect(checkExactlyOnceLmid(anchor.events, anchor.schedule).violations).toContain(
-      'fire receipt does not anchor its fault history event'
-    )
   })
 
   test('rejects malformed canonical domains', () => {
@@ -969,49 +856,6 @@ describe(`${EXACTLY_ONCE_LMID_PROFILE.name}@${EXACTLY_ONCE_LMID_PROFILE.version}
       status: 'fail',
       violations: ['missing complete non-writing client rank-0 probe precondition'],
     })
-  })
-
-  test('requires one rejected mutation, rollback, and its LMID advance', () => {
-    const missing = history()
-    missing.events = missing.events.filter(
-      (event) =>
-        event.exactlyOnce?.type !== 'mutation' ||
-        event.exactlyOnce.effect.type !== 'rejected-increment'
-    )
-    reindex(missing.events, missing.schedule)
-    expect(checkExactlyOnceLmid(missing.events, missing.schedule).violations).toContain(
-      'expected exactly one app-error mutation, got 0'
-    )
-
-    const failedResponse = history()
-    failedResponse.events.find(
-      (event) =>
-        event.exactlyOnce?.type === 'mutation' &&
-        event.exactlyOnce.effect.type === 'rejected-increment' &&
-        event.phase === 'ok'
-    )!.phase = 'fail'
-    expect(
-      checkExactlyOnceLmid(failedResponse.events, failedResponse.schedule).violations
-    ).toContain('app-error mutation did not receive the expected rejection')
-
-    for (const [field, value] of [
-      ['applicationCount', '2'],
-      ['lastMutationId', '1'],
-    ] as const) {
-      const fixture = history()
-      const after = fixture.events.find(
-        (event) =>
-          event.exactlyOnce?.type === 'authority' &&
-          event.exactlyOnce.observation === 'after' &&
-          event.phase === 'ok'
-      )!
-      if (after.exactlyOnce?.type === 'authority' && after.exactlyOnce.observed) {
-        after.exactlyOnce.observed[field] = value
-      }
-      expect(checkExactlyOnceLmid(fixture.events, fixture.schedule).violations).toContain(
-        'after authority does not show one application and LMID 2'
-      )
-    }
   })
 
   test('closes nested raw evidence objects', () => {

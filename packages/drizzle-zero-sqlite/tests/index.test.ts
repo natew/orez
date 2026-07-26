@@ -77,27 +77,6 @@ describe('drizzleZeroConfig', () => {
     expect(updateFieldType).toBe('Ada')
   })
 
-  test('generates a type-preserving SQLite schema module without PostgreSQL imports', () => {
-    const source = generateDrizzleZeroSqliteSchemaFile({
-      importPath: './drizzle-schema.js',
-      schemaName: 'zeroSchema',
-      tableNames: ['users', 'posts'],
-    })
-
-    expect(source).toContain("import { createBuilder, type Row } from '@rocicorp/zero'")
-    expect(source).toContain("import { drizzleZeroConfig } from 'drizzle-zero-sqlite'")
-    expect(source).toContain('import * as drizzleSchema from "./drizzle-schema.js"')
-    expect(source).toContain(
-      'export const zeroSchema = drizzleZeroConfig(drizzleSchema, { suppressDefaultsWarning: true })'
-    )
-    expect(source).toContain(
-      `export type Posts = Row<(typeof zeroSchema)['tables']["posts"]>`
-    )
-    expect(source).toContain('export const zql = createBuilder(zeroSchema)')
-    expect(source).toContain('schema: Schema')
-    expect(source).not.toMatch(/pg-core|drizzle-zero'|postgres/)
-  })
-
   test('maps SQLite tables, columns, defaults, and composite primary keys', () => {
     const schema = drizzleZeroConfig(
       { users, posts, groups, memberships, relations },

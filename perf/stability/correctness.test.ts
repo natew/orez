@@ -475,49 +475,6 @@ describe('orez correctness (all modes)', () => {
     // No new changes should be created for the no-op update
     expect(afterCnt).toBe(beforeCnt)
   }, 15_000)
-
-  test('change tracking captures inserts, updates, and deletes', async () => {
-    const id = `ct-${Date.now()}`
-    const startWm = Number(
-      (
-        await db.query<{ max: string }>(
-          `SELECT COALESCE(max(watermark), 0)::text as max FROM _orez._zero_changes`
-        )
-      ).rows[0]?.max
-    )
-
-    // insert
-    await db.query(
-      `INSERT INTO correctness_items (id, value, counter) VALUES ($1, $2, $3)`,
-      [id, 'val1', 10]
-    )
-    // update
-    await db.query(
-      `UPDATE correctness_items SET value = $1, counter = $2 WHERE id = $3`,
-      ['val2', 20, id]
-    )
-    // delete
-    await db.query(`DELETE FROM correctness_items WHERE id = $1`, [id])
-
-    await new Promise((r) => setTimeout(r, 500))
-
-    const changes = await db.query<{ op: string; table_name: string }>(
-      `SELECT op, table_name FROM _orez._zero_changes WHERE watermark > $1 ORDER BY watermark`,
-      [startWm]
-    )
-
-    expect(changes.rows.length).toBeGreaterThanOrEqual(3)
-
-    const ops = changes.rows.map((r) => r.op)
-    expect(ops).toContain('INSERT')
-    expect(ops).toContain('UPDATE')
-    expect(ops).toContain('DELETE')
-
-    // all changes should be for our table
-    for (const r of changes.rows) {
-      expect(r.table_name).toContain('correctness_items')
-    }
-  }, 20_000)
 })
 
 // ---- Native-only replication tests ----

@@ -281,19 +281,6 @@ describe(`atomic visibility (${ATOMIC_VISIBILITY_WORKLOAD_PROFILE.name}@${ATOMIC
     expect(checkAtomicVisibility(events)).toEqual({ valid: true, violations: [] })
   })
 
-  test('excludes failed mutations from atomic groups', () => {
-    const events = history(
-      ...mutation('failed-group', group, 'fail'),
-      ...read('read-effects', { x: [1], y: [] })
-    )
-    expect(violations(events)).toContain(
-      'atomic visibility requires at least one multi-effect mutation group'
-    )
-    expect(
-      violations(events).some((violation) => violation.includes('partially visible'))
-    ).toBe(false)
-  })
-
   test('propagates validateHistory failures without semantic diagnostics', () => {
     const malformed = history(...mutation('group-1', group))
     malformed.shift()

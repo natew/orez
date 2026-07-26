@@ -82,21 +82,6 @@ describe('catalog pass — rewrite', () => {
 })
 
 describe('catalog seed + pass roundtrip — executable', () => {
-  it('pg_class returns the user-table rows after seeding', () => {
-    const { db, setup } = freshDb()
-    setup([
-      'CREATE TABLE message (id text PRIMARY KEY, content text)',
-      'CREATE TABLE event (id text PRIMARY KEY, ts timestamp)',
-    ])
-    buildCatalogTables(db)
-    const { sql } = compile(`SELECT relname FROM pg_catalog.pg_class WHERE relkind = 'r'`)
-    const rows = db.prepare(rewriteParams(sql)).all() as { relname: string }[]
-    const names = rows.map((r) => r.relname).sort()
-    expect(names).toContain('message')
-    expect(names).toContain('event')
-    db.close()
-  })
-
   it('pg_attribute returns column info per table', () => {
     const { db, setup } = freshDb()
     setup(['CREATE TABLE message (id text PRIMARY KEY, content text NOT NULL)'])

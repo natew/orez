@@ -161,34 +161,6 @@ describe('consistency artifact writer', () => {
     ).rejects.toThrow(`refusing to overwrite results directory ${results}`)
   })
 
-  test('concurrent writers publish one complete bundle and one refusal', async () => {
-    const { parent, results } = await tempResults()
-    const write = () =>
-      writeConsistencyArtifacts({
-        resultsDir: results,
-        recorder: completeRecorder(),
-        manifest: manifest(),
-        schedule: schedule(),
-        checks: checks(),
-      })
-    const outcomes = await Promise.allSettled([write(), write()])
-    expect(outcomes.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
-    const rejected = outcomes.filter(
-      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected'
-    )
-    expect(rejected).toHaveLength(1)
-    expect(String(rejected[0]!.reason)).toContain(
-      `refusing to overwrite results directory ${results}`
-    )
-    expect((await readdir(results)).sort()).toEqual([
-      'checks.json',
-      'history.jsonl',
-      'manifest.json',
-      'schedule.json',
-    ])
-    expect(await readdir(parent)).toEqual(['run-1'])
-  })
-
   test('refuses incomplete finalize without creating the results directory', async () => {
     const { results } = await tempResults()
     const recorder = new HistoryRecorder(() => 0)

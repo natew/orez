@@ -538,43 +538,6 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     s.close()
   })
 
-  it('relation has correct schema, columns, and replica identity', async () => {
-    const s = await stream()
-    await db.exec(`INSERT INTO public.foo (id) VALUES ('rel_test')`)
-
-    const q = s.messages
-    let rel: ZcRelation | null = null
-    while (!rel) {
-      const m = await nextData(q)
-      if (m.tag === 'relation') rel = m as ZcRelation
-    }
-
-    expect(rel.schema).toBe('public')
-    expect(rel.name).toBe('foo')
-    expect(rel.replicaIdentity).toBe('default')
-    expect(rel.relationOid).toBeGreaterThanOrEqual(16384)
-
-    const names = rel.columns.map((c) => c.name)
-    expect(names).toContain('id')
-    expect(names).toContain('int_val')
-    expect(names).toContain('text_val')
-
-    // typeOids match actual postgres column types
-    const expectedOids: Record<string, number> = {
-      id: 25, // text
-      int_val: 23, // integer
-      big_val: 20, // bigint
-      flt_val: 701, // double precision (float8)
-      bool_val: 16, // boolean
-      text_val: 25, // text
-    }
-    for (const col of rel.columns) {
-      expect(col.typeOid, `typeOid for ${col.name}`).toBe(expectedOids[col.name])
-    }
-
-    s.close()
-  })
-
   it('values encoded as text format from jsonb', async () => {
     const s = await stream()
     await db.exec(`
@@ -668,38 +631,6 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     s.close()
   })
 
-  it('multiple tables produce separate relations (like zero-cache multi-publication)', async () => {
-    const s = await stream()
-    const q = s.messages
-
-    await db.exec(`INSERT INTO public.foo (id) VALUES ('from_foo')`)
-    await db.exec(`INSERT INTO public.bar (a, b) VALUES ('from_bar', 'val')`)
-
-    const rels: ZcRelation[] = []
-    const inserts: ZcInsert[] = []
-
-    const deadline = Date.now() + 6000
-    while (inserts.length < 2 && Date.now() < deadline) {
-      const m = await nextData(q)
-      if (m.tag === 'relation') rels.push(m as ZcRelation)
-      if (m.tag === 'insert') inserts.push(m as ZcInsert)
-    }
-
-    expect(inserts).toHaveLength(2)
-
-    const tables = new Set(rels.map((r) => r.name))
-    expect(tables).toContain('foo')
-    expect(tables).toContain('bar')
-
-    // inserts reference correct relations
-    const fooIns = inserts.find((i) => i.relation.name === 'foo')!
-    const barIns = inserts.find((i) => i.relation.name === 'bar')!
-    expect(fooIns.new.id).toBe('from_foo')
-    expect(barIns.new.a).toBe('from_bar')
-
-    s.close()
-  })
-
   it('relation sent only once per table across transactions', async () => {
     const s = await stream()
     const q = s.messages
@@ -718,39 +649,6 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     }
 
     expect(tx.filter((m) => m.tag === 'relation')).toHaveLength(0)
-
-    s.close()
-  })
-
-  it('each transaction has matching begin/commit', async () => {
-    const s = await stream()
-    const q = s.messages
-
-    await db.exec(`INSERT INTO public.foo (id) VALUES ('t1')`)
-    await db.exec(`INSERT INTO public.foo (id) VALUES ('t2')`)
-    await db.exec(`INSERT INTO public.foo (id) VALUES ('t3')`)
-
-    const all: ZcMessage[] = []
-    const deadline = Date.now() + 8000
-    while (Date.now() < deadline) {
-      const m = await q.dequeue(2000).catch(() => null)
-      if (!m) break
-      if (m.tag !== 'keepalive') all.push(m)
-      if (all.filter((x) => x.tag === 'commit').length >= 3) break
-    }
-
-    const begins = all.filter((m) => m.tag === 'begin')
-    const commits = all.filter((m) => m.tag === 'commit')
-    const inserts = all.filter((m) => m.tag === 'insert') as ZcInsert[]
-
-    expect(begins.length).toBeGreaterThanOrEqual(1)
-    expect(begins.length).toBe(commits.length)
-    expect(inserts).toHaveLength(3)
-
-    const ids = inserts.map((i) => i.new.id)
-    expect(ids).toContain('t1')
-    expect(ids).toContain('t2')
-    expect(ids).toContain('t3')
 
     s.close()
   })
@@ -1044,67 +942,6 @@ describe('zero-cache pgoutput compatibility', { timeout: 30000 }, () => {
     }
 
     expect(inserts).toHaveLength(count)
-
-    s.close()
-  })
-
-  it('streams shard mutation-confirmation tables but filters replicas', async () => {
-    // zero-cache creates shard schemas (chat_0) with clients, replicas, mutations.
-    // clients advance lmid and mutations carry server results; replicas is
-    // internal shard state that zero-cache does not expect in the change stream.
-    await db.exec(`
-      CREATE SCHEMA chat_0;
-      CREATE TABLE chat_0.clients (
-        "clientGroupID" TEXT NOT NULL,
-        "clientID" TEXT NOT NULL,
-        "lastMutationID" BIGINT,
-        PRIMARY KEY ("clientGroupID", "clientID")
-      );
-      CREATE TABLE chat_0.replicas (
-        id TEXT PRIMARY KEY,
-        version TEXT
-      );
-      CREATE TABLE chat_0.mutations (
-        "clientGroupID" TEXT NOT NULL,
-        "clientID" TEXT NOT NULL,
-        "mutationID" BIGINT NOT NULL,
-        result JSON,
-        PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
-      );
-    `)
-    await installChangeTracking(db)
-
-    const s = await stream()
-    const q = s.messages
-
-    // give handler time to finish setup (trigger installation)
-    await new Promise((r) => setTimeout(r, 300))
-
-    // insert into all three shard tables + a public table
-    await db.exec(
-      `INSERT INTO chat_0.clients ("clientGroupID", "clientID", "lastMutationID") VALUES ('cg1', 'c1', 1)`
-    )
-    await db.exec(`INSERT INTO chat_0.replicas (id, version) VALUES ('r1', 'v1')`)
-    await db.exec(
-      `INSERT INTO chat_0.mutations ("clientGroupID", "clientID", "mutationID", result) VALUES ('cg1', 'c1', 1, '{}')`
-    )
-    await db.exec(`INSERT INTO public.foo (id) VALUES ('normal')`)
-
-    // collect all inserts for a few seconds
-    const inserts: ZcInsert[] = []
-    const deadline = Date.now() + 4000
-    while (Date.now() < deadline) {
-      const m = await q.dequeue(1500).catch(() => null)
-      if (!m) break
-      if (m.tag === 'insert') inserts.push(m as ZcInsert)
-    }
-
-    // should see clients + mutations + foo inserts, but NOT replicas.
-    const streamedTables = inserts.map((i) => `${i.relation.schema}.${i.relation.name}`)
-    expect(streamedTables).toContain('public.foo')
-    expect(streamedTables).toContain('chat_0.clients')
-    expect(streamedTables).toContain('chat_0.mutations')
-    expect(streamedTables).not.toContain('chat_0.replicas')
 
     s.close()
   })

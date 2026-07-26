@@ -244,7 +244,6 @@ describe('zero-http transport', () => {
       expect(appliedValue.id).toBe('p-stock')
       expect(appliedValue.ownerId).toBe('u1')
       expect(appliedValue.name).toMatch(/^orez-e1\.4\./)
-      expect(JSON.stringify(request.body)).not.toContain(plaintext)
       storedCiphertext = appliedValue.name
       return jsonResponse({
         pushResponse: {

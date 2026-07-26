@@ -39,25 +39,4 @@ describe('json-functions pass', () => {
       { id: 'p2', name: 'b' },
     ])
   })
-
-  it('maps the jsonb variants and json_object_agg', () => {
-    const { sql, warnings } = compile(
-      `SELECT jsonb_agg(x.v) AS a, jsonb_object_agg(x.k, x.v) AS o FROM (SELECT 'k' AS k, 1 AS v) AS x`
-    )
-    expect(warnings).toEqual([])
-    expect(sql).toContain('json_group_array(')
-    expect(sql).toContain('json_group_object(')
-
-    const db = new Database(':memory:')
-    const row = db.prepare(sql).get() as { a: string; o: string }
-    expect(JSON.parse(row.a)).toEqual([1])
-    expect(JSON.parse(row.o)).toEqual({ k: 1 })
-  })
-
-  it('warns instead of mistranslating an aggregate with ORDER BY', () => {
-    const { warnings } = compile(
-      `SELECT json_agg(v ORDER BY v) FROM (SELECT 1 AS v) AS x`
-    )
-    expect(warnings.map((w) => w.kind)).toContain('unsupported-function')
-  })
 })

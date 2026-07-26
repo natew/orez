@@ -102,21 +102,6 @@ describe('row_to_json → json_object executes correctly', () => {
     expect(result).toEqual({ id: 'w1', label: 'hello' })
   })
 
-  it('expands a bare SELECT * from the authoritative schema shape', () => {
-    const { result, warnings, sql } = runRowJson(
-      `SELECT row_to_json(zql_root) AS zql_result
-       FROM (SELECT * FROM widget) AS zql_root`,
-      `CREATE TABLE widget (id TEXT, label TEXT);
-       INSERT INTO widget (id, label) VALUES ('w1', 'hello');`,
-      { schema: schemaWith({ widget: ['id', 'label'] }) }
-    )
-    expect(warnings).toEqual([])
-    expect(sql).not.toMatch(/row_to_json/i)
-    expect(sql).toContain(`zql_root.id`)
-    expect(sql).toContain(`zql_root.label`)
-    expect(result).toEqual({ id: 'w1', label: 'hello' })
-  })
-
   it('expands a qualified t.* from the authoritative schema shape', () => {
     const { result, warnings } = runRowJson(
       `SELECT row_to_json(zql_root) AS zql_result

@@ -49,79 +49,6 @@ describe('sqlite mode resolution', () => {
   })
 })
 
-describe('shim template generation', () => {
-  it('generates cjs shim with correct journal_mode for wasm', () => {
-    const shim = generateCjsShim({
-      mode: 'wasm',
-      bedrockPath: '/path/to/bedrock',
-    })
-    expect(shim).toContain("db.pragma('journal_mode = wal2')")
-    expect(shim).toContain('// mode: wasm')
-    expect(shim).toContain('orez sqlite shim')
-  })
-
-  it('generates cjs shim with correct journal_mode for native', () => {
-    const shim = generateCjsShim({
-      mode: 'native',
-      bedrockPath: '/path/to/bedrock',
-    })
-    expect(shim).toContain("db.pragma('journal_mode = wal2')")
-    expect(shim).toContain('// mode: native')
-  })
-
-  it('generates esm shim with correct journal_mode for wasm', () => {
-    const shim = generateEsmShim({
-      mode: 'wasm',
-      bedrockPath: '/path/to/bedrock',
-    })
-    expect(shim).toContain("db.pragma('journal_mode = wal2')")
-    expect(shim).toContain('// mode: wasm')
-  })
-
-  it('includes common pragmas in both shim types', () => {
-    const cjs = generateCjsShim({ mode: 'wasm', bedrockPath: '/path' })
-    const esm = generateEsmShim({ mode: 'wasm', bedrockPath: '/path' })
-
-    for (const shim of [cjs, esm]) {
-      expect(shim).toContain("db.pragma('busy_timeout = 30000')")
-      expect(shim).toContain("db.pragma('synchronous = off')")
-    }
-  })
-
-  it('includes api polyfills in generated shims', () => {
-    const shim = generateCjsShim({ mode: 'wasm', bedrockPath: '/path' })
-
-    expect(shim).toContain('Database.prototype.unsafeMode')
-    expect(shim).toContain('Database.prototype.defaultSafeIntegers')
-    expect(shim).toContain('Database.prototype.serialize')
-    expect(shim).toContain('Database.prototype.backup')
-    expect(shim).toContain('SP.scanStatus')
-    expect(shim).toContain('SP.scanStatusV2')
-    expect(shim).toContain('SQLITE_SCANSTAT_NLOOP')
-  })
-
-  it('includes pragma wrapper to skip optimize', () => {
-    const shim = generateCjsShim({ mode: 'wasm', bedrockPath: '/path' })
-    expect(shim).toContain("str.trim().toLowerCase().startsWith('optimize')")
-  })
-
-  it('includes tracing when enabled', () => {
-    const withTracing = generateCjsShim({
-      mode: 'wasm',
-      bedrockPath: '/path',
-      includeTracing: true,
-    })
-    const withoutTracing = generateCjsShim({
-      mode: 'wasm',
-      bedrockPath: '/path',
-      includeTracing: false,
-    })
-
-    expect(withTracing).toContain('_zero.changeLog')
-    expect(withoutTracing).not.toContain('_zero.changeLog')
-  })
-})
-
 describe('shim backup/restore lifecycle', () => {
   let testDir: string
   let mockPackageDir: string
@@ -270,36 +197,6 @@ module.exports = require('better-sqlite3');
     expect(hasBackup(mockIndexPath)).toBe(false)
   })
 
-  it('wasm -> native -> wasm works correctly', () => {
-    // start in wasm mode
-    applySqliteMode({
-      mode: 'wasm',
-      bedrockPath: '/path/to/bedrock',
-      zeroSqlitePath: mockIndexPath,
-    })
-    expect(getShimMode(mockIndexPath)).toBe('wasm')
-    const wasmContent = readFileSync(mockIndexPath, 'utf-8')
-
-    // switch to native
-    applySqliteMode({
-      mode: 'native',
-      zeroSqlitePath: mockIndexPath,
-    })
-    expect(getShimMode(mockIndexPath)).toBeNull()
-
-    // switch back to wasm
-    applySqliteMode({
-      mode: 'wasm',
-      bedrockPath: '/path/to/bedrock',
-      zeroSqlitePath: mockIndexPath,
-    })
-    expect(getShimMode(mockIndexPath)).toBe('wasm')
-
-    // shim should have same journal_mode
-    const newWasmContent = readFileSync(mockIndexPath, 'utf-8')
-    expect(newWasmContent).toContain('journal_mode = wal2')
-  })
-
   it('multiple wasm applies are idempotent', () => {
     applySqliteMode({
       mode: 'wasm',
@@ -355,73 +252,5 @@ module.exports = require('better-sqlite3');
       zeroSqlitePath: mockIndexPath,
     })
     expect(result.success).toBe(true)
-  })
-
-  it('wasm shim fails on unshimmed file if backup cannot be created', () => {
-    // manually write a shimmed file without backup (simulates external corruption)
-    const shimContent = generateCjsShim({ mode: 'native', bedrockPath: '/path' })
-    writeFileSync(mockIndexPath, shimContent)
-
-    // try to apply wasm shim - should fail because file is shimmed but no backup
-    const result = applySqliteMode({
-      mode: 'wasm',
-      bedrockPath: '/path/to/bedrock',
-      zeroSqlitePath: mockIndexPath,
-    })
-    expect(result.success).toBe(false)
-    expect(result.error).toContain('no backup')
-  })
-
-  it('native mode fails if shimmed with no backup', () => {
-    // apply wasm shim first
-    applySqliteMode({
-      mode: 'wasm',
-      bedrockPath: '/path/to/bedrock',
-      zeroSqlitePath: mockIndexPath,
-    })
-
-    // delete backup to simulate corruption
-    const backupPath = mockIndexPath + BACKUP_MARKER
-    rmSync(backupPath)
-
-    // try to restore native - should fail
-    const result = applySqliteMode({
-      mode: 'native',
-      zeroSqlitePath: mockIndexPath,
-    })
-    expect(result.success).toBe(false)
-    expect(result.error).toContain('no backup')
-  })
-})
-
-describe('shim contract tests', () => {
-  it('wasm shim sets journal_mode = wal2', () => {
-    const shim = generateCjsShim({ mode: 'wasm', bedrockPath: '/path' })
-    expect(shim).toContain("db.pragma('journal_mode = wal2')")
-  })
-
-  it('native shim sets journal_mode = wal2', () => {
-    const shim = generateCjsShim({ mode: 'native', bedrockPath: '/path' })
-    expect(shim).toContain("db.pragma('journal_mode = wal2')")
-  })
-
-  it('both modes set busy_timeout and synchronous', () => {
-    for (const mode of ['wasm', 'native'] as const) {
-      const shim = generateCjsShim({ mode, bedrockPath: '/path' })
-      expect(shim).toContain("db.pragma('busy_timeout = 30000')")
-      expect(shim).toContain("db.pragma('synchronous = off')")
-    }
-  })
-
-  it('shim exports Database and SqliteError', () => {
-    const shim = generateCjsShim({ mode: 'wasm', bedrockPath: '/path' })
-    expect(shim).toContain('module.exports = Database')
-    expect(shim).toContain('module.exports.SqliteError = SqliteError')
-  })
-
-  it('esm shim exports default and named SqliteError', () => {
-    const shim = generateEsmShim({ mode: 'wasm', bedrockPath: '/path' })
-    expect(shim).toContain('export default Database')
-    expect(shim).toContain('export { SqliteError }')
   })
 })

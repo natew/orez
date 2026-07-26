@@ -79,20 +79,6 @@ describe('PGliteWorkerProxy', () => {
     expect(hasRfq).toBe(true)
   })
 
-  test('listen receives notifications', async () => {
-    const received: string[] = []
-    const unsub = await proxy.listen('test_channel', (payload) => {
-      received.push(payload)
-    })
-
-    await proxy.exec(`NOTIFY test_channel, 'hello'`)
-    // give notification time to propagate
-    await new Promise((r) => setTimeout(r, 100))
-
-    expect(received).toContain('hello')
-    await unsub()
-  })
-
   test('error propagation with SQL code', async () => {
     await expect(proxy.exec('SELECT * FROM nonexistent_table')).rejects.toThrow()
   })

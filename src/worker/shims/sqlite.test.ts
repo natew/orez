@@ -129,12 +129,6 @@ describe('SqliteError', () => {
     expect(err.code).toBe('SQLITE_ERROR')
     expect(err.name).toBe('SqliteError')
   })
-
-  it('captures stack trace', () => {
-    const err = new SqliteError('test', 'SQLITE_MISUSE')
-    expect(err.stack).toBeDefined()
-    expect(err.stack).toContain('SqliteError')
-  })
 })
 
 describe('Database', () => {

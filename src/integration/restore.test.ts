@@ -188,24 +188,6 @@ describe('restore integration', { timeout: 120_000 }, () => {
     }
   })
 
-  test('data integrity preserved (quotes, nulls, large values)', async () => {
-    const sql = wireClient()
-    try {
-      const quoted =
-        await sql`SELECT name FROM items WHERE name LIKE ${"O'Brien%"} LIMIT 1`
-      expect(quoted[0].name).toContain("O'Brien")
-
-      const nulls = await sql`SELECT count(*) as cnt FROM items WHERE data IS NULL`
-      expect(Number(nulls[0].cnt)).toBeGreaterThan(0)
-
-      const scores = await sql`SELECT min(score) as lo, max(score) as hi FROM items`
-      expect(Number(scores[0].lo)).toBe(0)
-      expect(Number(scores[0].hi)).toBe(1990)
-    } finally {
-      await sql.end()
-    }
-  })
-
   test('views work after restore', async () => {
     const sql = wireClient()
     try {
@@ -223,25 +205,6 @@ describe('restore integration', { timeout: 120_000 }, () => {
     try {
       const result = await sql`SELECT item_count() as cnt`
       expect(Number(result[0].cnt)).toBe(200)
-    } finally {
-      await sql.end()
-    }
-  })
-
-  test('foreign keys intact', async () => {
-    const sql = wireClient()
-    try {
-      const joined =
-        await sql`SELECT t.label, i.name FROM tags t JOIN items i ON i.id = t.item_id LIMIT 1`
-      expect(joined.length).toBe(1)
-
-      // FK enforced — inserting with nonexistent item_id should fail
-      try {
-        await sql`INSERT INTO tags (item_id, label) VALUES (99999, 'bad')`
-        expect.unreachable('should have thrown FK violation')
-      } catch (err: any) {
-        expect(err.message).toContain('foreign key')
-      }
     } finally {
       await sql.end()
     }

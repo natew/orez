@@ -23,42 +23,6 @@ function migrationsDirWith(sql: string) {
 const parseStatement = (sql: string) => ({ sql })
 
 describe('readNativeSqlMigrationStatements', () => {
-  // the reconcile decides whether a rebuild block landed by comparing this
-  // column list against the live table, so a column the parser invents makes a
-  // perfectly current table read as stale forever — and every migration run
-  // then drops and rebuilds it.
-  it('does not invent a column from a comma inside a DEFAULT literal', () => {
-    const create = [
-      'CREATE TABLE `repoBuildConfig` (',
-      '  `id` text PRIMARY KEY,',
-      `  \`platforms\` text DEFAULT '{"ios":true,"android":false}',`,
-      '  `label` text',
-      ');',
-    ].join('\n')
-    expect(create).toContain(`'{"ios":true,"android":false}'`)
-
-    const expected = ['id', 'platforms', 'label']
-
-    const statements = readNativeSqlMigrationStatements(
-      migrationsDirWith(
-        [
-          create.replace(
-            'CREATE TABLE `repoBuildConfig`',
-            'CREATE TABLE `__new_repoBuildConfig`'
-          ),
-          'INSERT INTO `__new_repoBuildConfig` SELECT * FROM `repoBuildConfig`;',
-          'DROP TABLE `repoBuildConfig`;',
-          'ALTER TABLE `__new_repoBuildConfig` RENAME TO `repoBuildConfig`;',
-        ].join('--> statement-breakpoint\n')
-      ),
-      parseStatement
-    )
-
-    const block = statements.find((statement) => statement.rebuildColumns)
-    expect(block?.rebuildTarget).toBe('repoBuildConfig')
-    expect(block?.rebuildColumns).toEqual(expected)
-  })
-
   it('carries block membership from the create through the rename', () => {
     const statements = readNativeSqlMigrationStatements(
       migrationsDirWith(

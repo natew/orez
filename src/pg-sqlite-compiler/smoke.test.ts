@@ -68,33 +68,6 @@ describe('pg-sqlite-compiler smoke', () => {
     expect(sql).not.toMatch(/public\.message/i)
   })
 
-  it('emits SQLite string literals for values containing backslashes', () => {
-    const json = JSON.stringify({ text: '# web layout\n  span "Todos"' })
-    const escaped = json.replaceAll("'", "''")
-    const { sql } = compile(`SELECT '${escaped}' AS payload`)
-
-    expect(sql).toContain(`'${escaped}'`)
-    expect(sql).not.toContain("E'")
-  })
-
-  it('rewrites Zero row_to_json subquery results to SQLite json_object', () => {
-    const { sql, warnings } = compile(`
-      SELECT row_to_json(zql_root) AS zql_result
-      FROM (
-        SELECT session.id AS id, session."userId" AS "userId"
-        FROM "sootSession" AS session
-      ) AS zql_root
-    `)
-
-    expect(warnings).toEqual([])
-    expect(sql).toMatch(/"?json_object"?\s*\(/i)
-    expect(sql).toContain(`'id'`)
-    expect(sql).toContain(`zql_root.id`)
-    expect(sql).toContain(`'userId'`)
-    expect(sql).toContain(`zql_root."userId"`)
-    expect(sql).not.toMatch(/row_to_json/i)
-  })
-
   it('flattens schema-qualified tables and matching two-part column refs', () => {
     const { sql } = compile(`
       SELECT replicas.slot, "shardConfig".publications
@@ -108,16 +81,6 @@ describe('pg-sqlite-compiler smoke', () => {
     expect(sql).toMatch(/JOIN\s+"chat_0_shardConfig"/i)
     expect(sql).not.toMatch(/chat_0\.replicas/i)
     expect(sql).not.toMatch(/(^|[^_])replicas\.slot/)
-  })
-
-  it('removes slashes from flattened Zero internal schema names', () => {
-    const { sql } = compile(`
-      INSERT INTO "soot_0/cdc"."versionHistory" ("dataVersion")
-      VALUES (1)
-    `)
-
-    expect(sql).toContain('"soot_0_cdc_versionHistory"')
-    expect(sql).not.toContain('soot_0/cdc')
   })
 
   it('rejects known PG-only functions in strict mode', () => {

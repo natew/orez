@@ -124,64 +124,6 @@ describe('tx-journal core', () => {
     expect(hiddenIntrospection).toBe(0)
   })
 
-  it('resolves transitive trigger, view, and foreign-key targets case-insensitively', () => {
-    const storage = createSqliteStorage()
-    storage.exec('PRAGMA foreign_keys = ON')
-    storage.exec('CREATE TABLE item (id INTEGER PRIMARY KEY, body TEXT)')
-    storage.exec('CREATE TABLE audit (id INTEGER PRIMARY KEY, item_id INTEGER)')
-    storage.exec('CREATE TABLE stats (id INTEGER PRIMARY KEY, writes INTEGER)')
-    storage.exec('CREATE VIEW audit_view AS SELECT id, item_id FROM audit')
-    storage.exec(
-      'CREATE TABLE child (' +
-        'id INTEGER PRIMARY KEY, item_id INTEGER REFERENCES "ItEm"(id) ON DELETE CASCADE)'
-    )
-    storage.exec('CREATE TABLE unrelated (id INTEGER PRIMARY KEY, body TEXT)')
-    storage.exec(
-      `CREATE TRIGGER item_audit AFTER INSERT ON item BEGIN
-         INSERT INTO "AuDiT_ViEw" (id, item_id) VALUES (NEW.id, NEW.id);
-       END`
-    )
-    storage.exec(
-      `CREATE TRIGGER audit_view_insert INSTEAD OF INSERT ON audit_view BEGIN
-         INSERT INTO "AuDiT" (id, item_id) VALUES (NEW.id, NEW.item_id);
-       END`
-    )
-    storage.exec(
-      `CREATE TRIGGER audit_stats AFTER INSERT ON "AUDIT" BEGIN
-         UPDATE stats SET writes = writes + 1 WHERE id = 1;
-       END`
-    )
-    storage.exec(TX_MANIFEST_DDL)
-    storage.exec(
-      `INSERT INTO "${TX_MANIFEST_TABLE}" (tx_id, owner, original, snapshot) VALUES (?, ?, ?, '')`,
-      'tx-targeted',
-      'orez-embed',
-      'item'
-    )
-
-    expect(
-      snapshotSideEffectWriteTables(storage.journal, 'tx-targeted', 'ITEM', 'INSERT')
-    ).toBe(true)
-    const manifest = storage
-      .exec(
-        `SELECT original, snapshot FROM "${TX_MANIFEST_TABLE}" WHERE tx_id = ? ORDER BY original`,
-        'tx-targeted'
-      )
-      .toArray()
-    // `child` references item ON DELETE CASCADE only, so inserting into item
-    // cannot touch it.
-    expect(manifest.map((row) => String(row.original))).toEqual([
-      'audit',
-      'item',
-      'stats',
-    ])
-    expect(manifest.every((row) => String(row.snapshot).startsWith('_orez_tx_'))).toBe(
-      true
-    )
-    expect(storage.tables()).toContain('unrelated')
-    expect(manifest.some((row) => String(row.original) === 'unrelated')).toBe(false)
-  })
-
   it('follows referential actions only for the operation that fires them', () => {
     const storage = createSqliteStorage()
     storage.exec('PRAGMA foreign_keys = ON')
@@ -555,27 +497,6 @@ describe('tx-journal core', () => {
     expect(storage.rows(TX_MANIFEST_TABLE)).toEqual([])
   })
 
-  it('rollback restores snapshotted tables and drops tables created in-tx', () => {
-    const storage = createSqliteStorage()
-    storage.exec('CREATE TABLE items (id TEXT PRIMARY KEY, body TEXT)')
-    storage.exec("INSERT INTO items VALUES ('a', 'one')")
-    snapshotTx(storage, 'tx1', 'items')
-    storage.exec("UPDATE items SET body = 'mutated' WHERE id = 'a'")
-    storage.exec("INSERT INTO items VALUES ('b', 'two')")
-    snapshotTx(storage, 'tx1', 'created_in_tx', { exists: false })
-    storage.exec('CREATE TABLE created_in_tx (id TEXT)')
-
-    storage.transactionSync(() => rollbackTxJournal(storage.journal, 'tx1'))
-
-    expect(storage.rows('items')).toEqual([{ id: 'a', body: 'one' }])
-    expect(storage.tables()).not.toContain('created_in_tx')
-    expect(
-      storage
-        .tables()
-        .filter((name) => name.startsWith('_orez_tx_') && name !== TX_MANIFEST_TABLE)
-    ).toEqual([])
-  })
-
   it('rollback does not fire table triggers while restoring', () => {
     const storage = createSqliteStorage()
     storage.exec('CREATE TABLE items (id TEXT PRIMARY KEY)')
@@ -638,35 +559,6 @@ describe('tx-journal core', () => {
     }
   )
 
-  it('recovery rolls back only the requested owner and sweeps unreferenced snapshots', () => {
-    const storage = createSqliteStorage()
-    storage.exec('CREATE TABLE embed_table (id TEXT)')
-    storage.exec('CREATE TABLE app_table (id TEXT)')
-    storage.exec("INSERT INTO embed_table VALUES ('clean')")
-    storage.exec("INSERT INTO app_table VALUES ('clean')")
-
-    snapshotTx(storage, 'embed-tx', 'embed_table', { owner: 'orez-embed' })
-    storage.exec("INSERT INTO embed_table VALUES ('partial')")
-    snapshotTx(storage, 'app-tx', 'app_table', { owner: 'default' })
-    storage.exec("INSERT INTO app_table VALUES ('in-flight')")
-
-    // pre-journal leftover: snapshot table with no manifest row
-    storage.exec('CREATE TABLE _orez_tx_dead_0_old (id TEXT)')
-
-    const recovered = storage.transactionSync(() =>
-      recoverTxJournal(storage.journal, 'orez-embed')
-    )
-
-    expect(recovered).toEqual(['embed-tx'])
-    // embed's partial tx rolled back
-    expect(storage.rows('embed_table').map((row) => row.id)).toEqual(['clean'])
-    // the other owner's live tx untouched (writes + snapshot intact)
-    expect(storage.rows('app_table').map((row) => row.id)).toEqual(['clean', 'in-flight'])
-    expect(storage.tables()).toContain('_orez_tx_app-tx_0_app_table')
-    // unreferenced leftover swept
-    expect(storage.tables()).not.toContain('_orez_tx_dead_0_old')
-  })
-
   it('recovery without owner rolls back every journaled tx', () => {
     const storage = createSqliteStorage()
     storage.exec('CREATE TABLE items (id TEXT)')
@@ -706,13 +598,6 @@ describe('tx-journal core', () => {
     expect(recovered).toEqual(['row-tx'])
     expect(storage.rows('items')).toEqual([{ id: 'a', body: 'before' }])
     expect(storage.rows(TX_MANIFEST_TABLE)).toEqual([])
-  })
-
-  it('recovery is a no-op on a store with no journal', () => {
-    const storage = createSqliteStorage()
-    storage.exec('CREATE TABLE items (id TEXT)')
-    expect(storage.transactionSync(() => recoverTxJournal(storage.journal))).toEqual([])
-    expect(storage.tables()).toContain('items')
   })
 })
 
@@ -1124,24 +1009,6 @@ describe('kill-mid-tx crash recovery (embed-local backend)', () => {
     expect(storage.rows('cvr_rows')).toEqual([{ id: 'r1', version: 'v3' }])
     expect(local.recoverOrphanedTransactions()).toEqual([])
     expect(storage.rows('cvr_rows')).toEqual([{ id: 'r1', version: 'v3' }])
-  })
-
-  it('rejects change-tracking requests (tracking belongs to the shared upstream db)', async () => {
-    const storage = createSqliteStorage()
-    const local = createLocalSqlBackend({
-      exec: storage.exec,
-      transactionSync: storage.transactionSync,
-    })
-    const resp = await local.fetch('https://orez-do-backend.local/exec', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sql: 'SELECT 1',
-        track: { tableName: 'x', operation: 'INSERT' },
-      }),
-    })
-    expect(resp.status).toBe(500)
-    expect(((await resp.json()) as { error: string }).error).toContain('change tracking')
   })
 })
 

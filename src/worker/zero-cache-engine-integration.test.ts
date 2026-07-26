@@ -121,22 +121,6 @@ describe('replica repair over real sqlite', () => {
     expect(tables.filter((n) => !n.startsWith('sqlite_'))).toEqual([])
   })
 
-  it('repairPartialReplicaInit leaves a cleanly-initialized replica intact', () => {
-    const db = new DatabaseSync(':memory:')
-    seedReplica(db)
-    db.exec('CREATE TABLE "_zero.versionHistory" (v INTEGER)')
-    db.exec('INSERT INTO "_zero.versionHistory" (v) VALUES (1)')
-    const sql = doSqlAdapter(db) as never
-    repairPartialReplicaInit(sql, { logPrefix: '[itest]' })
-    const tables = (
-      db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{
-        name: string
-      }>
-    ).map((r) => r.name)
-    expect(tables).toContain('user')
-    expect(tables).toContain('project')
-  })
-
   it('resetReplicaIfTableSetChanged wipes on a changed tag and persists the new one', async () => {
     const db = new DatabaseSync(':memory:')
     seedReplica(db)

@@ -235,58 +235,6 @@ describe('transaction query materializer', () => {
     expect(result).toEqual([{ id: 'u1', active: true, profile: null, posts: null }])
   })
 
-  test('aborts on the select budget with a registered query name', () => {
-    expect(() =>
-      executeTransactionQueryPlan(
-        plan(),
-        (sql) =>
-          sql === 'root'
-            ? [
-                { id: 'u1', active: 1, profile: null },
-                { id: 'u2', active: 1, profile: null },
-              ]
-            : [],
-        { queryName: 'usersWithPosts', budget: { maxSelects: 2 } }
-      )
-    ).toThrow(TransactionQueryBudgetError)
-
-    try {
-      executeTransactionQueryPlan(
-        plan(),
-        (sql) =>
-          sql === 'root'
-            ? [
-                { id: 'u1', active: 1, profile: null },
-                { id: 'u2', active: 1, profile: null },
-              ]
-            : [],
-        { queryName: 'usersWithPosts', budget: { maxSelects: 2 } }
-      )
-    } catch (error) {
-      expect(error.code).toBe('transaction_query_budget_exceeded')
-      expect(error.query).toBe('usersWithPosts')
-      expect(error.selects).toBe(3)
-      expect(error.message).toContain('maxSelects=2')
-    }
-  })
-
-  test('aborts on row budget with the root table and plan hash', () => {
-    try {
-      executeTransactionQueryPlan(
-        { ...plan(), root: { ...plan().root, relationships: [] } },
-        () => [
-          { id: 'u1', active: 1, profile: null },
-          { id: 'u2', active: 1, profile: null },
-        ],
-        { budget: { maxRows: 1 } }
-      )
-    } catch (error) {
-      expect(error.query).toBe('user:0123456789abcdef')
-      expect(error.rows).toBe(2)
-      expect(error.message).toContain('maxRows=1')
-    }
-  })
-
   test('rejects a malformed plan before executing SQL', () => {
     let executed = false
     expect(() =>

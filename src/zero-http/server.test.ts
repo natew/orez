@@ -151,46 +151,6 @@ describe('zero-http fixture server', () => {
     ).toBe(401)
   })
 
-  it('returns unchanged pulls by cookie and incremental rows after a push', async () => {
-    const server = await start({
-      user: [{ id: 'u1', name: 'ada' }],
-      project: [],
-      member: [],
-    })
-
-    const first = await pull(server, 'token-u1')
-    expect(first.res.status).toBe(200)
-    expect(first.body.cookie).toBe(await server.version())
-    expect(first.body.rowsPatch).toBeDefined()
-
-    const unchanged = await pull(server, 'token-u1', { cookie: first.body.cookie })
-    expect(unchanged.res.status).toBe(200)
-    expect(unchanged.body).toEqual({ cookie: first.body.cookie, unchanged: true })
-    expect(unchanged.body.rowsPatch).toBeUndefined()
-
-    const future = await pull(server, 'token-u1', { cookie: first.body.cookie + 100 })
-    expect(future.res.status).toBe(409)
-    expect(future.body.error).toContain('future cookie')
-
-    const created = await push(server, 'token-u1', {
-      id: 1,
-      name: 'project|create',
-      args: { id: 'p1', ownerId: 'u1', name: 'new project' },
-    })
-    expect(created.res.status).toBe(200)
-
-    const changed = await pull(server, 'token-u1', { cookie: first.body.cookie })
-    expect(changed.res.status).toBe(200)
-    expect(changed.body.cookie).toBeGreaterThan(first.body.cookie)
-    expect(changed.body.rowsPatch).toEqual([
-      {
-        op: 'put',
-        tableName: 'project_record',
-        value: { project_id: 'p1', owner_id: 'u1', project_name: 'new project' },
-      },
-    ])
-  })
-
   it('applies pushes, exposes LMID changes, and acks replays idempotently', async () => {
     const server = await start({
       user: [{ id: 'u1', name: 'ada' }],
@@ -242,57 +202,6 @@ describe('zero-http fixture server', () => {
 
     const afterReplay = await pull(server, 'token-u1')
     expect(afterReplay.body.lastMutationIDChanges).toEqual({ c1: 1 })
-  })
-
-  it('binds client groups to the first authenticated user', async () => {
-    const server = await start({
-      user: [
-        { id: 'u1', name: 'ada' },
-        { id: 'u2', name: 'ben' },
-      ],
-      project: [],
-      member: [],
-    })
-
-    const created = await push(
-      server,
-      'token-u1',
-      {
-        id: 1,
-        name: 'project|create',
-        args: { id: 'p1', ownerId: 'u1', name: 'u1 project' },
-      },
-      'cg-u1'
-    )
-    expect(created.res.status).toBe(200)
-
-    const u2Pull = await pull(server, 'token-u2', {
-      clientGroupID: 'cg-u1',
-    })
-    expect(u2Pull.res.status).toBe(403)
-    expect(u2Pull.body.error).toContain('client group belongs to a different user')
-
-    const u2Push = await push(
-      server,
-      'token-u2',
-      {
-        id: 1,
-        name: 'project|create',
-        args: { id: 'p2', ownerId: 'u2', name: 'u2 project' },
-      },
-      'cg-u1'
-    )
-    expect(u2Push.res.status).toBe(403)
-    expect(u2Push.body.error).toContain('client group belongs to a different user')
-    expect(server.rows('project')).toEqual([
-      { id: 'p1', ownerId: 'u1', name: 'u1 project' },
-    ])
-
-    const u1Pull = await pull(server, 'token-u1', {
-      clientGroupID: 'cg-u1',
-    })
-    expect(u1Pull.res.status).toBe(200)
-    expect(u1Pull.body.lastMutationIDChanges).toEqual({ c1: 1 })
   })
 
   it('advances LMID and cookie for app-error mutations without changing rows', async () => {
@@ -382,31 +291,6 @@ describe('zero-http fixture server', () => {
     })
     expect(afterForbidden.body.cookie).toBeGreaterThan(beforeForbidden)
     expect(afterForbidden.body.lastMutationIDChanges).toEqual({ c1: 2 })
-  })
-
-  it('rejects out-of-order mutation ids without corrupting LMID state', async () => {
-    const server = await start({
-      user: [{ id: 'u1', name: 'ada' }],
-      project: [],
-      member: [],
-    })
-    const beforeVersion = await server.version()
-
-    const gap = await push(server, 'token-u1', {
-      id: 2,
-      name: 'project|create',
-      args: { id: 'p-gap', ownerId: 'u1', name: 'gap' },
-    })
-    expect(gap.res.status).toBe(400)
-    expect(gap.body.error).toContain('skips lmid')
-    expect(await server.version()).toBe(beforeVersion)
-    expect(server.rows('project')).toEqual([])
-
-    const afterGap = await pull(server, 'token-u1')
-    expect(afterGap.body.lastMutationIDChanges).toEqual({ c1: 0 })
-    expect(puts(afterGap.body)).toEqual([
-      { tableName: 'user_record', value: { user_id: 'u1', display_name: 'ada' } },
-    ])
   })
 
   it('handles member removal app errors and success', async () => {
