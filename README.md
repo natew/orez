@@ -30,10 +30,7 @@ normalization, bundle pruning, and readiness checks. Consumers provide their
 own token prefix and app-specific policy:
 
 ```ts
-import {
-  buildRustSyncUserShimSource,
-  cfDeployConfig,
-} from 'orez/cf-deploy'
+import { buildRustSyncUserShimSource, cfDeployConfig } from 'orez/cf-deploy'
 
 const config = cfDeployConfig('example', {
   compiledWasmModules: ['example-wasm/module.wasm'],

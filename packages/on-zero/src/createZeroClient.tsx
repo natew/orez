@@ -1086,7 +1086,6 @@ export function createZeroClientInternal<
     }
   }
 
-
   // watch a zero instance's connection and own the generic recovery: stale-poke
   // and transport reconnects, needs-auth token refresh, reconnect-status events,
   // and optional dataset mirroring. plain subscription, no react — a headless
