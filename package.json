@@ -63,17 +63,33 @@
       "types": "./dist/sync-browser-host/index.d.ts",
       "import": "./dist/sync-browser-host/index.js"
     },
-    "./sync-cf-host": {
-      "types": "./dist/sync-cf-host.d.ts",
-      "import": "./dist/sync-cf-host.js"
+    "./cloudflare": {
+      "types": "./dist/cloudflare.d.ts",
+      "import": "./dist/cloudflare.js"
     },
-    "./cf-deploy": {
-      "types": "./dist/cf-deploy/index.d.ts",
-      "import": "./dist/cf-deploy/index.js"
+    "./cloudflare/runtime": {
+      "types": "./dist/cloudflare-runtime.d.ts",
+      "import": "./dist/cloudflare-runtime.js"
     },
-    "./cf-deploy/*": {
-      "types": "./dist/cf-deploy/*.d.ts",
-      "import": "./dist/cf-deploy/*.js"
+    "./cloudflare/sync": {
+      "types": "./dist/cloudflare-sync.d.ts",
+      "import": "./dist/cloudflare-sync.js"
+    },
+    "./cloudflare/query-compiler": {
+      "types": "./dist/cloudflare-query-compiler.d.ts",
+      "import": "./dist/cloudflare-query-compiler.js"
+    },
+    "./cloudflare/transaction-query": {
+      "types": "./dist/cloudflare-transaction-query.d.ts",
+      "import": "./dist/cloudflare-transaction-query.js"
+    },
+    "./cloudflare/vite-wasm-loader": {
+      "types": "./dist/cloudflare-vite-wasm-loader.d.ts",
+      "import": "./dist/cloudflare-vite-wasm-loader.js"
+    },
+    "./cloudflare/bun-wasm-loader": {
+      "types": "./dist/cloudflare-bun-wasm-loader.d.ts",
+      "import": "./dist/cloudflare-bun-wasm-loader.js"
     },
     "./worker/*": {
       "types": "./dist/worker/*.d.ts",
@@ -82,10 +98,6 @@
     "./worker/shims/*": {
       "types": "./dist/worker/shims/*.d.ts",
       "import": "./dist/worker/shims/*.js"
-    },
-    "./cf-do": {
-      "types": "./dist/cf-do/worker.d.ts",
-      "import": "./dist/cf-do/worker.js"
     }
   },
   "bin": {
@@ -115,10 +127,6 @@
     "test:transaction-query:chat": "bun run --cwd packages/sync-cf-host build:dist && bun harness/src/chat-transaction-query-diff.ts",
     "test:all": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && vitest run && bun run test:sync-executor",
     "test:watch": "bun run --cwd packages/sync-cf-host build:dist && vitest",
-    "test:compiler": "vitest run src/pg-sqlite-compiler/",
-    "test:compiler:oracle": "bun scripts/pgsqlite/ensure.ts && vitest run src/pg-sqlite-compiler/test/",
-    "compiler:harvest-fixtures": "bun scripts/pgsqlite/harvest-fixtures.ts",
-    "compiler:ensure-pgsqlite": "bun scripts/pgsqlite/ensure.ts",
     "lint": "oxlint --import-plugin --ignore-pattern sqlite-wasm/",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
@@ -127,13 +135,11 @@
     "check:all": "bun run lint && bun run format:check && bun run check && bun run test",
     "test:chat": "bun scripts/test-chat-integration.ts",
     "test:chat:smoke": "bun scripts/test-chat-integration.ts --smoke",
-    "test:chat:e2e": "bun scripts/test-chat-e2e.ts",
     "release": "bun scripts/release.ts",
     "release:native:prepare": "bun scripts/set-sync-native-version.ts",
     "release:native:bootstrap": "bun scripts/bootstrap-sync-native-packages.ts",
     "perf:load": "bun run perf/load/harness.ts",
     "perf:memory": "bun run perf/memory/profile.ts",
-    "perf:write-profile": "bun run build && bun run perf/write-amplification/build-production-shape.ts && bun run perf/write-amplification/production-shape.ts",
     "perf:bench": "bun run perf/scripts/bench-all.ts",
     "perf:overhead": "bun run perf/scripts/bench-proxy-overhead.ts",
     "perf:soak": "bun run perf/stability/soak.ts",
@@ -150,7 +156,6 @@
     "@noble/ciphers": "1.3.0",
     "@noble/curves": "1.9.7",
     "@noble/hashes": "1.8.0",
-    "@pgsql/traverse": "17.2.6",
     "bedrock-sqlite": "workspace:*",
     "citty": "^0.2.0",
     "esbuild": "^0.25.0",
@@ -195,7 +200,6 @@
     "url": "git+https://github.com/natew/orez.git"
   },
   "workspaces": [
-    "pg-to-sqlite",
     "sqlite-wasm",
     "packages/drizzle-zero-sqlite",
     "packages/on-zero",

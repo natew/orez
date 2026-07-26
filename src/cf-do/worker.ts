@@ -61,18 +61,11 @@ export type {
 export type { SqlStatementMetadata } from 'orez-sync-executor'
 
 /**
- * zero-do: Durable Object that exposes raw SQL execution over ctx.storage.sql.
+ * SQLite Durable Object used by Orez Lite.
  *
- * The production Cloudflare path runs real zero-cache via
- * src/worker/zero-cache-embed-cf.ts, with DoBackend calling this DO for
- * Postgres-protocol-backed SQL. The WS sync handler here is kept for
- * development/protocol experiments only; it is not the production replacement
- * for zero-cache.
- *
- * Modes:
- *   WS /sync/v51/connect — bespoke Zero sync protocol (dev/protocol testing)
- *   POST /exec — raw SQL execution (from DoBackend adapter)
- *   POST /batch — atomic batch execution via ctx.storage.transaction()
+ * Application code uses the typed ApplicationSql RPC surface. The HTTP SQL and
+ * websocket routes remain development/protocol tools; they are not a Postgres
+ * compatibility layer and are not used by the production sync host.
  */
 
 interface Env {
@@ -134,7 +127,7 @@ interface SqlExecStatement {
   // runtime-conditional DDL: the deploy-time rewriter can't know a target
   // namespace's current shape, so ALTER TABLE ... ADD/DROP COLUMN IF [NOT]
   // EXISTS ships as an unconditional statement plus a skip condition the DO
-  // evaluates against pragma_table_info at apply time (mirrors DoBackend's
+  // evaluates against pragma_table_info at apply time (mirrors the transaction client's
   // client-side handling for the embedded path).
   skipIfColumnExists?: { table: string; column: string }
   skipIfColumnMissing?: { table: string; column: string }
@@ -952,7 +945,7 @@ export class ZeroDO extends DurableObject {
   }
 
   /**
-   * atomic commit point for a DoBackend-emulated pg transaction. promotes the
+   * Atomic commit point for an application-SQL transaction. Promotes the
    * tx's pending tracked changes into _zero_changes (allocating watermarks)
    * and clears its journal (drops snapshots + manifest rows) in ONE storage
    * transaction, so a DO kill can never leave a tx half-committed: either the
@@ -1699,7 +1692,7 @@ export class ZeroDO extends DurableObject {
       throw new Error(`upsert requires CDC registration for ${track.tableName}`)
     }
 
-    // DoBackend already marked this table row-journaled, betting the DO could
+    // The transaction owner marked this table row-journaled, expecting the DO to
     // capture before/after images for it. When it cannot, that marker promises
     // a rollback nothing can perform, so take the table snapshot the journal
     // would otherwise have taken. It has to happen before the DML, while the
@@ -2331,8 +2324,8 @@ export class ZeroDO extends DurableObject {
           value === true || value === 1 || value === '1' || value === 'true'
       } else if (type === 'number') {
         // timestamp/timestamptz columns are declared `number` in the zero
-        // schema but stored as postgres timestamp TEXT (pg-proxy-do-backend
-        // `postgresTimestampText`, e.g. "2026-07-11 13:34:46.000+00"). Coercing
+        // schema but may be stored as timestamp text (for example
+        // "2026-07-11 13:34:46.000+00"). Coercing
         // that text with Number() yields NaN, which JSON serializes as null and
         // silently wipes every timestamp reaching the sync-cf-host snapshot
         // feed. Forward a non-numeric value untouched so the engine's

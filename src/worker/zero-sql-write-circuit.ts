@@ -1,8 +1,8 @@
 /**
  * runaway-write circuit breaker for a Durable Object's SQLite storage.
  *
- * a ZeroSqlDO (orez `ZeroDO`) runs the pg-over-DO backend in-instance, so a
- * buggy or malicious mutation flow can write unbounded rows into the DO's
+ * A ZeroSqlDO (Orez `ZeroDO`) owns authoritative application SQLite. A buggy
+ * or malicious mutation flow can write unbounded rows into the DO's
  * SQLite and blow past the platform's per-object storage + billing limits
  * before anything notices. this wraps `sql.exec` to meter rows written per
  * rolling window and trip — refusing further writes — once the rate stays over

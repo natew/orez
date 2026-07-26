@@ -12,10 +12,8 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { bundleCloudflareRustSyncAppWorker } from './bundle.js'
-import { cfDeployConfig } from './config.js'
-import { buildMigrationModuleSource } from './migration.js'
-import { buildAppShimSource, buildRustSyncUserShimSource } from './shims.js'
+import { bundleCloudflareLiteAppWorker } from './bundle.js'
+import { defineCloudflareConfig } from './config.js'
 
 const workerDirs: string[] = []
 
@@ -23,48 +21,48 @@ afterEach(() => {
   for (const dir of workerDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-describe('bundleCloudflareRustSyncAppWorker', () => {
-  it('bundles the generated static app shim without a lazy app chunk', async () => {
-    const workerDir = mkdtempSync(join(tmpdir(), 'orez-app-shim-split-'))
+describe('Cloudflare app bundling', () => {
+  it('bundles a caller-owned entrypoint with stable virtual imports', async () => {
+    const workerDir = mkdtempSync(join(tmpdir(), 'orez-lite-entry-'))
     workerDirs.push(workerDir)
-    const orezDir = join(workerDir, 'node_modules', 'orez')
-    mkdirSync(join(orezDir, 'dist', 'worker'), { recursive: true })
-    writeFileSync(
-      join(orezDir, 'package.json'),
-      JSON.stringify({
-        name: 'orez',
-        type: 'module',
-        exports: {
-          './worker/cf-do-shim': './dist/worker/cf-do-shim.js',
-        },
-      })
-    )
-    writeFileSync(
-      join(orezDir, 'dist', 'worker', 'cf-do-shim.js'),
-      'export function isValidNamespace() { return true }\n'
-    )
+    mkdirSync(join(workerDir, 'node_modules'))
     writeFileSync(
       join(workerDir, 'index.js'),
       "export default { fetch() { return new Response('ok') } }\n"
     )
-    const shimPath = join(workerDir, 'app-shim.js')
+    const entryPoint = join(workerDir, 'cloudflare-worker.js')
+    writeFileSync(
+      entryPoint,
+      [
+        "import { SCHEMA_VERSION } from 'orez:cloudflare-migrations'",
+        "const app = import('orez:application-worker')",
+        'export default {',
+        '  async fetch(request, env, ctx) {',
+        '    const worker = (await app).default',
+        '    return worker.fetch(request, env, ctx)',
+        '  },',
+        '}',
+        'export { SCHEMA_VERSION }',
+      ].join('\n')
+    )
     const outfile = join(workerDir, 'index.js')
-    writeFileSync(shimPath, buildAppShimSource(cfDeployConfig('contrast')))
 
-    await bundleCloudflareRustSyncAppWorker(cfDeployConfig('contrast'), {
+    await bundleCloudflareLiteAppWorker(defineCloudflareConfig('contrast'), {
       workerDir,
-      shimPath,
+      entryPoint,
       outfile,
       writeMigrationModule: async (dir) => {
-        writeFileSync(join(dir, 'orez-migrations.js'), 'export {}\n')
-        writeFileSync(join(dir, 'orez-schema-version.js'), 'export {}\n')
+        writeFileSync(
+          join(dir, 'orez-migrations.js'),
+          "export const SCHEMA_VERSION = 'v1'\n"
+        )
         return join(dir, 'orez-migrations.js')
       },
     })
 
     expect(
       readdirSync(workerDir).filter((name) => /^one-app-[A-Za-z0-9_-]+\.js$/.test(name))
-    ).toHaveLength(0)
+    ).toHaveLength(1)
   })
 
   it('keeps external One asset imports linked to the lazy app chunk', async () => {
@@ -104,10 +102,10 @@ describe('bundleCloudflareRustSyncAppWorker', () => {
         '}',
       ].join('\n')
     )
-    const shimPath = join(workerDir, 'user-shim.js')
+    const entryPoint = join(workerDir, 'user-shim.js')
     const outfile = join(workerDir, 'index.js')
     writeFileSync(
-      shimPath,
+      entryPoint,
       [
         'let workerPromise',
         'function getWorker() {',
@@ -122,9 +120,9 @@ describe('bundleCloudflareRustSyncAppWorker', () => {
       ].join('\n')
     )
 
-    await bundleCloudflareRustSyncAppWorker(cfDeployConfig('contrast'), {
+    await bundleCloudflareLiteAppWorker(defineCloudflareConfig('contrast'), {
       workerDir,
-      shimPath,
+      entryPoint,
       outfile,
       writeMigrationModule: async (dir) => {
         writeFileSync(join(dir, 'orez-migrations.js'), 'export {}\n')

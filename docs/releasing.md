@@ -15,7 +15,6 @@ Configure the same GitHub Actions trusted publisher for each public package:
 
 - `orez`
 - `bedrock-sqlite`
-- `pg-to-sqlite`
 - `orez-sync-cf-host`
 - `drizzle-zero-sqlite`
 
@@ -31,7 +30,7 @@ The release workflow deliberately has no npm token. GitHub issues a short-lived
 OIDC identity for the publish job, and npm exchanges it for package-specific
 publish access. The workflow uses npm 12.0.1, Node 24, and a GitHub-hosted runner.
 
-Configure all five packages before `release.yml` reaches `main`. A package
+Configure all packages before `release.yml` reaches `main`. A package
 without the trusted publisher will reject its publish after earlier packages may
 already have been published.
 

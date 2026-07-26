@@ -115,7 +115,7 @@ export function pruneWorkerChunksBySignature(
   // removing the browser-only chunks orphans every chunk that was reachable
   // ONLY through them (e.g. the ~466 shiki/textmate-grammar/wasm chunks
   // pulled in solely by the codemirror+lsp editor surface — 2.6 MiB gz).
-  // the initial reachability prune ran inside bundleCloudflareDoWorker BEFORE
+  // The initial reachability prune ran during app-worker bundling before
   // these deletions, so it counted them as live; re-run it now to drop the
   // newly-unreachable set. without this the worker ships dead grammar chunks
   // and trips CF's 10 MiB code limit.

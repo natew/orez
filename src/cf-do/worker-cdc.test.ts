@@ -616,7 +616,7 @@ describe('ZeroDO tracked writes on a table CDC cannot undo', () => {
     sql.exec('CREATE TABLE weird (rowid TEXT, _rowid_ TEXT, oid TEXT, body TEXT)')
     sql.exec("INSERT INTO weird VALUES ('r1', 'r2', 'r3', 'before')")
 
-    // DoBackend marked the table row-journaled before asking the DO whether it
+    // The transaction owner marked the table row-journaled before asking whether it
     // could capture it.
     sql.exec(TX_MANIFEST_DDL)
     sql.exec(

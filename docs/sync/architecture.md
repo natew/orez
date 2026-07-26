@@ -211,8 +211,8 @@ production on Cloudflare.
 On Cloudflare the deployment has two Durable Object roles:
 
 - The **data worker** (`src/cf-do/worker.ts`, the `ZeroSqlDO` class) is the
-  write side. Apps write to it over the Postgres wire protocol through a
-  DoBackend, and it stores rows in DO SQLite. It exposes a
+  write side. Apps use the typed Application SQL Durable Object RPC, and it
+  stores rows in DO SQLite. It exposes a
   watermark-cursored change feed the sync host consumes:
   `GET/POST /<db>/changes {watermark, limit}` returns `{watermark, changes}` and
   answers HTTP 410 `watermarkTooOld` when the cursor precedes the retained
@@ -227,9 +227,8 @@ On Cloudflare the deployment has two Durable Object roles:
   entrypoint.
 - The **sync host** (`packages/sync-cf-host`) is the read side. It ingests the
   data worker's feed into the engine's own change log, then serves pulls and
-  pushes. In delegation mode it replaces the embedded zero-cache DO
-  one-for-one, and the app's Postgres-wire writes to the data worker are
-  unchanged.
+  pushes. Application writes and sync ingestion share the same authoritative
+  SQLite object without a Postgres compatibility layer.
 
 The canonical Orez transport integration lives at `orez/zero-http`, with source
 in `src/zero-http/`. It keeps `@rocicorp/zero` as the client and maps its sync

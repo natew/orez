@@ -21,28 +21,31 @@ hosts. It replaces Zero's server side and speaks the Zero protocol to the real
 forking Zero's query or mutation API. See the
 [Orez Lite server documentation](docs/sync/README.md).
 
-## Cloudflare deploy integration
+## Cloudflare
 
-`orez/cf-deploy` is the canonical deploy-time integration for One/Orez apps
-using the split app-worker and Durable Object data-worker architecture. It
-exports worker-shim generators, migration-module builders, wrangler
-normalization, bundle pruning, and readiness checks. Consumers provide their
-own token prefix and app-specific policy:
+`orez/cloudflare` is the public Orez Lite surface for Cloudflare: the Rust sync
+host, the checked-in worker runtime, migration builders, bundling, wrangler
+configuration, pruning, and readiness checks. It does not generate or patch
+worker source. Consumers provide deployment configuration to the bundler:
 
 ```ts
-import { buildRustSyncUserShimSource, cfDeployConfig } from 'orez/cf-deploy'
+import { bundleCloudflareLiteAppWorker, defineCloudflareConfig } from 'orez/cloudflare'
 
-const config = cfDeployConfig('example', {
+const config = defineCloudflareConfig('example', {
   compiledWasmModules: ['example-wasm/module.wasm'],
 })
 
-const source = buildRustSyncUserShimSource(config, {
-  feedTables: {},
+await bundleCloudflareLiteAppWorker(config, {
+  workerDir,
+  entryPoint: new URL('./cloudflare-worker.ts', import.meta.url).pathname,
+  outfile,
+  writeMigrationModule,
 })
 ```
 
-Individual modules are also exported, such as
-`orez/cf-deploy/bundle` and `orez/cf-deploy/nativeMigrations`.
+Cloudflare query compilation is available at
+`orez/cloudflare/query-compiler`. Applications only depend on `orez`; the
+workspace packages behind these exports are internal implementation units.
 
 ## Requirements
 
@@ -63,9 +66,8 @@ not suitable for production.
 - **Trigger overhead** (pglite backend) — every write fires change-tracking triggers.
 - **Local filesystem** — no replication, no HA. Use `orez pg_dump` for backups.
 
-The earlier `src/worker/**` experiment that embeds zero-cache inside a
-Cloudflare Durable Object is frozen for removal and receives security fixes
-only. New Cloudflare server work uses Orez Lite and `orez-sync-cf-host`.
+Orez does not embed zero-cache in Cloudflare Durable Objects. Cloudflare server
+work uses the SQLite-native Orez Lite runtime from `orez/cloudflare`.
 
 ## Backends
 

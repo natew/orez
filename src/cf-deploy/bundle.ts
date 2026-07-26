@@ -12,26 +12,20 @@ import { basename, dirname, join } from 'path'
 
 import { build, type Plugin } from 'esbuild'
 
-import { getBrowserAliases, getBrowserDefine } from '../worker/browser-build-config.js'
-import { prepareZeroCacheForCF } from '../worker/cf-patches.js'
-import {
-  NODE_EXTERNALS,
-  isCloudflarePgImporter,
-  isOrezAliasImporter,
-  resolveAlias,
-} from './leaves.js'
+import { getBrowserDefine } from '../worker/browser-build-config.js'
+import { NODE_EXTERNALS, isOrezAliasImporter, resolveAlias } from './leaves.js'
 import { pruneUnreachableWorkerModules, shimWorkerCreateRequire } from './prune.js'
-import { cloudflarePgVirtualModule } from './sources.js'
 
-import type { CfDeployConfig } from './config.js'
+import type { CloudflareConfig } from './config.js'
 import type { WorkerChunkPruneSignatures } from './prune.js'
 
-export interface BundleCloudflareDoWorkerOptions {
+export interface BundleCloudflareWorkerOptions {
   workerDir: string
-  shimPath: string
+  entryPoint: string
   outfile: string
   writeMigrationModule: (workerDir: string) => Promise<string>
   chunkPruneSignatures?: WorkerChunkPruneSignatures
+  define?: Readonly<Record<string, string>>
 }
 
 // react's build-context marker packages, resolved for the SERVER context these
@@ -48,12 +42,11 @@ export const SERVER_CONTEXT_STUBS: Record<string, string> = {
 }
 
 export function orezCfAliasPlugin(
-  cfg: CfDeployConfig,
+  cfg: CloudflareConfig,
   aliases: Record<string, string>,
   resolveDir: string,
   nodeModulesPath: string,
-  wasmOutDir = resolveDir,
-  options?: { nativeApplicationSql?: boolean }
+  wasmOutDir = resolveDir
 ): Plugin {
   const entries = Object.entries(aliases)
   const utilVirtualModule =
@@ -105,13 +98,6 @@ export function orezCfAliasPlugin(
       'export function isIPv6(value) { return String(value).includes(":") }\nexport function isPrivate() { return false }\nexport function isReserved() { return false }\n',
     ...SERVER_CONTEXT_STUBS,
   }
-  if (!options?.nativeApplicationSql) {
-    const doBackendPath = join(nodeModulesPath, 'orez', 'dist', 'pg-proxy-do-backend.js')
-    const doBackendVirtualSpecifier = `${cfg.prefix}-do-backend`
-    virtualModules.pg = cloudflarePgVirtualModule(cfg, doBackendPath)
-    virtualModules[doBackendVirtualSpecifier] =
-      `export { DoBackend } from ${JSON.stringify(doBackendPath)}\n`
-  }
   return {
     name: 'orez-cf-aliases',
     setup(buildApi) {
@@ -140,16 +126,6 @@ export function orezCfAliasPlugin(
       for (const specifier of Object.keys(virtualModules)) {
         const filter = new RegExp(`^${specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`)
         buildApi.onResolve({ filter }, (args) => {
-          if (specifier === 'pg' || specifier.endsWith('-do-backend')) {
-            if (
-              args.importer &&
-              !isCloudflarePgImporter(args.importer, resolveDir) &&
-              !isOrezAliasImporter(args.importer)
-            ) {
-              return undefined
-            }
-            return { path: specifier, namespace: 'orez-cf-virtual' }
-          }
           // server-context stubs apply regardless of importer: consumer app
           // code (e.g. an auth module's `import 'server-only'`) must hit the
           // no-op, not the throwing client-guard entry
@@ -169,10 +145,12 @@ export function orezCfAliasPlugin(
       for (const [specifier, target] of entries) {
         const filter = new RegExp(`^${specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`)
         buildApi.onResolve({ filter }, async (args) => {
+          const isOrezBuildModule = specifier.startsWith('orez:')
           const isZeroRunner =
             specifier === '@rocicorp/zero/out/zero-cache/src/server/runner/run-worker.js'
           const isPatchedParser = specifier.startsWith('libpg-query')
           if (
+            !isOrezBuildModule &&
             !isZeroRunner &&
             !isPatchedParser &&
             args.importer &&
@@ -191,34 +169,10 @@ export function orezCfAliasPlugin(
   }
 }
 
-export async function bundleCloudflareDoWorker(
-  cfg: CfDeployConfig,
-  options: BundleCloudflareDoWorkerOptions
-) {
-  const { workerDir } = options
-  const nodeModulesPath = realpathSync(
-    [
-      join(workerDir, 'node_modules'),
-      join(workerDir, '..', '..', 'node_modules'),
-      join(process.cwd(), 'node_modules'),
-    ].find((candidate) => existsSync(candidate)) || join(process.cwd(), 'node_modules')
-  )
-  const zeroOverlay = prepareZeroCacheForCF({
-    nodeModulesPath,
-    outDir: join(workerDir, '.orez/zero-cache-cf'),
-  })
-  return bundleCloudflareSplitAppWorker(
-    cfg,
-    options,
-    nodeModulesPath,
-    getBrowserAliases(zeroOverlay)
-  )
-}
-
 /** bundle a One app with SQL storage but without the zero-cache runtime. */
-export async function bundleCloudflareRustSyncAppWorker(
-  cfg: CfDeployConfig,
-  options: BundleCloudflareDoWorkerOptions
+export async function bundleCloudflareLiteAppWorker(
+  cfg: CloudflareConfig,
+  options: BundleCloudflareWorkerOptions
 ) {
   const { workerDir } = options
   const nodeModulesPath = realpathSync(
@@ -228,25 +182,21 @@ export async function bundleCloudflareRustSyncAppWorker(
       join(process.cwd(), 'node_modules'),
     ].find((candidate) => existsSync(candidate)) || join(process.cwd(), 'node_modules')
   )
-  return bundleCloudflareSplitAppWorker(
-    cfg,
-    options,
-    nodeModulesPath,
-    {},
-    { nativeApplicationSql: true }
-  )
+  return bundleCloudflareSplitAppWorker(cfg, options, nodeModulesPath, {
+    'orez:application-worker': join(workerDir, 'one-app.js'),
+    'orez:cloudflare-migrations': join(workerDir, 'orez-migrations.js'),
+  })
 }
 
 async function bundleCloudflareSplitAppWorker(
-  cfg: CfDeployConfig,
-  options: BundleCloudflareDoWorkerOptions,
+  cfg: CloudflareConfig,
+  options: BundleCloudflareWorkerOptions,
   nodeModulesPath: string,
-  aliases: Record<string, string>,
-  pluginOptions?: { nativeApplicationSql?: boolean }
+  aliases: Record<string, string>
 ) {
-  const { workerDir, shimPath, outfile, writeMigrationModule } = options
+  const { workerDir, entryPoint, outfile, writeMigrationModule } = options
   await writeMigrationModule(workerDir)
-  // expose One's worker output under a stable name so the shim can DYNAMICALLY
+  // Expose One's worker output under a stable name so the entrypoint can dynamically
   // import it (getOneWorker -> './one-app.js'). esbuild code-splitting then emits
   // it as its own lazily-evaluated chunk, so the DO isolates (schema migration /
   // SQL backend) never evaluate the One app graph — the fix for the 128 MiB DO
@@ -269,7 +219,7 @@ async function bundleCloudflareSplitAppWorker(
   const outDir = join(workerDir, '.do-bundle')
   if (existsSync(outDir)) rmSync(outDir, { recursive: true, force: true })
   await build({
-    entryPoints: [shimPath],
+    entryPoints: [entryPoint],
     outdir: outDir,
     entryNames: 'index',
     bundle: true,
@@ -282,6 +232,7 @@ async function bundleCloudflareSplitAppWorker(
     external: ['cloudflare:*', './assets/*', ...NODE_EXTERNALS],
     define: {
       ...getBrowserDefine(),
+      ...options.define,
       // shim the CJS module globals, which are undefined in this workerd ESM
       // bundle (platform: 'neutral' does not inject them). a bundled dep that
       // references __filename/__dirname — common in RN/node libraries pulled
@@ -290,16 +241,7 @@ async function bundleCloudflareSplitAppWorker(
       __filename: JSON.stringify('index.js'),
       __dirname: JSON.stringify('/'),
     },
-    plugins: [
-      orezCfAliasPlugin(
-        cfg,
-        aliases,
-        workerDir,
-        nodeModulesPath,
-        workerDir,
-        pluginOptions
-      ),
-    ],
+    plugins: [orezCfAliasPlugin(cfg, aliases, workerDir, nodeModulesPath, workerDir)],
     logLevel: 'silent',
   })
   const oneAppChunks = readdirSync(outDir).filter((name) =>
@@ -312,9 +254,9 @@ async function bundleCloudflareSplitAppWorker(
   }
   const oneAppChunk = oneAppChunks[0]
   if (oneAppChunk) {
-    // dynamic Rust-sync shims emit one lazy app chunk. one's external asset
+    // Dynamic Orez Lite entrypoints emit one lazy app chunk. One's external asset
     // modules import the entry's helpers back from ../index.js, so retarget
-    // those references to that chunk. the static app shim emits no chunk and
+    // those references to that chunk. A static entrypoint emits no chunk and
     // needs no rewrite.
     const assetsDir = join(workerDir, 'assets')
     if (existsSync(assetsDir)) {
@@ -331,13 +273,12 @@ async function bundleCloudflareSplitAppWorker(
     }
   }
   rmSync(oneAppPath, { force: true })
-  // the shim entry (shimPath) plus the migration + schema-version modules it
+  // The caller-owned entrypoint plus the migration + schema-version modules it
   // statically imports are esbuild INPUTS: esbuild inlined their code into
   // index.js, so the root source files are orphans. leave them and wrangler's
   // general `*-*.js` module rule (they all contain a dash) attaches dead
   // duplicates into every DO isolate — resident weight against the 128 MiB DO
   // budget the code-splitting above exists to protect. rm them like one-app.js.
-  rmSync(shimPath, { force: true })
   rmSync(join(workerDir, 'orez-migrations.js'), { force: true })
   rmSync(join(workerDir, 'orez-schema-version.js'), { force: true })
   // collect the split output: index.js (entry) + chunk-*.js (lazy graphs) ->
@@ -367,16 +308,12 @@ async function bundleCloudflareSplitAppWorker(
   shimWorkerCreateRequire(workerDir)
 }
 
-// bundle the LEAN data-tier worker: the orez data shim (ZeroSqlDO + ZeroCacheDO +
-// embed + migration), NONE of the One app. single-outfile (no splitting needed —
-// this graph is small, ~2.4 MiB, and runs with full DO-isolate headroom). reuses
-// bundleCloudflareDoWorker's orez machinery (overlay + migration module + pg/
-// browser aliases) but skips the one-app copy/split/prune.
-export async function bundleCloudflareDoDataWorker(
-  cfg: CfDeployConfig,
-  options: BundleCloudflareDoWorkerOptions
+/** Bundle a data worker that owns the authoritative SQLite Durable Object. */
+export async function bundleCloudflareLiteDataWorker(
+  cfg: CloudflareConfig,
+  options: BundleCloudflareWorkerOptions
 ) {
-  const { workerDir, shimPath, outfile, writeMigrationModule } = options
+  const { workerDir, entryPoint, outfile, writeMigrationModule } = options
   const nodeModulesPath = realpathSync(
     [
       join(workerDir, 'node_modules'),
@@ -384,23 +321,9 @@ export async function bundleCloudflareDoDataWorker(
       join(process.cwd(), 'node_modules'),
     ].find((candidate) => existsSync(candidate)) || join(process.cwd(), 'node_modules')
   )
-  const zeroOverlay = prepareZeroCacheForCF({
-    nodeModulesPath,
-    outDir: join(workerDir, '.orez/zero-cache-cf'),
-  })
   await writeMigrationModule(workerDir)
-  const aliases = getBrowserAliases(zeroOverlay)
-  for (const key of [
-    'node:stream',
-    'stream',
-    'node:stream/promises',
-    'stream/promises',
-    'readable-stream',
-  ]) {
-    delete aliases[key]
-  }
   await build({
-    entryPoints: [shimPath],
+    entryPoints: [entryPoint],
     outfile,
     bundle: true,
     format: 'esm',
@@ -411,49 +334,20 @@ export async function bundleCloudflareDoDataWorker(
     external: ['cloudflare:*', ...NODE_EXTERNALS],
     define: {
       ...getBrowserDefine(),
+      ...options.define,
       __filename: JSON.stringify('index.js'),
       __dirname: JSON.stringify('/'),
     },
     plugins: [
-      orezCfAliasPlugin(cfg, aliases, workerDir, nodeModulesPath, dirname(outfile)),
-    ],
-    logLevel: 'silent',
-  })
-}
-
-/** bundle a data worker that owns the SQL DO without the PG translator or zero-cache. */
-export async function bundleCloudflareNativeDataWorker(
-  cfg: CfDeployConfig,
-  options: BundleCloudflareDoWorkerOptions
-) {
-  const { workerDir, shimPath, outfile, writeMigrationModule } = options
-  const nodeModulesPath = realpathSync(
-    [
-      join(workerDir, 'node_modules'),
-      join(workerDir, '..', '..', 'node_modules'),
-      join(process.cwd(), 'node_modules'),
-    ].find((candidate) => existsSync(candidate)) || join(process.cwd(), 'node_modules')
-  )
-  await writeMigrationModule(workerDir)
-  await build({
-    entryPoints: [shimPath],
-    outfile,
-    bundle: true,
-    format: 'esm',
-    platform: 'neutral',
-    target: 'es2022',
-    conditions: ['workerd', 'worker', 'import'],
-    mainFields: ['browser', 'module', 'main'],
-    external: ['cloudflare:*', ...NODE_EXTERNALS],
-    define: {
-      ...getBrowserDefine(),
-      __filename: JSON.stringify('index.js'),
-      __dirname: JSON.stringify('/'),
-    },
-    plugins: [
-      orezCfAliasPlugin(cfg, {}, workerDir, nodeModulesPath, dirname(outfile), {
-        nativeApplicationSql: true,
-      }),
+      orezCfAliasPlugin(
+        cfg,
+        {
+          'orez:cloudflare-migrations': join(workerDir, 'orez-migrations.js'),
+        },
+        workerDir,
+        nodeModulesPath,
+        dirname(outfile)
+      ),
     ],
     logLevel: 'silent',
   })

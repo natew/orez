@@ -7,11 +7,9 @@
  * value is never trusted) and must validate its shape before routing — an
  * unvalidated namespace would let a client mint unbounded DO instances.
  *
- * the deployed worker entry classes are bundled strings in the consumer's
- * deploy integration (awkward to unit-test), so the routing decision and the
- * security-relevant shape validation live here as pure functions, tested in
- * cf-do-shim.test.ts. consumers import these into their worker shims instead of
- * copy-pasting the validation regex at every routing site.
+ * The routing decision and security-relevant shape validation live here as
+ * pure functions so caller-owned worker entrypoints do not copy the validation
+ * regex at every routing site.
  */
 
 /** default namespace scope prefixes (`proj-<id>`, `test-<id>`). */

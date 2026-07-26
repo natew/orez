@@ -51,7 +51,6 @@ export const docsSections: DocsSection[] = [
   {
     title: 'Reference',
     pages: [
-      { title: 'pg-to-sqlite', route: '/docs/reference/pg-to-sqlite' },
       { title: 'Packages', route: '/docs/reference/packages' },
       { title: 'Troubleshooting', route: '/docs/reference/troubleshooting' },
     ],

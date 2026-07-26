@@ -71,30 +71,6 @@ export function quoteSqlIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`
 }
 
-export function isCloudflarePgImporter(importer: string, workerDir: string): boolean {
-  const normalized = normalizeTmpSymlinkPath(importer.replaceAll('\\', '/'))
-  const normalizedWorkerDir = normalizeTmpSymlinkPath(workerDir.replaceAll('\\', '/'))
-  return (
-    normalized.startsWith(normalizedWorkerDir) ||
-    normalized.includes('/node_modules/on-zero/') ||
-    normalized.includes('/node_modules/@take-out/database/') ||
-    // drizzle's node-postgres driver imports 'pg' directly; in the data-worker
-    // push bundle real pg is fatal (its module init requires util/types and
-    // later net/tls, none of which exist in a DO worker)
-    normalized.includes('/node_modules/drizzle-orm/') ||
-    normalized.includes('/node_modules/@rocicorp/zero/out/zero-server/')
-  )
-}
-
-// macOS symlinks /tmp and /var into /private; esbuild reports realpathed
-// importers while callers hold the symlinked form, so importer-prefix checks
-// must compare on one side of the link.
-export function normalizeTmpSymlinkPath(path: string): string {
-  return path.startsWith('/private/tmp/') || path.startsWith('/private/var/')
-    ? path.slice('/private'.length)
-    : path
-}
-
 export const NODE_EXTERNALS = [
   'node:*',
   'async_hooks',

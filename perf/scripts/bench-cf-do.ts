@@ -4,8 +4,8 @@
  *
  * Drives the orez Cloudflare DO SQL backend (the `ZeroDO` worker in
  * src/cf-do/worker.ts) over its HTTP endpoints — /exec, /batch, /changes — the
- * exact surface DoBackend hammers during chat e2e boot. Measures throughput +
- * latency distribution per scenario and asserts conformance (roundtrip, batch
+ * development SQL surface. Measures throughput + latency distribution per
+ * scenario and asserts conformance (roundtrip, batch
  * atomicity, change capture, monotonic watermark). Use it to baseline the DO
  * SQL path and to verify that an optimization actually helped without breaking
  * correctness.

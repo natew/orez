@@ -1,8 +1,7 @@
 /**
  * durable transaction journal for the DO SQL backend.
  *
- * the Durable Object refuses raw SQL BEGIN/COMMIT, so DoBackend emulates pg
- * transactions by applying writes eagerly. Parsed DML is rolled back from the
+ * Durable Object RPC transactions apply writes eagerly. Parsed DML is rolled back from the
  * CDC row before-images captured by the same SQLite statement; unknown writes
  * fall back to a first-write table snapshot (`_orez_tx_<txID>_*`). Before this
  * journal, the rollback bookkeeping lived only in the client's memory: a DO eviction or
@@ -633,7 +632,7 @@ export function rollbackTxJournal(sql: DurableSqlStorage, txID: string): void {
 /**
  * Point a transaction's journal entry for `table` at a real table snapshot.
  *
- * DoBackend marks a parsed write row-journaled (an empty snapshot) before the
+ * The transaction owner marks a parsed write row-journaled (an empty snapshot) before the
  * DO has said whether it can capture that table. When CDC declines it, because
  * the table has no stable row identity, that empty marker promises a row-level
  * rollback nothing is able to perform. The owner therefore copies the table and

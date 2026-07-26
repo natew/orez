@@ -1,8 +1,8 @@
 # cf-do SQL backend — perf findings
 
 Harness: `perf/scripts/bench-cf-do.ts` — drives the `ZeroDO` worker's
-`/exec`, `/batch`, `/changes` over HTTP (the surface `DoBackend` hammers during
-chat e2e boot) and asserts conformance.
+development `/exec`, `/batch`, and `/changes` HTTP tools and asserts
+conformance.
 
 Run the lean DO worker first (same as chat e2e, CHAT_E2E.md §5):
 
@@ -42,15 +42,9 @@ individual `INSERT INTO reaction ... ON CONFLICT DO NOTHING` `/exec` calls, each
 paying the full hop. The §4 amplification bugs (redundant metadata/probe HTTPs)
 are already fixed — the remaining boot cost is the seed-insert round-trip count.
 
-## next perf lever (NOT done here — flagged risky)
-
-Have `DoBackend` (src/pg-proxy-do-backend.ts) coalesce a run of same-shape inserts
-inside one transaction into a single `/batch` instead of N `/exec`. CHAT*E2E.md §8
-flags this risky (prepared-statement / bind-param tracking). This harness is the
-gate for it: it proves `/batch` is atomic + conformant and measures the win, so a
-DoBackend batching change can be validated for speed \_and* correctness here before
-the full chat e2e run. Not attempted in this pass to keep the hot path stable
-(chat e2e must-pass + shared-machine CPU budget).
+These HTTP routes are not on the production Orez Lite path. Production
+application SQL uses Durable Object RPC, and the Rust host reads the native
+change feed.
 
 ## cleanup done in this pass
 
