@@ -1274,3 +1274,120 @@ describe('kill-mid-tx crash recovery: fresh-namespace bootstrap matrix (DoBacken
     expect(failures, failures.join('\n')).toEqual([])
   }, 120_000)
 })
+
+describe('cdc registration restore', () => {
+  // A cdc trigger is restored by the schema snapshot, but the row in
+  // _orez_cdc_tables describing it is internal and was never restored, so the
+  // two halves reverted on different rules. A rollback could leave a trigger
+  // with no registration; beginSchemaChange skips unregistered tables, so
+  // capture was never suspended and the next DROP/RENAME COLUMN on that table
+  // failed on the surviving trigger forever. Seen in production 2026-07-25.
+  const triggerNames = (storage: SqliteStorage, table: string) => {
+    const stem = `_orez_cdc_${[...new TextEncoder().encode(table)]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('')}`
+    return storage
+      .exec(
+        `SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE '${stem}%'`,
+      )
+      .toArray().length
+  }
+  const registrations = (storage: SqliteStorage, table: string) => {
+    // the registration table does not exist until something registers; a
+    // missing table is honestly zero registrations, not an error.
+    const exists = storage
+      .exec(
+        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '_orez_cdc_tables' LIMIT 1",
+      )
+      .toArray().length
+    if (!exists) return 0
+    return storage
+      .exec(`SELECT physical_table FROM "_orez_cdc_tables" WHERE physical_table = ?`, table)
+      .toArray().length
+  }
+
+  it('brings a registration back when its table is restored', () => {
+    const storage = createSqliteStorage()
+    storage.exec(`CREATE TABLE "tokenUsage" (id TEXT PRIMARY KEY, createdAt INTEGER)`)
+    const cdc = new TransactionalCdc(storage.journal)
+    cdc.ensureTable({ physicalTableName: 'tokenUsage', tableName: 'tokenUsage' })
+    // the fixture must actually start registered, or the rollback below proves
+    // nothing about restoring a registration.
+    expect(triggerNames(storage, 'tokenUsage')).toBe(3)
+    expect(registrations(storage, 'tokenUsage')).toBe(1)
+
+    snapshotTxSchema(storage.journal, 'tx1', 'application', ['tokenUsage'])
+    const suspended = cdc.beginSchemaChange('DROP TABLE `tokenUsage`')
+    storage.exec('DROP TABLE "tokenUsage"')
+    cdc.finishSchemaChange(suspended) // table gone -> deletes the registration
+    expect(registrations(storage, 'tokenUsage')).toBe(0)
+
+    storage.exec('PRAGMA defer_foreign_keys = ON')
+    rollbackTxJournal(storage.journal, 'tx1')
+
+    expect(triggerNames(storage, 'tokenUsage')).toBe(3)
+    expect(registrations(storage, 'tokenUsage')).toBe(1)
+    // assert from a fresh read: the live object's cache is not the thing at risk
+    expect(new TransactionalCdc(storage.journal).active).toBe(true)
+  })
+
+  it('removes a registration created during the transaction', () => {
+    const storage = createSqliteStorage()
+    const cdc = new TransactionalCdc(storage.journal)
+    // unregistered at snapshot time, and the table does not exist yet
+    snapshotTxSchema(storage.journal, 'tx1', 'application', ['tokenUsage'])
+    expect(registrations(storage, 'tokenUsage')).toBe(0)
+
+    storage.exec(`CREATE TABLE "tokenUsage" (id TEXT PRIMARY KEY, createdAt INTEGER)`)
+    cdc.ensureTable({ physicalTableName: 'tokenUsage', tableName: 'tokenUsage' })
+    expect(registrations(storage, 'tokenUsage')).toBe(1)
+
+    storage.exec('PRAGMA defer_foreign_keys = ON')
+    rollbackTxJournal(storage.journal, 'tx1')
+
+    // the rollback drops the table, so its triggers went with it. a surviving
+    // row would claim a captured table that nothing captures.
+    expect(triggerNames(storage, 'tokenUsage')).toBe(0)
+    expect(registrations(storage, 'tokenUsage')).toBe(0)
+  })
+
+  it('keeps a table registered mid-session in lockstep, never row-without-triggers', () => {
+    // the arm that looks redundant, and the one that pins the scope. every exec
+    // and every registerTables is its own committed storage transaction, so an
+    // unrelated table can be registered between the snapshot and the rollback.
+    // the schema snapshot covers ALL of sqlite_master, so the restore drops
+    // that table's mid-session triggers even though this transaction never
+    // touched it. Reverting registration per-affected-table would leave its row
+    // behind with no triggers: capture silently off on a table the system
+    // believes is captured. Both halves must move together.
+    const storage = createSqliteStorage()
+    storage.exec(`CREATE TABLE "tokenUsage" (id TEXT PRIMARY KEY, createdAt INTEGER)`)
+    // `unrelated` must pre-date the snapshot, or the rollback legitimately drops
+    // it as a table created during the transaction and the arm tests nothing.
+    storage.exec(`CREATE TABLE "unrelated" (id TEXT PRIMARY KEY)`)
+    const cdc = new TransactionalCdc(storage.journal)
+    cdc.ensureTable({ physicalTableName: 'tokenUsage', tableName: 'tokenUsage' })
+
+    snapshotTxSchema(storage.journal, 'tx1', 'application', ['tokenUsage'])
+
+    // registered mid-session, after the snapshot, by work this transaction
+    // never touched
+    cdc.ensureTable({ physicalTableName: 'unrelated', tableName: 'unrelated' })
+    expect(registrations(storage, 'unrelated')).toBe(1)
+    expect(triggerNames(storage, 'unrelated')).toBe(3)
+
+    const suspended = cdc.beginSchemaChange('DROP TABLE `tokenUsage`')
+    storage.exec('DROP TABLE "tokenUsage"')
+    cdc.finishSchemaChange(suspended)
+    storage.exec('PRAGMA defer_foreign_keys = ON')
+    rollbackTxJournal(storage.journal, 'tx1')
+
+    // the restore reverted its triggers, so its registration must go too
+    expect(triggerNames(storage, 'unrelated')).toBe(0)
+    expect(registrations(storage, 'unrelated')).toBe(0)
+    // the invariant, stated directly: never a registration without triggers
+    expect(registrations(storage, 'unrelated') === 0).toBe(
+      triggerNames(storage, 'unrelated') === 0
+    )
+  })
+})
