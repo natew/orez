@@ -389,7 +389,6 @@ console.info('\nbuilding...')
 cleanRootDist()
 run('bun run build')
 run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
-preparePgToSqliteDist()
 
 // bump versions in source (skip for --pack-only and --canary)
 if (!packOnly && !canary) {
