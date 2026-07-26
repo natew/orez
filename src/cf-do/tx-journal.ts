@@ -55,10 +55,17 @@ export const TX_SCHEMA_DDL =
   'tbl_name TEXT NOT NULL, ' +
   'sql TEXT)'
 
+/**
+ * The cdc registration table. It stays in INTERNAL_TABLES -- ordinary row-level
+ * undo must not touch it -- and the schema restore carves it out explicitly
+ * instead; see `snapshotCdcRegistration`.
+ */
+const CDC_REGISTRATION_TABLE = '_orez_cdc_tables'
+
 const INTERNAL_TABLES = new Set([
   TX_MANIFEST_TABLE,
   TX_SCHEMA_TABLE,
-  '_orez_cdc_tables',
+  CDC_REGISTRATION_TABLE,
   '_orez_cdc_buffer',
   '_zero_pending_changes',
   '_zero_changes',
@@ -285,6 +292,7 @@ export function snapshotTxSchema(
         object.sql
       )
     }
+    snapshotCdcRegistrations(sql, txID, owner)
   }
 
   for (const table of new Set(affectedTables)) {
@@ -296,6 +304,61 @@ export function snapshotTxSchema(
       )
       .toArray()
     if (tableExists.length > 0) upgradeToTableSnapshot(sql, txID, table, owner)
+  }
+}
+
+/**
+ * Capture every cdc registration alongside the schema snapshot.
+ *
+ * A cdc trigger is restored by the schema snapshot -- it is not an internal
+ * object -- but the row in `_orez_cdc_tables` describing it IS internal and was
+ * never restored. The two halves reverted on different rules, so a rollback
+ * could leave a trigger with no registration. beginSchemaChange skips
+ * unregistered tables, so capture was never suspended and the next
+ * DROP/RENAME COLUMN on that table failed on the surviving trigger, forever
+ * (production, 2026-07-25).
+ *
+ * Scope matches the schema snapshot exactly, and that is the whole point. The
+ * snapshot is taken over ALL of sqlite_master, not over the statement's
+ * affected tables -- only the row-data snapshots are per-table -- so the
+ * restore drops any trigger absent from it, including one installed mid-session
+ * for a table this transaction never touched. Capturing per affected table
+ * instead would leave that table's row behind with its triggers gone: capture
+ * silently off on a table the system believes is captured. Registration
+ * therefore reverts wholesale, exactly as the triggers it describes do.
+ *
+ * Deliberately NOT extended to `_orez_cdc_buffer`, its sibling in
+ * INTERNAL_TABLES. The buffer is drained and cleared by every statement (see
+ * `drain`), so it holds in-flight changes rather than state describing a table;
+ * restoring it would re-emit change records for writes the rollback just undid.
+ */
+function snapshotCdcRegistrations(
+  sql: DurableSqlStorage,
+  txID: string,
+  owner: string
+): void {
+  const registrationTableExists = sql
+    .exec(
+      "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+      CDC_REGISTRATION_TABLE
+    )
+    .toArray()
+  if (registrationTableExists.length === 0) return
+  const rows = sql
+    .exec(
+      `SELECT physical_table, table_name, columns_json, publish, schema_version ` +
+        `FROM ${quoteIdent(CDC_REGISTRATION_TABLE)}`
+    )
+    .toArray()
+  for (const row of rows) {
+    sql.exec(
+      `INSERT INTO "${TX_SCHEMA_TABLE}" (tx_id, owner, type, name, tbl_name, sql) VALUES (?, ?, 'cdc', ?, ?, ?)`,
+      txID,
+      owner,
+      String(row.physical_table ?? ''),
+      String(row.physical_table ?? ''),
+      JSON.stringify(row)
+    )
   }
 }
 
@@ -420,6 +483,41 @@ function restoreSchemaSnapshot(
       if (!after || after.sql !== row.sql || changedOriginalTables.has(row.table)) {
         sql.exec(row.sql!)
       }
+    }
+  }
+
+  // Revert cdc registration in lockstep with the triggers the restore above
+  // just put back or dropped, at the same whole-database scope the schema
+  // snapshot uses. Clearing first is what handles the other direction: a table
+  // registered during the transaction has had its triggers dropped by the
+  // restore, and a row left behind would claim a captured table that nothing
+  // captures. See `snapshotCdcRegistrations`.
+  if (
+    sql
+      .exec(
+        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        CDC_REGISTRATION_TABLE
+      )
+      .toArray().length > 0
+  ) {
+    sql.exec(`DELETE FROM ${quoteIdent(CDC_REGISTRATION_TABLE)}`)
+    for (const row of schema.filter((item) => item.type === 'cdc' && item.sql)) {
+      const registration = JSON.parse(row.sql!) as {
+        columns_json: string
+        physical_table: string
+        publish: number
+        schema_version: number
+        table_name: string
+      }
+      sql.exec(
+        `INSERT INTO ${quoteIdent(CDC_REGISTRATION_TABLE)} ` +
+          '(physical_table, table_name, columns_json, publish, schema_version) VALUES (?, ?, ?, ?, ?)',
+        registration.physical_table,
+        registration.table_name,
+        registration.columns_json,
+        registration.publish,
+        registration.schema_version
+      )
     }
   }
 
