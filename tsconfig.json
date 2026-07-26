@@ -13,7 +13,22 @@
     "verbatimModuleSyntax": true,
     "types": ["node"]
   },
-  "include": ["src"],
+  "include": [
+    "src/lite-index.ts",
+    "src/sync-executor.ts",
+    "src/wake.ts",
+    "src/naming.ts",
+    "src/zero-http/**/*.ts",
+    "src/cf-deploy/**/*.ts",
+    "src/cf-do/**/*.ts",
+    "src/worker/browser-build-config.ts",
+    "src/worker/cf-do-shim.ts",
+    "src/worker/cf-patches.ts",
+    "src/worker/zero-sql-write-circuit.ts",
+    "src/zero-changelog-cleanup-patch.ts",
+    "src/zero-litestream-patch.ts",
+    "src/zero-worker-argv-patch.ts"
+  ],
   "exclude": [
     "src/**/*.test.ts",
     "src/integration/two-zero-cache-do",

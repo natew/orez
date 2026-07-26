@@ -76,26 +76,6 @@ function cleanRootDist() {
   rmSync(resolve(root, 'dist'), { recursive: true, force: true })
 }
 
-function preparePgToSqliteDist() {
-  const packageDir = resolve(root, 'pg-to-sqlite')
-  const dest = resolve(packageDir, 'dist')
-  rmSync(dest, { recursive: true, force: true })
-  mkdirSync(dest, { recursive: true })
-  cpSync(resolve(root, 'dist', 'pg-sqlite-compiler'), join(dest, 'pg-sqlite-compiler'), {
-    recursive: true,
-  })
-  rmSync(join(dest, 'pg-sqlite-compiler', 'test'), { recursive: true, force: true })
-  for (const file of [
-    'sqlite-keyword-identifiers.js',
-    'sqlite-keyword-identifiers.js.map',
-    'sqlite-keyword-identifiers.d.ts',
-    'sqlite-keyword-identifiers.d.ts.map',
-  ]) {
-    const src = resolve(root, 'dist', file)
-    if (existsSync(src)) cpSync(src, join(dest, file))
-  }
-}
-
 function bumpVersion(current: string): string {
   if (rePublish) {
     return current
@@ -130,7 +110,6 @@ if (into) {
   cleanRootDist()
   run('bun run build')
   run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
-  preparePgToSqliteDist()
 
   const tmpDir = mkdtempSync(join(tmpdir(), 'orez-release-into-'))
 
@@ -138,13 +117,6 @@ if (into) {
   const pkgDirs: { name: string; dir: string; pkg: any }[] = []
   const rootPkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf-8'))
   pkgDirs.push({ name: rootPkg.name, dir: root, pkg: rootPkg })
-  const compilerDir = resolve(root, 'pg-to-sqlite')
-  const compilerPkgPath = resolve(compilerDir, 'package.json')
-  if (existsSync(compilerPkgPath)) {
-    const compilerPkg = JSON.parse(readFileSync(compilerPkgPath, 'utf-8'))
-    pkgDirs.push({ name: compilerPkg.name, dir: compilerDir, pkg: compilerPkg })
-  }
-
   const sqlDir = resolve(root, 'sqlite-wasm')
   const sqlPkgPath = resolve(sqlDir, 'package.json')
   if (existsSync(sqlPkgPath)) {
@@ -294,20 +266,6 @@ if (existsSync(sqlitePkgPath) && sqliteDistExists) {
   console.info('skipping bedrock-sqlite (no wasm dist built)')
 }
 
-// pg-to-sqlite — standalone compiler package sourced from src/pg-sqlite-compiler.
-const compilerDir = resolve(root, 'pg-to-sqlite')
-const compilerPkgPath = resolve(compilerDir, 'package.json')
-if (existsSync(compilerPkgPath)) {
-  const compilerPkg = JSON.parse(readFileSync(compilerPkgPath, 'utf-8'))
-  packages.push({
-    dir: compilerDir,
-    originalVersion: compilerPkg.version,
-    pkgPath: compilerPkgPath,
-    pkg: compilerPkg,
-    next: orezNext,
-  })
-}
-
 // orez-sync-cf-host — built CF DO host and standalone query runtime plus
 // generated wasm. skip if wasm isn't built — the release build step builds it.
 const cfHostDir = resolve(root, 'packages', 'sync-cf-host')
@@ -432,7 +390,6 @@ console.info('\nbuilding...')
 cleanRootDist()
 run('bun run build')
 run('bun run build:dist', { cwd: resolve(root, 'packages', 'sync-cf-host') })
-preparePgToSqliteDist()
 
 // bump versions in source (skip for --pack-only and --canary)
 if (!packOnly && !canary) {

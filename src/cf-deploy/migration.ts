@@ -11,11 +11,6 @@ function applyPrefix(template: string, cfg: CfDeployConfig): string {
     .join(cfg.prefix)
 }
 
-export interface CloudflareMigrationModuleFile {
-  id: string
-  importSpecifier: string
-}
-
 export type CloudflareNativeTableShape = {
   columns: Array<{
     name: string
@@ -40,16 +35,6 @@ export type CloudflareMigrationModuleSourceParts =
       publicTables?: Array<{ table: string; publicTable: string }>
       expectedTables?: CloudflareNativeTableShape[]
     }
-  | {
-      mode: 'full'
-      schemaVersion: string
-      schemaImportSpecifier: string
-      migrationFiles: CloudflareMigrationModuleFile[]
-      initSql: string
-      initSqlBatchStatements: unknown
-      zeroHttpShardSql: string
-      zeroHttpShardBatchStatements: unknown
-    }
 
 export function buildMigrationModuleSource(
   cfg: CfDeployConfig,
@@ -57,7 +42,6 @@ export function buildMigrationModuleSource(
 ): string {
   const runCloudflareMigrations = applyPrefix('runNspfxCloudflareMigrations', cfg)
   const migrationTableName = applyPrefix('__nspfx_cf_migrations', cfg)
-  const sqlFetchGlobal = applyPrefix('__nspfx_cf_do_sql_fetch_by_instance', cfg)
 
   if (parts.mode === 'noop') {
     return `export const SCHEMA_VERSION = ${JSON.stringify(parts.schemaVersion)}\nexport async function ${runCloudflareMigrations}() {}\n`
@@ -679,228 +663,5 @@ export async function ${runCloudflareMigrations}({
 `
   }
 
-  const imports = [
-    `import { Pool } from 'pg'`,
-    `import { schema } from ${JSON.stringify(parts.schemaImportSpecifier)}`,
-    ...parts.migrationFiles.map(
-      (file, index) =>
-        `import * as migration${index} from ${JSON.stringify(file.importSpecifier)}`
-    ),
-  ]
-  const migrations = parts.migrationFiles
-    .map((file, index) => {
-      return `{ id: ${JSON.stringify(file.id)}, up: migration${index}.up }`
-    })
-    .join(',\n  ')
-
-  return `${imports.join('\n')}
-
-export const SCHEMA_VERSION = ${JSON.stringify(parts.schemaVersion)}
-
-const migrations = [
-  ${migrations}
-].filter((migration) => typeof migration.up === 'function')
-
-const migrationTable = '${migrationTableName}'
-
-// regenerated-from-schema DDL (CREATE TABLE IF NOT EXISTS ...). always current
-// vs the drizzle migrations dir, which the in-browser codegen never rewrites.
-const initSql = ${JSON.stringify(parts.initSql)}
-// the same DDL pre-translated at deploy time by orez's statement rewriter
-// (deployTimeSchemaBatchStatements): SQLite-native DDL + the _orez_pg_metadata
-// upserts that give the data tier its pg column types. /batch-applied with NO
-// runtime libpg parse.
-const initSqlBatchStatements = ${JSON.stringify(parts.initSqlBatchStatements)}
-// zero-http uses the zero shard for clientGroupID ownership and mutation
-// results. this repairs old persistent CF namespaces and creates the same
-// shape for fresh namespaces before the first push.
-const zeroHttpShardSql = ${JSON.stringify(parts.zeroHttpShardSql)}
-const zeroHttpShardBatchStatements = ${JSON.stringify(parts.zeroHttpShardBatchStatements)}
-
-function quoteIdentifier(value) {
-  return '"' + String(value).replaceAll('"', '""') + '"'
-}
-
-// apply the full schema as ONE /batch of SQLite-native DDL straight to the SQL
-// DO (ctx.storage.sql.exec, no parse, single transaction). this replaces ~118
-// per-statement /exec calls, each of which paid the DoBackend client's
-// libpg-query WASM parse (~1.4s) — the cold-migration loop that hit 36s + OOM.
-// the DDL is IF-NOT-EXISTS so re-runs are no-ops. falls back to the node pg path
-// off-CF (no per-instance DO fetch registry).
-async function applyInitSqlDDL(client, instance) {
-  const schemaMetadataStatements = Object.values(schema.tables || {})
-    .filter((table) => table && typeof table.name === 'string')
-    .map((table) => ({
-      sql: 'INSERT OR REPLACE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
-      params: [
-        table.name,
-        JSON.stringify({ columns: table.columns, primaryKey: table.primaryKey }),
-      ],
-    }))
-  const batchStatements = [
-    ...initSqlBatchStatements,
-    ...zeroHttpShardBatchStatements,
-    {
-      sql: 'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)',
-    },
-    ...schemaMetadataStatements,
-  ]
-  const fetch = (globalThis.${sqlFetchGlobal} || {})[
-    instance || 'singleton'
-  ]
-  if (typeof fetch === 'function') {
-    if (batchStatements.length === 0) return
-    const res = await fetch('https://orez-do-backend.local/batch', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ statements: batchStatements }),
-    })
-    if (!res.ok) {
-      throw new Error('schema /batch failed: ' + res.status + ' ' + (await res.text()))
-    }
-    return
-  }
-  for (const sql of [initSql, zeroHttpShardSql]) {
-    for (const statement of sql
-      .split('--> statement-breakpoint')
-      .map((statement) => statement.trim())
-      .filter((statement) => statement.length > 0)) {
-      await client.query(statement)
-    }
-  }
-}
-
-function tableNamesFromSchema() {
-  return Object.values(schema.tables || {})
-    .map((table) => table && table.name)
-    .filter((name) => typeof name === 'string' && name.length > 0)
-}
-
-async function ensurePublication(client, publications) {
-  const publicationName = publications[0]
-  const schemaTables = tableNamesFromSchema()
-  if (!publicationName || schemaTables.length === 0) return []
-
-  // only publish tables that actually exist. a zero-schema table with no DDL
-  // must not abort the whole publication (CREATE/ALTER PUBLICATION throws on a
-  // missing relation), which would take every other table offline too. with
-  // applyInitSqlDDL run first this is normally a no-op, but it keeps a single
-  // drifted table from breaking all of replication.
-  const existingTablesRes = await client.query(
-    "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
-  )
-  const existingTables = new Set(existingTablesRes.rows.map((row) => row.tablename))
-  const tableNames = schemaTables.filter((table) => existingTables.has(table))
-  if (tableNames.length === 0) return []
-
-  const existing = await client.query(
-    'SELECT 1 FROM pg_publication WHERE pubname = $1',
-    [publicationName],
-  )
-  if (!existing.rows.length) {
-    await client.query(
-      'CREATE PUBLICATION ' +
-        quoteIdentifier(publicationName) +
-        ' FOR TABLE ' +
-        tableNames.map(quoteIdentifier).join(', '),
-    )
-    return tableNames
-  }
-
-  const current = await client.query(
-    "SELECT tablename FROM pg_publication_tables WHERE pubname = $1 AND schemaname = 'public'",
-    [publicationName],
-  )
-  const currentTables = new Set(current.rows.map((row) => row.tablename))
-  const missing = tableNames.filter((table) => !currentTables.has(table))
-  if (missing.length) {
-    await client.query(
-      'ALTER PUBLICATION ' +
-        quoteIdentifier(publicationName) +
-        ' ADD TABLE ' +
-        missing.map(quoteIdentifier).join(', '),
-    )
-  }
-  return tableNames
-}
-
-export async function ${runCloudflareMigrations}({
-  publications = [],
-  schemaOnly = false,
-  publicationOnly = false,
-  instance = 'singleton',
-} = {}) {
-  if (schemaOnly && publicationOnly) {
-    throw new Error('schemaOnly and publicationOnly are mutually exclusive')
-  }
-  // the instance rides the connection string so the pg shim's backendFor
-  // resolves THIS namespace's DO fetch (see cloudflarePgVirtualModule).
-  const pool = new Pool({
-    connectionString: 'orez-do://postgres?instance=' + encodeURIComponent(instance),
-  })
-  const client = await pool.connect()
-  const onCloudflareDO =
-    typeof (globalThis.${sqlFetchGlobal} || {})[instance] ===
-    'function'
-  try {
-    // on Cloudflare every client.query() pays a libpg-query WASM parse
-    // (~1.4s/statement) to translate PG->SQLite. so on CF we SKIP the drizzle
-    // migration-tracking table + the no-op migration loop entirely (the
-    // persisted SCHEMA_VERSION guard in ZeroCacheDO.migrateOnly already makes the
-    // whole migration run once per schema) and rely on applyInitSqlDDL's single
-    // pre-translated /batch. off-CF (node), keep the full drizzle tracking path.
-    if (!onCloudflareDO) {
-      await client.query(
-        'CREATE TABLE IF NOT EXISTS ' +
-          quoteIdentifier(migrationTable) +
-          ' (id TEXT PRIMARY KEY, appliedAt BIGINT NOT NULL)',
-      )
-      for (const migration of migrations) {
-        const seen = await client.query(
-          'SELECT 1 FROM ' + quoteIdentifier(migrationTable) + ' WHERE id = $1',
-          [migration.id],
-        )
-        if (seen.rows.length) continue
-        await client.query('BEGIN')
-        try {
-          await migration.up(client)
-          await client.query(
-            'INSERT INTO ' +
-              quoteIdentifier(migrationTable) +
-              ' (id, appliedAt) VALUES ($1, $2)',
-            [migration.id, Date.now()],
-          )
-          await client.query('COMMIT')
-        } catch (err) {
-          try {
-            await client.query('ROLLBACK')
-          } catch {}
-          throw err
-        }
-      }
-    }
-
-    // ZeroCacheDO persists SCHEMA_VERSION and calls the schema path only when
-    // that content hash changes. Embed boots still need to verify publication
-    // membership, but must not replay the pre-translated schema batch: its
-    // _orez_pg_metadata INSERT OR REPLACE statements write every schema row
-    // even when the DDL itself is idempotent. Replaying that batch on every
-    // reconnect produced the 2026-07-10 rows-written spike.
-    if (!publicationOnly) await applyInitSqlDDL(client, instance)
-    // schemaOnly: apply the table DDL but DEFER ensurePublication. on CF the
-    // publication setup makes zero-cache/the pg-proxy register every published
-    // table's schema (~6 queries x ~42 tables = ~260 libpg parses) — that parse
-    // burst is what tips the app/cache-DO isolate over 128 MiB during the gate
-    // (bootstrap/get-session). those writes only need the TABLES to exist, not the
-    // publication; the publication is for /sync replication, so we run it lazily
-    // in ensureReady (the /sync path) where the full embed already runs. off-CF,
-    // node has no parse cost so callers don't pass schemaOnly.
-    if (schemaOnly) return { tables: tableNamesFromSchema(), schemaOnly: true }
-    const tables = await ensurePublication(client, publications)
-    return { tables: tables || [] }
-  } finally {
-    client.release()
-  }
-}
-`
+  throw new TypeError('unsupported Cloudflare migration mode')
 }

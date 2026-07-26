@@ -366,34 +366,6 @@ describe('sync executor', () => {
     ])
   })
 
-  test('postgresql insert uses numbered bindings and skip-if-exists conflict SQL', async () => {
-    const statements: Array<{ sql: string; params: readonly unknown[] }> = []
-    const tx: ApplicationTransaction = {
-      async exec(sql, params = []) {
-        statements.push({ sql, params })
-        return { changes: 0 }
-      },
-      async query() {
-        return []
-      },
-      async queryAst() {
-        throw new Error('unused')
-      },
-    }
-
-    await executeCrud(tx, schema, 'postgresql', 'item', 'insert', {
-      id: 'a',
-      value: 'original',
-    })
-
-    expect(statements).toEqual([
-      {
-        sql: 'INSERT INTO "item" ("id", "value") VALUES ($1, $2) ON CONFLICT ("id") DO NOTHING',
-        params: ['a', 'original'],
-      },
-    ])
-  })
-
   test('accepts cleanup mutation id zero without dispatch or acknowledgement', async () => {
     const { database, sqlite } = sqliteDatabase()
     sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
