@@ -611,6 +611,7 @@ describe('cf shim builders', () => {
     const statements: Array<{ sql: string; params?: unknown[] }> = []
     const appliedMigrations = new Set<string>()
     const registrations: Array<{ table: string; publicTable: string }[]> = []
+    const migrationEvents: string[] = []
     let itemLabelType = 'TEXT'
     let itemCountHasNull = false
     let itemCompositeIndex = true
@@ -643,6 +644,7 @@ describe('cf shim builders', () => {
           await work({
             async exec(sql, params) {
               statements.push({ sql, params })
+              migrationEvents.push(sql)
               if (sql.startsWith('INSERT INTO "__contrast_cf_migrations"')) {
                 appliedMigrations.add(String(params?.[0]))
               }
@@ -712,6 +714,7 @@ describe('cf shim builders', () => {
             },
             async registerTables(tables) {
               registrations.push(tables)
+              migrationEvents.push('registerTables')
             },
           })
         },
@@ -737,6 +740,13 @@ describe('cf shim builders', () => {
         schemaOnly: true,
         instance: 'preexisting',
       })
+      const publicTables = [{ table: 'item', publicTable: 'public.item' }]
+      expect(registrations).toEqual([publicTables, publicTables])
+      expect(migrationEvents.indexOf('registerTables')).toBeLessThan(
+        migrationEvents.indexOf(
+          'CREATE TABLE IF NOT EXISTS item (id TEXT NOT NULL, label TEXT NOT NULL, count INTEGER NOT NULL)'
+        )
+      )
       await module.runContrastCloudflareMigrations({
         schemaOnly: true,
         instance: 'preexisting',
@@ -785,10 +795,6 @@ describe('cf shim builders', () => {
     expect(statements.map((statement) => statement.sql)).toContain(
       'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)'
     )
-    expect(registrations).toEqual([
-      [{ table: 'item', publicTable: 'public.item' }],
-      [{ table: 'item', publicTable: 'public.item' }],
-    ])
     expect(migrationSource).not.toContain("from 'pg'")
     expect(migrationSource).not.toContain('__contrast_cf_do_sql_fetch_by_instance')
   })
