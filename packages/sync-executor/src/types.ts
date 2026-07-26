@@ -78,7 +78,8 @@ export interface ApplicationTransaction {
 }
 
 export interface ApplicationDatabase {
-  readonly dialect: 'sqlite'
+  readonly dialect: 'sqlite' | 'postgresql'
+  readonly internalSchema?: string
 
   transaction<Value>(
     work: (tx: ApplicationTransaction) => Value | Promise<Value>

@@ -1,15 +1,31 @@
 {
   "name": "orez",
   "version": "0.9.6",
-  "description": "SQLite-first application database and Zero sync runtime.",
+  "description": "PGlite-powered zero-sync development backend. No Docker required.",
   "type": "module",
   "license": "MIT",
-  "main": "dist/lite-index.js",
-  "types": "dist/lite-index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/lite-index.d.ts",
-      "import": "./dist/lite-index.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./s3": {
+      "types": "./dist/s3-local.d.ts",
+      "import": "./dist/s3-local.js"
+    },
+    "./vite": {
+      "types": "./dist/vite-plugin.d.ts",
+      "import": "./dist/vite-plugin.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    },
+    "./change-tracking": {
+      "types": "./dist/change-tracking.d.ts",
+      "import": "./dist/change-tracking.js"
     },
     "./sync-executor": {
       "types": "./dist/sync-executor.d.ts",
@@ -72,12 +88,15 @@
       "import": "./dist/cf-do/worker.js"
     }
   },
+  "bin": {
+    "orez": "dist/cli-entry.js"
+  },
   "files": [
     "dist"
   ],
   "scripts": {
     "prepare": "bun run --cwd packages/sync-executor build",
-    "build": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && tsc && bun run build:sync-browser-host && bun run --cwd packages/drizzle-zero-sqlite build && bun run --cwd packages/on-zero build",
+    "build": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && tsc && bun run build:sync-browser-host && bun run --cwd packages/drizzle-zero-sqlite build && bun run --cwd packages/on-zero build && chmod +x dist/cli-entry.js",
     "build:sync-browser-host": "bun run --cwd packages/sync-browser-host build:dist",
     "dev": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && tsc --watch",
     "test": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && vitest run --exclude 'src/integration/' --exclude 'src/wasm-sqlite.test.ts' && bun run test:sync-executor && bun run --cwd packages/drizzle-zero-sqlite test",
@@ -126,20 +145,30 @@
     "perf:ci": "bun run perf:bench -- --output=perf/reports/bench.json && bun run perf:overhead && bun run perf:correctness"
   },
   "dependencies": {
+    "@electric-sql/pglite": "0.4.1",
+    "@electric-sql/pglite-tools": "^0.3.1",
     "@noble/ciphers": "1.3.0",
     "@noble/curves": "1.9.7",
     "@noble/hashes": "1.8.0",
+    "@pgsql/traverse": "17.2.6",
     "bedrock-sqlite": "workspace:*",
     "citty": "^0.2.0",
     "esbuild": "^0.25.0",
     "orez-sync-cf-host": "workspace:*",
-    "orez-sync-executor": "workspace:*"
+    "orez-sync-executor": "workspace:*",
+    "pg-gateway": "0.3.0-beta.4",
+    "pgsql-parser": "^17.9.11",
+    "postgres": "^3.4.5"
   },
   "peerDependencies": {
     "@rocicorp/zero": ">=1.7.0",
+    "embedded-postgres": ">=16.0.0-beta.1",
     "vite": ">=5"
   },
   "peerDependenciesMeta": {
+    "embedded-postgres": {
+      "optional": true
+    },
     "vite": {
       "optional": true
     }
@@ -152,8 +181,10 @@
     "@rocicorp/zero-sqlite3": "1.1.2",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
+    "embedded-postgres": "17.10.0-beta.17",
     "oxfmt": "latest",
     "oxlint": "latest",
+    "pg": "8.22.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0",
     "wrangler": "^4.75.0",
@@ -164,6 +195,7 @@
     "url": "git+https://github.com/natew/orez.git"
   },
   "workspaces": [
+    "pg-to-sqlite",
     "sqlite-wasm",
     "packages/drizzle-zero-sqlite",
     "packages/on-zero",
@@ -178,7 +210,8 @@
   ],
   "keywords": [
     "zero",
-    "sqlite",
+    "pglite",
+    "postgres",
     "replication",
     "sync",
     "zero-cache",

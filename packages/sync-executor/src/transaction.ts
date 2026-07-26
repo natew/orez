@@ -14,16 +14,21 @@ import type { HumanReadable, Query, Schema } from '@rocicorp/zero'
 export function createServerTransaction<S extends Schema>(
   schema: S,
   applicationTx: ApplicationTransaction,
+  dialect: 'sqlite' | 'postgresql',
   clientID = '',
   mutationID = 0
 ): ServerTransaction<S> {
   const mutate: Record<string, Record<string, (value: unknown) => Promise<void>>> = {}
   for (const tableName of Object.keys(schema.tables)) {
     mutate[tableName] = {
-      insert: (value) => executeCrud(applicationTx, schema, tableName, 'insert', value),
-      upsert: (value) => executeCrud(applicationTx, schema, tableName, 'upsert', value),
-      update: (value) => executeCrud(applicationTx, schema, tableName, 'update', value),
-      delete: (value) => executeCrud(applicationTx, schema, tableName, 'delete', value),
+      insert: (value) =>
+        executeCrud(applicationTx, schema, dialect, tableName, 'insert', value),
+      upsert: (value) =>
+        executeCrud(applicationTx, schema, dialect, tableName, 'upsert', value),
+      update: (value) =>
+        executeCrud(applicationTx, schema, dialect, tableName, 'update', value),
+      delete: (value) =>
+        executeCrud(applicationTx, schema, dialect, tableName, 'delete', value),
     }
   }
 

@@ -25,81 +25,6 @@ function applyPrefix(template: string, cfg: CfDeployConfig): string {
     .join(cfg.prefix)
 }
 
-function applySQLiteOnlyDataTransport(source: string): string {
-  let next = source
-    .replace("import { Pool as NspfxCloudflarePgPool } from 'pg'\n", '')
-    .replace("import { DoBackend } from 'nspfx-do-backend'\n", '')
-    .replace(/let doBackendClassPromise\nfunction getDoBackend\(\) \{[\s\S]*?\n\}\n/, '')
-    .replace(
-      /  globalThis\.__nspfx_cf_do_create_pg_pool = \(connectionString = ''\) =>\n    new NspfxCloudflarePgPool\(\{ connectionString \}\)\n/,
-      ''
-    )
-  const routeStart = next.indexOf("    if (url.pathname === '/__nspfx_pg') {")
-  const routeEnd = next.indexOf('    return super.fetch(request)', routeStart)
-  if (routeStart >= 0 && routeEnd >= 0) {
-    next = next.slice(0, routeStart) + next.slice(routeEnd)
-  }
-  next = next
-    .replaceAll('/__nspfx_pg', '/exec')
-    .replaceAll(
-      "JSON.stringify({ text: 'SELECT id FROM project', values: [] })",
-      "JSON.stringify({ sql: 'SELECT id FROM project', params: [] })"
-    )
-    .replaceAll(
-      "JSON.stringify({ text: 'SELECT 1', values: [] })",
-      "JSON.stringify({ sql: 'SELECT 1', params: [] })"
-    )
-  const legacyRouteStart = next.indexOf("    if (url.pathname === '/__nspfx_query') {")
-  const legacyRouteEnd = next.indexOf('    // schema-warmup', legacyRouteStart)
-  if (legacyRouteStart >= 0 && legacyRouteEnd >= 0) {
-    next =
-      next.slice(0, legacyRouteStart) +
-      "    if (url.pathname === '/__nspfx_query') {\n" +
-      "      return new Response('legacy SQL transport retired', { status: 410 })\n" +
-      '    }\n' +
-      next.slice(legacyRouteEnd)
-  }
-  return next
-}
-
-function applySQLiteOnlyAppTransport(source: string): string {
-  let next = source
-    .replace(
-      "import { ZeroDO as OrezZeroSqlDO } from 'orez/cf-do'\n",
-      "import { ZeroDO as OrezZeroSqlDO, createApplicationSqlClient } from 'orez/cf-do'\n"
-    )
-    .replace(
-      "import { isValidNamespace } from 'orez/worker/cf-do-shim'\n",
-      "import { createApplicationSqlClient } from 'orez/cf-do'\nimport { isValidNamespace } from 'orez/worker/cf-do-shim'\n"
-    )
-  next = next
-    .replace(
-      "  globalThis.__nspfx_cf_do_namespace = env.ZERO_APP_ID || 'zero'\n" +
-        '  globalThis.__nspfx_cf_do_create_pg_pool = () => makeRemotePgPool(env)\n',
-      "  globalThis.__nspfx_cf_do_namespace = env.ZERO_APP_ID || 'zero'\n" +
-        "  globalThis.__nspfx_cf_application_sql_client = (namespace = 'singleton') =>\n" +
-        '    createApplicationSqlClient(env.ZERO_SQL_DO, namespace)\n'
-    )
-    .replace(/  \/\/ per-project pool:[\s\S]*?\n  if \(env\.FILES\)/, '  if (env.FILES)')
-  const poolStart = next.indexOf('function makeRemotePgPool(')
-  const poolEnd = next.indexOf(
-    '// poke the data tier to run the schema migration',
-    poolStart
-  )
-  if (poolStart >= 0 && poolEnd >= 0) {
-    next = next.slice(0, poolStart) + next.slice(poolEnd)
-  }
-  if (!next.includes('__nspfx_cf_application_sql_client')) {
-    next = next.replace(
-      "  globalThis.__nspfx_cf_do_namespace = env.ZERO_APP_ID || 'zero'\n",
-      "  globalThis.__nspfx_cf_do_namespace = env.ZERO_APP_ID || 'zero'\n" +
-        "  globalThis.__nspfx_cf_application_sql_client = (namespace = 'singleton') =>\n" +
-        '    createApplicationSqlClient(env.ZERO_SQL_DO, namespace)\n'
-    )
-  }
-  return next
-}
-
 // Schema DDL and its _orez_pg_metadata rows are content-hash gated, while
 // publication membership is checked on every embed generation. Keep those as
 // separate phases: the generated schema batch contains unconditional metadata
@@ -648,15 +573,13 @@ export function buildDataShimSource(cfg: CfDeployConfig): string {
     )
     .join('')
   const source = applyPrefix(
-    applySQLiteOnlyDataTransport(
-      applyRequestScopedDoBackend(
-        persistEmbedBootRequest(
-          addDeployTerminalWarmProbe(
-            persistBootFailureBeforeRetry(
-              applyMigrationLifecycle(
-                allowLargeReplicaResync(
-                  passEmbedInstanceId(serializeShimPgBatches(DATA_SHIM_TEMPLATE))
-                )
+    applyRequestScopedDoBackend(
+      persistEmbedBootRequest(
+        addDeployTerminalWarmProbe(
+          persistBootFailureBeforeRetry(
+            applyMigrationLifecycle(
+              allowLargeReplicaResync(
+                passEmbedInstanceId(serializeShimPgBatches(DATA_SHIM_TEMPLATE))
               )
             )
           )
@@ -671,18 +594,14 @@ export function buildDataShimSource(cfg: CfDeployConfig): string {
 /** single-worker user-app entry: both DO classes + the One app in one worker. */
 export function buildUserShimSource(cfg: CfDeployConfig): string {
   return applyPrefix(
-    applySQLiteOnlyAppTransport(
-      applySQLiteOnlyDataTransport(
-        applySqlSchemaGateContract(
-          applyRequestScopedDoBackend(
-            persistEmbedBootRequest(
-              addDeployTerminalWarmProbe(
-                persistBootFailureBeforeRetry(
-                  applyMigrationLifecycle(
-                    allowLargeReplicaResync(
-                      passEmbedInstanceId(serializeShimPgBatches(USER_SHIM_TEMPLATE))
-                    )
-                  )
+    applySqlSchemaGateContract(
+      applyRequestScopedDoBackend(
+        persistEmbedBootRequest(
+          addDeployTerminalWarmProbe(
+            persistBootFailureBeforeRetry(
+              applyMigrationLifecycle(
+                allowLargeReplicaResync(
+                  passEmbedInstanceId(serializeShimPgBatches(USER_SHIM_TEMPLATE))
                 )
               )
             )
@@ -696,10 +615,7 @@ export function buildUserShimSource(cfg: CfDeployConfig): string {
 
 /** app-tier worker entry (control-plane split deploy): namespace router over the data binding. */
 export function buildAppShimSource(cfg: CfDeployConfig): string {
-  return applyPrefix(
-    applySQLiteOnlyAppTransport(applySqlSchemaGateContract(APP_SHIM_TEMPLATE)),
-    cfg
-  )
+  return applyPrefix(applySqlSchemaGateContract(APP_SHIM_TEMPLATE), cfg)
 }
 
 export type RustSyncUserShimOptions = {

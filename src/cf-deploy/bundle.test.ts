@@ -29,14 +29,12 @@ describe('bundleCloudflareRustSyncAppWorker', () => {
     workerDirs.push(workerDir)
     const orezDir = join(workerDir, 'node_modules', 'orez')
     mkdirSync(join(orezDir, 'dist', 'worker'), { recursive: true })
-    mkdirSync(join(orezDir, 'dist', 'cf-do'), { recursive: true })
     writeFileSync(
       join(orezDir, 'package.json'),
       JSON.stringify({
         name: 'orez',
         type: 'module',
         exports: {
-          './cf-do': './dist/cf-do/worker.js',
           './worker/cf-do-shim': './dist/worker/cf-do-shim.js',
         },
       })
@@ -44,10 +42,6 @@ describe('bundleCloudflareRustSyncAppWorker', () => {
     writeFileSync(
       join(orezDir, 'dist', 'worker', 'cf-do-shim.js'),
       'export function isValidNamespace() { return true }\n'
-    )
-    writeFileSync(
-      join(orezDir, 'dist', 'cf-do', 'worker.js'),
-      'export function createApplicationSqlClient() { return {} }\n'
     )
     writeFileSync(
       join(workerDir, 'index.js'),

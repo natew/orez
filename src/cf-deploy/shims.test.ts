@@ -106,13 +106,18 @@ describe('cf shim builders', () => {
     )
   })
 
-  it('removes the retired PostgreSQL transport from SQLite workers', () => {
+  it('serializes each pg batch as one DoBackend operation', () => {
     for (const build of [buildDataShimSource, buildUserShimSource]) {
       const src = build(cfDeployConfig('contrast'))
-      expect(src).not.toContain("from 'pg'")
-      expect(src).not.toContain("from 'contrast-do-backend'")
-      expect(src).not.toContain("'/__contrast_pg'")
-      expect(src).not.toContain('__contrast_cf_do_create_pg_pool')
+      expect(src).toContain('await this.contrastPgBackend.queryBatch(')
+      expect(src).toContain('sql: stmt.text')
+      expect(src).toContain('params: stmt.values || []')
+      expect(src).not.toContain(
+        'await this.contrastPgBackend.query(stmt.text, stmt.values || [])'
+      )
+      expect(src).not.toContain("await this.contrastPgBackend.query('ROLLBACK', [])")
+      expect(src).toContain("'batch failed: '")
+      expect(src).not.toContain("'batch failed at statement '")
     }
   })
 
@@ -171,13 +176,12 @@ describe('cf shim builders', () => {
     }
   })
 
-  it('binds application SQL directly to the SQLite Durable Object', () => {
-    for (const build of [buildUserShimSource, buildAppShimSource]) {
+  it('loads the Orez backend inside a request instead of worker module startup', () => {
+    for (const build of [buildDataShimSource, buildUserShimSource]) {
       const src = build(cfDeployConfig('contrast'))
-      expect(src).toContain('createApplicationSqlClient')
-      expect(src).toContain('__contrast_cf_application_sql_client')
-      expect(src).not.toContain('makeRemotePgPool')
-      expect(src).not.toContain('__contrast_cf_do_create_pg_pool')
+      expect(src).toContain("import('contrast-do-backend')")
+      expect(src).toContain('new (await getDoBackend())(')
+      expect(src).not.toContain("import { DoBackend } from 'contrast-do-backend'")
     }
   })
 
@@ -275,6 +279,27 @@ describe('cf shim builders', () => {
       )
       expect(migrateWithPublication).toContain('return migrationResult')
     }
+
+    const migrationSource = buildMigrationModuleSource(cfDeployConfig('contrast'), {
+      mode: 'full',
+      schemaVersion: 'schema-v1',
+      schemaImportSpecifier: './schema.js',
+      migrationFiles: [],
+      initSql: '',
+      initSqlBatchStatements: [],
+      zeroHttpShardSql: '',
+      zeroHttpShardBatchStatements: [],
+    })
+    expect(migrationSource).toContain('publicationOnly = false')
+    expect(migrationSource).toContain(
+      'CREATE TABLE IF NOT EXISTS _zero_schema_tables (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)'
+    )
+    expect(migrationSource).toContain(
+      'INSERT OR REPLACE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)'
+    )
+    expect(migrationSource).toContain(
+      'if (!publicationOnly) await applyInitSqlDDL(client, instance)'
+    )
   })
 
   it('waits on an active deploy boot before reporting its terminal failure', async () => {
@@ -474,6 +499,78 @@ describe('cf shim builders', () => {
     expect(deleted).toContain('__contrast_boot_failure_reason')
     expect(deleted).toContain('__contrast_boot_failures_version')
     expect(deleted).toContain('__contrast_boot_backoff_until')
+  })
+
+  it('registers deployed tables for a preexisting-row snapshot', async () => {
+    const migrationSource = buildMigrationModuleSource(cfDeployConfig('contrast'), {
+      mode: 'full',
+      schemaVersion: 'schema-v1',
+      schemaImportSpecifier: './schema.js',
+      migrationFiles: [],
+      initSql: '',
+      initSqlBatchStatements: [],
+      zeroHttpShardSql: '',
+      zeroHttpShardBatchStatements: [],
+    })
+    let statements: Array<{ sql: string; params?: unknown[] }> = []
+    const instance = 'preexisting'
+    const globals = globalThis as typeof globalThis & {
+      __contrast_cf_do_sql_fetch_by_instance?: Record<string, typeof fetch>
+      __contrast_test_migration_pool?: unknown
+      __contrast_test_migration_schema?: unknown
+    }
+    globals.__contrast_cf_do_sql_fetch_by_instance = {
+      [instance]: (async (_input: string | URL | Request, init?: RequestInit) => {
+        statements = JSON.parse(String(init?.body)).statements
+        return Response.json({ ok: true })
+      }) as unknown as typeof fetch,
+    }
+    const Pool = class {
+      async connect() {
+        return { release() {} }
+      }
+    }
+    const schema = {
+      tables: {
+        item: {
+          name: 'item',
+          columns: { id: { type: 'string' }, label: { type: 'string' } },
+          primaryKey: ['id'],
+        },
+      },
+    }
+    const moduleDirectory = await mkdtemp(join(tmpdir(), 'contrast-cf-migration-test-'))
+    try {
+      globals.__contrast_test_migration_pool = Pool
+      globals.__contrast_test_migration_schema = schema
+      const executable = migrationSource
+        .replace(
+          "import { Pool } from 'pg'",
+          'const Pool = globalThis.__contrast_test_migration_pool'
+        )
+        .replace(
+          'import { schema } from "./schema.js"',
+          'const schema = globalThis.__contrast_test_migration_schema'
+        )
+        .replaceAll('export const ', 'const ')
+      const modulePath = join(moduleDirectory, 'migration.mjs')
+      await writeFile(modulePath, executable)
+      const module = await import(pathToFileURL(modulePath).href)
+      await module.runContrastCloudflareMigrations({ schemaOnly: true, instance })
+    } finally {
+      delete globals.__contrast_cf_do_sql_fetch_by_instance
+      delete globals.__contrast_test_migration_pool
+      delete globals.__contrast_test_migration_schema
+      await rm(moduleDirectory, { recursive: true, force: true })
+    }
+    const registration = statements.find((statement) =>
+      statement.sql.startsWith('INSERT OR REPLACE INTO _zero_schema_tables')
+    )
+    expect(registration?.params?.[0]).toBe('item')
+    expect(JSON.parse(String(registration?.params?.[1]))).toEqual({
+      columns: schema.tables.item.columns,
+      primaryKey: ['id'],
+    })
   })
 
   it('applies native SQLite schema statements and registers public CDC tables', async () => {

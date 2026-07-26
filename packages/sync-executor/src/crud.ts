@@ -12,10 +12,26 @@ function quoteIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`
 }
 
-function encodeValue(type: string, value: unknown): unknown {
+function quoteTable(value: string, dialect: 'sqlite' | 'postgresql'): string {
+  return dialect === 'postgresql'
+    ? value.split('.').map(quoteIdentifier).join('.')
+    : quoteIdentifier(value)
+}
+
+function placeholder(dialect: 'sqlite' | 'postgresql', index: number): string {
+  return dialect === 'sqlite' ? '?' : `$${index}`
+}
+
+function encodeValue(
+  dialect: 'sqlite' | 'postgresql',
+  type: string,
+  value: unknown
+): unknown {
   if (value === null) return null
-  if (type === 'boolean' && typeof value === 'boolean') return value ? 1 : 0
-  if (type === 'json') return JSON.stringify(value)
+  if (dialect === 'sqlite') {
+    if (type === 'boolean' && typeof value === 'boolean') return value ? 1 : 0
+    if (type === 'json') return JSON.stringify(value)
+  }
   return value
 }
 
@@ -29,6 +45,7 @@ function valueRecord(value: unknown): Record<string, unknown> {
 export async function executeCrud(
   tx: ApplicationTransaction,
   schema: ZeroSchemaConfig,
+  dialect: 'sqlite' | 'postgresql',
   tableName: string,
   kind: CrudKind,
   input: unknown
@@ -54,7 +71,7 @@ export async function executeCrud(
   }
 
   const physicalTable = table.serverName ?? table.name ?? tableName
-  const quotedTable = quoteIdentifier(physicalTable)
+  const quotedTable = quoteTable(physicalTable, dialect)
   const physicalColumn = (column: string) => table.columns[column]?.serverName ?? column
   const metadata: SqlStatementMetadata = {
     table: physicalTable,
@@ -63,12 +80,15 @@ export async function executeCrud(
   }
   const primaryKeys = table.primaryKey.map((column) => physicalColumn(column))
   const whereParams = table.primaryKey.map((column) =>
-    encodeValue(table.columns[column]!.type, value[column])
+    encodeValue(dialect, table.columns[column]!.type, value[column])
   )
 
   if (kind === 'delete') {
     const where = primaryKeys
-      .map((column) => `${quoteIdentifier(column)} = ?`)
+      .map(
+        (column, index) =>
+          `${quoteIdentifier(column)} = ${placeholder(dialect, index + 1)}`
+      )
       .join(' AND ')
     await tx.exec(`DELETE FROM ${quotedTable} WHERE ${where}`, whereParams, metadata)
     return
@@ -78,13 +98,19 @@ export async function executeCrud(
     const mutable = entries.filter(([column]) => !table.primaryKey.includes(column))
     if (mutable.length === 0) return
     const params = mutable.map(([column, field]) =>
-      encodeValue(table.columns[column]!.type, field)
+      encodeValue(dialect, table.columns[column]!.type, field)
     )
     const set = mutable
-      .map(([column]) => `${quoteIdentifier(physicalColumn(column))} = ?`)
+      .map(
+        ([column], index) =>
+          `${quoteIdentifier(physicalColumn(column))} = ${placeholder(dialect, index + 1)}`
+      )
       .join(', ')
     const where = primaryKeys
-      .map((column) => `${quoteIdentifier(column)} = ?`)
+      .map(
+        (column, index) =>
+          `${quoteIdentifier(column)} = ${placeholder(dialect, mutable.length + index + 1)}`
+      )
       .join(' AND ')
     await tx.exec(
       `UPDATE ${quotedTable} SET ${set} WHERE ${where}`,
@@ -96,11 +122,13 @@ export async function executeCrud(
 
   const columns = entries.map(([column]) => column)
   const params = entries.map(([column, field]) =>
-    encodeValue(table.columns[column]!.type, field)
+    encodeValue(dialect, table.columns[column]!.type, field)
   )
   const insert = `INSERT INTO ${quotedTable} (${columns
     .map((column) => quoteIdentifier(physicalColumn(column)))
-    .join(', ')}) VALUES (${params.map(() => '?').join(', ')})`
+    .join(', ')}) VALUES (${params
+    .map((_, index) => placeholder(dialect, index + 1))
+    .join(', ')})`
   const conflict = primaryKeys.map(quoteIdentifier).join(', ')
 
   if (kind === 'insert') {
