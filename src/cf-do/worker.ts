@@ -143,6 +143,9 @@ interface SqlWriteMeasurement {
   sql: string
   rowsWritten: number
 }
+type PersistedWriteBudgetTrip = RowWriteBudgetTrip & {
+  statement?: SqlWriteMeasurement
+}
 
 export type ZeroDOQueryCompiler = (
   ast: unknown,
@@ -342,16 +345,28 @@ export class ZeroDO extends DurableObject {
   private writeBudgetDisabled: boolean
   private writeBudgetAdminToken: string | undefined
   private activeWriteMeasurements: SqlWriteMeasurement[] | null = null
+  private writeBudgetTripStatement: SqlWriteMeasurement | undefined
   private pendingChangesSchemaReady = false
   private activeApplicationSqlSession: ApplicationSqlSessionTarget | null = null
   protected applicationSqlDidCommit(_changed: boolean): void {}
 
-  private recordWriteBudgetRows(rows: number): void {
+  private recordWriteBudgetRows(rows: number, statement?: SqlWriteMeasurement): void {
     const wasTripped = this.writeBudget.status().tripped
     try {
       this.writeBudget.recordBillable(rows)
     } catch (error) {
       if (error instanceof WriteBudgetExceededError && !wasTripped) {
+        this.writeBudgetTripStatement = statement
+          ? {
+              sql: statement.sql
+                .replace(/'(?:''|[^'])*'/g, '?')
+                .replace(/\b\d+(?:\.\d+)?\b/g, '?')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 1_000),
+              rowsWritten: statement.rowsWritten,
+            }
+          : undefined
         const status = this.writeBudget.status()
         console.error(
           JSON.stringify({
@@ -362,6 +377,7 @@ export class ZeroDO extends DurableObject {
             budget: status.budget,
             windowMs: status.windowMs,
             trippedAt: status.trippedAt,
+            statement: this.writeBudgetTripStatement,
           })
         )
         this.persistWriteBudgetTrip()
@@ -394,7 +410,10 @@ export class ZeroDO extends DurableObject {
     if (!trip) return
     void this.ctx
       .blockConcurrencyWhile(async () => {
-        await this.ctx.storage.put(WRITE_BUDGET_TRIPPED_KEY, trip)
+        await this.ctx.storage.put(WRITE_BUDGET_TRIPPED_KEY, {
+          ...trip,
+          statement: this.writeBudgetTripStatement,
+        } satisfies PersistedWriteBudgetTrip)
       })
       .catch((error: unknown) => {
         console.error(
@@ -444,15 +463,16 @@ export class ZeroDO extends DurableObject {
     this.sql.exec = (statement: string, ...params: unknown[]) => {
       const mutation = isSqlMutation(statement)
       if (mutation && !this.writeBudgetDisabled) this.writeBudget.assertOpen()
-      const measurement = this.activeWriteMeasurements
-        ? { sql: statement, rowsWritten: 0 }
-        : null
-      if (measurement) this.activeWriteMeasurements!.push(measurement)
       const cursor = rawExec(statement, ...params)
       if (!mutation) return cursor
+      const measurement = {
+        sql: statement,
+        rowsWritten: 0,
+      }
+      if (this.activeWriteMeasurements) this.activeWriteMeasurements.push(measurement)
       return trackSqlCursorRowsWritten(cursor, (rows) => {
-        if (measurement) measurement.rowsWritten += rows
-        if (!this.writeBudgetDisabled) this.recordWriteBudgetRows(rows)
+        measurement.rowsWritten += rows
+        if (!this.writeBudgetDisabled) this.recordWriteBudgetRows(rows, measurement)
       })
     }
     this.cdc = new TransactionalCdc(this.sql)
@@ -472,10 +492,14 @@ export class ZeroDO extends DurableObject {
       })
       if (recovered.length) this.invalidateSchemaCaches()
       if (!this.writeBudgetDisabled) {
-        const persisted = await ctx.storage.get<number | RowWriteBudgetTrip>(
+        const persisted = await ctx.storage.get<number | PersistedWriteBudgetTrip>(
           WRITE_BUDGET_TRIPPED_KEY
         )
-        if (persisted) this.writeBudget.restoreTrip(persisted)
+        if (persisted) {
+          this.writeBudget.restoreTrip(persisted)
+          if (typeof persisted !== 'number')
+            this.writeBudgetTripStatement = persisted.statement
+        }
       }
     })
   }
@@ -497,6 +521,7 @@ export class ZeroDO extends DurableObject {
       return Response.json({
         enabled: !this.writeBudgetDisabled,
         ...this.writeBudget.status(),
+        trippedStatement: this.writeBudgetTripStatement,
       })
     if (url.pathname === '/_orez/write-budget/reopen' && request.method === 'POST')
       return this.handleWriteBudgetReopen(request)
@@ -536,6 +561,7 @@ export class ZeroDO extends DurableObject {
     if (!this.writeBudgetAdminToken || supplied !== this.writeBudgetAdminToken)
       return Response.json({ error: 'forbidden' }, { status: 403 })
     await this.ctx.storage.delete(WRITE_BUDGET_TRIPPED_KEY)
+    this.writeBudgetTripStatement = undefined
     const status = this.writeBudget.reopen()
     console.log(
       JSON.stringify({ event: 'orez_do_write_budget_reopened', reopenedAt: Date.now() })
