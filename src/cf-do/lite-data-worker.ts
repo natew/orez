@@ -70,6 +70,7 @@ export interface OrezDataWorkerNamespace extends ApplicationSqlDurableObjectName
 }
 
 export interface OrezDataWorkerEnv {
+  CF_VERSION?: { id?: string }
   ZERO_SQL_DO: OrezDataWorkerNamespace
   OREZ_DO_WRITE_BUDGET_ROWS?: string
   OREZ_DO_WRITE_BUDGET_WINDOW_MS?: string
@@ -518,6 +519,7 @@ export function createOrezDataWorker<
 
   class ZeroSqlDO extends OrezZeroDO {
     private readonly orezStorage: any
+    private readonly orezWorkerVersion: string
     private orezSchemaRunVersion: string | null = null
     private orezSchemaRun: Promise<unknown> | null = null
     private orezReadyVersion: string | null = null
@@ -542,6 +544,7 @@ export function createOrezDataWorker<
           : env) as never
       )
       this.orezStorage = ctx.storage
+      this.orezWorkerVersion = env.CF_VERSION?.id ?? ''
       ctx.storage.sql.exec(
         `CREATE TABLE IF NOT EXISTS ${readyTable} (id INTEGER PRIMARY KEY CHECK (id = 1), version TEXT NOT NULL)`
       )
@@ -594,10 +597,11 @@ export function createOrezDataWorker<
         return
       }
       if (!runOptions.force) {
+        const attemptKey = this.orezSchemaAttemptKey(schemaVersion)
         const attempt = this.orezStorage.sql
           .exec(
             `SELECT attempt_count, last_error FROM ${attemptTable} WHERE id = 1 AND version = ?`,
-            schemaVersion
+            attemptKey
           )
           .toArray()[0]
         if (
@@ -605,13 +609,14 @@ export function createOrezDataWorker<
           Number(attempt.attempt_count) >= suspendAfterFailures
         ) {
           throw new Error(
-            `schema reconcile suspended after ${attempt.attempt_count} failed attempts for schema ${schemaVersion}; last error: ${attempt.last_error} — deploy a fixed schema version or force a retry`
+            `schema reconcile suspended after ${attempt.attempt_count} failed attempts for schema ${schemaVersion}; last error: ${attempt.last_error} — deploy a new worker or force a retry`
           )
         }
       }
+      const attemptKey = this.orezSchemaAttemptKey(schemaVersion)
       this.orezStorage.sql.exec(
         `INSERT INTO ${attemptTable} (id, version, attempt_count, last_error) VALUES (1, ?, 1, NULL) ON CONFLICT (id) DO UPDATE SET version = excluded.version, attempt_count = CASE WHEN version = excluded.version THEN attempt_count + 1 ELSE 1 END, last_error = CASE WHEN version = excluded.version THEN last_error ELSE NULL END`,
-        schemaVersion
+        attemptKey
       )
       this.orezSchemaRunVersion = schemaVersion
       this.orezSchemaRun = (async () => {
@@ -624,14 +629,14 @@ export function createOrezDataWorker<
           this.orezMarkApplicationSchemaReady(schemaVersion)
           this.orezStorage.sql.exec(
             `UPDATE ${attemptTable} SET last_error = NULL WHERE id = 1 AND version = ?`,
-            schemaVersion
+            attemptKey
           )
           return result
         } catch (error) {
           this.orezStorage.sql.exec(
             `UPDATE ${attemptTable} SET last_error = ? WHERE id = 1 AND version = ?`,
             errorMessage(error).slice(0, 4_000),
-            schemaVersion
+            attemptKey
           )
           throw error
         }
@@ -655,10 +660,11 @@ export function createOrezDataWorker<
 
     orezApplicationSchemaStatus(schemaVersion: string): OrezSchemaStatus {
       const ready = this.orezApplicationSchemaReady(schemaVersion)
+      const attemptKey = this.orezSchemaAttemptKey(schemaVersion)
       const attempt = this.orezStorage.sql
         .exec(
           `SELECT attempt_count, last_error FROM ${attemptTable} WHERE id = 1 AND version = ?`,
-          schemaVersion
+          attemptKey
         )
         .toArray()[0]
       return {
@@ -719,6 +725,12 @@ export function createOrezDataWorker<
           .exec(`SELECT id FROM ${restoreTable} WHERE id = 1`)
           .toArray()[0]
       )
+    }
+
+    private orezSchemaAttemptKey(schemaVersion: string): string {
+      return this.orezWorkerVersion
+        ? `${schemaVersion}@${this.orezWorkerVersion}`
+        : schemaVersion
     }
   }
 
