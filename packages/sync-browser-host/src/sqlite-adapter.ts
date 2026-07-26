@@ -1,4 +1,5 @@
 import { executeTransactionQueryPlan } from 'orez-sync-cf-host/transaction-query'
+import { encodeSqlValue } from 'orez-sync-executor'
 
 import type { SyncSql } from './types.js'
 import type { BedrockSqliteModule, Database, Statement } from 'bedrock-sqlite/browser'
@@ -6,19 +7,14 @@ import type {
   CompiledTransactionQueryPlan,
   TransactionQueryBudget,
 } from 'orez-sync-cf-host/transaction-query'
-import type { TransactionQueryFormat } from 'orez-sync-executor'
+import type { SqlWireValue, TransactionQueryFormat } from 'orez-sync-executor'
 import type {
   ApplicationTransaction,
   ExecResult as SQLiteExecResult,
   SqlStatementMetadata,
 } from 'orez-sync-executor'
 
-export type WireValue =
-  | { kind: 'null' }
-  | { kind: 'integer'; value: string }
-  | { kind: 'real'; value: number }
-  | { kind: 'text'; value: string }
-  | { kind: 'blob'; value: number[] }
+export type WireValue = SqlWireValue
 
 export type WireRow = { columns: string[]; values: WireValue[] }
 
@@ -67,26 +63,7 @@ function decodeBinding(value: WireValue): unknown {
 }
 
 function encodeResult(value: unknown): WireValue {
-  if (value === null) return { kind: 'null' }
-  if (typeof value === 'bigint') return { kind: 'integer', value: value.toString() }
-  if (typeof value === 'number') {
-    return Number.isInteger(value)
-      ? { kind: 'integer', value: String(value) }
-      : { kind: 'real', value }
-  }
-  if (typeof value === 'string') return { kind: 'text', value }
-  if (value instanceof ArrayBuffer) {
-    return { kind: 'blob', value: Array.from(new Uint8Array(value)) }
-  }
-  if (ArrayBuffer.isView(value)) {
-    return {
-      kind: 'blob',
-      value: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)),
-    }
-  }
-  throw new TypeError(
-    `unsupported Bedrock SQLite result: ${Object.prototype.toString.call(value)}`
-  )
+  return encodeSqlValue(value)
 }
 
 class StatementCache {

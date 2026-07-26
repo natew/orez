@@ -1,3 +1,5 @@
+import { encodeSqlValue } from 'orez-sync-executor'
+
 import { executeTransactionQueryPlan } from './transaction-query.js'
 import { trackBillableCursorRows } from './write-safeguards.js'
 
@@ -9,16 +11,12 @@ import type { SyncSql } from './types.js'
 import type {
   ApplicationTransaction,
   ExecResult,
+  SqlWireValue,
   SqlStatementMetadata,
 } from 'orez-sync-executor'
 import type { TransactionQueryFormat } from 'orez-sync-executor'
 
-type WireValue =
-  | { kind: 'null' }
-  | { kind: 'integer'; value: string }
-  | { kind: 'real'; value: number }
-  | { kind: 'text'; value: string }
-  | { kind: 'blob'; value: number[] }
+type WireValue = SqlWireValue
 
 type WireRow = { columns: string[]; values: WireValue[] }
 
@@ -123,25 +121,7 @@ export function decodeSqlParams(value: unknown): unknown[] {
 }
 
 function encodeResult(value: unknown): WireValue {
-  if (value === null) return { kind: 'null' }
-  if (typeof value === 'number') {
-    return Number.isInteger(value)
-      ? { kind: 'integer', value: String(value) }
-      : { kind: 'real', value }
-  }
-  if (typeof value === 'string') return { kind: 'text', value }
-  if (value instanceof ArrayBuffer) {
-    return { kind: 'blob', value: Array.from(new Uint8Array(value)) }
-  }
-  if (ArrayBuffer.isView(value)) {
-    return {
-      kind: 'blob',
-      value: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)),
-    }
-  }
-  throw new TypeError(
-    `unsupported SqlStorage result: ${Object.prototype.toString.call(value)}`
-  )
+  return encodeSqlValue(value)
 }
 
 /**

@@ -31,6 +31,10 @@
       "types": "./dist/sync-executor.d.ts",
       "import": "./dist/sync-executor.js"
     },
+    "./sync": {
+      "types": "./dist/sync.d.ts",
+      "import": "./dist/sync.js"
+    },
     "./zero-http": {
       "types": "./dist/zero-http/transport.d.ts",
       "import": "./dist/zero-http/transport.js"
