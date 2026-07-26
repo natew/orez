@@ -459,6 +459,17 @@ async function applyNativeSchema(tx, instance) {
   const appliedRows = await tx.query('SELECT id FROM ' + quoteIdentifier(migrationTable))
   const applied = new Set(appliedRows.map((row) => row.id))
   await reconcilePhantomLedger(tx, applied)
+  // register BEFORE the statements, not only after them. a cdc trigger whose
+  // _orez_cdc_tables row is missing is invisible to beginSchemaChange, which
+  // skips unregistered tables, so it never suspends capture and the next
+  // DROP/RENAME COLUMN on that table dies on the surviving trigger. ensureTable
+  // reads that orphan as changed (its registration lookup returns nothing),
+  // drops the stale triggers and rewrites the row, so registering first is what
+  // lets the DDL below suspend capture at all. the pass after the statements
+  // still runs and still owns publication; this one only heals. on a fresh
+  // namespace every table is absent, ensureTable returns false for each, and
+  // this is a no-op beyond creating the cdc bookkeeping tables early.
+  await tx.registerTables(publicTables())
   const appliedIds = [...applied]
   const appliedStatementIds = new Set()
   const supersededStatementIds = new Set()
