@@ -1288,7 +1288,7 @@ describe('cdc registration restore', () => {
       .join('')}`
     return storage
       .exec(
-        `SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE '${stem}%'`,
+        `SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE '${stem}%'`
       )
       .toArray().length
   }
@@ -1297,12 +1297,15 @@ describe('cdc registration restore', () => {
     // missing table is honestly zero registrations, not an error.
     const exists = storage
       .exec(
-        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '_orez_cdc_tables' LIMIT 1",
+        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '_orez_cdc_tables' LIMIT 1"
       )
       .toArray().length
     if (!exists) return 0
     return storage
-      .exec(`SELECT physical_table FROM "_orez_cdc_tables" WHERE physical_table = ?`, table)
+      .exec(
+        `SELECT physical_table FROM "_orez_cdc_tables" WHERE physical_table = ?`,
+        table
+      )
       .toArray().length
   }
 
