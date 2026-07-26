@@ -664,12 +664,12 @@ async function liveSchemaSummary(client) {
 // instance would be read by another.
 export async function ${runCloudflareMigrations}({
   schemaOnly = false,
-  publicationOnly = false,
+  registrationOnly = false,
   instance = 'singleton',
   client: providedClient,
 } = {}) {
-  if (schemaOnly && publicationOnly) {
-    throw new Error('schemaOnly and publicationOnly are mutually exclusive')
+  if (schemaOnly && registrationOnly) {
+    throw new Error('schemaOnly and registrationOnly are mutually exclusive')
   }
   let client = providedClient
   if (!client) {
@@ -679,7 +679,7 @@ export async function ${runCloudflareMigrations}({
     }
     client = createClient(instance)
   }
-  if (publicationOnly) {
+  if (registrationOnly) {
     await client.registerTables(publicTables())
     return { tables: publicTables().map((table) => table.publicTable) }
   }

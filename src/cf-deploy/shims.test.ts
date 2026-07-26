@@ -743,6 +743,11 @@ describe('cf shim builders', () => {
       })
       const publicTables = [{ table: 'item', publicTable: 'public.item' }]
       expect(registrations).toEqual([publicTables, publicTables])
+      await module.runContrastCloudflareMigrations({
+        registrationOnly: true,
+        instance: 'preexisting',
+      })
+      expect(registrations).toEqual([publicTables, publicTables, publicTables])
       expect(migrationEvents.indexOf('registerTables')).toBeLessThan(
         migrationEvents.indexOf(
           'CREATE TABLE IF NOT EXISTS item (id TEXT NOT NULL, label TEXT NOT NULL, count INTEGER NOT NULL)'
