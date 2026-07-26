@@ -132,6 +132,26 @@ export const typesPass: Pass = {
   name: 'types',
   run(rawStmt, _ctx) {
     walkAst(rawStmt, {
+      ColumnDef: (node: any) => {
+        const pgName = extractName(node.typeName?.names)
+        if (TYPE_MAP[pgName ?? ''] !== 'INTEGER' || !Array.isArray(node.constraints)) {
+          return
+        }
+
+        const constraintTypes = node.constraints.map(
+          (constraint: any) => constraint?.Constraint?.contype
+        )
+        if (
+          !constraintTypes.includes('CONSTR_IDENTITY') ||
+          !constraintTypes.includes('CONSTR_PRIMARY')
+        ) {
+          return
+        }
+
+        node.constraints = node.constraints.filter(
+          (constraint: any) => constraint?.Constraint?.contype !== 'CONSTR_IDENTITY'
+        )
+      },
       TypeName: (node: any) => {
         const pgName = extractName(node.names)
         if (!pgName) return
