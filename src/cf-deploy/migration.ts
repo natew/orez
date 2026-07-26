@@ -391,57 +391,6 @@ async function reconcilePhantomLedger(tx, applied) {
     let missing = false
     if ((match = /^CREATE TABLE\\s+(?:IF NOT EXISTS\\s+)?[\`"]?(\\w+)/i.exec(sql))) {
       missing = !tables.has(match[1])
-      // a ledgered CREATE trusted by NAME can hide a table that predates the
-      // CREATE's definition: the table resolves, the CREATE never re-runs, and
-      // columns that only exist inside its definition are unreachable — every
-      // later index on them then fails the whole run, forever (prod
-      // 2026-07-26, 217 wedged namespaces retrying every sweep). converge the
-      // live table to the declared column set instead.
-      //
-      // the column read is a direct PRAGMA rather than the bulk scan above:
-      // that scan keys on sqlite_master.name case-EXACTLY, so a table whose
-      // stored spelling differs from the migration's reads as having no
-      // columns, and a convergence guarded on "did the bulk scan see it" then
-      // silently does nothing on exactly the namespaces that need it. PRAGMA
-      // resolves the table the way the failing statement will, and it is the
-      // same mechanism shouldSkipStatement already trusts here. rows.length
-      // is therefore the authority on existence too: sqlite_master saying
-      // absent while PRAGMA resolves columns means the CREATE would no-op.
-      if (Array.isArray(item.declaredColumns)) {
-        const liveRows = await tx.query(
-          'PRAGMA table_info(' + quoteIdentifier(match[1]) + ')',
-        )
-        const live = new Set(
-          liveRows.map((column) => String((column && column.name) ?? '')),
-        )
-        if (live.size > 0) {
-          missing = false
-          for (const column of item.declaredColumns) {
-            if (!column || typeof column.name !== 'string') continue
-            if (live.has(column.name)) continue
-            let definition = String(column.definition || '').trim()
-            if (!definition) continue
-            // sqlite refuses ADD COLUMN for these shapes; leave them to
-            // assertExpectedSchema, which reports the namespace loudly.
-            if (/\\bPRIMARY KEY\\b|\\bUNIQUE\\b/i.test(definition)) continue
-            if (/\\bNOT NULL\\b/i.test(definition) && /\\bREFERENCES\\b/i.test(definition)) continue
-            if (/\\bNOT NULL\\b/i.test(definition) && !/\\bDEFAULT\\b/i.test(definition)) {
-              // assertExpectedSchema compares name, type and NOT NULL but not
-              // defaults, so a zero default converges without a false mismatch.
-              definition += /\\b(?:INT|INTEGER|REAL|NUMERIC|BOOLEAN|FLOAT|DOUBLE|DECIMAL)\\b/i.test(definition)
-                ? ' DEFAULT 0'
-                : " DEFAULT ''"
-            }
-            console.warn(
-              '[orez-migrations] converging ' + match[1] + '.' + column.name +
-                ' from ledgered ' + baseId,
-            )
-            await tx.exec(
-              'ALTER TABLE ' + quoteIdentifier(match[1]) + ' ADD COLUMN ' + definition,
-            )
-          }
-        }
-      }
     } else if ((match = /^CREATE (?:UNIQUE )?INDEX\\s+(?:IF NOT EXISTS\\s+)?[\`"]?(\\w+)[\`"]?\\s+ON\\s+[\`"]?(\\w+)/i.exec(sql))) {
       // the index set was sampled BEFORE this pass drops and rebuilds <t>, so
       // "the index exists" is stale evidence for any table a resurrecting
@@ -538,6 +487,59 @@ async function applyNativeSchema(tx, instance) {
     }
     for (const id of Array.isArray(item.supersedes) ? item.supersedes : []) {
       supersededStatementIds.add(id)
+    }
+  }
+  // CREATE TABLE IF NOT EXISTS is a SILENT NO-OP against a table that already
+  // exists in an older shape, so every column that only ever appears inside a
+  // CREATE definition is unreachable on a namespace whose table predates it,
+  // and the first index over such a column fails the whole run forever (prod
+  // 2026-07-26: 217 namespaces, ~2k billed rows per retry, for two days).
+  //
+  // this belongs here and not in the phantom-ledger pass, which is where it was
+  // tried first and did nothing: that pass only considers LEDGERED statements,
+  // and the ledger entry for a failing run's CREATE is deleted again by the
+  // failure compensation below, so at the start of every retry the CREATE is
+  // unledgered and the pass skipped it. converging here is independent of
+  // ledger state, which is the only thing that made it reachable at all.
+  for (const [index, statement] of nativeSqlStatements.entries()) {
+    const item = typeof statement === 'string' ? null : statement
+    if (!item || !Array.isArray(item.declaredColumns)) continue
+    if (typeof item.sql !== 'string') continue
+    const created = /^CREATE TABLE\\s+(?:IF NOT EXISTS\\s+)?[\`"]?(\\w+)/i.exec(item.sql.trim())
+    if (!created) continue
+    const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+    if (supersededStatementIds.has(baseId)) continue
+    // PRAGMA, not the bulk sqlite_master scan: it resolves the table the same
+    // way the statements do, and no rows means the table is genuinely absent,
+    // so the CREATE below builds it correctly and there is nothing to converge.
+    const liveRows = await tx.query(
+      'PRAGMA table_info(' + quoteIdentifier(created[1]) + ')',
+    )
+    if (liveRows.length === 0) continue
+    const live = new Set(liveRows.map((column) => String((column && column.name) ?? '')))
+    for (const column of item.declaredColumns) {
+      if (!column || typeof column.name !== 'string') continue
+      if (live.has(column.name)) continue
+      let definition = String(column.definition || '').trim()
+      if (!definition) continue
+      // sqlite refuses ADD COLUMN for these shapes; leave them to
+      // assertExpectedSchema, which reports the namespace loudly.
+      if (/\\bPRIMARY KEY\\b|\\bUNIQUE\\b/i.test(definition)) continue
+      if (/\\bNOT NULL\\b/i.test(definition) && /\\bREFERENCES\\b/i.test(definition)) continue
+      if (/\\bNOT NULL\\b/i.test(definition) && !/\\bDEFAULT\\b/i.test(definition)) {
+        // assertExpectedSchema compares name, type and NOT NULL but not
+        // defaults, so a zero default converges without a false mismatch.
+        definition += /\\b(?:INT|INTEGER|REAL|NUMERIC|BOOLEAN|FLOAT|DOUBLE|DECIMAL)\\b/i.test(definition)
+          ? ' DEFAULT 0'
+          : " DEFAULT ''"
+      }
+      console.warn(
+        '[orez-migrations] converging ' + created[1] + '.' + column.name +
+          ' declared by ' + baseId,
+      )
+      await tx.exec(
+        'ALTER TABLE ' + quoteIdentifier(created[1]) + ' ADD COLUMN ' + definition,
+      )
     }
   }
   // the ledger table is treated as replication bookkeeping by the DO backend,
