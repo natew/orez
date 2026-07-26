@@ -25,6 +25,111 @@ function applyPrefix(template: string, cfg: CfDeployConfig): string {
     .join(cfg.prefix)
 }
 
+function applySQLiteOnlyDataTransport(source: string, splitDataWorker: boolean): string {
+  const poolFactory =
+    "  globalThis.__nspfx_cf_do_create_pg_pool = (connectionString = '') =>\n" +
+    '    new NspfxCloudflarePgPool({ connectionString })\n'
+  const applicationClient =
+    "  globalThis.__nspfx_cf_application_sql_client = (namespace = 'singleton') =>\n" +
+    '    createApplicationSqlClient(env.ZERO_SQL_DO, namespace)\n'
+  if (!source.includes(poolFactory)) {
+    throw new Error('orez SQLite data shim pool factory shape changed')
+  }
+  let next = source
+    .replace("import { Pool as NspfxCloudflarePgPool } from 'pg'\n", '')
+    .replace(/let doBackendClassPromise\nfunction getDoBackend\(\) \{[\s\S]*?\n\}\n/, '')
+    .replace(poolFactory, splitDataWorker ? '' : applicationClient)
+    .replace('// pg-over-DO query endpoint.', '// database-over-DO query endpoint.')
+
+  const routeStart = next.indexOf("    if (url.pathname === '/__nspfx_pg') {")
+  const routeEnd = next.indexOf('    return super.fetch(request)', routeStart)
+  if (routeStart < 0 || routeEnd < 0) {
+    throw new Error('orez SQLite data shim transport shape changed')
+  }
+  next = next.slice(0, routeStart) + next.slice(routeEnd)
+  next = next
+    .replaceAll('/__nspfx_pg', '/exec')
+    .replaceAll(
+      "JSON.stringify({ text: 'SELECT id FROM project', values: [] })",
+      "JSON.stringify({ sql: 'SELECT id FROM project', params: [] })"
+    )
+    .replaceAll(
+      "JSON.stringify({ text: 'SELECT 1', values: [] })",
+      "JSON.stringify({ sql: 'SELECT 1', params: [] })"
+    )
+
+  const legacyRouteStart = next.indexOf("    if (url.pathname === '/__nspfx_query') {")
+  if (!splitDataWorker) {
+    if (legacyRouteStart >= 0) {
+      throw new Error('orez SQLite user shim unexpectedly has a split transport')
+    }
+    return next
+  }
+  const legacyRouteEnd = next.indexOf('    // schema-warmup', legacyRouteStart)
+  if (legacyRouteStart < 0 || legacyRouteEnd < 0) {
+    throw new Error('orez SQLite data shim legacy transport shape changed')
+  }
+  return (
+    next.slice(0, legacyRouteStart) +
+    "    if (url.pathname === '/__nspfx_query') {\n" +
+    "      return new Response('legacy SQL transport retired', { status: 410 })\n" +
+    '    }\n' +
+    next.slice(legacyRouteEnd)
+  )
+}
+
+function applySQLiteOnlyAppTransport(source: string, splitAppWorker: boolean): string {
+  let next: string
+  if (source.includes("import { ZeroDO as OrezZeroSqlDO } from 'orez/cf-do'\n")) {
+    next = source.replace(
+      "import { ZeroDO as OrezZeroSqlDO } from 'orez/cf-do'\n",
+      "import { ZeroDO as OrezZeroSqlDO, createApplicationSqlClient } from 'orez/cf-do'\n"
+    )
+  } else if (
+    source.includes("import { isValidNamespace } from 'orez/worker/cf-do-shim'\n")
+  ) {
+    next = source.replace(
+      "import { isValidNamespace } from 'orez/worker/cf-do-shim'\n",
+      "import { createApplicationSqlClient } from 'orez/cf-do'\nimport { isValidNamespace } from 'orez/worker/cf-do-shim'\n"
+    )
+  } else {
+    throw new Error('orez SQLite app shim import shape changed')
+  }
+
+  const globalsBefore =
+    "  globalThis.__nspfx_cf_do_namespace = env.ZERO_APP_ID || 'zero'\n" +
+    '  globalThis.__nspfx_cf_do_create_pg_pool = () => makeRemotePgPool(env)\n'
+  const globalsAfter =
+    "  globalThis.__nspfx_cf_do_namespace = env.ZERO_APP_ID || 'zero'\n" +
+    "  globalThis.__nspfx_cf_application_sql_client = (namespace = 'singleton') =>\n" +
+    '    createApplicationSqlClient(env.ZERO_SQL_DO, namespace)\n'
+  if (!splitAppWorker) {
+    if (
+      !next.includes('__nspfx_cf_application_sql_client') ||
+      next.includes('makeRemotePgPool')
+    ) {
+      throw new Error('orez SQLite user shim application client shape changed')
+    }
+    return next
+  }
+  if (!next.includes(globalsBefore)) {
+    throw new Error('orez SQLite app shim globals shape changed')
+  }
+  next = next
+    .replace(globalsBefore, globalsAfter)
+    .replace(/  \/\/ per-project pool:[\s\S]*?\n  if \(env\.FILES\)/, '  if (env.FILES)')
+
+  const poolStart = next.indexOf('function makeRemotePgPool(')
+  const poolEnd = next.indexOf(
+    '// poke the data tier to run the schema migration',
+    poolStart
+  )
+  if (poolStart < 0 || poolEnd < 0) {
+    throw new Error('orez SQLite app shim remote pool shape changed')
+  }
+  return next.slice(0, poolStart) + next.slice(poolEnd)
+}
+
 // Schema DDL and its _orez_pg_metadata rows are content-hash gated, while
 // publication membership is checked on every embed generation. Keep those as
 // separate phases: the generated schema batch contains unconditional metadata
@@ -560,8 +665,15 @@ const USER_SHIM_TEMPLATE =
 const APP_SHIM_TEMPLATE =
   "import oneWorker from './one-app.js'\nimport { AsyncLocalStorage } from 'node:async_hooks'\nimport { isValidNamespace } from 'orez/worker/cf-do-shim'\n\nconst INTERNAL_ZERO_MUTATE_URL = 'https://orez-zero-api.local/api/zero/push'\nconst INTERNAL_ZERO_QUERY_URL = 'https://orez-zero-api.local/api/zero/pull'\n\n// per-request project-namespace scope. the authoritative zero push replay and\n// detached server-effect writes resolve their ns here at /__nspfx_query time, so\n// the ONE module-singleton zeroServer pool routes project-table writes to\n// ns=proj-<id> instead of the control-plane 'singleton'. AsyncLocalStorage\n// (nodejs_compat) isolates concurrent requests; absent scope => singleton.\n// withProjectNamespace (src/zero/withProjectNamespace.ts) reaches __nspfx_run_in_ns\n// for detached async-effect writes whose request scope is already unwound.\nconst __nspfxNsStore = new AsyncLocalStorage()\nglobalThis.__nspfx_run_in_ns = (ns, fn) => (ns ? __nspfxNsStore.run(ns, fn) : fn())\nglobalThis.__nspfx_current_ns = () => __nspfxNsStore.getStore()\n\nfunction parsePublications(value) {\n  return String(value || '').split(',').map((p) => p.trim()).filter(Boolean)\n}\nfunction normalizeZeroCachePathname(pathname) {\n  const normalized = pathname.startsWith('/api/zero/')\n    ? pathname.slice('/api/zero'.length)\n    : pathname\n  if (normalized.startsWith('/sync/v') && normalized.endsWith('/connect/')) {\n    return normalized.slice(0, -1)\n  }\n  return normalized\n}\nfunction isZeroCachePath(pathname) {\n  const n = normalizeZeroCachePathname(pathname)\n  if (n.startsWith('/sync/v') && n.endsWith('/connect')) return true\n  if (n.startsWith('/replication/v')) return true\n  if (n === '/statz' || n === '/heapz' || n === '/keepalive') return true\n  return false\n}\nfunction needsSqlSchema(pathname) {\n  return (\n    pathname.startsWith('/api/auth/') ||\n    pathname.startsWith('/api/bootstrap-') ||\n    pathname.startsWith('/api/zero/')\n  )\n}\nfunction zeroCacheRequestForUrl(request, url) {\n  const pathname = normalizeZeroCachePathname(url.pathname)\n  if (pathname === url.pathname) return request\n  const u = new URL(request.url)\n  u.pathname = pathname\n  return new Request(u.toString(), request)\n}\n\n// per-project sharding: the app worker OWNS the namespace decision on the\n// public surface. an explicit signal (?ns= query or nspfx-ns cookie) must be\n// shape-valid AND authorized; the x-nspfx-ns header the shim stamps is the only\n// ns channel the data tier sees from here — an inbound x-nspfx-ns never\n// forwards. until the directory split gives real clients project identity,\n// every non-control-plane ns requires the e2e admin token (probe/agent\n// surface only), so a public client cannot mint DO namespaces.\nfunction requestedNamespace(request, url) {\n  const fromQuery = url.searchParams.get('ns')\n  if (fromQuery) return fromQuery\n  const cookies = request.headers.get('cookie') || ''\n  for (const part of cookies.split(';')) {\n    const eq = part.indexOf('=')\n    if (eq === -1) continue\n    if (part.slice(0, eq).trim() !== 'nspfx-ns') continue\n    return decodeURIComponent(part.slice(eq + 1).trim())\n  }\n  return ''\n}\n\nfunction adminTokenValid(request, env) {\n  const provided = request.headers.get('x-nspfx-admin-token') || ''\n  const expected = typeof env.E2E_ADMIN_TOKEN === 'string' ? env.E2E_ADMIN_TOKEN : ''\n  if (!provided || !expected) return false\n  const enc = new TextEncoder()\n  const a = enc.encode(provided)\n  const b = enc.encode(expected)\n  if (a.byteLength !== b.byteLength) return false\n  return crypto.subtle.timingSafeEqual(a, b)\n}\n\n// per-project ns CLIENT routing: a project zero instance connects with\n// server = https://host/p-<projectId>, so its traffic arrives as\n// /p-<id>/<worker>/v<n>/<action>. zero v51's dispatcher pattern\n// (/:base)/:worker/v:version/:action natively tolerates the one base\n// component, so the path forwards UNMODIFIED — the prefix is only READ here\n// to derive ns = proj-<id>. the id charset matches the data tier's ns shape\n// validation so a stamped header can never be rejected downstream.\nconst PROJECT_ZERO_PATH = new RegExp(\n  '^/p-([A-Za-z0-9_-]{1,64})/(sync|replication|mutate)/v[0-9]+/',\n)\n\nfunction projectIdFromZeroPath(pathname) {\n  const match = PROJECT_ZERO_PATH.exec(pathname)\n  return match ? match[1] : null\n}\n\n// native (expo) zero clients carry no cookie on the websocket: the session\n// bearer rides zero's Sec-WebSocket-Protocol encoding —\n// encodeURIComponent(btoa(JSON({ initConnectionMessage, authToken }))). the\n// browser client sends the same header, but its same-origin cookie is the\n// canonical credential there, so the cookie is TRIED first when both are\n// present — and a denied cookie falls through to the bearer (authorizeProjectNs).\nfunction bearerFromSecProtocol(request) {\n  const header = request.headers.get('sec-websocket-protocol') || ''\n  if (!header) return ''\n  try {\n    const decoded = JSON.parse(atob(decodeURIComponent(header)))\n    return typeof decoded.authToken === 'string' ? decoded.authToken : ''\n  } catch {\n    return ''\n  }\n}\n\n// authorize \"this credential's session user is a member of this project\"\n// through the app's own internal endpoint (one indexed read server-side). the\n// credential is the request cookie (browser) or the session bearer from the\n// websocket sec-protocol (native) — getAuthData accepts both. verdicts are\n// cached in-memory keyed by sha-256(projectId | credential) so a websocket\n// reconnect storm collapses to one endpoint call per minute per session.\nconst NS_AUTHORIZE_TTL_MS = 60000\nconst nsAuthorizeVerdicts = new Map()\n\nasync function authorizeProjectNs(request, env, ctx, projectId) {\n  const cookie = request.headers.get('cookie') || ''\n  const bearer = bearerFromSecProtocol(request)\n  if (!cookie && !bearer) return false\n  // ios attaches the shared cookie jar to app websockets, so a NATIVE request\n  // arrives with BOTH a (possibly stale) jar cookie and the valid session\n  // bearer in the sec-protocol. try the cookie first (canonical for browsers),\n  // but a denied cookie must fall through to the bearer — a dead jar cookie\n  // shadowing a valid bearer 403'd every mobile project sync (2026-07-08).\n  if (cookie && (await authorizeNsCredential(request, env, ctx, projectId, cookie, ''))) {\n    return true\n  }\n  if (bearer && (await authorizeNsCredential(request, env, ctx, projectId, '', bearer))) {\n    return true\n  }\n  return false\n}\n\nasync function authorizeNsCredential(request, env, ctx, projectId, cookie, bearer) {\n  const digest = await crypto.subtle.digest(\n    'SHA-256',\n    new TextEncoder().encode(projectId + '|' + (cookie || 'swp:' + bearer)),\n  )\n  const key = Array.from(new Uint8Array(digest), (byte) =>\n    byte.toString(16).padStart(2, '0'),\n  ).join('')\n  const now = Date.now()\n  const cached = nsAuthorizeVerdicts.get(key)\n  if (cached && now < cached.expires) return cached.allowed\n  // session + membership read through the app's normal data path; make sure\n  // the platform schema exists before the endpoint queries it. a transient\n  // infra failure (schema poke / endpoint blip) must be a RETRYABLE deny, never\n  // a cached negative or a 1101 throw — otherwise one blip locks a real member\n  // out for the full TTL.\n  try {\n    await ensureSchemaViaDataTier(env)\n  } catch {\n    return false\n  }\n  const authorizeUrl = new URL(request.url)\n  authorizeUrl.pathname = '/api/project/authorize-ns'\n  authorizeUrl.search = '?projectId=' + encodeURIComponent(projectId)\n  // one's getURLfromRequestURL does new URL(request.url, host ? http://host : \"\")\n  // — and on workerd/V8 new URL(absolute, \"\") THROWS \"Invalid URL string\" when\n  // the base is empty (bun tolerates it, which is why this only bit on CF). a\n  // synthesized subrequest must therefore carry a host header so one derives a\n  // valid base. forward the inbound host (this is same-origin, /api on our own\n  // worker) so the subrequest resolves exactly like a top-level one would.\n  let response\n  try {\n    response = await withAppProcessEnv(env, () =>\n      oneWorker.fetch(\n        new Request(authorizeUrl.toString(), {\n          headers: cookie\n            ? { cookie: cookie, host: authorizeUrl.host }\n            : { authorization: 'Bearer ' + bearer, host: authorizeUrl.host },\n        }),\n        env,\n        ctx,\n      ),\n    )\n  } catch {\n    return false\n  }\n  const allowed = response instanceof Response && response.status === 200\n  // cache ONLY positive verdicts: a deny may be a transient infra error or a\n  // not-yet-propagated membership write; re-check those next reconnect rather\n  // than pinning the user out for the TTL.\n  if (allowed) {\n    if (nsAuthorizeVerdicts.size > 1024) nsAuthorizeVerdicts.clear()\n    nsAuthorizeVerdicts.set(key, { allowed: true, expires: now + NS_AUTHORIZE_TTL_MS })\n  }\n  return allowed\n}\n\nfunction withAppProcessEnv(env, run) {\n  globalThis.process ||= {}\n  globalThis.process.env ||= {}\n  const processEnv = globalThis.process.env\n  const previous = new Map()\n  for (const key of ['ZERO_UPSTREAM_DB', 'ZERO_CVR_DB', 'ZERO_CHANGE_DB']) {\n    const had = Object.prototype.hasOwnProperty.call(processEnv, key)\n    previous.set(key, had ? processEnv[key] : undefined)\n    delete processEnv[key]\n  }\n  for (const [key, value] of Object.entries(env)) {\n    if (typeof value !== 'string') continue\n    if (previous.has(key)) continue\n    const had = Object.prototype.hasOwnProperty.call(processEnv, key)\n    previous.set(key, had ? processEnv[key] : undefined)\n    processEnv[key] = value\n  }\n  const restore = () => {\n    for (const [key, value] of previous) {\n      if (value === undefined) delete processEnv[key]\n      else processEnv[key] = value\n    }\n  }\n  try {\n    const result = run()\n    if (result && typeof result.then === 'function') return result.finally(restore)\n    restore()\n    return result\n  } catch (err) {\n    restore()\n    throw err\n  }\n}\n\n// db.pool in the app worker is a THIN client: each query forwards RAW pg SQL\n// { text, values } to orez-data /__nspfx_query over the service binding, where the\n// DoBackend (libpg parse + SQLite translate + exec) runs in the LEAN isolate. the\n// app worker does NO pg parsing — that kept the heavy app isolate GC-thrashing /\n// OOMing. (also keeps pg/pgsql-parser/libpg-query OUT of the app worker bundle.)\nfunction installAppSqlBackendGlobals(env) {\n  globalThis.__nspfx_cf_do_namespace = env.ZERO_APP_ID || 'zero'\n  globalThis.__nspfx_cf_do_create_pg_pool = () => makeRemotePgPool(env)\n  // per-project pool: project-scoped tables (file, snapshot, …) live in the\n  // project's OWN DO namespace, which the project zero instance reads from.\n  // server writes to those tables MUST stamp ns=proj-<id> or they land in the\n  // singleton namespace and the client never sees them (the empty-file-tree\n  // bug). projectId is validated to the data tier's accepted shape; an invalid\n  // id falls back to the singleton pool (a stray id can't mint a DO namespace).\n  globalThis.__nspfx_cf_project_pool = (projectId) =>\n    typeof projectId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(projectId)\n      ? makeRemotePgPool(env, 'proj-' + projectId)\n      : makeRemotePgPool(env)\n  if (env.FILES) globalThis.__nspfx_cf_r2_bucket = env.FILES\n  // hoist the LanguageService worker binding so check_types\n  // (src/project/projectTypecheckPlatform.ts) routes to the warm nspfx-cf-ls\n  // DO instead of trying to spawn the bun+tsgo child.\n  if (env.LS) globalThis.__nspfx_cf_ls_service = env.LS\n  // hoist the data-tier binding so project create can provision its own\n  // per-project DO namespace (src/project/projectNamespacePlatform.ts).\n  if (env.OREZ_DATA) globalThis.__nspfx_cf_data_service = env.OREZ_DATA\n  // hoist the cf-build service binding so triggerBuild ships user-app deploy\n  // builds to the nspfx-cf-build-demo CF Container instead of importing the\n  // pruned buildUserApp chunk (src/deploy/buildRunnerPlatform.ts). CF-native,\n  // the cf-ls pattern; auth is the shared admin token. (the Hetzner box URL\n  // transport was removed when the box was decommissioned.)\n  if (env.BUILD_RUNNER && env.E2E_ADMIN_TOKEN) {\n    globalThis.__nspfx_build_runner_service = {\n      service: env.BUILD_RUNNER,\n      token: env.E2E_ADMIN_TOKEN,\n    }\n  }\n  // hoist the cf-factory service binding so the headless control plane\n  // (app/api/factory/headless+api.ts) starts a per-project cf-factory CF\n  // Container instead of spawning a local child process\n  // (src/features/factory/factoryRuntimePlatform.ts). absent → the local spawn path.\n  if (env.FACTORY_RUNNER && env.E2E_ADMIN_TOKEN) {\n    globalThis.__nspfx_factory_runtime_service = {\n      service: env.FACTORY_RUNNER,\n      token: env.E2E_ADMIN_TOKEN,\n    }\n  }\n}\n\n// minimal pg.Pool/Client shim round-tripping queries to orez-data /__nspfx_query.\n// ns (optional) stamps x-nspfx-ns so project-scoped tables (file, snapshot, …)\n// land in the project's OWN DO namespace (ns=proj-<id>) — the one the project\n// zero instance reads from. absent → the control-plane 'singleton' namespace.\nfunction makeRemotePgPool(env, ns) {\n  // an explicit ns arg (e.g. __nspfx_cf_project_pool / projectDb) always wins;\n  // otherwise resolve the request-scoped ns from the ALS at call time so the\n  // no-arg zeroServer pool routes the authoritative mutator replay's writes to\n  // the project namespace the inbound push carried. absent both => singleton.\n  const headersFor = () => {\n    const effective =\n      ns ||\n      (typeof globalThis.__nspfx_current_ns === 'function'\n        ? globalThis.__nspfx_current_ns()\n        : undefined)\n    return effective\n      ? { 'content-type': 'application/json', 'x-nspfx-ns': effective }\n      : { 'content-type': 'application/json' }\n  }\n  const runQuery = async (query, params) => {\n    const text = typeof query === 'string' ? query : query && query.text\n    const values =\n      params !== undefined ? params : query && (query.values || query.params)\n    const res = await env.OREZ_DATA.fetch(\n      new Request('https://orez-data.local/__nspfx_query', {\n        method: 'POST',\n        headers: headersFor(),\n        body: JSON.stringify({ text, values: values || [] }),\n      }),\n    )\n    const body = await res.json()\n    if (!res.ok) throw new Error(body && body.error ? body.error : 'query failed')\n    const rowMode = query && typeof query === 'object' ? query.rowMode : undefined\n    const outRows = body.rows || []\n    if (rowMode === 'array' && outRows.length > 0) {\n      // drizzle-orm's typed SELECT path requests rowMode:'array' then indexes each\n      // row POSITIONALLY (mapResultRow -> row[0], row[1], ...). the data tier\n      // returns column-keyed objects, so project them into arrays in column order,\n      // exactly as node-postgres would. without this drizzle reads row[0] on an\n      // object -> undefined -> the first typed decoder (timestamp/json) throws.\n      const keys = Object.keys(outRows[0])\n      return {\n        rows: outRows.map((r) => keys.map((k) => r[k])),\n        rowCount: body.rowCount,\n        fields: keys.map((name) => ({ name })),\n      }\n    }\n    return { rows: outRows, rowCount: body.rowCount }\n  }\n  // ordered multi-statement execution in one round trip (see the DO's\n  // /__nspfx_pg batch branch). app code reaches this through db.server's\n  // sqlBatch seam.\n  const runBatch = async (statements) => {\n    const res = await env.OREZ_DATA.fetch(\n      new Request('https://orez-data.local/__nspfx_query', {\n        method: 'POST',\n        headers: headersFor(),\n        body: JSON.stringify({\n          batch: statements.map((s) => ({ text: s.text, values: s.values || [] })),\n        }),\n      }),\n    )\n    const body = await res.json()\n    if (!res.ok) throw new Error(body && body.error ? body.error : 'batch failed')\n    return body.results || []\n  }\n  const client = {\n    query: (q, p, cb) => {\n      const promise = runQuery(q, typeof p === 'function' ? undefined : p)\n      const callback = typeof p === 'function' ? p : cb\n      if (typeof callback === 'function') {\n        promise.then((r) => callback(null, r), callback)\n        return undefined\n      }\n      return promise\n    },\n    batch: runBatch,\n    release: () => {},\n    on: () => client,\n    end: async () => {},\n  }\n  return {\n    connect: (cb) => {\n      if (typeof cb === 'function') {\n        cb(null, client, () => {})\n        return undefined\n      }\n      return Promise.resolve(client)\n    },\n    query: client.query,\n    batch: runBatch,\n    on: () => client,\n    end: async () => {},\n  }\n}\n\n// poke the data tier to run the schema migration before the first app write.\nlet appSchemaReady\nfunction ensureSchemaViaDataTier(env) {\n  if (appSchemaReady) return appSchemaReady\n  appSchemaReady = (async () => {\n    const res = await env.OREZ_DATA.fetch(\n      new Request('https://orez-data.local/__nspfx_migrate'),\n    )\n    if (!res.ok) throw new Error('schema migration failed: ' + res.status)\n    await res.text().catch(() => {})\n  })().catch((err) => {\n    appSchemaReady = undefined\n    throw err\n  })\n  return appSchemaReady\n}\n\nexport default {\n  async fetch(request, env, ctx) {\n    if (env.AUTH_DB) globalThis.AUTH_DB = env.AUTH_DB\n    installAppSqlBackendGlobals(env)\n    // bridge the worker's waitUntil so app code (the zero push handler) can keep\n    // mutator asyncTasks — e.g. seedTemplateProject — alive past the response.\n    // workerd kills un-awaited promises on response; without this a created\n    // project's template files never seed.\n    globalThis.__nspfx_background_task = (p) => {\n      try {\n        ctx.waitUntil(Promise.resolve(p))\n      } catch {}\n    }\n    const url = new URL(request.url)\n    // operational per-namespace backup + restore + write-circuit-breaker\n    // control: always admin-token gated,\n    // same ns rules as sync. GET /__nspfx_export[?ns=proj-…] streams that\n    // namespace's tables to R2 backups/; POST /__nspfx_import?confirm=<ns>\n    // {key} overwrite-restores a dump into the namespace.\n    if (\n      url.pathname === '/__nspfx_export' ||\n      url.pathname === '/__nspfx_import' ||\n      url.pathname === '/__nspfx_circuit'\n    ) {\n      if (!adminTokenValid(request, env)) {\n        return new Response('forbidden', { status: 403 })\n      }\n      const ns = requestedNamespace(request, url)\n      const forwardUrl = new URL('https://orez-data.local' + url.pathname)\n      forwardUrl.search = url.search\n      const forward = new Request(forwardUrl.toString(), request)\n      forward.headers.delete('x-nspfx-ns')\n      if (ns && ns !== 'nspfx') {\n        if (!isValidNamespace(ns)) {\n          return new Response('invalid ns', { status: 400 })\n        }\n        forward.headers.set('x-nspfx-ns', ns)\n      }\n      return env.OREZ_DATA.fetch(forward)\n    }\n    // per-project zero traffic: /p-<projectId>/{sync|replication|mutate}/v*.\n    // authorize via the e2e admin token (probe surface) or the request\n    // credential's project membership (cookie, or the native websocket\n    // bearer), then forward the path unmodified with\n    // x-nspfx-ns stamped. inbound x-nspfx-ns never forwards — the stamp below\n    // overwrites it, and a denied request never reaches the data tier.\n    const zeroProjectId = projectIdFromZeroPath(url.pathname)\n    if (zeroProjectId) {\n      if (\n        !adminTokenValid(request, env) &&\n        !(await authorizeProjectNs(request, env, ctx, zeroProjectId))\n      ) {\n        return new Response('ns forbidden', { status: 403 })\n      }\n      const forward = new Request(request)\n      forward.headers.set('x-nspfx-ns', 'proj-' + zeroProjectId)\n      return env.OREZ_DATA.fetch(forward)\n    }\n    // /sync + zero-cache traffic -> the data tier's ZeroCacheDO, stamped with\n    // the shim's namespace decision (see requestedNamespace above).\n    if (isZeroCachePath(url.pathname)) {\n      const ns = requestedNamespace(request, url)\n      const forward = new Request(zeroCacheRequestForUrl(request, url))\n      forward.headers.delete('x-nspfx-ns')\n      if (ns && ns !== 'nspfx') {\n        if (!isValidNamespace(ns)) {\n          return new Response('invalid ns', { status: 400 })\n        }\n        if (!adminTokenValid(request, env)) {\n          return new Response('ns forbidden', { status: 403 })\n        }\n        forward.headers.set('x-nspfx-ns', ns)\n      }\n      return env.OREZ_DATA.fetch(forward)\n    }\n    // before an app WRITE to the SQL DO (better-auth, bootstrap, mutator), make\n    // sure the platform schema exists in the data tier.\n    if (needsSqlSchema(url.pathname)) {\n      await ensureSchemaViaDataTier(env)\n    }\n    // the authoritative zero push from a project embed carries x-nspfx-ns; scope\n    // it so the singleton zeroServer pool routes the mutator replay's writes to\n    // ns=proj-<id> (matching the optimistic client copy). control-plane traffic\n    // has no header => no scope => 'singleton', unchanged. only the internal\n    // embed reaches /api/zero/push with x-nspfx-ns; validate the shape so a stray\n    // header can't mint a namespace.\n    const inboundNs = request.headers.get('x-nspfx-ns')\n    const scopedNs =\n      inboundNs && /^(proj|test)-[A-Za-z0-9_-]{1,64}$/.test(inboundNs)\n        ? inboundNs\n        : undefined\n    return globalThis.__nspfx_run_in_ns(scopedNs, () =>\n      withAppProcessEnv(env, async () => {\n        // a request that falls through every route must never surface a\n        // non-Response to workerd (error 1101 took previews down when a stale\n        // build's asset manifest was missing a deps-web file). resolve to 404.\n        const response = await oneWorker.fetch(request, env, ctx)\n        return response instanceof Response\n          ? response\n          : new Response('not found', { status: 404 })\n      }),\n    )\n  },\n}\n"
 
+export type ShimBuildOptions = {
+  database?: 'postgres' | 'sqlite'
+}
+
 /** data-tier worker entry (control-plane split deploy): sql/migrate/sync/backup only. */
-export function buildDataShimSource(cfg: CfDeployConfig): string {
+export function buildDataShimSource(
+  cfg: CfDeployConfig,
+  options: ShimBuildOptions = {}
+): string {
   // consumer-declared minute-cron fetches forwarded to the app worker over the APP
   // service binding (workerd has no long-running process, so a job/flow runner in the
   // app worker needs a periodic tick). emitted into the data shim's minute-cron branch
@@ -572,50 +684,71 @@ export function buildDataShimSource(cfg: CfDeployConfig): string {
         `      ctx.waitUntil(env.APP.fetch(new Request('https://app${f.path}', { method: 'POST', headers: { host: 'app', 'x-cron-secret': env.${f.secretEnvVar} || '' } })))\n`
     )
     .join('')
-  const source = applyPrefix(
-    applyRequestScopedDoBackend(
-      persistEmbedBootRequest(
-        addDeployTerminalWarmProbe(
-          persistBootFailureBeforeRetry(
-            applyMigrationLifecycle(
-              allowLargeReplicaResync(
-                passEmbedInstanceId(serializeShimPgBatches(DATA_SHIM_TEMPLATE))
-              )
+  const transformed = applyRequestScopedDoBackend(
+    persistEmbedBootRequest(
+      addDeployTerminalWarmProbe(
+        persistBootFailureBeforeRetry(
+          applyMigrationLifecycle(
+            allowLargeReplicaResync(
+              passEmbedInstanceId(serializeShimPgBatches(DATA_SHIM_TEMPLATE))
             )
           )
         )
       )
-    ),
+    )
+  )
+  const source = applyPrefix(
+    options.database === 'sqlite'
+      ? applySQLiteOnlyDataTransport(transformed, true)
+      : transformed,
     cfg
   ).replace('__CRON_FORWARDS__', forwards)
   return applyDataWorkerZeroPush(source, cfg)
 }
 
 /** single-worker user-app entry: both DO classes + the One app in one worker. */
-export function buildUserShimSource(cfg: CfDeployConfig): string {
-  return applyPrefix(
-    applySqlSchemaGateContract(
-      applyRequestScopedDoBackend(
-        persistEmbedBootRequest(
-          addDeployTerminalWarmProbe(
-            persistBootFailureBeforeRetry(
-              applyMigrationLifecycle(
-                allowLargeReplicaResync(
-                  passEmbedInstanceId(serializeShimPgBatches(USER_SHIM_TEMPLATE))
-                )
+export function buildUserShimSource(
+  cfg: CfDeployConfig,
+  options: ShimBuildOptions = {}
+): string {
+  const transformed = applySqlSchemaGateContract(
+    applyRequestScopedDoBackend(
+      persistEmbedBootRequest(
+        addDeployTerminalWarmProbe(
+          persistBootFailureBeforeRetry(
+            applyMigrationLifecycle(
+              allowLargeReplicaResync(
+                passEmbedInstanceId(serializeShimPgBatches(USER_SHIM_TEMPLATE))
               )
             )
           )
         )
       )
-    ),
+    )
+  )
+  return applyPrefix(
+    options.database === 'sqlite'
+      ? applySQLiteOnlyAppTransport(
+          applySQLiteOnlyDataTransport(transformed, false),
+          false
+        )
+      : transformed,
     cfg
   )
 }
 
 /** app-tier worker entry (control-plane split deploy): namespace router over the data binding. */
-export function buildAppShimSource(cfg: CfDeployConfig): string {
-  return applyPrefix(applySqlSchemaGateContract(APP_SHIM_TEMPLATE), cfg)
+export function buildAppShimSource(
+  cfg: CfDeployConfig,
+  options: ShimBuildOptions = {}
+): string {
+  const transformed = applySqlSchemaGateContract(APP_SHIM_TEMPLATE)
+  return applyPrefix(
+    options.database === 'sqlite'
+      ? applySQLiteOnlyAppTransport(transformed, true)
+      : transformed,
+    cfg
+  )
 }
 
 export type RustSyncUserShimOptions = {
