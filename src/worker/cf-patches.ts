@@ -45,6 +45,10 @@ import { dirname, resolve } from 'node:path'
 
 import { applyChangeLogCleanupRetryPatch } from '../zero-changelog-cleanup-patch.js'
 import { applyLitestreamRestoreGuard } from '../zero-litestream-patch.js'
+import {
+  applyZeroMainArgvPatch,
+  applyZeroWorkerArgvPatch,
+} from '../zero-worker-argv-patch.js'
 
 const ZERO_CACHE_WORKERS = [
   'main',
@@ -281,6 +285,8 @@ function patchProcesses(zcBase: string): void {
     throw new Error(`orez CF overlay: processes.js missing at ${processesPath}`)
   }
 
+  applyZeroWorkerArgvPatch(processesPath)
+  applyZeroMainArgvPatch(resolve(zcBase, 'server', 'main.js'))
   let code = readFileSync(processesPath, 'utf-8')
   const proxyGetAnchor = 'return Reflect.get(target, prop, receiver);'
   const proxyGetReplacement =

@@ -449,12 +449,20 @@ describe('embed restart contract (gen-2 boot in one process)', () => {
       const replicaFile = resolve(dataDir, 'zero-replica.db')
 
       // ── generation 1: cold start, hydrate, live replication ──
-      const gen1 = await startGeneration({
-        remoteFetch: remote.fetch,
-        localSql,
-        zeroPort: basePort,
-        replicaFile,
-      })
+      // vitest worker flags belong to the host process. embedded zero-cache
+      // workers must not parse them as their own CLI configuration.
+      process.argv.push('--task-id')
+      let gen1: Awaited<ReturnType<typeof startGeneration>>
+      try {
+        gen1 = await startGeneration({
+          remoteFetch: remote.fetch,
+          localSql,
+          zeroPort: basePort,
+          replicaFile,
+        })
+      } finally {
+        process.argv.pop()
+      }
       {
         const downstream = new Queue<unknown>()
         const ws = connectAndSubscribe(gen1.zeroPort, `cg-gen1-${Date.now()}`, downstream)

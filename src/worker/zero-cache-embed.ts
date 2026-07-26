@@ -28,6 +28,7 @@ import { resolve } from 'node:path'
 import { enableZeroChangeLogCleanupRetry } from '../zero-changelog-cleanup-patch.js'
 import { disableZeroLitestreamRestore } from '../zero-litestream-patch.js'
 import { installZeroSqliteHandleRegistry } from '../zero-sqlite-handle-patch.js'
+import { isolateEmbeddedZeroWorkerArgs } from '../zero-worker-argv-patch.js'
 import { sweepLeakedSqliteHandles } from './embed-generation.js'
 
 import type { PGlite } from '@electric-sql/pglite'
@@ -192,6 +193,7 @@ export async function startZeroCacheEmbed(
   // MutagenService keeps the replica open; a leftover handle wedges the next
   // generation's `journal_mode` switch with SQLITE_BUSY).
   installZeroSqliteHandleRegistry()
+  isolateEmbeddedZeroWorkerArgs()
   const leakedHandles = sweepLeakedSqliteHandles()
   if (leakedHandles > 0) {
     console.warn(
@@ -253,8 +255,21 @@ export async function startZeroCacheEmbed(
     parent.emit('exit', code ?? 0)
   }) as never
 
+  // zero-cache's top-level runner parses process.argv synchronously before its
+  // first await. those arguments belong to the embedding host, so expose only
+  // the executable and script while that parse runs. nested workers are
+  // isolated by isolateEmbeddedZeroWorkerArgs() above.
+  const hostArgv = process.argv
+  process.argv = hostArgv.slice(0, 2)
+  let runWorkerResult: Promise<void>
+  try {
+    runWorkerResult = runWorkerFn(wrappedParent, env)
+  } finally {
+    process.argv = hostArgv
+  }
+
   // start runWorker (runs until killed)
-  runWorkerPromise = runWorkerFn(wrappedParent, env).catch((err) => {
+  runWorkerPromise = runWorkerResult.catch((err) => {
     if (!isReady) {
       throw err
     }
