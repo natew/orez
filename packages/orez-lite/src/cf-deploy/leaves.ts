@@ -3,6 +3,9 @@ import { join, relative } from 'path'
 
 import type { OnResolveArgs, PluginBuild } from 'esbuild'
 
+export const WORKERS_DEV_URL_PATTERN =
+  /https?:\/\/[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev\b/i
+
 export function isOrezLiteImporter(importer: string): boolean {
   const normalized = importer.replaceAll('\\', '/')
   return (
