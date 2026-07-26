@@ -71,8 +71,13 @@ fn failed_upstream_transaction_rolls_back_rows_log_and_cursor() {
                 watermark: 2,
                 table_name: "item".into(),
                 op: "INSERT".into(),
+                // a missing PRIMARY KEY column: still fatal, because without it
+                // there is no row identity to upsert. a missing NON-key column
+                // is no longer an error (see
+                // pre_alter_row_image_missing_added_column_applies_as_null), so
+                // using one here would have quietly stopped exercising rollback
+                // at all.
                 row_data: Some(row(json!({
-                    "id": "missing-full-image",
                     "label": "bad",
                     "rank": 1,
                     "done": false
@@ -306,4 +311,42 @@ fn transaction_larger_than_pull_cap_converges_without_loss_or_duplication() {
         .pull_as("fresh", "fresh-group", json!(null), None, "u1")
         .unwrap();
     assert_eq!(patch_ids(&fresh), expected);
+}
+
+
+// a full row image written before a column was added does not carry it. ALTER
+// TABLE ... ADD gives the live table the column as NULL but does not rewrite
+// stored change history, so a namespace whose cursor still points at pre-ALTER
+// history replays an image that can never satisfy the current schema. rejecting
+// it wedged the namespace permanently: the cursor could not advance past the row
+// that was rejecting it, so every pull returned the same 400 forever.
+#[test]
+fn pre_alter_row_image_missing_added_column_applies_as_null() {
+    let (mut db, tables) = setup();
+    let batch = UpstreamBatch {
+        watermark: 1,
+        changes: vec![UpstreamChange {
+            watermark: 1,
+            table_name: "item".into(),
+            op: "INSERT".into(),
+            // no "meta": the shape this row had before that column existed.
+            // meta is the fixture's only NULLABLE column, and that is the
+            // representative case — `ALTER TABLE ... ADD` cannot add a NOT NULL
+            // column without a default, so a column that appears later is one
+            // NULL is valid for. a NOT NULL column missing from an image is real
+            // corruption and the db still rejects it, which is what we want.
+            row_data: Some(row(json!({
+                "id": "pre-alter",
+                "label": "old image",
+                "rank": 1,
+                "done": false
+            }))),
+            old_data: None,
+        }],
+    };
+
+    db.transaction(|tx| apply_upstream(tx, &tables, &batch))
+        .expect("a pre-ALTER image must apply rather than wedge the namespace");
+    assert_eq!(count(&mut db, "item"), 1);
+    assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 1);
 }

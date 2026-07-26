@@ -189,11 +189,27 @@ fn upsert_row_into(
         .collect::<Vec<_>>();
     let mut params = Vec::with_capacity(columns.len());
     for (column, ty) in &spec.columns {
-        let value = row.get(column).ok_or_else(|| {
-            EngineError::bad_request(format!(
-                "upstream full row for {table} is missing column {column}"
-            ))
-        })?;
+        // a full row image written BEFORE a column was added does not carry it.
+        // `ALTER TABLE ... ADD` gives the live table that column as NULL but does
+        // not rewrite stored `_zero_changes.row_data`, so a namespace whose
+        // upstream cursor still points at pre-ALTER history replays an image
+        // that can never satisfy the current schema. rejecting it wedged the
+        // namespace permanently: the cursor cannot advance past the row that is
+        // rejecting it.
+        //
+        // absent therefore means NULL for a non-key column, which is exactly what
+        // the ALTER did to the live table. a missing PRIMARY KEY column stays
+        // fatal — without it there is no row identity to upsert, so that is real
+        // corruption rather than an older shape.
+        let value = match row.get(column) {
+            Some(value) => value,
+            None if !spec.primary_key.contains(column) => &Value::Null,
+            None => {
+                return Err(EngineError::bad_request(format!(
+                    "upstream full row for {table} is missing key column {column}"
+                )))
+            }
+        };
         params.push(sql_value(*ty, value)?);
     }
     let quoted = columns
