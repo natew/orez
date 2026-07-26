@@ -281,6 +281,29 @@ describe('ZeroDO transactional CDC integration', () => {
     ).toEqual(['id', 'body'])
   })
 
+  it('does not rewrite identical application table registrations after a cold start', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY, body TEXT)')
+
+    const initial = await zero.applicationSqlSession('application-register-initial')
+    await initial.begin()
+    await initial.registerTables([{ table: 'item', publicTable: 'public.item' }])
+    await initial.commit()
+
+    // a new CDC instance has persisted registrations but no verified-table
+    // cache, matching a durable object cold start.
+    zero.cdc = new TransactionalCdc(sql)
+    const before = Number(sql.exec('SELECT total_changes() AS value').one()?.value)
+
+    const repeated = await zero.applicationSqlSession('application-register-repeated')
+    await repeated.begin()
+    await repeated.registerTables([{ table: 'item', publicTable: 'public.item' }])
+    await repeated.commit()
+
+    const after = Number(sql.exec('SELECT total_changes() AS value').one()?.value)
+    expect(after - before).toBe(0)
+  })
+
   it('commits a read-only application session while the write circuit is tripped', async () => {
     const { sql, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY)')
