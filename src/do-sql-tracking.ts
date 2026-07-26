@@ -130,6 +130,20 @@ export class RollingRowWriteBudget {
     return this.#trip
   }
 
+  /** Trip immediately for an operator-requested, non-destructive write stop. */
+  forceTrip(): RowWriteBudgetStatus {
+    if (this.#trip === null) {
+      this.#prune(this.#now())
+      this.#trip = {
+        at: this.#now(),
+        windowRows: this.#billableRows,
+        budget: this.#budgetRows,
+        windowMs: this.#windowMs,
+      }
+    }
+    return this.status()
+  }
+
   assertOpen(): void {
     const trip = this.#trip
     if (trip === null) return
@@ -223,31 +237,42 @@ const SQL_WITH_RE = /(?:^|;)\s*with\b/i
 const SQL_WITH_MUTATION_RE = /\b(?:insert|update|delete|replace)\b/i
 
 function sqlWithoutLeadingTrivia(sql: unknown): string {
-  return String(sql ?? '').replace(
-    /(^|;)\s*(?:(?:--[^\n]*(?:\n|$))|(?:\/\*[\s\S]*?\*\/))\s*/g,
-    '$1'
-  )
+  const text = String(sql ?? '')
+  if (!text.includes('--') && !text.includes('/*')) return text
+  return text.replace(/(^|;)\s*(?:(?:--[^\n]*(?:\n|$))|(?:\/\*[\s\S]*?\*\/))\s*/g, '$1')
 }
 
-/** Conservative SQL classifier used to block writes before execution. */
-export function isSqlMutation(sql: unknown): boolean {
+export interface SqlClassification {
+  mutation: boolean
+  rowMutation: boolean
+}
+
+/** Classify a statement once for the write gate, CDC, and logical accounting. */
+export function classifySql(sql: unknown): SqlClassification {
   // SqlStorage accepts comments before a statement. Remove only trivia at the
   // beginning (and after statement separators) so a comment cannot bypass the
   // pre-execution gate on a sticky circuit.
   const text = sqlWithoutLeadingTrivia(sql)
-  return (
-    SQL_MUTATION_RE.test(text) ||
-    (SQL_WITH_RE.test(text) && SQL_WITH_MUTATION_RE.test(text))
-  )
+  const withMutation = SQL_WITH_RE.test(text) && SQL_WITH_MUTATION_RE.test(text)
+  return {
+    mutation: SQL_MUTATION_RE.test(text) || withMutation,
+    rowMutation: SQL_ROW_MUTATION_RE.test(text) || withMutation,
+  }
+}
+
+/** Conservative SQL classifier used to block writes before execution. */
+export function isSqlMutation(sql: unknown): boolean {
+  return classifySql(sql).mutation
 }
 
 /** Row-level DML classifier used to decide when a CDC drain must be atomic. */
 export function isSqlRowMutation(sql: unknown): boolean {
-  const text = sqlWithoutLeadingTrivia(sql)
-  return (
-    SQL_ROW_MUTATION_RE.test(text) ||
-    (SQL_WITH_RE.test(text) && SQL_WITH_MUTATION_RE.test(text))
-  )
+  return classifySql(sql).rowMutation
+}
+
+/** Normalize Zero's optional PostgreSQL-style public schema prefix. */
+export function stripPublicPrefix(tableName: string): string {
+  return tableName.startsWith('public.') ? tableName.slice('public.'.length) : tableName
 }
 
 type SqlCursorLike = {

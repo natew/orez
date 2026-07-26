@@ -48,6 +48,12 @@ export function buildMigrationModuleSource(
     return `export const SCHEMA_VERSION = ${JSON.stringify(parts.schemaVersion)}
 export async function ${runCloudflareMigrations}() {}
 export { ${runCloudflareMigrations} as runCloudflareMigrations }
+export const orezAppSchema = {
+  version: SCHEMA_VERSION,
+  schema: { tables: {}, relationships: {} },
+  publicTables: [],
+  migrate: ${runCloudflareMigrations},
+}
 `
   }
 
@@ -69,13 +75,28 @@ function quoteIdentifier(value) {
 function schemaMetadataStatements() {
   return Object.values(schema.tables || {})
     .filter((table) => table && typeof table.name === 'string')
-    .map((table) => ({
-      sql: 'INSERT OR REPLACE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
-      params: [
-        table.name,
-        JSON.stringify({ columns: table.columns, primaryKey: table.primaryKey }),
-      ],
-    }))
+    .map((table) => {
+      const publicName = table.name.startsWith('public.')
+        ? table.name
+        : 'public.' + table.name
+      const registration = resolvedPublicTables.find(
+        (candidate) => candidate.publicTable === publicName,
+      )
+      return {
+        sql: 'INSERT OR REPLACE INTO _zero_schema_tables (name, schema_json) VALUES (?, ?)',
+        params: [
+          table.name.replace(/^public\\./, ''),
+          JSON.stringify({
+            columns: table.columns,
+            primaryKey: table.primaryKey,
+            physicalName:
+              (registration && registration.table) ||
+              table.serverName ||
+              table.name.replace(/^public\\./, ''),
+          }),
+        ],
+      }
+    })
 }
 
 function publicTables() {
@@ -87,6 +108,8 @@ function publicTables() {
       return { table: publicTable.replace(/^public\\./, ''), publicTable }
     })
 }
+
+const resolvedPublicTables = publicTables()
 
 async function shouldSkipStatement(tx, statement) {
   if (statement.skipIfTableMissing) {
@@ -695,8 +718,8 @@ export async function ${runCloudflareMigrations}({
     client = createClient(instance)
   }
   if (registrationOnly) {
-    await client.registerTables(publicTables())
-    return { tables: publicTables().map((table) => table.publicTable) }
+    await client.registerTables(resolvedPublicTables)
+    return { tables: resolvedPublicTables.map((table) => table.publicTable) }
   }
   // the statement loop labels its own failures; acquiring the session and
   // committing sit OUTSIDE every try/catch in applyNativeSchema, so a Durable
@@ -725,12 +748,18 @@ export async function ${runCloudflareMigrations}({
     )
   }
   return {
-    tables: publicTables().map((table) => table.publicTable),
+    tables: resolvedPublicTables.map((table) => table.publicTable),
     ...(schemaOnly ? { schemaOnly: true } : null),
   }
 }
 
 export { ${runCloudflareMigrations} as runCloudflareMigrations }
+export const orezAppSchema = {
+  version: SCHEMA_VERSION,
+  schema,
+  publicTables: resolvedPublicTables,
+  migrate: ${runCloudflareMigrations},
+}
 `
   }
 

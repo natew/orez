@@ -23,25 +23,29 @@ forking Zero's query or mutation API. See the
 
 ## Cloudflare
 
-`orez/cloudflare` is the public Orez Lite surface for Cloudflare: the Rust sync
-host, the checked-in worker runtime, migration builders, bundling, wrangler
-configuration, pruning, and readiness checks. It does not generate or patch
-worker source. Consumers provide deployment configuration to the bundler:
+`orez/cloudflare` is the workerd runtime. A complete data worker is one factory
+call; the generated descriptor carries the real Zero schema, migration, and
+publication metadata, so applications never list tables or columns again:
 
 ```ts
-import { bundleCloudflareLiteAppWorker, defineCloudflareConfig } from 'orez/cloudflare'
+import { createOrezDataWorker } from 'orez/cloudflare'
+import { orezAppSchema } from 'orez:cloudflare-migrations'
 
-const config = defineCloudflareConfig('example', {
-  compiledWasmModules: ['example-wasm/module.wasm'],
+const orez = createOrezDataWorker({
+  name: 'example',
+  schema: orezAppSchema,
 })
 
-await bundleCloudflareLiteAppWorker(config, {
-  workerDir,
-  entryPoint: new URL('./cloudflare-worker.ts', import.meta.url).pathname,
-  outfile,
-  writeMigrationModule,
-})
+export const { ZeroSqlDO, ZeroDO } = orez
+export default orez
 ```
+
+Orez owns namespace routing, schema readiness and coalescing, change-feed
+projection, write budgets, and optional streaming backups. Applications add
+only product routes, telemetry, cron work, and namespace inventory.
+
+Node-side migration, bundling, Wrangler configuration, pruning, and readiness
+helpers live at `orez/cloudflare/build`.
 
 Cloudflare query compilation is available at
 `orez/cloudflare/query-compiler`. Applications only depend on `orez`; the

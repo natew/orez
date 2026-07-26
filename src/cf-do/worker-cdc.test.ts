@@ -2,7 +2,6 @@
 import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
-import { installZeroSqlWriteCircuitBreaker } from '../worker/zero-sql-write-circuit.js'
 import { TransactionalCdc } from './cdc.js'
 import { DurableWatermarkState } from './watermark.js'
 
@@ -307,19 +306,16 @@ describe('ZeroDO transactional CDC integration', () => {
   it('commits a read-only application session while the write circuit is tripped', async () => {
     const { sql, zero } = await createWorkerCore()
     sql.exec('CREATE TABLE item (id TEXT PRIMARY KEY)')
-    installZeroSqlWriteCircuitBreaker(sql, {
-      hardRowsPerWindow: 0,
-      rowsPerWindow: 0,
-    })
-    expect(() => sql.exec("INSERT INTO item VALUES ('visible')")).toThrow(
-      /circuit breaker tripped/
-    )
+    zero.writeBudget = {
+      assertOpen() {
+        throw new Error('row write budget exceeded')
+      },
+      recordLogical() {},
+    }
 
     const session = await zero.applicationSqlSession('application-read-only')
     await session.begin()
-    await expect(session.query('SELECT id FROM item')).resolves.toEqual([
-      { id: 'visible' },
-    ])
+    await expect(session.query('SELECT id FROM item')).resolves.toEqual([])
     await expect(session.commit()).resolves.toBeUndefined()
   })
 

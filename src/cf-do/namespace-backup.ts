@@ -45,6 +45,8 @@ export interface NamespaceRestoreSummary {
 
 export interface NamespaceBackupOptions<Env> {
   format: string
+  /** Older on-disk formats accepted for restore but never emitted. */
+  acceptedFormats?: readonly string[]
   markerTable: string
   files(env: Env): NamespaceBackupBucket
   query(
@@ -143,6 +145,7 @@ export function createNamespaceBackupManager<Env>(
   const runBudgetMs = options.runBudgetMs ?? 10 * 60 * 1000
   const logPrefix = options.logPrefix ?? '[orez]'
   const excludedTables = new Set(options.excludedTables ?? [])
+  const acceptedFormats = new Set([options.format, ...(options.acceptedFormats ?? [])])
   const backupPrefix =
     options.prefix ?? ((namespace: string) => `backups/${namespace.replace(':', '/')}/`)
 
@@ -152,6 +155,7 @@ export function createNamespaceBackupManager<Env>(
       table.startsWith('sqlite_') ||
       table.startsWith('_cf_') ||
       table.startsWith('_orez_tx_') ||
+      /^[A-Za-z0-9_]+_0\.(?:clients|mutations)$/.test(table) ||
       excludedTables.has(table) ||
       REPLICATION_BOOKKEEPING_TABLES.has(table)
     )
@@ -187,7 +191,42 @@ export function createNamespaceBackupManager<Env>(
       "SELECT name, sql, type, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND sql IS NOT NULL ORDER BY name",
       []
     )
-    const tables = master.filter((row) => row.type === 'table' && !isExcluded(row.name))
+    const unorderedTables = master.filter(
+      (row) => row.type === 'table' && !isExcluded(row.name)
+    )
+    const tableNames = new Set(unorderedTables.map((row) => String(row.name)))
+    const dependencies = new Map<string, string[]>()
+    for (const table of unorderedTables) {
+      const name = String(table.name)
+      const foreignKeys = await options.query(
+        env,
+        namespace,
+        `PRAGMA foreign_key_list("${quoteIdentifier(name)}")`,
+        []
+      )
+      dependencies.set(
+        name,
+        foreignKeys
+          .map((foreignKey) => String(foreignKey.table))
+          .filter((dependency) => dependency !== name && tableNames.has(dependency))
+      )
+    }
+    const orderedNames: string[] = []
+    const ordered = new Set<string>()
+    const visiting = new Set<string>()
+    const visit = (name: string) => {
+      if (ordered.has(name) || visiting.has(name)) return
+      visiting.add(name)
+      for (const dependency of dependencies.get(name) ?? []) visit(dependency)
+      visiting.delete(name)
+      ordered.add(name)
+      orderedNames.push(name)
+    }
+    for (const table of unorderedTables) visit(String(table.name))
+    const tableByName = new Map(
+      unorderedTables.map((table) => [String(table.name), table])
+    )
+    const tables = orderedNames.map((name) => tableByName.get(name)!)
     const indexes = master.filter(
       (row) => row.type === 'index' && !isExcluded(row.name) && !isExcluded(row.tbl_name)
     )
@@ -238,6 +277,7 @@ export function createNamespaceBackupManager<Env>(
         ns: namespace,
         exportedAt,
         marker,
+        orderedTables: true,
       })
       for (const table of tables) {
         const name = String(table.name)
@@ -314,8 +354,65 @@ export function createNamespaceBackupManager<Env>(
     namespace: string,
     key: string
   ): Promise<NamespaceRestoreSummary> => {
-    const object = await options.files(env).get(key)
-    if (!object?.body) throw new Error(`backup object not found: ${key}`)
+    const files = options.files(env)
+    const validationObject = await files.get(key)
+    if (!validationObject?.body) throw new Error(`backup object not found: ${key}`)
+
+    type TableEntry = {
+      name: string
+      sql: string
+      indexes: string[]
+    }
+    let validatedHeader:
+      | { ns?: unknown; format?: unknown; orderedTables?: unknown }
+      | undefined
+    let validatedFooter: { rows?: unknown } | undefined
+    let validatedRows = 0
+    const tableEntries: TableEntry[] = []
+    const seenTables = new Set<string>()
+    for await (const line of ndjsonLines(validationObject.body)) {
+      const entry = JSON.parse(line) as Record<string, any>
+      if (entry.kind === 'header') {
+        if (validatedHeader) throw new Error('backup contains multiple headers')
+        if (!acceptedFormats.has(String(entry.format))) {
+          throw new Error(`unsupported backup format: ${entry.format}`)
+        }
+        validatedHeader = entry
+      } else if (entry.kind === 'table') {
+        const name = String(entry.name ?? '')
+        if (!name || seenTables.has(name)) {
+          throw new Error(`invalid or duplicate backup table: ${name}`)
+        }
+        seenTables.add(name)
+        tableEntries.push({
+          name,
+          sql: String(entry.sql ?? ''),
+          indexes: Array.isArray(entry.indexes)
+            ? entry.indexes.map((sql: unknown) => String(sql))
+            : [],
+        })
+      } else if (entry.kind === 'rows') {
+        if (!Array.isArray(entry.rows) || !seenTables.has(String(entry.table))) {
+          throw new Error('invalid backup rows entry')
+        }
+        validatedRows += entry.rows.length
+      } else if (entry.kind === 'footer') {
+        validatedFooter = entry
+      } else {
+        throw new Error(`unsupported backup entry kind: ${String(entry.kind)}`)
+      }
+    }
+    if (!validatedHeader || !validatedFooter) {
+      throw new Error(`backup is truncated or not a supported dump`)
+    }
+    if (Number(validatedFooter.rows) !== validatedRows) {
+      throw new Error(
+        `backup row count mismatch: footer says ${validatedFooter.rows}, read ${validatedRows}`
+      )
+    }
+
+    const object = await files.get(key)
+    if (!object?.body) throw new Error(`backup object disappeared during restore: ${key}`)
 
     for (const name of REPLICATION_BOOKKEEPING_TABLES) {
       try {
@@ -325,95 +422,129 @@ export function createNamespaceBackupManager<Env>(
       }
     }
 
-    let header: { ns?: unknown } | undefined
-    let footer: { rows?: unknown } | undefined
+    const header = validatedHeader
+    const footer = validatedFooter
     let rowTotal = 0
     let skippedRows = 0
-    const tableNames: string[] = []
+    const tableNames = tableEntries
+      .map((entry) => entry.name)
+      .filter((name) => !isExcluded(name))
     const bufferedRows = new Map<string, Record<string, unknown>[]>()
+    const insertSql = new Map<string, string>()
+
+    const statementsForRows = (
+      name: string,
+      rows: readonly Record<string, unknown>[]
+    ): NamespaceBackupStatement[] =>
+      rows.map((row) => {
+        const columns = Object.keys(row)
+        const signature = `${name}\0${columns.join('\0')}`
+        let sql = insertSql.get(signature)
+        if (!sql) {
+          sql =
+            `INSERT INTO "${quoteIdentifier(name)}" (` +
+            columns.map((column) => `"${quoteIdentifier(column)}"`).join(', ') +
+            `) VALUES (${columns.map(() => '?').join(', ')})`
+          insertSql.set(signature, sql)
+        }
+        return {
+          sql,
+          params: columns.map((column) => row[column]),
+        }
+      })
+
+    const insertRows = async (name: string, rows: readonly Record<string, unknown>[]) => {
+      for (let offset = 0; offset < rows.length; offset += 400) {
+        await options.batch(
+          env,
+          namespace,
+          statementsForRows(name, rows.slice(offset, offset + 400))
+        )
+      }
+      rowTotal += rows.length
+    }
+
+    for (let offset = 0; offset < tableNames.length; offset += 400) {
+      await options.batch(
+        env,
+        namespace,
+        tableNames
+          .slice()
+          .reverse()
+          .slice(offset, offset + 400)
+          .map((name) => ({
+            sql: `DROP TABLE IF EXISTS "${quoteIdentifier(name)}"`,
+          }))
+      )
+    }
+    const includedEntries = tableEntries.filter((entry) => !isExcluded(entry.name))
+    for (let offset = 0; offset < includedEntries.length; offset += 400) {
+      await options.batch(
+        env,
+        namespace,
+        includedEntries.slice(offset, offset + 400).map((entry) => ({
+          sql: entry.sql,
+        }))
+      )
+    }
 
     for await (const line of ndjsonLines(object.body)) {
       const entry = JSON.parse(line) as Record<string, any>
       if (entry.kind === 'header') {
-        if (entry.format !== options.format) {
-          throw new Error(`unsupported backup format: ${entry.format}`)
-        }
-        header = entry
       } else if (entry.kind === 'table') {
-        if (isExcluded(entry.name)) continue
-        const name = String(entry.name)
-        tableNames.push(name)
-        await options.batch(env, namespace, [
-          { sql: `DROP TABLE IF EXISTS "${quoteIdentifier(name)}"` },
-          { sql: String(entry.sql) },
-          ...(Array.isArray(entry.indexes) ? entry.indexes : []).map((sql: unknown) => ({
-            sql: String(sql),
-          })),
-        ])
       } else if (entry.kind === 'rows') {
-        if (!Array.isArray(entry.rows)) {
-          throw new Error('invalid backup rows entry')
-        }
         if (isExcluded(entry.table)) {
           skippedRows += entry.rows.length
           continue
         }
         const name = String(entry.table)
-        const rows = bufferedRows.get(name) ?? []
-        rows.push(...entry.rows)
-        bufferedRows.set(name, rows)
+        if (validatedHeader.orderedTables === true) {
+          await insertRows(name, entry.rows)
+        } else {
+          const rows = bufferedRows.get(name) ?? []
+          for (const row of entry.rows) rows.push(row)
+          bufferedRows.set(name, rows)
+        }
       } else if (entry.kind === 'footer') {
-        footer = entry
       }
     }
-    if (!header || !footer) {
-      throw new Error(`backup is truncated or not a ${options.format} dump`)
-    }
 
-    const dependencies = new Map<string, string[]>()
-    for (const name of tableNames) {
-      const foreignKeys = await options.query(
-        env,
-        namespace,
-        `PRAGMA foreign_key_list("${quoteIdentifier(name)}")`,
-        []
-      )
-      dependencies.set(
-        name,
-        foreignKeys
-          .map((foreignKey) => String(foreignKey.table))
-          .filter((table) => table !== name && tableNames.includes(table))
-      )
-    }
-    const ordered: string[] = []
-    const done = new Set<string>()
-    const visiting = new Set<string>()
-    const visit = (name: string) => {
-      if (done.has(name) || visiting.has(name)) return
-      visiting.add(name)
-      for (const dependency of dependencies.get(name) ?? []) visit(dependency)
-      visiting.delete(name)
-      done.add(name)
-      ordered.push(name)
-    }
-    for (const name of tableNames) visit(name)
-
-    for (const name of ordered) {
-      const rows = bufferedRows.get(name) ?? []
-      for (let offset = 0; offset < rows.length; offset += 400) {
-        const statements = rows.slice(offset, offset + 400).map((row) => {
-          const columns = Object.keys(row)
-          return {
-            sql:
-              `INSERT INTO "${quoteIdentifier(name)}" (` +
-              columns.map((column) => `"${quoteIdentifier(column)}"`).join(', ') +
-              `) VALUES (${columns.map(() => '?').join(', ')})`,
-            params: columns.map((column) => row[column]),
-          }
-        })
-        await options.batch(env, namespace, statements)
+    if (validatedHeader.orderedTables !== true) {
+      const dependencies = new Map<string, string[]>()
+      for (const name of tableNames) {
+        const foreignKeys = await options.query(
+          env,
+          namespace,
+          `PRAGMA foreign_key_list("${quoteIdentifier(name)}")`,
+          []
+        )
+        dependencies.set(
+          name,
+          foreignKeys
+            .map((foreignKey) => String(foreignKey.table))
+            .filter((table) => table !== name && tableNames.includes(table))
+        )
       }
-      rowTotal += rows.length
+      const ordered: string[] = []
+      const done = new Set<string>()
+      const visiting = new Set<string>()
+      const visit = (name: string) => {
+        if (done.has(name) || visiting.has(name)) return
+        visiting.add(name)
+        for (const dependency of dependencies.get(name) ?? []) visit(dependency)
+        visiting.delete(name)
+        done.add(name)
+        ordered.push(name)
+      }
+      for (const name of tableNames) visit(name)
+      for (const name of ordered) await insertRows(name, bufferedRows.get(name) ?? [])
+    }
+
+    const indexStatements = includedEntries.flatMap((entry) =>
+      entry.indexes.map((sql) => ({ sql }))
+    )
+    for (let offset = 0; offset < indexStatements.length; offset += 400) {
+      await options.batch(env, namespace, indexStatements.slice(offset, offset + 400))
     }
 
     if (Number(footer.rows) !== rowTotal + skippedRows) {

@@ -32,9 +32,17 @@ function escapeForRegExp(value: string): string {
 }
 
 function namespacePattern(scopes: readonly string[]): RegExp {
-  const group = scopes.map(escapeForRegExp).join('|')
-  return new RegExp(`^(?:${group})-[A-Za-z0-9_-]{1,64}$`)
+  const key = scopes.join('\0')
+  let pattern = namespacePatterns.get(key)
+  if (!pattern) {
+    const group = scopes.map(escapeForRegExp).join('|')
+    pattern = new RegExp(`^(?:${group})-[A-Za-z0-9_-]{1,64}$`)
+    namespacePatterns.set(key, pattern)
+  }
+  return pattern
 }
+
+const namespacePatterns = new Map<string, RegExp>()
 
 /**
  * true when `ns` is a structurally valid tenant namespace: a configured scope
@@ -60,9 +68,11 @@ export function doInstanceName(
   opts: NamespaceRoutingOptions = {}
 ): string | null {
   if (!ns) return 'singleton'
+  if (ns === 'singleton') return 'singleton'
   if ((opts.controlPlaneNamespaces ?? []).includes(ns)) return 'singleton'
-  if (!isValidNamespace(ns, opts)) return null
-  return 'ns:' + ns
+  const raw = ns.startsWith('ns:') ? ns.slice(3) : ns
+  if (!isValidNamespace(raw, opts)) return null
+  return 'ns:' + raw
 }
 
 interface HeaderReader {

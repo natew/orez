@@ -67,9 +67,9 @@
       "types": "./dist/cloudflare.d.ts",
       "import": "./dist/cloudflare.js"
     },
-    "./cloudflare/runtime": {
-      "types": "./dist/cloudflare-runtime.d.ts",
-      "import": "./dist/cloudflare-runtime.js"
+    "./cloudflare/build": {
+      "types": "./dist/cloudflare-build.d.ts",
+      "import": "./dist/cloudflare-build.js"
     },
     "./cloudflare/sync": {
       "types": "./dist/cloudflare-sync.d.ts",

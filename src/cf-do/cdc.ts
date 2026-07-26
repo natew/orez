@@ -1,3 +1,5 @@
+import { stripPublicPrefix } from '../do-sql-tracking.js'
+
 import type { DurableSqlStorage } from './watermark.js'
 
 /** Bump whenever the generated trigger bodies or buffer shape change. */
@@ -470,6 +472,16 @@ function unquoteSqlIdentifier(identifier: string): string {
   return identifier
 }
 
+const SCHEMA_CHANGE_GATE_RE = /\b(?:ALTER|CREATE|DROP)\b/i
+const SQL_IDENTIFIER = '("(?:[^"]|"")*"|`(?:[^`]|``)*`|\\[[^\\]]+\\]|[^\\s;(]+)'
+const SCHEMA_CHANGE_PATTERNS = [
+  new RegExp(`\\bALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${SQL_IDENTIFIER}`, 'gi'),
+  new RegExp(
+    `\\b(?:CREATE|DROP)\\s+TABLE\\s+(?:IF\\s+(?:NOT\\s+)?EXISTS\\s+)?${SQL_IDENTIFIER}`,
+    'gi'
+  ),
+] as const
+
 /**
  * Return physical tables whose SQLite schema may be changed by this statement.
  * The DO compiler emits one SQLite DDL statement at a time and quotes physical
@@ -477,16 +489,9 @@ function unquoteSqlIdentifier(identifier: string): string {
  * callers and keeps CDC independent of the compiler.
  */
 export function schemaChangeTargets(sql: string): string[] {
-  const identifier = '("(?:[^"]|"")*"|`(?:[^`]|``)*`|\\[[^\\]]+\\]|[^\\s;(]+)'
-  const patterns = [
-    new RegExp(`\\bALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${identifier}`, 'gi'),
-    new RegExp(
-      `\\b(?:CREATE|DROP)\\s+TABLE\\s+(?:IF\\s+(?:NOT\\s+)?EXISTS\\s+)?${identifier}`,
-      'gi'
-    ),
-  ]
+  if (!SCHEMA_CHANGE_GATE_RE.test(sql)) return []
   const targets = new Set<string>()
-  for (const pattern of patterns) {
+  for (const pattern of SCHEMA_CHANGE_PATTERNS) {
     for (const match of sql.matchAll(pattern)) {
       const name = match[1]
       if (name) targets.add(unquoteSqlIdentifier(name))
@@ -895,7 +900,7 @@ export class TransactionalCdc {
       const physicalTableName =
         [...this.#registrations].find(
           ([, registration]) => registration.tableName === tableName
-        )?.[0] ?? tableName.replace(/^public\./, '')
+        )?.[0] ?? stripPublicPrefix(tableName)
       const registration = this.#registrations.get(physicalTableName)
       const rowJournal = parseJournalRecord(row.row_json)
       const oldJournal = parseJournalRecord(row.old_json)

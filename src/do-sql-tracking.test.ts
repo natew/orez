@@ -72,6 +72,25 @@ describe('RollingRowWriteBudget', () => {
     expect(() => meter.record(1)).not.toThrow()
   })
 
+  it('supports an operator force-trip without manufacturing row usage', () => {
+    let now = 5_000
+    const meter = new RollingRowWriteBudget({
+      budgetRows: 10,
+      windowMs: 1_000,
+      now: () => now,
+    })
+
+    meter.record(3)
+    expect(meter.forceTrip()).toMatchObject({
+      tripped: true,
+      trippedAt: 5_000,
+      trippedWindowRows: 3,
+      trippedBudget: 10,
+    })
+    now += 2_000
+    expect(() => meter.record(1)).toThrow('row write budget exceeded: 3/10 rows')
+  })
+
   it('round-trips a persisted trip so a restored object still reports its count', () => {
     let now = 10
     const tripped = new RollingRowWriteBudget({

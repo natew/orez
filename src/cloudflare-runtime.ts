@@ -1,8 +1,8 @@
 /**
  * Runtime-only Orez Lite APIs for modules evaluated by workerd.
  *
- * Deploy tooling lives at `orez/cloudflare` so Node-based build scripts never
- * evaluate `cloudflare:workers`.
+ * Deploy tooling lives at `orez/cloudflare/build` so Node-based build scripts
+ * never evaluate `cloudflare:workers`.
  */
 export { createApplicationSqlClient, ZeroDO } from './cf-do/worker.js'
 export type {
@@ -23,12 +23,26 @@ export {
   isValidNamespace,
 } from './worker/cf-do-shim.js'
 export type { NamespaceRoutingOptions } from './worker/cf-do-shim.js'
-export { installZeroSqlWriteCircuitBreaker } from './worker/zero-sql-write-circuit.js'
+export {
+  canonicalOrezNamespace,
+  createOrezDataWorker,
+  projectOrezFeedBody,
+  resolveOrezDataRequest,
+} from './cf-do/lite-data-worker.js'
 export type {
-  DurableSqlCursor,
-  DurableSqlStorage,
-  WriteCircuitOptions,
-} from './worker/zero-sql-write-circuit.js'
+  OrezAppSchemaDescriptor,
+  OrezBackupConfig,
+  OrezDataWorkerEnv,
+  OrezDataWorkerOptions,
+  OrezDataWorkerResult,
+  OrezExecutionContext,
+  OrezErrorContext,
+  OrezRequestContext,
+  OrezResolvedDataRequest,
+  OrezScheduledEvent,
+  OrezSchemaMigrationOptions,
+  OrezSchemaStatus,
+} from './cf-do/lite-data-worker.js'
 export { createNamespaceBackupManager } from './cf-do/namespace-backup.js'
 export type {
   NamespaceBackupBucket,

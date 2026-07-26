@@ -7,9 +7,11 @@ import {
 } from 'orez-sync-cf-host/transaction-query'
 
 import {
+  classifySql,
   isSqlMutation,
   isSqlRowMutation,
   RollingRowWriteBudget,
+  stripPublicPrefix,
   trackSqlCursorRowsWritten,
   trackedChangeRow,
   WriteBudgetExceededError,
@@ -77,7 +79,8 @@ interface Env {
 }
 interface SchemaTable {
   primaryKey: string[]
-  columns: Record<string, { type: string; optional?: boolean }>
+  physicalName?: string
+  columns: Record<string, { type: string; optional?: boolean; serverName?: string }>
 }
 interface ClientSchema {
   tables: Record<string, SchemaTable>
@@ -341,7 +344,7 @@ export class ZeroDO extends DurableObject {
   private writeBudgetTripStatement: SqlWriteMeasurement | undefined
   private pendingChangesSchemaReady = false
   private activeApplicationSqlSession: ApplicationSqlSessionTarget | null = null
-  protected applicationSqlDidCommit(_changed: boolean): void {}
+  protected applicationSqlDidCommit(_changed: boolean, _mutated: boolean): void {}
 
   private recordWriteBudgetRows(rows: number, statement?: SqlWriteMeasurement): void {
     const wasTripped = this.writeBudget.status().tripped
@@ -516,6 +519,8 @@ export class ZeroDO extends DurableObject {
         ...this.writeBudget.status(),
         trippedStatement: this.writeBudgetTripStatement,
       })
+    if (url.pathname === '/_orez/write-budget/trip' && request.method === 'POST')
+      return this.handleWriteBudgetTrip(request)
     if (url.pathname === '/_orez/write-budget/reopen' && request.method === 'POST')
       return this.handleWriteBudgetReopen(request)
     if (
@@ -548,10 +553,7 @@ export class ZeroDO extends DurableObject {
   }
 
   private async handleWriteBudgetReopen(request: Request): Promise<Response> {
-    const supplied =
-      request.headers.get('x-orez-admin-token') ??
-      request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
-    if (!this.writeBudgetAdminToken || supplied !== this.writeBudgetAdminToken)
+    if (!this.hasWriteBudgetAdminToken(request))
       return Response.json({ error: 'forbidden' }, { status: 403 })
     await this.ctx.storage.delete(WRITE_BUDGET_TRIPPED_KEY)
     this.writeBudgetTripStatement = undefined
@@ -560,6 +562,39 @@ export class ZeroDO extends DurableObject {
       JSON.stringify({ event: 'orez_do_write_budget_reopened', reopenedAt: Date.now() })
     )
     return Response.json({ ok: true, enabled: !this.writeBudgetDisabled, ...status })
+  }
+
+  private async handleWriteBudgetTrip(request: Request): Promise<Response> {
+    if (!this.hasWriteBudgetAdminToken(request))
+      return Response.json({ error: 'forbidden' }, { status: 403 })
+    const status = this.writeBudget.forceTrip()
+    this.writeBudgetTripStatement = {
+      sql: 'operator force-trip',
+      rowsWritten: 0,
+    }
+    await this.ctx.storage.put(WRITE_BUDGET_TRIPPED_KEY, {
+      ...this.writeBudget.trip(),
+      statement: this.writeBudgetTripStatement,
+    } satisfies PersistedWriteBudgetTrip)
+    console.error(
+      JSON.stringify({
+        event: 'orez_do_write_budget_force_tripped',
+        trippedAt: Date.now(),
+      })
+    )
+    return Response.json({
+      ok: true,
+      enabled: !this.writeBudgetDisabled,
+      ...status,
+      trippedStatement: this.writeBudgetTripStatement,
+    })
+  }
+
+  private hasWriteBudgetAdminToken(request: Request): boolean {
+    const supplied =
+      request.headers.get('x-orez-admin-token') ??
+      request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+    return Boolean(this.writeBudgetAdminToken && supplied === this.writeBudgetAdminToken)
   }
 
   // ── Zero sync protocol ──────────────────────────────────────────────────
@@ -1140,6 +1175,10 @@ export class ZeroDO extends DurableObject {
             )
           }
           this.tableSchemas.set(table, schema)
+          const physicalTable = schema.physicalName || table
+          const physicalPrimaryKey = schema.primaryKey.map(
+            (column) => schema.columns[column]?.serverName || column
+          )
 
           const cursor = url.searchParams.get('cursor')
           let cursorValues: unknown[] | null = null
@@ -1169,7 +1208,7 @@ export class ZeroDO extends DurableObject {
             }
           }
 
-          const primaryKey = schema.primaryKey.map(quoteIdent)
+          const primaryKey = physicalPrimaryKey.map(quoteIdent)
           const keyColumns =
             primaryKey.length === 1 ? primaryKey[0] : `(${primaryKey.join(', ')})`
           const keyParams =
@@ -1179,7 +1218,7 @@ export class ZeroDO extends DurableObject {
           // with more data without issuing an unbounded count or second read.
           const page = this.sql
             .exec(
-              `SELECT * FROM ${quoteIdent(table)}${where} ORDER BY ${primaryKey.join(', ')} LIMIT ?`,
+              `SELECT * FROM ${quoteIdent(physicalTable)}${where} ORDER BY ${primaryKey.join(', ')} LIMIT ?`,
               ...(cursorValues ?? []),
               limit + 1
             )
@@ -1189,7 +1228,7 @@ export class ZeroDO extends DurableObject {
           let nextCursor: string | null = null
           if (hasMore) {
             const last = rawRows[rawRows.length - 1]
-            const values = schema.primaryKey.map((column) => last[column])
+            const values = physicalPrimaryKey.map((column) => last[column])
             if (
               values.some(
                 (value) =>
@@ -1218,7 +1257,14 @@ export class ZeroDO extends DurableObject {
           .toArray()
           .map((row: any) => String(row.name))
         const tables: Record<string, Record<string, unknown>[]> = {}
-        for (const name of names) tables[name] = this.readAllRows(name)
+        for (const name of names) {
+          const schema = this.schemaForTable(name)
+          const physicalName = schema?.physicalName || name
+          tables[name] = this.sql
+            .exec(`SELECT * FROM ${quoteIdent(physicalName)}`)
+            .toArray()
+            .map((row: any) => this.normalizeRow(name, row))
+        }
         return Response.json({ watermark: this.watermark(), tables })
       })
     } catch (err: any) {
@@ -1528,7 +1574,7 @@ export class ZeroDO extends DurableObject {
     } finally {
       this.releaseApplicationSqlTurn(session)
     }
-    this.applicationSqlDidCommit(session.changed)
+    this.applicationSqlDidCommit(session.changed, session.mutated)
   }
 
   async [APPLICATION_SQL_ROLLBACK](session: ApplicationSqlSessionTarget): Promise<void> {
@@ -1701,14 +1747,14 @@ export class ZeroDO extends DurableObject {
     let snapshotsOwnStatement = false
     if (track && !capturesTrackedTable && trackedTransactionID) {
       const physicalTableName =
-        track.physicalTableName || track.tableName.replace(/^public\./, '')
+        track.physicalTableName || stripPublicPrefix(track.tableName)
       if (this.tableExists(physicalTableName)) {
         upgradeToTableSnapshot(this.sql, trackedTransactionID, physicalTableName)
       }
     }
     if (track && trackedTransactionID) {
       const physicalTableName =
-        track.physicalTableName || track.tableName.replace(/^public\./, '')
+        track.physicalTableName || stripPublicPrefix(track.tableName)
       snapshotsOwnStatement = snapshotSideEffectWriteTables(
         this.sql,
         trackedTransactionID,
@@ -1731,11 +1777,10 @@ export class ZeroDO extends DurableObject {
     this.cdc.finishSchemaChange(suspendedCdc)
     const columns = Array.isArray(cursor.columnNames) ? cursor.columnNames : []
     const rows = this.cursorRows(cursor, columns)
-    const rowMutation = isSqlRowMutation(sql)
+    const { mutation, rowMutation } = classifySql(sql)
     const changes = rowMutation
       ? Number(this.sql.exec('SELECT changes() AS changes').one()?.changes ?? 0)
       : 0
-    const mutation = isSqlMutation(sql)
     if (mutation) this.writeBudget.recordLogical(rows.length)
     if (mutation && !rowMutation) this.cdc.invalidateSchema()
     const captured = track || (this.cdc.active && rowMutation) ? this.cdc.drain() : []
@@ -1758,7 +1803,7 @@ export class ZeroDO extends DurableObject {
     // cannot round-trip a blob or an int64.
     if (track && !capturesTrackedTable) {
       const physicalTableName =
-        track.physicalTableName || track.tableName.replace(/^public\./, '')
+        track.physicalTableName || stripPublicPrefix(track.tableName)
       for (const row of rows) {
         const trackedRow = trackedChangeRow(row, track)
         const isDelete = track.operation === 'DELETE'
@@ -1809,7 +1854,7 @@ export class ZeroDO extends DurableObject {
 
   private appendDerivedTrackedChanges(track: SqlTrack, rows: Record<string, unknown>[]) {
     if (!rows.length) return
-    const table = track.tableName.replace(/^public\./, '')
+    const table = stripPublicPrefix(track.tableName)
     if (table !== 'message') return
 
     const channelIds = new Set<string>()
@@ -2213,7 +2258,7 @@ export class ZeroDO extends DurableObject {
   }
 
   private schemaForTable(tableName: string): SchemaTable | undefined {
-    const schemaTableName = tableName.replace(/^public\./, '')
+    const schemaTableName = stripPublicPrefix(tableName)
     const tableSchemas = (this.tableSchemas ??= new Map())
     const cached = tableSchemas.get(schemaTableName)
     if (cached) return cached
@@ -2300,7 +2345,12 @@ export class ZeroDO extends DurableObject {
 
   private storageColumnValue(tn: string, column: string, value: unknown): unknown {
     if (value === undefined || value === null) return null
-    const type = this.schemaForTable(tn)?.columns?.[column]?.type
+    const schema = this.schemaForTable(tn)
+    const type =
+      schema?.columns?.[column]?.type ??
+      Object.values(schema?.columns ?? {}).find(
+        (candidate) => candidate.serverName === column
+      )?.type
     if (type === 'boolean') return value ? 1 : 0
     if (type === 'json') return typeof value === 'string' ? value : JSON.stringify(value)
     if (type === 'number') return Number(value)
@@ -2315,7 +2365,11 @@ export class ZeroDO extends DurableObject {
     const schema = this.schemaForTable(tn)
     const normalized: Record<string, unknown> = {}
     for (const key of Object.keys(row)) {
-      const type = schema?.columns?.[key]?.type
+      const type =
+        schema?.columns?.[key]?.type ??
+        Object.values(schema?.columns ?? {}).find(
+          (candidate) => candidate.serverName === key
+        )?.type
       const value = row[key]
       if (value === null || value === undefined) {
         normalized[key] = null
