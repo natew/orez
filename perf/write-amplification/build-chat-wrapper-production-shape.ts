@@ -94,10 +94,9 @@ function chatRoot(): string {
 const chat = chatRoot()
 const chatImport = (path: string) => pathToFileURL(join(chat, path)).href
 const chatDeploy = await import(chatImport('src/deploy/cloudflareDoDeploy.ts'))
-const chatBundle = await import(chatImport('packages/orez-cf-deploy/src/bundle.ts'))
-const chatMigration = await import(chatImport('packages/orez-cf-deploy/src/migration.ts'))
-const chatLeaves = await import(chatImport('packages/orez-cf-deploy/src/leaves.ts'))
-const chatSources = await import(chatImport('packages/orez-cf-deploy/src/sources.ts'))
+const chatCfDeploy = await import(
+  pathToFileURL(Bun.resolveSync('orez/cf-deploy', chat)).href
+)
 
 const rawShim = String(chatDeploy.CLOUDFLARE_DO_SHIM_SOURCE)
 const instrumented = instrumentChatDataWorker(rawShim)
@@ -109,7 +108,7 @@ writeFileSync(fixtureSchemaPath, productionShapeZeroSchemaSource())
 
 const ddl = productionShapeDDL()
 const initSqlBatchStatements = await deployTimeSchemaBatchStatements(ddl)
-const zeroHttpShardSql = chatSources.zeroHttpShardDDL('chat')
+const zeroHttpShardSql = chatCfDeploy.zeroHttpShardDDL('chat')
 const zeroHttpShardBatchStatements =
   await deployTimeSchemaBatchStatements(zeroHttpShardSql)
 const schemaVersion = createHash('sha256')
@@ -123,7 +122,7 @@ const cfg = {
 }
 writeFileSync(
   join(generatedDir, 'orez-migrations.js'),
-  chatMigration.buildMigrationModuleSource(cfg, {
+  chatCfDeploy.buildMigrationModuleSource(cfg, {
     mode: 'full',
     schemaVersion,
     schemaImportSpecifier: './fixture-schema.js',
@@ -202,7 +201,7 @@ await build({
   target: 'es2022',
   conditions: ['workerd', 'worker', 'import'],
   mainFields: ['browser', 'module', 'main'],
-  external: ['cloudflare:*', ...chatLeaves.NODE_EXTERNALS],
+  external: ['cloudflare:*', ...chatCfDeploy.NODE_EXTERNALS],
   define: {
     ...getBrowserDefine(),
     __filename: JSON.stringify('chat-wrapper-bundle.js'),
@@ -211,7 +210,7 @@ await build({
   plugins: [
     wasmPlugin,
     localOrezPlugin,
-    chatBundle.orezCfAliasPlugin(
+    chatCfDeploy.orezCfAliasPlugin(
       cfg,
       aliases,
       generatedDir,

@@ -21,6 +21,32 @@ hosts. It replaces Zero's server side and speaks the Zero protocol to the real
 forking Zero's query or mutation API. See the
 [Orez Lite server documentation](docs/sync/README.md).
 
+## Cloudflare deploy integration
+
+`orez/cf-deploy` is the canonical deploy-time integration for One/Orez apps
+using the split app-worker and Durable Object data-worker architecture. It
+exports worker-shim generators, migration-module builders, wrangler
+normalization, bundle pruning, and readiness checks. Consumers provide their
+own token prefix and app-specific policy:
+
+```ts
+import {
+  buildRustSyncUserShimSource,
+  cfDeployConfig,
+} from 'orez/cf-deploy'
+
+const config = cfDeployConfig('example', {
+  compiledWasmModules: ['example-wasm/module.wasm'],
+})
+
+const source = buildRustSyncUserShimSource(config, {
+  feedTables: {},
+})
+```
+
+Individual modules are also exported, such as
+`orez/cf-deploy/bundle` and `orez/cf-deploy/nativeMigrations`.
+
 ## Requirements
 
 - **Bun** 1.0+ or **Node.js** 20+
