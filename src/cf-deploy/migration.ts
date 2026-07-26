@@ -526,13 +526,14 @@ async function applyNativeSchema(tx, instance) {
       // assertExpectedSchema, which reports the namespace loudly.
       if (/\\bPRIMARY KEY\\b|\\bUNIQUE\\b/i.test(definition)) continue
       if (/\\bNOT NULL\\b/i.test(definition) && /\\bREFERENCES\\b/i.test(definition)) continue
-      if (/\\bNOT NULL\\b/i.test(definition) && !/\\bDEFAULT\\b/i.test(definition)) {
-        // assertExpectedSchema compares name, type and NOT NULL but not
-        // defaults, so a zero default converges without a false mismatch.
-        definition += /\\b(?:INT|INTEGER|REAL|NUMERIC|BOOLEAN|FLOAT|DOUBLE|DECIMAL)\\b/i.test(definition)
-          ? ' DEFAULT 0'
-          : " DEFAULT ''"
-      }
+      // a NOT NULL column with no default is skipped rather than given a
+      // synthesised one. sqlite would accept ADD COLUMN ... NOT NULL DEFAULT '',
+      // and every existing row would silently take that placeholder — inventing
+      // data the migration author never wrote, on a table that already holds
+      // real rows. the honest outcome is the loud one: assertExpectedSchema
+      // names the column and the namespace reports instead of self-repairing.
+      // no column that wedged production is of this shape.
+      if (/\\bNOT NULL\\b/i.test(definition) && !/\\bDEFAULT\\b/i.test(definition)) continue
       console.warn(
         '[orez-migrations] converging ' + created[1] + '.' + column.name +
           ' declared by ' + baseId,

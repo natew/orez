@@ -694,7 +694,6 @@ describe('cf shim builders', () => {
                   primaryKeyOrder: 0,
                   sqlType: 'text',
                 },
-                { name: 'accountId', notNull: true, primaryKeyOrder: 0, sqlType: 'text' },
               ],
             },
           ],
@@ -771,7 +770,10 @@ describe('cf shim builders', () => {
         )
         expect(byName.get('submittedAt')).toEqual({ type: 'integer', notnull: 0 })
         expect(byName.get('visibility')).toEqual({ type: 'text', notnull: 1 })
-        expect(byName.get('accountId')).toEqual({ type: 'text', notnull: 1 })
+        // `accountId` is NOT NULL with no default. converging it would mean
+        // inventing a value for every existing row, so it is left alone and
+        // reported by the shape assert instead of silently backfilled.
+        expect(byName.has('accountId')).toBe(false)
         const indexes = db
           .prepare('PRAGMA index_list("communityListing")')
           .all() as Array<{
