@@ -55,6 +55,8 @@ runs:
 
     - name: Build release binary
       shell: bash
+      env:
+        RUSTUP_TOOLCHAIN: 1.94.0
       run: |
         if [ '${{ inputs.libc }}' = 'glibc' ]; then
           cargo zigbuild \
