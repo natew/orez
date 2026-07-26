@@ -59,26 +59,18 @@ initialization alone cannot explain the window.
 
 The forced-timeout run after the fix, including its retry, measured 1,265 source
 rows and 28,361 cache rows. It covers embed shutdown and restart on one durable
-replica. The wrapper profile below measures the remaining production boot
-behavior.
+replica. The historical wrapper profile below measured the remaining production
+boot behavior at the time of the incident.
 
-## Chat data-worker wrapper profile
+## Historical Chat data-worker wrapper profile
 
-`chat-wrapper-production-shape.ts` builds and instruments Chat's current
-`CLOUDFLARE_DO_SHIM_SOURCE`. It runs the real generated `ZeroSqlDO` and
+The retired wrapper harness instrumented Chat's generated `ZeroSqlDO` and
 `ZeroCacheDO` in local workerd, including Chat migrations, schema-tag reset,
 partial replica repair, poisoned change-log repair, retained change-streamer
-cleanup, NULL replica-rank repair, boot alarms, and retry backoff.
-
-Run it from an Orez checkout with a current Chat checkout at `~/chat`:
-
-```sh
-bun run perf:write-wrapper-profile
-```
-
-Set `OREZ_CHAT_PROFILE_REPO` to profile a different Chat checkout. The report
-records a SHA-256 hash of the generated Chat shim, so results remain tied to the
-exact wrapper source. The July run used source hash
+cleanup, NULL replica-rank repair, boot alarms, and retry backoff. Chat now uses
+the Rust sync host and keeps `ZeroCacheDO` only as a migration holder, so the
+JavaScript embed harness and its command were removed instead of continuing to
+measure a runtime production no longer uses. The July run used source hash
 `f33b3333e13571cf77b50f5315217152838df5f72c8f56997b73cca38f2b9089`.
 
 | Wrapper phase                                        | Source rows | Cache rows | Outcome                                     |
@@ -124,18 +116,12 @@ than the current stack.
 
 ### Historical all-table rollback guard
 
-Set `OREZ_PROFILE_ROLLBACK_MODE=historical-all-table` to replace only the
-copied profile build's rollback guard with the exact implementation from
+The historical replay replaced the copied profile build's rollback guard with
+the exact implementation from
 `478bd9b54ea69fdc01f5fa972e4234a52aadd51e`, the Orez 0.5.9 commit immediately
-before `d66e626`. The regular checkout and package output remain unchanged.
-This isolates the old all-published-table snapshots while retaining the current
-Chat wrapper, Zero 1.7.0, cleanup, and generation-recovery code.
-
-```sh
-OREZ_PROFILE_ROLLBACK_MODE=historical-all-table \
-  OREZ_CHAT_PROFILE_REPO=~/chat \
-  bun run perf:write-wrapper-profile
-```
+before `d66e626`. This isolated the old all-published-table snapshots while
+retaining the then-current Chat wrapper, Zero 1.7.0, cleanup, and
+generation-recovery code.
 
 The incident replay used Chat commit `632f07122`, including its local terminal
 deploy-probe change on top of failed-rollout commit `5c20c203d`. Its generated
