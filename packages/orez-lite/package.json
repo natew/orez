@@ -4,7 +4,8 @@
   "description": "SQLite and Rust sync engine for Zero applications",
   "type": "module",
   "sideEffects": [
-    "./dist/cloudflare-bun-wasm-loader.js"
+    "./dist/cloudflare-bun-wasm-loader.js",
+    "./dist/cloudflare-node-wasm-loader.js"
   ],
   "exports": {
     ".": {
@@ -59,6 +60,10 @@
       "types": "./dist/cloudflare-vite-wasm-loader.d.ts",
       "import": "./dist/cloudflare-vite-wasm-loader.js"
     },
+    "./cloudflare/node-wasm-loader": {
+      "types": "./dist/cloudflare-node-wasm-loader.d.ts",
+      "import": "./dist/cloudflare-node-wasm-loader.js"
+    },
     "./cloudflare/bun-wasm-loader": {
       "types": "./dist/cloudflare-bun-wasm-loader.d.ts",
       "import": "./dist/cloudflare-bun-wasm-loader.js"
@@ -69,6 +74,7 @@
     "build:dependencies": "bun run --cwd ../sync-executor build && bun run --cwd ../sync-cf-host build:dist",
     "build": "bun run build:dependencies && bun run build:runtime && bun run --cwd ../sync-browser-host build:dist",
     "test": "vitest run --config ../../vitest.config.ts packages/orez-lite/src",
+    "test:package": "bun run build && node package-runtime-test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
