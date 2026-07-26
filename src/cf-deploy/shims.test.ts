@@ -634,4 +634,153 @@ describe('cf shim builders', () => {
     expect(executed.filter((sql) => sql === nextSql)).toHaveLength(1)
     expect(nextTableExists).toBe(true)
   })
+  it('converges a ledgered CREATE TABLE whose live table is missing declared columns', async () => {
+    // prod 2026-07-26: 217 namespaces held an old-shape communityListing whose
+    // ledgered CREATE was trusted by table NAME, so the columns that only ever
+    // existed inside the CREATE definition were never added and every later
+    // CREATE INDEX on them failed the whole reconcile, forever, at ~2k billed
+    // rows per retry. the phantom pass must converge an existing table to its
+    // ledgered CREATE's declared column set.
+    const { DatabaseSync } = await import('node:sqlite')
+    const migrationsDirectory = await mkdtemp(
+      join(tmpdir(), 'contrast-cf-drift-migrations-')
+    )
+    const moduleDirectory = await mkdtemp(join(tmpdir(), 'contrast-cf-drift-module-'))
+    const globals = globalThis as typeof globalThis & {
+      __contrast_cf_application_sql_client?: () => unknown
+      __contrast_test_drift_migration_schema?: unknown
+    }
+    try {
+      await mkdir(join(migrationsDirectory, '0001_old'))
+      await writeFile(
+        join(migrationsDirectory, '0001_old', 'migration.sql'),
+        'CREATE TABLE `communityListing` (\n' +
+          '\t`id` text PRIMARY KEY,\n' +
+          '\t`userId` text,\n' +
+          '\t`submittedAt` integer,\n' +
+          "\t`visibility` text DEFAULT 'public' NOT NULL,\n" +
+          '\t`accountId` text NOT NULL,\n' +
+          '\tCONSTRAINT `fk_communityListing_userId` FOREIGN KEY (`userId`) REFERENCES `user`(`id`) ON DELETE SET NULL\n' +
+          ');--> statement-breakpoint\n' +
+          'CREATE INDEX `communityListing_userId_submittedAt_idx` ON `communityListing` (`userId`,`submittedAt`);\n'
+      )
+      const nativeSqlStatements = readNativeSqlMigrationStatements(
+        migrationsDirectory,
+        (sql) => ({ sql })
+      )
+      const migrationSource = buildMigrationModuleSource(cfDeployConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'schema-drift',
+        schemaImportSpecifier: './schema.js',
+        nativeSqlStatements,
+        publicTables: [],
+        expectedTables: [
+          {
+            name: 'communityListing',
+            columns: [
+              { name: 'id', notNull: true, primaryKeyOrder: 1, sqlType: 'text' },
+              { name: 'userId', notNull: false, primaryKeyOrder: 0, sqlType: 'text' },
+              {
+                name: 'submittedAt',
+                notNull: false,
+                primaryKeyOrder: 0,
+                sqlType: 'integer',
+              },
+              {
+                name: 'visibility',
+                notNull: true,
+                primaryKeyOrder: 0,
+                sqlType: 'text',
+              },
+              { name: 'accountId', notNull: true, primaryKeyOrder: 0, sqlType: 'text' },
+            ],
+          },
+        ],
+      })
+      const db = new DatabaseSync(':memory:')
+      // the drifted reality: the table exists in a pre-CREATE-definition shape,
+      // and the ledger says the CREATE already ran.
+      db.exec('CREATE TABLE communityListing (id text PRIMARY KEY, "userId" text)')
+      db.exec(
+        'CREATE TABLE "__contrast_cf_migrations" (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)'
+      )
+      db.prepare(
+        'INSERT INTO "__contrast_cf_migrations" (id, applied_at) VALUES (?, ?)'
+      ).run('0001_old/migration.sql:0', 1)
+      const executed: string[] = []
+      globals.__contrast_test_drift_migration_schema = { tables: {} }
+      globals.__contrast_cf_application_sql_client = () => ({
+        async transaction(
+          _compile: unknown,
+          work: (tx: {
+            exec(sql: string, params?: unknown[]): Promise<void>
+            query(sql: string): Promise<Array<Record<string, unknown>>>
+            registerTables(): Promise<void>
+          }) => Promise<void>
+        ) {
+          await work({
+            async exec(sql, params) {
+              executed.push(sql)
+              if (params && params.length > 0) {
+                db.prepare(sql).run(...(params as (string | number)[]))
+              } else {
+                db.exec(sql)
+              }
+            },
+            async query(sql) {
+              return db.prepare(sql).all() as Array<Record<string, unknown>>
+            },
+            async registerTables() {},
+          })
+        },
+      })
+      const executable = migrationSource
+        .replace(
+          'import { schema } from "./schema.js"',
+          'const schema = globalThis.__contrast_test_drift_migration_schema'
+        )
+        .replaceAll('export const ', 'const ')
+      const modulePath = join(moduleDirectory, 'migration.mjs')
+      await writeFile(modulePath, executable)
+      const module = await import(pathToFileURL(modulePath).href)
+      await module.runContrastCloudflareMigrations({
+        schemaOnly: true,
+        instance: 'drifted',
+      })
+      const columns = db.prepare('PRAGMA table_info("communityListing")').all() as Array<{
+        name: string
+        type: string
+        notnull: number
+      }>
+      const byName = new Map(
+        columns.map((column) => [
+          column.name,
+          { notnull: column.notnull, type: column.type.toLowerCase() },
+        ])
+      )
+      expect(byName.get('submittedAt')).toEqual({ type: 'integer', notnull: 0 })
+      expect(byName.get('visibility')).toEqual({ type: 'text', notnull: 1 })
+      expect(byName.get('accountId')).toEqual({ type: 'text', notnull: 1 })
+      const indexes = db.prepare('PRAGMA index_list("communityListing")').all() as Array<{
+        name: string
+      }>
+      expect(indexes.map((index) => index.name)).toContain(
+        'communityListing_userId_submittedAt_idx'
+      )
+      // a second run must find nothing left to converge.
+      const alreadyExecuted = executed.length
+      await module.runContrastCloudflareMigrations({
+        schemaOnly: true,
+        instance: 'drifted',
+      })
+      expect(
+        executed.slice(alreadyExecuted).filter((sql) => sql.startsWith('ALTER TABLE'))
+      ).toEqual([])
+    } finally {
+      delete globals.__contrast_cf_application_sql_client
+      delete globals.__contrast_test_drift_migration_schema
+      await rm(migrationsDirectory, { recursive: true, force: true })
+      await rm(moduleDirectory, { recursive: true, force: true })
+    }
+  })
 })
