@@ -64,8 +64,17 @@ export type StreamingManifest = {
   readonly schemaKey: string
 }
 
-// A callable topic factory per declared field: `streaming.message.content({id})`
-export type StreamingFieldRef<Key, Value> = ((key: Key) => RealtimeTopic) & {
+// Everything a consumer or producer needs for one row's field: which row, and
+// what the manifest says about the column. Carrying the spec alongside the
+// topic means no call site has to look the field up again, and a hook or writer
+// cannot be handed a topic whose field is not declared.
+export type StreamingFieldHandle = {
+  readonly topic: RealtimeTopic
+  readonly spec: StreamingFieldSpec
+}
+
+// A callable handle factory per declared field: `streaming.message.content({id})`
+export type StreamingFieldRef<Key, Value> = ((key: Key) => StreamingFieldHandle) & {
   readonly spec: StreamingFieldSpec
   // phantom carrier so the hook can infer the field's value type
   readonly __value?: Value
@@ -156,7 +165,7 @@ export function defineStreamingFields<Declaration extends StreamingFieldDeclarat
       }
       specs.push(spec)
 
-      const ref = ((key: Record<string, RealtimeKeyValue>): RealtimeTopic => {
+      const ref = ((key: Record<string, RealtimeKeyValue>): StreamingFieldHandle => {
         for (const column of spec.primaryKey) {
           if (key[column] === undefined) {
             throw new TypeError(
@@ -164,7 +173,7 @@ export function defineStreamingFields<Declaration extends StreamingFieldDeclarat
             )
           }
         }
-        return { table, key, field }
+        return { topic: { table, key, field }, spec }
       }) as unknown as StreamingFieldRef<never, unknown>
       Object.defineProperty(ref, 'spec', { value: spec, enumerable: true })
       refs[field] = ref

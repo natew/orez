@@ -256,7 +256,7 @@ describe('realtime publisher', () => {
     // against a hand-written expectation of the wire
     const store = new RealtimeStore({ send: () => {}, staleAfterMs: 10_000 })
     const topic = { table: 'message', key: { id: 'm1' }, field: 'content' } as const
-    store.subscribe(streaming.message.content.spec, topic, () => {})
+    store.subscribe({ spec: streaming.message.content.spec, topic }, () => {})
 
     const session = await begin()
     let content = ''
@@ -268,7 +268,9 @@ describe('realtime publisher', () => {
     await session.finish(content, async () => {})
 
     store.applyUpdates(published)
-    expect(store.read(streaming.message.content.spec, topic, 'stale row')).toMatchObject({
+    expect(
+      store.read({ spec: streaming.message.content.spec, topic }, 'stale row')
+    ).toMatchObject({
       value: 'The quick brown fox jumps',
       phase: 'committing',
     })
@@ -286,7 +288,7 @@ describe('realtime publisher', () => {
     // a subscriber that missed everything so far sees only the frames from here
     const store = new RealtimeStore({ send: () => {}, staleAfterMs: 10_000 })
     const topic = { table: 'message', key: { id: 'm1' }, field: 'content' } as const
-    store.subscribe(streaming.message.content.spec, topic, () => {})
+    store.subscribe({ spec: streaming.message.content.spec, topic }, () => {})
     const alreadySent = published.length
 
     // the host repairs a new subscriber with a snapshot of what it accumulated,
@@ -306,7 +308,7 @@ describe('realtime publisher', () => {
     await advance(60)
     store.applyUpdates(published.slice(alreadySent))
 
-    expect(store.read(streaming.message.content.spec, topic, '').value).toBe(
+    expect(store.read({ spec: streaming.message.content.spec, topic }, '').value).toBe(
       'one two three four'
     )
   })

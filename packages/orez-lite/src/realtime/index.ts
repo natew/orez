@@ -11,6 +11,7 @@ export type {
   FieldMode,
   StreamingFieldDeclaration,
   StreamingFieldOptions,
+  StreamingFieldHandle,
   StreamingFieldRef,
   StreamingFieldSpec,
   StreamingManifest,

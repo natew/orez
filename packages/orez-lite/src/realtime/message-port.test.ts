@@ -74,7 +74,7 @@ describe('realtime over a MessagePort', () => {
 
   it('streams a value from the in-process publisher to a port subscriber', async () => {
     const client = connect()
-    client.store.subscribe(contentSpec, topicOf('m1'), () => {})
+    client.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
     await settle()
 
     const session = await realtime.publisher.begin<string>('message', 'content', {
@@ -86,14 +86,14 @@ describe('realtime over a MessagePort', () => {
     realtime.flush()
     await settle()
 
-    expect(client.store.read(contentSpec, topicOf('m1'), '').value).toBe(
+    expect(client.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
       'Hello from the worker'
     )
   })
 
   it('appends deltas rather than resending the accumulated value', async () => {
     const client = connect()
-    client.store.subscribe(contentSpec, topicOf('m1'), () => {})
+    client.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
     await settle()
 
     const session = await realtime.publisher.begin<string>('message', 'content', {
@@ -109,7 +109,7 @@ describe('realtime over a MessagePort', () => {
       await settle()
     }
 
-    expect(client.store.read(contentSpec, topicOf('m1'), '').value).toBe(
+    expect(client.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
       'one two three four'
     )
   })
@@ -122,7 +122,7 @@ describe('realtime over a MessagePort', () => {
     channel.port2.start()
     const client = connectRealtimePort(channel.port1, { onError: (m) => errors.push(m) })
 
-    client.store.subscribe(contentSpec, topicOf('m1'), () => {})
+    client.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
     await settle()
 
     expect(errors[0]).toContain('client group does not belong to this user')
@@ -131,7 +131,7 @@ describe('realtime over a MessagePort', () => {
   it('answers pending for a row whose membership the server has not recorded', async () => {
     members.delete('message:m1')
     const client = connect()
-    client.store.subscribe(contentSpec, topicOf('m1'), () => {})
+    client.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
     await settle()
 
     const session = await realtime.publisher.begin<string>('message', 'content', {
@@ -142,7 +142,9 @@ describe('realtime over a MessagePort', () => {
     await settle()
     realtime.flush()
     await settle()
-    expect(client.store.read(contentSpec, topicOf('m1'), 'durable').phase).toBe('durable')
+    expect(
+      client.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').phase
+    ).toBe('durable')
 
     // the pull lands, membership is recorded, the client retries
     members.add('message:m1')
@@ -150,9 +152,9 @@ describe('realtime over a MessagePort', () => {
     await settle()
     realtime.flush()
     await settle()
-    expect(client.store.read(contentSpec, topicOf('m1'), 'durable').value).toBe(
-      'not yet authorized'
-    )
+    expect(
+      client.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').value
+    ).toBe('not yet authorized')
   })
 
   // the acceptance criterion: no hook, no traffic
@@ -172,19 +174,21 @@ describe('realtime over a MessagePort', () => {
     await settle()
 
     expect(received).toEqual([])
-    expect(client.store.read(contentSpec, topicOf('m1'), 'durable').phase).toBe('durable')
+    expect(
+      client.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').phase
+    ).toBe('durable')
 
     // positive control: the same listener DOES receive frames once this port
     // subscribes, so the emptiness above is the hub withholding traffic rather
     // than a listener that could never have observed anything.
-    client.store.subscribe(contentSpec, topicOf('m1'), () => {})
+    client.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
     await settle()
     session.set('unobserved, then observed')
     await settle()
     realtime.flush()
     await settle()
     expect(received.length).toBeGreaterThan(0)
-    expect(client.store.read(contentSpec, topicOf('m1'), '').value).toBe(
+    expect(client.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
       'unobserved, then observed'
     )
   })
@@ -193,8 +197,8 @@ describe('realtime over a MessagePort', () => {
     members.add('message:m2')
     const first = connect()
     const second = connect()
-    first.store.subscribe(contentSpec, topicOf('m1'), () => {})
-    second.store.subscribe(contentSpec, topicOf('m2'), () => {})
+    first.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
+    second.store.subscribe({ spec: contentSpec, topic: topicOf('m2') }, () => {})
     await settle()
 
     const session = await realtime.publisher.begin<string>('message', 'content', {
@@ -206,8 +210,12 @@ describe('realtime over a MessagePort', () => {
     realtime.flush()
     await settle()
 
-    expect(first.store.read(contentSpec, topicOf('m1'), '').value).toBe('only for m1')
-    expect(second.store.read(contentSpec, topicOf('m2'), 'durable').phase).toBe('durable')
+    expect(first.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
+      'only for m1'
+    )
+    expect(
+      second.store.read({ spec: contentSpec, topic: topicOf('m2') }, 'durable').phase
+    ).toBe('durable')
   })
 
   it('catches a port that subscribes mid-stream up to the accumulated value', async () => {
@@ -225,17 +233,17 @@ describe('realtime over a MessagePort', () => {
     await settle()
 
     const late = connect()
-    late.store.subscribe(contentSpec, topicOf('m1'), () => {})
+    late.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
     await settle()
 
-    expect(late.store.read(contentSpec, topicOf('m1'), '').value).toBe(
+    expect(late.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
       'already in progress'
     )
   })
 
   it('holds the final overlay through commit and hands off when Zero catches up', async () => {
     const client = connect()
-    client.store.subscribe(contentSpec, topicOf('m1'), () => {})
+    client.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
     await settle()
 
     const session = await realtime.publisher.begin<string>('message', 'content', {
@@ -249,11 +257,15 @@ describe('realtime over a MessagePort', () => {
     realtime.flush()
     await settle()
 
-    expect(client.store.read(contentSpec, topicOf('m1'), 'old row')).toMatchObject({
+    expect(
+      client.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'old row')
+    ).toMatchObject({
       value: 'the answer',
       phase: 'committing',
     })
-    expect(client.store.read(contentSpec, topicOf('m1'), 'the answer')).toMatchObject({
+    expect(
+      client.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'the answer')
+    ).toMatchObject({
       phase: 'durable',
       streamID: null,
     })
@@ -266,7 +278,7 @@ describe('realtime over a MessagePort', () => {
     realtime.connect(channel.port2, identity)
     channel.port2.start()
     const client = connectRealtimePort(channel.port1, { onError: (m) => errors.push(m) })
-    client.store.subscribe(contentSpec, topicOf('m1'), () => {})
+    client.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
     await settle()
 
     realtime.revokeMembership('group-1', [topicOf('m1')])
@@ -277,7 +289,7 @@ describe('realtime over a MessagePort', () => {
 
   it('ignores a publish frame arriving on a subscriber port', async () => {
     const client = connect()
-    client.store.subscribe(contentSpec, topicOf('m1'), () => {})
+    client.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
     await settle()
 
     // a compromised page cannot become a producer by sending producer frames:
@@ -301,13 +313,15 @@ describe('realtime over a MessagePort', () => {
     })
     await settle()
 
-    expect(client.store.read(contentSpec, topicOf('m1'), 'durable').value).toBe('durable')
+    expect(
+      client.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').value
+    ).toBe('durable')
     expect(realtime.hub.activeTopics).toBe(0)
   })
 
   it('stops delivering after the port detaches', async () => {
     const client = connect()
-    client.store.subscribe(contentSpec, topicOf('m1'), () => {})
+    client.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
     await settle()
 
     client.detach()
@@ -320,7 +334,9 @@ describe('realtime over a MessagePort', () => {
     realtime.flush()
     await settle()
 
-    expect(client.store.read(contentSpec, topicOf('m1'), 'durable').phase).toBe('durable')
+    expect(
+      client.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').phase
+    ).toBe('durable')
     expect(realtime.hub.subscribedTopics).toBe(0)
   })
 })

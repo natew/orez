@@ -22,20 +22,20 @@ import { useCallback, useMemo, useSyncExternalStore } from 'react'
 
 import type {
   RealtimeStore,
-  RealtimeTopic,
-  StreamingFieldSpec,
+  StreamingFieldHandle,
   StreamingFieldState,
 } from 'orez-lite/realtime'
 
-// A topic paired with the spec it came from. `streaming.message.content({id})`
-// returns the topic; the spec rides along so the hook needs no manifest lookup.
-export type StreamingFieldHandle = {
-  readonly topic: RealtimeTopic
-  readonly spec: StreamingFieldSpec
-}
+// `streaming.message.content({ id })` returns a StreamingFieldHandle: the row's
+// topic plus the manifest spec for that column, so a hook needs no lookup and
+// cannot be handed a field the manifest does not declare.
+export type { StreamingFieldHandle }
 
+// `handle` may be null so a component can subscribe conditionally while still
+// calling the hook unconditionally, which is the common React shape: a row that
+// is not streaming, or whose id is not known yet, has nothing to subscribe to.
 export type UseStreamingField = <Value>(
-  handle: StreamingFieldHandle,
+  handle: StreamingFieldHandle | null | undefined,
   base: Value
 ) => StreamingFieldState<Value>
 
@@ -59,20 +59,20 @@ export function createUseStreamingField(
   getStore: () => RealtimeStore | undefined
 ): UseStreamingField {
   return function useStreamingField<Value>(
-    handle: StreamingFieldHandle,
+    handle: StreamingFieldHandle | null | undefined,
     base: Value
   ): StreamingFieldState<Value> {
     const store = getStore()
     // the canonical topic, not object identity: a caller that rebuilds `{id}`
     // inline on every render must not churn its subscription
-    const id = canonicalTopic(handle.spec.primaryKey, handle.topic)
+    const id = handle ? canonicalTopic(handle.spec.primaryKey, handle.topic) : ''
 
     const subscribe = useCallback(
       (onChange: () => void) => {
-        if (!store) return () => {}
-        return store.subscribe(handle.spec, handle.topic, onChange)
+        if (!store || !handle) return () => {}
+        return store.subscribe(handle, onChange)
       },
-      [store, handle.spec, id]
+      [store, id]
     )
 
     // `store.read` returns a reference-stable state: useSyncExternalStore
@@ -80,9 +80,9 @@ export function createUseStreamingField(
     // a fresh object each time. `base` participates because a new durable value
     // from Zero is what ends the committing phase.
     const getSnapshot = useCallback(() => {
-      if (!store) return durableOnly(base)
-      return store.read(handle.spec, handle.topic, base)
-    }, [store, handle.spec, id, base])
+      if (!store || !handle) return durableOnly(base)
+      return store.read(handle, base)
+    }, [store, id, base])
 
     return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   }
@@ -120,7 +120,7 @@ export function createUseStreamingFields(
       (onChange: () => void) => {
         if (!store) return () => {}
         const releases = requests.map((request) =>
-          store.subscribe(request.handle.spec, request.handle.topic, onChange)
+          store.subscribe(request.handle, onChange)
         )
         return () => {
           for (const release of releases) release()
@@ -142,7 +142,7 @@ export function createUseStreamingFields(
       let changed = false
       for (const request of requests) {
         const state = store
-          ? store.read(request.handle.spec, request.handle.topic, request.base)
+          ? store.read(request.handle, request.base)
           : durableOnly(request.base)
         next[request.key] = state
         if (cache.value[request.key] !== state) changed = true

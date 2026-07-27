@@ -111,7 +111,7 @@ export function createLocalRealtime(options: LocalRealtimeOptions): LocalRealtim
   return {
     store,
     publisher,
-    fields: new FieldWriter(publisher, options.manifest, {
+    fields: new FieldWriter(publisher, {
       onError: (error, topic) =>
         options.onError?.(
           `realtime write failed for ${topic.table}.${topic.field}: ${error.message}`

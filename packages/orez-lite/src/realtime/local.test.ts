@@ -55,7 +55,7 @@ describe('local realtime', () => {
   it('streams assistant text into the tab that is producing it', async () => {
     const realtime = createLocalRealtime({ manifest: streaming.manifest })
     const topic = streaming.message.content({ id: 'm1' })
-    realtime.store.subscribe(contentSpec, topic, () => {})
+    realtime.store.subscribe(topic, () => {})
 
     const session = await realtime.publisher.begin<string>('message', 'content', {
       namespace: 'local',
@@ -68,15 +68,13 @@ describe('local realtime', () => {
       await session.flush()
     }
 
-    expect(realtime.store.read(contentSpec, topic, '').value).toBe(
-      'The agent is thinking'
-    )
+    expect(realtime.store.read(topic, '').value).toBe('The agent is thinking')
   })
 
   it('streams a task description while the task is being written', async () => {
     const realtime = createLocalRealtime({ manifest: streaming.manifest })
     const topic = streaming.sootTask.description({ id: 'task-1' })
-    realtime.store.subscribe(descriptionSpec, topic, () => {})
+    realtime.store.subscribe(topic, () => {})
 
     const session = await realtime.publisher.begin<string>('sootTask', 'description', {
       namespace: 'local',
@@ -90,7 +88,7 @@ describe('local realtime', () => {
     }
 
     // the card shows live text while the row's durable description is empty
-    expect(realtime.store.read(descriptionSpec, topic, '')).toMatchObject({
+    expect(realtime.store.read(topic, '')).toMatchObject({
       value: 'Refactor the sync layer',
       phase: 'streaming',
     })
@@ -98,15 +96,16 @@ describe('local realtime', () => {
     await session.finish('Refactor the sync layer', async () => {})
 
     // and hands off cleanly once the row is committed and Zero produces it
-    expect(
-      realtime.store.read(descriptionSpec, topic, 'Refactor the sync layer')
-    ).toMatchObject({ phase: 'durable', streamID: null })
+    expect(realtime.store.read(topic, 'Refactor the sync layer')).toMatchObject({
+      phase: 'durable',
+      streamID: null,
+    })
   })
 
   it('replaces a JSON-in-text column rather than appending to it', async () => {
     const realtime = createLocalRealtime({ manifest: streaming.manifest })
     const topic = streaming.message.parts({ id: 'm1' })
-    realtime.store.subscribe(partsSpec, topic, () => {})
+    realtime.store.subscribe(topic, () => {})
 
     const session = await realtime.publisher.begin<string>('message', 'parts', {
       namespace: 'local',
@@ -124,9 +123,7 @@ describe('local realtime', () => {
     )
     await session.flush()
 
-    expect(
-      JSON.parse(realtime.store.read(partsSpec, topic, '[]').value as string)
-    ).toEqual([
+    expect(JSON.parse(realtime.store.read(topic, '[]').value as string)).toEqual([
       { type: 'text', text: 'hi' },
       { type: 'tool', name: 'read' },
     ])
@@ -158,10 +155,10 @@ describe('local realtime', () => {
     const realtime = createLocalRealtime({ manifest: streaming.manifest })
     let firstWakes = 0
     let secondWakes = 0
-    realtime.store.subscribe(contentSpec, streaming.message.content({ id: 'm1' }), () => {
+    realtime.store.subscribe(streaming.message.content({ id: 'm1' }), () => {
       firstWakes++
     })
-    realtime.store.subscribe(contentSpec, streaming.message.content({ id: 'm2' }), () => {
+    realtime.store.subscribe(streaming.message.content({ id: 'm2' }), () => {
       secondWakes++
     })
 
@@ -183,7 +180,7 @@ describe('local realtime', () => {
   it('runs several concurrent generations without crosstalk', async () => {
     const realtime = createLocalRealtime({ manifest: streaming.manifest })
     const topics = ['m1', 'm2', 'm3'].map((id) => streaming.message.content({ id }))
-    for (const topic of topics) realtime.store.subscribe(contentSpec, topic, () => {})
+    for (const topic of topics) realtime.store.subscribe(topic, () => {})
 
     const sessions = await Promise.all(
       ['m1', 'm2', 'm3'].map((id) =>
@@ -199,16 +196,14 @@ describe('local realtime', () => {
     }
 
     topics.forEach((topic, index) => {
-      expect(realtime.store.read(contentSpec, topic, '').value).toBe(
-        `agent-${index}-`.repeat(4)
-      )
+      expect(realtime.store.read(topic, '').value).toBe(`agent-${index}-`.repeat(4))
     })
   })
 
   it('reveals the durable value when a generation is abandoned', async () => {
     const realtime = createLocalRealtime({ manifest: streaming.manifest })
     const topic = streaming.message.content({ id: 'm1' })
-    realtime.store.subscribe(contentSpec, topic, () => {})
+    realtime.store.subscribe(topic, () => {})
 
     const session = await realtime.publisher.begin<string>('message', 'content', {
       namespace: 'local',
@@ -218,7 +213,7 @@ describe('local realtime', () => {
     await session.flush()
     await session.abort()
 
-    expect(realtime.store.read(contentSpec, topic, 'last committed')).toMatchObject({
+    expect(realtime.store.read(topic, 'last committed')).toMatchObject({
       value: 'last committed',
       phase: 'durable',
     })
@@ -229,7 +224,7 @@ describe('local realtime', () => {
   it('supports a checkpoint: commit, then start a new generation', async () => {
     const realtime = createLocalRealtime({ manifest: streaming.manifest })
     const topic = streaming.message.content({ id: 'm1' })
-    realtime.store.subscribe(contentSpec, topic, () => {})
+    realtime.store.subscribe(topic, () => {})
 
     const first = await realtime.publisher.begin<string>('message', 'content', {
       namespace: 'local',
@@ -241,7 +236,7 @@ describe('local realtime', () => {
     await first.finish('before the tool call', async () => {
       durable = 'before the tool call'
     })
-    expect(realtime.store.read(contentSpec, topic, durable).phase).toBe('durable')
+    expect(realtime.store.read(topic, durable).phase).toBe('durable')
 
     const second = await realtime.publisher.begin<string>('message', 'content', {
       namespace: 'local',
@@ -250,7 +245,7 @@ describe('local realtime', () => {
     second.set(`${durable} and after it`)
     await second.flush()
 
-    expect(realtime.store.read(contentSpec, topic, durable)).toMatchObject({
+    expect(realtime.store.read(topic, durable)).toMatchObject({
       value: 'before the tool call and after it',
       phase: 'streaming',
     })

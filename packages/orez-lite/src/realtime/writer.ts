@@ -15,7 +15,7 @@
 
 import { canonicalTopic } from './protocol.js'
 
-import type { StreamingManifest } from './manifest.js'
+import type { StreamingFieldHandle } from './manifest.js'
 import type { RealtimeTopic } from './protocol.js'
 import type { RealtimePublisher, StreamSession } from './publisher.js'
 
@@ -36,17 +36,11 @@ export type FieldWriterOptions = {
 
 export class FieldWriter {
   readonly #publisher: RealtimePublisher
-  readonly #manifest: StreamingManifest
   readonly #onError: (error: Error, topic: RealtimeTopic) => void
   readonly #entries = new Map<string, Entry>()
 
-  constructor(
-    publisher: RealtimePublisher,
-    manifest: StreamingManifest,
-    options: FieldWriterOptions = {}
-  ) {
+  constructor(publisher: RealtimePublisher, options: FieldWriterOptions = {}) {
     this.#publisher = publisher
-    this.#manifest = manifest
     this.#onError =
       options.onError ??
       ((error, topic) => {
@@ -57,21 +51,18 @@ export class FieldWriter {
       })
   }
 
-  #id(topic: RealtimeTopic): string {
-    const spec = this.#manifest.fields.get(`${topic.table}.${topic.field}`)
-    if (!spec) {
-      throw new TypeError(
-        `'${topic.table}.${topic.field}' is not a streaming field in this manifest`
-      )
-    }
-    return canonicalTopic(spec.primaryKey, topic)
+  // The handle already carries its spec, so a call site cannot name a field
+  // that is not in the manifest and there is nothing to look up per write.
+  #id(handle: StreamingFieldHandle): string {
+    return canonicalTopic(handle.spec.primaryKey, handle.topic)
   }
 
   // Publish the field's current value. Synchronous and safe to call on every
   // token: the first call opens a generation in the background, later calls
   // reach the open session directly.
-  set(topic: RealtimeTopic, value: unknown): void {
-    const id = this.#id(topic)
+  set(handle: StreamingFieldHandle, value: unknown): void {
+    const { topic } = handle
+    const id = this.#id(handle)
     const existing = this.#entries.get(id)
 
     if (existing && !existing.closed) {
@@ -109,8 +100,8 @@ export class FieldWriter {
   }
 
   // Deliver pending values for one topic, honouring its rate bounds.
-  async flush(topic: RealtimeTopic): Promise<void> {
-    const entry = this.#entries.get(this.#id(topic))
+  async flush(handle: StreamingFieldHandle): Promise<void> {
+    const entry = this.#entries.get(this.#id(handle))
     if (!entry) return
     await entry.opening
     await entry.session?.flush()
@@ -119,11 +110,11 @@ export class FieldWriter {
   // Close the generation: flush the final value, run the application's durable
   // write, then tell subscribers to hold the overlay until Zero produces it.
   async finish(
-    topic: RealtimeTopic,
+    handle: StreamingFieldHandle,
     value: unknown,
     commit: () => Promise<void>
   ): Promise<void> {
-    const id = this.#id(topic)
+    const id = this.#id(handle)
     const entry = this.#entries.get(id)
     if (!entry || entry.closed) {
       // nothing was ever streamed for this row; the durable write still has to
@@ -143,8 +134,8 @@ export class FieldWriter {
 
   // Drop the overlay now and reveal the durable row. Used when a run is
   // cancelled or errors: there is no value worth showing.
-  async abort(topic: RealtimeTopic): Promise<void> {
-    const id = this.#id(topic)
+  async abort(handle: StreamingFieldHandle): Promise<void> {
+    const id = this.#id(handle)
     const entry = this.#entries.get(id)
     if (!entry || entry.closed) return
     entry.closed = true
@@ -153,8 +144,8 @@ export class FieldWriter {
     await entry.session?.abort()
   }
 
-  isStreaming(topic: RealtimeTopic): boolean {
-    const entry = this.#entries.get(this.#id(topic))
+  isStreaming(handle: StreamingFieldHandle): boolean {
+    const entry = this.#entries.get(this.#id(handle))
     return !!entry && !entry.closed
   }
 

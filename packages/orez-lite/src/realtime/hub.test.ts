@@ -103,7 +103,7 @@ describe('realtime hub', () => {
       }
     }
     const mount = async (topic: RealtimeTopic, spec = contentSpec) => {
-      const release = store.subscribe(spec, topic, () => {})
+      const release = store.subscribe({ spec, topic }, () => {})
       await pump()
       return release
     }
@@ -178,7 +178,9 @@ describe('realtime hub', () => {
       await advance(30)
     }
 
-    expect(alice.store.read(contentSpec, topicOf('m1'), '').value).toBe('Hello, world!')
+    expect(alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
+      'Hello, world!'
+    )
     expect(alice.errors).toEqual([])
   })
 
@@ -196,8 +198,12 @@ describe('realtime hub', () => {
     session.set('shared text')
     await advance(50)
 
-    expect(alice.store.read(contentSpec, topicOf('m1'), '').value).toBe('shared text')
-    expect(bob.store.read(contentSpec, topicOf('m1'), '').value).toBe('shared text')
+    expect(alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
+      'shared text'
+    )
+    expect(bob.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
+      'shared text'
+    )
   })
 
   it('sends nothing to a subscriber of a different row', async () => {
@@ -212,7 +218,9 @@ describe('realtime hub', () => {
     session.set('not for alice')
     await advance(50)
 
-    expect(alice.store.read(contentSpec, topicOf('other-row'), 'durable')).toMatchObject({
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('other-row') }, 'durable')
+    ).toMatchObject({
       value: 'durable',
       phase: 'durable',
     })
@@ -229,7 +237,9 @@ describe('realtime hub', () => {
     session.set('unobserved')
     await advance(50)
 
-    expect(alice.store.read(contentSpec, topicOf('m1'), 'durable').phase).toBe('durable')
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').phase
+    ).toBe('durable')
   })
 
   it('catches a mid-stream subscriber up with one snapshot, then appends', async () => {
@@ -251,15 +261,17 @@ describe('realtime hub', () => {
     // bob arrives 3 tokens late and must still see the whole value
     const bob = client('bob')
     await bob.mount(topicOf('m1'))
-    expect(bob.store.read(contentSpec, topicOf('m1'), '').value).toBe('one two three ')
+    expect(bob.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
+      'one two three '
+    )
 
     content += 'four'
     session.set(content)
     await advance(30)
-    expect(bob.store.read(contentSpec, topicOf('m1'), '').value).toBe(
+    expect(bob.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
       'one two three four'
     )
-    expect(alice.store.read(contentSpec, topicOf('m1'), '').value).toBe(
+    expect(alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
       'one two three four'
     )
   })
@@ -281,7 +293,9 @@ describe('realtime hub', () => {
     await advance(50)
 
     expect(alice.errors[0]).toContain('row is not in your query membership')
-    expect(alice.store.read(contentSpec, topicOf('m1'), 'durable').phase).toBe('durable')
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').phase
+    ).toBe('durable')
   })
 
   it('holds a pending subscription out of fan-out until it is retried', async () => {
@@ -296,15 +310,17 @@ describe('realtime hub', () => {
     })
     session.set('optimistic row is not authorized yet')
     await advance(50)
-    expect(alice.store.read(contentSpec, topicOf('m1'), 'durable').phase).toBe('durable')
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').phase
+    ).toBe('durable')
 
     // the pull lands, membership is recorded, and the retry succeeds
     authorize = () => ({ status: 'active' })
     alice.store.retryPending()
     await alice.pump()
-    expect(alice.store.read(contentSpec, topicOf('m1'), 'durable').value).toBe(
-      'optimistic row is not authorized yet'
-    )
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').value
+    ).toBe('optimistic row is not authorized yet')
   })
 
   it('drops subscriptions when a pull removes the row from membership', async () => {
@@ -317,7 +333,9 @@ describe('realtime hub', () => {
     })
     session.set('visible for now')
     await advance(50)
-    expect(alice.store.read(contentSpec, topicOf('m1'), '').value).toBe('visible for now')
+    expect(alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
+      'visible for now'
+    )
 
     hub.revokeMembership('group-alice', [topicOf('m1')])
     session.set('visible for now, plus more')
@@ -327,7 +345,9 @@ describe('realtime hub', () => {
     // the overlay is dropped rather than frozen: the client is no longer
     // authorized for this row, so it must not keep displaying streamed content
     // for it. the durable value is whatever its next pull says.
-    expect(alice.store.read(contentSpec, topicOf('m1'), 'durable')).toMatchObject({
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable')
+    ).toMatchObject({
       value: 'durable',
       phase: 'durable',
     })
@@ -354,7 +374,9 @@ describe('realtime hub', () => {
     })
     retry.set('retried attempt')
     await advance(30)
-    expect(alice.store.read(contentSpec, topicOf('m1'), '').value).toBe('retried attempt')
+    expect(alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
+      'retried attempt'
+    )
 
     // the superseded producer is told, and its frames are refused at the hub
     expect(first.sent.at(-1)).toMatchObject(['superseded', { streamID: stale.streamID }])
@@ -365,7 +387,9 @@ describe('realtime hub', () => {
     stale.set('first attempt continues')
     await advance(30)
     expect(() => stale.set('and more')).toThrow(/hub rejected a producer frame/)
-    expect(alice.store.read(contentSpec, topicOf('m1'), '').value).toBe('retried attempt')
+    expect(alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
+      'retried attempt'
+    )
   })
 
   it('refuses a producer frame carrying another generation stream id', async () => {
@@ -410,12 +434,16 @@ describe('realtime hub', () => {
     await advance(30)
 
     // the row in Zero is still the old one: no flash of stale text
-    expect(alice.store.read(contentSpec, topicOf('m1'), 'old row')).toMatchObject({
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'old row')
+    ).toMatchObject({
       value: 'the complete answer',
       phase: 'committing',
     })
     // the pull lands and the overlay hands off
-    expect(alice.store.read(contentSpec, topicOf('m1'), committed!)).toMatchObject({
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, committed!)
+    ).toMatchObject({
       value: 'the complete answer',
       phase: 'durable',
       streamID: null,
@@ -436,7 +464,9 @@ describe('realtime hub', () => {
     await session.abort()
     await advance(30)
 
-    expect(alice.store.read(contentSpec, topicOf('m1'), 'durable row')).toMatchObject({
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable row')
+    ).toMatchObject({
       value: 'durable row',
       phase: 'durable',
     })
@@ -460,7 +490,9 @@ describe('realtime hub', () => {
     // a new subscriber gets no snapshot of the abandoned generation
     const bob = client('bob')
     await bob.mount(topicOf('m1'))
-    expect(bob.store.read(contentSpec, topicOf('m1'), 'durable').phase).toBe('durable')
+    expect(
+      bob.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').phase
+    ).toBe('durable')
   })
 
   it('stops fan-out once the last subscriber of a topic unmounts', async () => {
@@ -481,7 +513,9 @@ describe('realtime hub', () => {
 
     session.set('watched no longer')
     await advance(30)
-    expect(alice.store.read(contentSpec, topicOf('m1'), 'durable').phase).toBe('durable')
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').phase
+    ).toBe('durable')
   })
 
   it('drops every subscription when a connection goes away', async () => {
@@ -549,14 +583,16 @@ describe('realtime hub', () => {
     })
     session.set('streamed while authorization is in flight')
     await advance(50)
-    expect(alice.store.read(contentSpec, topicOf('m1'), 'durable').phase).toBe('durable')
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').phase
+    ).toBe('durable')
 
     release({ status: 'active' })
     await pending
     // the catch-up snapshot arrives with the subscription, not before it
-    expect(alice.store.read(contentSpec, topicOf('m1'), 'durable').value).toBe(
-      'streamed while authorization is in flight'
-    )
+    expect(
+      alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, 'durable').value
+    ).toBe('streamed while authorization is in flight')
   })
 
   // the reason subscribe/unsubscribe are queued per connection: with an

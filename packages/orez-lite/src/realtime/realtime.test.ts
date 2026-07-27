@@ -279,7 +279,7 @@ describe('realtime store', () => {
 
   const mount = (spec: StreamingFieldSpec = contentSpec, topic = contentTopic) => {
     const listener = vi.fn()
-    const release = store.subscribe(spec, topic, listener)
+    const release = store.subscribe({ spec, topic }, listener)
     return { listener, release }
   }
 
@@ -301,7 +301,9 @@ describe('realtime store', () => {
   })
 
   it('sends no traffic and reports durable state without a subscription', () => {
-    expect(store.read(contentSpec, contentTopic, 'durable value')).toEqual({
+    expect(
+      store.read({ spec: contentSpec, topic: contentTopic }, 'durable value')
+    ).toEqual({
       value: 'durable value',
       phase: 'durable',
       streamID: null,
@@ -329,7 +331,7 @@ describe('realtime store', () => {
     apply({ topic: id, streamID: 's1', seq: 1, op: 'append', text: 'lo ' })
     apply({ topic: id, streamID: 's1', seq: 2, op: 'append', text: 'world' })
 
-    expect(store.read(contentSpec, contentTopic, '')).toEqual({
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, '')).toEqual({
       value: 'Hello world',
       phase: 'streaming',
       streamID: 's1',
@@ -343,7 +345,7 @@ describe('realtime store', () => {
     apply({ topic: id, streamID: 's1', seq: 1, op: 'append', text: 'b' })
     apply({ topic: id, streamID: 's1', seq: 1, op: 'append', text: 'DUPLICATE' })
 
-    expect(store.read(contentSpec, contentTopic, '').value).toBe('ab')
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, '').value).toBe('ab')
   })
 
   it('ignores frames from a superseded generation', () => {
@@ -352,7 +354,9 @@ describe('realtime store', () => {
     apply({ topic: id, streamID: 'new', seq: 0, op: 'snapshot', value: 'new value' })
     apply({ topic: id, streamID: 'old', seq: 9, op: 'append', text: ' LATE' })
 
-    expect(store.read(contentSpec, contentTopic, '').value).toBe('new value')
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, '').value).toBe(
+      'new value'
+    )
   })
 
   it('holds the final value in committing until Zero catches up', () => {
@@ -361,14 +365,14 @@ describe('realtime store', () => {
     apply({ topic: id, streamID: 's1', seq: 1, op: 'end' })
 
     // Zero still has the old row: the overlay stays visible, no flash of stale
-    expect(store.read(contentSpec, contentTopic, 'old row')).toEqual({
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, 'old row')).toEqual({
       value: 'final text',
       phase: 'committing',
       streamID: 's1',
     })
 
     // the pull lands and the durable value takes over
-    expect(store.read(contentSpec, contentTopic, 'final text')).toEqual({
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, 'final text')).toEqual({
       value: 'final text',
       phase: 'durable',
       streamID: null,
@@ -383,7 +387,7 @@ describe('realtime store', () => {
     apply({ topic: id, streamID: 's1', seq: 0, op: 'snapshot', value: 'final text' })
     apply({ topic: id, streamID: 's1', seq: 1, op: 'end' })
 
-    expect(store.read(contentSpec, contentTopic, 'final text')).toEqual({
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, 'final text')).toEqual({
       value: 'final text',
       phase: 'durable',
       streamID: null,
@@ -393,10 +397,12 @@ describe('realtime store', () => {
   it('converges when the terminal frame is lost and the durable field changes', () => {
     mount()
     apply({ topic: id, streamID: 's1', seq: 0, op: 'snapshot', value: 'partial' })
-    store.read(contentSpec, contentTopic, 'old row')
+    store.read({ spec: contentSpec, topic: contentTopic }, 'old row')
 
     // no `end` ever arrives, but the commit landed and Zero produced it
-    expect(store.read(contentSpec, contentTopic, 'committed text')).toEqual({
+    expect(
+      store.read({ spec: contentSpec, topic: contentTopic }, 'committed text')
+    ).toEqual({
       value: 'committed text',
       phase: 'durable',
       streamID: null,
@@ -406,23 +412,25 @@ describe('realtime store', () => {
   it('ignores later frames from a generation the database already fenced', () => {
     mount()
     apply({ topic: id, streamID: 's1', seq: 0, op: 'snapshot', value: 'partial' })
-    store.read(contentSpec, contentTopic, 'old row')
-    store.read(contentSpec, contentTopic, 'committed text')
+    store.read({ spec: contentSpec, topic: contentTopic }, 'old row')
+    store.read({ spec: contentSpec, topic: contentTopic }, 'committed text')
 
     apply({ topic: id, streamID: 's1', seq: 5, op: 'append', text: ' MORE' })
-    expect(store.read(contentSpec, contentTopic, 'committed text').value).toBe(
-      'committed text'
-    )
+    expect(
+      store.read({ spec: contentSpec, topic: contentTopic }, 'committed text').value
+    ).toBe('committed text')
   })
 
   it('lets a NEW generation overlay a value the database already settled', () => {
     mount()
     apply({ topic: id, streamID: 's1', seq: 0, op: 'snapshot', value: 'first' })
-    store.read(contentSpec, contentTopic, 'old row')
-    store.read(contentSpec, contentTopic, 'committed first')
+    store.read({ spec: contentSpec, topic: contentTopic }, 'old row')
+    store.read({ spec: contentSpec, topic: contentTopic }, 'committed first')
 
     apply({ topic: id, streamID: 's2', seq: 0, op: 'snapshot', value: 'second run' })
-    expect(store.read(contentSpec, contentTopic, 'committed first')).toEqual({
+    expect(
+      store.read({ spec: contentSpec, topic: contentTopic }, 'committed first')
+    ).toEqual({
       value: 'second run',
       phase: 'streaming',
       streamID: 's2',
@@ -434,7 +442,7 @@ describe('realtime store', () => {
     apply({ topic: id, streamID: 's1', seq: 0, op: 'snapshot', value: 'half a sentence' })
     apply({ topic: id, streamID: 's1', seq: 1, op: 'abort' })
 
-    expect(store.read(contentSpec, contentTopic, 'durable')).toEqual({
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, 'durable')).toEqual({
       value: 'durable',
       phase: 'durable',
       streamID: null,
@@ -447,14 +455,14 @@ describe('realtime store', () => {
 
     vi.advanceTimersByTime(1001)
     expect(listener).toHaveBeenCalledTimes(2)
-    expect(store.read(contentSpec, contentTopic, 'durable')).toEqual({
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, 'durable')).toEqual({
       value: 'durable',
       phase: 'stale',
       streamID: 's1',
     })
 
     apply({ topic: id, streamID: 's1', seq: 1, op: 'append', text: ' resumed' })
-    expect(store.read(contentSpec, contentTopic, 'durable')).toEqual({
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, 'durable')).toEqual({
       value: 'stalled resumed',
       phase: 'streaming',
       streamID: 's1',
@@ -466,7 +474,9 @@ describe('realtime store', () => {
     apply({ topic: id, streamID: 's1', seq: 0, op: 'snapshot', value: 'mid-stream' })
 
     store.handleDisconnect()
-    expect(store.read(contentSpec, contentTopic, 'durable').phase).toBe('stale')
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, 'durable').phase).toBe(
+      'stale'
+    )
 
     sent.length = 0
     store.handleReconnect()
@@ -480,7 +490,7 @@ describe('realtime store', () => {
       op: 'snapshot',
       value: 'mid-stream and more',
     })
-    expect(store.read(contentSpec, contentTopic, 'durable')).toEqual({
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, 'durable')).toEqual({
       value: 'mid-stream and more',
       phase: 'streaming',
       streamID: 's1',
@@ -549,7 +559,7 @@ describe('realtime store', () => {
       value: { not: 'an array' },
     })
     expect(errors[0]).toContain('failed its validate()')
-    expect(store.read(partsSpec, partsTopic, []).phase).toBe('durable')
+    expect(store.read({ spec: partsSpec, topic: partsTopic }, []).phase).toBe('durable')
 
     apply({
       topic: partsID,
@@ -558,7 +568,9 @@ describe('realtime store', () => {
       op: 'snapshot',
       value: [{ type: 'text' }],
     })
-    expect(store.read(partsSpec, partsTopic, []).value).toEqual([{ type: 'text' }])
+    expect(store.read({ spec: partsSpec, topic: partsTopic }, []).value).toEqual([
+      { type: 'text' },
+    ])
   })
 
   it('compares json values structurally, not by reference, for the durable handoff', () => {
@@ -579,8 +591,8 @@ describe('realtime store', () => {
     // durable value: the overlay must hand off rather than treat it as a
     // concurrent write
     const fromZero = [{ text: 'done', type: 'text' }]
-    store.read(partsSpec, partsTopic, fromZero)
-    expect(store.read(partsSpec, partsTopic, fromZero)).toEqual({
+    store.read({ spec: partsSpec, topic: partsTopic }, fromZero)
+    expect(store.read({ spec: partsSpec, topic: partsTopic }, fromZero)).toEqual({
       value: fromZero,
       phase: 'durable',
       streamID: null,
@@ -593,7 +605,9 @@ describe('realtime store', () => {
     apply({ topic: id, streamID: 's1', seq: 1, op: 'append', text: 'y'.repeat(512_001) })
 
     expect(errors[0]).toContain('exceeded maxBytes')
-    expect(store.read(contentSpec, contentTopic, 'durable').phase).toBe('durable')
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, 'durable').phase).toBe(
+      'durable'
+    )
   })
 
   it('rejects a non-string snapshot on an append-mode field', () => {
@@ -606,7 +620,9 @@ describe('realtime store', () => {
       value: { not: 'a string' },
     })
     expect(errors[0]).toContain('received a non-string snapshot')
-    expect(store.read(contentSpec, contentTopic, 'durable').phase).toBe('durable')
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, 'durable').phase).toBe(
+      'durable'
+    )
   })
 
   it('releases all state when the last listener leaves mid-stream', () => {
@@ -617,6 +633,8 @@ describe('realtime store', () => {
     release()
     expect(store.topicCount).toBe(0)
     apply({ topic: id, streamID: 's1', seq: 1, op: 'append', text: 'more' })
-    expect(store.read(contentSpec, contentTopic, 'durable').phase).toBe('durable')
+    expect(store.read({ spec: contentSpec, topic: contentTopic }, 'durable').phase).toBe(
+      'durable'
+    )
   })
 })
