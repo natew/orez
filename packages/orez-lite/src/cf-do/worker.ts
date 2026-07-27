@@ -1800,7 +1800,15 @@ export class ZeroDO extends DurableObject {
     const changes = rowMutation
       ? Number(this.sql.exec('SELECT changes() AS changes').one()?.changes ?? 0)
       : 0
-    if (mutation) this.writeBudget.recordLogical(rows.length)
+    // Application rows the statement changed, which is `changes()` and not the
+    // rows it RETURNED. Every statement `executeCrud` emits is a bare
+    // INSERT/UPDATE/DELETE with no RETURNING clause, so `rows.length` is zero
+    // on the application-SQL path that carries all of production's writes, and
+    // the ratio this denominator exists to report divided by zero. `changes()`
+    // is already the affected-row count this method returns to the executor,
+    // and SQLite excludes trigger and referential-action rows from it, which is
+    // exactly the "logical" half of the billable/logical pair.
+    if (rowMutation) this.writeBudget.recordLogical(changes)
     if (mutation && !rowMutation) this.cdc.invalidateSchema()
     const captured = track || (this.cdc.active && rowMutation) ? this.cdc.drain() : []
     for (const change of captured) {
