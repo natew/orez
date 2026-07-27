@@ -74,6 +74,10 @@ export { applyClientFrame, applyHostFrame, applyProducerFrame } from './host.js'
 export { createProducer, inProcessTransport } from './producer.js'
 export type { ProducerOptions, RealtimeProducer } from './producer.js'
 
+// The host role over sockets, for any runtime that has them
+export { createSocketHost } from './socket-host.js'
+export type { HostConnection, HostSocket, RealtimeSocketHost } from './socket-host.js'
+
 // A producer that reaches the hub over a socket: an application server
 // generating values while the subscribers are browsers elsewhere
 export { createSocketProducer } from './producer-socket.js'
