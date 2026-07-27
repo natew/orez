@@ -1,4 +1,5 @@
 import createSqliteModule from 'bedrock-sqlite/browser'
+import { resolveQueryPatch } from 'orez-sync-cf-host'
 import { createSyncExecutor } from 'orez-sync-executor/core'
 
 import {
@@ -122,8 +123,8 @@ function validateConfig<S extends Schema, A extends AuthData>(
 ): PullCaps {
   if (!config.storageKey) throw new TypeError('storageKey must not be empty')
   if (!config.mutators) throw new TypeError('mutators are required')
-  if (config.queryAware && !config.resolveQuery) {
-    throw new TypeError('queryAware requires resolveQuery')
+  if (config.queryAware && !config.resolveQueries) {
+    throw new TypeError('queryAware requires resolveQueries')
   }
   const caps = { ...DEFAULT_CAPS, ...config.caps }
   for (const [name, value] of Object.entries(caps)) {
@@ -307,7 +308,7 @@ class BrowserSyncHostImpl<
       await host.#writeTransaction('bootstrap', async () => {
         config.initialize(host.#directSql)
         engine_init_schema(host.#engineDb, config.schema)
-        if (config.queryAware || config.resolveQuery) {
+        if (config.queryAware || config.resolveQueries) {
           engine_init_query_schema(host.#engineDb)
         }
       })
@@ -456,35 +457,15 @@ class BrowserSyncHostImpl<
     const queries = body.queries as { version?: unknown; patch?: unknown }
     if (!Array.isArray(queries.patch)) return body
 
-    const patch = []
-    for (const operation of queries.patch) {
-      if (!operation || typeof operation !== 'object') {
-        patch.push(operation)
-        continue
-      }
-      const entry = operation as Record<string, unknown>
-      if (entry.op !== 'put') {
-        patch.push(operation)
-        continue
-      }
-      if (!this.config.resolveQuery || typeof entry.name !== 'string') {
-        throw requestError('query put requires a server-resolved named query')
-      }
-      if (!Array.isArray(entry.args)) {
-        throw requestError('named query args must be an array')
-      }
-      let ast: JsonValue
-      try {
-        ast = await this.config.resolveQuery(
-          entry.name,
-          entry.args as JsonValue[],
-          authData
-        )
-      } catch {
-        throw requestError(`unknown or unsupported named query: ${entry.name}`)
-      }
-      patch.push({ op: 'put', hash: entry.hash, ast, transformVersion })
+    if (!this.config.resolveQueries) {
+      throw requestError('query put requires a server-resolved named query')
     }
+    const patch = await resolveQueryPatch(
+      queries.patch,
+      (requests) => this.config.resolveQueries!(requests, authData),
+      transformVersion,
+      requestError
+    )
     return { ...body, queries: { ...queries, patch } }
   }
 
@@ -498,7 +479,7 @@ class BrowserSyncHostImpl<
         const queryAware =
           typeof this.config.queryAware === 'function'
             ? this.config.queryAware(authData)
-            : (this.config.queryAware ?? Boolean(this.config.resolveQuery))
+            : (this.config.queryAware ?? Boolean(this.config.resolveQueries))
         const transformVersion = queryAware
           ? typeof this.config.queryTransformVersion === 'function'
             ? this.config.queryTransformVersion(authData)

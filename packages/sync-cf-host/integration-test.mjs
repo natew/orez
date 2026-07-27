@@ -313,8 +313,102 @@ try {
     'query resolution and desired-query apply preserve arrival order'
   )
 
+  // A whole desired-query patch resolves in ONE call. The harness resolver
+  // sleeps once for the longest delayMs in the batch, so a host that still
+  // resolved per query would pay four sleeps here, not one. A screen mounting
+  // several views registers exactly this shape, and against production an
+  // 11-query patch cost 23.3 s resolved one at a time against 0.5 s batched.
+  const batchStarted = Date.now()
+  const batchedQueryPull = await post('/pull', {
+    clientID: 'batched-query-client',
+    clientGroupID: 'batched-query-group',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [
+        {
+          op: 'put',
+          hash: 'batch-p1',
+          name: 'tasksInProjects',
+          args: [{ projectIds: ['p1'], delayMs: 300 }],
+        },
+        {
+          op: 'put',
+          hash: 'batch-p4',
+          name: 'tasksInProjects',
+          args: [{ projectIds: ['p4'], delayMs: 300 }],
+        },
+        // same (name, args) as the first put under a different hash: one
+        // request on the wire, both hashes resolved
+        {
+          op: 'put',
+          hash: 'batch-p1-again',
+          name: 'tasksInProjects',
+          args: [{ projectIds: ['p1'], delayMs: 300 }],
+        },
+        {
+          op: 'put',
+          hash: 'batch-p2',
+          name: 'tasksInProjects',
+          args: [{ projectIds: ['p2'], delayMs: 300 }],
+        },
+      ],
+    },
+  })
+  const batchMs = Date.now() - batchStarted
+  equal(batchedQueryPull.status, 200, 'batched query pull status')
+  equal(
+    batchedQueryPull.body.gotQueries.patch.map((entry) => entry.hash).sort(),
+    ['batch-p1', 'batch-p1-again', 'batch-p2', 'batch-p4'],
+    'every hash in the patch is acknowledged, duplicates included'
+  )
+  const batchedTaskPuts = batchedQueryPull.body.rowsPatch.filter(
+    (entry) => entry.op === 'put' && entry.tableName === 'task'
+  )
+  assert.ok(
+    batchedTaskPuts.length > 0 &&
+      batchedTaskPuts.every((entry) =>
+        ['p1', 'p2', 'p4'].includes(entry.value.projectId)
+      ),
+    'batched patch resolves every distinct query and excludes non-members'
+  )
+  assertions++
+  assert.ok(
+    batchMs < 900,
+    `four-query patch took ${batchMs} ms; a batched resolve pays one 300 ms delay, a per-query resolve pays four`
+  )
+  assertions++
+  console.log(`four-query desired patch resolved in ${batchMs} ms (one 300 ms resolver)`)
+
+  // An unknown query fails its own pull and names itself, so one bad query in a
+  // batch is still attributable.
+  const unknownQueryPull = await post('/pull', {
+    clientID: 'unknown-query-client',
+    clientGroupID: 'unknown-query-group',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [
+        {
+          op: 'put',
+          hash: 'known',
+          name: 'tasksInProjects',
+          args: [{ projectIds: ['p1'] }],
+        },
+        { op: 'put', hash: 'unknown', name: 'noSuchQuery', args: [{}] },
+      ],
+    },
+  })
+  equal(unknownQueryPull.status, 400, 'unknown query in a batch is a request error')
+  assert.match(
+    unknownQueryPull.body.error,
+    /noSuchQuery/,
+    'batch error names the query that failed'
+  )
+  assertions++
+
   // A patch-free pull carries no desired-query change to order, so it must not
-  // wait out another pull's resolveQuery round trip. This is the shape a warm
+  // wait out another pull's query-resolution round trip. This is the shape a warm
   // client actually polls in: it re-states nothing and expects `unchanged`.
   const blockingQueryPull = post('/pull', {
     clientID: 'warm-blocking-client',

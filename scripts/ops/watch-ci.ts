@@ -16,13 +16,16 @@ const flag = (name: string): string | undefined => {
   return index === -1 ? undefined : args[index + 1]
 }
 
-const sha =
-  flag('sha') ??
-  new TextDecoder()
-    .decode(
-      await new Response(Bun.spawn(['git', 'rev-parse', 'HEAD']).stdout).arrayBuffer()
-    )
-    .trim()
+// `gh run list --commit` matches the full 40-character sha only: an
+// abbreviated one silently returns no runs, which reads as "CI has not started"
+// forever rather than as a bad argument.
+const sha = new TextDecoder()
+  .decode(
+    await new Response(
+      Bun.spawn(['git', 'rev-parse', flag('sha') ?? 'HEAD']).stdout
+    ).arrayBuffer()
+  )
+  .trim()
 const intervalMs = Math.max(60, Number(flag('interval') ?? 180)) * 1000
 const deadline = Date.now() + Math.max(60, Number(flag('timeout') ?? 2400)) * 1000
 

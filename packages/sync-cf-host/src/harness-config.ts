@@ -443,10 +443,24 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
     mutators: harnessMutators,
     queryAware: false,
     queryTransformVersion: 1,
-    async resolveQuery(name, args) {
-      const delayMs = Number((args[0] as { delayMs?: unknown } | undefined)?.delayMs ?? 0)
+    // one call for the whole patch, and one delay for it: a resolver that slept
+    // per query would hide the very waterfall the batch contract removes, so
+    // the lane's timing assertions would pass either way.
+    async resolveQueries(requests) {
+      const delayMs = Math.max(
+        0,
+        ...requests.map((request) =>
+          Number((request.args[0] as { delayMs?: unknown } | undefined)?.delayMs ?? 0)
+        )
+      )
       if (delayMs > 0) await scheduler.wait(delayMs)
-      return queryNameToAst(name, args) as never
+      return requests.map((request) => {
+        try {
+          return { ast: queryNameToAst(request.name, request.args) as never }
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : String(error) }
+        }
+      })
     },
     initialize: initializeHarness,
     namespace(request) {

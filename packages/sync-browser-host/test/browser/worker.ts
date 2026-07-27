@@ -381,6 +381,24 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
         await new Promise<never>(() => {})
       },
     }
+    const queryAst = (name: string): JsonValue => {
+      if (name === 'todosDone') {
+        return {
+          table: 'todo',
+          where: {
+            type: 'simple',
+            left: { type: 'column', name: 'done' },
+            right: { type: 'literal', value: true },
+            op: '=',
+          },
+          orderBy: [['id', 'asc']],
+        }
+      }
+      if (name === 'allExpenses') return { table: 'expense', orderBy: [['date', 'desc']] }
+      if (name === 'allBudgets') return { table: 'budget' }
+      if (name === 'allSavingsGoals') return { table: 'savingsGoal' }
+      throw new Error(`unknown query: ${name}`)
+    }
     const config = {
       storageKey,
       schema,
@@ -414,25 +432,14 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
       },
       mutators,
       queryAware: (authData) => authData?.queryAware === true,
-      resolveQuery(name): JsonValue {
-        if (name === 'todosDone') {
-          return {
-            table: 'todo',
-            where: {
-              type: 'simple',
-              left: { type: 'column', name: 'done' },
-              right: { type: 'literal', value: true },
-              op: '=',
-            },
-            orderBy: [['id', 'asc']],
+      resolveQueries(requests) {
+        return requests.map((request) => {
+          try {
+            return { ast: queryAst(request.name) }
+          } catch (error) {
+            return { error: error instanceof Error ? error.message : String(error) }
           }
-        }
-        if (name === 'allExpenses') {
-          return { table: 'expense', orderBy: [['date', 'desc']] }
-        }
-        if (name === 'allBudgets') return { table: 'budget' }
-        if (name === 'allSavingsGoals') return { table: 'savingsGoal' }
-        throw new Error(`unknown query: ${name}`)
+        })
       },
     } satisfies BrowserSyncHostConfig<typeof schema, { id: string; queryAware: boolean }>
     const createdHost = faultPoint

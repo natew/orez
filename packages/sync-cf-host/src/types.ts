@@ -30,12 +30,38 @@ export interface SyncSql {
   ): Row[]
 }
 
+export type QueryResolutionRequest = {
+  readonly name: string
+  readonly args: readonly JsonValue[]
+}
+
+/**
+ * One resolved query, positionally matched to the request at the same index.
+ *
+ * An `error` fails only its own query rather than the whole patch, so a client
+ * that registers one unknown query alongside nine good ones is told which one
+ * is unknown.
+ */
+export type QueryResolution = { readonly ast: JsonValue } | { readonly error: string }
+
+/**
+ * Resolve a whole desired-query patch in one call.
+ *
+ * This is a batch contract because it is nearly always a network call: a
+ * consumer delegates the transform to its application, which authenticates and
+ * answers over a service binding. Resolving one query per call made a pull's
+ * cost linear in the number of queries a screen registers, and each round trip
+ * re-authenticated. Measured against production with a captured mobile client's
+ * desired-query set: an 11-query pull took 23.3 s against 2.0 s for the same
+ * pull carrying no queries.
+ *
+ * Implementations must return exactly one entry per request, in request order.
+ */
 export type QueryResolver = (
-  name: string,
-  args: readonly JsonValue[],
+  requests: readonly QueryResolutionRequest[],
   claims: NormalizedClaims,
   env: SyncHostEnv
-) => JsonValue | Promise<JsonValue>
+) => readonly QueryResolution[] | Promise<readonly QueryResolution[]>
 
 export type PullCaps = {
   maxChangeRows: number
@@ -130,7 +156,8 @@ export type SyncHostConfig<
   /** Enable desired-query pulls for this namespace and resolve named queries
    * into validated Zero ASTs before they reach sync-core. */
   queryAware?: boolean | ((claims: NormalizedClaims) => boolean)
-  resolveQuery?: QueryResolver
+  /** Resolve every named query in one desired-query patch, in one call. */
+  resolveQueries?: QueryResolver
   /** Server-owned invalidation epoch for permission/schema transforms. */
   queryTransformVersion?: number | ((claims: NormalizedClaims) => number)
   /** Enable consumer visibility from the first request. Defaults to false for harnesses. */

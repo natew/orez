@@ -1,4 +1,5 @@
 import type { Schema } from '@rocicorp/zero'
+import type { QueryResolution, QueryResolutionRequest } from 'orez-sync-cf-host'
 import type { TransactionQueryBudget } from 'orez-sync-cf-host/transaction-query'
 import type {
   AuthData,
@@ -58,11 +59,11 @@ export type BrowserSyncHostConfig<
   mutators: MutatorRegistry<S>
   visibility?: VisibilityConfig
   queryAware?: boolean | ((authData: A | null) => boolean)
-  resolveQuery?: (
-    name: string,
-    args: readonly JsonValue[],
+  /** Resolve every named query in one desired-query patch, in one call. */
+  resolveQueries?: (
+    requests: readonly QueryResolutionRequest[],
     authData: A | null
-  ) => JsonValue | Promise<JsonValue>
+  ) => readonly QueryResolution[] | Promise<readonly QueryResolution[]>
   queryTransformVersion?: number | ((authData: A | null) => number)
   retainChanges?: number
   caps?: Partial<PullCaps>

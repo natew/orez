@@ -1,6 +1,6 @@
 // Adversarial CF-host lane: a remote client must never be allowed to provide
 // the AST that determines server-side membership. Only named queries resolved
-// by SyncHostConfig.resolveQuery may cross the host/engine boundary.
+// by SyncHostConfig.resolveQueries may cross the host/engine boundary.
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'

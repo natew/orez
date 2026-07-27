@@ -1,5 +1,6 @@
 export { createSyncDurableObject, createSyncWorker } from './host.js'
 export { createQueryCompiler } from './query-compiler.js'
+export { resolveQueryPatch } from './query-patch.js'
 export { visibility } from './types.js'
 export {
   DEFAULT_TRANSACTION_QUERY_BUDGET,
@@ -10,6 +11,8 @@ export {
 
 export type {
   PullCaps,
+  QueryResolution,
+  QueryResolutionRequest,
   QueryResolver,
   SyncHostConfig,
   SyncHostEnv,

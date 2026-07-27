@@ -3,6 +3,7 @@ import { createSyncExecutor } from 'orez-sync-executor/core'
 
 import { validatePullCaps, validateSyncHostConfig } from './config.js'
 import { createQueryCompiler } from './query-compiler.js'
+import { resolveQueryPatch } from './query-patch.js'
 import {
   decodeSqlParams,
   SqlStorageDirect,
@@ -518,7 +519,7 @@ export function createSyncDurableObject<
             )
           }
           this.#wasm(() => engine_init_schema(this.#engineDb, config.schema))
-          if (config.queryAware || config.resolveQuery)
+          if (config.queryAware || config.resolveQueries)
             this.#wasm(() => engine_init_query_schema(this.#engineDb))
         })
       })
@@ -1312,7 +1313,7 @@ export function createSyncDurableObject<
           this.#queryAwareOverride() ??
           (typeof config.queryAware === 'function'
             ? config.queryAware(claims)
-            : (config.queryAware ?? Boolean(config.resolveQuery)))
+            : (config.queryAware ?? Boolean(config.resolveQueries)))
         const transformVersion = queryAware
           ? typeof config.queryTransformVersion === 'function'
             ? config.queryTransformVersion(claims)
@@ -1326,12 +1327,12 @@ export function createSyncDurableObject<
         // A pull carrying no patch applies nothing, and it reads membership
         // inside transactionSync, which is already atomic against whichever
         // patch commits around it. Holding the lock for those pulls only makes
-        // an unchanged warm pull wait out somebody else's resolveQuery round
+        // an unchanged warm pull wait out somebody else's query-resolution round
         // trip to the application, which is the head-of-line blocking behind
         // the pull tail: a client polls far more often than it changes what it
         // wants, so almost every pull in flight is patch-free.
         const releaseQueryPull =
-          queryAware && config.resolveQuery && body.queries
+          queryAware && config.resolveQueries && body.queries
             ? await this.#acquireQueryPullLock(
                 typeof body.clientGroupID === 'string' ? body.clientGroupID : ''
               )
@@ -1344,40 +1345,17 @@ export function createSyncDurableObject<
               patch?: unknown
             }
             if (Array.isArray(queries.patch)) {
-              const patch = []
-              for (const operation of queries.patch) {
-                if (!operation || typeof operation !== 'object') {
-                  patch.push(operation)
-                  continue
-                }
-                const op = operation as Record<string, unknown>
-                if (op.op === 'put') {
-                  if (!config.resolveQuery || typeof op.name !== 'string') {
-                    throw requestError('query put requires a server-resolved named query')
-                  }
-                  if (!Array.isArray(op.args)) {
-                    throw requestError('named query args must be an array')
-                  }
-                  const args = op.args as JsonValue[]
-                  let ast: JsonValue
-                  try {
-                    // resolveQuery may be async and needs `env` (a consumer can
-                    // delegate the transform to its app's real synced-queries
-                    // endpoint over an app service binding — authenticate runs in the
-                    // worker isolate, but the query loop runs here in the DO, so the
-                    // binding must come from the DO's own env, not a shared global).
-                    ast = await config.resolveQuery(op.name, args, claims, this.env)
-                  } catch (error) {
-                    throw requestError(`unknown or unsupported named query: ${op.name}`)
-                  }
-                  patch.push({
-                    op: 'put',
-                    hash: op.hash,
-                    ast,
-                    transformVersion,
-                  })
-                } else patch.push(operation)
-              }
+              // resolveQueries may be async and needs `env` (a consumer can
+              // delegate the transform to its app's real synced-queries
+              // endpoint over an app service binding — authenticate runs in the
+              // worker isolate, but the query loop runs here in the DO, so the
+              // binding must come from the DO's own env, not a shared global).
+              const patch = await resolveQueryPatch(
+                queries.patch,
+                (requests) => config.resolveQueries!(requests, claims, this.env),
+                transformVersion,
+                requestError
+              )
               body = { ...body, queries: { ...queries, patch } }
             }
           }
