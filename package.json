@@ -73,7 +73,7 @@
     "lint": "oxlint --import-plugin --ignore-pattern sqlite-wasm/",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
-    "check": "tsc --noEmit && bun run --cwd packages/sync-executor typecheck && bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host typecheck && bun run --cwd packages/orez-lite typecheck && bun run --cwd packages/sync-browser-host typecheck && bun run --cwd packages/drizzle-zero-sqlite typecheck",
+    "check": "bun run --cwd packages/orez-lite build:runtime && tsc --noEmit && bun run --cwd packages/sync-executor typecheck && bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host typecheck && bun run --cwd packages/orez-lite typecheck && bun run --cwd packages/sync-browser-host typecheck && bun run --cwd packages/drizzle-zero-sqlite typecheck",
     "demo:test": "bun demo/src/test/run-e2e.ts",
     "check:all": "bun run lint && bun run format:check && bun run check && bun run test",
     "test:chat": "bun scripts/test-chat-integration.ts",
