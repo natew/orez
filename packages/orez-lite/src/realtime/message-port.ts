@@ -10,9 +10,10 @@
 // which is correct: the durable value is whatever the client's next Zero pull
 // produces.
 
+import { applyClientFrame, applyHostFrame } from './host.js'
 import { RealtimeHub } from './hub.js'
+import { createProducer, inProcessTransport } from './producer.js'
 import { decodeFrame, encodeFrame } from './protocol.js'
-import { RealtimePublisher } from './publisher.js'
 import { RealtimeStore } from './store.js'
 
 import type {
@@ -22,8 +23,10 @@ import type {
   SubscribeAuthorization,
 } from './hub.js'
 import type { StreamingManifest } from './manifest.js'
-import type { FieldUpdate, RealtimeTopic } from './protocol.js'
-import type { PublisherTransport } from './publisher.js'
+import type { RealtimeProducer } from './producer.js'
+import type { HostFrame, RealtimeTopic } from './protocol.js'
+import type { RealtimePublisher } from './publisher.js'
+import type { FieldWriter } from './writer.js'
 
 // Reads the row-membership fact from the engine. Supplied by the host so this
 // module never touches the database or the wasm boundary directly.
@@ -36,11 +39,12 @@ export type MembershipReader = (
 export type BrowserRealtimeOptions = {
   readonly manifest: StreamingManifest
   readonly readMembership: MembershipReader
+  readonly onError?: (message: string) => void
 }
 
 export class BrowserRealtime {
   readonly #hub: RealtimeHub
-  readonly #publisher: RealtimePublisher
+  readonly #producer: RealtimeProducer
   #producerCounter = 0
   #connectionCounter = 0
 
@@ -65,31 +69,30 @@ export class BrowserRealtime {
       },
     })
 
-    // In-process producer transport. There is no producer socket in the
-    // browser: the application code that runs the model loop and the hub share
-    // one JavaScript context, so `begin`/`publish` are direct calls.
-    const producer: HubProducer = {
+    // There is no producer socket in the browser: the code running the model
+    // loop and the hub share one JavaScript context, so begin/publish are
+    // direct calls. The producer ROLE is still the shared one, so a loop
+    // written here runs unchanged against a socket host.
+    const producerHandle: HubProducer = {
       id: `browser-producer-${++this.#producerCounter}`,
       send: () => {},
     }
-    const transport: PublisherTransport = {
-      begin: (topic: RealtimeTopic, streamID: string) => {
-        const result = this.#hub.beginGeneration(producer, topic, streamID)
-        if (!result.ok) throw new Error(result.reason)
-      },
-      publish: (update: FieldUpdate) => {
-        const result = this.#hub.publish(producer, update)
-        if (!result.ok) throw new Error(result.reason)
-      },
-      end: () => {},
-    }
-    this.#publisher = new RealtimePublisher(transport, options.manifest)
+    this.#producer = createProducer(
+      inProcessTransport(this.#hub, producerHandle),
+      options
+    )
   }
 
-  // The application's handle for producing values. Trusted by construction:
-  // this is the worker's own code, not a remote publisher.
+  // Imperative writing: set a row's field to its current value, generations
+  // managed for you. Trusted by construction, this is the worker's own code.
+  get fields(): FieldWriter {
+    return this.#producer.fields
+  }
+
+  // The explicit generation API underneath, for a producer that controls begin,
+  // commit, and end itself.
   get publisher(): RealtimePublisher {
-    return this.#publisher
+    return this.#producer.publisher
   }
 
   // Attach a port. The identity comes from the host's authenticated pull path,
@@ -117,14 +120,10 @@ export class BrowserRealtime {
       if (typeof raw !== 'string') return
       const frame = decodeFrame(raw)
       if (!frame) return
-      const [kind, body] = frame
       // A subscriber channel is never a publish channel. Only subscribe and
       // unsubscribe are accepted here, whatever else a port sends.
-      if (kind === 'subscribe') {
-        void this.#hub.subscribe(connection, (body as { topic: RealtimeTopic }).topic)
-      } else if (kind === 'unsubscribe') {
-        void this.#hub.unsubscribe(connection, (body as { topic: RealtimeTopic }).topic)
-      }
+      if (frame[0] !== 'subscribe' && frame[0] !== 'unsubscribe') return
+      void applyClientFrame(this.#hub, connection, frame)
     }
 
     port.addEventListener('message', onMessage)
@@ -179,17 +178,7 @@ export function connectRealtimePort(
     const raw = (message as { frame?: unknown }).frame
     if (typeof raw !== 'string') return
     const frame = decodeFrame(raw)
-    if (!frame) return
-    const [kind, body] = frame
-    if (kind === 'field') {
-      store.applyUpdates((body as { updates: readonly FieldUpdate[] }).updates)
-    } else if (kind === 'subscribed') {
-      const { topic, status } = body as { topic: string; status: 'active' | 'pending' }
-      store.handleSubscribed(topic, status)
-    } else if (kind === 'subscribe-error') {
-      const { topic, reason } = body as { topic: string; reason: string }
-      store.handleSubscribeError(topic, reason)
-    }
+    if (frame) applyHostFrame(store, frame as HostFrame)
   }
 
   port.addEventListener('message', onMessage)

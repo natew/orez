@@ -18,15 +18,15 @@
 // exactly the guarantee the overlay already makes: a reload, another tab, or
 // another user sees the committed value, never the in-flight one.
 
+import { applyClientFrame, applyHostFrame } from './host.js'
 import { RealtimeHub } from './hub.js'
-import { RealtimePublisher } from './publisher.js'
+import { createProducer, inProcessTransport } from './producer.js'
 import { RealtimeStore } from './store.js'
-import { FieldWriter } from './writer.js'
 
 import type { HubConnection, HubProducer } from './hub.js'
 import type { StreamingManifest } from './manifest.js'
-import type { FieldUpdate, RealtimeTopic } from './protocol.js'
-import type { PublisherTransport } from './publisher.js'
+import type { RealtimeProducer } from './producer.js'
+import type { ClientFrame, HostFrame } from './protocol.js'
 
 export type LocalRealtimeOptions = {
   readonly manifest: StreamingManifest
@@ -35,15 +35,11 @@ export type LocalRealtimeOptions = {
   readonly onError?: (message: string) => void
 }
 
-export type LocalRealtime = {
+// The producer role is the shared one, so a loop written against a local
+// realtime moves to a worker or a socket host unchanged.
+export type LocalRealtime = RealtimeProducer & {
   // hand to createUseStreamingField / createUseStreamingFields
   readonly store: RealtimeStore
-  // imperative writing: set a row's field to its current value, generations
-  // managed for you. This is what most producer loops want.
-  readonly fields: FieldWriter
-  // the explicit generation API underneath, when a producer needs to control
-  // begin, commit, and end itself
-  readonly publisher: RealtimePublisher
   // Deliver whatever the batching window has ready. Called automatically on a
   // timer; exposed so a test can be deterministic without faking timers.
   readonly flush: () => void
@@ -65,11 +61,7 @@ export function createLocalRealtime(options: LocalRealtimeOptions): LocalRealtim
   })
 
   const store = new RealtimeStore({
-    send: (frame) => {
-      const [kind, body] = frame as [string, { topic: RealtimeTopic }]
-      if (kind === 'subscribe') void hub.subscribe(connection, body.topic)
-      else if (kind === 'unsubscribe') void hub.unsubscribe(connection, body.topic)
-    },
+    send: (frame) => void applyClientFrame(hub, connection, frame as ClientFrame),
     staleAfterMs: options.staleAfterMs,
     onError: options.onError,
   })
@@ -77,46 +69,22 @@ export function createLocalRealtime(options: LocalRealtimeOptions): LocalRealtim
   const connection: HubConnection = {
     id: 'local',
     identity: { userID: 'local', clientID: 'local', clientGroupID: 'local' },
-    // Frames are handed straight to the store. They are not serialized: this
-    // is one context, and a JSON round trip per token would be pure cost.
-    send: (frame) => {
-      const [kind, body] = frame as [string, Record<string, unknown>]
-      if (kind === 'field') {
-        store.applyUpdates(body.updates as readonly FieldUpdate[])
-      } else if (kind === 'subscribed') {
-        store.handleSubscribed(body.topic as string, body.status as 'active' | 'pending')
-      } else if (kind === 'subscribe-error') {
-        store.handleSubscribeError(body.topic as string, body.reason as string)
-      }
-    },
+    // Frames are handed straight to the store, not serialized: this is one
+    // context, and a JSON round trip per token would be pure cost. The routing
+    // is still the shared one, so a frame means the same thing here as it does
+    // over a socket.
+    send: (frame) => applyHostFrame(store, frame as HostFrame),
   }
 
-  const producer: HubProducer = { id: 'local-producer', send: () => {} }
-  const transport: PublisherTransport = {
-    begin: (topic, streamID) => {
-      const result = hub.beginGeneration(producer, topic, streamID)
-      if (!result.ok) throw new Error(result.reason)
-    },
-    publish: (update: FieldUpdate) => {
-      const result = hub.publish(producer, update)
-      if (!result.ok) throw new Error(result.reason)
-    },
-    end: () => {},
-  }
+  const producerHandle: HubProducer = { id: 'local-producer', send: () => {} }
+  const producer = createProducer(inProcessTransport(hub, producerHandle), options)
 
-  const publisher = new RealtimePublisher(transport, options.manifest)
   return {
     store,
-    publisher,
-    fields: new FieldWriter(publisher, {
-      onError: (error, topic) =>
-        options.onError?.(
-          `realtime write failed for ${topic.table}.${topic.field}: ${error.message}`
-        ),
-    }),
+    ...producer,
     flush: () => hub.flush(),
     close: () => {
-      hub.dropProducer(producer.id)
+      hub.dropProducer(producerHandle.id)
       hub.dropConnection(connection.id)
     },
   }

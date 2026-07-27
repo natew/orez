@@ -12,9 +12,8 @@ import { describe, expect, it } from 'vitest'
 import { applyProducerFrame } from './host.js'
 import { RealtimeHub } from './hub.js'
 import { defineStreamingFields } from './manifest.js'
-import { createProducerTransport } from './producer-socket.js'
+import { createSocketProducer } from './producer-socket.js'
 import { decodeFrame } from './protocol.js'
-import { RealtimePublisher } from './publisher.js'
 
 import type { HubConnection, HubProducer } from './hub.js'
 import type { ProducerFrame } from './protocol.js'
@@ -63,14 +62,17 @@ function connect(options: { immediate?: boolean } = {}) {
     },
   }
 
-  const remote = createProducerTransport({
-    send: (raw) => {
-      const frame = decodeFrame(raw)
-      if (frame) applyProducerFrame(hub, producerHandle, frame as ProducerFrame)
+  const remote = createSocketProducer(
+    {
+      send: (raw) => {
+        const frame = decodeFrame(raw)
+        if (frame) applyProducerFrame(hub, producerHandle, frame as ProducerFrame)
+      },
     },
-  })
+    { manifest: streaming.manifest }
+  )
 
-  const publisher = new RealtimePublisher(remote.transport, streaming.manifest)
+  const publisher = remote.publisher
 
   const received: unknown[][] = []
   const subscriber: HubConnection = {

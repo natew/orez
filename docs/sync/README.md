@@ -25,6 +25,10 @@ incremental sync.
   a drop-in for zero-cache.
 - **[Configuration reference](./configuration.md)**: every `SyncHostConfig`
   field, the environment variables, and the Node mount surface.
+- **[Streaming fields](../streaming-fields.md)**: broadcasting a column's value
+  to clients before it is written, for generated text and other values a reader
+  should watch arrive. Runs beside Zero: no cookie advances and no row is
+  written, so a dropped frame costs latency and never correctness.
 - **[Testing](./testing.md)**: an honest account of what is tested, how, and
   what is not.
 - **[Trade-offs and operational reality](./trade-offs.md)**: Durable Object

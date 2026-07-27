@@ -67,13 +67,17 @@ export type { LocalRealtime, LocalRealtimeOptions } from './local.js'
 export { BrowserRealtime, connectRealtimePort } from './message-port.js'
 export type { BrowserRealtimeOptions, MembershipReader } from './message-port.js'
 
-// Frame routing, for a host that owns its own sockets
-export { applyClientFrame, applyProducerFrame } from './host.js'
+// Frame routing. One applier per direction; every surface is built from these.
+export { applyClientFrame, applyHostFrame, applyProducerFrame } from './host.js'
 
-// The producer half of that: an application server that generates values while
-// the subscribers are browsers elsewhere
-export { createProducerTransport } from './producer-socket.js'
-export type { ProducerSocket, ProducerTransport } from './producer-socket.js'
+// The producer role, identical on every surface
+export { createProducer, inProcessTransport } from './producer.js'
+export type { ProducerOptions, RealtimeProducer } from './producer.js'
+
+// A producer that reaches the hub over a socket: an application server
+// generating values while the subscribers are browsers elsewhere
+export { createSocketProducer } from './producer-socket.js'
+export type { ProducerSocket, SocketProducer } from './producer-socket.js'
 
 // The React binding lives in on-zero, which already owns the React peer
 // dependency. orez-lite stays framework-free: see on-zero's useStreamingField.

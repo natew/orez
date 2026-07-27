@@ -14,8 +14,10 @@
 // own deployment. This owns only the frame bookkeeping on top of a socket that
 // is already open.
 
+import { createProducer } from './producer.js'
 import { decodeFrame, encodeFrame } from './protocol.js'
 
+import type { ProducerOptions, RealtimeProducer } from './producer.js'
 import type { FieldUpdate, RealtimeTopic } from './protocol.js'
 import type { PublisherTransport } from './publisher.js'
 
@@ -23,8 +25,7 @@ export type ProducerSocket = {
   send(data: string): void
 }
 
-export type ProducerTransport = {
-  readonly transport: PublisherTransport
+export type SocketProducer = RealtimeProducer & {
   // feed every inbound socket message here
   handleMessage(raw: string): void
   // the socket closed or errored. Every generation waiting on a begin ack is
@@ -33,7 +34,10 @@ export type ProducerTransport = {
   fail(reason: string): void
 }
 
-export function createProducerTransport(socket: ProducerSocket): ProducerTransport {
+export function createSocketProducer(
+  socket: ProducerSocket,
+  options: ProducerOptions
+): SocketProducer {
   const pendingBegins = new Map<
     string,
     { resolve: () => void; reject: (error: Error) => void }
@@ -69,7 +73,7 @@ export function createProducerTransport(socket: ProducerSocket): ProducerTranspo
   }
 
   return {
-    transport,
+    ...createProducer(transport, options),
 
     handleMessage(raw: string): void {
       const frame = decodeFrame(raw)
