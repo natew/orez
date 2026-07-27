@@ -171,7 +171,9 @@ jobs:
       - run: bun install --frozen-lockfile
 
       - name: build sync runtime dependencies
-        run: bun run build:sync-runtime
+        run: |
+          bun run build:sync-runtime
+          bun run --cwd packages/sync-cf-host build:dist
 
       - name: install chromium
         run: bun run --cwd packages/sync-browser-host playwright install --with-deps chromium
