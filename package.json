@@ -27,10 +27,6 @@
       "types": "./dist/change-tracking.d.ts",
       "import": "./dist/change-tracking.js"
     },
-    "./realtime": {
-      "types": "./dist/realtime.d.ts",
-      "import": "./dist/realtime.js"
-    },
     "./naming": {
       "types": "./dist/naming.d.ts",
       "import": "./dist/naming.js"
