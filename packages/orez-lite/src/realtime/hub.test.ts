@@ -95,16 +95,16 @@ describe('realtime hub', () => {
       },
     }
     // the store's outbound frames drive the hub, closing the loop
-    const pump = () => {
+    const pump = async () => {
       for (const frame of sentToHub.splice(0)) {
         const [kind, body] = frame as [string, { topic: RealtimeTopic }]
-        if (kind === 'subscribe') hub.subscribe(connection, body.topic)
-        else if (kind === 'unsubscribe') hub.unsubscribe(connection, body.topic)
+        if (kind === 'subscribe') await hub.subscribe(connection, body.topic)
+        else if (kind === 'unsubscribe') await hub.unsubscribe(connection, body.topic)
       }
     }
-    const mount = (topic: RealtimeTopic, spec = contentSpec) => {
+    const mount = async (topic: RealtimeTopic, spec = contentSpec) => {
       const release = store.subscribe(spec, topic, () => {})
-      pump()
+      await pump()
       return release
     }
     return { store, connection, errors, mount, pump }
@@ -168,7 +168,7 @@ describe('realtime hub', () => {
 
   it('streams a token sequence from producer to subscriber', async () => {
     const alice = client('alice')
-    alice.mount(topicOf('m1'))
+    await alice.mount(topicOf('m1'))
     const { publisher } = makePublisher()
 
     const session = await publisher.begin<string>('message', 'content', {
@@ -189,8 +189,8 @@ describe('realtime hub', () => {
   it('fans one stream out to every subscriber of that row', async () => {
     const alice = client('alice')
     const bob = client('bob')
-    alice.mount(topicOf('m1'))
-    bob.mount(topicOf('m1'))
+    await alice.mount(topicOf('m1'))
+    await bob.mount(topicOf('m1'))
     const { publisher } = makePublisher()
 
     const session = await publisher.begin<string>('message', 'content', {
@@ -206,7 +206,7 @@ describe('realtime hub', () => {
 
   it('sends nothing to a subscriber of a different row', async () => {
     const alice = client('alice')
-    alice.mount(topicOf('other-row'))
+    await alice.mount(topicOf('other-row'))
     const { publisher } = makePublisher()
 
     const session = await publisher.begin<string>('message', 'content', {
@@ -238,7 +238,7 @@ describe('realtime hub', () => {
 
   it('catches a mid-stream subscriber up with one snapshot, then appends', async () => {
     const alice = client('alice')
-    alice.mount(topicOf('m1'))
+    await alice.mount(topicOf('m1'))
     const { publisher } = makePublisher()
 
     const session = await publisher.begin<string>('message', 'content', {
@@ -254,7 +254,7 @@ describe('realtime hub', () => {
 
     // bob arrives 3 tokens late and must still see the whole value
     const bob = client('bob')
-    bob.mount(topicOf('m1'))
+    await bob.mount(topicOf('m1'))
     expect(bob.store.read(contentSpec, topicOf('m1'), '').value).toBe('one two three ')
 
     content += 'four'
@@ -274,7 +274,7 @@ describe('realtime hub', () => {
       reason: 'row is not in your query membership',
     })
     const alice = client('alice')
-    alice.mount(topicOf('m1'))
+    await alice.mount(topicOf('m1'))
 
     const { publisher } = makePublisher()
     const session = await publisher.begin<string>('message', 'content', {
@@ -291,7 +291,7 @@ describe('realtime hub', () => {
   it('holds a pending subscription out of fan-out until it is retried', async () => {
     authorize = () => ({ status: 'pending' })
     const alice = client('alice')
-    alice.mount(topicOf('m1'))
+    await alice.mount(topicOf('m1'))
 
     const { publisher } = makePublisher()
     const session = await publisher.begin<string>('message', 'content', {
@@ -305,7 +305,7 @@ describe('realtime hub', () => {
     // the pull lands, membership is recorded, and the retry succeeds
     authorize = () => ({ status: 'active' })
     alice.store.retryPending()
-    alice.pump()
+    await alice.pump()
     expect(alice.store.read(contentSpec, topicOf('m1'), 'durable').value).toBe(
       'optimistic row is not authorized yet'
     )
@@ -313,7 +313,7 @@ describe('realtime hub', () => {
 
   it('drops subscriptions when a pull removes the row from membership', async () => {
     const alice = client('alice')
-    alice.mount(topicOf('m1'))
+    await alice.mount(topicOf('m1'))
     const { publisher } = makePublisher()
     const session = await publisher.begin<string>('message', 'content', {
       namespace: 'ns',
@@ -340,7 +340,7 @@ describe('realtime hub', () => {
 
   it('supersedes an older generation and rejects its late frames', async () => {
     const alice = client('alice')
-    alice.mount(topicOf('m1'))
+    await alice.mount(topicOf('m1'))
 
     const first = makePublisher('producer-1')
     const second = makePublisher('producer-2')
@@ -397,7 +397,7 @@ describe('realtime hub', () => {
 
   it('holds the final overlay until Zero produces the committed value', async () => {
     const alice = client('alice')
-    alice.mount(topicOf('m1'))
+    await alice.mount(topicOf('m1'))
     const { publisher } = makePublisher()
 
     const session = await publisher.begin<string>('message', 'content', {
@@ -428,7 +428,7 @@ describe('realtime hub', () => {
 
   it('reveals the durable value when the producer aborts', async () => {
     const alice = client('alice')
-    alice.mount(topicOf('m1'))
+    await alice.mount(topicOf('m1'))
     const { publisher } = makePublisher()
 
     const session = await publisher.begin<string>('message', 'content', {
@@ -449,7 +449,7 @@ describe('realtime hub', () => {
 
   it('releases a generation when the producer socket dies without a terminal frame', async () => {
     const alice = client('alice')
-    alice.mount(topicOf('m1'))
+    await alice.mount(topicOf('m1'))
     const { producer, publisher } = makePublisher()
     const session = await publisher.begin<string>('message', 'content', {
       namespace: 'ns',
@@ -463,13 +463,13 @@ describe('realtime hub', () => {
 
     // a new subscriber gets no snapshot of the abandoned generation
     const bob = client('bob')
-    bob.mount(topicOf('m1'))
+    await bob.mount(topicOf('m1'))
     expect(bob.store.read(contentSpec, topicOf('m1'), 'durable').phase).toBe('durable')
   })
 
   it('stops fan-out once the last subscriber of a topic unmounts', async () => {
     const alice = client('alice')
-    const release = alice.mount(topicOf('m1'))
+    const release = await alice.mount(topicOf('m1'))
     const { publisher } = makePublisher()
     const session = await publisher.begin<string>('message', 'content', {
       namespace: 'ns',
@@ -480,7 +480,7 @@ describe('realtime hub', () => {
     expect(hub.subscribedTopics).toBe(1)
 
     release()
-    alice.pump()
+    await alice.pump()
     expect(hub.subscribedTopics).toBe(0)
 
     session.set('watched no longer')
@@ -490,8 +490,8 @@ describe('realtime hub', () => {
 
   it('drops every subscription when a connection goes away', async () => {
     const alice = client('alice')
-    alice.mount(topicOf('m1'))
-    alice.mount(topicOf('m2'))
+    await alice.mount(topicOf('m1'))
+    await alice.mount(topicOf('m2'))
     expect(hub.subscribedTopics).toBe(2)
 
     hub.dropConnection(alice.connection.id)
@@ -505,8 +505,8 @@ describe('realtime hub', () => {
       identity: identity('counter'),
       send: (frame) => frames.push(frame),
     }
-    hub.subscribe(connection, topicOf('m1'))
-    hub.subscribe(connection, topicOf('m2'))
+    await hub.subscribe(connection, topicOf('m1'))
+    await hub.subscribe(connection, topicOf('m2'))
     frames.length = 0
 
     const { producer } = makePublisher()
@@ -534,7 +534,80 @@ describe('realtime hub', () => {
     expect((frames[0] as [string, { updates: unknown[] }])[1].updates).toHaveLength(2)
   })
 
-  it('refuses a topic outside the manifest', () => {
+  // authorization can await (the browser worker serializes every database
+  // access through its write queue), so the hub must not fan out to a
+  // connection whose authorization has not come back yet.
+  it('delivers nothing until a slow authorization resolves', async () => {
+    let release!: (value: SubscribeAuthorization) => void
+    const gate = new Promise<SubscribeAuthorization>((resolve) => {
+      release = resolve
+    })
+    authorize = () => gate
+
+    const alice = client('alice')
+    const pending = alice.mount(topicOf('m1'))
+    const { publisher } = makePublisher()
+    const session = await publisher.begin<string>('message', 'content', {
+      namespace: 'ns',
+      key: { id: 'm1' },
+    })
+    session.set('streamed while authorization is in flight')
+    await advance(50)
+    expect(alice.store.read(contentSpec, topicOf('m1'), 'durable').phase).toBe('durable')
+
+    release({ status: 'active' })
+    await pending
+    // the catch-up snapshot arrives with the subscription, not before it
+    expect(alice.store.read(contentSpec, topicOf('m1'), 'durable').value).toBe(
+      'streamed while authorization is in flight'
+    )
+  })
+
+  // the reason subscribe/unsubscribe are queued per connection: with an
+  // awaiting authorizer, an unqueued unsubscribe would resolve first and the
+  // later subscribe would leave the connection subscribed to a topic it had
+  // already dropped.
+  it('applies subscribe and unsubscribe in arrival order despite slow authorization', async () => {
+    let resolveAuth!: (value: SubscribeAuthorization) => void
+    const gate = new Promise<SubscribeAuthorization>((resolve) => {
+      resolveAuth = resolve
+    })
+    authorize = () => gate
+
+    const connection: HubConnection = {
+      id: 'ordered',
+      identity: identity('ordered'),
+      send: () => {},
+    }
+    const subscribed = hub.subscribe(connection, topicOf('m1'))
+    const unsubscribed = hub.unsubscribe(connection, topicOf('m1'))
+    resolveAuth({ status: 'active' })
+    await Promise.all([subscribed, unsubscribed])
+
+    expect(hub.subscribedTopics).toBe(0)
+  })
+
+  it('drops a subscription whose connection went away mid-authorization', async () => {
+    let resolveAuth!: (value: SubscribeAuthorization) => void
+    const gate = new Promise<SubscribeAuthorization>((resolve) => {
+      resolveAuth = resolve
+    })
+    authorize = () => gate
+
+    const connection: HubConnection = {
+      id: 'vanishing',
+      identity: identity('vanishing'),
+      send: () => {},
+    }
+    const subscribed = hub.subscribe(connection, topicOf('m1'))
+    hub.dropConnection(connection.id)
+    resolveAuth({ status: 'active' })
+    await subscribed
+
+    expect(hub.subscribedTopics).toBe(0)
+  })
+
+  it('refuses a topic outside the manifest', async () => {
     const errors: string[] = []
     const connection: HubConnection = {
       id: 'c',
@@ -544,11 +617,11 @@ describe('realtime hub', () => {
         if (kind === 'subscribe-error') errors.push(body.reason!)
       },
     }
-    hub.subscribe(connection, { table: 'message', key: { id: 'm1' }, field: 'id' })
+    await hub.subscribe(connection, { table: 'message', key: { id: 'm1' }, field: 'id' })
     expect(errors[0]).toContain("'message.id' is not a streaming field")
   })
 
-  it('enforces the per-connection subscription limit', () => {
+  it('enforces the per-connection subscription limit', async () => {
     const limited = new RealtimeHub({
       manifest: streaming.manifest,
       authorizeSubscribe: () => ({ status: 'active' }),
@@ -563,13 +636,13 @@ describe('realtime hub', () => {
         if (kind === 'subscribe-error') errors.push(body.reason!)
       },
     }
-    limited.subscribe(connection, topicOf('m1'))
-    limited.subscribe(connection, topicOf('m2'))
-    limited.subscribe(connection, topicOf('m3'))
+    await limited.subscribe(connection, topicOf('m1'))
+    await limited.subscribe(connection, topicOf('m2'))
+    await limited.subscribe(connection, topicOf('m3'))
     expect(errors).toEqual(['connection is at its subscription limit'])
   })
 
-  it('lets a resubscribe after reconnect through the per-connection limit', () => {
+  it('lets a resubscribe after reconnect through the per-connection limit', async () => {
     const limited = new RealtimeHub({
       manifest: streaming.manifest,
       authorizeSubscribe: () => ({ status: 'active' }),
@@ -584,8 +657,8 @@ describe('realtime hub', () => {
         if (kind === 'subscribe-error') errors.push(body.reason!)
       },
     }
-    limited.subscribe(connection, topicOf('m1'))
-    limited.subscribe(connection, topicOf('m1'))
+    await limited.subscribe(connection, topicOf('m1'))
+    await limited.subscribe(connection, topicOf('m1'))
     expect(errors).toEqual([])
   })
 

@@ -61,11 +61,15 @@ export const DEFAULT_HUB_LIMITS: HubLimits = {
 
 export type HubOptions = {
   readonly manifest: StreamingManifest
+  // May answer synchronously or not. The Cloudflare DO reads its membership
+  // synchronously, while the browser worker serializes every database access
+  // through a write queue, so the hub awaits either way rather than forcing one
+  // host to fake the other's shape.
   readonly authorizeSubscribe: (
     identity: RealtimeIdentity,
     topic: RealtimeTopic,
     spec: StreamingFieldSpec
-  ) => SubscribeAuthorization
+  ) => Promise<SubscribeAuthorization> | SubscribeAuthorization
   readonly limits?: Partial<HubLimits>
   // injected so tests drive batching deterministically
   readonly scheduleFlush?: (flush: () => void, ms: number) => () => void
@@ -101,6 +105,18 @@ export class RealtimeHub {
   readonly #outbox = new Map<string, FieldUpdate[]>()
   #cancelFlush: (() => void) | undefined
 
+  // One chain per connection so its subscribe and unsubscribe frames apply in
+  // arrival order even though authorization may await. Without it, a
+  // subscribe/unsubscribe pair sent back to back could resolve out of order and
+  // leave a connection subscribed to a topic it had already dropped.
+  readonly #connectionQueue = new Map<string, Promise<void>>()
+
+  // Bumped by dropConnection. A subscribe captures the epoch when the frame
+  // ARRIVES, not when its queued task runs, so a socket that closes while its
+  // authorization is still in flight abandons the subscription instead of
+  // completing it against a connection nobody is reading from.
+  readonly #connectionEpoch = new Map<string, number>()
+
   constructor(options: HubOptions) {
     this.#manifest = options.manifest
     this.#authorize = options.authorizeSubscribe
@@ -115,7 +131,40 @@ export class RealtimeHub {
 
   // ---- subscribers --------------------------------------------------------
 
-  subscribe(connection: HubConnection, topic: RealtimeTopic): void {
+  // Queued per connection: the returned promise resolves once this frame has
+  // been applied, which is what a host adapter awaits before processing the
+  // next frame from the same socket.
+  subscribe(connection: HubConnection, topic: RealtimeTopic): Promise<void> {
+    const epoch = this.#connectionEpoch.get(connection.id) ?? 0
+    return this.#enqueue(connection.id, () => this.#subscribe(connection, topic, epoch))
+  }
+
+  unsubscribe(connection: HubConnection, topic: RealtimeTopic): Promise<void> {
+    return this.#enqueue(connection.id, () => {
+      const resolved = resolveTopic(this.#manifest, topic)
+      if ('reason' in resolved) return
+      this.#removeSubscription(connection.id, resolved.id)
+    })
+  }
+
+  #enqueue(connectionID: string, task: () => Promise<void> | void): Promise<void> {
+    const previous = this.#connectionQueue.get(connectionID) ?? Promise.resolve()
+    // a rejected task must not poison the chain for later frames
+    const next = previous.then(task).catch(() => {})
+    this.#connectionQueue.set(connectionID, next)
+    return next
+  }
+
+  #isCurrent(connectionID: string, epoch: number): boolean {
+    return (this.#connectionEpoch.get(connectionID) ?? 0) === epoch
+  }
+
+  async #subscribe(
+    connection: HubConnection,
+    topic: RealtimeTopic,
+    epoch: number
+  ): Promise<void> {
+    if (!this.#isCurrent(connection.id, epoch)) return
     this.#connections.set(connection.id, connection)
     const resolved = resolveTopic(this.#manifest, topic)
     if ('reason' in resolved) {
@@ -157,7 +206,9 @@ export class RealtimeHub {
       }
     }
 
-    const authorization = this.#authorize(connection.identity, topic, spec)
+    const authorization = await this.#authorize(connection.identity, topic, spec)
+    // the socket can close while authorization is in flight
+    if (!this.#isCurrent(connection.id, epoch)) return
     if (authorization.status === 'denied') {
       connection.send(['subscribe-error', { topic: id, reason: authorization.reason }])
       return
@@ -198,13 +249,12 @@ export class RealtimeHub {
     }
   }
 
-  unsubscribe(connection: HubConnection, topic: RealtimeTopic): void {
-    const resolved = resolveTopic(this.#manifest, topic)
-    if ('reason' in resolved) return
-    this.#removeSubscription(connection.id, resolved.id)
-  }
-
   dropConnection(connectionID: string): void {
+    this.#connectionEpoch.set(
+      connectionID,
+      (this.#connectionEpoch.get(connectionID) ?? 0) + 1
+    )
+    this.#connectionQueue.delete(connectionID)
     for (const topicID of this.#connectionTopics.get(connectionID) ?? []) {
       this.#subscribers.get(topicID)?.forEach((connection) => {
         if (connection.id === connectionID)
