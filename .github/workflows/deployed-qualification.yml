@@ -8,11 +8,10 @@ name: Deployed Cloudflare qualification
 # this NEVER runs on pull_request or push: it needs the CLOUDFLARE_API_TOKEN
 # secret and an external deployment, and pull requests must not depend on
 # external credentials or a mutable deployment
-# (plans/consistency-validation-architecture.md — "the credentialed deployed
-# Cloudflare lane runs on a separate schedule"). weekly plus on demand only.
+# plans/consistency-validation-architecture.md keeps this credentialed lane
+# separate. it is on demand only while t-ms368ka4-196z0 tracks the deployed
+# worker's Cloudflare 1101 failure.
 on:
-  schedule:
-    - cron: '17 8 * * 1' # mondays 08:17 utc
   workflow_dispatch:
     inputs:
       steps:
@@ -23,8 +22,8 @@ permissions:
   contents: read
 
 concurrency:
-  # one deployed worker name is reused; never let a scheduled run and a manual
-  # dispatch deploy or delete it at the same time
+  # one deployed worker name is reused; never let two manual dispatches deploy
+  # or delete it at the same time
   group: deployed-qualification
   cancel-in-progress: false
 
