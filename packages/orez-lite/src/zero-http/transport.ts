@@ -29,7 +29,7 @@ type SocketEventType = 'open' | 'message' | 'close' | 'error'
 type SocketListener = ((event: any) => void) | { handleEvent(event: any): void }
 
 type WebSocketConstructor = {
-  new (url: string | URL, protocols?: WebSocketProtocols): any
+  new (url: string | URL, protocols?: WebSocketProtocols, options?: unknown): any
   CONNECTING?: number
   OPEN?: number
   CLOSING?: number
@@ -352,14 +352,18 @@ export function installHttpPullTransport(
     static CLOSING = 2
     static CLOSED = 3
 
-    constructor(url: string | URL, protocols?: WebSocketProtocols) {
+    constructor(
+      url: string | URL,
+      protocols?: WebSocketProtocols,
+      options?: unknown
+    ) {
       if (shouldIntercept(state.origin, url)) {
         return new ZeroHttpSocket(state, url, protocols)
       }
       if (!state.nativeWebSocket) {
         throw new Error(`No native WebSocket available for ${String(url)}`)
       }
-      return new state.nativeWebSocket(url, protocols)
+      return new state.nativeWebSocket(url, protocols, options)
     }
   }
 

@@ -1319,18 +1319,30 @@ describe('zero-http transport', () => {
       static CLOSED = 3
       constructor(
         readonly url: string | URL,
-        readonly protocols?: string | string[]
+        readonly protocols?: string | string[],
+        readonly options?: unknown
       ) {}
     }
     globalThis.WebSocket = NativeWebSocket as unknown as typeof WebSocket
 
     const transport = installHttpPullTransport({ origin: ORIGIN, fetch: vi.fn() })
-    const socket = new WebSocket('wss://elsewhere.local/socket', 'native')
+    const options = { headers: { authorization: 'Bearer mobile-session' } }
+    const WebSocketWithOptions = globalThis.WebSocket as unknown as {
+      new (
+        url: string | URL,
+        protocols?: string | string[],
+        options?: unknown
+      ): NativeWebSocket
+    }
+    const socket = new WebSocketWithOptions(
+      'wss://elsewhere.local/socket',
+      'native',
+      options
+    )
 
     expect(socket).toBeInstanceOf(NativeWebSocket)
-    expect((socket as unknown as NativeWebSocket).url).toBe(
-      'wss://elsewhere.local/socket'
-    )
+    expect(socket.url).toBe('wss://elsewhere.local/socket')
+    expect(socket.options).toBe(options)
 
     transport.uninstall()
     expect(globalThis.WebSocket).toBe(NativeWebSocket)
