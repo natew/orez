@@ -769,11 +769,7 @@ function triggerEvent(sql: string | null): RowOperation | null {
 const NO_SNAPSHOTS: ReadonlySet<string> = new Set<string>()
 
 /** true when this transaction already recorded row-undo images for `table`. */
-function hasRowUndoImages(
-  sql: DurableSqlStorage,
-  txID: string,
-  table: string
-): boolean {
+function hasRowUndoImages(sql: DurableSqlStorage, txID: string, table: string): boolean {
   if (!tableExists(sql, PENDING_CHANGES_TABLE)) return false
   return (
     sql

@@ -1485,9 +1485,7 @@ describe('table snapshots never capture earlier writes from the same transaction
     // The classifier cannot read a target out of this body, so the statement
     // falls to `mustSnapshotAll`. That path copies every table it can see,
     // which is how it used to reach `note` after statement 1 had written it.
-    sql.exec(
-      "CREATE TRIGGER note_opaque AFTER DELETE ON note BEGIN SELECT 'INSERT'; END"
-    )
+    sql.exec("CREATE TRIGGER note_opaque AFTER DELETE ON note BEGIN SELECT 'INSERT'; END")
 
     zero.executeSQL(
       "INSERT INTO note VALUES ('new', 'written in tx') RETURNING *",
