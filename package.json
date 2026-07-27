@@ -51,7 +51,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc && bun run --cwd packages/orez-lite build && bun run --cwd packages/drizzle-zero-sqlite build && bun run --cwd packages/on-zero build && chmod +x dist/cli-entry.js",
+    "build": "rm -rf dist && bun run --cwd packages/orez-lite build && tsc && bun run --cwd packages/drizzle-zero-sqlite build && bun run --cwd packages/on-zero build && chmod +x dist/cli-entry.js",
     "dev": "tsc --watch",
     "test": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && vitest run --exclude 'src/integration/' --exclude 'src/wasm-sqlite.test.ts' && bun run test:sync-executor && bun run --cwd packages/drizzle-zero-sqlite test",
     "test:integration": "bun run --cwd packages/sync-executor build && bun run --cwd packages/sync-cf-host build:dist && vitest run src/integration/",
