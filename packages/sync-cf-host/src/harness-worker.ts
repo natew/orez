@@ -1,4 +1,5 @@
-import { harnessConfig, mintHarnessWakeToken } from './harness-config.js'
+import { harnessConfig } from './harness-config.js'
+import { mintHarnessWakeToken } from './harness-wake-token.js'
 import { createSyncDurableObject, createSyncWorker } from './index.js'
 
 import type { SyncHostEnv } from './index.js'

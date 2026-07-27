@@ -32,6 +32,9 @@ export const engine_apply_upstream = withWasm(generated.engine_apply_upstream)
 export const engine_assemble_push_response = withWasm(
   generated.engine_assemble_push_response
 )
+export const engine_authorize_realtime_subscription = withWasm(
+  generated.engine_authorize_realtime_subscription
+)
 export const engine_begin_snapshot_generation = withWasm(
   generated.engine_begin_snapshot_generation
 )

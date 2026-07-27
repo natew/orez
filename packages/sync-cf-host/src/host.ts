@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers'
+import { createSocketHost } from 'orez-lite/realtime'
 import { createSyncExecutor } from 'orez-sync-executor/core'
 
 import { validatePullCaps, validateSyncHostConfig } from './config.js'
@@ -11,6 +12,7 @@ import {
   SqlStorageSyncDb,
 } from './sql-storage-adapter.js'
 import {
+  engine_authorize_realtime_subscription,
   engine_apply_snapshot_changes,
   engine_apply_snapshot_page,
   engine_apply_upstream,
@@ -40,6 +42,12 @@ import {
 import type { PullCaps, SyncHostConfig, SyncHostEnv } from './types.js'
 import type { Schema } from '@rocicorp/zero'
 import type {
+  HostConnection,
+  RealtimeIdentity,
+  RealtimeSocketHost,
+  RealtimeTopic,
+} from 'orez-lite/realtime'
+import type {
   ApplicationDatabase,
   ApplicationTransaction,
   JsonValue,
@@ -49,6 +57,11 @@ import type {
 
 const NAMESPACE_HEADER = 'x-orez-sync-namespace'
 const UPSTREAM_PATH_HEADER = 'x-orez-sync-upstream-path'
+// A websocket upgrade is a GET, so the authenticated identity cannot ride the
+// body the way /pull and /push carry their claims. It rides a private header
+// the worker always deletes from the incoming request before setting its own,
+// so a client cannot present one.
+const IDENTITY_HEADER = 'x-orez-sync-identity'
 const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
 const MIN_SNAPSHOT_PAGE_ROWS = 100
 const DEFAULT_CAPS: PullCaps = {
@@ -105,7 +118,18 @@ type SnapshotPage = {
   rows: Record<string, unknown>[]
   nextCursor: string | null
 }
-type SocketAttachment = { clientID: string }
+// A hibernatable socket outlives the object holding the hub, so anything the
+// hub must not lose lives here. Identity is recorded at the authenticated
+// upgrade and never read from a frame; topics are what `rehydrate` replays
+// after an eviction, in the shape it accepts.
+type SocketAttachment = {
+  clientID: string
+  identity?: RealtimeIdentity
+  topics?: RealtimeTopic[]
+  // A producer socket, which has no identity and no topics: it holds
+  // generations, and generations deliberately do not survive an eviction.
+  producerID?: string
+}
 type FaultPoint =
   | 'push_before_mutation'
   | 'push_after_write_before_commit'
@@ -322,9 +346,17 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
 
       const route = routeAfterNamespace(new URL(request.url).pathname)
       const isAdmin = route.startsWith('/admin/')
+      let wakeUserID: string | null = null
       if (route === '/wake') {
-        if (!(await config.authorizeWake(request, env))) {
-          return json({ error: 'missing wake capability' }, 401)
+        const wake = await config.authorizeWake(request, env)
+        if (!wake) return json({ error: 'missing wake capability' }, 401)
+        if (typeof wake === 'object') wakeUserID = wake.userID
+        // A namespace that streams fields authorizes every subscription against
+        // this userID, so a capability that does not carry one cannot open the
+        // socket. Failing here names the cause; accepting it would produce a
+        // wake-only socket whose subscriptions silently never deliver.
+        if (config.streamingManifest && !wakeUserID) {
+          return json({ error: 'wake capability must identify a user' }, 401)
         }
       } else if (route === '/notify') {
         if (!(await config.authorizeNotify(request, env))) {
@@ -340,8 +372,18 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
       const headers = new Headers(request.headers)
       headers.delete(NAMESPACE_HEADER)
       headers.delete(UPSTREAM_PATH_HEADER)
+      headers.delete(IDENTITY_HEADER)
       let forwardedBody: ForwardedSyncBody | null = null
-      if (!isAdmin && route !== '/wake' && route !== '/notify') {
+      // /wake and /realtime/produce are both websocket upgrades, which cannot
+      // carry an Authorization header from a browser and have no body to put
+      // claims in. Each has its own capability check above and in the DO, so
+      // neither passes through the bearer-token gate below.
+      if (
+        !isAdmin &&
+        route !== '/wake' &&
+        route !== '/notify' &&
+        route !== '/realtime/produce'
+      ) {
         const claims = await config.authenticate(request, env)
         if (!claims || typeof claims.userID !== 'string' || claims.userID.length === 0) {
           return json({ error: 'missing authentication' }, 401)
@@ -358,6 +400,12 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
           }
         }
       }
+      // Only the userID travels, because it is the only part the DO must be
+      // unable to doubt. The socket also carries a clientID and clientGroupID,
+      // but those are the client's own assertion and the engine checks the
+      // group against this userID before it will read a single row, so there is
+      // nothing gained by moving them here.
+      if (wakeUserID) headers.set(IDENTITY_HEADER, encodeURIComponent(wakeUserID))
       headers.set(NAMESPACE_HEADER, await namespaceHash(namespace))
       if (config.upstream) {
         const namespacePath =
@@ -422,6 +470,14 @@ export function createSyncDurableObject<
     #wakeOrigins = new Set<string>()
     #wakeRecipients = new Set<WebSocket>()
     #wakePromise: Promise<void> | null = null
+    // Streaming fields. Null when the namespace configures no manifest, which
+    // is every wake-only deployment: no hub is built and nothing below runs.
+    #realtime: RealtimeSocketHost | null = null
+    #realtimeConnections = new Map<WebSocket, HostConnection>()
+    // Resolves once the sockets from a previous incarnation have been replayed
+    // into this hub. Held as a promise rather than a flag so frames arriving
+    // during the replay wait for it instead of racing past into an empty hub.
+    #realtimeReady: Promise<void> | null = null
     #ingestPromise: Promise<number> | null = null
     #queryPullLocks = new Map<string, Promise<void>>()
     #recordingIngestBillable = false
@@ -566,6 +622,14 @@ export function createSyncDurableObject<
         this.#wakeOrigins.clear()
         this.#wakeRecipients.clear()
         this.#wakePromise = null
+        // Real hibernation reconstructs the object, so the hub and every
+        // connection handle are gone while the sockets stay open. Modelling
+        // that here is what makes rehydration reachable from a test: leaving
+        // the hub in place would make the simulation pass for a reason the
+        // real runtime never gives it.
+        this.#realtime = null
+        this.#realtimeConnections.clear()
+        this.#realtimeReady = null
       }
       this.#lastRequestAt = now
     }
@@ -1696,16 +1760,131 @@ export function createSyncDurableObject<
       }
     }
 
+    // The hub for this incarnation, built on first use. Null unless the
+    // namespace configures a manifest, so a wake-only deployment never pays for
+    // one and every realtime path below is skipped.
+    #realtimeHost(): RealtimeSocketHost | null {
+      const manifest = config.streamingManifest
+      if (!manifest) return null
+      if (this.#realtime) return this.#realtime
+      this.#realtime = createSocketHost({
+        manifest,
+        // Answered from this object's own SQLite, which is the same durable
+        // membership the client's query pull reads. A field is streamed to a
+        // client exactly when the row carrying it is already being synced to
+        // that client, so streaming can never widen what somebody can see.
+        authorizeSubscribe: (identity, topic) => {
+          const result = this.#wasm(() =>
+            engine_authorize_realtime_subscription(
+              this.#engineDb,
+              config.schema,
+              identity.clientGroupID,
+              identity.userID,
+              topic.table,
+              topic.key
+            )
+          ) as { ownsGroup: boolean; authorized: boolean }
+          if (result.authorized) return { status: 'active' }
+          // the group is this user's, but the row is not in its membership
+          // yet. That is the optimistic-row race, not a denial: the client
+          // holds a row from its own unacked mutation, and retries after the
+          // pull that records it.
+          if (result.ownsGroup) return { status: 'pending' }
+          return { status: 'denied', reason: 'row is not in this client group' }
+        },
+      })
+      return this.#realtime
+    }
+
+    // Replay the sockets that outlived the previous incarnation. Every open
+    // socket is replayed, not just the one that woke us: a producer's frames
+    // must reach every subscriber of a topic, so restoring only the socket that
+    // happened to send first would silently drop the rest.
+    #realtimeRehydrate(host: RealtimeSocketHost): Promise<void> {
+      if (this.#realtimeReady) return this.#realtimeReady
+      this.#realtimeReady = (async () => {
+        const subscribers: {
+          socket: WebSocket
+          identity: RealtimeIdentity
+          connectionID: string
+          topics: RealtimeTopic[]
+        }[] = []
+        for (const socket of this.ctx.getWebSockets()) {
+          if (this.#realtimeConnections.has(socket)) continue
+          const attachment = socketAttachment(socket)
+          if (!attachment) continue
+          if (attachment.producerID) {
+            // Generations are ephemeral by design, so nothing is restored here
+            // beyond the channel itself; the producer opens a new generation
+            // and the durable row covers the gap either way.
+            this.#realtimeConnections.set(
+              socket,
+              host.acceptProducer(socket, attachment.producerID)
+            )
+            continue
+          }
+          if (!attachment.identity) continue
+          subscribers.push({
+            socket,
+            identity: attachment.identity,
+            connectionID: attachment.identity.clientID,
+            topics: attachment.topics ?? [],
+          })
+        }
+        const restored = await host.rehydrate(subscribers)
+        subscribers.forEach((entry, index) => {
+          this.#realtimeConnections.set(entry.socket, restored[index])
+        })
+      })()
+      return this.#realtimeReady
+    }
+
+    // A socket's topics are the only realtime state that must survive an
+    // eviction, so they are rewritten whenever they change rather than on a
+    // timer: an eviction is not announced.
+    #realtimePersist(socket: WebSocket, connection: HostConnection): void {
+      const attachment = socketAttachment(socket)
+      if (!attachment) return
+      socket.serializeAttachment({
+        ...attachment,
+        topics: [...connection.topics()],
+      } satisfies SocketAttachment)
+    }
+
     #wake(request: Request): Response {
       if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
         return json({ error: 'websocket upgrade required' }, 426)
       }
-      const clientID = new URL(request.url).searchParams.get('clientID')
+      const params = new URL(request.url).searchParams
+      const clientID = params.get('clientID')
       if (!clientID) return json({ error: 'clientID is required' }, 400)
       const pair = new WebSocketPair()
       const [client, server] = Object.values(pair)
-      server.serializeAttachment({ clientID } satisfies SocketAttachment)
+      // The userID is the worker's, taken from the authenticated request. The
+      // group is the client's own claim, and stays a claim: every subscription
+      // is checked against this userID before a row is read, so asserting
+      // someone else's group buys nothing.
+      const encodedUserID = request.headers.get(IDENTITY_HEADER)
+      const clientGroupID = params.get('clientGroupID')
+      const identity =
+        encodedUserID && clientGroupID
+          ? {
+              userID: decodeURIComponent(encodedUserID),
+              clientID,
+              clientGroupID,
+            }
+          : undefined
+      server.serializeAttachment({ clientID, identity } satisfies SocketAttachment)
       this.ctx.acceptWebSocket(server, [`client:${clientID}`])
+      if (identity) {
+        const host = this.#realtimeHost()
+        if (host) {
+          this.#realtimeConnections.set(
+            server,
+            host.acceptSubscriber(server, identity, clientID)
+          )
+        }
+      }
       // The alarm is only a safety net for an actively connected consumer.
       // A namespace with no wake socket has nobody to notify; its next pull or
       // push ingests synchronously. Arming from construction made every
@@ -1904,6 +2083,9 @@ export function createSyncDurableObject<
       if (route.startsWith('/admin/')) return this.#admin(route, request, upstreamPath)
 
       if (route === '/wake' && request.method === 'GET') return this.#wake(request)
+      if (route === '/realtime/produce' && request.method === 'GET') {
+        return this.#realtimeProduce(request, this.env)
+      }
       if (route === '/notify' && request.method === 'POST') {
         try {
           const applied = await this.#ingest(upstreamPath)
@@ -1956,8 +2138,51 @@ export function createSyncDurableObject<
       }
     }
 
-    webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
-      if (message === 'ping') socket.send('pong')
+    // A producer channel. Publishing is a far stronger capability than waking,
+    // so it needs its own authorization and gets no default: a namespace that
+    // configures no authorizeProduce cannot be published to at all.
+    async #realtimeProduce(request: Request, env: Env): Promise<Response> {
+      if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+        return json({ error: 'websocket upgrade required' }, 426)
+      }
+      const host = this.#realtimeHost()
+      if (!host) return json({ error: 'namespace streams no fields' }, 404)
+      if (!config.authorizeProduce || !(await config.authorizeProduce(request, env))) {
+        return json({ error: 'forbidden' }, 403)
+      }
+      const producerID =
+        new URL(request.url).searchParams.get('producerID') ?? crypto.randomUUID()
+      const pair = new WebSocketPair()
+      const [client, server] = Object.values(pair)
+      server.serializeAttachment({
+        clientID: producerID,
+        producerID,
+      } satisfies SocketAttachment)
+      this.ctx.acceptWebSocket(server, [`producer:${producerID}`])
+      this.#realtimeConnections.set(server, host.acceptProducer(server, producerID))
+      return new Response(null, { status: 101, webSocket: client })
+    }
+
+    async webSocketMessage(
+      socket: WebSocket,
+      message: string | ArrayBuffer
+    ): Promise<void> {
+      if (message === 'ping') {
+        socket.send('pong')
+        return
+      }
+      const host = this.#realtimeHost()
+      if (!host || typeof message !== 'string') return
+      // A cold start left the hub empty while the socket stayed open, so the
+      // subscriptions have to be replayed before this frame is applied.
+      await this.#realtimeRehydrate(host)
+      const connection = this.#realtimeConnections.get(socket)
+      if (!connection) return
+      connection.handleMessage(message)
+      // The hub may authorize asynchronously, so the topic set this frame
+      // changed is not final until that settles.
+      await Promise.resolve()
+      this.#realtimePersist(socket, connection)
     }
 
     webSocketClose(
@@ -1972,11 +2197,23 @@ export function createSyncDurableObject<
       // closes with 1001/1005. An uncaught throw here aborts the DO, so only
       // echo an application-permitted code and otherwise close cleanly.
       const echoable = code === 1000 || (code >= 3000 && code <= 4999)
+      this.#realtimeDrop(socket)
       socketCloseQuietly(socket, echoable ? code : 1000, echoable ? reason : '')
     }
 
     webSocketError(socket: WebSocket, _error: unknown): void {
+      this.#realtimeDrop(socket)
       socketCloseQuietly(socket, 1011, 'wake socket error')
+    }
+
+    // Release whatever the socket held: a subscriber's topics, or a producer's
+    // generations. Dropping a producer reveals the durable row to everyone
+    // watching it, so a crashed producer cannot strand a stale overlay.
+    #realtimeDrop(socket: WebSocket): void {
+      const connection = this.#realtimeConnections.get(socket)
+      if (!connection) return
+      this.#realtimeConnections.delete(socket)
+      connection.close()
     }
   }
 }

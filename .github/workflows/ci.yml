@@ -626,6 +626,7 @@ jobs:
           bun src/upstream-corpus.ts --hosts typescript-oracle,rust-cf
           bun src/protocol-fuzz.ts --target rust-cf --cases 500 --seed ${{ github.run_id }} --concurrency 20
           bun src/reconnect.ts --target rust-cf
+          bun src/streaming-fields.ts
           bun src/eviction.ts --target rust-cf --clients 5
           bun src/storage-faults.ts --target rust-cf
           bun src/backup-restore.ts --target rust-cf
