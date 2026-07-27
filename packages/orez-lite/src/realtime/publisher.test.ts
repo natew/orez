@@ -224,7 +224,9 @@ describe('realtime publisher', () => {
     const session = await begin()
     session.set('hello world')
     await advance(100)
-    expect(() => session.set('goodbye')).toThrow(/stopped being an extension/)
+    expect(() => session.set('goodbye')).toThrow(
+      /is not an extension of what was already sent/
+    )
   })
 
   it('sends complete values for a replace-mode field', async () => {

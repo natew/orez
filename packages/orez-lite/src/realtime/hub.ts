@@ -72,7 +72,7 @@ export type HubOptions = {
   ) => Promise<SubscribeAuthorization> | SubscribeAuthorization
   readonly limits?: Partial<HubLimits>
   // injected so tests drive batching deterministically
-  readonly scheduleFlush?: (flush: () => void, ms: number) => () => void
+  readonly scheduleFlush?: (flush: () => void, ms: number) => void
 }
 
 type Generation = {
@@ -91,7 +91,7 @@ export class RealtimeHub {
   readonly #manifest: StreamingManifest
   readonly #authorize: HubOptions['authorizeSubscribe']
   readonly #limits: HubLimits
-  readonly #schedule: (flush: () => void, ms: number) => () => void
+  readonly #schedule: (flush: () => void, ms: number) => void
 
   readonly #generations = new Map<string, Generation>()
   readonly #subscribers = new Map<string, Set<HubConnection>>()
@@ -103,7 +103,7 @@ export class RealtimeHub {
 
   // per-connection outbound batch, flushed on the batching window
   readonly #outbox = new Map<string, FieldUpdate[]>()
-  #cancelFlush: (() => void) | undefined
+  #flushScheduled = false
 
   // One chain per connection so its subscribe and unsubscribe frames apply in
   // arrival order even though authorization may await. Without it, a
@@ -124,8 +124,7 @@ export class RealtimeHub {
     this.#schedule =
       options.scheduleFlush ??
       ((flush, ms) => {
-        const timer = setTimeout(flush, ms)
-        return () => clearTimeout(timer)
+        setTimeout(flush, ms)
       })
   }
 
@@ -418,15 +417,25 @@ export class RealtimeHub {
       if (batch) batch.push(update)
       else this.#outbox.set(connection.id, [update])
     }
-    if (!this.#cancelFlush) {
-      this.#cancelFlush = this.#schedule(() => this.flush(), this.#limits.batchWindowMs)
-    }
+    this.#scheduleFlush()
+  }
+
+  // The "is a flush already pending" flag is separate from the cancel handle
+  // because a scheduler is allowed to run its callback SYNCHRONOUSLY, which the
+  // local in-process host does (there is no socket, so there is nothing to
+  // batch for). In that case flush() completes during the schedule call and
+  // clears its state before the handle could be assigned, so guarding on the
+  // handle alone left it permanently set and no later batch was ever scheduled.
+  #scheduleFlush(): void {
+    if (this.#flushScheduled) return
+    this.#flushScheduled = true
+    this.#schedule(() => this.flush(), this.#limits.batchWindowMs)
   }
 
   // Deliver every pending batch. Public so an adapter can force a flush before
   // it lets its runtime go idle.
   flush(): void {
-    this.#cancelFlush = undefined
+    this.#flushScheduled = false
     if (this.#outbox.size === 0) return
     const outbox = [...this.#outbox]
     this.#outbox.clear()
@@ -451,9 +460,7 @@ export class RealtimeHub {
         requeued = true
       }
     }
-    if (requeued && !this.#cancelFlush) {
-      this.#cancelFlush = this.#schedule(() => this.flush(), this.#limits.batchWindowMs)
-    }
+    if (requeued) this.#scheduleFlush()
   }
 
   // ---- introspection for adapters and tests -------------------------------

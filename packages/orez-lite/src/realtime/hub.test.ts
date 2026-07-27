@@ -154,10 +154,6 @@ describe('realtime hub', () => {
       authorizeSubscribe: (id, topic) => authorize(id, topic),
       scheduleFlush: (flush) => {
         flushes.push(flush)
-        return () => {
-          const index = flushes.indexOf(flush)
-          if (index >= 0) flushes.splice(index, 1)
-        }
       },
     })
   })
@@ -605,6 +601,56 @@ describe('realtime hub', () => {
     await subscribed
 
     expect(hub.subscribedTopics).toBe(0)
+  })
+
+  // A scheduler is allowed to run its callback synchronously; the local
+  // in-process host does exactly that, because there is no socket to batch for.
+  // That used to deliver the FIRST batch and then silently stop: flush() cleared
+  // the pending-flush state during the schedule call, and the cancel handle was
+  // assigned afterwards, so the guard stayed set forever.
+  it('keeps scheduling batches when the scheduler runs synchronously', async () => {
+    const frames: unknown[] = []
+    const immediate = new RealtimeHub({
+      manifest: streaming.manifest,
+      authorizeSubscribe: () => ({ status: 'active' }),
+      scheduleFlush: (flush) => flush(),
+    })
+    const connection: HubConnection = {
+      id: 'sync',
+      identity: identity('sync'),
+      send: (frame) => {
+        if ((frame as [string])[0] === 'field') frames.push(frame)
+      },
+    }
+    await immediate.subscribe(connection, topicOf('m1'))
+
+    const producer: HubProducer = { id: 'p', send: () => {} }
+    immediate.beginGeneration(producer, topicOf('m1'), 's1')
+    const id = canonicalTopic(contentSpec.primaryKey, topicOf('m1'))
+    immediate.publish(producer, {
+      topic: id,
+      streamID: 's1',
+      seq: 1,
+      op: 'snapshot',
+      value: 'a',
+    })
+    immediate.publish(producer, {
+      topic: id,
+      streamID: 's1',
+      seq: 2,
+      op: 'append',
+      text: 'b',
+    })
+    immediate.publish(producer, {
+      topic: id,
+      streamID: 's1',
+      seq: 3,
+      op: 'append',
+      text: 'c',
+    })
+
+    // every update reaches the connection, not just the first
+    expect(frames).toHaveLength(3)
   })
 
   it('refuses a topic outside the manifest', async () => {

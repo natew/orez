@@ -36,6 +36,8 @@ export type StreamSession<Value> = {
   // the new suffix, so a growing text value costs new bytes rather than total
   // bytes per frame.
   set(value: Value): void
+  // deliver pending values now, honouring the manifest's rate bounds
+  flush(): Promise<void>
   // flush, run the application's durable write, then close the generation.
   finish(value: Value, commit: () => Promise<void>): Promise<void>
   abort(): Promise<void>
@@ -155,6 +157,22 @@ class Session<Value> implements StreamSession<Value> {
     this.#schedule()
   }
 
+  // Deliver whatever is pending now, waiting only as long as the manifest's
+  // rate bounds require. `set` is fire-and-forget by design so a token loop
+  // never awaits; this is for the places a producer needs the value to have
+  // actually left: a semantic checkpoint, or a deterministic test.
+  //
+  // It waits rather than bypassing the bound, so a producer calling flush in a
+  // loop still cannot exceed its declared maxUpdatesPerSecond.
+  async flush(): Promise<void> {
+    this.#throwIfUnusable()
+    if (this.#pending.value === undefined) return
+    const delay = this.#delayUntilAllowed()
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
+    this.#cancelTimer()
+    await this.#flush(false)
+  }
+
   async finish(value: Value, commit: () => Promise<void>): Promise<void> {
     this.#throwIfUnusable()
     this.#validate(value)
@@ -225,8 +243,13 @@ class Session<Value> implements StreamSession<Value> {
       // suffix would leave every subscriber with a corrupted value.
       const next = value as unknown as string
       if (!next.startsWith(this.#delivered)) {
+        // A text column holding JSON is the common way to hit this: the
+        // manifest infers append from the Zero column type, but the producer
+        // replaces the value rather than extending it. Naming the fix here
+        // saves the reader from inferring it from a corrupted overlay.
         throw new TypeError(
-          `streaming field '${this.#spec.table}.${this.#spec.field}' is append mode and its value stopped being an extension of what was already sent`
+          `streaming field '${this.#spec.table}.${this.#spec.field}' is append mode, but its new value is not an extension of what was already sent. ` +
+            `Append ships only the added suffix, so the value must grow. If this field is replaced rather than extended (a JSON payload in a text column, for example), declare mode: 'replace' for it in the manifest.`
         )
       }
     }

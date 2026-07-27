@@ -54,6 +54,9 @@ export type {
   SubscribeAuthorization,
 } from './hub.js'
 
+export { createLocalRealtime } from './local.js'
+export type { LocalRealtime, LocalRealtimeOptions } from './local.js'
+
 export { BrowserRealtime, connectRealtimePort } from './message-port.js'
 export type { BrowserRealtimeOptions, MembershipReader } from './message-port.js'
 

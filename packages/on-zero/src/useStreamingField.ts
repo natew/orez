@@ -1,4 +1,4 @@
-// React binding for a streaming field.
+// React bindings for streaming fields.
 //
 // The base value is passed in explicitly rather than the hook reaching into the
 // Zero query result. Two reasons: Zero query results are not mutated behind the
@@ -9,11 +9,16 @@
 //   const content = useStreamingField(streaming.message.content({ id }), message.content)
 //   return <Markdown>{content.value}</Markdown>
 //
-// Mounting the hook is what subscribes. A component that renders the row
-// without the hook receives no field traffic at all.
+// Mounting a hook is what subscribes. A component that renders the row without
+// one receives no field traffic at all.
+//
+// Both hooks are selector-isolated: a subscription covers exactly one row's one
+// field, so a value arriving for another row cannot wake this component. That
+// is the property an app hand-rolls otherwise, usually as a global emitter plus
+// a deep-equal projection to undo the over-broadcasting.
 
 import { canonicalTopic } from 'orez-lite/realtime'
-import { useCallback, useSyncExternalStore } from 'react'
+import { useCallback, useMemo, useSyncExternalStore } from 'react'
 
 import type {
   RealtimeStore,
@@ -34,8 +39,22 @@ export type UseStreamingField = <Value>(
   base: Value
 ) => StreamingFieldState<Value>
 
-// The store lives on the transport, so the hook is created against whichever
-// store the client installed rather than reaching for a module-level singleton.
+// One row's field, keyed by whatever the caller already uses to identify the
+// row (a message id, usually), so results can be looked up without rebuilding
+// a canonical topic at the call site.
+export type StreamingFieldRequest<Value = unknown> = {
+  readonly key: string
+  readonly handle: StreamingFieldHandle
+  readonly base: Value
+}
+
+export type UseStreamingFields = <Value>(
+  requests: readonly StreamingFieldRequest<Value>[]
+) => Readonly<Record<string, StreamingFieldState<Value>>>
+
+// The store lives on the transport (or on a local realtime), so the hooks are
+// created against whichever store the application installed rather than
+// reaching for a module-level singleton.
 export function createUseStreamingField(
   getStore: () => RealtimeStore | undefined
 ): UseStreamingField {
@@ -64,6 +83,76 @@ export function createUseStreamingField(
       if (!store) return durableOnly(base)
       return store.read(handle.spec, handle.topic, base)
     }, [store, handle.spec, id, base])
+
+    return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  }
+}
+
+// Many rows' fields at once, for a list that has to merge live values before it
+// renders (grouping consecutive tool parts, interleaving by timestamp, and so
+// on) and therefore cannot push the subscription down into each row.
+//
+// Scoping is structural: this component subscribes to exactly the topics in
+// `requests`, so a value for a row outside the list cannot wake it. There is no
+// projection to write and no deep-equal comparator to get right.
+export function createUseStreamingFields(
+  getStore: () => RealtimeStore | undefined
+): UseStreamingFields {
+  return function useStreamingFields<Value>(
+    requests: readonly StreamingFieldRequest<Value>[]
+  ): Readonly<Record<string, StreamingFieldState<Value>>> {
+    const store = getStore()
+
+    // identity of the subscription SET, so adding or removing a row
+    // resubscribes but a changing base value does not
+    const topicsKey = useMemo(
+      () =>
+        requests
+          .map(
+            (request) =>
+              `${request.key}=${canonicalTopic(request.handle.spec.primaryKey, request.handle.topic)}`
+          )
+          .join('\n'),
+      [requests]
+    )
+
+    const subscribe = useCallback(
+      (onChange: () => void) => {
+        if (!store) return () => {}
+        const releases = requests.map((request) =>
+          store.subscribe(request.handle.spec, request.handle.topic, onChange)
+        )
+        return () => {
+          for (const release of releases) release()
+        }
+      },
+      [store, topicsKey]
+    )
+
+    // Reference-stable across renders where nothing observable changed, both
+    // for useSyncExternalStore's contract and so a consuming useMemo (soot
+    // merges these into its transcript) is not invalidated every render.
+    const cache = useMemo(
+      () => ({ value: {} as Record<string, StreamingFieldState<Value>> }),
+      [store, topicsKey]
+    )
+
+    const getSnapshot = useCallback(() => {
+      const next: Record<string, StreamingFieldState<Value>> = {}
+      let changed = false
+      for (const request of requests) {
+        const state = store
+          ? store.read(request.handle.spec, request.handle.topic, request.base)
+          : durableOnly(request.base)
+        next[request.key] = state
+        if (cache.value[request.key] !== state) changed = true
+      }
+      if (!changed && Object.keys(cache.value).length === Object.keys(next).length) {
+        return cache.value
+      }
+      cache.value = next
+      return next
+    }, [store, topicsKey, cache, requests])
 
     return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   }
