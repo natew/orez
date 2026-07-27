@@ -106,6 +106,10 @@ if (typeof built.compiledSql !== 'string' || built.compiledSql.length === 0) {
   )
 
   execFileSync('node', ['build.mjs'], { cwd: consumer, stdio: 'pipe' })
+  const native = await import(
+    new URL('./node_modules/orez-lite/dist/native.js', `file://${consumer}/`)
+  )
+  assert.equal(typeof native.createNativeHost, 'function')
   execFileSync(
     'node',
     [

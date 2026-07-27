@@ -33,6 +33,10 @@ Usage:
 Options:
   --host <IP>                       Default: 127.0.0.1
   --allow-origin <origin>           Repeat for each browser origin
+  --callback-ca <PEM-file>          Additional callback certificate authority
+  --retention <disabled|workers>    Default: disabled
+  --worker-idle-ms <milliseconds>   Required with worker retention
+  --worker-sweep-ms <milliseconds>  Required with worker retention
   --retain-changes <rows>           Default: 4096
   --max-change-rows <rows>          Default: engine limit
   -h, --help
@@ -49,9 +53,17 @@ pub struct ServeConfig {
     pub auth_url: Url,
     pub wake_authorize_url: Url,
     pub query_transform_url: Url,
+    pub callback_ca: Option<PathBuf>,
     pub allowed_origins: Vec<String>,
+    pub retention: StandaloneRetention,
     pub retain_changes: i64,
     pub max_change_rows: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StandaloneRetention {
+    Disabled,
+    Workers { idle: Duration, interval: Duration },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,7 +108,11 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
                 | "--auth-url"
                 | "--wake-authorize-url"
                 | "--query-transform-url"
+                | "--callback-ca"
                 | "--allow-origin"
+                | "--retention"
+                | "--worker-idle-ms"
+                | "--worker-sweep-ms"
                 | "--retain-changes"
                 | "--max-change-rows"
         );
@@ -149,6 +165,27 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
     if max_change_rows == 0 {
         return Err("--max-change-rows must be greater than zero".to_string());
     }
+    let retention = match values.get("--retention").map(String::as_str) {
+        None | Some("disabled") => {
+            if values.contains_key("--worker-idle-ms") || values.contains_key("--worker-sweep-ms") {
+                return Err(
+                    "--worker-idle-ms and --worker-sweep-ms require --retention workers"
+                        .to_string(),
+                );
+            }
+            StandaloneRetention::Disabled
+        }
+        Some("workers") => {
+            let idle = parse_duration(&required("--worker-idle-ms")?, "--worker-idle-ms")?;
+            let interval = parse_duration(&required("--worker-sweep-ms")?, "--worker-sweep-ms")?;
+            StandaloneRetention::Workers { idle, interval }
+        }
+        Some(value) => {
+            return Err(format!(
+                "invalid value for --retention: '{value}'; expected disabled or workers"
+            ));
+        }
+    };
     Ok(Command::Serve(Box::new(ServeConfig {
         schema: PathBuf::from(required("--schema")?),
         init_sql: PathBuf::from(required("--init-sql")?),
@@ -173,7 +210,9 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
             &required("--query-transform-url")?,
             "--query-transform-url",
         )?,
+        callback_ca: values.get("--callback-ca").map(PathBuf::from),
         allowed_origins,
+        retention,
         retain_changes,
         max_change_rows,
     })))
@@ -188,9 +227,17 @@ where
         .map_err(|_| format!("invalid value for {flag}: '{value}'"))
 }
 
+fn parse_duration(value: &str, flag: &str) -> Result<Duration, String> {
+    let milliseconds = parse_number::<u64>(value, flag)?;
+    if milliseconds == 0 {
+        return Err(format!("{flag} must be greater than zero"));
+    }
+    Ok(Duration::from_millis(milliseconds))
+}
+
 fn loopback_url(value: &str, flag: &str) -> Result<Url, String> {
     let url = Url::parse(value).map_err(|error| format!("invalid {flag}: {error}"))?;
-    if url.scheme() != "http"
+    if !matches!(url.scheme(), "http" | "https")
         || !matches!(
             url.host_str(),
             Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
@@ -201,7 +248,7 @@ fn loopback_url(value: &str, flag: &str) -> Result<Url, String> {
         || url.fragment().is_some()
     {
         return Err(format!(
-            "{flag} must be an explicit-port HTTP URL on localhost, 127.0.0.1, or [::1]"
+            "{flag} must be an explicit-port HTTP(S) URL on localhost, 127.0.0.1, or [::1]"
         ));
     }
     Ok(url)
@@ -241,9 +288,17 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
     })?;
     prepare_data_dir(&config.data_dir)?;
 
-    let client = Client::builder()
+    let mut client_builder = Client::builder()
         .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(path) = &config.callback_ca {
+        let pem = std::fs::read(path)
+            .map_err(|error| format!("failed to read callback CA {}: {error}", path.display()))?;
+        let certificate = reqwest::Certificate::from_pem(&pem)
+            .map_err(|error| format!("invalid callback CA {}: {error}", path.display()))?;
+        client_builder = client_builder.add_root_certificate(certificate);
+    }
+    let client = client_builder
         .build()
         .map_err(|error| format!("failed to build callback client: {error}"))?;
     let authenticate = callback_auth(
@@ -272,6 +327,10 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
     for origin in config.allowed_origins {
         security = security.allow_origin(origin);
     }
+    let retention = match config.retention {
+        StandaloneRetention::Disabled => RetentionPolicy::disabled(),
+        StandaloneRetention::Workers { idle, interval } => RetentionPolicy::workers(idle, interval),
+    };
     let host = SyncNativeHost::new_with_security(
         SyncNativeConfig {
             tables,
@@ -287,7 +346,7 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
             query_aware: true,
             query_resolution: Some(QueryResolution { resolve }),
             admin_tx_lease: crate::DEFAULT_ADMIN_TX_LEASE,
-            retention: RetentionPolicy::workers(Duration::from_secs(30), Duration::from_secs(5)),
+            retention,
         },
         config.data_dir,
         security,
@@ -593,12 +652,12 @@ mod tests {
         assert_eq!(config.port, 4848);
         assert_eq!(config.host, "127.0.0.1".parse::<IpAddr>().unwrap());
         assert_eq!(config.retain_changes, 4096);
+        assert_eq!(config.retention, StandaloneRetention::Disabled);
     }
 
     #[test]
     fn rejects_non_loopback_callbacks() {
         for value in [
-            "https://127.0.0.1:3000/auth",
             "http://example.com:3000/auth",
             "http://127.0.0.1/auth",
             "http://user@127.0.0.1:3000/auth",
@@ -607,12 +666,63 @@ mod tests {
             let mut args = required_args();
             let index = args.iter().position(|arg| arg == "--auth-url").unwrap() + 1;
             args[index] = value.to_string();
-            assert!(
-                parse_args(args)
-                    .unwrap_err()
-                    .contains("explicit-port HTTP URL")
+            assert_eq!(
+                parse_args(args).unwrap_err(),
+                "--auth-url must be an explicit-port HTTP(S) URL on localhost, 127.0.0.1, or [::1]"
             );
         }
+    }
+
+    #[test]
+    fn accepts_https_loopback_callbacks() {
+        let mut args = required_args();
+        let index = args.iter().position(|arg| arg == "--auth-url").unwrap() + 1;
+        args[index] = "https://localhost:3300/auth".to_string();
+        let Command::Serve(config) = parse_args(args).unwrap() else {
+            panic!("expected serve command");
+        };
+        assert_eq!(config.auth_url.as_str(), "https://localhost:3300/auth");
+    }
+
+    #[test]
+    fn parses_worker_retention() {
+        let mut args = required_args();
+        args.extend(
+            [
+                "--retention",
+                "workers",
+                "--worker-idle-ms",
+                "30000",
+                "--worker-sweep-ms",
+                "5000",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+        let Command::Serve(config) = parse_args(args).unwrap() else {
+            panic!("expected serve command");
+        };
+        assert_eq!(
+            config.retention,
+            StandaloneRetention::Workers {
+                idle: Duration::from_secs(30),
+                interval: Duration::from_secs(5),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_worker_timing_without_worker_retention() {
+        let mut args = required_args();
+        args.extend(
+            ["--worker-idle-ms", "30000"]
+                .into_iter()
+                .map(str::to_string),
+        );
+        assert_eq!(
+            parse_args(args).unwrap_err(),
+            "--worker-idle-ms and --worker-sweep-ms require --retention workers"
+        );
     }
 
     #[test]

@@ -246,12 +246,11 @@ before route execution, even if their token is valid. Pull, push, and wake
 requests with an `Origin` header must match an allowed origin exactly.
 Originless native and server-side sync clients remain supported.
 
-The standalone `sync-native` binary reads `SYNC_NATIVE_ADMIN_TOKEN` or accepts
-`--admin-token <token>`, plus a repeatable `--allow-origin <origin>`. Prefer the
-environment variable so the credential does not appear in the process command
-line. Without either token input, the binary generates an unreported
-process-local token, which intentionally leaves the admin surface unavailable
-to external clients.
+The standalone `sync-native serve` command requires
+`--admin-token-env <variable>`, plus a repeatable
+`--allow-origin <origin>`. The credential stays in the named environment
+variable and never appears in the process command line. `orez-lite/native`
+provides this contract through `createNativeHost`.
 
 ### Settling application-owned native pushes
 

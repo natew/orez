@@ -134,6 +134,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let admin = Router::new()
         .route("/admin/health", get(health))
         .route("/admin/namespaces", get(admin_namespaces))
+        .route("/{ns}/admin/notify", post(admin_notify))
         .route("/{ns}/admin/sql", post(admin_sql))
         .route("/{ns}/admin/settle-push", post(admin_settle_push))
         .route("/{ns}/admin/status", get(admin_status))
@@ -271,6 +272,14 @@ async fn admin_namespaces(State(state): State<Arc<AppState>>) -> Response {
         Ok(Err(error)) => json_status(500, json!({ "error": error })),
         Err(error) => json_status(500, json!({ "error": error.to_string() })),
     }
+}
+
+async fn admin_notify(State(state): State<Arc<AppState>>, Path(ns): Path<String>) -> Response {
+    if let Err(error) = state.manager.get(&ns) {
+        return json_status(400, json!({ "error": error }));
+    }
+    state.wake.wake(&ns, "");
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn pull(

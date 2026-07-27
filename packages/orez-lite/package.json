@@ -36,6 +36,10 @@
       "types": "./dist/browser/index.d.ts",
       "import": "./dist/browser/index.js"
     },
+    "./native": {
+      "types": "./dist/native.d.ts",
+      "import": "./dist/native.js"
+    },
     "./cloudflare": {
       "types": "./dist/cloudflare.d.ts",
       "import": "./dist/cloudflare.js"
@@ -94,6 +98,9 @@
     "vite": {
       "optional": true
     }
+  },
+  "optionalDependencies": {
+    "orez-sync-native": "workspace:*"
   },
   "devDependencies": {
     "@rocicorp/zero": "1.7.0",

@@ -1,18 +1,13 @@
 [workspace]
 resolver = "2"
-members = [
-  "crates/sync-core",
-  "crates/sync-native",
-  "crates/sync-wasm",
-  "crates/soot-native",
-]
+members = ["crates/sync-core", "crates/sync-native", "crates/sync-wasm"]
 # test-chat is a copied-in chat checkout (scripts/test-chat-e2e.ts); its
 # standalone crates (rust-sync/chat-native) must not join this workspace
 exclude = ["test-chat"]
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "0.1.1"
 license = "MIT"
 
 [workspace.dependencies]
