@@ -169,6 +169,12 @@ class Session<Value> implements StreamSession<Value> {
     if (this.#pending.value === undefined) return
     const delay = this.#delayUntilAllowed()
     if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
+    // A scheduled flush can fire during that wait, and if it failed then this
+    // generation is dead and its pending value was never delivered. Re-checking
+    // is what keeps flush() honest: it either delivered, or it throws. Without
+    // it the scheduled flush's suffix bookkeeping makes the retry here a no-op
+    // and the producer is told its value went out when it did not.
+    this.#throwIfUnusable()
     this.#cancelTimer()
     await this.#flush(false)
   }

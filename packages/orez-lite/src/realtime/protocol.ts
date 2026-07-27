@@ -70,6 +70,58 @@ export type SubscribeFrame = readonly ['subscribe', { readonly topic: RealtimeTo
 export type UnsubscribeFrame = readonly ['unsubscribe', { readonly topic: RealtimeTopic }]
 export type ClientFrame = SubscribeFrame | UnsubscribeFrame
 
+// ---- producer -> host -----------------------------------------------------
+//
+// A producer that is not in-process (an application server streaming to clients
+// through a Cloudflare Durable Object) speaks these over its own socket. One
+// socket carries as many generations as the producer has open: a server writing
+// twenty agent sessions at once holds one connection, not twenty.
+//
+// `begin` is the only producer frame that is acknowledged. It has to be, because
+// the host can refuse it (unknown field, namespace at capacity) and the producer
+// cannot start streaming until it knows. Updates are unacknowledged in the happy
+// path and answered only when REJECTED, so a token stream costs one frame per
+// update rather than a round trip.
+
+export type BeginFrame = readonly [
+  'begin',
+  { readonly topic: RealtimeTopic; readonly streamID: string },
+]
+export type PublishFrame = readonly ['publish', { readonly update: FieldUpdate }]
+// There is no separate "release" frame: an `end` or `abort` update IS how a
+// generation closes, and the socket dropping is how a crashed producer's
+// generations close. A second release path could only disagree with those.
+export type ProducerFrame = BeginFrame | PublishFrame
+
+// ---- host -> producer -----------------------------------------------------
+
+export type BeginResultFrame = readonly [
+  'begin-result',
+  {
+    readonly streamID: string
+    readonly topic: string | null
+    readonly reason: string | null
+  },
+]
+
+// The host refused an update. The generation is unusable from here, so the
+// producer fails it rather than continuing to write into a stream the host is
+// discarding.
+export type PublishRejectedFrame = readonly [
+  'publish-rejected',
+  { readonly topic: string; readonly streamID: string; readonly reason: string },
+]
+
+// A newer generation took this topic over (the retry case). The displaced
+// producer learns immediately instead of discovering it through rejected
+// updates.
+export type SupersededFrame = readonly [
+  'superseded',
+  { readonly topic: string; readonly streamID: string },
+]
+
+export type ProducerHostFrame = BeginResultFrame | PublishRejectedFrame | SupersededFrame
+
 // ---- host -> client -------------------------------------------------------
 
 // A subscription is acknowledged with the canonical topic string the HOST
@@ -140,14 +192,16 @@ export function isLegacyWake(raw: string): boolean {
   return raw === LEGACY_WAKE_FRAME
 }
 
-export function encodeFrame(frame: ClientFrame | HostFrame): string {
+export type AnyFrame = ClientFrame | HostFrame | ProducerFrame | ProducerHostFrame
+
+export function encodeFrame(frame: AnyFrame): string {
   return JSON.stringify(frame)
 }
 
 // Parsing is total: a malformed frame returns undefined rather than throwing,
 // because a socket message is attacker-influenced input on the host side and a
 // throw inside a message handler would tear down an otherwise healthy socket.
-export function decodeFrame(raw: string): ClientFrame | HostFrame | undefined {
+export function decodeFrame(raw: string): AnyFrame | undefined {
   if (isLegacyWake(raw)) return ['wake', {}]
   let parsed: unknown
   try {
@@ -185,6 +239,41 @@ export function decodeFrame(raw: string): ClientFrame | HostFrame | undefined {
         decoded.push(valid)
       }
       return ['field', { updates: decoded }]
+    }
+    case 'begin': {
+      const { topic, streamID } = body as { topic?: unknown; streamID?: unknown }
+      if (!isTopic(topic) || typeof streamID !== 'string' || !streamID) return undefined
+      return ['begin', { topic, streamID }]
+    }
+    case 'publish': {
+      const update = decodeUpdate((body as { update?: unknown }).update)
+      return update ? ['publish', { update }] : undefined
+    }
+    case 'begin-result': {
+      const { streamID, topic, reason } = body as {
+        streamID?: unknown
+        topic?: unknown
+        reason?: unknown
+      }
+      if (typeof streamID !== 'string') return undefined
+      if (topic !== null && typeof topic !== 'string') return undefined
+      if (reason !== null && typeof reason !== 'string') return undefined
+      return ['begin-result', { streamID, topic, reason }]
+    }
+    case 'publish-rejected': {
+      const { topic, streamID, reason } = body as {
+        topic?: unknown
+        streamID?: unknown
+        reason?: unknown
+      }
+      if (typeof topic !== 'string' || typeof streamID !== 'string') return undefined
+      if (typeof reason !== 'string') return undefined
+      return ['publish-rejected', { topic, streamID, reason }]
+    }
+    case 'superseded': {
+      const { topic, streamID } = body as { topic?: unknown; streamID?: unknown }
+      if (typeof topic !== 'string' || typeof streamID !== 'string') return undefined
+      return ['superseded', { topic, streamID }]
     }
     case 'wake':
       return ['wake', {}]

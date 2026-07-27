@@ -84,7 +84,6 @@ type Generation = {
   // complete value in replace mode
   value: unknown
   producer: HubProducer | undefined
-  superseded: boolean
 }
 
 export class RealtimeHub {
@@ -97,9 +96,10 @@ export class RealtimeHub {
   readonly #subscribers = new Map<string, Set<HubConnection>>()
   readonly #connectionTopics = new Map<string, Set<string>>()
   readonly #connections = new Map<string, HubConnection>()
-  // producer id -> the one generation it leases. One producer socket carries
-  // one generation, so the socket closing is what releases the lease.
-  readonly #producerGenerations = new Map<string, string>()
+  // producer id -> every generation it currently leases. An application server
+  // streaming twenty agent sessions holds one connection, not twenty, so the
+  // lease is a set: the socket closing releases all of them at once.
+  readonly #producerGenerations = new Map<string, Set<string>>()
 
   // per-connection outbound batch, flushed on the batching window
   readonly #outbox = new Map<string, FieldUpdate[]>()
@@ -230,7 +230,7 @@ export class RealtimeHub {
     // lets append-mode frames be safe for late joiners, and it is sent
     // immediately rather than batched so a mid-stream mount paints at once.
     const generation = this.#generations.get(id)
-    if (authorization.status === 'active' && generation && !generation.superseded) {
+    if (authorization.status === 'active' && generation) {
       connection.send([
         'field',
         {
@@ -330,9 +330,8 @@ export class RealtimeHub {
 
     const previous = this.#generations.get(id)
     if (previous && previous.streamID !== streamID) {
-      previous.superseded = true
       if (previous.producer) {
-        this.#producerGenerations.delete(previous.producer.id)
+        this.#releaseLease(previous.producer.id, id)
         previous.producer.send(['superseded', { topic: id, streamID: previous.streamID }])
       }
     }
@@ -344,36 +343,71 @@ export class RealtimeHub {
       seq: -1,
       value: spec.mode === 'append' ? '' : null,
       producer,
-      superseded: false,
     })
-    this.#producerGenerations.set(producer.id, id)
+    const leases = this.#producerGenerations.get(producer.id)
+    if (leases) leases.add(id)
+    else this.#producerGenerations.set(producer.id, new Set([id]))
     return { ok: true, topicID: id }
   }
 
-  // Accept one update from a producer, accumulate it, and fan it out. Returns
-  // false when the frame was rejected, which the adapter turns into a producer
-  // error rather than silently dropping.
-  publish(producer: HubProducer, update: FieldUpdate): boolean {
+  // Accept one update from a producer, accumulate it, and fan it out. The
+  // rejection REASON is returned rather than a bare false: a producer that is
+  // told only "refused" has to guess between supersession, a stale sequence, and
+  // a manifest bound, and every adapter was inventing the same vague guess.
+  publish(
+    producer: HubProducer,
+    update: FieldUpdate
+  ): { readonly ok: true } | { readonly ok: false; readonly reason: string } {
     const generation = this.#generations.get(update.topic)
-    if (!generation) return false
-    // Only the unsuperseded producer holding this generation may publish. A
-    // subscriber socket is never a producer, so a leaked streamID grants
-    // nothing: the check is on the producer handle, not the frame contents.
-    if (generation.superseded) return false
-    if (generation.producer?.id !== producer.id) return false
-    if (generation.streamID !== update.streamID) return false
-    if (update.seq <= generation.seq) return false
+    if (!generation) {
+      return { ok: false, reason: `no open generation for '${update.topic}'` }
+    }
+    // Only the producer holding this generation may publish. A subscriber
+    // socket is never a producer, so a leaked streamID grants nothing: the check
+    // is on the producer handle, not the frame contents. A superseded generation
+    // needs no flag of its own, because beginGeneration REPLACED it in this map;
+    // its old producer falls out here, and its old stream id falls out below.
+    if (generation.producer?.id !== producer.id) {
+      return { ok: false, reason: `another producer holds '${update.topic}'` }
+    }
+    if (generation.streamID !== update.streamID) {
+      return {
+        ok: false,
+        reason: `stream ${update.streamID} is not the current generation for '${update.topic}'`,
+      }
+    }
+    if (update.seq <= generation.seq) {
+      return {
+        ok: false,
+        reason: `seq ${update.seq} is not newer than the delivered ${generation.seq}`,
+      }
+    }
 
     switch (update.op) {
       case 'snapshot': {
-        if (!this.#validate(generation.spec, update.value)) return false
+        if (!this.#validate(generation.spec, update.value)) {
+          return {
+            ok: false,
+            reason: `value failed the manifest bounds for '${update.topic}'`,
+          }
+        }
         generation.value = update.value
         break
       }
       case 'append': {
-        if (generation.spec.mode !== 'append') return false
+        if (generation.spec.mode !== 'append') {
+          return {
+            ok: false,
+            reason: `'${update.topic}' is replace mode and takes no appends`,
+          }
+        }
         const next = (generation.value as string) + update.text
-        if (byteLength(next) > generation.spec.maxBytes) return false
+        if (byteLength(next) > generation.spec.maxBytes) {
+          return {
+            ok: false,
+            reason: `append would exceed maxBytes for '${update.topic}'`,
+          }
+        }
         generation.value = next
         break
       }
@@ -386,9 +420,16 @@ export class RealtimeHub {
 
     if (update.op === 'end' || update.op === 'abort') {
       this.#generations.delete(update.topic)
-      this.#producerGenerations.delete(producer.id)
+      this.#releaseLease(producer.id, update.topic)
     }
-    return true
+    return { ok: true }
+  }
+
+  #releaseLease(producerID: string, topicID: string): void {
+    const leases = this.#producerGenerations.get(producerID)
+    if (!leases) return
+    leases.delete(topicID)
+    if (leases.size === 0) this.#producerGenerations.delete(producerID)
   }
 
   // A producer socket closed without a terminal frame (a crash, or a lost
@@ -396,11 +437,13 @@ export class RealtimeHub {
   // clean; subscribers fall back to their inactivity deadline, which reveals
   // the durable value rather than inventing a recovery value here.
   dropProducer(producerID: string): void {
-    const topicID = this.#producerGenerations.get(producerID)
+    const leases = this.#producerGenerations.get(producerID)
     this.#producerGenerations.delete(producerID)
-    if (!topicID) return
-    const generation = this.#generations.get(topicID)
-    if (generation?.producer?.id === producerID) this.#generations.delete(topicID)
+    if (!leases) return
+    for (const topicID of leases) {
+      const generation = this.#generations.get(topicID)
+      if (generation?.producer?.id === producerID) this.#generations.delete(topicID)
+    }
   }
 
   #validate(spec: StreamingFieldSpec, value: unknown): boolean {

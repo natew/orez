@@ -116,9 +116,8 @@ describe('realtime hub', () => {
       if (!result.ok) throw new Error(result.reason)
     },
     publish: (update) => {
-      if (!hub.publish(producer, update)) {
-        throw new Error(`hub rejected a producer frame: ${update.op}`)
-      }
+      const result = hub.publish(producer, update)
+      if (!result.ok) throw new Error(result.reason)
     },
     end: () => {},
   })
@@ -386,7 +385,7 @@ describe('realtime hub', () => {
     // stream nobody accepts
     stale.set('first attempt continues')
     await advance(30)
-    expect(() => stale.set('and more')).toThrow(/hub rejected a producer frame/)
+    expect(() => stale.set('and more')).toThrow(/another producer holds/)
     expect(alice.store.read({ spec: contentSpec, topic: topicOf('m1') }, '').value).toBe(
       'retried attempt'
     )
@@ -412,7 +411,10 @@ describe('realtime hub', () => {
         op: 'append',
         text: 'injected',
       })
-    ).toBe(false)
+    ).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('another producer holds'),
+    })
   })
 
   it('holds the final overlay until Zero produces the committed value', async () => {
@@ -764,7 +766,7 @@ describe('realtime hub', () => {
         op: 'snapshot',
         value: { not: 'an array' },
       })
-    ).toBe(false)
+    ).toMatchObject({ ok: false, reason: expect.stringContaining('manifest bounds') })
     expect(
       hub.publish(producer, {
         topic: topicID,
@@ -773,7 +775,7 @@ describe('realtime hub', () => {
         op: 'snapshot',
         value: [{ type: 'text' }],
       })
-    ).toBe(true)
+    ).toEqual({ ok: true })
   })
 
   it('refuses an append that would carry the value past its byte ceiling', async () => {
@@ -789,6 +791,6 @@ describe('realtime hub', () => {
         op: 'append',
         text: 'x'.repeat(100_001),
       })
-    ).toBe(false)
+    ).toMatchObject({ ok: false, reason: expect.stringContaining('exceed maxBytes') })
   })
 })

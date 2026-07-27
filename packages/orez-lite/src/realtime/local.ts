@@ -98,11 +98,8 @@ export function createLocalRealtime(options: LocalRealtimeOptions): LocalRealtim
       if (!result.ok) throw new Error(result.reason)
     },
     publish: (update: FieldUpdate) => {
-      if (!hub.publish(producer, update)) {
-        throw new Error(
-          `realtime hub refused a ${update.op} frame for ${update.topic}: the generation was superseded, or the value failed its manifest bounds`
-        )
-      }
+      const result = hub.publish(producer, update)
+      if (!result.ok) throw new Error(result.reason)
     },
     end: () => {},
   }

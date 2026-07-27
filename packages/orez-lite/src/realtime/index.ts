@@ -28,9 +28,12 @@ export {
   TOPIC_SEPARATOR,
 } from './protocol.js'
 export type {
+  AnyFrame,
   ClientFrame,
   FieldUpdate,
   HostFrame,
+  ProducerFrame,
+  ProducerHostFrame,
   RealtimeKeyValue,
   RealtimeTopic,
 } from './protocol.js'
@@ -63,6 +66,14 @@ export type { LocalRealtime, LocalRealtimeOptions } from './local.js'
 
 export { BrowserRealtime, connectRealtimePort } from './message-port.js'
 export type { BrowserRealtimeOptions, MembershipReader } from './message-port.js'
+
+// Frame routing, for a host that owns its own sockets
+export { applyClientFrame, applyProducerFrame } from './host.js'
+
+// The producer half of that: an application server that generates values while
+// the subscribers are browsers elsewhere
+export { createProducerTransport } from './producer-socket.js'
+export type { ProducerSocket, ProducerTransport } from './producer-socket.js'
 
 // The React binding lives in on-zero, which already owns the React peer
 // dependency. orez-lite stays framework-free: see on-zero's useStreamingField.
