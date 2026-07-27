@@ -1,6 +1,49 @@
 # Streaming fields for Orez Lite
 
-Status: design proposal
+Status: built and shipped for in-process producers; off-host producers have a
+protocol and a transport but no host adapter yet.
+
+## What exists (2026-07-27)
+
+Everything below is in `packages/orez-lite/src/realtime/`, covered by 124 tests.
+
+- `manifest.ts` declares which columns may stream, validated against the real
+  Zero schema. `append` is inferred for string columns, `replace` otherwise, and
+  the mode is fixed at manifest time so no host branches on frame shape.
+- `hub.ts` is the host state machine, with no I/O. It ACCUMULATES each
+  generation's value, which is what makes append frames safe for a late
+  subscriber: it gets one snapshot then deltas, and no client needs a replay
+  buffer.
+- `store.ts` is the client overlay, with the `durable | streaming | committing |
+  stale` handoff.
+- `publisher.ts` / `writer.ts` are the producer API. `writer.ts` is the one soot
+  uses: a synchronous `set(handle, value)` with no session to track.
+- `local.ts` wires all of it in one process. This is what an app whose producer
+  runs in the browser needs, and it is all soot needed.
+- `producer-socket.ts` + `host.ts` are the off-host producer path: an
+  application server generates values while the subscribers are browsers
+  elsewhere.
+
+Consumed by soot as of `soot@0bfa3274`, against `orez-lite@0.10.7-canary.1785181620131`.
+`orez/realtime` re-exports the whole module for apps on the full package.
+
+## What is NOT built
+
+- **No Cloudflare DO host adapter.** `host.ts` routes frames and `hub.ts` holds
+  the state, but nothing wires them into `cf-do/worker.ts`. Two open questions
+  there, neither trivial: how an application supplies its manifest to a generic
+  DO class (`validate` is a function, so it cannot be serialized into the deploy
+  bundle), and hibernation. A hibernatable socket outlives the DO's memory, so
+  subscriptions have to live in the socket attachment and the hub has to
+  rehydrate from `ctx.getWebSockets()` before any producer frame is served.
+  Generations need no such treatment: they are ephemeral by definition and the
+  durable row is still truth.
+- **No Rust producer client.** agentbus writes `session.latest_summary_body`
+  from `src/pg_writer.rs`, so its producer is a Rust process and cannot use
+  `producer-socket.ts`. It needs either a small Rust client for the begin/publish
+  frames, or a TypeScript relay point that already sees the summary chunks.
+
+## Original proposal
 
 ## Decision
 
