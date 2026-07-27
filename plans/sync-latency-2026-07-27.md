@@ -82,13 +82,13 @@ query it came from.
 
 ## Measurements
 
-| what | before | after | lane |
-| --- | --- | --- | --- |
-| read admission p95, 4 writers / 8 readers / 2 cancellations | 455 ms, strictly serialized | 209 ms, 3 reads concurrent | `sync-cf-host` platform probe |
-| arrival-order inversions under that load | present by construction | 0 | same |
-| warm pull while another pull in its group is 750 ms inside query resolution | 738 ms | 5 ms | `sync-cf-host` integration |
-| four-query desired patch, resolver sleeping once per call | 1,209 ms | 314 ms | same |
-| cold pull for one registered query, same fixture and client | 11,275 B / 90 patches (`orez-local`) | 806 B / 5 patches (`rust-local`) | `harness/src/pull-payload.ts` |
+| what                                                                        | before                               | after                            | lane                          |
+| --------------------------------------------------------------------------- | ------------------------------------ | -------------------------------- | ----------------------------- |
+| read admission p95, 4 writers / 8 readers / 2 cancellations                 | 455 ms, strictly serialized          | 209 ms, 3 reads concurrent       | `sync-cf-host` platform probe |
+| arrival-order inversions under that load                                    | present by construction              | 0                                | same                          |
+| warm pull while another pull in its group is 750 ms inside query resolution | 738 ms                               | 5 ms                             | `sync-cf-host` integration    |
+| four-query desired patch, resolver sleeping once per call                   | 1,209 ms                             | 314 ms                           | same                          |
+| cold pull for one registered query, same fixture and client                 | 11,275 B / 90 patches (`orez-local`) | 806 B / 5 patches (`rust-local`) | `harness/src/pull-payload.ts` |
 
 The last row is not a before/after of a change; it is the standing difference
 between Orez's two pull implementations. The zero-http mount serves every mounted
@@ -104,7 +104,7 @@ Each timing claim above has a run that fails without the change, not an argument
 that it should:
 
 - Warm pull behind query resolution: `AssertionError: patch-free pull waited
-  738 ms behind another pull's query resolution` on the parent commit.
+738 ms behind another pull's query resolution` on the parent commit.
 - Batched resolution: `AssertionError: four-query patch took 1209 ms` on the
   parent commit, which is 4 x the resolver's single 300 ms sleep.
 - Read concurrency: the same mixed load re-run with `readLane=0` reports
@@ -143,7 +143,8 @@ and unpacks it into the consumer's `node_modules` without touching npm or git.
 
 ```ts
 // before
-resolveQuery: async (name, args, claims, env) => (await transform(name, args, claims, env)).ast
+resolveQuery: async (name, args, claims, env) =>
+  (await transform(name, args, claims, env)).ast
 
 // after — one call for the whole patch, results in request order
 resolveQueries: async (requests, claims, env) => {
