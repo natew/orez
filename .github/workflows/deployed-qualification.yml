@@ -57,6 +57,9 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      - name: build sync runtime
+        run: bun run build:sync-runtime
+
       - name: sync-cf-host install
         run: cd packages/sync-cf-host && bun install
 
