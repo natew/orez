@@ -591,6 +591,9 @@ jobs:
       - name: sync-cf-host suite
         run: cd packages/sync-cf-host && bun run test
 
+      - name: build harness zero-http host
+        run: bun run --cwd packages/orez-lite build:zero-http
+
       - name: sync-cf-host push memory soak
         run: |
           cd packages/sync-cf-host
