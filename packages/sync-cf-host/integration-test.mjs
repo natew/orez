@@ -313,6 +313,45 @@ try {
     'query resolution and desired-query apply preserve arrival order'
   )
 
+  // A patch-free pull carries no desired-query change to order, so it must not
+  // wait out another pull's resolveQuery round trip. This is the shape a warm
+  // client actually polls in: it re-states nothing and expects `unchanged`.
+  const blockingQueryPull = post('/pull', {
+    clientID: 'warm-blocking-client',
+    clientGroupID: 'warm-pull-group',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [
+        {
+          op: 'put',
+          hash: 'warm-tasks',
+          name: 'tasksInProjects',
+          args: [{ projectIds: ['p1'], delayMs: 750 }],
+        },
+      ],
+    },
+  })
+  await Bun.sleep(25)
+  const warmPullStarted = Date.now()
+  const warmPull = await post('/pull', {
+    clientID: 'warm-poll-client',
+    clientGroupID: 'warm-pull-group',
+    cookie: null,
+  })
+  const warmPullMs = Date.now() - warmPullStarted
+  equal(warmPull.status, 200, 'patch-free warm pull status')
+  const blockingQueryResponse = await blockingQueryPull
+  equal(blockingQueryResponse.status, 200, 'blocking query pull status')
+  assert.ok(
+    warmPullMs < 400,
+    `patch-free pull waited ${warmPullMs} ms behind another pull's query resolution`
+  )
+  assertions++
+  console.log(
+    `warm pull under a 750 ms query resolution in the same client group: ${warmPullMs} ms`
+  )
+
   const queryFollowup = await post('/pull', {
     clientID: 'query-client',
     clientGroupID: 'query-group',

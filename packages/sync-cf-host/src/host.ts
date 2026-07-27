@@ -1321,8 +1321,17 @@ export function createSyncDurableObject<
         if (!Number.isSafeInteger(transformVersion) || transformVersion < 0) {
           throw new TypeError('queryTransformVersion must be a non-negative safe integer')
         }
+        // The group lock exists to keep two desired-query patches from being
+        // applied out of arrival order when one of them is slow to resolve.
+        // A pull carrying no patch applies nothing, and it reads membership
+        // inside transactionSync, which is already atomic against whichever
+        // patch commits around it. Holding the lock for those pulls only makes
+        // an unchanged warm pull wait out somebody else's resolveQuery round
+        // trip to the application, which is the head-of-line blocking behind
+        // the pull tail: a client polls far more often than it changes what it
+        // wants, so almost every pull in flight is patch-free.
         const releaseQueryPull =
-          queryAware && config.resolveQuery
+          queryAware && config.resolveQuery && body.queries
             ? await this.#acquireQueryPullLock(
                 typeof body.clientGroupID === 'string' ? body.clientGroupID : ''
               )
