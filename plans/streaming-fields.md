@@ -15,7 +15,7 @@ Everything below is in `packages/orez-lite/src/realtime/`, covered by 124 tests.
   subscriber: it gets one snapshot then deltas, and no client needs a replay
   buffer.
 - `store.ts` is the client overlay, with the `durable | streaming | committing |
-  stale` handoff.
+stale` handoff.
 - `publisher.ts` / `writer.ts` are the producer API. `writer.ts` is the one soot
   uses: a synchronous `set(handle, value)` with no session to track.
 - `local.ts` wires all of it in one process. This is what an app whose producer
