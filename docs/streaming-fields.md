@@ -171,6 +171,26 @@ nobody to withhold values from and nothing to send them over.
 If no, the producer needs to reach a hub over a wire, and that hub needs to
 decide who may subscribe.
 
+Expect the answer to be no. It is easy to look at one deployment of an
+application and conclude its producer is in-process, and be wrong about the
+same application's other deployments. Soot runs its agent loop in the browser on
+desktop and routes the same chat through a separate Cloudflare service on
+mobile; the second one is a server-side producer whatever the first one is. Pick
+the surface per deployment, not per application.
+
+### Where the hub goes
+
+Put the hub where the subscribers already are, which in a Zero deployment means
+the per-namespace object their sync sockets are attached to. It is also where
+query membership lives, and membership is the authorization fact a subscription
+is checked against. A hub anywhere else needs its own copy of both.
+
+Open the producer's socket when the producer is warmed, not when it first has a
+value. Soot measured a warm call into its chat service at 386ms and 393ms while
+the container itself reported 0ms of work, so the cost of reaching a service is
+almost entirely in getting there. Paying that on the first token of every turn
+would put it directly in the latency the stream exists to hide.
+
 ### Frame routing
 
 A stream has exactly three directions, and there is one function for each. Any
