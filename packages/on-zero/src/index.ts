@@ -17,6 +17,7 @@ export {
   type ZeroProviderTransport,
 } from './createZeroClient'
 export * from './createUseQuery'
+export * from './useStreamingField'
 export * from './resolveQuery'
 export * from './run'
 export { setRunner, type ZeroRunner } from './zeroRunner'

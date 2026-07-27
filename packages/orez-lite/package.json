@@ -20,6 +20,10 @@
       "types": "./dist/wake.d.ts",
       "import": "./dist/wake.js"
     },
+    "./realtime": {
+      "types": "./dist/realtime/index.d.ts",
+      "import": "./dist/realtime/index.js"
+    },
     "./zero-http": {
       "types": "./dist/zero-http/mount.d.ts",
       "import": "./dist/zero-http/mount.js"
