@@ -281,6 +281,31 @@ try {
   check(String(result.body.boundary), '9007199254740993', '2^53 + 1 stays exact decimal')
   check(result.body.real, 0.30000000000000004, 'float keeps shortest-round-trip fidelity')
 
+  // canonical primary-key encoding, cross-build half. sync-native compiles
+  // serde_json with preserve_order and this wasm build does not, so the same
+  // composite key used to encode differently in each. membership keys, delete
+  // ids, and realtime topics all key off this string. the native half of these
+  // vectors runs in sync_core::value's tests.
+  const pkVectors = ns('canonical-pk')
+  const { vectors } = await Bun.file(
+    new URL('../../harness/fixtures/canonical-pk-vectors.json', import.meta.url)
+  ).json()
+  let pkDisagreements = 0
+  for (const vector of vectors) {
+    result = await call(pkVectors, '/canonical-pk', {
+      primaryKey: vector.primaryKey,
+      pk: vector.pk,
+    })
+    check(result.status, 200, `canonical pk status: ${vector.name}`)
+    check(result.body.encoded, vector.expected, `canonical pk vector: ${vector.name}`)
+    if (JSON.stringify(vector.pk) !== vector.expected) pkDisagreements++
+  }
+  // negative control: at least one vector must differ from a plain
+  // JSON.stringify of the input object, otherwise these vectors are not
+  // exercising key ordering at all and would pass under any encoder.
+  assert.ok(pkDisagreements > 0, 'canonical pk vectors do not exercise key ordering')
+  assertions++
+
   const guard = ns('guard')
   result = await call(guard, '/adapter-guard')
   check(result.status, 200, 'adapter guard status')

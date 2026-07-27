@@ -250,6 +250,49 @@ pub fn zero_row(
     Ok(Value::Object(value))
 }
 
+// the canonical string form of a row's primary key, used for membership keys,
+// delete ids, and realtime topics.
+//
+// serde_json's object ordering is a BUILD property, not a value property:
+// sync-native enables the `preserve_order` feature (insertion order) and
+// sync-wasm does not (BTreeMap, sorted). cargo unifies features per build, so
+// `serde_json::to_string(pk_object)` produced a different string for the same
+// row depending on which host compiled it, and any key that crossed builds
+// silently failed to match. emitting columns in the schema's declared
+// primary-key order removes serde_json's map ordering from the encoding
+// entirely, and matches what SQLite's `json_object(...)` already writes in the
+// change-log triggers.
+//
+// pk values are scalars (see `raw_pk`), so `Value::to_string` never recurses
+// into a nested map whose ordering would be build-dependent again.
+pub fn canonical_pk(spec: &crate::schema::TableSpec, pk: &Value) -> String {
+    let mut out = String::from("{");
+    for (i, col) in spec.primary_key.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        // Value::String's serializer applies the same escaping serde_json uses
+        // for object keys, so the output stays byte-identical to the old
+        // native encoding for the common single-column case.
+        out.push_str(&Value::String(col.clone()).to_string());
+        out.push(':');
+        out.push_str(&pk.get(col).unwrap_or(&Value::Null).to_string());
+    }
+    out.push('}');
+    out
+}
+
+// canonicalize a primary key that arrives as JSON text (the change-log's
+// `json_object(...)` pk, or a realtime topic key from a client) into the same
+// form `canonical_pk` produces. an unparseable key is returned unchanged so a
+// malformed change-log row cannot panic a pull.
+pub fn canonical_pk_text(spec: &crate::schema::TableSpec, pk_text: &str) -> String {
+    match serde_json::from_str::<Value>(pk_text) {
+        Ok(v) => canonical_pk(spec, &v),
+        Err(_) => pk_text.to_string(),
+    }
+}
+
 // build a zero-typed rowsPatch `id`: read logical journal keys and emit physical
 // downstream-wire column names
 pub fn zero_pk_id(
@@ -284,9 +327,102 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{ZeroColumnType, to_zero_value_json, zero_row};
+    use super::{ZeroColumnType, canonical_pk, canonical_pk_text, to_zero_value_json, zero_row};
     use crate::db::{Row, SqlValue};
     use crate::schema::{TableSpec, Tables};
+
+    fn pk_spec(primary_key: &[&str]) -> TableSpec {
+        TableSpec {
+            columns: primary_key
+                .iter()
+                .map(|c| ((*c).to_string(), ZeroColumnType::String))
+                .collect(),
+            primary_key: primary_key.iter().map(|c| (*c).to_string()).collect(),
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
+        }
+    }
+
+    // the same vectors run against the wasm build in
+    // packages/sync-cf-host/canonical-pk.test.mjs. every vector's `pk` object is
+    // built with its keys in an order that differs from the declared primary
+    // key, so an encoder that inherits serde_json's map ordering fails here
+    // under preserve_order and fails in the wasm suite without it.
+    #[test]
+    fn canonical_pk_matches_the_shared_cross_build_vectors() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../harness/fixtures/canonical-pk-vectors.json"
+        ))
+        .unwrap();
+        for case in fixture["vectors"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let primary_key: Vec<&str> = case["primaryKey"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c.as_str().unwrap())
+                .collect();
+            let spec = pk_spec(&primary_key);
+            let expected = case["expected"].as_str().unwrap();
+
+            assert_eq!(canonical_pk(&spec, &case["pk"]), expected, "vector: {name}");
+
+            // the change-log path parses `json_object(...)` text and must land
+            // on the identical key, whichever order sqlite emitted it in.
+            let as_text = serde_json::to_string(&case["pk"]).unwrap();
+            assert_eq!(
+                canonical_pk_text(&spec, &as_text),
+                expected,
+                "vector via text: {name}"
+            );
+        }
+    }
+
+    // negative control for the vectors above: a test that cannot fail is not a
+    // test. the encoding this replaced was `serde_json::to_string(pk)`, so at
+    // least one vector must disagree with that on THIS build, whichever way
+    // cargo resolved the preserve_order feature. if this ever stops holding,
+    // the vectors stopped exercising map ordering and need new cases.
+    #[test]
+    fn the_shared_vectors_would_catch_a_serde_json_ordered_encoder() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../harness/fixtures/canonical-pk-vectors.json"
+        ))
+        .unwrap();
+        let disagreements = fixture["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| {
+                serde_json::to_string(&case["pk"]).unwrap() != case["expected"].as_str().unwrap()
+            })
+            .count();
+        assert!(
+            disagreements > 0,
+            "no vector distinguishes the schema-ordered encoder from serde_json's map order"
+        );
+    }
+
+    #[test]
+    fn canonical_pk_ignores_the_key_order_of_the_input_object() {
+        let spec = pk_spec(&["workspaceID", "id"]);
+        let forward: Value = serde_json::from_str(r#"{"workspaceID":"ws","id":"m"}"#).unwrap();
+        let reversed: Value = serde_json::from_str(r#"{"id":"m","workspaceID":"ws"}"#).unwrap();
+        assert_eq!(
+            canonical_pk(&spec, &forward),
+            canonical_pk(&spec, &reversed)
+        );
+        assert_eq!(
+            canonical_pk(&spec, &forward),
+            r#"{"workspaceID":"ws","id":"m"}"#
+        );
+    }
+
+    #[test]
+    fn canonical_pk_text_passes_through_unparseable_input() {
+        let spec = pk_spec(&["id"]);
+        assert_eq!(canonical_pk_text(&spec, "not json"), "not json");
+    }
 
     #[test]
     fn zero_number_storage_text_matches_the_shared_host_fixture() {

@@ -51,6 +51,8 @@ pub use upstream::{
     apply_upstream_snapshot, begin_snapshot_generation, finalize_snapshot_generation,
     read_snapshot_progress, upstream_watermark,
 };
-pub use value::{ZeroColumnType, to_zero_value, to_zero_value_json};
+pub use value::{
+    ZeroColumnType, canonical_pk, canonical_pk_text, to_zero_value, to_zero_value_json,
+};
 pub use visibility::{VisibilityExpression, compile_visibility_filter};
 pub use wire::WireValue;

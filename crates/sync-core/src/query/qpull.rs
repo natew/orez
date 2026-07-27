@@ -101,6 +101,7 @@ fn apply_desired_patch(
 // recompute's phase-3 re-emit of changed-but-still-member rows
 fn scan_changed(
     db: &mut dyn SyncDb,
+    tables: &Tables,
     cookie: i64,
 ) -> Result<BTreeSet<(String, String)>, EngineError> {
     let rows = db.query(
@@ -114,7 +115,10 @@ fn scan_changed(
             _ => continue,
         };
         let pk = match row.get("pk") {
-            Some(SqlValue::Text(s)) => canonical_pk_text(s),
+            Some(SqlValue::Text(s)) => match canonical_pk_text(tables, &table, s) {
+                Some(pk) => pk,
+                None => continue,
+            },
             _ => continue,
         };
         out.insert((table, pk));
@@ -201,7 +205,7 @@ pub fn handle_query_pull(
     let changed = if fresh {
         BTreeSet::new()
     } else {
-        scan_changed(db, cookie.unwrap())?
+        scan_changed(db, tables, cookie.unwrap())?
     };
     let rehydrate = applied_queries.as_ref().cloned().unwrap_or_default();
     let mut rows_patch = recompute_group_with_rehydrate(db, tables, group, &changed, &rehydrate)?;

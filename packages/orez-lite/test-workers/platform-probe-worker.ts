@@ -6,6 +6,7 @@ import {
   SqlStorageSyncDb,
 } from '../../sync-cf-host/src/sql-storage-adapter.js'
 import {
+  canonical_pk_probe,
   init_probe_schema,
   pull_snapshot,
   push_finalize,
@@ -588,6 +589,13 @@ export class ProbeDurableObject extends ZeroDO {
         value_round_trip(this.#db, input)
       )
       return json(output)
+    }
+
+    // canonical primary-key encoding, asserted against the same fixture the
+    // native build asserts. no db needed: the encoder is pure.
+    if (route === '/canonical-pk') {
+      const input = (await request.json()) as { primaryKey: string[]; pk: unknown }
+      return json({ encoded: canonical_pk_probe(input) })
     }
 
     if (route === '/adapter-guard') {

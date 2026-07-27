@@ -314,6 +314,40 @@ pub fn value_round_trip(db: &JsSyncDb, input: JsValue) -> Result<JsValue, JsValu
         .map_err(js_err)
 }
 
+#[cfg(feature = "platform-probes")]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalPkProbe {
+    primary_key: Vec<String>,
+    pk: serde_json::Value,
+}
+
+/// Canonical primary-key encoding probe, run against the SAME
+/// harness/fixtures/canonical-pk-vectors.json the native build asserts in
+/// sync_core::value's tests.
+///
+/// This is the half of the conformance that matters: sync-native compiles
+/// serde_json with `preserve_order` and this crate does not, so before the
+/// schema-ordered encoder the two builds encoded the same composite key to
+/// different strings. Membership keys, delete ids, and realtime topics all key
+/// off this string, so the two builds have to agree byte for byte.
+#[cfg(feature = "platform-probes")]
+#[wasm_bindgen]
+pub fn canonical_pk_probe(input: JsValue) -> Result<String, JsValue> {
+    let input: CanonicalPkProbe = serde_wasm_bindgen::from_value(input).map_err(js_err)?;
+    let spec = sync_core::TableSpec {
+        columns: input
+            .primary_key
+            .iter()
+            .map(|c| (c.clone(), sync_core::ZeroColumnType::String))
+            .collect(),
+        primary_key: input.primary_key,
+        encrypted_columns: Default::default(),
+        encrypted_physical_columns: Default::default(),
+    };
+    Ok(sync_core::canonical_pk(&spec, &input.pk))
+}
+
 // ---- production sync-core boundary ---------------------------------------
 
 #[derive(Deserialize)]

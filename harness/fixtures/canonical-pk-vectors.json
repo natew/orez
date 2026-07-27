@@ -1,0 +1,65 @@
+{
+  "comment": "canonical primary-key encoding vectors. asserted by the native build (crates/sync-core/src/value.rs, serde_json preserve_order ON) and the wasm build (packages/sync-cf-host/canonical-pk.test.mjs, sorted maps). every vector deliberately supplies `pk` with its keys in an order that differs from `primaryKey`, so an encoder that leans on serde_json's map ordering produces the wrong string under at least one build.",
+  "vectors": [
+    {
+      "name": "single string column",
+      "primaryKey": ["id"],
+      "pk": { "id": "message-1" },
+      "expected": "{\"id\":\"message-1\"}"
+    },
+    {
+      "name": "composite key supplied in reverse declared order",
+      "primaryKey": ["workspaceID", "id"],
+      "pk": { "id": "message-1", "workspaceID": "ws-1" },
+      "expected": "{\"workspaceID\":\"ws-1\",\"id\":\"message-1\"}"
+    },
+    {
+      "name": "composite key whose declared order is not alphabetical",
+      "primaryKey": ["zone", "alpha"],
+      "pk": { "alpha": "a", "zone": "z" },
+      "expected": "{\"zone\":\"z\",\"alpha\":\"a\"}"
+    },
+    {
+      "name": "three columns, declared order neither insertion nor sorted",
+      "primaryKey": ["b", "c", "a"],
+      "pk": { "a": 1, "b": 2, "c": 3 },
+      "expected": "{\"b\":2,\"c\":3,\"a\":1}"
+    },
+    {
+      "name": "integer key column",
+      "primaryKey": ["seq"],
+      "pk": { "seq": 42 },
+      "expected": "{\"seq\":42}"
+    },
+    {
+      "name": "missing column encodes as null rather than being dropped",
+      "primaryKey": ["tenant", "id"],
+      "pk": { "id": "x" },
+      "expected": "{\"tenant\":null,\"id\":\"x\"}"
+    },
+    {
+      "name": "extra non-key columns are ignored",
+      "primaryKey": ["id"],
+      "pk": { "id": "x", "content": "not part of the key" },
+      "expected": "{\"id\":\"x\"}"
+    },
+    {
+      "name": "quotes and backslashes escape like serde_json object keys",
+      "primaryKey": ["we\"ird"],
+      "pk": { "we\"ird": "a\"b\\c" },
+      "expected": "{\"we\\\"ird\":\"a\\\"b\\\\c\"}"
+    },
+    {
+      "name": "unicode column name and value stay unescaped",
+      "primaryKey": ["café"],
+      "pk": { "café": "naïve" },
+      "expected": "{\"café\":\"naïve\"}"
+    },
+    {
+      "name": "non-ascii column names order by schema, never by codepoint",
+      "primaryKey": ["ü", "a"],
+      "pk": { "a": 1, "ü": 2 },
+      "expected": "{\"ü\":2,\"a\":1}"
+    }
+  ]
+}

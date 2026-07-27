@@ -49,11 +49,9 @@ fn text(s: impl Into<String>) -> SqlValue {
     SqlValue::Text(s.into())
 }
 
-// canonical string key for a primary-key JSON object (deterministic within a
-// build; pk column order is fixed by the schema)
-fn canonical_pk(pk: &Value) -> String {
-    serde_json::to_string(pk).unwrap_or_default()
-}
+// canonical pk encoding lives in `value` so membership keys, delete ids, and
+// realtime topics all share one build-independent encoder.
+use crate::value::canonical_pk;
 
 // raw (non-zero-typed) primary-key object of a live row, for keying membership
 // and for building del ids
@@ -74,7 +72,14 @@ fn raw_pk(spec: &TableSpec, row: &crate::db::Row) -> Value {
 
 // the current query-aware schema version. bump when a query-aware table changes
 // shape, and add the forward migration in migrate_query_schema.
-const QUERY_SCHEMA_VERSION: i64 = 2;
+//
+// v3: rowPk switched from serde_json's build-dependent map order to the
+// schema's declared primary-key order (see value::canonical_pk). single-column
+// pks encode identically, but a composite pk written by a wasm build sorted its
+// columns, so those stored keys no longer match a recompute. the query-aware
+// tables rebuild from the next desiredQueriesPatch, so the version bump resets
+// them instead of migrating each key.
+const QUERY_SCHEMA_VERSION: i64 = 3;
 
 fn table_exists(db: &mut dyn SyncDb, name: &str) -> Result<bool, EngineError> {
     let rows = db.query(
@@ -514,12 +519,12 @@ pub(crate) fn prepare_transform_version(
     Ok(reset_client)
 }
 
-// canonicalize a change-log pk (json_object text) to the membership key form
-pub(crate) fn canonical_pk_text(pk_text: &str) -> String {
-    match serde_json::from_str::<Value>(pk_text) {
-        Ok(v) => canonical_pk(&v),
-        Err(_) => pk_text.to_string(),
-    }
+// canonicalize a change-log pk (json_object text) to the membership key form.
+// an unknown table has no spec to order by, so its rows are skipped rather than
+// keyed under a build-dependent encoding.
+pub(crate) fn canonical_pk_text(tables: &Tables, table: &str, pk_text: &str) -> Option<String> {
+    let spec = tables.get(table)?;
+    Some(crate::value::canonical_pk_text(spec, pk_text))
 }
 
 struct ActiveQuery {
@@ -716,7 +721,7 @@ fn collect_dependent_rows(
         })?;
         for row in &db.query(&cr.sql, &cr.params)? {
             let pk_obj = raw_pk(child_spec, row);
-            let key = canonical_pk(&pk_obj);
+            let key = canonical_pk(child_spec, &pk_obj);
             live.insert((cr.child_table.clone(), key.clone()));
             values.insert(
                 (cr.child_table.clone(), key),
@@ -859,7 +864,7 @@ pub(crate) fn recompute_group_with_rehydrate(
         let compiled = compile(&ast, tables)?;
         for row in &db.query(&compiled.sql, &compiled.params)? {
             let pk_obj = raw_pk(spec, row);
-            let key = canonical_pk(&pk_obj);
+            let key = canonical_pk(spec, &pk_obj);
             live.insert((q.root_table.clone(), key.clone()));
             values.insert(
                 (q.root_table.clone(), key),
