@@ -38,8 +38,8 @@
   },
   "scripts": {
     "build:dependencies": "bun run --cwd ../sync-executor build",
-    "build:wasm": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm && rm -f src/generated/.gitignore && bun scripts/write-wasm-module-type.ts",
-    "build:wasm:platform": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm -- --features platform-probes && rm -f src/generated/.gitignore && bun scripts/write-wasm-module-type.ts",
+    "build:wasm": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm && rm -f src/generated/.gitignore && bun scripts/finish-wasm-build.ts",
+    "build:wasm:platform": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm -- --features platform-probes && rm -f src/generated/.gitignore && bun scripts/finish-wasm-build.ts --platform-probes",
     "build:runtime": "rm -rf dist && mkdir -p dist && cp -R src/generated dist/generated && tsc -p tsconfig.build.json",
     "build:dist": "bun run build:dependencies && bun run build:wasm && bun run build:runtime",
     "build:dist:platform": "bun run build:dependencies && bun run build:wasm:platform && bun run build:runtime",

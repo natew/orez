@@ -37,14 +37,13 @@ try {
     './dist/generated/sync_wasm_bg.wasm'
   )
 
-  const listing = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' })
-  assert.match(listing, /package\/dist\/generated\/sync_wasm_bg\.wasm\n/)
-  assert.doesNotMatch(listing, /package\/src\//)
-
   const extracted = join(temporary, 'extracted')
   mkdirSync(extracted)
   execFileSync('tar', ['-xzf', tarball, '-C', extracted])
   const packageRoot = join(extracted, 'package')
+  assert.ok(existsSync(join(packageRoot, 'dist', 'generated', 'sync_wasm_bg.wasm')))
+  assert.ok(existsSync(join(packageRoot, 'dist', 'generated', 'sync_wasm_bg.js')))
+  assert.ok(!existsSync(join(packageRoot, 'src')))
   execFileSync(
     'node',
     [
@@ -79,6 +78,10 @@ if (typeof visibility.visibility?.filter !== 'function') {
 const viteLoader = await import('orez-sync-cf-host/vite-wasm-loader')
 if (typeof viteLoader.orezSyncCfHostWasm !== 'function') {
   throw new Error('built Vite loader export did not load')
+}
+const companion = await import('./dist/generated/sync_wasm_bg.js')
+if (typeof companion.__wbg_set_wasm !== 'function') {
+  throw new Error('built Wasm companion module did not load')
 }`,
     ],
     { cwd: packageRoot, stdio: 'pipe' }
