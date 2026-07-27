@@ -76,8 +76,8 @@
   "scripts": {
     "build:runtime": "rm -rf dist && tsc -p tsconfig.build.json",
     "build:zero-http": "rm -rf dist/zero-http && tsc -p tsconfig.zero-http.json",
-    "build:dependencies": "bun run --cwd ../sync-executor build && bun run --cwd ../sync-cf-host build:dist",
-    "build": "bun run build:dependencies && bun run build:runtime && bun run --cwd ../sync-browser-host build:dist",
+    "build:dependencies": "bun run --cwd ../sync-cf-host build:dist",
+    "build": "bun run build:dependencies && bun run build:runtime && bun run --cwd ../sync-browser-host build:runtime",
     "test": "vitest run --config ../../vitest.config.ts packages/orez-lite/src",
     "test:package": "bun run build && node package-runtime-test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"

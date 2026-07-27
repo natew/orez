@@ -1,4 +1,4 @@
-import { encodeSqlValue } from 'orez-sync-executor'
+import { encodeSqlValue } from 'orez-sync-executor/sqlite'
 
 import { executeTransactionQueryPlan } from './transaction-query.js'
 import { trackBillableCursorRows } from './write-safeguards.js'
@@ -11,10 +11,10 @@ import type { SyncSql } from './types.js'
 import type {
   ApplicationTransaction,
   ExecResult,
-  SqlWireValue,
   SqlStatementMetadata,
 } from 'orez-sync-executor'
 import type { TransactionQueryFormat } from 'orez-sync-executor'
+import type { SqlWireValue } from 'orez-sync-executor/sqlite'
 
 type WireValue = SqlWireValue
 

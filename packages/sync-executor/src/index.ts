@@ -1,7 +1,5 @@
-export {
-  createPostgreSQLApplicationDatabase,
-  createSQLiteApplicationDatabase,
-} from './adapters.js'
+export { createPostgreSQLApplicationDatabase } from './postgres.js'
+export { createSQLiteApplicationDatabase } from './sqlite.js'
 export * from './core.js'
 export { encodeSqlParams, encodeSqlValue } from './sql-wire.js'
 export type { SqlWireValue } from './sql-wire.js'
@@ -11,4 +9,4 @@ export type {
   PostgreSQLClient,
   PostgreSQLPool,
   PostgreSQLQueryResult,
-} from './adapters.js'
+} from './postgres.js'

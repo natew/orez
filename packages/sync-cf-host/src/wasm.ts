@@ -15,7 +15,7 @@ function ensureWasm(): void {
   initialized = true
 }
 
-function withWasm<Args extends unknown[], Result>(
+export function withWasm<Args extends unknown[], Result>(
   operation: (...args: Args) => Result
 ): (...args: Args) => Result {
   return (...args) => {

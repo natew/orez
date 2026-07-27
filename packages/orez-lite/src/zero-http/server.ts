@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
 
-import { MutationApplicationError, type MutatorRegistry } from 'orez-sync-executor'
+import { MutationApplicationError, type MutatorRegistry } from 'orez-sync-executor/core'
 
 import { zeroHttpFixtureSchema } from './fixture-schema.js'
 import {

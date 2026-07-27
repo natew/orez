@@ -2,7 +2,7 @@ export {
   createSQLiteApplicationDatabase,
   encodeSqlParams,
   encodeSqlValue,
-} from 'orez-sync-executor'
+} from 'orez-sync-executor/sqlite'
 export * from 'orez-sync-executor/core'
 
-export type { SqlWireValue } from 'orez-sync-executor'
+export type { SqlWireValue } from 'orez-sync-executor/sqlite'

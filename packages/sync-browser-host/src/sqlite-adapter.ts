@@ -1,5 +1,5 @@
 import { executeTransactionQueryPlan } from 'orez-sync-cf-host/transaction-query'
-import { encodeSqlValue } from 'orez-sync-executor/sql-wire'
+import { encodeSqlValue } from 'orez-sync-executor/sqlite'
 
 import type { SyncSql } from './types.js'
 import type { BedrockSqliteModule, Database, Statement } from 'bedrock-sqlite/browser'
@@ -7,13 +7,13 @@ import type {
   CompiledTransactionQueryPlan,
   TransactionQueryBudget,
 } from 'orez-sync-cf-host/transaction-query'
+import type { TransactionQueryFormat } from 'orez-sync-executor'
 import type {
   ApplicationTransaction,
   ExecResult as SQLiteExecResult,
   SqlStatementMetadata,
-  TransactionQueryFormat,
 } from 'orez-sync-executor'
-import type { SqlWireValue } from 'orez-sync-executor/sql-wire'
+import type { SqlWireValue } from 'orez-sync-executor/sqlite'
 
 export type WireValue = SqlWireValue
 
