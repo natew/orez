@@ -37,11 +37,12 @@
     }
   },
   "scripts": {
+    "build:dependencies": "bun run --cwd ../sync-executor build",
     "build:wasm": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm && rm -f src/generated/.gitignore && bun scripts/write-wasm-module-type.ts",
     "build:wasm:platform": "wasm-pack build ../../crates/sync-wasm --target web --release --out-dir ../../packages/sync-cf-host/src/generated --out-name sync_wasm -- --features platform-probes && rm -f src/generated/.gitignore && bun scripts/write-wasm-module-type.ts",
     "build:runtime": "rm -rf dist && mkdir -p dist && cp -R src/generated dist/generated && tsc -p tsconfig.build.json",
-    "build:dist": "bun run build:wasm && bun run build:runtime",
-    "build:dist:platform": "bun run build:wasm:platform && bun run build:runtime",
+    "build:dist": "bun run build:dependencies && bun run build:wasm && bun run build:runtime",
+    "build:dist:platform": "bun run build:dependencies && bun run build:wasm:platform && bun run build:runtime",
     "bundle": "bun run build:dist && wrangler deploy --dry-run --outdir .wrangler/bundle",
     "measure": "bun run build:dist && bun measure.mjs",
     "test": "bun run test:config && bun run test:query-compiler && bun run test:package && bun run test:platform && bun run test:integration && bun run test:ingest && bun run test:restart",

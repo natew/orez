@@ -2,7 +2,7 @@ import {
   createSyncExecutor,
   reportPushDiagnostics,
   SyncExecutorRequestError,
-} from 'orez-sync-executor'
+} from 'orez-sync-executor/core'
 
 import type { Schema } from '@rocicorp/zero'
 import type {

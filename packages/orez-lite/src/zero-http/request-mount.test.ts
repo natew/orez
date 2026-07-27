@@ -1,4 +1,4 @@
-import { SyncExecutorRequestError } from 'orez-sync-executor'
+import { SyncExecutorRequestError } from 'orez-sync-executor/core'
 import { describe, expect, test, vi } from 'vitest'
 
 import { createZeroHttpMount, ZeroHttpRequestError } from './mount.js'
