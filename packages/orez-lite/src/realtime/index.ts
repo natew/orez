@@ -54,6 +54,9 @@ export type {
   SubscribeAuthorization,
 } from './hub.js'
 
+export { FieldWriter } from './writer.js'
+export type { FieldWriterOptions } from './writer.js'
+
 export { createLocalRealtime } from './local.js'
 export type { LocalRealtime, LocalRealtimeOptions } from './local.js'
 

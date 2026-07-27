@@ -21,6 +21,7 @@
 import { RealtimeHub } from './hub.js'
 import { RealtimePublisher } from './publisher.js'
 import { RealtimeStore } from './store.js'
+import { FieldWriter } from './writer.js'
 
 import type { HubConnection, HubProducer } from './hub.js'
 import type { StreamingManifest } from './manifest.js'
@@ -37,6 +38,11 @@ export type LocalRealtimeOptions = {
 export type LocalRealtime = {
   // hand to createUseStreamingField / createUseStreamingFields
   readonly store: RealtimeStore
+  // imperative writing: set a row's field to its current value, generations
+  // managed for you. This is what most producer loops want.
+  readonly fields: FieldWriter
+  // the explicit generation API underneath, when a producer needs to control
+  // begin, commit, and end itself
   readonly publisher: RealtimePublisher
   // Deliver whatever the batching window has ready. Called automatically on a
   // timer; exposed so a test can be deterministic without faking timers.
@@ -101,9 +107,16 @@ export function createLocalRealtime(options: LocalRealtimeOptions): LocalRealtim
     end: () => {},
   }
 
+  const publisher = new RealtimePublisher(transport, options.manifest)
   return {
     store,
-    publisher: new RealtimePublisher(transport, options.manifest),
+    publisher,
+    fields: new FieldWriter(publisher, options.manifest, {
+      onError: (error, topic) =>
+        options.onError?.(
+          `realtime write failed for ${topic.table}.${topic.field}: ${error.message}`
+        ),
+    }),
     flush: () => hub.flush(),
     close: () => {
       hub.dropProducer(producer.id)
