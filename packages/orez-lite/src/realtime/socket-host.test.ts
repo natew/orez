@@ -176,6 +176,42 @@ describe('socket host', () => {
     expect(sub.updates().at(-1)).toMatchObject({ value: 'after the cold start' })
   })
 
+  // a socket can be evicted more than once, and the second time has to work the
+  // same as the first: the connection rehydrate hands back is a whole
+  // connection, not a one-shot replay
+  it('survives a second eviction and keeps serving the restored socket', async () => {
+    const first = build()
+    const sub = socket()
+    const connection = first.acceptSubscriber(sub, identity, 'conn-1')
+    await connection.handleMessage(encodeFrame(['subscribe', { topic }]))
+    await Promise.resolve()
+
+    const revived = build()
+    const [restored] = await revived.rehydrate([
+      { socket: sub, identity, connectionID: 'conn-1', topics: connection.topics() },
+    ])
+
+    // it still takes frames after being restored
+    const second: RealtimeTopic = {
+      table: 'message',
+      key: { id: 'm2' },
+      field: 'content',
+    }
+    await restored.handleMessage(encodeFrame(['subscribe', { topic: second }]))
+    await Promise.resolve()
+    expect(restored.topics()).toEqual([topic, second])
+
+    // and the second eviction restores both topics, including the one added
+    // after the first one
+    const again = build()
+    await again.rehydrate([
+      { socket: sub, identity, connectionID: 'conn-1', topics: restored.topics() },
+    ])
+    const prod = socket()
+    await stream(again, prod, 'after two cold starts')
+    expect(sub.updates().at(-1)).toMatchObject({ value: 'after two cold starts' })
+  })
+
   // rehydration re-authorizes rather than restoring state, so access lost
   // during the gap is not resurrected
   it('does not restore a subscription whose authorization was revoked', async () => {

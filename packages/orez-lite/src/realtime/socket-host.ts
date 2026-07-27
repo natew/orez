@@ -59,6 +59,11 @@ export type RealtimeSocketHost = {
   // Generations deliberately do NOT survive. They are ephemeral by definition,
   // and the durable row is still the truth, so a producer whose generation
   // vanished re-opens one and the client converges either way.
+  //
+  // Returns one connection per entry, in order, so a runtime that keeps sockets
+  // in a map can put them straight back. Without that a rehydrated socket would
+  // have no handle: its later frames would go nowhere and its topics would be
+  // lost at the NEXT eviction, which looks like the first one half-worked.
   rehydrate(
     entries: readonly {
       socket: HostSocket
@@ -66,18 +71,25 @@ export type RealtimeSocketHost = {
       connectionID: string
       topics: readonly RealtimeTopic[]
     }[]
-  ): Promise<void>
+  ): Promise<readonly HostConnection[]>
   flush(): void
 }
 
 export function createSocketHost(options: HubOptions): RealtimeSocketHost {
   const hub = new RealtimeHub(options)
 
+  // One subscriber, whether it is being accepted for the first time or rebuilt
+  // after an eviction. Both paths need the same tracking, so neither gets its
+  // own copy of it.
   const subscriber = (
     socket: HostSocket,
     identity: RealtimeIdentity,
     connectionID: string
-  ): { connection: HubConnection; owned: Map<string, RealtimeTopic> } => {
+  ): {
+    connection: HubConnection
+    owned: Map<string, RealtimeTopic>
+    host: HostConnection
+  } => {
     // keyed for dedup, valued with the structured topic so `topics()` can hand
     // back something `rehydrate` accepts without a second parser
     const owned = new Map<string, RealtimeTopic>()
@@ -88,33 +100,31 @@ export function createSocketHost(options: HubOptions): RealtimeSocketHost {
         socket.send(encodeFrame(frame as never))
       },
     }
-    return { connection, owned }
+    const host: HostConnection = {
+      handleMessage(raw: string): void {
+        const frame = decodeFrame(raw)
+        if (!frame) return
+        // A subscriber channel is never a publish channel, whatever arrives on
+        // it. Producer frames are not merely ignored by the hub here; they are
+        // refused before reaching it.
+        if (frame[0] !== 'subscribe' && frame[0] !== 'unsubscribe') return
+        if (frame[0] === 'subscribe') owned.set(topicKey(frame[1].topic), frame[1].topic)
+        else owned.delete(topicKey(frame[1].topic))
+        void applyClientFrame(hub, connection, frame)
+      },
+      close(): void {
+        hub.dropConnection(connectionID)
+      },
+      topics: () => [...owned.values()],
+    }
+    return { connection, owned, host }
   }
 
   return {
     hub,
 
-    acceptSubscriber(socket, identity, connectionID) {
-      const { connection, owned } = subscriber(socket, identity, connectionID)
-      return {
-        handleMessage(raw: string): void {
-          const frame = decodeFrame(raw)
-          if (!frame) return
-          // A subscriber channel is never a publish channel, whatever arrives
-          // on it. Producer frames are not merely ignored by the hub here; they
-          // are refused before reaching it.
-          if (frame[0] !== 'subscribe' && frame[0] !== 'unsubscribe') return
-          if (frame[0] === 'subscribe')
-            owned.set(topicKey(frame[1].topic), frame[1].topic)
-          else owned.delete(topicKey(frame[1].topic))
-          void applyClientFrame(hub, connection, frame)
-        },
-        close(): void {
-          hub.dropConnection(connectionID)
-        },
-        topics: () => [...owned.values()],
-      }
-    },
+    acceptSubscriber: (socket, identity, connectionID) =>
+      subscriber(socket, identity, connectionID).host,
 
     acceptProducer(socket, producerID) {
       const producer: HubProducer = {
@@ -137,15 +147,25 @@ export function createSocketHost(options: HubOptions): RealtimeSocketHost {
       }
     },
 
-    async rehydrate(entries): Promise<void> {
+    async rehydrate(entries): Promise<readonly HostConnection[]> {
+      const restored: HostConnection[] = []
       for (const entry of entries) {
-        const { connection } = subscriber(
+        const { connection, owned, host } = subscriber(
           entry.socket,
           entry.identity,
           entry.connectionID
         )
-        for (const topic of entry.topics) await hub.subscribe(connection, topic)
+        for (const topic of entry.topics) {
+          // recorded before the result, exactly as a live subscribe frame does:
+          // a topic denied during the gap stays the client's asserted interest,
+          // so a membership that comes back is picked up at the next eviction
+          // instead of being forgotten here.
+          owned.set(topicKey(topic), topic)
+          await hub.subscribe(connection, topic)
+        }
+        restored.push(host)
       }
+      return restored
     },
 
     flush: () => hub.flush(),
