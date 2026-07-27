@@ -9,5 +9,9 @@
     "strict": true,
     "target": "ES2020"
   },
-  "files": ["multi-client-types.ts", "server-return-types.ts"]
+  "files": [
+    "multi-client-types.ts",
+    "server-return-types.ts",
+    "streaming-entry-types.ts"
+  ]
 }

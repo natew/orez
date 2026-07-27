@@ -77,6 +77,13 @@
       "import": "./dist/esm/multi.mjs",
       "require": "./dist/cjs/multi.cjs"
     },
+    "./streaming": {
+      "react-native": "./dist/esm/streaming.native.js",
+      "types": "./types/streaming.d.ts",
+      "import": "./dist/esm/streaming.mjs",
+      "require": "./dist/cjs/streaming.cjs",
+      "default": "./dist/esm/streaming.mjs"
+    },
     "./drizzle": {
       "types": "./types/createSchemaFromDrizzle.d.ts",
       "import": "./dist/esm/createSchemaFromDrizzle.mjs",
