@@ -54,5 +54,8 @@ export type {
   SubscribeAuthorization,
 } from './hub.js'
 
+export { BrowserRealtime, connectRealtimePort } from './message-port.js'
+export type { BrowserRealtimeOptions, MembershipReader } from './message-port.js'
+
 // The React binding lives in on-zero, which already owns the React peer
 // dependency. orez-lite stays framework-free: see on-zero's useStreamingField.
