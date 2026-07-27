@@ -1,3 +1,4 @@
+import type { QueryResolution, QueryResolutionRequest } from './query-patch.js'
 import type { TransactionQueryBudget } from './transaction-query.js'
 import type { Schema } from '@rocicorp/zero'
 import type {
@@ -17,6 +18,9 @@ export {
   type VisibilityValue,
 } from './visibility.js'
 export type { VisibilityConfig } from 'orez-sync-executor'
+// the batch-resolution contract lives with the helper that enforces it, so a
+// browser bundle can import it without dragging in this module's host types
+export type { QueryResolution, QueryResolutionRequest } from './query-patch.js'
 
 export interface SyncSql {
   exec(
@@ -29,20 +33,6 @@ export interface SyncSql {
     params?: readonly unknown[]
   ): Row[]
 }
-
-export type QueryResolutionRequest = {
-  readonly name: string
-  readonly args: readonly JsonValue[]
-}
-
-/**
- * One resolved query, positionally matched to the request at the same index.
- *
- * An `error` fails only its own query rather than the whole patch, so a client
- * that registers one unknown query alongside nine good ones is told which one
- * is unknown.
- */
-export type QueryResolution = { readonly ast: JsonValue } | { readonly error: string }
 
 /**
  * Resolve a whole desired-query patch in one call.

@@ -19,6 +19,10 @@
       "types": "./dist/query-compiler.d.ts",
       "import": "./dist/query-compiler.js"
     },
+    "./query-patch": {
+      "types": "./dist/query-patch.d.ts",
+      "import": "./dist/query-patch.js"
+    },
     "./transaction-query": {
       "types": "./dist/transaction-query.d.ts",
       "import": "./dist/transaction-query.js"

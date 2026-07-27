@@ -1,5 +1,18 @@
-import type { QueryResolution, QueryResolutionRequest } from './types.js'
 import type { JsonValue } from 'orez-sync-executor'
+
+export type QueryResolutionRequest = {
+  readonly name: string
+  readonly args: readonly JsonValue[]
+}
+
+/**
+ * One resolved query, positionally matched to the request at the same index.
+ *
+ * An `error` fails only its own query rather than the whole patch, so a client
+ * that registers one unknown query alongside nine good ones is told which one
+ * is unknown.
+ */
+export type QueryResolution = { readonly ast: JsonValue } | { readonly error: string }
 
 /**
  * Turn a client's desired-query patch into the resolved patch sync-core takes.

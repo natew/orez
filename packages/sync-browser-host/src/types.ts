@@ -1,5 +1,8 @@
 import type { Schema } from '@rocicorp/zero'
-import type { QueryResolution, QueryResolutionRequest } from 'orez-sync-cf-host'
+import type {
+  QueryResolution,
+  QueryResolutionRequest,
+} from 'orez-sync-cf-host/query-patch'
 import type { TransactionQueryBudget } from 'orez-sync-cf-host/transaction-query'
 import type {
   AuthData,
