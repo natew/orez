@@ -698,6 +698,18 @@ export class TransactionalCdc {
     return this.#registrations.get(table) ?? null
   }
 
+  /**
+   * True when a verified registration can undo this PHYSICAL table row by row,
+   * whether or not it publishes. Deliberately a pure query: the transaction
+   * journal asks it about tables it did not write, and registering one of those
+   * here would both churn the identity a tracked write registers under and, for
+   * a cascade child nothing has registered yet, pin it to `publish: false` so
+   * its deletes would never reach the changefeed.
+   */
+  coversRowUndo(physicalTable: string): boolean {
+    return this.#registrations.has(physicalTable) && this.#verified.has(physicalTable)
+  }
+
   capturesTable(tableName: string): boolean {
     return (
       this.#active &&

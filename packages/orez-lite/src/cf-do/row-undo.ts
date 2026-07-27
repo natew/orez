@@ -7,11 +7,11 @@ import {
   type JournalRecord,
   type TableIdentity,
 } from './cdc.js'
-import { schemaRestoreOwnsTable } from './tx-journal.js'
+import { PENDING_CHANGES_TABLE, schemaRestoreOwnsTable } from './tx-journal.js'
 
 import type { DurableSqlStorage } from './watermark.js'
 
-export const PENDING_CHANGES_TABLE = '_zero_pending_changes'
+export { PENDING_CHANGES_TABLE }
 
 type Op = 'INSERT' | 'UPDATE' | 'DELETE'
 

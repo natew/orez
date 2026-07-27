@@ -3,6 +3,7 @@ import BedrockSqlite from 'bedrock-sqlite'
 import { describe, expect, it, vi } from 'vitest'
 
 import { TransactionalCdc } from './cdc.js'
+import { rollbackTxJournal } from './tx-journal.js'
 import { DurableWatermarkState } from './watermark.js'
 
 vi.mock('cloudflare:workers', () => ({
@@ -712,7 +713,9 @@ describe('ZeroDO triggered writes to private tables', () => {
             txID
           )
           .toArray()
-      ).toEqual([{ undoable: 0 }])
+        // `item` is captured, so it rolls back row by row. Only the two
+        // unregistered private targets need a table snapshot.
+      ).toEqual([{ undoable: 1 }])
 
       await zero.atomically(() => {
         const beforeRollback = (id: string) => zero.rollbackPendingTrackedChanges(id)
@@ -788,7 +791,11 @@ describe('ZeroDO implicit foreign-key side effects', () => {
             txID
           )
           .toArray()
-      ).toEqual([{ undoable: 0 }, { undoable: 0 }])
+        // `child` is reached by ON UPDATE CASCADE, and nothing suspends a
+        // foreign key during rollback, so undoing `parent` re-fires the action
+        // against it. It therefore keeps its snapshot while `parent`, reached
+        // directly, rolls back row by row.
+      ).toEqual([{ undoable: 0 }, { undoable: 1 }])
 
       await zero.atomically(() => {
         const beforeRollback = (id: string) => zero.rollbackPendingTrackedChanges(id)
@@ -1395,5 +1402,162 @@ describe('ZeroDO paged snapshot feed', () => {
     expect(await response.json()).toEqual({
       error: 'injected paged snapshot read failure',
     })
+  })
+})
+
+/**
+ * A table snapshot is copied at FIRST TOUCH, so it is a faithful
+ * pre-transaction image only if nothing in the transaction wrote that table
+ * first. These cover the ways that used to break, all of which end with a
+ * rolled-back write surviving in committed data.
+ */
+describe('table snapshots never capture earlier writes from the same transaction', () => {
+  const noteTrack = (operation: 'INSERT' | 'DELETE') => ({
+    physicalTableName: 'note',
+    tableName: 'public.note',
+    operation,
+    rowColumns: ['id', 'body'],
+  })
+
+  async function withCascade() {
+    const core = await createWorkerCore()
+    core.sql.exec('CREATE TABLE note (id TEXT PRIMARY KEY, body TEXT)')
+    // Never registered with the CDC, so its cascade deletes cannot be undone
+    // row by row and it is the one table that genuinely needs a snapshot.
+    core.sql.exec(
+      'CREATE TABLE noteTag (id TEXT PRIMARY KEY, ' +
+        'noteId TEXT REFERENCES note(id) ON DELETE CASCADE)'
+    )
+    core.sql.exec("INSERT INTO note VALUES ('pre', 'committed before the tx')")
+    return core
+  }
+
+  const noteIds = (sql: { exec: (statement: string) => { toArray(): any[] } }) =>
+    sql
+      .exec('SELECT id FROM note ORDER BY id')
+      .toArray()
+      .map((row) => String(row.id))
+
+  const undoTableCount = (sql: { exec: (statement: string) => { toArray(): any[] } }) =>
+    sql
+      .exec(
+        "SELECT name FROM sqlite_master WHERE type = 'table' " +
+          "AND name LIKE '\\_orez\\_tx\\_undo\\_%' ESCAPE '\\'"
+      )
+      .toArray().length
+
+  it('rolls back a clean write followed by a cascade write in one transaction', async () => {
+    const { sql, zero } = await withCascade()
+
+    // Statement 1 reaches nothing, so it takes no snapshot and is undone row by
+    // row. Statement 2 reaches the uncoverable cascade child and does snapshot.
+    // The child's snapshot is fine; `note`'s would have carried statement 1.
+    zero.executeSQL(
+      "INSERT INTO note VALUES ('new', 'written in tx') RETURNING *",
+      [],
+      noteTrack('INSERT'),
+      'tx-mixed'
+    )
+    expect(noteIds(sql)).toEqual(['new', 'pre'])
+    zero.executeSQL(
+      "DELETE FROM note WHERE id = 'pre' RETURNING *",
+      [],
+      noteTrack('DELETE'),
+      'tx-mixed'
+    )
+
+    zero.rollbackPendingTrackedChanges('tx-mixed')
+    zero.deletePendingTrackedChanges('tx-mixed')
+    rollbackTxJournal(sql, 'tx-mixed')
+
+    expect(noteIds(sql)).toEqual(['pre'])
+  })
+
+  it('rolls back when an unparseable trigger forces the all-tables snapshot', async () => {
+    const { sql, zero } = await withCascade()
+    // The classifier cannot read a target out of this body, so the statement
+    // falls to `mustSnapshotAll`. That path copies every table it can see,
+    // which is how it used to reach `note` after statement 1 had written it.
+    sql.exec(
+      "CREATE TRIGGER note_opaque AFTER DELETE ON note BEGIN SELECT 'INSERT'; END"
+    )
+
+    zero.executeSQL(
+      "INSERT INTO note VALUES ('new', 'written in tx') RETURNING *",
+      [],
+      noteTrack('INSERT'),
+      'tx-all'
+    )
+    zero.executeSQL(
+      "DELETE FROM note WHERE id = 'pre' RETURNING *",
+      [],
+      noteTrack('DELETE'),
+      'tx-all'
+    )
+
+    zero.rollbackPendingTrackedChanges('tx-all')
+    zero.deletePendingTrackedChanges('tx-all')
+    rollbackTxJournal(sql, 'tx-all')
+
+    expect(noteIds(sql)).toEqual(['pre'])
+  })
+
+  it('still snapshots a side-effect target the CDC cannot undo', async () => {
+    const { sql, zero } = await withCascade()
+    sql.exec("INSERT INTO noteTag VALUES ('t1', 'pre')")
+
+    zero.executeSQL(
+      "DELETE FROM note WHERE id = 'pre' RETURNING *",
+      [],
+      noteTrack('DELETE'),
+      'tx-child'
+    )
+    // The cascade emptied it, and only a snapshot can bring it back.
+    expect(sql.exec('SELECT id FROM noteTag').toArray()).toEqual([])
+    expect(undoTableCount(sql)).toBeGreaterThan(0)
+
+    zero.rollbackPendingTrackedChanges('tx-child')
+    zero.deletePendingTrackedChanges('tx-child')
+    rollbackTxJournal(sql, 'tx-child')
+
+    expect(sql.exec('SELECT id FROM noteTag').toArray()).toEqual([{ id: 't1' }])
+    expect(noteIds(sql)).toEqual(['pre'])
+  })
+
+  it('copies nothing for a synced write whose only side effect is the zsync journal', async () => {
+    const { sql, zero } = await createWorkerCore()
+    sql.exec('CREATE TABLE note (id TEXT PRIMARY KEY, body TEXT)')
+    sql.exec(
+      'CREATE TABLE _zsync_changes (watermark INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+        '"tableName" TEXT NOT NULL, "op" TEXT NOT NULL, "pk" TEXT)'
+    )
+    for (let index = 0; index < 200; index++) {
+      sql.exec(
+        `INSERT INTO _zsync_changes ("tableName", "op", "pk") VALUES ('note', 'row', '{}')`
+      )
+    }
+    // The shape zero-http's mount installs on every synced table.
+    sql.exec(
+      'CREATE TRIGGER "_zsync_tr_note_i" AFTER INSERT ON "note" BEGIN ' +
+        `INSERT INTO _zsync_changes ("tableName", "op", "pk") VALUES ('note', 'row', '{}'); END`
+    )
+
+    zero.executeSQL(
+      "INSERT INTO note VALUES ('new', 'written') RETURNING *",
+      [],
+      noteTrack('INSERT'),
+      'tx-zsync'
+    )
+
+    // Before this fix the journal AND the written table were both copied, which
+    // is what tripped three production apps' 300k-row write budgets.
+    expect(undoTableCount(sql)).toBe(0)
+
+    zero.rollbackPendingTrackedChanges('tx-zsync')
+    zero.deletePendingTrackedChanges('tx-zsync')
+    rollbackTxJournal(sql, 'tx-zsync')
+
+    expect(noteIds(sql)).toEqual([])
+    expect(sql.exec('SELECT COUNT(*) AS n FROM _zsync_changes').one()).toEqual({ n: 200 })
   })
 })

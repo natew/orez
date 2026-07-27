@@ -37,6 +37,7 @@ import {
   snapshotSideEffectWriteTables,
   snapshotTxSchema,
   upgradeToTableSnapshot,
+  ZSYNC_CHANGES_TABLE,
 } from './tx-journal.js'
 import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
 
@@ -1744,23 +1745,41 @@ export class ZeroDO extends DurableObject {
     // would otherwise have taken. It has to happen before the DML, while the
     // table still holds its pre-transaction contents.
     const trackedTransactionID = track ? transactionID || track.transactionID : undefined
-    let snapshotsOwnStatement = false
+    // Which tables a table snapshot now owns the rollback of. Everything else
+    // this statement captures stays row-undoable, so snapshotting one
+    // uncoverable side-effect target cannot strand the rest.
+    const snapshotted = new Set<string>()
     if (track && !capturesTrackedTable && trackedTransactionID) {
       const physicalTableName =
         track.physicalTableName || stripPublicPrefix(track.tableName)
       if (this.tableExists(physicalTableName)) {
         upgradeToTableSnapshot(this.sql, trackedTransactionID, physicalTableName)
+        snapshotted.add(physicalTableName)
       }
     }
     if (track && trackedTransactionID) {
       const physicalTableName =
         track.physicalTableName || stripPublicPrefix(track.tableName)
-      snapshotsOwnStatement = snapshotSideEffectWriteTables(
+      // zero-http's journal is the one side-effect target orez owns, so it is
+      // the one this path may register itself: its identity is fixed and it
+      // never publishes. Registering it here rather than at mount is what makes
+      // the ordering safe -- it is in place before the DML that fires the
+      // trigger, in the same storage transaction, or `coversRowUndo` says no
+      // and the journal is snapshotted exactly as before.
+      this.cdc.ensureTable({
+        physicalTableName: ZSYNC_CHANGES_TABLE,
+        tableName: ZSYNC_CHANGES_TABLE,
+        publish: false,
+      })
+      for (const table of snapshotSideEffectWriteTables(
         this.sql,
         trackedTransactionID,
         physicalTableName,
-        track.operation
-      )
+        track.operation,
+        (table) => this.cdc.coversRowUndo(table)
+      )) {
+        snapshotted.add(table)
+      }
     }
 
     const suspendedCdc = this.cdc.beginSchemaChange(sql)
@@ -1788,7 +1807,7 @@ export class ZeroDO extends DurableObject {
       this.appendCapturedChange(
         change,
         transactionID || track?.transactionID,
-        !snapshotsOwnStatement
+        !snapshotted.has(change.physicalTableName)
       )
     }
 

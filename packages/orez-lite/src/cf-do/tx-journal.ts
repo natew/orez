@@ -61,12 +61,28 @@ export const TX_SCHEMA_DDL =
  */
 const CDC_REGISTRATION_TABLE = '_orez_cdc_tables'
 
+/**
+ * Where row-undo keeps its before/after images. Declared here rather than in
+ * row-undo so both modules name one constant: row-undo already imports from
+ * this file, and the classifier below has to read the table to refuse a
+ * mid-transaction snapshot.
+ */
+export const PENDING_CHANGES_TABLE = '_zero_pending_changes'
+
+/**
+ * zero-http's change journal (`src/zero-http/mount.ts`). Its AFTER triggers
+ * write it on every synced application write, so it is the one side-effect
+ * target orez both owns and knows the fixed identity of, which is what lets the
+ * DO register it for rollback-only capture instead of copying it.
+ */
+export const ZSYNC_CHANGES_TABLE = '_zsync_changes'
+
 const INTERNAL_TABLES = new Set([
   TX_MANIFEST_TABLE,
   TX_SCHEMA_TABLE,
   CDC_REGISTRATION_TABLE,
   '_orez_cdc_buffer',
-  '_zero_pending_changes',
+  PENDING_CHANGES_TABLE,
   '_zero_changes',
   '_zero_change_state',
   '_zero_schema_tables',
@@ -655,6 +671,16 @@ export function upgradeToTableSnapshot(
       table
     )
     .toArray()
+  // A snapshot is only a pre-transaction image if this transaction has not
+  // already written the table. Row-undo images prove it has: the copy would
+  // contain those writes, and `rollbackTxJournal` restores it AFTER row undo
+  // has removed them, so they would come back. Nothing here can reconstruct
+  // the pre-transaction contents, so refuse rather than corrupt the rollback.
+  if (existing.length === 0 && hasRowUndoImages(sql, txID, table)) {
+    throw new Error(
+      `cannot snapshot ${table} for transaction ${txID}: it already holds row-undo images from an earlier statement, so a first-touch snapshot would capture them`
+    )
+  }
   // A null snapshot means the table did not exist at first write, so rollback
   // drops it and no copy is needed. A non-empty one is already a real snapshot.
   const snapshotted = existing.some(
@@ -740,6 +766,27 @@ function triggerEvent(sql: string | null): RowOperation | null {
   return match ? (match[1]!.toUpperCase() as RowOperation) : null
 }
 
+const NO_SNAPSHOTS: ReadonlySet<string> = new Set<string>()
+
+/** true when this transaction already recorded row-undo images for `table`. */
+function hasRowUndoImages(
+  sql: DurableSqlStorage,
+  txID: string,
+  table: string
+): boolean {
+  if (!tableExists(sql, PENDING_CHANGES_TABLE)) return false
+  return (
+    sql
+      .exec(
+        `SELECT 1 AS ok FROM ${quoteIdent(PENDING_CHANGES_TABLE)} ` +
+          'WHERE transaction_id = ? AND physical_table_name = ? AND undoable != 0 LIMIT 1',
+        txID,
+        table
+      )
+      .toArray().length > 0
+  )
+}
+
 /**
  * snapshot the source table and the transitive targets of its business
  * triggers and cascading/SET foreign keys. trigger SQL and FK metadata name
@@ -757,13 +804,27 @@ function triggerEvent(sql: string | null): RowOperation | null {
  * references `sootAgent` `ON DELETE CASCADE`: 35 billable rows with an empty
  * event table, 1,035 with 1,000 retained events, and the rolling write budget
  * tripped from heartbeats alone once the table grew.
+ *
+ * returns the tables it actually snapshotted, which is the reachable set minus
+ * everything `coversRowUndo` can roll back row by row. the caller marks each
+ * captured change undoable against that set, so a statement that snapshots one
+ * uncoverable side-effect target does not also strand its coverable tables with
+ * a rollback nothing performs.
+ *
+ * this filter is also what keeps a snapshot from ever being taken late.
+ * installing zero-http's `_zsync_tr_*` triggers used to make every synced write
+ * reach `_zsync_changes` and so copy both the journal AND the written table on
+ * every transaction: 2,854 rows per write on one measured namespace, against a
+ * 300,000-row budget, which froze three production apps. those tables are
+ * row-undoable, so none of that copying was buying anything.
  */
 export function snapshotSideEffectWriteTables(
   sql: DurableSqlStorage,
   txID: string,
   sourceTable: string,
-  operation: TrackedOperation
-): boolean {
+  operation: TrackedOperation,
+  coversRowUndo: (physicalTable: string) => boolean
+): ReadonlySet<string> {
   const relations = sql
     .exec(
       "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') " +
@@ -786,15 +847,27 @@ export function snapshotSideEffectWriteTables(
   const node = (table: string, op: RowOperation) => `${sqliteNoCase(table)}\0${op}`
   const edges = new Map<string, Set<string>>()
   const unsafeNodes = new Set<string>()
+  // Nodes reached by a referential action rather than by a trigger. Rollback
+  // suspends triggers over the tables it touches, so a trigger's target can be
+  // undone row by row without the trigger firing again. A foreign key is a
+  // constraint, not a trigger, and nothing suspends it: undoing the parent
+  // re-fires the action against the child, which then no longer matches its own
+  // before-image. Such a child must keep its table snapshot.
+  const referentialNodes = new Set<string>()
   const addEdge = (
     from: string,
     fromOp: RowOperation,
     to: string,
-    toOps: readonly RowOperation[]
+    toOps: readonly RowOperation[],
+    referential = false
   ) => {
     const fromKey = node(from, fromOp)
     const targets = edges.get(fromKey) ?? new Set<string>()
-    for (const toOp of toOps) targets.add(node(to, toOp))
+    for (const toOp of toOps) {
+      const toKey = node(to, toOp)
+      targets.add(toKey)
+      if (referential) referentialNodes.add(toKey)
+    }
     edges.set(fromKey, targets)
   }
 
@@ -836,14 +909,14 @@ export function snapshotSideEffectWriteTables(
       const onDelete = String(row.on_delete ?? 'NO ACTION').toUpperCase()
       const onUpdate = String(row.on_update ?? 'NO ACTION').toUpperCase()
       // deleting a parent row deletes cascaded children and rewrites SET ones.
-      if (onDelete === 'CASCADE') addEdge(parent, 'DELETE', child.name, ['DELETE'])
+      if (onDelete === 'CASCADE') addEdge(parent, 'DELETE', child.name, ['DELETE'], true)
       else if (onDelete === 'SET NULL' || onDelete === 'SET DEFAULT')
-        addEdge(parent, 'DELETE', child.name, ['UPDATE'])
+        addEdge(parent, 'DELETE', child.name, ['UPDATE'], true)
       // updating a parent key rewrites children under every non-restricting
       // action. which columns the statement touched is not known here, so any
       // parent update follows the ON UPDATE edge.
       if (onUpdate === 'CASCADE' || onUpdate === 'SET NULL' || onUpdate === 'SET DEFAULT')
-        addEdge(parent, 'UPDATE', child.name, ['UPDATE'])
+        addEdge(parent, 'UPDATE', child.name, ['UPDATE'], true)
     }
   }
 
@@ -853,6 +926,7 @@ export function snapshotSideEffectWriteTables(
     operation === 'UPSERT' ? ['INSERT', 'UPDATE'] : [operation]
   const reachable = new Set<string>()
   const reachableTables = new Set<string>()
+  const referentialTables = new Set<string>()
   const pending = seeded.map((op) => node(sourceTable, op))
   let hasSideEffect = false
   let mustSnapshotAll = false
@@ -861,21 +935,37 @@ export function snapshotSideEffectWriteTables(
     if (reachable.has(current)) continue
     reachable.add(current)
     reachableTables.add(current.slice(0, current.indexOf('\0')))
+    if (referentialNodes.has(current))
+      referentialTables.add(current.slice(0, current.indexOf('\0')))
     if (unsafeNodes.has(current)) mustSnapshotAll = true
     for (const target of edges.get(current) ?? []) {
       hasSideEffect = true
       pending.push(target)
     }
   }
-  if (!hasSideEffect && !mustSnapshotAll) return false
+  if (!hasSideEffect && !mustSnapshotAll) return NO_SNAPSHOTS
 
-  const selected = mustSnapshotAll
+  const candidates = mustSnapshotAll
     ? [...snapshotTables.values()]
     : [...reachableTables]
         .map((table) => snapshotTables.get(table))
         .filter((table): table is string => table !== undefined)
-  for (const table of selected.sort()) upgradeToTableSnapshot(sql, txID, table)
-  return true
+
+  const snapshotted = new Set<string>()
+  for (const table of candidates.sort()) {
+    // Copy only what CDC cannot undo row by row. Row-level undo is both cheaper
+    // and the only form of rollback that cannot be captured at the wrong
+    // moment: `upgradeToTableSnapshot` copies at first TOUCH, so a table this
+    // statement skipped and a later statement copies would be captured with
+    // this statement's writes already committed into it, and the restore would
+    // put them back after row undo had removed them.
+    if (coversRowUndo(table) && !referentialTables.has(sqliteNoCase(table))) continue
+    // `upgradeToTableSnapshot` refuses a table this transaction has already
+    // written row-undoably, which is what stops a late first-touch copy.
+    upgradeToTableSnapshot(sql, txID, table)
+    snapshotted.add(table)
+  }
+  return snapshotted
 }
 
 /**
