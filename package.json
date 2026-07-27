@@ -119,6 +119,7 @@
     "oxfmt": "latest",
     "oxlint": "latest",
     "orez-lite": "workspace:*",
+    "orez-sync-executor": "workspace:*",
     "pg": "8.22.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0",
