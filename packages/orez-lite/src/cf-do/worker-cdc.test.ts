@@ -713,8 +713,11 @@ describe('ZeroDO triggered writes to private tables', () => {
             txID
           )
           .toArray()
-        // `item` is captured, so it rolls back row by row. Only the two
-        // unregistered private targets need a table snapshot.
+        // Was `undoable: 0`, when any snapshot in the statement marked every
+        // captured row snapshot-owned. That was an implementation detail, not
+        // the behaviour: `item` is captured, so row undo can restore it, and
+        // only the two unregistered private targets ever needed a copy. The
+        // behaviour is still asserted below, where all three tables come back.
       ).toEqual([{ undoable: 1 }])
 
       await zero.atomically(() => {
@@ -791,10 +794,14 @@ describe('ZeroDO implicit foreign-key side effects', () => {
             txID
           )
           .toArray()
-        // `child` is reached by ON UPDATE CASCADE, and nothing suspends a
-        // foreign key during rollback, so undoing `parent` re-fires the action
-        // against it. It therefore keeps its snapshot while `parent`, reached
-        // directly, rolls back row by row.
+        // Was `[0, 0]`, when both tables were snapshot-owned. `parent`
+        // flipping to 1 is the change: it is captured, so row undo restores it
+        // and it no longer needs a copy. `child` stays 0 on purpose, and that
+        // is the load-bearing half -- it is reached by ON UPDATE CASCADE, and
+        // rollback suspends TRIGGERS but cannot suspend a foreign key, so
+        // undoing `parent` re-fires the action against `child`, whose own undo
+        // then matches nothing. The behaviour both values encode is asserted
+        // below, where parent and child are each back at 1.
       ).toEqual([{ undoable: 0 }, { undoable: 1 }])
 
       await zero.atomically(() => {
