@@ -88,12 +88,18 @@ enum Job {
     End {
         id: String,
         end: TxEnd,
-        reply: oneshot::Sender<Result<(), AdminTxError>>,
+        reply: oneshot::Sender<Result<bool, AdminTxError>>,
     },
 }
 
 // the boxed statement a Query step runs inside its admin transaction.
 type TxQueryFn = Box<dyn FnOnce(&Connection) -> Result<Vec<Row>, DbError> + Send>;
+
+#[derive(Clone)]
+struct ActiveTransaction {
+    id: String,
+    total_changes: u64,
+}
 
 // initializes a worker connection. the callback decides whether application
 // initialization is needed and always converges the engine schema/triggers.
@@ -158,7 +164,7 @@ impl Namespace {
     // releases the namespace only once the connection is back in autocommit, so a
     // failed commit cannot leave a transaction open. rejected if id does not own
     // the namespace.
-    pub async fn tx_end(&self, id: String, end: TxEnd) -> Result<(), AdminTxError> {
+    pub async fn tx_end(&self, id: String, end: TxEnd) -> Result<bool, AdminTxError> {
         let (reply, rx) = oneshot::channel();
         self.send(Job::End { id, end, reply });
         rx.await.expect("namespace worker dropped the reply")
@@ -194,12 +200,12 @@ fn force_autocommit(conn: &Connection) -> bool {
 }
 
 // the worker loop: pull one job at a time off the channel and run it on the one
-// connection. active_transaction is the id of the admin transaction that owns
-// the namespace, or None. it is set only after BEGIN succeeds and cleared only
-// after the connection is back in autocommit, so it always mirrors the
-// connection's real transaction state.
+// connection. active_transaction identifies the admin transaction that owns the
+// namespace and remembers SQLite's total-change count at BEGIN. it is set only
+// after BEGIN succeeds and cleared only after the connection is back in
+// autocommit, so it always mirrors the connection's real transaction state.
 fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease: Duration) {
-    let mut active_transaction: Option<String> = None;
+    let mut active_transaction: Option<ActiveTransaction> = None;
     // plain jobs that arrived while a transaction owned the namespace. drained in
     // arrival order once it frees. begins are never deferred (they are rejected
     // while a transaction is active), so this only ever holds plain work.
@@ -214,7 +220,7 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
             // defer unrelated plain work, reject begins and steps that name a
             // different transaction, and reclaim the namespace if the lease
             // expires with no next step.
-            Some(active_id) => {
+            Some(active) => {
                 // enforce the lease before receiving. recv_timeout(0) returns an
                 // already-queued job rather than Timeout, so once the deadline has
                 // passed a sustained backlog of plain jobs (deferred one per loop)
@@ -245,7 +251,7 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                     continue;
                 };
                 match job {
-                    Job::Query { id, run, reply } if id == active_id => {
+                    Job::Query { id, run, reply } if id == active.id => {
                         let outcome = run(&conn);
                         if reply.send(outcome.map_err(AdminTxError::sql)).is_ok() {
                             lease_deadline = Instant::now() + lease;
@@ -257,7 +263,7 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                             lease_deadline = Instant::now() + lease;
                         }
                     }
-                    Job::End { id, end, reply } if id == active_id => {
+                    Job::End { id, end, reply } if id == active.id => {
                         let sql = match end {
                             TxEnd::Commit => "COMMIT",
                             TxEnd::Rollback => "ROLLBACK",
@@ -273,7 +279,10 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                             lease_deadline = Instant::now() + lease;
                         }
                         let result = outcome
-                            .map(|_| ())
+                            .map(|_| {
+                                matches!(end, TxEnd::Commit)
+                                    && conn.total_changes() > active.total_changes
+                            })
                             .map_err(|e| AdminTxError::sql(DbError(e.to_string())));
                         let _ = reply.send(result);
                     }
@@ -293,10 +302,10 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                     // duplicate of the owner, or a foreign transaction. both are
                     // ownership conflicts, not queued work.
                     Job::Begin { id, reply } => {
-                        let message = if id == active_id {
+                        let message = if id == active.id {
                             format!("transaction {id} is already active")
                         } else {
-                            format!("transaction {active_id} already owns this namespace")
+                            format!("transaction {} already owns this namespace", active.id)
                         };
                         let _ = reply.send(Err(AdminTxError::conflict(message)));
                     }
@@ -316,34 +325,40 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                 };
                 match job {
                     Job::Plain(run) => run(&conn),
-                    Job::Begin { id, reply } => match conn.execute_batch("BEGIN") {
-                        Ok(()) => {
-                            if reply.send(Ok(())).is_ok() {
-                                // state changes only after BEGIN succeeded and the
-                                // client is still there to own the transaction.
-                                active_transaction = Some(id);
-                                lease_deadline = Instant::now() + lease;
-                            } else {
-                                // client vanished during begin: undo it so the
-                                // namespace is never blocked on a dead session.
-                                if !force_autocommit(&conn) {
-                                    active_transaction = Some(id);
+                    Job::Begin { id, reply } => {
+                        let total_changes = conn.total_changes();
+                        match conn.execute_batch("BEGIN") {
+                            Ok(()) => {
+                                if reply.send(Ok(())).is_ok() {
+                                    // state changes only after BEGIN succeeded and the
+                                    // client is still there to own the transaction.
+                                    active_transaction =
+                                        Some(ActiveTransaction { id, total_changes });
                                     lease_deadline = Instant::now() + lease;
+                                } else {
+                                    // client vanished during begin: undo it so the
+                                    // namespace is never blocked on a dead session.
+                                    if !force_autocommit(&conn) {
+                                        active_transaction =
+                                            Some(ActiveTransaction { id, total_changes });
+                                        lease_deadline = Instant::now() + lease;
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            // a failed BEGIN should normally leave autocommit on. if
-                            // the connection was already dirty, force it clean before
-                            // releasing plain work; keep ownership and retry on the
-                            // lease if SQLite cannot roll it back yet.
-                            if !force_autocommit(&conn) {
-                                active_transaction = Some(id);
-                                lease_deadline = Instant::now() + lease;
+                            Err(e) => {
+                                // a failed BEGIN should normally leave autocommit on. if
+                                // the connection was already dirty, force it clean before
+                                // releasing plain work; keep ownership and retry on the
+                                // lease if SQLite cannot roll it back yet.
+                                if !force_autocommit(&conn) {
+                                    active_transaction =
+                                        Some(ActiveTransaction { id, total_changes });
+                                    lease_deadline = Instant::now() + lease;
+                                }
+                                let _ = reply.send(Err(AdminTxError::sql(DbError(e.to_string()))));
                             }
-                            let _ = reply.send(Err(AdminTxError::sql(DbError(e.to_string()))));
                         }
-                    },
+                    }
                     // a query/end step with no transaction open to belong to.
                     Job::Query { id, reply, .. } => {
                         let _ = reply.send(Err(AdminTxError::conflict(format!(
@@ -1148,7 +1163,7 @@ mod tests {
         })
         .await
         .unwrap();
-        ns.tx_end("t1".into(), TxEnd::Commit).await.unwrap();
+        assert!(ns.tx_end("t1".into(), TxEnd::Commit).await.unwrap());
         assert_eq!(row_count(&ns, "t").await, 1);
 
         // rollback path leaves the committed row alone and drops its own write
@@ -1159,8 +1174,18 @@ mod tests {
         })
         .await
         .unwrap();
-        ns.tx_end("t2".into(), TxEnd::Rollback).await.unwrap();
+        assert!(!ns.tx_end("t2".into(), TxEnd::Rollback).await.unwrap());
         assert_eq!(row_count(&ns, "t").await, 1);
+
+        // a read-only commit publishes no new rows.
+        ns.tx_begin("t3".into()).await.unwrap();
+        ns.tx_query("t3".into(), |c| {
+            let mut db = RusqliteDb::new(c);
+            db.query("SELECT * FROM t", &[])
+        })
+        .await
+        .unwrap();
+        assert!(!ns.tx_end("t3".into(), TxEnd::Commit).await.unwrap());
     }
 
     #[tokio::test]
