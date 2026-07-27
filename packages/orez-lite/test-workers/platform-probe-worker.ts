@@ -242,6 +242,178 @@ async function runApplicationOverlapProbe(
   })
 }
 
+type AdmissionRecord = {
+  label: string
+  lane: 'read' | 'write'
+  waitMs: number
+  ok: boolean
+}
+
+/**
+ * Drive a mixed application-SQL load through the real client and report how the
+ * Durable Object admitted it.
+ *
+ * `order` is recorded when each session's transaction body starts, which is the
+ * instant it owns its turn, so comparing it to the launch order measures
+ * admission fairness directly rather than inferring it from latency. The holder
+ * counters bracket admission to settlement, so `maxConcurrent` is the real
+ * number of sessions inside the database at once.
+ */
+async function runApplicationAdmissionProbe(
+  env: Env,
+  namespace: string,
+  url: URL
+): Promise<Response> {
+  const count = (name: string, fallback: number) => {
+    const value = Number(url.searchParams.get(name))
+    return Number.isFinite(value) && value >= 0 ? value : fallback
+  }
+  const writers = count('writers', 6)
+  const readers = count('readers', 0)
+  const cancels = count('cancels', 0)
+  const holdMs = count('holdMs', 60)
+  const staggerMs = count('staggerMs', 20)
+  const readLane = url.searchParams.get('readLane') !== '0'
+
+  const client = createApplicationSqlClient(env.PROBE_DO, namespace)
+  const order: string[] = []
+  const launched: string[] = []
+  const records: AdmissionRecord[] = []
+  const open = { read: 0, write: 0 }
+  const maxConcurrent = { read: 0, write: 0 }
+  let readerSawWriter = false
+  let writerSawReader = false
+
+  const session = (label: string, lane: 'read' | 'write', signal?: AbortSignal) => {
+    const startedAt = Date.now()
+    launched.push(label)
+    const scoped = signal
+      ? createApplicationSqlClient(env.PROBE_DO, namespace, { signal })
+      : client
+    const work = async (tx: {
+      query: (sql: string) => Promise<unknown>
+      exec: (sql: string, params: unknown[], metadata: unknown) => Promise<unknown>
+    }) => {
+      order.push(label)
+      records.push({ label, lane, waitMs: Date.now() - startedAt, ok: true })
+      // the holder window closes when the body ends, not when the client's
+      // commit response lands: the object releases the turn inside commit, so
+      // the next session is legitimately admitted while this one's commit reply
+      // is still in flight.
+      open[lane]++
+      maxConcurrent[lane] = Math.max(maxConcurrent[lane], open[lane])
+      if (lane === 'read' && open.write > 0) readerSawWriter = true
+      if (lane === 'write' && open.read > 0) writerSawReader = true
+      try {
+        await tx.query("SELECT balance FROM accounts WHERE id = 'primary'")
+        if (lane === 'write') {
+          await tx.exec(
+            "UPDATE accounts SET balance = balance + 1 WHERE id = 'primary'",
+            [],
+            { table: 'accounts', publicTable: 'public.account', kind: 'update' }
+          )
+        }
+        await new Promise((resolve) => setTimeout(resolve, holdMs))
+      } finally {
+        open[lane]--
+      }
+    }
+    const pending =
+      lane === 'read' && readLane
+        ? scoped.readTransaction(compileTransactionQuery, work)
+        : scoped.transaction(compileTransactionQuery, work)
+    return pending.then(
+      () => true,
+      () => {
+        records.push({ label, lane, waitMs: Date.now() - startedAt, ok: false })
+        return false
+      }
+    )
+  }
+
+  const pending: Promise<boolean>[] = []
+  const total = writers + readers + cancels
+  let writerIndex = 0
+  let readerIndex = 0
+  let cancelIndex = 0
+  for (let step = 0; step < total; step++) {
+    // interleave the lanes so arrival order is not lane order
+    const wantRead = readerIndex < readers && (step % 2 === 1 || writerIndex >= writers)
+    const wantCancel =
+      !wantRead && cancelIndex < cancels && step % 3 === 2 && writerIndex >= 1
+    if (wantCancel) {
+      const controller = new AbortController()
+      pending.push(session(`cancel-${cancelIndex++}`, 'write', controller.signal))
+      setTimeout(() => controller.abort(), Math.max(1, Math.floor(staggerMs / 2)))
+    } else if (wantRead) {
+      pending.push(session(`read-${readerIndex++}`, 'read'))
+    } else if (writerIndex < writers) {
+      pending.push(session(`write-${writerIndex++}`, 'write'))
+    } else if (readerIndex < readers) {
+      pending.push(session(`read-${readerIndex++}`, 'read'))
+    } else {
+      const controller = new AbortController()
+      pending.push(session(`cancel-${cancelIndex++}`, 'write', controller.signal))
+      setTimeout(() => controller.abort(), Math.max(1, Math.floor(staggerMs / 2)))
+    }
+    if (staggerMs > 0) await new Promise((resolve) => setTimeout(resolve, staggerMs))
+  }
+  await Promise.all(pending)
+
+  // an inversion is a session that was admitted before one that arrived earlier
+  const arrivalRank = new Map(launched.map((label, index) => [label, index]))
+  const admittedRanks = order.map((label) => arrivalRank.get(label) ?? -1)
+  let inversions = 0
+  for (let i = 0; i < admittedRanks.length; i++) {
+    for (let j = i + 1; j < admittedRanks.length; j++) {
+      if (admittedRanks[j] < admittedRanks[i]) inversions++
+    }
+  }
+  const admittedWaits = records
+    .filter((record) => record.ok)
+    .map((record) => record.waitMs)
+    .sort((left, right) => left - right)
+  const percentile = (fraction: number) =>
+    admittedWaits.length === 0
+      ? 0
+      : admittedWaits[
+          Math.min(admittedWaits.length - 1, Math.floor(fraction * admittedWaits.length))
+        ]
+  const readWaits = records
+    .filter((record) => record.ok && record.lane === 'read')
+    .map((record) => record.waitMs)
+    .sort((left, right) => left - right)
+
+  const balance = await client.query<{ balance: number }>(
+    "SELECT balance FROM accounts WHERE id = 'primary'"
+  )
+  const target = env.PROBE_DO.get(env.PROBE_DO.idFromName(namespace))
+  return json({
+    residue: await target.applicationAdmissionResidue(),
+    launched,
+    order,
+    inversions,
+    admitted: order.length,
+    canceled: records.filter((record) => !record.ok).length,
+    maxConcurrentReads: maxConcurrent.read,
+    maxConcurrentWrites: maxConcurrent.write,
+    readerSawWriter,
+    writerSawReader,
+    waitMs: {
+      p50: percentile(0.5),
+      p95: percentile(0.95),
+      max: admittedWaits[admittedWaits.length - 1] ?? 0,
+      readP95:
+        readWaits.length === 0
+          ? 0
+          : readWaits[
+              Math.min(readWaits.length - 1, Math.floor(0.95 * readWaits.length))
+            ],
+    },
+    balance,
+  })
+}
+
 async function runApplicationCancellationProbe(
   env: Env,
   namespace: string,
@@ -365,6 +537,15 @@ export class ProbeDurableObject extends ZeroDO {
     }
   }
 
+  /** admission state read from inside the object, with no RPC skew */
+  applicationAdmissionResidue(): { writer: boolean; readers: number; queued: number } {
+    return {
+      writer: Reflect.get(this, 'applicationSqlWriter') !== null,
+      readers: (Reflect.get(this, 'applicationSqlReaders') as Set<unknown>).size,
+      queued: (Reflect.get(this, 'applicationSqlQueue') as unknown[]).length,
+    }
+  }
+
   applicationCancellationMark(stage: string): void {
     this.#applicationCancellationStages.add(stage)
   }
@@ -372,7 +553,9 @@ export class ProbeDurableObject extends ZeroDO {
   applicationCancellationStatus(): { stages: string[]; activeSession: boolean } {
     return {
       stages: [...this.#applicationCancellationStages],
-      activeSession: Reflect.get(this, 'activeApplicationSqlSession') !== null,
+      activeSession:
+        Reflect.get(this, 'applicationSqlWriter') !== null ||
+        (Reflect.get(this, 'applicationSqlReaders') as Set<unknown>).size > 0,
     }
   }
 
@@ -695,6 +878,10 @@ export default {
       }
       if (third === 'overlap') return runApplicationOverlapProbe(env, second)
       return runApplicationRpcProbe(env, second, third)
+    }
+    if (first === '_application-admission') {
+      if (!second) return json({ error: 'unknown application admission probe' }, 404)
+      return runApplicationAdmissionProbe(env, second, url)
     }
     if (first === '_application-cancellation') {
       if (!second) return json({ error: 'unknown application cancellation probe' }, 404)

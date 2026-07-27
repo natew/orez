@@ -175,6 +175,69 @@ try {
     'overlapping transaction result is durable'
   )
 
+  // Mixed application-SQL load: arrival-order admission, read concurrency, and
+  // cancellation, measured through the real client against a real Durable
+  // Object. Every assertion below is false against competitive `begin()`
+  // polling: admission order was decided by whose 25 ms timer fired first, and
+  // there was no read lane at all.
+  const admissionFifo = ns('application-admission-fifo')
+  result = await call(
+    `_application-admission/${admissionFifo}`,
+    '/mixed?writers=8&readers=0&holdMs=60&staggerMs=20'
+  )
+  check(result.status, 200, 'admission fifo status')
+  check(result.body.admitted, 8, 'every write session was admitted')
+  check(result.body.inversions, 0, 'write sessions are admitted in arrival order')
+  check(result.body.order, result.body.launched, 'admission order equals arrival order')
+  check(result.body.maxConcurrentWrites, 1, 'write sessions stay mutually exclusive')
+  check(result.body.balance, [{ balance: 108 }], 'every admitted write committed once')
+  check(
+    result.body.residue,
+    { writer: false, readers: 0, queued: 0 },
+    'the admission queue is empty after the load'
+  )
+
+  const admissionMixed = ns('application-admission-mixed')
+  result = await call(
+    `_application-admission/${admissionMixed}`,
+    '/mixed?writers=4&readers=8&cancels=2&holdMs=60&staggerMs=20'
+  )
+  check(result.status, 200, 'mixed admission status')
+  check(result.body.inversions, 0, 'mixed load is admitted in arrival order')
+  check(result.body.canceled, 2, 'queued cancellations abandon their turn')
+  check(result.body.maxConcurrentWrites, 1, 'a write session excludes every other')
+  check(result.body.readerSawWriter, false, 'no read session runs beside a write session')
+  check(result.body.writerSawReader, false, 'no write session runs beside a read session')
+  check(result.body.balance, [{ balance: 104 }], 'canceled writes left nothing behind')
+  check(
+    result.body.residue,
+    { writer: false, readers: 0, queued: 0 },
+    'cancellation leaves no waiter in the admission queue'
+  )
+  assert.ok(
+    result.body.maxConcurrentReads > 1,
+    `read sessions serialized (maxConcurrentReads ${result.body.maxConcurrentReads})`
+  )
+  assertions++
+  // The same load with the read lane disabled is the negative control: these
+  // reads are identical SQL, so a concurrency number above one here would mean
+  // the counter is measuring something other than admission.
+  const admissionControl = ns('application-admission-control')
+  const control = await call(
+    `_application-admission/${admissionControl}`,
+    '/mixed?writers=4&readers=8&cancels=0&holdMs=60&staggerMs=20&readLane=0'
+  )
+  check(control.status, 200, 'admission negative control status')
+  check(control.body.maxConcurrentReads, 1, 'write-lane reads serialize one at a time')
+  assert.ok(
+    control.body.waitMs.readP95 > result.body.waitMs.readP95,
+    `read lane did not reduce read admission wait (read lane p95 ${result.body.waitMs.readP95} ms, write lane p95 ${control.body.waitMs.readP95} ms)`
+  )
+  assertions++
+  console.log(
+    `application admission: read lane p50 ${result.body.waitMs.p50} ms / p95 ${result.body.waitMs.p95} ms / max ${result.body.waitMs.max} ms, read p95 ${result.body.waitMs.readP95} ms, concurrent reads ${result.body.maxConcurrentReads}; write-lane control read p95 ${control.body.waitMs.readP95} ms, max ${control.body.waitMs.max} ms`
+  )
+
   const canceledQueued = ns('application-canceled-queued')
   const held = call(`_application-cancellation/${canceledQueued}`, '/hold')
   await waitForStage(canceledQueued, 'hold-active')

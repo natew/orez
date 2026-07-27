@@ -87,7 +87,9 @@ async function createWorkerCore() {
   zero.tableSchemas = new Map()
   zero.schemaTables = new Set<string>()
   zero.pendingChangesSchemaReady = false
-  zero.activeApplicationSqlSession = null
+  zero.applicationSqlWriter = null
+  zero.applicationSqlReaders = new Set()
+  zero.applicationSqlQueue = []
   zero.applicationSqlDidCommit = () => {}
   const runTransaction = <T>(work: () => T): T => {
     storage.nativeDb.exec('BEGIN')

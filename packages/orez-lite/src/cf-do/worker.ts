@@ -44,7 +44,9 @@ import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
 import type {
   ApplicationSqlClient,
   ApplicationSqlExecResult,
+  ApplicationSqlSessionOptions,
   ApplicationSqlTable,
+  ApplicationSqlTransactionWork,
 } from './application-sql.js'
 import type { SqlStatementMetadata, TransactionQueryFormat } from 'orez-sync-executor'
 
@@ -56,6 +58,7 @@ export type {
   ApplicationSqlExecResult,
   ApplicationSqlQueryCompiler,
   ApplicationSqlRpc,
+  ApplicationSqlSessionOptions,
   ApplicationSqlSessionRpc,
   ApplicationSqlTable,
   ApplicationSqlTransaction,
@@ -265,7 +268,14 @@ function applicationSqlTrack(
   }
 }
 
-type ApplicationSqlSessionState = 'created' | 'active' | 'closed'
+type ApplicationSqlSessionState = 'created' | 'waiting' | 'active' | 'closed'
+
+type ApplicationSqlWaiter = {
+  session: ApplicationSqlSessionTarget
+  admit: () => void
+  reject: (error: unknown) => void
+  timer: ReturnType<typeof setTimeout>
+}
 
 const APPLICATION_SQL_ACQUIRE = Symbol('applicationSqlAcquire')
 const APPLICATION_SQL_QUERY = Symbol('applicationSqlQuery')
@@ -283,12 +293,13 @@ class ApplicationSqlSessionTarget extends RpcTarget {
 
   constructor(
     readonly owner: ZeroDO,
-    readonly sessionID: string
+    readonly sessionID: string,
+    readonly readOnly: boolean
   ) {
     super()
   }
 
-  async begin(): Promise<boolean> {
+  begin(): Promise<void> {
     return this.owner[APPLICATION_SQL_ACQUIRE](this)
   }
 
@@ -344,7 +355,9 @@ export class ZeroDO extends DurableObject {
   private activeWriteMeasurements: SqlWriteMeasurement[] | null = null
   private writeBudgetTripStatement: SqlWriteMeasurement | undefined
   private pendingChangesSchemaReady = false
-  private activeApplicationSqlSession: ApplicationSqlSessionTarget | null = null
+  private applicationSqlWriter: ApplicationSqlSessionTarget | null = null
+  private applicationSqlReaders = new Set<ApplicationSqlSessionTarget>()
+  private applicationSqlQueue: ApplicationSqlWaiter[] = []
   protected applicationSqlDidCommit(_changed: boolean, _mutated: boolean): void {}
 
   private recordWriteBudgetRows(rows: number, statement?: SqlWriteMeasurement): void {
@@ -1344,47 +1357,137 @@ export class ZeroDO extends DurableObject {
   }
 
   private assertApplicationSqlSession(session: ApplicationSqlSessionTarget): void {
-    if (session.state !== 'active' || this.activeApplicationSqlSession !== session) {
+    const admitted = session.readOnly
+      ? this.applicationSqlReaders.has(session)
+      : this.applicationSqlWriter === session
+    if (session.state !== 'active' || !admitted) {
       throw new Error('application SQLite session is not active')
     }
   }
 
-  [APPLICATION_SQL_ACQUIRE](session: ApplicationSqlSessionTarget): boolean {
-    if (session.state === 'active' && this.activeApplicationSqlSession === session) {
-      return true
-    }
-    if (session.state !== 'created') {
-      throw new Error('application SQLite session cannot begin again')
-    }
-    if (this.activeApplicationSqlSession) return false
-    session.state = 'active'
-    this.activeApplicationSqlSession = session
-    return true
+  /**
+   * Read sessions never mutate, so no lane can escalate and there is nothing to
+   * deadlock over: a reader waits only on the writer, and the writer waits only
+   * on the reader set draining.
+   */
+  private canAdmitApplicationSqlSession(session: ApplicationSqlSessionTarget): boolean {
+    if (this.applicationSqlWriter) return false
+    return session.readOnly || this.applicationSqlReaders.size === 0
   }
 
+  /**
+   * Admit from the head of the arrival queue and stop at the first waiter that
+   * cannot run yet.
+   *
+   * The stop is what makes this fair. Scanning past a blocked writer to admit
+   * younger readers would let a steady read load hold the turn away from it
+   * indefinitely, which is the starvation the competitive `begin()` poll this
+   * replaces produced in production: callers raced a 25 ms timer for one
+   * ownership flag, so admission order was decided by poll phase, and sessions
+   * that had arrived ten seconds earlier watched later ones complete.
+   */
+  private pumpApplicationSqlQueue(): void {
+    while (this.applicationSqlQueue.length > 0) {
+      const waiter = this.applicationSqlQueue[0]
+      if (waiter.session.state !== 'waiting') {
+        this.applicationSqlQueue.shift()
+        clearTimeout(waiter.timer)
+        continue
+      }
+      if (!this.canAdmitApplicationSqlSession(waiter.session)) return
+      this.applicationSqlQueue.shift()
+      clearTimeout(waiter.timer)
+      waiter.session.state = 'active'
+      if (waiter.session.readOnly) this.applicationSqlReaders.add(waiter.session)
+      else this.applicationSqlWriter = waiter.session
+      waiter.admit()
+    }
+  }
+
+  /**
+   * Join the arrival queue and resolve when this session owns its turn.
+   *
+   * A waiting session holds one queue entry and one timer, and nothing else:
+   * cancellation, rollback and RPC stub disposal all route through
+   * `releaseApplicationSqlTurn`, which drops the entry and re-pumps. The
+   * deadline bounds a queue entry whose caller neither cancels nor disposes,
+   * and reports the wait as an error instead of hanging the request.
+   */
+  [APPLICATION_SQL_ACQUIRE](session: ApplicationSqlSessionTarget): Promise<void> {
+    if (session.state !== 'created') {
+      return Promise.reject(new Error('application SQLite session cannot begin again'))
+    }
+    session.state = 'waiting'
+    const admission = new Promise<void>((resolve, reject) => {
+      const waiter: ApplicationSqlWaiter = {
+        session,
+        admit: resolve,
+        reject,
+        timer: setTimeout(() => {
+          const index = this.applicationSqlQueue.indexOf(waiter)
+          if (index < 0) return
+          this.applicationSqlQueue.splice(index, 1)
+          session.state = 'closed'
+          reject(new Error('timed out acquiring the application SQLite session'))
+        }, APPLICATION_SQL_TURN_WAIT_MS),
+      }
+      this.applicationSqlQueue.push(waiter)
+      this.pumpApplicationSqlQueue()
+    })
+    return admission
+  }
+
+  /**
+   * Close a session in any state and hand the turn to the next arrival.
+   *
+   * A session that is still queued has never touched SQLite, so dropping its
+   * queue entry is the whole of its cleanup.
+   */
   private releaseApplicationSqlTurn(session: ApplicationSqlSessionTarget): void {
+    if (session.state === 'closed') return
+    if (session.state === 'created') {
+      session.state = 'closed'
+      return
+    }
+    if (session.state === 'waiting') {
+      const index = this.applicationSqlQueue.findIndex(
+        (waiter) => waiter.session === session
+      )
+      if (index >= 0) {
+        const [waiter] = this.applicationSqlQueue.splice(index, 1)
+        clearTimeout(waiter.timer)
+      }
+      // The in-flight `begin()` is left unsettled on purpose. Only this
+      // session's own caller can close it while it waits, and by then that
+      // caller has stopped awaiting admission and is on its way to disposing
+      // the stub, which cancels the call. Rejecting instead delivers an error
+      // nobody is listening for, and workerd reports every one of those as an
+      // uncaught error — measured, one per cancellation.
+      session.state = 'closed'
+      return
+    }
     this.assertApplicationSqlSession(session)
     session.state = 'closed'
-    this.activeApplicationSqlSession = null
+    if (session.readOnly) this.applicationSqlReaders.delete(session)
+    else this.applicationSqlWriter = null
+    this.pumpApplicationSqlQueue()
   }
 
   private async withApplicationSqlTurn<Value>(
     work: () => Value | Promise<Value>,
     signal?: AbortSignal
   ): Promise<Value> {
-    const session = await this.applicationSqlSession(crypto.randomUUID())
+    const session = await this.applicationSqlSession(crypto.randomUUID(), {
+      readOnly: true,
+    })
     const dispose = () => session[Symbol.dispose]()
     signal?.addEventListener('abort', dispose, { once: true })
     try {
-      while (!(await session.begin())) {
-        if (signal?.aborted) throw new Error('application SQLite request was canceled')
-        await new Promise((resolve) => setTimeout(resolve, 25))
-      }
+      await session.begin()
       return await work()
     } finally {
       signal?.removeEventListener('abort', dispose)
-      if (session.state === 'active') this.releaseApplicationSqlTurn(session)
-      else if (session.state !== 'closed') dispose()
+      dispose()
     }
   }
 
@@ -1392,26 +1495,17 @@ export class ZeroDO extends DurableObject {
    * drive one application SQLite session from INSIDE this durable object.
    *
    * identical to the client-side session helper in application-sql.ts — same
-   * ownership acquisition, same per-statement journal, same commit/rollback —
-   * except the begin poll and every statement are local calls instead of RPCs.
-   * the caller must already be running in this object.
+   * admission, same per-statement journal, same commit/rollback — except every
+   * call is local instead of an RPC. the caller must already be running in this
+   * object.
    */
   private async withLocalApplicationSqlSession<Value>(
+    readOnly: boolean,
     work: (session: ApplicationSqlSessionTarget) => Value | Promise<Value>
   ): Promise<Value> {
-    const session = await this.applicationSqlSession(crypto.randomUUID())
+    const session = await this.applicationSqlSession(crypto.randomUUID(), { readOnly })
     try {
-      // bounded, unlike the client-side poll. a remote caller that goes away
-      // stops polling and frees the turn; a local caller has no signal to
-      // observe, so an unbounded loop would spin for the life of the object
-      // every time somebody abandoned a request mid-reconcile.
-      const deadline = Date.now() + APPLICATION_SQL_TURN_WAIT_MS
-      while (!(await session.begin())) {
-        if (Date.now() >= deadline) {
-          throw new Error('timed out acquiring the application SQLite session')
-        }
-        await scheduler.wait(25)
-      }
+      await session.begin()
       const value = await work(session)
       await session.commit()
       return value
@@ -1435,29 +1529,40 @@ export class ZeroDO extends DurableObject {
    * the transport is.
    */
   protected applicationSqlLocalClient(namespace: string): ApplicationSqlClient {
-    const run = <Value>(work: (session: ApplicationSqlSessionTarget) => Promise<Value>) =>
-      this.withLocalApplicationSqlSession(work)
+    const run = <Value>(
+      readOnly: boolean,
+      work: (session: ApplicationSqlSessionTarget) => Promise<Value>
+    ) => this.withLocalApplicationSqlSession(readOnly, work)
+    const transaction = <Value>(
+      readOnly: boolean,
+      compileQuery: ZeroDOQueryCompiler,
+      work: ApplicationSqlTransactionWork<Value>,
+      queryBudget?: Partial<TransactionQueryBudget>
+    ) =>
+      run(readOnly, async (session) =>
+        work({
+          exec: (sql, params = [], metadata) => session.exec(sql, params, metadata),
+          query: (sql, params = []) => session.query(sql, params),
+          registerTables: (tables) => session.registerTables(tables),
+          async queryAst(ast, format, queryName) {
+            return session.queryPlan(
+              await compileQuery(ast, format),
+              queryName,
+              queryBudget
+            )
+          },
+        })
+      )
     return {
       namespace,
-      query: (sql, params = []) => run((session) => session.query(sql, params)),
+      query: (sql, params = []) => run(true, (session) => session.query(sql, params)),
       exec: (sql, params = [], metadata) =>
-        run((session) => session.exec(sql, params, metadata)),
-      registerTables: (tables) => run((session) => session.registerTables(tables)),
+        run(false, (session) => session.exec(sql, params, metadata)),
+      registerTables: (tables) => run(false, (session) => session.registerTables(tables)),
       transaction: (compileQuery, work, queryBudget) =>
-        run(async (session) =>
-          work({
-            exec: (sql, params = [], metadata) => session.exec(sql, params, metadata),
-            query: (sql, params = []) => session.query(sql, params),
-            registerTables: (tables) => session.registerTables(tables),
-            async queryAst(ast, format, queryName) {
-              return session.queryPlan(
-                await compileQuery(ast, format),
-                queryName,
-                queryBudget
-              )
-            },
-          })
-        ),
+        transaction(false, compileQuery, work, queryBudget),
+      readTransaction: (compileQuery, work, queryBudget) =>
+        transaction(true, compileQuery, work, queryBudget),
     }
   }
 
@@ -1473,13 +1578,32 @@ export class ZeroDO extends DurableObject {
 
   /**
    * private durable object RPC surface for the application SQLite client. the
-   * disposable target exists before ownership acquisition, so waiting callers
-   * hold no server state and active cancellation rolls back the transaction.
-   * this method is intentionally absent from fetch().
+   * disposable target exists before admission, so a queued caller can cancel by
+   * disposing it and an active one rolls its transaction back. this method is
+   * intentionally absent from fetch().
    */
-  async applicationSqlSession(sessionID: string): Promise<ApplicationSqlSessionTarget> {
+  async applicationSqlSession(
+    sessionID: string,
+    options: ApplicationSqlSessionOptions = {}
+  ): Promise<ApplicationSqlSessionTarget> {
     if (!sessionID) throw new TypeError('application SQLite session id is required')
-    return new ApplicationSqlSessionTarget(this, sessionID)
+    return new ApplicationSqlSessionTarget(this, sessionID, options.readOnly === true)
+  }
+
+  /**
+   * Run one read statement end to end in a single round trip.
+   *
+   * A single statement is already atomic, so a session that exists only to
+   * carry it costs four sequential RPCs (open, admit, run, commit) for one
+   * SELECT — the shape every authenticated read on the sync path pays. This
+   * opens, admits, runs and closes the same read session locally instead.
+   */
+  async applicationSqlQuery<
+    Row extends Record<string, unknown> = Record<string, unknown>,
+  >(sql: string, params: readonly unknown[] = []): Promise<Row[]> {
+    return this.withLocalApplicationSqlSession(true, (session) =>
+      session.query<Row>(sql, params)
+    )
   }
 
   private prepareApplicationSqlMutation(sessionID: string, sql: string): boolean {
@@ -1501,6 +1625,22 @@ export class ZeroDO extends DurableObject {
     return true
   }
 
+  /**
+   * A read session declared its lane before it was admitted, and readers run
+   * alongside each other on the strength of that declaration. Escalating one
+   * mid-session would strand every other reader on a state that is no longer
+   * committed, so a mutation here is an error rather than an upgrade.
+   */
+  private assertApplicationSqlStatement(
+    session: ApplicationSqlSessionTarget,
+    sql: string
+  ): void {
+    this.assertApplicationSqlSession(session)
+    if (session.readOnly && classifySql(sql).mutation) {
+      throw new Error('read-only application SQLite session cannot execute a mutation')
+    }
+  }
+
   async [APPLICATION_SQL_QUERY]<
     Row extends Record<string, unknown> = Record<string, unknown>,
   >(
@@ -1508,7 +1648,7 @@ export class ZeroDO extends DurableObject {
     sql: string,
     params: readonly unknown[] = []
   ): Promise<Row[]> {
-    this.assertApplicationSqlSession(session)
+    this.assertApplicationSqlStatement(session, sql)
     return this.atomically(() => {
       if (this.prepareApplicationSqlMutation(session.sessionID, sql)) {
         session.mutated = true
@@ -1523,7 +1663,7 @@ export class ZeroDO extends DurableObject {
     params: readonly unknown[] = [],
     metadata?: SqlStatementMetadata
   ): Promise<ApplicationSqlExecResult> {
-    this.assertApplicationSqlSession(session)
+    this.assertApplicationSqlStatement(session, sql)
     return this.atomically(() => {
       if (this.prepareApplicationSqlMutation(session.sessionID, sql)) {
         session.mutated = true
@@ -1549,7 +1689,10 @@ export class ZeroDO extends DurableObject {
     return this.atomically(() =>
       executeTransactionQueryPlan<Result>(
         plan,
-        (sql, params) => this.executeSQL(sql, params, undefined, session.sessionID).rows,
+        (sql, params) => {
+          this.assertApplicationSqlStatement(session, sql)
+          return this.executeSQL(sql, params, undefined, session.sessionID).rows
+        },
         { queryName, budget: queryBudget }
       )
     )
@@ -1560,6 +1703,9 @@ export class ZeroDO extends DurableObject {
     tables: readonly ApplicationSqlTable[]
   ): Promise<void> {
     this.assertApplicationSqlSession(session)
+    if (session.readOnly) {
+      throw new Error('read-only application SQLite session cannot register tables')
+    }
     await this.atomically(() => this.registerApplicationSqlTables(tables))
   }
 
@@ -1578,46 +1724,36 @@ export class ZeroDO extends DurableObject {
     this.applicationSqlDidCommit(session.changed, session.mutated)
   }
 
-  async [APPLICATION_SQL_ROLLBACK](session: ApplicationSqlSessionTarget): Promise<void> {
-    if (session.state === 'created') {
-      session.state = 'closed'
-      return
-    }
-    this.assertApplicationSqlSession(session)
-    try {
-      if (session.mutated) {
+  /**
+   * Undo whatever this session wrote and hand its turn on.
+   *
+   * Rollback, cancellation and RPC stub disposal are the same operation: a
+   * session that never reached SQLite only has to leave the queue, and one that
+   * did has to replay its row images before releasing.
+   */
+  private closeApplicationSqlSession(session: ApplicationSqlSessionTarget): void {
+    if (session.state === 'active' && session.mutated) {
+      try {
         this.rollbackAtomicallyWithoutForeignKeys(() => {
           this.rollbackPendingTrackedChanges(session.sessionID)
           rollbackTxJournal(this.sql, session.sessionID)
           this.deletePendingTrackedChanges(session.sessionID)
         })
         this.invalidateSchemaCaches()
+      } finally {
+        this.releaseApplicationSqlTurn(session)
       }
-    } finally {
-      this.releaseApplicationSqlTurn(session)
+      return
     }
+    this.releaseApplicationSqlTurn(session)
+  }
+
+  async [APPLICATION_SQL_ROLLBACK](session: ApplicationSqlSessionTarget): Promise<void> {
+    this.closeApplicationSqlSession(session)
   }
 
   [APPLICATION_SQL_DISPOSE](session: ApplicationSqlSessionTarget): void {
-    if (session.state === 'closed') return
-    if (session.state === 'created') {
-      session.state = 'closed'
-      return
-    }
-
-    this.assertApplicationSqlSession(session)
-    try {
-      if (session.mutated) {
-        this.rollbackAtomicallyWithoutForeignKeys(() => {
-          this.rollbackPendingTrackedChanges(session.sessionID)
-          rollbackTxJournal(this.sql, session.sessionID)
-          this.deletePendingTrackedChanges(session.sessionID)
-        })
-        this.invalidateSchemaCaches()
-      }
-    } finally {
-      this.releaseApplicationSqlTurn(session)
-    }
+    this.closeApplicationSqlSession(session)
   }
 
   private atomicallySync<T>(work: () => T): T {

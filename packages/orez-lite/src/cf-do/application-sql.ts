@@ -43,13 +43,25 @@ export type ApplicationSqlTransactionWork<Value> = (
 ) => Value | Promise<Value>
 
 /**
+ * Admission lane for one application SQLite session.
+ *
+ * A read session shares the database with every other read session and refuses
+ * mutating SQL. A write session (the default) excludes every other session for
+ * its whole life, which is what the row-undo journal needs to be able to roll
+ * one transaction back without stepping on another's images.
+ */
+export type ApplicationSqlSessionOptions = {
+  readOnly?: boolean
+}
+
+/**
  * private durable object RPC protocol. the session capability is returned
- * before it asks for ownership. waiting retries hold no durable object state,
- * and a cancellation signal closes a queued session or rolls back an active
- * session before rejecting work.
+ * before it asks for ownership, and `begin()` resolves when the durable object
+ * grants this session its turn in arrival order. a cancellation signal closes a
+ * queued session or rolls back an active session before rejecting work.
  */
 export type ApplicationSqlSessionRpc = Disposable & {
-  begin(): Promise<boolean>
+  begin(): Promise<void>
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -70,7 +82,14 @@ export type ApplicationSqlSessionRpc = Disposable & {
 }
 
 export type ApplicationSqlRpc = {
-  applicationSqlSession(sessionID: string): Promise<ApplicationSqlSessionRpc>
+  applicationSqlSession(
+    sessionID: string,
+    options?: ApplicationSqlSessionOptions
+  ): Promise<ApplicationSqlSessionRpc>
+  applicationSqlQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
+    sql: string,
+    params?: readonly unknown[]
+  ): Promise<Row[]>
 }
 
 export type ApplicationSqlDurableObjectNamespace = {
@@ -95,50 +114,72 @@ export type ApplicationSqlClient = {
     work: ApplicationSqlTransactionWork<Value>,
     queryBudget?: Partial<TransactionQueryBudget>
   ): Promise<Value>
+  /**
+   * Same statements, read-only admission. Concurrent read transactions run
+   * together instead of queueing behind each other, and no write session can be
+   * admitted while any of them is open, so each still sees one committed state
+   * for its whole life. A mutating statement is rejected rather than escalated.
+   */
+  readTransaction<Value>(
+    compileQuery: ApplicationSqlQueryCompiler,
+    work: ApplicationSqlTransactionWork<Value>,
+    queryBudget?: Partial<TransactionQueryBudget>
+  ): Promise<Value>
 }
 
 export type ApplicationSqlClientOptions = {
   signal?: AbortSignal
 }
 
+function canceled(signal: AbortSignal): unknown {
+  return (
+    signal.reason ??
+    new DOMException('application SQLite request was canceled', 'AbortError')
+  )
+}
+
+async function raceAbort<Value>(
+  signal: AbortSignal | undefined,
+  pending: Promise<Value>
+): Promise<Value> {
+  if (!signal) return pending
+  // once the abort wins the race nothing observes `pending` again, and a
+  // canceled session's admission is rejected by the durable object on rollback.
+  void pending.catch(() => {})
+  signal.throwIfAborted()
+  let rejectAbort: (reason: unknown) => void = () => {}
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject
+  })
+  void aborted.catch(() => {})
+  const abort = () => rejectAbort(canceled(signal))
+  signal.addEventListener('abort', abort, { once: true })
+  try {
+    return await Promise.race([pending, aborted])
+  } finally {
+    signal.removeEventListener('abort', abort)
+  }
+}
+
 async function withApplicationSqlSession<Value>(
   target: ApplicationSqlRpc,
   signal: AbortSignal | undefined,
+  sessionOptions: ApplicationSqlSessionOptions,
   work: (session: ApplicationSqlSessionRpc) => Value | Promise<Value>
 ): Promise<Value> {
-  using session = await target.applicationSqlSession(crypto.randomUUID())
-  let rejectAbort: ((reason: unknown) => void) | undefined
-  const aborted = signal
-    ? new Promise<never>((_resolve, reject) => {
-        rejectAbort = reject
-      })
-    : undefined
-  void aborted?.catch(() => {})
-  const abort = () => {
-    rejectAbort?.(
-      signal?.reason ??
-        new DOMException('application SQLite request was canceled', 'AbortError')
-    )
-  }
-  signal?.addEventListener('abort', abort, { once: true })
+  using session = await target.applicationSqlSession(crypto.randomUUID(), sessionOptions)
   try {
-    signal?.throwIfAborted()
-    while (!(await session.begin())) {
-      await new Promise((resolve) => setTimeout(resolve, 25))
-      signal?.throwIfAborted()
-    }
-    const pendingWork = work(session)
-    const value = aborted
-      ? await Promise.race([Promise.resolve(pendingWork), aborted])
-      : await pendingWork
+    // The durable object grants turns in arrival order, so this settles the
+    // moment the turn is this session's rather than on the next poll tick.
+    // Cancellation races the grant; rollback then drops the queued session.
+    await raceAbort(signal, session.begin())
+    const value = await raceAbort(signal, Promise.resolve(work(session)))
     signal?.throwIfAborted()
     await session.commit()
     return value
   } catch (error) {
     await session.rollback().catch(() => {})
     throw error
-  } finally {
-    signal?.removeEventListener('abort', abort)
   }
 }
 
@@ -149,33 +190,41 @@ export function createApplicationSqlClient(
 ): ApplicationSqlClient {
   if (!namespace) throw new TypeError('application SQLite namespace is required')
   const target = durableObjects.get(durableObjects.idFromName(namespace))
+  const session = <Value>(
+    sessionOptions: ApplicationSqlSessionOptions,
+    work: (session: ApplicationSqlSessionRpc) => Value | Promise<Value>
+  ) => withApplicationSqlSession(target, options.signal, sessionOptions, work)
+  const transaction = <Value>(
+    sessionOptions: ApplicationSqlSessionOptions,
+    compileQuery: ApplicationSqlQueryCompiler,
+    work: ApplicationSqlTransactionWork<Value>,
+    queryBudget?: Partial<TransactionQueryBudget>
+  ) =>
+    session(sessionOptions, (active) =>
+      work({
+        exec: (sql, params = [], metadata) => active.exec(sql, params, metadata),
+        query: (sql, params = []) => active.query(sql, params),
+        async queryAst(ast, format, queryName) {
+          const plan = await compileQuery(ast, format)
+          return active.queryPlan(plan, queryName, queryBudget)
+        },
+        registerTables: (tables) => active.registerTables(tables),
+      })
+    )
   return {
     namespace,
+    // One statement is already atomic, so it needs no session round trips of
+    // its own: the durable object opens, admits, runs and closes a read session
+    // inside this single call. Cancellation only stops waiting for the answer,
+    // which is free to abandon because a read leaves nothing behind.
     query: (sql, params = []) =>
-      withApplicationSqlSession(target, options.signal, (session) =>
-        session.query(sql, params)
-      ),
+      raceAbort(options.signal, target.applicationSqlQuery(sql, params)),
     exec: (sql, params = [], metadata) =>
-      withApplicationSqlSession(target, options.signal, (session) =>
-        session.exec(sql, params, metadata)
-      ),
-    registerTables: (tables) =>
-      withApplicationSqlSession(target, options.signal, (session) =>
-        session.registerTables(tables)
-      ),
-    async transaction(compileQuery, work, queryBudget) {
-      return withApplicationSqlSession(target, options.signal, async (session) => {
-        const tx: ApplicationSqlTransaction = {
-          exec: (sql, params = [], metadata) => session.exec(sql, params, metadata),
-          query: (sql, params = []) => session.query(sql, params),
-          async queryAst(ast, format, queryName) {
-            const plan = await compileQuery(ast, format)
-            return session.queryPlan(plan, queryName, queryBudget)
-          },
-          registerTables: (tables) => session.registerTables(tables),
-        }
-        return work(tx)
-      })
-    },
+      session({}, (active) => active.exec(sql, params, metadata)),
+    registerTables: (tables) => session({}, (active) => active.registerTables(tables)),
+    transaction: (compileQuery, work, queryBudget) =>
+      transaction({}, compileQuery, work, queryBudget),
+    readTransaction: (compileQuery, work, queryBudget) =>
+      transaction({ readOnly: true }, compileQuery, work, queryBudget),
   }
 }

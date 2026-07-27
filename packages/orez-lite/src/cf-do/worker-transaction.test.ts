@@ -78,7 +78,9 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
   zero.tableSchemas = new Map()
   zero.schemaTables = new Set<string>()
   zero.pendingChangesSchemaReady = false
-  zero.activeApplicationSqlSession = null
+  zero.applicationSqlWriter = null
+  zero.applicationSqlReaders = new Set()
+  zero.applicationSqlQueue = []
   zero.applicationSqlDidCommit = () => {}
   zero.ctx = { storage: { transaction } }
   return { storage, zero }
@@ -131,13 +133,14 @@ describe('ZeroDO trusted application transaction', () => {
     const { createApplicationSqlClient } = await import('./application-sql.js')
     const calls: unknown[] = []
     const target = {
+      applicationSqlQuery: async (sql: string, params: readonly unknown[]) => {
+        calls.push(['query', sql, params])
+        return [{ id: 'row-1' }]
+      },
       applicationSqlSession: async () => ({
         [Symbol.dispose]() {},
-        begin: async () => true,
-        query: async (sql: string, params: readonly unknown[]) => {
-          calls.push(['query', sql, params])
-          return [{ id: 'row-1' }]
-        },
+        begin: async () => {},
+        query: async () => [],
         exec: async (sql: string, params: readonly unknown[], metadata: unknown) => {
           calls.push(['exec', sql, params, metadata])
           return { changes: 1 }
@@ -210,11 +213,11 @@ describe('ZeroDO trusted application transaction', () => {
     const events: string[] = []
     const { createApplicationSqlClient } = await import('./application-sql.js')
     const target = {
+      applicationSqlQuery: async () => [],
       applicationSqlSession: async (sessionID: string) => ({
         [Symbol.dispose]() {},
         begin: async () => {
           events.push(`begin:${sessionID}`)
-          return true
         },
         query: async () => [],
         exec: async () => {
@@ -259,18 +262,99 @@ describe('ZeroDO trusted application transaction', () => {
     const owner = await zero.applicationSqlSession('owner')
     const canceled = await zero.applicationSqlSession('canceled')
     const next = await zero.applicationSqlSession('next')
-    expect(await owner.begin()).toBe(true)
+    await owner.begin()
 
-    expect(await canceled.begin()).toBe(false)
+    let canceledAdmitted = false
+    void canceled.begin().then(() => {
+      canceledAdmitted = true
+    })
+    const nextAdmission = next.begin()
     canceled[Symbol.dispose]()
-    expect(await next.begin()).toBe(false)
     zero.releaseApplicationSqlTurn(owner)
-    expect(await next.begin()).toBe(true)
+    await nextAdmission
+    expect(canceledAdmitted).toBe(false)
+    expect(zero.applicationSqlQueue).toEqual([])
 
     await expect(next.query('SELECT id FROM item')).resolves.toEqual([
       { id: 'row-1', enabled: 1 },
     ])
     zero.releaseApplicationSqlTurn(next)
+  })
+
+  it('admits waiting sessions in arrival order', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    const owner = await zero.applicationSqlSession('owner')
+    await owner.begin()
+
+    const admitted: string[] = []
+    const waiting = await Promise.all(
+      ['first', 'second', 'third'].map((id) => zero.applicationSqlSession(id))
+    )
+    // deliberately release in reverse order so an unfair queue would show it
+    const admissions = waiting.map((session, index) =>
+      session.begin().then(() => {
+        admitted.push(['first', 'second', 'third'][index])
+        zero.releaseApplicationSqlTurn(session)
+      })
+    )
+
+    zero.releaseApplicationSqlTurn(owner)
+    await Promise.all(admissions)
+
+    expect(admitted).toEqual(['first', 'second', 'third'])
+  })
+
+  it('runs read sessions together and excludes them from a write session', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    const writer = await zero.applicationSqlSession('writer')
+    await writer.begin()
+
+    const readers = await Promise.all([
+      zero.applicationSqlSession('read-a', { readOnly: true }),
+      zero.applicationSqlSession('read-b', { readOnly: true }),
+    ])
+    const admitted: string[] = []
+    const admissions = readers.map((session, index) =>
+      session.begin().then(() => admitted.push(['read-a', 'read-b'][index]))
+    )
+    await Promise.resolve()
+    expect(admitted).toEqual([])
+
+    zero.releaseApplicationSqlTurn(writer)
+    await Promise.all(admissions)
+    expect(admitted).toEqual(['read-a', 'read-b'])
+
+    const laterWriter = await zero.applicationSqlSession('later-writer')
+    let laterWriterAdmitted = false
+    const laterAdmission = laterWriter.begin().then(() => {
+      laterWriterAdmitted = true
+    })
+    await Promise.resolve()
+    expect(laterWriterAdmitted).toBe(false)
+
+    zero.releaseApplicationSqlTurn(readers[0])
+    await Promise.resolve()
+    expect(laterWriterAdmitted).toBe(false)
+    zero.releaseApplicationSqlTurn(readers[1])
+    await laterAdmission
+    zero.releaseApplicationSqlTurn(laterWriter)
+  })
+
+  it('refuses a mutation from a read session instead of escalating it', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    const reader = await zero.applicationSqlSession('reader', { readOnly: true })
+    await reader.begin()
+
+    await expect(
+      reader.exec("UPDATE item SET enabled = 1 WHERE id = 'row-1'")
+    ).rejects.toThrow('read-only application SQLite session cannot execute a mutation')
+    await expect(
+      reader.registerTables([{ table: 'item', publicTable: 'public.item' }])
+    ).rejects.toThrow('read-only application SQLite session cannot register tables')
+    await expect(reader.query('SELECT id FROM item')).resolves.toEqual([
+      { id: 'row-1', enabled: 1 },
+    ])
+    zero.releaseApplicationSqlTurn(reader)
   })
 
   it('installs CDC from explicit SQLite write metadata', async () => {
