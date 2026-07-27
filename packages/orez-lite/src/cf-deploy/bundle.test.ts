@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -14,6 +15,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { bundleCloudflareLiteAppWorker } from './bundle.js'
 import { defineCloudflareConfig } from './config.js'
+import { configureCloudflareWorker } from './wrangler.js'
 
 const workerDirs: string[] = []
 
@@ -22,6 +24,56 @@ afterEach(() => {
 })
 
 describe('Cloudflare app bundling', () => {
+  it('attaches root split chunks to a bare Wrangler upload', () => {
+    const workerDir = mkdtempSync(join(tmpdir(), 'orez-wrangler-modules-'))
+    workerDirs.push(workerDir)
+    mkdirSync(join(workerDir, 'assets'))
+    writeFileSync(
+      join(workerDir, 'index.js'),
+      [
+        "import { value } from './chunk-EXAMPLE.js'",
+        'export class ZeroSqlDO {}',
+        'export default { fetch() { return new Response(value) } }',
+      ].join('\n')
+    )
+    writeFileSync(join(workerDir, 'chunk-EXAMPLE.js'), "export const value = 'ok'\n")
+    writeFileSync(join(workerDir, 'assets', 'route.js'), "export const route = 'ok'\n")
+    writeFileSync(join(workerDir, 'assets', 'message.mdx'), 'caller rule preserved\n')
+    const configPath = join(workerDir, 'wrangler.json')
+    const dryRunDir = join(workerDir, 'dry-run')
+    writeFileSync(
+      configPath,
+      JSON.stringify(
+        configureCloudflareWorker({
+          name: 'orez-root-module-test',
+          main: 'index.js',
+          no_bundle: true,
+          rules: [
+            { type: 'ESModule', globs: ['assets/**/*.js'], fallthrough: true },
+            { type: 'Text', globs: ['assets/**/*.mdx'], fallthrough: true },
+          ],
+        })
+      )
+    )
+
+    const dryRun = spawnSync(
+      join(process.cwd(), 'node_modules', '.bin', 'wrangler'),
+      ['deploy', '--dry-run', '--outdir', dryRunDir, '--config', configPath],
+      {
+        cwd: workerDir,
+        encoding: 'utf8',
+      }
+    )
+
+    expect({ status: dryRun.status, stderr: dryRun.stderr }).toEqual({
+      status: 0,
+      stderr: '',
+    })
+    expect(existsSync(join(dryRunDir, 'chunk-EXAMPLE.js'))).toBe(true)
+    expect(existsSync(join(dryRunDir, 'assets', 'route.js'))).toBe(true)
+    expect(existsSync(join(dryRunDir, 'assets', 'message.mdx'))).toBe(true)
+  })
+
   it('bundles a caller-owned entrypoint with stable virtual imports', async () => {
     const workerDir = mkdtempSync(join(tmpdir(), 'orez-lite-entry-'))
     workerDirs.push(workerDir)

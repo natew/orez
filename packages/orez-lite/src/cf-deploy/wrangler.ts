@@ -27,6 +27,25 @@ export function configureCloudflareWorker(config: WranglerConfig): WranglerConfi
     ...new Set([...stringArray(config.compatibility_flags), 'enable_request_signal']),
   ]
 
+  // the app bundler emits root split chunks beside index.js and keeps One's
+  // asset modules external. no_bundle uploads only modules matched by a rule,
+  // so the reusable bundle contract must carry its required globs with it.
+  const rules = Array.isArray(config.rules)
+    ? config.rules.filter((rule): rule is Record<string, unknown> =>
+        Boolean(record(rule))
+      )
+    : []
+  const esModuleRule = rules.find((rule) => rule.type === 'ESModule')
+  const requiredModuleGlobs = ['*-*.js', 'assets/**/*.js', 'assets/**/*.mjs']
+  if (esModuleRule) {
+    esModuleRule.globs = [
+      ...new Set([...stringArray(esModuleRule.globs), ...requiredModuleGlobs]),
+    ]
+  } else {
+    rules.unshift({ type: 'ESModule', globs: requiredModuleGlobs })
+  }
+  config.rules = rules
+
   const durableObjects = record(config.durable_objects) ?? {}
   const bindings = Array.isArray(durableObjects.bindings)
     ? durableObjects.bindings.filter((binding): binding is WranglerBinding =>
