@@ -15,13 +15,17 @@ wait for Rust builds.
 
 ## Standalone contract
 
-The supervisor starts the binary with file-backed schema and migration inputs:
+Applications normally use `createNativeHost` from `orez-lite/native`. It accepts
+the Zero schema, initialization SQL, callback URLs, storage directory, and
+server options as one object, then resolves the correct prebuilt binary
+internally. The lower-level launcher remains available for non-JavaScript
+supervisors with file-backed schema and migration inputs:
 
 ```sh
 sync-native serve \
   --schema zero-schema.json \
   --init-sql init-sql.json \
-  --data-dir .orez/sync-native \
+  --data-dir .orez-lite-native \
   --host 127.0.0.1 \
   --port 5048 \
   --admin-token-env SYNC_NATIVE_ADMIN_TOKEN \
@@ -55,9 +59,13 @@ The standalone process creates and resets `--data-dir` to owner-only mode
 (`0700`) on Unix. On Windows, choose a user-private application directory whose
 ACL is inherited by the namespace databases.
 
-All callback URLs must be explicit-port `http://` URLs on `localhost`,
+All callback URLs must be explicit-port `http://` or `https://` URLs on `localhost`,
 `127.0.0.1`, or `[::1]`; redirects are disabled. Orez strips an inbound
 `x-admin-key`, attaches the process-owned key, and uses these contracts:
+
+For a private callback certificate authority, pass `--callback-ca <PEM-file>`.
+`createNativeHost` exposes the same setting as
+`callbacks.certificateAuthority`.
 
 - Auth: POST `{ "namespace": "..." }` while forwarding the original request
   headers. The application must authorize both the session and that exact
@@ -81,11 +89,21 @@ application endpoint, and the application calls
 `/<namespace>/admin/settle-push` with the same process token after its SQLite
 transaction commits.
 
+When another process commits directly to a namespace SQLite file, it calls
+`POST /<namespace>/admin/notify` with the process token after the commit. This
+wakes connected clients without manufacturing a SQL write or reintroducing
+read-only transaction wake loops.
+
 `--host` defaults to `127.0.0.1`; containers may explicitly use `0.0.0.0` so
 clients can reach pull and wake. Admin routes still require the actual TCP peer
 address to be loopback and ignore forwarded-address headers. A missing peer is
 untrusted. Rust embedders that intentionally have an in-process admin trust
 boundary must opt in visibly with `into_router_trusted()`.
+
+Namespace file retention is disabled by default. Supervisors may opt into
+closing idle workers, without deleting their files, with `--retention workers`,
+`--worker-idle-ms`, and `--worker-sweep-ms`. The `orez-lite/native` equivalent
+is `workerRetention`.
 
 ## Supported targets
 

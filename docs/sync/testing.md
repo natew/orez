@@ -235,28 +235,15 @@ The root TypeScript suite covers the Postgres-to-DO-SQLite path separately from
 the Rust engine. Run it from the repository root with `bun run test`. The most
 relevant files are:
 
-- `src/cf-do/cdc.test.ts`: real-SQLite logical CDC, including full row images,
+- `packages/orez-lite/src/cf-do/cdc.test.ts`: real-SQLite logical CDC, including full row images,
   failed multi-row statements, SQLite transaction rollback, primary-key
   changes, schema changes, and indirect writes from business triggers. The
   failed-statement, rollback, and primary-key cases are adapted from Turso's CDC
   integration suite.
-- `src/cf-do/worker-cdc.test.ts`: staging, transaction grouping, publish versus
+- `packages/orez-lite/src/cf-do/worker-cdc.test.ts`: staging, transaction grouping, publish versus
   rollback-only capture, and DDL integration at the `ZeroDO` boundary.
-- `src/cf-do/tx-journal.test.ts`: commit, rollback, abandoned-owner recovery,
-  row-image undo, and full-table fallback for unclassified writes.
-- `src/pg-proxy-do-backend.test.ts` and
-  `src/pg-sqlite-compiler/integration.test.ts`: protocol transaction behavior
-  and the final Postgres-to-SQLite compilation boundary.
-
-`scripts/test-chat-e2e.ts` is the compatibility harness for Chat against the
-local orez crates. It snapshots the Chat tree with `git archive` into a
-disposable workspace, installs the local orez and bedrock-sqlite dist, and runs
-Chat's full Playwright integration suite. The 2026-07-16 run was fully green:
-78 passed, 1 skipped, zero failures or flakes, after fixing an e2e-only auth
-rate-limit collision in Chat (all local Playwright workers shared one anonymous
-localhost rate-limit key; production limits unchanged). Earlier
-point-in-time results (the 2026-07-13 setup-only qualification at 125,402
-billable rows) are superseded by that green full run.
+- `packages/orez-lite/src/cf-do/worker-transaction.test.ts`: application-SQL transaction commit
+  and rollback behavior at the `ZeroDO` boundary.
 
 ## What is not covered
 

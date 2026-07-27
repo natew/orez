@@ -403,7 +403,7 @@ describe('pgoutput-encoder', () => {
       expect(a).not.toBe(b)
     })
 
-    it('matches DoBackend catalog oids for flattened schema tables', () => {
+    it('uses stable catalog oids for flattened schema tables', () => {
       expect(getTableOid('public.todo')).toBe(4392680)
       expect(getTableOid('todo_0.clients')).toBe(9663976)
       expect(getTableOid('todo_0.mutations')).toBe(8519194)

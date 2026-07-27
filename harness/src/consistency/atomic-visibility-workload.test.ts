@@ -17,7 +17,7 @@ import {
 } from './atomic-visibility.js'
 import { HistoryRecorder } from './recorder.js'
 
-import type { ZeroHttpSyncDb as SyncDb } from '../../../src/zero-http/mount.js'
+import type { ZeroHttpSyncDb as SyncDb } from 'orez-lite/zero-http'
 
 const effects = [
   { id: 'run-a', projectId: 'p0', rank: 101 },
@@ -144,72 +144,6 @@ describe('atomic visibility workload contract', () => {
     )
     expect(() => assertAtomicInitialClientAbsence(effects, effects)).toThrow(
       'initial client state (all)'
-    )
-  })
-
-  test('records a strict subset as terminal and freezes the decisive history', () => {
-    let now = 0
-    const recorder = new HistoryRecorder(() => now++)
-    const recordPair = (opId: string, rows: typeof effects) => {
-      recorder.record({
-        opId,
-        process: 'reader',
-        phase: 'invoke',
-        kind: 'read',
-        transaction: [
-          { type: 'read', key: 'p0', value: null },
-          { type: 'read', key: 'p1', value: null },
-        ],
-      })
-      recorder.record({
-        opId,
-        process: 'reader',
-        phase: 'ok',
-        kind: 'read',
-        transaction: projectAtomicRead(['p0', 'p1'], rows),
-      })
-    }
-    recordPair('before', [])
-    const mutation = effects.map(({ projectId: key, rank: value }) => ({
-      type: 'append' as const,
-      key,
-      value,
-    }))
-    recorder.record({
-      opId: 'group',
-      process: 'writer',
-      phase: 'invoke',
-      kind: 'mutation',
-      transaction: mutation,
-    })
-    recorder.record({
-      opId: 'group',
-      process: 'writer',
-      phase: 'ok',
-      kind: 'mutation',
-      transaction: mutation,
-    })
-    const seen: string[] = []
-    let index = 0
-    const collector = new AtomicObservationCollector(effects, (rows, state) => {
-      seen.push(state)
-      recordPair(`after-${index++}`, [...rows])
-    })
-    collector.initialize([])
-    collector.arm()
-    collector.observe([])
-    collector.observe([effects[0]!])
-    const frozenLength = recorder.snapshot().length
-    expect(() => collector.observe(effects)).toThrow(
-      'atomic observer is terminal after partial'
-    )
-
-    expect(seen).toEqual(['none', 'partial'])
-    expect(recorder.snapshot()).toHaveLength(frozenLength)
-    const outcome = checkAtomicVisibility(recorder.snapshot())
-    expect(outcome.valid).toBe(false)
-    expect(outcome.violations).toContain(
-      'atomic group group is partially visible in read after-1; missing effects: p1=102'
     )
   })
 

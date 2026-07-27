@@ -3,7 +3,7 @@
 // each namespace is one `<name>.sqlite` file (plus its `-wal`/`-shm` sidecars)
 // under the host's data_dir. nothing in the sync protocol ever removes them, so
 // a consumer that creates many namespaces (one replica per project) grows the
-// data dir without bound: soot's `.orez/sync-native` reached gigabytes of
+// data dir without bound: soot's `.orez-lite-native` reached gigabytes of
 // `proj-*.sqlite` with no ceiling.
 //
 // deletion is safe only when these replicas are derived and sync-native is the

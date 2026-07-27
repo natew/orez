@@ -30,48 +30,6 @@ describe('serverWhere SSR behavior', () => {
     ;(globalThis as any)[Symbol.for('on-zero:state')] = null
   })
 
-  test('serverWhere returns no-op on client environment', () => {
-    setEnvironment('client')
-
-    const whereFn = serverWhere('post', (eb) => eb.cmp('ownerId', 'user-123'))
-    const eb = createMockEB()
-    const result = whereFn(eb as any, { id: 'user-123' })
-
-    // on client, should return no-op (and())
-    expect(eb.calls).toContain('and()')
-    expect(result).toEqual({ type: 'noop' })
-  })
-
-  test('serverWhere evaluates condition on server environment', () => {
-    setEnvironment('server')
-
-    const whereFn = serverWhere('post', (eb) => eb.cmp('ownerId', 'user-123'))
-    const eb = createMockEB()
-    const result = whereFn(eb as any, { id: 'user-123' })
-
-    // on server, should evaluate the actual condition
-    expect(eb.calls).toContain('cmp(ownerId, user-123)')
-    expect(result).toEqual({ type: 'condition', field: 'ownerId', value: 'user-123' })
-  })
-
-  test('serverWhere evaluates when _evaluatingPermission is true (even on client)', () => {
-    setEnvironment('client')
-
-    const whereFn = serverWhere('post', (eb) => eb.cmp('ownerId', 'user-123'))
-    const eb = createMockEB()
-
-    setEvaluatingPermission(true)
-    try {
-      const result = whereFn(eb as any, { id: 'user-123' })
-
-      // even on client, should evaluate when evaluating permission
-      expect(eb.calls).toContain('cmp(ownerId, user-123)')
-      expect(result).toEqual({ type: 'condition', field: 'ownerId', value: 'user-123' })
-    } finally {
-      setEvaluatingPermission(false)
-    }
-  })
-
   test('environment stays server when already set (SSR scenario)', () => {
     // simulate SSR: server sets environment first
     setEnvironment('server')

@@ -7,14 +7,14 @@ import {
   table,
   type Schema,
 } from '@rocicorp/zero'
-
 import {
   createZeroHttpApplicationDatabase,
   createZeroHttpSyncServer,
   type ZeroHttpSyncDb,
   type ZeroHttpVisibility,
   type ZeroHttpVisibilityInvalidation,
-} from '../../src/zero-http/mount.js'
+} from 'orez-lite/zero-http'
+
 import { TABLES, executeMutator } from './fixture-data.js'
 
 import type { MutatorRegistry } from 'orez-sync-executor'

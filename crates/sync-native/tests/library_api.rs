@@ -272,6 +272,15 @@ fn admin_settle_push_req(
         .unwrap()
 }
 
+fn admin_notify_req(ns: &str) -> Request<axum::body::Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/{ns}/admin/notify"))
+        .header("x-admin-key", ADMIN_TOKEN)
+        .body(axum::body::Body::empty())
+        .unwrap()
+}
+
 fn patch_count(resp: &Value, table: &str, op: &str) -> usize {
     resp["rowsPatch"]
         .as_array()
@@ -964,6 +973,33 @@ async fn admin_lists_persisted_namespaces_in_lexical_order() {
         response,
         json!({ "namespaces": ["control", "project-a", "project-z"] })
     );
+}
+
+#[tokio::test]
+async fn admin_notify_initializes_the_namespace_and_requires_admin_auth() {
+    let tmp = tempfile::tempdir().unwrap();
+    let router = test_host(custom_config(), tmp.path().to_path_buf()).into_router_trusted();
+
+    let mut unauthorized = admin_notify_req("project-notify");
+    unauthorized.headers_mut().remove("x-admin-key");
+    let (status, _) = send(&router, unauthorized).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let response = router
+        .clone()
+        .oneshot(admin_notify_req("project-notify"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let request = Request::builder()
+        .uri("/admin/namespaces")
+        .header("x-admin-key", ADMIN_TOKEN)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, response) = send(&router, request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response, json!({ "namespaces": ["project-notify"] }));
 }
 
 #[tokio::test]

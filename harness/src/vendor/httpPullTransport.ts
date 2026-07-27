@@ -1,7 +1,7 @@
 // VENDORED self-contained transport copy for harness targets. the canonical
-// implementation now lives at ~/orez/src/zero-http/transport.ts; refresh this
+// implementation now lives at ~/orez/packages/orez-lite/src/zero-http/transport.ts; refresh this
 // file only from that source:
-//   cp ~/orez/src/zero-http/transport.ts \
+//   cp ~/orez/packages/orez-lite/src/zero-http/transport.ts \
 //      harness/src/vendor/httpPullTransport.ts   (re-add this header)
 // the canonical has since grown consumer-only features (appID/shardNum/
 // pushOrigin routing, authenticated wake tokens, a flush/quiescence gate) the

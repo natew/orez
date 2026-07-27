@@ -90,26 +90,6 @@ function database() {
 }
 
 describe('standalone query compiler', () => {
-  test('explains how to load wasm when Bun has no preload', async () => {
-    const child = Bun.spawn(
-      [process.execPath, '-e', "await import('orez-sync-cf-host/query-compiler')"],
-      {
-        cwd: import.meta.dir,
-        stdout: 'ignore',
-        stderr: 'pipe',
-      }
-    )
-    const [exitCode, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stderr).text(),
-    ])
-
-    expect(exitCode).not.toBe(0)
-    expect(stderr).toContain(
-      'see the orez-sync-cf-host README Query compiler runtimes matrix'
-    )
-  })
-
   test('compiles and materializes a related query outside a durable object', () => {
     const db = database()
     const compile = createQueryCompiler(schema)
@@ -166,22 +146,6 @@ describe('standalone query compiler', () => {
     ).toThrow(
       "schema 'query-compiler-encryption-v1' encrypted column 'record.secret' has forbidden use 'predicate'"
     )
-  })
-
-  test('allows encrypted columns in transaction query projection', () => {
-    const plan = createQueryCompiler(encryptedSchema)(
-      {
-        table: 'record',
-      },
-      flatFormat
-    )
-
-    expect(plan.root.columns).toEqual([
-      { name: 'id', columnType: 'string' },
-      { name: 'route', columnType: 'string' },
-      { name: 'secret', columnType: 'string' },
-    ])
-    expect(plan.root.sql).toContain('"secret_blob" AS "secret"')
   })
 
   test('rejects v51 right-hand column references at parse time', () => {

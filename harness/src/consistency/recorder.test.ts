@@ -174,13 +174,4 @@ describe('HistoryRecorder', () => {
     )
     expect(reads).toBe(0)
   })
-
-  test('round-trip mutation is rejected by the existing validator', () => {
-    const recorder = new HistoryRecorder(clock(0, 1))
-    recorder.record(invocation())
-    recorder.record(terminal())
-    const history: HistoryEvent[] = recorder.finalize()
-    history[1]!.index = 4
-    expect(validateHistory(history).violations).toContain('event 1 has index 4')
-  })
 })

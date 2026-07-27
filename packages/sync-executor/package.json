@@ -1,6 +1,6 @@
 {
   "name": "orez-sync-executor",
-  "version": "0.9.5",
+  "version": "0.10.5",
   "type": "module",
   "sideEffects": false,
   "exports": {
@@ -11,6 +11,14 @@
     "./core": {
       "types": "./dist/core.d.ts",
       "import": "./dist/core.js"
+    },
+    "./postgres": {
+      "types": "./dist/postgres.d.ts",
+      "import": "./dist/postgres.js"
+    },
+    "./sqlite": {
+      "types": "./dist/sqlite.d.ts",
+      "import": "./dist/sqlite.js"
     }
   },
   "scripts": {

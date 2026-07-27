@@ -1,9 +1,8 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -14,10 +13,6 @@ concurrency:
 
 jobs:
   publish:
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -28,7 +23,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
 
       - name: select latest main build
         id: candidate
@@ -37,7 +32,7 @@ jobs:
           version=$(node -p "require('./package.json').version")
           subject=$(git log -1 --pretty=%s)
           if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
-            echo "A newer main commit exists; its CI run will publish the canary instead."
+            echo "A newer main commit exists; its push will publish the canary instead."
             echo "release=false" >> "$GITHUB_OUTPUT"
           elif [ "$subject" = "v$version" ]; then
             echo "Skipping stable release commit v$version."

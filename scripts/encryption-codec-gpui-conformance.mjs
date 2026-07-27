@@ -11,7 +11,7 @@ const service = buildGPUIService(rngpuiRoot)
 const repositoryRoot = resolve(import.meta.dirname, '..')
 const conformanceModule = resolve(
   repositoryRoot,
-  'dist/zero-http/encrypted-column-conformance.js'
+  'packages/orez-lite/dist/zero-http/encrypted-column-conformance.js'
 )
 const workdir = mkdtempSync(join(tmpdir(), 'orez-encryption-hermes-'))
 try {

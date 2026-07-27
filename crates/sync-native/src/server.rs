@@ -134,6 +134,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let admin = Router::new()
         .route("/admin/health", get(health))
         .route("/admin/namespaces", get(admin_namespaces))
+        .route("/{ns}/admin/notify", post(admin_notify))
         .route("/{ns}/admin/sql", post(admin_sql))
         .route("/{ns}/admin/settle-push", post(admin_settle_push))
         .route("/{ns}/admin/status", get(admin_status))
@@ -271,6 +272,14 @@ async fn admin_namespaces(State(state): State<Arc<AppState>>) -> Response {
         Ok(Err(error)) => json_status(500, json!({ "error": error })),
         Err(error) => json_status(500, json!({ "error": error.to_string() })),
     }
+}
+
+async fn admin_notify(State(state): State<Arc<AppState>>, Path(ns): Path<String>) -> Response {
+    if let Err(error) = state.manager.get(&ns) {
+        return json_status(400, json!({ "error": error }));
+    }
+    state.wake.wake(&ns, "");
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn pull(
@@ -653,10 +662,11 @@ async fn admin_sql(
                 return json_status(400, json!({ "error": "transaction end forbids params" }));
             }
             match namespace.tx_end(id, end).await {
-                Ok(()) => {
-                    // a committed transaction publishes its rows; wake every
-                    // namespace client so they pull without waiting for a push.
-                    if matches!(end, TxEnd::Commit) {
+                Ok(committed_writes) => {
+                    // only committed writes can advance a client's view. waking
+                    // after a read-only transaction feeds query-aware pulls back
+                    // into themselves forever.
+                    if committed_writes {
                         state.wake.wake(&ns, "");
                     }
                     json_status(200, json!({ "rows": [] }))
@@ -673,20 +683,23 @@ async fn admin_sql(
         (None, None) => {
             let result = namespace
                 .run(move |conn| {
+                    let total_changes = conn.total_changes();
                     let mut db = RusqliteDb::new(conn);
-                    db.query(&query, &params)
+                    let rows = db.query(&query, &params);
+                    (rows, conn.total_changes() > total_changes)
                 })
                 .await;
             match result {
-                Ok(rows) => {
+                (Ok(rows), changed) => {
                     // admin SQL is the upstream-write seam for embedded consumers.
-                    // triggers captured the committed rows; wake every namespace
-                    // client so they pull those changes without waiting for a push.
-                    state.wake.wake(&ns, "");
+                    // only a statement that changed rows can advance the feed.
+                    if changed {
+                        state.wake.wake(&ns, "");
+                    }
                     let rows: Vec<Value> = rows.iter().map(row_to_json).collect();
                     json_status(200, json!({ "rows": rows }))
                 }
-                Err(e) => json_status(500, json!({ "error": e.0 })),
+                (Err(e), _) => json_status(500, json!({ "error": e.0 })),
             }
         }
     }

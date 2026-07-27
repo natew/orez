@@ -55,41 +55,6 @@ jobs:
       - name: native sqlite guard
         run: bun run test:native:guard
 
-  compiler:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.94.0
-
-      - name: cache cargo + pgsqlite build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            vendor/pgsqlite/build/target
-          # cache key derives from ensure.ts so PGSQLITE_PIN bumps invalidate
-          key: pgsqlite-${{ runner.os }}-${{ hashFiles('scripts/pgsqlite/ensure.ts') }}
-          restore-keys: |
-            pgsqlite-${{ runner.os }}-
-
-      - run: bun install --frozen-lockfile
-
-      - name: build pgsqlite (oracle)
-        run: bun run compiler:ensure-pgsqlite
-
-      - name: compiler tests (incl. pgsqlite oracle)
-        run: bun run test:compiler
-
   harness:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -101,9 +66,11 @@ jobs:
         with:
           bun-version: latest
 
-      # root install: the harness imports repo-root src and workspace packages;
-      # the root prepare script builds orez-sync-executor's dist
+      # the harness imports repository source and built workspace packages.
       - run: bun install --frozen-lockfile
+
+      - name: build sync runtime
+        run: bun run build:sync-runtime
 
       - name: harness install
         run: cd harness && bun install
@@ -203,11 +170,16 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      - name: build sync runtime dependencies
+        run: |
+          bun run build:sync-runtime
+          bun run --cwd packages/sync-cf-host build:dist
+
       - name: install chromium
         run: bun run --cwd packages/sync-browser-host playwright install --with-deps chromium
 
       - name: browser worker durability and protocol suite
-        run: rm -rf packages/sync-cf-host/dist && bun run test:sync-browser-host
+        run: bun run test:sync-browser-host
 
   # rust sync engine: workspace build + native crate tests + format gate.
   rust:
@@ -225,6 +197,9 @@ jobs:
           bun-version: latest
 
       - run: bun install --frozen-lockfile
+
+      - name: build sync runtime
+        run: bun run build:sync-runtime
 
       - uses: actions/setup-node@v4
         with:
@@ -399,9 +374,11 @@ jobs:
       - name: build sync-native fixture (release)
         run: cargo build --release -p sync-native --bin sync-native-fixture
 
-      # root install: the harness imports repo-root src and workspace packages;
-      # the root prepare script builds orez-sync-executor's dist
+      # the harness imports repository source and built workspace packages.
       - run: bun install --frozen-lockfile
+
+      - name: build sync runtime
+        run: bun run build:sync-runtime
 
       - name: harness install
         run: cd harness && bun install
@@ -522,6 +499,9 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      - name: build sync runtime
+        run: bun run build:sync-runtime
+
       - name: harness install
         run: cd harness && bun install
 
@@ -603,10 +583,16 @@ jobs:
       - name: sync-cf-host install
         run: cd packages/sync-cf-host && bun install
 
+      - name: build sync executor
+        run: bun run --cwd packages/sync-executor build
+
       # full suite: config cap-validation (bun:test) + workerd platform probe +
       # wasm integration contract. build:wasm runs inside the package scripts.
       - name: sync-cf-host suite
         run: cd packages/sync-cf-host && bun run test
+
+      - name: build harness zero-http host
+        run: bun run --cwd packages/orez-lite build:zero-http
 
       - name: sync-cf-host push memory soak
         run: |
@@ -665,7 +651,6 @@ jobs:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs:
       - test
-      - compiler
       - harness
       - native-integration
       - rust

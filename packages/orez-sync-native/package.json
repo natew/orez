@@ -1,6 +1,6 @@
 {
   "name": "orez-sync-native",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Prebuilt generic Orez sync host for application-owned callbacks",
   "license": "MIT",
   "repository": {
@@ -9,6 +9,9 @@
   },
   "bin": {
     "sync-native": "bin/sync-native.cjs"
+  },
+  "exports": {
+    "./launcher": "./bin/sync-native.cjs"
   },
   "files": [
     "bin"

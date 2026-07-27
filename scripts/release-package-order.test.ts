@@ -21,7 +21,6 @@ describe('orderReleasePackages', () => {
         'orez-sync-cf-host': 'workspace:*',
       }),
       pkg('bedrock-sqlite'),
-      pkg('pg-to-sqlite'),
       pkg('orez-sync-cf-host'),
     ]
 
@@ -29,7 +28,6 @@ describe('orderReleasePackages', () => {
       'bedrock-sqlite',
       'orez-sync-cf-host',
       'orez',
-      'pg-to-sqlite',
     ])
   })
 

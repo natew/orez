@@ -15,11 +15,43 @@ oreZ makes Zero work on [PGlite](https://pglite.dev) (Postgres in WASM) and [bed
 
 ## Orez Lite
 
-Orez Lite is a SQLite-native Zero server for Cloudflare and other constrained
+[`orez-lite`](https://www.npmjs.com/package/orez-lite) is a separate
+SQLite-native Zero engine for Cloudflare and other constrained
 hosts. It replaces Zero's server side and speaks the Zero protocol to the real
-`@rocicorp/zero` client. `orez/client` supplies the Orez Lite transport without
+`@rocicorp/zero` client. `orez-lite/client` supplies the Orez Lite transport without
 forking Zero's query or mutation API. See the
 [Orez Lite server documentation](docs/sync/README.md).
+
+## Cloudflare
+
+`orez-lite/cloudflare` is the workerd runtime. A complete data worker is one factory
+call; the generated descriptor carries the real Zero schema, migration, and
+publication metadata, so applications never list tables or columns again:
+
+```ts
+import { createOrezDataWorker } from 'orez-lite/cloudflare'
+import { orezAppSchema } from 'orez:cloudflare-migrations'
+
+const orez = createOrezDataWorker({
+  name: 'example',
+  schema: orezAppSchema,
+})
+
+export const { ZeroSqlDO, ZeroDO } = orez
+export default orez
+```
+
+Orez owns namespace routing, schema readiness and coalescing, change-feed
+projection, write budgets, and optional streaming backups. Applications add
+only product routes, telemetry, cron work, and namespace inventory.
+
+Node-side migration, bundling, Wrangler configuration, pruning, and readiness
+helpers live at `orez-lite/cloudflare/build`.
+
+Cloudflare query compilation is available at
+`orez-lite/cloudflare/query-compiler`. Lite applications depend on `orez-lite`,
+not `orez`; the workspace packages behind these exports are internal
+implementation units.
 
 ## Requirements
 
@@ -40,9 +72,8 @@ not suitable for production.
 - **Trigger overhead** (pglite backend) — every write fires change-tracking triggers.
 - **Local filesystem** — no replication, no HA. Use `orez pg_dump` for backups.
 
-The earlier `src/worker/**` experiment that embeds zero-cache inside a
-Cloudflare Durable Object is frozen for removal and receives security fixes
-only. New Cloudflare server work uses Orez Lite and `orez-sync-cf-host`.
+Orez does not embed zero-cache in Cloudflare Durable Objects. Cloudflare server
+work uses the SQLite-native Orez Lite runtime from `orez-lite/cloudflare`.
 
 ## Backends
 

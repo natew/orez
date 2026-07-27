@@ -1,19 +1,14 @@
-// real-SQLite integration for the lifted DO engine: backs the circuit breaker +
-// replica-repair functions with an actual node:sqlite database through a
-// DO-SqlStorage adapter, so the lifted SQL (CREATE/INSERT/SELECT/UPDATE/DROP,
-// sqlite_master scans, the circuit meter) is exercised end to end, not mocked.
+// Real-SQLite integration for replica-repair functions through a minimal
+// Durable Object SqlStorage adapter.
 import { DatabaseSync } from 'node:sqlite'
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import {
   dropReplicaTables,
   repairPartialReplicaInit,
   resetReplicaIfTableSetChanged,
 } from './zero-cache-replica-repair.js'
-import { installZeroSqlWriteCircuitBreaker } from './zero-sql-write-circuit.js'
-
-import type { DurableSqlStorage } from './zero-sql-write-circuit.js'
 
 type Db = InstanceType<typeof DatabaseSync>
 
@@ -36,56 +31,6 @@ function doSqlAdapter(db: Db) {
     },
   }
 }
-
-describe('circuit breaker over real sqlite', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-    vi.setSystemTime(1_700_000_000_000)
-  })
-  afterEach(() => vi.useRealTimers())
-
-  it('creates its meter table, meters real writes, and trips on the hard cap', () => {
-    const db = new DatabaseSync(':memory:')
-    db.exec('CREATE TABLE app (id INTEGER PRIMARY KEY, v TEXT)')
-    const sql = doSqlAdapter(db) as unknown as DurableSqlStorage
-    // tiny caps so a handful of real rows trips it
-    installZeroSqlWriteCircuitBreaker(sql, {
-      table: '_wc',
-      rowsPerWindow: 3,
-      hardRowsPerWindow: 5,
-      logPrefix: '[itest]',
-    })
-
-    // the meter table is created on first metered write, and real rows count
-    sql.exec('INSERT INTO app (v) VALUES (?)', 'a')
-    const meter = db
-      .prepare('SELECT rows_in_window, tripped_at FROM _wc WHERE id = 1')
-      .get() as {
-      rows_in_window: number
-      tripped_at: number
-    }
-    expect(meter.rows_in_window).toBe(1)
-    expect(meter.tripped_at).toBe(0)
-
-    // cross the hard cap (5) within the window -> trips and refuses writes
-    expect(() => {
-      for (let i = 0; i < 20; i++) sql.exec('INSERT INTO app (v) VALUES (?)', 'x')
-    }).toThrow(/\[itest\] ZeroSqlDO write circuit breaker tripped/)
-    expect(
-      (
-        db.prepare('SELECT tripped_at FROM _wc WHERE id = 1').get() as {
-          tripped_at: number
-        }
-      ).tripped_at
-    ).toBeGreaterThan(0)
-    // reads still pass after the trip
-    expect(() => sql.exec('SELECT COUNT(*) FROM app')).not.toThrow()
-    // and writes stay refused
-    expect(() => sql.exec('INSERT INTO app (v) VALUES (?)', 'z')).toThrow(
-      /refusing SQL write/
-    )
-  })
-})
 
 describe('replica repair over real sqlite', () => {
   function seedReplica(db: Db) {
@@ -119,22 +64,6 @@ describe('replica repair over real sqlite', () => {
       }>
     ).map((r) => r.name)
     expect(tables.filter((n) => !n.startsWith('sqlite_'))).toEqual([])
-  })
-
-  it('repairPartialReplicaInit leaves a cleanly-initialized replica intact', () => {
-    const db = new DatabaseSync(':memory:')
-    seedReplica(db)
-    db.exec('CREATE TABLE "_zero.versionHistory" (v INTEGER)')
-    db.exec('INSERT INTO "_zero.versionHistory" (v) VALUES (1)')
-    const sql = doSqlAdapter(db) as never
-    repairPartialReplicaInit(sql, { logPrefix: '[itest]' })
-    const tables = (
-      db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{
-        name: string
-      }>
-    ).map((r) => r.name)
-    expect(tables).toContain('user')
-    expect(tables).toContain('project')
   })
 
   it('resetReplicaIfTableSetChanged wipes on a changed tag and persists the new one', async () => {

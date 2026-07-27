@@ -10,7 +10,7 @@
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,
     "paths": {
-      "orez/sync-browser-host": ["dist/sync-browser-host/index.d.ts"]
+      "orez-lite/browser": ["packages/orez-lite/dist/browser/index.d.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/browser/main.ts", "test/browser/worker.ts"]

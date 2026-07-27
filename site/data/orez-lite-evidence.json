@@ -203,7 +203,6 @@
     "branch": "main",
     "requiredJobs": [
       "test",
-      "compiler",
       "harness",
       "native-integration",
       "rust",

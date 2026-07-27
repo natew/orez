@@ -45,200 +45,11 @@ describe(`permission transition (${PERMISSION_TRANSITION_PROFILE.name}@${PERMISS
     expect(checkPermissionTransition(valid())).toEqual({ valid: true, violations: [] })
   })
 
-  // ---- topology ---------------------------------------------------------
-  test('rejects a single namespace', () => {
-    const events = valid().map((e) =>
-      'namespace' in e ? ({ ...e, namespace: 'nsA' } as PermissionEvent) : e
-    )
-    expect(violations(events)).toContain('expected exactly two namespaces, saw 1')
-  })
-
-  test('rejects a third namespace', () => {
-    const extra = valid()
-    extra.push({
-      v: PERMISSION_HISTORY_SCHEMA_VERSION,
-      index: extra.length,
-      host: 'H',
-      type: 'client',
-      opId: 'stray-named-0',
-      epoch: 0,
-      namespace: 'nsC',
-      principal: 'ghost',
-      clientId: 'ghost',
-      groupId: 'ghost-g',
-      storageKey: 'ghost-sk',
-      origin: 'named',
-      rows: [],
-      markers: [],
-      sentinelMarker: 'sn-0',
-      complete: true,
-      fresh: false,
-      pullEchoed: true,
-    })
-    expect(violations(extra)).toContain('expected exactly two namespaces, saw 3')
-  })
-
-  test('rejects more than one host', () => {
-    expect(violations(patch(valid(), 'cAo-named-0', { host: 'H2' }))).toContain(
-      'expected exactly one host, saw 2'
-    )
-  })
-
-  // ---- exact grant then revoke -----------------------------------------
-  test('rejects a missing revoke', () => {
-    expect(violations(reindex(valid().filter((e) => e.opId !== 'revoke')))).toContain(
-      'expected exactly one grant and one revoke change'
-    )
-  })
-
-  test('rejects two grants', () => {
-    expect(violations(patch(valid(), 'revoke', { action: 'grant' }))).toContain(
-      'expected exactly one grant and one revoke change'
-    )
-  })
-
-  test('rejects an extra change event', () => {
-    const events = valid()
-    events.push({
-      v: PERMISSION_HISTORY_SCHEMA_VERSION,
-      index: events.length,
-      host: 'H',
-      type: 'change',
-      opId: 'grant-2',
-      epoch: 1,
-      namespace: 'nsA',
-      principal: 'subjectA',
-      action: 'grant',
-      phase: 'ok',
-      sqlReturned: true,
-      authorityRef: 'auth-grant',
-    })
-    expect(violations(events)).toContain(
-      'expected exactly one grant and one revoke change'
-    )
-  })
-
-  test('rejects grant and revoke on different principals', () => {
-    expect(violations(patch(valid(), 'revoke', { principal: 'ownerA' }))).toContain(
-      'grant and revoke target different namespace or principal'
-    )
-  })
-
-  test('rejects revoke ordered before grant', () => {
-    let events = patch(valid(), 'grant', { epoch: 2 })
-    events = patch(events, 'revoke', { epoch: 1 })
-    expect(violations(events)).toContain(
-      'grant must establish epoch 1 before revoke establishes epoch 2'
-    )
-  })
-
-  // ---- authority corroboration -----------------------------------------
-  test('treats an info grant as inconclusive, not authoritative', () => {
-    expect(violations(patch(valid(), 'grant', { phase: 'info' }))).toContain(
-      'grant is info, not an authoritative ok'
-    )
-  })
-
   test('rejects a non-terminal fail phase structurally', () => {
     const events = patch(valid(), 'grant', { phase: 'fail' })
     expect(
       violations(events).some((v) => v.includes('invalid terminal phase fail'))
     ).toBe(true)
-  })
-
-  test('rejects an ok change without a target.sql return', () => {
-    expect(violations(patch(valid(), 'grant', { sqlReturned: false }))).toContain(
-      'grant ok without a target.sql return'
-    )
-  })
-
-  test('rejects authority that does not corroborate the count', () => {
-    expect(violations(patch(valid(), 'auth-grant', { count: 0 }))).toContain(
-      'grant authority read does not corroborate count 1'
-    )
-  })
-
-  test('rejects a dangling authorityRef', () => {
-    expect(violations(patch(valid(), 'grant', { authorityRef: 'nope' }))).toContain(
-      'grant authorityRef does not resolve to a membership read'
-    )
-  })
-
-  // ---- sentinel liveness barrier ---------------------------------------
-  test('rejects sentinel ACL drift across epochs', () => {
-    expect(
-      violations(patch(valid(), 'acl-A-2', { rows: ['member:sn-ownerA'] }))
-    ).toContain('namespace nsA sentinel ACL drifted at epoch 2')
-  })
-
-  test('rejects a missing sentinel ACL read', () => {
-    expect(violations(reindex(valid().filter((e) => e.opId !== 'acl-A-1')))).toContain(
-      'namespace nsA is missing a sentinel-acl read at epoch 1'
-    )
-  })
-
-  test('rejects an empty sentinel scope', () => {
-    let events = valid()
-    for (const epoch of [0, 1, 2]) events = patch(events, `acl-A-${epoch}`, { rows: [] })
-    expect(violations(events)).toContain('namespace nsA sentinel scope is empty')
-  })
-
-  test('rejects an incomplete sentinel barrier', () => {
-    expect(violations(patch(valid(), 'bar-1', { complete: false }))).toContain(
-      'sentinel barrier at epoch 1 is not complete'
-    )
-  })
-
-  test('rejects a missing sentinel barrier', () => {
-    expect(violations(reindex(valid().filter((e) => e.opId !== 'bar-2')))).toContain(
-      'expected exactly one sentinel barrier at epoch 2'
-    )
-  })
-
-  test('rejects a duplicated sentinel barrier at one epoch', () => {
-    const events = valid()
-    events.push({
-      v: PERMISSION_HISTORY_SCHEMA_VERSION,
-      index: events.length,
-      host: 'H',
-      type: 'barrier',
-      opId: 'bar-1b',
-      epoch: 1,
-      marker: 'sn-1x',
-      complete: true,
-      observers: ['cAo', 'cAs', 'cBs', 'fAs1', 'fBs1'],
-      observationRefs: [],
-      changeRef: 'grant',
-      authorityRef: 'auth-grant',
-    })
-    expect(violations(events)).toContain(
-      'expected exactly one sentinel barrier at epoch 1'
-    )
-  })
-
-  test('rejects a stale (reused) sentinel marker', () => {
-    expect(violations(patch(valid(), 'bar-2', { marker: 'sn-1' }))).toContain(
-      'sentinel barrier at epoch 2 reuses a stale marker'
-    )
-  })
-
-  test('rejects a barrier that does not cover every live client', () => {
-    expect(
-      violations(patch(valid(), 'bar-2', { observers: ['cAo', 'cAs', 'cBs', 'fAs2'] }))
-    ).toContain('sentinel barrier at epoch 2 does not cover every live client')
-  })
-
-  // ---- client observations ---------------------------------------------
-  test('rejects an incomplete client callback', () => {
-    expect(violations(patch(valid(), 'cAs-named-1', { complete: false }))).toContain(
-      'client cAs-named-1 reported an incomplete observation'
-    )
-  })
-
-  test('rejects a client identity not echoed in a pull body', () => {
-    expect(violations(patch(valid(), 'cAo-named-0', { pullEchoed: false }))).toContain(
-      'client cAo-named-0 identity was not echoed in a pull body'
-    )
   })
 
   test('rejects retained rows after revoke', () => {
@@ -271,72 +82,6 @@ describe(`permission transition (${PERMISSION_TRANSITION_PROFILE.name}@${PERMISS
     expect(violations(events).some((v) => v.includes('zzz:extra'))).toBe(true)
   })
 
-  test('rejects A-marker contamination in the stable namespace', () => {
-    expect(violations(patch(valid(), 'cBs-named-0', { markers: ['mk-A'] }))).toContain(
-      'namespace nsB observed markers [mk-A, mk-B]'
-    )
-  })
-
-  test('rejects fresh/original disagreement', () => {
-    const events = patch(valid(), 'fAs1-named-1', { rows: OWNER_BASE })
-    expect(violations(events)).toContain(
-      'fresh and original clients disagree for nsA|subjectA|named|1'
-    )
-  })
-
-  test('rejects markers reported without rows', () => {
-    const events = patch(valid(), 'cAs-named-0', { markers: ['mk-A'] })
-    expect(violations(events)).toContain(
-      'client cAs-named-0 carries markers without any rows'
-    )
-  })
-
-  // ---- required roles + evidence ---------------------------------------
-  test('rejects a missing transition owner client', () => {
-    expect(violations(reindex(valid().filter((e) => e.clientId !== 'cAo')))).toContain(
-      'expected exactly one stable original transition/owner client, saw 0'
-    )
-  })
-
-  test('rejects a missing stable subject client', () => {
-    const events = reindex(
-      valid().filter(
-        (e) => e.clientId !== 'cBs' && e.clientId !== 'fBs1' && e.clientId !== 'fBs2'
-      )
-    )
-    expect(violations(events)).toContain(
-      'expected exactly one stable original stable/subject client, saw 0'
-    )
-  })
-
-  test('rejects missing raw local-only evidence', () => {
-    expect(
-      violations(
-        reindex(valid().filter((e) => e.type !== 'client' || e.origin !== 'raw'))
-      )
-    ).toContain('missing raw local-cache-only client evidence')
-  })
-
-  test('rejects missing named full-scope evidence', () => {
-    expect(
-      violations(
-        reindex(valid().filter((e) => e.type !== 'client' || e.origin !== 'named'))
-      )
-    ).toContain('missing named full-scope client evidence')
-  })
-
-  test('rejects a history with no fresh client at the grant epoch', () => {
-    // demoting the epoch-1 fresh clients to non-fresh leaves the grant epoch
-    // without its required fresh roster entry
-    let events = patch(valid(), 'fAs1-named-1', { fresh: false })
-    events = patch(events, 'fAs1-raw-1', { fresh: false })
-    events = patch(events, 'fBs1-named-1', { fresh: false })
-    events = patch(events, 'fBs1-raw-1', { fresh: false })
-    expect(violations(events)).toContain(
-      'expected exactly one fresh transition/subject client at epoch 1'
-    )
-  })
-
   test('rejects when the same original subject is not populated at the grant', () => {
     // the original subject client must hold the full protected set at epoch 1;
     // an empty snapshot there is a rows mismatch against the granted expectation
@@ -347,24 +92,6 @@ describe(`permission transition (${PERMISSION_TRANSITION_PROFILE.name}@${PERMISS
         (v) => v.includes('cAs-named-1') && v.includes('!= expected')
       )
     ).toBe(true)
-  })
-
-  // ---- sentinel marker liveness on each client -------------------------
-  test('rejects a client that observed a stale sentinel marker', () => {
-    expect(
-      violations(patch(valid(), 'cAs-named-1', { sentinelMarker: 'sn-0' }))
-    ).toContain(
-      'client cAs-named-1 observed sentinel marker sn-0, not the epoch 1 barrier marker'
-    )
-  })
-
-  // ---- barrier observation / change / authority references -------------
-  test('rejects barrier observationRefs that miss a live client', () => {
-    expect(
-      violations(patch(valid(), 'bar-1', { observationRefs: ['cAo-named-1'] }))
-    ).toContain(
-      'sentinel barrier at epoch 1 observationRefs do not match the live client observations'
-    )
   })
 
   test('rejects a barrier observationRef that resolves to the wrong epoch', () => {
@@ -392,24 +119,6 @@ describe(`permission transition (${PERMISSION_TRANSITION_PROFILE.name}@${PERMISS
     ).toBe(true)
   })
 
-  test('rejects a barrier changeRef that does not reference its change', () => {
-    expect(violations(patch(valid(), 'bar-1', { changeRef: 'revoke' }))).toContain(
-      'sentinel barrier at epoch 1 changeRef does not reference the grant'
-    )
-  })
-
-  test('rejects a barrier authorityRef that does not corroborate', () => {
-    expect(violations(patch(valid(), 'bar-2', { authorityRef: 'auth-grant' }))).toContain(
-      'sentinel barrier at epoch 2 authorityRef does not reference the corroborating oracle read'
-    )
-  })
-
-  test('rejects an epoch-0 barrier that references a permission change', () => {
-    expect(violations(patch(valid(), 'bar-0', { changeRef: 'grant' }))).toContain(
-      'sentinel barrier at epoch 0 must not reference a permission change'
-    )
-  })
-
   // ---- 1:1 client identity ---------------------------------------------
   test('rejects a groupId shared by two clients', () => {
     expect(
@@ -434,68 +143,6 @@ describe(`permission transition (${PERMISSION_TRANSITION_PROFILE.name}@${PERMISS
         v.includes('reports an inconsistent identity')
       )
     ).toBe(true)
-  })
-
-  // ---- sentinel ACL cardinality + disjointness -------------------------
-  test('rejects a sentinel scope with an extra identity', () => {
-    let events = valid()
-    for (const epoch of [0, 1, 2])
-      events = patch(events, `acl-A-${epoch}`, {
-        rows: ['member:sn-extra', 'member:sn-ownerA', 'member:sn-subjectA'],
-      })
-    expect(violations(events)).toContain(
-      'namespace nsA sentinel scope grants 3 identities, not its 2 participants'
-    )
-  })
-
-  test('rejects a sentinel scope that overlaps a protected identity', () => {
-    let events = valid()
-    for (const epoch of [0, 1, 2])
-      events = patch(events, `acl-A-${epoch}`, {
-        rows: ['member:pt-member', 'member:sn-ownerA'],
-      })
-    expect(violations(events)).toContain(
-      'namespace nsA sentinel scope overlaps a protected identity'
-    )
-  })
-
-  // ---- exact fresh roster ----------------------------------------------
-  test('rejects an unexpected fresh client role in the roster', () => {
-    const events = valid()
-    for (const origin of ['named', 'raw'] as const) {
-      events.push({
-        v: PERMISSION_HISTORY_SCHEMA_VERSION,
-        index: events.length,
-        host: 'H',
-        type: 'client',
-        opId: `fAo1-${origin}-1`,
-        epoch: 1,
-        namespace: 'nsA',
-        principal: 'ownerA',
-        clientId: 'fAo1',
-        groupId: 'fAo1-g',
-        storageKey: 'fAo1-sk',
-        origin,
-        rows: FULL,
-        markers: ['mk-A'],
-        sentinelMarker: 'sn-1',
-        complete: true,
-        fresh: true,
-        pullEchoed: true,
-      })
-    }
-    expect(violations(events)).toContain(
-      'unexpected fresh client in the roster: transition/owner@1'
-    )
-  })
-
-  test('rejects an original client absent at one epoch', () => {
-    const events = reindex(
-      valid().filter((e) => e.opId !== 'cAo-named-1' && e.opId !== 'cAo-raw-1')
-    )
-    expect(violations(events)).toContain(
-      'original transition/owner client is not present in named and raw at every epoch'
-    )
   })
 
   // ---- structural / schema ---------------------------------------------

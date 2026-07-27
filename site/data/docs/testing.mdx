@@ -1,6 +1,6 @@
 ---
 title: Testing by runtime
-description: How Orez separates evidence for Node, Orez Lite, and pg-to-sqlite.
+description: How Orez separates evidence for Node and Orez Lite.
 ---
 
 # Testing by runtime
@@ -16,12 +16,8 @@ Orez crosses PostgreSQL, SQLite, WebAssembly, and Zero protocol surfaces. Each r
     Deterministic model, differential, fault, permissions, retention, WASM-host, and
     deployment qualification layers.
   </DocCard>
-  <DocCard href="/docs/reference/pg-to-sqlite" title="pg-to-sqlite testing">
-    Translation fixtures and differential execution against an independent
-    PostgreSQL-on-SQLite implementation.
-  </DocCard>
 </CardGrid>
 
 ## Reading an evidence claim
 
-For each claim, the runtime page identifies the layer that ran, the implementation boundaries it crossed, and the asserted result. Compiler fixtures establish translation behavior. Process scenarios establish the behavior of a running stack under the stated setup.
+For each claim, the runtime page identifies the layer that ran, the implementation boundaries it crossed, and the asserted result. Process scenarios establish the behavior of a running stack under the stated setup.

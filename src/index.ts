@@ -34,7 +34,6 @@ import {
 } from './child-process.js'
 import { getConfig, getConnectionString } from './config.js'
 import { log, port, setLogLevel, setLogStore } from './log.js'
-import { DoBackend } from './pg-proxy-do-backend.js'
 import { PgStartupBarrier, startPgProxy } from './pg-proxy.js'
 import {
   createPGliteInstances,
@@ -91,17 +90,6 @@ type ZeroChildProcess = ChildProcess & {
   __orezTail?: string[]
 }
 
-function ensureDoBackendNamespace(dataDir: string): string {
-  const marker = resolve(dataDir, 'do-backend-namespace')
-  if (existsSync(marker)) {
-    const existing = readFileSync(marker, 'utf8').trim()
-    if (existing) return existing
-  }
-  const next = randomUUID()
-  writeFileSync(marker, `${next}\n`)
-  return next
-}
-
 function resolveNodeBinary(): string {
   const explicitNode = process.env.OREZ_NODE
   if (explicitNode && existsSync(explicitNode)) {
@@ -151,7 +139,6 @@ export type {
   OrezConfig,
   ZeroLiteConfig,
 } from './config.js'
-export { deployTimeSchemaBatchStatements } from './pg-proxy-do-backend.js'
 export { installChangeTracking } from './replication/change-tracker.js'
 
 // helper to run a hook (string command or callback function)
@@ -306,7 +293,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   const onDbReadyTimeoutMs = config.onDbReadyTimeoutMs ?? 30_000
   setLogLevel(config.logLevel)
 
-  if (config.ephemeral && !config.doBackendUrl) {
+  if (config.ephemeral) {
     config.pgliteOptions = { ...config.pgliteOptions, dataDir: 'memory://' }
     config.ephemeralDir = resolve(
       tmpdir(),
@@ -436,19 +423,17 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
   // otherwise, separate instances for postgres, zero_cvr, zero_cdb with optional
   // worker threads for non-blocking WASM execution.
 
-  // ── DO backend path (replaces PGlite) ──────────────────────────────
   let instances: any,
     db: any,
     stopCheckpoint: any,
     stopVacuum: any = () => {}
   let migrationsApplied = 0
-  let isDoBackend = false
   let nativePg: import('./native-postgres.js').NativePostgres | undefined
   let pgliteVacuumMs = 0
   let delayedVacuumTimer: ReturnType<typeof setTimeout> | undefined
 
   const queuePgliteVacuum = (delayMs = 15_000) => {
-    if (isDoBackend || pgliteVacuumMs <= 0) return
+    if (pgliteVacuumMs <= 0) return
     if (delayedVacuumTimer) clearTimeout(delayedVacuumTimer)
     delayedVacuumTimer = setTimeout(() => {
       delayedVacuumTimer = undefined
@@ -457,26 +442,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
     delayedVacuumTimer.unref?.()
   }
 
-  if (config.doBackendUrl) {
-    isDoBackend = true
-    log.orez(`using DO backend: ${config.doBackendUrl}`)
-    const backendUrl = config.doBackendUrl.replace(/\/+$/, '')
-    const doNamespace = ensureDoBackendNamespace(config.dataDir)
-    const doInstances = {
-      postgres: new DoBackend(backendUrl, 'postgres', doNamespace),
-      cvr: new DoBackend(backendUrl, 'zero_cvr', doNamespace),
-      cdb: new DoBackend(backendUrl, 'zero_cdb', doNamespace),
-      postgresReplicas: [],
-    }
-    await Promise.all([
-      doInstances.postgres.waitReady,
-      doInstances.cvr.waitReady,
-      doInstances.cdb.waitReady,
-    ])
-    instances = doInstances
-    db = doInstances.postgres
-    stopCheckpoint = () => {}
-  } else if (config.backend === 'postgres') {
+  if (config.backend === 'postgres') {
     // ── native postgres backend (real postgres, real logical replication) ──
     const { startNativePostgres } = await import('./native-postgres.js')
     nativePg = await startNativePostgres(config)
@@ -608,14 +574,11 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         log.debug.orez('re-installing change tracking after on-db-ready')
         await installChangeTracking(db)
       }
-      if (!isDoBackend && pgliteVacuumMs > 0) {
+      if (pgliteVacuumMs > 0) {
         await vacuumPGliteChurnTables(instances)
       }
     }
 
-    if (isDoBackend) {
-      await installChangeTracking(db)
-    }
     pgStartupBarrier?.release()
   } catch (error) {
     // Release waiting sockets with the initialization error instead of leaving
@@ -707,7 +670,7 @@ export async function startZeroLite(overrides: Partial<ZeroLiteConfig> = {}) {
         const details = tail?.length ? tail.slice(-20).join('\n') : ''
         throw new Error(`zero-cache crashed during startup stability check\n${details}`)
       }
-      if (!isDoBackend && pgliteVacuumMs > 0) {
+      if (pgliteVacuumMs > 0) {
         await vacuumPGliteChurnTables(instances)
         queuePgliteVacuum()
       }

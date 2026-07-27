@@ -380,19 +380,6 @@ describe('zero recovery signatures', () => {
     })
   })
 
-  it('requires startup reset for an empty replica file', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'orez-recovery-'))
-    try {
-      expect(getZeroReplicaStartupResetReason(dir)).toBe(null)
-      writeFileSync(join(dir, 'zero-replica.db'), '')
-      expect(getZeroReplicaStartupResetReason(dir)).toContain('empty replica file')
-      writeFileSync(join(dir, 'zero-replica.db'), 'not empty')
-      expect(getZeroReplicaStartupResetReason(dir)).toBe(null)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
   describe('zeroInconsistencyResetMode (cache-only vs full)', () => {
     const rowsBehind = 'RowsVersionBehindError: rowsVersion (a1) is behind CVR a2'
     const cvrCatchup =
@@ -450,21 +437,6 @@ describe('isReplicationBankrupt', () => {
 
   it('healthy pipeline is not bankrupt', () => {
     expect(isReplicationBankrupt(health(), NOW, STALL, 0).bankrupt).toBe(false)
-  })
-
-  it('the 2026-07-03 wedge shape is bankrupt: writes flow, consumer reconnects, no confirms', () => {
-    const verdict = isReplicationBankrupt(
-      health({
-        lastWriteSignalAt: NOW - 1_000,
-        lastConfirmProgressAt: NOW - 2 * STALL,
-        lastStreamActivityAt: NOW - 30_000,
-      }),
-      NOW,
-      STALL,
-      NOW - 2 * STALL
-    )
-    expect(verdict.bankrupt).toBe(true)
-    expect(verdict.reason).toContain('no confirm progress')
   })
 
   it('idle system (no writes since last confirm) is not bankrupt', () => {

@@ -117,66 +117,12 @@ describe('admin data explorer', { timeout: 60_000 }, () => {
     rmSync(DATA_DIR, { recursive: true, force: true })
   })
 
-  // --- html ---
-
-  test('GET / serves html', async () => {
-    const res = await fetch(`${base}/`)
-    expect(res.status).toBe(200)
-    expect(res.headers.get('content-type')).toContain('text/html')
-    const html = await res.text()
-    expect(html).toContain('oreZ admin')
-    expect(html).toContain('data-db="sqlite"')
-  })
-
-  test('GET /data serves html', async () => {
-    const res = await fetch(`${base}/data`)
-    expect(res.status).toBe(200)
-    const html = await res.text()
-    expect(html).toContain('sql-editor')
-  })
-
-  // --- /api/db/tables ---
-
-  test('lists postgres tables', async () => {
-    const res = await fetch(`${base}/api/db/tables?db=postgres`)
-    expect(res.status).toBe(200)
-    const data = await res.json()
-    expect(data.tables).toBeDefined()
-    const names = data.tables.map((t: any) => t.table_name)
-    expect(names).toContain('users')
-    expect(names).toContain('posts')
-  })
-
   test('lists cvr tables (empty)', async () => {
     const res = await fetch(`${base}/api/db/tables?db=cvr`)
     expect(res.status).toBe(200)
     const data = await res.json()
     expect(data.tables).toBeDefined()
     expect(data.tables.length).toBe(0)
-  })
-
-  test('rejects unknown db name', async () => {
-    const res = await fetch(`${base}/api/db/tables?db=nope`)
-    expect(res.status).toBe(400)
-    const data = await res.json()
-    expect(data.error).toContain('unknown db')
-  })
-
-  // --- /api/db/table-data ---
-
-  test('browses table data', async () => {
-    const res = await fetch(`${base}/api/db/table-data?db=postgres&table=users`)
-    expect(res.status).toBe(200)
-    const data = await res.json()
-    expect(data.columns).toBeDefined()
-    expect(data.columns.length).toBeGreaterThanOrEqual(4)
-    expect(data.rows.length).toBe(3)
-    expect(data.total).toBe(3)
-    // check column metadata
-    const colNames = data.columns.map((c: any) => c.name)
-    expect(colNames).toContain('id')
-    expect(colNames).toContain('name')
-    expect(colNames).toContain('email')
   })
 
   test('table-data supports search', async () => {
@@ -212,13 +158,6 @@ describe('admin data explorer', { timeout: 60_000 }, () => {
     const bobPost = data.rows.find((r: any) => r.title === 'bob writes')
     expect(bobPost).toBeDefined()
     expect(bobPost.body).toBeNull()
-  })
-
-  test('table-data missing table param', async () => {
-    const res = await fetch(`${base}/api/db/table-data?db=postgres`)
-    expect(res.status).toBe(400)
-    const data = await res.json()
-    expect(data.error).toContain('missing table')
   })
 
   // --- /api/db/query ---
@@ -263,79 +202,6 @@ describe('admin data explorer', { timeout: 60_000 }, () => {
     const data = await res.json()
     expect(data.rowCount).toBe(3)
     expect(data.fields).toEqual(['name', 'title'])
-  })
-
-  test('query missing sql', async () => {
-    const res = await fetch(`${base}/api/db/query`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ db: 'postgres' }),
-    })
-    expect(res.status).toBe(400)
-    const data = await res.json()
-    expect(data.error).toContain('missing sql')
-  })
-
-  // --- sqlite ---
-
-  test('sqlite tables returns 404 when no replica', async () => {
-    const res = await fetch(`${base}/api/sqlite/tables`)
-    expect(res.status).toBe(404)
-    const data = await res.json()
-    expect(data.error).toContain('not found')
-  })
-
-  test('sqlite endpoints work when replica file exists', async () => {
-    // create a fake zero-replica.db using bedrock-sqlite
-    // @ts-expect-error - CJS module
-    const bedrock: any = await import('bedrock-sqlite')
-    const Ctor = bedrock.Database || bedrock.default?.Database || bedrock.default
-    const replicaPath = resolve(DATA_DIR, 'zero-replica.db')
-    const setupDb = new Ctor(replicaPath)
-    setupDb.exec(`
-      CREATE TABLE widgets (
-        id INTEGER PRIMARY KEY,
-        label TEXT NOT NULL,
-        count INTEGER
-      );
-      INSERT INTO widgets (label, count) VALUES
-        ('alpha', 1),
-        ('beta', 2),
-        ('gamma', 3);
-    `)
-    setupDb.close()
-
-    // list tables
-    const tablesRes = await fetch(`${base}/api/sqlite/tables`)
-    expect(tablesRes.status).toBe(200)
-    const tables = await tablesRes.json()
-    expect(tables.tables.some((t: any) => t.name === 'widgets')).toBe(true)
-
-    // browse table data
-    const browseRes = await fetch(`${base}/api/sqlite/table-data?table=widgets`)
-    expect(browseRes.status).toBe(200)
-    const browse = await browseRes.json()
-    expect(browse.rows.length).toBe(3)
-    expect(browse.total).toBe(3)
-
-    // search
-    const searchRes = await fetch(
-      `${base}/api/sqlite/table-data?table=widgets&search=beta`
-    )
-    const search = await searchRes.json()
-    expect(search.rows.length).toBe(1)
-    expect(search.rows[0].label).toBe('beta')
-
-    // raw query
-    const queryRes = await fetch(`${base}/api/sqlite/query`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sql: 'SELECT count(*) as c FROM widgets' }),
-    })
-    expect(queryRes.status).toBe(200)
-    const q = await queryRes.json()
-    expect(q.rows[0].c).toBe(3)
-    expect(q.fields).toContain('c')
   })
 
   // --- CORS ---

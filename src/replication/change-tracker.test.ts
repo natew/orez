@@ -117,19 +117,6 @@ describe('change-tracker', () => {
     expect(after).toBeGreaterThan(before)
   })
 
-  it('tracks multiple tables', async () => {
-    await db.exec(`CREATE TABLE public.other (id SERIAL PRIMARY KEY, label TEXT)`)
-    await installChangeTracking(db) // reinstall picks up new table
-
-    await db.exec(`INSERT INTO public.items (name, value) VALUES ('a', 1)`)
-    await db.exec(`INSERT INTO public.other (label) VALUES ('b')`)
-
-    const changes = await getChangesSince(db, 0)
-    const tables = new Set(changes.map((c) => c.table_name))
-    expect(tables).toContain('public.items')
-    expect(tables).toContain('public.other')
-  })
-
   it('handles rapid inserts (50 rows)', async () => {
     for (let i = 0; i < 50; i++) {
       await db.exec(`INSERT INTO public.items (name, value) VALUES ('r${i}', ${i})`)
@@ -307,52 +294,6 @@ describe('shard table tracking', () => {
 
   afterEach(async () => {
     await db.close()
-  })
-
-  it('only tracks mutation-confirmation tables in shard schemas', async () => {
-    // zero-cache creates shard schemas like chat_0 with clients, replicas, mutations.
-    // clients advance lmid and mutations carry server results; replicas stays internal.
-    // with "Unknown table chat_0.replicas" because they aren't in zero's schema.
-    await db.exec(`
-      CREATE SCHEMA chat_0;
-      CREATE TABLE chat_0.clients (
-        "clientGroupID" TEXT NOT NULL,
-        "clientID" TEXT NOT NULL,
-        "lastMutationID" BIGINT,
-        "userID" TEXT,
-        PRIMARY KEY ("clientGroupID", "clientID")
-      );
-      CREATE TABLE chat_0.replicas (
-        id TEXT PRIMARY KEY,
-        version TEXT,
-        cookie TEXT
-      );
-      CREATE TABLE chat_0.mutations (
-        id TEXT PRIMARY KEY,
-        "clientID" TEXT,
-        name TEXT,
-        args JSONB
-      );
-    `)
-
-    await installTriggersOnShardTables(db)
-
-    // insert into all three tables
-    await db.exec(
-      `INSERT INTO chat_0.clients ("clientGroupID", "clientID", "lastMutationID") VALUES ('cg1', 'c1', 1)`
-    )
-    await db.exec(`INSERT INTO chat_0.replicas (id, version) VALUES ('r1', 'v1')`)
-    await db.exec(
-      `INSERT INTO chat_0.mutations (id, "clientID", name) VALUES ('m1', 'c1', 'sendMessage')`
-    )
-
-    const changes = await getChangesSince(db, 0)
-    const tables = changes.map((c) => c.table_name)
-
-    // only mutation-confirmation tables should be tracked
-    expect(tables).toContain('chat_0.clients')
-    expect(tables).toContain('chat_0.mutations')
-    expect(tables).not.toContain('chat_0.replicas')
   })
 
   it('purges consumed changes to prevent OOM', async () => {

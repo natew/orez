@@ -4,7 +4,7 @@
     "declaration": true,
     "declarationMap": true,
     "noEmit": false,
-    "outDir": "../../dist/sync-browser-host",
+    "outDir": "../orez-lite/dist/browser",
     "rootDir": "./src",
     "sourceMap": true
   },

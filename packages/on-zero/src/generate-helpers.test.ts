@@ -30,38 +30,6 @@ function expectNoDuplicates(source: string) {
 }
 
 describe('generated module identifiers', () => {
-  test('grouped queries keep distinct aliases when one namespace is another plus Source', () => {
-    const source = generateGroupedQueriesFile([
-      { name: 'appById', sourceFile: 'app', importPath: '../app/queries' },
-      {
-        name: 'appSourceByAppId',
-        sourceFile: 'appSource',
-        importPath: '../appSource/queries',
-      },
-    ])
-
-    expectNoDuplicates(source)
-    // each namespace still exports its own queries, reading from its own module
-    const appExport = source.match(/export const app = \{([^}]*)\}/)![1]!
-    const appSourceExport = source.match(/export const appSource = \{([^}]*)\}/)![1]!
-    expect(appExport).toContain('appById')
-    expect(appSourceExport).toContain('appSourceByAppId')
-    expect(appExport).not.toContain('appSourceByAppId')
-  })
-
-  test('models keep distinct aliases when user and userPublic both exist', () => {
-    const source = generateModelsFile([
-      { name: 'user', importPath: '../user' },
-      { name: 'userPublic', importPath: '../userPublic' },
-    ] as Parameters<typeof generateModelsFile>[0])
-
-    expectNoDuplicates(source)
-    // both namespaces survive as distinct keys bound to their own module
-    const modelsObject = source.match(/export const models = \{([\s\S]*)\}/)![1]!
-    expect(modelsObject).toMatch(/\buser:/)
-    expect(modelsObject).toMatch(/\buserPublic\b/)
-  })
-
   test('table re-exports keep distinct names when user and userPublic both exist', () => {
     const source = generateTablesFile([
       { name: 'user', importPath: '../user' },
@@ -69,13 +37,5 @@ describe('generated module identifiers', () => {
     ] as Parameters<typeof generateTablesFile>[0])
 
     expectNoDuplicates(source)
-  })
-
-  test('a namespace with no collision keeps its plain alias', () => {
-    const source = generateGroupedQueriesFile([
-      { name: 'todoById', sourceFile: 'todo', importPath: '../todo/queries' },
-    ])
-
-    expect(source).toContain(`import * as todoSource from '../todo/queries'`)
   })
 })

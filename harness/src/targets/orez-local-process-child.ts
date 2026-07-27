@@ -8,7 +8,7 @@ import { createServer } from 'node:http'
 import { createHarnessSyncServer } from '../executor-host.js'
 import { seedSqlite, userIDFromAuth } from '../fixture-data.js'
 
-import type { ZeroHttpSyncDb as SyncDb } from '../../../src/zero-http/mount.js'
+import type { ZeroHttpSyncDb as SyncDb } from 'orez-lite/zero-http'
 
 const port = Number(process.env.ZHARNESS_PROCESS_PORT)
 const filename = process.env.ZHARNESS_PROCESS_DB

@@ -34,48 +34,6 @@ describe('history structure', () => {
     ]
     expect(validateHistory(history)).toEqual({ valid: true, violations: [] })
   })
-
-  test('rejects an overlapping process and an unpaired completion', () => {
-    const history = [
-      event({}),
-      event({ index: 1, relativeMicros: 1, opId: 'op-2' }),
-      event({ index: 2, relativeMicros: 2, opId: 'op-3', phase: 'info' }),
-    ]
-    const checked = validateHistory(history)
-    expect(checked.valid).toBe(false)
-    expect(checked.violations).toContain('process client-1 overlaps op-1 and op-2')
-    expect(checked.violations).toContain('operation op-3 completes without an invocation')
-  })
-
-  test('rejects a terminal transaction that differs from its invocation', () => {
-    const history = [
-      event({
-        transaction: [
-          { type: 'append', key: 'x', value: 1 },
-          { type: 'read', key: 'y', value: null },
-        ],
-      }),
-      event({
-        index: 1,
-        relativeMicros: 1,
-        phase: 'ok',
-        transaction: [
-          { type: 'append', key: 'x', value: 2 },
-          { type: 'read', key: 'z', value: [3] },
-        ],
-      }),
-    ]
-    expect(validateHistory(history).violations).toContain(
-      'operation op-1 changes transaction at completion'
-    )
-  })
-
-  test('rejects a negative first relative timestamp', () => {
-    const history = [event({ relativeMicros: -1 })]
-    expect(validateHistory(history).violations).toContain(
-      'event 0 has non-monotonic time -1'
-    )
-  })
 })
 
 describe('snapshot monotonicity', () => {

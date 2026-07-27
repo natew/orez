@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@orez/sync-cf-host-m0",
+      "name": "@orez-lite-cf-host-m0",
       "devDependencies": {
         "@cloudflare/workers-types": "4.20260617.1",
         "typescript": "5.9.3",

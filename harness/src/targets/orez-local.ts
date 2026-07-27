@@ -9,6 +9,7 @@ import { createServer, type Server } from 'node:http'
 
 import { Zero } from '@rocicorp/zero'
 
+import { findPort } from '../../../src/port.js'
 import {
   assertExpectedExactlyOncePush,
   parseExactlyOncePush,
@@ -22,12 +23,12 @@ import { mutators, schema } from '../fixture.js'
 // instructions in the vendor file header
 import { ensureHttpPullTransport } from '../vendor/httpPullTransport.js'
 
+import type { Rows, SyncTarget } from '../target.js'
 import type {
   ZeroHttpSyncDb as SyncDb,
   ZeroHttpVisibility,
   ZeroHttpVisibilityInvalidation,
-} from '../../../src/zero-http/mount.js'
-import type { Rows, SyncTarget } from '../target.js'
+} from 'orez-lite/zero-http'
 
 export type PullObservation = {
   body: unknown
@@ -71,8 +72,9 @@ export async function startOrezLocal(opts?: {
   onPull?: (observation: PullObservation) => void
   fetch?: typeof fetch
 }): Promise<OrezLocalTarget> {
-  // random per run — see stock-zero.ts port note
-  const port = opts?.port ?? 59_000 + Math.floor(Math.random() * 4_000)
+  const port =
+    opts?.port ??
+    (await findPort(25_000 + Math.floor(Math.random() * 2_000), { host: '::' }))
   const sqlite = new Database(':memory:')
   const db = bunSqliteDb(sqlite)
 
