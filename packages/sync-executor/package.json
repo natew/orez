@@ -11,6 +11,10 @@
     "./core": {
       "types": "./dist/core.d.ts",
       "import": "./dist/core.js"
+    },
+    "./sql-wire": {
+      "types": "./dist/sql-wire.d.ts",
+      "import": "./dist/sql-wire.js"
     }
   },
   "scripts": {
