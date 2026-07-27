@@ -29,19 +29,51 @@ Consumed by soot as of `soot@0bfa3274`, against `orez-lite@0.10.7-canary.1785181
 
 ## What is NOT built
 
-- **No Cloudflare DO host adapter.** `host.ts` routes frames and `hub.ts` holds
-  the state, but nothing wires them into `cf-do/worker.ts`. Two open questions
-  there, neither trivial: how an application supplies its manifest to a generic
-  DO class (`validate` is a function, so it cannot be serialized into the deploy
-  bundle), and hibernation. A hibernatable socket outlives the DO's memory, so
-  subscriptions have to live in the socket attachment and the hub has to
-  rehydrate from `ctx.getWebSockets()` before any producer frame is served.
-  Generations need no such treatment: they are ephemeral by definition and the
-  durable row is still truth.
+- **No Cloudflare DO host adapter.** `realtime/host.ts` routes frames and
+  `realtime/hub.ts` holds the state, but nothing wires them into a Durable
+  Object. The design below is settled; only the implementation is missing.
 - **No Rust producer client.** agentbus writes `session.latest_summary_body`
   from `src/pg_writer.rs`, so its producer is a Rust process and cannot use
   `producer-socket.ts`. It needs either a small Rust client for the begin/publish
   frames, or a TypeScript relay point that already sees the summary chunks.
+
+## The DO adapter, as designed
+
+It goes in `packages/sync-cf-host/src/host.ts`, NOT in `cf-do/worker.ts`. That
+package already has the factory an application configures, so the manifest needs
+no new mechanism:
+
+- **Manifest injection**: add `streamingManifest?: StreamingManifest` to
+  `SyncHostConfig` (`sync-cf-host/src/types.ts:84`). `createSyncDurableObject`
+  (`host.ts:386`) already closes over `config` to build `compileQuery` and the
+  caps, so the hub is constructed the same way. This sidesteps serialization
+  entirely: `validate` stays a live function in the application's own bundle,
+  which is why a serialized-into-the-deploy-bundle approach was rejected.
+- **Frames** ride the existing wake socket. `webSocketMessage` (`host.ts:1972`)
+  currently answers only `'ping'`; `subscribe`/`unsubscribe` route through
+  `applyClientFrame`, and the producer frames through `applyProducerFrame`.
+  Realtime frames are `[type, body]` tuples, the same shape Zero's protocol
+  already uses on that socket.
+- **Lifecycle**: `webSocketClose` (`host.ts:1977`) and `webSocketError`
+  (`host.ts:1991`) call `hub.dropConnection` / `hub.dropProducer`.
+
+Two things that will bite whoever implements it:
+
+- **Hibernation.** A hibernatable socket outlives the DO's memory, so the hub is
+  empty after a wake while sockets are still open. Subscriptions must live in the
+  socket attachment (`host.ts:107`, today just `{ clientID: string }`) and the hub
+  must rehydrate from `ctx.getWebSockets()` before serving any producer frame,
+  or a client that subscribed before hibernation silently receives nothing.
+  Replaying `hub.subscribe` per stored topic is the right rehydration, because it
+  re-authorizes as a side effect. Generations need no such treatment: they are
+  ephemeral by definition and the durable row is still truth.
+- **Identity.** `RealtimeIdentity` needs `userID` + `clientGroupID`, and the wake
+  socket's attachment carries only `clientID`. `#wake` (`host.ts:1712`) takes it
+  from a query parameter and authenticates nothing. A subscription is an
+  authorization decision (it grants a live feed of a row the caller may not be
+  allowed to read), so the upgrade has to run `config.authenticate` and persist
+  the resulting claims in the attachment. Do not let the client assert its own
+  userID here.
 
 ## Original proposal
 
