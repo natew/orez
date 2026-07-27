@@ -10,6 +10,7 @@ import { join, resolve } from 'node:path'
 import { Zero } from '@rocicorp/zero'
 import postgres from 'postgres'
 
+import { findPortBlock } from '../../../src/port.js'
 import { startAppServer } from '../app-server.js'
 import { DDL, SEED, jsonColumns, mutators, permissions, schema } from '../fixture.js'
 
@@ -95,11 +96,12 @@ export async function startStockZero(opts?: {
   appPort?: number
   logLevel?: string
 }): Promise<SyncTarget> {
-  // random port block per run: a crashed/timed-out previous run can leave an
-  // orphaned zero-cache holding fixed ports (EADDRINUSE crash-loop). NOTE:
-  // zero-cache binds ZERO_PORT+1 (change-streamer) and +2 internally — the
-  // app server must stay clear of that range.
-  const base = 27_000 + Math.floor(Math.random() * 2_000) * 16
+  // stay below linux's ephemeral client-port range: zero-cache binds late in
+  // boot, after postgres setup has opened connections that can otherwise
+  // claim its listener port. zero-cache also binds ZERO_PORT+1 and +2.
+  const base = await findPortBlock(20_000 + Math.floor(Math.random() * 300) * 16, 13, {
+    host: '::',
+  })
   const pgPort = opts?.pgPort ?? base
   const zeroPort = opts?.zeroPort ?? base + 4
   const appPort = opts?.appPort ?? base + 12
