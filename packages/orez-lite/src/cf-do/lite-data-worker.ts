@@ -191,9 +191,21 @@ export interface OrezResolvedDataRequest {
   url: URL
 }
 
+export type OrezDataWorkerDurableObject = OrezZeroDO & {
+  orezApplicationSchemaStatus(version: string): OrezSchemaStatus
+  orezRunApplicationSchema(
+    version: string,
+    instance: string,
+    options?: { force?: boolean }
+  ): Promise<unknown>
+  orezStartApplicationSchema(version: string, instance: string): OrezSchemaStatus
+  orezImportBatch(statements: readonly NamespaceBackupStatement[]): Promise<void>
+  orezBeginRestore(): Promise<void>
+}
+
 export interface OrezDataWorkerResult<Env extends OrezDataWorkerEnv> {
-  ZeroSqlDO: new (ctx: any, env: Env) => OrezZeroDO
-  ZeroDO: new (ctx: any, env: Env) => OrezZeroDO
+  ZeroSqlDO: new (ctx: any, env: Env) => OrezDataWorkerDurableObject
+  ZeroDO: new (ctx: any, env: Env) => OrezDataWorkerDurableObject
   fetch(request: Request, env: Env, ctx: OrezExecutionContext): Promise<Response>
   scheduled(event: OrezScheduledEvent, env: Env, ctx: OrezExecutionContext): Promise<void>
   applicationSqlClient(
