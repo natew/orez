@@ -822,6 +822,39 @@ pub fn engine_handle_query_pull(
     .and_then(|value| to_js(&value))
 }
 
+/// Authorize a realtime field subscription.
+///
+/// Answers the one question a host needs before it will stream a row's field to
+/// a client: does this client group's own durable query membership already
+/// deliver that row, and does the group belong to the authenticated user?
+///
+/// A negative answer is not always a denial. `authorized: false` with
+/// `ownsGroup: true` is the optimistic-row race, where the client legitimately
+/// holds a row from its own mutation that the server has not recorded
+/// membership for yet; the host answers that subscription pending and the
+/// client retries after its next pull. `ownsGroup: false` is a real denial.
+#[wasm_bindgen]
+pub fn engine_authorize_realtime_subscription(
+    db: &JsSyncDb,
+    schema: JsValue,
+    client_group_id: &str,
+    user_id: &str,
+    table: &str,
+    pk: JsValue,
+) -> Result<JsValue, JsValue> {
+    let tables = tables_from_js(schema)?;
+    let pk: serde_json::Value = from_js(pk)?;
+    let mut db = WasmDb(db);
+    let owns_group = sync_core::query::group_belongs_to_user(&mut db, client_group_id, user_id)
+        .map_err(engine_error)?;
+    // never consult membership for a group the caller does not own: a group id
+    // is not a bearer token
+    let authorized = owns_group
+        && sync_core::query::row_membership(&mut db, &tables, client_group_id, table, &pk)
+            .map_err(engine_error)?;
+    to_js(&serde_json::json!({ "ownsGroup": owns_group, "authorized": authorized }))
+}
+
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum PushPlanWire {

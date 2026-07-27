@@ -625,6 +625,57 @@ fn read_query_row_keys(
     Ok(out)
 }
 
+// Is this row currently delivered to this client group?
+//
+// The authorization fact behind a realtime field subscription. It is the SAME
+// durable membership the group's transformed Zero queries produced, so a
+// subscriber can never reach a row its queries did not already authorize, and
+// no second permission language appears alongside Zero's.
+//
+// `pk` is the row's primary key as a JSON object; it is canonicalized here so a
+// caller may pass columns in any order (a realtime topic key arrives from a
+// client, where object key order is whatever the caller's literal used).
+//
+// A false answer is not necessarily a denial. During the optimistic-row race
+// the client legitimately holds a row from its own mutation that the server has
+// not recorded membership for yet, so a host answers that subscription pending
+// and the client retries after its next pull.
+pub fn row_membership(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+    group: &str,
+    table: &str,
+    pk: &Value,
+) -> Result<bool, EngineError> {
+    let Some(spec) = tables.get(table) else {
+        return Ok(false);
+    };
+    let key = canonical_pk(spec, pk);
+    Ok(read_ref(db, group, table, &key)? > 0)
+}
+
+// Does this client group belong to this user? Checked before membership so a
+// caller cannot borrow another user's group id to read its rows.
+pub fn group_belongs_to_user(
+    db: &mut dyn SyncDb,
+    group: &str,
+    user_id: &str,
+) -> Result<bool, EngineError> {
+    let rows = db.query(
+        "SELECT DISTINCT userID FROM _zsync_clients WHERE clientGroupID = ?",
+        &[text(group)],
+    )?;
+    if rows.is_empty() {
+        return Ok(false);
+    }
+    Ok(rows.iter().all(|row| match row.get("userID") {
+        Some(SqlValue::Text(owner)) => owner == user_id,
+        // a client row with no owner yet was claimed by this pull path already;
+        // treat it as unowned rather than as belonging to everyone
+        _ => false,
+    }))
+}
+
 fn read_ref(db: &mut dyn SyncDb, group: &str, table: &str, pk: &str) -> Result<i64, EngineError> {
     let rows = db.query(
         "SELECT CAST(refcount AS TEXT) AS c FROM _zsync_row_refs

@@ -18,7 +18,8 @@ pub use ast::{
 };
 pub use compile::{CompiledQuery, compile};
 pub use membership::{
-    clear_desires, init_query_schema, recompute_group, register_query, remove_desire, set_desire,
+    clear_desires, group_belongs_to_user, init_query_schema, recompute_group, register_query,
+    remove_desire, row_membership, set_desire,
 };
 pub use opacity::validate_encrypted_column_usage;
 pub use qpull::handle_query_pull;

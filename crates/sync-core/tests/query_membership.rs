@@ -521,3 +521,152 @@ fn transform_version_bump_forces_recompute() {
         .unwrap();
     assert!(noop.is_empty());
 }
+
+// The authorization fact behind a realtime field subscription: a row is
+// streamable to a client group exactly when that group's own transformed
+// queries already deliver it. This is the same _zsync_row_refs state the pull
+// path maintains, so no second permission language appears next to Zero's.
+#[test]
+fn realtime_membership_tracks_exactly_the_rows_a_group_receives() {
+    use sync_core::query::row_membership;
+
+    let mut host = Host::new();
+    host.register(
+        "open",
+        json!({ "table": "issue", "where": where_eq("closed", json!(false)) }),
+    );
+    host.desire("c", "open", 1);
+    let patch = host.recompute(&[]);
+    assert_eq!(put_ids(&patch), vec!["i1", "i3", "i4"]);
+
+    let tables = host.tables.clone();
+    let member = |host: &mut Host, id: &str| {
+        row_membership(&mut host.db, &tables, G, "issue", &json!({ "id": id })).unwrap()
+    };
+
+    // delivered rows are streamable
+    assert!(member(&mut host, "i1"));
+    assert!(member(&mut host, "i3"));
+    // i2 is closed, so it never entered this group's membership
+    assert!(
+        !member(&mut host, "i2"),
+        "a row the query excludes is not streamable"
+    );
+    // a row that does not exist at all
+    assert!(!member(&mut host, "nonexistent"));
+
+    // when a row leaves the query, its subscription authority leaves with it
+    host.exec("UPDATE issue SET closed = 1 WHERE id = 'i1'");
+    host.recompute(&[("issue", "i1")]);
+    assert!(
+        !member(&mut host, "i1"),
+        "a row that left the query is no longer streamable"
+    );
+    assert!(
+        member(&mut host, "i3"),
+        "unrelated rows keep their membership"
+    );
+
+    // and when it comes back, so does the authority
+    host.exec("UPDATE issue SET closed = 0 WHERE id = 'i1'");
+    host.recompute(&[("issue", "i1")]);
+    assert!(member(&mut host, "i1"));
+
+    // dropping the query drops every row's streamability
+    host.undesire("c", "open");
+    host.recompute(&[]);
+    for id in ["i1", "i3", "i4"] {
+        assert!(
+            !member(&mut host, id),
+            "{id} is not streamable with no desired query"
+        );
+    }
+}
+
+// A composite primary key has to resolve identically no matter what order the
+// caller's key object used, because a realtime topic key arrives from a client
+// where that order is whatever the calling code's object literal happened to be.
+#[test]
+fn realtime_membership_ignores_the_key_order_of_the_caller() {
+    use sync_core::query::row_membership;
+    use sync_core::value::ZeroColumnType;
+
+    let mut db = TestDb::memory();
+    db.exec(
+        "CREATE TABLE revision (workspaceID TEXT, id TEXT, body TEXT, PRIMARY KEY (workspaceID, id))",
+        &[],
+    )
+    .unwrap();
+    db.exec("INSERT INTO revision VALUES ('w1', 'r1', 'text')", &[])
+        .unwrap();
+    init_query_schema(&mut db).unwrap();
+
+    let tables = Tables::new().with(
+        "revision",
+        TableSpec {
+            columns: vec![
+                ("workspaceID".into(), ZeroColumnType::String),
+                ("id".into(), ZeroColumnType::String),
+                ("body".into(), ZeroColumnType::String),
+            ],
+            primary_key: vec!["workspaceID".into(), "id".into()],
+            encrypted_columns: Default::default(),
+            encrypted_physical_columns: Default::default(),
+        },
+    );
+
+    register_query(
+        &mut db,
+        &tables,
+        G,
+        "all",
+        &json!({ "table": "revision" }),
+        0,
+    )
+    .unwrap();
+    set_desire(&mut db, G, "c", "all", 1).unwrap();
+    db.transaction(|d| recompute_group(d, &tables, G, &BTreeSet::new()))
+        .unwrap();
+
+    let declared = json!({ "workspaceID": "w1", "id": "r1" });
+    let reversed = json!({ "id": "r1", "workspaceID": "w1" });
+    assert!(row_membership(&mut db, &tables, G, "revision", &declared).unwrap());
+    assert!(
+        row_membership(&mut db, &tables, G, "revision", &reversed).unwrap(),
+        "the same row must resolve regardless of the caller's key order"
+    );
+    // negative control: a different row is still not a member
+    let other = json!({ "workspaceID": "w1", "id": "r2" });
+    assert!(!row_membership(&mut db, &tables, G, "revision", &other).unwrap());
+}
+
+// A group id is not a bearer token: borrowing another user's group must not
+// hand over that group's rows.
+#[test]
+fn realtime_group_ownership_is_checked_against_the_authenticated_user() {
+    use sync_core::query::group_belongs_to_user;
+
+    // Host::new creates the application table; init_schema then adds the
+    // baseline metadata tables, which is the order a real host boots in
+    let mut host = Host::new();
+    let tables = host.tables.clone();
+    let db = &mut host.db;
+    init_schema(db, &tables).unwrap();
+    // the shape claim_client writes on a pull/push: the group's clients carry
+    // the owning user
+    db.exec(
+        "INSERT INTO _zsync_clients (clientGroupID, clientID, lastMutationID, userID)
+         VALUES (?, ?, 0, ?)",
+        &[
+            SqlValue::Text(G.into()),
+            SqlValue::Text("c1".into()),
+            SqlValue::Text("alice".into()),
+        ],
+    )
+    .unwrap();
+
+    assert!(group_belongs_to_user(db, G, "alice").unwrap());
+    assert!(!group_belongs_to_user(db, G, "mallory").unwrap());
+    // a group nobody has claimed grants nothing
+    assert!(!group_belongs_to_user(db, "unknown-group", "alice").unwrap());
+}
