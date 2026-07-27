@@ -331,23 +331,29 @@ The existing wake socket evolves into a typed realtime channel. Legacy
 Client to host:
 
 ```json
-["subscribe", {
-  "topic": {
-    "table": "message",
-    "key": { "id": "message-1" },
-    "field": "content"
+[
+  "subscribe",
+  {
+    "topic": {
+      "table": "message",
+      "key": { "id": "message-1" },
+      "field": "content"
+    }
   }
-}]
+]
 ```
 
 ```json
-["unsubscribe", {
-  "topic": {
-    "table": "message",
-    "key": { "id": "message-1" },
-    "field": "content"
+[
+  "unsubscribe",
+  {
+    "topic": {
+      "table": "message",
+      "key": { "id": "message-1" },
+      "field": "content"
+    }
   }
-}]
+]
 ```
 
 Host to client:
@@ -357,17 +363,20 @@ Host to client:
 ```
 
 ```json
-["field", {
-  "topic": {
-    "table": "message",
-    "key": { "id": "message-1" },
-    "field": "content"
-  },
-  "streamID": "019...",
-  "seq": 14,
-  "phase": "streaming",
-  "value": "complete current value"
-}]
+[
+  "field",
+  {
+    "topic": {
+      "table": "message",
+      "key": { "id": "message-1" },
+      "field": "content"
+    },
+    "streamID": "019...",
+    "seq": 14,
+    "phase": "streaming",
+    "value": "complete current value"
+  }
+]
 ```
 
 The terminal phases are `committing` and `aborted`. Every frame is bounded by
@@ -596,17 +605,17 @@ does not branch on Cloudflare, native, or browser execution.
 
 ## Failure semantics
 
-| Event | Visible result | Durable result |
-| --- | --- | --- |
-| One field frame is lost | Next complete value repairs the overlay | Unchanged |
-| Socket disconnects | Overlay becomes `stale`; reconnect resubscribes | Next pull converges |
-| Client joins mid-stream | Next complete value becomes current | Unchanged |
-| Producer aborts | Overlay drops to the Zero value | Unchanged unless the app committed separately |
-| Producer crashes | Inactivity deadline drops the overlay | Last committed Zero value remains |
-| Final commit fails | No successful end; overlay drops on abort or timeout | Existing row remains |
-| Final commit succeeds but pull is late | Final overlay stays in `committing` | Zero eventually supplies the same value |
-| Durable Object hibernates | Attachments restore generation fencing | Zero remains authoritative |
-| Two producers race | New `begin` supersedes the old stream generation | Application final-write fencing decides the database winner |
+| Event                                  | Visible result                                       | Durable result                                              |
+| -------------------------------------- | ---------------------------------------------------- | ----------------------------------------------------------- |
+| One field frame is lost                | Next complete value repairs the overlay              | Unchanged                                                   |
+| Socket disconnects                     | Overlay becomes `stale`; reconnect resubscribes      | Next pull converges                                         |
+| Client joins mid-stream                | Next complete value becomes current                  | Unchanged                                                   |
+| Producer aborts                        | Overlay drops to the Zero value                      | Unchanged unless the app committed separately               |
+| Producer crashes                       | Inactivity deadline drops the overlay                | Last committed Zero value remains                           |
+| Final commit fails                     | No successful end; overlay drops on abort or timeout | Existing row remains                                        |
+| Final commit succeeds but pull is late | Final overlay stays in `committing`                  | Zero eventually supplies the same value                     |
+| Durable Object hibernates              | Attachments restore generation fencing               | Zero remains authoritative                                  |
+| Two producers race                     | New `begin` supersedes the old stream generation     | Application final-write fencing decides the database winner |
 
 The socket offers low latency. Pull remains the recovery path.
 
@@ -684,16 +693,16 @@ would create a second replication protocol hidden inside the Zero protocol.
 
 ## Comparison
 
-| Property | A: ephemeral overlay | B: throttled durable writes | C: synthetic Zero patches |
-| --- | --- | --- | --- |
-| Application DB writes | Final by default | Repeated | Final only |
-| Existing query value changes directly | No | Yes | Yes |
-| Separate listening hook | Yes | No | No |
-| Offline intermediate value | No | Yes | Accidentally |
-| Stock Zero semantics | Preserved | Preserved | Violated |
-| Cloudflare write cost | Low | Potentially high | Low server cost, unsafe client state |
-| Reconnect model | Pull plus next field value | Pull | Ambiguous |
-| Recommendation | Yes | Only for low-rate durable progress | No |
+| Property                              | A: ephemeral overlay       | B: throttled durable writes        | C: synthetic Zero patches            |
+| ------------------------------------- | -------------------------- | ---------------------------------- | ------------------------------------ |
+| Application DB writes                 | Final by default           | Repeated                           | Final only                           |
+| Existing query value changes directly | No                         | Yes                                | Yes                                  |
+| Separate listening hook               | Yes                        | No                                 | No                                   |
+| Offline intermediate value            | No                         | Yes                                | Accidentally                         |
+| Stock Zero semantics                  | Preserved                  | Preserved                          | Violated                             |
+| Cloudflare write cost                 | Low                        | Potentially high                   | Low server cost, unsafe client state |
+| Reconnect model                       | Pull plus next field value | Pull                               | Ambiguous                            |
+| Recommendation                        | Yes                        | Only for low-rate durable progress | No                                   |
 
 ## Implementation slices
 
