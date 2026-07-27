@@ -10,9 +10,7 @@ type OrezSyncCfHostWasmOptions = {
 }
 
 /** load the sync engine for Vite's Node serve, SSR, and production build paths. */
-export function orezSyncCfHostWasm(
-  options: OrezSyncCfHostWasmOptions = {}
-): Plugin[] {
+export function orezSyncCfHostWasm(options: OrezSyncCfHostWasmOptions = {}): Plugin[] {
   const noExternal = ['orez-sync-cf-host', ...(options.noExternal ?? [])]
   return [
     {
