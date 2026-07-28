@@ -594,6 +594,13 @@ jobs:
       - name: build harness zero-http host
         run: bun run --cwd packages/orez-lite build:zero-http
 
+      # harness lanes import orez-sync-executor by package path, which resolves
+      # to dist. Bun reads the rest of the harness from TypeScript source, so
+      # nothing else in these lanes needs a build and it is easy to assume this
+      # one does not either.
+      - name: build sync-executor for harness lanes
+        run: bun run --cwd packages/sync-executor build
+
       - name: sync-cf-host push memory soak
         run: |
           cd packages/sync-cf-host

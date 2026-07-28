@@ -15,13 +15,13 @@
 
 import assert from 'node:assert/strict'
 
-import { createSocketProducer, encodeFrame } from 'orez-lite/realtime'
+import { createSocketProducer, encodeFrame } from 'orez-sync-executor/realtime'
 
 import { harnessStreaming } from '../../packages/sync-cf-host/src/harness-schema.js'
 import { mintHarnessWakeToken } from '../../packages/sync-cf-host/src/harness-wake-token.js'
 import { queries } from './fixture.js'
 
-import type { RealtimeTopic } from 'orez-lite/realtime'
+import type { RealtimeTopic } from 'orez-sync-executor/realtime'
 
 const args = process.argv.slice(2)
 const flag = (name: string): string | undefined => {
