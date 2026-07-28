@@ -313,4 +313,58 @@ describe('createOrezDataWorker', () => {
     })
     expect(new URL(fetch.mock.calls[0]?.[0].url).pathname).toBe('/changes')
   })
+
+  it('reloads persisted table metadata after a live schema migration', async () => {
+    const oldTable = {
+      columns: { id: { type: 'string' as const } },
+      primaryKey: ['id'] as const,
+    }
+    const newTable = {
+      columns: {
+        id: { type: 'string' as const },
+        location: { type: 'string' as const },
+      },
+      primaryKey: ['id'] as const,
+    }
+    let persistedTable = oldTable
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: {
+        ...descriptor,
+        version: 'schema-v8',
+        migrate: async () => {
+          persistedTable = newTable
+        },
+      },
+    })
+    const zero = Object.create(runtime.ZeroDO.prototype) as any
+    zero.sql = {
+      exec(sql: string) {
+        if (sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_schema_tables')) {
+          return { one: () => undefined }
+        }
+        if (sql.startsWith('SELECT schema_json FROM _zero_schema_tables')) {
+          return { one: () => ({ schema_json: JSON.stringify(persistedTable) }) }
+        }
+        throw new Error(`unexpected application SQL: ${sql}`)
+      },
+    }
+    zero.tableSchemas = new Map([['widget', oldTable]])
+    zero.orezStorage = {
+      sql: {
+        exec: () => ({ toArray: () => [] }),
+      },
+    }
+    zero.applicationSqlLocalClient = () => ({})
+    zero.orezRestoreInProgress = () => false
+    zero.orezApplicationSchemaReady = () => false
+    zero.orezBeginApplicationSchemaReconcile = () => {}
+    zero.orezMarkApplicationSchemaReady = () => {}
+    zero.orezSchemaRunVersion = null
+    zero.orezSchemaRun = null
+
+    expect(zero.schemaForTable('widget')).toEqual(oldTable)
+    await zero.orezRunApplicationSchema('schema-v8', 'singleton', { force: true })
+    expect(zero.schemaForTable('widget')).toEqual(newTable)
+  })
 })

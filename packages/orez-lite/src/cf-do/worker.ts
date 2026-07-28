@@ -1566,6 +1566,10 @@ export class ZeroDO extends DurableObject {
     }
   }
 
+  protected invalidateApplicationSchemaMetadata(): void {
+    this.tableSchemas.clear()
+  }
+
   private registerApplicationSqlTables(tables: readonly ApplicationSqlTable[]): void {
     for (const table of tables) {
       this.cdc.ensureTable({

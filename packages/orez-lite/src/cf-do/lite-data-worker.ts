@@ -635,6 +635,7 @@ export function createOrezDataWorker<
         try {
           this.orezBeginApplicationSchemaReconcile()
           const result = await options.schema.migrate({ client, instance })
+          this.invalidateApplicationSchemaMetadata()
           if (finishingRestore) {
             this.orezStorage.sql.exec(`DELETE FROM ${restoreTable} WHERE id = 1`)
           }
