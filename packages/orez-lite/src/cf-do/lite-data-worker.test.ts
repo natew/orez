@@ -350,6 +350,8 @@ describe('createOrezDataWorker', () => {
       },
     }
     zero.tableSchemas = new Map([['widget', oldTable]])
+    zero.watermarks = { invalidateCache: () => {} }
+    zero.cdc = { reload: () => {} }
     zero.orezStorage = {
       sql: {
         exec: () => ({ toArray: () => [] }),
@@ -365,6 +367,66 @@ describe('createOrezDataWorker', () => {
 
     expect(zero.schemaForTable('widget')).toEqual(oldTable)
     await zero.orezRunApplicationSchema('schema-v8', 'singleton', { force: true })
+    expect(zero.schemaForTable('widget')).toEqual(newTable)
+  })
+
+  it('reloads persisted table metadata after a migration that fails partway', async () => {
+    const oldTable = {
+      columns: { id: { type: 'string' as const } },
+      primaryKey: ['id'] as const,
+    }
+    const newTable = {
+      columns: {
+        id: { type: 'string' as const },
+        location: { type: 'string' as const },
+      },
+      primaryKey: ['id'] as const,
+    }
+    let persistedTable = oldTable
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: {
+        ...descriptor,
+        version: 'schema-v9',
+        migrate: async () => {
+          // earlier statements committed through their own sessions before the
+          // failing one, exactly like a partial native SQL migration
+          persistedTable = newTable
+          throw new Error('statement 8 violates a constraint')
+        },
+      },
+    })
+    const zero = Object.create(runtime.ZeroDO.prototype) as any
+    zero.sql = {
+      exec(sql: string) {
+        if (sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_schema_tables')) {
+          return { one: () => undefined }
+        }
+        if (sql.startsWith('SELECT schema_json FROM _zero_schema_tables')) {
+          return { one: () => ({ schema_json: JSON.stringify(persistedTable) }) }
+        }
+        throw new Error(`unexpected application SQL: ${sql}`)
+      },
+    }
+    zero.tableSchemas = new Map([['widget', oldTable]])
+    zero.watermarks = { invalidateCache: () => {} }
+    zero.cdc = { reload: () => {} }
+    zero.orezStorage = {
+      sql: {
+        exec: () => ({ toArray: () => [] }),
+      },
+    }
+    zero.applicationSqlLocalClient = () => ({})
+    zero.orezRestoreInProgress = () => false
+    zero.orezApplicationSchemaReady = () => false
+    zero.orezBeginApplicationSchemaReconcile = () => {}
+    zero.orezMarkApplicationSchemaReady = () => {}
+    zero.orezSchemaRunVersion = null
+    zero.orezSchemaRun = null
+
+    await expect(
+      zero.orezRunApplicationSchema('schema-v9', 'singleton', { force: true })
+    ).rejects.toThrow('statement 8')
     expect(zero.schemaForTable('widget')).toEqual(newTable)
   })
 })

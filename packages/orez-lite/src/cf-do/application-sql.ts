@@ -99,6 +99,11 @@ export type ApplicationSqlDurableObjectNamespace = {
 
 export type ApplicationSqlClient = {
   readonly namespace: string
+  /**
+   * Read-only: runs on the shared read lane, so a mutating statement is
+   * rejected. A write (`INSERT ... RETURNING` included) belongs in exec() or
+   * transaction(), which take the write lane.
+   */
   query<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
     params?: readonly unknown[]
@@ -116,9 +121,11 @@ export type ApplicationSqlClient = {
   ): Promise<Value>
   /**
    * Same statements, read-only admission. Concurrent read transactions run
-   * together instead of queueing behind each other, and no write session can be
-   * admitted while any of them is open, so each still sees one committed state
-   * for its whole life. A mutating statement is rejected rather than escalated.
+   * together instead of queueing behind each other, and no application-SQL
+   * write session is admitted while any of them is open. The durable object's
+   * own maintenance writes (transaction rollback, recovery) run outside this
+   * queue, so that is admission-order fairness, not snapshot isolation.
+   * A mutating statement is rejected rather than escalated.
    */
   readTransaction<Value>(
     compileQuery: ApplicationSqlQueryCompiler,

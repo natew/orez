@@ -634,8 +634,15 @@ export function createOrezDataWorker<
       this.orezSchemaRun = (async () => {
         try {
           this.orezBeginApplicationSchemaReconcile()
-          const result = await options.schema.migrate({ client, instance })
-          this.invalidateApplicationSchemaMetadata()
+          let result: Awaited<ReturnType<typeof options.schema.migrate>>
+          try {
+            result = await options.schema.migrate({ client, instance })
+          } finally {
+            // each migration statement commits through its own session, so a
+            // migrate() that throws partway has already moved the persisted
+            // schema; the cached table shapes are stale on every exit
+            this.invalidateSchemaCaches()
+          }
           if (finishingRestore) {
             this.orezStorage.sql.exec(`DELETE FROM ${restoreTable} WHERE id = 1`)
           }
