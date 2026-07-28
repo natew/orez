@@ -106,6 +106,7 @@
     "citty": "^0.1.6",
     "dequal": "^2.0.3",
     "orez-lite": "workspace:*",
+    "orez-sync-executor": "workspace:*",
     "valibot": "^1.1.0"
   },
   "peerDependencies": {
