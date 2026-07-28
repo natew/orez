@@ -52,8 +52,9 @@ belongs to.
 ### Query transforms
 
 When a config is query-aware, clients send a named query plus arguments in their
-desired-queries patch rather than a raw AST. `config.resolveQuery(name, args,
-claims, env)` turns that into a validated Zero AST before it reaches the engine
+desired-queries patch rather than a raw AST. `config.resolveQueries(requests,
+claims, env)` turns the whole patch into validated Zero ASTs in one call before
+it reaches the engine
 (`host.ts`, the `#pull` handler). The resolver can call the app's real
 synced-queries endpoint over an app service binding and return the
 permission-transformed AST, so row-level permissions are enforced by the app's
