@@ -44,6 +44,7 @@ import { DurableWatermarkState, type DurableSqlStorage } from './watermark.js'
 import type {
   ApplicationSqlClient,
   ApplicationSqlExecResult,
+  ApplicationSqlSessionPriority,
   ApplicationSqlSessionOptions,
   ApplicationSqlTable,
   ApplicationSqlTransactionWork,
@@ -58,6 +59,7 @@ export type {
   ApplicationSqlExecResult,
   ApplicationSqlQueryCompiler,
   ApplicationSqlRpc,
+  ApplicationSqlSessionPriority,
   ApplicationSqlSessionOptions,
   ApplicationSqlSessionRpc,
   ApplicationSqlTable,
@@ -294,7 +296,8 @@ class ApplicationSqlSessionTarget extends RpcTarget {
   constructor(
     readonly owner: ZeroDO,
     readonly sessionID: string,
-    readonly readOnly: boolean
+    readonly readOnly: boolean,
+    readonly priority: ApplicationSqlSessionPriority
   ) {
     super()
   }
@@ -1377,11 +1380,12 @@ export class ZeroDO extends DurableObject {
   }
 
   /**
-   * Admit from the head of the arrival queue and stop at the first waiter that
+   * admit from the head of the ordered queue and stop at the first waiter that
    * cannot run yet.
    *
-   * The stop is what makes this fair. Scanning past a blocked writer to admit
-   * younger readers would let a steady read load hold the turn away from it
+   * the stop keeps ordering within each priority class. scanning past a blocked
+   * writer to admit younger readers would let a steady read load hold the turn
+   * away from it
    * indefinitely, which is the starvation the competitive `begin()` poll this
    * replaces produced in production: callers raced a 25 ms timer for one
    * ownership flag, so admission order was decided by poll phase, and sessions
@@ -1406,7 +1410,7 @@ export class ZeroDO extends DurableObject {
   }
 
   /**
-   * Join the arrival queue and resolve when this session owns its turn.
+   * join the ordered queue and resolve when this session owns its turn.
    *
    * A waiting session holds one queue entry and one timer, and nothing else:
    * cancellation, rollback and RPC stub disposal all route through
@@ -1432,7 +1436,15 @@ export class ZeroDO extends DurableObject {
           reject(new Error('timed out acquiring the application SQLite session'))
         }, APPLICATION_SQL_TURN_WAIT_MS),
       }
-      this.applicationSqlQueue.push(waiter)
+      if (session.priority === 'latency-sensitive') {
+        const firstNormal = this.applicationSqlQueue.findIndex(
+          (queued) => queued.session.priority === 'normal'
+        )
+        if (firstNormal === -1) this.applicationSqlQueue.push(waiter)
+        else this.applicationSqlQueue.splice(firstNormal, 0, waiter)
+      } else {
+        this.applicationSqlQueue.push(waiter)
+      }
       this.pumpApplicationSqlQueue()
     })
     return admission
@@ -1502,9 +1514,13 @@ export class ZeroDO extends DurableObject {
    */
   private async withLocalApplicationSqlSession<Value>(
     readOnly: boolean,
-    work: (session: ApplicationSqlSessionTarget) => Value | Promise<Value>
+    work: (session: ApplicationSqlSessionTarget) => Value | Promise<Value>,
+    priority: ApplicationSqlSessionPriority = 'normal'
   ): Promise<Value> {
-    const session = await this.applicationSqlSession(crypto.randomUUID(), { readOnly })
+    const session = await this.applicationSqlSession(crypto.randomUUID(), {
+      readOnly,
+      priority,
+    })
     try {
       await session.begin()
       const value = await work(session)
@@ -1588,7 +1604,16 @@ export class ZeroDO extends DurableObject {
     options: ApplicationSqlSessionOptions = {}
   ): Promise<ApplicationSqlSessionTarget> {
     if (!sessionID) throw new TypeError('application SQLite session id is required')
-    return new ApplicationSqlSessionTarget(this, sessionID, options.readOnly === true)
+    const priority = options.priority ?? 'normal'
+    if (priority !== 'normal' && priority !== 'latency-sensitive') {
+      throw new TypeError('invalid application SQLite session priority')
+    }
+    return new ApplicationSqlSessionTarget(
+      this,
+      sessionID,
+      options.readOnly === true,
+      priority
+    )
   }
 
   /**
@@ -1601,9 +1626,15 @@ export class ZeroDO extends DurableObject {
    */
   async applicationSqlQuery<
     Row extends Record<string, unknown> = Record<string, unknown>,
-  >(sql: string, params: readonly unknown[] = []): Promise<Row[]> {
-    return this.withLocalApplicationSqlSession(true, (session) =>
-      session.query<Row>(sql, params)
+  >(
+    sql: string,
+    params: readonly unknown[] = [],
+    options: Pick<ApplicationSqlSessionOptions, 'priority'> = {}
+  ): Promise<Row[]> {
+    return this.withLocalApplicationSqlSession(
+      true,
+      (session) => session.query<Row>(sql, params),
+      options.priority
     )
   }
 

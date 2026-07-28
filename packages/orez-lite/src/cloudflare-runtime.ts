@@ -12,6 +12,7 @@ export type {
   ApplicationSqlExecResult,
   ApplicationSqlQueryCompiler,
   ApplicationSqlRpc,
+  ApplicationSqlSessionPriority,
   ApplicationSqlSessionRpc,
   ApplicationSqlTable,
   ApplicationSqlTransaction,

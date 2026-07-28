@@ -43,22 +43,33 @@ export type ApplicationSqlTransactionWork<Value> = (
 ) => Value | Promise<Value>
 
 /**
- * Admission lane for one application SQLite session.
+ * admission lane for one application SQLite session.
  *
- * A read session shares the database with every other read session and refuses
- * mutating SQL. A write session (the default) excludes every other session for
+ * a read session shares the database with every other read session and refuses
+ * mutating SQL. a write session (the default) excludes every other session for
  * its whole life, which is what the row-undo journal needs to be able to roll
  * one transaction back without stepping on another's images.
  */
+export type ApplicationSqlSessionPriority = 'normal' | 'latency-sensitive'
+
 export type ApplicationSqlSessionOptions = {
   readOnly?: boolean
+  /**
+   * latency-sensitive sessions enter ahead of queued normal work while keeping
+   * FIFO order within their own class. use only for short control transactions
+   * whose deadline protects correctness; an active transaction is never
+   * preempted. callers must bound this traffic because sustained priority work
+   * can delay normal sessions.
+   */
+  priority?: ApplicationSqlSessionPriority
 }
 
 /**
  * private durable object RPC protocol. the session capability is returned
  * before it asks for ownership, and `begin()` resolves when the durable object
- * grants this session its turn in arrival order. a cancellation signal closes a
- * queued session or rolls back an active session before rejecting work.
+ * grants this session its turn in priority and arrival order. a cancellation
+ * signal closes a queued session or rolls back an active session before
+ * rejecting work.
  */
 export type ApplicationSqlSessionRpc = Disposable & {
   begin(): Promise<void>
@@ -88,7 +99,8 @@ export type ApplicationSqlRpc = {
   ): Promise<ApplicationSqlSessionRpc>
   applicationSqlQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
-    params?: readonly unknown[]
+    params?: readonly unknown[],
+    options?: Pick<ApplicationSqlSessionOptions, 'priority'>
   ): Promise<Row[]>
 }
 
@@ -136,6 +148,7 @@ export type ApplicationSqlClient = {
 
 export type ApplicationSqlClientOptions = {
   signal?: AbortSignal
+  priority?: ApplicationSqlSessionPriority
 }
 
 function canceled(signal: AbortSignal): unknown {
@@ -176,9 +189,9 @@ async function withApplicationSqlSession<Value>(
 ): Promise<Value> {
   using session = await target.applicationSqlSession(crypto.randomUUID(), sessionOptions)
   try {
-    // The durable object grants turns in arrival order, so this settles the
-    // moment the turn is this session's rather than on the next poll tick.
-    // Cancellation races the grant; rollback then drops the queued session.
+    // the durable object grants turns in priority and arrival order, so this
+    // settles the moment the turn is this session's rather than on the next poll tick.
+    // cancellation races the grant; rollback then drops the queued session.
     await raceAbort(signal, session.begin())
     const value = await raceAbort(signal, Promise.resolve(work(session)))
     signal?.throwIfAborted()
@@ -200,7 +213,15 @@ export function createApplicationSqlClient(
   const session = <Value>(
     sessionOptions: ApplicationSqlSessionOptions,
     work: (session: ApplicationSqlSessionRpc) => Value | Promise<Value>
-  ) => withApplicationSqlSession(target, options.signal, sessionOptions, work)
+  ) =>
+    withApplicationSqlSession(
+      target,
+      options.signal,
+      options.priority
+        ? { ...sessionOptions, priority: options.priority }
+        : sessionOptions,
+      work
+    )
   const transaction = <Value>(
     sessionOptions: ApplicationSqlSessionOptions,
     compileQuery: ApplicationSqlQueryCompiler,
@@ -225,7 +246,14 @@ export function createApplicationSqlClient(
     // inside this single call. Cancellation only stops waiting for the answer,
     // which is free to abandon because a read leaves nothing behind.
     query: (sql, params = []) =>
-      raceAbort(options.signal, target.applicationSqlQuery(sql, params)),
+      raceAbort(
+        options.signal,
+        target.applicationSqlQuery(
+          sql,
+          params,
+          options.priority ? { priority: options.priority } : undefined
+        )
+      ),
     exec: (sql, params = [], metadata) =>
       session({}, (active) => active.exec(sql, params, metadata)),
     registerTables: (tables) => session({}, (active) => active.registerTables(tables)),

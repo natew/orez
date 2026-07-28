@@ -133,16 +133,20 @@ describe('ZeroDO trusted application transaction', () => {
     const { createApplicationSqlClient } = await import('./application-sql.js')
     const calls: unknown[] = []
     const target = {
-      applicationSqlQuery: async (sql: string, params: readonly unknown[]) => {
-        calls.push(['query', sql, params])
+      applicationSqlQuery: async (
+        sql: string,
+        params: readonly unknown[],
+        options: unknown
+      ) => {
+        calls.push(['query', sql, params, options])
         return [{ id: 'row-1' }]
       },
-      applicationSqlSession: async () => ({
+      applicationSqlSession: async (_sessionID: string, options: unknown) => ({
         [Symbol.dispose]() {},
         begin: async () => {},
         query: async () => [],
         exec: async (sql: string, params: readonly unknown[], metadata: unknown) => {
-          calls.push(['exec', sql, params, metadata])
+          calls.push(['exec', sql, params, metadata, options])
           return { changes: 1 }
         },
         queryPlan: async () => [],
@@ -159,7 +163,8 @@ describe('ZeroDO trusted application transaction', () => {
           return target
         },
       },
-      'proj-123'
+      'proj-123',
+      { priority: 'latency-sensitive' }
     )
 
     await client.query('SELECT id FROM item WHERE id = ?', ['row-1'])
@@ -177,12 +182,18 @@ describe('ZeroDO trusted application transaction', () => {
     expect(execResult).toEqual({ changes: 1 })
     expect(calls).toEqual([
       ['get', 'id:proj-123'],
-      ['query', 'SELECT id FROM item WHERE id = ?', ['row-1']],
+      [
+        'query',
+        'SELECT id FROM item WHERE id = ?',
+        ['row-1'],
+        { priority: 'latency-sensitive' },
+      ],
       [
         'exec',
         'UPDATE item SET enabled = ? WHERE id = ?',
         [1, 'row-1'],
         { table: 'item', publicTable: 'public.item', kind: 'update' },
+        { priority: 'latency-sensitive' },
       ],
     ])
   })
@@ -302,6 +313,40 @@ describe('ZeroDO trusted application transaction', () => {
     await Promise.all(admissions)
 
     expect(admitted).toEqual(['first', 'second', 'third'])
+  })
+
+  it('admits latency-sensitive sessions before queued normal work', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    const owner = await zero.applicationSqlSession('owner')
+    await owner.begin()
+
+    const normal = await zero.applicationSqlSession('normal')
+    const urgentFirst = await zero.applicationSqlSession('urgent-first', {
+      priority: 'latency-sensitive',
+    })
+    const urgentSecond = await zero.applicationSqlSession('urgent-second', {
+      priority: 'latency-sensitive',
+    })
+    const admitted: string[] = []
+    const admissions = [
+      normal.begin().then(() => {
+        admitted.push('normal')
+        zero.releaseApplicationSqlTurn(normal)
+      }),
+      urgentFirst.begin().then(() => {
+        admitted.push('urgent-first')
+        zero.releaseApplicationSqlTurn(urgentFirst)
+      }),
+      urgentSecond.begin().then(() => {
+        admitted.push('urgent-second')
+        zero.releaseApplicationSqlTurn(urgentSecond)
+      }),
+    ]
+
+    zero.releaseApplicationSqlTurn(owner)
+    await Promise.all(admissions)
+
+    expect(admitted).toEqual(['urgent-first', 'urgent-second', 'normal'])
   })
 
   it('runs read sessions together and excludes them from a write session', async () => {
