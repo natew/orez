@@ -18,7 +18,7 @@
 // a deep-equal projection to undo the over-broadcasting.
 
 import { canonicalTopic } from 'orez-lite/realtime'
-import { useCallback, useMemo, useSyncExternalStore } from 'react'
+import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react'
 
 import type {
   RealtimeStore,
@@ -75,13 +75,24 @@ export function createUseStreamingField(
       [store, id]
     )
 
-    // `store.read` returns a reference-stable state: useSyncExternalStore
-    // re-invokes getSnapshot on every render and loops forever if the result is
-    // a fresh object each time. `base` participates because a new durable value
-    // from Zero is what ends the committing phase.
+    // getSnapshot must hand back the SAME reference until something observable
+    // changes: useSyncExternalStore re-invokes it on every render and rerenders
+    // forever (throwing "Maximum update depth exceeded") if each call returns a
+    // fresh object. The store only stabilizes SUBSCRIBED topics — an
+    // unsubscribed read (before the subscription effect lands, after an error
+    // boundary unmounts the tree so it never lands, or with a null handle) has
+    // no entry to cache on. Each hook therefore carries its own last-state
+    // slot, which also survives interleaved renders of many hooks in a way a
+    // module-level cache cannot. `base` participates because a new durable
+    // value from Zero is what ends the committing phase.
+    const last = useRef<StreamingFieldState<Value> | undefined>(undefined)
     const getSnapshot = useCallback(() => {
-      if (!store || !handle) return durableOnly(base)
-      return store.read(handle, base)
+      const next =
+        !store || !handle ? durableState(base) : store.read(handle, base)
+      const cached = last.current
+      if (cached && sameState(cached, next)) return cached
+      last.current = next
+      return next
     }, [store, id, base])
 
     return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
@@ -138,17 +149,24 @@ export function createUseStreamingFields(
     )
 
     const getSnapshot = useCallback(() => {
+      const previous = cache.value
       const next: Record<string, StreamingFieldState<Value>> = {}
       let changed = false
       for (const request of requests) {
-        const state = store
+        const raw = store
           ? store.read(request.handle, request.base)
-          : durableOnly(request.base)
+          : durableState(request.base)
+        // stabilize per key here, not just per store entry: an unsubscribed
+        // topic's read is a fresh object each call, and one unstable member
+        // would otherwise force a fresh map from every getSnapshot — the same
+        // rerender loop the single-field hook guards against.
+        const cached = previous[request.key]
+        const state = cached && sameState(cached, raw) ? cached : raw
         next[request.key] = state
-        if (cache.value[request.key] !== state) changed = true
+        if (state !== cached) changed = true
       }
-      if (!changed && Object.keys(cache.value).length === Object.keys(next).length) {
-        return cache.value
+      if (!changed && Object.keys(previous).length === Object.keys(next).length) {
+        return previous
       }
       cache.value = next
       return next
@@ -158,23 +176,16 @@ export function createUseStreamingFields(
   }
 }
 
-const DURABLE_CACHE = new WeakMap<object, StreamingFieldState<unknown>>()
-let lastPrimitiveBase: unknown
-let lastPrimitiveState: StreamingFieldState<unknown> | undefined
+function sameState(
+  a: StreamingFieldState<unknown>,
+  b: StreamingFieldState<unknown>
+): boolean {
+  // exact: `value` is either the caller's own base reference or the store
+  // generation's accumulated value, both of which only change identity when
+  // they actually change
+  return Object.is(a.value, b.value) && a.phase === b.phase && a.streamID === b.streamID
+}
 
-// Unsubscribed reads still have to be reference-stable for the same reason.
-function durableOnly<Value>(base: Value): StreamingFieldState<Value> {
-  if (base !== null && typeof base === 'object') {
-    const cached = DURABLE_CACHE.get(base)
-    if (cached) return cached as StreamingFieldState<Value>
-    const state = { value: base, phase: 'durable', streamID: null } as const
-    DURABLE_CACHE.set(base, state as StreamingFieldState<unknown>)
-    return state as StreamingFieldState<Value>
-  }
-  if (lastPrimitiveState && Object.is(lastPrimitiveBase, base)) {
-    return lastPrimitiveState as StreamingFieldState<Value>
-  }
-  lastPrimitiveBase = base
-  lastPrimitiveState = { value: base, phase: 'durable', streamID: null }
-  return lastPrimitiveState as StreamingFieldState<Value>
+function durableState<Value>(base: Value): StreamingFieldState<Value> {
+  return { value: base, phase: 'durable', streamID: null }
 }
