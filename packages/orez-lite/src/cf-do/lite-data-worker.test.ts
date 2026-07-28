@@ -430,3 +430,153 @@ describe('createOrezDataWorker', () => {
     expect(zero.schemaForTable('widget')).toEqual(newTable)
   })
 })
+
+describe('Orez Lite committed operation receipts', () => {
+  function meteredNamespace(
+    onCommittedOperation: (operation: Record<string, unknown>) => void
+  ) {
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: descriptor,
+      onCommittedOperation: onCommittedOperation as never,
+    })
+    const settled: Promise<unknown>[] = []
+    const zero = Object.create(runtime.ZeroDO.prototype) as any
+    zero.orezContext = {
+      waitUntil: (promise: Promise<unknown>) => settled.push(promise),
+    }
+    zero.orezEnv = { ZERO_SQL_DO: {} }
+    zero.orezStorage = { sql: { exec: () => ({ toArray: () => [] }) } }
+    return { settled, zero }
+  }
+
+  const applicationWrite = {
+    sessionID: 'session-1',
+    namespace: 'ns:proj-a',
+    origin: 'application' as const,
+    mutated: true,
+    changed: true,
+    rowsRead: 4,
+    rowsWritten: 2,
+  }
+
+  it('splits a session that both read and wrote into two priced receipts', async () => {
+    const operations: Record<string, unknown>[] = []
+    const { settled, zero } = meteredNamespace((operation) => {
+      operations.push(operation)
+    })
+
+    zero.applicationSqlDidCommit(applicationWrite)
+    await Promise.all(settled)
+
+    expect(operations).toEqual([
+      {
+        namespace: 'ns:proj-a',
+        kind: 'read',
+        source: 'application-sql',
+        rows: 4,
+        receipt: 'read:ns:proj-a:session-1',
+      },
+      {
+        namespace: 'ns:proj-a',
+        kind: 'write',
+        source: 'application-sql',
+        rows: 2,
+        receipt: 'write:ns:proj-a:session-1',
+      },
+    ])
+  })
+
+  it('reports a read alone for a session that never mutated', async () => {
+    const operations: Record<string, unknown>[] = []
+    const { settled, zero } = meteredNamespace((operation) => {
+      operations.push(operation)
+    })
+
+    zero.applicationSqlDidCommit({
+      ...applicationWrite,
+      mutated: false,
+      changed: false,
+      rowsWritten: 0,
+    })
+    await Promise.all(settled)
+
+    expect(operations).toEqual([
+      {
+        namespace: 'ns:proj-a',
+        kind: 'read',
+        source: 'application-sql',
+        rows: 4,
+        receipt: 'read:ns:proj-a:session-1',
+      },
+    ])
+  })
+
+  it('reports nothing for platform work', async () => {
+    const operations: unknown[] = []
+    const { settled, zero } = meteredNamespace((operation) => {
+      operations.push(operation)
+    })
+
+    zero.applicationSqlDidCommit({ ...applicationWrite, origin: 'platform' })
+    await Promise.all(settled)
+
+    expect(operations).toEqual([])
+  })
+
+  it('keeps a failing handler off the path of the commit it describes', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { settled, zero } = meteredNamespace(() => {
+      throw new Error('metering sink unreachable')
+    })
+
+    expect(() => zero.applicationSqlDidCommit(applicationWrite)).not.toThrow()
+    await expect(Promise.all(settled)).resolves.toEqual([undefined, undefined])
+    expect(logged.mock.calls.map((call) => JSON.parse(String(call[0])).receipt)).toEqual([
+      'read:ns:proj-a:session-1',
+      'write:ns:proj-a:session-1',
+    ])
+    logged.mockRestore()
+  })
+
+  it('declares the backup sweep as platform work so it is never metered', async () => {
+    const declared: unknown[] = []
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: descriptor,
+      backup: {
+        bucket: () => ({
+          async createMultipartUpload() {
+            throw new Error('export stops here')
+          },
+        }),
+        inventory: () => [],
+        authorize: () => true,
+      } as never,
+    })
+    const env = {
+      ZERO_SQL_DO: {
+        idFromName: (name: string) => name,
+        get: () => ({
+          applicationSqlQuery: async (
+            _sql: string,
+            _params: readonly unknown[],
+            options: unknown
+          ) => {
+            declared.push(options)
+            return []
+          },
+        }),
+      },
+    }
+
+    await expect(
+      runtime.backupManager!.exportNamespace(env as never, 'proj-a')
+    ).rejects.toThrow('export stops here')
+
+    expect(declared.length).toBeGreaterThan(0)
+    expect(new Set(declared.map((options) => JSON.stringify(options)))).toEqual(
+      new Set([JSON.stringify({ namespace: 'ns:proj-a', origin: 'platform' })])
+    )
+  })
+})

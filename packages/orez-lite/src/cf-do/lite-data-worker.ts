@@ -17,7 +17,12 @@ import type {
   ApplicationSqlDurableObjectNamespace,
   ApplicationSqlRpc,
 } from './application-sql.js'
+import type { CommittedApplicationSql } from './worker.js'
 import type { Schema } from '@rocicorp/zero'
+import type {
+  CommittedDataOperation,
+  CommittedOperationHandler,
+} from 'orez-sync-cf-host/committed-operation'
 
 type MaybePromise<Value> = Value | Promise<Value>
 type JsonRecord = Record<string, unknown>
@@ -158,6 +163,18 @@ export interface OrezDataWorkerOptions<
     rows?: number
     windowMs?: number
   }
+  /**
+   * Receipt for every committed unit of application data work in this
+   * namespace, for hosts that meter usage.
+   *
+   * It runs after the work is durable and after the session has handed its turn
+   * on, so a rollback, a cancellation or a disposed session emits nothing and a
+   * handler cannot hold the database. Platform work (schema reconciliation,
+   * backup export, restore, and the snapshot/changefeed endpoints) declares a
+   * platform origin and never reaches here. A handler that throws or rejects is
+   * logged and dropped: metering must not be able to fail a committed write.
+   */
+  onCommittedOperation?: CommittedOperationHandler<Env>
   setup?(context: OrezRequestContext<Env>): MaybePromise<void>
   routes?(context: OrezRequestContext<Env>): MaybePromise<Response | null | undefined>
   onError?(error: unknown, context: OrezErrorContext<Env>): MaybePromise<void>
@@ -522,6 +539,18 @@ export function createOrezDataWorker<
   ): ApplicationSqlClient =>
     createApplicationSqlClient(env.ZERO_SQL_DO, canonical(namespace), { signal })
 
+  /**
+   * The same client, declared as Orez's own work rather than the application's.
+   * The backup sweep reads every table in a namespace and a restore writes them
+   * all back, which would otherwise be the largest metered read and write a
+   * namespace ever reports and would grow with how often the platform chooses
+   * to back it up.
+   */
+  const platformSqlClient = (env: Env, namespace: string): ApplicationSqlClient =>
+    createApplicationSqlClient(env.ZERO_SQL_DO, canonical(namespace), {
+      origin: 'platform',
+    })
+
   const installRuntimeGlobals = (env: Env): void => {
     const globals = globalThis as typeof globalThis & Record<string, unknown>
     globals[applicationClientGlobal] = (namespace = 'singleton') =>
@@ -531,6 +560,8 @@ export function createOrezDataWorker<
 
   class ZeroSqlDO extends OrezZeroDO {
     private readonly orezStorage: any
+    private readonly orezContext: OrezExecutionContext
+    private readonly orezEnv: Env
     private readonly orezWorkerVersion: string
     private orezSchemaRunVersion: string | null = null
     private orezSchemaRun: Promise<unknown> | null = null
@@ -556,6 +587,8 @@ export function createOrezDataWorker<
           : env) as never
       )
       this.orezStorage = ctx.storage
+      this.orezContext = ctx
+      this.orezEnv = env
       this.orezWorkerVersion = env.CF_VERSION?.id ?? ''
       ctx.storage.sql.exec(
         `CREATE TABLE IF NOT EXISTS ${readyTable} (id INTEGER PRIMARY KEY CHECK (id = 1), version TEXT NOT NULL)`
@@ -568,8 +601,53 @@ export function createOrezDataWorker<
       )
     }
 
-    protected applicationSqlDidCommit(_changed: boolean, mutated: boolean): void {
-      if (mutated) this.orezBumpBackupMarker()
+    protected applicationSqlDidCommit(committed: CommittedApplicationSql): void {
+      if (committed.mutated) this.orezBumpBackupMarker()
+      if (committed.origin !== 'application' || !options.onCommittedOperation) return
+      // Reads and writes are priced apart, so a session that did both produces
+      // one receipt of each rather than a single row count that has already
+      // mixed them. Both derive from the session id, which the client generates
+      // once per session, so a retry that re-runs the same session repeats them.
+      this.orezEmitCommittedOperation({
+        namespace: committed.namespace,
+        kind: 'read',
+        source: 'application-sql',
+        rows: committed.rowsRead,
+        receipt: `read:${committed.namespace}:${committed.sessionID}`,
+      })
+      if (!committed.mutated) return
+      this.orezEmitCommittedOperation({
+        namespace: committed.namespace,
+        kind: 'write',
+        source: 'application-sql',
+        rows: committed.rowsWritten,
+        receipt: `write:${committed.namespace}:${committed.sessionID}`,
+      })
+    }
+
+    /**
+     * Hand a receipt to the application on the durable object's execution
+     * context.
+     *
+     * waitUntil keeps the handler off the request's critical path and, more
+     * importantly, off its failure path: the write it describes is already
+     * committed, so a metering handler that throws, rejects or hangs must not
+     * be able to turn a successful commit into an error the client sees.
+     */
+    private orezEmitCommittedOperation(operation: CommittedDataOperation): void {
+      this.orezContext.waitUntil(
+        (async () => options.onCommittedOperation!(operation, this.orezEnv))().catch(
+          (error: unknown) => {
+            console.error(
+              JSON.stringify({
+                event: 'orez_committed_operation_failed',
+                receipt: operation.receipt,
+                message: errorMessage(error),
+              })
+            )
+          }
+        )
+      )
     }
 
     async orezImportBatch(
@@ -775,7 +853,7 @@ export function createOrezDataWorker<
     sql: string,
     params: readonly unknown[] = []
   ): Promise<Record<string, any>[]> => {
-    const client = applicationSqlClient(env, namespace)
+    const client = platformSqlClient(env, namespace)
     if (/^\s*(?:SELECT|PRAGMA)\b/i.test(sql)) return client.query(sql, params)
     await client.exec(sql, params)
     return []
@@ -794,7 +872,7 @@ export function createOrezDataWorker<
         },
         listNamespaces: async (env) => {
           const listed = await options.backup!.inventory(
-            applicationSqlClient(env, 'singleton'),
+            platformSqlClient(env, 'singleton'),
             env
           )
           const namespaces = new Set<string>(['singleton'])

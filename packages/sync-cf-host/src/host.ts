@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers'
 import { createSyncExecutor } from 'orez-sync-executor/core'
 import { createSocketHost } from 'orez-sync-executor/realtime'
 
+import { pullCommittedOperation } from './committed-operation.js'
 import { validatePullCaps, validateSyncHostConfig } from './config.js'
 import { createQueryCompiler } from './query-compiler.js'
 import { resolveQueryPatch } from './query-patch.js'
@@ -1468,6 +1469,26 @@ export function createSyncDurableObject<
           }
         } finally {
           releaseQueryPull?.()
+        }
+        // The state this describes is already durable, so the receipt is owed
+        // whether or not the client ever sees the response. A pull lost after
+        // this point is retried and reports the same receipt again, which is
+        // exactly what makes the receipt worth deduplicating on.
+        if (config.onCommittedOperation) {
+          const operation = pullCommittedOperation(namespace, body, response)
+          this.ctx.waitUntil(
+            (async () => config.onCommittedOperation!(operation, this.env))().catch(
+              (error: unknown) => {
+                console.error(
+                  JSON.stringify({
+                    event: 'sync_committed_operation_failed',
+                    receipt: operation.receipt,
+                    error: errorMessage(error),
+                  })
+                )
+              }
+            )
+          )
         }
         const afterPullFault = this.#takeFault('pull_after_commit')
         if (afterPullFault) throw this.#faultError(afterPullFault, 'pull_after_commit')

@@ -637,6 +637,34 @@ try {
   })
   equal(faultRows.rows, [{ n: 1 }], 'post-pull fault preserves committed client claim')
 
+  // A client whose pull response never arrived re-sends the identical request.
+  // The receipt a metering hook reports is derived from who asked and which
+  // cookie the pull moved from and to, so a retry that lands on the same cookie
+  // and the same rows reports the same receipt and can be deduplicated.
+  const lostPull = {
+    clientID: 'fault-pull-after',
+    clientGroupID: 'fault-pull-group-after',
+    cookie: null,
+  }
+  const movedRows = (body) =>
+    (Array.isArray(body.rowsPatch) ? body.rowsPatch : []).filter(
+      (entry) => entry?.op === 'put' || entry?.op === 'del'
+    ).length
+  const firstAttempt = await post('/pull', lostPull)
+  equal(firstAttempt.status, 200, 'pull after the fault is cleared succeeds')
+  const retriedAttempt = await post('/pull', lostPull)
+  equal(retriedAttempt.status, 200, 'retrying the same pull succeeds')
+  equal(
+    retriedAttempt.body.cookie,
+    firstAttempt.body.cookie,
+    'a retried pull ends on the cookie its lost attempt reached'
+  )
+  equal(
+    movedRows(retriedAttempt.body),
+    movedRows(firstAttempt.body),
+    'a retried pull moves the same rows'
+  )
+
   let response = await post(
     '/push',
     mutation('client-a', 1, 'project.create', {

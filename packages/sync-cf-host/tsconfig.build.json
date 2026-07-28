@@ -10,6 +10,7 @@
     "src/index.ts",
     "src/node-wasm-loader.ts",
     "src/bun-wasm-loader.ts",
+    "src/committed-operation.ts",
     "src/query-compiler.ts",
     "src/transaction-query.ts",
     "src/vite-wasm-loader.ts"

@@ -21,6 +21,12 @@ export function validateSyncHostConfig<
   if (typeof config.authorize !== 'function') {
     throw new TypeError('sync host config authorize is required')
   }
+  if (
+    config.onCommittedOperation !== undefined &&
+    typeof config.onCommittedOperation !== 'function'
+  ) {
+    throw new TypeError('sync host config onCommittedOperation must be a function')
+  }
   const hasMutators = config.mutators !== undefined
   const hasDelegate = config.mutateUrl !== undefined
   if (hasMutators === hasDelegate) {

@@ -1,3 +1,4 @@
+import type { CommittedOperationHandler } from './committed-operation.js'
 import type { QueryResolution, QueryResolutionRequest } from './query-patch.js'
 import type { TransactionQueryBudget } from './transaction-query.js'
 import type { Schema } from '@rocicorp/zero'
@@ -19,6 +20,13 @@ export {
   type VisibilityValue,
 } from './visibility.js'
 export type { VisibilityConfig } from 'orez-sync-executor'
+export type {
+  CommittedDataOperation,
+  CommittedOperationHandler,
+  CommittedOperationKind,
+  CommittedOperationOrigin,
+  CommittedOperationSource,
+} from './committed-operation.js'
 // the batch-resolution contract lives with the helper that enforces it, so a
 // browser bundle can import it without dragging in this module's host types
 export type { QueryResolution, QueryResolutionRequest } from './query-patch.js'
@@ -185,6 +193,17 @@ export type SyncHostConfig<
   queryTransformVersion?: number | ((claims: NormalizedClaims) => number)
   /** Enable consumer visibility from the first request. Defaults to false for harnesses. */
   visibilityEnabled?: boolean
+  /**
+   * Receipt for every pull this namespace commits, for hosts that meter usage.
+   *
+   * It runs after the pull's storage transaction commits, on the durable
+   * object's execution context, so a pull that threw inside the transaction
+   * emits nothing and a handler that throws or hangs cannot fail a pull whose
+   * state is already durable. Pushes are not reported: this host's writes
+   * arrive through upstream ingest or a delegated push service, and neither is
+   * this namespace's own application work.
+   */
+  onCommittedOperation?: CommittedOperationHandler<Env>
   retainChanges?: number
   caps?: Partial<PullCaps>
   idleTeardownMs?: number

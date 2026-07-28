@@ -303,6 +303,97 @@ describe('billable write amplification on a synced namespace', () => {
     expect(write.billed).toBeGreaterThan(1_000)
   })
 
+  it('reports a committed write as rows changed, not as rows billed', async () => {
+    const ns = await controlNamespace()
+    ns.sql.exec('PRAGMA foreign_keys = ON')
+    const committed: Record<string, unknown>[] = []
+    ns.zero.applicationSqlDidCommit = (record: Record<string, unknown>) =>
+      committed.push(record)
+
+    const session = await ns.zero.applicationSqlSession('delete-user', {
+      namespace: 'ns:control',
+    })
+    await session.begin()
+    ns.start()
+    await session.exec("DELETE FROM user WHERE id = 'u1'", [], {
+      table: 'user',
+      publicTable: 'user',
+      kind: 'delete',
+    })
+    await session.commit()
+    ns.stop()
+
+    // One row deleted by the statement. The cascade took the project with it and
+    // the triggers wrote a change row for each, and none of that is the
+    // application's logical write.
+    expect(committed).toEqual([
+      {
+        sessionID: 'delete-user',
+        namespace: 'ns:control',
+        origin: 'application',
+        mutated: true,
+        changed: true,
+        rowsRead: 0,
+        rowsWritten: 1,
+      },
+    ])
+    expect(ns.nativeDb.prepare('SELECT COUNT(*) AS c FROM project').get().c).toBe(0)
+    // CONTROL. If the statement had not amplified, `rowsWritten: 1` would be
+    // right by accident rather than because it reads `changes()`.
+    expect(ns.written.reduce((sum, write) => sum + write.rows, 0)).toBeGreaterThan(5)
+  })
+
+  it('reports a committed read as the rows its statements materialized', async () => {
+    const ns = await controlNamespace()
+    const committed: Record<string, unknown>[] = []
+    ns.zero.applicationSqlDidCommit = (record: Record<string, unknown>) =>
+      committed.push(record)
+
+    const session = await ns.zero.applicationSqlSession('read-clients', {
+      namespace: 'ns:control',
+      readOnly: true,
+    })
+    await session.begin()
+    await session.query('SELECT "clientID" FROM _zsync_clients LIMIT 5')
+    await session.query('SELECT id FROM file')
+    await session.commit()
+
+    expect(committed).toEqual([
+      {
+        sessionID: 'read-clients',
+        namespace: 'ns:control',
+        origin: 'application',
+        mutated: false,
+        changed: false,
+        rowsRead: 6,
+        rowsWritten: 0,
+      },
+    ])
+  })
+
+  it('reports nothing when a write session rolls back', async () => {
+    const ns = await controlNamespace()
+    const committed: unknown[] = []
+    ns.zero.applicationSqlDidCommit = (record: unknown) => committed.push(record)
+
+    const session = await ns.zero.applicationSqlSession('rolled-back', {
+      namespace: 'ns:control',
+    })
+    await session.begin()
+    await session.exec("UPDATE file SET body = 'rolled back' WHERE id = 'f1'", [], {
+      table: 'file',
+      publicTable: 'file',
+      kind: 'update',
+    })
+    await session.rollback()
+
+    expect(committed).toEqual([])
+    // The silence means something only because the write really was undone.
+    expect(ns.nativeDb.prepare(`SELECT body FROM file WHERE id = 'f1'`).get().body).toBe(
+      'hello'
+    )
+  })
+
   it('counts logical rows as rows changed, not rows returned', async () => {
     const ns = await controlNamespace()
     // exactly the statement shape packages/sync-executor/src/crud.ts emits: no

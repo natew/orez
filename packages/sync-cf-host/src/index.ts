@@ -10,6 +10,11 @@ export {
 } from './transaction-query.js'
 
 export type {
+  CommittedDataOperation,
+  CommittedOperationHandler,
+  CommittedOperationKind,
+  CommittedOperationOrigin,
+  CommittedOperationSource,
   PullCaps,
   QueryResolution,
   QueryResolutionRequest,

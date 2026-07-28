@@ -1,3 +1,4 @@
+import type { CommittedOperationOrigin } from 'orez-sync-cf-host/committed-operation'
 import type {
   CompiledTransactionQueryPlan,
   TransactionQueryBudget,
@@ -52,6 +53,14 @@ export type ApplicationSqlTransactionWork<Value> = (
  */
 export type ApplicationSqlSessionOptions = {
   readOnly?: boolean
+  /**
+   * Metering identity of the session, declared by the client because the
+   * durable object is addressed by name and never learns its own. Both fields
+   * describe the caller, not the data, so they only reach a committed-operation
+   * receipt; nothing in the SQLite path reads them.
+   */
+  namespace?: string
+  origin?: CommittedOperationOrigin
 }
 
 /**
@@ -88,7 +97,8 @@ export type ApplicationSqlRpc = {
   ): Promise<ApplicationSqlSessionRpc>
   applicationSqlQuery<Row extends Record<string, unknown> = Record<string, unknown>>(
     sql: string,
-    params?: readonly unknown[]
+    params?: readonly unknown[],
+    options?: ApplicationSqlSessionOptions
   ): Promise<Row[]>
 }
 
@@ -136,6 +146,12 @@ export type ApplicationSqlClient = {
 
 export type ApplicationSqlClientOptions = {
   signal?: AbortSignal
+  /**
+   * Declared once for every session this client opens. Orez's own schema,
+   * backup and restore clients declare `platform` so their work produces no
+   * committed-operation receipt.
+   */
+  origin?: CommittedOperationOrigin
 }
 
 function canceled(signal: AbortSignal): unknown {
@@ -197,10 +213,20 @@ export function createApplicationSqlClient(
 ): ApplicationSqlClient {
   if (!namespace) throw new TypeError('application SQLite namespace is required')
   const target = durableObjects.get(durableObjects.idFromName(namespace))
+  const identity: ApplicationSqlSessionOptions = {
+    namespace,
+    origin: options.origin ?? 'application',
+  }
   const session = <Value>(
     sessionOptions: ApplicationSqlSessionOptions,
     work: (session: ApplicationSqlSessionRpc) => Value | Promise<Value>
-  ) => withApplicationSqlSession(target, options.signal, sessionOptions, work)
+  ) =>
+    withApplicationSqlSession(
+      target,
+      options.signal,
+      { ...identity, ...sessionOptions },
+      work
+    )
   const transaction = <Value>(
     sessionOptions: ApplicationSqlSessionOptions,
     compileQuery: ApplicationSqlQueryCompiler,
@@ -225,7 +251,7 @@ export function createApplicationSqlClient(
     // inside this single call. Cancellation only stops waiting for the answer,
     // which is free to abandon because a read leaves nothing behind.
     query: (sql, params = []) =>
-      raceAbort(options.signal, target.applicationSqlQuery(sql, params)),
+      raceAbort(options.signal, target.applicationSqlQuery(sql, params, identity)),
     exec: (sql, params = [], metadata) =>
       session({}, (active) => active.exec(sql, params, metadata)),
     registerTables: (tables) => session({}, (active) => active.registerTables(tables)),

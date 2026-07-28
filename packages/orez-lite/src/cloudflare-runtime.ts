@@ -5,6 +5,14 @@
  * never evaluate `cloudflare:workers`.
  */
 export { createApplicationSqlClient, ZeroDO } from './cf-do/worker.js'
+export type { CommittedApplicationSql } from './cf-do/worker.js'
+export type {
+  CommittedDataOperation,
+  CommittedOperationHandler,
+  CommittedOperationKind,
+  CommittedOperationOrigin,
+  CommittedOperationSource,
+} from 'orez-sync-cf-host/committed-operation'
 export type {
   ApplicationSqlClient,
   ApplicationSqlClientOptions,

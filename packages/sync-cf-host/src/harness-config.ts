@@ -322,6 +322,13 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
       })
     },
     initialize: initializeHarness,
+    // The harness has no metering sink, and a handler that always fails is the
+    // useful shape to run under workerd: every pull in the integration suite is
+    // then evidence that a metering handler cannot turn a committed pull into
+    // an error the client sees.
+    onCommittedOperation() {
+      throw new Error('harness metering sink is intentionally unavailable')
+    },
     namespace(request) {
       return new URL(request.url).pathname.split('/')[1] || null
     },

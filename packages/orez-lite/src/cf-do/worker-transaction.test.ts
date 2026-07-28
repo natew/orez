@@ -187,6 +187,79 @@ describe('ZeroDO trusted application transaction', () => {
     ])
   })
 
+  it('declares its namespace and origin on every session it opens', async () => {
+    const { createApplicationSqlClient } = await import('./application-sql.js')
+    const declared: unknown[] = []
+    const target = {
+      applicationSqlQuery: async (
+        _sql: string,
+        _params: readonly unknown[],
+        options: unknown
+      ) => {
+        declared.push(['query', options])
+        return []
+      },
+      applicationSqlSession: async (_sessionID: string, options: unknown) => {
+        declared.push(['session', options])
+        return {
+          [Symbol.dispose]() {},
+          begin: async () => {},
+          query: async () => [],
+          exec: async () => ({ changes: 1 }),
+          queryPlan: async () => [],
+          registerTables: async () => {},
+          commit: async () => {},
+          rollback: async () => {},
+        }
+      },
+    }
+    const namespaceStub = { idFromName: (name: string) => name, get: () => target }
+
+    const application = createApplicationSqlClient(namespaceStub, 'proj-123')
+    await application.query('SELECT id FROM item')
+    await application.exec('UPDATE item SET enabled = 1')
+    await application.readTransaction(unusedCompiler, async () => {})
+
+    const platform = createApplicationSqlClient(namespaceStub, 'proj-123', {
+      origin: 'platform',
+    })
+    await platform.query('SELECT id FROM item')
+    await platform.exec('UPDATE item SET enabled = 1')
+
+    expect(declared).toEqual([
+      ['query', { namespace: 'proj-123', origin: 'application' }],
+      ['session', { namespace: 'proj-123', origin: 'application' }],
+      ['session', { namespace: 'proj-123', origin: 'application', readOnly: true }],
+      ['query', { namespace: 'proj-123', origin: 'platform' }],
+      ['session', { namespace: 'proj-123', origin: 'platform' }],
+    ])
+  })
+
+  it('reports nothing for a session that never committed', async () => {
+    const { zero } = await createTestZero(async (work) => await work())
+    const committed: unknown[] = []
+    zero.applicationSqlDidCommit = (record: unknown) => committed.push(record)
+
+    const read = await zero.applicationSqlSession('read-rollback', { readOnly: true })
+    await read.begin()
+    await read.query('SELECT id FROM item')
+    await read.rollback()
+
+    const disposed = await zero.applicationSqlSession('disposed', { readOnly: true })
+    await disposed.begin()
+    await disposed.query('SELECT id FROM item')
+    disposed[Symbol.dispose]()
+
+    const owner = await zero.applicationSqlSession('owner')
+    await owner.begin()
+    const cancelled = await zero.applicationSqlSession('cancelled')
+    void cancelled.begin()
+    cancelled[Symbol.dispose]()
+    zero.releaseApplicationSqlTurn(owner)
+
+    expect(committed).toEqual([])
+  })
+
   it('materializes rows before returning a promise and commits after work', async () => {
     const events: string[] = []
     const { storage, zero } = await createTestZero(async (work) => {

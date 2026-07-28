@@ -48,6 +48,7 @@ import type {
   ApplicationSqlTable,
   ApplicationSqlTransactionWork,
 } from './application-sql.js'
+import type { CommittedOperationOrigin } from 'orez-sync-cf-host/committed-operation'
 import type { SqlStatementMetadata, TransactionQueryFormat } from 'orez-sync-executor'
 
 export { createApplicationSqlClient } from './application-sql.js'
@@ -64,6 +65,13 @@ export type {
   ApplicationSqlTransaction,
   ApplicationSqlTransactionWork,
 } from './application-sql.js'
+export type {
+  CommittedDataOperation,
+  CommittedOperationHandler,
+  CommittedOperationKind,
+  CommittedOperationOrigin,
+  CommittedOperationSource,
+} from 'orez-sync-cf-host/committed-operation'
 export type { SqlStatementMetadata } from 'orez-sync-executor'
 
 /**
@@ -270,6 +278,27 @@ function applicationSqlTrack(
 
 type ApplicationSqlSessionState = 'created' | 'waiting' | 'active' | 'closed'
 
+/**
+ * What one application SQLite session committed, reported once its work is
+ * durable and its turn has been handed on.
+ *
+ * A session that rolled back, was cancelled, or was disposed never reaches
+ * here: `closeApplicationSqlSession` is the only other exit and it does not
+ * report. That is what makes this the seam a subclass can meter from without
+ * having to reason about which failure path it is on.
+ */
+export type CommittedApplicationSql = {
+  sessionID: string
+  namespace: string
+  origin: CommittedOperationOrigin
+  /** The session ran at least one mutating statement. */
+  mutated: boolean
+  /** At least one of those statements changed a row. */
+  changed: boolean
+  rowsRead: number
+  rowsWritten: number
+}
+
 type ApplicationSqlWaiter = {
   session: ApplicationSqlSessionTarget
   admit: () => void
@@ -290,11 +319,17 @@ class ApplicationSqlSessionTarget extends RpcTarget {
   state: ApplicationSqlSessionState = 'created'
   changed = false
   mutated = false
+  /** Application rows this session's statements materialized. */
+  rowsRead = 0
+  /** Application rows this session's statements changed, per `changes()`. */
+  rowsWritten = 0
 
   constructor(
     readonly owner: ZeroDO,
     readonly sessionID: string,
-    readonly readOnly: boolean
+    readonly readOnly: boolean,
+    readonly namespace: string,
+    readonly origin: CommittedOperationOrigin
   ) {
     super()
   }
@@ -358,7 +393,7 @@ export class ZeroDO extends DurableObject {
   private applicationSqlWriter: ApplicationSqlSessionTarget | null = null
   private applicationSqlReaders = new Set<ApplicationSqlSessionTarget>()
   private applicationSqlQueue: ApplicationSqlWaiter[] = []
-  protected applicationSqlDidCommit(_changed: boolean, _mutated: boolean): void {}
+  protected applicationSqlDidCommit(_committed: CommittedApplicationSql): void {}
 
   private recordWriteBudgetRows(rows: number, statement?: SqlWriteMeasurement): void {
     const wasTripped = this.writeBudget.status().tripped
@@ -1477,8 +1512,11 @@ export class ZeroDO extends DurableObject {
     work: () => Value | Promise<Value>,
     signal?: AbortSignal
   ): Promise<Value> {
+    // The snapshot and changefeed endpoints are the platform reading its own
+    // replication state, not the application reading its data.
     const session = await this.applicationSqlSession(crypto.randomUUID(), {
       readOnly: true,
+      origin: 'platform',
     })
     const dispose = () => session[Symbol.dispose]()
     signal?.addEventListener('abort', dispose, { once: true })
@@ -1500,10 +1538,10 @@ export class ZeroDO extends DurableObject {
    * object.
    */
   private async withLocalApplicationSqlSession<Value>(
-    readOnly: boolean,
+    options: ApplicationSqlSessionOptions,
     work: (session: ApplicationSqlSessionTarget) => Value | Promise<Value>
   ): Promise<Value> {
-    const session = await this.applicationSqlSession(crypto.randomUUID(), { readOnly })
+    const session = await this.applicationSqlSession(crypto.randomUUID(), options)
     try {
       await session.begin()
       const value = await work(session)
@@ -1529,10 +1567,16 @@ export class ZeroDO extends DurableObject {
    * the transport is.
    */
   protected applicationSqlLocalClient(namespace: string): ApplicationSqlClient {
+    // Schema reconciliation is the platform rebuilding the namespace, so none
+    // of its statements are metered as the application's own work.
     const run = <Value>(
       readOnly: boolean,
       work: (session: ApplicationSqlSessionTarget) => Promise<Value>
-    ) => this.withLocalApplicationSqlSession(readOnly, work)
+    ) =>
+      this.withLocalApplicationSqlSession(
+        { readOnly, namespace, origin: 'platform' },
+        work
+      )
     const transaction = <Value>(
       readOnly: boolean,
       compileQuery: ZeroDOQueryCompiler,
@@ -1587,7 +1631,13 @@ export class ZeroDO extends DurableObject {
     options: ApplicationSqlSessionOptions = {}
   ): Promise<ApplicationSqlSessionTarget> {
     if (!sessionID) throw new TypeError('application SQLite session id is required')
-    return new ApplicationSqlSessionTarget(this, sessionID, options.readOnly === true)
+    return new ApplicationSqlSessionTarget(
+      this,
+      sessionID,
+      options.readOnly === true,
+      options.namespace ?? '',
+      options.origin ?? 'application'
+    )
   }
 
   /**
@@ -1600,9 +1650,14 @@ export class ZeroDO extends DurableObject {
    */
   async applicationSqlQuery<
     Row extends Record<string, unknown> = Record<string, unknown>,
-  >(sql: string, params: readonly unknown[] = []): Promise<Row[]> {
-    return this.withLocalApplicationSqlSession(true, (session) =>
-      session.query<Row>(sql, params)
+  >(
+    sql: string,
+    params: readonly unknown[] = [],
+    options: ApplicationSqlSessionOptions = {}
+  ): Promise<Row[]> {
+    return this.withLocalApplicationSqlSession(
+      { ...options, readOnly: true },
+      (session) => session.query<Row>(sql, params)
     )
   }
 
@@ -1653,7 +1708,10 @@ export class ZeroDO extends DurableObject {
       if (this.prepareApplicationSqlMutation(session.sessionID, sql)) {
         session.mutated = true
       }
-      return this.executeSQL(sql, [...params], undefined, session.sessionID).rows as Row[]
+      const rows = this.executeSQL(sql, [...params], undefined, session.sessionID)
+        .rows as Row[]
+      session.rowsRead += rows.length
+      return rows
     })
   }
 
@@ -1675,6 +1733,7 @@ export class ZeroDO extends DurableObject {
         session.sessionID
       )
       if (result.changes > 0) session.changed = true
+      session.rowsWritten += result.changes
       return { changes: result.changes }
     })
   }
@@ -1691,7 +1750,9 @@ export class ZeroDO extends DurableObject {
         plan,
         (sql, params) => {
           this.assertApplicationSqlStatement(session, sql)
-          return this.executeSQL(sql, params, undefined, session.sessionID).rows
+          const rows = this.executeSQL(sql, params, undefined, session.sessionID).rows
+          session.rowsRead += rows.length
+          return rows
         },
         { queryName, budget: queryBudget }
       )
@@ -1721,7 +1782,15 @@ export class ZeroDO extends DurableObject {
     } finally {
       this.releaseApplicationSqlTurn(session)
     }
-    this.applicationSqlDidCommit(session.changed, session.mutated)
+    this.applicationSqlDidCommit({
+      sessionID: session.sessionID,
+      namespace: session.namespace,
+      origin: session.origin,
+      mutated: session.mutated,
+      changed: session.changed,
+      rowsRead: session.rowsRead,
+      rowsWritten: session.rowsWritten,
+    })
   }
 
   /**
