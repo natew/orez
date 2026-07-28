@@ -18,7 +18,7 @@
 // a deep-equal projection to undo the over-broadcasting.
 
 import { canonicalTopic } from 'orez-lite/realtime'
-import { useCallback, useMemo, useSyncExternalStore } from 'react'
+import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react'
 
 import type {
   RealtimeStore,
@@ -87,8 +87,7 @@ export function createUseStreamingField(
     // value from Zero is what ends the committing phase.
     const last = useRef<StreamingFieldState<Value> | undefined>(undefined)
     const getSnapshot = useCallback(() => {
-      const next =
-        !store || !handle ? durableState(base) : store.read(handle, base)
+      const next = !store || !handle ? durableState(base) : store.read(handle, base)
       const cached = last.current
       if (cached && sameState(cached, next)) return cached
       last.current = next
