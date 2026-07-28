@@ -394,6 +394,66 @@ describe('sync executor', () => {
     ])
   })
 
+  // Every other postgresql test here asserts against a transaction that only
+  // records SQL strings, so a statement PostgreSQL actually rejects still looks
+  // correct. This one executes it. The preflight upsert's DO UPDATE predicate
+  // was `WHERE "userID" IS NULL`, which PostgreSQL refuses as ambiguous between
+  // the conflicting row and `excluded` — that error surfaced as a failed push
+  // for every client, while SQLite accepted the same statement.
+  test('postgresql preflight upsert executes against a real postgres', async () => {
+    const { PGlite } = await import('@electric-sql/pglite')
+    const pg = new PGlite()
+    const run = async (sql: string, params: readonly unknown[] = []) =>
+      (await pg.query(sql, params as unknown[])).rows as Record<string, unknown>[]
+
+    const applicationTransaction: ApplicationTransaction = {
+      async exec(sql, params = []) {
+        await pg.query(sql, params as unknown[])
+        return { changes: 0 }
+      },
+      async query(sql, params = []) {
+        return (await run(sql, params)) as never
+      },
+      async queryAst() {
+        throw new Error('queryAst is not used by this fixture')
+      },
+    }
+    const database: ApplicationDatabase = {
+      dialect: 'postgresql',
+      async transaction(work) {
+        await pg.query('BEGIN')
+        try {
+          const value = await work(applicationTransaction)
+          await pg.query('COMMIT')
+          return value
+        } catch (error) {
+          await pg.query('ROLLBACK')
+          throw error
+        }
+      },
+      async query(sql, params = []) {
+        return (await run(sql, params)) as never
+      },
+    }
+
+    await pg.query('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    const mutators = {
+      create: async ({ tx }) => {
+        await tx.mutate.item.insert({ id: 'a', value: 'v' })
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    await expect(executor.push(push('create'), { userID: 'user-1' })).resolves.toEqual({
+      pushResponse: {
+        mutations: [{ id: { clientID: 'client-1', id: 1 }, result: {} }],
+      },
+    })
+    expect(await run('SELECT id, value FROM item')).toEqual([{ id: 'a', value: 'v' }])
+    expect(await run('SELECT "userID" FROM "_zsync_clients"')).toEqual([{ userID: 'user-1' }])
+    await pg.close()
+  })
+
   test('accepts cleanup mutation id zero without dispatch or acknowledgement', async () => {
     const { database, sqlite } = sqliteDatabase()
     sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')

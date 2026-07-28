@@ -206,6 +206,13 @@ async function preflight(
     ])
   }
   const params = placeholders(database, 5)
+  // the DO UPDATE predicate must name the row it filters. bare "userID" there is
+  // ambiguous between the conflicting row and `excluded`, and PostgreSQL rejects
+  // the whole statement with `column reference "userID" is ambiguous`, which
+  // fails every push. Qualify with the bare relation name: that is what both
+  // PostgreSQL and SQLite accept inside ON CONFLICT, and a schema-qualified
+  // reference is not allowed there.
+  const clientsRelation = quoteIdentifier('_zsync_clients')
   await tx.exec(
     `INSERT INTO ${clients} ("clientGroupID", "clientID", "lastMutationID", "userID")
      SELECT ${params[0]}, ${params[1]}, 0, ${params[2]}
@@ -214,7 +221,7 @@ async function preflight(
        WHERE "clientGroupID" = ${params[3]} AND "userID" IS NOT NULL AND "userID" <> ${params[4]}
      )
      ON CONFLICT ("clientGroupID", "clientID")
-     DO UPDATE SET "userID" = excluded."userID" WHERE "userID" IS NULL`,
+     DO UPDATE SET "userID" = excluded."userID" WHERE ${clientsRelation}."userID" IS NULL`,
     [clientGroupID, clientID, userID, clientGroupID, userID]
   )
 
