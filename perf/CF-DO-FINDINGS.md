@@ -69,11 +69,11 @@ byte-exact agreement with the shipped TS before any timing was taken.
 
 5000-change `/changes` body (2.7 MB), per call:
 
-| runtime | TS parse+project+stringify | Rust str→str (wasm) | ratio |
-| ------- | -------------------------: | ------------------: | ----: |
-| workerd | 14.60 ms | 33.18 ms | 2.27x slower |
-| node 25 (V8) | 13.35 ms | 30.44 ms | 2.28x slower |
-| bun (JSC) | 9.26 ms | 25.85 ms | 2.79x slower |
+| runtime      | TS parse+project+stringify | Rust str→str (wasm) |        ratio |
+| ------------ | -------------------------: | ------------------: | -----------: |
+| workerd      |                   14.60 ms |            33.18 ms | 2.27x slower |
+| node 25 (V8) |                   13.35 ms |            30.44 ms | 2.28x slower |
+| bun (JSC)    |                    9.26 ms |            25.85 ms | 2.79x slower |
 
 The drop-in shape (JS object in, JS object out, through `serde-wasm-bindgen`) is
 **19x slower** than the TS projection it would replace: 78.81 ms vs 4.12 ms in
@@ -101,11 +101,11 @@ it is ~1.5 ms of compute; SQLite is ~1.7 ms. Neither is the bill.
 Differential measurement against a live DO, 5000 rows, each step adding exactly
 one stage over the previous (`limit=5000`, wrangler dev --local):
 
-| stage | p50 | delta |
-| ----- | --: | ----: |
-| request floor (`SELECT 1`) | 0.78 ms | |
-| + SQLite scan of `_zero_changes` | 2.51 ms | 1.73 ms |
-| + full 2.8 MB payload out | 22.17 ms | 19.66 ms |
+| stage                                   |       p50 |        delta |
+| --------------------------------------- | --------: | -----------: |
+| request floor (`SELECT 1`)              |   0.78 ms |              |
+| + SQLite scan of `_zero_changes`        |   2.51 ms |      1.73 ms |
+| + full 2.8 MB payload out               |  22.17 ms |     19.66 ms |
 | + per-row `JSON.parse` + `normalizeRow` | 110.03 ms | **87.86 ms** |
 
 **SQLite is 1.6% of the pull.** 80% was the per-row decode — and most of that
@@ -127,10 +127,10 @@ so applications don't have to), and `_zero_schema_tables` is populated only from
 Isolated with byte-identical payloads whose only difference is whether
 `table_name` resolves:
 
-| | unregistered table | registered table |
-| - | ---: | ---: |
-| before | 114.49 ms | 40.01 ms |
-| after | 30.03 ms | 29.77 ms |
+|        | unregistered table | registered table |
+| ------ | -----------------: | ---------------: |
+| before |          114.49 ms |         40.01 ms |
+| after  |           30.03 ms |         29.77 ms |
 
 3.81x on the unregistered path at 5000 rows, 3.46x at 1000, registered path
 unchanged. Fixed by caching `null` for a confirmed absence; safe because every
