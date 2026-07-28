@@ -17,14 +17,14 @@
 // is the property an app hand-rolls otherwise, usually as a global emitter plus
 // a deep-equal projection to undo the over-broadcasting.
 
-import { canonicalTopic } from 'orez-lite/realtime'
-import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react'
+import { canonicalTopic } from 'orez-sync-executor/realtime'
+import { useCallback, useMemo, useSyncExternalStore } from 'react'
 
 import type {
   RealtimeStore,
   StreamingFieldHandle,
   StreamingFieldState,
-} from 'orez-lite/realtime'
+} from 'orez-sync-executor/realtime'
 
 // `streaming.message.content({ id })` returns a StreamingFieldHandle: the row's
 // topic plus the manifest spec for that column, so a hook needs no lookup and

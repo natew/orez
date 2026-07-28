@@ -1,6 +1,6 @@
 {
   "name": "on-zero",
-  "version": "0.11.0",
+  "version": "0.11.2",
   "description": "A typed layer over @rocicorp/zero with queries, mutations, and permissions",
   "sideEffects": false,
   "files": [
@@ -106,6 +106,7 @@
     "citty": "^0.1.6",
     "dequal": "^2.0.3",
     "orez-lite": "workspace:*",
+    "orez-sync-executor": "workspace:*",
     "valibot": "^1.1.0"
   },
   "peerDependencies": {

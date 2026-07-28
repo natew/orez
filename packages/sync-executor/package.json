@@ -1,6 +1,6 @@
 {
   "name": "orez-sync-executor",
-  "version": "0.11.0",
+  "version": "0.11.2",
   "type": "module",
   "sideEffects": false,
   "exports": {
@@ -19,6 +19,10 @@
     "./sqlite": {
       "types": "./dist/sqlite.d.ts",
       "import": "./dist/sqlite.js"
+    },
+    "./realtime": {
+      "types": "./dist/realtime/index.d.ts",
+      "import": "./dist/realtime/index.js"
     }
   },
   "scripts": {

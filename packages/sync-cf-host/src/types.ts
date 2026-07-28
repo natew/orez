@@ -9,6 +9,7 @@ import type {
   SqlStatementMetadata,
   VisibilityConfig,
 } from 'orez-sync-executor'
+import type { StreamingManifest } from 'orez-sync-executor/realtime'
 
 export {
   visibility,
@@ -136,8 +137,19 @@ export type SyncHostConfig<
   ): boolean | Promise<boolean>
   /** Authorize the advisory wake socket before selecting a namespace DO.
    * Browser clients should present a short-lived, namespace-scoped capability
-   * in the query string because WebSocket cannot set request headers. */
-  authorizeWake(request: Request, env: Env): boolean | Promise<boolean>
+   * in the query string because WebSocket cannot set request headers.
+   *
+   * Return `{ userID }` instead of `true` to also identify the socket, which is
+   * what a namespace serving `streamingManifest` must do: field subscriptions
+   * ride this socket and are authorized against that userID. Returning bare
+   * `true` there is refused rather than quietly downgraded to a wake-only
+   * socket, because the failure would otherwise look like streaming that just
+   * never arrives. The capability is the only credential available here, so the
+   * userID belongs inside it. */
+  authorizeWake(
+    request: Request,
+    env: Env
+  ): boolean | { userID: string } | Promise<boolean | { userID: string }>
   /** Authorize upstream service notifications before selecting a namespace DO. */
   authorizeNotify(request: Request, env: Env): boolean | Promise<boolean>
   /** Resolve the first path component or another consumer-defined namespace. */
@@ -148,6 +160,27 @@ export type SyncHostConfig<
   queryAware?: boolean | ((claims: NormalizedClaims) => boolean)
   /** Resolve every named query in one desired-query patch, in one call. */
   resolveQueries?: QueryResolver
+  /**
+   * Streaming fields for this namespace: which columns may carry a live,
+   * uncommitted value, and their publish mode and rate bounds.
+   *
+   * Supplied as a live object rather than data because a field's `validate` is
+   * a function; there is nothing to serialize into a deploy bundle, and the
+   * application's own module is where it belongs. Absent means the namespace
+   * serves no field subscriptions and rejects producer frames.
+   *
+   * See docs/streaming-fields.md.
+   */
+  streamingManifest?: StreamingManifest
+  /**
+   * Authorize a producer socket, which may publish a value into any streaming
+   * field for any row. That is a much stronger capability than the wake socket
+   * or an ordinary client's, so it has no default: leaving this unset means the
+   * namespace accepts no producers, and every `/realtime/produce` upgrade is
+   * refused. Producers are server-side callers (an AI generation worker, a job
+   * runner), so a service binding or a shared secret is the usual check.
+   */
+  authorizeProduce?: (request: Request, env: Env) => boolean | Promise<boolean>
   /** Server-owned invalidation epoch for permission/schema transforms. */
   queryTransformVersion?: number | ((claims: NormalizedClaims) => number)
   /** Enable consumer visibility from the first request. Defaults to false for harnesses. */

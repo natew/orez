@@ -1,6 +1,9 @@
 import { MutationApplicationError, registerMutators } from 'orez-sync-executor/core'
+import { defineStreamingFields } from 'orez-sync-executor/realtime'
 
 import { queryNameToAst } from '../../../harness/src/query-resolver.mjs'
+import { harnessSchema, harnessStreaming } from './harness-schema.js'
+import { verifyHarnessWakeToken } from './harness-wake-token.js'
 import {
   visibility,
   type SyncHostConfig,
@@ -9,63 +12,6 @@ import {
 } from './index.js'
 
 import type { Schema } from '@rocicorp/zero'
-
-export const harnessSchema = {
-  tables: {
-    user: {
-      name: 'user',
-      columns: { id: { type: 'string' }, name: { type: 'string' } },
-      primaryKey: ['id'],
-    },
-    project: {
-      name: 'project',
-      columns: {
-        id: { type: 'string' },
-        ownerId: { type: 'string' },
-        name: { type: 'string' },
-      },
-      primaryKey: ['id'],
-    },
-    member: {
-      name: 'member',
-      columns: {
-        id: { type: 'string' },
-        projectId: { type: 'string' },
-        userId: { type: 'string' },
-      },
-      primaryKey: ['id'],
-    },
-    task: {
-      name: 'task',
-      columns: {
-        id: { type: 'string' },
-        projectId: { type: 'string' },
-        title: { type: 'string' },
-        rank: { type: 'number' },
-        done: { type: 'boolean' },
-        meta: { type: 'json' },
-        dueAt: { type: 'number' },
-      },
-      primaryKey: ['id'],
-    },
-    message: {
-      name: 'message',
-      columns: {
-        id: { type: 'string' },
-        serverId: { type: 'string' },
-        channelId: { type: 'string' },
-        creatorId: { type: 'string' },
-        content: { type: 'string' },
-        type: { type: 'string' },
-        createdAt: { type: 'number' },
-        order: { type: 'string' },
-        meta: { type: 'json' },
-      },
-      primaryKey: ['id'],
-    },
-  },
-  relationships: {},
-} as const satisfies Schema
 
 const DDL = [
   'CREATE TABLE IF NOT EXISTS "user" (id TEXT PRIMARY KEY, name TEXT NOT NULL)',
@@ -349,93 +295,6 @@ const harnessMutators = registerMutators({
   },
 })
 
-const WAKE_TOKEN_TTL_MS = 60_000
-
-type HarnessWakeTokenPayload = {
-  namespace: string
-  userID: string
-  expiresAt: number
-}
-
-export async function mintHarnessWakeToken(
-  namespace: string,
-  userID: string,
-  secret: string
-): Promise<{ token: string; expiresAt: number }> {
-  const expiresAt = Date.now() + WAKE_TOKEN_TTL_MS
-  const payload = encodeBase64URL(
-    new TextEncoder().encode(JSON.stringify({ namespace, userID, expiresAt }))
-  )
-  return {
-    token: `${payload}.${await signWakeToken(payload, secret)}`,
-    expiresAt,
-  }
-}
-
-async function verifyHarnessWakeToken(
-  token: string,
-  namespace: string,
-  secret: string
-): Promise<boolean> {
-  try {
-    const [payload, signature, extra] = token.split('.')
-    if (!payload || !signature || extra) return false
-    const key = await wakeTokenKey(secret, ['verify'])
-    const valid = await crypto.subtle.verify(
-      'HMAC',
-      key,
-      decodeBase64URL(signature),
-      new TextEncoder().encode(payload)
-    )
-    if (!valid) return false
-    const claims = JSON.parse(
-      new TextDecoder().decode(decodeBase64URL(payload))
-    ) as HarnessWakeTokenPayload
-    return (
-      claims.namespace === namespace &&
-      typeof claims.userID === 'string' &&
-      claims.userID.length > 0 &&
-      Number.isFinite(claims.expiresAt) &&
-      claims.expiresAt > Date.now()
-    )
-  } catch {
-    return false
-  }
-}
-
-async function signWakeToken(payload: string, secret: string): Promise<string> {
-  const key = await wakeTokenKey(secret, ['sign'])
-  const signature = await crypto.subtle.sign(
-    'HMAC',
-    key,
-    new TextEncoder().encode(payload)
-  )
-  return encodeBase64URL(new Uint8Array(signature))
-}
-
-function wakeTokenKey(secret: string, usages: KeyUsage[]): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    usages
-  )
-}
-
-function encodeBase64URL(bytes: Uint8Array): string {
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
-}
-
-function decodeBase64URL(value: string): ArrayBuffer {
-  const base64 = value.replaceAll('-', '+').replaceAll('_', '/')
-  const binary = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='))
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0))
-    .buffer as ArrayBuffer
-}
-
 export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
   return {
     hostVersion: '0.1.0',
@@ -488,6 +347,16 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
     authorizeNotify(request, env) {
       return (
         Boolean(env.ADMIN_KEY) && request.headers.get('x-admin-key') === env.ADMIN_KEY
+      )
+    },
+    streamingManifest: harnessStreaming.manifest,
+    // A producer upgrade is a WebSocket, which cannot set headers, so the
+    // harness puts its admin key in the query string. A real deployment uses a
+    // service binding and never exposes this route publicly.
+    authorizeProduce(request, env) {
+      return (
+        Boolean(env.ADMIN_KEY) &&
+        new URL(request.url).searchParams.get('adminKey') === env.ADMIN_KEY
       )
     },
     visibility: {

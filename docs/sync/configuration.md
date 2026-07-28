@@ -24,7 +24,7 @@ immediately rather than failing at request time.
 
 `NormalizedClaims` must carry a non-empty `userID`; it owns client-group
 ownership. Put the raw client token into claims (for example under a
-`__zeroAuthToken` key) if `resolveQuery` needs to forward it to the app.
+`__zeroAuthToken` key) if `resolveQueries` needs to forward it to the app.
 
 ## Push mode: exactly one of two
 
@@ -78,11 +78,11 @@ data worker has its own independent budget, configured by environment variables
 Turn these on when clients send named queries and the app owns the
 permission transform.
 
-| Field                   | Type                                     | Default                 | Meaning                                                                                                                                                                         |
-| ----------------------- | ---------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `queryAware`            | `boolean \| (claims) => boolean`         | `Boolean(resolveQuery)` | Enables the desired-query pull path for this namespace.                                                                                                                         |
-| `resolveQuery`          | `(name, args, claims, env) => JsonValue` | none                    | Resolves a named query plus args into a validated Zero AST before it reaches the engine. Commonly delegates to the app's real synced-queries endpoint over a service binding.   |
-| `queryTransformVersion` | `number \| (claims) => number`           | 0                       | Server-owned invalidation epoch for permission or schema transforms. Must be a non-negative safe integer. Bump it to force recompilation of every client's transformed queries. |
+| Field                   | Type                                           | Default                   | Meaning                                                                                                                                                                                                                         |
+| ----------------------- | ---------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queryAware`            | `boolean \| (claims) => boolean`               | `Boolean(resolveQueries)` | Enables the desired-query pull path for this namespace.                                                                                                                                                                         |
+| `resolveQueries`        | `(requests, claims, env) => QueryResolution[]` | none                      | Resolves a whole desired-query patch (name + args per entry) into validated Zero ASTs in one call, one entry per request in request order. Commonly delegates to the app's real synced-queries endpoint over a service binding. |
+| `queryTransformVersion` | `number \| (claims) => number`                 | 0                         | Server-owned invalidation epoch for permission or schema transforms. Must be a non-negative safe integer. Bump it to force recompilation of every client's transformed queries.                                                 |
 
 ## Visibility (local filtering)
 

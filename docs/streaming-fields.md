@@ -35,7 +35,7 @@ gets out of the way once the database catches up.
 ## Declaring fields
 
 ```ts
-import { defineStreamingFields } from 'orez/realtime'
+import { defineStreamingFields } from 'orez-lite/realtime'
 import { schema } from './schema'
 
 export const streaming = defineStreamingFields(schema, {
@@ -162,6 +162,7 @@ differs between surfaces is only how frames travel.
 | `createLocalRealtime`  | in-process              | same context               | the tab producing values is the tab rendering them            |
 | `BrowserRealtime`      | in the worker           | pages over a `MessagePort` | a shared worker owns the sync engine                          |
 | `createSocketProducer` | off-host, over a socket | wherever the hub is        | an application server generates values for browsers elsewhere |
+| `createSocketHost`     | over a socket           | over sockets               | the hub runs in a Durable Object or a Node server             |
 
 Choosing between them is one question: **is the code producing the value in the
 same process as the code displaying it?** If yes, use the local surface and stop
@@ -185,11 +186,68 @@ the per-namespace object their sync sockets are attached to. It is also where
 query membership lives, and membership is the authorization fact a subscription
 is checked against. A hub anywhere else needs its own copy of both.
 
-Open the producer's socket when the producer is warmed, not when it first has a
-value. Soot measured a warm call into its chat service at 386ms and 393ms while
-the container itself reported 0ms of work, so the cost of reaching a service is
-almost entirely in getting there. Paying that on the first token of every turn
-would put it directly in the latency the stream exists to hide.
+### On Cloudflare
+
+`sync-cf-host` mounts the hub in the namespace Durable Object, which is where
+both facts it needs already are: the clients' sockets, and the query membership
+a subscription is checked against. Two config options turn it on.
+
+```ts
+createSyncWorker({
+  streamingManifest: streaming.manifest,
+  // Server-side producers only. Absent means the namespace accepts none.
+  authorizeProduce: (request, env) => request.headers.get('x-internal') === env.SECRET,
+  authorizeWake: async (request, env) => {
+    const claims = await verifyCapability(request, env)
+    // `{ userID }` rather than `true`: subscriptions ride this socket
+    return claims && { userID: claims.userID }
+  },
+})
+```
+
+Subscriptions ride the existing wake socket rather than opening a second one.
+That socket is a `GET` upgrade, so it can carry neither an `Authorization`
+header nor a body, which is why identity comes back from `authorizeWake`
+instead: the capability in the query string is the only credential available.
+Returning bare `true` from a namespace that sets `streamingManifest` is refused
+rather than downgraded, because a wake-only socket whose subscriptions never
+deliver looks exactly like a stream that is merely slow.
+
+The client's `clientID` and `clientGroupID` stay query parameters, and stay
+claims. The engine checks the group against the authenticated userID before it
+reads a row, so asserting someone else's group buys nothing.
+
+Producers connect to `/<namespace>/realtime/produce` and are authorized by
+`authorizeProduce`, separately from end users, because publishing into any
+row's field is a much stronger capability than reading one. On the producer
+side that socket is driven by `createSocketProducer`, so the code that writes
+values is the same code it would be in-process:
+
+```ts
+const socket = new WebSocket(`${origin}/realtime/produce?producerKey=${key}`)
+const producer = createSocketProducer(socket, { manifest: streaming.manifest })
+socket.addEventListener('message', (event) => producer.handleMessage(event.data))
+socket.addEventListener('close', () => producer.fail('socket closed'))
+
+// from here on, identical to the local surface
+producer.fields.set(streaming.message.content({ id }), text)
+```
+
+Open that socket when the producer is warmed rather than on its first value.
+Soot measured warm calls into its chat service at 386ms and 393ms while the
+service itself reported 0ms of work, so almost all of the cost is in getting
+there, and paying it on the first token would sit squarely in the latency the
+stream exists to hide.
+
+**Hibernation.** Cloudflare evicts the object while its sockets stay open, so
+the hub is rebuilt on the next frame and each socket's topics are replayed from
+its attachment. Replaying `subscribe` re-authorizes as a side effect, so
+membership revoked during the eviction is honoured rather than restored.
+Generations deliberately do not survive: they are ephemeral, the durable row is
+still the truth, and a producer whose generation vanished opens a new one.
+
+`harness/src/streaming-fields.ts` drives all of this against a real Durable
+Object, eviction included.
 
 ### Frame routing
 

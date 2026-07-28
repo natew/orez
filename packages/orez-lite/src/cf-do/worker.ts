@@ -1819,9 +1819,12 @@ export class ZeroDO extends DurableObject {
       })
   }
 
-  private invalidateSchemaCaches(): void {
+  protected invalidateSchemaCaches(): void {
     this.watermarks.invalidateCache()
     this.pendingChangesSchemaReady = false
+    // memoized application table shapes revert with the SQLite row on rollback,
+    // so every path that discards a transaction must also discard this map
+    this.tableSchemas.clear()
     // Reload is intentionally last because corrupt persisted CDC metadata must
     // throw (fail closed), without preventing the other caches from invalidating.
     this.cdc.reload()

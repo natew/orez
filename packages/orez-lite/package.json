@@ -1,6 +1,6 @@
 {
   "name": "orez-lite",
-  "version": "0.11.0",
+  "version": "0.11.2",
   "description": "SQLite and Rust sync engine for Zero applications",
   "type": "module",
   "sideEffects": [
@@ -21,8 +21,8 @@
       "import": "./dist/wake.js"
     },
     "./realtime": {
-      "types": "./dist/realtime/index.d.ts",
-      "import": "./dist/realtime/index.js"
+      "types": "./dist/realtime.d.ts",
+      "import": "./dist/realtime.js"
     },
     "./zero-http": {
       "types": "./dist/zero-http/mount.d.ts",

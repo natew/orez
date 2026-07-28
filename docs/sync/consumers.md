@@ -24,7 +24,7 @@ export const chatConfig: SyncHostConfig = {
   hostVersion: 'chat-rust-sync-0.1',
   schema: chatSchema,
   queryAware: true,
-  resolveQuery: (name, args, claims, env) => resolveQuery(name, args, claims, env),
+  resolveQueries: (requests, claims, env) => resolveQueries(requests, claims, env),
   queryTransformVersion: 1,
   mutateUrl: '/api/zero/push?schema=chat_0&appID=chat', // delegated push
   mutateBinding: 'APP',
@@ -53,7 +53,7 @@ The pieces:
   `/snapshot` and `/changes` from the paired data worker over `DATA`, advances
   its watermark, and wakes connected clients — so app effects and the Rust
   replica share one authoritative write path.
-- **`resolveQuery` delegates.** It POSTs a `transform` request to the Chat app
+- **`resolveQueries` delegates.** It POSTs one `transform` request per desired-query patch to the Chat app
   worker's real `/api/zero/pull` over the `APP` service binding and returns the
   permission-transformed AST. The client's bearer token rides in claims and is
   forwarded on that subrequest.
@@ -102,7 +102,7 @@ export function createSootSyncConfig(authenticate) {
     authenticate,
     namespace: namespaceForRequest,
     queryAware: true,
-    resolveQuery: (name, args, claims, env) => resolveSootQuery(name, args, claims, env),
+    resolveQueries: (requests, claims, env) => resolveSootQueries(requests, claims, env),
     queryTransformVersion: 1,
     caps: { maxChangeRows: 10_000, maxChangeBytes: 2_000_000 },
     retainChanges: 4_096,
@@ -165,7 +165,7 @@ Distilling both, a new app provides four things.
 Required for every app: `hostVersion`, `schema` (derived from your Zero schema),
 `initialize(sql)` for your DDL, `authenticate(request, env)` returning
 `{userID, ...}`, and `namespace(request)` returning the DO partition key. Carry
-the raw client token into claims so `resolveQuery` can forward it.
+the raw client token into claims so `resolveQueries` can forward it.
 
 Then choose exactly one push model:
 
@@ -178,10 +178,11 @@ Then choose exactly one push model:
   server-side effects (jobs, projections, notifications) run outside the sync
   path, or when the app already owns a real push endpoint.
 
-For query-aware pulls (both apps use this): `queryAware: true`, a `resolveQuery`
-that POSTs a transform request to your app's `/api/zero/pull` and returns the
-AST, and a `queryTransformVersion` epoch you bump on permission or schema
-changes.
+For query-aware pulls (both apps use this): `queryAware: true`, a
+`resolveQueries` that POSTs the whole patch as one transform request to your
+app's `/api/zero/pull` and returns one AST-or-error entry per request in
+request order, and a `queryTransformVersion` epoch you bump on permission or
+schema changes.
 
 ### 2. A workerd composition entry
 
@@ -194,7 +195,7 @@ layer (handle preflight, echo headers, pass 101 upgrades through).
 - A `SYNC_DO` Durable Object binding pointing at your DO class, with a
   `[[migrations]]` `new_sqlite_classes` entry.
 - A `[[services]]` `APP` binding to the app worker (used by `authenticate`,
-  `resolveQuery`, and delegated `mutateUrl`).
+  `resolveQueries`, and delegated `mutateUrl`).
 - For delegated push, a second `[[services]]` `DATA` binding for the change
   feed, matching `upstream.binding`.
 - Vars for the app origin and any admin or test flags. Import the published
