@@ -194,6 +194,61 @@ describe('Orez Lite feed projection', () => {
       nextCursor: null,
     })
   })
+
+  it('fills current optional columns omitted by historical full rows', () => {
+    const evolvingDescriptor = {
+      ...descriptor,
+      schema: {
+        ...descriptor.schema,
+        tables: {
+          widget: {
+            ...descriptor.schema.tables.widget,
+            columns: {
+              ...descriptor.schema.tables.widget.columns,
+              location: {
+                type: 'string' as const,
+                optional: true,
+                serverName: 'widget_location',
+              },
+            },
+          },
+        },
+      },
+    }
+
+    expect(
+      projectOrezFeedBody(evolvingDescriptor, {
+        watermark: 10,
+        changes: [
+          {
+            watermark: 10,
+            tableName: 'public.widget',
+            op: 'UPDATE',
+            rowData: {
+              widget_id: 'w1',
+              display_title: 'Historical',
+            },
+            oldData: null,
+          },
+        ],
+      })
+    ).toEqual({
+      watermark: 10,
+      changes: [
+        {
+          watermark: 10,
+          tableName: 'widget',
+          op: 'UPDATE',
+          rowData: {
+            id: 'w1',
+            title: 'Historical',
+            location: null,
+          },
+          oldData: null,
+        },
+      ],
+    })
+  })
 })
 
 describe('createOrezDataWorker', () => {

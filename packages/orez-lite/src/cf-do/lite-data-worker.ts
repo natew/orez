@@ -316,6 +316,7 @@ export function resolveOrezDataRequest(
 type ProjectedTable = {
   name: string
   columns: ReadonlyMap<string, string>
+  optionalColumns: ReadonlySet<string>
 }
 
 function schemaFeedTables(
@@ -342,11 +343,13 @@ function schemaFeedTables(
     }
     const [logicalName, table] = matched
     const columns = new Map<string, string>()
+    const optionalColumns = new Set<string>()
     for (const [columnName, column] of Object.entries(table.columns)) {
       columns.set(column.serverName ?? columnName, columnName)
       columns.set(columnName, columnName)
+      if (column.optional === true) optionalColumns.add(columnName)
     }
-    const projection = { name: logicalName, columns }
+    const projection = { name: logicalName, columns, optionalColumns }
     for (const alias of [
       published.table,
       published.publicTable,
@@ -366,6 +369,9 @@ function projectedRow(table: ProjectedTable, row: unknown): unknown {
   const projected: JsonRecord = {}
   for (const [source, target] of table.columns) {
     if (source in row && !(target in projected)) projected[target] = row[source]
+  }
+  for (const column of table.optionalColumns) {
+    if (!(column in projected)) projected[column] = null
   }
   return projected
 }
