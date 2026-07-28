@@ -20,14 +20,18 @@ import { FieldWriter } from './writer.js'
 import type { RealtimeHub, HubProducer } from './hub.js'
 import type { StreamingManifest } from './manifest.js'
 import type { FieldUpdate, RealtimeTopic } from './protocol.js'
-import type { PublisherTransport } from './publisher.js'
+import type { PublisherOptions, PublisherTransport } from './publisher.js'
 
 export type RealtimeProducer = {
   readonly fields: FieldWriter
   readonly publisher: RealtimePublisher
 }
 
-export type ProducerOptions = {
+// The publisher's own options ride along, so `now` and `randomID` are injectable
+// from wherever an application builds its realtime. A producer is the only thing
+// most applications construct, so an option the publisher accepts but a producer
+// cannot pass through is an option nobody can reach.
+export type ProducerOptions = PublisherOptions & {
   readonly manifest: StreamingManifest
   // A failed write is reported, never thrown into the caller's loop: `set` runs
   // inside a token loop where throwing would abort the model run over a
@@ -39,7 +43,7 @@ export function createProducer(
   transport: PublisherTransport,
   options: ProducerOptions
 ): RealtimeProducer {
-  const publisher = new RealtimePublisher(transport, options.manifest)
+  const publisher = new RealtimePublisher(transport, options.manifest, options)
   const fields = new FieldWriter(publisher, {
     onError: (error, topic) => {
       options.onError?.(`${topic.table}.${topic.field}: ${error.message}`)

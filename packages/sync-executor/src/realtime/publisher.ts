@@ -24,6 +24,16 @@ export type PublisherTransport = {
   readonly end: (streamID: string) => Promise<void> | void
 }
 
+export type PublisherOptions = {
+  readonly now?: () => number
+  // Every generation needs an id, and the default reaches for `crypto`. Hermes
+  // has no such global, so a React Native producer supplies its own here (from
+  // expo-crypto, say) rather than throwing on its first begin. Every surface
+  // that builds a producer forwards this, so an application injects it once at
+  // the realtime it constructs.
+  readonly randomID?: () => string
+}
+
 export type BeginOptions = {
   readonly namespace: string
   readonly key: Readonly<Record<string, boolean | null | number | string>>
@@ -64,7 +74,7 @@ export class RealtimePublisher {
   constructor(
     transport: PublisherTransport,
     manifest: StreamingManifest,
-    options: { readonly now?: () => number; readonly randomID?: () => string } = {}
+    options: PublisherOptions = {}
   ) {
     this.#transport = transport
     this.#manifest = manifest

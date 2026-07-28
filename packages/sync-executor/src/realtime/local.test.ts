@@ -200,6 +200,35 @@ describe('local realtime', () => {
     })
   })
 
+  // Hermes has no `crypto` global, so React Native supplies its own id source
+  // (expo-crypto). Until a producer forwarded it, every begin threw on device
+  // and the overlay silently never appeared.
+  it('streams on a runtime with no crypto global, given an id source', async () => {
+    const globalCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto')
+    Object.defineProperty(globalThis, 'crypto', { configurable: true, value: undefined })
+    try {
+      let issued = 0
+      const realtime = createLocalRealtime({
+        manifest: streaming.manifest,
+        randomID: () => `no-crypto-${++issued}`,
+      })
+      const topic = streaming.message.content({ id: 'm1' })
+      realtime.store.subscribe(topic, () => {})
+
+      const session = await realtime.publisher.begin<string>('message', 'content', {
+        namespace: 'local',
+        key: { id: 'm1' },
+      })
+      session.set('a summary arriving')
+      await session.flush()
+
+      expect(session.streamID).toBe('no-crypto-1')
+      expect(realtime.store.read(topic, '').value).toBe('a summary arriving')
+    } finally {
+      if (globalCrypto) Object.defineProperty(globalThis, 'crypto', globalCrypto)
+    }
+  })
+
   it('reveals the durable value when a generation is abandoned', async () => {
     const realtime = createLocalRealtime({ manifest: streaming.manifest })
     const topic = streaming.message.content({ id: 'm1' })

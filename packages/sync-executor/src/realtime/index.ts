@@ -46,7 +46,12 @@ export type {
 } from './store.js'
 
 export { RealtimePublisher } from './publisher.js'
-export type { BeginOptions, PublisherTransport, StreamSession } from './publisher.js'
+export type {
+  BeginOptions,
+  PublisherOptions,
+  PublisherTransport,
+  StreamSession,
+} from './publisher.js'
 
 export { DEFAULT_HUB_LIMITS, RealtimeHub } from './hub.js'
 export type {

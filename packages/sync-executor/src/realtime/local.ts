@@ -24,15 +24,12 @@ import { createProducer, inProcessTransport } from './producer.js'
 import { RealtimeStore } from './store.js'
 
 import type { HubConnection, HubProducer } from './hub.js'
-import type { StreamingManifest } from './manifest.js'
-import type { RealtimeProducer } from './producer.js'
+import type { ProducerOptions, RealtimeProducer } from './producer.js'
 import type { ClientFrame, HostFrame } from './protocol.js'
 
-export type LocalRealtimeOptions = {
-  readonly manifest: StreamingManifest
+export type LocalRealtimeOptions = ProducerOptions & {
   // how long without a frame before an overlay reveals the durable value
   readonly staleAfterMs?: number
-  readonly onError?: (message: string) => void
 }
 
 // The producer role is the shared one, so a loop written against a local

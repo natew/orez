@@ -179,6 +179,22 @@ desktop and routes the same chat through a separate Cloudflare service on
 mobile; the second one is a server-side producer whatever the first one is. Pick
 the surface per deployment, not per application.
 
+### On React Native
+
+Every surface takes an optional `randomID`, and Hermes is the reason. A producer
+names each generation with an id that defaults to `crypto.randomUUID()`, and
+Hermes has no `crypto` global, so on device the default throws at `begin` and no
+frame is ever produced. Pass an id source when the producer runs there:
+
+```ts
+import { randomUUID } from 'expo-crypto'
+
+createLocalRealtime({ manifest: streaming.manifest, randomID: () => randomUUID() })
+```
+
+Nothing else in the client path needs a polyfill; the store and the hub do no
+crypto at all.
+
 ### Where the hub goes
 
 Put the hub where the subscribers already are, which in a Zero deployment means
