@@ -442,10 +442,8 @@ describe('Orez Lite committed operation receipts', () => {
     })
     const settled: Promise<unknown>[] = []
     const zero = Object.create(runtime.ZeroDO.prototype) as any
-    zero.orezContext = {
-      waitUntil: (promise: Promise<unknown>) => settled.push(promise),
-    }
-    zero.orezEnv = { ZERO_SQL_DO: {} }
+    zero.ctx = { waitUntil: (promise: Promise<unknown>) => settled.push(promise) }
+    zero.env = { ZERO_SQL_DO: {} }
     zero.orezStorage = { sql: { exec: () => ({ toArray: () => [] }) } }
     return { settled, zero }
   }

@@ -48,7 +48,11 @@ import type {
   ApplicationSqlTable,
   ApplicationSqlTransactionWork,
 } from './application-sql.js'
-import type { CommittedOperationOrigin } from 'orez-sync-cf-host/committed-operation'
+import type {
+  CommittedDataOperation,
+  CommittedOperationHandler,
+  CommittedOperationOrigin,
+} from 'orez-sync-cf-host/committed-operation'
 import type { SqlStatementMetadata, TransactionQueryFormat } from 'orez-sync-executor'
 
 export { createApplicationSqlClient } from './application-sql.js'
@@ -393,7 +397,71 @@ export class ZeroDO extends DurableObject {
   private applicationSqlWriter: ApplicationSqlSessionTarget | null = null
   private applicationSqlReaders = new Set<ApplicationSqlSessionTarget>()
   private applicationSqlQueue: ApplicationSqlWaiter[] = []
-  protected applicationSqlDidCommit(_committed: CommittedApplicationSql): void {}
+
+  /**
+   * The host's metering handler for this object, or nothing.
+   *
+   * Whatever configured the object answers this: `createOrezZeroDO` for a
+   * Worker that exports the base object, and the Lite data worker for one built
+   * by `createOrezDataWorker`. Turning a commit into receipts is deliberately
+   * not part of what they override, so both hosts report the same shape.
+   *
+   * The env is untyped here on purpose. This object's own `Env` is this
+   * module's binding shape, and an override belongs to a host that is generic
+   * over its application's env; naming either one would make the other an
+   * unrelated type. The precise env reaches the application through the
+   * `onCommittedOperation` option it actually writes.
+   */
+  protected committedOperationHandler(): CommittedOperationHandler<any> | undefined {
+    return undefined
+  }
+
+  /**
+   * Report what a session committed, as receipts.
+   *
+   * Reads and writes are priced apart, so a session that did both produces one
+   * receipt of each rather than a single row count that has already mixed them.
+   * Both derive from the session id, which the client generates once per
+   * session, so a retry that re-runs the same session repeats them.
+   *
+   * Every receipt is handed over on this object's execution context. waitUntil
+   * keeps the handler off the request's critical path and, more importantly,
+   * off its failure path: the work it describes is already committed, so a
+   * metering handler that throws, rejects or hangs must not be able to turn a
+   * successful commit into an error the client sees.
+   */
+  protected applicationSqlDidCommit(committed: CommittedApplicationSql): void {
+    const handler = this.committedOperationHandler()
+    if (!handler || committed.origin !== 'application') return
+    const report = (operation: CommittedDataOperation) => {
+      this.ctx.waitUntil(
+        (async () => handler(operation, this.env))().catch((error: unknown) => {
+          console.error(
+            JSON.stringify({
+              event: 'orez_committed_operation_failed',
+              receipt: operation.receipt,
+              message: error instanceof Error ? error.message : String(error),
+            })
+          )
+        })
+      )
+    }
+    report({
+      namespace: committed.namespace,
+      kind: 'read',
+      source: 'application-sql',
+      rows: committed.rowsRead,
+      receipt: `read:${committed.namespace}:${committed.sessionID}`,
+    })
+    if (!committed.mutated) return
+    report({
+      namespace: committed.namespace,
+      kind: 'write',
+      source: 'application-sql',
+      rows: committed.rowsWritten,
+      receipt: `write:${committed.namespace}:${committed.sessionID}`,
+    })
+  }
 
   private recordWriteBudgetRows(rows: number, statement?: SqlWriteMeasurement): void {
     const wasTripped = this.writeBudget.status().tripped
@@ -2771,6 +2839,36 @@ export class ZeroDO extends DurableObject {
       return JSON.parse(typeof data === 'string' ? data : new TextDecoder().decode(data))
     } catch {
       return null
+    }
+  }
+}
+
+export type OrezZeroDOOptions<Env> = {
+  /**
+   * Receipt for every committed unit of application data work in this
+   * namespace, for hosts that meter usage. See `CommittedDataOperation`; the
+   * reporting rules are `ZeroDO#applicationSqlDidCommit`, and they are the same
+   * ones `createOrezDataWorker` applies.
+   */
+  onCommittedOperation?: CommittedOperationHandler<Env>
+}
+
+/**
+ * The base durable object, configured.
+ *
+ * A Worker that owns its own migrations and routing exports `ZeroDO` straight
+ * from this module and has nowhere to put host options, because workerd
+ * constructs the class itself. This returns the same object with those options
+ * bound, so adopting metering is a one-line change to that export rather than a
+ * move to `createOrezDataWorker` and a second owner for work the Worker already
+ * does. `ZeroDO` itself is unchanged and still exported.
+ */
+export function createOrezZeroDO<Env>(
+  options: OrezZeroDOOptions<Env> = {}
+): typeof ZeroDO {
+  return class OrezZeroDO extends ZeroDO {
+    protected committedOperationHandler(): CommittedOperationHandler<Env> | undefined {
+      return options.onCommittedOperation
     }
   }
 }

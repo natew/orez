@@ -4,8 +4,8 @@
  * Deploy tooling lives at `orez-lite/cloudflare/build` so Node-based build scripts
  * never evaluate `cloudflare:workers`.
  */
-export { createApplicationSqlClient, ZeroDO } from './cf-do/worker.js'
-export type { CommittedApplicationSql } from './cf-do/worker.js'
+export { createApplicationSqlClient, createOrezZeroDO, ZeroDO } from './cf-do/worker.js'
+export type { CommittedApplicationSql, OrezZeroDOOptions } from './cf-do/worker.js'
 export type {
   CommittedDataOperation,
   CommittedOperationHandler,

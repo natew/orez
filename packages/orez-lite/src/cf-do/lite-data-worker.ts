@@ -19,10 +19,7 @@ import type {
 } from './application-sql.js'
 import type { CommittedApplicationSql } from './worker.js'
 import type { Schema } from '@rocicorp/zero'
-import type {
-  CommittedDataOperation,
-  CommittedOperationHandler,
-} from 'orez-sync-cf-host/committed-operation'
+import type { CommittedOperationHandler } from 'orez-sync-cf-host/committed-operation'
 
 type MaybePromise<Value> = Value | Promise<Value>
 type JsonRecord = Record<string, unknown>
@@ -173,6 +170,10 @@ export interface OrezDataWorkerOptions<
    * backup export, restore, and the snapshot/changefeed endpoints) declares a
    * platform origin and never reaches here. A handler that throws or rejects is
    * logged and dropped: metering must not be able to fail a committed write.
+   *
+   * A Worker that exports the base `ZeroDO` rather than this factory configures
+   * the same handler through `createOrezZeroDO`; both report through
+   * `ZeroDO#applicationSqlDidCommit`.
    */
   onCommittedOperation?: CommittedOperationHandler<Env>
   setup?(context: OrezRequestContext<Env>): MaybePromise<void>
@@ -560,8 +561,6 @@ export function createOrezDataWorker<
 
   class ZeroSqlDO extends OrezZeroDO {
     private readonly orezStorage: any
-    private readonly orezContext: OrezExecutionContext
-    private readonly orezEnv: Env
     private readonly orezWorkerVersion: string
     private orezSchemaRunVersion: string | null = null
     private orezSchemaRun: Promise<unknown> | null = null
@@ -587,8 +586,6 @@ export function createOrezDataWorker<
           : env) as never
       )
       this.orezStorage = ctx.storage
-      this.orezContext = ctx
-      this.orezEnv = env
       this.orezWorkerVersion = env.CF_VERSION?.id ?? ''
       ctx.storage.sql.exec(
         `CREATE TABLE IF NOT EXISTS ${readyTable} (id INTEGER PRIMARY KEY CHECK (id = 1), version TEXT NOT NULL)`
@@ -601,53 +598,13 @@ export function createOrezDataWorker<
       )
     }
 
-    protected applicationSqlDidCommit(committed: CommittedApplicationSql): void {
-      if (committed.mutated) this.orezBumpBackupMarker()
-      if (committed.origin !== 'application' || !options.onCommittedOperation) return
-      // Reads and writes are priced apart, so a session that did both produces
-      // one receipt of each rather than a single row count that has already
-      // mixed them. Both derive from the session id, which the client generates
-      // once per session, so a retry that re-runs the same session repeats them.
-      this.orezEmitCommittedOperation({
-        namespace: committed.namespace,
-        kind: 'read',
-        source: 'application-sql',
-        rows: committed.rowsRead,
-        receipt: `read:${committed.namespace}:${committed.sessionID}`,
-      })
-      if (!committed.mutated) return
-      this.orezEmitCommittedOperation({
-        namespace: committed.namespace,
-        kind: 'write',
-        source: 'application-sql',
-        rows: committed.rowsWritten,
-        receipt: `write:${committed.namespace}:${committed.sessionID}`,
-      })
+    protected committedOperationHandler(): CommittedOperationHandler<Env> | undefined {
+      return options.onCommittedOperation
     }
 
-    /**
-     * Hand a receipt to the application on the durable object's execution
-     * context.
-     *
-     * waitUntil keeps the handler off the request's critical path and, more
-     * importantly, off its failure path: the write it describes is already
-     * committed, so a metering handler that throws, rejects or hangs must not
-     * be able to turn a successful commit into an error the client sees.
-     */
-    private orezEmitCommittedOperation(operation: CommittedDataOperation): void {
-      this.orezContext.waitUntil(
-        (async () => options.onCommittedOperation!(operation, this.orezEnv))().catch(
-          (error: unknown) => {
-            console.error(
-              JSON.stringify({
-                event: 'orez_committed_operation_failed',
-                receipt: operation.receipt,
-                message: errorMessage(error),
-              })
-            )
-          }
-        )
-      )
+    protected applicationSqlDidCommit(committed: CommittedApplicationSql): void {
+      if (committed.mutated) this.orezBumpBackupMarker()
+      super.applicationSqlDidCommit(committed)
     }
 
     async orezImportBatch(

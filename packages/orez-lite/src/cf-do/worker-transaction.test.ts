@@ -81,7 +81,6 @@ async function createTestZero(transaction: <T>(work: TransactionWork<T>) => Prom
   zero.applicationSqlWriter = null
   zero.applicationSqlReaders = new Set()
   zero.applicationSqlQueue = []
-  zero.applicationSqlDidCommit = () => {}
   zero.ctx = { storage: { transaction } }
   return { storage, zero }
 }

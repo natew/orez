@@ -72,10 +72,11 @@ function createSqliteStorage() {
   }
 }
 
-async function createWorkerCore() {
+async function createWorkerCore(durableObject?: any) {
   const { ZeroDO } = await import('./worker.js')
   const storage = createSqliteStorage()
-  const zero = Object.create(ZeroDO.prototype) as any
+  const settled: Promise<unknown>[] = []
+  const zero = Object.create((durableObject ?? ZeroDO).prototype) as any
   zero.sql = storage.sql
   zero.cdc = new TransactionalCdc(storage.sql)
   zero.watermarks = new DurableWatermarkState(storage.sql)
@@ -90,7 +91,6 @@ async function createWorkerCore() {
   zero.applicationSqlWriter = null
   zero.applicationSqlReaders = new Set()
   zero.applicationSqlQueue = []
-  zero.applicationSqlDidCommit = () => {}
   const runTransaction = <T>(work: () => T): T => {
     storage.nativeDb.exec('BEGIN')
     try {
@@ -107,8 +107,9 @@ async function createWorkerCore() {
       transaction: async <T>(work: () => T) => runTransaction(work),
       transactionSync: runTransaction,
     },
+    waitUntil: (promise: Promise<unknown>) => settled.push(promise),
   }
-  return { ...storage, zero }
+  return { ...storage, settled, zero }
 }
 
 /**
@@ -182,8 +183,8 @@ function buildControlShape(sql: { exec: (s: string, ...p: unknown[]) => any }) {
   }
 }
 
-async function controlNamespace() {
-  const core = await createWorkerCore()
+async function controlNamespace(durableObject?: any) {
+  const core = await createWorkerCore(durableObject)
   buildControlShape(core.sql)
   core.zero.cdc.syncTables([
     { physicalTableName: 'user', tableName: 'user' },
@@ -369,6 +370,53 @@ describe('billable write amplification on a synced namespace', () => {
         rowsWritten: 0,
       },
     ])
+  })
+
+  it('reports the same receipts from the base object a Worker exports directly', async () => {
+    const { createOrezZeroDO } = await import('./worker.js')
+    const operations: Record<string, unknown>[] = []
+    const environments: unknown[] = []
+    const ns = await controlNamespace(
+      createOrezZeroDO({
+        onCommittedOperation: (operation, env) => {
+          operations.push(operation as never)
+          environments.push(env)
+        },
+      })
+    )
+    const env = { BINDING: 'from the worker env' }
+    ns.zero.env = env
+
+    const session = await ns.zero.applicationSqlSession('base-object', {
+      namespace: 'ns:proj-a',
+    })
+    await session.begin()
+    await session.query('SELECT id FROM file')
+    await session.exec("UPDATE file SET body = 'metered' WHERE id = 'f1'", [], {
+      table: 'file',
+      publicTable: 'file',
+      kind: 'update',
+    })
+    await session.commit()
+    await Promise.all(ns.settled)
+
+    expect(operations).toEqual([
+      {
+        namespace: 'ns:proj-a',
+        kind: 'read',
+        source: 'application-sql',
+        rows: 1,
+        receipt: 'read:ns:proj-a:base-object',
+      },
+      {
+        namespace: 'ns:proj-a',
+        kind: 'write',
+        source: 'application-sql',
+        rows: 1,
+        receipt: 'write:ns:proj-a:base-object',
+      },
+    ])
+    expect(environments).toEqual([env, env])
   })
 
   it('reports nothing when a write session rolls back', async () => {
