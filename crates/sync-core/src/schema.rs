@@ -726,10 +726,24 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
             cursor TEXT,
             state TEXT NOT NULL CHECK (state IN ('paging', 'catching_up', 'complete', 'abandoned')),
             catchupWatermark INTEGER NOT NULL CHECK (catchupWatermark >= 0),
+            schemaSignature TEXT,
             active INTEGER UNIQUE CHECK (active IS NULL OR active = 1)
         )",
         &[],
     )?;
+    let has_snapshot_schema_signature = !db
+        .query(
+            "SELECT name FROM pragma_table_info('_zsync_snapshot_progress')
+             WHERE name = 'schemaSignature'",
+            &[],
+        )?
+        .is_empty();
+    if !has_snapshot_schema_signature {
+        db.exec(
+            "ALTER TABLE _zsync_snapshot_progress ADD COLUMN schemaSignature TEXT",
+            &[],
+        )?;
+    }
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_snapshot_cleanup (
             generation INTEGER NOT NULL,
@@ -739,6 +753,8 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
         &[],
     )?;
 
+    crate::upstream::reconcile_snapshot_schema(db, tables)
+        .map_err(|error| DbError(error.message))?;
     for sql in trigger_ddl(tables) {
         db.exec(&sql, &[])?;
     }

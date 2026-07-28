@@ -5,7 +5,7 @@
 //! exact same path as local mutator writes and existing pull/CVR logic remains
 //! unaware of the upstream watermark domain.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -315,6 +315,56 @@ fn sorted_table_names(tables: &Tables) -> Vec<&str> {
     names
 }
 
+fn snapshot_schema_signature(db: &mut dyn SyncDb, tables: &Tables) -> Result<String, EngineError> {
+    // use the stored sqlite definitions instead of schemaID, which is optional.
+    // unmapped application columns and indexes must also survive a cutover.
+    let physical_tables = tables
+        .iter()
+        .map(|(logical, _)| {
+            (
+                tables
+                    .physical_name(logical)
+                    .expect("iterated table has physical mapping"),
+                logical,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut found_tables = BTreeSet::new();
+    let mut definitions = Vec::new();
+    for row in db.query(
+        "SELECT type, name, tbl_name, sql
+         FROM sqlite_schema
+         WHERE type IN ('table', 'index') AND sql IS NOT NULL
+         ORDER BY type, tbl_name, name",
+        &[],
+    )? {
+        let physical = required_text(&row, "tbl_name")?;
+        let Some(logical) = physical_tables.get(physical) else {
+            continue;
+        };
+        let kind = required_text(&row, "type")?;
+        if kind == "table" {
+            found_tables.insert(physical.to_string());
+        }
+        definitions.push((
+            (*logical).to_string(),
+            physical.to_string(),
+            kind.to_string(),
+            required_text(&row, "name")?.to_string(),
+            required_text(&row, "sql")?.to_string(),
+        ));
+    }
+    for physical in physical_tables.keys() {
+        if !found_tables.contains(*physical) {
+            return Err(schema_refresh(format!(
+                "modeled table {physical} is missing from the live database"
+            )));
+        }
+    }
+    serde_json::to_string(&definitions)
+        .map_err(|error| EngineError::internal(format!("snapshot schema encode failed: {error}")))
+}
+
 fn stage_table_name(generation: i64, table: &str) -> String {
     format!("_zsync_stage_{generation}_{table}")
 }
@@ -546,6 +596,32 @@ fn abandon_active_generation(db: &mut dyn SyncDb) -> Result<(), EngineError> {
     finish_cleanup_generation(db, progress.generation)
 }
 
+pub(crate) fn reconcile_snapshot_schema(
+    db: &mut dyn SyncDb,
+    tables: &Tables,
+) -> Result<(), EngineError> {
+    let Some(progress) = read_snapshot_progress(db)? else {
+        return Ok(());
+    };
+    let rows = db.query(
+        "SELECT schemaSignature
+         FROM _zsync_snapshot_progress
+         WHERE generation = ? AND active = 1",
+        &[store::counter(progress.generation)],
+    )?;
+    if rows.len() != 1 {
+        return Err(EngineError::internal(format!(
+            "snapshot generation {} schema signature is missing or duplicated",
+            progress.generation
+        )));
+    }
+    let signature = optional_text(&rows[0], "schemaSignature")?;
+    if signature.as_deref() != Some(snapshot_schema_signature(db, tables)?.as_str()) {
+        abandon_active_generation(db)?;
+    }
+    Ok(())
+}
+
 fn next_generation(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
     let rows = db.query(
         "SELECT CAST(nextGeneration AS TEXT) AS nextGeneration
@@ -689,6 +765,7 @@ pub fn begin_snapshot_generation(
     cleanup_one_snapshot_batch(db)?;
     reject_foreign_keys(db, tables)?;
     abandon_active_generation(db)?;
+    let schema_signature = snapshot_schema_signature(db, tables)?;
     let generation = next_generation(db)?;
     let names = sorted_table_names(tables);
     for table in &names {
@@ -700,14 +777,16 @@ pub fn begin_snapshot_generation(
     };
     db.exec(
         "INSERT INTO _zsync_snapshot_progress
-         (generation, startWatermark, tableName, cursor, state, catchupWatermark, active)
-         VALUES (?, ?, ?, NULL, ?, ?, 1)",
+         (generation, startWatermark, tableName, cursor, state, catchupWatermark,
+          schemaSignature, active)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, 1)",
         &[
             store::counter(generation),
             store::counter(start_watermark),
             table,
             SqlValue::Text(state.to_string()),
             store::counter(start_watermark),
+            SqlValue::Text(schema_signature),
         ],
     )?;
     generation_progress(db, generation)

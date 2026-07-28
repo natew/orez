@@ -112,6 +112,66 @@ fn pages_commit_progress_and_resume_from_the_opaque_cursor() {
 }
 
 #[test]
+fn schema_change_abandons_the_active_generation_before_resume() {
+    let (mut db, tables) = setup();
+    let original = db
+        .transaction(|db| begin_snapshot_generation(db, &tables, 50))
+        .unwrap();
+    init_schema(&mut db, &tables).unwrap();
+    assert_eq!(read_snapshot_progress(&mut db).unwrap(), Some(original));
+
+    db.exec("ALTER TABLE item_record ADD COLUMN owner_name TEXT", &[])
+        .unwrap();
+    let expanded_tables = Tables::from_zero_schema(&json!({
+        "tables": {
+            "item": {
+                "serverName": "item_record",
+                "columns": {
+                    "id": { "type": "string", "serverName": "item_id" },
+                    "label": { "type": "string", "serverName": "item_label" },
+                    "rank": { "type": "number", "serverName": "sort_rank" },
+                    "done": { "type": "boolean", "serverName": "is_done" },
+                    "meta": { "type": "json", "serverName": "metadata_json" },
+                    "owner": { "type": "string", "serverName": "owner_name", "optional": true },
+                },
+                "primaryKey": ["id"],
+            }
+        }
+    }))
+    .unwrap();
+
+    init_schema(&mut db, &expanded_tables).unwrap();
+
+    assert!(read_snapshot_progress(&mut db).unwrap().is_none());
+    let abandoned = db
+        .query(
+            "SELECT state, active FROM _zsync_snapshot_progress WHERE generation = 1",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        abandoned[0].get("state"),
+        Some(&SqlValue::Text("abandoned".into()))
+    );
+    assert_eq!(abandoned[0].get("active"), Some(&SqlValue::Null));
+
+    let replacement = db
+        .transaction(|db| begin_snapshot_generation(db, &expanded_tables, 60))
+        .unwrap();
+    assert_eq!(replacement.generation, 2);
+    assert_eq!(
+        db.query(
+            "SELECT name FROM pragma_table_info('_zsync_stage_2_item')
+             WHERE name = 'owner_name'",
+            &[],
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+}
+
+#[test]
 fn progress_reads_fail_closed_when_the_progress_table_is_unreadable() {
     let (mut db, _) = setup();
     db.exec("DROP TABLE _zsync_snapshot_progress", &[]).unwrap();
