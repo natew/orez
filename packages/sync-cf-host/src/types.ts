@@ -1,7 +1,6 @@
 import type { QueryResolution, QueryResolutionRequest } from './query-patch.js'
 import type { TransactionQueryBudget } from './transaction-query.js'
 import type { Schema } from '@rocicorp/zero'
-import type { StreamingManifest } from 'orez-lite/realtime'
 import type {
   ExecResult,
   JsonValue,
@@ -10,6 +9,7 @@ import type {
   SqlStatementMetadata,
   VisibilityConfig,
 } from 'orez-sync-executor'
+import type { StreamingManifest } from 'orez-sync-executor/realtime'
 
 export {
   visibility,

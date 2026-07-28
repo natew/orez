@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
-import { createSocketHost } from 'orez-lite/realtime'
 import { createSyncExecutor } from 'orez-sync-executor/core'
+import { createSocketHost } from 'orez-sync-executor/realtime'
 
 import { validatePullCaps, validateSyncHostConfig } from './config.js'
 import { createQueryCompiler } from './query-compiler.js'
@@ -42,18 +42,18 @@ import {
 import type { PullCaps, SyncHostConfig, SyncHostEnv } from './types.js'
 import type { Schema } from '@rocicorp/zero'
 import type {
-  HostConnection,
-  RealtimeIdentity,
-  RealtimeSocketHost,
-  RealtimeTopic,
-} from 'orez-lite/realtime'
-import type {
   ApplicationDatabase,
   ApplicationTransaction,
   JsonValue,
   NormalizedClaims,
   SyncExecutor,
 } from 'orez-sync-executor'
+import type {
+  HostConnection,
+  RealtimeIdentity,
+  RealtimeSocketHost,
+  RealtimeTopic,
+} from 'orez-sync-executor/realtime'
 
 const NAMESPACE_HEADER = 'x-orez-sync-namespace'
 const UPSTREAM_PATH_HEADER = 'x-orez-sync-upstream-path'

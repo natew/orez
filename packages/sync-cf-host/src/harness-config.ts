@@ -1,5 +1,5 @@
-import { defineStreamingFields } from 'orez-lite/realtime'
 import { MutationApplicationError, registerMutators } from 'orez-sync-executor/core'
+import { defineStreamingFields } from 'orez-sync-executor/realtime'
 
 import { queryNameToAst } from '../../../harness/src/query-resolver.mjs'
 import { harnessSchema, harnessStreaming } from './harness-schema.js'

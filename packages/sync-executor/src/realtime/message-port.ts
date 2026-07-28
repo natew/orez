@@ -1,7 +1,7 @@
 // MessagePort realtime adapter: the browser-worker host's transport.
 //
 // The hub state machine, publisher, and protocol are shared with every other
-// host (orez-lite/realtime). This file is only the browser's socket lifecycle:
+// host (the realtime hub). This file is only the browser's socket lifecycle:
 // a MessagePort instead of a WebSocket, and an authorizer that reads the same
 // durable query membership the pull path maintains.
 //

@@ -4,7 +4,7 @@
 // 'cloudflare:workers': harness-config reaches the host, so a Bun-side lane
 // importing it would fail on that import alone.
 
-import { defineStreamingFields } from 'orez-lite/realtime'
+import { defineStreamingFields } from 'orez-sync-executor/realtime'
 
 import type { Schema } from '@rocicorp/zero'
 
