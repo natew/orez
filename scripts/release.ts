@@ -98,6 +98,89 @@ function bumpVersion(current: string): string {
       : `${curMajor}.${curMinor}.${curPatch + 1}`
 }
 
+// Stage a package into `destDir` ready to pack: its shipped files, plus a
+// package.json with workspace:* resolved to real versions and the
+// workspace-only fields dropped.
+//
+// Everything that packs goes through here. A tarball packed straight from the
+// repo tree carries `workspace:*` specifiers, which resolve to nothing once
+// installed: orez-lite's `./realtime` re-export of orez-sync-executor is one
+// import that then fails outright in the consumer.
+function stageForPack(
+  dir: string,
+  pkg: { files?: string[]; scripts?: Record<string, string> },
+  version: string,
+  versionMap: Map<string, string>,
+  destDir: string
+): void {
+  const filesToCopy = [...(pkg.files ?? []), 'package.json']
+  if (existsSync(resolve(dir, 'README.md'))) filesToCopy.push('README.md')
+  if (existsSync(resolve(dir, 'LICENSE'))) filesToCopy.push('LICENSE')
+
+  for (const file of filesToCopy) {
+    const src = resolve(dir, file)
+    if (existsSync(src)) cpSync(src, join(destDir, file), { recursive: true })
+  }
+
+  const stagedPath = join(destDir, 'package.json')
+  const staged = JSON.parse(readFileSync(stagedPath, 'utf-8'))
+  staged.version = version
+  for (const depField of [
+    'dependencies',
+    'devDependencies',
+    'peerDependencies',
+    'optionalDependencies',
+  ]) {
+    const deps = staged[depField]
+    if (!deps) continue
+    for (const dep of Object.keys(deps)) {
+      if (deps[dep].startsWith('workspace:')) {
+        const resolved = versionMap.get(dep)
+        if (resolved) deps[dep] = resolved
+      }
+    }
+  }
+  // remove workspace-only fields. prepare builds workspace packages from the
+  // repo tree; this copy ships prebuilt dist and has no workspace tree, so npm
+  // must not run it here or for anyone installing the published git ref
+  delete staged.workspaces
+  if (staged.scripts) delete staged.scripts.prepare
+  writeFileSync(stagedPath, JSON.stringify(staged, null, 2) + '\n')
+}
+
+// Every installed copy of `name` under the target, not only the hoisted one.
+//
+// A consumer nests a second copy of a package whenever two of its dependencies
+// want different versions, and the nested one wins for anything resolving from
+// inside that subtree. Refreshing only the hoisted copy leaves the consumer
+// running two versions of the family at once with nothing to say so: agentbus
+// resolved orez-lite's realtime re-export into a stale nested sync-executor
+// that had no such export, and the import simply failed.
+function installedCopies(targetDir: string, name: string): string[] {
+  const found: string[] = []
+  const visit = (modulesDir: string) => {
+    if (!existsSync(modulesDir)) return
+    if (existsSync(join(modulesDir, name, 'package.json'))) {
+      found.push(join(modulesDir, name))
+    }
+    for (const entry of readdirSync(modulesDir, { withFileTypes: true })) {
+      // symlinks are skipped rather than followed: a linked package belongs to
+      // whatever tree it really lives in, and following them can cycle
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+      const dir = join(modulesDir, entry.name)
+      if (entry.name.startsWith('@')) {
+        for (const scoped of readdirSync(dir, { withFileTypes: true })) {
+          if (scoped.isDirectory()) visit(join(dir, scoped.name, 'node_modules'))
+        }
+        continue
+      }
+      visit(join(dir, 'node_modules'))
+    }
+  }
+  visit(join(targetDir, 'node_modules'))
+  return found
+}
+
 // --into <dir>: quick local release, packs each package and unpacks into target node_modules
 if (into) {
   if (!into || into.startsWith('--')) {
@@ -200,20 +283,30 @@ if (into) {
     pkg: nativeLauncherPkg,
   })
 
+  const copies = new Map(
+    pkgDirs.map(({ name }) => [name, installedCopies(targetDir, name)])
+  )
   const installed = new Set(
-    pkgDirs
-      .filter(({ name }) => existsSync(join(targetDir, 'node_modules', name)))
-      .map(({ name }) => name)
+    pkgDirs.filter(({ name }) => copies.get(name)!.length > 0).map(({ name }) => name)
   )
   const selectedPkgDirs = selectLocalReleasePackages(pkgDirs, installed)
 
+  // --into ships the versions already in the tree; nothing is bumped here
+  const versionMap = new Map(
+    pkgDirs.map(({ name, pkg }) => [name, pkg.version as string])
+  )
+
   let released = 0
   try {
-    for (const { name, dir } of selectedPkgDirs) {
-      const destDir = join(targetDir, 'node_modules', name)
-      mkdirSync(destDir, { recursive: true })
+    for (const { name, dir, pkg } of selectedPkgDirs) {
+      // a dependency the consumer does not have yet lands hoisted
+      const destDirs = copies.get(name)!
+      if (destDirs.length === 0) destDirs.push(join(targetDir, 'node_modules', name))
 
-      run(`npm pack --pack-destination ${tmpDir}`, { cwd: dir, silent: true })
+      const stageDir = join(tmpDir, 'stage', name)
+      mkdirSync(stageDir, { recursive: true })
+      stageForPack(dir, pkg, pkg.version, versionMap, stageDir)
+      run(`npm pack --pack-destination ${tmpDir}`, { cwd: stageDir, silent: true })
 
       const files = readdirSync(tmpDir)
       const prefix = name.replace('@', '').replace('/', '-')
@@ -222,11 +315,15 @@ if (into) {
       if (!packed) throw new Error(`${name}: pack produced no tgz`)
 
       const tgzPath = join(tmpDir, packed)
-      rmSync(join(destDir, 'dist'), { recursive: true, force: true })
-      run(`tar -xzf ${tgzPath} -C ${destDir} --strip-components=1`, { silent: true })
+      for (const destDir of destDirs) {
+        mkdirSync(destDir, { recursive: true })
+        rmSync(join(destDir, 'dist'), { recursive: true, force: true })
+        run(`tar -xzf ${tgzPath} -C ${destDir} --strip-components=1`, { silent: true })
+      }
       rmSync(tgzPath)
       released++
-      console.info(`  ✓ ${name}`)
+      const nested = destDirs.length > 1 ? ` (${destDirs.length} copies)` : ''
+      console.info(`  ✓ ${name}${nested}`)
     }
   } finally {
     rmSync(tmpDir, { recursive: true, force: true })
@@ -451,47 +548,7 @@ for (const p of packages) {
   const name = p.pkg.name
   const tmpDir = join(tmpBase, name)
 
-  // copy package files to tmp
-  const files: string[] = p.pkg.files || []
-  const filesToCopy = [...files, 'package.json']
-  if (existsSync(resolve(p.dir, 'README.md'))) filesToCopy.push('README.md')
-  if (existsSync(resolve(p.dir, 'LICENSE'))) filesToCopy.push('LICENSE')
-
-  for (const f of filesToCopy) {
-    const src = resolve(p.dir, f)
-    const dest = join(tmpDir, f)
-    if (existsSync(src)) {
-      cpSync(src, dest, { recursive: true })
-    }
-  }
-
-  // resolve workspace:* references and set version in the tmp package.json
-  const tmpPkgPath = join(tmpDir, 'package.json')
-  const tmpPkg = JSON.parse(readFileSync(tmpPkgPath, 'utf-8'))
-  tmpPkg.version = p.next
-  for (const depField of [
-    'dependencies',
-    'devDependencies',
-    'peerDependencies',
-    'optionalDependencies',
-  ]) {
-    const deps = tmpPkg[depField]
-    if (!deps) continue
-    for (const dep of Object.keys(deps)) {
-      if (deps[dep].startsWith('workspace:')) {
-        const resolved = versionMap.get(dep)
-        if (resolved) {
-          deps[dep] = resolved
-        }
-      }
-    }
-  }
-  // remove workspace-only fields. prepare builds workspace packages from the
-  // repo tree; this tmp package ships prebuilt dist and has no workspace tree,
-  // so npm must not run it here or for anyone installing the published git ref
-  delete tmpPkg.workspaces
-  if (tmpPkg.scripts) delete tmpPkg.scripts.prepare
-  writeFileSync(tmpPkgPath, JSON.stringify(tmpPkg, null, 2) + '\n')
+  stageForPack(p.dir, p.pkg, p.next, versionMap, tmpDir)
 
   if (packOnly) {
     console.info(`\npacking ${name}@${p.next}...`)
