@@ -348,7 +348,8 @@ export class ZeroDO extends DurableObject {
   private watermarks: DurableWatermarkState
   private cdc: TransactionalCdc
   private schemaTables = new Set<string>()
-  private tableSchemas = new Map<string, SchemaTable>()
+  // `null` records a table confirmed absent from _zero_schema_tables
+  private tableSchemas = new Map<string, SchemaTable | null>()
   private writeBudget: RollingRowWriteBudget
   private writeBudgetDisabled: boolean
   private writeBudgetAdminToken: string | undefined
@@ -2426,17 +2427,33 @@ export class ZeroDO extends DurableObject {
   private schemaForTable(tableName: string): SchemaTable | undefined {
     const schemaTableName = stripPublicPrefix(tableName)
     const tableSchemas = (this.tableSchemas ??= new Map())
+    // `null` is a cached miss. Only `undefined` means "not looked up yet", so
+    // an unmodeled table costs one lookup per cache generation instead of one
+    // per row: normalizeRow asks for every change row's schema, and the change
+    // feed always carries tables that are unmodeled by design (the mutation
+    // cursor sources `_zsync_clients` and `<app>_0.clients|mutations`, which
+    // applications must never put in their Zero schema). Without this, a pull
+    // whose rows are unmodeled runs three SQLite statements and one
+    // thrown-and-caught `.one()` error per row, and measures ~3x slower than
+    // the identical pull over a modeled table.
     const cached = tableSchemas.get(schemaTableName)
-    if (cached) return cached
+    if (cached !== undefined) return cached ?? undefined
+    // Every path that can change what this returns already discards the whole
+    // map: ensureSchemaTables sets entries directly, and migration, rollback,
+    // batch DDL, and recovery all call invalidateSchemaCaches().
     try {
       this.ensureSchemaMetadataTable()
+      // toArray()[0] rather than one(), which throws when a table is unmodeled
       const row = this.sql
         .exec(
           'SELECT schema_json FROM _zero_schema_tables WHERE name = ?',
           schemaTableName
         )
-        .one()
-      if (!row?.schema_json) return undefined
+        .toArray()[0]
+      if (!row?.schema_json) {
+        tableSchemas.set(schemaTableName, null)
+        return undefined
+      }
       const schema = JSON.parse(String(row.schema_json)) as SchemaTable
       tableSchemas.set(schemaTableName, schema)
       return schema

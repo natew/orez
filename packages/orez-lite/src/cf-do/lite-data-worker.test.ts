@@ -396,10 +396,13 @@ describe('createOrezDataWorker', () => {
     zero.sql = {
       exec(sql: string) {
         if (sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_schema_tables')) {
-          return { one: () => undefined }
+          return { one: () => undefined, toArray: () => [] }
         }
         if (sql.startsWith('SELECT schema_json FROM _zero_schema_tables')) {
-          return { one: () => ({ schema_json: JSON.stringify(persistedTable) }) }
+          return {
+            one: () => ({ schema_json: JSON.stringify(persistedTable) }),
+            toArray: () => [{ schema_json: JSON.stringify(persistedTable) }],
+          }
         }
         throw new Error(`unexpected application SQL: ${sql}`)
       },
@@ -455,10 +458,13 @@ describe('createOrezDataWorker', () => {
     zero.sql = {
       exec(sql: string) {
         if (sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_schema_tables')) {
-          return { one: () => undefined }
+          return { one: () => undefined, toArray: () => [] }
         }
         if (sql.startsWith('SELECT schema_json FROM _zero_schema_tables')) {
-          return { one: () => ({ schema_json: JSON.stringify(persistedTable) }) }
+          return {
+            one: () => ({ schema_json: JSON.stringify(persistedTable) }),
+            toArray: () => [{ schema_json: JSON.stringify(persistedTable) }],
+          }
         }
         throw new Error(`unexpected application SQL: ${sql}`)
       },
