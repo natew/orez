@@ -15,8 +15,9 @@
 
 import assert from 'node:assert/strict'
 
-import { canonicalTopic, encodeFrame } from 'orez-lite/realtime'
+import { createSocketProducer, encodeFrame } from 'orez-lite/realtime'
 
+import { harnessStreaming } from '../../packages/sync-cf-host/src/harness-schema.js'
 import { mintHarnessWakeToken } from '../../packages/sync-cf-host/src/harness-wake-token.js'
 import { queries } from './fixture.js'
 
@@ -163,39 +164,28 @@ try {
   sockets.push(producer)
   await producer.open()
 
-  // The first frame carries the whole value so a subscriber can start from it;
-  // every later frame carries only the suffix, which is what keeps per-frame
-  // cost flat as the text grows.
-  const topicID = canonicalTopic(['id'], topic)
-  producer.socket.send(encodeFrame(['begin', { topic, streamID: 'probe-stream' }]))
+  // Driven through the SHIPPED producer client, not hand-rolled frames. That
+  // client waits for the host's begin ack before it will publish, so a host
+  // that never acked would hang here rather than quietly working in a test that
+  // encoded its own frames.
+  const errors: string[] = []
+  const writer = createSocketProducer(producer.socket, {
+    manifest: harnessStreaming.manifest,
+    onError: (message) => errors.push(message),
+  })
+  producer.socket.addEventListener('message', (event) => {
+    if (typeof event.data === 'string') writer.handleMessage(event.data)
+  })
+
+  const field = harnessStreaming.task.title({ id: taskID })
   const tokens = ['Streaming ', 'across ', 'isolates']
   let text = ''
-  tokens.forEach((token, index) => {
+  for (const token of tokens) {
     text += token
-    producer.socket.send(
-      encodeFrame([
-        'publish',
-        {
-          update:
-            index === 0
-              ? {
-                  topic: topicID,
-                  streamID: 'probe-stream',
-                  seq: index,
-                  op: 'snapshot',
-                  value: token,
-                }
-              : {
-                  topic: topicID,
-                  streamID: 'probe-stream',
-                  seq: index,
-                  op: 'append',
-                  text: token,
-                },
-        },
-      ])
-    )
-  })
+    writer.fields.set(field, text)
+  }
+  await writer.fields.flush(field)
+  assert.deepEqual(errors, [], 'the producer client reported errors')
 
   await subscriber.waitFor('field')
   // the batching window coalesces, so give the tail a moment to arrive
@@ -243,22 +233,12 @@ try {
     'the durable object never evicted, so rehydration was not exercised'
   )
 
-  producer.socket.send(encodeFrame(['begin', { topic, streamID: 'after-eviction' }]))
-  producer.socket.send(
-    encodeFrame([
-      'publish',
-      {
-        update: {
-          topic: topicID,
-          streamID: 'after-eviction',
-          seq: 0,
-          op: 'snapshot',
-          value: 'survived the eviction',
-        },
-      },
-    ])
-  )
   const beforeCount = subscriber.updates().length
+  // A fresh generation on the same socket, through the same client. Its begin
+  // has to be acked by a hub that did not exist when the socket was opened.
+  await writer.fields.abort(field)
+  writer.fields.set(field, 'survived the eviction')
+  await writer.fields.flush(field)
   await new Promise((resolve) => setTimeout(resolve, 1_000))
   const latest = subscriber.updates().at(-1)
   assert(
