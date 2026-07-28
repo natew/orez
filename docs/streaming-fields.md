@@ -186,12 +186,6 @@ the per-namespace object their sync sockets are attached to. It is also where
 query membership lives, and membership is the authorization fact a subscription
 is checked against. A hub anywhere else needs its own copy of both.
 
-Open the producer's socket when the producer is warmed, not when it first has a
-value. Soot measured a warm call into its chat service at 386ms and 393ms while
-the container itself reported 0ms of work, so the cost of reaching a service is
-almost entirely in getting there. Paying that on the first token of every turn
-would put it directly in the latency the stream exists to hide.
-
 ### On Cloudflare
 
 `sync-cf-host` mounts the hub in the namespace Durable Object, which is where
@@ -225,7 +219,25 @@ reads a row, so asserting someone else's group buys nothing.
 
 Producers connect to `/<namespace>/realtime/produce` and are authorized by
 `authorizeProduce`, separately from end users, because publishing into any
-row's field is a much stronger capability than reading one.
+row's field is a much stronger capability than reading one. On the producer
+side that socket is driven by `createSocketProducer`, so the code that writes
+values is the same code it would be in-process:
+
+```ts
+const socket = new WebSocket(`${origin}/realtime/produce?producerKey=${key}`)
+const producer = createSocketProducer(socket, { manifest: streaming.manifest })
+socket.addEventListener('message', (event) => producer.handleMessage(event.data))
+socket.addEventListener('close', () => producer.fail('socket closed'))
+
+// from here on, identical to the local surface
+producer.fields.set(streaming.message.content({ id }), text)
+```
+
+Open that socket when the producer is warmed rather than on its first value.
+Soot measured warm calls into its chat service at 386ms and 393ms while the
+service itself reported 0ms of work, so almost all of the cost is in getting
+there, and paying it on the first token would sit squarely in the latency the
+stream exists to hide.
 
 **Hibernation.** Cloudflare evicts the object while its sockets stay open, so
 the hub is rebuilt on the next frame and each socket's topics are replayed from
