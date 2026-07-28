@@ -1,0 +1,261 @@
+{
+  "seed": 30310392041,
+  "target": "rust-local",
+  "error": "Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+  "replay": "bun src/state-machine.ts --against rust-local --seed 30310392041 --nemesis --replay /Users/n8/orez/harness/regressions/state-machine-rust-local-seed-30310392041.json --no-shrink",
+  "trace": [
+    {
+      "kind": "desire",
+      "slot": 0,
+      "projectIDs": ["p0", "p1"]
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "push_after_commit_before_response",
+      "faultKind": "error",
+      "faultReceipt": {
+        "id": "fault-30310392041-1",
+        "arm": {
+          "step": 1,
+          "point": "push_after_commit_before_response",
+          "kind": "error",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "fired",
+          "step": 2,
+          "operation": "write",
+          "reason": "server confirmed injected 500 during push"
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "id": "sm-30310392041-postcommit",
+      "projectID": "p0",
+      "rank": 4.25
+    },
+    {
+      "kind": "prune",
+      "epoch": 0
+    },
+    {
+      "kind": "pausePulls",
+      "transportReceipt": {
+        "id": "transport-30310392041-1",
+        "arm": {
+          "step": 4,
+          "kind": "pause-pulls",
+          "confirmed": true
+        },
+        "fire": {
+          "step": 4,
+          "operation": "pausePulls",
+          "blockedPulls": 1
+        },
+        "overlap": {
+          "faultId": "fault-30310392041-2",
+          "point": "pull_after_commit",
+          "kind": "error",
+          "step": 6
+        },
+        "heal": {
+          "step": 9,
+          "operation": "resumePulls"
+        }
+      }
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "pull_after_commit",
+      "faultKind": "error",
+      "faultReceipt": {
+        "id": "fault-30310392041-2",
+        "arm": {
+          "step": 5,
+          "point": "pull_after_commit",
+          "kind": "error",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "fired",
+          "step": 6,
+          "operation": "observerPull",
+          "reason": "server confirmed injected 500 during pull"
+        }
+      }
+    },
+    {
+      "kind": "observerPull"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "push_after_write_before_commit",
+      "faultKind": "kill",
+      "faultReceipt": {
+        "id": "fault-30310392041-3",
+        "arm": {
+          "step": 7,
+          "point": "push_after_write_before_commit",
+          "kind": "kill",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "not-fired",
+          "step": 8,
+          "operation": "serverRestart",
+          "reason": "server restarted before fault fired"
+        }
+      }
+    },
+    {
+      "kind": "serverRestart"
+    },
+    {
+      "kind": "resumePulls"
+    },
+    {
+      "kind": "fullPruneRestart"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "push_after_write_before_commit",
+      "faultKind": "kill",
+      "faultReceipt": {
+        "id": "fault-30310392041-4",
+        "arm": {
+          "step": 11,
+          "point": "push_after_write_before_commit",
+          "kind": "kill",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "fired",
+          "step": 12,
+          "operation": "write",
+          "reason": "engine process exited during push"
+        }
+      }
+    },
+    {
+      "kind": "write",
+      "id": "sm-30310392041-kill",
+      "projectID": "p1",
+      "rank": 9.5
+    },
+    {
+      "kind": "responseLoss",
+      "id": "sm-30310392041-lost-response",
+      "projectID": "p1"
+    },
+    {
+      "kind": "serverRestart"
+    },
+    {
+      "kind": "clientRestart"
+    },
+    {
+      "kind": "desire",
+      "slot": 1,
+      "projectIDs": ["p2"]
+    },
+    {
+      "kind": "undesire",
+      "slot": 1
+    },
+    {
+      "kind": "checkpoint"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "pull_after_commit",
+      "faultKind": "kill",
+      "faultReceipt": {
+        "id": "fault-30310392041-5",
+        "arm": {
+          "step": 19,
+          "point": "pull_after_commit",
+          "kind": "kill",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "not-fired",
+          "step": 24,
+          "operation": "run-end",
+          "reason": "run ended before fault fired"
+        }
+      }
+    },
+    {
+      "kind": "responseLoss",
+      "id": "sm-30310392041-20-lost-response",
+      "projectID": "p7"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "pull_after_commit",
+      "faultKind": "error"
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "push_before_mutation",
+      "faultKind": "kill"
+    },
+    {
+      "kind": "clientRestart"
+    }
+  ],
+  "minimized": [
+    {
+      "kind": "clientRestart"
+    },
+    {
+      "kind": "desire",
+      "slot": 1,
+      "projectIDs": ["p2"]
+    },
+    {
+      "kind": "armEngineFault",
+      "point": "pull_after_commit",
+      "faultKind": "kill",
+      "faultReceipt": {
+        "id": "fault-30310392041-1",
+        "arm": {
+          "step": 2,
+          "point": "pull_after_commit",
+          "kind": "kill",
+          "confirmed": true
+        },
+        "resolution": {
+          "status": "fired",
+          "step": 3,
+          "operation": "responseLoss",
+          "reason": "engine process exited during pull"
+        }
+      }
+    },
+    {
+      "kind": "responseLoss",
+      "id": "sm-30310392041-20-lost-response",
+      "projectID": "p7"
+    }
+  ],
+  "faultTally": {
+    "armed": 1,
+    "fired": 1,
+    "notFired": 0,
+    "byFault": {
+      "pull_after_commit/kill": {
+        "armed": 1,
+        "fired": 1,
+        "notFired": 0
+      }
+    }
+  },
+  "transportTally": {
+    "armed": 0,
+    "fired": 0,
+    "healed": 0,
+    "overlapped": 0
+  }
+}
