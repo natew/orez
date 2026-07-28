@@ -18,3 +18,11 @@ the ONLY way to publish is:
 `bun release --patch --ci`
 
 IF YOU JUST TESTED USE `--skip-test`
+
+PACKAGE EXPORTS (owner rule, 2026-07-27): implementation may live in
+sub-packages (orez-sync-executor, orez-sync-cf-host), but the CANONICAL import
+path for consumers is always the parent package (`orez-lite/realtime`, not
+`orez-sync-executor/realtime`). Published consumers (on-zero, apps) and docs
+use the parent path only. Direct sub-package imports are allowed solely inside
+this repo's own sub-packages and the harness where importing through the
+parent would create a package cycle or an unbuilt-dist resolution problem.
