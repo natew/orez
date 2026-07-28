@@ -1409,6 +1409,13 @@ export function createSyncDurableObject<
               patch?: unknown
             }
             if (Array.isArray(queries.patch)) {
+              // matches the browser host: a query-aware namespace with no
+              // resolver refuses the patch (400) instead of crashing (500).
+              // #queryAwareOverride can force queryAware on, so this is
+              // reachable even though validateSyncHostConfig passes.
+              if (!config.resolveQueries) {
+                throw requestError('query put requires a server-resolved named query')
+              }
               // resolveQueries may be async and needs `env` (a consumer can
               // delegate the transform to its app's real synced-queries
               // endpoint over an app service binding — authenticate runs in the
@@ -2177,11 +2184,17 @@ export function createSyncDurableObject<
       // subscriptions have to be replayed before this frame is applied.
       await this.#realtimeRehydrate(host)
       const connection = this.#realtimeConnections.get(socket)
-      if (!connection) return
+      if (!connection) {
+        // a wake-only socket (no clientGroupID on the upgrade) has no realtime
+        // identity, so a frame here is a subscription that can never deliver.
+        // Closing names the cause; ignoring it would look like streaming that
+        // silently stopped.
+        socket.close(1008, 'realtime frames require clientGroupID on the wake upgrade')
+        return
+      }
       connection.handleMessage(message)
-      // The hub may authorize asynchronously, so the topic set this frame
-      // changed is not final until that settles.
-      await Promise.resolve()
+      // handleMessage moves the owned-topic set synchronously before any async
+      // delivery work starts, so the set is final when it returns.
       this.#realtimePersist(socket, connection)
     }
 

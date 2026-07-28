@@ -8,9 +8,10 @@ export type QueryResolutionRequest = {
 /**
  * One resolved query, positionally matched to the request at the same index.
  *
- * An `error` fails only its own query rather than the whole patch, so a client
- * that registers one unknown query alongside nine good ones is told which one
- * is unknown.
+ * An `error` fails the whole patch (the pull is refused as one unit), but the
+ * refusal names the query it came from and carries its resolver error, so a
+ * client that registers one unknown query alongside nine good ones is told
+ * which one is unknown.
  */
 export type QueryResolution = { readonly ast: JsonValue } | { readonly error: string }
 
@@ -55,6 +56,8 @@ export async function resolveQueryPatch(
 
   if (puts.length === 0) return [...patch]
   const resolved = await resolve(requests)
+  // broken positional arity is a host-side resolver bug, not a client error,
+  // so it deliberately bypasses fail() and surfaces as a 500
   if (resolved.length !== requests.length) {
     throw new Error(
       `query resolver returned ${resolved.length} results for ${requests.length} queries`
@@ -65,7 +68,8 @@ export async function resolveQueryPatch(
   for (const put of puts) {
     const resolution = resolved[requestByKey.get(put.key)!]
     if (!resolution || 'error' in resolution) {
-      throw fail(`unknown or unsupported named query: ${put.name}`)
+      const detail = resolution && 'error' in resolution ? `: ${resolution.error}` : ''
+      throw fail(`unknown or unsupported named query: ${put.name}${detail}`)
     }
     result[put.index] = {
       op: 'put',
