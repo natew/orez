@@ -246,6 +246,102 @@ try {
     )
   }
 
+  // --- query re-add after delete: the same hash hydrates again -----------
+  // downstream regression shape: materialize a named query, wait complete,
+  // destroy the view (ttl 0 ships the del), then materialize the identical
+  // query. the second view must complete WITH the rows, not empty.
+  {
+    const u = client('u8')
+    const spec = queries.tasksInProjects({ projectIds: ['p9'] })
+    const want = await oracleIds(target, `SELECT id FROM task WHERE "projectId" = 'p9'`)
+    const first = watch(u, spec, 0)
+    await eventually(() => {
+      if (!first.complete) throw new Error('first view not complete')
+      equal(first.ids(), want, 're-add precondition rows')
+    }, 're-add precondition')
+    first.destroy()
+    await eventually(
+      async () => equal(await rawClientIds(u, 'task'), [], 'raw store cleared'),
+      're-add: delete shipped and cleared the raw store'
+    )
+    const second = watch(u, queries.tasksInProjects({ projectIds: ['p9'] }), 0)
+    await eventually(() => {
+      if (!second.complete) throw new Error('second view not complete')
+      equal(second.ids(), want, 're-added query rows')
+    }, 'same-hash re-add hydrates the same rows')
+    second.destroy()
+    console.log(
+      `[queries] re-add: same query hash rehydrated ${want.length} rows after delete PASS`
+    )
+
+    // immediate re-add: destroy and re-materialize with no settling between,
+    // so the del and the re-put race in flight (the downstream failure shape)
+    const third = watch(u, queries.tasksInProjects({ projectIds: ['p9'] }), 0)
+    await eventually(() => {
+      if (!third.complete) throw new Error('third view not complete')
+      equal(third.ids(), want, 'immediate re-add rows')
+    }, 'immediate re-add precondition')
+    third.destroy()
+    const fourth = watch(u, queries.tasksInProjects({ projectIds: ['p9'] }), 0)
+    await eventually(() => {
+      if (!fourth.complete) throw new Error('fourth view not complete')
+      equal(fourth.ids(), want, 'immediate re-added query rows')
+    }, 'immediate same-hash re-add hydrates')
+    fourth.destroy()
+    console.log(
+      `[queries] re-add: immediate destroy+rematerialize kept ${want.length} rows PASS`
+    )
+  }
+
+  // --- singular .one() re-add: byId query completes with the row again ---
+  // the downstream regression used a byId .one() query: first materialization
+  // resolved the row, the second completed with undefined. watch a singular
+  // view directly (data is the row object, not an array).
+  {
+    const u = client('u9')
+    const one = (ttl?: unknown) => {
+      const query = queries.taskById({ id: 't17' })
+      const view =
+        ttl === undefined
+          ? u.materialize(query as never)
+          : u.materialize(query as never, { ttl } as never)
+      let row: { id: string } | undefined
+      let complete = false
+      view.addListener((data: unknown, resultType: unknown) => {
+        row = data ? (JSON.parse(JSON.stringify(data)) as { id: string }) : undefined
+        if (resultType === 'complete') complete = true
+      })
+      return {
+        get complete() {
+          return complete
+        },
+        get row() {
+          return row
+        },
+        destroy: () => view.destroy(),
+      }
+    }
+    for (const [label, ttl] of [
+      ['ttl 0', 0],
+      ['default ttl', undefined],
+    ] as const) {
+      const before = one(ttl)
+      await eventually(() => {
+        if (!before.complete) throw new Error('first .one() view not complete')
+        if (before.row?.id !== 't17') throw new Error(`first row ${before.row?.id}`)
+      }, `.one() re-add precondition (${label})`)
+      before.destroy()
+      const after = one(ttl)
+      await eventually(() => {
+        if (!after.complete) throw new Error('second .one() view not complete')
+        if (after.row?.id !== 't17')
+          throw new Error(`second .one() completed with ${JSON.stringify(after.row)}`)
+      }, `.one() same-hash re-add returns the row (${label})`)
+      after.destroy()
+    }
+    console.log('[queries] re-add: .one() byId rehydrated under ttl 0 and default PASS')
+  }
+
   // --- reconnect replays desires -----------------------------------------
   {
     const dir = mkdtempSync(join(tmpdir(), 'zharness-q-'))
