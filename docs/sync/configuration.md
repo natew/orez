@@ -187,6 +187,34 @@ integration. It launches the prebuilt Rust host with the application's Zero
 schema, SQLite initialization statements, storage directory, browser-origin
 policy, and HTTP callbacks.
 
+Most applications use the higher-level local supervisor. It prepares the
+application database, reads table and index initialization SQL from the
+authoritative SQLite file, starts the native child, waits for readiness, and
+owns shutdown:
+
+```ts
+import { defineLocalConfig } from 'orez-lite/local'
+
+export default defineLocalConfig({
+  schema,
+  dataDir: '.orez/application-sql',
+  namespace: 'app',
+  port: 4949,
+  prepare: migrate,
+  callbacks: {
+    authenticate: 'http://127.0.0.1:4100/api/zero/auth',
+    authorizeWake: 'http://127.0.0.1:4100/api/zero/wake-authorize',
+    transformQueries: 'http://127.0.0.1:4100/api/zero/queries',
+  },
+  allowedOrigins: ['http://127.0.0.1:4100'],
+})
+```
+
+`orez-lite/vite` runs this configuration only during local serve and proxies
+`/zero-http` to the configured namespace. Cloudflare builds continue to use
+`orez-lite/cloudflare/sync`. Non-Vite servers use the same implementation with
+`orez-lite dev -- <server command>`.
+
 Every pull is query-driven. The application must define its named queries once
 and use the same `defineQueries` registry for the client and server-side query
 resolution. The native host's required `transformQueries` callback resolves

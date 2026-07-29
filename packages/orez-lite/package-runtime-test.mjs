@@ -110,6 +110,14 @@ if (typeof built.compiledSql !== 'string' || built.compiledSql.length === 0) {
     new URL('./node_modules/orez-lite/dist/native.js', `file://${consumer}/`)
   )
   assert.equal(typeof native.createNativeHost, 'function')
+  const local = await import('orez-lite/local')
+  assert.equal(typeof local.defineLocalConfig, 'function')
+  assert.equal(typeof local.loadLocalConfig, 'function')
+  assert.equal(typeof local.startLocalSyncHost, 'function')
+  const vite = await import('orez-lite/vite')
+  const plugin = vite.orez()
+  assert.equal(plugin.name, 'orez-lite')
+  assert.equal(plugin.apply, 'serve')
   execFileSync(
     'node',
     [

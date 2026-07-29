@@ -40,6 +40,14 @@
       "types": "./dist/native.d.ts",
       "import": "./dist/native.js"
     },
+    "./local": {
+      "types": "./dist/local.d.ts",
+      "import": "./dist/local.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js"
+    },
     "./cloudflare": {
       "types": "./dist/cloudflare.d.ts",
       "import": "./dist/cloudflare.js"
@@ -73,8 +81,11 @@
       "import": "./dist/cloudflare-bun-wasm-loader.js"
     }
   },
+  "bin": {
+    "orez-lite": "dist/cli.js"
+  },
   "scripts": {
-    "build:runtime": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build:runtime": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "build:dependencies": "bun run --cwd ../sync-cf-host build:dist",
     "build": "bun run build:dependencies && bun run build:runtime && bun run --cwd ../sync-browser-host build:runtime",
     "test": "cd ../.. && vitest run --config vitest.config.ts packages/orez-lite/src",

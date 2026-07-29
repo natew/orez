@@ -7,6 +7,8 @@
 - `orez-lite/browser` runs the engine with SQLite WASM in a browser worker.
 - `orez-lite/native` runs the prebuilt native engine from an application-owned
   Zero schema, SQLite initializer, and HTTP policy callbacks.
+- `orez-lite/local` prepares SQLite and owns the local native process.
+- `orez-lite/vite` starts the local host only while Vite is serving.
 - `orez-lite/cloudflare` provides the Cloudflare runtime and data-worker factory.
 - `orez-lite/cloudflare/build` provides Node-side worker build and deployment tools.
 
@@ -44,3 +46,41 @@ Orez owns the sync protocol, namespace databases, query cache, and wake
 delivery. The callbacks keep authentication, authorization, and query policy in
 the application. Storage retention is disabled unless the application
 explicitly supplies `workerRetention`.
+
+Application development normally uses the higher-level local configuration:
+
+```ts
+// orez-lite.config.ts
+import { defineLocalConfig } from 'orez-lite/local'
+
+export default defineLocalConfig({
+  schema,
+  dataDir: '.orez/application-sql',
+  namespace: 'app',
+  port: 4949,
+  prepare: migrate,
+  callbacks: {
+    authenticate: 'http://127.0.0.1:4100/api/zero/auth',
+    authorizeWake: 'http://127.0.0.1:4100/api/zero/wake-authorize',
+    transformQueries: 'http://127.0.0.1:4100/api/zero/queries',
+  },
+  allowedOrigins: ['http://127.0.0.1:4100'],
+})
+```
+
+```ts
+// vite.config.ts
+import { orez } from 'orez-lite/vite'
+
+export default {
+  plugins: [orez()],
+}
+```
+
+The Vite plugin applies only to local serve mode. Production builds keep using
+the Cloudflare host. Projects without Vite run the same supervisor through the
+CLI:
+
+```sh
+orez-lite dev -- node server.js
+```
