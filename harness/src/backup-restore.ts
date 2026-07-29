@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { canonical } from './canonical.js'
-import { mutators } from './fixture.js'
+import { mutators, queryNameToAst } from './fixture.js'
 import { assertServerOutcome } from './server-outcome.js'
 import { startRustCf, type RustCfTarget } from './targets/rust-cf.js'
 import { startRustLocal, type RustLocalTarget } from './targets/rust-local.js'
@@ -59,14 +59,65 @@ async function stopCfWriter(target: RustCfTarget) {
 }
 
 try {
-  const zero = source.createClient('backup-user')
+  const ownerID = 'backup-user'
+  const queryArgs = [{ ownerId: ownerID }]
+  const desiredQueries = {
+    version: 1,
+    patch: [
+      {
+        op: 'put',
+        hash: 'q-backup',
+        name: 'projectsOwnedBy',
+        args: queryArgs,
+        ast: queryNameToAst('projectsOwnedBy', queryArgs),
+      },
+    ],
+  }
+  const pullQueryRows = async (target: Target, phase: 'source' | 'destination') => {
+    const response = await fetch(`${origin(target)}/pull`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer token-${ownerID}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        clientID: `backup-restore-${phase}`,
+        clientGroupID: `backup-restore-${phase}-group`,
+        cookie: null,
+        queries: desiredQueries,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    const body = (await response.json()) as {
+      rowsPatch?: Array<{ op?: string; tableName?: unknown; value?: unknown }>
+      error?: string
+    }
+    if (!response.ok) {
+      throw new Error(`${phase} query pull failed ${response.status}: ${body.error}`)
+    }
+
+    const puts = new Set<string>()
+    for (const patch of body.rowsPatch ?? []) {
+      if (patch.op !== 'put') continue
+      const value = patch.value as Record<string, unknown> | null | undefined
+      if (typeof patch.tableName !== 'string' || typeof value?.id !== 'string') {
+        throw new Error(
+          `${phase} query pull emitted a put without tableName and value.id`
+        )
+      }
+      puts.add(canonical([patch.tableName, value.id]))
+    }
+    return [...puts].sort()
+  }
+
+  const zero = source.createClient(ownerID)
   const projectID = `backup-${crypto.randomUUID()}`
   const taskID = `backup-task-${crypto.randomUUID()}`
   for (const request of [
     zero.mutate(
       mutators.project.create({
         id: projectID,
-        ownerId: 'backup-user',
+        ownerId: ownerID,
         name: 'backup project',
       })
     ),
@@ -89,6 +140,10 @@ try {
   const backup = new Map<string, Array<Record<string, unknown>>>()
   for (const table of tables) {
     backup.set(table, await source.oracle(`SELECT * FROM "${table}" ORDER BY id`))
+  }
+  const baselinePuts = await pullQueryRows(source, 'source')
+  if (baselinePuts.length === 0) {
+    throw new Error('source baseline query emitted no puts')
   }
   await source.close()
   sourceClosed = true
@@ -113,28 +168,12 @@ try {
     }
   }
 
-  const pull = await fetch(`${origin(destination)}/pull`, {
-    method: 'POST',
-    headers: {
-      authorization: 'Bearer token-backup-user',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      clientID: 'backup-restore-client',
-      clientGroupID: 'backup-restore-group',
-      cookie: null,
-    }),
-  })
-  const body = (await pull.json()) as {
-    rowsPatch?: Array<{ op?: string }>
-    error?: string
-  }
-  if (!pull.ok)
-    throw new Error(`restored snapshot pull failed ${pull.status}: ${body.error}`)
-  const expectedRows = [...backup.values()].reduce((sum, rows) => sum + rows.length, 0)
-  const puts = body.rowsPatch?.filter(({ op }) => op === 'put').length ?? 0
-  if (puts !== expectedRows) {
-    throw new Error(`restored snapshot emitted ${puts} puts, expected ${expectedRows}`)
+  const restoredPuts = await pullQueryRows(destination, 'destination')
+  if (canonical(restoredPuts) !== canonical(baselinePuts)) {
+    throw new Error(
+      `restored query rows diverged: source=${canonical(baselinePuts)} ` +
+        `destination=${canonical(restoredPuts)}`
+    )
   }
 
   console.log(
@@ -143,8 +182,9 @@ try {
       result: 'PASS',
       target: args.target,
       tables: tables.length,
-      rows: expectedRows,
-      freshSnapshotPuts: puts,
+      rows: [...backup.values()].reduce((sum, rows) => sum + rows.length, 0),
+      baselinePuts: baselinePuts.length,
+      restoredPuts: restoredPuts.length,
     })
   )
 } finally {
