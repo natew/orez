@@ -104,7 +104,10 @@ describe('realtime over a MessagePort', () => {
     for (const token of ['one ', 'two ', 'three ', 'four']) {
       content += token
       session.set(content)
-      await settle()
+      // session.flush waits out the manifest's rate bound (updates after the
+      // first defer ~20ms at 50/s), so each token really leaves as its own
+      // delta instead of coalescing under a fixed-length settle
+      await session.flush()
       realtime.flush()
       await settle()
     }
@@ -184,7 +187,8 @@ describe('realtime over a MessagePort', () => {
     client.store.subscribe({ spec: contentSpec, topic: topicOf('m1') }, () => {})
     await settle()
     session.set('unobserved, then observed')
-    await settle()
+    // second update in the rate window: only session.flush waits out the bound
+    await session.flush()
     realtime.flush()
     await settle()
     expect(received.length).toBeGreaterThan(0)
@@ -227,7 +231,9 @@ describe('realtime over a MessagePort', () => {
     for (const token of ['already ', 'in ', 'progress']) {
       content += token
       session.set(content)
-      await settle()
+      // deterministic delivery: updates after the first sit in the publisher's
+      // rate limiter (50/s = 20ms gap), longer than settle's zero-timers
+      await session.flush()
     }
     realtime.flush()
     await settle()
