@@ -450,7 +450,9 @@ describe('sync executor', () => {
       },
     })
     expect(await run('SELECT id, value FROM item')).toEqual([{ id: 'a', value: 'v' }])
-    expect(await run('SELECT "userID" FROM "_zsync_clients"')).toEqual([{ userID: 'user-1' }])
+    expect(await run('SELECT "userID" FROM "_zsync_clients"')).toEqual([
+      { userID: 'user-1' },
+    ])
     await pg.close()
   })
 
