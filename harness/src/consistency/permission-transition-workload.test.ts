@@ -106,8 +106,8 @@ describe('permission transition workload contract', () => {
   })
 
   test('replay command preserves a leading-dash seed as one option value', () => {
-    expect(permissionReplayCommand('orez-local', '-case')).toBe(
-      'bun src/permission-transition-lane.ts --target orez-local --seed=-case --replay'
+    expect(permissionReplayCommand('rust-local', '-case')).toBe(
+      'bun src/permission-transition-lane.ts --target rust-local --seed=-case --replay'
     )
   })
 

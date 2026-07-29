@@ -13,12 +13,11 @@ import { parseArgs } from 'node:util'
 import { mutators, queries } from './fixture.js'
 import { persistentKVStoreProvider } from './persistent-kv.js'
 import { assertServerOutcome } from './server-outcome.js'
-import { startOrezLocal } from './targets/orez-local.js'
 
 import type { FixtureZero } from './target.js'
 
 const { values: cli } = parseArgs({
-  options: { target: { type: 'string', default: 'orez-local' } },
+  options: { target: { type: 'string', default: 'rust-local' } },
 })
 
 type ProjectRow = { id: string }
@@ -87,14 +86,15 @@ async function mutateProjects(
 const storageDir = mkdtempSync(join(tmpdir(), 'zharness-tabs-'))
 const kvStore = persistentKVStoreProvider(storageDir)
 const storageKey = `zharness-tabs-${Date.now()}`
+if (cli.target !== 'rust-local' && cli.target !== 'rust-cf') {
+  throw new Error(`multi-tab target must be rust-local or rust-cf, got '${cli.target}'`)
+}
 const target =
   cli.target === 'rust-local'
     ? await (
         await import('./targets/rust-local.js')
       ).startRustLocal({ pullIntervalMs: 75 })
-    : cli.target === 'rust-cf'
-      ? await (await import('./targets/rust-cf.js')).startRustCf({ pullIntervalMs: 75 })
-      : await startOrezLocal({ pullIntervalMs: 75 })
+    : await (await import('./targets/rust-cf.js')).startRustCf({ pullIntervalMs: 75 })
 const views: ReturnType<typeof watchProjects>[] = []
 
 try {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { executeMutator } from '../fixture-data.js'
+import { executeMutator, type SyncDb } from '../fixture-data.js'
 import {
   AtomicObservationCollector,
   atomicReplayCommand,
@@ -16,8 +16,6 @@ import {
   checkAtomicVisibility,
 } from './atomic-visibility.js'
 import { HistoryRecorder } from './recorder.js'
-
-import type { ZeroHttpSyncDb as SyncDb } from 'orez-lite/zero-http'
 
 const effects = [
   { id: 'run-a', projectId: 'p0', rank: 101 },
@@ -148,8 +146,8 @@ describe('atomic visibility workload contract', () => {
   })
 
   test('replay command preserves a safe leading-dash seed as one option value', () => {
-    expect(atomicReplayCommand('orez-local', '-case')).toBe(
-      'bun src/atomic-visibility-lane.ts --target orez-local --seed=-case --replay'
+    expect(atomicReplayCommand('rust-local', '-case')).toBe(
+      'bun src/atomic-visibility-lane.ts --target rust-local --seed=-case --replay'
     )
   })
 })

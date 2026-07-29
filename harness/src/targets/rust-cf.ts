@@ -1,6 +1,6 @@
 // rust-cf target: sync-core compiled to wasm inside the production-shaped
 // sync-cf-host Durable Object. Each run uses a fresh namespace/DO while the
-// client and oracle surface stays identical to rust-local and orez-cf.
+// client and oracle surface stays identical to rust-local.
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'

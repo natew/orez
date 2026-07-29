@@ -86,39 +86,6 @@ jobs:
       - name: shrink and corpus self-test
         run: cd harness && bun src/spec-shrink.selftest.ts
 
-      - name: sync-server smoke (pure sqlite, 20 clients)
-        run: cd harness && bun src/smoke.ts --target orez-local --clients 20 --projects 3
-
-      - name: sync-server permission grant and revoke
-        # Keep the advertised default lane executable and prove removal from
-        # several already-populated client caches across repeated transitions.
-        run: cd harness && bun src/permissions.ts
-
-      - name: multi-project sync-server mount
-        run: cd harness && bun src/multi-project-mount.ts
-
-      - name: populated-cache permission transition (same-host A/B namespaces)
-        # grant/revoke against ALREADY-populated caches across two child
-        # namespaces on one host, proven live by a disjoint sentinel barrier
-        run: cd harness && bun src/permission-transition-lane.ts
-
-      - name: conformance shapes (stock zero-cache vs sync-server)
-        # boots embedded postgres + real zero-cache; the cross-implementation
-        # differential is the rewrite's acceptance gate
-        run: cd harness && bun src/shapes.ts
-
-      - name: randomized sweep (fresh seed every run)
-        # The run ID is both fresh and replayable; the evidence ledger records it.
-        run: cd harness && bun src/sweep.ts --rounds 10 --seed ${{ github.run_id }}
-
-      - name: upload sweep regressions
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sweep-regressions
-          path: harness/regressions/
-          if-no-files-found: ignore
-
   native-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -339,7 +306,7 @@ jobs:
 
   # native real-client conformance: build the sync-native release binary and run
   # the rust-local harness lanes against it. shapes/sweep boot embedded postgres +
-  # real zero-cache (Node), the same differential the orez-local harness job runs.
+  # real zero-cache (Node), the same differential the rust-local job runs.
   rust-local:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -500,8 +467,8 @@ jobs:
       - name: pinned upstream corpus ledger
         run: cd harness && bun src/corpus-check.ts
 
-      - name: portable upstream corpus (TypeScript, stock Zero, native Rust)
-        run: cd harness && bun src/upstream-corpus.ts --hosts typescript-oracle,stock-zero,sync-native
+      - name: portable upstream corpus (stock Zero, native Rust)
+        run: cd harness && bun src/upstream-corpus.ts --hosts stock-zero,sync-native
 
       - name: rust-local protocol fuzz
         run: cd harness && bun src/protocol-fuzz.ts --target rust-local --cases 500 --seed ${{ github.run_id }} --concurrency 20
@@ -619,7 +586,7 @@ jobs:
             sleep 0.1
           done
           cd ../../harness
-          bun src/upstream-corpus.ts --hosts typescript-oracle,rust-cf
+          bun src/upstream-corpus.ts --hosts stock-zero,rust-cf
           bun src/protocol-fuzz.ts --target rust-cf --cases 500 --seed ${{ github.run_id }} --concurrency 20
           bun src/reconnect.ts --target rust-cf
           bun src/streaming-fields.ts

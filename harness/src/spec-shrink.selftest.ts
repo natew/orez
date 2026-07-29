@@ -447,8 +447,8 @@ function exactEntry(): Record<string, unknown> {
     exactReplayable: true,
     minimizationComplete: true,
     spec: specA,
-    against: 'orez-local',
-    observedTarget: 'orez-local',
+    against: 'rust-local',
+    observedTarget: 'rust-local',
     seed: 42,
     sourceFingerprint: HEX64,
     constructCount: constructCount(specA),
@@ -461,7 +461,7 @@ function exactEntry(): Record<string, unknown> {
   e.replay = buildReplayCommand({
     exactReplayable: true,
     id,
-    against: 'orez-local',
+    against: 'rust-local',
     seed: 42,
     rounds: 10,
     queriesPerRound: 4,
@@ -484,7 +484,7 @@ function nonexactEntry(): Record<string, unknown> {
     exactReplayable: false,
     minimizationComplete: false,
     spec: specA,
-    against: 'orez-local',
+    against: 'rust-local',
     observedTarget: 'stock-zero',
     seed: 7,
     sourceFingerprint: HEX64,
@@ -498,7 +498,7 @@ function nonexactEntry(): Record<string, unknown> {
   e.replay = buildReplayCommand({
     exactReplayable: false,
     id,
-    against: 'orez-local',
+    against: 'rust-local',
     seed: 7,
     rounds: 10,
     queriesPerRound: 4,
@@ -567,14 +567,14 @@ rx((o) => (o.specIndex = 4), 'specIndex out of phase-sensitive range (round 0 < 
 rx((o) => (o.expectConverge = false), 'expectConverge not true')
 rx((o) => delete o.replay, 'replay REQUIRED')
 rx(
-  (o) => (o.replay = 'bun src/sweep.ts --replay-corpus wrong.json --against orez-local'),
+  (o) => (o.replay = 'bun src/sweep.ts --replay-corpus wrong.json --against rust-local'),
   'stale replay command'
 )
 rx((o) => (o.fullSidecar = '../escape.json'), 'unsafe fullSidecar (traversal)')
 rx((o) => (o.fullSidecar = '/etc/x'), 'absolute fullSidecar')
 rx((o) => (o.against = 'stock-zero'), 'against cannot be stock-zero')
 rx((o) => (o.against = 'not-a-target'), 'unknown against target')
-rx((o) => (o.observedTarget = 'orez-cf'), 'cross-target observedTarget != against')
+rx((o) => (o.observedTarget = 'rust-cf'), 'cross-target observedTarget != against')
 rx((o) => (o.round = 1), 'hydrate round!=0 contradicts exactReplayable')
 rx((o) => (o.exactReplayable = false), 'exactReplayable false but hydrate+round0+cross')
 rejects(
@@ -622,7 +622,7 @@ function entryWithId(id: string): Record<string, unknown> {
   e.replay = buildReplayCommand({
     exactReplayable: true,
     id,
-    against: 'orez-local',
+    against: 'rust-local',
     seed: 42,
     rounds: 10,
     queriesPerRound: 4,
@@ -711,8 +711,8 @@ console.log('[spec-corpus] writer helpers — id, buildSweepDivergence, refuse-o
     rounds: 10,
     queriesPerRound: 4,
     seed: 42,
-    against: 'orez-local',
-    observedTarget: 'orez-local',
+    against: 'rust-local',
+    observedTarget: 'rust-local',
     spec: specA,
   }
   const id = divergenceId(baseId)
@@ -721,8 +721,7 @@ console.log('[spec-corpus] writer helpers — id, buildSweepDivergence, refuse-o
   assert(id !== divergenceId({ ...baseId, seed: 43 }), 'divergenceId varies with seed')
   // full-provenance identity: no false collisions across target / run shape
   assert(
-    id !==
-      divergenceId({ ...baseId, against: 'rust-local', observedTarget: 'rust-local' }),
+    id !== divergenceId({ ...baseId, against: 'rust-cf', observedTarget: 'rust-cf' }),
     'varies with against (no cross-target collision)'
   )
   assert(id !== divergenceId({ ...baseId, rounds: 20 }), 'varies with rounds')
@@ -738,7 +737,7 @@ console.log('[spec-corpus] writer helpers — id, buildSweepDivergence, refuse-o
     observedTarget: 'stock-zero',
   }
   assert(
-    divergenceId(st) !== divergenceId({ ...st, observedTarget: 'orez-local' }),
+    divergenceId(st) !== divergenceId({ ...st, observedTarget: 'rust-local' }),
     'single-target varies with observedTarget'
   )
 
@@ -752,8 +751,8 @@ console.log('[spec-corpus] writer helpers — id, buildSweepDivergence, refuse-o
       queriesPerRound: 4,
       seed: 42,
       spec: specA,
-      against: 'orez-local',
-      observedTarget: 'orez-local',
+      against: 'rust-local',
+      observedTarget: 'rust-local',
       leftRows: [{ id: 'a' }],
       rightRows: [{ id: 'b' }],
       note,
@@ -784,8 +783,8 @@ console.log('[spec-corpus] writer helpers — id, buildSweepDivergence, refuse-o
         queriesPerRound: 4,
         seed: 7,
         spec: specA,
-        against: 'orez-local',
-        observedTarget: 'orez-local',
+        against: 'rust-local',
+        observedTarget: 'rust-local',
         leftRows: [{ id: 'a' }],
         rightRows: [{ id: 'a' }],
         note: 'same',
@@ -813,8 +812,8 @@ console.log('[spec-corpus] writer helpers — id, buildSweepDivergence, refuse-o
       queriesPerRound: 4,
       seed: 42,
       spec: specA,
-      against: 'orez-local',
-      observedTarget: 'orez-local',
+      against: 'rust-local',
+      observedTarget: 'rust-local',
       leftRows: [{ id: 'a' }],
       rightRows: [{ id: 'b' }],
       note: 'post-writes',
@@ -840,7 +839,7 @@ console.log('[spec-corpus] writer helpers — id, buildSweepDivergence, refuse-o
       queriesPerRound: 4,
       seed: 42,
       spec: specA,
-      against: 'orez-local',
+      against: 'rust-local',
       observedTarget: 'stock-zero',
       leftRows: [{ id: 'a' }],
       rightRows: [{ id: 'b' }],

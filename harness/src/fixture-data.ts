@@ -1,13 +1,22 @@
-// storage fixture shared by the local and Cloudflare Orez harness hosts.
+// storage fixture shared by the native and cloudflare rust harness hosts.
 import { MutationApplicationError } from 'orez-sync-executor'
 
 import { validateAtomicAppendArgs } from './consistency/atomic-visibility-workload.js'
 import { validateIncrementProbeArgs } from './consistency/exactly-once-workload.js'
 
-import type {
-  ZeroHttpSyncDb as SyncDb,
-  ZeroHttpTables as SyncTables,
-} from 'orez-lite/zero-http'
+export type SyncDb = {
+  exec(sql: string, params?: readonly unknown[]): void
+  all(sql: string, params?: readonly unknown[]): Record<string, unknown>[]
+  transaction<Value>(work: () => Value): Value
+}
+
+type SyncTables = Record<
+  string,
+  {
+    readonly columns: Readonly<Record<string, string>>
+    readonly primaryKey: readonly string[]
+  }
+>
 
 // mirror of the zero schema's tables (guarded against drift in fixture.ts)
 export const TABLES: SyncTables = {
@@ -135,7 +144,7 @@ export function generateSeed(seed = 1) {
 
 export const SEED = generateSeed()
 
-// seed a sqlite SyncDb (orez-local and the DO share this path)
+// seed a sqlite SyncDb shared by the rust fixture hosts.
 export function seedSqlite(db: SyncDb) {
   for (const stmt of DDL) db.exec(stmt)
   for (const [tableName, rows] of Object.entries(SEED)) {

@@ -19,10 +19,7 @@ LOG="results/nightly-$STAMP.log"
 {
   echo "== nightly $STAMP on $(hostname), seed $SEED =="
   bun src/corpus-check.ts
-  bun src/upstream-corpus.ts --hosts typescript-oracle,stock-zero,sync-native,rust-cf
-  bun src/smoke.ts --target orez-local --clients 50 --projects 5
-  bun src/shapes.ts
-  bun src/sweep.ts --rounds 40 --seed "$SEED"
+  bun src/upstream-corpus.ts --hosts stock-zero,sync-native,rust-cf
   bun src/smoke.ts --target rust-local --clients 50 --projects 5
   bun src/shapes.ts --against rust-local
   bun src/sweep.ts --against rust-local --rounds 80 --seed "$SEED"
@@ -34,7 +31,6 @@ LOG="results/nightly-$STAMP.log"
     bun src/state-machine.ts --against rust-cf --seed "$state_seed" --steps 80
   done
   for clients in 10 25 50 100; do
-    bun src/bench.ts --target orez-local --clients "$clients" --writers 5 --rate 10 --duration 30 --label nightly
     bun src/bench.ts --target rust-local --clients "$clients" --writers 5 --rate 10 --duration 30 --label nightly
   done
   bun src/bench.ts --target stock-zero --clients 25 --writers 5 --rate 10 --duration 30 --label nightly

@@ -128,7 +128,7 @@
       "whatItDoesNotProve": "Injected faults cover named boundaries and generated traces, not every operating-system, filesystem, hardware, or application failure mode.",
       "commands": [
         "cd harness && bun src/corpus-check.ts",
-        "cd harness && bun src/upstream-corpus.ts --hosts typescript-oracle,stock-zero,sync-native",
+        "cd harness && bun src/upstream-corpus.ts --hosts stock-zero,sync-native",
         "cd harness && bun src/protocol-fuzz.ts --target rust-local --cases 500 --seed <ledger-seed> --concurrency 20",
         "cd harness && bun src/state-machine.ts --against rust-local --nemesis --seed <ledger-seed> --steps 24"
       ],

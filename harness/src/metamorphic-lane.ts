@@ -1,10 +1,10 @@
 // PRODUCT / REFERENCE CONFORMANCE audit lane (NON-GATING). Runs the metamorphic
 // relations from metamorphic.ts against ONE real target over the wire — no
 // oracle, no second implementation — to expose per-target query-evaluation bugs
-// the stock-vs-orez differential can miss: bugs in an axis the sweep generator
+// the stock-vs-rust differential can miss: bugs in an axis the sweep generator
 // never emits, and the harder class where both targets share a wrong behavior.
 // EMPIRICALLY it caught #6121 on the stock 1.7.0 reference (a start cursor
-// anchored on a NULL-sorted row returns empty server-side; orez-local passes).
+// anchored on a NULL-sorted row returns empty server-side; rust-local passes).
 //
 // IMPORTANT (per manager guardrail): this lane is NON-GATING. The 1.7.0 pin may
 // genuinely contain #6121, so a FAIL here is a CLASSIFIED KNOWN-GAP / repro, not
@@ -13,8 +13,8 @@
 // distinction. Run this manually or in a nightly audit; a failure writes a
 // classified repro artifact and reports the finding.
 //
-//   bun src/metamorphic-lane.ts                       # audit orez-local
-//   bun src/metamorphic-lane.ts --against orez-cf
+//   bun src/metamorphic-lane.ts                       # audit rust-local
+//   bun src/metamorphic-lane.ts --against rust-cf
 //   bun src/metamorphic-lane.ts --mutate startSuffix  # plant #6121 live: proves
 //                                                       # the wiring catches it
 //   bun src/metamorphic-lane.ts --replay regressions/known-gap-....json \
@@ -51,7 +51,7 @@ import type { FixtureZero, SyncTarget } from './target.js'
 const { values: args } = parseArgs({
   options: {
     // no default: replay resolves the target from the fixture; the generator
-    // lane falls back to orez-local explicitly (args.against ?? 'orez-local').
+    // lane falls back to rust-local explicitly (args.against ?? 'rust-local').
     against: { type: 'string' },
     // plant a bug in the live result of one relation to prove the lane catches
     // it end-to-end (demonstration; not for normal runs)
@@ -260,12 +260,6 @@ async function startAgainst(name: string): Promise<SyncTarget> {
   // stock-zero is the REFERENCE: confirming a finding here places it in the
   // stock 1.7.0 reference path, not an Orez-specific artifact.
   if (name === 'stock-zero') return startStockZero()
-  if (name === 'orez-local')
-    return (await import('./targets/orez-local.js')).startOrezLocal({
-      pullIntervalMs: 150,
-    })
-  if (name === 'orez-cf')
-    return (await import('./targets/orez-cf.js')).startOrezCf({ pullIntervalMs: 150 })
   if (name === 'rust-local')
     return (await import('./targets/rust-local.js')).startRustLocal({
       pullIntervalMs: 150,
@@ -360,7 +354,7 @@ console.log('│ a FAIL is a classified known-gap/repro (e.g. #6121 in the 1.7.0
 console.log('│ NOT a CI break. checker validation is separate (metamorphic.selftest)│')
 console.log('└─────────────────────────────────────────────────────────────────────┘')
 
-const againstName = args.against ?? 'orez-local'
+const againstName = args.against ?? 'rust-local'
 const specs = [...startSpecs(), ...breadthSpecs()]
 const target = await startAgainst(againstName)
 

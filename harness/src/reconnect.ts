@@ -13,17 +13,15 @@ import { parseArgs } from 'node:util'
 import { mutators, queries } from './fixture.js'
 import { persistentKVStoreProvider } from './persistent-kv.js'
 import { assertServerOutcome } from './server-outcome.js'
-import { startOrezLocal } from './targets/orez-local.js'
 
 import type { FixtureZero } from './target.js'
 
 const { values: cli } = parseArgs({
-  options: { target: { type: 'string', default: 'orez-local' } },
+  options: { target: { type: 'string', default: 'rust-local' } },
 })
 
-// the only shape both targets' onPull observations share (orez-local emits
-// {body,response}; the spawned rust-local emits an observedPullFetch record).
-// the lane only inspects the request body and the response rowsPatch.
+// the lane only inspects the request body and response rowsPatch shared by both
+// rust targets' observed pull records.
 type Observed = { body: unknown; response?: unknown }
 
 type ProjectRow = { id: string }
@@ -106,12 +104,13 @@ const observe = (observation: Observed) => {
   pulls.push(observation)
 }
 const referenceOpts = { pullIntervalMs: 100, retainChanges: 2, onPull: observe }
+if (cli.target !== 'rust-local' && cli.target !== 'rust-cf') {
+  throw new Error(`reconnect target must be rust-local or rust-cf, got '${cli.target}'`)
+}
 const target =
   cli.target === 'rust-local'
     ? await (await import('./targets/rust-local.js')).startRustLocal(referenceOpts)
-    : cli.target === 'rust-cf'
-      ? await (await import('./targets/rust-cf.js')).startRustCf(referenceOpts)
-      : await startOrezLocal(referenceOpts)
+    : await (await import('./targets/rust-cf.js')).startRustCf(referenceOpts)
 const views: ReturnType<typeof watchProjects>[] = []
 
 try {

@@ -47,6 +47,19 @@ unique(
 
 const sourceIDs = new Set(corpus.sources.map(({ id }) => id))
 const hostIDs = new Set(Object.keys(corpus.hosts))
+const survivingHostIDs = [
+  'rust-cf',
+  'stock-zero',
+  'sync-core-rusqlite',
+  'sync-native',
+] as const
+if (
+  JSON.stringify([...hostIDs].sort()) !== JSON.stringify([...survivingHostIDs].sort())
+) {
+  problems.push(
+    `hosts must be exactly ${survivingHostIDs.join(', ')} (got ${[...hostIDs].sort().join(', ')})`
+  )
+}
 for (const source of corpus.sources) {
   if (!/^https:\/\/github\.com\/[^/]+\/[^/]+$/.test(source.repository))
     problems.push(`${source.id}: repository must be a GitHub repository URL`)

@@ -4,7 +4,7 @@
 // full cross-client + oracle correctness checks run. correctness under load
 // is the point; the numbers are the scaling curve.
 //
-//   bun src/bench.ts --target orez-local --clients 20 --writers 5 --rate 10 --duration 15
+//   bun src/bench.ts --target rust-local --clients 20 --writers 5 --rate 10 --duration 15
 import { parseArgs } from 'node:util'
 
 import { mutators, queries } from './fixture.js'
@@ -30,12 +30,9 @@ const DURATION_S = Number(args.duration)
 
 async function startTarget(name: string): Promise<SyncTarget> {
   if (name === 'stock-zero') return startStockZero()
-  if (name === 'orez-local')
-    return (await import('./targets/orez-local.js')).startOrezLocal()
   if (name === 'rust-local')
     return (await import('./targets/rust-local.js')).startRustLocal()
   if (name === 'rust-cf') return (await import('./targets/rust-cf.js')).startRustCf()
-  if (name === 'orez-cf') return (await import('./targets/orez-cf.js')).startOrezCf()
   throw new Error(`unknown target '${name}'`)
 }
 

@@ -1,20 +1,16 @@
 // pull payload lane: how many bytes a cold client is sent for ONE registered
 // query, measured through a real @rocicorp/zero client against each host.
 //
-// Orez ships two pull implementations. The Rust engine resolves the client's
-// desired queries and sends their membership. The zero-http mount serves every
-// mounted table the user can see and treats the desired-query patch as an ack
-// to echo, so what a client asked for has no bearing on what it receives. Both
-// are correct against their own contract, and on the same data with the same
-// registered query they send very different amounts, which is what this lane
-// puts a number on.
+// each rust host resolves the client's desired queries and sends their
+// membership. the lane keeps query shape and data fixed so payload differences
+// reflect the host runtime rather than different sync contracts.
 //
 // It reports the first pull (the cache miss a fresh install pays) and the
 // steady-state pull that follows, broken down by table, so a table nothing
 // queried is visible as its own line rather than buried in a total.
 //
-//   bun src/pull-payload.ts --against orez-local
 //   bun src/pull-payload.ts --against rust-local
+//   bun src/pull-payload.ts --against rust-cf
 import { parseArgs } from 'node:util'
 
 import { queries } from './fixture.js'
@@ -23,7 +19,7 @@ import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: {
-    against: { type: 'string', default: 'orez-local' },
+    against: { type: 'string', default: 'rust-local' },
     json: { type: 'boolean', default: false },
   },
 })
@@ -57,12 +53,6 @@ function record(response: unknown): void {
 }
 
 async function startTarget(): Promise<SyncTarget> {
-  if (args.against === 'orez-local') {
-    return (await import('./targets/orez-local.js')).startOrezLocal({
-      pullIntervalMs: 100,
-      onPull: (observation) => record(observation.response),
-    })
-  }
   if (args.against === 'rust-local') {
     return (await import('./targets/rust-local.js')).startRustLocal({
       pullIntervalMs: 100,
@@ -76,7 +66,7 @@ async function startTarget(): Promise<SyncTarget> {
     })
   }
   throw new Error(
-    `pull-payload --against must be orez-local, rust-local or rust-cf (got '${args.against}')`
+    `pull-payload --against must be rust-local or rust-cf (got '${args.against}')`
   )
 }
 

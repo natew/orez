@@ -12,18 +12,16 @@
 // metamorphic is "checked IVM-vs-IVM (no oracle needed) ... a different failure
 // mode than the differential oracle: engine self-inconsistency under a
 // transform the answer is known to be invariant under." It catches two things a
-// stock-vs-orez differential can miss: (1) a bug in an axis the differential's
+// stock-vs-rust differential can miss: (1) a bug in an axis the differential's
 // GENERATOR never emits, and (2) the harder class where BOTH targets share the
 // same wrong behavior (a differential is blind to shared bugs by construction).
 //
 // EMPIRICALLY (2026-07-11) it found #6121 (null-safe start constraints, lands
 // AFTER the 1.7.0 pin) — a case (1) bug: a start cursor anchored on a NULL-
 // sorted row returns EMPTY on the stock zero-cache reference (server-side sqlite
-// table-source), while orez-local returns the correct suffix (it ships full
-// snapshots and materializes client-side, so it does not push the start into
-// the buggy sqlite fetch). The stock-vs-orez differential misses it because the
-// sweep generator has no nullable-column start-cursor axis; had it emitted one,
-// the two targets would DIVERGE (stock=[], orez=rows) and the differential would
+// table-source), while rust-local returns the correct suffix. the stock-vs-rust
+// differential misses it because the sweep generator has no nullable-column
+// start-cursor axis; had it emitted one, the two targets would DIVERGE and it would
 // also catch it. The metamorphic guard caught it with no oracle by exercising
 // that axis on a single target. See harness/regressions/ for the recorded repro.
 //

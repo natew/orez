@@ -1,8 +1,8 @@
 import type { Schema, mutators } from './fixture.js'
 // the one abstraction the whole harness hangs off: a SyncTarget is a running
 // sync stack the harness can point stock zero clients at, write to upstream
-// directly, and read fresh oracle answers from. three implementations planned
-// (stock-zero, orez-local sqlite, orez-cf); see plans/zero-conformance-harness.md.
+// directly, and read fresh oracle answers from. retained implementations are
+// stock-zero, rust-local, and rust-cf.
 import type { Zero } from '@rocicorp/zero'
 import type { StoreProvider } from '@rocicorp/zero/sqlite'
 

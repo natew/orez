@@ -1,12 +1,11 @@
 // rust-local target: the native sync-native host (axum + rusqlite, one sqlite
 // file per namespace, WAL, one serialized writer per namespace) under test.
-// modeled on orez-local-process.ts — it builds the release binary once, spawns
-// it on a temp data dir, and points stock zero clients at it through the same
+// it builds the release binary once, spawns it on a temp data dir, and points
+// stock zero clients at it through the same
 // vendored http-pull transport every other target uses. a fresh namespace per
 // target instance isolates concurrent lanes on one process.
 //
 // this is the M2 conformance target: every required lane runs against it
-// exactly as it runs against orez-local, so the native host is proved
 // differentially against stock zero-cache with no target-specific normalizers.
 import { spawn, type ChildProcess } from 'node:child_process'
 import { execFile } from 'node:child_process'

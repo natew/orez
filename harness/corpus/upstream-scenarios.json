@@ -1,10 +1,6 @@
 {
   "schemaVersion": 1,
   "hosts": {
-    "typescript-oracle": {
-      "target": "orez-local",
-      "notes": "In-process TypeScript sync-server core over bun:sqlite."
-    },
     "stock-zero": {
       "target": "stock-zero",
       "notes": "Pinned @rocicorp/zero package backed by embedded PostgreSQL."
@@ -61,7 +57,7 @@
       },
       "contract": "A new client receives the complete result for its desired query.",
       "adaptation": "portable.initial-hydration",
-      "supportedHosts": ["typescript-oracle", "stock-zero", "sync-native", "rust-cf"]
+      "supportedHosts": ["stock-zero", "sync-native", "rust-cf"]
     },
     {
       "id": "zero.view-syncer.desired-query-change",
@@ -72,7 +68,7 @@
       },
       "contract": "Adding and removing desired queries changes the observable view without corrupting shared rows.",
       "adaptation": "portable.desired-query-change",
-      "supportedHosts": ["typescript-oracle", "stock-zero", "sync-native", "rust-cf"]
+      "supportedHosts": ["stock-zero", "sync-native", "rust-cf"]
     },
     {
       "id": "zero.view-syncer.catch-up-client",
@@ -83,7 +79,7 @@
       },
       "contract": "A client that misses writes catches up to the same state as a fresh client.",
       "adaptation": "portable.catch-up-client",
-      "supportedHosts": ["typescript-oracle", "stock-zero", "sync-native", "rust-cf"]
+      "supportedHosts": ["stock-zero", "sync-native", "rust-cf"]
     },
     {
       "id": "zero.view-syncer.client-reconnect",
@@ -94,7 +90,7 @@
       },
       "contract": "Closing and recreating a client does not retain stale query results.",
       "adaptation": "portable.client-reconnect",
-      "supportedHosts": ["typescript-oracle", "stock-zero", "sync-native", "rust-cf"]
+      "supportedHosts": ["stock-zero", "sync-native", "rust-cf"]
     },
     {
       "id": "zero.view-syncer.invalid-cookie",
@@ -105,7 +101,7 @@
       },
       "contract": "A client cursor ahead of the server is rejected or reset rather than accepted as valid state.",
       "adaptation": "crates/sync-core/tests/reference_delta.rs",
-      "supportedHosts": ["typescript-oracle", "sync-native", "rust-cf"]
+      "supportedHosts": ["sync-native", "rust-cf"]
     },
     {
       "id": "zero.change-processor.rollback",

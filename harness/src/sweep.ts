@@ -3,7 +3,7 @@
 // black-box wire-level conformance). every round generates random query
 // shapes over the fixture schema — cmp/and/or trees, exists, orderBy, limit,
 // related windows, one() — materializes them through the ONE `generated`
-// named query on stock-zero AND an orez target, then runs random writes
+// named query on stock-zero AND a rust target, then runs random writes
 // (custom mutators + upstream sql) and requires every live view to stay
 // canonically equal. views accumulate across rounds, so early shapes keep
 // being incrementally maintained under later churn. at the end, fresh late
@@ -16,9 +16,9 @@
 // that replays exactly from (seed, spec). every other divergence is stored
 // non-exact with its full seeded replay command.
 //
-//   bun src/sweep.ts                                  # random seed, orez-local
+//   bun src/sweep.ts                                  # random seed, rust-local
 //   bun src/sweep.ts --seed 12345 --rounds 20
-//   bun src/sweep.ts --against orez-cf --rounds 8
+//   bun src/sweep.ts --against rust-cf --rounds 8
 //   bun src/sweep.ts --replay-corpus regressions/sweep/v1/<id>.json  # one entry
 //   bun src/sweep.ts --corpus                         # nightly: preload + replay
 //   bun src/sweep.ts --inject --seed 42 --queriesPerRound 4  # proof seam
@@ -57,7 +57,7 @@ import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: {
-    against: { type: 'string', default: 'orez-local' },
+    against: { type: 'string', default: 'rust-local' },
     seed: { type: 'string', default: String(Math.floor(Math.random() * 2 ** 31)) },
     rounds: { type: 'string', default: '12' },
     queriesPerRound: { type: 'string', default: '4' },
@@ -71,7 +71,7 @@ const { values: args } = parseArgs({
     // NIGHTLY-only: before the random rounds, replay each committed exact
     // corpus entry and assert convergence. ordinary PR sweep does NOT preload.
     corpus: { type: 'boolean', default: false },
-    // demo/proof: make the orez side drop its first result row so a divergence
+    // demo/proof: make the rust side drop its first result row so a divergence
     // is injected reproducibly (exercises the writer + shrink path on a green
     // sweep). never for normal runs.
     inject: { type: 'boolean', default: false },
@@ -469,11 +469,6 @@ function genWrites(round: number): Write[] {
 // ---------------------------------------------------------------------------
 
 async function startAgainst(name: string): Promise<SyncTarget> {
-  if (name === 'orez-local') {
-    return (await import('./targets/orez-local.js')).startOrezLocal({
-      pullIntervalMs: 150,
-    })
-  }
   if (name === 'rust-local') {
     return (await import('./targets/rust-local.js')).startRustLocal({
       pullIntervalMs: 150,
@@ -481,9 +476,6 @@ async function startAgainst(name: string): Promise<SyncTarget> {
   }
   if (name === 'rust-cf') {
     return (await import('./targets/rust-cf.js')).startRustCf({ pullIntervalMs: 150 })
-  }
-  if (name === 'orez-cf') {
-    return (await import('./targets/orez-cf.js')).startOrezCf({ pullIntervalMs: 150 })
   }
   throw new Error(`unknown --against target '${name}'`)
 }

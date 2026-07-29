@@ -4,8 +4,8 @@
 // client and the authority before the next round starts; a fresh late client
 // then proves the final state hydrates without relying on an existing cache.
 //
-//   bun src/storm.ts --target orez-local --clients 100
-//   bun src/storm.ts --target orez-cf --clients 100 --pull-interval 1000
+//   bun src/storm.ts --target rust-local --clients 100
+//   bun src/storm.ts --target rust-cf --clients 100 --pull-interval 1000
 import { parseArgs } from 'node:util'
 
 import { mutators, queries } from './fixture.js'
@@ -15,7 +15,7 @@ import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: {
-    target: { type: 'string', default: 'orez-local' },
+    target: { type: 'string', default: 'rust-local' },
     clients: { type: 'string', default: '100' },
     writers: { type: 'string', default: '5' },
     rounds: { type: 'string', default: '5' },
@@ -34,7 +34,7 @@ const OPS_PER_WRITER = Number(args['ops-per-writer'])
 const RATE_PER_WRITER = Number(args.rate)
 const PULL_INTERVAL_MS = args['pull-interval']
   ? Number(args['pull-interval'])
-  : TARGET === 'orez-cf'
+  : TARGET === 'rust-cf'
     ? 1_000
     : 250
 
@@ -56,10 +56,6 @@ if (!Number.isInteger(ROUNDS) || !Number.isInteger(OPS_PER_WRITER)) {
 }
 
 async function startTarget(): Promise<SyncTarget> {
-  if (TARGET === 'orez-local') {
-    const { startOrezLocal } = await import('./targets/orez-local.js')
-    return startOrezLocal({ pullIntervalMs: PULL_INTERVAL_MS })
-  }
   if (TARGET === 'rust-local') {
     const { startRustLocal } = await import('./targets/rust-local.js')
     return startRustLocal({ pullIntervalMs: PULL_INTERVAL_MS })
@@ -68,13 +64,7 @@ async function startTarget(): Promise<SyncTarget> {
     const { startRustCf } = await import('./targets/rust-cf.js')
     return startRustCf({ pullIntervalMs: PULL_INTERVAL_MS })
   }
-  if (TARGET === 'orez-cf') {
-    const { startOrezCf } = await import('./targets/orez-cf.js')
-    return startOrezCf({ pullIntervalMs: PULL_INTERVAL_MS })
-  }
-  throw new Error(
-    `storm target must be orez-local, rust-local, rust-cf, or orez-cf, got '${TARGET}'`
-  )
+  throw new Error(`storm target must be rust-local or rust-cf, got '${TARGET}'`)
 }
 
 type TaskRow = {
@@ -182,7 +172,7 @@ function sortedTasks(tasks: Iterable<TaskRow>) {
   return [...tasks].sort((a, b) => a.id.localeCompare(b.id))
 }
 
-const timeoutMs = TARGET === 'orez-cf' ? 180_000 : 60_000
+const timeoutMs = TARGET === 'rust-cf' ? 180_000 : 60_000
 const runID = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
 const prefix = `storm-${runID}`
 const intervalMs = 1_000 / RATE_PER_WRITER

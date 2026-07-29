@@ -45,7 +45,7 @@ function baseManifest(): PermissionManifest {
     },
     host: 'http://127.0.0.1:9000',
     namespaces: { transition: 'nsA', stable: 'nsB' },
-    target: { name: 'orez-local', build: 'abc1234' },
+    target: { name: 'rust-local', build: 'abc1234' },
     replay: { command: 'bun src/permission-transition-lane.ts --seed=seed-1 --replay' },
   }
 }

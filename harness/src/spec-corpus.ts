@@ -29,7 +29,7 @@ import type { GenSpec, GenWhere } from './fixture.js'
 const ROOT_LIMIT_MAX = 8
 const SUB_LIMIT_MAX = 4
 const AND_OR_MAX = 3
-const AGAINST_TARGETS = ['orez-local', 'orez-cf', 'rust-local', 'rust-cf'] as const
+const AGAINST_TARGETS = ['rust-local', 'rust-cf'] as const
 const OBSERVED_TARGETS = ['stock-zero', ...AGAINST_TARGETS] as const
 const SAFE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 

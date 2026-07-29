@@ -6,12 +6,12 @@
 // deep-equal across targets, and a fresh late-joining client per target must
 // hydrate to the same answers (incremental == fresh).
 //
-// stock-zero evaluates queries server-side (view-syncer IVM row selection);
-// the orez targets ship full snapshots and evaluate client-side. equal
-// results is exactly the conformance property the rewrite must hold.
+// stock-zero evaluates queries in view-syncer while the rust targets evaluate
+// the same desired queries in sync-core. equal results is the conformance
+// property the rewrite must hold.
 //
-//   bun src/shapes.ts                      # stock-zero vs orez-local
-//   bun src/shapes.ts --against orez-cf    # stock-zero vs the CF DO host
+//   bun src/shapes.ts                         # stock-zero vs rust-local
+//   bun src/shapes.ts --against rust-cf       # stock-zero vs the CF DO host
 import { parseArgs } from 'node:util'
 
 import { canonical } from './canonical.js'
@@ -23,7 +23,7 @@ import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: {
-    against: { type: 'string', default: 'orez-local' },
+    against: { type: 'string', default: 'rust-local' },
   },
 })
 
@@ -173,8 +173,8 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
     }
   )
 
-  // upstream writes behind zero's back (replication path on stock, version
-  // bump on orez-local)
+  // upstream writes behind zero's back exercise each target's change-capture
+  // path.
   await target.sql(
     `INSERT INTO project (id, "ownerId", name) VALUES ('pu1', 'u2', 'upstream β')`
   )
@@ -192,11 +192,6 @@ async function runWriteScript(target: SyncTarget, zero: FixtureZero) {
 }
 
 async function startAgainst(name: string): Promise<SyncTarget> {
-  if (name === 'orez-local') {
-    return (await import('./targets/orez-local.js')).startOrezLocal({
-      pullIntervalMs: 150,
-    })
-  }
   if (name === 'rust-local') {
     return (await import('./targets/rust-local.js')).startRustLocal({
       pullIntervalMs: 150,
@@ -204,9 +199,6 @@ async function startAgainst(name: string): Promise<SyncTarget> {
   }
   if (name === 'rust-cf') {
     return (await import('./targets/rust-cf.js')).startRustCf({ pullIntervalMs: 150 })
-  }
-  if (name === 'orez-cf') {
-    return (await import('./targets/orez-cf.js')).startOrezCf({ pullIntervalMs: 150 })
   }
   throw new Error(`unknown --against target '${name}'`)
 }

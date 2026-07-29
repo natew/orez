@@ -28,13 +28,10 @@ const PROJECTS_PER_CLIENT = Number(args.projects)
 
 async function startTarget(name: string): Promise<SyncTarget> {
   if (name === 'stock-zero') return startStockZero()
-  if (name === 'orez-local')
-    return (await import('./targets/orez-local.js')).startOrezLocal()
   if (name === 'rust-local')
     return (await import('./targets/rust-local.js')).startRustLocal()
   if (name === 'rust-cf') return (await import('./targets/rust-cf.js')).startRustCf()
-  if (name === 'orez-cf') return (await import('./targets/orez-cf.js')).startOrezCf()
-  throw new Error(`unknown target '${name}' (orez-cf is M5)`)
+  throw new Error(`unknown target '${name}'`)
 }
 
 type ProjectRow = { id: string; ownerId: string; name: string; members: unknown[] }

@@ -1,20 +1,18 @@
 // Fault lane for authority restarts while stock Zero clients stay alive:
-// - local: SIGKILL a child-process sync server mid-churn, then reopen the same
+// - rust-local: SIGKILL the native sync server mid-churn, then reopen the same
 //   file-backed SQLite database on a new PID.
-// - CF: stop interval polling, idle beyond the harness DO's in-memory teardown
+// - rust-cf: stop interval polling, idle beyond the DO's in-memory teardown
 //   window, prove its boot ID changed, then resume the same clients.
 // Both paths pin all-client + oracle + fresh-client convergence, zero 409s,
 // and non-regressing request/response cookies.
 //
-//   bun src/eviction.ts --target local
-//   bun src/eviction.ts --target cf
+//   bun src/eviction.ts --target rust-local
+//   bun src/eviction.ts --target rust-cf
 import { statSync } from 'node:fs'
 import { parseArgs } from 'node:util'
 
 import { mutators, queries } from './fixture.js'
 import { assertServerOutcome } from './server-outcome.js'
-import { startOrezCf } from './targets/orez-cf.js'
-import { startOrezLocalProcess } from './targets/orez-local-process.js'
 import { startRustCf } from './targets/rust-cf.js'
 import { startRustLocal } from './targets/rust-local.js'
 
@@ -23,7 +21,7 @@ import type { FixtureZero, SyncTarget } from './target.js'
 
 const { values: args } = parseArgs({
   options: {
-    target: { type: 'string', default: 'local' },
+    target: { type: 'string', default: 'rust-local' },
     clients: { type: 'string', default: '10' },
     'idle-ms': { type: 'string' },
   },
@@ -251,8 +249,8 @@ type EvictionProcessTarget = SyncTarget & {
   crashAndRestart(downForMs?: number): Promise<{ before: number; after: number }>
 }
 
-// process-backed SIGKILL + reopen drill, shared by orez-local-process and the
-// native rust-local host (both persist a file-backed authority across the kill).
+// process-backed SIGKILL + reopen drill for the native rust-local host, which
+// persists a file-backed authority across the kill.
 async function runLocal(
   label: string,
   start: (opts: {
@@ -322,9 +320,9 @@ type EvictionCfTarget = SyncTarget & {
   hibernationStatus(): Promise<{ bootID: string; idleTeardownMs: number }>
 }
 
-// idle-teardown/hibernation drill, shared by orez-cf and the rust-cf host:
-// both resume the same clients across a DO memory teardown that changes the
-// boot ID, with no interval poll during the idle window.
+// idle-teardown/hibernation drill for rust-cf. It resumes the same clients
+// across a DO memory teardown that changes the boot ID, with no interval poll
+// during the idle window.
 async function runCf(
   label: string,
   start: (opts: {
@@ -406,14 +404,10 @@ async function runCf(
 
 let failed = false
 try {
-  if (args.target === 'local') await runLocal('local', startOrezLocalProcess)
-  else if (args.target === 'rust-local') await runLocal('rust-local', startRustLocal)
-  else if (args.target === 'cf') await runCf('cf', startOrezCf)
+  if (args.target === 'rust-local') await runLocal('rust-local', startRustLocal)
   else if (args.target === 'rust-cf') await runCf('rust-cf', startRustCf)
   else {
-    throw new Error(
-      `target must be local, rust-local, cf, or rust-cf, got '${args.target}'`
-    )
+    throw new Error(`target must be rust-local or rust-cf, got '${args.target}'`)
   }
 } catch (error) {
   failed = true

@@ -96,17 +96,17 @@ function sqlString(value: string): string {
 }
 
 async function startTarget(name: string): Promise<SyncTarget> {
-  if (name === 'orez-local') {
-    return (await import('./targets/orez-local.js')).startOrezLocal({
-      pullIntervalMs: 100,
-    })
-  }
   if (name === 'rust-local') {
     return (await import('./targets/rust-local.js')).startRustLocal({
       pullIntervalMs: 100,
     })
   }
-  throw new Error(`unsupported atomic-visibility target ${name}`)
+  if (name === 'rust-cf') {
+    return (await import('./targets/rust-cf.js')).startRustCf({
+      pullIntervalMs: 100,
+    })
+  }
+  throw new Error(`atomic-visibility target must be rust-local or rust-cf, got ${name}`)
 }
 
 type CompleteWatcher = {

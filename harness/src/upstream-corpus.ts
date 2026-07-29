@@ -9,10 +9,10 @@ import { assertServerOutcome } from './server-outcome.js'
 
 import type { FixtureZero, SyncTarget } from './target.js'
 
-type HostID = 'typescript-oracle' | 'stock-zero' | 'sync-native' | 'rust-cf'
+type HostID = 'stock-zero' | 'sync-native' | 'rust-cf'
 type Row = { id: string }
 
-const ALL_HOSTS: HostID[] = ['typescript-oracle', 'stock-zero', 'sync-native', 'rust-cf']
+const ALL_HOSTS: HostID[] = ['stock-zero', 'sync-native', 'rust-cf']
 
 const { values: args } = parseArgs({
   options: {
@@ -27,10 +27,6 @@ for (const host of hosts) {
 
 async function start(host: HostID): Promise<SyncTarget> {
   switch (host) {
-    case 'typescript-oracle':
-      return (await import('./targets/orez-local.js')).startOrezLocal({
-        pullIntervalMs: 75,
-      })
     case 'stock-zero':
       return (await import('./targets/stock-zero.js')).startStockZero()
     case 'sync-native':
