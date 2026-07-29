@@ -1,7 +1,6 @@
 import { resolve } from 'node:path'
 
-import { loadLocalConfig, startLocalSyncHost, type LocalSyncHostConfig } from './local.js'
-
+import type { LocalSyncHostConfig } from './local.js'
 import type { Plugin } from 'vite'
 
 export interface OrezLitePluginOptions {
@@ -23,6 +22,7 @@ export function orez(options: OrezLitePluginOptions = {}): Plugin {
     apply: 'serve',
 
     async config(config) {
+      const { loadLocalConfig } = await import('./local.js')
       root = resolve(config.root ?? process.cwd())
       localConfig = await loadLocalConfig(
         resolve(root, options.config ?? 'orez-lite.config.ts')
@@ -52,6 +52,7 @@ export function orez(options: OrezLitePluginOptions = {}): Plugin {
       if (!localConfig) {
         throw new Error('orez-lite local configuration was not loaded')
       }
+      const { startLocalSyncHost } = await import('./local.js')
       const host = await startLocalSyncHost({
         ...localConfig,
         dataDir: resolve(root, localConfig.dataDir),
