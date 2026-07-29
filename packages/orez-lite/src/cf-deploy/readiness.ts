@@ -1,5 +1,6 @@
 const DEFAULT_INTERVAL_MS = 2_000
 const DEFAULT_MAX_ATTEMPTS = 60
+const REQUIRED_MATCHING_OBSERVATIONS = 3
 
 export type CloudflareDeployLog = (message: string) => void
 
@@ -52,6 +53,7 @@ export async function waitForWorkerReady({
 }): Promise<void> {
   log(`[cloudflare] polling ${url} for readiness...`)
   let lastError: string | undefined
+  let matchingObservations = 0
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -76,14 +78,20 @@ export async function waitForWorkerReady({
         'version' in versionBody &&
         versionBody.version === expectedVersion
       ) {
-        log(
-          `[cloudflare] worker responded ${rootResponse.status} after ${attempt} attempt(s)`
-        )
-        return
+        matchingObservations++
+        if (matchingObservations === REQUIRED_MATCHING_OBSERVATIONS) {
+          log(
+            `[cloudflare] worker responded ${rootResponse.status} consistently after ${attempt} attempt(s)`
+          )
+          return
+        }
+        lastError = `matching version observed ${matchingObservations}/${REQUIRED_MATCHING_OBSERVATIONS} times`
+      } else {
+        matchingObservations = 0
+        lastError = `root ${rootResponse.status}; version ${versionResponse.status} ${JSON.stringify(versionBody)}`
       }
-
-      lastError = `root ${rootResponse.status}; version ${versionResponse.status} ${JSON.stringify(versionBody)}`
     } catch (error) {
+      matchingObservations = 0
       lastError = error instanceof Error ? error.message : String(error)
     }
 
