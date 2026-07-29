@@ -82,6 +82,78 @@ describe('buildMigrationModuleSource', () => {
     await expect(migrationModule.orezAppSchema.migrate()).resolves.toBeUndefined()
   })
 
+  it('accepts equivalent SQLite type affinities and still rejects incompatible types', async () => {
+    const schemaModuleUrl = javascriptModuleUrl(`
+      export const schema = { tables: {}, relationships: {} }
+    `)
+    const migrationModule = await importJavascriptModule(
+      buildMigrationModuleSource(defineCloudflareConfig('contrast'), {
+        mode: 'native',
+        schemaVersion: 'schema-affinity',
+        schemaImportSpecifier: schemaModuleUrl,
+        nativeSqlStatements: [],
+        expectedTables: [
+          {
+            name: 'account',
+            columns: [
+              {
+                name: 'id',
+                notNull: true,
+                primaryKeyOrder: 1,
+                sqlType: 'text',
+              },
+            ],
+          },
+        ],
+      })
+    )
+    const columnType = { current: 'varchar(255)' }
+    const tx = {
+      async query(sql: string) {
+        if (sql.startsWith('SELECT id FROM "__contrast_cf_migrations"')) return []
+        if (sql.includes('FROM sqlite_master m JOIN pragma_table_info')) {
+          return [
+            {
+              tableName: 'account',
+              columnName: 'id',
+              columnType: columnType.current,
+              columnNotNull: 1,
+              columnPk: 1,
+            },
+          ]
+        }
+        if (sql.includes("SELECT name FROM sqlite_master WHERE type = 'table'")) {
+          return [{ name: 'account' }]
+        }
+        throw new Error(`unexpected query: ${sql}`)
+      },
+      async exec(sql: string) {
+        if (
+          sql.startsWith('CREATE TABLE IF NOT EXISTS "__contrast_cf_migrations"') ||
+          sql.startsWith('CREATE TABLE IF NOT EXISTS _zero_schema_tables')
+        ) {
+          return
+        }
+        throw new Error(`unexpected exec: ${sql}`)
+      },
+      async registerTables() {},
+    }
+    const client = {
+      async transaction(_compile: unknown, run: (tx: typeof tx) => Promise<void>) {
+        await run(tx)
+      },
+    }
+
+    await expect(migrationModule.orezAppSchema.migrate({ client })).resolves.toEqual({
+      tables: [],
+    })
+
+    columnType.current = 'blob'
+    await expect(migrationModule.orezAppSchema.migrate({ client })).rejects.toThrow(
+      'expected text, found blob',
+    )
+  })
+
   it('leaves ledgered conditional statements unchanged when their predicate skips', async () => {
     const schemaModuleUrl = javascriptModuleUrl(`
       export const schema = { tables: {}, relationships: {} }

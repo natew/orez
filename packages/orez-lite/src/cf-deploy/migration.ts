@@ -135,6 +135,19 @@ function normalizeSqlType(value) {
   return String(value).trim().toLowerCase().replaceAll(/\\s+/g, ' ')
 }
 
+function sqliteTypeAffinity(value) {
+  const type = normalizeSqlType(value)
+  if (type.includes('int')) return 'integer'
+  if (type.includes('char') || type.includes('clob') || type.includes('text')) {
+    return 'text'
+  }
+  if (!type || type.includes('blob')) return 'blob'
+  if (type.includes('real') || type.includes('floa') || type.includes('doub')) {
+    return 'real'
+  }
+  return 'numeric'
+}
+
 // every table's columns in ONE round trip. this used to be a PRAGMA
 // table_info per expected table in the shape assert plus another per ledgered
 // ADD COLUMN in the reconcile — order 125 sequential DO calls, all of them
@@ -262,7 +275,7 @@ async function assertExpectedSchema(tx) {
         expected.sqlType === 'integer' &&
         (actualType === 'real' || actualType === 'text')
       if (
-        actualType !== expected.sqlType &&
+        sqliteTypeAffinity(actualType) !== sqliteTypeAffinity(expected.sqlType) &&
         !compatibleLegacyTimestamp &&
         !compatibleLegacyNumber
       ) {
