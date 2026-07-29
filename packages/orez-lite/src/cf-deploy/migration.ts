@@ -122,7 +122,13 @@ async function shouldSkipStatement(tx, statement) {
   if (!condition) return false
   const rows = await tx.query('PRAGMA table_info(' + quoteIdentifier(condition.table) + ')')
   const hasColumn = rows.some((row) => row && row.name === condition.column)
-  return statement.skipIfColumnExists ? hasColumn : !hasColumn
+  return shouldSkipForColumnCondition(statement, hasColumn)
+}
+
+function shouldSkipForColumnCondition(statement, hasColumn) {
+  if (statement.skipIfColumnExists) return hasColumn
+  if (statement.skipIfColumnMissing) return !hasColumn
+  return false
 }
 
 function normalizeSqlType(value) {
@@ -301,6 +307,83 @@ function hashMigrationSql(sql) {
   return (h >>> 0).toString(36)
 }
 
+function migrationTableOperation(sql) {
+  let match
+  if ((match = /^CREATE\\s+(?:TEMP(?:ORARY)?\\s+)?TABLE\\s+(?:IF NOT EXISTS\\s+)?[\`"]?(\\w+)/i.exec(sql))) {
+    return { action: 'create', table: match[1] }
+  }
+  if ((match = /^DROP\\s+TABLE\\s+(?:IF EXISTS\\s+)?[\`"]?(\\w+)/i.exec(sql))) {
+    return { action: 'drop', table: match[1] }
+  }
+  return null
+}
+
+function migrationStatementTargetTable(sql) {
+  const operation = migrationTableOperation(sql)
+  if (operation) return operation.table
+  const match =
+    /^INSERT(?:\\s+OR\\s+\\w+)?\\s+INTO\\s+[\`"]?(\\w+)/i.exec(sql) ||
+    /^(?:UPDATE|DELETE\\s+FROM|ALTER\\s+TABLE)\\s+[\`"]?(\\w+)/i.exec(sql)
+  return match ? match[1] : null
+}
+
+function appliedHasStatement(applied, baseId) {
+  for (const id of applied) {
+    if (id === baseId || id.startsWith(baseId + ':')) return true
+  }
+  return false
+}
+
+// A migration can create scratch/candidate/guard tables, use them, and drop
+// them before the file completes. Their correct final effect is absence, so
+// that absence cannot prove the CREATE (or a dependent write) rolled back.
+// Track this by statement file and final lifecycle operation rather than by a
+// naming convention: a later CREATE in the same file makes the table durable
+// again and therefore removes it from this set.
+function intentionallyDroppedTablesByMigration() {
+  const lifecycle = new Map()
+  for (const [index, statement] of nativeSqlStatements.entries()) {
+    const item = typeof statement === 'string'
+      ? { id: 'statement-' + index, sql: statement }
+      : statement
+    if (!item || typeof item.sql !== 'string') continue
+    const operation = migrationTableOperation(item.sql.trim())
+    if (!operation) continue
+    const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
+    const file = baseId.split(':')[0]
+    const key = file + '::' + operation.table
+    const current = lifecycle.get(key)
+    if (operation.action === 'create') {
+      lifecycle.set(key, {
+        created: true,
+        file,
+        table: operation.table,
+        final: 'create',
+        finalStatementId: baseId,
+      })
+    } else if (current && current.created) {
+      lifecycle.set(key, {
+        ...current,
+        final: 'drop',
+        finalStatementId: baseId,
+      })
+    }
+  }
+  const byFile = new Map()
+  for (const entry of lifecycle.values()) {
+    if (entry.final !== 'drop') continue
+    let tableDrops = byFile.get(entry.file)
+    if (!tableDrops) {
+      tableDrops = new Map()
+      byFile.set(entry.file, tableDrops)
+    }
+    tableDrops.set(entry.table, entry.finalStatementId)
+  }
+  return byFile
+}
+
+const intentionallyDroppedTableStatements = intentionallyDroppedTablesByMigration()
+
 // a run killed mid-transaction (client abort, isolate eviction) rolls its DDL
 // back but keeps its ledger rows: the ledger is not a CDC-registered table, so
 // the DO's row undo never captures it. those phantom rows made every later run
@@ -383,14 +466,7 @@ async function reconcilePhantomLedger(tx, applied) {
       : statement
     if (!item || typeof item.sql !== 'string' || !item.sql.trim()) continue
     const baseId = typeof item.id === 'string' && item.id ? item.id : 'statement-' + index
-    let ledgered = false
-    for (const id of applied) {
-      if (id === baseId || id.startsWith(baseId + ':')) {
-        ledgered = true
-        break
-      }
-    }
-    if (!ledgered) continue
+    if (!appliedHasStatement(applied, baseId)) continue
     // block members bypass the per-statement rules entirely: their effect is
     // the block's effect, judged once above.
     if (item.rebuildTarget) {
@@ -398,6 +474,26 @@ async function reconcilePhantomLedger(tx, applied) {
       continue
     }
     const sql = item.sql.trim()
+    const file = baseId.split(':')[0]
+    const targetTable = migrationStatementTargetTable(sql)
+    const finalDropId =
+      targetTable &&
+      intentionallyDroppedTableStatements.get(file)?.get(targetTable)
+    if (finalDropId && appliedHasStatement(applied, finalDropId)) {
+      continue
+    }
+    // A skipped conditional statement is intentionally ledgered even though
+    // its SQL effect is absent. Treating that absence as rollback evidence
+    // deletes and immediately rewrites the same ledger row on every run (for
+    // example, an index guarded by a column that the live schema does not
+    // have). Apply the exact execution predicate before effect inference.
+    if (item.skipIfTableMissing && !tables.has(item.skipIfTableMissing)) continue
+    const condition = item.skipIfColumnExists || item.skipIfColumnMissing
+    if (condition) {
+      const columns = liveColumns.get(condition.table) || []
+      const hasColumn = columns.some((column) => column.name === condition.column)
+      if (shouldSkipForColumnCondition(item, hasColumn)) continue
+    }
     let match
     let missing = false
     if ((match = /^CREATE TABLE\\s+(?:IF NOT EXISTS\\s+)?[\`"]?(\\w+)/i.exec(sql))) {

@@ -178,6 +178,7 @@ export interface OrezDataWorkerOptions<
 }
 
 export interface OrezSchemaStatus {
+  schemaVersion: string
   ready: boolean
   running: boolean
   restoring: boolean
@@ -508,6 +509,7 @@ export function createOrezDataWorker<
   }
 
   const requestSignals = new AsyncLocalStorage<AbortSignal>()
+  const schemaVersion = options.schema.version
   const readyTable = `${tablePrefix}_application_schema`
   const attemptTable = `${tablePrefix}_application_schema_attempt`
   const backupMarkerTable = `${tablePrefix}_backup_meta`
@@ -595,10 +597,11 @@ export function createOrezDataWorker<
     }
 
     async orezRunApplicationSchema(
-      schemaVersion: string,
+      requestedSchemaVersion: string,
       instance: string,
       runOptions: { force?: boolean } = {}
     ): Promise<unknown> {
+      this.orezAssertApplicationSchemaVersion(requestedSchemaVersion)
       const client = this.applicationSqlLocalClient(instance)
       const finishingRestore = this.orezRestoreInProgress()
       if (finishingRestore) {
@@ -611,11 +614,11 @@ export function createOrezDataWorker<
       if (this.orezSchemaRunVersion === schemaVersion && this.orezSchemaRun) {
         return this.orezSchemaRun
       }
-      if (!runOptions.force && this.orezApplicationSchemaReady(schemaVersion)) {
+      if (!runOptions.force && this.orezApplicationSchemaReady()) {
         return
       }
       if (!runOptions.force) {
-        const attemptKey = this.orezSchemaAttemptKey(schemaVersion)
+        const attemptKey = this.orezSchemaAttemptKey()
         const attempt = this.orezStorage.sql
           .exec(
             `SELECT attempt_count, last_error FROM ${attemptTable} WHERE id = 1 AND version = ?`,
@@ -631,7 +634,7 @@ export function createOrezDataWorker<
           )
         }
       }
-      const attemptKey = this.orezSchemaAttemptKey(schemaVersion)
+      const attemptKey = this.orezSchemaAttemptKey()
       this.orezStorage.sql.exec(
         `INSERT INTO ${attemptTable} (id, version, attempt_count, last_error) VALUES (1, ?, 1, NULL) ON CONFLICT (id) DO UPDATE SET version = excluded.version, attempt_count = CASE WHEN version = excluded.version THEN attempt_count + 1 ELSE 1 END, last_error = CASE WHEN version = excluded.version THEN last_error ELSE NULL END`,
         attemptKey
@@ -652,7 +655,7 @@ export function createOrezDataWorker<
           if (finishingRestore) {
             this.orezStorage.sql.exec(`DELETE FROM ${restoreTable} WHERE id = 1`)
           }
-          this.orezMarkApplicationSchemaReady(schemaVersion)
+          this.orezMarkApplicationSchemaReady()
           this.orezStorage.sql.exec(
             `UPDATE ${attemptTable} SET last_error = NULL WHERE id = 1 AND version = ?`,
             attemptKey
@@ -678,18 +681,29 @@ export function createOrezDataWorker<
     }
 
     orezStartApplicationSchema(
-      schemaVersion: string,
+      requestedSchemaVersion: string,
       instance: string
     ): OrezSchemaStatus {
-      const status = this.orezApplicationSchemaStatus(schemaVersion)
+      const status = this.orezApplicationSchemaStatus(requestedSchemaVersion)
       if (status.ready || status.running) return status
-      this.orezRunApplicationSchema(schemaVersion, instance).catch(() => {})
-      return this.orezApplicationSchemaStatus(schemaVersion)
+      if (requestedSchemaVersion !== schemaVersion) return status
+      this.orezRunApplicationSchema(requestedSchemaVersion, instance).catch(() => {})
+      return this.orezApplicationSchemaStatus(requestedSchemaVersion)
     }
 
-    orezApplicationSchemaStatus(schemaVersion: string): OrezSchemaStatus {
-      const ready = this.orezApplicationSchemaReady(schemaVersion)
-      const attemptKey = this.orezSchemaAttemptKey(schemaVersion)
+    orezApplicationSchemaStatus(requestedSchemaVersion: string): OrezSchemaStatus {
+      if (requestedSchemaVersion !== schemaVersion) {
+        return {
+          schemaVersion,
+          ready: false,
+          running: false,
+          restoring: this.orezRestoreInProgress(),
+          attemptCount: 0,
+          lastError: this.orezSchemaVersionMismatch(requestedSchemaVersion),
+        }
+      }
+      const ready = this.orezApplicationSchemaReady()
+      const attemptKey = this.orezSchemaAttemptKey()
       const attempt = this.orezStorage.sql
         .exec(
           `SELECT attempt_count, last_error FROM ${attemptTable} WHERE id = 1 AND version = ?`,
@@ -697,6 +711,7 @@ export function createOrezDataWorker<
         )
         .toArray()[0]
       return {
+        schemaVersion,
         ready,
         running:
           !ready &&
@@ -708,7 +723,7 @@ export function createOrezDataWorker<
       }
     }
 
-    orezApplicationSchemaReady(schemaVersion: string): boolean {
+    private orezApplicationSchemaReady(): boolean {
       if (this.orezReadyVersion === schemaVersion) return true
       const stored = this.orezStorage.sql
         .exec(`SELECT version FROM ${readyTable} WHERE id = 1`)
@@ -723,7 +738,7 @@ export function createOrezDataWorker<
       this.orezStorage.sql.exec(`DELETE FROM ${readyTable} WHERE id = 1`)
     }
 
-    orezMarkApplicationSchemaReady(schemaVersion: string): void {
+    private orezMarkApplicationSchemaReady(): void {
       this.orezStorage.sql.exec(
         `INSERT INTO ${readyTable} (id, version) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET version = excluded.version`,
         schemaVersion
@@ -756,10 +771,20 @@ export function createOrezDataWorker<
       )
     }
 
-    private orezSchemaAttemptKey(schemaVersion: string): string {
+    private orezSchemaAttemptKey(): string {
       return this.orezWorkerVersion
         ? `${schemaVersion}@${this.orezWorkerVersion}`
         : schemaVersion
+    }
+
+    private orezSchemaVersionMismatch(requestedSchemaVersion: string): string {
+      return `schema version mismatch: caller requested ${requestedSchemaVersion}, but durable object owns ${schemaVersion}; retry after the worker rollout converges`
+    }
+
+    private orezAssertApplicationSchemaVersion(requestedSchemaVersion: string): void {
+      if (requestedSchemaVersion !== schemaVersion) {
+        throw new Error(this.orezSchemaVersionMismatch(requestedSchemaVersion))
+      }
     }
   }
 
@@ -973,7 +998,6 @@ export function createOrezDataWorker<
             return Response.json({
               ns: resolved.instance,
               objectId: id.toString(),
-              schemaVersion: options.schema.version,
               ...status,
             })
           }

@@ -271,6 +271,7 @@ describe('createOrezDataWorker', () => {
 
   it('returns the concrete Cloudflare class and forwards standard feed routes', async () => {
     const status = vi.fn(async () => ({
+      schemaVersion: 'schema-v7',
       ready: true,
       running: false,
       attemptCount: 1,
@@ -337,6 +338,7 @@ describe('createOrezDataWorker', () => {
     const stub = {
       fetch,
       orezApplicationSchemaStatus: vi.fn(async () => ({
+        schemaVersion: 'schema-v7',
         ready: true,
         running: false,
         attemptCount: 1,
@@ -522,5 +524,103 @@ describe('createOrezDataWorker', () => {
       zero.orezRunApplicationSchema('schema-v9', 'singleton', { force: true })
     ).rejects.toThrow('statement 8')
     expect(zero.schemaForTable('widget')).toEqual(newTable)
+  })
+
+  it('keeps the durable object schema version authoritative across rolling deploys', async () => {
+    const migrate = vi.fn(async () => undefined)
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: {
+        ...descriptor,
+        version: 'schema-owned-by-do',
+        migrate,
+      },
+    })
+    let readyVersion: string | null = null
+    let attempt:
+      | { version: string; attempt_count: number; last_error: string | null }
+      | undefined
+    const zero = Object.create(runtime.ZeroDO.prototype) as any
+    zero.orezStorage = {
+      sql: {
+        exec(sql: string, ...params: unknown[]) {
+          if (sql.startsWith('SELECT version FROM _orez_application_schema ')) {
+            return {
+              toArray: () => (readyVersion ? [{ version: readyVersion }] : []),
+            }
+          }
+          if (sql.startsWith('SELECT attempt_count, last_error ')) {
+            return {
+              toArray: () => (attempt && attempt.version === params[0] ? [attempt] : []),
+            }
+          }
+          if (sql.startsWith('INSERT INTO _orez_application_schema_attempt ')) {
+            const version = String(params[0])
+            attempt = {
+              version,
+              attempt_count: attempt?.version === version ? attempt.attempt_count + 1 : 1,
+              last_error: attempt?.version === version ? attempt.last_error : null,
+            }
+            return { toArray: () => [] }
+          }
+          if (sql.startsWith('UPDATE _orez_application_schema_attempt ')) {
+            if (attempt?.version === params.at(-1)) {
+              attempt.last_error = sql.includes('SET last_error = NULL')
+                ? null
+                : String(params[0])
+            }
+            return { toArray: () => [] }
+          }
+          if (sql.startsWith('DELETE FROM _orez_application_schema ')) {
+            readyVersion = null
+            return { toArray: () => [] }
+          }
+          if (sql.startsWith('INSERT INTO _orez_application_schema ')) {
+            readyVersion = String(params[0])
+            return { toArray: () => [] }
+          }
+          throw new Error(`unexpected durable SQL: ${sql}`)
+        },
+      },
+    }
+    zero.applicationSqlLocalClient = () => ({})
+    zero.orezRestoreInProgress = () => false
+    zero.invalidateSchemaCaches = () => {}
+    zero.orezSchemaRunVersion = null
+    zero.orezSchemaRun = null
+    zero.orezReadyVersion = null
+    zero.orezWorkerVersion = 'worker-f54'
+
+    expect(zero.orezApplicationSchemaStatus('schema-from-new-caller')).toMatchObject({
+      schemaVersion: 'schema-owned-by-do',
+      ready: false,
+      running: false,
+      lastError: expect.stringMatching(/schema version mismatch/),
+    })
+    expect(
+      zero.orezStartApplicationSchema('schema-from-new-caller', 'singleton')
+    ).toMatchObject({
+      schemaVersion: 'schema-owned-by-do',
+      ready: false,
+      running: false,
+    })
+    await expect(
+      zero.orezRunApplicationSchema('schema-from-new-caller', 'singleton', {
+        force: true,
+      })
+    ).rejects.toThrow(/schema version mismatch/)
+    expect(migrate).not.toHaveBeenCalled()
+    expect(readyVersion).toBeNull()
+
+    await zero.orezRunApplicationSchema('schema-owned-by-do', 'singleton', {
+      force: true,
+    })
+    expect(migrate).toHaveBeenCalledOnce()
+    expect(zero.orezApplicationSchemaStatus('schema-owned-by-do')).toMatchObject({
+      schemaVersion: 'schema-owned-by-do',
+      ready: true,
+      running: false,
+    })
+    expect(readyVersion).toBe('schema-owned-by-do')
   })
 })
