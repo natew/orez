@@ -1,13 +1,13 @@
 // sync-native binary: the fixture-data harness server.
 //
 // this is a thin consumer of the sync-native library. it populates a
-// SyncNativeConfig with the standard fixture tables, mutators, visibility,
-// and auth, then starts the axum host.
+// SyncNativeConfig with the standard fixture tables, mutators, and auth, then
+// starts the axum host. pulls are query-aware: the harness client resolves
+// desired queries to ASTs before they reach this trusted fixture host.
 //
 // usage: sync-native --data-dir <dir> --port <port>
 //                    [--admin-token <token>] [--allow-origin <origin>]
-//                    [--retain-changes <n>] [--max-change-rows <n>]
-//                    [--visible] [--query-aware]
+//                    [--retain-changes <n>]
 //
 // routes (namespace = one sqlite file under --data-dir):
 //   POST /<ns>/pull, /<ns>/push        the http-pull dialect (engine)
@@ -31,16 +31,13 @@ use sync_native::AuthFn;
 use sync_native::SyncNativeConfig;
 use sync_native::SyncNativeHost;
 use sync_native::SyncNativeSecurity;
-use sync_native::engine::{InitFn, MutateFn, VisibleFn};
+use sync_native::engine::{InitFn, MutateFn};
 use sync_native::fixture;
 
 struct CliConfig {
     data_dir: PathBuf,
     port: u16,
     retain_changes: i64,
-    max_change_rows: usize,
-    visible: bool,
-    query_aware: bool,
     admin_token: Option<String>,
     allowed_origins: Vec<String>,
 }
@@ -53,9 +50,6 @@ Options:
   --admin-token <token>
   --allow-origin <origin>
   --retain-changes <n>
-  --max-change-rows <n>
-  --visible
-  --query-aware
   -h, --help
   -V, --version";
 
@@ -63,9 +57,6 @@ fn parse_args() -> CliConfig {
     let mut data_dir: Option<PathBuf> = None;
     let mut port: Option<u16> = None;
     let mut retain_changes: i64 = 4096;
-    let mut max_change_rows: usize = sync_core::pull::Caps::default().max_change_rows;
-    let mut visible = false;
-    let mut query_aware = false;
     let mut admin_token = None;
     let mut allowed_origins = Vec::new();
 
@@ -95,13 +86,6 @@ fn parse_args() -> CliConfig {
                     .parse()
                     .expect("--retain-changes must be an integer");
             }
-            "--max-change-rows" => {
-                max_change_rows = expect_value(&mut args, "--max-change-rows")
-                    .parse()
-                    .expect("--max-change-rows must be a non-negative integer");
-            }
-            "--visible" => visible = true,
-            "--query-aware" => query_aware = true,
             "--admin-token" => {
                 admin_token = Some(expect_value(&mut args, "--admin-token"));
             }
@@ -116,9 +100,6 @@ fn parse_args() -> CliConfig {
         data_dir: data_dir.expect("--data-dir is required"),
         port: port.expect("--port is required"),
         retain_changes,
-        max_change_rows,
-        visible,
-        query_aware,
         admin_token,
         allowed_origins,
     }
@@ -161,27 +142,14 @@ async fn main() {
         }
     });
 
-    // fixture visibility: per-user row filtering
-    let visible: Option<VisibleFn> = if cli.visible {
-        Some(Arc::new(|table: &str, user_id: &str| {
-            fixture::fixture_visible(table, user_id)
-        }))
-    } else {
-        None
-    };
-
     let config = SyncNativeConfig {
         tables: fixture::build_tables(),
         initialize_version: "fixture-v1".to_string(),
         initialize,
         mutate,
-        visible,
         authenticate,
         authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(()) })),
         retain_changes: cli.retain_changes,
-        max_change_rows: cli.max_change_rows,
-        visibility_enabled: cli.visible,
-        query_aware: cli.query_aware,
         query_resolution: None,
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
         // the fixture harness owns short-lived data dirs, so it does not need a

@@ -1,9 +1,8 @@
-// stock-zero cross-differential for query-aware membership: every corpus query
-// materialized on a rust-local --query-aware client (server-side membership +
+// stock-zero cross-differential for query membership: every corpus query
+// materialized on a rust-local client (server-side membership +
 // correlated-subquery row sync) must equal the same query on stock zero-cache,
-// which also computes membership server-side. this is the query-aware analogue
-// of shapes.ts (which runs rust-local BASELINE, i.e. client-side query eval);
-// here the SERVER decides membership on both sides. read-only hydrate diff.
+// which also computes membership server-side. the server decides membership
+// on both sides. read-only hydrate diff.
 //
 //   bun src/query-diff.ts   # needs Node for stock-zero
 import { parseArgs } from 'node:util'
@@ -24,13 +23,11 @@ const differentialCorpus = queryCorpus
 async function startRustTarget(): Promise<SyncTarget> {
   if (args.against === 'rust-local') {
     return (await import('./targets/rust-local.js')).startRustLocal({
-      queryAware: true,
       pullIntervalMs: 150,
     })
   }
   if (args.against === 'rust-cf') {
     return (await import('./targets/rust-cf.js')).startRustCf({
-      queryAware: true,
       pullIntervalMs: 300,
       onPull(observation) {
         cfObservations.push(observation)
@@ -86,7 +83,7 @@ async function eventually(check: () => void, timeoutMs: number, label: string) {
 }
 
 const t0 = Date.now()
-console.log(`[query-diff] booting stock-zero and ${args.against} --query-aware...`)
+console.log(`[query-diff] booting stock-zero and ${args.against}...`)
 const [stock, rust] = await Promise.all([startStockZero(), startRustTarget()])
 const targets: SyncTarget[] = [stock, rust]
 
@@ -114,7 +111,7 @@ try {
     const right = canonical(rustViews.views.get(name)!.rows())
     if (left !== right) {
       failures.push(
-        `${name} diverged:\n  stock-zero: ${left?.slice(0, 400)}\n  ${args.against}(qa): ${right?.slice(0, 400)}`
+        `${name} diverged:\n  stock-zero: ${left?.slice(0, 400)}\n  ${args.against}: ${right?.slice(0, 400)}`
       )
     }
   }
@@ -136,7 +133,7 @@ try {
   console.log(
     `[query-diff] PASS: ${differentialCorpus.length} supported corpus queries equal ` +
       `(${differentialCorpus.length - empty.length} return data) ` +
-      `stock-zero == ${args.against} --query-aware in ${Date.now() - t0}ms`
+      `stock-zero == ${args.against} in ${Date.now() - t0}ms`
   )
 } catch (error) {
   failed = true

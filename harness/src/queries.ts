@@ -1,5 +1,5 @@
-// query-aware lifecycle lane: the client ships desired queries to the host's
-// query-aware pull (membership + refcount) and receives ONLY their rows, never
+// query lifecycle lane: the client ships desired queries to the host's
+// pull (membership + refcount) and receives ONLY their rows, never
 // the whole namespace. each section uses a fresh client so the raw client-store
 // assertions (a forbidden row must never physically be present — invariants
 // 13-15) are clean.
@@ -10,7 +10,7 @@
 // store); permission expansion + contraction via membership change (a revoked
 // row leaves the raw store); reconnect replaying desires.
 //
-//   bun src/queries.ts                    # rust-local --query-aware
+//   bun src/queries.ts                    # rust-local
 //   bun src/queries.ts --against rust-cf  # sol-m0's CF host
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -37,13 +37,11 @@ type QueryTarget = SyncTarget & { dropNextPushResponse(): Promise<void> }
 async function startTarget(): Promise<SyncTarget> {
   if (args.against === 'rust-local') {
     return (await import('./targets/rust-local.js')).startRustLocal({
-      queryAware: true,
       pullIntervalMs: 100,
     })
   }
   if (args.against === 'rust-cf') {
     return (await import('./targets/rust-cf.js')).startRustCf({
-      queryAware: true,
       pullIntervalMs: 300,
     })
   }
@@ -272,6 +270,7 @@ try {
         'reconnect desire replay'
       )
       v2.destroy()
+      await second.close()
       console.log('[queries] reconnect: desired query replayed after reopen PASS')
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -328,7 +327,7 @@ try {
     )
   }
 
-  // --- lost push response, query-aware client ----------------------------
+  // --- lost push response, query client ----------------------------------
   // commit a mutation but drop its HTTP response; the client must reconnect and
   // settle via replay, and the woken query must converge on the new row without
   // a duplicate — the query membership recovers through the pull, not the ack.

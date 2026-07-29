@@ -1,12 +1,5 @@
-import type { PullCaps, SyncHostConfig, SyncHostEnv } from './types.js'
+import type { SyncHostConfig, SyncHostEnv } from './types.js'
 import type { Schema } from '@rocicorp/zero'
-
-export function validatePullCaps(caps: PullCaps): PullCaps {
-  if (!Number.isSafeInteger(caps.maxChangeRows) || caps.maxChangeRows < 1) {
-    throw new TypeError('caps.maxChangeRows must be a positive safe integer')
-  }
-  return caps
-}
 
 export function validateSyncHostConfig<
   Env extends SyncHostEnv,

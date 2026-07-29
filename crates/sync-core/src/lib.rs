@@ -33,12 +33,11 @@ pub mod schema;
 mod store;
 pub mod upstream;
 pub mod value;
-pub mod visibility;
 pub mod wire;
 
 pub use db::{DbError, Row, SqlValue, SyncDb};
 pub use error::{EngineError, MutateError};
-pub use pull::{Caps, Visibility, VisibleFilter, handle_pull, invalidate, prune, watermark};
+pub use pull::{invalidate, prune, watermark};
 pub use push::{
     MutationResult, Mutator, Preflight, PushBody, PushMutation, PushPlan, Transactor,
     assemble_push_response, finalize, handle_push, preflight, push_validate, record_app_error,
@@ -54,5 +53,4 @@ pub use upstream::{
 pub use value::{
     ZeroColumnType, canonical_pk, canonical_pk_text, to_zero_value, to_zero_value_json,
 };
-pub use visibility::{VisibilityExpression, compile_visibility_filter};
 pub use wire::WireValue;

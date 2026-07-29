@@ -3,7 +3,7 @@
 //
 // run with: bun crates/sync-core/ts-oracle/run-oracle.ts <trace.json>
 // the trace is a JSON array of ops; the runner maintains a per-client mutation
-// id counter and per-client cookie EXACTLY as the Rust runner does, so both
+// id counter and per-group cookie EXACTLY as the Rust runner does, so both
 // stay in lockstep. output on stdout: a JSON array of pull responses in order.
 import { Database } from 'bun:sqlite'
 
@@ -387,7 +387,9 @@ await sync.ready()
 const query = new QueryOracle()
 
 const nextId: Record<string, number> = {}
-const cookies: Record<string, number | null> = {}
+// one cookie per client GROUP: a group shares one replica in Zero, so every
+// tab pulls from the group's last served cookie, never a private one.
+let groupCookie: number | null = null
 const pulls: unknown[] = []
 
 for (const op of trace) {
@@ -425,15 +427,15 @@ for (const op of trace) {
       await sync.invalidate()
       break
     case 'pull': {
-      const client = op.client as string
-      const cookie = cookies[client] ?? null
+      // one puller per group, mirroring the Rust runner: a group shares one
+      // replica and one pull loop, so the pulling clientID is the group agent.
       const resp = (await sync.handlePull(
-        { clientID: client, clientGroupID: 'g1', cookie },
+        { clientID: 'puller', clientGroupID: 'g1', cookie: groupCookie },
         { userID: 'u1' }
       )) as {
         cookie: number
       }
-      cookies[client] = resp.cookie
+      groupCookie = resp.cookie
       pulls.push({ lane: 'base', response: resp })
       break
     }

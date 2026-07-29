@@ -5,15 +5,12 @@ use std::collections::BTreeSet;
 use serde_json::{Value, json};
 
 use common::TestDb;
-use sync_core::pull::Caps;
 use sync_core::query::compile::compile_predicate_probe;
 use sync_core::query::{
     compile, compile_transaction_query, handle_query_pull, init_query_schema, parse_ast,
     parse_query_format, parse_query_schema, recompute_group, register_query, set_desire,
 };
-use sync_core::{
-    Tables, Transactor, VisibilityExpression, compile_visibility_filter, handle_pull, init_schema,
-};
+use sync_core::{Tables, Transactor, init_schema};
 
 fn encrypted_schema() -> Value {
     json!({
@@ -255,16 +252,20 @@ fn clear_indexes_and_encrypted_projection_are_allowed() {
         .unwrap();
     let tables = tables();
     init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
 
     let response = db
         .transaction(|database| {
-            handle_pull(
+            handle_query_pull(
                 database,
                 &tables,
                 4096,
-                None,
-                Caps::default(),
-                &json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": null }),
+                &json!({
+                    "clientID": "c1", "clientGroupID": "g1", "cookie": null,
+                    "queries": { "version": 1, "patch": [
+                        { "op": "put", "hash": "q_messages", "ast": { "table": "message" } },
+                    ]},
+                }),
                 "u1",
             )
         })
@@ -477,40 +478,4 @@ fn projection_and_clear_relationship_correlation_remain_allowed() {
         0,
     )
     .unwrap();
-}
-
-#[test]
-fn structured_visibility_resolves_physical_names_and_rejects_encrypted_columns() {
-    let tables = tables();
-    let clear: VisibilityExpression = serde_json::from_value(json!({
-        "type": "comparison",
-        "operator": "=",
-        "left": { "type": "column", "table": "messages", "column": "route_key" },
-        "right": { "type": "value", "value": "r1" }
-    }))
-    .unwrap();
-    let compiled = compile_visibility_filter(&tables, "messages", &clear).unwrap();
-    assert_eq!(compiled.sql, "\"message\".\"route\" = ?");
-
-    let encrypted: VisibilityExpression = serde_json::from_value(json!({
-        "type": "comparison",
-        "operator": "=",
-        "left": { "type": "column", "table": "messages", "column": "secret_blob" },
-        "right": { "type": "value", "value": "ciphertext" }
-    }))
-    .unwrap();
-    let error = compile_visibility_filter(&tables, "messages", &encrypted)
-        .err()
-        .unwrap();
-    assert!(
-        error.message.contains("message.secret"),
-        "{}",
-        error.message
-    );
-    assert!(
-        error.message.contains("schema 'encryption-guards-v1'"),
-        "{}",
-        error.message
-    );
-    assert!(error.message.contains("forbidden use 'visibility'"));
 }

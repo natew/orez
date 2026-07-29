@@ -6,8 +6,8 @@ mod common;
 use common::{Host, item_tables};
 use serde_json::{Value, json};
 
-use sync_core::pull::{Caps, Visibility, VisibleFilter};
-use sync_core::{EngineError, SqlValue, Transactor, handle_pull, invalidate, push_validate};
+use sync_core::query::handle_query_pull;
+use sync_core::{EngineError, Transactor, invalidate, push_validate};
 
 // ---- helpers mirroring the TS suite's push()/pull()/patchOf() -------------
 
@@ -59,7 +59,7 @@ fn rejects_invalid_pull_cookies() {
         let body = json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": cookie });
         let err = h
             .db
-            .transaction(|db| handle_pull(db, &tables, 4096, None, Caps::default(), &body, "u1"))
+            .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
             .unwrap_err();
         assert_eq!(err.status, 400, "cookie {cookie} should 400");
     }
@@ -69,7 +69,7 @@ fn rejects_invalid_pull_cookies() {
     let tables = item_tables();
     let body = json!({ "clientID": "c1", "clientGroupID": "g1" });
     let err =
-        h.db.transaction(|db| handle_pull(db, &tables, 4096, None, Caps::default(), &body, "u1"))
+        h.db.transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
             .unwrap_err();
     assert_eq!(err.status, 400, "missing cookie should 400");
 }
@@ -82,7 +82,7 @@ fn canonical_string_cookie_is_accepted() {
     let tables = item_tables();
     let body = json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": "0" });
     let resp =
-        h.db.transaction(|db| handle_pull(db, &tables, 4096, None, Caps::default(), &body, "u1"))
+        h.db.transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
             .unwrap();
     assert_eq!(resp, json!({ "cookie": 0, "unchanged": true }));
 }
@@ -99,7 +99,7 @@ fn rejects_malformed_pull_body() {
         let tables = item_tables();
         let err = h
             .db
-            .transaction(|db| handle_pull(db, &tables, 4096, None, Caps::default(), &body, "u1"))
+            .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
             .unwrap_err();
         assert_eq!(err.status, 400);
     }
@@ -296,7 +296,7 @@ fn delete_then_recreate_collapses_to_put() {
 }
 
 #[test]
-fn insert_then_delete_collapses_to_del() {
+fn insert_then_delete_collapses_to_nothing() {
     let mut h = setup();
     let cookie = cookie_of(&h.pull(json!(null), "u1").unwrap());
     h.put(
@@ -305,11 +305,11 @@ fn insert_then_delete_collapses_to_del() {
         1,
     );
     h.del("ephemeral", 2);
+    // the client never held the row (it was never a member at any pull), so
+    // the membership diff correctly emits nothing, not a del for a row the
+    // client cannot have. the baseline change-log diff used to re-emit it.
     let patch = patch_of(&h.pull(json!(cookie), "u1").unwrap()).clone();
-    assert_eq!(
-        patch,
-        vec![json!({ "op": "del", "tableName": "item_record", "id": { "item_id": "ephemeral" } })]
-    );
+    assert_eq!(patch, Vec::<Value>::new());
 }
 
 #[test]
@@ -423,7 +423,7 @@ fn two_tabs_settle_through_last_mutation_id_changes() {
         "u1",
     )
     .unwrap();
-    let resp = h.pull_as("tab1", "g1", json!(null), None, "u1").unwrap();
+    let resp = h.pull_as("tab1", "g1", json!(null), "u1").unwrap();
     assert_eq!(
         resp["lastMutationIDChanges"],
         json!({ "tab1": 1, "tab2": 1 })
@@ -475,7 +475,7 @@ fn cookie_below_floor_snapshots_recent_cookies_still_diff() {
     for i in 0..6 {
         h.push_one("item.put", json!({ "id": format!("i{i}"), "label": format!("l{i}"), "rank": i, "done": false, "meta": null }), "c1", "g1", i + 1, "u1").unwrap();
     }
-    let recent = cookie_of(&h.pull_as("c2", "g1", json!(null), None, "u1").unwrap());
+    let recent = cookie_of(&h.pull_as("c2", "g1", json!(null), "u1").unwrap());
     h.push_one(
         "item.put",
         json!({ "id": "last", "label": "last", "rank": 99, "done": false, "meta": null }),
@@ -491,7 +491,7 @@ fn cookie_below_floor_snapshots_recent_cookies_still_diff() {
     assert_eq!(stale_patch[0], json!({ "op": "clear" })); // snapshot fallback
     assert!(puts(&stale_patch).len() >= 8);
 
-    let fresh = h.pull_as("c2", "g1", json!(recent), None, "u1").unwrap();
+    let fresh = h.pull_as("c2", "g1", json!(recent), "u1").unwrap();
     let fresh_patch = patch_of(&fresh).clone();
     assert!(!fresh_patch.iter().any(|op| op["op"] == "clear")); // still a diff
     assert_eq!(
@@ -530,52 +530,6 @@ fn invalidate_forces_one_snapshot_then_diffs_resume() {
     );
 }
 
-// ---- per-user visibility --------------------------------------------------
-
-#[test]
-fn visible_configs_always_snapshot_filtered_per_user() {
-    let mut h = setup();
-    // non-row-local visibility (done can flip without touching a row) forces
-    // snapshot, exactly like the reference core's `visible`.
-    let vis = Visibility {
-        row_local: false,
-        filter: Box::new(|_table: &str, _user: &str| {
-            Some(VisibleFilter {
-                sql: "done = 0".into(),
-                params: Vec::<SqlValue>::new(),
-            })
-        }),
-    };
-    h.push_one(
-        "item.put",
-        json!({ "id": "hidden", "label": "done item", "rank": 0, "done": true, "meta": null }),
-        "c1",
-        "g1",
-        1,
-        "u1",
-    )
-    .unwrap();
-    let cookie = cookie_of(&h.pull_vis(json!(null), Some(&vis), "u1").unwrap());
-    h.push_one(
-        "item.put",
-        json!({ "id": "shown", "label": "open item", "rank": 0, "done": false, "meta": null }),
-        "c1",
-        "g1",
-        2,
-        "u1",
-    )
-    .unwrap();
-    let resp = h.pull_vis(json!(cookie), Some(&vis), "u1").unwrap();
-    let patch = patch_of(&resp).clone();
-    assert_eq!(patch[0], json!({ "op": "clear" })); // never a diff with visibility filtering
-    let ids: Vec<Value> = puts(&patch)
-        .iter()
-        .map(|op| op["value"]["item_id"].clone())
-        .collect();
-    assert!(ids.iter().any(|id| id == &json!("shown")));
-    assert!(!ids.iter().any(|id| id == &json!("hidden")));
-}
-
 // ---- interleaved churn converges ------------------------------------------
 
 #[test]
@@ -594,7 +548,7 @@ fn interleaved_pushes_and_upstream_converge() {
         cookies: &mut std::collections::HashMap<&str, Value>,
     ) {
         let resp = h
-            .pull_as(client, "g1", cookies[client].clone(), None, "u1")
+            .pull_as(client, "g1", cookies[client].clone(), "u1")
             .unwrap();
         cookies.insert(client, resp["cookie"].clone());
         if resp.get("unchanged") == Some(&json!(true)) {
@@ -655,7 +609,7 @@ fn interleaved_pushes_and_upstream_converge() {
     apply_pull(&mut h, "c2", &mut stores, &mut cookies);
 
     // oracle: a fresh client's full snapshot
-    let oracle_resp = h.pull_as("c3", "g1", json!(null), None, "u1").unwrap();
+    let oracle_resp = h.pull_as("c3", "g1", json!(null), "u1").unwrap();
     let mut oracle: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     for op in oracle_resp["rowsPatch"].as_array().unwrap() {
         if op["op"] == "put" {
@@ -671,44 +625,6 @@ fn interleaved_pushes_and_upstream_converge() {
             "client {client} diverged from oracle"
         );
     }
-}
-
-#[test]
-fn row_cap_zero_still_makes_progress() {
-    // MEDIUM-8: a maxChangeRows cap of 0 must not stall the diff forever. the
-    // engine admits at least one change row per diff, so repeated pulls drain the
-    // log instead of echoing the same cookie with an empty patch.
-    let mut h = Host::new(true);
-    h.init();
-    let c0 = cookie_of(&h.pull(json!(null), "u1").unwrap());
-    // triggers are installed by init(), so direct inserts append change rows
-    for i in 0..3 {
-        h.exec(&format!(
-            "INSERT INTO item VALUES ('i{i}', 'l', 1.0, 0, NULL)"
-        ));
-    }
-    let target = h.watermark();
-    assert!(target > c0);
-
-    h.caps = Caps {
-        max_change_rows: 0,
-        max_change_bytes: 2_000_000,
-    };
-    let mut cookie = c0;
-    let mut steps = 0;
-    loop {
-        let resp = h.pull(json!(cookie), "u1").unwrap();
-        let next = cookie_of(&resp);
-        if resp.get("unchanged") == Some(&json!(true)) || next == target {
-            cookie = next;
-            break;
-        }
-        assert!(next > cookie, "cap-0 diff stalled at cookie {cookie}");
-        cookie = next;
-        steps += 1;
-        assert!(steps < 100, "cap-0 diff did not drain the log");
-    }
-    assert_eq!(cookie, target, "cap-0 diffs drained the whole change log");
 }
 
 // exercised indirectly above but keep the type imports honest

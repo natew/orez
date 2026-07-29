@@ -1,27 +1,12 @@
-import type { Schema } from '@rocicorp/zero'
-import type {
-  QueryResolution,
-  QueryResolutionRequest,
-} from 'orez-sync-cf-host/query-patch'
+import type { AnyQueryRegistry, Schema } from '@rocicorp/zero'
 import type { TransactionQueryBudget } from 'orez-sync-cf-host/transaction-query'
 import type {
   AuthData,
   ExecResult,
-  JsonValue,
   MutatorRegistry,
   SqlStatementMetadata,
   SyncExecutor,
-  VisibilityConfig,
 } from 'orez-sync-executor'
-
-export {
-  visibility,
-  type VisibilityExpression,
-  type VisibilityFilter,
-  type VisibilityOperand,
-  type VisibilityValue,
-} from 'orez-sync-cf-host/visibility'
-export type { VisibilityConfig } from 'orez-sync-executor'
 
 export interface SyncSql {
   exec(
@@ -33,11 +18,6 @@ export interface SyncSql {
     sql: string,
     params?: readonly unknown[]
   ): Row[]
-}
-
-export type PullCaps = {
-  maxChangeRows: number
-  maxChangeBytes: number
 }
 
 export type BrowserSyncHostAssets = {
@@ -60,16 +40,14 @@ export type BrowserSyncHostConfig<
     namespace: string
   ): boolean | Promise<boolean>
   mutators: MutatorRegistry<S>
-  visibility?: VisibilityConfig
-  queryAware?: boolean | ((authData: A | null) => boolean)
-  /** Resolve every named query in one desired-query patch, in one call. */
-  resolveQueries?: (
-    requests: readonly QueryResolutionRequest[],
-    authData: A | null
-  ) => readonly QueryResolution[] | Promise<readonly QueryResolution[]>
+  /**
+   * The app's ordinary Zero query registry (the `defineQueries` result the
+   * client is built with). The host resolves every desired named query
+   * in-process against it, with the authenticated authData as query context.
+   */
+  queries?: AnyQueryRegistry
   queryTransformVersion?: number | ((authData: A | null) => number)
   retainChanges?: number
-  caps?: Partial<PullCaps>
   transactionQueryBudget?: Partial<TransactionQueryBudget>
   onDataChanged?: () => void
 }

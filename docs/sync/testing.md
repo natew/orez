@@ -1,11 +1,12 @@
 # Testing
 
 This is an honest assessment of what is tested, how, and what is not. The short
-version: the baseline pull and push engine is genuinely differential-tested
-against the TypeScript reference and randomized-model-verified; the query-aware
-layer has a deterministic seeded oracle (named already-transformed ZQL ASTs,
-membership, multi-table writes, in-place permission-transform replacement) plus
-the live cross-check against stock zero-cache; the Cloudflare host has a real
+version: the single query pull and push engine is genuinely
+differential-tested against the TypeScript reference and
+randomized-model-verified. Its deterministic seeded oracle covers named
+already-transformed ZQL ASTs, membership, multi-table writes, and in-place
+permission-transform replacement, with a live cross-check against stock
+zero-cache. The Cloudflare host has a real
 workerd fault, soak, and qualification matrix; and the jepsen-style ambitions
 were scoped down to what this system honestly needs — a composed fault nemesis
 with arm/fire/heal receipts, an engine mutation matrix that proves each lane can
@@ -39,21 +40,23 @@ The suites that matter most:
   PRNG generates an operation trace (put, del, reject, upstream SQL, pull,
   invalidate), and both the Rust engine and the executor-backed TypeScript host
   (`harness/src/executor-host.ts`, via `crates/sync-core/ts-oracle/run-oracle.ts`)
-  execute the same trace. Pull responses are compared semantically: cookie
-  exact, `unchanged` exact, `rowsPatch` order-independent. It runs 8 seeds of
-  200 steps each.
-- **`reference_delta.rs`** ports the reference core's own 28 delta tests
-  verbatim: cookie validation, push validation, snapshot and unchanged and 409,
+  execute the same trace. The base lane applies each side's patches to its own
+  simulated client store and compares store convergence after every pull,
+  because membership-driven query pulls and the reference change log can encode
+  the same result with different patch bytes. The query lane compares normalized
+  patches directly. Cookies and `unchanged` remain exact in both lanes. It runs
+  8 seeds of 200 steps each.
+- **`reference_delta.rs`** runs the reference core's delta cases through
+  `handle_query_pull`: cookie validation, push validation, snapshot and
+  unchanged and 409,
   cursor diffs including float fidelity and primary-key changes, app-error
   last-mutation-id semantics, replay idempotency, retention floor, epoch
-  invalidation, and per-user visibility.
-- **`model.rs`** and **`query_model.rs`** are randomized convergence models (24
-  seeds each). They interleave pushes, upstream writes, invalidations, and
-  cap changes across several clients, continuously assert invariants (the cookie
-  never exceeds the watermark, never regresses, acks never lead their row
-  effects), and check that every client converges to a fresh-client oracle
-  snapshot. Their oracle is internal (a fresh snapshot), so these are property
-  tests, not a second implementation.
+  invalidation, and membership-driven row changes.
+- **`query_model.rs`** is a randomized convergence model over 24 seeds. It
+  interleaves data changes with desired-query changes, applies every membership
+  patch to a simulated client store, and checks after each step that the store
+  equals the union of the group's live query results. Its oracle is internal,
+  so this is a property test, not a second implementation.
 - **`upstream.rs`** and **`paged_snapshot.rs`** cover the ingest apply path:
   ordered changes, watermark idempotency, full-image updates and deletes,
   out-of-order rejection, schema drift, legacy metadata migration, staged
@@ -67,15 +70,15 @@ The suites that matter most:
   successful batch commits them together; a no-op commit and a rolled-back write
   emit no CDC and leave the connection usable; trigger CDC never captures its own
   metadata writes and is visible across independent connections; schema drift
-  rolls back with an idempotent legacy-metadata upgrade; and a transaction larger
-  than the pull cap converges without loss or duplication.
+  rolls back with an idempotent legacy-metadata upgrade; and a large transaction
+  converges without loss or duplication.
 - **The query suites** (`query_ast.rs`, `query_chat_shapes.rs`,
   `query_chat_permissions.rs`, `query_membership.rs`, `query_related.rs`,
   `query_pull.rs`, `query_narrowing.rs`, `query_windowed_corpus.rs`,
-  `soot_composition.rs`) are about 62 tests covering AST validation and SQL
+  and `query_model.rs`) cover AST validation and SQL
   compilation, Chat's real query shapes, Chat permission transforms with
   explicit deny cases, per-group membership refcounts, related and windowed
-  subqueries, and the wire-level query-aware pull path.
+  subqueries, and the wire-level query pull path.
 - **`schema_hardening.rs`** is a security regression suite for DDL and trigger
   injection, proving hostile table and column names cannot inject.
 
@@ -83,7 +86,7 @@ The suites that matter most:
 
 The native host has its own cargo coverage, separate from the sync-core engine
 suites. `crates/sync-native/tests/library_api.rs` drives the real axum router
-through `tower`'s `oneshot`: health, a fresh snapshot pull, push-then-pull,
+through `tower`'s `oneshot`: health, a fresh query pull, push-then-pull,
 app-error last-mutation-id semantics, per-namespace isolation, and the
 server-owned admin-transaction protocol on `/admin/sql` end to end. That protocol
 is worker-owned: the namespace thread runs the actual `BEGIN`/`COMMIT`/`ROLLBACK`
@@ -98,7 +101,7 @@ browser-origin admin request is denied, unknown browser origins cannot sync,
 and the exact allowed origin completes both preflight and pull with restricted
 CORS headers. The same router suite covers application-owned push settlement:
 exact acknowledgement validation, admin gating, cross-client diff and snapshot
-visibility, effects-before-LMID watermark order, and idempotent
+convergence, effects-before-LMID watermark order, and idempotent
 `alreadyProcessed` recovery without a duplicate LMID row.
 `crates/sync-native/src/namespace.rs` adds
 worker-level unit tests for the same scheduler where the lease and connection are
@@ -125,7 +128,7 @@ the whole sequence; the lanes:
   every effect and last-mutation-id, full value round-trip including large exact
   decimals and float fidelity, and idle-teardown eviction.
 - **`integration-test.mjs`** is the production integration suite (50-plus
-  assertions): snapshot pull, query-aware named-query resolution and member
+  assertions): fresh query pull, named-query resolution and member
   filtering, client-authored raw AST rejected, writer enable and disable, fault
   injection at five boundary points, deferred effects running only after commit,
   and wake WebSocket delivery.
@@ -135,9 +138,8 @@ the whole sequence; the lanes:
   failures and a bounded retry cap, and the runaway lane where a feed whose
   cursor stalls trips the breaker to a 429
   `ingestCursorStalled` and then recovers through the admin route.
-- **`restart-test.mjs`** is a regression for a real bug: admin-set namespace
-  knobs must survive a workerd restart, so a query-aware namespace does not
-  silently fall back to baseline after eviction.
+- **`restart-test.mjs`** verifies that desired-query state and persistent
+  namespace controls survive a real workerd restart.
 
 ## The harness
 
@@ -192,17 +194,16 @@ overlaps a fired engine fault, fails as invalid instead of passing vacuously
 keeps 14 known engine bugs as compile-checked patches and records which lane
 catches which, each verdict verified against the lane's actual failure output.
 It is the proof that the net can catch bugs at all: every mutant is caught by
-at least one suite, the former system-level blind spots (swallowed rollbacks,
-ignored visibility, capped-diff cut ordering, non-durable watermark) are now
-each caught by a dedicated system lane, and a new lane earns its place by
-going red on at least one mutant.
+at least one suite, and dedicated system lanes cover rollback handling, query
+membership changes, and durable watermarks. A new lane earns its place by going
+red on at least one mutant.
 
 **PR-gate budget** (audited 2026-07-16, run 29560870553): total wall clock is
 about ten minutes and the reliability lanes are not the bottleneck. The
 critical path is the root `test` job (about 6 minutes of vitest) and
 `native-integration`; the harness job finishes in under a minute and the
-`rust-local` job — every consistency lane, Elle, capped-diff, and the composed
-nemesis at 24 steps — in about 2.5 minutes, all in parallel. Before demoting
+`rust-local` job runs every consistency lane, Elle, query-diff, and the composed
+nemesis at 24 steps in about 2.5 minutes, all in parallel. Before demoting
 any reliability lane to nightly, check this balance again; the cheaper lever
 has been tooling installs shared across jobs, not lanes.
 
@@ -249,16 +250,16 @@ relevant files are:
 
 State this plainly rather than implying blanket coverage.
 
-1. **The permission-transform computation has no oracle differential.** The
+1. **The query-definition computation has no oracle differential.** The
    `differential.rs` oracle now generates a query axis — named
    already-transformed ZQL ASTs, query registration/removal, membership
    changes, and multi-table writes, including replacing a query's permission
-   transform in place — alongside the baseline put/del/reject/upstream/pull/
+   transform in place — alongside the base put/del/reject/upstream/pull/
    invalidate ops, and shrinks failures to minimal traces. What it feeds the
    engine are _already-transformed_ ASTs: the computation of a transform from a
-   policy is proven by the permissions lane (`permissions.ts --target
-rust-local`, with a `visible()` policy and a red-proof against mutant P1)
-   and the live `query-diff.ts` comparison, not by the deterministic oracle.
+   query definition and authenticated claims is exercised by the host
+   integration and permission suites, plus the live `query-diff.ts` comparison,
+   not by the deterministic oracle.
 2. **`sync-wasm` is covered at its boundary, not exhaustively.** Three Node
    wasm tests drive a real SQLite adapter through the exported push, pull,
    error, preflight, and finalize boundary, and a native race drives 256 engine

@@ -411,12 +411,6 @@ jobs:
       - name: rust-local exactly-once LMID consistency
         run: cd harness && bun src/exactly-once-lmid-lane.ts --target rust-local --seed ${{ github.run_id }}
 
-      # capped-diff cut: a one-row diff cap splits a mutation's effect from its
-      # lmid ack across two pulls, the system-level net for M4 and O2 (see
-      # docs/sync/mutation-matrix.md). sub-second; the release binary is already built.
-      - name: rust-local capped-diff cut (M4/O2)
-        run: cd harness && bun src/capped-diff-lane.ts --target rust-local
-
       - name: rust-local HTTP pull cookie dialect conformance
         run: cd harness && bun src/pull-dialect-conformance.ts --target rust-local
 
@@ -441,22 +435,17 @@ jobs:
       - name: rust-local wake propagation
         run: cd harness && bun src/propagation.ts --against rust-local --baseline none
 
-      - name: rust-local permission grant and revoke
-        # Prove per-user isolation plus removal from an already-populated client
-        # cache when membership is revoked.
-        run: cd harness && bun src/permissions.ts --target rust-local
-
       - name: rust-local concurrent client storm
         # Exercise one namespace with many live clients and mixed writers, then
         # require every peer and a fresh late client to converge.
         run: cd harness && bun src/storm.ts --target rust-local --clients 50
 
-      - name: rust-local query-aware lifecycle
+      - name: rust-local query lifecycle
         # desired-query membership: put/overlap/limit/related/delete/reconnect/
         # permission/lost-response, with forbidden-row raw-store assertions
         run: cd harness && bun src/queries.ts --against rust-local
 
-      - name: rust-local query-aware differential (stock zero-cache)
+      - name: rust-local query differential (stock zero-cache)
         # every corpus query's server-side membership must equal stock zero-cache
         run: cd harness && bun src/query-diff.ts
 

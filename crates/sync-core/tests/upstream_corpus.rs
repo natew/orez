@@ -10,7 +10,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use common::{Host, TestDb, item_sql, item_tables};
 use rusqlite::Connection;
 use serde_json::{Map, Value, json};
-use sync_core::pull::Caps;
 use sync_core::{
     EngineError, SqlValue, SyncDb, Transactor, UpstreamBatch, UpstreamChange, apply_upstream,
     init_schema,
@@ -255,7 +254,7 @@ fn patch_ids(response: &Value) -> BTreeSet<String> {
 
 // electric.replication.transaction-fragmentation
 #[test]
-fn transaction_larger_than_pull_cap_converges_without_loss_or_duplication() {
+fn large_transaction_converges_without_loss_or_duplication() {
     let mut host = Host::new(true);
     host.init();
     host.db
@@ -276,10 +275,6 @@ fn transaction_larger_than_pull_cap_converges_without_loss_or_duplication() {
         })
         .unwrap();
 
-    host.caps = Caps {
-        max_change_rows: 5,
-        max_change_bytes: 1_000_000,
-    };
     let mut cookie = json!(null);
     let mut seen = BTreeSet::new();
     let mut put_count = 0;
@@ -301,9 +296,8 @@ fn transaction_larger_than_pull_cap_converges_without_loss_or_duplication() {
     assert_eq!(seen, expected);
     assert_eq!(put_count, expected.len(), "fragmentation duplicated a put");
 
-    host.caps = Caps::default();
     let fresh = host
-        .pull_as("fresh", "fresh-group", json!(null), None, "u1")
+        .pull_as("fresh", "fresh-group", json!(null), "u1")
         .unwrap();
     assert_eq!(patch_ids(&fresh), expected);
 }

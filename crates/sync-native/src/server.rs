@@ -304,7 +304,7 @@ async fn pull(
         Ok(n) => n,
         Err(e) => return json_status(400, json!({ "error": e })),
     };
-    let _query_pull_guard = if state.ctx.query_aware && state.query_resolution.is_some() {
+    let _query_pull_guard = if state.query_resolution.is_some() {
         let client_group = value
             .get("clientGroupID")
             .and_then(Value::as_str)
@@ -317,9 +317,7 @@ async fn pull(
     } else {
         None
     };
-    if state.ctx.query_aware
-        && let Some(resolution) = &state.query_resolution
-    {
+    if let Some(resolution) = &state.query_resolution {
         match resolve_named_queries(&mut value, &headers, &claims, &ns, &resolution.resolve).await {
             Ok(transform_version) => {
                 value["_serverQueryTransformVersion"] = json!(transform_version);

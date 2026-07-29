@@ -33,11 +33,11 @@ the same split, so an app can keep one real push endpoint and one real database
 and point the sync host at them. The design is written up in
 `plans/rust-sync-upstream-ingest.md`.
 
-## What the app worker owns
+## What the app owns
 
-In delegation mode the app worker owns three responsibilities, and the host
-delegates to it for each. All three cross a private service binding, so the
-host never holds app credentials.
+In delegation mode the app worker owns authentication and writes. Those calls
+can cross a private service binding, so the host never holds app credentials.
+The app's ordinary Zero query registry is bundled directly into the sync host.
 
 ### Authentication
 
@@ -49,23 +49,19 @@ forge claims. A common shape is to resolve the session over an APP service
 binding to the app's own auth, which keeps one source of truth for who a request
 belongs to.
 
-### Query transforms
+### Query definitions
 
-When a config is query-aware, clients send a named query plus arguments in their
-desired-queries patch rather than a raw AST. `config.resolveQueries(requests,
-claims, env)` turns the whole patch into validated Zero ASTs in one call before
-it reaches the engine
-(`host.ts`, the `#pull` handler). The resolver can call the app's real
-synced-queries endpoint over an app service binding and return the
-permission-transformed AST, so row-level permissions are enforced by the app's
-own query logic, not reimplemented in the host. `config.queryTransformVersion`
-is a server-owned epoch: bump it and every client's transformed queries are
-treated as stale and recompiled, which is how a permission or schema change
-invalidates cached transforms.
+Clients send a named query plus arguments in their desired-queries patch.
+`config.queries` is the app's ordinary Zero `defineQueries` registry, the same
+object used to build the client. The host looks up each desired query and runs
+its `CustomQuery.fn` in-process before the AST reaches the engine. Authenticated
+claims are the query context, so argument validation and row-level permissions
+stay in the app's query definitions without an app endpoint or service-binding
+round trip.
 
-Chat shipped this half first. Its query transform was already delegated to the
-application's real Zero query endpoint over an APP binding before push
-delegation existed.
+`config.queryTransformVersion` is a server-owned epoch. Bump it after a
+permission or schema change so every client's desired queries are treated as
+stale and resolved again.
 
 ### Writes
 
@@ -76,7 +72,7 @@ it to `<upstreamPath><mutateUrl>` over the mutate binding
 caller's exact body bytes and `Authorization` header, removes only its own
 private headers, and supplies the binding request host. The app endpoint then
 authenticates the original client token using the same binding-origin pattern as
-the query-transform delegation. There is no host credential fallback
+edge authentication. There is no host credential fallback
 (`plans/rust-sync-upstream-ingest.md`, resolved decisions).
 
 The host does not apply the mutation's rows locally. It records the

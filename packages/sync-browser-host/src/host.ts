@@ -4,7 +4,6 @@ import { createSyncExecutor } from 'orez-sync-executor/core'
 
 import {
   engine_compile_query,
-  engine_handle_pull,
   engine_handle_query_pull,
   engine_init_query_schema,
   engine_init_schema,
@@ -19,7 +18,7 @@ import {
   type BedrockBrowserModule,
 } from './sqlite-adapter.js'
 
-import type { BrowserSyncHost, BrowserSyncHostConfig, PullCaps } from './types.js'
+import type { BrowserSyncHost, BrowserSyncHostConfig } from './types.js'
 import type { Schema } from '@rocicorp/zero'
 import type {
   ApplicationDatabase,
@@ -32,11 +31,6 @@ import type {
   SqlStatementMetadata,
   SyncExecutor,
 } from 'orez-sync-executor'
-
-const DEFAULT_CAPS: PullCaps = {
-  maxChangeRows: 10_000,
-  maxChangeBytes: 2_000_000,
-}
 
 export type BrowserHostTestFaultPoint =
   | 'before_mutation'
@@ -78,33 +72,6 @@ function requestError(message: string, status = 400): Error & { status: number }
   return Object.assign(new Error(message), { status })
 }
 
-// clients always ship their desired queries and treat the server's got ack as
-// authoritative. the query-aware engine acks through its own tracking; a
-// non-query-aware host syncs every visible row, so its ack is an echo of the
-// hash-level desired delta in the same response that carries the rows.
-function withGotQueriesAck(
-  body: Record<string, unknown>,
-  queryAware: boolean,
-  response: unknown
-): unknown {
-  if (queryAware) return response
-  const queries = body.queries as { version?: unknown; patch?: unknown[] } | undefined
-  if (!queries || typeof queries.version !== 'number' || !Array.isArray(queries.patch)) {
-    return response
-  }
-  if (!response || typeof response !== 'object') return response
-  return {
-    ...response,
-    gotQueries: {
-      version: queries.version,
-      patch: queries.patch.map((op) => {
-        const entry = op as { op?: unknown; hash?: unknown }
-        return entry.op === 'put' ? { op: 'put', hash: entry.hash } : op
-      }),
-    },
-  }
-}
-
 async function requestObject(request: Request): Promise<Record<string, unknown>> {
   let value: unknown
   try {
@@ -120,18 +87,9 @@ async function requestObject(request: Request): Promise<Record<string, unknown>>
 
 function validateConfig<S extends Schema, A extends AuthData>(
   config: BrowserSyncHostConfig<S, A>
-): PullCaps {
+): void {
   if (!config.storageKey) throw new TypeError('storageKey must not be empty')
   if (!config.mutators) throw new TypeError('mutators are required')
-  if (config.queryAware && !config.resolveQueries) {
-    throw new TypeError('queryAware requires resolveQueries')
-  }
-  const caps = { ...DEFAULT_CAPS, ...config.caps }
-  for (const [name, value] of Object.entries(caps)) {
-    if (!Number.isSafeInteger(value) || value < 1) {
-      throw new TypeError(`caps.${name} must be a positive safe integer`)
-    }
-  }
   if (config.transactionQueryBudget) {
     for (const [name, value] of Object.entries(config.transactionQueryBudget)) {
       if (!Number.isSafeInteger(value) || Number(value) < 1) {
@@ -145,7 +103,6 @@ function validateConfig<S extends Schema, A extends AuthData>(
   if (!Number.isSafeInteger(retainChanges) || retainChanges < 0) {
     throw new TypeError('retainChanges must be a non-negative safe integer')
   }
-  return caps
 }
 
 class OperationQueue {
@@ -184,7 +141,6 @@ class BrowserSyncHostImpl<
 
   private constructor(
     private readonly config: BrowserSyncHostConfig<S, A>,
-    private readonly caps: PullCaps,
     private readonly module: BedrockBrowserModule,
     private readonly db: InstanceType<BedrockBrowserModule['Database']>,
     private readonly snapshots: IndexedDbSnapshotStore,
@@ -275,7 +231,7 @@ class BrowserSyncHostImpl<
     config: BrowserSyncHostConfig<S, A>,
     hooks?: BrowserHostTestHooks
   ): Promise<BrowserSyncHostImpl<S, A>> {
-    const caps = validateConfig(config)
+    validateConfig(config)
     const sqliteWasmUrl =
       config.assets?.sqliteWasmUrl ??
       new URL('./generated/sqlite3-browser.wasm', import.meta.url)
@@ -303,14 +259,12 @@ class BrowserSyncHostImpl<
     }
     db.pragma('foreign_keys = ON')
 
-    const host = new BrowserSyncHostImpl(config, caps, module, db, snapshots, hooks)
+    const host = new BrowserSyncHostImpl(config, module, db, snapshots, hooks)
     try {
       await host.#writeTransaction('bootstrap', async () => {
         config.initialize(host.#directSql)
         engine_init_schema(host.#engineDb, config.schema)
-        if (config.queryAware || config.resolveQueries) {
-          engine_init_query_schema(host.#engineDb)
-        }
+        engine_init_query_schema(host.#engineDb)
       })
       return host
     } catch (error) {
@@ -422,47 +376,18 @@ class BrowserSyncHostImpl<
     return result
   }
 
-  #visibility(claims: NormalizedClaims): unknown {
-    if (!this.config.visibility) return null
-    return {
-      rowLocal:
-        typeof this.config.visibility.rowLocal === 'function'
-          ? this.config.visibility.rowLocal(claims)
-          : this.config.visibility.rowLocal,
-      filters: Object.keys(this.config.schema.tables).flatMap((table) => {
-        const filter = this.config.visibility?.filter(table, claims)
-        return filter
-          ? [
-              filter.kind === 'expression'
-                ? { kind: 'expression', table, expression: filter.expression }
-                : {
-                    kind: 'raw',
-                    table,
-                    sql: filter.sql,
-                    params: [...(filter.params ?? [])],
-                  },
-            ]
-          : []
-      }),
-    }
-  }
-
-  async #resolvePullQueries(
+  #resolvePullQueries(
     body: Record<string, unknown>,
     authData: A | null,
-    queryAware: boolean,
     transformVersion: number
-  ): Promise<Record<string, unknown>> {
-    if (!queryAware || !body.queries) return body
+  ): Record<string, unknown> {
+    if (!body.queries) return body
     const queries = body.queries as { version?: unknown; patch?: unknown }
     if (!Array.isArray(queries.patch)) return body
-
-    if (!this.config.resolveQueries) {
-      throw requestError('query put requires a server-resolved named query')
-    }
-    const patch = await resolveQueryPatch(
+    const patch = resolveQueryPatch(
       queries.patch,
-      (requests) => this.config.resolveQueries!(requests, authData),
+      this.config.queries,
+      authData,
       transformVersion,
       requestError
     )
@@ -476,47 +401,25 @@ class BrowserSyncHostImpl<
       const input = await requestObject(request)
       return await this.#queue.run(async () => {
         this.#assertAvailable()
-        const queryAware =
-          typeof this.config.queryAware === 'function'
-            ? this.config.queryAware(authData)
-            : (this.config.queryAware ?? Boolean(this.config.resolveQueries))
-        const transformVersion = queryAware
-          ? typeof this.config.queryTransformVersion === 'function'
+        const transformVersion =
+          typeof this.config.queryTransformVersion === 'function'
             ? this.config.queryTransformVersion(authData)
             : (this.config.queryTransformVersion ?? 0)
-          : 0
         if (!Number.isSafeInteger(transformVersion) || transformVersion < 0) {
           throw new TypeError('queryTransformVersion must be a non-negative safe integer')
         }
-        let body = await this.#resolvePullQueries(
-          input,
-          authData,
-          queryAware,
-          transformVersion
-        )
-        if (queryAware) {
-          body = { ...body, _serverQueryTransformVersion: transformVersion }
-        }
+        let body = this.#resolvePullQueries(input, authData, transformVersion)
+        body = { ...body, _serverQueryTransformVersion: transformVersion }
         const response = await this.#writeTransaction('pull', () =>
-          queryAware
-            ? engine_handle_query_pull(
-                this.#engineDb,
-                this.config.schema,
-                this.#retainChanges,
-                body,
-                claims.userID
-              )
-            : engine_handle_pull(
-                this.#engineDb,
-                this.config.schema,
-                this.#visibility(claims),
-                this.caps,
-                this.#retainChanges,
-                body,
-                claims.userID
-              )
+          engine_handle_query_pull(
+            this.#engineDb,
+            this.config.schema,
+            this.#retainChanges,
+            body,
+            claims.userID
+          )
         )
-        return json(withGotQueriesAck(body, queryAware, response))
+        return json(response)
       })
     } catch (error) {
       return json({ error: errorMessage(error) }, statusOf(error))

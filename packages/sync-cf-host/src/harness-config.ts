@@ -1,17 +1,12 @@
 import { MutationApplicationError, registerMutators } from 'orez-sync-executor/core'
 import { defineStreamingFields } from 'orez-sync-executor/realtime'
 
-import { queryNameToAst } from '../../../harness/src/query-resolver.mjs'
+import { queries } from '../../../harness/src/query-resolver.mjs'
 import { harnessSchema, harnessStreaming } from './harness-schema.js'
 import { verifyHarnessWakeToken } from './harness-wake-token.js'
-import {
-  visibility,
-  type SyncHostConfig,
-  type SyncHostEnv,
-  type SyncSql,
-} from './index.js'
+import { type SyncHostConfig, type SyncHostEnv, type SyncSql } from './index.js'
 
-import type { Schema } from '@rocicorp/zero'
+import type { AnyQueryRegistry, Schema } from '@rocicorp/zero'
 
 const DDL = [
   'CREATE TABLE IF NOT EXISTS "user" (id TEXT PRIMARY KEY, name TEXT NOT NULL)',
@@ -300,27 +295,10 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
     hostVersion: '0.1.0',
     schema: harnessSchema,
     mutators: harnessMutators,
-    queryAware: false,
     queryTransformVersion: 1,
-    // one call for the whole patch, and one delay for it: a resolver that slept
-    // per query would hide the very waterfall the batch contract removes, so
-    // the lane's timing assertions would pass either way.
-    async resolveQueries(requests) {
-      const delayMs = Math.max(
-        0,
-        ...requests.map((request) =>
-          Number((request.args[0] as { delayMs?: unknown } | undefined)?.delayMs ?? 0)
-        )
-      )
-      if (delayMs > 0) await scheduler.wait(delayMs)
-      return requests.map((request) => {
-        try {
-          return { ast: queryNameToAst(request.name, request.args) as never }
-        } catch (error) {
-          return { error: error instanceof Error ? error.message : String(error) }
-        }
-      })
-    },
+    // the fixture's real defineQueries registry: the host resolves every
+    // desired named query through the same builders the client registers.
+    queries: queries as AnyQueryRegistry,
     initialize: initializeHarness,
     namespace(request) {
       return new URL(request.url).pathname.split('/')[1] || null
@@ -358,117 +336,6 @@ export function harnessConfig<Env extends SyncHostEnv>(): SyncHostConfig<Env> {
         Boolean(env.ADMIN_KEY) &&
         new URL(request.url).searchParams.get('adminKey') === env.ADMIN_KEY
       )
-    },
-    visibility: {
-      rowLocal: false,
-      filter(table, claims) {
-        const user = claims.userID
-        const userValue = visibility.value(user)
-        const eq = (
-          left: ReturnType<typeof visibility.column>,
-          right:
-            | ReturnType<typeof visibility.column>
-            | ReturnType<typeof visibility.value>
-        ) => visibility.comparison(left, '=', right)
-        if (table === 'user')
-          return visibility.filter(eq(visibility.column('user', 'id'), userValue))
-        if (table === 'project') {
-          return visibility.filter(
-            visibility.or(
-              eq(visibility.column('project', 'ownerId'), userValue),
-              visibility.exists(
-                'member',
-                visibility.and(
-                  eq(
-                    visibility.column('member', 'projectId'),
-                    visibility.column('project', 'id')
-                  ),
-                  eq(visibility.column('member', 'userId'), userValue)
-                )
-              )
-            )
-          )
-        }
-        if (table === 'member') {
-          return visibility.filter(
-            visibility.exists(
-              'project',
-              visibility.and(
-                eq(
-                  visibility.column('project', 'id', 'p'),
-                  visibility.column('member', 'projectId')
-                ),
-                visibility.or(
-                  eq(visibility.column('project', 'ownerId', 'p'), userValue),
-                  visibility.exists(
-                    'member',
-                    visibility.and(
-                      eq(
-                        visibility.column('member', 'projectId', 'access'),
-                        visibility.column('project', 'id', 'p')
-                      ),
-                      eq(visibility.column('member', 'userId', 'access'), userValue)
-                    ),
-                    'access'
-                  )
-                )
-              ),
-              'p'
-            )
-          )
-        }
-        if (table === 'task')
-          return visibility.filter(
-            visibility.exists(
-              'project',
-              visibility.and(
-                eq(
-                  visibility.column('project', 'id'),
-                  visibility.column('task', 'projectId')
-                ),
-                visibility.or(
-                  eq(visibility.column('project', 'ownerId'), userValue),
-                  visibility.exists(
-                    'member',
-                    visibility.and(
-                      eq(
-                        visibility.column('member', 'projectId'),
-                        visibility.column('project', 'id')
-                      ),
-                      eq(visibility.column('member', 'userId'), userValue)
-                    )
-                  )
-                )
-              )
-            )
-          )
-        if (table === 'message')
-          return visibility.filter(
-            visibility.exists(
-              'project',
-              visibility.and(
-                eq(
-                  visibility.column('project', 'id'),
-                  visibility.column('message', 'serverId')
-                ),
-                visibility.or(
-                  eq(visibility.column('project', 'ownerId'), userValue),
-                  visibility.exists(
-                    'member',
-                    visibility.and(
-                      eq(
-                        visibility.column('member', 'projectId'),
-                        visibility.column('project', 'id')
-                      ),
-                      eq(visibility.column('member', 'userId'), userValue)
-                    )
-                  )
-                )
-              )
-            )
-          )
-        return undefined
-      },
     },
   }
 }

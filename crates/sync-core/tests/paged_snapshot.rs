@@ -1,11 +1,10 @@
 mod common;
 
 use serde_json::{Map, Value, json};
-use sync_core::pull::Caps;
 use sync_core::{
     SnapshotState, SqlValue, SyncDb, TableSpec, Tables, Transactor, UpstreamBatch, UpstreamChange,
     ZeroColumnType, apply_snapshot_changes, apply_snapshot_page, begin_snapshot_generation,
-    finalize_snapshot_generation, handle_pull, init_schema, read_snapshot_progress,
+    finalize_snapshot_generation, init_schema, read_snapshot_progress,
 };
 
 use common::{TestDb, item_sql, item_tables};
@@ -41,12 +40,20 @@ fn setup() -> (TestDb, Tables) {
     )
     .unwrap();
     init_schema(&mut db, &tables).unwrap();
+    sync_core::query::init_query_schema(&mut db).unwrap();
     (db, tables)
 }
 
 fn pull(db: &mut TestDb, tables: &Tables, cookie: Value) -> Value {
-    let body = json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": cookie });
-    db.transaction(|db| handle_pull(db, tables, 4096, None, Caps::default(), &body, "u1"))
+    // every pull re-desires the all-items query; re-puts of the same hash and
+    // version are idempotent, so this serves the whole `item` surface.
+    let body = json!({
+        "clientID": "c1", "clientGroupID": "g1", "cookie": cookie,
+        "queries": { "version": 1, "patch": [
+            { "op": "put", "hash": "q_all", "ast": { "table": "item" } },
+        ]},
+    });
+    db.transaction(|db| sync_core::query::handle_query_pull(db, tables, 4096, &body, "u1"))
         .unwrap()
 }
 

@@ -326,14 +326,12 @@ async function startTarget(fetchImpl?: typeof fetch): Promise<StateTarget> {
   if (args.against === 'rust-local') {
     return (await import('./targets/rust-local.js')).startRustLocal({
       pullIntervalMs: 75,
-      queryAware: true,
       retainChanges: args.nemesis ? 2 : 8,
       fetch: fetchImpl,
     })
   }
   return (await import('./targets/rust-cf.js')).startRustCf({
     pullIntervalMs: 150,
-    queryAware: true,
     retainChanges: 8,
   })
 }

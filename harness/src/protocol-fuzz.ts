@@ -31,9 +31,9 @@ if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 100) 
 
 const target =
   args.target === 'rust-cf'
-    ? await startRustCf({ queryAware: false, pullIntervalMs: 0 })
+    ? await startRustCf({ pullIntervalMs: 0 })
     : args.target === 'rust-local'
-      ? await startRustLocal({ queryAware: false, pullIntervalMs: 0 })
+      ? await startRustLocal({ pullIntervalMs: 0 })
       : (() => {
           throw new Error('target must be rust-local or rust-cf')
         })()

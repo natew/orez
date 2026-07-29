@@ -5,7 +5,7 @@ import { createPermissions } from './createPermissions'
 import { createAsyncContext } from './helpers/asyncContext'
 import { createMutators } from './helpers/createMutators'
 import { getScopedAuthData, runWithAuthScope } from './helpers/mutatorContext'
-import { runWithQueryContext } from './helpers/queryContext'
+import { runWithQueryContext, runWithSyncQueryContext } from './helpers/queryContext'
 import { getMutationsPermissions } from './modelRegistry'
 import { setCustomQueries } from './run'
 import { getZQL, setEnvironment, setSchema } from './state'
@@ -173,6 +173,13 @@ export type ZeroServerBindings<
   Models extends GenericModels,
 > = {
   mutators: ZeroServerMutatorRegistry<Schema>
+  /**
+   * The app's queries in the standard Zero registry shape a sync host
+   * resolves in-process: entries map the host's claims to authData, run the
+   * on-zero query context, serve `permission.<table>` queries, and apply
+   * `validateQuery`. Pass this straight to the host config's `queries`.
+   */
+  queries: AnyQueryRegistry
   resolveQuery(
     name: string,
     args: readonly JsonValue[],
@@ -193,6 +200,70 @@ export type ZeroServerBindings<
       work: (q: QueryBuilder) => Query<any, Schema, Result>
     ): Promise<HumanReadable<Result>>
   }
+}
+
+export type CreateSyncQueriesOptions<Schema extends ZeroSchema> = {
+  schema: Schema
+  queries: AnyQueryRegistry
+  validateQuery?: ValidateQueryFn
+  defaultAllowAdminRole?: AdminRoleMode
+  mapClaims?: (claims: NormalizedClaims) => AuthData | null
+}
+
+/**
+ * The app's queries in the standard Zero registry shape a sync host resolves
+ * in-process, without the rest of the server bindings. This is what a
+ * split-worker deployment bundles into its sync worker: schema + query
+ * definitions only, no models, server actions, or database. Entries map the
+ * host's claims to authData, run the on-zero query context, serve
+ * `permission.<table>` queries, and apply `validateQuery`.
+ */
+export function createSyncQueries<Schema extends ZeroSchema>(
+  options: CreateSyncQueriesOptions<Schema>
+): AnyQueryRegistry {
+  setSchema(options.schema, createBuilder(options.schema))
+  setEnvironment('server')
+  setCustomQueries(options.queries)
+  const mapClaims = options.mapClaims ?? defaultMapClaims
+  const permissions = createPermissions({
+    environment: 'server',
+    schema: options.schema,
+    adminRoleMode: options.defaultAllowAdminRole ?? 'all',
+  })
+  // every `namespace.name` lookup yields a standard CustomQuery-shaped entry.
+  // a Proxy covers permission.<table> and unknown names uniformly — an
+  // unknown name throws inside fn and the host reports it as a 400 naming
+  // the query. resolution is synchronous by contract: the host applies a
+  // whole desired-query patch in one synchronous call.
+  const entry = (name: string) => ({
+    queryName: name,
+    fn: ({ args, ctx }: { args: unknown; ctx: unknown }) => {
+      const claims = (ctx ?? { userID: 'anon' }) as NormalizedClaims
+      const authData = mapClaims(claims)
+      return runWithSyncQueryContext({ authData }, () =>
+        resolveServerQuery({
+          authData,
+          name,
+          args,
+          queries: options.queries,
+          permissions,
+          validateQuery: options.validateQuery,
+        })
+      )
+    },
+  })
+  return new Proxy({ '~': 'QueryRegistry' } as Record<string, unknown>, {
+    get(target, namespace) {
+      if (typeof namespace !== 'string' || namespace === '~') {
+        return target[namespace as string]
+      }
+      return new Proxy({} as Record<string, unknown>, {
+        get(_inner, name) {
+          return typeof name === 'string' ? entry(`${namespace}.${name}`) : undefined
+        },
+      })
+    },
+  }) as AnyQueryRegistry
 }
 
 export function createZeroServerBindings<
@@ -276,10 +347,41 @@ export function createZeroServerBindings<
     }
   }
 
+  const hostQueries: AnyQueryRegistry = options.queries
+    ? createSyncQueries({
+        schema: options.schema,
+        queries: options.queries,
+        validateQuery: options.validateQuery,
+        defaultAllowAdminRole: options.defaultAllowAdminRole,
+        mapClaims: options.mapClaims,
+      })
+    : (new Proxy({ '~': 'QueryRegistry' } as Record<string, unknown>, {
+        get(target, namespace) {
+          if (typeof namespace !== 'string' || namespace === '~') {
+            return target[namespace as string]
+          }
+          return new Proxy({} as Record<string, unknown>, {
+            get(_inner, name) {
+              return typeof name === 'string'
+                ? {
+                    queryName: `${namespace}.${name}`,
+                    fn: () => {
+                      throw new Error(
+                        'No queries registered with createZeroServerBindings.'
+                      )
+                    },
+                  }
+                : undefined
+            },
+          })
+        },
+      }) as AnyQueryRegistry)
+
   const bindings: ZeroServerBindings<Schema, Models> = {
     // freezing the registry makes the server seam immutable without importing
     // any particular executor implementation.
     mutators: Object.freeze({ ...registry }),
+    queries: hostQueries,
     async resolveQuery(name, args, authData) {
       if (!options.queries) {
         throw new Error('No queries registered with createZeroServerBindings.')

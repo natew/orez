@@ -1,7 +1,6 @@
 export { createSyncDurableObject, createSyncWorker } from './host.js'
 export { createQueryCompiler } from './query-compiler.js'
 export { resolveQueryPatch } from './query-patch.js'
-export { visibility } from './types.js'
 export {
   DEFAULT_TRANSACTION_QUERY_BUDGET,
   TransactionQueryBudgetError,
@@ -10,20 +9,11 @@ export {
 } from './transaction-query.js'
 
 export type {
-  PullCaps,
-  QueryResolution,
-  QueryResolutionRequest,
-  QueryResolver,
   SyncHostConfig,
   SyncHostEnv,
   ServiceBinding,
   SyncSql,
   UpstreamConfig,
-  VisibilityConfig,
-  VisibilityExpression,
-  VisibilityFilter,
-  VisibilityOperand,
-  VisibilityValue,
 } from './types.js'
 export type { SyncDurableObjectConstructor } from './host.js'
 export type {

@@ -350,35 +350,6 @@ pub fn canonical_pk_probe(input: JsValue) -> Result<String, JsValue> {
 
 // ---- production sync-core boundary ---------------------------------------
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CapsWire {
-    max_change_rows: usize,
-    max_change_bytes: usize,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct VisibilityWire {
-    row_local: bool,
-    filters: Vec<VisibilityFilterWire>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-enum VisibilityFilterWire {
-    Raw {
-        table: String,
-        sql: String,
-        #[serde(default)]
-        params: Vec<serde_json::Value>,
-    },
-    Expression {
-        table: String,
-        expression: sync_core::VisibilityExpression,
-    },
-}
-
 fn from_js<T: for<'de> Deserialize<'de>>(value: JsValue) -> Result<T, JsValue> {
     serde_wasm_bindgen::from_value(value).map_err(js_err)
 }
@@ -416,27 +387,6 @@ fn parse_counter(value: &str, name: &str) -> Result<i64, JsValue> {
     value
         .parse::<i64>()
         .map_err(|error| js_err(format!("invalid {name} {value:?}: {error}")))
-}
-
-fn sql_value_from_json(value: serde_json::Value) -> Result<SqlValue, JsValue> {
-    match value {
-        serde_json::Value::Null => Ok(SqlValue::Null),
-        serde_json::Value::Bool(value) => Ok(SqlValue::Integer(i64::from(value))),
-        serde_json::Value::Number(value) => {
-            if let Some(value) = value.as_i64() {
-                Ok(SqlValue::Integer(value))
-            } else {
-                value
-                    .as_f64()
-                    .map(SqlValue::Real)
-                    .ok_or_else(|| js_err("visibility parameter is not a finite number"))
-            }
-        }
-        serde_json::Value::String(value) => Ok(SqlValue::Text(value)),
-        value => Err(js_err(format!(
-            "visibility parameter must be a scalar, got {value}"
-        ))),
-    }
 }
 
 /// Initialize the sync engine's durable metadata and triggers. The host calls
@@ -708,98 +658,7 @@ pub fn engine_compile_query(
     })
 }
 
-/// Production pull entry. The TypeScript host owns `transactionSync`.
-#[wasm_bindgen]
-pub fn engine_handle_pull(
-    db: &JsSyncDb,
-    schema: JsValue,
-    visibility: JsValue,
-    caps: JsValue,
-    retain_changes: &str,
-    body: JsValue,
-    user_id: &str,
-) -> Result<JsValue, JsValue> {
-    let mut db = WasmDb(db);
-    let tables = tables_from_js(schema)?;
-    let visibility: Option<VisibilityWire> = from_js(visibility)?;
-    let visibility = match visibility {
-        Some(visibility) => {
-            let mut filters = Vec::with_capacity(visibility.filters.len());
-            for filter in visibility.filters {
-                match filter {
-                    VisibilityFilterWire::Raw { table, sql, params } => {
-                        let table = tables
-                            .logical_name(&table)
-                            .ok_or_else(|| {
-                                engine_error(sync_core::EngineError::bad_request(format!(
-                                    "unknown table '{table}'"
-                                )))
-                            })?
-                            .to_string();
-                        if tables.has_encrypted_columns() {
-                            return Err(engine_error(sync_core::EngineError::bad_request(
-                                format!(
-                                    "schema '{}' raw visibility SQL for table '{table}' cannot prove all referenced columns clear; forbidden use 'visibility'",
-                                    tables.schema_id()
-                                ),
-                            )));
-                        }
-                        let params = params
-                            .into_iter()
-                            .map(sql_value_from_json)
-                            .collect::<Result<Vec<_>, _>>()?;
-                        filters.push((table, sync_core::VisibleFilter { sql, params }));
-                    }
-                    VisibilityFilterWire::Expression { table, expression } => {
-                        let table = tables
-                            .logical_name(&table)
-                            .ok_or_else(|| {
-                                engine_error(sync_core::EngineError::bad_request(format!(
-                                    "unknown table '{table}'"
-                                )))
-                            })?
-                            .to_string();
-                        let filter =
-                            sync_core::compile_visibility_filter(&tables, &table, &expression)
-                                .map_err(engine_error)?;
-                        filters.push((table, filter));
-                    }
-                }
-            }
-            Some(sync_core::Visibility {
-                row_local: visibility.row_local,
-                filter: Box::new(move |table, _user_id| {
-                    let (_, filter) = filters
-                        .iter()
-                        .find(|(filter_table, _)| filter_table == table)?;
-                    Some(sync_core::VisibleFilter {
-                        sql: filter.sql.clone(),
-                        params: filter.params.clone(),
-                    })
-                }),
-            })
-        }
-        None => None,
-    };
-    let caps: CapsWire = from_js(caps)?;
-    let body: serde_json::Value = from_js(body)?;
-    let result = sync_core::handle_pull(
-        &mut db,
-        &tables,
-        parse_counter(retain_changes, "retention count")?,
-        visibility.as_ref(),
-        sync_core::Caps {
-            max_change_rows: caps.max_change_rows,
-            max_change_bytes: caps.max_change_bytes,
-        },
-        &body,
-        user_id,
-    )
-    .map_err(engine_error)?;
-    to_js(&result)
-}
-
-/// Query-aware pull entry point. Desired-query ASTs are already resolved and
+/// Production pull entry point. Desired-query ASTs are already resolved and
 /// validated by the consumer host before crossing this boundary.
 #[wasm_bindgen]
 pub fn engine_handle_query_pull(

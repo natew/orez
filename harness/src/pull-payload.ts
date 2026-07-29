@@ -65,14 +65,12 @@ async function startTarget(): Promise<SyncTarget> {
   }
   if (args.against === 'rust-local') {
     return (await import('./targets/rust-local.js')).startRustLocal({
-      queryAware: true,
       pullIntervalMs: 100,
       onPull: (observation) => record(observation.response),
     })
   }
   if (args.against === 'rust-cf') {
     return (await import('./targets/rust-cf.js')).startRustCf({
-      queryAware: true,
       pullIntervalMs: 300,
       onPull: (observation) => record(observation.response),
     })

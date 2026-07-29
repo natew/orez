@@ -23,8 +23,8 @@ immediately rather than failing at request time.
 | `authorizeNotify(request, env)` | `=> boolean \| Promise<boolean>`              | Authorizes upstream change notifications before a namespace object is selected. Required and fail-closed.                     |
 
 `NormalizedClaims` must carry a non-empty `userID`; it owns client-group
-ownership. Put the raw client token into claims (for example under a
-`__zeroAuthToken` key) if `resolveQueries` needs to forward it to the app.
+ownership. The complete claims object becomes the context for every desired
+query, so query definitions can scope results to the authenticated user.
 
 ## Push mode: exactly one of two
 
@@ -73,44 +73,47 @@ The ingest budget knobs are the sync host's half of the write safeguards. The
 data worker has its own independent budget, configured by environment variables
 (below). See the trade-offs page for why both exist.
 
-## Query awareness
+## Queries
 
-Turn these on when clients send named queries and the app owns the
-permission transform.
+Pulls always use the named-query path. Pass the same ordinary Zero
+`defineQueries` registry used to build the client as `queries`. The host looks
+up every desired query in that registry and runs its `CustomQuery.fn`
+in-process. Argument validation and permission scoping therefore stay in the
+query definition, with authenticated claims supplied as `ctx`. The host does
+not call an application transform endpoint or require a service binding for
+query resolution.
 
-| Field                   | Type                                           | Default                   | Meaning                                                                                                                                                                                                                         |
-| ----------------------- | ---------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `queryAware`            | `boolean \| (claims) => boolean`               | `Boolean(resolveQueries)` | Enables the desired-query pull path for this namespace.                                                                                                                                                                         |
-| `resolveQueries`        | `(requests, claims, env) => QueryResolution[]` | none                      | Resolves a whole desired-query patch (name + args per entry) into validated Zero ASTs in one call, one entry per request in request order. Commonly delegates to the app's real synced-queries endpoint over a service binding. |
-| `queryTransformVersion` | `number \| (claims) => number`                 | 0                         | Server-owned invalidation epoch for permission or schema transforms. Must be a non-negative safe integer. Bump it to force recompilation of every client's transformed queries.                                                 |
+```ts
+import { defineQueries, defineQuery } from '@rocicorp/zero'
+import { zql } from './zero.generated'
 
-## Visibility (local filtering)
+export const appQueries = defineQueries({
+  project: {
+    mine: defineQuery(({ ctx }) => zql.project.where('ownerId', ctx.userID)),
+  },
+})
 
-An alternative to query awareness for simpler per-user row filtering, applied
-inside the engine rather than delegated to the app.
+export const config: SyncHostConfig = {
+  // required host fields...
+  queries: appQueries,
+  queryTransformVersion: 1,
+}
+```
 
-| Field                              | Type                               | Default | Meaning                                                                                                                     |
-| ---------------------------------- | ---------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `visibility.rowLocal`              | `boolean \| (claims) => boolean`   | none    | True only when every predicate depends on the selected row alone.                                                           |
-| `visibility.filter(table, claims)` | `=> VisibilityFilter \| undefined` | none    | Returns `visibility.filter(expression)`. Rust generates the SQL and validates every referenced column from that expression. |
-| `visibilityEnabled`                | `boolean`                          | `false` | Enables visibility from the first request. Defaults off so harnesses start unfiltered.                                      |
+| Field                   | Type                           | Default | Meaning                                                                                                                                                      |
+| ----------------------- | ------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `queries`               | `AnyQueryRegistry`             | none    | The app's ordinary `defineQueries` registry. Required when a client requests named queries.                                                                  |
+| `queryTransformVersion` | `number \| (claims) => number` | 0       | Server-owned invalidation epoch for permission or schema changes. Must be a non-negative safe integer. Bump it to re-resolve every client's desired queries. |
 
-Build filters with `visibility.column`, `visibility.value`,
-`visibility.comparison`, `visibility.and`, `visibility.or`, and
-`visibility.exists`. `visibility.raw(sql, params)` is retained for schemas with
-no encrypted columns and is rejected when any column has `encrypted: true`.
+Work and memory are proportional to query results. Pulls emit
+membership-driven puts and dels for the rows held by each client group, without
+projecting the full namespace.
 
-A visibility filter can revoke rows without any row change, which a diff cannot
-express, so any config with `visibility` always answers pulls with a full
-snapshot.
-
-## Retention, caps, and lifecycle
+## Retention and lifecycle
 
 | Field                          | Type         | Default           | Meaning                                                                                                                       |
 | ------------------------------ | ------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `retainChanges`                | `number`     | 4096              | Change-log rows kept below the high watermark. A client whose cookie falls below the pruned floor gets a snapshot.            |
-| `caps.maxChangeRows`           | `number`     | 10000             | Upper bound on rows in one pull response. Must be a positive safe integer.                                                    |
-| `caps.maxChangeBytes`          | `number`     | 2000000           | Upper bound on bytes in one pull response.                                                                                    |
 | `idleTeardownMs`               | `number`     | 5000              | Simulated idle-teardown window. After this much inactivity the DO resets its in-memory boot state, mirroring a real eviction. |
 | `wakeCoalesceMs`               | `number`     | 25                | Batching window for the wake fan-out. A storm of writes produces one pull wave instead of one per write.                      |
 | `authorizeAdmin(request, env)` | `=> boolean` | `ADMIN_KEY` check | Authorizes `/admin/*` routes. The default requires `env.ADMIN_KEY` set and a matching `x-admin-key` header.                   |
@@ -169,9 +172,6 @@ Every route is under `/<namespace>/admin/` and gated by `authorizeAdmin` (or the
 - `POST /admin/writer` `{enabled}` (also `GET`): disable or enable the writer.
   A disabled writer answers pushes with 503.
 - `POST /admin/retention` `{retainChanges}`: override retention at runtime.
-- `POST /admin/visibility` `{enabled}` and `POST /admin/query-aware` `{enabled}`:
-  flip those modes at runtime. Stored in the control table so an eviction does
-  not silently revert them.
 - `GET /admin/ingest-breaker` and `POST /admin/ingest-breaker`: read or clear
   the ingest circuit breaker.
 - `GET /admin/upstream-write-budget`: proxy the data worker's write-budget

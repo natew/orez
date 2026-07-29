@@ -3,18 +3,12 @@
 // reveal and membership-revoke removal from an already-populated client cache.
 //
 //   bun src/permissions.ts
-//   bun src/permissions.ts --target rust-local
-import { parseArgs } from 'node:util'
 
 import { fixtureVisibility, fixtureVisibilityInvalidation } from './fixture-visibility.js'
 import { queries } from './fixture.js'
 import { startOrezLocal } from './targets/orez-local.js'
 
 import type { FixtureZero } from './target.js'
-
-const { values: cli } = parseArgs({
-  options: { target: { type: 'string', default: 'orez-local' } },
-})
 
 type ProjectRow = {
   id: string
@@ -95,22 +89,11 @@ function equal(actual: string[], expected: string[], label: string) {
   }
 }
 
-// rust-local/rust-cf bake the SAME fixture visibility policy into the host
-// behind --visible; orez-local takes it as a JS callback. same semantics.
-const target =
-  cli.target === 'rust-local'
-    ? await (
-        await import('./targets/rust-local.js')
-      ).startRustLocal({ pullIntervalMs: 100, visible: true })
-    : cli.target === 'rust-cf'
-      ? await (
-          await import('./targets/rust-cf.js')
-        ).startRustCf({ pullIntervalMs: 100, visible: true })
-      : await startOrezLocal({
-          pullIntervalMs: 100,
-          visible: fixtureVisibility,
-          visibilityInvalidation: fixtureVisibilityInvalidation,
-        })
+const target = await startOrezLocal({
+  pullIntervalMs: 100,
+  visible: fixtureVisibility,
+  visibilityInvalidation: fixtureVisibilityInvalidation,
+})
 const views: ReturnType<typeof watchAccess>[] = []
 
 try {

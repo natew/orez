@@ -203,16 +203,60 @@ try {
     clientID: 'client-a',
     clientGroupID: 'group-client-a',
     cookie: null,
+    queries: {
+      version: 1,
+      patch: [
+        {
+          op: 'put',
+          hash: 'all-projects',
+          name: 'allProjects',
+          args: [],
+        },
+        {
+          op: 'put',
+          hash: 'all-tasks',
+          name: 'tasksInProjects',
+          args: [
+            {
+              projectIds: [
+                'p0',
+                'p1',
+                'p2',
+                'p3',
+                'p4',
+                'p5',
+                'p6',
+                'p7',
+                'p8',
+                'p9',
+                'p10',
+                'p11',
+              ],
+            },
+          ],
+        },
+      ],
+    },
   })
   equal(firstPull.status, 200, 'initial pull status')
   equal(firstPull.body.cookie, 0, 'initial cookie')
+  equal(
+    firstPull.body.gotQueries,
+    {
+      version: 1,
+      patch: [
+        { op: 'put', hash: 'all-projects' },
+        { op: 'put', hash: 'all-tasks' },
+      ],
+    },
+    'initial pull acknowledges every named query'
+  )
   assert.ok(
     firstPull.body.rowsPatch.length > 60,
-    'initial snapshot includes fixture rows'
+    'initial named queries include fixture rows'
   )
   assertions++
 
-  await admin('/admin/query-aware', { enabled: true })
   const queryPull = await post('/pull', {
     clientID: 'query-client',
     clientGroupID: 'query-group',
@@ -229,7 +273,7 @@ try {
       ],
     },
   })
-  equal(queryPull.status, 200, 'query-aware pull status')
+  equal(queryPull.status, 200, 'scoped query pull status')
   equal(
     queryPull.body.gotQueries,
     {
@@ -241,10 +285,10 @@ try {
   const queryTaskPuts = queryPull.body.rowsPatch.filter(
     (entry) => entry.op === 'put' && entry.tableName === 'task'
   )
-  assert.ok(queryTaskPuts.length > 0, 'query-aware pull includes members')
+  assert.ok(queryTaskPuts.length > 0, 'scoped query pull includes members')
   assert.ok(
     queryTaskPuts.every((entry) => ['p1', 'p4'].includes(entry.value.projectId)),
-    'query-aware pull excludes non-members'
+    'scoped query pull excludes non-members'
   )
   const queryStatus = await admin('/admin/status')
   assert.ok(
@@ -270,115 +314,100 @@ try {
     'query transform version is server-authored'
   )
 
-  const slowQueryPull = post('/pull', {
-    clientID: 'ordered-query-client',
-    clientGroupID: 'ordered-query-group',
-    cookie: null,
-    queries: {
-      version: 1,
-      patch: [
-        {
-          op: 'put',
-          hash: 'ordered-tasks',
-          name: 'tasksInProjects',
-          args: [{ projectIds: ['p1'], delayMs: 200 }],
-        },
-      ],
-    },
+  const queryFollowup = await post('/pull', {
+    clientID: 'query-client',
+    clientGroupID: 'query-group',
+    cookie: queryPull.body.cookie,
   })
-  await Bun.sleep(25)
-  const clearQueryPull = post('/pull', {
-    clientID: 'ordered-query-client',
-    clientGroupID: 'ordered-query-group',
-    cookie: null,
-    queries: { version: 2, patch: [{ op: 'clear' }] },
-  })
-  const [slowQueryResponse, clearQueryResponse] = await Promise.all([
-    slowQueryPull,
-    clearQueryPull,
-  ])
-  equal(slowQueryResponse.status, 200, 'slow query pull status')
-  equal(clearQueryResponse.status, 200, 'clear query pull status')
-  const orderedQueryState = await admin('/admin/sql', {
-    query: `SELECT
-      (SELECT COUNT(*) FROM _zsync_desires
-       WHERE clientGroupID = 'ordered-query-group') AS desires,
-      (SELECT version FROM _zsync_query_ack
-       WHERE clientGroupID = 'ordered-query-group'
-       AND clientID = 'ordered-query-client') AS version`,
-  })
+  equal(queryFollowup.status, 200, 'query pull without query patch status')
   equal(
-    orderedQueryState.rows,
-    [{ desires: 0, version: 2 }],
-    'query resolution and desired-query apply preserve arrival order'
+    queryFollowup.body.unchanged,
+    true,
+    'registered query persists without queries field'
   )
 
-  // A whole desired-query patch resolves in ONE call. The harness resolver
-  // sleeps once for the longest delayMs in the batch, so a host that still
-  // resolved per query would pay four sleeps here, not one. A screen mounting
-  // several views registers exactly this shape, and against production an
-  // 11-query patch cost 23.3 s resolved one at a time against 0.5 s batched.
-  const batchStarted = Date.now()
-  const batchedQueryPull = await post('/pull', {
-    clientID: 'batched-query-client',
-    clientGroupID: 'batched-query-group',
-    cookie: null,
-    queries: {
-      version: 1,
-      patch: [
-        {
-          op: 'put',
-          hash: 'batch-p1',
-          name: 'tasksInProjects',
-          args: [{ projectIds: ['p1'], delayMs: 300 }],
-        },
-        {
-          op: 'put',
-          hash: 'batch-p4',
-          name: 'tasksInProjects',
-          args: [{ projectIds: ['p4'], delayMs: 300 }],
-        },
-        // same (name, args) as the first put under a different hash: one
-        // request on the wire, both hashes resolved
-        {
-          op: 'put',
-          hash: 'batch-p1-again',
-          name: 'tasksInProjects',
-          args: [{ projectIds: ['p1'], delayMs: 300 }],
-        },
-        {
-          op: 'put',
-          hash: 'batch-p2',
-          name: 'tasksInProjects',
-          args: [{ projectIds: ['p2'], delayMs: 300 }],
-        },
-      ],
-    },
-  })
-  const batchMs = Date.now() - batchStarted
-  equal(batchedQueryPull.status, 200, 'batched query pull status')
   equal(
-    batchedQueryPull.body.gotQueries.patch.map((entry) => entry.hash).sort(),
-    ['batch-p1', 'batch-p1-again', 'batch-p2', 'batch-p4'],
-    'every hash in the patch is acknowledged, duplicates included'
+    (
+      await post(
+        '/push',
+        mutation('claims-project-a', 1, 'project.create', {
+          id: 'claims-project-a',
+          ownerId: 'user-a',
+          name: 'user a project',
+        }),
+        'user-a'
+      )
+    ).status,
+    200,
+    'user a scoped-query fixture push'
   )
-  const batchedTaskPuts = batchedQueryPull.body.rowsPatch.filter(
-    (entry) => entry.op === 'put' && entry.tableName === 'task'
+  equal(
+    (
+      await post(
+        '/push',
+        mutation('claims-project-b', 1, 'project.create', {
+          id: 'claims-project-b',
+          ownerId: 'user-b',
+          name: 'user b project',
+        }),
+        'user-b'
+      )
+    ).status,
+    200,
+    'user b scoped-query fixture push'
   )
-  assert.ok(
-    batchedTaskPuts.length > 0 &&
-      batchedTaskPuts.every((entry) =>
-        ['p1', 'p2', 'p4'].includes(entry.value.projectId)
-      ),
-    'batched patch resolves every distinct query and excludes non-members'
+  const userAProjects = await post(
+    '/pull',
+    {
+      clientID: 'claims-query-a',
+      clientGroupID: 'claims-query-group-a',
+      cookie: null,
+      queries: {
+        version: 1,
+        patch: [{ op: 'put', hash: 'my-projects-a', name: 'myProjects', args: [] }],
+      },
+    },
+    'user-a'
   )
-  assertions++
-  assert.ok(
-    batchMs < 900,
-    `four-query patch took ${batchMs} ms; a batched resolve pays one 300 ms delay, a per-query resolve pays four`
+  const userBProjects = await post(
+    '/pull',
+    {
+      clientID: 'claims-query-b',
+      clientGroupID: 'claims-query-group-b',
+      cookie: null,
+      queries: {
+        version: 1,
+        patch: [{ op: 'put', hash: 'my-projects-b', name: 'myProjects', args: [] }],
+      },
+    },
+    'user-b'
   )
-  assertions++
-  console.log(`four-query desired patch resolved in ${batchMs} ms (one 300 ms resolver)`)
+  equal(userAProjects.status, 200, 'user a scoped-query pull status')
+  equal(userBProjects.status, 200, 'user b scoped-query pull status')
+  equal(
+    userAProjects.body.gotQueries,
+    { version: 1, patch: [{ op: 'put', hash: 'my-projects-a' }] },
+    'user a scoped query is acknowledged'
+  )
+  equal(
+    userBProjects.body.gotQueries,
+    { version: 1, patch: [{ op: 'put', hash: 'my-projects-b' }] },
+    'user b scoped query is acknowledged'
+  )
+  equal(
+    userAProjects.body.rowsPatch
+      .filter((entry) => entry.op === 'put' && entry.tableName === 'project')
+      .map((entry) => [entry.value.id, entry.value.ownerId]),
+    [['claims-project-a', 'user-a']],
+    'user a receives only projects selected by claims'
+  )
+  equal(
+    userBProjects.body.rowsPatch
+      .filter((entry) => entry.op === 'put' && entry.tableName === 'project')
+      .map((entry) => [entry.value.id, entry.value.ownerId]),
+    [['claims-project-b', 'user-b']],
+    'user b receives only projects selected by claims'
+  )
 
   // An unknown query fails its own pull and names itself, so one bad query in a
   // batch is still attributable.
@@ -406,57 +435,6 @@ try {
     'batch error names the query that failed'
   )
   assertions++
-
-  // A patch-free pull carries no desired-query change to order, so it must not
-  // wait out another pull's query-resolution round trip. This is the shape a warm
-  // client actually polls in: it re-states nothing and expects `unchanged`.
-  const blockingQueryPull = post('/pull', {
-    clientID: 'warm-blocking-client',
-    clientGroupID: 'warm-pull-group',
-    cookie: null,
-    queries: {
-      version: 1,
-      patch: [
-        {
-          op: 'put',
-          hash: 'warm-tasks',
-          name: 'tasksInProjects',
-          args: [{ projectIds: ['p1'], delayMs: 750 }],
-        },
-      ],
-    },
-  })
-  await Bun.sleep(25)
-  const warmPullStarted = Date.now()
-  const warmPull = await post('/pull', {
-    clientID: 'warm-poll-client',
-    clientGroupID: 'warm-pull-group',
-    cookie: null,
-  })
-  const warmPullMs = Date.now() - warmPullStarted
-  equal(warmPull.status, 200, 'patch-free warm pull status')
-  const blockingQueryResponse = await blockingQueryPull
-  equal(blockingQueryResponse.status, 200, 'blocking query pull status')
-  assert.ok(
-    warmPullMs < 400,
-    `patch-free pull waited ${warmPullMs} ms behind another pull's query resolution`
-  )
-  assertions++
-  console.log(
-    `warm pull under a 750 ms query resolution in the same client group: ${warmPullMs} ms`
-  )
-
-  const queryFollowup = await post('/pull', {
-    clientID: 'query-client',
-    clientGroupID: 'query-group',
-    cookie: queryPull.body.cookie,
-  })
-  equal(queryFollowup.status, 200, 'query-aware pull without query patch status')
-  equal(
-    queryFollowup.body.unchanged,
-    true,
-    'query-aware route persists without queries field'
-  )
 
   const injected = await post('/pull', {
     clientID: 'attacker',
@@ -493,8 +471,7 @@ try {
       ],
     },
   })
-  equal(malformedQuery.status, 400, 'query-aware EngineError status reaches HTTP')
-  await admin('/admin/query-aware', { enabled: false })
+  equal(malformedQuery.status, 400, 'query EngineError status reaches HTTP')
 
   for (const route of ['/pull', '/push']) {
     for (const body of ['{', 'null', '[]']) {

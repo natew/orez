@@ -48,6 +48,12 @@ try {
     }
     return { status: response.status, body: parsed }
   }
+  // a fresh client registers the fixture's allItems named query; its desire
+  // persists on the client afterward, so incremental pulls omit the field.
+  const allItemsQueries = {
+    version: 1,
+    patch: [{ op: 'put', hash: 'q-all-items', name: 'allItems', args: [] }],
+  }
 
   // A root-mounted data feed is encoded as an empty internal path. Empty is a
   // configured root, while null means the worker has not supplied a feed path.
@@ -227,6 +233,7 @@ try {
           clientID: `isolated-reader-${index}`,
           clientGroupID: `isolated-reader-group-${index}`,
           cookie: null,
+          queries: allItemsQueries,
         }),
       }).then(async (response) => ({
         status: response.status,
@@ -301,6 +308,7 @@ try {
     clientID: 'reader',
     clientGroupID: 'group',
     cookie: null,
+    queries: allItemsQueries,
   })
   assert.equal(initial.status, 200)
   assert.equal(
@@ -321,79 +329,12 @@ try {
   assert.ok(Number.isSafeInteger(upstreamBudget.logicalRows))
   assert.ok(upstreamBudget.billableRows > upstreamBudget.logicalRows)
 
-  // a delegated acknowledgement must follow its ingested row in the engine
-  // log. with a one-byte diff cap, the first pull can carry only the first log
-  // entry. it must expose the effect first and leave the lmid for the next pull.
-  const cappedNamespace = `capped-order-${crypto.randomUUID()}`
-  const cappedOrigin = `${base}/capped/${cappedNamespace}`
-  const cappedPost = async (path, body) => {
-    const response = await fetch(`${cappedOrigin}${path}`, {
-      method: 'POST',
-      headers: {
-        authorization: 'Bearer token-user-a',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    })
-    return { status: response.status, body: await response.json() }
-  }
-  const cappedInitial = await cappedPost('/pull', {
-    clientID: 'capped-reader',
-    clientGroupID: 'capped-group',
-    cookie: null,
-  })
-  assert.equal(cappedInitial.status, 200)
-  const cappedPush = await cappedPost('/push', {
-    clientGroupID: 'capped-group',
-    pushVersion: 1,
-    mutations: [
-      {
-        type: 'custom',
-        clientID: 'capped-writer',
-        id: 1,
-        name: 'item.insert',
-        args: [
-          {
-            id: 'capped-effect',
-            label: 'effect before lmid',
-            rank: 1,
-            done: false,
-            meta: null,
-          },
-        ],
-      },
-    ],
-  })
-  assert.equal(cappedPush.status, 200)
-  const cappedEffect = await cappedPost('/pull', {
-    clientID: 'capped-reader',
-    clientGroupID: 'capped-group',
-    cookie: cappedInitial.body.cookie,
-  })
-  assert.equal(cappedEffect.status, 200)
-  assert.equal(cappedEffect.body.lastMutationIDChanges['capped-writer'], undefined)
-  assert.equal(
-    cappedEffect.body.rowsPatch.some(
-      (entry) =>
-        entry.op === 'put' &&
-        entry.tableName === 'item' &&
-        entry.value.id === 'capped-effect'
-    ),
-    true
-  )
-  const cappedSettlement = await cappedPost('/pull', {
-    clientID: 'capped-reader',
-    clientGroupID: 'capped-group',
-    cookie: cappedEffect.body.cookie,
-  })
-  assert.equal(cappedSettlement.status, 200)
-  assert.equal(cappedSettlement.body.lastMutationIDChanges['capped-writer'], 1)
-
   // a changes request that began before APP committed may still be in flight
   // when the delegated response arrives. the push must wait through that stale
-  // round and run one new ingest before it journals the lmid.
-  const concurrentNamespace = `capped-concurrent-${crypto.randomUUID()}`
-  const concurrentOrigin = `${base}/capped/${concurrentNamespace}`
+  // round and run one new ingest before it journals the lmid, so the effect
+  // row and the acknowledgement land together in the next pull.
+  const concurrentNamespace = `concurrent-${crypto.randomUUID()}`
+  const concurrentOrigin = `${base}/${concurrentNamespace}`
   const concurrentControl = `${base}/delegated-ingest-control/${concurrentNamespace}`
   const concurrentPost = async (path, body) => {
     const response = await fetch(`${concurrentOrigin}${path}`, {
@@ -426,6 +367,7 @@ try {
     clientID: 'concurrent-reader',
     clientGroupID: 'concurrent-group',
     cookie: null,
+    queries: allItemsQueries,
   })
   assert.equal(concurrentInitial.status, 200)
   await setConcurrentControl({ appHeld: true })
@@ -472,10 +414,7 @@ try {
     clientGroupID: 'concurrent-group',
     cookie: concurrentInitial.body.cookie,
   })
-  assert.equal(
-    concurrentEffect.body.lastMutationIDChanges['concurrent-writer'],
-    undefined
-  )
+  assert.equal(concurrentEffect.body.lastMutationIDChanges['concurrent-writer'], 1)
   assert.equal(
     concurrentEffect.body.rowsPatch.some(
       (entry) =>
@@ -572,6 +511,7 @@ try {
     clientID: 'cleanup-reader',
     clientGroupID: 'cleanup-group',
     cookie: null,
+    queries: allItemsQueries,
   })
   assert.equal(mixedCleanupPull.status, 200)
   assert.equal(mixedCleanupPull.body.lastMutationIDChanges['cleanup-writer'], 1)
@@ -958,6 +898,7 @@ try {
       clientID: 'paged-reader',
       clientGroupID: 'paged-group',
       cookie: null,
+      queries: allItemsQueries,
     }),
   })
   assert.equal(pagedInitialPull.status, 200)
@@ -1245,6 +1186,7 @@ try {
     clientID: 'numeric-reader',
     clientGroupID: 'numeric-group',
     cookie: null,
+    queries: allItemsQueries,
   })
   assert.equal(numericInitial.status, 200)
   await fetch(`${base}/numeric-text-control/${numericTextNamespace}`, {
@@ -1290,6 +1232,7 @@ try {
     clientID: 'json-reader',
     clientGroupID: 'json-group',
     cookie: null,
+    queries: allItemsQueries,
   })
   assert.equal(jsonInitial.status, 200)
   await fetch(`${base}/json-values-control/${jsonNamespace}`, {

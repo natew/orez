@@ -1,3 +1,4 @@
+import { createBuilder, defineQueries, defineQuery } from '@rocicorp/zero'
 import { createBrowserSyncHost } from 'orez-lite/browser'
 import { MutationApplicationError } from 'orez-sync-executor/core'
 
@@ -381,24 +382,21 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
         await new Promise<never>(() => {})
       },
     }
-    const queryAst = (name: string): JsonValue => {
-      if (name === 'todosDone') {
-        return {
-          table: 'todo',
-          where: {
-            type: 'simple',
-            left: { type: 'column', name: 'done' },
-            right: { type: 'literal', value: true },
-            op: '=',
-          },
-          orderBy: [['id', 'asc']],
-        }
-      }
-      if (name === 'allExpenses') return { table: 'expense', orderBy: [['date', 'desc']] }
-      if (name === 'allBudgets') return { table: 'budget' }
-      if (name === 'allSavingsGoals') return { table: 'savingsGoal' }
-      throw new Error(`unknown query: ${name}`)
+    // the app's ordinary Zero query registry, resolved in-process by the host
+    type Chain = {
+      where: (column: string, value: unknown) => Chain
+      orderBy: (column: string, direction: string) => Chain
     }
+    const zql = createBuilder(schema as never) as unknown as Record<string, Chain>
+    const queries = defineQueries({
+      todosDone: defineQuery(
+        () => zql.todo!.where('done', true).orderBy('id', 'asc') as never
+      ),
+      allTodos: defineQuery(() => zql.todo!.orderBy('id', 'asc') as never),
+      allExpenses: defineQuery(() => zql.expense!.orderBy('date', 'desc') as never),
+      allBudgets: defineQuery(() => zql.budget as never),
+      allSavingsGoals: defineQuery(() => zql.savingsGoal as never),
+    })
     const config = {
       storageKey,
       schema,
@@ -421,27 +419,15 @@ self.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
       },
       authenticate(request) {
         return request.headers.get('authorization') === 'Bearer preview-token'
-          ? {
-              id: 'preview-user',
-              queryAware: request.headers.get('x-query-aware') === '1',
-            }
+          ? { id: 'preview-user' }
           : null
       },
       authorize() {
         return true
       },
       mutators,
-      queryAware: (authData) => authData?.queryAware === true,
-      resolveQueries(requests) {
-        return requests.map((request) => {
-          try {
-            return { ast: queryAst(request.name) }
-          } catch (error) {
-            return { error: error instanceof Error ? error.message : String(error) }
-          }
-        })
-      },
-    } satisfies BrowserSyncHostConfig<typeof schema, { id: string; queryAware: boolean }>
+      queries: queries as never,
+    } satisfies BrowserSyncHostConfig<typeof schema, { id: string }>
     const createdHost = faultPoint
       ? await createBrowserSyncHostInternal(config, hooks)
       : await createBrowserSyncHost(config)

@@ -1,6 +1,7 @@
 {
   "name": "orez-sync-cf-host",
   "version": "0.11.7",
+  "description": "Internal orez Cloudflare sync host. Do not import directly: consumers use orez-lite/cloudflare/sync.",
   "type": "module",
   "exports": {
     ".": {
@@ -27,10 +28,6 @@
       "types": "./dist/transaction-query.d.ts",
       "import": "./dist/transaction-query.js"
     },
-    "./visibility": {
-      "types": "./dist/visibility.d.ts",
-      "import": "./dist/visibility.js"
-    },
     "./vite-wasm-loader": {
       "types": "./dist/vite-wasm-loader.d.ts",
       "import": "./dist/vite-wasm-loader.js"
@@ -49,7 +46,7 @@
     "build:dist:platform": "bun run build:dependencies && bun run build:wasm:platform && bun run build:runtime",
     "bundle": "bun run build:dist && wrangler deploy --dry-run --outdir .wrangler/bundle",
     "measure": "bun run build:dist && bun measure.mjs",
-    "test": "bun run test:config && bun run test:query-compiler && bun run test:package && bun run test:platform && bun run test:integration && bun run test:ingest && bun run test:restart",
+    "test": "bun run test:config && bun run test:query-compiler && bun run test:package && bun run test:platform && bun run test:integration && bun run test:large-data && bun run test:ingest && bun run test:restart",
     "test:config": "bun test config.test.mjs write-safeguards.test.mjs transaction-query.test.mjs",
     "test:integration": "bun run build:dist && bun integration-test.mjs",
     "test:ingest": "bun run build:dist && bun ingest-test.mjs",
@@ -57,7 +54,8 @@
     "test:query-compiler": "bun run build:dist && bun test --preload orez-sync-cf-host/bun-wasm-loader query-compiler.test.mjs && node vite-ssr-query-compiler-test.mjs",
     "test:restart": "bun run build:dist && bun restart-test.mjs",
     "test:platform": "bun run build:dist:platform && bun platform-test.mjs",
-    "typecheck": "bun run build:dist:platform && tsc --noEmit"
+    "typecheck": "bun run build:dist:platform && tsc --noEmit",
+    "test:large-data": "bun run build:dist && bun large-data-test.mjs"
   },
   "dependencies": {
     "orez-sync-executor": "workspace:*"

@@ -1,26 +1,11 @@
 // Adversarial CF-host lane: a remote client must never be allowed to provide
 // the AST that determines server-side membership. Only named queries resolved
-// by SyncHostConfig.resolveQueries may cross the host/engine boundary.
-import { readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
+// by SyncHostConfig.queries may cross the host/engine boundary.
 
 const worker =
   process.env.ZHARNESS_RUST_CF_WORKER ?? 'https://orez-rust-sync.lslcf.workers.dev'
-const adminKey =
-  process.env.ZHARNESS_CF_ADMIN_KEY ??
-  readFileSync(join(homedir(), '.zharness-cf-admin-key'), 'utf8').trim()
 const namespace = `query-security-${crypto.randomUUID()}`
 const origin = `${worker}/${namespace}`
-
-const enabled = await fetch(`${origin}/admin/query-aware`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', 'x-admin-key': adminKey },
-  body: JSON.stringify({ enabled: true }),
-})
-if (!enabled.ok) {
-  throw new Error(`query-aware setup failed ${enabled.status}: ${await enabled.text()}`)
-}
 
 const response = await fetch(`${origin}/pull`, {
   method: 'POST',

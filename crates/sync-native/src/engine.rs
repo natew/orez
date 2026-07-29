@@ -1,9 +1,9 @@
 // the single integration seam between the native host and the sync-core
 // engine. the host owns transaction begin/commit/rollback here (sync-core
-// never emits BEGIN/COMMIT) and adapts the consumer's init/mutator/visibility
-// closures into sync-core's Mutator / Visibility / Transactor traits. every
-// engine call runs on a namespace's worker thread, so the Connection is
-// single-threaded and a plain BEGIN/COMMIT is the whole transaction story.
+// never emits BEGIN/COMMIT) and adapts the consumer's init/mutator closures
+// into sync-core's Mutator / Transactor traits. every engine call runs on a
+// namespace's worker thread, so the Connection is single-threaded and a plain
+// BEGIN/COMMIT is the whole transaction story.
 
 use std::sync::Arc;
 
@@ -11,7 +11,6 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use sync_core::error::{EngineError, MutateError};
-use sync_core::pull::{Caps, Visibility, VisibleFilter, handle_pull};
 use sync_core::push::{Mutator, Transactor, handle_push};
 use sync_core::schema::Tables;
 use sync_core::{DbError, SqlValue, SyncDb};
@@ -35,46 +34,16 @@ pub type InitFn = Arc<dyn Fn(&mut dyn SyncDb) -> Result<(), String> + Send + Syn
 pub type MutateFn =
     Arc<dyn Fn(&mut dyn SyncDb, &str, &Value, &str) -> Result<(), MutateError> + Send + Sync>;
 
-/// Optional per-user row visibility. Returns a WHERE fragment (without the
-/// WHERE keyword) and positional parameters, or None for a table with no
-/// visibility filter.
-pub type VisibleFn = Arc<dyn Fn(&str, &str) -> Option<(String, Vec<SqlValue>)> + Send + Sync>;
-
 // ---- EngineContext -------------------------------------------------------
 
 // process-wide engine configuration shared by every namespace worker.
 pub struct EngineContext {
     pub tables: Tables,
     pub retain_changes: i64,
-    // baseline-pull change-row cap. one diff ships at most this many change
-    // rows, cutting at a row boundary before pk dedup, so effects and their
-    // lmid ack ride separate pulls when the cap is small (see Caps).
-    pub max_change_rows: usize,
-    pub visibility_enabled: bool,
-    // query-aware mode: pulls carry desired queries and go through the
-    // query-aware engine (membership/refcount) instead of the baseline
-    // full-namespace pull. a namespace serves one consumer kind, not a mix.
-    pub query_aware: bool,
     // consumer-provided callbacks
     pub(crate) init_version: String,
     pub(crate) init_fn: InitFn,
     pub(crate) mutate_fn: MutateFn,
-    pub(crate) visible_fn: Option<VisibleFn>,
-}
-
-impl EngineContext {
-    fn visibility(&self) -> Option<Visibility<'_>> {
-        let visible_fn = self.visible_fn.as_ref()?;
-        if !self.visibility_enabled {
-            return None;
-        }
-        Some(Visibility {
-            row_local: false,
-            filter: Box::new(|table, user| {
-                visible_fn(table, user).map(|(sql, params)| VisibleFilter { sql, params })
-            }),
-        })
-    }
 }
 
 // ---- helpers -------------------------------------------------------------
@@ -152,8 +121,6 @@ pub fn init_namespace(db: &mut dyn SyncDb, ctx: &EngineContext) -> Result<(), St
         .map_err(|error| error.0)?;
     }
     sync_core::schema::init_schema(db, &ctx.tables).map_err(|e| e.0)?;
-    // the query-aware tables are idempotent + unused in baseline mode, so
-    // install them always so a namespace can serve query-aware pulls.
     sync_core::query::init_query_schema(db).map_err(|e| e.message)?;
     Ok(())
 }
@@ -174,31 +141,9 @@ pub fn pull(
     conn.execute_batch("BEGIN").expect("BEGIN failed");
     let mut result = {
         let mut db = RusqliteDb::new(conn);
-        if ctx.query_aware {
-            // query-aware pull: desired queries in the body drive membership;
-            // no whole-namespace visibility filter (permissions ride the AST).
-            sync_core::query::handle_query_pull(
-                &mut db,
-                &ctx.tables,
-                ctx.retain_changes,
-                body,
-                user_id,
-            )
-        } else {
-            let visibility = ctx.visibility();
-            handle_pull(
-                &mut db,
-                &ctx.tables,
-                ctx.retain_changes,
-                visibility.as_ref(),
-                Caps {
-                    max_change_rows: ctx.max_change_rows,
-                    ..Caps::default()
-                },
-                body,
-                user_id,
-            )
-        }
+        // desired queries in the body drive membership; permissions ride the
+        // resolved ASTs, so there is no whole-namespace visibility filter.
+        sync_core::query::handle_query_pull(&mut db, &ctx.tables, ctx.retain_changes, body, user_id)
     };
     // fault: mid pull transaction, before COMMIT. Kill exits (SIGKILL-shaped, so
     // the tx never commits); Error/Quota roll back via finish() below.

@@ -38,7 +38,6 @@ Options:
   --worker-idle-ms <milliseconds>   Required with worker retention
   --worker-sweep-ms <milliseconds>  Required with worker retention
   --retain-changes <rows>           Default: 4096
-  --max-change-rows <rows>          Default: engine limit
   -h, --help
   -V, --version";
 
@@ -57,7 +56,6 @@ pub struct ServeConfig {
     pub allowed_origins: Vec<String>,
     pub retention: StandaloneRetention,
     pub retain_changes: i64,
-    pub max_change_rows: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,14 +155,6 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
     if retain_changes < 1 {
         return Err("--retain-changes must be greater than zero".to_string());
     }
-    let max_change_rows = values
-        .get("--max-change-rows")
-        .map(|value| parse_number::<usize>(value, "--max-change-rows"))
-        .transpose()?
-        .unwrap_or_else(|| sync_core::Caps::default().max_change_rows);
-    if max_change_rows == 0 {
-        return Err("--max-change-rows must be greater than zero".to_string());
-    }
     let retention = match values.get("--retention").map(String::as_str) {
         None | Some("disabled") => {
             if values.contains_key("--worker-idle-ms") || values.contains_key("--worker-sweep-ms") {
@@ -214,7 +204,6 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, Str
         allowed_origins,
         retention,
         retain_changes,
-        max_change_rows,
     })))
 }
 
@@ -337,13 +326,9 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
             initialize_version,
             initialize,
             mutate,
-            visible: None,
             authenticate,
             authorize_wake,
             retain_changes: config.retain_changes,
-            max_change_rows: config.max_change_rows,
-            visibility_enabled: false,
-            query_aware: true,
             query_resolution: Some(QueryResolution { resolve }),
             admin_tx_lease: crate::DEFAULT_ADMIN_TX_LEASE,
             retention,

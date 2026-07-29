@@ -1,9 +1,8 @@
 // the fixture the native host serves: table spec, DDL, deterministic seed
-// install, the built-in mutators, and the optional per-user visibility policy.
-// ported from harness/src/fixture-data.ts (mutators + DDL + tables) and
-// harness/src/permissions.ts (fixtureVisibility) so rust-local lanes need no
-// app-server sidecar. these are plain host functions; engine.rs wraps them in
-// sync-core's Mutator/Visibility traits.
+// install and the built-in mutators.
+// ported from harness/src/fixture-data.ts (mutators + DDL + tables) so
+// rust-local lanes need no app-server sidecar. these are plain host functions;
+// engine.rs wraps them in sync-core's Mutator trait.
 
 use serde_json::Value;
 use std::collections::HashSet;
@@ -377,47 +376,3 @@ pub fn run_mutator(
     }
 }
 
-// optional per-user row visibility (permissions lane). returns a WHERE FRAGMENT
-// (+ positional params) selecting the user's visible rows of `table`; sync-core
-// exposes logical table and column names through CTEs before applying it.
-// semantically identical to permissions.ts fixtureVisibility, rewritten from
-// aliased full SELECTs to fragments to match sync-core's Visibility contract.
-pub fn fixture_visible(table: &str, user_id: &str) -> Option<(String, Vec<SqlValue>)> {
-    // project access predicate against the project table by two references: the
-    // unaliased `project` row (used when filtering the project table itself)
-    // and a `p`-aliased project subquery (used inside member/task EXISTS).
-    let access = |project_ref: &str| {
-        format!(
-            r#"({project_ref}."ownerId" = ? OR EXISTS (
-                SELECT 1 FROM member access
-                WHERE access."projectId" = {project_ref}.id AND access."userId" = ?
-            ))"#
-        )
-    };
-    let uid = || SqlValue::Text(user_id.to_string());
-    match table {
-        "user" => Some(("id = ?".to_string(), vec![uid()])),
-        "project" => Some((access("project"), vec![uid(), uid()])),
-        "member" => Some((
-            format!(
-                r#"EXISTS (
-                    SELECT 1 FROM project p
-                    WHERE p.id = member."projectId" AND {}
-                )"#,
-                access("p")
-            ),
-            vec![uid(), uid()],
-        )),
-        "task" => Some((
-            format!(
-                r#"EXISTS (
-                    SELECT 1 FROM project p
-                    WHERE p.id = task."projectId" AND {}
-                )"#,
-                access("p")
-            ),
-            vec![uid(), uid()],
-        )),
-        _ => None,
-    }
-}

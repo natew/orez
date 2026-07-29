@@ -26,7 +26,8 @@ The deployment’s retained-history window bounds incremental changes. A client
 below the floor receives a snapshot and continues from the current watermark.
 Choose the window from expected offline duration, write rate, and snapshot cost.
 
-The Cloudflare host also caps change rows and serialized bytes per pull. Clients continue pulling until they reach the current cookie.
+Pull work and memory scale with the rows selected by the client's desired
+queries.
 
 ## Recovery paths
 

@@ -1,3 +1,4 @@
+import { createBuilder, defineQueries, defineQuery } from '@rocicorp/zero'
 import { WorkerEntrypoint } from 'cloudflare:workers'
 
 import {
@@ -26,11 +27,15 @@ const schema = {
   relationships: {},
 } as const satisfies Schema
 
+const zql = createBuilder(schema as never) as { item: unknown }
+const queries = defineQueries({
+  allItems: defineQuery(() => zql.item as never),
+})
+
 type Fetcher = { fetch(input: string | Request, init?: RequestInit): Promise<Response> }
 interface Env extends SyncHostEnv {
   DATA: Fetcher
   APP: Fetcher
-  CAPPED_SYNC_DO: DurableObjectNamespace
   UPSTREAM_DO: DurableObjectNamespace
 }
 
@@ -55,6 +60,7 @@ let delegatedUrl = ''
 const config: SyncHostConfig<Env> = {
   hostVersion: 'upstream-ingest-harness',
   schema,
+  queries: queries as never,
   mutateUrl: '/api/zero/push?schema=feed_0&appID=feed',
   mutateOrigin: 'https://app.internal',
   mutateBinding: 'APP',
@@ -96,11 +102,6 @@ const config: SyncHostConfig<Env> = {
 }
 
 export const SyncDurableObject = createSyncDurableObject(config)
-const cappedConfig: SyncHostConfig<Env> = {
-  ...config,
-  caps: { maxChangeRows: 10_000, maxChangeBytes: 1 },
-}
-export const CappedSyncDurableObject = createSyncDurableObject(cappedConfig)
 export { ZeroDO }
 
 async function upstreamFetch(request: Request, env: Env): Promise<Response> {
@@ -381,7 +382,6 @@ export class AppService extends WorkerEntrypoint<Env> {
 }
 
 const syncWorker = createSyncWorker(config)
-const cappedSyncWorker = createSyncWorker(cappedConfig)
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
@@ -525,15 +525,6 @@ export default {
             delegatedUrl,
           })
         })
-    }
-    if (url.pathname.startsWith('/capped/')) {
-      url.pathname = url.pathname.slice('/capped'.length)
-      const cappedEnv = { ...env, SYNC_DO: env.CAPPED_SYNC_DO }
-      return cappedSyncWorker.fetch!(
-        new Request(url, request) as never,
-        cappedEnv,
-        ctx
-      ) as Promise<Response>
     }
     if (url.pathname.startsWith('/upstream/')) {
       url.pathname = url.pathname.slice('/upstream'.length)

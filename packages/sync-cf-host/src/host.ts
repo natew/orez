@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers'
 import { createSyncExecutor } from 'orez-sync-executor/core'
 import { createSocketHost } from 'orez-sync-executor/realtime'
 
-import { validatePullCaps, validateSyncHostConfig } from './config.js'
+import { validateSyncHostConfig } from './config.js'
 import { createQueryCompiler } from './query-compiler.js'
 import { resolveQueryPatch } from './query-patch.js'
 import {
@@ -19,7 +19,6 @@ import {
   engine_begin_snapshot_generation,
   engine_finalize,
   engine_finalize_snapshot_generation,
-  engine_handle_pull,
   engine_handle_query_pull,
   engine_init_query_schema,
   engine_init_schema,
@@ -39,7 +38,7 @@ import {
   shouldRetryDelegatedPush,
 } from './write-safeguards.js'
 
-import type { PullCaps, SyncHostConfig, SyncHostEnv } from './types.js'
+import type { SyncHostConfig, SyncHostEnv } from './types.js'
 import type { Schema } from '@rocicorp/zero'
 import type {
   ApplicationDatabase,
@@ -64,10 +63,6 @@ const UPSTREAM_PATH_HEADER = 'x-orez-sync-upstream-path'
 const IDENTITY_HEADER = 'x-orez-sync-identity'
 const DEFAULT_SNAPSHOT_PAGE_ROWS = 2_000
 const MIN_SNAPSHOT_PAGE_ROWS = 100
-const DEFAULT_CAPS: PullCaps = {
-  maxChangeRows: 10_000,
-  maxChangeBytes: 2_000_000,
-}
 
 type PushMutation = {
   id: string
@@ -233,32 +228,6 @@ async function requestObject(request: Request): Promise<Record<string, unknown>>
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw requestError('request body must be a JSON object')
   return value as Record<string, unknown>
-}
-
-// clients always ship their desired queries and treat the server's got ack as
-// authoritative. the query-aware engine acks through its own tracking; a
-// non-query-aware host syncs every visible row, so its ack is an echo of the
-// hash-level desired delta in the same response that carries the rows.
-function withGotQueriesAck(
-  body: Record<string, unknown>,
-  queryAware: boolean,
-  response: Record<string, unknown>
-): Record<string, unknown> {
-  if (queryAware) return response
-  const queries = body.queries as { version?: unknown; patch?: unknown[] } | undefined
-  if (!queries || typeof queries.version !== 'number' || !Array.isArray(queries.patch)) {
-    return response
-  }
-  return {
-    ...response,
-    gotQueries: {
-      version: queries.version,
-      patch: queries.patch.map((op) => {
-        const entry = op as { op?: unknown; hash?: unknown }
-        return entry.op === 'put' ? { op: 'put', hash: entry.hash } : op
-      }),
-    },
-  }
 }
 
 function routeAfterNamespace(pathname: string): string {
@@ -439,7 +408,6 @@ export function createSyncDurableObject<
   validateSyncHostConfig(config)
   const compileQuery = createQueryCompiler(config.schema)
   const defaultRetainChanges = String(config.retainChanges ?? 4_096)
-  const caps: PullCaps = validatePullCaps({ ...DEFAULT_CAPS, ...config.caps })
   const idleTeardownMs = config.idleTeardownMs ?? 5_000
   // A CF fan-out wakes every client into an HTTP pull. Give concurrent writer
   // requests a real batching window so a storm burst creates one pull wave.
@@ -479,7 +447,6 @@ export function createSyncDurableObject<
     // during the replay wait for it instead of racing past into an empty hub.
     #realtimeReady: Promise<void> | null = null
     #ingestPromise: Promise<number> | null = null
-    #queryPullLocks = new Map<string, Promise<void>>()
     #recordingIngestBillable = false
     #ingestBreaker = new IngestCircuitBreaker({
       budgetRows: ingestBudgetRows,
@@ -575,8 +542,7 @@ export function createSyncDurableObject<
             )
           }
           this.#wasm(() => engine_init_schema(this.#engineDb, config.schema))
-          if (config.queryAware || config.resolveQueries)
-            this.#wasm(() => engine_init_query_schema(this.#engineDb))
+          this.#wasm(() => engine_init_query_schema(this.#engineDb))
         })
       })
     }
@@ -595,22 +561,6 @@ export function createSyncDurableObject<
     #wasm<T>(call: () => T): T {
       this.#counters.wasmBoundaryCalls++
       return call()
-    }
-
-    async #acquireQueryPullLock(clientGroupID: string): Promise<() => void> {
-      const previous = this.#queryPullLocks.get(clientGroupID)
-      let release!: () => void
-      const current = new Promise<void>((resolve) => {
-        release = resolve
-      })
-      this.#queryPullLocks.set(clientGroupID, current)
-      if (previous) await previous
-      return () => {
-        release()
-        if (this.#queryPullLocks.get(clientGroupID) === current) {
-          this.#queryPullLocks.delete(clientGroupID)
-        }
-      }
     }
 
     #simulateIdleTeardown(now: number): void {
@@ -634,38 +584,10 @@ export function createSyncDurableObject<
       this.#lastRequestAt = now
     }
 
-    #visibility(claims: NormalizedClaims): unknown {
-      if (!config.visibility || !this.#visibilityEnabled()) return null
-      return {
-        rowLocal:
-          typeof config.visibility.rowLocal === 'function'
-            ? config.visibility.rowLocal(claims)
-            : config.visibility.rowLocal,
-        filters: Object.keys(config.schema.tables).flatMap((table) => {
-          const filter = config.visibility?.filter(table, claims)
-          return filter
-            ? [
-                filter.kind === 'expression'
-                  ? { kind: 'expression', table, expression: filter.expression }
-                  : {
-                      kind: 'raw',
-                      table,
-                      sql: filter.sql,
-                      params: [...(filter.params ?? [])],
-                    },
-              ]
-            : []
-        }),
-      }
-    }
-
-    // the admin-set namespace knobs (writer, visibility, query-aware,
-    // retention) live in _zsync_host_control, NOT in instance fields: a real
-    // eviction recreates this instance, and an in-memory override silently
-    // reverting to the config default mid-run turns a query-aware namespace
-    // back into a baseline one — the client keeps re-sending its desired-query
-    // patch, the host ignores it, and every pull answers {unchanged:true}
-    // forever.
+    // the admin-set namespace knobs (writer, retention) live in
+    // _zsync_host_control, NOT in instance fields: a real eviction recreates
+    // this instance, and an in-memory override silently reverting to the
+    // config default mid-run changes namespace behavior under the client.
     #controlGet(key: string): string | null {
       const row = this.#directSql.query<{ value: string }>(
         'SELECT value FROM _zsync_host_control WHERE key = ?',
@@ -712,16 +634,6 @@ export function createSyncDurableObject<
 
     #writerEnabled(): boolean {
       return this.#controlGet('writerEnabled') === '1'
-    }
-
-    #visibilityEnabled(): boolean {
-      const value = this.#controlGet('visibilityEnabled')
-      return value === null ? (config.visibilityEnabled ?? false) : value === '1'
-    }
-
-    #queryAwareOverride(): boolean | null {
-      const value = this.#controlGet('queryAwareOverride')
-      return value === null ? null : value === '1'
     }
 
     #retainChanges(): string {
@@ -1373,66 +1285,33 @@ export function createSyncDurableObject<
       let body: Record<string, unknown> | undefined
       try {
         body = await requestObject(request)
-        const queryAware =
-          this.#queryAwareOverride() ??
-          (typeof config.queryAware === 'function'
-            ? config.queryAware(claims)
-            : (config.queryAware ?? Boolean(config.resolveQueries)))
-        const transformVersion = queryAware
-          ? typeof config.queryTransformVersion === 'function'
+        const transformVersion =
+          typeof config.queryTransformVersion === 'function'
             ? config.queryTransformVersion(claims)
             : (config.queryTransformVersion ?? 0)
-          : 0
         if (!Number.isSafeInteger(transformVersion) || transformVersion < 0) {
           throw new TypeError('queryTransformVersion must be a non-negative safe integer')
         }
-        // The group lock exists to keep two desired-query patches from being
-        // applied out of arrival order when one of them is slow to resolve.
-        // A pull carrying no patch applies nothing, and it reads membership
-        // inside transactionSync, which is already atomic against whichever
-        // patch commits around it. Holding the lock for those pulls only makes
-        // an unchanged warm pull wait out somebody else's query-resolution round
-        // trip to the application, which is the head-of-line blocking behind
-        // the pull tail: a client polls far more often than it changes what it
-        // wants, so almost every pull in flight is patch-free.
-        const releaseQueryPull =
-          queryAware && config.resolveQueries && body.queries
-            ? await this.#acquireQueryPullLock(
-                typeof body.clientGroupID === 'string' ? body.clientGroupID : ''
-              )
-            : null
         let response: Record<string, unknown>
-        try {
-          if (queryAware && body.queries) {
-            const queries = body.queries as {
-              version?: unknown
-              patch?: unknown
-            }
-            if (Array.isArray(queries.patch)) {
-              // matches the browser host: a query-aware namespace with no
-              // resolver refuses the patch (400) instead of crashing (500).
-              // #queryAwareOverride can force queryAware on, so this is
-              // reachable even though validateSyncHostConfig passes.
-              if (!config.resolveQueries) {
-                throw requestError('query put requires a server-resolved named query')
-              }
-              // resolveQueries may be async and needs `env` (a consumer can
-              // delegate the transform to its app's real synced-queries
-              // endpoint over an app service binding — authenticate runs in the
-              // worker isolate, but the query loop runs here in the DO, so the
-              // binding must come from the DO's own env, not a shared global).
-              const patch = await resolveQueryPatch(
-                queries.patch,
-                (requests) => config.resolveQueries!(requests, claims, this.env),
-                transformVersion,
-                requestError
-              )
-              body = { ...body, queries: { ...queries, patch } }
-            }
+        {
+          const queries = body.queries as
+            | { version?: unknown; patch?: unknown }
+            | undefined
+          if (queries && Array.isArray(queries.patch)) {
+            // named queries resolve in-process against the app's ordinary
+            // Zero registry, synchronously: patch application order is
+            // arrival order by construction, with no cross-request await
+            // between resolution and the engine transaction.
+            const patch = resolveQueryPatch(
+              queries.patch,
+              config.queries,
+              claims,
+              transformVersion,
+              requestError
+            )
+            body = { ...body, queries: { ...queries, patch } }
           }
-          if (queryAware) {
-            body = { ...body, _serverQueryTransformVersion: transformVersion }
-          }
+          body = { ...body, _serverQueryTransformVersion: transformVersion }
           const clientID = typeof body.clientID === 'string' ? body.clientID : ''
           this.#pulling.add(clientID)
           try {
@@ -1440,45 +1319,31 @@ export function createSyncDurableObject<
             const duringFault = this.#takeFault('pull_during_tx')
             response = this.ctx.storage.transactionSync(() => {
               const result = this.#wasm(() =>
-                queryAware
-                  ? engine_handle_query_pull(
-                      this.#engineDb,
-                      config.schema,
-                      this.#retainChanges(),
-                      body,
-                      claims.userID
-                    )
-                  : engine_handle_pull(
-                      this.#engineDb,
-                      config.schema,
-                      this.#visibility(claims),
-                      caps,
-                      this.#retainChanges(),
-                      body,
-                      claims.userID
-                    )
+                engine_handle_query_pull(
+                  this.#engineDb,
+                  config.schema,
+                  this.#retainChanges(),
+                  body,
+                  claims.userID
+                )
               ) as Record<string, unknown>
               if (duringFault) throw this.#faultError(duringFault, 'pull_during_tx')
               return result
             })
             transactionMs = performance.now() - txStarted
-            response = withGotQueriesAck(body, queryAware, response)
           } finally {
             this.#pulling.delete(clientID)
           }
-        } finally {
-          releaseQueryPull?.()
         }
         const afterPullFault = this.#takeFault('pull_after_commit')
         if (afterPullFault) throw this.#faultError(afterPullFault, 'pull_after_commit')
         const patch = Array.isArray(response.rowsPatch) ? response.rowsPatch : []
         const queriesBody = body.queries as { patch?: unknown[] } | undefined
-        const queryPuts =
-          queryAware && Array.isArray(queriesBody?.patch)
-            ? queriesBody.patch.filter(
-                (entry) => (entry as { op?: unknown } | null)?.op === 'put'
-              ).length
-            : 0
+        const queryPuts = Array.isArray(queriesBody?.patch)
+          ? queriesBody.patch.filter(
+              (entry) => (entry as { op?: unknown } | null)?.op === 'put'
+            ).length
+          : 0
         this.#counters.queryRecompilations += queryPuts
         const state = this.#engineStateBestEffort()
         this.#log({
@@ -1992,20 +1857,6 @@ export function createSyncDurableObject<
       if (route === '/admin/restart') {
         this.ctx.abort('admin requested durable object restart')
         return json({ ok: true, bootID: this.#bootID })
-      }
-      if (route === '/admin/visibility') {
-        return request.json().then((body) => {
-          const enabled = Boolean((body as { enabled?: unknown }).enabled)
-          this.#controlSet('visibilityEnabled', enabled ? '1' : '0')
-          return json({ ok: true, enabled })
-        })
-      }
-      if (route === '/admin/query-aware') {
-        return request.json().then((body) => {
-          const enabled = Boolean((body as { enabled?: unknown }).enabled)
-          this.#controlSet('queryAwareOverride', enabled ? '1' : '0')
-          return json({ ok: true, enabled })
-        })
       }
       if (route === '/admin/retention') {
         return request

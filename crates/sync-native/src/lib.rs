@@ -30,7 +30,7 @@ use std::time::{Duration, SystemTime};
 
 use axum::Router;
 use axum::http::HeaderMap;
-use engine::{EngineContext, InitFn, MutateFn, VisibleFn};
+use engine::{EngineContext, InitFn, MutateFn};
 use namespace::Manager;
 use serde_json::Value;
 use sync_core::schema::Tables;
@@ -242,7 +242,7 @@ fn valid_origin(origin: &str) -> bool {
 // ---- public config -------------------------------------------------------
 
 /// Complete configuration for a sync-native host. Populate this with your
-/// schema, DDL/seed, mutators, visibility rules, and auth, then pass it to
+/// schema, DDL/seed, mutators, and auth, then pass it to
 /// `SyncNativeHost::new`.
 pub struct SyncNativeConfig {
     /// Application tables with Zero column types and primary keys.
@@ -275,22 +275,6 @@ pub struct SyncNativeConfig {
     /// rolls back the entire push and retries.
     pub mutate: MutateFn,
 
-    /// Optional per-user row visibility. `None` means every table is
-    /// fully visible to every authenticated user.
-    ///
-    /// When set: for each application table, the engine calls this
-    /// function. Return `None` if the table has no visibility filter
-    /// (fully visible). Return `Some((where_clause, params))` with a
-    /// SQL WHERE fragment (without the `WHERE` keyword) and positional
-    /// parameters. Table and column references in this callback use logical
-    /// Zero schema names. The engine projects physical `serverName` columns
-    /// to logical aliases before applying the fragment.
-    ///
-    /// Any visibility config forces every pull to a full snapshot
-    /// because a permission flip can revoke rows without changing them,
-    /// which a diff cannot express.
-    pub visible: Option<VisibleFn>,
-
     /// Authenticate an incoming request. Receives the raw HTTP headers and
     /// namespace. Return the authenticated user ID or an [`AuthError`].
     pub authenticate: AuthFn,
@@ -304,28 +288,11 @@ pub struct SyncNativeConfig {
     /// pruned floor gets a full snapshot on its next pull. Default: 4096.
     pub retain_changes: i64,
 
-    /// Baseline-pull change-row cap. One diff response ships at most this many
-    /// change rows, cutting at a row boundary before pk dedup; the remainder
-    /// ships on the next poll. A small cap forces a mutation's row effects and
-    /// its lmid ack onto separate pulls, exercising the capped-diff cut path.
-    /// Use [`sync_core::Caps::default().max_change_rows`] for production budgets.
-    pub max_change_rows: usize,
-
-    /// Whether visibility filtering is active at boot. When false the
-    /// visibility callback is ignored. Can be toggled at runtime via the
-    /// admin route.
-    pub visibility_enabled: bool,
-
-    /// Whether query-aware mode is active at boot. In query-aware mode
-    /// pulls carry desired queries and go through the membership/refcount
-    /// engine instead of the baseline full-namespace pull. Can be toggled
-    /// at runtime via the admin route.
-    pub query_aware: bool,
-
     /// Optional server-side named-query resolver. When configured, every query
     /// put must carry a name and args, and any client-authored AST is discarded.
     /// The request headers are included so the consumer can apply the same auth
-    /// context as its application query endpoint.
+    /// context as its application query endpoint. Without it, pulls must carry
+    /// already-resolved ASTs from a trusted client (harness use only).
     pub query_resolution: Option<QueryResolution>,
 
     /// Idle-between-steps budget for a server-owned admin transaction (the
@@ -380,13 +347,9 @@ impl SyncNativeHost {
         let ctx = Arc::new(EngineContext {
             tables: config.tables,
             retain_changes: config.retain_changes,
-            max_change_rows: config.max_change_rows,
-            visibility_enabled: config.visibility_enabled,
-            query_aware: config.query_aware,
             init_version: config.initialize_version,
             init_fn: config.initialize,
             mutate_fn: config.mutate,
-            visible_fn: config.visible,
         });
 
         let init_ctx = ctx.clone();

@@ -84,7 +84,6 @@ function endpoint(label: 'old' | 'new') {
   }
 
   async function queryState() {
-    await admin('/admin/query-aware', { enabled: true })
     const response = await fetch(`${origin}/pull`, {
       method: 'POST',
       headers: {

@@ -28,14 +28,14 @@ what lets it compile to WASM and run inside a Durable Object.
 The engine owns a small set of internal SQLite tables and the protocol logic
 over them. Its modules (`crates/sync-core/src/`):
 
-- `pull.rs`: cursor-diff pulls, snapshot fallback, retention/floor, epoch
-  invalidation (`handle_pull`, `watermark`, `prune`, `invalidate`).
+- `pull.rs`: shared change-log lifecycle helpers (`watermark`, `floor`, `prune`,
+  `invalidate`).
 - `push.rs`: v51 custom-mutator pushes as a set of step functions the host
   drives around its own (possibly async) mutator: `push_validate`, `preflight`,
   `finalize`, `record_app_error`, `assemble_push_response`. A synchronous
   `handle_push` composes those steps for the native host and tests.
-- `query/`: the query-aware pull path: `ast.rs`, `compile.rs` (Zero AST to
-  SQL), `membership.rs`, `qpull.rs`.
+- `query/`: the single pull path: `ast.rs`, `compile.rs` (Zero AST to SQL),
+  `membership.rs`, and `qpull.rs` (`handle_query_pull`).
 - `upstream.rs`: `apply_upstream` and `apply_upstream_snapshot`, which ingest
   rows from an upstream change feed and advance the engine's change log exactly
   as a push does.
@@ -64,8 +64,8 @@ with `CAST(x AS TEXT)` so a value never passes through a float.
 
 The `wasm-bindgen` wrapper around sync-core (`crates/sync-wasm/src/lib.rs`). It
 exposes the engine as a flat set of `engine_*` functions the host calls across
-the WASM boundary: `engine_init_schema`, `engine_handle_pull`,
-`engine_handle_query_pull`, `engine_push_validate`, `engine_preflight`,
+the WASM boundary: `engine_init_schema`, `engine_handle_query_pull`,
+`engine_push_validate`, `engine_preflight`,
 `engine_finalize`, `engine_assemble_push_response`, `engine_apply_upstream`,
 `engine_apply_upstream_snapshot`, `engine_prune`, `engine_invalidate`,
 `engine_compile_query`, `engine_state`, `engine_version`, `engine_memory_bytes`,
@@ -107,7 +107,7 @@ engine, and it exports two factories from `src/index.ts`:
   engine and its SQLite storage. It handles `/pull`, `/push`, the `/wake`
   advisory socket, `/notify`, and an `/admin/*` surface.
 
-Everything an app varies (schema, auth, namespace resolution, query transforms,
+Everything an app varies (schema, auth, namespace resolution, query registry,
 mutators or push delegation, upstream ingest) is passed in as one
 `SyncHostConfig` object. That object is the entire public API; the configuration
 page documents every field.
@@ -145,17 +145,25 @@ bundles do not need consumer-specific asset copies.
 At runtime a client does exactly two things against the host: pull and push.
 
 **Pull** (`POST /<namespace>/pull`). The worker authenticates the request,
-attaches normalized claims, and forwards to the DO. The DO opens one synchronous
-SQLite transaction and calls the engine. The engine compares the client's cookie
-to the change log's high watermark:
+attaches normalized claims, and forwards to the DO. The host resolves every
+desired named query against the app's `config.queries` registry, passing those
+claims as the query context. The DO opens one synchronous SQLite transaction and
+calls `engine_handle_query_pull`. The engine applies the desired-query patch,
+updates durable group membership, and compares the client's cookie to the
+change log's high watermark:
 
-- cookie equals watermark: `{cookie, unchanged: true}`.
-- cookie below the retained floor, or a per-user visibility filter is active, or
-  the client is fresh: a full snapshot, `[{op:'clear'}, ...puts]`.
-- cookie within the retained window: a diff, the put/del rows touched since the
-  cookie, resolved against live table state.
-- cookie ahead of the watermark: HTTP 409, and the client rebuilds its local
+- cookie equals the watermark with no desired-query change: `{cookie,
+unchanged: true}`.
+- a fresh client, a cookie below the retained floor, or an epoch reset: clear
+  the client store and put the rows selected by the group's current queries.
+- a cookie within the retained window: membership-driven puts and dels for
+  changed rows and desired-query changes.
+- a cookie ahead of the watermark: HTTP 409, and the client rebuilds its local
   store from scratch.
+
+Per-user scoping lives in the resolved query ASTs. A group never receives a del
+for a row it did not hold, and the engine never projects the full namespace to
+serve a pull.
 
 **Push** (`POST /<namespace>/push`). A v51 custom-mutator body. In local-mutator
 mode the DO runs the app's mutator inside the push transaction, advances the
@@ -175,11 +183,12 @@ size-bounded: once the log passes `retainChanges` rows, the oldest entries are
 pruned and the floor rises. A client whose cookie has fallen below the floor
 gets a snapshot on its next pull.
 
-This is the whole recovery model. There is one snapshot path, used for fresh
-clients, below-floor cookies, visibility-filtered configs, and epoch
-invalidation. There is no CVR, no per-client server-side view state, and no
-websocket poke stream. The only durable per-client state is the clients table
-(`_zsync_clients`): a last-mutation-id and the client-group to user binding.
+This is the whole recovery model. Fresh clients, below-floor cookies, and epoch
+invalidation clear the client store and rehydrate the group's current query
+membership. Desired queries and row membership are durable engine state, along
+with the clients table (`_zsync_clients`) that stores last-mutation-ids and the
+client-group to user binding. The wake socket remains advisory and carries no
+row data.
 
 ## Paged upstream resnapshot
 

@@ -105,7 +105,7 @@ function collector(url: string) {
   }
 }
 
-const target = await startRustCf({ queryAware: true })
+const target = await startRustCf()
 const namespace = new URL(target.origin).pathname.slice(1)
 const wsOrigin = target.origin.replace(/^http/, 'ws')
 const sockets: { close(): void }[] = []

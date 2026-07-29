@@ -20,7 +20,7 @@ const ops = Number(args.ops)
 if (!Number.isSafeInteger(blocks) || blocks < 3) throw new Error('blocks must be >= 3')
 if (!Number.isSafeInteger(ops) || ops < 1) throw new Error('ops must be positive')
 
-const target = await startRustCf({ queryAware: true, pullIntervalMs: 0 })
+const target = await startRustCf({ pullIntervalMs: 0 })
 const origin = target.origin
 const clientID = `memory-${crypto.randomUUID()}`
 const clientGroupID = `memory-group-${crypto.randomUUID()}`

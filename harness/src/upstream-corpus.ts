@@ -36,12 +36,10 @@ async function start(host: HostID): Promise<SyncTarget> {
     case 'sync-native':
       return (await import('./targets/rust-local.js')).startRustLocal({
         pullIntervalMs: 75,
-        queryAware: true,
       })
     case 'rust-cf':
       return (await import('./targets/rust-cf.js')).startRustCf({
         pullIntervalMs: 150,
-        queryAware: true,
       })
   }
 }

@@ -188,59 +188,5 @@ export interface SyncExecutor<S extends Schema> {
   ): Promise<Result>
 }
 
-export type VisibilityValue = JsonPrimitive
-
-export type VisibilityOperand =
-  | {
-      readonly type: 'column'
-      readonly table: string
-      readonly column: string
-      readonly qualifier?: string
-    }
-  | { readonly type: 'value'; readonly value: VisibilityValue }
-
-export type VisibilityExpression =
-  | {
-      readonly type: 'comparison'
-      readonly operator: '=' | '!=' | '<' | '>' | '<=' | '>=' | 'IS' | 'IS NOT'
-      readonly left: VisibilityOperand
-      readonly right: VisibilityOperand
-    }
-  | {
-      readonly type: 'and' | 'or'
-      readonly conditions: readonly VisibilityExpression[]
-    }
-  | {
-      readonly type: 'exists'
-      readonly table: string
-      readonly qualifier?: string
-      readonly where: VisibilityExpression
-    }
-
-export type VisibilityFilter =
-  | {
-      readonly kind: 'expression'
-      readonly expression: VisibilityExpression
-      readonly sql?: never
-      readonly params?: never
-    }
-  | {
-      readonly kind: 'raw'
-      readonly sql: string
-      readonly params?: readonly VisibilityValue[]
-      readonly expression?: never
-    }
-
-export type VisibilityConfig = {
-  readonly rowLocal: boolean | ((claims: NormalizedClaims) => boolean)
-  filter(table: string, claims: NormalizedClaims): VisibilityFilter | undefined
-}
-
-export type QueryResolver = (
-  name: string,
-  args: readonly JsonValue[],
-  claims: NormalizedClaims
-) => JsonValue | Promise<JsonValue>
-
 export type TransactionQuery = Query<string, Schema, unknown>
 export type TransactionQueryResult = HumanReadable<unknown>

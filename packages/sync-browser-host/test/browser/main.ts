@@ -215,15 +215,13 @@ async function post(
   client: BrowserSyncHostPortClient,
   path: '/pull' | '/push',
   body: unknown,
-  authenticated = true,
-  queryAware = false
+  authenticated = true
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const response = await client.fetch(`http://preview.invalid${path}`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       ...(authenticated ? { authorization: 'Bearer preview-token' } : {}),
-      ...(queryAware ? { 'x-query-aware': '1' } : {}),
     },
     body: JSON.stringify(body),
   })
@@ -373,6 +371,10 @@ async function runBrowserHostSpike() {
     clientID: 'client-main',
     clientGroupID: 'group-client-main',
     cookie: null,
+    queries: {
+      version: 1,
+      patch: [{ op: 'put', hash: 'q-all-todos', name: 'allTodos', args: [] }],
+    },
   })
   equal(initial.status, 200, 'initial pull status')
   assert('cookie' in initial.body, 'initial pull returns a cookie')
@@ -486,25 +488,19 @@ async function runBrowserHostSpike() {
     ],
     'wave finance tables have insert, update, and delete change triggers'
   )
-  const seedQueryPull = await post(
-    connection.client,
-    '/pull',
-    {
-      clientID: 'wave-finance-client',
-      clientGroupID: 'wave-finance-group',
-      cookie: null,
-      queries: {
-        version: 1,
-        patch: [
-          { op: 'put', hash: 'all-expenses', name: 'allExpenses', args: [] },
-          { op: 'put', hash: 'all-budgets', name: 'allBudgets', args: [] },
-          { op: 'put', hash: 'all-savings-goals', name: 'allSavingsGoals', args: [] },
-        ],
-      },
+  const seedQueryPull = await post(connection.client, '/pull', {
+    clientID: 'wave-finance-client',
+    clientGroupID: 'wave-finance-group',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [
+        { op: 'put', hash: 'all-expenses', name: 'allExpenses', args: [] },
+        { op: 'put', hash: 'all-budgets', name: 'allBudgets', args: [] },
+        { op: 'put', hash: 'all-savings-goals', name: 'allSavingsGoals', args: [] },
+      ],
     },
-    true,
-    true
-  )
+  })
   equal(seedQueryPull.status, 200, 'wave finance fresh named query status')
   const seedQueryCounts = Object.fromEntries(
     ['budget', 'expense', 'savingsGoal'].map((tableName) => [
@@ -549,22 +545,16 @@ async function runBrowserHostSpike() {
     })
   )
   equal(querySeed.status, 200, 'query seed status')
-  const queryPull = await post(
-    connection.client,
-    '/pull',
-    {
-      clientID: 'query-client',
-      clientGroupID: 'query-group',
-      cookie: null,
-      queries: {
-        version: 1,
-        patch: [{ op: 'put', hash: 'done', name: 'todosDone', args: [] }],
-      },
+  const queryPull = await post(connection.client, '/pull', {
+    clientID: 'query-client',
+    clientGroupID: 'query-group',
+    cookie: null,
+    queries: {
+      version: 1,
+      patch: [{ op: 'put', hash: 'done', name: 'todosDone', args: [] }],
     },
-    true,
-    true
-  )
-  equal(queryPull.status, 200, 'query-aware pull status')
+  })
+  equal(queryPull.status, 200, 'scoped query pull status')
   equal(
     queryPull.body.gotQueries,
     { version: 1, patch: [{ op: 'put', hash: 'done' }] },
@@ -573,7 +563,7 @@ async function runBrowserHostSpike() {
   const queryRows = (queryPull.body.rowsPatch as Array<Record<string, unknown>>)
     .filter((entry) => entry.op === 'put' && entry.tableName === 'todo')
     .map((entry) => (entry.value as { id: string }).id)
-  equal(queryRows, ['query-done'], 'query-aware pull includes only matching rows')
+  equal(queryRows, ['query-done'], 'scoped query pull includes only matching rows')
 
   const tag = await post(
     connection.client,

@@ -10,8 +10,9 @@ Chat used it before upstream ingest existed and has since migrated.)
 - **Chat** (start.chat, live) uses delegated push with upstream ingest.
 - **Soot** (mid-cutover) uses delegated push with upstream ingest.
 
-Both share the identical query-permission path: they delegate the query
-transform to the app's real synced-queries endpoint.
+Both pass the same Zero query registry used by their clients into
+`config.queries`. The host resolves desired named queries in-process, with
+authenticated claims as the query context.
 
 ## Chat: delegated push with upstream ingest
 
@@ -23,8 +24,7 @@ wrangler). The config is a single exported object (`rust-sync/chat-config/index.
 export const chatConfig: SyncHostConfig = {
   hostVersion: 'chat-rust-sync-0.1',
   schema: chatSchema,
-  queryAware: true,
-  resolveQueries: (requests, claims, env) => resolveQueries(requests, claims, env),
+  queries: appQueries,
   queryTransformVersion: 1,
   mutateUrl: '/api/zero/push?schema=chat_0&appID=chat', // delegated push
   mutateBinding: 'APP',
@@ -53,10 +53,11 @@ The pieces:
   `/snapshot` and `/changes` from the paired data worker over `DATA`, advances
   its watermark, and wakes connected clients — so app effects and the Rust
   replica share one authoritative write path.
-- **`resolveQueries` delegates.** It POSTs one `transform` request per desired-query patch to the Chat app
-  worker's real `/api/zero/pull` over the `APP` service binding and returns the
-  permission-transformed AST. The client's bearer token rides in claims and is
-  forwarded on that subrequest.
+- **`queries` resolves in-process.** Chat passes its ordinary `defineQueries`
+  registry into the host. The host invokes each desired query definition with
+  the authenticated claims as `ctx`, so argument validation and permission
+  scoping use the same code as the client without an app endpoint or service
+  binding round trip.
 - **`authenticate` delegates.** It reads the `Authorization: Bearer` session
   token, resolves it against the app's `/api/auth/get-session` over the `APP`
   binding, and caches the token-to-claims result briefly.
@@ -64,7 +65,7 @@ The pieces:
   `staging` or `production`, producing host namespaces such as `staging:control`
   and `production:p-<serverId>`; `upstreamPathForNamespace` maps `control` to
   `/control` and `p-<serverId>` to `/proj-<serverId>` on `DATA`.
-- Chat needs both `APP` and `DATA` service bindings, and leaves `caps`,
+- Chat needs both `APP` and `DATA` service bindings, and leaves
   `retainChanges`, `idleTeardownMs`, `wakeCoalesceMs`, `delegatedPushRetry`, and
   ingest-budget settings at host defaults.
 
@@ -101,10 +102,8 @@ export function createSootSyncConfig(authenticate) {
     initialize: initializeSootSchema,
     authenticate,
     namespace: namespaceForRequest,
-    queryAware: true,
-    resolveQueries: (requests, claims, env) => resolveSootQueries(requests, claims, env),
+    queries: appQueries,
     queryTransformVersion: 1,
-    caps: { maxChangeRows: 10_000, maxChangeBytes: 2_000_000 },
     retainChanges: 4_096,
     idleTeardownMs: 5_000,
     wakeCoalesceMs: 25,
@@ -120,13 +119,13 @@ The pieces:
   `upstream.namespacePath`. Soot has no local mutator registry at all. Its
   projections and jobs keep writing through the app's real push endpoint, and
   clients read what ingest replicates.
-- **Two service bindings.** `APP` (used by push, auth, and the query transform)
-  and `DATA` (the change feed). Chat needs only `APP`.
+- **Two service bindings.** `APP` is used by push and auth, while `DATA` serves
+  the change feed. Query resolution needs neither binding.
 - **`namespace` has planes.** `soot` and `zero-http` map to the control-plane
   namespace; `proj-<id>` and `p-<id>` map to a project namespace. Claims carry a
   `plane` discriminator plus project id and role.
-- Soot sets `caps`, `retainChanges`, `idleTeardownMs`, and `wakeCoalesceMs`
-  explicitly rather than taking defaults.
+- Soot sets `retainChanges`, `idleTeardownMs`, and `wakeCoalesceMs` explicitly
+  rather than taking defaults.
 
 Soot is mid-cutover. The default deployable worker (`src/worker.ts`) still wires
 a test authenticator gated by `SOOT_SYNC_TEST_AUTH`, so the primary artifact is
@@ -143,17 +142,17 @@ deploy-only entrypoint; the everyday worker ships test auth.
 | Push             | Delegated `mutateUrl` + `mutateBinding` | Delegated `mutateUrl` + `mutateBinding` |
 | Upstream ingest  | `upstream` from the `DATA` feed         | `upstream` from the `DATA` feed         |
 | Service bindings | `APP` and `DATA`                        | `APP` and `DATA`                        |
-| Query transform  | app `/api/zero/pull` over `APP`         | app `/api/zero/pull` over `APP` (same)  |
+| Query resolution | `appQueries` registry in-process        | `appQueries` registry in-process        |
 | Auth             | app `/api/auth/get-session`             | app `/api/zero/rust-auth`               |
 | Namespace        | env + control/per-server planes         | control and project planes              |
-| Tuning           | host defaults                           | explicit caps, retention, idle, wake    |
+| Tuning           | host defaults                           | explicit retention, idle, wake          |
 
 Both apps now run the delegated write path. Chat initially used local mutators
 because upstream ingest did not yet exist — a delegated push then would have
 split write authority — and migrated once ingest landed (chat's `e882b97ba`);
 `1a2941e47` moved it onto the published host package. So the two now differ only
 in their auth endpoint and namespace planes, and both keep the identical
-query-permission delegation. Local mutators remain a supported mode for an app
+query-permission definitions. Local mutators remain a supported mode for an app
 whose entire write surface can live in the host.
 
 ## Integrate a new app
@@ -164,8 +163,10 @@ Distilling both, a new app provides four things.
 
 Required for every app: `hostVersion`, `schema` (derived from your Zero schema),
 `initialize(sql)` for your DDL, `authenticate(request, env)` returning
-`{userID, ...}`, and `namespace(request)` returning the DO partition key. Carry
-the raw client token into claims so `resolveQueries` can forward it.
+`{userID, ...}`, and `namespace(request)` returning the DO partition key. Pass
+the app's ordinary `defineQueries` result as `queries`. Each query definition
+receives the authenticated claims as `ctx`, so it can scope rows to the current
+user.
 
 Then choose exactly one push model:
 
@@ -178,11 +179,8 @@ Then choose exactly one push model:
   server-side effects (jobs, projections, notifications) run outside the sync
   path, or when the app already owns a real push endpoint.
 
-For query-aware pulls (both apps use this): `queryAware: true`, a
-`resolveQueries` that POSTs the whole patch as one transform request to your
-app's `/api/zero/pull` and returns one AST-or-error entry per request in
-request order, and a `queryTransformVersion` epoch you bump on permission or
-schema changes.
+All pulls use named queries. Set `queries: appQueries` and keep a
+`queryTransformVersion` epoch that you bump on permission or schema changes.
 
 ### 2. A workerd composition entry
 
@@ -194,8 +192,8 @@ layer (handle preflight, echo headers, pass 101 upgrades through).
 
 - A `SYNC_DO` Durable Object binding pointing at your DO class, with a
   `[[migrations]]` `new_sqlite_classes` entry.
-- A `[[services]]` `APP` binding to the app worker (used by `authenticate`,
-  `resolveQueries`, and delegated `mutateUrl`).
+- A `[[services]]` `APP` binding to the app worker when `authenticate` or
+  delegated `mutateUrl` calls it.
 - For delegated push, a second `[[services]]` `DATA` binding for the change
   feed, matching `upstream.binding`.
 - Vars for the app origin and any admin or test flags. Import the published
@@ -208,11 +206,12 @@ The bound `APP` service must expose:
 
 - A session or identity endpoint for `authenticate` (`/api/auth/get-session` or
   `/api/zero/rust-auth`).
-- The query transform endpoint `/api/zero/pull`, which accepts a `transform`
-  request and returns the permission-transformed AST.
 - For delegated push only: a push endpoint (`/api/zero/push`), plus a change
   feed served at each namespace's `upstream.namespacePath` on the `DATA`
   service.
+
+The app worker does not need a `/api/zero/pull` transform endpoint for Orez.
+Query definitions are bundled with the sync host through `config.queries`.
 
 ### 5. Deploying updates: Durable Objects stay on old code until they restart
 

@@ -49,7 +49,6 @@ pub enum ColumnUse {
     Order,
     Cursor,
     Correlation,
-    Visibility,
 }
 
 impl ColumnUse {
@@ -60,7 +59,6 @@ impl ColumnUse {
             ColumnUse::Order => "order",
             ColumnUse::Cursor => "cursor",
             ColumnUse::Correlation => "correlation",
-            ColumnUse::Visibility => "visibility",
         }
     }
 }
@@ -267,25 +265,6 @@ impl Tables {
             .map(|columns| columns.join(", "))
     }
 
-    pub(crate) fn logical_ctes(&self) -> String {
-        self.iter()
-            .map(|(logical_table, _)| {
-                let projection = self
-                    .projected_columns(logical_table, None)
-                    .expect("iterated table has projected columns");
-                let physical_table = self
-                    .physical_name(logical_table)
-                    .expect("iterated table has physical mapping");
-                format!(
-                    "{} AS (SELECT {projection} FROM {}.{})",
-                    quote_ident(logical_table),
-                    quote_ident("main"),
-                    quote_ident(physical_table)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

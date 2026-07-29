@@ -1,1 +1,3 @@
-export function queryNameToAst(name: string, args: readonly unknown[]): unknown
+import type { AnyQueryRegistry } from '@rocicorp/zero'
+
+export declare const queries: AnyQueryRegistry

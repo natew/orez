@@ -5,14 +5,16 @@
 // host composition. rusqlite is a DEV-dependency only.
 #![allow(dead_code)]
 
+use std::collections::HashSet;
+
 use rusqlite::Connection;
 use rusqlite::types::{Value as Sqlite, ValueRef};
 use serde_json::{Value, json};
 
-use sync_core::pull::Caps;
+use sync_core::query::{handle_query_pull, init_query_schema};
 use sync_core::{
-    DbError, MutateError, Mutator, Row, SqlValue, SyncDb, Tables, Transactor, Visibility,
-    handle_pull, handle_push, init_schema,
+    DbError, MutateError, Mutator, Row, SqlValue, SyncDb, Tables, Transactor, handle_push,
+    init_schema,
 };
 
 pub struct TestDb {
@@ -204,7 +206,12 @@ pub struct Host {
     pub db: TestDb,
     pub tables: Tables,
     pub retain: i64,
-    pub caps: Caps,
+    // (group, client) pairs that already registered the all-items query. the
+    // first pull for a pair desires q_all (everything in `item`), so the
+    // membership-driven pull serves the same surface the old full-namespace
+    // pull did; later pulls carry no patch and stay shape-compatible with a
+    // plain diff/unchanged response.
+    registered: HashSet<(String, String)>,
 }
 
 impl Host {
@@ -222,7 +229,7 @@ impl Host {
             db,
             tables: item_tables(),
             retain: 4096,
-            caps: Caps::default(),
+            registered: HashSet::new(),
         }
     }
 
@@ -233,20 +240,12 @@ impl Host {
 
     pub fn init(&mut self) {
         init_schema(&mut self.db, &self.tables).unwrap();
+        init_query_schema(&mut self.db).unwrap();
     }
 
     // a pull inside one host transaction, returning the response JSON
     pub fn pull(&mut self, cookie: Value, user: &str) -> Result<Value, sync_core::EngineError> {
-        self.pull_as("c1", "g1", cookie, None, user)
-    }
-
-    pub fn pull_vis(
-        &mut self,
-        cookie: Value,
-        visible: Option<&Visibility>,
-        user: &str,
-    ) -> Result<Value, sync_core::EngineError> {
-        self.pull_as("c1", "g1", cookie, visible, user)
+        self.pull_as("c1", "g1", cookie, user)
     }
 
     pub fn pull_as(
@@ -254,15 +253,25 @@ impl Host {
         client: &str,
         group: &str,
         cookie: Value,
-        visible: Option<&Visibility>,
         user: &str,
     ) -> Result<Value, sync_core::EngineError> {
-        let body = json!({ "clientID": client, "clientGroupID": group, "cookie": cookie });
+        let mut body = json!({ "clientID": client, "clientGroupID": group, "cookie": cookie });
+        let key = (group.to_string(), client.to_string());
+        if !self.registered.contains(&key) {
+            body["queries"] = json!({
+                "version": 1,
+                "patch": [{ "op": "put", "hash": "q_all", "ast": { "table": "item" } }],
+            });
+        }
         let tables = self.tables.clone();
         let retain = self.retain;
-        let caps = self.caps;
-        self.db
-            .transaction(|db| handle_pull(db, &tables, retain, visible, caps, &body, user))
+        let result = self
+            .db
+            .transaction(|db| handle_query_pull(db, &tables, retain, &body, user));
+        if result.is_ok() {
+            self.registered.insert(key);
+        }
+        result
     }
 
     // a push through the native convenience driver (composes the push steps)

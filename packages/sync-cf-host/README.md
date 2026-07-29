@@ -5,18 +5,26 @@ engine. The package exposes a consumer integration surface (`createSyncWorker`,
 `createSyncDurableObject`) and a harness deployment built
 from `src/harness-worker.ts`. Consumers provide a JSON Zero schema, application
 DDL/seed initializer, normalized-claims authenticator, an
-`orez-sync-executor` mutator registry, and an optional row-visibility hook.
+`orez-sync-executor` mutator registry or delegated push route, and the app's
+ordinary Zero `defineQueries` registry.
 
-The Worker authenticates and authorizes at the consumer edge, then forwards normalized claims
-inside the binding request body, where request-header observability cannot record
-them. It never logs tokens, mutation arguments, or row contents. Pull runs
-`engine_handle_pull` inside `transactionSync`; local push delegates validation,
-replay, LMID advancement, CRUD, and committed effects to `orez-sync-executor`
-inside `ctx.storage.transaction`. Every SQL cursor is materialized before an
-await. Mutators may await only their application transaction operations;
-timers, fetches, and other external work belong in
+The Worker authenticates and authorizes at the consumer edge, then forwards
+normalized claims inside the binding request body, where request-header
+observability cannot record them. It never logs tokens, mutation arguments, or
+row contents. Pull runs `engine_handle_query_pull` inside `transactionSync`;
+local push delegates validation, replay, LMID advancement, CRUD, and committed
+effects to `orez-sync-executor` inside `ctx.storage.transaction`. Every SQL
+cursor is materialized before an await. Mutators may await only their
+application transaction operations; timers, fetches, and other external work
+belong in
 `ctx.defer`, which runs only after commit. Application failures use the
 required second transaction to advance the LMID marker.
+
+Every pull is query-driven. Set `config.queries` to the same registry used by
+the client. The host resolves desired named queries in-process and passes
+authenticated claims as their context, so permission scoping remains inside the
+query definitions. Membership-driven puts and dels keep pull work proportional
+to query results without projecting the full namespace.
 
 Transaction-query `ILIKE` folding is ASCII-only on Durable Object SQLite;
 non-ASCII case pairs can diverge from PostgreSQL.
@@ -224,8 +232,8 @@ A successful delegated mutation response has a hard causality contract: its
 committed application effects must already be readable from the configured
 upstream `/changes` feed before the application worker returns. The sync host
 then ingests through those effects, journals the acknowledged LMID after them,
-and only then returns the push response. This keeps every capped change-log
-prefix ordered so an acknowledgement cannot reach a client before its effects.
+and only then returns the push response. This keeps change-log order intact so
+an acknowledgement cannot reach a client before its effects.
 Chat and Soot use an application-to-data service path that provides this
 ordering today. A future topology that cannot provide it must extend the
 delegated response with an upstream watermark receipt and make the host ingest

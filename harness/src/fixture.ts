@@ -279,6 +279,12 @@ export function queryNameToAst(name: string, args: readonly unknown[]): unknown 
 
 export const queries = defineQueries({
   generated: defineQuery(({ args }: { args: GenSpec }) => buildGenerated(args)),
+  // claims-scoped: the host passes its authenticated claims as ctx, so this
+  // resolves to a per-user AST. the wire-level permission check for the sync
+  // host: a client can only ever receive rows this transform selects.
+  myProjects: defineQuery(({ ctx }: { ctx?: { userID?: string } }) =>
+    zql.project.where('ownerId', ctx?.userID ?? '')
+  ),
   allProjects: defineQuery(() => queryBuilders.allProjects()),
   projectById: defineQuery(({ args }: { args: { id: string } }) =>
     queryBuilders.projectById(args)

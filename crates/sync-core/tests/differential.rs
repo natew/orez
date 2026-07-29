@@ -33,7 +33,6 @@ use proptest::test_runner::{Config, FileFailurePersistence};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use sync_core::pull::Caps;
 use sync_core::query::{handle_query_pull, init_query_schema};
 use sync_core::{SqlValue, SyncDb, Tables, Transactor, init_schema};
 
@@ -705,13 +704,10 @@ fn run_rust(trace: &[Op]) -> Vec<Value> {
     let mut h = Host::new(true);
     let mut query = QueryHost::new();
     h.init();
-    // uncapped, to mirror the reference core (which has no caps)
-    h.caps = Caps {
-        max_change_rows: 1_000_000,
-        max_change_bytes: usize::MAX,
-    };
     let mut next_id: HashMap<String, i64> = HashMap::new();
-    let mut cookies: HashMap<String, Value> = HashMap::new();
+    // one cookie per client GROUP: a group shares one replica in Zero, so every
+    // tab pulls from the group's last served cookie, never a private one.
+    let mut group_cookie = json!(null);
     let mut pulls = Vec::new();
 
     for op in trace {
@@ -764,11 +760,12 @@ fn run_rust(trace: &[Op]) -> Vec<Value> {
             Op::Invalidate => {
                 h.db.transaction(|db| sync_core::invalidate(db)).unwrap();
             }
-            Op::Pull { client } => {
-                let client = client.clone();
-                let cookie = cookies.get(&client).cloned().unwrap_or(json!(null));
-                let resp = h.pull_as(&client, "g1", cookie, None, "u1").unwrap();
-                cookies.insert(client, resp["cookie"].clone());
+            Op::Pull { client: _ } => {
+                // one puller per group: a group shares one replica and one
+                // pull loop, so the pulling clientID is the group's agent.
+                // pushes keep per-client ids; their lmids ride this pull.
+                let resp = h.pull_as("puller", "g1", group_cookie.clone(), "u1").unwrap();
+                group_cookie = resp["cookie"].clone();
                 pulls.push(json!({ "lane": "base", "response": resp }));
             }
             Op::QueryPut {
@@ -932,6 +929,43 @@ fn canonical_json(value: Value) -> Value {
     }
 }
 
+// apply one normalized response to a simulated client store keyed
+// tableName + canonical pk json. clear empties it; put upserts; del removes.
+fn apply_to_store(
+    store: &mut std::collections::BTreeMap<String, Value>,
+    resp: &Value,
+    base_lane: bool,
+) {
+    let patch = resp["rowsPatch"].as_array().cloned().unwrap_or_default();
+    for op in patch {
+        let op = if base_lane {
+            physical_item_op(op)
+        } else {
+            op
+        };
+        match op["op"].as_str() {
+            Some("clear") => store.clear(),
+            Some("put") => {
+                let key = format!(
+                    "{} {}",
+                    op["tableName"],
+                    canonical_json(op["value"]["item_id"].clone())
+                );
+                store.insert(key, canonical_json(op["value"].clone()));
+            }
+            Some("del") => {
+                let key = format!(
+                    "{} {}",
+                    op["tableName"],
+                    canonical_json(op["id"]["item_id"].clone())
+                );
+                store.remove(&key);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
     if rust.len() != ts.len() {
         return Err(format!(
@@ -940,6 +974,15 @@ fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
             ts.len()
         ));
     }
+    // the base lane compares CONVERGENCE, not patch bytes: the membership
+    // engine legitimately skips deletes for rows the client never held and
+    // re-sends members when a desire is re-registered, both of which the
+    // change-log reference re-encodes differently. each side's responses are
+    // applied to its own simulated store and the stores must match after
+    // every pull. the query lane still compares patches exactly (both sides
+    // speak membership semantics there).
+    let mut rust_store = std::collections::BTreeMap::new();
+    let mut ts_store = std::collections::BTreeMap::new();
     for (i, (r, t)) in rust.iter().zip(ts.iter()).enumerate() {
         if r["lane"] != t["lane"] {
             return Err(format!("observation {i}: lane differs\nrust={r}\nts={t}"));
@@ -958,12 +1001,22 @@ fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
         if r.get("unchanged").is_some() {
             continue;
         }
-        let rust_patch = normalize_patch(r, base_lane);
-        let ts_patch = normalize_patch(t, base_lane);
-        if rust_patch != ts_patch {
-            return Err(format!(
-                "pull {i}: rowsPatch differs\nrust={r}\nts={t}\nnormalized rust={rust_patch:?}\nnormalized ts={ts_patch:?}"
-            ));
+        if base_lane {
+            apply_to_store(&mut rust_store, r, true);
+            apply_to_store(&mut ts_store, t, true);
+            if rust_store != ts_store {
+                return Err(format!(
+                    "pull {i}: stores diverged after applying rowsPatch\nrust={r}\nts={t}\nrust store={rust_store:?}\nts store={ts_store:?}"
+                ));
+            }
+        } else {
+            let rust_patch = normalize_patch(r, base_lane);
+            let ts_patch = normalize_patch(t, base_lane);
+            if rust_patch != ts_patch {
+                return Err(format!(
+                    "pull {i}: rowsPatch differs\nrust={r}\nts={t}\nnormalized rust={rust_patch:?}\nnormalized ts={ts_patch:?}"
+                ));
+            }
         }
         // rust lmids must be a subset of ts lmids with identical values
         let rl = r["lastMutationIDChanges"].as_object().unwrap();

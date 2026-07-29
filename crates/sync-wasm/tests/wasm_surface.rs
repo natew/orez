@@ -4,8 +4,8 @@ use js_sys::Reflect;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sync_wasm::{
-    JsSyncDb, engine_assemble_push_response, engine_finalize, engine_handle_pull,
-    engine_init_schema, engine_preflight, engine_push_validate,
+    JsSyncDb, engine_assemble_push_response, engine_finalize, engine_handle_query_pull,
+    engine_init_query_schema, engine_init_schema, engine_preflight, engine_push_validate,
 };
 use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
 use wasm_bindgen_test::*;
@@ -56,6 +56,14 @@ fn initialize(db: &JsSyncDb) {
         "CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL)",
     );
     engine_init_schema(db, to_js(&schema())).unwrap();
+    engine_init_query_schema(db).unwrap();
+}
+
+fn all_items_queries() -> Value {
+    json!({
+        "version": 1,
+        "patch": [{ "op": "put", "hash": "q_all", "ast": { "table": "item" } }],
+    })
 }
 
 fn status(error: &JsValue) -> u16 {
@@ -113,16 +121,15 @@ fn push_and_pull_round_trip_through_wasm_exports() {
     assert_eq!(response["pushResponse"]["mutations"][0]["id"]["id"], 1);
 
     exec_sql(&db, "BEGIN");
-    let pull = engine_handle_pull(
+    let pull = engine_handle_query_pull(
         &db,
         to_js(&schema()),
-        JsValue::NULL,
-        to_js(&json!({ "maxChangeRows": 100, "maxChangeBytes": 65_536 })),
         "4096",
         to_js(&json!({
             "clientID": "reader-1",
             "clientGroupID": "group-1",
             "cookie": null,
+            "queries": all_items_queries(),
         })),
         "user-1",
     )
@@ -130,6 +137,10 @@ fn push_and_pull_round_trip_through_wasm_exports() {
     exec_sql(&db, "COMMIT");
     let pull = from_js(pull);
     assert_eq!(pull["lastMutationIDChanges"]["writer-1"], 1);
+    assert_eq!(
+        pull["gotQueries"],
+        json!({ "version": 1, "patch": [{ "op": "put", "hash": "q_all" }] })
+    );
     assert!(
         pull["rowsPatch"]
             .as_array()
@@ -167,7 +178,7 @@ fn engine_errors_keep_400_and_403_statuses_without_panicking() {
 }
 
 #[wasm_bindgen_test]
-fn encrypted_visibility_is_rejected_while_projection_stays_opaque() {
+fn encrypted_columns_ride_opaque_through_a_query_pull() {
     let db = db();
     let schema = json!({
         "schemaID": "wasm-encryption-v1",
@@ -186,94 +197,24 @@ fn encrypted_visibility_is_rejected_while_projection_stays_opaque() {
         "CREATE TABLE item (id TEXT PRIMARY KEY, secret TEXT NOT NULL)",
     );
     engine_init_schema(&db, to_js(&schema)).unwrap();
+    engine_init_query_schema(&db).unwrap();
     exec_sql(
         &db,
         "INSERT INTO item VALUES ('i1', 'orez-e1.7.tag.ciphertext')",
     );
 
-    let pull_body = json!({
-        "clientID": "reader-1",
-        "clientGroupID": "group-1",
-        "cookie": null,
-    });
-    for columns in [json!([]), json!([{ "table": "item", "column": "id" }])] {
-        exec_sql(&db, "BEGIN");
-        let error = engine_handle_pull(
-            &db,
-            to_js(&schema),
-            to_js(&json!({
-                "rowLocal": false,
-                "filters": [{
-                    "kind": "raw",
-                    "table": "item",
-                    "sql": "secret = ?",
-                    "params": ["orez-e1.7.tag.ciphertext"],
-                    "columns": columns,
-                }],
-            })),
-            to_js(&json!({ "maxChangeRows": 100, "maxChangeBytes": 65_536 })),
-            "4096",
-            to_js(&pull_body),
-            "user-1",
-        )
-        .expect_err("raw visibility metadata must not bypass encrypted schemas");
-        exec_sql(&db, "ROLLBACK");
-        assert_eq!(status(&error), 400);
-        assert!(message(&error).contains("schema 'wasm-encryption-v1'"));
-        assert!(message(&error).contains("raw visibility SQL"));
-        assert!(message(&error).contains("forbidden use 'visibility'"));
-    }
-
-    exec_sql(&db, "BEGIN");
-    let error = engine_handle_pull(
-        &db,
-        to_js(&schema),
-        to_js(&json!({
-            "rowLocal": false,
-            "filters": [{
-                "kind": "expression",
-                "table": "item",
-                "expression": {
-                    "type": "comparison",
-                    "operator": "=",
-                    "left": { "type": "column", "table": "item", "column": "secret" },
-                    "right": { "type": "value", "value": "orez-e1.7.tag.ciphertext" },
-                },
-            }],
-        })),
-        to_js(&json!({ "maxChangeRows": 100, "maxChangeBytes": 65_536 })),
-        "4096",
-        to_js(&pull_body),
-        "user-1",
-    )
-    .expect_err("structured visibility must reject encrypted columns");
-    exec_sql(&db, "ROLLBACK");
-    assert_eq!(status(&error), 400);
-    assert!(message(&error).contains("schema 'wasm-encryption-v1'"));
-    assert!(message(&error).contains("item.secret"));
-    assert!(message(&error).contains("forbidden use 'visibility'"));
-
     exec_sql(&db, "BEGIN");
     let pull = from_js(
-        engine_handle_pull(
+        engine_handle_query_pull(
             &db,
             to_js(&schema),
-            to_js(&json!({
-                "rowLocal": true,
-                "filters": [{
-                    "kind": "expression",
-                    "table": "item",
-                    "expression": {
-                        "type": "comparison",
-                        "operator": "=",
-                        "left": { "type": "column", "table": "item", "column": "id" },
-                        "right": { "type": "value", "value": "i1" },
-                    },
-                }],
-            })),
-            to_js(&json!({ "maxChangeRows": 100, "maxChangeBytes": 65_536 })),
             "4096",
-            to_js(&pull_body),
+            to_js(&json!({
+                "clientID": "reader-1",
+                "clientGroupID": "group-1",
+                "cookie": null,
+                "queries": all_items_queries(),
+            })),
             "user-1",
         )
         .unwrap(),

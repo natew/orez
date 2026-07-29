@@ -136,13 +136,9 @@ fn custom_config_with_lease(admin_tx_lease: std::time::Duration) -> SyncNativeCo
         initialize_version: "test-v1".to_string(),
         initialize: custom_init(),
         mutate: custom_mutate(),
-        visible: None,
         authenticate: custom_auth(),
         authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(()) })),
         retain_changes: 4096,
-        max_change_rows: sync_core::Caps::default().max_change_rows,
-        visibility_enabled: false,
-        query_aware: false,
         query_resolution: None,
         admin_tx_lease,
         // tests drive retention directly (namespace.rs unit tests); keep it off
@@ -296,11 +292,22 @@ fn patch_count(resp: &Value, table: &str, op: &str) -> usize {
 }
 
 fn pull_body(cookie: Option<&Value>) -> Value {
-    json!({
+    let mut body = json!({
         "clientID": "test-client",
         "clientGroupID": "test-group",
         "cookie": cookie.unwrap_or(&Value::Null),
-    })
+    });
+    if cookie.is_none() {
+        body["queries"] = json!({
+            "version": 1,
+            "patch": [{
+                "op": "put",
+                "hash": "q_all",
+                "ast": { "table": "item" },
+            }],
+        });
+    }
+    body
 }
 
 fn push_body(mutations: Value) -> Value {
@@ -345,7 +352,6 @@ async fn named_queries_are_batched_and_resolved_before_sqlite() {
     });
 
     let mut config = custom_config();
-    config.query_aware = true;
     config.query_resolution = Some(QueryResolution { resolve: resolver });
     let tmp = tempfile::tempdir().unwrap();
     let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
@@ -435,7 +441,6 @@ async fn configured_query_resolver_rejects_client_authored_ast() {
         Box::pin(async { Ok(resolved(vec![item_query(None)], 0)) })
     });
     let mut config = custom_config();
-    config.query_aware = true;
     config.query_resolution = Some(QueryResolution { resolve: resolver });
     let tmp = tempfile::tempdir().unwrap();
     let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
@@ -479,7 +484,6 @@ async fn query_resolution_preserves_pull_arrival_order() {
         })
     });
     let mut config = custom_config();
-    config.query_aware = true;
     config.query_resolution = Some(QueryResolution { resolve: resolver });
     let tmp = tempfile::tempdir().unwrap();
     let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
@@ -572,7 +576,6 @@ async fn slow_query_transform_does_not_block_another_client_group() {
         }
     });
     let mut config = custom_config();
-    config.query_aware = true;
     config.query_resolution = Some(QueryResolution { resolve: resolver });
     let tmp = tempfile::tempdir().unwrap();
     let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
@@ -637,7 +640,6 @@ async fn transform_version_bump_revokes_stored_query_without_a_client_patch() {
         })
     });
     let mut first_config = custom_config();
-    first_config.query_aware = true;
     first_config.query_resolution = Some(QueryResolution { resolve: resolver });
     let first_router = test_host(first_config, tmp.path().to_path_buf()).into_router_trusted();
     let body = json!({
@@ -693,7 +695,6 @@ async fn transform_version_bump_revokes_stored_query_without_a_client_patch() {
         .map_err(|error| error.0)?;
         Ok(())
     });
-    second_config.query_aware = true;
     second_config.query_resolution = Some(QueryResolution { resolve: resolver });
     let second_router = test_host(second_config, tmp.path().to_path_buf()).into_router_trusted();
     let body = json!({
@@ -757,7 +758,6 @@ async fn unchanged_pulls_observe_query_transform_version_changes() {
         })
     });
     let mut config = custom_config();
-    config.query_aware = true;
     config.query_resolution = Some(QueryResolution { resolve: resolver });
     let tmp = tempfile::tempdir().unwrap();
     let router = test_host(config, tmp.path().to_path_buf()).into_router_trusted();
@@ -828,7 +828,6 @@ async fn transform_version_bump_invalidates_each_client_when_it_checks_in() {
         })
     });
     let mut first_config = custom_config();
-    first_config.query_aware = true;
     first_config.query_resolution = Some(QueryResolution { resolve: resolver });
     let first_router = test_host(first_config, tmp.path().to_path_buf()).into_router_trusted();
 
@@ -883,7 +882,6 @@ async fn transform_version_bump_invalidates_each_client_when_it_checks_in() {
         .map_err(|error| error.0)?;
         Ok(())
     });
-    second_config.query_aware = true;
     second_config.query_resolution = Some(QueryResolution { resolve: resolver });
     let second_router = test_host(second_config, tmp.path().to_path_buf()).into_router_trusted();
 
@@ -1487,6 +1485,14 @@ async fn delegated_push_settlement_is_pull_visible_after_its_effects_and_idempot
         "clientID": "client-b",
         "clientGroupID": "shared-group",
         "cookie": null,
+        "queries": {
+            "version": 1,
+            "patch": [{
+                "op": "put",
+                "hash": "q_all",
+                "ast": { "table": "item" },
+            }],
+        },
     });
     let (status, before) = send(
         &router,
@@ -1550,6 +1556,14 @@ async fn delegated_push_settlement_is_pull_visible_after_its_effects_and_idempot
         "clientID": "client-c",
         "clientGroupID": "shared-group",
         "cookie": null,
+        "queries": {
+            "version": 1,
+            "patch": [{
+                "op": "put",
+                "hash": "q_all",
+                "ast": { "table": "item" },
+            }],
+        },
     });
     let (status, snapshot) = send(
         &router,
@@ -2324,7 +2338,6 @@ async fn fixture_config_still_works() {
         initialize_version: "fixture-v1".to_string(),
         initialize: fixture_init,
         mutate: fixture_mutate,
-        visible: None,
         authenticate: Arc::new(|headers, _namespace| {
             Box::pin(async move {
                 headers
@@ -2337,9 +2350,6 @@ async fn fixture_config_still_works() {
         }),
         authorize_wake: Arc::new(|_, _| Box::pin(async { Ok(()) })),
         retain_changes: 4096,
-        max_change_rows: sync_core::Caps::default().max_change_rows,
-        visibility_enabled: false,
-        query_aware: false,
         query_resolution: None,
         admin_tx_lease: sync_native::DEFAULT_ADMIN_TX_LEASE,
         retention: sync_native::retain::RetentionPolicy::disabled(),
@@ -2348,7 +2358,20 @@ async fn fixture_config_still_works() {
     let router = host.into_router_trusted();
 
     // pull: should get the fixture seed (users, projects, members, tasks)
-    let body = pull_body(None);
+    let body = json!({
+        "clientID": "test-client",
+        "clientGroupID": "test-group",
+        "cookie": null,
+        "queries": {
+            "version": 1,
+            "patch": [
+                { "op": "put", "hash": "q_user", "ast": { "table": "user" } },
+                { "op": "put", "hash": "q_project", "ast": { "table": "project" } },
+                { "op": "put", "hash": "q_member", "ast": { "table": "member" } },
+                { "op": "put", "hash": "q_task", "ast": { "table": "task" } },
+            ],
+        },
+    });
     let req = pull_req("test-ns", &body, "Bearer token-u1");
     let (_status, pull_resp) = send(&router, req).await;
 

@@ -1,12 +1,7 @@
-// regression: the admin-set namespace knobs (query-aware, visibility,
-// retention, writer) must survive a REAL instance restart. pre-fix they were
-// instance fields, so an eviction between `/admin/query-aware {enabled:true}`
-// and the client's pulls silently reverted the namespace to baseline mode and
-// every query-aware pull deadlocked on {cookie, unchanged:true} while the
-// client kept re-sending its desired-query patch (the intermittent rust-cf
-// query-diff timeout of 2026-07-09). workerd is killed and restarted on the
-// same persist dir: in-memory DO state is lost, durable storage survives —
-// exactly what a CF eviction does.
+// regression: the admin-set retention override must survive a REAL instance
+// restart. workerd is killed and restarted on the same persist dir, so
+// in-memory DO state is lost while durable storage survives, exactly as it
+// does across a CF eviction.
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -68,45 +63,52 @@ const admin = async (path, body) => {
   return response.json()
 }
 
-const queryPull = () =>
-  fetch(`${origin}/pull`, {
+const post = (path, body) =>
+  fetch(`${origin}${path}`, {
     method: 'POST',
     headers: {
       authorization: 'Bearer token-user-a',
       'content-type': 'application/json',
     },
-    body: JSON.stringify({
-      clientID: 'restart-client',
-      clientGroupID: 'restart-group',
-      cookie: null,
-      queries: {
-        version: 1,
-        patch: [
-          {
-            op: 'put',
-            hash: 'tasks-p1-p4',
-            name: 'tasksInProjects',
-            args: [{ projectIds: ['p1', 'p4'] }],
-          },
-        ],
-      },
-    }),
+    body: JSON.stringify(body),
   }).then(async (response) => ({ status: response.status, body: await response.json() }))
+
+const retentionPull = () =>
+  post('/pull', {
+    clientID: 'restart-client',
+    clientGroupID: 'restart-group',
+    cookie: null,
+  })
+
+const push = (id) =>
+  post('/push', {
+    clientGroupID: 'restart-writer-group',
+    pushVersion: 1,
+    mutations: [
+      {
+        type: 'custom',
+        clientID: 'restart-writer',
+        id,
+        name: 'project.create',
+        args: [{ id: `restart-project-${id}`, ownerId: 'user-a', name: `project ${id}` }],
+      },
+    ],
+  })
+
+const storedRetention = () =>
+  admin('/admin/sql', {
+    query: "SELECT value FROM _zsync_host_control WHERE key = 'retainChanges'",
+  })
 
 let server = startWorkerd()
 try {
   await waitReady()
 
-  await admin('/admin/query-aware', { enabled: true })
-  await admin('/admin/retention', { retainChanges: 512 })
-
-  // sanity: query-aware works before the restart
-  const before = await queryPull()
-  assert.equal(before.status, 200, 'pre-restart pull status')
+  await admin('/admin/retention', { retainChanges: 1 })
   assert.deepStrictEqual(
-    before.body.gotQueries,
-    { version: 1, patch: [{ op: 'put', hash: 'tasks-p1-p4' }] },
-    'pre-restart pull acknowledges the named query'
+    await storedRetention(),
+    { rows: [{ value: '1' }] },
+    'retention override is stored before restart'
   )
 
   // the real eviction: kill workerd, restart on the same durable storage
@@ -115,20 +117,31 @@ try {
   server = startWorkerd()
   await waitReady()
 
-  const after = await queryPull()
-  assert.equal(after.status, 200, 'post-restart pull status')
-  assert.notEqual(
-    after.body.unchanged,
-    true,
-    'post-restart pull must not fall back to baseline unchanged'
-  )
   assert.deepStrictEqual(
-    after.body.gotQueries,
-    { version: 1, patch: [{ op: 'put', hash: 'tasks-p1-p4' }] },
-    'query-aware override survives an instance restart'
+    await storedRetention(),
+    { rows: [{ value: '1' }] },
+    'retention override remains stored after restart'
+  )
+  for (let id = 1; id <= 3; id++) {
+    const response = await push(id)
+    assert.equal(response.status, 200, `post-restart push ${id}`)
+  }
+
+  const pull = await retentionPull()
+  assert.equal(pull.status, 200, 'post-restart pull status')
+  assert.equal(
+    pull.body.rowsPatch.some((entry) => entry.op === 'put'),
+    false,
+    'a client without desired queries receives no rows'
+  )
+  const status = await admin('/admin/status')
+  assert.deepStrictEqual(
+    { floor: status.engine.floor, watermark: status.engine.watermark },
+    { floor: '5', watermark: '6' },
+    'post-restart pull prunes to the persisted one-change retention window'
   )
 
-  console.log('restart-test: PASS (admin knobs survive a real workerd restart)')
+  console.log('restart-test: PASS (retention override survives a real workerd restart)')
 } finally {
   server.kill()
   await server.exited.catch(() => {})

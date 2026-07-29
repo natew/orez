@@ -27,7 +27,6 @@ export interface NativeHostOptions {
   allowedOrigins?: readonly string[]
   workerRetention?: NativeHostWorkerRetention
   changeLogRows?: number
-  maxChangeRows?: number
 }
 
 export interface NativeHost {
@@ -109,9 +108,6 @@ function nativeHostArguments(
   if (options.changeLogRows !== undefined) {
     args.push('--retain-changes', String(options.changeLogRows))
   }
-  if (options.maxChangeRows !== undefined) {
-    args.push('--max-change-rows', String(options.maxChangeRows))
-  }
   return args
 }
 
@@ -134,9 +130,6 @@ function validateOptions(options: NativeHostOptions) {
   }
   if (options.changeLogRows !== undefined) {
     positiveInteger(options.changeLogRows, 'changeLogRows')
-  }
-  if (options.maxChangeRows !== undefined) {
-    positiveInteger(options.maxChangeRows, 'maxChangeRows')
   }
 }
 

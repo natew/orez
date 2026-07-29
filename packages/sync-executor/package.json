@@ -1,6 +1,7 @@
 {
   "name": "orez-sync-executor",
   "version": "0.11.7",
+  "description": "Internal orez engine package. Do not import directly: consumers use orez-lite (e.g. orez-lite/realtime).",
   "type": "module",
   "sideEffects": false,
   "exports": {

@@ -142,7 +142,6 @@ function rssMb(pid: number): number {
 
 const target = await startRustLocal({
   pullIntervalMs: 75,
-  queryAware: true,
   retainChanges: 8,
 })
 
