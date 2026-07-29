@@ -34,5 +34,27 @@ execFileSync('cargo', ['metadata', '--format-version=1', '--no-deps'], {
   cwd: root,
   stdio: 'ignore',
 })
+execFileSync(
+  'cargo',
+  [
+    'about',
+    'generate',
+    '--locked',
+    '--manifest-path',
+    'crates/sync-native/Cargo.toml',
+    '--fail',
+    '--output-file',
+    'LICENSES.txt',
+    'scripts/sync-native-licenses.hbs',
+  ],
+  {
+    cwd: root,
+    stdio: 'inherit',
+  }
+)
+execFileSync('bun', ['scripts/normalize-sync-native-licenses.ts', 'LICENSES.txt'], {
+  cwd: root,
+  stdio: 'inherit',
+})
 execFileSync('bun', ['install'], { cwd: root, stdio: 'inherit' })
 console.log(`sync-native manifests are now ${version}`)

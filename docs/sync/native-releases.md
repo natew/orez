@@ -132,14 +132,14 @@ bun scripts/normalize-sync-native-licenses.ts LICENSES.txt
 Prepare a new native version and commit it with the Rust changes:
 
 ```sh
-bun run release:native:prepare 0.1.1
+bun run release:native:prepare 0.1.2
 ```
 
 After that commit reaches `main` and CI is green for that exact commit, run the
 `Release sync-native` workflow manually. The workflow verifies both conditions
 before publishing.
 
-1. The small `orez-sync-native@0.1.1` launcher publishes first. Its optional
+1. The small `orez-sync-native@0.1.2` launcher publishes first. Its optional
    dependencies point at the exact platform package versions that are about to
    be built. npm permits missing optional dependencies, so `orez` can already
    reference this version without breaking installs.
@@ -148,7 +148,7 @@ before publishing.
    point it is immediately usable, while every other target keeps building:
 
    ```sh
-   npm install orez-sync-native@0.1.1
+   npm install orez-sync-native@0.1.2
    npx sync-native --version
    ```
 
