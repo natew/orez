@@ -114,7 +114,7 @@ async function createWorkerCore() {
 /**
  * soot's control namespace as measured on 2026-07-27: which tables exist, which
  * ones the CDC has registered, how many rows the unregistered ones hold, and
- * zero-http's journal triggers over the synced tables. The row counts are the
+ * the `_zsync_changes` journal triggers over the synced tables. The row counts are the
  * point -- an unregistered table only costs what it holds, so a shape with
  * empty tables cannot show the amplification at all.
  */

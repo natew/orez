@@ -1,5 +1,5 @@
 // the durable `_zsync_*` schema and the application-table triggers that feed
-// the change log. mirrors the executor-backed zero-http mount plus the plan's
+// the change log. mirrors the original executor-backed TypeScript host plus the plan's
 // durable-watermark table.
 //
 // invariants encoded here:
@@ -264,7 +264,6 @@ impl Tables {
             .collect::<Option<Vec<_>>>()
             .map(|columns| columns.join(", "))
     }
-
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

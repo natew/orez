@@ -1,5 +1,5 @@
 // deterministic error classification. `EngineError` is the Rust equivalent of
-// the executor-backed zero-http mount's `ZeroHttpRequestError`: one
+// the original executor-backed TypeScript host's request error: one
 // status + message per class, so every host renders the same wire error.
 //
 //   400 malformed / unsupported / out-of-order push

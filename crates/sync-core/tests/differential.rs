@@ -1,33 +1,17 @@
-// generated operation-trace differential against the TypeScript reference core.
-// a deterministic PRNG generates a trace of high-level ops; the Rust engine and
-// the executor-backed TS mount (run by ts-oracle/run-oracle.ts
-// under bun) each execute the SAME trace with identical per-client id/cookie
-// bookkeeping, and their pull responses are compared. The same trace also
-// drives a multi-table query-aware pull fixture against a pure TypeScript ZQL
-// evaluator, including named-query membership and transform changes.
-//
-// comparison is SEMANTIC where the two cores legitimately differ:
-// - cookie: exact (both are the change-log watermark)
-// - unchanged flag: exact
-// - rowsPatch: order-independent (a clear must lead; the rest is a set) — both
-//   resolve the same touched pks against the same live rows
-// - lastMutationIDChanges: the Rust core derives diff acks from the INCLUDED log
-//   prefix (soot semantics), the reference core from a full clients read, so the
-//   Rust map is a subset of the reference map with identical values — every
-//   (client,lmid) the Rust core reports must equal the reference's. this is the
-//   representational difference (a client already knows its unchanged peers'
-//   lmids); it can never ack ahead of effects.
+// generated desired-query differential against a pure TypeScript evaluator.
+// a deterministic trace exercises named-query membership, transform changes,
+// related rows, ordering, limits, and membership removal through the single
+// Rust query-pull path.
 //
 // REQUIRES bun on PATH (documented in the crate README / ts-oracle). run with a
 // normal `cargo test -p sync-core`.
 mod common;
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use common::{Host, TestDb};
+use common::TestDb;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence};
 use serde::{Deserialize, Serialize};
@@ -36,60 +20,15 @@ use serde_json::{Value, json};
 use sync_core::query::{handle_query_pull, init_query_schema};
 use sync_core::{SqlValue, SyncDb, Tables, Transactor, init_schema};
 
-const CLIENTS: [&str; 3] = ["c1", "c2", "c3"];
-const POOL: u8 = 6;
 static TRACE_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545F4914F6CDD1D)
-    }
-
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
-    }
-
-    fn boolean(&mut self) -> bool {
-        self.next() & 1 == 1
-    }
-}
-
-// Commands are symbolic: both runners assign mutation ids and cookies from
-// their current state. This makes every generated command valid while still
-// exercising state-dependent duplicate deletes, rejected transactions, stale
-// pulls, invalidation, and writes outside the mutation path.
+// commands are symbolic so both runners apply the same query and row changes.
+// the lowercase variant names are the wire tags run-oracle.ts consumes, so the
+// shared Query prefix stays even though it is the only family left.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 enum Op {
-    Put {
-        client: String,
-        item: String,
-        label: String,
-        rank: f64,
-        done: bool,
-        meta: Value,
-    },
-    Del {
-        client: String,
-        item: String,
-    },
-    Reject {
-        client: String,
-    },
-    Upstream {
-        sql: String,
-    },
-    Pull {
-        client: String,
-    },
-    Invalidate,
     QueryPut {
         hash: String,
         ast: Value,
@@ -286,56 +225,8 @@ fn query_op() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn client() -> impl Strategy<Value = String> {
-    prop::sample::select(&CLIENTS).prop_map(str::to_owned)
-}
-
-fn item() -> impl Strategy<Value = String> {
-    (0..POOL).prop_map(|id| format!("k{id}"))
-}
-
-fn op() -> impl Strategy<Value = Op> {
-    prop_oneof![
-        4 => (client(), item(), 0u16..1000, any::<bool>(), any::<bool>()).prop_map(
-            |(client, item, n, done, with_meta)| Op::Put {
-                client,
-                item,
-                label: format!("l{n}"),
-                rank: f64::from(n) / 7.0,
-                done,
-                meta: if with_meta { json!({ "s": n }) } else { Value::Null },
-            },
-        ),
-        2 => (client(), item()).prop_map(|(client, item)| Op::Del { client, item }),
-        1 => client().prop_map(|client| Op::Reject { client }),
-        2 => (item(), 0u8..50, any::<bool>()).prop_map(|(item, n, put)| {
-            let sql = if put {
-                format!(
-                    "INSERT INTO item (id,label,rank,done,meta) VALUES ('{item}','u{n}',{},0,NULL) ON CONFLICT (id) DO UPDATE SET label=excluded.label",
-                    f64::from(n) / 3.0
-                )
-            } else {
-                format!("DELETE FROM item WHERE id='{item}'")
-            };
-            Op::Upstream { sql }
-        }),
-        3 => client().prop_map(|client| Op::Pull { client }),
-        1 => Just(Op::Invalidate),
-        8 => query_op(),
-    ]
-}
-
 fn trace() -> impl Strategy<Value = Vec<Op>> {
-    prop::collection::vec(op(), 1..=64).prop_map(|mut ops| {
-        // Observe late state and verify the unchanged response after convergence.
-        for client in CLIENTS {
-            ops.push(Op::Pull {
-                client: client.into(),
-            });
-            ops.push(Op::Pull {
-                client: client.into(),
-            });
-        }
+    prop::collection::vec(query_op(), 1..=64).prop_map(|mut ops| {
         // Always leave two independently useful query observations in the
         // minimized trace. These make AND and order/limit mutants shrink to a
         // handful of operations instead of relying on a lucky random suffix.
@@ -352,84 +243,6 @@ fn trace() -> impl Strategy<Value = Vec<Op>> {
         ops.push(Op::QueryPull);
         ops
     })
-}
-
-fn fixed_client(rng: &mut Rng) -> String {
-    CLIENTS[rng.below(3) as usize].to_owned()
-}
-
-fn fixed_item(rng: &mut Rng) -> String {
-    format!("k{}", rng.below(u64::from(POOL)))
-}
-
-// Preserve the original stable corpus alongside proptest. These long traces
-// provide coverage-neutral migration while the property lane adds shrinking.
-fn fixed_trace(seed: u64, steps: u64) -> Vec<Op> {
-    let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(0xABC));
-    let mut ops = Vec::new();
-    let mut seq = 0u64;
-    for step in 0..steps {
-        match rng.below(7) {
-            0 | 1 => {
-                seq += 1;
-                // Keep PRNG consumption byte-for-byte compatible with the
-                // pre-proptest fixed corpus.
-                let rank = rng.below(1000) as f64 / 7.0;
-                let client = fixed_client(&mut rng);
-                let item = fixed_item(&mut rng);
-                let done = rng.boolean();
-                let meta = if rng.boolean() {
-                    json!({ "s": seq })
-                } else {
-                    Value::Null
-                };
-                ops.push(Op::Put {
-                    client,
-                    item,
-                    label: format!("l{seq}"),
-                    rank,
-                    done,
-                    meta,
-                });
-            }
-            2 => ops.push(Op::Del {
-                client: fixed_client(&mut rng),
-                item: fixed_item(&mut rng),
-            }),
-            3 => ops.push(Op::Reject {
-                client: fixed_client(&mut rng),
-            }),
-            4 => {
-                let item = fixed_item(&mut rng);
-                let sql = if rng.boolean() {
-                    seq += 1;
-                    format!(
-                        "INSERT INTO item (id,label,rank,done,meta) VALUES ('{item}','u{seq}',{},0,NULL) ON CONFLICT (id) DO UPDATE SET label=excluded.label",
-                        rng.below(50) as f64 / 3.0
-                    )
-                } else {
-                    format!("DELETE FROM item WHERE id='{item}'")
-                };
-                ops.push(Op::Upstream { sql });
-            }
-            5 => ops.push(Op::Pull {
-                client: fixed_client(&mut rng),
-            }),
-            _ if step % 40 == 39 => ops.push(Op::Invalidate),
-            _ => ops.push(Op::Pull {
-                client: fixed_client(&mut rng),
-            }),
-        }
-    }
-    for client in CLIENTS {
-        ops.push(Op::Pull {
-            client: client.into(),
-        });
-        ops.push(Op::Pull {
-            client: client.into(),
-        });
-    }
-    ops
 }
 
 fn fixed_query_trace() -> Vec<Op> {
@@ -701,73 +514,11 @@ impl QueryHost {
 
 // run the trace through the Rust engine, returning the pull responses in order
 fn run_rust(trace: &[Op]) -> Vec<Value> {
-    let mut h = Host::new(true);
     let mut query = QueryHost::new();
-    h.init();
-    let mut next_id: HashMap<String, i64> = HashMap::new();
-    // one cookie per client GROUP: a group shares one replica in Zero, so every
-    // tab pulls from the group's last served cookie, never a private one.
-    let mut group_cookie = json!(null);
     let mut pulls = Vec::new();
 
     for op in trace {
         match op {
-            Op::Put {
-                client,
-                item,
-                label,
-                rank,
-                done,
-                meta,
-            } => {
-                let client = client.clone();
-                let id = {
-                    let e = next_id.entry(client.clone()).or_insert(0);
-                    *e += 1;
-                    *e
-                };
-                h.push_one(
-                    "item.put",
-                    json!({ "id": item, "label": label, "rank": rank, "done": done, "meta": meta }),
-                    &client,
-                    "g1",
-                    id,
-                    "u1",
-                )
-                .unwrap();
-            }
-            Op::Del { client, item } => {
-                let client = client.clone();
-                let id = {
-                    let e = next_id.entry(client.clone()).or_insert(0);
-                    *e += 1;
-                    *e
-                };
-                h.push_one("item.del", json!({ "id": item }), &client, "g1", id, "u1")
-                    .unwrap();
-            }
-            Op::Reject { client } => {
-                let client = client.clone();
-                let id = {
-                    let e = next_id.entry(client.clone()).or_insert(0);
-                    *e += 1;
-                    *e
-                };
-                h.push_one("item.reject", json!({}), &client, "g1", id, "u1")
-                    .unwrap();
-            }
-            Op::Upstream { sql } => h.exec(sql),
-            Op::Invalidate => {
-                h.db.transaction(|db| sync_core::invalidate(db)).unwrap();
-            }
-            Op::Pull { client: _ } => {
-                // one puller per group: a group shares one replica and one
-                // pull loop, so the pulling clientID is the group's agent.
-                // pushes keep per-client ids; their lmids ride this pull.
-                let resp = h.pull_as("puller", "g1", group_cookie.clone(), "u1").unwrap();
-                group_cookie = resp["cookie"].clone();
-                pulls.push(json!({ "lane": "base", "response": resp }));
-            }
             Op::QueryPut {
                 hash,
                 ast,
@@ -854,63 +605,17 @@ fn run_ts(trace: &[Op]) -> Vec<Value> {
     parsed
 }
 
-// (has_clear, sorted non-clear ops) — rowsPatch order is not semantic
-fn normalize_patch(resp: &Value, base_lane: bool) -> (bool, Vec<String>) {
+// (has_clear, sorted non-clear ops): rowsPatch order is not semantic
+fn normalize_patch(resp: &Value) -> (bool, Vec<String>) {
     let patch = resp["rowsPatch"].as_array().cloned().unwrap_or_default();
     let has_clear = patch.first() == Some(&json!({ "op": "clear" }));
     let mut ops: Vec<String> = patch
         .iter()
         .filter(|op| op["op"] != "clear")
-        // the TS reference core fixture is identity-named while the Rust
-        // differential fixture deliberately exercises serverName mappings.
-        // canonicalize the reference response to the physical downstream wire
-        // before comparing row semantics.
-        .map(|op| {
-            let op = if base_lane {
-                physical_item_op(op.clone())
-            } else {
-                op.clone()
-            };
-            serde_json::to_string(&canonical_json(op)).unwrap()
-        })
+        .map(|op| serde_json::to_string(&canonical_json(op.clone())).unwrap())
         .collect();
     ops.sort();
     (has_clear, ops)
-}
-
-fn physical_item_op(mut op: Value) -> Value {
-    if op["tableName"] == "item" {
-        op["tableName"] = json!("item_record");
-    }
-    for field in ["value", "id", "merge"] {
-        let Some(row) = op.get_mut(field).and_then(Value::as_object_mut) else {
-            continue;
-        };
-        for (logical, physical) in [
-            ("id", "item_id"),
-            ("label", "item_label"),
-            ("rank", "sort_rank"),
-            ("done", "is_done"),
-            ("meta", "metadata_json"),
-        ] {
-            if let Some(value) = row.remove(logical) {
-                row.insert(physical.to_string(), value);
-            }
-        }
-    }
-    if let Some(columns) = op.get_mut("constrain").and_then(Value::as_array_mut) {
-        for column in columns {
-            *column = match column.as_str() {
-                Some("id") => json!("item_id"),
-                Some("label") => json!("item_label"),
-                Some("rank") => json!("sort_rank"),
-                Some("done") => json!("is_done"),
-                Some("meta") => json!("metadata_json"),
-                _ => column.clone(),
-            };
-        }
-    }
-    op
 }
 
 fn canonical_json(value: Value) -> Value {
@@ -929,43 +634,6 @@ fn canonical_json(value: Value) -> Value {
     }
 }
 
-// apply one normalized response to a simulated client store keyed
-// tableName + canonical pk json. clear empties it; put upserts; del removes.
-fn apply_to_store(
-    store: &mut std::collections::BTreeMap<String, Value>,
-    resp: &Value,
-    base_lane: bool,
-) {
-    let patch = resp["rowsPatch"].as_array().cloned().unwrap_or_default();
-    for op in patch {
-        let op = if base_lane {
-            physical_item_op(op)
-        } else {
-            op
-        };
-        match op["op"].as_str() {
-            Some("clear") => store.clear(),
-            Some("put") => {
-                let key = format!(
-                    "{} {}",
-                    op["tableName"],
-                    canonical_json(op["value"]["item_id"].clone())
-                );
-                store.insert(key, canonical_json(op["value"].clone()));
-            }
-            Some("del") => {
-                let key = format!(
-                    "{} {}",
-                    op["tableName"],
-                    canonical_json(op["id"]["item_id"].clone())
-                );
-                store.remove(&key);
-            }
-            _ => {}
-        }
-    }
-}
-
 fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
     if rust.len() != ts.len() {
         return Err(format!(
@@ -974,20 +642,10 @@ fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
             ts.len()
         ));
     }
-    // the base lane compares CONVERGENCE, not patch bytes: the membership
-    // engine legitimately skips deletes for rows the client never held and
-    // re-sends members when a desire is re-registered, both of which the
-    // change-log reference re-encodes differently. each side's responses are
-    // applied to its own simulated store and the stores must match after
-    // every pull. the query lane still compares patches exactly (both sides
-    // speak membership semantics there).
-    let mut rust_store = std::collections::BTreeMap::new();
-    let mut ts_store = std::collections::BTreeMap::new();
     for (i, (r, t)) in rust.iter().zip(ts.iter()).enumerate() {
         if r["lane"] != t["lane"] {
             return Err(format!("observation {i}: lane differs\nrust={r}\nts={t}"));
         }
-        let base_lane = r["lane"] == "base";
         let r = &r["response"];
         let t = &t["response"];
         if r["cookie"] != t["cookie"] {
@@ -1001,22 +659,12 @@ fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
         if r.get("unchanged").is_some() {
             continue;
         }
-        if base_lane {
-            apply_to_store(&mut rust_store, r, true);
-            apply_to_store(&mut ts_store, t, true);
-            if rust_store != ts_store {
-                return Err(format!(
-                    "pull {i}: stores diverged after applying rowsPatch\nrust={r}\nts={t}\nrust store={rust_store:?}\nts store={ts_store:?}"
-                ));
-            }
-        } else {
-            let rust_patch = normalize_patch(r, base_lane);
-            let ts_patch = normalize_patch(t, base_lane);
-            if rust_patch != ts_patch {
-                return Err(format!(
-                    "pull {i}: rowsPatch differs\nrust={r}\nts={t}\nnormalized rust={rust_patch:?}\nnormalized ts={ts_patch:?}"
-                ));
-            }
+        let rust_patch = normalize_patch(r);
+        let ts_patch = normalize_patch(t);
+        if rust_patch != ts_patch {
+            return Err(format!(
+                "pull {i}: rowsPatch differs\nrust={r}\nts={t}\nnormalized rust={rust_patch:?}\nnormalized ts={ts_patch:?}"
+            ));
         }
         // rust lmids must be a subset of ts lmids with identical values
         let rl = r["lastMutationIDChanges"].as_object().unwrap();
@@ -1028,7 +676,7 @@ fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
                 ));
             }
         }
-        if !base_lane && r["gotQueries"] != t["gotQueries"] {
+        if r["gotQueries"] != t["gotQueries"] {
             return Err(format!("pull {i}: gotQueries differs\nrust={r}\nts={t}"));
         }
     }
@@ -1037,7 +685,7 @@ fn compare(rust: &[Value], ts: &[Value]) -> Result<(), String> {
 
 fn property_config() -> Config {
     let default = Config::default();
-    // Each case launches the black-box Bun oracle. Keep pull requests bounded;
+    // each case launches the black-box Bun oracle. keep pull requests bounded;
     // nightly can raise this without changing code, e.g. PROPTEST_CASES=256.
     let cases = if std::env::var_os("PROPTEST_CASES").is_none() {
         12
@@ -1133,18 +781,15 @@ fn replay_saved_differential_trace() {
 }
 
 #[test]
-fn rust_matches_the_ts_reference_core_on_fixed_traces() {
-    for seed in 0..8 {
-        let mut ops = fixed_trace(seed, 200);
-        ops.extend(fixed_query_trace());
-        let rust = run_rust(&ops);
-        let ts = run_ts(&ops);
-        if let Err(reason) = compare(&rust, &ts) {
-            panic!(
-                "fixed seed {seed}: {reason}\ntrace={}",
-                serde_json::to_string_pretty(&ops).unwrap()
-            );
-        }
+fn rust_matches_the_ts_query_oracle_on_fixed_trace() {
+    let ops = fixed_query_trace();
+    let rust = run_rust(&ops);
+    let ts = run_ts(&ops);
+    if let Err(reason) = compare(&rust, &ts) {
+        panic!(
+            "fixed query trace: {reason}\ntrace={}",
+            serde_json::to_string_pretty(&ops).unwrap()
+        );
     }
 }
 
@@ -1152,7 +797,7 @@ proptest! {
     #![proptest_config(property_config())]
 
     #[test]
-    fn rust_matches_the_ts_reference_core_on_generated_traces(ops in trace()) {
+    fn rust_matches_the_ts_query_oracle_on_generated_traces(ops in trace()) {
         let rust = run_rust(&ops);
         let ts = run_ts(&ops);
         if let Err(reason) = compare(&rust, &ts) {

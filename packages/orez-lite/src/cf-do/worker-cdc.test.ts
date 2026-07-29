@@ -1543,7 +1543,7 @@ describe('table snapshots never capture earlier writes from the same transaction
         `INSERT INTO _zsync_changes ("tableName", "op", "pk") VALUES ('note', 'row', '{}')`
       )
     }
-    // The shape zero-http's mount installs on every synced table.
+    // the `_zsync_tr_*` trigger shape installed on every synced table.
     sql.exec(
       'CREATE TRIGGER "_zsync_tr_note_i" AFTER INSERT ON "note" BEGIN ' +
         `INSERT INTO _zsync_changes ("tableName", "op", "pk") VALUES ('note', 'row', '{}'); END`

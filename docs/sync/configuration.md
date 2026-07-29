@@ -180,36 +180,49 @@ Every route is under `/<namespace>/admin/` and gated by `authorizeAdmin` (or the
   `POST /admin/drop-next-push-response`, `POST /admin/restart`: fault injection
   and lifecycle controls used by the conformance harness.
 
-## Node mount surface
+## Node host surface
 
-`packages/orez-lite/src/zero-http/mount.ts` is the executor-backed TypeScript implementation usable
-directly as a Node or bun mount. It is the smaller surface: local mutators and
-per-user visibility, without query awareness or upstream ingest.
+`orez-lite/native` exports `createNativeHost`, the supported Node and bun
+integration. It launches the prebuilt Rust host with the application's Zero
+schema, SQLite initialization statements, storage directory, browser-origin
+policy, and HTTP callbacks.
 
-`createZeroHttpSyncServer(config)` returns `{executor, ready, handlePull,
-handlePush, watermark, invalidate}`. Its config:
+Every pull is query-driven. The application must define its named queries once
+and use the same `defineQueries` registry for the client and server-side query
+resolution. The native host's required `transformQueries` callback resolves
+each desired query name and arguments through that registry with the
+authenticated claims as context. A client with no desired queries receives no
+application rows.
 
-| Field                    | Type                          | Default     | Meaning                                                                                     |
-| ------------------------ | ----------------------------- | ----------- | ------------------------------------------------------------------------------------------- |
-| `applicationDatabase`    | `ApplicationDatabase`         | required    | The one async transaction provider used by pull, push, invalidation, pruning, and replay.   |
-| `schema`                 | Zero `Schema`                 | required    | The Zero schema, including physical table and column names, types, and primary keys.        |
-| `tables`                 | `readonly string[]`           | required    | Logical schema table names to capture and sync.                                             |
-| `mutators`               | `MutatorRegistry`             | required    | Registered application mutators executed inside the application database transaction.       |
-| `effects`                | `EffectScheduler`             | required    | Background effect scheduling and error reporting for mutators.                              |
-| `visible(table, userID)` | `=> {where, params}`          | whole table | Per-user row predicate used by snapshots and incremental point reads.                       |
-| `visibilityInvalidation` | capture fields + reset policy | none        | Access-dependency changes that make an affected user receive one fresh authorized snapshot. |
-| `initialCookie`          | `(transaction) => number`     | 0           | Existing cookie high-water mark adopted once when change capture is first installed.        |
-| `retainChanges`          | `number`                      | 4096        | Change-log retention.                                                                       |
+```ts
+import { defineQueries, defineQuery } from '@rocicorp/zero'
+import { createNativeHost } from 'orez-lite/native'
+import { zql } from './zero.generated'
 
-`createZeroHttpMount(config)` mounts the pull and push handlers behind one
-database-id path segment. Its config is `pathPrefix` (must start with `/`, for
-example `/p-` to produce `/p-<projectID>/pull`) and `server(databaseID)`, which
-resolves the `ZeroHttpSyncServer` for a database only after the caller has
-authorized `route.databaseID`. It returns `{match(pathname), handle(route, body,
-authData)}`. `authenticate` and `handle` take application auth data directly;
-the mount constructs the sync claims internally. `match` does routing only;
-`handle` delegates without translating
-bodies, responses, or errors.
+export const appQueries = defineQueries({
+  project: {
+    mine: defineQuery(({ ctx }) => zql.project.where('ownerId', ctx.userID)),
+  },
+})
+
+const host = createNativeHost({
+  schema,
+  initSql,
+  dataDir: '.orez/native',
+  port: 7849,
+  adminTokenEnv: 'OREZ_ADMIN_TOKEN',
+  callbacks: {
+    authenticate: 'https://localhost:3000/api/zero/auth',
+    authorizeWake: 'https://localhost:3000/api/zero/wake-authorize',
+    transformQueries: 'https://localhost:3000/api/zero/queries',
+  },
+  allowedOrigins: ['https://localhost:3000'],
+})
+```
+
+The handler at `transformQueries` must resolve from `appQueries`. Cloudflare
+and browser hosts take the registry directly as the required `queries` field.
+The native callback is the process boundary for the same contract.
 
 ## Native replica-file retention
 

@@ -24,7 +24,7 @@ existing §6 worked example for 1.5→1.6 and the brand-new §6 entry for
 Driver: Codex session `ab-mqokjnye-60287` (now idle, can be re-used or left).
 
 - `3da0cc4 chore(deps): upgrade @rocicorp/zero to 1.7.0-canary.3` — package.json + bun.lock + appended §6 worked example to `plans/upgrade-zero.md`.
-- `fc6f96f fix: align zero 1.7 transport timing` — `src/zero-http/transport.ts` (+ a beforeEach hook timeout fix in `src/replication/zero-compat.test.ts`).
+- `fc6f96f fix: align zero 1.7 transport timing` changed the HTTP transport, now at `packages/orez-lite/src/client/transport.ts` (plus a beforeEach hook timeout fix in `src/replication/zero-compat.test.ts`).
 - `670de46 docs: record zero 1.7 canary validation` — finishes the §6 worked example.
 
 Validation:

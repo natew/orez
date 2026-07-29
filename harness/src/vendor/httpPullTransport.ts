@@ -10,11 +10,11 @@
 // snapshot-reset stall it prevents is pinned by httpPullTransport.stall.test.ts.
 // http-pull transport: runs a stock @rocicorp/zero client over stateless HTTP
 // by intercepting its /sync/v51/connect WebSocket with a shim that translates
-// pull responses into v51 pokes. ported from the orez zero-http spike — the
+// pull responses into v51 pokes. ported from the canonical Orez HTTP transport.
 // wire contract (lexicographic string cookies, gotQueriesPatch poke-part
 // ordering, FIFO push serialization, updateAuth, 401→Unauthorized frame,
 // teardown drain) is pinned by the tests in ./httpPull/ and documented in
-// ~/orez/plans/zero-http.md. do not "simplify" any of it without re-running
+// do not "simplify" any of it without re-running
 // those tests against a stock zero client.
 
 type WebSocketProtocols = string | string[] | undefined
@@ -241,7 +241,7 @@ class ZeroHttpSocket {
     this.url = String(url)
     this.clientID = this.connectURL.searchParams.get('clientID') ?? ''
     this.clientGroupID = this.connectURL.searchParams.get('clientGroupID') ?? ''
-    this.wsid = this.connectURL.searchParams.get('wsid') ?? `zero-http-${Date.now()}`
+    this.wsid = this.connectURL.searchParams.get('wsid') ?? `orez-http-${Date.now()}`
     const baseCookie = this.connectURL.searchParams.get('baseCookie')
     this.cookie = baseCookie ? baseCookie : null
     // the local cookie ID is encoded into the suffix of any cookie we
@@ -301,7 +301,7 @@ class ZeroHttpSocket {
       case 'ackMutationResponses':
         return
       default:
-        throw new Error(`unsupported zero-http upstream message ${message[0]}`)
+        throw new Error(`unsupported Orez HTTP upstream message ${message[0]}`)
     }
   }
 
@@ -600,7 +600,7 @@ class ZeroHttpSocket {
       // the server watermark is BEHIND the client: a real reset/restore. mirror
       // the 409 stale path instead of poking the client backwards.
       throw new Error(
-        `zero-http pull returned stale cookie ${response.cookie} for ${this.cookie}`
+        `Orez HTTP pull returned stale cookie ${response.cookie} for ${this.cookie}`
       )
     } else if (currentServer !== null && response.cookie === currentServer) {
       // same server watermark but a non-empty patch: a query-aware membership
@@ -613,7 +613,7 @@ class ZeroHttpSocket {
       nextCookie = toWebSocketCookie(response.cookie) as string
     }
 
-    const pokeID = `zero-http-${++this.state.nextPokeID}`
+    const pokeID = `orez-http-${++this.state.nextPokeID}`
     let gotQueries = dedupeGotQueriesPatch(this.pendingGotQueriesPatch)
     this.pendingGotQueriesPatch = []
     const rowsCleared =
@@ -666,7 +666,7 @@ class ZeroHttpSocket {
     const serverCookie = cookie ?? toHttpCookie(this.cookie)
     if (serverCookie === null) return
     const nextCookie = toLocalWebSocketCookie(serverCookie, ++this.nextLocalCookieID)
-    const pokeID = `zero-http-${++this.state.nextPokeID}`
+    const pokeID = `orez-http-${++this.state.nextPokeID}`
     const gotQueries = dedupeGotQueriesPatch(this.pendingGotQueriesPatch)
     this.pendingGotQueriesPatch = []
     this.recordAckedGotQueries(gotQueries)
@@ -789,7 +789,7 @@ function toHttpCookie(cookie: string | null): number | null {
   if (cookie === null || cookie === '') return null
   const parsed = Number(cookie.slice(0, COOKIE_WIDTH))
   if (!Number.isFinite(parsed)) {
-    throw new Error(`zero-http cookie is not numeric: ${cookie}`)
+    throw new Error(`Orez HTTP cookie is not numeric: ${cookie}`)
   }
   return parsed
 }
@@ -814,7 +814,7 @@ class ZeroHttpResponseError extends Error {
     readonly path: '/pull' | '/push',
     readonly status: number
   ) {
-    super(`zero-http ${path} failed with ${status}`)
+    super(`Orez HTTP ${path} failed with ${status}`)
   }
 }
 

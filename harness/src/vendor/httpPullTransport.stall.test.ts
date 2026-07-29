@@ -15,7 +15,7 @@ import { Zero } from '@rocicorp/zero'
 import { mutators, queries, schema } from '../fixture.js'
 import { installHttpPullTransport } from './httpPullTransport.js'
 
-const ORIGIN = 'https://zero-http-stall.local'
+const ORIGIN = 'https://orez-http-stall.local'
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), {

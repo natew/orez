@@ -1,4 +1,4 @@
-// SQLite-to-Zero value conversion, mirrored from the zero-http mount's
+// SQLite-to-Zero value conversion, mirrored from the TypeScript transport's
 // `toZeroValue` and soot's `toZeroValue`.
 // rowsPatch values must match the zero schema's column types exactly, and
 // floats must round-trip with full fidelity: SQLite's json_object formats

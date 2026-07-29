@@ -18,7 +18,7 @@ import type {
   PushRequest,
 } from './transport.js'
 
-const ORIGIN = 'https://zero-http.local'
+const ORIGIN = 'https://orez-http.local'
 const transportEncryptionKey = new Uint8Array(32).fill(17)
 const transportEncryptionManifest = {
   version: 1,
@@ -80,7 +80,7 @@ afterEach(async () => {
   vi.useRealTimers()
 })
 
-describe('zero-http transport', () => {
+describe('Orez HTTP transport', () => {
   test('connect + complete maps physical rows into a stock Zero materialized query', async () => {
     const requests: RequestRecord[] = []
     let cookie = 0
@@ -456,8 +456,8 @@ describe('zero-http transport', () => {
     })
     const transport = installHttpPullTransport({
       origin: ORIGIN,
-      pullOrigin: 'https://app.local/zero-http',
-      pushOrigin: 'https://app.local/zero-http',
+      pullOrigin: 'https://app.local/api/zero',
+      pushOrigin: 'https://app.local/api/zero',
       fetch,
     })
     transports.push(transport)
@@ -477,9 +477,9 @@ describe('zero-http transport', () => {
     const push = requests.find((request) => request.path.endsWith('/push'))
     // push always carries the schema-shard routing params (native hosts route
     // by them; other servers ignore unknown query params)
-    expect(push?.url).toBe('https://app.local/zero-http/push?schema=zero_0&appID=zero')
+    expect(push?.url).toBe('https://app.local/api/zero/push?schema=zero_0&appID=zero')
     expect(requests.find((request) => request.path.endsWith('/pull'))?.url).toBe(
-      'https://app.local/zero-http/pull'
+      'https://app.local/api/zero/pull'
     )
   })
 
@@ -1242,7 +1242,7 @@ describe('zero-http transport', () => {
     await eventually(() => expect(wakeSockets).toHaveLength(1))
     expect(getToken).toHaveBeenCalledTimes(1)
     expect(wakeSockets[0].url).toBe(
-      'wss://zero-http.local/wake?clientID=c1&wakeToken=signed%20token%26scope%3Done'
+      'wss://orez-http.local/wake?clientID=c1&wakeToken=signed%20token%26scope%3Done'
     )
   })
 
@@ -1266,8 +1266,8 @@ describe('zero-http transport', () => {
     await eventually(() => expect(wakeSockets).toHaveLength(2), 1_000)
     expect(getToken).toHaveBeenCalledTimes(2)
     expect(wakeSockets.map((socket) => socket.url)).toEqual([
-      'wss://zero-http.local/wake?clientID=c1&wakeToken=wake-token-1',
-      'wss://zero-http.local/wake?clientID=c1&wakeToken=wake-token-2',
+      'wss://orez-http.local/wake?clientID=c1&wakeToken=wake-token-1',
+      'wss://orez-http.local/wake?clientID=c1&wakeToken=wake-token-2',
     ])
   })
 
@@ -1307,7 +1307,7 @@ describe('zero-http transport', () => {
     openRawSocketWithMessages()
 
     await eventually(() => expect(wakeSockets).toHaveLength(1))
-    expect(wakeSockets[0].url).toBe('wss://zero-http.local/wake?clientID=c1')
+    expect(wakeSockets[0].url).toBe('wss://orez-http.local/wake?clientID=c1')
   })
 
   test('non-origin WebSockets pass through to the native implementation', () => {
@@ -1562,7 +1562,7 @@ function createZero(
     auth: 'token-u1',
     schema: zeroHttpFixtureSchema,
     kvStore: 'mem',
-    storageKey: `zero-http-test-${++storageID}`,
+    storageKey: `orez-http-test-${++storageID}`,
     mutators: zeroHttpFixtureMutators,
     pingTimeoutMs: options.pingTimeoutMs,
     onClientStateNotFound: options.onClientStateNotFound,
@@ -1580,7 +1580,7 @@ function createEncryptedZero() {
     auth: 'token-u1',
     schema: zeroHttpFixtureSchema,
     kvStore: 'mem',
-    storageKey: `zero-http-encryption-test-${++storageID}`,
+    storageKey: `orez-http-encryption-test-${++storageID}`,
     mutators: encryptionFixtureMutators,
   })
   zeros.push(zero)
@@ -1784,7 +1784,7 @@ function installWithQueries(
   return transport
 }
 
-describe('zero-http desired-query sync', () => {
+describe('Orez HTTP desired-query sync', () => {
   test('ships desired queries with pull state (transformed AST) and emits server got-query ack', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

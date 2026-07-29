@@ -24,10 +24,6 @@
       "types": "./dist/realtime.d.ts",
       "import": "./dist/realtime.js"
     },
-    "./zero-http": {
-      "types": "./dist/zero-http/mount.d.ts",
-      "import": "./dist/zero-http/mount.js"
-    },
     "./encryption": {
       "types": "./dist/client/encrypted-column-codec.d.ts",
       "import": "./dist/client/encrypted-column-codec.js"
@@ -79,7 +75,6 @@
   },
   "scripts": {
     "build:runtime": "rm -rf dist && tsc -p tsconfig.build.json",
-    "build:zero-http": "rm -rf dist/zero-http && tsc -p tsconfig.zero-http.json",
     "build:dependencies": "bun run --cwd ../sync-cf-host build:dist",
     "build": "bun run build:dependencies && bun run build:runtime && bun run --cwd ../sync-browser-host build:runtime",
     "test": "cd ../.. && vitest run --config vitest.config.ts packages/orez-lite/src",

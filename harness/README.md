@@ -4,8 +4,7 @@ zero sync-engine conformance + load harness. plan and status:
 `../plans/zero-conformance-harness.md`. never published; private tooling.
 
 one harness, multiple targets (`src/target.ts`): stock zero-cache,
-orez-local pure-sqlite, orez-cf (cloudflare DO), sync-native (`rust-local`),
-and sync-core WASM (`rust-cf`). every lane points stock
+sync-native (`rust-local`), and sync-core WASM (`rust-cf`). every lane points stock
 `@rocicorp/zero` clients at a target, writes both through sync and straight
 to the upstream store, requires convergence, and compares converged client
 state against a fresh oracle read of the authoritative store.
@@ -15,23 +14,21 @@ state against a fresh oracle read of the authoritative store.
 ```sh
 bun install
 bun run smoke                                      # 10 clients vs real zero-cache
-bun src/smoke.ts --target orez-local --clients 50  # same vs the sqlite sync-server core
-bun src/multi-project-mount.ts                      # plain vs /p-<id> transport + DB isolation
-bun src/smoke.ts --target orez-cf --clients 5      # same vs the deployed CF DO
-bun src/shapes.ts                                  # 22-query differential: stock-zero vs orez-local
-bun src/shapes.ts --against orez-cf                # same differential vs the CF DO
+bun src/smoke.ts --target rust-local --clients 50  # same vs the native Rust host
+bun src/smoke.ts --target rust-cf --clients 5      # same vs the Rust/WASM CF host
+bun src/shapes.ts                                  # 22-query differential: stock-zero vs rust-local
+bun src/shapes.ts --against rust-cf                # same differential vs the CF host
 bun src/sweep.ts --rounds 15                       # seeded randomized differential (prints seed)
-bun src/sweep.ts --seed 12345 --against orez-cf    # deterministic replay / CF host
-bun src/bench.ts --target orez-local --clients 20 --writers 5 --rate 10 --duration 15
-bun src/storm.ts --target orez-local --clients 100 # one-project width + round gates
-bun src/storm.ts --target orez-cf --clients 100    # same against one deployed DO
-bun src/eviction.ts --target local                 # SIGKILL + file-backed restart
-bun src/eviction.ts --target cf                    # idle DO memory teardown + resume
-bun src/permissions.ts                             # per-user visibility + add/revoke
+bun src/sweep.ts --seed 12345 --against rust-cf    # deterministic replay / CF host
+bun src/bench.ts --target rust-local --clients 20 --writers 5 --rate 10 --duration 15
+bun src/storm.ts --target rust-local --clients 100 # one-project width + round gates
+bun src/storm.ts --target rust-cf --clients 100    # same against one deployed DO
+bun src/eviction.ts --target rust-local            # SIGKILL + file-backed restart
+bun src/eviction.ts --target rust-cf               # idle DO memory teardown + resume
 bun src/reconnect.ts                               # persisted resume + recovery faults
 bun src/multi-tab.ts                               # real shared client group + LMIDs
 bun src/corpus-check.ts                            # validate pinned upstream provenance
-bun src/upstream-corpus.ts                         # one observable trace across all four hosts
+bun src/upstream-corpus.ts                         # one observable trace across all three hosts
 bun src/state-machine.ts --against rust-local --seed 7 --steps 24
 bun src/pull-dialect-conformance.ts --target rust-local # raw HTTP cookie contract
 bun src/m6-runner.ts --suite native --quick        # native fault/recovery qualification
@@ -47,23 +44,12 @@ and the three weakest axis pairs. `--dry` prints the full per-pair accounting
 and missing tuples without booting targets; seed 42 reaches all 225/225
 coverable pairs with 400 generated specs (`--rounds 100 --queriesPerRound 4`).
 
-targets: `stock-zero` (real zero-cache + embedded postgres + fixture app
-server), `orez-local` (orez executor-backed zero-http core over pure bun:sqlite,
-real `@rocicorp/zero` clients through the canonical `orez-lite/client`
-integration), and `orez-cf` (the
-SAME core hosted in a durable object over `ctx.storage.sql` — `cf/worker.ts`
-deployed as `zharness-sync` on lslcf; fresh namespace per run; admin oracle
-gated by the ADMIN_KEY secret, key file `~/.zharness-cf-admin-key`; deploy
-with `cd cf && bunx wrangler deploy`, then wait ~1min for propagation before
-probing). DO sqlite gotchas the core is written around: no raw
-`BEGIN`/`SAVEPOINT` SQL (only `storage.transactionSync`), no `?N` numbered
-bindings.
-
-`rust-local` runs the release sync-native binary against a temporary,
-file-backed SQLite namespace. `rust-cf` runs the same sync-core engine as WASM
-inside the production-shaped sync-cf-host Durable Object. The
-`upstream-corpus.ts` portable lane compares TypeScript, stock Zero, native Rust,
-and Rust/WASM observations; `state-machine.ts` mixes writes, desired-query
+targets: `stock-zero` runs real zero-cache with embedded postgres and the
+fixture app server. `rust-local` runs the release sync-native binary against a
+temporary, file-backed SQLite namespace. `rust-cf` runs the same sync-core
+engine as WASM inside the production-shaped sync-cf-host Durable Object. The
+`upstream-corpus.ts` portable lane compares stock Zero, native Rust, and
+Rust/WASM observations. `state-machine.ts` mixes writes, desired-query
 changes, pruning, response loss, server restart, and client restart while
 checking every live view against an authoritative SQL oracle. Rust-CF commands
 use `ZHARNESS_RUST_CF_WORKER` when set and read `ZHARNESS_CF_ADMIN_KEY` (or
@@ -75,12 +61,6 @@ durability through raw HTTP pulls. Protocol sequencing is independent of the
 fixture schema: a target adapter supplies auth, state changes, authoritative row
 reads, and patch normalization. Each check emits a receipt and the full run is
 saved under `target/consistency/`.
-
-`permissions.ts` runs `orez-local` with its optional `visible()` policy:
-owner-or-member projects, tasks/members through visible projects, and only
-the authenticated user's own user row. it is intentionally separate from
-the globally visible differential lanes and asserts that membership removal
-clears already-cached project/task data.
 
 `reconnect.ts` and `multi-tab.ts` use a temporary file-backed implementation
 of Zero's own SQLite KV store. they exercise the actual persisted Replicache

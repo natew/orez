@@ -90,13 +90,11 @@ query it came from.
 | four-query desired patch, resolver sleeping once per call                   | 1,209 ms                             | 314 ms                           | same                          |
 | cold pull for one registered query, same fixture and client                 | 11,275 B / 90 patches (`orez-local`) | 806 B / 5 patches (`rust-local`) | `harness/src/pull-payload.ts` |
 
-The last row is not a before/after of a change; it is the standing difference
-between Orez's two pull implementations. The zero-http mount serves every mounted
-table the user can see and treats the desired-query patch as an ack to echo,
-so its payload grows with everything the user can see. The Rust engine resolves
-the client's queries and sends their membership, so its payload grows with what
-was asked for. The warm `unchanged` pull is 29 bytes on both: the gap is entirely
-the cache miss.
+The last row records the historical difference between the removed TypeScript
+full-projection host and the Rust query engine. The Rust engine resolves the
+client's queries and sends their membership, so payload grows with what was
+asked for. The TypeScript host was removed when Orez adopted one query-pull
+path.
 
 ## Negative controls
 
@@ -122,15 +120,9 @@ nothing downstream calls it yet. A consumer that routes every read through
 that is the 455 ms to 209 ms difference. This is the largest remaining lever on
 sync-auth latency and it is a call-site change, not an Orez change.
 
-**Two production pull paths still exist.** Web reaches the Rust query-aware host;
-native mobile reaches the zero-http mount, and the mount is what serves the
-all-visible-row payload. The Rust host's namespace router already accepts the
-native URL shapes, its authenticator already forwards bearer tokens, and push is
-already delegated to the same application route, so the reuse is client
-configuration rather than protocol. A client that moves must rotate its local
-store key in the same change: the two hosts' cookies are different watermark
-domains, and a numerically plausible cookie from the wrong one diffs from a
-baseline that never existed.
+**The pull-path migration is complete.** Web and native mobile use the Rust
+query host. Clients migrated from the removed TypeScript host rotated their
+local store keys because the two hosts used different cookie domains.
 
 **The batch resolver is a breaking config change.** `resolveQuery` is gone; a
 consumer must supply `resolveQueries`. See the migration note below.

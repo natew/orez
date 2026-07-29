@@ -1,5 +1,5 @@
 // sync-core: the deterministic sqlite zero sync engine behind Orez hosts and
-// the executor-backed zero-http conformance mount; see
+// the original executor-backed TypeScript conformance host; see
 // plans/rust-sync-server-final-plan.md.
 //
 // hard boundary rules (pinned by the plan, do not relax):

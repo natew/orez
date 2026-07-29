@@ -1,4 +1,4 @@
-// cursor-pull delta primitive: semantics must mirror the Orez zero-http delta
+// cursor-pull delta primitive: semantics must mirror the Orez sync delta
 // suite — see the build plan in
 // plans/zero-server-rewrite.md. fixtures are PRODUCTION-SHAPED (2026-07-09
 // review, blocker 1): schema-qualified log identities like `public.item`,

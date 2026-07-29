@@ -28,8 +28,7 @@ namespace `soot`) and a **project plane** (one DO namespace per project,
 
 ### A.1 Control plane — `src/zero/httpPull.server.ts`
 
-- Routes: `POST /zero-http/pull` (`app/zero-http/pull+api.tsx`) and
-  `POST /zero-http/push` (`app/zero-http/push+api.tsx`).
+- Routes: the legacy control-plane HTTP pull and push endpoints.
 - Model: **stateless full snapshot every pull** — no change log. Each response
   is `[{op:'clear'}, ...puts]` (module header `:14-20`). This is the "uniform
   project visibility, row-local predicates, proven in production" surface the
@@ -296,8 +295,8 @@ u.id=s."userId" WHERE s.token=$1 AND s."expiresAt" > now() LIMIT 1`.
 - **Normalized claims passed to the engine** (plan's "auth handoff"): `{ userId
 (→ id), email, role }`. Anonymous identity: signed `soot_anon_id` cookie
   (`src/auth/anonCookie.server.ts`, IDs shaped `anon-<hex>`, `:12-14`);
-  endpoints fall back to anon when no session (control `app/zero-http/
-pull+api.tsx:17-18`; project `httpPullProject.server.ts:664-669`).
+  endpoints fall back to anon when no session (control route `:17-18`;
+  project `httpPullProject.server.ts:664-669`).
 
 ### C.2 userID → namespace (DO / database)
 
@@ -369,7 +368,7 @@ pull+api.tsx:17-18`; project `httpPullProject.server.ts:664-669`).
   routing (asserts a `/p-<id>/(sync|replication|mutate)/v<n>/` matcher;
   forwards `/p-...` sync/mutate to the data worker; treats non-zero `/p-`
   paths as app traffic — `:1034`, `:1154-1363`), the authoritative push
-  forwarded to `/api/zero/push` (`:1363-1414`), and the zero-http shard DDL
+  forwarded to `/api/zero/push` (`:1363-1414`), and the sync shard DDL
   repair (`zeroHttpShardDDL('soot')`, `:1044-1101`).
 - **DDL/deploy composition**: `src/deploy/cloudflareDoDeploy.ts` (1641 lines).
   `zeroHttpShardDDL` at `:384`; `zeroHttpShardBatchStatements` via
@@ -384,7 +383,7 @@ pull+api.tsx:17-18`; project `httpPullProject.server.ts:664-669`).
 - **Upstream conformance gate** for cursor-pull semantics is external to soot:
   orez `src/sync-server/sync-server.ts` + `src/cf-do/cursor-pull.ts`, run by
   the orez harness lanes on branch `zero-sync-server`
-  (`plans/sootbean/zero/zero-http-project-plane.md:8-12`,
+  (the project-plane HTTP transport plan, plus
   `httpPullProject.server.ts:36-39`). This is the reference the Rust engine is
   replacing.
 
@@ -398,7 +397,7 @@ pull+api.tsx:17-18`; project `httpPullProject.server.ts:664-669`).
   `app/api/zero/pull+api.tsx` (`zeroServer.handleQueryRequest`, `:14`),
   `app/api/zero/push+api.tsx` (`handleMutationRequest`),
   `app/api/zero/async-action+api.tsx`.
-- **Control-plane http-pull:** `app/zero-http/pull+api.tsx`, `push+api.tsx`.
+- **Control-plane http-pull:** the legacy control pull and push route modules.
 - **Project-plane http-pull:** `app/[zeroProjectBase]/pull+api.tsx`,
   `push+api.tsx`.
 
@@ -407,8 +406,8 @@ pull+api.tsx:17-18`; project `httpPullProject.server.ts:664-669`).
 Both instances are hardwired to `http-pull` today:
 
 - Control: `controlTransport = bootstrapUserGraph ? ('http-pull') : undefined`
-  (`:233`), `controlServer = \`${APP_ORIGIN}/zero-http\`` (`:215-217`), mounted
-`:277-282`.
+  (`:233`), with the control endpoint selected at `:215-217` and mounted at
+  `:277-282`.
 - Project: hardcoded `transport="http-pull"`, `pullIntervalMs={15_000}`,
   `cacheURL={projectId ? \`${APP_ORIGIN}/p-${projectId}\` : cacheURL}`
 (`:431-433`).
@@ -467,7 +466,7 @@ zero-cache routes + env + the TS `httpPull.server.ts` / `httpPullProject
 
 10 files; migration-relevant:
 
-- `zero-http-project-plane.md` — project-plane http-pull design/contract
+- the project-plane http-pull design and contract
   (status BUILT 2026-07-09); names all code files and the `/p-<id>/pull|push`
   → One-router fall-through routing fact.
 - `custom-mutator-depth-seam-2026-07-09.md` — the CF subrequest-depth push

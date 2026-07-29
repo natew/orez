@@ -112,11 +112,11 @@ mutators or push delegation, upstream ingest) is passed in as one
 `SyncHostConfig` object. That object is the entire public API; the configuration
 page documents every field.
 
-`orez-lite` exposes the shared application-database boundary. Both hosts
-call it for registered mutators, CRUD SQL, last-mutation-id ownership, replay,
-and deferred effects. `packages/orez-lite/src/zero-http/mount.ts` composes it with the
-SQLite pull/change-log surface used by the Node and bun test mounts. The CF host
-keeps the Rust pull and ingest engine compiled to WASM.
+`orez-lite` exposes the shared application-database boundary. Both hosts call
+it for registered mutators, CRUD SQL, last-mutation-id ownership, replay, and
+deferred effects. Node and bun applications launch the Rust host through
+`orez-lite/native`. The CF host keeps the Rust pull and ingest engine compiled
+to WASM.
 
 ### packages/sync-browser-host
 
@@ -239,7 +239,8 @@ On Cloudflare the deployment has two Durable Object roles:
   pushes. Application writes and sync ingestion share the same authoritative
   SQLite object without a Postgres compatibility layer.
 
-The canonical Orez transport integration lives at `orez-lite/client`, with source
-in `packages/orez-lite/src/zero-http/`. It keeps `@rocicorp/zero` as the client and maps its sync
-connection onto the Orez Lite pull, push, and wake server endpoints. Downstream
-vendored copies are refreshed from this implementation.
+The canonical Orez transport integration lives at `orez-lite/client`, with
+source in `packages/orez-lite/src/client/`. It keeps `@rocicorp/zero` as the
+client and maps its sync connection onto the Orez Lite pull, push, and wake
+server endpoints. Downstream vendored copies are refreshed from this
+implementation.

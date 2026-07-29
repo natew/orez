@@ -1,9 +1,8 @@
 # Align orez timestamp storage with Zero's number model
 
 Status: proposal, needs Nate's go-ahead. Written 2026-07-23 by p1570 after the
-Soot prod timestamp incident. The companion mount fix (decode/throw in
-`toZeroValue`, `src/zero-http/mount.ts`) is committed on this branch and is
-safe to land independently; this document scopes the deeper storage change.
+Soot prod timestamp incident. The original TypeScript mount fix was removed
+with that host; this document scopes the deeper storage change.
 
 ## The divergence
 
@@ -20,7 +19,7 @@ Orez's pg proxy instead maps `timestamptz` to sqlite `text`
 (`src/pg-proxy-do-backend.ts` type map) and stores pg timestamp TEXT. Every
 read boundary then needs its own decoder: the Rust engine's
 `timestamp_text_to_epoch_ms` (`crates/sync-core/src/value.rs`), the cf-do
-`normalizeRow` NaN-passthrough, and (until this branch) the zero-http mount,
+`normalizeRow` NaN-passthrough, and the former TypeScript mount,
 which forwarded raw strings and let them detonate in the client's
 `compareValues`.
 

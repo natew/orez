@@ -63,7 +63,7 @@ sync-server.ts` (~500 lines) + `sync-server.test.ts` (19-test delta
   log-derived lmids, legacy/control table classification, membership auth.
   `~/soot/src/zero/httpPull.server.ts` is the simpler control-plane
   (snapshot-only) shape. design doc with every decision + revision history:
-  `~/soot/plans/sootbean/zero/zero-http-project-plane.md`.
+  the Soot project-plane HTTP transport plan.
 - **cursor primitive**: `~/orez/src/cf-do/cursor-pull.ts` (+ tests) — the
   table-identity contract (schema-qualified log names, explicit skip
   classifier, THROW on unmapped — silent drops are permanent divergence).

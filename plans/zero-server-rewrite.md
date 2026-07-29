@@ -12,7 +12,7 @@ coexistence measurement, then the default flip. 100-client storm lane green
 window.
 
 status: consolidated plan, 2026-07-09. this merges the prior decision docs and
-the passed zero-http spike into one execution plan. the direction is the
+the passed HTTP transport spike into one execution plan. the direction is the
 "clean-room zero-compatible engine" (soot's
 `plans/sootbean/zero-compatible-sync-engine.md`, option 2), scoped to what is
 provable and shippable: keep the stock `@rocicorp/zero` client, replace the
@@ -24,11 +24,11 @@ when this is done.
 http-pull) is SHIPPED and validated in prod. on-zero ships
 `transport: 'http-pull'` (`~/takeout/packages/on-zero/src/httpPullTransport.ts`
 plus the ported spike suite in `src/httpPull/`), soot serves
-`/zero-http/pull|push` (`~/soot/src/zero/httpPull.server.ts`), the control
+the control pull and push routes (`~/soot/src/zero/httpPull.server.ts`), the control
 instance is flipped (`~/soot/src/zero/client.tsx`), and the flip's five launch
 gates were proven (soot commit 70fb7efd26; the shipped integration design was
 pruned from soot plans as done, recover it via
-`git show fe4b345577~1:plans/sootbean/zero/zero-http-integration.md`).
+the deleted Soot HTTP transport integration plan from that parent commit).
 **phase 2 (project plane) is the active work.**
 
 ## prior art this consolidates (read these before changing course)
@@ -39,10 +39,10 @@ pruned from soot plans as done, recover it via
   2026-06-12); per-project sharding shipped and did not move the wall,
   because the cost is per-client resident view-syncer state, structural to
   zero-cache's connection contract.
-- `~/orez/plans/zero-http.md`: the spike, PASSED 2026-06-12. a stock 1.6.1
+- the Orez HTTP transport spike, PASSED 2026-06-12. a stock 1.6.1
   zero client runs on an HTTP transport (fake-WebSocket seam) against a
   stateless server: full-snapshot pulls, HTTP push, LMID bookkeeping, rebase,
-  rollback, relations, auth parity all proven. 26 tests in `src/zero-http/`
+  rollback, relations, auth parity all proven. 26 tests in the original suite
   pin nine wire-level discoveries; that VERDICT section is the transport
   contract. its "step 2" (cursor-diff pulls) is phase 2 below.
 - `~/soot/src/zero/core.ts`: the account/project split, live in prod. control
@@ -87,13 +87,13 @@ requirement plane by plane, which is why the rewrite is small enough to own.
 client (stock @rocicorp/zero, zql, optimistic mutations, rebase: unchanged)
   │  on-zero transport: 'http-pull' (fake-WebSocket seam, v51 pokes)
   │  note: base must be ONE path component (zero server-option validation),
-  │  so soot uses /zero-http, project routes get their own single-component
+  │  so soot uses one control path, project routes get their own single-component
   │  base (e.g. /p-<projectId> prefix routing already exists)
   ▼
 app worker
-  ├── /zero-http/pull (control) ──► per-user full snapshot   [SHIPPED]
+  ├── control pull ───────────────► per-user full snapshot   [SHIPPED]
   ├── project pull ───────────────► cursor-diff from project DO change log
-  └── /zero-http/push ────────────► on-zero PushProcessor (LMID in soot_0.clients)
+  └── control push ───────────────► on-zero PushProcessor (LMID in soot_0.clients)
   ▼
 ZeroSqlDO (per project + control): DO sqlite, _zero_changes + watermark +
 tx-journal. the authoritative store. no ZeroCacheDO, no replica, no CVR/CDB,
@@ -112,16 +112,16 @@ done and validated in prod. what shipped (evidence, not aspiration):
   plus production hardening the spike didn't have: transient-reconnect
   backoff, 409 → InvalidConnectionRequestBaseCookie reset, per-client push
   result filtering, rehydrated baseCookie suffix resume, bound fetch.
-- soot endpoints at `/zero-http/pull|push` (`src/zero/httpPull.server.ts`):
+- soot's control pull and push endpoints (`src/zero/httpPull.server.ts`):
   full per-user snapshot with schema-typed value conversion, cookie derived
   from control-row change clocks + client-group max LMID, group→user
   binding via a nullable `userID` column on `soot_0.clients`, push through
   zero's own `PushProcessor`.
 - control instance flipped in `src/zero/client.tsx`
-  (`transport: 'http-pull'`, server `${APP_ORIGIN}/zero-http`).
-- launch gates proven (soot 70bd/70b commit chain, `zero-http-flip` handoff);
+  (`transport: 'http-pull'`, using the application control origin).
+- launch gates proven (soot 70bd/70b commit chain, HTTP transport handoff);
   the shipped design doc was pruned as done, recover via
-  `git show fe4b345577~1:plans/sootbean/zero/zero-http-integration.md`.
+  the deleted integration plan from the parent of `fe4b345577`.
 
 known caveats recorded at ship time: admin cross-user control queries are
 not in the snapshot; tokenUsage snapshot is newest-200 per user. extend the
@@ -325,8 +325,7 @@ this yet.
   mapping, epoch bookkeeping, retention/compaction over `_zero_changes`)
   belongs in orez next to `cf-do/watermark.ts` + `cf-do/tx-journal.ts`;
   soot's data worker composes it into the project pull endpoint. the orez
-  spike dir `src/zero-http/` stays as the frozen wire-contract reference
-  (its port now lives in on-zero `src/httpPull/`).
+  the client transport tests remain the wire-contract reference.
 - releases beyond the local tree need explicit approval, per repo rules.
 - ~/soot is a shared multi-agent checkout: explicit-pathspec commits only,
   and coordinate with the depth-seam spec owner (phase 1 changes that

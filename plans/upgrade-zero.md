@@ -314,7 +314,7 @@ Verify the binary exists for the resolved version:
     `processes.js` dynamic-import anchor, `run-worker.js` import path —
     all unchanged.
 - **What DID break (the real work):**
-  - **HTTP transport ordering race** (`src/zero-http/transport.ts`) — only
+  - **HTTP transport ordering race** (`packages/orez-lite/src/client/transport.ts`) was the only
     1.7-specific runtime change requiring a code fix. Zero 1.7's client-side
     query-change throttle (~10ms) means `initConnection` / `changeDesiredQueries`
     messages arrive on the wire **after** the `'connected'` frame, while the

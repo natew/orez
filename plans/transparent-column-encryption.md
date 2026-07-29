@@ -10,7 +10,7 @@ This design protects payload content. Identifiers, routing fields, state, sequen
 
 ## Fixed architecture
 
-1. `src/zero-http/transport.ts` owns the row payload codec.
+1. `packages/orez-lite/src/client/transport.ts` owns the row payload codec.
    - Encode selected values after Zero has constructed a push and immediately before `POST /push`.
    - Decode selected values immediately after `fetchPull` receives and validates the JSON response, before `pull()` can call `emitPoke`.
    - Stock `@rocicorp/zero` sees plaintext on an enrolled client and does not know that encryption exists.

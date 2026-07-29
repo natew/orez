@@ -121,9 +121,9 @@ The pieces:
   clients read what ingest replicates.
 - **Two service bindings.** `APP` is used by push and auth, while `DATA` serves
   the change feed. Query resolution needs neither binding.
-- **`namespace` has planes.** `soot` and `zero-http` map to the control-plane
-  namespace; `proj-<id>` and `p-<id>` map to a project namespace. Claims carry a
-  `plane` discriminator plus project id and role.
+- **`namespace` has planes.** `soot` and its legacy alias map to the
+  control-plane namespace; `proj-<id>` and `p-<id>` map to a project
+  namespace. Claims carry a `plane` discriminator plus project id and role.
 - Soot sets `retainChanges`, `idleTeardownMs`, and `wakeCoalesceMs` explicitly
   rather than taking defaults.
 

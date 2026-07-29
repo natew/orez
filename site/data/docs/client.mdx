@@ -58,7 +58,5 @@ The transport sends bearer auth from Zero's connection to both endpoints.
 
 `orez-lite/client` is a browser-only leaf export. It contains the HTTP transport and
 payload codec interface, and does not import Orez's Node, PostgreSQL, server,
-or mount code. Import server integration separately from
-`orez-lite/zero-http`.
-
-`orez-lite/client` remains an alias of `orez-lite/client` for compatibility.
+or host code. Import server integration separately from `orez-lite/native`,
+`orez-lite/browser`, or `orez-lite/cloudflare`.

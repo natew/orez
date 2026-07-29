@@ -97,8 +97,8 @@ outside-in half, and ours must be implementation-agnostic.
   harness that measured the singleton wall), `validate-cf-do-runtime.ts`
   (multi-context browser validation + flicker MutationObserver), access-denied
   playwright suite.
-- **orez**: the zero-http spike suite (26 tests pinning the v51 transport
-  contract), now ported+hardened in on-zero `src/httpPull/`.
+- **orez**: the original HTTP transport suite (26 tests pinning the v51
+  transport contract), now carried by `packages/orez-lite/src/client/`.
 
 these are app-shaped and catch integration regressions, but none generate
 adversarial query/mutation workloads or check consistency under faults.
@@ -150,9 +150,9 @@ crates (one workspace):
    store (cookie ordering, gotQueriesPatch, lmid tracking), push (CRUD +
    custom mutators), reconnect/resume. references: mono
    `packages/zero-protocol/src/*` (valita schemas are readable specs), the
-   orez spike's nine wire discoveries, on-zero `httpPullTransport.ts`. NOTE:
-   this same crate must also speak the on-zero http-pull dialect
-   (`/zero-http/pull|push`) so one harness drives both stock zero and the
+   original transport's nine wire discoveries, on-zero
+   `httpPullTransport.ts`. NOTE: this same crate must also speak the on-zero
+   `/pull|push` HTTP dialect so one harness drives both stock zero and the
    orez planes.
 2. **workload**: query generator (port upstream's skeleton/axes/pairwise
    coverage design from `fuzz/` — it is well-factored and documented),
@@ -189,7 +189,7 @@ right fit; keep seeds + full histories so every failure replays.
    published scaling curves (memory per client group, poke lag percentiles).
 3. chat's CF zero deploy (validates the agent-automated migration nate is
    unsure about).
-4. orez control plane (zero-http, already prod) and the embed project plane.
+4. orez's Rust query hosts for the control and project planes.
 5. becomes the acceptance gate for rewrite phase 2/3: the same workloads +
    checkers, byte-identical, run against the new server. this IS the
    conformance suite the clean-room engine was always going to need.
@@ -405,15 +405,12 @@ remaining: hours-long longevity + bigger grids on the mini, per-client
 memory isolation. if TS tops out below the client counts we need, THAT is
 the trigger to revisit rust for the load generator only.
 
-**M5, orez-cf target [DONE 2026-07-09]:** the M2 core hosted in a DO over
-`ctx.storage.sql` — `harness/cf/worker.ts`, deployed as `zharness-sync` on
-lslcf (https://zharness-sync.lslcf.workers.dev). each harness run gets a
-fresh namespace (one path segment, zero's server-option limit) routed to its
-own DO; admin oracle endpoint gated by the ADMIN_KEY secret (key in
-`~/.zharness-cf-admin-key`, never committed). 15KB bundle, no @rocicorp/zero
-server-side. green: smoke (5 clients), shapes differential
-`--against orez-cf` (17/17 shapes equal vs stock-zero through hydrate +
-write script + incremental==fresh), bench 10 clients 3x5/s: ack p50/p95
+**M5, historical TypeScript CF target [DONE 2026-07-09, REMOVED 2026-07-29]:**
+the M2 core was hosted in a DO over `ctx.storage.sql`. Each harness run got a
+fresh namespace routed to its own DO, with an admin oracle endpoint guarded by
+the ADMIN_KEY secret. Green runs included smoke (5 clients), a 17-shape
+differential against stock-zero, and a 10-client bench at 3x5 writes/sec.
+The target was removed after the harness standardized on the Rust hosts.
 1169/1924ms, propagation p50/p95 1538/2304ms with full-snapshot pulls.
 SAME DAY: rewrite phase 2 cursor-diff pulls landed in the core
 (src/sync-server + 18-test delta suite) and re-ran this grid: ack p50/p95
@@ -536,11 +533,10 @@ rerun after harness deploy]:**
   a real Bun child process over a WAL-mode, FULL-synchronous SQLite file. the
   lane keeps 10 stock clients polling and 30 task mutations churning while it
   SIGKILLs that process for 1.5s, then starts a new PID over the same file.
-- `harness/cf/worker.ts` gives the harness DO a deterministic 5s idle teardown:
-  the next request after the window discards and reconstructs the in-memory
-  `SyncServer` over unchanged Durable Object SQL. `/admin/status` exposes a
-  memory boot ID, so the lane proves it crossed that boundary (a real platform
-  eviction also changes the ID) rather than merely sleeping.
+- the former TypeScript CF target supplied a deterministic 5s idle teardown.
+  The next request after the window reconstructed in-memory host state over
+  unchanged Durable Object SQL. `/admin/status` exposed a memory boot ID so
+  the lane proved it crossed that boundary rather than merely sleeping.
 - pull observation uses the transport's existing injectable-fetch seam; it
   asserts every original client successfully pulls on both sides of the fault,
   request and response cookies never regress, responses never trail request

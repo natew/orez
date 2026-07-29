@@ -196,8 +196,8 @@ export class RollingRowWriteBudget {
    * clause, and the ratio divided by that zero.
    *
    * What this deliberately does NOT count, which anyone picking a ratio
-   * threshold has to know: only TRACKED mutations reach it. zero-http's pull
-   * path writes on every poll -- claiming a client into `_zsync_clients`,
+   * threshold has to know: only TRACKED mutations reach it. the sync pull path
+   * writes on every poll -- claiming a client into `_zsync_clients`,
    * pruning `_zsync_changes`, moving the `_zsync_meta` floor -- and all of that
    * is billable while none of it is logical. So a quiet or pull-dominated
    * namespace inflates the ratio by construction, with no amplification

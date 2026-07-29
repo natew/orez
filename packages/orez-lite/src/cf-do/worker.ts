@@ -1931,12 +1931,11 @@ export class ZeroDO extends DurableObject {
     if (track && trackedTransactionID) {
       const physicalTableName =
         track.physicalTableName || stripPublicPrefix(track.tableName)
-      // zero-http's journal is the one side-effect target orez owns, so it is
-      // the one this path may register itself: its identity is fixed and it
-      // never publishes. Registering it here rather than at mount is what makes
-      // the ordering safe -- it is in place before the DML that fires the
-      // trigger, in the same storage transaction, or `coversRowUndo` says no
-      // and the journal is snapshotted exactly as before.
+      // the `_zsync_changes` journal is the one side-effect target orez owns,
+      // so this path may register it directly: its identity is fixed and it
+      // never publishes. registering it before the DML that fires the trigger,
+      // in the same storage transaction, keeps the ordering safe. otherwise
+      // `coversRowUndo` says no and the journal is snapshotted as before.
       this.cdc.ensureTable({
         physicalTableName: ZSYNC_CHANGES_TABLE,
         tableName: ZSYNC_CHANGES_TABLE,

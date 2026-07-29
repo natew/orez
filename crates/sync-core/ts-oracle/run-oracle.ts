@@ -1,70 +1,10 @@
-// differential oracle: runs the executor-backed zero-http mount on a shared
+// differential oracle: evaluates desired-query membership for a shared
 // operation trace and emits pull responses for the Rust differential test.
 //
 // run with: bun crates/sync-core/ts-oracle/run-oracle.ts <trace.json>
 // the trace is a JSON array of ops; the runner maintains a per-client mutation
 // id counter and per-group cookie EXACTLY as the Rust runner does, so both
 // stay in lockstep. output on stdout: a JSON array of pull responses in order.
-import { Database } from 'bun:sqlite'
-
-import { boolean, createSchema, json, number, string, table } from '@rocicorp/zero'
-import {
-  createZeroHttpApplicationDatabase,
-  createZeroHttpSyncServer,
-  type ZeroHttpSyncDb as SyncDb,
-} from 'orez-lite/zero-http'
-import { MutationApplicationError } from 'orez-sync-executor'
-
-function bunSqliteDb(sqlite: Database): SyncDb {
-  return {
-    exec(sql, params = []) {
-      sqlite.query(sql).run(...(params as never[]))
-    },
-    all(sql, params = []) {
-      return sqlite.query(sql).all(...(params as never[])) as Record<string, unknown>[]
-    },
-    transaction<T>(fn: () => T): T {
-      sqlite.run('BEGIN')
-      try {
-        const result = fn()
-        sqlite.run('COMMIT')
-        return result
-      } catch (error) {
-        sqlite.run('ROLLBACK')
-        throw error
-      }
-    },
-  }
-}
-
-function mutate(tx: SyncDb, name: string, args: unknown, _ctx: { userID: string }) {
-  const a = args as Record<string, unknown>
-  if (name === 'item.put') {
-    tx.exec(
-      `INSERT INTO item (id, label, rank, done, meta) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (id) DO UPDATE SET label = excluded.label, rank = excluded.rank,
-       done = excluded.done, meta = excluded.meta`,
-      [
-        a.id,
-        a.label,
-        a.rank,
-        a.done ? 1 : 0,
-        a.meta === null ? null : JSON.stringify(a.meta),
-      ]
-    )
-    return
-  }
-  if (name === 'item.del') {
-    tx.exec(`DELETE FROM item WHERE id = ?`, [a.id])
-    return
-  }
-  if (name === 'item.reject') {
-    tx.exec(`INSERT INTO item (id, label, rank, done) VALUES ('rejected', 'x', 0, 0)`)
-    throw new MutationApplicationError('nope')
-  }
-  throw new Error(`unknown mutator ${name}`)
-}
-
 type Op = Record<string, any>
 
 type Row = Record<string, unknown> & { id: string }
@@ -349,96 +289,11 @@ const tracePath = process.argv[2]
 if (!tracePath) throw new Error('usage: run-oracle.ts <trace.json>')
 const trace = JSON.parse(await Bun.file(tracePath).text()) as Op[]
 
-const sqlite = new Database(':memory:')
-const db = bunSqliteDb(sqlite)
-db.exec(
-  `CREATE TABLE item (id TEXT PRIMARY KEY, label TEXT NOT NULL,
-   rank REAL NOT NULL, done INTEGER NOT NULL, meta TEXT)`
-)
-const item = table('item')
-  .columns({
-    id: string(),
-    label: string(),
-    rank: number(),
-    done: boolean(),
-    meta: json(),
-  })
-  .primaryKey('id')
-const schema = createSchema({ tables: [item] })
-const sync = createZeroHttpSyncServer({
-  applicationDatabase: createZeroHttpApplicationDatabase(db),
-  effects: {
-    runBackground(promise) {
-      return promise
-    },
-    report(error) {
-      throw error
-    },
-  },
-  mutators: {
-    'item.put': ({ args }) => mutate(db, 'item.put', args, { userID: 'u1' }),
-    'item.del': ({ args }) => mutate(db, 'item.del', args, { userID: 'u1' }),
-    'item.reject': ({ args }) => mutate(db, 'item.reject', args, { userID: 'u1' }),
-  },
-  schema,
-  tables: ['item'],
-})
-await sync.ready()
 const query = new QueryOracle()
-
-const nextId: Record<string, number> = {}
-// one cookie per client GROUP: a group shares one replica in Zero, so every
-// tab pulls from the group's last served cookie, never a private one.
-let groupCookie: number | null = null
 const pulls: unknown[] = []
 
 for (const op of trace) {
   switch (op.op) {
-    case 'put':
-    case 'del':
-    case 'reject': {
-      const client = op.client as string
-      const id = (nextId[client] = (nextId[client] ?? 0) + 1)
-      const name =
-        op.op === 'put' ? 'item.put' : op.op === 'del' ? 'item.del' : 'item.reject'
-      const args =
-        op.op === 'put'
-          ? { id: op.item, label: op.label, rank: op.rank, done: op.done, meta: op.meta }
-          : op.op === 'del'
-            ? { id: op.item }
-            : {}
-      await sync.handlePush(
-        {
-          clientGroupID: 'g1',
-          mutations: [
-            { type: 'custom', id, clientID: client, name, args: [args], timestamp: 0 },
-          ],
-          pushVersion: 1,
-          requestID: 'r',
-        },
-        { userID: 'u1' }
-      )
-      break
-    }
-    case 'upstream':
-      db.exec(op.sql as string)
-      break
-    case 'invalidate':
-      await sync.invalidate()
-      break
-    case 'pull': {
-      // one puller per group, mirroring the Rust runner: a group shares one
-      // replica and one pull loop, so the pulling clientID is the group agent.
-      const resp = (await sync.handlePull(
-        { clientID: 'puller', clientGroupID: 'g1', cookie: groupCookie },
-        { userID: 'u1' }
-      )) as {
-        cookie: number
-      }
-      groupCookie = resp.cookie
-      pulls.push({ lane: 'base', response: resp })
-      break
-    }
     case 'queryput':
       pulls.push({
         lane: 'query',

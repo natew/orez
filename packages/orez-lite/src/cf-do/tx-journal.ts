@@ -70,10 +70,10 @@ const CDC_REGISTRATION_TABLE = '_orez_cdc_tables'
 export const PENDING_CHANGES_TABLE = '_zero_pending_changes'
 
 /**
- * zero-http's change journal (`src/zero-http/mount.ts`). Its AFTER triggers
- * write it on every synced application write, so it is the one side-effect
- * target orez both owns and knows the fixed identity of, which is what lets the
- * DO register it for rollback-only capture instead of copying it.
+ * the `_zsync_changes` journal. its AFTER triggers write it on every synced
+ * application write, so it is the one side-effect target orez both owns and
+ * knows the fixed identity of. that lets the DO register it for rollback-only
+ * capture instead of copying it.
  */
 export const ZSYNC_CHANGES_TABLE = '_zsync_changes'
 
@@ -808,7 +808,7 @@ function hasRowUndoImages(sql: DurableSqlStorage, txID: string, table: string): 
  * a rollback nothing performs.
  *
  * this filter is also what keeps a snapshot from ever being taken late.
- * installing zero-http's `_zsync_tr_*` triggers used to make every synced write
+ * installing the `_zsync_tr_*` triggers used to make every synced write
  * reach `_zsync_changes` and so copy both the journal AND the written table on
  * every transaction: 2,854 rows per write on one measured namespace, against a
  * 300,000-row budget, which froze three production apps. those tables are

@@ -74,7 +74,7 @@ const transactionQueryFormat = {
 const compileTransactionQuery = createQueryCompiler(transactionQuerySchema)
 
 // Deterministic local analogue of normal DO idle eviction, matching the
-// harness/cf probe: discard all in-memory state after an idle gap while SQL
+// harness probe: discard all in-memory state after an idle gap while SQL
 // storage remains intact. This keeps the test sub-second instead of waiting
 // for workerd/platform eviction heuristics.
 const IDLE_TEARDOWN_MS = 250

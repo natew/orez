@@ -82,7 +82,7 @@ notFound`.
      standard POST-and-validate-token flow. Static or async request init supports
      cookie, Bearer, credentials, and namespace-in-body or namespace-in-path auth.
 7. Structured push diagnostics (replaces soot pushDiagnostics.ts 288):
-   sync-executor/zero-http push path emits a structured failure/mutation-error
+   the sync-executor push path emits a structured failure/mutation-error
    summary (request summary with arg allowlist, failure kind, per-mutation
    errors) through an optional `diagnostics` callback. Consumers log it;
    nobody re-parses push bodies.

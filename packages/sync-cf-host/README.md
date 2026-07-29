@@ -162,7 +162,7 @@ convergence.
 sockets, durable database size, engine watermark/floor, and aggregate counters.
 After the configured idle gap (5 seconds in the harness deployment), the local
 deterministic model resets in-memory state and changes boot ID while retaining
-SQLite state and sockets. This models the harness/cf idle-teardown pattern; it
+SQLite state and sockets. This models the harness idle-teardown pattern; it
 does not claim that a real platform eviction happens on a 5-second schedule.
 
 ## Authenticated operator controls
