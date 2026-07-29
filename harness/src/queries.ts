@@ -58,13 +58,23 @@ function watch<T extends Row>(zero: FixtureZero, query: unknown, ttl?: unknown) 
   let rows: T[] = []
   let complete = false
   let destroyed = false
+  let firstCompleteIds: string[] | undefined
   view.addListener((data: unknown, resultType: string) => {
     rows = JSON.parse(JSON.stringify(data)) as T[]
-    if (resultType === 'complete') complete = true
+    if (resultType === 'complete') {
+      // snapshot the FIRST complete: a caller that settles on it (the
+      // downstream pattern) must see the hydrated rows, not a premature
+      // empty completion from stale client got-state
+      if (!complete) firstCompleteIds = rows.map((r) => r.id).sort()
+      complete = true
+    }
   })
   return {
     get complete() {
       return complete
+    },
+    get firstCompleteIds() {
+      return firstCompleteIds
     },
     ids() {
       return rows.map((r) => r.id).sort()
@@ -268,6 +278,9 @@ try {
     await eventually(() => {
       if (!second.complete) throw new Error('second view not complete')
       equal(second.ids(), want, 're-added query rows')
+      // the FIRST complete must already carry the rows: a premature empty
+      // completion means the server never un-got the deleted query
+      equal(second.firstCompleteIds ?? [], want, 're-added query first complete')
     }, 'same-hash re-add hydrates the same rows')
     second.destroy()
     console.log(
@@ -286,6 +299,7 @@ try {
     await eventually(() => {
       if (!fourth.complete) throw new Error('fourth view not complete')
       equal(fourth.ids(), want, 'immediate re-added query rows')
+      equal(fourth.firstCompleteIds ?? [], want, 'immediate re-add first complete')
     }, 'immediate same-hash re-add hydrates')
     fourth.destroy()
     console.log(
@@ -307,9 +321,13 @@ try {
           : u.materialize(query as never, { ttl } as never)
       let row: { id: string } | undefined
       let complete = false
+      let firstCompleteRow: { id: string } | undefined
       view.addListener((data: unknown, resultType: unknown) => {
         row = data ? (JSON.parse(JSON.stringify(data)) as { id: string }) : undefined
-        if (resultType === 'complete') complete = true
+        if (resultType === 'complete') {
+          if (!complete) firstCompleteRow = row
+          complete = true
+        }
       })
       return {
         get complete() {
@@ -317,6 +335,9 @@ try {
         },
         get row() {
           return row
+        },
+        get firstCompleteRow() {
+          return firstCompleteRow
         },
         destroy: () => view.destroy(),
       }
@@ -336,6 +357,12 @@ try {
         if (!after.complete) throw new Error('second .one() view not complete')
         if (after.row?.id !== 't17')
           throw new Error(`second .one() completed with ${JSON.stringify(after.row)}`)
+        // the downstream caller settles on the FIRST complete; it must
+        // already hold the row (stale got-state completes with undefined)
+        if (after.firstCompleteRow?.id !== 't17')
+          throw new Error(
+            `second .one() FIRST complete was ${JSON.stringify(after.firstCompleteRow)}`
+          )
       }, `.one() same-hash re-add returns the row (${label})`)
       after.destroy()
     }

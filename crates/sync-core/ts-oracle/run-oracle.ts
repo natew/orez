@@ -220,6 +220,9 @@ class QueryOracle {
     const caughtUp = this.cookie === this.watermark
     const oldUnion = this.union(this.memberships)
     const rehydrate = new Set<string>()
+    // hashes desired before this patch: any no longer desired after it get a
+    // targeted gotQueries del (mirrors qpull.rs, so a removed query is un-got)
+    const priorDesired = patch ? new Set(this.desired) : new Set<string>()
     if (patch) {
       this.version++
       for (const operation of patch) {
@@ -279,7 +282,13 @@ class QueryOracle {
       rowsPatch,
       gotQueries: {
         version: this.version,
-        patch: [...this.desired].sort().map((hash) => ({ op: 'put', hash })),
+        patch: [
+          ...[...priorDesired]
+            .filter((hash) => !this.desired.has(hash))
+            .sort()
+            .map((hash) => ({ op: 'del', hash })),
+          ...[...this.desired].sort().map((hash) => ({ op: 'put', hash })),
+        ],
       },
     }
   }

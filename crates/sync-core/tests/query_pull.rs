@@ -330,11 +330,57 @@ fn deleting_a_desired_query_removes_its_rows() {
     assert_eq!(put_ids(&r1), vec!["i1", "i3"]);
     let c1 = r1["cookie"].clone();
 
-    // delete the desired query -> its rows leave, gotQueries empties
+    // delete the desired query -> its rows leave AND the got-state is told:
+    // the ack patch carries a targeted del, or the client keeps the hash as
+    // got forever and a re-added query completes before hydration
     let del = json!({ "version": 2, "patch": [{ "op": "del", "hash": "q_open" }] });
     let r2 = h.pull("c1", c1, Some(del));
     assert_eq!(del_ids(&r2), vec!["i1", "i3"]);
-    assert_eq!(r2["gotQueries"], json!({ "version": 2, "patch": [] }));
+    assert_eq!(
+        r2["gotQueries"],
+        json!({ "version": 2, "patch": [{ "op": "del", "hash": "q_open" }] })
+    );
+}
+
+#[test]
+fn removed_query_gets_a_got_del_and_readds_cleanly() {
+    // the downstream regression shape: put A -> [del A, put B] in one patch ->
+    // re-put A. the middle pull must ack the removal of A (got del) so the
+    // client un-gots it, and the re-put must resend A's rows.
+    let mut h = QHost::new();
+    let closed_query = json!({ "table": "issue", "where": {
+        "type": "simple", "op": "=",
+        "left": { "type": "column", "name": "closed" },
+        "right": { "type": "literal", "value": true }
+    } });
+    let put_a =
+        json!({ "version": 1, "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }] });
+    let r1 = h.pull("c1", json!(null), Some(put_a));
+    assert_eq!(put_ids(&r1), vec!["i1", "i3"]);
+
+    let swap = json!({ "version": 2, "patch": [
+        { "op": "del", "hash": "q_open" },
+        { "op": "put", "hash": "q_closed", "ast": closed_query },
+    ] });
+    let r2 = h.pull("c1", r1["cookie"].clone(), Some(swap));
+    assert_eq!(del_ids(&r2), vec!["i1", "i3"]);
+    assert_eq!(put_ids(&r2), vec!["i2"]);
+    assert_eq!(
+        r2["gotQueries"]["patch"],
+        json!([
+            { "op": "del", "hash": "q_open" },
+            { "op": "put", "hash": "q_closed" },
+        ])
+    );
+
+    // re-adding the identical hash must hydrate its rows again
+    let readd =
+        json!({ "version": 3, "patch": [{ "op": "put", "hash": "q_open", "ast": open_query() }] });
+    let r3 = h.pull("c1", r2["cookie"].clone(), Some(readd));
+    assert_eq!(put_ids(&r3), vec!["i1", "i3"]);
+    let got = r3["gotQueries"]["patch"].as_array().unwrap();
+    assert!(got.contains(&json!({ "op": "put", "hash": "q_open" })));
+    assert!(!got.iter().any(|op| op["op"] == "del"));
 }
 
 #[test]
@@ -376,13 +422,17 @@ fn gotqueries_version_never_regresses_after_del_or_clear() {
         "ack regressed after del"
     );
 
-    // clear at version 4 -> ack 4 even though no desire remains
+    // clear at version 4 -> ack 4, and the surviving desire A is un-got so the
+    // client's got-state cannot outlive the cleared desire
     let r5 = h.pull(
         "c",
         r4["cookie"].clone(),
         Some(json!({ "version": 4, "patch": [{ "op": "clear" }] })),
     );
-    assert_eq!(r5["gotQueries"], json!({ "version": 4, "patch": [] }));
+    assert_eq!(
+        r5["gotQueries"],
+        json!({ "version": 4, "patch": [{ "op": "del", "hash": "A" }] })
+    );
 
     // another non-caught-up pull without queries still acks 4, not 0
     h.exec("INSERT INTO issue VALUES ('i5', 't-i5', 0)");

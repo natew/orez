@@ -168,6 +168,17 @@ pub fn handle_query_pull(
         BTreeSet::new()
     };
 
+    // hashes desired before this request's patch: any that end up no longer
+    // desired after it get a targeted gotQueries del below. without the del the
+    // client's got-state keeps the hash forever, and a later re-add of the same
+    // query completes from an empty local store before its rows arrive.
+    let prior_hashes = match body.get("queries") {
+        None | Some(Value::Null) => BTreeSet::new(),
+        Some(_) => desired_hashes(db, group, client_id)?
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+    };
+
     // apply the desired-query lifecycle before recomputing
     let applied_queries = match body.get("queries") {
         None | Some(Value::Null) => None,
@@ -220,8 +231,10 @@ pub fn handle_query_pull(
     let desired_hashes = desired_hashes(db, group, client_id)?;
     let desired_set = desired_hashes.iter().cloned().collect::<BTreeSet<_>>();
     let mut got_patch = Vec::new();
-    for hash in invalidated_hashes.difference(&desired_set) {
-        got_patch.push(json!({ "op": "del", "hash": hash }));
+    for hash in invalidated_hashes.union(&prior_hashes) {
+        if !desired_set.contains(hash) {
+            got_patch.push(json!({ "op": "del", "hash": hash }));
+        }
     }
     for hash in desired_hashes {
         got_patch.push(json!({ "op": "put", "hash": hash }));

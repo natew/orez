@@ -150,7 +150,7 @@ describe('buildMigrationModuleSource', () => {
 
     columnType.current = 'blob'
     await expect(migrationModule.orezAppSchema.migrate({ client })).rejects.toThrow(
-      'expected text, found blob',
+      'expected text, found blob'
     )
   })
 
