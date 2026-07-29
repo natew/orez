@@ -481,21 +481,23 @@ pub(crate) fn prepare_transform_version(
                 _ => None,
             });
 
-    if group_version.is_some_and(|stored| stored != version) {
-        // keep per-client desires until each client checks in so qpull can
-        // acknowledge targeted dels. a gotQueries clear drops Zero's local
-        // named-query mapping and leaves correctly returned rows invisible.
+    if group_version != Some(version) {
+        if group_version.is_some() {
+            // keep per-client desires until each client checks in so qpull can
+            // acknowledge targeted dels. a gotQueries clear drops Zero's local
+            // named-query mapping and leaves correctly returned rows invisible.
+            db.exec(
+                "DELETE FROM _zsync_queries WHERE clientGroupID = ?",
+                &[text(group)],
+            )?;
+            reset_group(db, group)?;
+        }
         db.exec(
-            "DELETE FROM _zsync_queries WHERE clientGroupID = ?",
-            &[text(group)],
+            "INSERT INTO _zsync_query_transform_group (clientGroupID, version) VALUES (?, ?)
+             ON CONFLICT (clientGroupID) DO UPDATE SET version = excluded.version",
+            &[text(group), SqlValue::Integer(version)],
         )?;
-        reset_group(db, group)?;
     }
-    db.exec(
-        "INSERT INTO _zsync_query_transform_group (clientGroupID, version) VALUES (?, ?)
-         ON CONFLICT (clientGroupID) DO UPDATE SET version = excluded.version",
-        &[text(group), SqlValue::Integer(version)],
-    )?;
 
     let client_rows = db.query(
         "SELECT CAST(version AS TEXT) AS v FROM _zsync_query_transform_client
@@ -510,12 +512,14 @@ pub(crate) fn prepare_transform_version(
             _ => None,
         });
     let reset_client = client_version != Some(version);
-    db.exec(
-        "INSERT INTO _zsync_query_transform_client (clientGroupID, clientID, version)
-         VALUES (?, ?, ?)
-         ON CONFLICT (clientGroupID, clientID) DO UPDATE SET version = excluded.version",
-        &[text(group), text(client), SqlValue::Integer(version)],
-    )?;
+    if reset_client {
+        db.exec(
+            "INSERT INTO _zsync_query_transform_client (clientGroupID, clientID, version)
+             VALUES (?, ?, ?)
+             ON CONFLICT (clientGroupID, clientID) DO UPDATE SET version = excluded.version",
+            &[text(group), text(client), SqlValue::Integer(version)],
+        )?;
+    }
     Ok(reset_client)
 }
 

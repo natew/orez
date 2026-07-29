@@ -75,6 +75,24 @@ impl QHost {
             .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
             .unwrap()
     }
+
+    fn pull_with_transform_version(
+        &mut self,
+        client: &str,
+        cookie: Value,
+        transform_version: i64,
+    ) -> Value {
+        let body = json!({
+            "clientID": client,
+            "clientGroupID": "g1",
+            "cookie": cookie,
+            "_serverQueryTransformVersion": transform_version,
+        });
+        let tables = self.tables.clone();
+        self.db
+            .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+            .unwrap()
+    }
 }
 
 fn open_query() -> Value {
@@ -144,6 +162,25 @@ fn desire_pull_then_data_change_flows_as_membership_delta() {
     h.exec("INSERT INTO issue VALUES ('i4', 't-i4', 0)");
     let r3 = h.pull("c1", c2, None);
     assert_eq!(put_ids(&r3), vec!["i4"]);
+}
+
+#[test]
+fn caught_up_pull_with_unchanged_transform_version_writes_no_rows() {
+    let mut h = QHost::new();
+    let first = h.pull_with_transform_version("c1", json!(null), 7);
+    let writes_before = h.db.conn.total_changes();
+
+    let caught_up = h.pull_with_transform_version("c1", first["cookie"].clone(), 7);
+
+    assert_eq!(
+        caught_up,
+        json!({ "cookie": first["cookie"], "unchanged": true })
+    );
+    assert_eq!(
+        h.db.conn.total_changes(),
+        writes_before,
+        "an unchanged sync poll must remain read-only"
+    );
 }
 
 #[test]
