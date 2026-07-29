@@ -97,6 +97,9 @@ export async function startOrezLocalProcess(opts?: {
     origin,
     fetch: observedPullFetch(opts?.onPull),
     pullIntervalMs: opts?.pullIntervalMs ?? 100,
+    // the mount acks forwarded hashes; shipping the desired patch is what
+    // completes client hydration (no local got-query synthesis anymore)
+    queryForward: true,
   })
   const clients: Zero<typeof schema, typeof mutators>[] = []
   let clientN = 0

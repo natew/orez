@@ -375,4 +375,3 @@ pub fn run_mutator(
         other => Err(MutateError::Unknown(format!("unknown mutator: {other}"))),
     }
 }
-

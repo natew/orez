@@ -281,7 +281,11 @@ function transportFor(namespaceId: string) {
   const origin = `${host}/${namespaceId}`
   let transport = transports.get(origin)
   if (!transport) {
-    transport = ensureHttpPullTransport({ origin, pullIntervalMs: 100 })
+    transport = ensureHttpPullTransport({
+      origin,
+      pullIntervalMs: 100,
+      queryForward: true,
+    })
     transports.set(origin, transport)
   }
   return transport

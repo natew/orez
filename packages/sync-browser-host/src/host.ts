@@ -90,6 +90,11 @@ function validateConfig<S extends Schema, A extends AuthData>(
 ): void {
   if (!config.storageKey) throw new TypeError('storageKey must not be empty')
   if (!config.mutators) throw new TypeError('mutators are required')
+  if (!config.queries || typeof config.queries !== 'object') {
+    throw new TypeError(
+      "queries is required: pass the app's Zero query registry (defineQueries result)"
+    )
+  }
   if (config.transactionQueryBudget) {
     for (const [name, value] of Object.entries(config.transactionQueryBudget)) {
       if (!Number.isSafeInteger(value) || Number(value) < 1) {

@@ -122,7 +122,7 @@ export type SyncHostConfig<
    * the query definitions themselves, with the authenticated claims as the
    * query context. There is no app endpoint to call and nothing else to wire.
    */
-  queries?: AnyQueryRegistry
+  queries: AnyQueryRegistry
   /**
    * Streaming fields for this namespace: which columns may carry a live,
    * uncommitted value, and their publish mode and rate bounds.

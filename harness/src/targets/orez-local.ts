@@ -172,6 +172,10 @@ export async function startOrezLocal(opts?: {
     origin,
     fetch: opts?.fetch,
     pullIntervalMs: opts?.pullIntervalMs ?? 250,
+    // the mount ignores desired-query membership but acks every forwarded
+    // hash, which is what completes client hydration now that the transport
+    // no longer synthesizes local got-query acks
+    queryForward: true,
   })
 
   const clients: Zero<typeof schema, typeof mutators>[] = []

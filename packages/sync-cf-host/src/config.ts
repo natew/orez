@@ -14,6 +14,11 @@ export function validateSyncHostConfig<
   if (typeof config.authorize !== 'function') {
     throw new TypeError('sync host config authorize is required')
   }
+  if (!config.queries || typeof config.queries !== 'object') {
+    throw new TypeError(
+      "sync host config queries is required: pass the app's Zero query registry (defineQueries result)"
+    )
+  }
   const hasMutators = config.mutators !== undefined
   const hasDelegate = config.mutateUrl !== undefined
   if (hasMutators === hasDelegate) {

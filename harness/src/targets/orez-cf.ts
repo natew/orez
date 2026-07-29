@@ -65,6 +65,9 @@ export async function startOrezCf(opts?: {
     origin,
     fetch: opts?.onPull ? observedPullFetch(opts.onPull) : undefined,
     pullIntervalMs: opts?.pullIntervalMs ?? 500,
+    // the mount acks forwarded hashes; shipping the desired patch is what
+    // completes client hydration (no local got-query synthesis anymore)
+    queryForward: true,
   })
 
   const clients: Zero<typeof schema, typeof mutators>[] = []

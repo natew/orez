@@ -276,7 +276,10 @@ export function createZeroServerBindings<
 ): ZeroServerBindings<Schema, Models> {
   setSchema(options.schema, createBuilder(options.schema))
   setEnvironment('server')
-  if (options.queries) setCustomQueries(options.queries)
+  // an app without syncedQueries still serves permission.<table> queries; an
+  // unknown name fails per-query, naming it, when a client actually asks.
+  const customQueries = options.queries ?? ({} as AnyQueryRegistry)
+  setCustomQueries(customQueries)
 
   const mapClaims = options.mapClaims ?? defaultMapClaims
   const permissions = createPermissions({
@@ -347,35 +350,13 @@ export function createZeroServerBindings<
     }
   }
 
-  const hostQueries: AnyQueryRegistry = options.queries
-    ? createSyncQueries({
-        schema: options.schema,
-        queries: options.queries,
-        validateQuery: options.validateQuery,
-        defaultAllowAdminRole: options.defaultAllowAdminRole,
-        mapClaims: options.mapClaims,
-      })
-    : (new Proxy({ '~': 'QueryRegistry' } as Record<string, unknown>, {
-        get(target, namespace) {
-          if (typeof namespace !== 'string' || namespace === '~') {
-            return target[namespace as string]
-          }
-          return new Proxy({} as Record<string, unknown>, {
-            get(_inner, name) {
-              return typeof name === 'string'
-                ? {
-                    queryName: `${namespace}.${name}`,
-                    fn: () => {
-                      throw new Error(
-                        'No queries registered with createZeroServerBindings.'
-                      )
-                    },
-                  }
-                : undefined
-            },
-          })
-        },
-      }) as AnyQueryRegistry)
+  const hostQueries: AnyQueryRegistry = createSyncQueries({
+    schema: options.schema,
+    queries: customQueries,
+    validateQuery: options.validateQuery,
+    defaultAllowAdminRole: options.defaultAllowAdminRole,
+    mapClaims: options.mapClaims,
+  })
 
   const bindings: ZeroServerBindings<Schema, Models> = {
     // freezing the registry makes the server seam immutable without importing
@@ -383,15 +364,12 @@ export function createZeroServerBindings<
     mutators: Object.freeze({ ...registry }),
     queries: hostQueries,
     async resolveQuery(name, args, authData) {
-      if (!options.queries) {
-        throw new Error('No queries registered with createZeroServerBindings.')
-      }
       const query = await runWithQueryContext({ authData }, () =>
         resolveServerQuery({
           authData,
           name,
           args: args[0],
-          queries: options.queries!,
+          queries: customQueries,
           permissions,
           validateQuery: options.validateQuery,
         })
@@ -399,15 +377,12 @@ export function createZeroServerBindings<
       return asQueryInternals(query as never).ast as JsonValue
     },
     async transformQueryRequest({ authData, request }) {
-      if (!options.queries) {
-        throw new Error('No queries registered with createZeroServerBindings.')
-      }
       const handler = (name: string, args: unknown) =>
         resolveServerQuery({
           authData,
           name,
           args,
-          queries: options.queries!,
+          queries: customQueries,
           permissions,
           validateQuery: options.validateQuery,
         })

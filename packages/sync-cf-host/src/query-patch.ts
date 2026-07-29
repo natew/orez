@@ -25,7 +25,7 @@ const NAME_SEPARATOR = /[.|]/
  */
 export function resolveQueryPatch(
   patch: readonly unknown[],
-  queries: AnyQueryRegistry | undefined,
+  queries: AnyQueryRegistry,
   context: unknown,
   transformVersion: number,
   fail: (message: string) => Error
@@ -39,9 +39,6 @@ export function resolveQueryPatch(
       throw fail('query put requires a server-resolved named query')
     }
     if (!Array.isArray(op.args)) throw fail('named query args must be an array')
-    if (!queries) {
-      throw fail(`no queries are configured on this namespace: ${op.name}`)
-    }
     let node: unknown = queries
     for (const segment of op.name.split(NAME_SEPARATOR)) {
       node =

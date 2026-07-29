@@ -24,6 +24,7 @@ describe('sync host config', () => {
 const base = {
   hostVersion: 'test',
   schema: { tables: {}, relationships: {} },
+  queries: {},
   initialize() {},
   authenticate() {
     return { userID: 'u' }
@@ -53,6 +54,12 @@ describe('mutation mode', () => {
     expect(() =>
       validateSyncHostConfig({ ...base, authorizeNotify: undefined, mutators: {} })
     ).toThrow('authorizeNotify is required')
+  })
+
+  test('refuses construction without the Zero query registry', () => {
+    expect(() =>
+      validateSyncHostConfig({ ...base, queries: undefined, mutators: {} })
+    ).toThrow('queries is required')
   })
 
   test('requires exactly one local or delegated path', () => {

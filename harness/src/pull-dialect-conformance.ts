@@ -7,6 +7,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 
+import { queryNameToAst } from './fixture.js'
 import { startRustLocal } from './targets/rust-local.js'
 
 type JsonObject = Record<string, unknown>
@@ -377,13 +378,34 @@ export async function startRustLocalPullDialectTarget(): Promise<PullDialectTarg
   return {
     name: target.name,
     async pull(cookie) {
+      // a fresh pull registers the scoped named query; the desire persists on
+      // the client, so cookie-bearing pulls carry no queries field and the
+      // unchanged-pull cookie check observes pure pull semantics.
       const response = await fetch(`${target.origin}/pull`, {
         method: 'POST',
         headers: {
           authorization: 'Bearer token-u0',
           'content-type': 'application/json',
         },
-        body: JSON.stringify({ clientID, clientGroupID, cookie }),
+        body: JSON.stringify({
+          clientID,
+          clientGroupID,
+          cookie,
+          ...(cookie === null
+            ? {
+                queries: {
+                  version: 1,
+                  patch: [
+                    {
+                      op: 'put',
+                      hash: 'q-dialect',
+                      ast: queryNameToAst('projectsOwnedBy', [{ ownerId: 'u0' }]),
+                    },
+                  ],
+                },
+              }
+            : {}),
+        }),
         signal: AbortSignal.timeout(10_000),
       })
       const body = object(await response.json(), 'pull response')

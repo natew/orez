@@ -45,7 +45,7 @@ export type BrowserSyncHostConfig<
    * client is built with). The host resolves every desired named query
    * in-process against it, with the authenticated authData as query context.
    */
-  queries?: AnyQueryRegistry
+  queries: AnyQueryRegistry
   queryTransformVersion?: number | ((authData: A | null) => number)
   retainChanges?: number
   transactionQueryBudget?: Partial<TransactionQueryBudget>

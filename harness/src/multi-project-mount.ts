@@ -164,7 +164,7 @@ const baseURL = `http://127.0.0.1:${address.port}`
 
 async function runClient(databaseID: 'plain' | 'alpha') {
   const origin = databaseID === 'plain' ? baseURL : `${baseURL}/p-${databaseID}`
-  const transport = installHttpPullTransport({ origin })
+  const transport = installHttpPullTransport({ origin, queryForward: true })
   const zero = new Zero({
     server: origin,
     userID: 'u1',
