@@ -57,10 +57,9 @@ fn rejects_invalid_pull_cookies() {
         let mut h = setup();
         let tables = item_tables();
         let body = json!({ "clientID": "c1", "clientGroupID": "g1", "cookie": cookie });
-        let err = h
-            .db
-            .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
-            .unwrap_err();
+        let err =
+            h.db.transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+                .unwrap_err();
         assert_eq!(err.status, 400, "cookie {cookie} should 400");
     }
 
@@ -97,10 +96,9 @@ fn rejects_malformed_pull_body() {
     for body in cases {
         let mut h = setup();
         let tables = item_tables();
-        let err = h
-            .db
-            .transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
-            .unwrap_err();
+        let err =
+            h.db.transaction(|db| handle_query_pull(db, &tables, 4096, &body, "u1"))
+                .unwrap_err();
         assert_eq!(err.status, 400);
     }
 }

@@ -8,9 +8,9 @@ mod common;
 use common::TestDb;
 use serde_json::json;
 
+use sync_core::query::{handle_query_pull, init_query_schema};
 use sync_core::schema::TableSpec;
 use sync_core::value::ZeroColumnType;
-use sync_core::query::{handle_query_pull, init_query_schema};
 use sync_core::{SyncDb, Tables, Transactor, init_schema, trigger_ddl};
 
 // the classic breakout payload: a table name that, unescaped, closes the trigger

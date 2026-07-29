@@ -6,8 +6,6 @@ use common::{TestDb, item_tables};
 use rusqlite::Connection;
 use sync_core::{SyncDb, Transactor, init_schema, prune, watermark};
 
-
-
 #[test]
 fn watermark_survives_full_prune_and_reopen() {
     let nonce = SystemTime::now()
