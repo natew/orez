@@ -428,6 +428,39 @@ describe('createOrezDataWorker', () => {
     expect(zero.schemaForTable('widget')).toEqual(newTable)
   })
 
+  it('runs a forced reconcile again after the prior schema run completed', async () => {
+    let migrationRuns = 0
+    const runtime = createOrezDataWorker({
+      name: 'testapp',
+      schema: {
+        ...descriptor,
+        version: 'schema-v8',
+        migrate: async () => {
+          migrationRuns++
+        },
+      },
+    })
+    const zero = Object.create(runtime.ZeroDO.prototype) as any
+    zero.orezStorage = {
+      sql: {
+        exec: () => ({ toArray: () => [] }),
+      },
+    }
+    zero.applicationSqlLocalClient = () => ({})
+    zero.orezRestoreInProgress = () => false
+    zero.orezApplicationSchemaReady = () => false
+    zero.orezBeginApplicationSchemaReconcile = () => {}
+    zero.orezMarkApplicationSchemaReady = () => {}
+    zero.invalidateSchemaCaches = () => {}
+    zero.orezSchemaRunVersion = null
+    zero.orezSchemaRun = null
+
+    await zero.orezRunApplicationSchema('schema-v8', 'singleton', { force: true })
+    await zero.orezRunApplicationSchema('schema-v8', 'singleton', { force: true })
+
+    expect(migrationRuns).toBe(2)
+  })
+
   it('reloads persisted table metadata after a migration that fails partway', async () => {
     const oldTable = {
       columns: { id: { type: 'string' as const } },

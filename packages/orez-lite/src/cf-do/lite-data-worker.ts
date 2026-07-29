@@ -667,11 +667,14 @@ export function createOrezDataWorker<
           throw error
         }
       })()
-      this.orezSchemaRun.catch(() => {
+      const schemaRun = this.orezSchemaRun
+      const clearSettledRun = () => {
+        if (this.orezSchemaRun !== schemaRun) return
         this.orezSchemaRun = null
         this.orezSchemaRunVersion = null
-      })
-      return this.orezSchemaRun
+      }
+      void schemaRun.then(clearSettledRun, clearSettledRun)
+      return schemaRun
     }
 
     orezStartApplicationSchema(
