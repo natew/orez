@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "sync-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "proptest",
  "rusqlite",
@@ -1359,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "sync-native"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "sync-wasm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "js-sys",
  "serde",
