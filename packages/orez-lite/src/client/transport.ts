@@ -498,10 +498,9 @@ class ZeroHttpSocket {
   // a snapshot clear removes both rows and got-query marks from Replicache.
   // remember every delivered mark so a clear-bearing poke can restore them.
   private ackedGotHashes = new Set<string>()
-  // query-aware extension state: the accumulated un-acked desired-query delta
-  // to ship, a client-side query-state version that bumps on each change, and
-  // the version/length of the delta the in-flight pull sent (to clear the
-  // acked prefix on the server's ack).
+  // the accumulated un-acked desired-query delta to ship, a client-side state
+  // version that bumps on each change, and the version/length of the delta the
+  // in-flight pull sent so the server's ack can clear that prefix.
   private desiredQueryPatch: QueryPatchOp[] = []
   private queryVersion = 0
   private sentQueryVersion: number | undefined
@@ -906,11 +905,11 @@ class ZeroHttpSocket {
     this.run(this.pull())
   }
 
-  // in query-aware mode the got-query ack is authoritative from the server:
-  // take the server's gotQueries.patch as the got patch to emit (replacing
-  // local synthesis), and clear the acked prefix of the shipped desired delta
-  // once the server acks that version (the ack never leads its row effects —
-  // invariant 13 — so the client marks a query got only after its rows land).
+  // the got-query ack is authoritative from the server. take the server's
+  // gotQueries.patch as the got patch to emit, and clear the acked prefix of
+  // the shipped desired delta once the server acks that version. the ack never
+  // leads its row effects, so the client marks a query got only after its rows
+  // land.
   private applyServerGotQueries(response: PullResponse) {
     const got = response.gotQueries
     this.pendingGotQueriesPatch = got ? [...got.patch] : []
@@ -1095,11 +1094,11 @@ class ZeroHttpSocket {
         `zero-http pull returned stale cookie ${response.cookie} for ${this.cookie}`
       )
     } else if (currentServer !== null && response.cookie === currentServer) {
-      // same server watermark but a non-empty patch: a query-aware membership
-      // delta (a desired-query change recomputes rows without advancing the
-      // change log). bump a client-local cookie id so replicache sees a changed
-      // cookie — otherwise it trips "cookie did not change, but patch is not
-      // empty" and drops the patch.
+      // same server watermark but a non-empty membership delta. a desired-query
+      // change recomputes rows without advancing the change log. bump a
+      // client-local cookie id so replicache sees a changed cookie, otherwise
+      // it trips "cookie did not change, but patch is not empty" and drops the
+      // patch.
       nextCookie = toLocalWebSocketCookie(response.cookie, ++this.nextLocalCookieID)
     } else {
       nextCookie = toWebSocketCookie(response.cookie) as string

@@ -1773,8 +1773,8 @@ function defer<T>() {
   return { promise, resolve, reject }
 }
 
-// installs the transport with the query-aware extension on (a queryTransform
-// resolver), pushing it for afterEach cleanup.
+// installs the transport with a client-side query resolver, pushing it for
+// afterEach cleanup.
 function installWithQueries(
   fetch: typeof globalThis.fetch,
   queryTransform: (name: string, args: readonly unknown[]) => unknown
@@ -1784,7 +1784,7 @@ function installWithQueries(
   return transport
 }
 
-describe('zero-http query-aware extension', () => {
+describe('zero-http desired-query sync', () => {
   test('ships desired queries with pull state (transformed AST) and emits server got-query ack', async () => {
     const requests: RequestRecord[] = []
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

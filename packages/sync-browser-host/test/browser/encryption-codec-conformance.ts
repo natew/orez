@@ -8,7 +8,7 @@ const result = await build({
   entryPoints: [
     join(
       repositoryRoot,
-      'packages/orez-lite/dist/zero-http/encrypted-column-conformance.js'
+      'packages/orez-lite/dist/client/encrypted-column-conformance.js'
     ),
   ],
   bundle: true,

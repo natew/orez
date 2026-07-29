@@ -3,7 +3,11 @@ import { DatabaseSync } from 'node:sqlite'
 import { Zero } from '@rocicorp/zero'
 import { afterEach, expect, test } from 'vitest'
 
-import { zeroHttpFixtureMutators, zeroHttpFixtureSchema } from './fixture-schema.js'
+import {
+  zeroHttpFixtureMutators,
+  zeroHttpFixtureSchema,
+} from '../client/fixture-schema.js'
+import { installHttpPullTransport } from '../client/transport.js'
 import {
   createZeroHttpApplicationDatabase,
   createZeroHttpMount,
@@ -11,7 +15,6 @@ import {
   ZeroHttpRequestError,
   type ZeroHttpSyncDb,
 } from './mount.js'
-import { installHttpPullTransport } from './transport.js'
 
 const ORIGIN = 'https://orez-client-conformance.local'
 const databases: DatabaseSync[] = []

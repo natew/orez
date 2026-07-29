@@ -1,8 +1,11 @@
 import { Zero } from '@rocicorp/zero'
 
-import { zeroHttpFixtureMutators, zeroHttpFixtureSchema } from './fixture-schema.js'
+import {
+  zeroHttpFixtureMutators,
+  zeroHttpFixtureSchema,
+} from '../client/fixture-schema.js'
+import { installHttpPullTransport } from '../client/transport.js'
 import { startZeroHttpServer, type Row } from './server.js'
-import { installHttpPullTransport } from './transport.js'
 
 let storageID = 0
 

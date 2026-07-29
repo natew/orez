@@ -29,12 +29,12 @@
       "import": "./dist/zero-http/mount.js"
     },
     "./encryption": {
-      "types": "./dist/zero-http/encrypted-column-codec.d.ts",
-      "import": "./dist/zero-http/encrypted-column-codec.js"
+      "types": "./dist/client/encrypted-column-codec.d.ts",
+      "import": "./dist/client/encrypted-column-codec.js"
     },
     "./encryption/conformance": {
-      "types": "./dist/zero-http/encrypted-column-conformance.d.ts",
-      "import": "./dist/zero-http/encrypted-column-conformance.js"
+      "types": "./dist/client/encrypted-column-conformance.d.ts",
+      "import": "./dist/client/encrypted-column-conformance.js"
     },
     "./browser": {
       "types": "./dist/browser/index.d.ts",
@@ -82,7 +82,7 @@
     "build:zero-http": "rm -rf dist/zero-http && tsc -p tsconfig.zero-http.json",
     "build:dependencies": "bun run --cwd ../sync-cf-host build:dist",
     "build": "bun run build:dependencies && bun run build:runtime && bun run --cwd ../sync-browser-host build:runtime",
-    "test": "vitest run --config ../../vitest.config.ts packages/orez-lite/src",
+    "test": "cd ../.. && vitest run --config vitest.config.ts packages/orez-lite/src",
     "test:package": "bun run build && node package-runtime-test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
