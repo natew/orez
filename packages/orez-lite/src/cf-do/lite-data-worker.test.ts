@@ -128,6 +128,13 @@ describe('Orez Lite feed projection', () => {
           rowData: { id: 'w2', title: 'Visible' },
           oldData: null,
         },
+        {
+          watermark: 9,
+          tableName: 'syncCursor',
+          op: 'INSERT',
+          rowData: { id: 'zero-http', watermark: 9 },
+          oldData: null,
+        },
       ],
     })
   })

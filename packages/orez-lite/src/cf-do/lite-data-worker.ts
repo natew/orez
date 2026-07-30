@@ -438,6 +438,7 @@ function projectFeedBody(
 
   if (Array.isArray(value.changes)) {
     const changes: unknown[] = []
+    let trailingUnpublishedWatermark: unknown
     for (const rawChange of value.changes) {
       if (!isRecord(rawChange)) continue
       const rawName = stripPublicPrefix(String(rawChange.tableName ?? ''))
@@ -449,15 +450,32 @@ function projectFeedBody(
           rowData: { id: 'zero-http', watermark: rawChange.watermark },
           oldData: null,
         })
+        trailingUnpublishedWatermark = undefined
         continue
       }
       const table = feedTables.get(rawName)
-      if (!table) continue
+      if (!table) {
+        trailingUnpublishedWatermark = rawChange.watermark
+        continue
+      }
       changes.push({
         ...rawChange,
         tableName: table.name,
         rowData: projectedRow(table, rawChange.rowData),
         oldData: projectedRow(table, rawChange.oldData),
+      })
+      trailingUnpublishedWatermark = undefined
+    }
+    // The upstream watermark is the feed head, not the last row in this page.
+    // If the page ends with private rows, filtering them all would leave the
+    // replica at its old cursor and make it replay the same page forever.
+    if (trailingUnpublishedWatermark !== undefined) {
+      changes.push({
+        watermark: trailingUnpublishedWatermark,
+        tableName: 'syncCursor',
+        op: 'INSERT',
+        rowData: { id: 'zero-http', watermark: trailingUnpublishedWatermark },
+        oldData: null,
       })
     }
     projected.changes = changes
