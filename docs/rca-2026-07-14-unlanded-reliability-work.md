@@ -19,7 +19,7 @@ Superseded/stale branches and their worktrees were removed; active WIP (`fix/cf-
 
 - **2026-07-11** — reliability work committed on its branches (earliest `2b60396` 09:27, latest `bd2ef30` 12:15). Reviewed: multiple review rounds, mutant checks, replay evidence.
 - **2026-07-11 → 07-14** — priorities pivoted to the Rust Zero migration. `origin/main` advanced 67 commits and shipped v0.5.9 and v0.5.11.
-- **2026-07-14** — the reviewed branches were still unmerged. Agentbus parent task `t-mrgqyuci-23qp0` ("Build Jepsen-lite reliability testing for Orez") was still `open` / `urgent`.
+- **2026-07-14** — the reviewed branches were still unmerged. Team Machine parent task `t-mrgqyuci-23qp0` ("Build Jepsen-lite reliability testing for Orez") was still `open` / `urgent`.
 
 The work stopped because priorities changed, not because reviewers rejected it.
 
@@ -35,13 +35,13 @@ The task lifecycle had no landing step. "Reviewed" was treated as terminal; noth
 
 4. **The divergence tax compounded.** Every day main moved, the merge got scarier and landing felt more optional. The `rescue/worktree-hygiene-*` branches are evidence the team already felt this: a prior hygiene pass _preserved_ the work into more branches instead of _landing_ it, which added clutter without closing the loop.
 
-The agentbus task state is the clearest single signal that was present but unwired: an `urgent` task stayed `open` while its deliverable sat done-but-parked. Nobody connected "open task + finished branch not on main" to "land it now."
+The Team Machine task state is the clearest single signal that was present but unwired: an `urgent` task stayed `open` while its deliverable sat done-but-parked. Nobody connected "open task + finished branch not on main" to "land it now."
 
 ## Prevention
 
 ### 1. Land-or-kill discipline
 
-A task is done only when its diff is on `main` or explicitly discarded with a reason. "Reviewed and parked in a worktree" is not a terminal state. When an agentbus session ends, its branch is either landed, handed off with an owner, or closed as discarded.
+A task is done only when its diff is on `main` or explicitly discarded with a reason. "Reviewed and parked in a worktree" is not a terminal state. When a Team Machine session ends, its branch is either landed, handed off with an owner, or closed as discarded.
 
 ### 2. Keep main green and mergeable
 
@@ -55,7 +55,7 @@ Worktrees are for genuinely concurrent, heavily-overlapping work. For sequential
 
 Land within a day or two. If a branch cannot land that soon, that is the signal to finish or drop it, not to let it accrue divergence tax.
 
-### 5. Agentbus auto-scan for landing debt
+### 5. Team Machine auto-scan for landing debt
 
 The coordinator should surface parked work automatically instead of relying on a human to remember it. Two pieces:
 
@@ -70,7 +70,7 @@ codex/orez-chat-wrapper-profile     5     0   yes       clean
 
 Before cleanup the same scan would have listed ~18 rows, most with `WORKTREE=no`.
 
-**b. Wire it into agentbus.** A periodic coordinator job (cron, per repo) runs `landing-debt.sh --tsv` and cross-references agentbus task state:
+**b. Wire it into Team Machine.** A periodic coordinator job (cron, per repo) runs `landing-debt.sh --tsv` and cross-references `tm task` state:
 
 - branch with commits-not-on-main **and** a linked task that is `done`/`reviewed` → **landing debt**, open a "land or discard" follow-up owned by the manager.
 - branch that is a live session's active worktree → active, skip.
