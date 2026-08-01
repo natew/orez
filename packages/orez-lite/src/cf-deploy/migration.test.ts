@@ -1,3 +1,8 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import { defineCloudflareConfig } from './config.js'
@@ -8,7 +13,14 @@ function javascriptModuleUrl(source: string): string {
 }
 
 async function importJavascriptModule(source: string): Promise<Record<string, any>> {
-  return import(/* @vite-ignore */ javascriptModuleUrl(source))
+  const directory = mkdtempSync(join(tmpdir(), 'orez-migration-module-'))
+  const file = join(directory, 'migration.mjs')
+  writeFileSync(file, source)
+  try {
+    return await import(/* @vite-ignore */ pathToFileURL(file).href)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 }
 
 describe('buildMigrationModuleSource', () => {
