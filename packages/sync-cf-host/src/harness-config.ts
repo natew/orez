@@ -1,4 +1,8 @@
-import { MutationApplicationError, registerMutators } from 'orez-sync-executor/core'
+import {
+  MutationApplicationError,
+  MutationRetryError,
+  registerMutators,
+} from 'orez-sync-executor/core'
 import { defineStreamingFields } from 'orez-sync-executor/realtime'
 
 import { queries } from '../../../harness/src/query-resolver.mjs'
@@ -287,6 +291,18 @@ const harnessMutators = registerMutators({
       )
     })
     throw new MutationApplicationError('intentional-rollback')
+  },
+  async 'test.retryLater'({ tx, args, ctx }) {
+    const sql = tx.dbTransaction.wrappedTransaction
+    const value = args as { id: string }
+    await sql.exec('INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)', [
+      value.id,
+      ctx.claims.userID,
+      'must-roll-back',
+    ])
+    throw new MutationRetryError(300_000, 'intentional-retry', {
+      error: 'harnessBudgetExceeded',
+    })
   },
 })
 

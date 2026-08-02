@@ -182,6 +182,26 @@ Then choose exactly one push model:
 All pulls use named queries. Set `queries: appQueries` and keep a
 `queryTransformVersion` epoch that you bump on permission or schema changes.
 
+#### How a mutator refuses a write
+
+Anything a mutator throws is a permanent application failure by default: the
+write rolls back, the client is told the mutation failed, and the ledger still
+advances so the client stops resending it. That is the right answer for a
+mutation that can never succeed, like a validation failure or a denied
+permission.
+
+Throw `MutationRetryError(retryAfterMs, message, details)` for the other case,
+where the mutation is fine and cannot run _yet_ (a budget, a rate limit, an open
+circuit). The whole push is refused with `429` and a `Retry-After` header,
+`details` rides the response body so the caller can pace on the reason, and
+nothing at all is written: no rows, no ledger advance, no change row. The
+mutation id is not consumed, so the client's next attempt applies it.
+
+Reaching for the default in that second case has a specific failure mode. An
+acknowledgement is itself a write, so a spend or rate guard that refuses by
+throwing an ordinary error charges for every refusal and drops the caller's
+data while doing it, which is the exact opposite of what it exists to do.
+
 ### 2. A workerd composition entry
 
 A `worker.ts` that exports `createSyncDurableObject(config)` as the DO class and

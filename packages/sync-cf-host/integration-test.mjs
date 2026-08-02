@@ -55,7 +55,11 @@ const post = async (path, body, userID = 'user-a') => {
     },
     body: JSON.stringify(body),
   })
-  return { status: response.status, body: await response.json() }
+  return {
+    status: response.status,
+    headers: response.headers,
+    body: await response.json(),
+  }
 }
 
 const admin = async (path, body) => {
@@ -656,6 +660,53 @@ try {
     [{ projectCount: 0, effectCount: 0, lmid: '3' }],
     'awaited app error rolls back rows/effect and advances LMID in tx2'
   )
+
+  // a retryable rejection is the opposite of the app error above: refusing has
+  // to be free, because the thing that refuses is usually a budget, and paying
+  // a ledger write per refusal is how a spend guard keeps spending after it
+  // closes. the mutation id also has to survive, or refusing silently drops it.
+  const changesBeforeRetry = await admin('/admin/sql', {
+    query: 'SELECT COUNT(*) AS n FROM _zsync_changes',
+  })
+  response = await post(
+    '/push',
+    mutation('client-a', 4, 'test.retryLater', { id: 'retry-later' })
+  )
+  equal(response.status, 429, 'retryable rejection is refused, not acknowledged')
+  equal(response.headers.get('retry-after'), '300', 'refusal says when to return')
+  equal(
+    response.body.details,
+    { error: 'harnessBudgetExceeded' },
+    'refusal keeps the reason the caller paces on'
+  )
+  rows = await admin('/admin/sql', {
+    query:
+      "SELECT (SELECT COUNT(*) FROM project WHERE id = 'retry-later') AS projectCount, " +
+      '(SELECT COUNT(*) FROM _zsync_changes) AS changeCount, ' +
+      "(SELECT CAST(lastMutationID AS TEXT) FROM _zsync_clients WHERE clientID = 'client-a') AS lmid",
+  })
+  equal(
+    rows.rows,
+    [
+      {
+        projectCount: 0,
+        changeCount: changesBeforeRetry.rows[0].n,
+        lmid: '3',
+      },
+    ],
+    'retryable rejection writes no row, no change, and no ledger advance'
+  )
+
+  response = await post(
+    '/push',
+    mutation('client-a', 4, 'project.create', {
+      id: 'retry-later-applied',
+      ownerId: 'user-a',
+      name: 'retried',
+    })
+  )
+  equal(response.status, 200, 'the refused mutation id is still available')
+  equal(response.body.pushResponse.mutations[0].result, {}, 'the retry applies')
 
   const receiver = await openWake('wake-receiver', 'user-a')
   const pusher = await openWake('wake-pusher', 'user-b')

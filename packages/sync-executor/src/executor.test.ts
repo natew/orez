@@ -4,6 +4,7 @@ import { createSchema, string, table } from '@rocicorp/zero'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { executeCrud } from './crud.js'
+import { MutationRetryError } from './errors.js'
 import { createSyncExecutor, handleSyncExecutorPushRequest } from './executor.js'
 
 import type {
@@ -324,6 +325,91 @@ describe('sync executor', () => {
     expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([
       { id: 'b', value: 'later' },
     ])
+  })
+
+  test('a retryable rejection writes nothing at all and keeps the mutation id', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+
+    let overBudget = true
+    const mutators = {
+      spend: async ({ tx }) => {
+        if (overBudget) {
+          throw new MutationRetryError(300_000, 'cloud spend budget exceeded', {
+            error: 'cloudSpendBudgetExceeded',
+          })
+        }
+        await tx.mutate.item.insert({ id: 'a', value: 'within budget' })
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    await expect(
+      executor.push(push('spend'), { userID: 'user-1' })
+    ).rejects.toMatchObject({
+      name: 'MutationRetryError',
+      status: 429,
+      retryAfterMs: 300_000,
+      details: { error: 'cloudSpendBudgetExceeded' },
+    })
+
+    // the whole point of refusing a write is that refusing is free. an
+    // acknowledged rejection would move the ledger and append its lmid change
+    // row, so the mechanism that exists to stop spending would itself spend.
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM _zsync_changes').get()).toEqual({
+      n: 0,
+    })
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM _zsync_clients').get()).toEqual({
+      n: 0,
+    })
+    expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([])
+
+    // and the mutation is not consumed: the same id applies once the reason to
+    // refuse it goes away, instead of being silently dropped forever.
+    overBudget = false
+    await expect(executor.push(push('spend'), { userID: 'user-1' })).resolves.toEqual({
+      pushResponse: {
+        mutations: [{ id: { clientID: 'client-1', id: 1 }, result: {} }],
+      },
+    })
+    expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([
+      { id: 'a', value: 'within budget' },
+    ])
+  })
+
+  test('a retryable rejection answers the push endpoint with 429 and Retry-After', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    sqlite.exec('CREATE TABLE item (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+
+    const mutators = {
+      spend: async () => {
+        throw new MutationRetryError(300_000, 'cloud spend budget exceeded', {
+          error: 'cloudSpendBudgetExceeded',
+        })
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    const response = await handleSyncExecutorPushRequest({
+      executor,
+      request: new Request('https://example.test/push', {
+        method: 'POST',
+        body: JSON.stringify(push('spend')),
+      }),
+      authData: { id: 'user-1' } as never,
+    })
+
+    expect(response.status).toBe(429)
+    // seconds, because that is what an HTTP client reads
+    expect(response.headers.get('retry-after')).toBe('300')
+    await expect(response.json()).resolves.toEqual({
+      error: 'cloud spend budget exceeded',
+      details: { error: 'cloudSpendBudgetExceeded' },
+      retryAfterMs: 300_000,
+    })
+    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM _zsync_changes').get()).toEqual({
+      n: 0,
+    })
   })
 
   test('replay acknowledges without invoking the mutator or effects again', async () => {

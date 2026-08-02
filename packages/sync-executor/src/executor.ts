@@ -61,6 +61,22 @@ function isMutationApplicationError(
   )
 }
 
+// exported because the durable-object host answers the same rejection over
+// HTTP and must not duck-type it a second time.
+export function isMutationRetryError(error: unknown): error is Error & {
+  readonly retryAfterMs: number
+  readonly details: JsonValue | undefined
+} {
+  return (
+    isRecord(error) &&
+    error.name === 'MutationRetryError' &&
+    typeof error.message === 'string' &&
+    Number.isSafeInteger(error.retryAfterMs) &&
+    Number(error.retryAfterMs) >= 0 &&
+    (error.details === undefined || isJsonValue(error.details))
+  )
+}
+
 function validatePushBody(value: unknown): PushBody {
   if (
     !isRecord(value) ||
@@ -104,7 +120,13 @@ function validatePushBody(value: unknown): PushBody {
 // advances. rethrowing instead would make the client retry that id forever and
 // block every later mutation in its group. ledger and database failures raised
 // outside the mutator stay fatal.
+//
+// a MutationRetryError is the deliberate exception: the mutator is saying the
+// mutation is fine but cannot run yet. wrapping that as permanent would both
+// drop the caller's data and, since the acknowledgement is itself a write,
+// charge for every refusal. it travels out of the push untouched instead.
 function toApplicationError(error: unknown): unknown {
+  if (isMutationRetryError(error)) return error
   if (isMutationApplicationError(error)) return error
   if (error instanceof SyncExecutorRequestError) return error
   const message = error instanceof Error ? error.message : String(error)
@@ -524,21 +546,35 @@ export async function handleSyncExecutorPushRequest<S extends Schema>(options: {
     // zero's mutateResponseSchema and the push comes back as PushFailed
     return Response.json(result.pushResponse)
   } catch (error) {
-    const status =
-      error instanceof SyncExecutorRequestError
-        ? error.status
-        : error instanceof SyntaxError
-          ? 400
-          : 500
+    const status = pushErrorStatus(error)
     await reportPushDiagnostics(options.diagnostics, {
       request: options.request,
       bodyText,
       error,
       status,
     })
-    return Response.json(
-      { error: error instanceof Error ? error.message : String(error) },
-      { status }
-    )
+    const body: Record<string, JsonValue> = {
+      error: error instanceof Error ? error.message : String(error),
+    }
+    const headers: Record<string, string> = {}
+    if (isMutationRetryError(error)) {
+      if (error.details !== undefined) body.details = error.details
+      body.retryAfterMs = error.retryAfterMs
+      // Retry-After is whole seconds on the wire, and rounding down would tell
+      // a caller to come back while the window it must wait out is still open.
+      headers['retry-after'] = String(Math.ceil(error.retryAfterMs / 1000))
+    }
+    return Response.json(body, { status, headers })
   }
+}
+
+// every rejection class here carries the status it means, so reading the field
+// covers all of them at once and keeps working for a class built by another
+// copy of this package, the way the name checks above do.
+function pushErrorStatus(error: unknown): number {
+  if (isRecord(error)) {
+    const status = Number(error.status)
+    if (Number.isInteger(status) && status >= 400 && status <= 599) return status
+  }
+  return error instanceof SyntaxError ? 400 : 500
 }

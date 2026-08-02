@@ -1,7 +1,12 @@
-export { MutationApplicationError, SyncExecutorRequestError } from './errors.js'
+export {
+  MutationApplicationError,
+  MutationRetryError,
+  SyncExecutorRequestError,
+} from './errors.js'
 export {
   createSyncExecutor,
   handleSyncExecutorPushRequest,
+  isMutationRetryError,
   registerMutators,
 } from './executor.js'
 export { reportPushDiagnostics, summarizePushRequest } from './diagnostics.js'

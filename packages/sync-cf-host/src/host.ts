@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers'
-import { createSyncExecutor } from 'orez-sync-executor/core'
+import { createSyncExecutor, isMutationRetryError } from 'orez-sync-executor/core'
 import { createSocketHost } from 'orez-sync-executor/realtime'
 
 import { validateSyncHostConfig } from './config.js'
@@ -168,10 +168,10 @@ function freshCounters(): Counters {
   }
 }
 
-function json(value: unknown, status = 200): Response {
+function json(value: unknown, status = 200, headers?: Record<string, string>): Response {
   return Response.json(value, {
     status,
-    headers: { 'cache-control': 'no-store' },
+    headers: { 'cache-control': 'no-store', ...headers },
   })
 }
 
@@ -208,7 +208,33 @@ function errorBody(error: unknown): Record<string, unknown> {
       retryAfterMs: error.retryAfterMs,
     }
   }
+  if (isMutationRetryError(error)) {
+    // the reason travels in `details` so a caller can pace on why it was
+    // refused. it used to arrive as an acknowledged app error, which cost a
+    // ledger write per refusal and consumed the mutation.
+    return {
+      error: errorMessage(error),
+      ...(error.details === undefined ? {} : { details: error.details }),
+      retryAfterMs: error.retryAfterMs,
+    }
+  }
   return { error: errorMessage(error) }
+}
+
+// one response builder for every refusal, so a rejection that tells the caller
+// when to come back always says so in the header an HTTP client already reads.
+function errorResponse(error: unknown): Response {
+  const body = errorBody(error)
+  const retryAfterMs = body.retryAfterMs
+  // whole seconds on the wire, rounded up: rounding down invites the caller
+  // back while the window it has to wait out is still open.
+  return json(
+    body,
+    statusOf(error),
+    typeof retryAfterMs === 'number'
+      ? { 'retry-after': String(Math.ceil(retryAfterMs / 1000)) }
+      : undefined
+  )
 }
 
 function requestError(message: string, status = 400): Error & { status: number } {
@@ -365,7 +391,7 @@ export function createSyncWorker<Env extends SyncHostEnv, S extends Schema = Sch
             const body = await requestObject(request)
             forwardedBody = { claims, body }
           } catch (error) {
-            return json(errorBody(error), statusOf(error))
+            return errorResponse(error)
           }
         }
       }
@@ -1526,8 +1552,7 @@ export function createSyncDurableObject<
           }
           return json({ pushResponse: delegatedResponse })
         } catch (error) {
-          const status = statusOf(error)
-          return json(errorBody(error), status)
+          return errorResponse(error)
         }
       }
       try {
@@ -1628,7 +1653,7 @@ export function createSyncDurableObject<
           totalMs: performance.now() - started,
           resetReason: null,
         })
-        return json({ error: errorMessage(error) }, status)
+        return errorResponse(error)
       }
     }
 
@@ -1846,7 +1871,7 @@ export function createSyncDurableObject<
               engine,
             })
           } catch (error) {
-            return json(errorBody(error), statusOf(error))
+            return errorResponse(error)
           }
         })()
       }
@@ -1949,7 +1974,7 @@ export function createSyncDurableObject<
           const applied = await this.#ingest(upstreamPath)
           return json({ ok: true, applied })
         } catch (error) {
-          return json(errorBody(error), statusOf(error))
+          return errorResponse(error)
         }
       }
 
@@ -1958,13 +1983,13 @@ export function createSyncDurableObject<
         try {
           forwarded = await forwardedSyncRequest(request)
         } catch (error) {
-          return json(errorBody(error), statusOf(error))
+          return errorResponse(error)
         }
         // pull and push both establish the upstream schema and snapshot barrier.
         try {
           await this.#ingest(upstreamPath)
         } catch (error) {
-          return json(errorBody(error), statusOf(error))
+          return errorResponse(error)
         }
         if (route === '/pull') {
           return this.#pull(forwarded.request, forwarded.claims, namespace)
