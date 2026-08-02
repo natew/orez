@@ -826,11 +826,24 @@ fn query_relevant(
     if root_pks.is_empty() {
         return Ok(false);
     }
-    let durable = read_query_row_keys(db, group, &q.hash)?;
     let ast = parse_ast(&q.ast_json)?;
     let (sql, base_params, pk_cols) = compile_predicate_probe(&ast, tables)?;
     for pk in root_pks {
-        if durable.contains(&(q.root_table.clone(), pk.clone())) {
+        // "is this one changed row already a member" is a point lookup on the
+        // full _zsync_query_rows primary key. it used to materialize the whole
+        // of read_query_row_keys(group, hash) -- every row in the query's
+        // result -- to answer it, so the step that exists to make a recompute
+        // CHEAPER read the entire membership of every candidate query. the
+        // per-pk predicate probe below already dominates this loop, so an
+        // indexed one-row existence check is strictly cheaper than the set.
+        let member = !db
+            .query(
+                "SELECT 1 FROM _zsync_query_rows
+                 WHERE clientGroupID = ? AND hash = ? AND rowTable = ? AND rowPk = ?",
+                &[text(group), text(&q.hash), text(&q.root_table), text(pk)],
+            )?
+            .is_empty();
+        if member {
             return Ok(true);
         }
         let pk_obj: Value = serde_json::from_str(pk).unwrap_or(Value::Null);
