@@ -873,7 +873,7 @@ pub(crate) fn recompute_group_with_rehydrate(
     // later re-desire recomputes from scratch instead of being narrowed away.
     db.exec(
         "DELETE FROM _zsync_query_state WHERE clientGroupID = ?
-         AND hash NOT IN (SELECT DISTINCT hash FROM _zsync_desires WHERE clientGroupID = ?)",
+         AND hash NOT IN (SELECT hash FROM _zsync_desires WHERE clientGroupID = ?)",
         &[text(group), text(group)],
     )?;
 
@@ -972,10 +972,26 @@ pub(crate) fn recompute_group_with_rehydrate(
     // dropping a desired query removes its rows unless another query holds them).
     // find just the deactivated hashes first, so a recompute with no deactivation
     // never scans the whole membership.
+    //
+    // the candidate set comes from _zsync_queries (one row per registered query)
+    // rather than _zsync_query_rows (one row per row in every query's result).
+    // it is a guaranteed superset: membership rows are only ever written for a
+    // hash in active_queries (_zsync_desires JOIN _zsync_queries), and the one
+    // DELETE of a group's _zsync_queries is immediately followed by reset_group,
+    // which drops that group's membership too -- so a hash can never keep rows
+    // after leaving _zsync_queries. a candidate with no rows costs one empty
+    // index lookup in the loop below.
+    //
+    // reading it from _zsync_query_rows made this probe visit every membership
+    // row in the group on EVERY recompute (measured: 10,000 rows read to yield
+    // 10 hashes at 10 queries x 1,000 rows), which is the opposite of what the
+    // comment above promises. _zsync_query_state is NOT usable here: the
+    // DELETE at the top of this function has already cleared exactly these
+    // hashes' markers, and rows orphaned by an AST change have no marker at all.
     let deactivated: Vec<String> = db
         .query(
-            "SELECT DISTINCT hash FROM _zsync_query_rows WHERE clientGroupID = ?
-             AND hash NOT IN (SELECT DISTINCT hash FROM _zsync_desires WHERE clientGroupID = ?)",
+            "SELECT hash FROM _zsync_queries WHERE clientGroupID = ?
+             AND hash NOT IN (SELECT hash FROM _zsync_desires WHERE clientGroupID = ?)",
             &[text(group), text(group)],
         )?
         .iter()
