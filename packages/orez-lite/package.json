@@ -10,75 +10,93 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./client": {
       "types": "./dist/client.d.ts",
-      "import": "./dist/client.js"
+      "import": "./dist/client.js",
+      "default": "./dist/client.js"
     },
     "./wake": {
       "types": "./dist/wake.d.ts",
-      "import": "./dist/wake.js"
+      "import": "./dist/wake.js",
+      "default": "./dist/wake.js"
     },
     "./realtime": {
       "types": "./dist/realtime.d.ts",
-      "import": "./dist/realtime.js"
+      "import": "./dist/realtime.js",
+      "default": "./dist/realtime.js"
     },
     "./encryption": {
       "types": "./dist/client/encrypted-column-codec.d.ts",
-      "import": "./dist/client/encrypted-column-codec.js"
+      "import": "./dist/client/encrypted-column-codec.js",
+      "default": "./dist/client/encrypted-column-codec.js"
     },
     "./encryption/conformance": {
       "types": "./dist/client/encrypted-column-conformance.d.ts",
-      "import": "./dist/client/encrypted-column-conformance.js"
+      "import": "./dist/client/encrypted-column-conformance.js",
+      "default": "./dist/client/encrypted-column-conformance.js"
     },
     "./browser": {
       "types": "./dist/browser/index.d.ts",
-      "import": "./dist/browser/index.js"
+      "import": "./dist/browser/index.js",
+      "default": "./dist/browser/index.js"
     },
     "./native": {
       "types": "./dist/native.d.ts",
-      "import": "./dist/native.js"
+      "import": "./dist/native.js",
+      "default": "./dist/native.js"
     },
     "./local": {
       "types": "./dist/local.d.ts",
-      "import": "./dist/local.js"
+      "import": "./dist/local.js",
+      "default": "./dist/local.js"
     },
     "./vite": {
       "types": "./dist/vite.d.ts",
-      "import": "./dist/vite.js"
+      "import": "./dist/vite.js",
+      "default": "./dist/vite.js"
     },
     "./cloudflare": {
       "types": "./dist/cloudflare.d.ts",
-      "import": "./dist/cloudflare.js"
+      "import": "./dist/cloudflare.js",
+      "default": "./dist/cloudflare.js"
     },
     "./cloudflare/build": {
       "types": "./dist/cloudflare-build.d.ts",
-      "import": "./dist/cloudflare-build.js"
+      "import": "./dist/cloudflare-build.js",
+      "default": "./dist/cloudflare-build.js"
     },
     "./cloudflare/sync": {
       "types": "./dist/cloudflare-sync.d.ts",
-      "import": "./dist/cloudflare-sync.js"
+      "import": "./dist/cloudflare-sync.js",
+      "default": "./dist/cloudflare-sync.js"
     },
     "./cloudflare/query-compiler": {
       "types": "./dist/cloudflare-query-compiler.d.ts",
-      "import": "./dist/cloudflare-query-compiler.js"
+      "import": "./dist/cloudflare-query-compiler.js",
+      "default": "./dist/cloudflare-query-compiler.js"
     },
     "./cloudflare/transaction-query": {
       "types": "./dist/cloudflare-transaction-query.d.ts",
-      "import": "./dist/cloudflare-transaction-query.js"
+      "import": "./dist/cloudflare-transaction-query.js",
+      "default": "./dist/cloudflare-transaction-query.js"
     },
     "./cloudflare/vite-wasm-loader": {
       "types": "./dist/cloudflare-vite-wasm-loader.d.ts",
-      "import": "./dist/cloudflare-vite-wasm-loader.js"
+      "import": "./dist/cloudflare-vite-wasm-loader.js",
+      "default": "./dist/cloudflare-vite-wasm-loader.js"
     },
     "./cloudflare/node-wasm-loader": {
       "types": "./dist/cloudflare-node-wasm-loader.d.ts",
-      "import": "./dist/cloudflare-node-wasm-loader.js"
+      "import": "./dist/cloudflare-node-wasm-loader.js",
+      "default": "./dist/cloudflare-node-wasm-loader.js"
     },
     "./cloudflare/bun-wasm-loader": {
       "types": "./dist/cloudflare-bun-wasm-loader.d.ts",
-      "import": "./dist/cloudflare-bun-wasm-loader.js"
+      "import": "./dist/cloudflare-bun-wasm-loader.js",
+      "default": "./dist/cloudflare-bun-wasm-loader.js"
     }
   },
   "bin": {
