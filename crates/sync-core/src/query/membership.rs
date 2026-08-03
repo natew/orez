@@ -261,7 +261,8 @@ pub fn init_query_schema(db: &mut dyn SyncDb) -> Result<(), EngineError> {
     // record the schema version so a future shape change can migrate forward.
     db.exec(
         "INSERT INTO _zsync_query_meta (lock, version) VALUES (1, ?)
-         ON CONFLICT (lock) DO UPDATE SET version = excluded.version",
+         ON CONFLICT (lock) DO UPDATE SET version = excluded.version
+         WHERE version <> excluded.version",
         &[SqlValue::Integer(QUERY_SCHEMA_VERSION)],
     )?;
     Ok(())

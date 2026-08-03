@@ -527,8 +527,11 @@ async function runBrowserHostSpike() {
     'wave finance seed direct SQL counts'
   )
   const seedChanges = await connection.client.query<{ tableName: string; count: number }>(
-    `SELECT tableName, COUNT(*) AS count FROM _zsync_changes
-     WHERE tableName IN ('budget', 'expense', 'savingsGoal')
+    `SELECT json_extract(change.value, '$[0]') AS tableName, COUNT(*) AS count
+     FROM _zsync_log_segments AS segment,
+          json_each(segment.payload, '$.transactions') AS tx,
+          json_each(tx.value, '$.changes') AS change
+     WHERE json_extract(change.value, '$[0]') IN ('budget', 'expense', 'savingsGoal')
      GROUP BY tableName ORDER BY tableName`
   )
   equal(
@@ -585,8 +588,8 @@ async function runBrowserHostSpike() {
     'wave finance fresh named query counts match direct SQL'
   )
   const seedWatermark = await connection.client.query<{ high: number; log: number }>(
-    `SELECT high, (SELECT MAX(watermark) FROM _zsync_changes) AS log
-     FROM _zsync_watermark WHERE lock = 1`
+    `SELECT endVersion AS high, endVersion AS log
+     FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1`
   )
   equal(seedWatermark, [{ high: 19, log: 19 }], 'wave finance pull advances watermark')
   equal(wakes, 1, 'wave finance seed wakes the first attached client')

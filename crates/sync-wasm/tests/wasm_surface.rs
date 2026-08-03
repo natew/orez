@@ -227,7 +227,7 @@ fn encrypted_columns_ride_opaque_through_a_query_pull() {
 }
 
 #[wasm_bindgen_test]
-fn preflight_then_application_write_then_finalize_preserves_journal_order() {
+fn preflight_then_application_write_then_finalize_preserves_ledger_order() {
     let db = db();
     initialize(&db);
 
@@ -235,7 +235,12 @@ fn preflight_then_application_write_then_finalize_preserves_journal_order() {
     let decision = from_js(engine_preflight(&db, "group-1", "writer-1", "1", "user-1").unwrap());
     assert_eq!(decision, json!({ "kind": "applied" }));
     assert_eq!(
-        from_js(query_sql(&db, "SELECT count(*) AS n FROM _zsync_changes"))[0]["values"][0]["value"],
+        from_js(query_sql(
+            &db,
+            "SELECT COALESCE(SUM(json_array_length(json_extract(tx.value, '$.changes'))), 0) AS n
+             FROM _zsync_log_segments AS segment,
+                  json_each(segment.payload, '$.transactions') AS tx",
+        ))[0]["values"][0]["value"],
         "0",
     );
     exec_sql(
@@ -245,12 +250,18 @@ fn preflight_then_application_write_then_finalize_preserves_journal_order() {
     engine_finalize(&db, "group-1", "writer-1", "1").unwrap();
     exec_sql(&db, "COMMIT");
 
-    let changes = from_js(query_sql(
+    let envelopes = from_js(query_sql(
         &db,
-        "SELECT op FROM _zsync_changes ORDER BY watermark",
+        "SELECT CASE
+                   WHEN json_array_length(json_extract(tx.value, '$.changes')) > 0 THEN 'row'
+                   WHEN json_type(tx.value, '$.lmid') = 'object' THEN 'lmid'
+                 END AS kind
+         FROM _zsync_log_segments AS segment,
+              json_each(segment.payload, '$.transactions') AS tx
+         ORDER BY CAST(json_extract(tx.value, '$.version') AS INTEGER)",
     ));
-    assert_eq!(changes[0]["values"][0]["value"], "row");
-    assert_eq!(changes[1]["values"][0]["value"], "lmid");
+    assert_eq!(envelopes[0]["values"][0]["value"], "row");
+    assert_eq!(envelopes[1]["values"][0]["value"], "lmid");
 
     let replay = from_js(engine_preflight(&db, "group-1", "writer-1", "1", "user-1").unwrap());
     assert_eq!(replay, json!({ "kind": "replay", "expected": "2" }));

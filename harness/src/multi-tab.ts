@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { mutators, queries } from './fixture.js'
+import { readPackedLmidCheckpoint } from './packed-lmids.js'
 import { persistentKVStoreProvider } from './persistent-kv.js'
 import { assertServerOutcome } from './server-outcome.js'
 
@@ -129,18 +130,18 @@ try {
     if (!viewB.hasEvery(allIDs)) throw new Error('tab B has not converged')
   }, 'two-tab convergence')
 
-  const initialLMIDs = await target.oracle(
-    `SELECT clientID, lastMutationID FROM _zsync_clients
-     WHERE clientGroupID = '${groupA}' ORDER BY clientID`
-  )
+  const initialLMIDs = await readPackedLmidCheckpoint(target)
   const initialByClient = new Map(
-    initialLMIDs.map((row) => [String(row.clientID), Number(row.lastMutationID)])
+    Object.entries(initialLMIDs[groupA] ?? {}).map(([client, lmid]) => [
+      client,
+      Number(lmid),
+    ])
   )
   if (
     initialByClient.get(tabA.clientID) !== 6 ||
     initialByClient.get(tabB.clientID) !== 6
   ) {
-    throw new Error(`group LMIDs missing tabs: ${JSON.stringify(initialLMIDs)}`)
+    throw new Error(`group LMIDs missing tabs: ${JSON.stringify(initialLMIDs[groupA])}`)
   }
   console.log('[multi-tab] shared group + concurrent per-tab LMIDs PASS')
 
@@ -172,15 +173,17 @@ try {
       throw new Error('replacement tab missed surviving writes')
   }, 'replacement/survivor convergence')
 
-  const finalLMIDs = await target.oracle(
-    `SELECT clientID, lastMutationID FROM _zsync_clients
-     WHERE clientGroupID = '${groupA}' ORDER BY clientID`
-  )
+  const finalLMIDs = await readPackedLmidCheckpoint(target)
   const finalByClient = new Map(
-    finalLMIDs.map((row) => [String(row.clientID), Number(row.lastMutationID)])
+    Object.entries(finalLMIDs[groupA] ?? {}).map(([client, lmid]) => [
+      client,
+      Number(lmid),
+    ])
   )
   if (finalByClient.get(tabB.clientID) !== 8 || finalByClient.get(tabC.clientID) !== 2) {
-    throw new Error(`replacement group LMIDs wrong: ${JSON.stringify(finalLMIDs)}`)
+    throw new Error(
+      `replacement group LMIDs wrong: ${JSON.stringify(finalLMIDs[groupA])}`
+    )
   }
 
   const oracle = await target.oracle(

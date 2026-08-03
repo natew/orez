@@ -104,6 +104,13 @@ let server = startWorkerd()
 try {
   await waitReady()
 
+  const initialBilling = await admin('/admin/sql-billing')
+  assert.equal(
+    initialBilling.rowsWritten > 0,
+    true,
+    'fresh schema initialization proves the billing meter can observe DDL writes'
+  )
+
   await admin('/admin/retention', { retainChanges: 1 })
   assert.deepStrictEqual(
     await storedRetention(),
@@ -116,6 +123,31 @@ try {
   await server.exited
   server = startWorkerd()
   await waitReady()
+
+  const restartBilling = await admin('/admin/sql-billing')
+  assert.equal(
+    restartBilling.rowsWritten,
+    0,
+    'reopening an initialized object rewrites no schema or trigger rows'
+  )
+  const triggerRows = await admin('/admin/sql', {
+    query:
+      "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '_zsync_tr_%_v2' ORDER BY name LIMIT 1",
+  })
+  assert.equal(triggerRows.rows.length, 1, 'the restart probe found a packed trigger')
+  const beforeTriggerReplay = await admin('/admin/sql-billing')
+  await admin('/admin/sql', {
+    query: triggerRows.rows[0].sql.replace(
+      /^CREATE TRIGGER /,
+      'CREATE TRIGGER IF NOT EXISTS '
+    ),
+  })
+  const afterTriggerReplay = await admin('/admin/sql-billing')
+  assert.equal(
+    afterTriggerReplay.rowsWritten - beforeTriggerReplay.rowsWritten,
+    0,
+    'replaying CREATE TRIGGER IF NOT EXISTS writes no SQLite rows'
+  )
 
   assert.deepStrictEqual(
     await storedRetention(),
@@ -137,7 +169,7 @@ try {
   const status = await admin('/admin/status')
   assert.deepStrictEqual(
     { floor: status.engine.floor, watermark: status.engine.watermark },
-    { floor: '5', watermark: '6' },
+    { floor: '2', watermark: '3' },
     'post-restart pull prunes to the persisted one-change retention window'
   )
 

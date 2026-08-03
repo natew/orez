@@ -134,7 +134,8 @@ export class SqlStorageSyncDb implements JsSyncDb {
 
   constructor(
     private readonly sql: SqlStorage,
-    private readonly recordRowsWritten: (rows: number) => void = () => {}
+    private readonly recordRowsWritten: (rows: number) => void = () => {},
+    private readonly recordRowsRead: (rows: number) => void = () => {}
   ) {}
 
   resetStats(): void {
@@ -148,7 +149,8 @@ export class SqlStorageSyncDb implements JsSyncDb {
     const start = performance.now()
     trackBillableCursorRows(
       this.sql.exec(sql, ...params.map((value) => decodeBinding(value))),
-      this.recordRowsWritten
+      this.recordRowsWritten,
+      this.recordRowsRead
     )
     this.stats.execCalls++
     this.stats.sqlMs += performance.now() - start
@@ -159,7 +161,8 @@ export class SqlStorageSyncDb implements JsSyncDb {
     const start = performance.now()
     const cursor = trackBillableCursorRows(
       this.sql.exec(sql, ...params.map((value) => decodeBinding(value))),
-      this.recordRowsWritten
+      this.recordRowsWritten,
+      this.recordRowsRead
     )
     const columns = [...cursor.columnNames]
     // A SqlStorage cursor must be fully consumed before any await. Returning a
@@ -178,7 +181,8 @@ export class SqlStorageSyncDb implements JsSyncDb {
 export class SqlStorageDirect implements SyncSql {
   constructor(
     private readonly sql: SqlStorage,
-    private readonly recordRowsWritten: (rows: number) => void = () => {}
+    private readonly recordRowsWritten: (rows: number) => void = () => {},
+    private readonly recordRowsRead: (rows: number) => void = () => {}
   ) {}
 
   exec(
@@ -189,10 +193,15 @@ export class SqlStorageDirect implements SyncSql {
     assertHostSql(sql)
     trackBillableCursorRows(
       this.sql.exec(sql, ...params),
-      this.recordRowsWritten
+      this.recordRowsWritten,
+      this.recordRowsRead
     ).toArray()
     const changes = Number(
-      this.sql.exec('SELECT changes() AS changes').one()?.changes ?? 0
+      trackBillableCursorRows(
+        this.sql.exec('SELECT changes() AS changes'),
+        this.recordRowsWritten,
+        this.recordRowsRead
+      ).one()?.changes ?? 0
     )
     return { changes }
   }
@@ -204,7 +213,8 @@ export class SqlStorageDirect implements SyncSql {
     assertHostSql(sql)
     return trackBillableCursorRows(
       this.sql.exec(sql, ...params),
-      this.recordRowsWritten
+      this.recordRowsWritten,
+      this.recordRowsRead
     ).toArray() as Row[]
   }
 }

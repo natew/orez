@@ -34,19 +34,57 @@ function sqliteDatabase(): { database: ApplicationDatabase; sqlite: DatabaseSync
       op TEXT NOT NULL CHECK (op IN ('row', 'lmid', 'marker')),
       pk TEXT
     );
+    CREATE TABLE _zsync_log_segments (
+      startVersion INTEGER PRIMARY KEY,
+      endVersion INTEGER NOT NULL,
+      payload TEXT NOT NULL,
+      pending TEXT NOT NULL,
+      captureMode INTEGER NOT NULL CHECK (captureMode IN (0, 1))
+    ) WITHOUT ROWID;
     CREATE TRIGGER item_insert AFTER INSERT ON item BEGIN
-      INSERT INTO _zsync_changes (tableName, op, pk)
-      VALUES ('item', 'row', json_object('id', NEW.id));
+      UPDATE _zsync_log_segments
+      SET endVersion = endVersion + 1,
+          payload = json_insert(
+            payload,
+            '$.transactions[#]',
+            json_object(
+              'version', CAST(endVersion + 1 AS TEXT),
+              'changes', json_array(json_array('item', json_object('id', NEW.id)))
+            )
+          )
+      WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
+        AND captureMode = 0;
     END;
     CREATE TRIGGER item_update AFTER UPDATE ON item BEGIN
-      INSERT INTO _zsync_changes (tableName, op, pk)
-      VALUES ('item', 'row', json_object('id', OLD.id));
-      INSERT INTO _zsync_changes (tableName, op, pk)
-      VALUES ('item', 'row', json_object('id', NEW.id));
+      UPDATE _zsync_log_segments
+      SET endVersion = endVersion + 2,
+          payload = json_insert(
+            payload,
+            '$.transactions[#]',
+            json_object(
+              'version', CAST(endVersion + 2 AS TEXT),
+              'changes', json_array(
+                json_array('item', json_object('id', OLD.id)),
+                json_array('item', json_object('id', NEW.id))
+              )
+            )
+          )
+      WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
+        AND captureMode = 0;
     END;
     CREATE TRIGGER item_delete AFTER DELETE ON item BEGIN
-      INSERT INTO _zsync_changes (tableName, op, pk)
-      VALUES ('item', 'row', json_object('id', OLD.id));
+      UPDATE _zsync_log_segments
+      SET endVersion = endVersion + 1,
+          payload = json_insert(
+            payload,
+            '$.transactions[#]',
+            json_object(
+              'version', CAST(endVersion + 1 AS TEXT),
+              'changes', json_array(json_array('item', json_object('id', OLD.id)))
+            )
+          )
+      WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
+        AND captureMode = 0;
     END;
   `)
 
@@ -92,6 +130,20 @@ function sqliteDatabase(): { database: ApplicationDatabase; sqlite: DatabaseSync
   return { database, sqlite }
 }
 
+function packedPayload(sqlite: DatabaseSync) {
+  const row = sqlite
+    .prepare('SELECT payload FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1')
+    .get() as { payload: string }
+  return JSON.parse(row.payload) as {
+    lmids: Record<string, Record<string, string>>
+    transactions: {
+      version: string
+      changes: [string, Record<string, unknown>][]
+      lmid?: { clientGroupID: string; clientID: string; mutationID: string }
+    }[]
+  }
+}
+
 const effects: EffectScheduler = {
   async runBackground(promise) {
     await promise
@@ -120,10 +172,14 @@ function push(name: string, id = 1, clientID = 'client-1') {
 }
 
 describe('sync executor', () => {
-  test('helper shadowing adds no writes and the meter detects an extra logical row', async () => {
-    const measureRowsWritten = async (lane: 'raw' | 'helper', logicalRows: 1 | 2) => {
+  test('packed helper capture amortizes to two ledger writes per warm mutation', async () => {
+    const measureRowsWritten = async (
+      lane: 'raw' | 'helper',
+      logicalRows: 1 | 2 | 32
+    ) => {
       const { database, sqlite } = sqliteDatabase()
       const mutators = {
+        warm: async () => {},
         create: async ({ tx }) => {
           const write = async (id: string, value: string) => {
             if (lane === 'helper') {
@@ -135,24 +191,71 @@ describe('sync executor', () => {
               )
             }
           }
-          await write('a', 'one')
-          if (logicalRows === 2) {
-            await write('b', 'two')
+          for (let index = 0; index < logicalRows; index++) {
+            await write(`item-${index}`, `value-${index}`)
           }
         },
       } satisfies MutatorRegistry<typeof schema>
       const executor = createSyncExecutor({ database, effects, mutators, schema })
+      await executor.push(push('warm'), { userID: 'user-1' })
       const before = Number(
         sqlite.prepare('SELECT total_changes() AS total').get()!.total
       )
-      await executor.push(push('create'), { userID: 'user-1' })
+      await executor.push(push('create', 2), { userID: 'user-1' })
       const after = Number(sqlite.prepare('SELECT total_changes() AS total').get()!.total)
       return after - before
     }
 
-    await expect(measureRowsWritten('raw', 1)).resolves.toBe(5)
-    await expect(measureRowsWritten('helper', 1)).resolves.toBe(5)
-    await expect(measureRowsWritten('helper', 2)).resolves.toBe(7)
+    await expect(measureRowsWritten('raw', 1)).resolves.toBe(3)
+    await expect(measureRowsWritten('helper', 1)).resolves.toBe(3)
+    await expect(measureRowsWritten('helper', 2)).resolves.toBe(4)
+    await expect(measureRowsWritten('raw', 32)).resolves.toBe(65)
+    await expect(measureRowsWritten('helper', 32)).resolves.toBe(34)
+  })
+
+  test('helper rotation copies the LMID checkpoint into the new segment', async () => {
+    for (const [fillerBytes, expectedSegments] of [
+      [760_000, 1],
+      [790_000, 2],
+    ] as const) {
+      const { database, sqlite } = sqliteDatabase()
+      const mutators = {
+        create: async ({ tx, args }) => {
+          await tx.mutate.item.insert(args)
+        },
+      } satisfies MutatorRegistry<typeof schema>
+      const executor = createSyncExecutor({ database, effects, mutators, schema })
+      await executor.push(push('create'), { userID: 'user-1' })
+      const payload = packedPayload(sqlite)
+      payload.transactions[0]!.changes = [['item', { id: 'x'.repeat(fillerBytes) }]]
+      sqlite
+        .prepare('UPDATE _zsync_log_segments SET payload = ? WHERE startVersion = 1')
+        .run(JSON.stringify(payload))
+
+      await executor.push(
+        {
+          clientGroupID: 'group-1',
+          pushVersion: 1,
+          mutations: [
+            {
+              type: 'custom',
+              id: 2,
+              clientID: 'client-1',
+              name: 'create',
+              args: [{ id: 'second', value: 'v2' }],
+            },
+          ],
+        },
+        { userID: 'user-1' }
+      )
+      expect(
+        sqlite.prepare('SELECT COUNT(*) AS count FROM _zsync_log_segments').get()
+      ).toEqual({ count: expectedSegments })
+      expect(packedPayload(sqlite).lmids['group-1']?.['client-1']).toBe('2')
+      expect(sqlite.prepare("SELECT value FROM item WHERE id = 'second'").get()).toEqual({
+        value: 'v2',
+      })
+    }
   })
 
   test('insert conflict keeps the existing row and commits the later insert', async () => {
@@ -176,9 +279,7 @@ describe('sync executor', () => {
       { id: 'a', value: 'original' },
       { id: 'b', value: 'later' },
     ])
-    expect(sqlite.prepare('SELECT lastMutationID FROM _zsync_clients').get()).toEqual({
-      lastMutationID: 1,
-    })
+    expect(packedPayload(sqlite).lmids['group-1']?.['client-1']).toBe('1')
   })
 
   test('the push endpoint returns zero mutate response shape, not an internal wrapper', async () => {
@@ -325,9 +426,26 @@ describe('sync executor', () => {
       { id: 'query-write', value: 'v' },
       { id: 'raw', value: 'v' },
     ])
+    const committed = packedPayload(sqlite)
+    expect(
+      committed.transactions
+        .flatMap((transaction) => transaction.changes)
+        .map(([table, key]) => JSON.stringify([table, key]))
+        .sort()
+    ).toEqual(
+      ['helper', 'query-write', 'raw']
+        .map((id) => JSON.stringify(['item', { id }]))
+        .sort()
+    )
+    expect(
+      committed.transactions.filter((transaction) => transaction.lmid !== undefined)
+    ).toHaveLength(1)
+    expect(
+      new Set(committed.transactions.map((transaction) => transaction.version)).size
+    ).toBe(committed.transactions.length)
     await expect(
       executor.push(push('wrongAfterRaw', 1, 'wrong-client'), { userID: 'user-1' })
-    ).rejects.toThrow('does not match trigger write set')
+    ).rejects.toThrow('does not match returned write set')
     expect(
       sqlite
         .prepare(
@@ -361,11 +479,11 @@ describe('sync executor', () => {
       { id: 'legacy', value: 'v' },
     ])
     expect(
-      sqlite.prepare("SELECT tableName, pk FROM _zsync_changes WHERE op = 'row'").all()
-    ).toEqual([{ tableName: 'item', pk: '{"id":"legacy"}' }])
+      packedPayload(sqlite).transactions.flatMap((transaction) => transaction.changes)
+    ).toEqual([['item', { id: 'legacy' }]])
   })
 
-  test('helper shadowing matches primary-key changes, bulk writes, and repeated keys', async () => {
+  test('triggers capture primary-key changes while helpers capture bulk and repeated keys', async () => {
     const { database, sqlite } = sqliteDatabase()
     sqlite
       .prepare('INSERT INTO item (id, value) VALUES (?, ?), (?, ?), (?, ?)')
@@ -373,17 +491,11 @@ describe('sync executor', () => {
     const mutators = {
       reshape: async ({ tx }) => {
         const sql = tx.dbTransaction.wrappedTransaction
-        await sql.exec(
-          'UPDATE item SET id = ?, value = ? WHERE id = ?',
-          ['new', 'v4', 'old'],
-          {
-            table: 'item',
-            publicTable: 'item',
-            kind: 'update',
-            capture: 'exact',
-            primaryKeys: [{ before: { id: 'old' }, after: { id: 'new' } }],
-          }
-        )
+        await sql.exec('UPDATE item SET id = ?, value = ? WHERE id = ?', [
+          'new',
+          'v4',
+          'old',
+        ])
         await sql.exec('UPDATE item SET value = ? WHERE id = ?', ['v5', 'new'], {
           table: 'item',
           publicTable: 'item',
@@ -409,6 +521,44 @@ describe('sync executor', () => {
     })
     expect(sqlite.prepare('SELECT * FROM item ORDER BY id').all()).toEqual([
       { id: 'new', value: 'v5' },
+    ])
+    expect(
+      packedPayload(sqlite)
+        .transactions.flatMap((transaction) => transaction.changes)
+        .map(([table, key]) => JSON.stringify([table, key]))
+        .sort()
+    ).toEqual(
+      ['bulk-a', 'bulk-b', 'new', 'old']
+        .map((id) => JSON.stringify(['item', { id }]))
+        .sort()
+    )
+  })
+
+  test('primary-key-changing exact metadata fails before SQL reaches the database', async () => {
+    const { database, sqlite } = sqliteDatabase()
+    sqlite.prepare('INSERT INTO item (id, value) VALUES (?, ?)').run('old', 'v1')
+    const mutators = {
+      unsafe: async ({ tx }) => {
+        await tx.dbTransaction.wrappedTransaction.exec(
+          'UPDATE item SET id = ? WHERE id = ?',
+          ['new', 'old'],
+          {
+            table: 'item',
+            publicTable: 'item',
+            kind: 'update',
+            capture: 'exact',
+            primaryKeys: [{ before: { id: 'old' }, after: { id: 'new' } }],
+          }
+        )
+      },
+    } satisfies MutatorRegistry<typeof schema>
+    const executor = createSyncExecutor({ database, effects, mutators, schema })
+
+    await expect(executor.push(push('unsafe'), { userID: 'user-1' })).rejects.toThrow(
+      'primary-key-changing SQL must use transparent trigger capture'
+    )
+    expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([
+      { id: 'old', value: 'v1' },
     ])
   })
 
@@ -492,9 +642,7 @@ describe('sync executor', () => {
       },
     })
     expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([])
-    expect(sqlite.prepare('SELECT lastMutationID FROM _zsync_clients').get()).toEqual({
-      lastMutationID: 1,
-    })
+    expect(packedPayload(sqlite).lmids['group-1']?.['client-1']).toBe('1')
 
     // the next mutation must land: a stalled ledger would reject id 2 as
     // out-of-order and the client would retry the failed mutation forever
@@ -538,9 +686,7 @@ describe('sync executor', () => {
     // the whole point of refusing a write is that refusing is free. an
     // acknowledged rejection would move the ledger and append its lmid change
     // row, so the mechanism that exists to stop spending would itself spend.
-    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM _zsync_changes').get()).toEqual({
-      n: 0,
-    })
+    expect(packedPayload(sqlite)).toMatchObject({ lmids: {}, transactions: [] })
     expect(sqlite.prepare('SELECT COUNT(*) AS n FROM _zsync_clients').get()).toEqual({
       n: 0,
     })
@@ -588,9 +734,7 @@ describe('sync executor', () => {
       details: { error: 'cloudSpendBudgetExceeded' },
       retryAfterMs: 300_000,
     })
-    expect(sqlite.prepare('SELECT COUNT(*) AS n FROM _zsync_changes').get()).toEqual({
-      n: 0,
-    })
+    expect(packedPayload(sqlite)).toMatchObject({ lmids: {}, transactions: [] })
   })
 
   test('replay acknowledges without invoking the mutator or effects again', async () => {
@@ -799,8 +943,6 @@ describe('sync executor', () => {
       },
     })
     expect(sqlite.prepare('SELECT * FROM item').all()).toEqual([])
-    expect(sqlite.prepare('SELECT lastMutationID FROM _zsync_clients').get()).toEqual({
-      lastMutationID: 1,
-    })
+    expect(packedPayload(sqlite).lmids['group-1']?.['client-1']).toBe('1')
   })
 })

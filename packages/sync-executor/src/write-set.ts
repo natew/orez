@@ -1,5 +1,11 @@
 import { MutationWriteSetError } from './errors.js'
+import {
+  commitPackedLedger,
+  preparePackedLedger,
+  setPackedCaptureMode,
+} from './packed-ledger.js'
 
+import type { PackedLedgerIdentity, PackedLedgerKey } from './packed-ledger.js'
 import type {
   ApplicationTransaction,
   JsonPrimitive,
@@ -7,10 +13,7 @@ import type {
   ZeroSchemaConfig,
 } from './types.js'
 
-type CapturedPrimaryKey = {
-  readonly table: string
-  readonly key: Readonly<Record<string, JsonPrimitive>>
-}
+type CapturedPrimaryKey = PackedLedgerKey
 
 function isJsonPrimitive(value: unknown): value is JsonPrimitive {
   return (
@@ -25,7 +28,7 @@ function canonicalPrimaryKey(
   schema: ZeroSchemaConfig,
   tableName: string,
   value: unknown,
-  source: 'executor metadata' | 'trigger'
+  source: 'database result' | 'executor metadata'
 ): CapturedPrimaryKey {
   if (!Object.hasOwn(schema.tables, tableName)) {
     throw new MutationWriteSetError(`${source} names unknown table ${tableName}`)
@@ -51,7 +54,7 @@ function canonicalPrimaryKey(
   const key: Record<string, JsonPrimitive> = {}
   for (const column of table.primaryKey) {
     let field = input[column]
-    if (source === 'trigger' && table.columns[column]?.type === 'boolean') {
+    if (source === 'database result' && table.columns[column]?.type === 'boolean') {
       if (field === 0) field = false
       if (field === 1) field = true
     }
@@ -69,10 +72,27 @@ function encodedPrimaryKey(primaryKey: CapturedPrimaryKey): string {
   return JSON.stringify([primaryKey.table, primaryKey.key])
 }
 
-function validateMetadata(
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`
+}
+
+function expectedResultKeys(
   schema: ZeroSchemaConfig,
   metadata: Extract<SqlStatementMetadata, { readonly capture: 'exact' }>
 ): CapturedPrimaryKey[] {
+  const side = metadata.kind === 'delete' ? 'before' : 'after'
+  return metadata.primaryKeys.flatMap((row) => {
+    const value = row[side]
+    return value
+      ? [canonicalPrimaryKey(schema, metadata.publicTable, value, 'executor metadata')]
+      : []
+  })
+}
+
+function validateMetadata(
+  schema: ZeroSchemaConfig,
+  metadata: Extract<SqlStatementMetadata, { readonly capture: 'exact' }>
+): void {
   if (!Object.hasOwn(schema.tables, metadata.publicTable)) {
     throw new MutationWriteSetError(
       `executor metadata names unknown table ${metadata.publicTable}`
@@ -86,45 +106,48 @@ function validateMetadata(
     )
   }
 
-  const captured: CapturedPrimaryKey[] = []
   for (const [index, row] of metadata.primaryKeys.entries()) {
     if (!row.before && !row.after) {
       throw new MutationWriteSetError(
         `executor metadata primaryKeys[${index}] has neither before nor after`
       )
     }
-    if (row.before) {
-      captured.push(
-        canonicalPrimaryKey(schema, metadata.publicTable, row.before, 'executor metadata')
-      )
-    }
-    if (row.after) {
-      captured.push(
-        canonicalPrimaryKey(schema, metadata.publicTable, row.after, 'executor metadata')
+    const before = row.before
+      ? canonicalPrimaryKey(schema, metadata.publicTable, row.before, 'executor metadata')
+      : undefined
+    const after = row.after
+      ? canonicalPrimaryKey(schema, metadata.publicTable, row.after, 'executor metadata')
+      : undefined
+    if (before && after && encodedPrimaryKey(before) !== encodedPrimaryKey(after)) {
+      throw new MutationWriteSetError(
+        'primary-key-changing SQL must use transparent trigger capture'
       )
     }
   }
-  return captured
 }
 
-export function beginWriteSetCapture(
+export async function beginWriteSetCapture(
   schema: ZeroSchemaConfig,
   applicationTx: ApplicationTransaction,
   dialect: 'sqlite' | 'postgresql'
-): {
+): Promise<{
   readonly transaction: ApplicationTransaction
-  validate(): Promise<void>
-} {
+  commit(identity?: PackedLedgerIdentity): Promise<void>
+}> {
   if (dialect !== 'sqlite') {
     return {
       transaction: applicationTx,
-      validate: async () => {},
+      commit: async () => {},
     }
   }
+  const captureStart = await preparePackedLedger(applicationTx)
 
   let active = true
   let operation = Promise.resolve<unknown>(undefined)
   let fatalFailure: unknown
+  let exactMode = false
+  let rawWrite = false
+  const exactKeys = new Map<string, CapturedPrimaryKey>()
 
   const assertActive = () => {
     if (!active) {
@@ -140,70 +163,67 @@ export function beginWriteSetCapture(
     )
     return result
   }
+  const setMode = async (exact: boolean) => {
+    if (exactMode === exact) return
+    await setPackedCaptureMode(applicationTx, exact)
+    exactMode = exact
+  }
 
   const transaction: ApplicationTransaction = {
     exec(sql, params, metadata) {
       return serialize(async () => {
         // arbitrary sql keeps the product's trigger-backed "just use the db"
-        // contract. generated helpers opt each modeled statement into shadowing.
+        // contract. generated helpers opt each modeled run into the packed lane.
         if (metadata?.capture !== 'exact') {
-          return applicationTx.exec(sql, params, metadata)
+          await setMode(false)
+          const result = await applicationTx.exec(sql, params, metadata)
+          rawWrite ||= result.changes > 0
+          return result
         }
         try {
-          const statementKeys = validateMetadata(schema, metadata)
-          const checkpoint =
-            (
-              await applicationTx.query<{ watermark: number | bigint | string }>(
-                'SELECT COALESCE(MAX("watermark"), 0) AS "watermark" FROM "_zsync_changes"'
-              )
-            )[0]?.watermark ?? 0
-          const result = await applicationTx.exec(sql, params, metadata)
-          const rows = await applicationTx.query<{
-            tableName: string
-            pk: string | null
-          }>(
-            `SELECT "tableName" AS "tableName", "pk" AS "pk"
-             FROM "_zsync_changes"
-             WHERE "watermark" > ? AND "op" = 'row'`,
-            [checkpoint]
-          )
-          const triggered = new Map<string, CapturedPrimaryKey>()
-          for (const row of rows) {
-            if (typeof row.tableName !== 'string' || typeof row.pk !== 'string') {
-              throw new MutationWriteSetError(
-                'trigger emitted an invalid touched-key row'
-              )
-            }
-            let parsed: unknown
-            try {
-              parsed = JSON.parse(row.pk)
-            } catch {
-              throw new MutationWriteSetError(
-                `trigger emitted invalid primary-key JSON for ${row.tableName}`
-              )
-            }
-            const primaryKey = canonicalPrimaryKey(
-              schema,
-              row.tableName,
-              parsed,
-              'trigger'
+          validateMetadata(schema, metadata)
+          const table = schema.tables[metadata.publicTable]!
+          if (/\bRETURNING\b/i.test(sql)) {
+            throw new MutationWriteSetError(
+              'exact write SQL must leave RETURNING to the executor'
             )
-            triggered.set(encodedPrimaryKey(primaryKey), primaryKey)
           }
-
-          const executorKeys = [
-            ...new Set((result.changes > 0 ? statementKeys : []).map(encodedPrimaryKey)),
-          ].sort()
-          const triggerKeys = [...triggered.keys()].sort()
+          const returning = table.primaryKey
+            .map((column) => {
+              const physical = table.columns[column]?.serverName ?? column
+              return `${quoteIdentifier(physical)} AS ${quoteIdentifier(column)}`
+            })
+            .join(', ')
+          const statement = sql.trim().replace(/;$/, '')
+          await setMode(true)
+          const returned = await applicationTx.query<Record<string, unknown>>(
+            `${statement} RETURNING ${returning}`,
+            params
+          )
+          const actualResultKeys = returned.map((row) =>
+            canonicalPrimaryKey(schema, metadata.publicTable, row, 'database result')
+          )
+          const expected =
+            returned.length === 0
+              ? []
+              : [
+                  ...new Set(expectedResultKeys(schema, metadata).map(encodedPrimaryKey)),
+                ].sort()
+          const actual = [...new Set(actualResultKeys.map(encodedPrimaryKey))].sort()
           if (
-            executorKeys.length !== triggerKeys.length ||
-            executorKeys.some((key, index) => key !== triggerKeys[index])
+            expected.length !== actual.length ||
+            expected.some((key, index) => key !== actual[index])
           ) {
             throw new MutationWriteSetError(
-              `executor write set ${JSON.stringify(executorKeys)} does not match trigger write set ${JSON.stringify(triggerKeys)}`
+              `executor write set ${JSON.stringify(expected)} does not match returned write set ${JSON.stringify(actual)}`
             )
           }
-          return result
+          if (returned.length > 0) {
+            for (const key of actualResultKeys) {
+              exactKeys.set(encodedPrimaryKey(key), key)
+            }
+          }
+          return { changes: returned.length }
         } catch (error) {
           if (
             error &&
@@ -217,21 +237,38 @@ export function beginWriteSetCapture(
         }
       })
     },
-    query(sql, params) {
-      return serialize(() => applicationTx.query(sql, params))
+    query<Row extends Record<string, unknown> = Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[]
+    ) {
+      return serialize(async () => {
+        await setMode(false)
+        const rows = await applicationTx.query<Row>(sql, params)
+        rawWrite ||= /\b(?:INSERT|UPDATE|DELETE|REPLACE)\b/i.test(sql)
+        return rows
+      })
     },
     queryAst(ast, format, queryName) {
-      return serialize(() => applicationTx.queryAst(ast, format, queryName))
+      return serialize(async () => {
+        await setMode(false)
+        return applicationTx.queryAst(ast, format, queryName)
+      })
     },
   }
 
   return {
     transaction,
-    async validate(): Promise<void> {
+    async commit(identity?: PackedLedgerIdentity): Promise<void> {
       assertActive()
       try {
         await operation
         if (fatalFailure !== undefined) throw fatalFailure
+        await commitPackedLedger(
+          applicationTx,
+          [...exactKeys.values()],
+          identity,
+          rawWrite ? captureStart : undefined
+        )
       } finally {
         active = false
       }

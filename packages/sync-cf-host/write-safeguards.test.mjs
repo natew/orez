@@ -76,6 +76,7 @@ test('delegated push retries are bounded and exponentially capped', () => {
 
 test('billable cursor tracking captures rows that appear during raw iteration', () => {
   const cursor = {
+    rowsRead: 0,
     rowsWritten: 0,
     raw() {
       let done = false
@@ -86,14 +87,21 @@ test('billable cursor tracking captures rows that appear during raw iteration', 
         next: () => {
           if (done) return { done: true }
           done = true
+          this.rowsRead = 1
           this.rowsWritten = 7
           return { done: false, value: [1] }
         },
       }
     },
   }
-  const deltas = []
-  const tracked = trackBillableCursorRows(cursor, (rows) => deltas.push(rows))
+  const written = []
+  const read = []
+  const tracked = trackBillableCursorRows(
+    cursor,
+    (rows) => written.push(rows),
+    (rows) => read.push(rows)
+  )
   expect(Array.from(tracked.raw())).toEqual([[1]])
-  expect(deltas).toEqual([7])
+  expect(written).toEqual([7])
+  expect(read).toEqual([1])
 })

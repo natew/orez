@@ -111,23 +111,12 @@ fn applies_ordered_pages_and_is_watermark_idempotent() {
     let first = apply_upstream(&mut db, &tables, &batch).unwrap();
     assert_eq!(first.applied, 2);
     assert!(first.caught_up);
-    let changes = db
-        .query(
-            "SELECT watermark FROM _zsync_changes ORDER BY watermark",
-            &[],
-        )
-        .unwrap();
-    assert_eq!(changes.len(), 2);
+    assert_eq!(sync_core::watermark(&mut db).unwrap(), 2);
 
     let replay = apply_upstream(&mut db, &tables, &batch).unwrap();
     assert_eq!(replay.applied, 0);
     assert_eq!(replay.watermark, 2);
-    assert_eq!(
-        db.query("SELECT watermark FROM _zsync_changes", &[])
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(sync_core::watermark(&mut db).unwrap(), 2);
 }
 
 #[test]
@@ -164,13 +153,8 @@ fn update_and_delete_use_full_images_and_advance_the_change_log() {
             .unwrap()
             .is_empty()
     );
-    // insert + update old/new + delete
-    assert_eq!(
-        db.query("SELECT watermark FROM _zsync_changes", &[])
-            .unwrap()
-            .len(),
-        4
-    );
+    // insert + update old/new + delete preserve the legacy cookie sequence
+    assert_eq!(sync_core::watermark(&mut db).unwrap(), 4);
 }
 
 #[test]

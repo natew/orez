@@ -4,6 +4,7 @@
 import { parseArgs } from 'node:util'
 
 import { mutators } from './fixture.js'
+import { readPackedLmidCheckpoint } from './packed-lmids.js'
 import { assertServerOutcome } from './server-outcome.js'
 import { startRustCf } from './targets/rust-cf.js'
 import { startRustLocal } from './targets/rust-local.js'
@@ -59,10 +60,12 @@ try {
       throw new Error(`application timestamp changed for skew row ${index}`)
     }
   }
-  const clients = await target.oracle(
-    'SELECT CAST(MAX(lastMutationID) AS TEXT) AS lmid FROM _zsync_clients'
+  const checkpoint = await readPackedLmidCheckpoint(target)
+  const maxLmid = Math.max(
+    0,
+    ...Object.values(checkpoint).flatMap((clients) => Object.values(clients).map(Number))
   )
-  if (String(clients[0]?.lmid) !== '2') {
+  if (maxLmid !== 2) {
     throw new Error(`skewed application timestamps affected mutation ordering`)
   }
 

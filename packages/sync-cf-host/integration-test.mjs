@@ -583,7 +583,8 @@ try {
   faultRows = await admin('/admin/sql', {
     query:
       "SELECT (SELECT COUNT(*) FROM project WHERE id = 'fault-after-commit-row') AS projectCount, " +
-      "(SELECT CAST(lastMutationID AS TEXT) FROM _zsync_clients WHERE clientID = 'fault-after-commit-client') AS lmid",
+      `(SELECT json_extract(payload, '$.lmids."group-fault-after-commit-client"."fault-after-commit-client"')
+        FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1) AS lmid`,
   })
   equal(
     faultRows.rows,
@@ -651,7 +652,7 @@ try {
     '/push',
     mutation('capture-wrong', 1, 'test.wrongWriteSet', { id: 'capture-wrong' })
   )
-  equal(response.status, 500, 'wrong raw SQL write set fails trigger shadowing')
+  equal(response.status, 500, 'wrong helper write set fails returned-key validation')
 
   response = await post(
     '/push',
@@ -688,6 +689,85 @@ try {
     'only the wrong helper-key probe leaves its mutation id unconsumed'
   )
 
+  const billing = async () => admin('/admin/sql-billing')
+  const delta = (before, after) => ({
+    rowsWritten: after.rowsWritten - before.rowsWritten,
+    rowsRead: after.rowsRead - before.rowsRead,
+  })
+  await post(
+    '/push',
+    mutation('batch-helper', 1, 'test.exactWriteSet', { id: 'batch-helper-warm' })
+  )
+  await post('/push', mutation('batch-raw', 1, 'test.rawWrite', { id: 'batch-raw-warm' }))
+
+  for (const [index, logicalRows] of [1, 10, 32, 250].entries()) {
+    const helperHeadBefore = await admin('/admin/sql', {
+      query:
+        'SELECT endVersion AS head FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1',
+    })
+    const helperBefore = await billing()
+    response = await post(
+      '/push',
+      mutation('batch-helper', index + 2, 'test.batchHelper', {
+        prefix: `batch-helper-${logicalRows}`,
+        count: logicalRows,
+      })
+    )
+    equal(response.status, 200, `${logicalRows}-row helper batch commits`)
+    const helperAfter = await billing()
+    const helperHeadAfter = await admin('/admin/sql', {
+      query:
+        'SELECT endVersion AS head FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1',
+    })
+
+    const rawHeadBefore = await admin('/admin/sql', {
+      query:
+        'SELECT endVersion AS head FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1',
+    })
+    const rawBefore = await billing()
+    response = await post(
+      '/push',
+      mutation('batch-raw', index + 2, 'test.batchRaw', {
+        prefix: `batch-raw-${logicalRows}`,
+        count: logicalRows,
+      })
+    )
+    equal(response.status, 200, `${logicalRows}-row raw batch commits`)
+    const rawAfter = await billing()
+    const rawHeadAfter = await admin('/admin/sql', {
+      query:
+        'SELECT endVersion AS head FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1',
+    })
+
+    const helperCost = delta(helperBefore, helperAfter)
+    const rawCost = delta(rawBefore, rawAfter)
+    equal(
+      helperHeadAfter.rows[0].head - helperHeadBefore.rows[0].head,
+      1,
+      `${logicalRows}-row helper batch produces one transaction envelope`
+    )
+    equal(
+      rawHeadAfter.rows[0].head - rawHeadBefore.rows[0].head,
+      logicalRows + 1,
+      `${logicalRows}-row raw batch preserves trigger envelopes plus its LMID`
+    )
+    equal(
+      helperCost.rowsWritten < rawCost.rowsWritten || logicalRows === 1,
+      true,
+      `${logicalRows}-row Cloudflare meter distinguishes helper and raw lanes`
+    )
+    console.log(
+      `[ledger-cost] ${JSON.stringify({
+        logicalRows,
+        helper: {
+          ...helperCost,
+          ratio: helperCost.rowsWritten / logicalRows,
+        },
+        raw: { ...rawCost, ratio: rawCost.rowsWritten / logicalRows },
+      })}`
+    )
+  }
+
   response = await post(
     '/push',
     mutation('client-a', 2, 'test.effectSuccess', {
@@ -705,7 +785,8 @@ try {
   rows = await admin('/admin/sql', {
     query:
       "SELECT (SELECT COUNT(*) FROM project WHERE id = 'effect-rollback') AS projectCount, " +
-      "(SELECT CAST(lastMutationID AS TEXT) FROM _zsync_clients WHERE clientID = 'client-a') AS lmid",
+      `(SELECT json_extract(payload, '$.lmids."group-client-a"."client-a"')
+        FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1) AS lmid`,
   })
   equal(
     rows.rows,
@@ -717,8 +798,9 @@ try {
   // to be free, because the thing that refuses is usually a budget, and paying
   // a ledger write per refusal is how a spend guard keeps spending after it
   // closes. the mutation id also has to survive, or refusing silently drops it.
-  const changesBeforeRetry = await admin('/admin/sql', {
-    query: 'SELECT COUNT(*) AS n FROM _zsync_changes',
+  const ledgerBeforeRetry = await admin('/admin/sql', {
+    query:
+      'SELECT endVersion AS head FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1',
   })
   response = await post(
     '/push',
@@ -734,15 +816,16 @@ try {
   rows = await admin('/admin/sql', {
     query:
       "SELECT (SELECT COUNT(*) FROM project WHERE id = 'retry-later') AS projectCount, " +
-      '(SELECT COUNT(*) FROM _zsync_changes) AS changeCount, ' +
-      "(SELECT CAST(lastMutationID AS TEXT) FROM _zsync_clients WHERE clientID = 'client-a') AS lmid",
+      '(SELECT endVersion FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1) AS ledgerHead, ' +
+      `(SELECT json_extract(payload, '$.lmids."group-client-a"."client-a"')
+        FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1) AS lmid`,
   })
   equal(
     rows.rows,
     [
       {
         projectCount: 0,
-        changeCount: changesBeforeRetry.rows[0].n,
+        ledgerHead: ledgerBeforeRetry.rows[0].head,
         lmid: '3',
       },
     ],

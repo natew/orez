@@ -372,6 +372,18 @@ pub fn run_mutator(
             )?;
             Ok(())
         }
+        "test.mixedCapture" => {
+            let id = text(args, "id")?;
+            db.exec(
+                r#"INSERT INTO project (id, "ownerId", name) VALUES (?, 'u0', 'mixed raw trigger')"#,
+                &[SqlValue::Text(format!("{id}-raw"))],
+            )?;
+            db.exec(
+                r#"INSERT INTO project (id, "ownerId", name) VALUES (?, 'u0', 'mixed helper')"#,
+                &[SqlValue::Text(format!("{id}-helper"))],
+            )?;
+            Ok(())
+        }
         other => Err(MutateError::Unknown(format!("unknown mutator: {other}"))),
     }
 }

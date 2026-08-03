@@ -470,6 +470,22 @@ export const mutators = defineMutators({
       }
     ),
   },
+  test: {
+    mixedCapture: defineMutator(
+      async ({ tx, args }: { tx: Tx; args: { id: string } }) => {
+        await tx.mutate.project.insert({
+          id: `${args.id}-raw`,
+          ownerId: 'u0',
+          name: 'mixed raw trigger',
+        })
+        await tx.mutate.project.insert({
+          id: `${args.id}-helper`,
+          ownerId: 'u0',
+          name: 'mixed helper',
+        })
+      }
+    ),
+  },
 })
 
 // zero-cache requires a deployed permissions row; named queries carry their

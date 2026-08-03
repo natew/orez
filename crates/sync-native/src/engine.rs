@@ -79,10 +79,13 @@ pub fn read_floor(conn: &Connection) -> i64 {
     .unwrap_or(0)
 }
 
-// the durable high-water mark: the max watermark ever assigned in this namespace.
+// the durable high-water mark: the max version ever assigned in this namespace.
 pub fn read_watermark(conn: &Connection) -> i64 {
     conn.query_row(
-        "SELECT high FROM _zsync_watermark WHERE lock = 1",
+        "SELECT MAX(
+             (SELECT high FROM _zsync_watermark WHERE lock = 1),
+             COALESCE((SELECT MAX(endVersion) FROM _zsync_log_segments), 0)
+         )",
         [],
         |row| row.get(0),
     )
@@ -287,13 +290,17 @@ pub fn prune_to_head(conn: &Connection) -> Result<(), EngineError> {
     result
 }
 
-// harness reset-cursor fault hook: wipe the change log + floor + durable
-// high-water mark to simulate a restored/behind server, so a persisted client
-// whose cookie is ahead gets the 409 future-cookie reset path.
+// harness reset-cursor fault hook: wipe both generations of the change log,
+// floor, and durable high-water mark to simulate a restored/behind server, so
+// a persisted client whose cookie is ahead gets the 409 reset path.
 pub fn reset_cursor(conn: &Connection) -> Result<(), DbError> {
     conn.execute_batch(
         "BEGIN;
          DELETE FROM _zsync_changes;
+         DELETE FROM _zsync_log_segments;
+         INSERT INTO _zsync_log_segments
+           (startVersion, endVersion, payload, pending, captureMode)
+         VALUES (1, 0, '{\"format\":1,\"lmids\":{},\"transactions\":[]}', '[]', 0);
          UPDATE _zsync_meta SET floor = 0;
          UPDATE _zsync_watermark SET high = 0;
          COMMIT;",

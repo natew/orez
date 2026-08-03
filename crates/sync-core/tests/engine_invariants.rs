@@ -44,6 +44,15 @@ fn watermark_survives_full_prune_and_reopen() {
             db.query("SELECT 1 FROM _zsync_changes", &[]).unwrap().len(),
             0
         );
+        assert_eq!(
+            db.query(
+                "SELECT 1 FROM _zsync_log_segments WHERE endVersion = ?",
+                &[sync_core::SqlValue::Integer(before)],
+            )
+            .unwrap()
+            .len(),
+            1
+        );
         before
     };
 

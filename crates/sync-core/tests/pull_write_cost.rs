@@ -93,8 +93,8 @@ fn a_pull_with_no_cookie_writes_only_a_real_membership_delta() {
     });
 
     assert_eq!(
-        written, 3,
-        "one departed row advances the high-water and updates membership plus its group ref"
+        written, 2,
+        "one departed row updates membership plus its group ref; the trigger already advanced the packed head"
     );
     let patch = response["rowsPatch"].as_array().unwrap();
     assert_eq!(patch.first().unwrap()["op"], "clear");
@@ -120,7 +120,7 @@ fn a_pull_with_no_cookie_writes_only_a_real_membership_delta() {
     );
     println!(
         "cookieless one-row membership delta wrote {written} rows and sent 999 rows \
-         (1 high-water, 1 query membership, 1 group ref)"
+         (1 query membership, 1 group ref; the trigger advanced the packed head before pull)"
     );
 }
 

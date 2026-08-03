@@ -84,8 +84,8 @@ fn failed_upstream_transaction_rolls_back_rows_log_and_cursor() {
     let result = db.transaction(|tx| apply_upstream(tx, &tables, &batch));
     assert!(result.is_err());
     assert_eq!(count(&mut db, "item"), 0);
-    assert_eq!(count(&mut db, "_zsync_changes"), 0);
     assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 0);
+    assert_eq!(sync_core::watermark(&mut db).unwrap(), 0);
 }
 
 // turso.cdc.transaction-boundary
@@ -102,7 +102,7 @@ fn successful_upstream_batch_commits_rows_log_and_cursor_together() {
         .unwrap();
     assert_eq!(result.applied, 3);
     assert_eq!(count(&mut db, "item"), 3);
-    assert_eq!(count(&mut db, "_zsync_changes"), 3);
+    assert_eq!(sync_core::watermark(&mut db).unwrap(), 3);
     assert_eq!(sync_core::upstream_watermark(&mut db).unwrap(), 3);
 }
 
@@ -120,7 +120,7 @@ fn no_op_commit_and_rolled_back_write_emit_no_cdc_and_connection_stays_usable() 
     });
     assert!(rolled_back.is_err());
     assert_eq!(count(&mut db, "item"), 0);
-    assert_eq!(count(&mut db, "_zsync_changes"), 0);
+    assert_eq!(sync_core::watermark(&mut db).unwrap(), 0);
 
     db.exec(
         &item_sql(
@@ -130,7 +130,7 @@ fn no_op_commit_and_rolled_back_write_emit_no_cdc_and_connection_stays_usable() 
     )
     .unwrap();
     assert_eq!(count(&mut db, "item"), 1);
-    assert_eq!(count(&mut db, "_zsync_changes"), 1);
+    assert_eq!(sync_core::watermark(&mut db).unwrap(), 1);
 }
 
 // turso.cdc.recursion-guard
@@ -146,13 +146,13 @@ fn trigger_cdc_does_not_capture_its_own_metadata_writes() {
 
     // The application write is captured once. Updating _zsync_meta and writing
     // the log row itself do not recursively append more log rows.
-    assert_eq!(count(&mut db, "_zsync_changes"), 1);
+    assert_eq!(sync_core::watermark(&mut db).unwrap(), 1);
     db.exec(
         "UPDATE _zsync_meta SET upstream_watermark = upstream_watermark WHERE lock = 1",
         &[],
     )
     .unwrap();
-    assert_eq!(count(&mut db, "_zsync_changes"), 1);
+    assert_eq!(sync_core::watermark(&mut db).unwrap(), 1);
 }
 
 // turso.cdc.connection-scope. Turso enables capture per connection; Orez's
@@ -184,14 +184,14 @@ fn trigger_cdc_is_visible_across_independent_connections() {
             &[],
         )
         .unwrap();
-    assert_eq!(count(&mut first, "_zsync_changes"), 1);
+    assert_eq!(sync_core::watermark(&mut first).unwrap(), 1);
     first
         .exec(
             &item_sql("INSERT INTO item (id, label, rank, done, meta) VALUES ('first', 'connection', 0, 0, NULL)"),
             &[],
         )
         .unwrap();
-    assert_eq!(count(&mut second, "_zsync_changes"), 2);
+    assert_eq!(sync_core::watermark(&mut second).unwrap(), 2);
 
     drop(second);
     drop(first);

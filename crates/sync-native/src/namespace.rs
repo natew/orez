@@ -907,37 +907,68 @@ mod tests {
                 (
                     scalar("SELECT count(*) FROM item"),
                     scalar(&format!(
-                        "SELECT count(*) FROM _zsync_clients WHERE lastMutationID = {WRITES_PER_THREAD}"
-                    )),
-                    scalar("SELECT count(*) FROM _zsync_changes WHERE op = 'row'"),
-                    scalar("SELECT count(*) FROM _zsync_changes WHERE op = 'lmid'"),
-                    scalar(&format!(
-                        "SELECT count(*) FROM (
-                            SELECT json_extract(pk, '$.clientID') AS client_id
-                            FROM _zsync_changes
-                            WHERE op = 'lmid'
-                            GROUP BY client_id
-                            HAVING count(*) != {WRITES_PER_THREAD}
-                                OR min(CAST(json_extract(pk, '$.lmid') AS INTEGER)) != 1
-                                OR max(CAST(json_extract(pk, '$.lmid') AS INTEGER)) != {WRITES_PER_THREAD}
-                                OR count(DISTINCT json_extract(pk, '$.lmid')) != {WRITES_PER_THREAD}
-                        )"
+                        "SELECT count(*)
+                         FROM json_each((
+                           SELECT json_extract(payload, '$.lmids.\"shared-group\"')
+                           FROM _zsync_log_segments
+                           ORDER BY startVersion DESC LIMIT 1
+                         ))
+                         WHERE CAST(value AS INTEGER) = {WRITES_PER_THREAD}"
                     )),
                     scalar(
                         "SELECT count(*)
-                         FROM _zsync_changes AS effect
-                         LEFT JOIN _zsync_changes AS acknowledgement
-                           ON acknowledgement.watermark = effect.watermark + 1
-                         WHERE effect.op = 'row'
+                         FROM _zsync_log_segments AS segment,
+                              json_each(segment.payload, '$.transactions') AS tx
+                         WHERE json_array_length(json_extract(tx.value, '$.changes')) > 0",
+                    ),
+                    scalar(
+                        "SELECT count(*)
+                         FROM _zsync_log_segments AS segment,
+                              json_each(segment.payload, '$.transactions') AS tx
+                         WHERE json_type(tx.value, '$.lmid') = 'object'",
+                    ),
+                    scalar(&format!(
+                        "SELECT count(*) FROM (
+                            SELECT json_extract(tx.value, '$.lmid.clientID') AS client_id
+                            FROM _zsync_log_segments AS segment,
+                                 json_each(segment.payload, '$.transactions') AS tx
+                            WHERE json_type(tx.value, '$.lmid') = 'object'
+                            GROUP BY client_id
+                            HAVING count(*) != {WRITES_PER_THREAD}
+                                OR min(CAST(json_extract(tx.value, '$.lmid.mutationID') AS INTEGER)) != 1
+                                OR max(CAST(json_extract(tx.value, '$.lmid.mutationID') AS INTEGER)) != {WRITES_PER_THREAD}
+                                OR count(DISTINCT json_extract(tx.value, '$.lmid.mutationID')) != {WRITES_PER_THREAD}
+                        )"
+                    )),
+                    scalar(
+                        "WITH transactions AS (
+                           SELECT CAST(json_extract(tx.value, '$.version') AS INTEGER) AS version,
+                                  tx.value AS envelope
+                           FROM _zsync_log_segments AS segment,
+                                json_each(segment.payload, '$.transactions') AS tx
+                         )
+                         SELECT count(*)
+                         FROM transactions AS acknowledgement
+                         LEFT JOIN transactions AS effect
+                           ON effect.version = acknowledgement.version - 1
+                         WHERE json_type(acknowledgement.envelope, '$.lmid') = 'object'
                            AND (
-                               COALESCE(acknowledgement.op, '') != 'lmid'
-                               OR json_extract(effect.pk, '$.id') !=
-                                  replace(json_extract(acknowledgement.pk, '$.clientID'), 'writer-', '')
-                                  || '-' || json_extract(acknowledgement.pk, '$.lmid')
+                               COALESCE(json_array_length(json_extract(effect.envelope, '$.changes')), 0) != 1
+                               OR json_extract(effect.envelope, '$.changes[0][1].id') !=
+                                  replace(json_extract(acknowledgement.envelope, '$.lmid.clientID'), 'writer-', '')
+                                  || '-' || json_extract(acknowledgement.envelope, '$.lmid.mutationID')
                            )",
                     ),
-                    scalar("SELECT count(DISTINCT watermark) FROM _zsync_changes"),
-                    scalar("SELECT COALESCE(max(watermark), 0) FROM _zsync_changes"),
+                    scalar(
+                        "SELECT count(DISTINCT json_extract(tx.value, '$.version'))
+                         FROM _zsync_log_segments AS segment,
+                              json_each(segment.payload, '$.transactions') AS tx",
+                    ),
+                    scalar(
+                        "SELECT COALESCE(MAX(CAST(json_extract(tx.value, '$.version') AS INTEGER)), 0)
+                         FROM _zsync_log_segments AS segment,
+                              json_each(segment.payload, '$.transactions') AS tx",
+                    ),
                 )
             }));
 
@@ -948,26 +979,19 @@ mod tests {
         assert_eq!(observed.1, i64::try_from(THREADS).unwrap());
         assert_eq!(
             observed.2, expected,
-            "every write needs one row journal entry"
+            "every write needs one touched-key envelope"
         );
-        assert_eq!(
-            observed.3, expected,
-            "every write needs one lmid journal entry"
-        );
+        assert_eq!(observed.3, expected, "every write needs one LMID envelope");
         assert_eq!(
             observed.4, 0,
             "each client must have a gap-free lmid history"
         );
         assert_eq!(observed.5, 0, "a different job interleaved before an lmid");
-        assert_eq!(
-            observed.6,
-            expected * 2,
-            "journal watermarks must be unique"
-        );
+        assert_eq!(observed.6, expected * 2, "ledger versions must be unique");
         assert_eq!(
             observed.7,
             expected * 2,
-            "journal watermarks must stay contiguous"
+            "ledger versions must stay contiguous"
         );
     }
 

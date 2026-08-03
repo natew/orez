@@ -6,6 +6,11 @@ import {
   type EffectAttempt,
 } from './effects.js'
 import { MutationApplicationError, SyncExecutorRequestError } from './errors.js'
+import {
+  commitPackedLedger,
+  initializePackedLedger,
+  readPackedLMID,
+} from './packed-ledger.js'
 import { createServerTransaction } from './transaction.js'
 import { beginWriteSetCapture } from './write-set.js'
 
@@ -216,6 +221,7 @@ async function initializeLedger(database: ApplicationDatabase): Promise<void> {
       )`)
     }
   })
+  await initializePackedLedger(database)
 }
 
 async function preflight(
@@ -271,7 +277,10 @@ async function preflight(
     [clientGroupID, clientID]
   )
   if (!rows[0]) throw new Error('failed to claim sync client')
-  const lmid = counter(rows[0].lastMutationID, 'lastMutationID')
+  const lmid =
+    database.dialect === 'sqlite'
+      ? await readPackedLMID(tx, clientGroupID, clientID)
+      : counter(rows[0].lastMutationID, 'lastMutationID')
   if (mutationID <= lmid) return { kind: 'replay', expected: lmid + 1 }
   if (mutationID > lmid + 1) {
     throw new SyncExecutorRequestError(
@@ -356,7 +365,7 @@ export function createSyncExecutor<S extends Schema>(
           }
       try {
         await mutator({ tx, args, ctx })
-        await writeSet.validate()
+        await writeSet.commit()
         attempt.close()
         committedEffects = attempt.entries()
       } catch (error) {
@@ -439,14 +448,20 @@ export function createSyncExecutor<S extends Schema>(
               } catch (error) {
                 throw toApplicationError(error)
               }
-              await writeSet.validate()
-              await advanceLMID(
-                database,
-                applicationTx,
-                push.clientGroupID,
-                mutation.clientID,
-                mutation.id
-              )
+              await writeSet.commit({
+                clientGroupID: push.clientGroupID,
+                clientID: mutation.clientID,
+                mutationID: mutation.id,
+              })
+              if (database.dialect !== 'sqlite') {
+                await advanceLMID(
+                  database,
+                  applicationTx,
+                  push.clientGroupID,
+                  mutation.clientID,
+                  mutation.id
+                )
+              }
               attempt.close()
               committedEffects = attempt.entries()
               return current
@@ -480,13 +495,21 @@ export function createSyncExecutor<S extends Schema>(
               claims.userID
             )
             if (decision.kind === 'applied') {
-              await advanceLMID(
-                database,
-                applicationTx,
-                push.clientGroupID,
-                mutation.clientID,
-                mutation.id
-              )
+              if (database.dialect === 'sqlite') {
+                await commitPackedLedger(applicationTx, [], {
+                  clientGroupID: push.clientGroupID,
+                  clientID: mutation.clientID,
+                  mutationID: mutation.id,
+                })
+              } else {
+                await advanceLMID(
+                  database,
+                  applicationTx,
+                  push.clientGroupID,
+                  mutation.clientID,
+                  mutation.id
+                )
+              }
             }
           })
           results.push({
@@ -520,7 +543,7 @@ export function createSyncExecutor<S extends Schema>(
         const value = await work(
           createServerTransaction(schema, writeSet.transaction, database.dialect)
         )
-        await writeSet.validate()
+        await writeSet.commit()
         return value
       })
     },
@@ -536,7 +559,7 @@ export function createSyncExecutor<S extends Schema>(
         const value = await work(
           createServerTransaction(schema, writeSet.transaction, database.dialect)
         )
-        await writeSet.validate()
+        await writeSet.commit()
         return value
       })
     },

@@ -975,6 +975,40 @@ try {
     )
   }
 
+  // this deterministic transaction runs after the randomized rounds, so it
+  // does not perturb their grammar or fixed-seed coverage. The rust-cf server
+  // applies one row through raw SQL and one through the generated helper in
+  // the same SQLite transaction; the other targets apply the same two logical
+  // rows through their ordinary mutator implementations.
+  const mixedID = `mixed-${SWEEP_SEED}`
+  for (const [targetName, zero] of [
+    [stock.name, stockZero],
+    [other.name, otherZero],
+  ] as const) {
+    const request = zero.mutate(mutators.test.mixedCapture({ id: mixedID }))
+    await withTimeout(request.client, 15_000, `${targetName} mixed client apply`)
+    await withTimeout(
+      assertServerOutcome(request.server, 'success', `${targetName} mixed capture`),
+      30_000,
+      `${targetName} mixed server ack`
+    )
+  }
+  await eventually(
+    () => {
+      for (const beacon of beacons) {
+        if (!beacon.has(`${mixedID}-raw`) || !beacon.has(`${mixedID}-helper`)) {
+          throw new Error(`mixed transaction ${mixedID} not visible`)
+        }
+      }
+    },
+    60_000,
+    'mixed raw/helper transaction convergence'
+  )
+  const mixedDiverged = compareAll('post-writes', ROUNDS)
+  console.log(
+    `[sweep] mixed raw/helper transaction: 2 logical writes, ${mixedDiverged} divergences`
+  )
+
   // incremental == fresh: late clients rematerialize EVERY spec from scratch
   const lateChecks = [
     { target: stock, views: stockViews },

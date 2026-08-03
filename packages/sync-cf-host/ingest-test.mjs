@@ -564,8 +564,11 @@ try {
       'x-admin-key': 'ingest-harness-admin',
     },
     body: JSON.stringify({
-      query:
-        "SELECT (SELECT count(*) FROM _zsync_clients) AS clients, (SELECT count(*) FROM _zsync_changes WHERE op = 'lmid') AS lmidRows",
+      query: `SELECT (SELECT count(*) FROM _zsync_clients) AS clients,
+                (SELECT count(*)
+                 FROM _zsync_log_segments AS segment,
+                      json_each(segment.payload, '$.transactions') AS tx
+                 WHERE json_type(tx.value, '$.lmid') = 'object') AS lmidRows`,
     }),
   }).then((response) => response.json())
   assert.deepEqual(cleanupOnlyState.rows[0], { clients: 0, lmidRows: 0 })
@@ -754,8 +757,10 @@ try {
       'x-admin-key': 'ingest-harness-admin',
     },
     body: JSON.stringify({
-      query:
-        "SELECT id, label, (SELECT lastMutationID FROM _zsync_clients WHERE clientGroupID = 'group' AND clientID = 'writer') AS lastMutationID FROM item WHERE id IN ('up-1', 'during-resnapshot') ORDER BY id",
+      query: `SELECT id, label,
+                (SELECT CAST(json_extract(payload, '$.lmids."group"."writer"') AS INTEGER)
+                 FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1) AS lastMutationID
+         FROM item WHERE id IN ('up-1', 'during-resnapshot') ORDER BY id`,
     }),
   }).then((response) => response.json())
   assert.deepEqual(repairedDerived.rows, [

@@ -287,6 +287,20 @@ export function executeMutator(
       tx.exec(`UPDATE task SET rank = ? WHERE id = ?`, [a.rank, a.id])
       return
     }
+    case 'test.mixedCapture': {
+      const a = args as { id: string }
+      tx.exec(`INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)`, [
+        `${a.id}-raw`,
+        'u0',
+        'mixed raw trigger',
+      ])
+      tx.exec(`INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)`, [
+        `${a.id}-helper`,
+        'u0',
+        'mixed helper',
+      ])
+      return
+    }
     default:
       throw new Error(`unknown mutator: ${name}`)
   }

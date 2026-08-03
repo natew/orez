@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::db::{SqlValue, SyncDb};
 use crate::error::EngineError;
+use crate::ledger;
 
 // bind an i64 counter as decimal text; INTEGER affinity coerces it losslessly
 pub(crate) fn counter(value: i64) -> SqlValue {
@@ -47,8 +48,9 @@ pub(crate) fn watermark(db: &mut dyn SyncDb) -> Result<i64, EngineError> {
         "SELECT CAST(high AS TEXT) FROM _zsync_watermark WHERE lock = 1",
         &[],
     )?;
-    let wm = max_log.max(high);
-    if wm > high {
+    let segment = ledger::watermark(db)?;
+    let wm = max_log.max(high).max(segment);
+    if wm > high && wm != segment {
         db.exec(
             "UPDATE _zsync_watermark SET high = ? WHERE lock = 1",
             &[counter(wm)],
@@ -74,6 +76,7 @@ pub(crate) fn prune(db: &mut dyn SyncDb, retain_changes: i64) -> Result<(), Engi
             "DELETE FROM _zsync_changes WHERE watermark <= ?",
             &[counter(cutoff)],
         )?;
+        ledger::prune(db, cutoff)?;
         db.exec(
             "UPDATE _zsync_meta SET floor = ? WHERE lock = 1",
             &[counter(cutoff)],
@@ -86,14 +89,10 @@ pub(crate) fn prune(db: &mut dyn SyncDb, retain_changes: i64) -> Result<(), Engi
 // raise the floor past every prior watermark, so every client's next pull is a
 // full snapshot.
 pub(crate) fn invalidate(db: &mut dyn SyncDb) -> Result<(), EngineError> {
+    let version = ledger::finalize(db, None, true)?;
     db.exec(
-        "INSERT INTO _zsync_changes (tableName, op, pk) VALUES ('_zsync_meta', 'marker', NULL)",
-        &[],
-    )?;
-    db.exec(
-        "UPDATE _zsync_meta SET floor = (SELECT COALESCE(MAX(watermark), 0) FROM _zsync_changes)
-         WHERE lock = 1",
-        &[],
+        "UPDATE _zsync_meta SET floor = ? WHERE lock = 1",
+        &[counter(version)],
     )?;
     Ok(())
 }
@@ -147,12 +146,7 @@ pub(crate) fn read_lmid(
     client_group_id: &str,
     client_id: &str,
 ) -> Result<i64, EngineError> {
-    read_i64(
-        db,
-        "SELECT CAST(lastMutationID AS TEXT) FROM _zsync_clients
-         WHERE clientGroupID = ? AND clientID = ?",
-        &[text(client_group_id), text(client_id)],
-    )
+    ledger::read_lmid(db, client_group_id, client_id)
 }
 
 // the full current lmid map for a group (snapshot responses read it directly)
@@ -160,49 +154,17 @@ pub(crate) fn all_lmids(
     db: &mut dyn SyncDb,
     client_group_id: &str,
 ) -> Result<BTreeMap<String, i64>, EngineError> {
-    let rows = db.query(
-        "SELECT clientID, CAST(lastMutationID AS TEXT) AS lmid FROM _zsync_clients
-         WHERE clientGroupID = ?",
-        &[text(client_group_id)],
-    )?;
-    let mut map = BTreeMap::new();
-    for row in &rows {
-        let client = match row.get("clientID") {
-            Some(SqlValue::Text(s)) => s.clone(),
-            _ => continue,
-        };
-        let lmid = match row.get("lmid") {
-            Some(SqlValue::Text(s)) => s.parse::<i64>().unwrap_or(0),
-            Some(SqlValue::Integer(i)) => *i,
-            _ => 0,
-        };
-        map.insert(client, lmid);
-    }
-    Ok(map)
+    ledger::all_lmids(db, client_group_id)
 }
 
-// advance a client's lmid and append an 'lmid' change row carrying the new
-// value, so a capped diff can derive this ack from the included prefix only
-// (invariant 3) and an lmid-only push still moves the cookie (invariant 4).
+// advance a client's lmid in the active segment checkpoint. an lmid-only push
+// still appends an empty envelope and moves the cookie.
 pub(crate) fn advance_lmid(
     db: &mut dyn SyncDb,
     client_group_id: &str,
     client_id: &str,
     mutation_id: i64,
 ) -> Result<(), EngineError> {
-    db.exec(
-        "UPDATE _zsync_clients SET lastMutationID = ?
-         WHERE clientGroupID = ? AND clientID = ?",
-        &[counter(mutation_id), text(client_group_id), text(client_id)],
-    )?;
-    // the lmid row carries the group so a diff derives acks for its OWN group
-    // only (never leaking a peer group's lmid); the lmid value rides as text so
-    // it too avoids any number path.
-    db.exec(
-        "INSERT INTO _zsync_changes (tableName, op, pk)
-         VALUES ('_zsync_clients', 'lmid',
-                 json_object('clientGroupID', ?, 'clientID', ?, 'lmid', ?))",
-        &[text(client_group_id), text(client_id), counter(mutation_id)],
-    )?;
+    ledger::finalize(db, Some((client_group_id, client_id, mutation_id)), false)?;
     Ok(())
 }

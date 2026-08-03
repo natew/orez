@@ -348,19 +348,8 @@ impl Host {
             .unwrap()
     }
 
-    pub fn change_count(&mut self) -> i64 {
-        let rows = self
-            .db
-            .query(
-                "SELECT CAST(COUNT(*) AS TEXT) AS n FROM _zsync_changes",
-                &[],
-            )
-            .unwrap();
-        match rows.first().and_then(|r| r.values.first()) {
-            Some(SqlValue::Text(s)) => s.parse().unwrap_or(0),
-            Some(SqlValue::Integer(i)) => *i,
-            _ => 0,
-        }
+    pub fn retained_version_count(&mut self) -> i64 {
+        self.watermark() - self.floor()
     }
 
     // a live item row as a plain JSON object (None if absent)

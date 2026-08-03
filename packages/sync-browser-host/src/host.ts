@@ -476,13 +476,13 @@ class BrowserSyncHostImpl<
     this.#assertAccepting()
     return await this.#queue.run(async () => {
       const result = await this.#writeTransaction('direct', async () => {
-        const writeSet = beginWriteSetCapture(
+        const writeSet = await beginWriteSetCapture(
           this.config.schema,
           this.#mutatorSql,
           'sqlite'
         )
         const value = await writeSet.transaction.exec(sql, params, metadata)
-        await writeSet.validate()
+        await writeSet.commit()
         return value
       })
       this.#notifyDataChanged()

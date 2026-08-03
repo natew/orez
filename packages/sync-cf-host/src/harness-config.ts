@@ -236,13 +236,38 @@ const harnessMutators = registerMutators({
     const value = args as { id: string }
     await tx.dbTransaction.wrappedTransaction.exec(
       'INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)',
-      [`${value.id}-raw`, 'user-a', 'mixed raw trigger']
+      [`${value.id}-raw`, 'u0', 'mixed raw trigger']
     )
     await tx.mutate.project.insert({
       id: `${value.id}-helper`,
-      ownerId: 'user-a',
+      ownerId: 'u0',
       name: 'mixed helper',
     })
+  },
+  async 'test.batchHelper'({ tx, args }) {
+    const value = args as { prefix: string; count: number }
+    if (!Number.isSafeInteger(value.count) || value.count < 1 || value.count > 250) {
+      throw new MutationApplicationError('invalid batch count')
+    }
+    for (let index = 0; index < value.count; index++) {
+      await tx.mutate.project.insert({
+        id: `${value.prefix}-${index}`,
+        ownerId: 'u0',
+        name: `helper batch ${index}`,
+      })
+    }
+  },
+  async 'test.batchRaw'({ tx, args }) {
+    const value = args as { prefix: string; count: number }
+    if (!Number.isSafeInteger(value.count) || value.count < 1 || value.count > 250) {
+      throw new MutationApplicationError('invalid batch count')
+    }
+    for (let index = 0; index < value.count; index++) {
+      await tx.dbTransaction.wrappedTransaction.exec(
+        'INSERT INTO project (id, "ownerId", name) VALUES (?, ?, ?)',
+        [`${value.prefix}-${index}`, 'u0', `raw batch ${index}`]
+      )
+    }
   },
   async 'test.wrongWriteSet'({ tx, args }) {
     const value = args as { id: string }

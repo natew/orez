@@ -7,7 +7,7 @@ use common::{Host, item_tables};
 use serde_json::{Value, json};
 
 use sync_core::query::handle_query_pull;
-use sync_core::{EngineError, Transactor, invalidate, push_validate};
+use sync_core::{EngineError, SyncDb, Transactor, invalidate, push_validate};
 
 // ---- helpers mirroring the TS suite's push()/pull()/patchOf() -------------
 
@@ -259,6 +259,129 @@ fn update_arrives_as_put_of_only_the_touched_row() {
 }
 
 #[test]
+fn a_missing_first_packed_segment_fails_loud() {
+    let mut h = setup();
+    let cookie = cookie_of(&h.pull(json!(null), "u1").unwrap());
+    h.put(
+        "i2",
+        json!({ "id": "i2", "label": "two", "rank": 2, "done": false, "meta": null }),
+        1,
+    );
+    let (end, payload, pending, capture_mode): (i64, String, String, i64) =
+        h.db.conn
+            .query_row(
+                "SELECT endVersion, payload, pending, captureMode
+             FROM _zsync_log_segments ORDER BY startVersion LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+    h.db.conn
+        .execute("DELETE FROM _zsync_log_segments", [])
+        .unwrap();
+    h.db.conn
+        .execute(
+            "INSERT INTO _zsync_log_segments
+               (startVersion, endVersion, payload, pending, captureMode)
+             VALUES (3, ?, ?, ?, ?)",
+            rusqlite::params![end, payload, pending, capture_mode],
+        )
+        .unwrap();
+
+    let error = h.pull(json!(cookie), "u1").unwrap_err();
+    assert_eq!(error.status, 500);
+    assert_eq!(
+        error.message,
+        "packed ledger segment chain has a leading gap"
+    );
+
+    h.db.conn
+        .execute("DELETE FROM _zsync_log_segments", [])
+        .unwrap();
+    h.db.conn
+        .execute(
+            "INSERT INTO _zsync_log_segments
+               (startVersion, endVersion, payload, pending, captureMode)
+             VALUES (1, ?, ?, ?, ?)",
+            rusqlite::params![end, payload, pending, capture_mode],
+        )
+        .unwrap();
+    let response = h.pull(json!(cookie), "u1").unwrap();
+    assert_eq!(puts(patch_of(&response)).len(), 1);
+}
+
+#[test]
+fn raw_trigger_rotation_preserves_the_incremental_boundary() {
+    for (label, filler_bytes, expected_segments) in [
+        ("below threshold", 760_000, 1),
+        ("above threshold", 790_000, 2),
+    ] {
+        let mut h = setup();
+        h.pull(json!(null), "u1").unwrap();
+        let payload = serde_json::to_string(&json!({
+            "format": 1,
+            "lmids": {},
+            "transactions": [{
+                "version": "1",
+                "changes": [["item", { "id": "x".repeat(filler_bytes) }]],
+            }],
+        }))
+        .unwrap();
+        h.db.conn
+            .execute(
+                "UPDATE _zsync_log_segments SET endVersion = 1, payload = ?",
+                rusqlite::params![payload],
+            )
+            .unwrap();
+
+        h.exec(
+            "INSERT INTO item (id, label, rank, done, meta)
+             VALUES ('rotated', 'visible', 1, 0, NULL)",
+        );
+        let segments: i64 =
+            h.db.conn
+                .query_row("SELECT COUNT(*) FROM _zsync_log_segments", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+        assert_eq!(segments, expected_segments, "{label}");
+        let response = h.pull(json!(1), "u1").unwrap();
+        assert_eq!(puts(patch_of(&response))[0]["value"]["item_id"], "rotated");
+    }
+}
+
+#[test]
+fn an_oversized_raw_envelope_rolls_back_the_application_write() {
+    let mut h = setup();
+    let oversized = "x".repeat(1_050_000);
+    let error =
+        h.db.exec(
+            "INSERT INTO item_record
+             (item_id, item_label, sort_rank, is_done, metadata_json)
+             VALUES (?, 'too large', 1, 0, NULL)",
+            &[sync_core::SqlValue::Text(oversized)],
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .0
+            .contains("packed ledger transaction exceeds the 1 MiB limit")
+    );
+    assert_eq!(h.watermark(), 0);
+    let rows: i64 =
+        h.db.conn
+            .query_row("SELECT COUNT(*) FROM item_record", [], |row| row.get(0))
+            .unwrap();
+    assert_eq!(rows, 1, "only the pre-init seed row remains");
+
+    h.exec(
+        "INSERT INTO item (id, label, rank, done, meta)
+         VALUES ('small', 'fits', 1, 0, NULL)",
+    );
+    assert_eq!(h.watermark(), 1);
+}
+
+#[test]
 fn delete_arrives_as_del_with_primary_key() {
     let mut h = setup();
     h.put(
@@ -452,12 +575,12 @@ fn pull_prunes_upstream_churn_before_unchanged() {
         ));
     }
     let current = h.watermark();
-    assert_eq!(h.change_count(), 6);
+    assert_eq!(h.retained_version_count(), 6);
     assert_eq!(
         h.pull(json!(current), "u1").unwrap(),
         json!({ "cookie": current, "unchanged": true })
     );
-    assert_eq!(h.change_count(), 2);
+    assert_eq!(h.retained_version_count(), 2);
     assert_eq!(h.floor(), current - 2);
     let stale = h.pull(json!(ancient), "u1").unwrap();
     assert_eq!(patch_of(&stale)[0], json!({ "op": "clear" }));

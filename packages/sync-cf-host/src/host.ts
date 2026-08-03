@@ -460,6 +460,7 @@ export function createSyncDurableObject<
     #hibernations = 0
     #dropNextPushResponse = false
     #counters = freshCounters()
+    #sqlBilling = { rowsRead: 0, rowsWritten: 0 }
     #pulling = new Set<string>()
     #wakeOrigins = new Set<string>()
     #wakeRecipients = new Set<WebSocket>()
@@ -485,10 +486,22 @@ export function createSyncDurableObject<
     constructor(ctx: DurableObjectState, env: Env) {
       super(ctx, env)
       const recordRowsWritten = (rows: number) => {
+        this.#sqlBilling.rowsWritten += rows
         if (this.#recordingIngestBillable) this.#ingestBreaker.recordBillable(rows)
       }
-      this.#engineDb = new SqlStorageSyncDb(ctx.storage.sql, recordRowsWritten)
-      this.#directSql = new SqlStorageDirect(ctx.storage.sql, recordRowsWritten)
+      const recordRowsRead = (rows: number) => {
+        this.#sqlBilling.rowsRead += rows
+      }
+      this.#engineDb = new SqlStorageSyncDb(
+        ctx.storage.sql,
+        recordRowsWritten,
+        recordRowsRead
+      )
+      this.#directSql = new SqlStorageDirect(
+        ctx.storage.sql,
+        recordRowsWritten,
+        recordRowsRead
+      )
       this.#mutatorSql = new SqlStorageMutatorTransaction(
         this.#directSql,
         (ast, format) => this.#wasm(() => compileQuery(ast, format)),
@@ -512,7 +525,18 @@ export function createSyncDurableObject<
                 }
                 return this.#mutatorSql.exec(sql, params, metadata)
               },
-              query: (sql, params) => this.#mutatorSql.query(sql, params),
+              query: (sql, params) => {
+                // exact helper statements use sqlite returning so the executor
+                // can prove the physical primary keys that changed. Keep the
+                // host's pre-commit fault boundary after those writes too.
+                if (
+                  /\b(?:INSERT|UPDATE|DELETE|REPLACE)\b/i.test(sql) &&
+                  /\bRETURNING\b/i.test(sql)
+                ) {
+                  applicationWrite = true
+                }
+                return this.#mutatorSql.query(sql, params)
+              },
               queryAst: (ast, format, queryName) =>
                 this.#mutatorSql.queryAst(ast, format, queryName),
             }
@@ -594,6 +618,7 @@ export function createSyncDurableObject<
         this.#bootID = crypto.randomUUID()
         this.#hibernations++
         this.#counters = freshCounters()
+        this.#sqlBilling = { rowsRead: 0, rowsWritten: 0 }
         this.#pulling.clear()
         this.#wakeOrigins.clear()
         this.#wakeRecipients.clear()
@@ -1797,6 +1822,7 @@ export function createSyncDurableObject<
       upstreamPath: string | null
     ): Promise<Response> | Response {
       if (route === '/admin/health') return json({ ok: true })
+      if (route === '/admin/sql-billing') return json({ ...this.#sqlBilling })
       if (route === '/admin/upstream-write-budget' && request.method === 'GET')
         return this.#upstreamWriteBudgetStatus()
       if (route === '/admin/status') {
@@ -1823,6 +1849,7 @@ export function createSyncDurableObject<
             heapTotalBytes: heap?.totalJSHeapSize ?? null,
             heapLimitBytes: heap?.jsHeapSizeLimit ?? null,
             engine: this.#engineStateBestEffort(),
+            sqlBillingSinceBoot: this.#sqlBilling,
             counters: this.#counters,
             ingestBreaker: this.#ingestBreaker.status(),
           })

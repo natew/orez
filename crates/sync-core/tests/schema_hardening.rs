@@ -98,25 +98,50 @@ fn initializes_triggers_for_soot_server_names() {
     .unwrap();
 
     init_schema(&mut db, &tables).unwrap();
+    init_query_schema(&mut db).unwrap();
+    let snapshot = db
+        .transaction(|database| {
+            handle_query_pull(
+                database,
+                &tables,
+                4096,
+                &json!({
+                    "clientID": "c1", "clientGroupID": "g1", "cookie": null,
+                    "queries": { "version": 1, "patch": [
+                        { "op": "put", "hash": "q_all", "ast": { "table": "userState" } },
+                    ]},
+                }),
+                "u1",
+            )
+        })
+        .unwrap();
     db.exec("INSERT INTO user_state VALUES ('u1', 42)", &[])
         .unwrap();
-
-    let changes = db
-        .query("SELECT tableName, pk FROM _zsync_changes", &[])
+    let diff = db
+        .transaction(|database| {
+            handle_query_pull(
+                database,
+                &tables,
+                4096,
+                &json!({
+                    "clientID": "c1", "clientGroupID": "g1", "cookie": snapshot["cookie"]
+                }),
+                "u1",
+            )
+        })
         .unwrap();
-    assert_eq!(changes.len(), 1);
-    assert!(matches!(
-        changes[0].get("tableName"),
-        Some(sync_core::SqlValue::Text(table)) if table == "userState"
-    ));
-    assert!(matches!(
-        changes[0].get("pk"),
-        Some(sync_core::SqlValue::Text(pk)) if pk == r#"{"userId":"u1"}"#
-    ));
+    assert_eq!(
+        diff["rowsPatch"],
+        json!([{
+            "op": "put",
+            "tableName": "user_state",
+            "value": { "user_id": "u1", "monthly_tokens": 42 },
+        }])
+    );
 }
 
 #[test]
-fn rows_patch_uses_physical_names_while_journal_stays_logical() {
+fn rows_patch_uses_physical_names_for_identity_and_mapped_schema() {
     let cases = [
         (
             "identity",
@@ -202,18 +227,6 @@ fn rows_patch_uses_physical_names_while_journal_stays_logical() {
         );
 
         db.exec(delete, &[]).unwrap();
-        let changes = db
-            .query("SELECT tableName, pk FROM _zsync_changes", &[])
-            .unwrap();
-        assert!(matches!(
-            changes[0].get("tableName"),
-            Some(sync_core::SqlValue::Text(table)) if table == "userState"
-        ));
-        assert!(matches!(
-            changes[0].get("pk"),
-            Some(sync_core::SqlValue::Text(pk)) if pk == r#"{"userId":"u1"}"#
-        ));
-
         let diff = db
             .transaction(|database| {
                 handle_query_pull(

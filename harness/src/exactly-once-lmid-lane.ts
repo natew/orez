@@ -40,6 +40,7 @@ import {
   PullAbortedByQuiesceControllerError,
   type SyncHttpObservation,
 } from './observed-fetch.js'
+import { readPackedLmidCheckpoint } from './packed-lmids.js'
 import { assertServerOutcome } from './server-outcome.js'
 import { startRustLocal } from './targets/rust-local.js'
 
@@ -407,8 +408,9 @@ try {
     })
     const probes = await target.oracle(`SELECT rank FROM task WHERE id = '${probeId}'`)
     const clients = await target.oracle(
-      `SELECT lastMutationID FROM _zsync_clients WHERE clientGroupID = '${identity!.clientGroupId}' AND clientID = '${identity!.clientId}'`
+      `SELECT clientID FROM _zsync_clients WHERE clientGroupID = '${identity!.clientGroupId}' AND clientID = '${identity!.clientId}'`
     )
+    const checkpoint = await readPackedLmidCheckpoint(target)
     return recorder.record({
       opId,
       process: `authority-${observation}`,
@@ -423,7 +425,7 @@ try {
           applicationCount: probes.length === 1 ? String(probes[0]!.rank) : '0',
           clientRowCount: clients.length,
           lastMutationId:
-            clients.length === 1 ? String(clients[0]!.lastMutationID) : null,
+            checkpoint[identity!.clientGroupId]?.[identity!.clientId] ?? null,
         },
       },
     })

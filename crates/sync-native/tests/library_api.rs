@@ -1585,16 +1585,24 @@ async fn delegated_push_settlement_is_pull_visible_after_its_effects_and_idempot
         &router,
         admin_sql_req(
             "settle-ns",
-            "SELECT c.lastMutationID, \
-                    (SELECT count(*) FROM _zsync_changes z \
-                     WHERE z.tableName = '_zsync_clients' AND z.op = 'lmid') AS lmidRows, \
-                    (SELECT watermark FROM _zsync_changes z \
-                     WHERE z.tableName = 'item' ORDER BY watermark DESC LIMIT 1) AS effectWatermark, \
-                    (SELECT watermark FROM _zsync_changes z \
-                     WHERE z.tableName = '_zsync_clients' AND z.op = 'lmid' \
-                     ORDER BY watermark DESC LIMIT 1) AS lmidWatermark \
-             FROM _zsync_clients c \
-             WHERE c.clientGroupID = 'shared-group' AND c.clientID = 'client-a'",
+            "WITH transactions AS ( \
+               SELECT CAST(json_extract(tx.value, '$.version') AS INTEGER) AS version, \
+                      tx.value AS envelope \
+               FROM _zsync_log_segments AS segment, \
+                    json_each(segment.payload, '$.transactions') AS tx \
+             ) \
+             SELECT CAST(json_extract(active.payload, \
+                       '$.lmids.\"shared-group\".\"client-a\"') AS INTEGER) AS lastMutationID, \
+                    (SELECT count(*) FROM transactions \
+                     WHERE json_extract(envelope, '$.lmid.clientGroupID') = 'shared-group' \
+                       AND json_extract(envelope, '$.lmid.clientID') = 'client-a') AS lmidRows, \
+                    (SELECT MAX(version) FROM transactions \
+                     WHERE json_array_length(json_extract(envelope, '$.changes')) > 0) AS effectWatermark, \
+                    (SELECT MAX(version) FROM transactions \
+                     WHERE json_extract(envelope, '$.lmid.clientGroupID') = 'shared-group' \
+                       AND json_extract(envelope, '$.lmid.clientID') = 'client-a') AS lmidWatermark \
+             FROM _zsync_log_segments AS active \
+             ORDER BY active.startVersion DESC LIMIT 1",
             None,
             None,
         ),
@@ -1659,8 +1667,9 @@ async fn delegated_push_settlement_ignores_unacknowledged_cleanup_mutations() {
         &router,
         admin_sql_req(
             "mixed-cleanup-ns",
-            "SELECT lastMutationID FROM _zsync_clients \
-             WHERE clientGroupID = 'cleanup-group' AND clientID = 'client-a'",
+            "SELECT CAST(json_extract(payload, \
+                     '$.lmids.\"cleanup-group\".\"client-a\"') AS INTEGER) AS lastMutationID \
+             FROM _zsync_log_segments ORDER BY startVersion DESC LIMIT 1",
             None,
             None,
         ),
@@ -1705,7 +1714,10 @@ async fn delegated_cleanup_only_settlement_needs_no_acknowledgement() {
         admin_sql_req(
             "cleanup-only-ns",
             "SELECT (SELECT count(*) FROM _zsync_clients) AS clients, \
-                    (SELECT count(*) FROM _zsync_changes WHERE op = 'lmid') AS lmidRows",
+                    (SELECT count(*) \
+                     FROM _zsync_log_segments AS segment, \
+                          json_each(segment.payload, '$.transactions') AS tx \
+                     WHERE json_type(tx.value, '$.lmid') = 'object') AS lmidRows",
             None,
             None,
         ),
@@ -1754,7 +1766,10 @@ async fn delegated_push_settlement_rejects_a_mismatched_ack_without_advancing_lm
         admin_sql_req(
             "settle-validation-ns",
             "SELECT (SELECT count(*) FROM _zsync_clients) AS clients, \
-                    (SELECT count(*) FROM _zsync_changes WHERE op = 'lmid') AS lmidRows",
+                    (SELECT count(*) \
+                     FROM _zsync_log_segments AS segment, \
+                          json_each(segment.payload, '$.transactions') AS tx \
+                     WHERE json_type(tx.value, '$.lmid') = 'object') AS lmidRows",
             None,
             None,
         ),

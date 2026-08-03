@@ -1,18 +1,16 @@
-// the durable `_zsync_*` schema and the application-table triggers that feed
-// the change log. mirrors the original executor-backed TypeScript host plus the plan's
-// durable-watermark table.
+// the durable `_zsync_*` schema and application-table triggers that feed the
+// packed ledger. the normalized change table remains readable during migration
+// but new sqlite writes use packed segments.
 //
 // invariants encoded here:
-// - the change log stores WHICH primary keys were touched, never row values:
-//   SQLite json_object formats REAL at 15 significant digits, so row images
+// - the ledger stores which primary keys were touched, never row values:
+//   sqlite json_object formats real at 15 significant digits, so row images
 //   would corrupt float columns. diffs re-read live rows instead (value.rs).
-// - triggers capture EVERY write path (mutators and upstream/admin sql alike)
-//   and are installed AFTER any seed so the initial dataset stays out of the
+// - triggers capture every raw write path (mutators and upstream/admin sql alike)
+//   and are installed after any seed so the initial dataset stays out of the
 //   log (fresh clients snapshot anyway).
-// - op 'row' carries a touched pk; op 'lmid' carries {clientID,lmid} so a
-//   capped diff can derive acknowledgements from the INCLUDED prefix only
-//   (never acking a mutation whose row effects were cut); op 'marker' carries
-//   nothing and only advances the watermark (epoch invalidation).
+// - generated helpers suppress their triggers transactionally and append their
+//   exact returned keys with the cookie and lmid checkpoint in one envelope.
 
 use std::collections::BTreeSet;
 
@@ -684,6 +682,7 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
         )",
         &[],
     )?;
+    crate::ledger::init(db)?;
     db.exec(
         "CREATE TABLE IF NOT EXISTS _zsync_snapshot_generation (
             lock INTEGER PRIMARY KEY CHECK (lock = 1),
@@ -739,9 +738,9 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
     Ok(())
 }
 
-// the CREATE TRIGGER statements that append touched pks to _zsync_changes for
-// every INSERT/UPDATE/DELETE. an UPDATE logs OLD and NEW pks so a pk-changing
-// update dels the old row and puts the new one.
+// the trigger statements that append raw-sql touched pks to the active packed
+// segment. generated helpers set captureMode while they carry exact keys in
+// memory, so the same trigger definitions preserve raw sql without double work.
 pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
     let mut out = Vec::new();
     for (table, spec) in tables.iter() {
@@ -759,25 +758,97 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
         let trigger_key = tables
             .physical_name(table)
             .expect("iterated table has physical mapping");
-        let tr_i = quote_ident(&format!("_zsync_tr_{trigger_key}_i"));
-        let tr_u = quote_ident(&format!("_zsync_tr_{trigger_key}_u"));
-        let tr_d = quote_ident(&format!("_zsync_tr_{trigger_key}_d"));
+        let legacy_tr_i = quote_ident(&format!("_zsync_tr_{trigger_key}_i"));
+        let legacy_tr_u = quote_ident(&format!("_zsync_tr_{trigger_key}_u"));
+        let legacy_tr_d = quote_ident(&format!("_zsync_tr_{trigger_key}_d"));
+        // trigger bodies are immutable within a version. the versioned names
+        // make startup idempotent while a future body migration can install a
+        // new version once instead of dropping and rewriting every trigger on
+        // every durable-object eviction.
+        let tr_i = quote_ident(&format!("_zsync_tr_{trigger_key}_i_v2"));
+        let tr_u = quote_ident(&format!("_zsync_tr_{trigger_key}_u_v2"));
+        let tr_d = quote_ident(&format!("_zsync_tr_{trigger_key}_d_v2"));
         let new_pk = pk_object(tables, table, spec, "NEW");
         let old_pk = pk_object(tables, table, spec, "OLD");
+        let rotate = "INSERT INTO _zsync_log_segments
+                (startVersion, endVersion, payload, pending, captureMode)
+            SELECT endVersion + 1, endVersion,
+                   json_object(
+                       'format', 1,
+                       'lmids', json_extract(payload, '$.lmids'),
+                       'transactions', json('[]')
+                   ),
+                   '[]', 0
+            FROM _zsync_log_segments
+            WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
+              AND captureMode = 0
+              AND length(CAST(payload AS BLOB)) >= 786432;";
+        let enforce_limit = "SELECT CASE
+                WHEN (
+                    SELECT length(CAST(payload AS BLOB))
+                    FROM _zsync_log_segments
+                    ORDER BY startVersion DESC LIMIT 1
+                ) > 1048576
+                THEN RAISE(ABORT, 'packed ledger transaction exceeds the 1 MiB limit')
+            END;";
+        out.push(format!("DROP TRIGGER IF EXISTS {legacy_tr_i}"));
+        out.push(format!("DROP TRIGGER IF EXISTS {legacy_tr_u}"));
+        out.push(format!("DROP TRIGGER IF EXISTS {legacy_tr_d}"));
         out.push(format!(
             "CREATE TRIGGER IF NOT EXISTS {tr_i} AFTER INSERT ON {tq} BEGIN
-                INSERT INTO _zsync_changes (tableName, op, pk) VALUES ({tl}, 'row', {new_pk});
+                {rotate}
+                UPDATE _zsync_log_segments
+                SET endVersion = endVersion + 1,
+                    payload = json_insert(
+                        payload,
+                        '$.transactions[#]',
+                        json_object(
+                            'version', CAST(endVersion + 1 AS TEXT),
+                            'changes', json_array(json_array({tl}, {new_pk}))
+                        )
+                    )
+                WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
+                  AND captureMode = 0;
+                {enforce_limit}
             END"
         ));
         out.push(format!(
             "CREATE TRIGGER IF NOT EXISTS {tr_u} AFTER UPDATE ON {tq} BEGIN
-                INSERT INTO _zsync_changes (tableName, op, pk) VALUES ({tl}, 'row', {old_pk});
-                INSERT INTO _zsync_changes (tableName, op, pk) VALUES ({tl}, 'row', {new_pk});
+                {rotate}
+                UPDATE _zsync_log_segments
+                SET endVersion = endVersion + 2,
+                    payload = json_insert(
+                        payload,
+                        '$.transactions[#]',
+                        json_object(
+                            'version', CAST(endVersion + 2 AS TEXT),
+                            'changes', json_array(
+                                json_array({tl}, {old_pk}),
+                                json_array({tl}, {new_pk})
+                            )
+                        )
+                    )
+                WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
+                  AND captureMode = 0;
+                {enforce_limit}
             END"
         ));
         out.push(format!(
             "CREATE TRIGGER IF NOT EXISTS {tr_d} AFTER DELETE ON {tq} BEGIN
-                INSERT INTO _zsync_changes (tableName, op, pk) VALUES ({tl}, 'row', {old_pk});
+                {rotate}
+                UPDATE _zsync_log_segments
+                SET endVersion = endVersion + 1,
+                    payload = json_insert(
+                        payload,
+                        '$.transactions[#]',
+                        json_object(
+                            'version', CAST(endVersion + 1 AS TEXT),
+                            'changes', json_array(json_array({tl}, {old_pk}))
+                        )
+                    )
+                WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
+                  AND captureMode = 0;
+                {enforce_limit}
             END"
         ));
     }

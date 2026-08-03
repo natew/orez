@@ -311,7 +311,7 @@ fn catchup_overlap_and_unseen_delete_converge_then_invalidate_old_clients() {
     .unwrap();
     let old_pull = pull(&mut db, &tables, Value::Null);
     let old_cookie = old_pull["cookie"].clone();
-    let changes_before_paging = integer(&mut db, "SELECT COUNT(*) FROM _zsync_changes");
+    let watermark_before_paging = sync_core::watermark(&mut db).unwrap();
 
     let generation = db
         .transaction(|db| begin_snapshot_generation(db, &tables, 100))
@@ -329,8 +329,8 @@ fn catchup_overlap_and_unseen_delete_converge_then_invalidate_old_clients() {
     })
     .unwrap();
     assert_eq!(
-        integer(&mut db, "SELECT COUNT(*) FROM _zsync_changes"),
-        changes_before_paging,
+        sync_core::watermark(&mut db).unwrap(),
+        watermark_before_paging,
         "staging writes must not pollute the live client change log"
     );
 
@@ -386,13 +386,14 @@ fn catchup_overlap_and_unseen_delete_converge_then_invalidate_old_clients() {
     assert_eq!(patch[1]["value"]["item_id"], "a");
     assert_eq!(patch[1]["value"]["item_label"], "catchup-new");
 
+    let before_live_insert = sync_core::watermark(&mut db).unwrap();
     db.exec(
         &item_sql("INSERT INTO item (id, label, rank, done, meta) VALUES ('after', 'after-cutover', 1, 0, NULL)"),
         &[],
     )
     .unwrap();
     assert!(
-        integer(&mut db, "SELECT COUNT(*) FROM _zsync_changes") > changes_before_paging + 1,
+        sync_core::watermark(&mut db).unwrap() > before_live_insert,
         "live-table triggers must be restored after rename"
     );
     let duplicate = db.exec(

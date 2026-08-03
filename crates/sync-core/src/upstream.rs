@@ -1,9 +1,8 @@
 //! Apply ordered full-row images from the ZeroSqlDO `/changes` feed.
 //!
-//! The host owns the surrounding transaction. Application-table triggers are
-//! deliberately left enabled, so upstream writes enter `_zsync_changes` by the
-//! exact same path as local mutator writes and existing pull/CVR logic remains
-//! unaware of the upstream watermark domain.
+//! the host owns the surrounding transaction. application-table triggers stay
+//! enabled, so upstream writes enter the packed ledger by the same raw-sql path
+//! as local unmodeled writes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1042,8 +1041,8 @@ pub fn apply_upstream(
     })
 }
 
-/// Atomically replace application rows after the feed's retained floor passes
-/// this replica. Normal triggers populate the ordinary engine change log.
+/// atomically replace application rows after the feed's retained floor passes
+/// this replica. raw triggers populate the packed ledger.
 pub fn apply_upstream_snapshot(
     db: &mut dyn SyncDb,
     tables: &Tables,

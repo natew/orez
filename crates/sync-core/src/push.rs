@@ -209,8 +209,8 @@ pub fn assemble_push_response(results: Vec<MutationResult>) -> Value {
 // settle an application-owned push after its database transaction committed.
 // the response must acknowledge exactly the mutations in the original push,
 // in order, before any lmid is touched. callers must run this in a transaction
-// that starts after the application effects committed, so their trigger rows
-// precede the lmid rows in the shared change log.
+// that starts after the application effects committed, so the trigger-backed
+// effect envelopes precede the lmid settlement envelope.
 pub fn settle_delegated_push(
     db: &mut dyn SyncDb,
     push: &Value,

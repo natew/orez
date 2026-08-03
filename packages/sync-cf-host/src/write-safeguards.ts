@@ -166,6 +166,7 @@ export class IngestCircuitBreaker {
 }
 
 type BillableCursor = {
+  rowsRead?: number
   rowsWritten?: number
   next?: (...args: unknown[]) => unknown
   one?: (...args: unknown[]) => unknown
@@ -176,16 +177,23 @@ type BillableCursor = {
 
 export function trackBillableCursorRows<Cursor extends BillableCursor>(
   cursor: Cursor,
-  record: (rows: number) => void
+  recordWritten: (rows: number) => void,
+  recordRead: (rows: number) => void = () => {}
 ): Cursor {
   if (!cursor || typeof cursor !== 'object') return cursor
-  let accountedRows = 0
+  let accountedWritten = 0
+  let accountedRead = 0
   const account = () => {
-    const current = Number(cursor.rowsWritten ?? 0)
-    if (!Number.isSafeInteger(current) || current <= accountedRows) return
-    const delta = current - accountedRows
-    accountedRows = current
-    record(delta)
+    const written = Number(cursor.rowsWritten ?? 0)
+    if (Number.isSafeInteger(written) && written > accountedWritten) {
+      recordWritten(written - accountedWritten)
+      accountedWritten = written
+    }
+    const read = Number(cursor.rowsRead ?? 0)
+    if (Number.isSafeInteger(read) && read > accountedRead) {
+      recordRead(read - accountedRead)
+      accountedRead = read
+    }
   }
   const wrapIterator = (iterator: Iterator<unknown>): IterableIterator<unknown> => {
     const next = iterator.next.bind(iterator)

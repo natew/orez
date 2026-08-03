@@ -26,6 +26,7 @@
 
 pub mod db;
 pub mod error;
+mod ledger;
 pub mod pull;
 pub mod push;
 pub mod query;
