@@ -82,7 +82,7 @@ enum Job {
     Query {
         id: String,
         run: TxQueryFn,
-        reply: oneshot::Sender<Result<Vec<Row>, AdminTxError>>,
+        reply: oneshot::Sender<Result<(Vec<Row>, u64), AdminTxError>>,
     },
     // end the admin transaction id with a commit or rollback.
     End {
@@ -146,8 +146,10 @@ impl Namespace {
     }
 
     // run one statement inside the admin transaction id. rejected (not run) if id
-    // is not the transaction that currently owns the namespace.
-    pub async fn tx_query<F>(&self, id: String, f: F) -> Result<Vec<Row>, AdminTxError>
+    // is not the transaction that currently owns the namespace. returns the rows
+    // the statement produced and how many rows it changed, so an admin client can
+    // tell a write that matched its target from one that silently matched nothing.
+    pub async fn tx_query<F>(&self, id: String, f: F) -> Result<(Vec<Row>, u64), AdminTxError>
     where
         F: FnOnce(&Connection) -> Result<Vec<Row>, DbError> + Send + 'static,
     {
@@ -168,6 +170,19 @@ impl Namespace {
         let (reply, rx) = oneshot::channel();
         self.send(Job::End { id, end, reply });
         rx.await.expect("namespace worker dropped the reply")
+    }
+}
+
+// how many rows the statement itself matched. sqlite counts trigger-written rows
+// in total_changes but not in changes, so a write that fires a capture trigger
+// inflates the delta past what the caller asked about. changes() is the count the
+// caller means, but it holds the previous write's value through a read, so the
+// delta is what decides whether this statement wrote at all.
+pub(crate) fn rows_changed(conn: &Connection, before: u64) -> u64 {
+    if conn.total_changes() > before {
+        conn.changes()
+    } else {
+        0
     }
 }
 
@@ -252,7 +267,8 @@ fn worker_loop(conn: Connection, receiver: std::sync::mpsc::Receiver<Job>, lease
                 };
                 match job {
                     Job::Query { id, run, reply } if id == active.id => {
-                        let outcome = run(&conn);
+                        let before = conn.total_changes();
+                        let outcome = run(&conn).map(|rows| (rows, rows_changed(&conn, before)));
                         if reply.send(outcome.map_err(AdminTxError::sql)).is_ok() {
                             lease_deadline = Instant::now() + lease;
                         } else if force_autocommit(&conn) {

@@ -1305,6 +1305,101 @@ async fn admin_sql_binds_typed_params_and_rejects_ambiguous_values() {
     );
 }
 
+// an admin client cannot tell "wrote the row i targeted" from "matched nothing"
+// by row output alone: a write returns no rows either way. the packed change
+// ledger asserts on exactly this count to catch a missing segment, so a write
+// that matched nothing has to be distinguishable from one that matched a row.
+#[tokio::test]
+async fn admin_sql_reports_rows_changed_by_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = test_host(custom_config(), tmp.path().to_path_buf());
+    let router = host.into_router_trusted();
+    let transaction_id = "tx-changes";
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "BEGIN", Some(transaction_id), Some("begin")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, inserted) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "INSERT INTO item (id, label) VALUES ('changed-item', 'before')",
+            Some(transaction_id),
+            Some("query"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(inserted["changes"], 1);
+
+    let (status, updated) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "UPDATE item SET label = 'after' WHERE id = 'changed-item'",
+            Some(transaction_id),
+            Some("query"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["changes"], 1);
+
+    // the case the ledger actually guards: a write whose WHERE matched nothing.
+    let (status, missed) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "UPDATE item SET label = 'never' WHERE id = 'absent-item'",
+            Some(transaction_id),
+            Some("query"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(missed["changes"], 0);
+
+    // a read must not inherit the preceding write's count.
+    let (status, read) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "SELECT label FROM item WHERE id = 'changed-item'",
+            Some(transaction_id),
+            Some("query"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read["changes"], 0);
+    assert_eq!(read["rows"], json!([{ "label": "after" }]));
+
+    let (status, _) = send(
+        &router,
+        admin_sql_req("test-ns", "COMMIT", Some(transaction_id), Some("end")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // the one-shot lane reports the same count as the transaction lane.
+    let (status, one_shot) = send(
+        &router,
+        admin_sql_req(
+            "test-ns",
+            "UPDATE item SET label = 'one-shot' WHERE id = 'changed-item'",
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(one_shot["changes"], 1);
+}
+
 #[tokio::test]
 async fn admin_sql_binds_params_through_transaction_rollback() {
     let tmp = tempfile::tempdir().unwrap();

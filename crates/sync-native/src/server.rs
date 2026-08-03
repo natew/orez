@@ -29,7 +29,7 @@ use sync_core::{Row, SqlValue, SyncDb, WireValue};
 use crate::db::RusqliteDb;
 use crate::engine::{self, EngineContext};
 use crate::fault::{FaultKind, FaultPoint, FaultRegistry};
-use crate::namespace::{Manager, TxEnd};
+use crate::namespace::{Manager, TxEnd, rows_changed};
 use crate::obs::{self, Counters};
 use crate::wake::WakeRegistry;
 
@@ -641,10 +641,10 @@ async fn admin_sql(
                 })
                 .await;
             match result {
-                Ok(rows) => {
+                Ok((rows, changes)) => {
                     // uncommitted: do not wake clients until the transaction ends.
                     let rows: Vec<Value> = rows.iter().map(row_to_json).collect();
-                    json_status(200, json!({ "rows": rows }))
+                    json_status(200, json!({ "rows": rows, "changes": changes }))
                 }
                 Err(e) => json_status(e.status, json!({ "error": e.message })),
             }
@@ -684,18 +684,18 @@ async fn admin_sql(
                     let total_changes = conn.total_changes();
                     let mut db = RusqliteDb::new(conn);
                     let rows = db.query(&query, &params);
-                    (rows, conn.total_changes() > total_changes)
+                    (rows, rows_changed(conn, total_changes))
                 })
                 .await;
             match result {
-                (Ok(rows), changed) => {
+                (Ok(rows), changes) => {
                     // admin SQL is the upstream-write seam for embedded consumers.
                     // only a statement that changed rows can advance the feed.
-                    if changed {
+                    if changes > 0 {
                         state.wake.wake(&ns, "");
                     }
                     let rows: Vec<Value> = rows.iter().map(row_to_json).collect();
-                    json_status(200, json!({ "rows": rows }))
+                    json_status(200, json!({ "rows": rows, "changes": changes }))
                 }
                 (Err(e), _) => json_status(500, json!({ "error": e.0 })),
             }
