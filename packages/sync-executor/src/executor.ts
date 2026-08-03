@@ -399,10 +399,25 @@ export function createSyncExecutor<S extends Schema>(
           | { error: 'alreadyProcessed'; details: string }
           | { error: 'app'; message: string; details?: JsonValue }
       }> = []
+      const replayExpectedByClient = new Map<string, number>()
+      const recordReplay = (mutation: PushMutation, expected: number) => {
+        results.push({
+          id: { clientID: mutation.clientID, id: mutation.id },
+          result: {
+            error: 'alreadyProcessed',
+            details: `Ignoring mutation from ${mutation.clientID} with ID ${mutation.id} as it was already processed. Expected: ${expected}`,
+          },
+        })
+      }
 
       for (const mutation of push.mutations) {
         if (mutation.name === CLEANUP_RESULTS_MUTATION_NAME) continue
         const id = { clientID: mutation.clientID, id: mutation.id }
+        const replayExpected = replayExpectedByClient.get(mutation.clientID)
+        if (replayExpected !== undefined && mutation.id < replayExpected) {
+          recordReplay(mutation, replayExpected)
+          continue
+        }
         let committedEffects: ReturnType<EffectAttempt['entries']> = []
         try {
           const decision = await database.transaction(async (applicationTx) => {
@@ -472,13 +487,8 @@ export function createSyncExecutor<S extends Schema>(
           })
 
           if (decision.kind === 'replay') {
-            results.push({
-              id,
-              result: {
-                error: 'alreadyProcessed',
-                details: `Ignoring mutation from ${mutation.clientID} with ID ${mutation.id} as it was already processed. Expected: ${decision.expected}`,
-              },
-            })
+            replayExpectedByClient.set(mutation.clientID, decision.expected)
+            recordReplay(mutation, decision.expected)
             continue
           }
           results.push({ id, result: {} })

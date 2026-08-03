@@ -787,6 +787,42 @@ describe('sync executor', () => {
     ])
   })
 
+  test('replay batch checks an already-advanced client once', async () => {
+    const { database } = sqliteDatabase()
+    const transaction = database.transaction.bind(database)
+    let transactionCount = 0
+    database.transaction = async (work) => {
+      transactionCount++
+      return transaction(work)
+    }
+    const executor = createSyncExecutor({
+      database,
+      effects,
+      mutators: { create: async () => {} },
+      schema,
+    })
+    const body = {
+      ...push('create'),
+      mutations: Array.from({ length: 64 }, (_, index) => ({
+        ...push('create', index + 1).mutations[0]!,
+      })),
+    }
+
+    await executor.push(body, { userID: 'user-1' })
+    transactionCount = 0
+    const replay = await executor.push(body, { userID: 'user-1' })
+
+    expect(transactionCount).toBe(1)
+    expect(
+      'mutations' in replay.pushResponse &&
+        replay.pushResponse.mutations.length === 64 &&
+        replay.pushResponse.mutations.every(
+          (mutation) =>
+            'error' in mutation.result && mutation.result.error === 'alreadyProcessed'
+        )
+    ).toBe(true)
+  })
+
   test('postgresql insert uses numbered bindings and skip-if-exists conflict SQL', async () => {
     const statements: Array<{ sql: string; params: readonly unknown[] }> = []
     const tx: ApplicationTransaction = {
