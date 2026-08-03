@@ -45,6 +45,21 @@ pub use push::{
     settle_delegated_push,
 };
 pub use schema::{TableSpec, Tables, init_schema, trigger_ddl};
+
+/// identity of every durable DDL surface this engine installs. a host stores
+/// it (with its own inputs) after a schema pass and skips the pass while the
+/// stored value matches, so the constants composed here MUST change whenever
+/// init_schema, trigger_ddl, init_query_schema, or the packed-ledger payload
+/// change what they would install.
+pub fn schema_revision() -> String {
+    format!(
+        "core{version}:q{query}:t{trigger}:l{ledger}",
+        version = env!("CARGO_PKG_VERSION"),
+        query = query::membership::QUERY_SCHEMA_VERSION,
+        trigger = schema::TRIGGER_VERSION,
+        ledger = ledger::LEDGER_FORMAT,
+    )
+}
 pub use upstream::{
     ApplyUpstreamResult, SnapshotProgress, SnapshotState, UpstreamBatch, UpstreamChange,
     UpstreamSnapshot, apply_snapshot_changes, apply_snapshot_page, apply_upstream,

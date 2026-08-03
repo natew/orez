@@ -28,6 +28,7 @@ import {
   engine_prune,
   engine_push_validate,
   engine_read_snapshot_progress,
+  engine_schema_revision,
   engine_state,
   engine_version,
 } from './wasm.js'
@@ -456,6 +457,7 @@ export function createSyncDurableObject<
     readonly #executor: SyncExecutor<S> | null
     #executorBeforeCommitFault: FaultKind | null = null
     #bootID = crypto.randomUUID()
+    #initSkipped = false
     #lastRequestAt = 0
     #hibernations = 0
     #dropNextPushResponse = false
@@ -572,14 +574,32 @@ export function createSyncDurableObject<
         : null
       ctx.blockConcurrencyWhile(async () => {
         ctx.storage.transactionSync(() => {
-          config.initialize(this.#directSql)
           this.#directSql.exec(`CREATE TABLE IF NOT EXISTS _zsync_host_control (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
           )`)
-          this.#directSql.exec(
-            "INSERT OR IGNORE INTO _zsync_host_control (key, value) VALUES ('writerEnabled', '1')"
-          )
+          // one durable fingerprint gates the whole schema pass. hibernation
+          // reconstructs this object every few idle minutes, and re-running
+          // consumer DDL plus both engine inits against an already-current
+          // database costs ~1.5k billable reads per wake. everything the pass
+          // depends on is in the fingerprint, so a build that changes any DDL
+          // surface re-runs it exactly once per namespace.
+          const initFingerprint = JSON.stringify([
+            config.hostVersion,
+            this.#wasm(() => engine_schema_revision()),
+            config.schema,
+            config.initialize.toString(),
+          ])
+          this.#initSkipped = this.#controlGet('initFingerprint') === initFingerprint
+          if (!this.#initSkipped) {
+            config.initialize(this.#directSql)
+            this.#directSql.exec(
+              "INSERT OR IGNORE INTO _zsync_host_control (key, value) VALUES ('writerEnabled', '1')"
+            )
+            this.#wasm(() => engine_init_schema(this.#engineDb, config.schema))
+            this.#wasm(() => engine_init_query_schema(this.#engineDb))
+            this.#controlSet('initFingerprint', initFingerprint)
+          }
           const ingestBreakerReason = this.#controlGet('ingestBreakerReason')
           if (
             ingestBreakerReason === 'ingestBudgetExceeded' ||
@@ -591,8 +611,6 @@ export function createSyncDurableObject<
               Number(this.#controlGet('ingestBreakerTrips'))
             )
           }
-          this.#wasm(() => engine_init_schema(this.#engineDb, config.schema))
-          this.#wasm(() => engine_init_query_schema(this.#engineDb))
         })
       })
     }
@@ -648,9 +666,13 @@ export function createSyncDurableObject<
     }
 
     #controlSet(key: string, value: string): void {
+      // the WHERE guard makes a same-value set free: upstreamPath arrives on
+      // every forwarded request, and an unguarded upsert billed one row
+      // written per request for a value that almost never changes.
       this.#directSql.exec(
         'INSERT INTO _zsync_host_control (key, value) VALUES (?, ?) ' +
-          'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+          'ON CONFLICT(key) DO UPDATE SET value = excluded.value ' +
+          'WHERE value <> excluded.value',
         [key, value]
       )
     }
@@ -1838,6 +1860,7 @@ export function createSyncDurableObject<
         return this.ctx.storage.getAlarm().then((upstreamAlarmAt) =>
           json({
             bootID: this.#bootID,
+            initSkipped: this.#initSkipped,
             idleTeardownMs,
             hibernations: this.#hibernations,
             databaseSizeBytes: this.ctx.storage.sql.databaseSize,

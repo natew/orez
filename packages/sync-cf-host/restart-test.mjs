@@ -110,6 +110,8 @@ try {
     true,
     'fresh schema initialization proves the billing meter can observe DDL writes'
   )
+  const initialStatus = await admin('/admin/status')
+  assert.equal(initialStatus.initSkipped, false, 'first boot runs the schema pass')
 
   await admin('/admin/retention', { retainChanges: 1 })
   assert.deepStrictEqual(
@@ -129,6 +131,18 @@ try {
     restartBilling.rowsWritten,
     0,
     'reopening an initialized object rewrites no schema or trigger rows'
+  )
+  // measured: 1 row (the fingerprint lookup) with the skip, 89 without it.
+  assert.equal(
+    restartBilling.rowsRead <= 8,
+    true,
+    `reopening an initialized object reads a fingerprint, not the schema (read ${restartBilling.rowsRead})`
+  )
+  const restartStatus = await admin('/admin/status')
+  assert.equal(
+    restartStatus.initSkipped,
+    true,
+    'a matching fingerprint skips the schema pass on restart'
   )
   const triggerRows = await admin('/admin/sql', {
     query:

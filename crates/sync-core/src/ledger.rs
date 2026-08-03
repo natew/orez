@@ -9,6 +9,10 @@ use crate::error::EngineError;
 const ROTATE_AT_BYTES: usize = 768 * 1_024;
 const MAX_PAYLOAD_BYTES: usize = 1_024 * 1_024;
 
+// bump when the packed payload shape changes; part of schema_revision so hosts
+// re-run the schema pass exactly once when a new format ships.
+pub const LEDGER_FORMAT: u8 = 1;
+
 fn is_false(value: &bool) -> bool {
     !value
 }
@@ -73,7 +77,7 @@ fn parse_payload(value: Option<&SqlValue>) -> Result<LedgerPayload, EngineError>
     };
     let payload: LedgerPayload = serde_json::from_str(value)
         .map_err(|_| EngineError::internal("packed ledger payload is invalid JSON"))?;
-    if payload.format != 1 {
+    if payload.format != LEDGER_FORMAT {
         return Err(EngineError::internal("packed ledger format is unsupported"));
     }
     Ok(payload)
@@ -131,7 +135,7 @@ fn rotate_if_full(
         ));
     }
     let payload = encoded_payload(&LedgerPayload {
-        format: 1,
+        format: LEDGER_FORMAT,
         lmids: segment.payload.lmids,
         transactions: Vec::new(),
     })?;
@@ -212,7 +216,7 @@ pub(crate) fn init(db: &mut dyn SyncDb) -> Result<(), DbError> {
             .insert(client.clone(), lmid);
     }
     let payload = serde_json::to_string(&LedgerPayload {
-        format: 1,
+        format: LEDGER_FORMAT,
         lmids,
         transactions: Vec::new(),
     })

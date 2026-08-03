@@ -79,7 +79,7 @@ fn raw_pk(spec: &TableSpec, row: &crate::db::Row) -> Value {
 // columns, so those stored keys no longer match a recompute. the query-aware
 // tables rebuild from the next desiredQueriesPatch, so the version bump resets
 // them instead of migrating each key.
-const QUERY_SCHEMA_VERSION: i64 = 3;
+pub(crate) const QUERY_SCHEMA_VERSION: i64 = 3;
 
 fn table_exists(db: &mut dyn SyncDb, name: &str) -> Result<bool, EngineError> {
     let rows = db.query(

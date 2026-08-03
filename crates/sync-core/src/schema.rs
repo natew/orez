@@ -741,6 +741,11 @@ pub fn init_schema(db: &mut dyn SyncDb, tables: &Tables) -> Result<(), DbError> 
 // the trigger statements that append raw-sql touched pks to the active packed
 // segment. generated helpers set captureMode while they carry exact keys in
 // memory, so the same trigger definitions preserve raw sql without double work.
+// bump when the trigger bodies change shape. versioned names make startup
+// idempotent, and the version feeds schema_revision so hosts re-run the
+// schema pass exactly once when new bodies ship.
+pub const TRIGGER_VERSION: u32 = 2;
+
 pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
     let mut out = Vec::new();
     for (table, spec) in tables.iter() {
@@ -765,16 +770,17 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
         // make startup idempotent while a future body migration can install a
         // new version once instead of dropping and rewriting every trigger on
         // every durable-object eviction.
-        let tr_i = quote_ident(&format!("_zsync_tr_{trigger_key}_i_v2"));
-        let tr_u = quote_ident(&format!("_zsync_tr_{trigger_key}_u_v2"));
-        let tr_d = quote_ident(&format!("_zsync_tr_{trigger_key}_d_v2"));
+        let tr_i = quote_ident(&format!("_zsync_tr_{trigger_key}_i_v{TRIGGER_VERSION}"));
+        let tr_u = quote_ident(&format!("_zsync_tr_{trigger_key}_u_v{TRIGGER_VERSION}"));
+        let tr_d = quote_ident(&format!("_zsync_tr_{trigger_key}_d_v{TRIGGER_VERSION}"));
         let new_pk = pk_object(tables, table, spec, "NEW");
         let old_pk = pk_object(tables, table, spec, "OLD");
-        let rotate = "INSERT INTO _zsync_log_segments
+        let rotate = format!(
+            "INSERT INTO _zsync_log_segments
                 (startVersion, endVersion, payload, pending, captureMode)
             SELECT endVersion + 1, endVersion,
                    json_object(
-                       'format', 1,
+                       'format', {ledger_format},
                        'lmids', json_extract(payload, '$.lmids'),
                        'transactions', json('[]')
                    ),
@@ -782,7 +788,9 @@ pub fn trigger_ddl(tables: &Tables) -> Vec<String> {
             FROM _zsync_log_segments
             WHERE startVersion = (SELECT MAX(startVersion) FROM _zsync_log_segments)
               AND captureMode = 0
-              AND length(CAST(payload AS BLOB)) >= 786432;";
+              AND length(CAST(payload AS BLOB)) >= 786432;",
+            ledger_format = crate::ledger::LEDGER_FORMAT,
+        );
         let enforce_limit = "SELECT CASE
                 WHEN (
                     SELECT length(CAST(payload AS BLOB))

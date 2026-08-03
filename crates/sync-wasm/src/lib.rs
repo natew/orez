@@ -893,6 +893,13 @@ pub fn engine_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Identity of the durable DDL this engine build installs. Hosts fold it into
+/// the fingerprint that lets an up-to-date namespace skip the schema pass.
+#[wasm_bindgen]
+pub fn engine_schema_revision() -> String {
+    sync_core::schema_revision()
+}
+
 /// Linear-memory size for authenticated operator soak diagnostics. This is a
 /// byte count only; it contains no application or query data.
 #[wasm_bindgen]
