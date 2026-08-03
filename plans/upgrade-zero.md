@@ -114,7 +114,14 @@ literals in `pg-proxy*.ts` / `proxy-throughput.bench.ts` /
   the correct gate (zero's `main.js` dispatcher gates real backup/restore behind
   the same field — mirror it).
 
-### C. Cloudflare overlay patches — `src/worker/cf-patches.ts`
+### C. Cloudflare overlay patches — `src/worker/cf-patches.ts` — ⚠️ GONE
+
+> **Stale as of the 1.8 upgrade (2026-08-03).** This file no longer exists. The
+> Cloudflare overlay moved to `packages/sync-cf-host` and the DO backend is now
+> PG-protocol over DO SQLite, so none of the five anchors or `cf-patches.test.ts`
+> below are real. Left in place because the *shape* of the problem (bundled
+> identifiers drifting) still applies. Rewrite for the current CF stack before
+> trusting any of it.
 
 Copies `out/` into a generated overlay and applies 5 patches. Each warns if its
 anchor is gone. Exercised by `src/worker/cf-patches.test.ts` — **run it first.**
@@ -233,6 +240,62 @@ Verify the binary exists for the resolved version:
 
 ## 6. Worked examples
 
+### 1.7.0 → 1.8.0 (August 2026)
+
+- **Versions:** `@rocicorp/zero` 1.7.0 → **1.8.0**; `@rocicorp/zero-sqlite3`
+  unchanged at **^1.1.2**. **Protocol unchanged at 51** — read out of the packed
+  tarball (`npm pack @rocicorp/zero@1.8.0` →
+  `package/out/zero-protocol/src/protocol-version.d.ts`), not the release notes.
+  None of the §3.A string sites changed.
+- **Release-age:** no `minimumReleaseAge` is set in `~/.bunfig.toml` or the repo
+  anymore, so **§2 no longer applies** and plain `bun install` works. §5's
+  downgrade footgun goes with it.
+- **All patch anchors held**, verified by grepping the packed 1.8.0 tarball
+  before installing: `OPEN_ANCHOR` and `CLOSE_ANCHOR`
+  (`zero-sqlite-handle-patch.ts`), litestream `restoreReplica`, and the
+  `run-worker.js` import path. **Zero orez source changes were needed for the
+  bump itself.**
+- **⚠️ Correction to the 1.7 entry's forward-looking finding: the
+  `SQLite3Database` → `Sqlite3Database` rename did NOT ship.** Released 1.8.0
+  carries the original `SQLite3Database` spelling; the rename existed only in
+  the canary line and rolldown re-picked the canonical name before release. The
+  `a5dfaf1` regex hardening is still correct and still the right call (it costs
+  nothing and survives either spelling), but it was **not** load-bearing for
+  1.8.0. **General lesson: a canary-observed bundler artifact is not a release
+  prediction — re-pack and re-grep the STABLE tarball before assuming.**
+- **§3.C is stale: `src/worker/cf-patches.ts` no longer exists in orez.** The
+  Cloudflare overlay moved to `packages/sync-cf-host` and the DO backend is now
+  PG-protocol over DO SQLite, so the five `patchWorker*` anchors and
+  `cf-patches.test.ts` are gone. Skip that section until someone rewrites it for
+  the current CF stack.
+- **New coupling point the map was missing: `~/chat` pins orez's RUST crates by
+  git rev**, separately from its npm `orez-lite` pin
+  (`chat/rust-sync/chat-native/Cargo.toml`, `sync-core` + `sync-native`). The two
+  drift independently and nothing checks them against each other. At this upgrade
+  the npm side was current while the Rust pin sat **132 commits and three
+  breaking changes** behind (`02d4f33`, `fb9be2b`, `4f19a1a`), which removed
+  `visible` / `max_change_rows` / `visibility_enabled` / `query_aware` from
+  `SyncNativeConfig`. **Bump both together, and pin the Rust rev to a SHA that is
+  actually pushed to `main`.**
+- **What DID break (not Zero's fault, surfaced by the orez 0.12.x bump):** the
+  packed change ledger asserts `result.changes === 1`, but the Rust `/admin/sql`
+  seam never returned an affected-row count, so chat's `sqlite-pool.ts` faked it
+  as `rawRows.length` — always 0 for an UPDATE. Every Chat signup failed with
+  `packed ledger capture mode update missed its row`. Fixed upstream in
+  `7fe3fc2`. Note the counter subtlety recorded in `AGENTS.md`: `total_changes()`
+  counts trigger-written rows, `changes()` does not but goes stale through a read.
+- **Nothing to port from 1.8's perf work.** `limit()` maintenance (2x/50x) and
+  client hydration (1.3x) are both IVM, which orez does not do server-side; the
+  client half arrives free with the bump. Large-transaction replication (1.5x)
+  batches zero-cache's `changeLog` into 2000-row multi-row INSERTs — orez's
+  packed ledger already writes a whole transaction as **one** payload in a single
+  UPDATE (`packages/sync-executor/src/packed-ledger.ts`), which is further along
+  than the change they shipped.
+- **Validated:** orez unit **949** (`bun run test`), Rust **75**
+  (`cargo test -p sync-native`), clippy/format/lint clean; chat unit
+  **1090/1090**, chat e2e **78 passed (4.7m)** against the SHA-pinned Rust host,
+  `bun check` clean. Stages 4-5 (orez-web, orez-cf in `~/soot`) not run.
+
 ### 1.7.0-canary.3 → 1.7.0 (July 2026)
 
 - **Versions:** `@rocicorp/zero` 1.7.0-canary.3 → **1.7.0** (stable);
@@ -269,6 +332,10 @@ Verify the binary exists for the resolved version:
   bump: bundled-identifier string anchors can drift with no source change — when
   upgrading to 1.8.x, re-pack and re-grep every anchor, and prefer bundler-name-
   agnostic matching.**
+  > **Followed up at the 1.8.0 upgrade: the rename did not ship.** Stable 1.8.0
+  > carries `SQLite3Database`, so this prediction was wrong about the release
+  > even though it was right about the canary. The hardening stays (free, and
+  > correct either way). See the 1.7.0 → 1.8.0 entry.
 - **Validated OK:** unit **825/825** (`bun run test`); typecheck/lint/format
   clean; native `restoreReplica` + all four anchors present in the packed 1.8.x
   tarballs too (so the hardened handle patch is forward-compatible). Integration
